@@ -12,8 +12,10 @@ pub struct PipelineConfig {
     /// Name of the Postgres publication to use for logical replication.
     pub publication_name: String,
     /// Batch processing configuration.
+    #[serde(default)]
     pub batch: BatchConfig,
     /// Retry configuration for initializing apply workers.
+    #[serde(default)]
     pub apply_worker_init_retry: RetryConfig,
 }
 
@@ -27,6 +29,15 @@ pub struct BatchConfig {
     pub max_fill_ms: u64,
 }
 
+impl Default for BatchConfig {
+    fn default() -> Self {
+        Self {
+            max_size: 1000,
+            max_fill_ms: 1000,
+        }
+    }
+}
+
 /// Retry policy configuration for operations such as worker initialization.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RetryConfig {
@@ -38,4 +49,15 @@ pub struct RetryConfig {
     pub max_delay_ms: u64,
     /// Exponential backoff multiplier applied to the delay after each attempt.
     pub backoff_factor: f32,
+}
+
+impl Default for RetryConfig {
+    fn default() -> Self {
+        Self {
+            max_attempts: 5,
+            initial_delay_ms: 500,
+            max_delay_ms: 10_000,
+            backoff_factor: 2.0,
+        }
+    }
 }

@@ -11,12 +11,3 @@ impl BatchConfig {
         BatchConfig { max_size, max_fill }
     }
 }
-
-impl Default for BatchConfig {
-    fn default() -> BatchConfig {
-        Self {
-            max_size: 1000,
-            max_fill: Duration::from_secs(1),
-        }
-    }
-}

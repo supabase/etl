@@ -28,14 +28,3 @@ impl RetryConfig {
         Duration::from_secs_f32(delay.min(self.max_delay.as_secs_f32()))
     }
 }
-
-impl Default for RetryConfig {
-    fn default() -> Self {
-        Self {
-            max_attempts: 5,
-            initial_delay: Duration::from_secs(1),
-            max_delay: Duration::from_secs(30),
-            backoff_factor: 2.0,
-        }
-    }
-}
