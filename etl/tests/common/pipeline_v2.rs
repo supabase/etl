@@ -29,7 +29,12 @@ where
             max_size: 1,
             max_fill: Duration::from_secs(1),
         },
-        apply_worker_initialization_retry: RetryConfig::default(),
+        apply_worker_initialization_retry: RetryConfig {
+            max_attempts: 2,
+            initial_delay: Duration::from_secs(1),
+            max_delay: Duration::from_secs(5),
+            backoff_factor: 2.0,
+        },
     };
 
     Pipeline::new(identity.clone(), config, vec![], state_store, destination)
