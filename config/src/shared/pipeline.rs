@@ -8,7 +8,7 @@ pub struct PipelineConfig {
     ///
     /// A pipeline id determines isolation between pipelines, in terms of replication slots and state
     /// store.
-    pub id: i64,
+    pub id: u64,
     /// Name of the Postgres publication to use for logical replication.
     pub publication_name: String,
     /// Batch processing configuration.

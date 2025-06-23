@@ -300,7 +300,7 @@ mod tests {
             "port": 5432,
             "name": "postgres",
             "username": "postgres",
-            "password": "postgres",
+            "password": "postgres"
         }"#;
 
         let deserialized = serde_json::from_str::<SourceConfig>(config);

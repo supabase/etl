@@ -57,7 +57,7 @@ enum PipelineWorkers {
     },
 }
 
-pub type PipelineId = i64;
+pub type PipelineId = u64;
 
 #[derive(Debug, Clone)]
 pub struct PipelineIdentity {

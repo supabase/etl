@@ -592,7 +592,10 @@ async fn build_replicator_config(
     };
 
     let pipeline_config = SharedPipelineConfig {
-        id: pipeline.id,
+        // We are safe to perform this conversion, since the i64 -> u64 conversion performs wrap
+        // around, and we won't have two different values map to the same u64, since the domain size
+        // is the same.
+        id: pipeline.id as u64,
         publication_name: pipeline.config.publication_name,
         batch: pipeline.config.batch,
         apply_worker_init_retry: pipeline.config.apply_worker_init_retry,
