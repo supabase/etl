@@ -1,0 +1,12 @@
+---
+source: api/src/db/destinations.rs
+expression: deserialized_config
+---
+BigQuery {
+    project_id: "project-id",
+    dataset_id: "dataset-id",
+    service_account_key: "REDACTED",
+    max_staleness_mins: Some(
+        99,
+    ),
+}

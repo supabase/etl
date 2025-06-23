@@ -1,6 +1,6 @@
 use api::{
     config::ApiConfig,
-    db::{destinations::DestinationConfig, pipelines::PipelineConfig, sources::SourceConfig},
+    db::{pipelines::PipelineConfig, sources::SourceConfig},
     encryption::{self, generate_random_key},
     startup::run,
 };
@@ -13,7 +13,7 @@ use std::io;
 use std::net::TcpListener;
 use tokio::runtime::Handle;
 use uuid::Uuid;
-
+use config::shared::DestinationConfig;
 use crate::common::database::create_etl_api_database;
 
 #[derive(Serialize)]

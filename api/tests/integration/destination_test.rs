@@ -1,5 +1,5 @@
-use api::db::destinations::DestinationConfig;
 use reqwest::StatusCode;
+use config::shared::DestinationConfig;
 
 use crate::{
     common::test_app::{
@@ -105,7 +105,7 @@ async fn an_existing_destination_can_be_read() {
     assert_eq!(response.id, destination_id);
     assert_eq!(&response.tenant_id, tenant_id);
     assert_eq!(response.name, destination.name);
-    assert_eq!(response.config, destination.config);
+    insta::assert_debug_snapshot!(destination.config); 
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -157,7 +157,7 @@ async fn an_existing_destination_can_be_updated() {
     assert_eq!(response.id, destination_id);
     assert_eq!(&response.tenant_id, tenant_id);
     assert_eq!(response.name, updated_config.name);
-    assert_eq!(response.config, updated_config.config);
+    insta::assert_debug_snapshot!(updated_config.config);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -243,16 +243,14 @@ async fn all_destinations_can_be_read() {
     for destination in response.destinations {
         if destination.id == destination1_id {
             let name = new_name();
-            let config = new_destination_config();
             assert_eq!(&destination.tenant_id, tenant_id);
             assert_eq!(destination.name, name);
-            assert_eq!(destination.config, config);
+            insta::assert_debug_snapshot!(destination.config);
         } else if destination.id == destination2_id {
             let name = updated_name();
-            let config = updated_destination_config();
             assert_eq!(&destination.tenant_id, tenant_id);
             assert_eq!(destination.name, name);
-            assert_eq!(destination.config, config);
+            insta::assert_debug_snapshot!(destination.config);
         }
     }
 }

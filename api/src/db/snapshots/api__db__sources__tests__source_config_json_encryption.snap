@@ -1,0 +1,11 @@
+---
+source: api/src/db/sources.rs
+expression: config_in_db
+---
+{
+  "host": "localhost",
+  "name": "postgres",
+  "password": "[password]",
+  "port": 5432,
+  "username": "postgres"
+}

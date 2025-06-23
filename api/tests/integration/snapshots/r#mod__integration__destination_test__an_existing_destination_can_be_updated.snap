@@ -1,0 +1,12 @@
+---
+source: api/tests/integration/destination_test.rs
+expression: updated_config.config
+---
+BigQuery {
+    project_id: "project-id-updated",
+    dataset_id: "dataset-id-updated",
+    service_account_key: "REDACTED",
+    max_staleness_mins: Some(
+        10,
+    ),
+}

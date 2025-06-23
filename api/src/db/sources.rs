@@ -14,11 +14,11 @@ use crate::encryption::{decrypt_text, encrypt_text, EncryptedValue, EncryptionKe
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct SourceConfig {
-    host: String,
-    port: u16,
-    name: String,
-    username: String,
-    password: Option<String>,
+    pub host: String,
+    pub port: u16,
+    pub name: String,
+    pub username: String,
+    pub password: Option<String>,
 }
 
 impl SourceConfig {
@@ -29,8 +29,8 @@ impl SourceConfig {
             name: self.name,
             username: self.username,
             password: self.password.map(Secret::new),
-            // By default, we enable ssl.
-            require_ssl: true,
+            // TODO: check whether we want to require ssl.
+            require_ssl: false,
         }
     }
 }
@@ -334,7 +334,9 @@ mod tests {
             &encryption_key,
         )
         .unwrap();
-        insta::assert_json_snapshot!(config_in_db);
+        insta::assert_json_snapshot!(config_in_db, {
+            ".password" => "[password]"
+        });
 
         let deserialized_config = decrypt_and_deserialize_from_value::<
             EncryptedSourceConfig,

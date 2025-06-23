@@ -11,7 +11,7 @@ use crate::db::replicators::create_replicator_txn;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PipelineConfig {
     pub publication_name: String,
-    pub config: BatchConfig,
+    pub batch: BatchConfig,
     pub apply_worker_init_retry: RetryConfig,
 }
 
@@ -315,7 +315,7 @@ mod tests {
     fn pipeline_config_json_serialization() {
         let config = PipelineConfig {
             publication_name: "pub1".to_string(),
-            config: BatchConfig {
+            batch: BatchConfig {
                 max_size: 1000,
                 max_fill_ms: 5000,
             },

@@ -1,0 +1,17 @@
+---
+source: api/src/db/pipelines.rs
+expression: config
+---
+{
+  "publication_name": "pub1",
+  "batch": {
+    "max_size": 1000,
+    "max_fill_ms": 5000
+  },
+  "apply_worker_init_retry": {
+    "max_attempts": 3,
+    "initial_delay_ms": 100,
+    "max_delay_ms": 1000,
+    "backoff_factor": 2.0
+  }
+}

@@ -65,29 +65,6 @@ where
     Ok(serialized_value)
 }
 
-pub fn deserialize_from_str<S>(value: &str) -> Result<S, DbDeserializationError>
-where
-    S: DeserializeOwned,
-{
-    let deserialized_value = serde_json::from_str(value)?;
-
-    Ok(deserialized_value)
-}
-
-pub fn decrypt_and_deserialize_from_str<T, S>(
-    value: &str,
-    encryption_key: &EncryptionKey,
-) -> Result<S, DbDeserializationError>
-where
-    T: Decryptable<S>,
-    T: DeserializeOwned,
-{
-    let deserialized_value: T = serde_json::from_str(value)?;
-    let value = deserialized_value.decrypt(encryption_key)?;
-
-    Ok(value)
-}
-
 pub fn deserialize_from_value<S>(value: serde_json::Value) -> Result<S, DbDeserializationError>
 where
     S: DeserializeOwned,

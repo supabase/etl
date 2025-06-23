@@ -288,7 +288,6 @@ pub async fn destination_exists(
     Ok(record.exists)
 }
 
-// TODO: rewrite tests.
 #[cfg(test)]
 mod tests {
     use aws_lc_rs::aead::RandomizedNonceKey;
@@ -343,7 +342,9 @@ mod tests {
             &encryption_key,
         )
         .unwrap();
-        insta::assert_json_snapshot!(config_in_db);
+        insta::assert_json_snapshot!(config_in_db, {
+            ".big_query.service_account_key" => "[key]"
+        });
 
         let deserialized_config = decrypt_and_deserialize_from_value::<
             EncryptedDestinationConfig,

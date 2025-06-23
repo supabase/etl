@@ -57,7 +57,7 @@ enum PipelineWorkers {
     },
 }
 
-pub type PipelineId = u64;
+pub type PipelineId = i64;
 
 #[derive(Debug, Clone)]
 pub struct PipelineIdentity {
@@ -66,7 +66,7 @@ pub struct PipelineIdentity {
 }
 
 impl PipelineIdentity {
-    pub fn new(id: u64, publication_name: &str) -> Self {
+    pub fn new(id: PipelineId, publication_name: &str) -> Self {
         Self {
             id,
             publication_name: publication_name.to_owned(),

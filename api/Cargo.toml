@@ -53,4 +53,4 @@ uuid = { version = "1.10.0", features = ["v4"] }
 [dev-dependencies]
 postgres = { workspace = true, features = ["test-utils", "sqlx"] }
 
-insta = { workspace = true, features = ["json"] }
+insta = { workspace = true, features = ["json", "redactions"] }
