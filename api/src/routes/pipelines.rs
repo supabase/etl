@@ -90,7 +90,7 @@ impl From<PipelinesDbError> for PipelineError {
             PipelinesDbError::Database(e) if db::pipelines::is_duplicate_pipeline_error(&e) => {
                 Self::DuplicatePipeline
             }
-            e @ _ => Self::PipelinesDb(e),
+            e => Self::PipelinesDb(e),
         }
     }
 }

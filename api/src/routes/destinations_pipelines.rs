@@ -78,7 +78,7 @@ impl From<DestinationPipelinesDbError> for DestinationPipelineError {
             {
                 DestinationPipelineError::DuplicatePipeline
             }
-            e @ _ => DestinationPipelineError::DestinationPipelinesDb(e.into()),
+            e => DestinationPipelineError::DestinationPipelinesDb(e),
         }
     }
 }

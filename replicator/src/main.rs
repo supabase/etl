@@ -4,7 +4,6 @@ use crate::core::start_replicator;
 
 mod config;
 mod core;
-mod environment;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {

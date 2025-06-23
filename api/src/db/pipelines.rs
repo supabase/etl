@@ -167,7 +167,7 @@ pub async fn update_pipeline(
         pipeline_id,
         source_id,
         destination_id,
-        &publication_name,
+        publication_name,
         pipeline_config,
     )
     .await?;
