@@ -1,7 +1,7 @@
 pipeline_id: 1
 batch:
   max_size: 1000
-  max_fill_secs: 1
+  max_fill_ms: 1
 tls:
   trusted_root_certs: ""
   enabled: false

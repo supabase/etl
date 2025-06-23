@@ -19,7 +19,7 @@ pub enum WorkerWaitError {
     #[error("Worker task panicked or was forcefully aborted: {0}")]
     WorkerPanicked(#[from] task::JoinError),
 
-    /// The worker's task failed internally, but the error was caught and not propagated as a panic.
+    /// The worker's task failed internally, but the error was caught and not propagated.
     ///
     /// This can occur when using abstractions like `ReactiveFuture`, which catch both panics and
     /// `Result::Err` values, and then notify the pool about the failure without letting it bubble up.
