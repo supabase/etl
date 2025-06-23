@@ -1,0 +1,13 @@
+---
+source: api/tests/integration/tenants_sources_test.rs
+expression: response.config
+---
+SourceConfig {
+    host: "localhost",
+    port: 5432,
+    name: "postgres",
+    username: "postgres",
+    password: Some(
+        "postgres",
+    ),
+}

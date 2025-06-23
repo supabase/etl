@@ -1,0 +1,13 @@
+---
+source: api/tests/integration/sources_test.rs
+expression: source.config
+---
+SourceConfig {
+    host: "example.com",
+    port: 2345,
+    name: "sergtsop",
+    username: "sergtsop",
+    password: Some(
+        "sergtsop",
+    ),
+}

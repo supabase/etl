@@ -1,6 +1,5 @@
 ---
 source: api/tests/integration/pipelines_test.rs
-assertion_line: 255
 expression: response.config
 ---
 PipelineConfig {

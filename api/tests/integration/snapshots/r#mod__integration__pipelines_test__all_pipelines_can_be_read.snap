@@ -1,7 +1,6 @@
 ---
 source: api/tests/integration/pipelines_test.rs
-assertion_line: 195
-expression: response.config
+expression: pipeline.config
 ---
 PipelineConfig {
     publication_name: "publication",
