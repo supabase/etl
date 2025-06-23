@@ -2,7 +2,7 @@ use config::shared::DestinationConfig;
 use sqlx::PgPool;
 use thiserror::Error;
 
-use crate::db::base::{
+use crate::db::serde::{
     encrypt_and_serialize, serialize, DbDeserializationError, DbSerializationError,
 };
 use crate::db::destinations::{

@@ -1,4 +1,4 @@
-mod base;
+mod serde;
 pub mod destinations;
 pub mod destinations_pipelines;
 pub mod images;

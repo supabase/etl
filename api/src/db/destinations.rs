@@ -4,7 +4,7 @@ use sqlx::{PgPool, Postgres, Transaction};
 use std::fmt::Debug;
 use thiserror::Error;
 
-use crate::db::base::{
+use crate::db::serde::{
     decrypt_and_deserialize_from_value, encrypt_and_serialize, DbDeserializationError,
     DbSerializationError,
 };
@@ -296,7 +296,7 @@ mod tests {
     use aws_lc_rs::aead::RandomizedNonceKey;
     use config::shared::DestinationConfig;
 
-    use crate::db::base::{decrypt_and_deserialize_from_value, encrypt_and_serialize};
+    use crate::db::serde::{decrypt_and_deserialize_from_value, encrypt_and_serialize};
     use crate::db::destinations::EncryptedDestinationConfig;
     use crate::encryption::EncryptionKey;
 
