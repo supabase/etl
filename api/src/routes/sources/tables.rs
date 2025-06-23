@@ -9,6 +9,7 @@ use sqlx::PgPool;
 use thiserror::Error;
 use utoipa::ToSchema;
 
+use crate::db::tables::TablesDbError;
 use crate::{
     db::{self, sources::SourcesDbError, tables::Table},
     encryption::EncryptionKey,
@@ -17,24 +18,27 @@ use crate::{
 
 #[derive(Debug, Error)]
 enum TableError {
-    #[error("database error: {0}")]
-    DatabaseError(#[from] sqlx::Error),
-
-    #[error("source with id {0} not found")]
+    #[error("The source with id {0} was not found")]
     SourceNotFound(i64),
 
-    #[error("tenant id error: {0}")]
+    #[error(transparent)]
     TenantId(#[from] TenantIdError),
 
-    #[error("sources db error: {0}")]
+    #[error(transparent)]
     SourcesDb(#[from] SourcesDbError),
+
+    #[error(transparent)]
+    TablesDb(#[from] TablesDbError),
 }
 
 impl TableError {
     fn to_message(&self) -> String {
         match self {
             // Do not expose internal database details in error messages
-            TableError::DatabaseError(_) => "internal server error".to_string(),
+            TableError::SourcesDb(SourcesDbError::Database(_))
+            | TableError::TablesDb(TablesDbError::Database(_)) => {
+                "internal server error".to_string()
+            }
             // Every other message is ok, as they do not divulge sensitive information
             e => e.to_string(),
         }
@@ -42,16 +46,14 @@ impl TableError {
 }
 
 #[derive(Serialize, ToSchema)]
-pub struct GetTablesReponse {
+pub struct GetTablesResponse {
     pub tables: Vec<Table>,
 }
 
 impl ResponseError for TableError {
     fn status_code(&self) -> StatusCode {
         match self {
-            TableError::DatabaseError(_) | TableError::SourcesDb(_) => {
-                StatusCode::INTERNAL_SERVER_ERROR
-            }
+            TableError::SourcesDb(_) | TableError::TablesDb(_) => StatusCode::INTERNAL_SERVER_ERROR,
             TableError::SourceNotFound(_) => StatusCode::NOT_FOUND,
             TableError::TenantId(_) => StatusCode::BAD_REQUEST,
         }
@@ -96,6 +98,6 @@ pub async fn read_table_names(
 
     let options = config.into_connection_config().with_db();
     let tables = db::tables::get_tables(&options).await?;
-    let response = GetTablesReponse { tables };
+    let response = GetTablesResponse { tables };
     Ok(Json(response))
 }

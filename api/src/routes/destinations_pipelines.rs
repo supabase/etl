@@ -12,10 +12,11 @@ use utoipa::ToSchema;
 
 use super::{destinations::DestinationError, extract_tenant_id, ErrorMessage, TenantIdError};
 use crate::db;
-use crate::db::destinations::destination_exists;
-use crate::db::destinations_pipelines::DestinationPipelineDbError;
+use crate::db::destinations::{destination_exists, DestinationsDbError};
+use crate::db::destinations_pipelines::DestinationPipelinesDbError;
+use crate::db::images::ImagesDbError;
 use crate::db::pipelines::PipelineConfig;
-use crate::db::sources::source_exists;
+use crate::db::sources::{source_exists, SourcesDbError};
 use crate::encryption::EncryptionKey;
 
 #[derive(Deserialize, ToSchema)]
@@ -35,40 +36,49 @@ pub struct PostDestinationPipelineRequest {
 
 #[derive(Debug, Error)]
 enum DestinationPipelineError {
-    #[error("database error: {0}")]
-    DatabaseError(sqlx::Error),
-
-    #[error("no default image found")]
+    #[error("No default image was found")]
     NoDefaultImageFound,
 
-    #[error("tenant id error: {0}")]
+    #[error(transparent)]
     TenantId(#[from] TenantIdError),
 
-    #[error("source with id {0} not found")]
+    #[error("The source with id {0} was not found")]
     SourceNotFound(i64),
 
-    #[error("destination with id {0} not found")]
+    #[error("The destination with id {0} was not found")]
     DestinationNotFound(i64),
 
-    #[error("pipeline with id {0} not found")]
+    #[error("The pipeline with id {0} was not found")]
     PipelineNotFound(i64),
 
-    #[error("destinations error: {0}")]
+    #[error(transparent)]
     Destination(#[from] DestinationError),
 
-    #[error("destinations and pipelines db error: {0}")]
-    DestinationPipelineDb(#[from] DestinationPipelineDbError),
-
-    #[error("a pipeline already exists for this source and destination combination")]
+    #[error("A pipeline already exists for this source and destination combination")]
     DuplicatePipeline,
+
+    #[error(transparent)]
+    DestinationPipelinesDb(DestinationPipelinesDbError),
+
+    #[error(transparent)]
+    DestinationsDb(#[from] DestinationsDbError),
+
+    #[error(transparent)]
+    ImagesDb(#[from] ImagesDbError),
+
+    #[error(transparent)]
+    SourcesDb(#[from] SourcesDbError),
 }
 
-impl From<sqlx::Error> for DestinationPipelineError {
-    fn from(e: sqlx::Error) -> Self {
-        if db::pipelines::is_duplicate_pipeline_error(&e) {
-            DestinationPipelineError::DuplicatePipeline
-        } else {
-            DestinationPipelineError::DatabaseError(e)
+impl From<DestinationPipelinesDbError> for DestinationPipelineError {
+    fn from(e: DestinationPipelinesDbError) -> Self {
+        match e {
+            DestinationPipelinesDbError::Database(e)
+                if db::pipelines::is_duplicate_pipeline_error(&e) =>
+            {
+                DestinationPipelineError::DuplicatePipeline
+            }
+            e @ _ => DestinationPipelineError::DestinationPipelinesDb(e.into()),
         }
     }
 }
@@ -77,8 +87,12 @@ impl DestinationPipelineError {
     fn to_message(&self) -> String {
         match self {
             // Do not expose internal database details in error messages
-            DestinationPipelineError::DatabaseError(_)
-            | DestinationPipelineError::DestinationPipelineDb(_) => {
+            DestinationPipelineError::DestinationPipelinesDb(
+                DestinationPipelinesDbError::Database(_),
+            )
+            | DestinationPipelineError::DestinationsDb(DestinationsDbError::Database(_))
+            | DestinationPipelineError::ImagesDb(ImagesDbError::Database(_))
+            | DestinationPipelineError::SourcesDb(SourcesDbError::Database(_)) => {
                 "internal server error".to_string()
             }
             // Every other message is ok, as they do not divulge sensitive information
@@ -91,11 +105,11 @@ impl ResponseError for DestinationPipelineError {
     fn status_code(&self) -> StatusCode {
         match self {
             DestinationPipelineError::Destination(e) => e.status_code(),
-            DestinationPipelineError::DatabaseError(_)
-            | DestinationPipelineError::NoDefaultImageFound
-            | DestinationPipelineError::DestinationPipelineDb(_) => {
-                StatusCode::INTERNAL_SERVER_ERROR
-            }
+            DestinationPipelineError::NoDefaultImageFound
+            | DestinationPipelineError::DestinationPipelinesDb(_)
+            | DestinationPipelineError::DestinationsDb(_)
+            | DestinationPipelineError::ImagesDb(_)
+            | DestinationPipelineError::SourcesDb(_) => StatusCode::INTERNAL_SERVER_ERROR,
             DestinationPipelineError::TenantId(_)
             | DestinationPipelineError::SourceNotFound(_)
             | DestinationPipelineError::DestinationNotFound(_)
@@ -222,10 +236,10 @@ pub async fn update_destinations_and_pipelines(
     )
     .await
     .map_err(|e| match e {
-        DestinationPipelineDbError::DestinationNotFound(destination_id) => {
+        DestinationPipelinesDbError::DestinationNotFound(destination_id) => {
             DestinationPipelineError::DestinationNotFound(destination_id)
         }
-        DestinationPipelineDbError::PipelineNotFound(pipeline_id) => {
+        DestinationPipelinesDbError::PipelineNotFound(pipeline_id) => {
             DestinationPipelineError::PipelineNotFound(pipeline_id)
         }
         e => e.into(),

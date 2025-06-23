@@ -1,5 +1,12 @@
 use serde::{Deserialize, Serialize};
 use sqlx::{postgres::PgConnectOptions, Connection, Executor, PgConnection, Row};
+use thiserror::Error;
+
+#[derive(Debug, Error)]
+pub enum TablesDbError {
+    #[error("Error while interacting with PostgreSQL for tables: {0}")]
+    Database(#[from] sqlx::Error),
+}
 
 #[derive(Serialize, Deserialize)]
 pub struct Table {
@@ -7,7 +14,7 @@ pub struct Table {
     pub name: String,
 }
 
-pub async fn get_tables(options: &PgConnectOptions) -> Result<Vec<Table>, sqlx::Error> {
+pub async fn get_tables(options: &PgConnectOptions) -> Result<Vec<Table>, TablesDbError> {
     let mut connection = PgConnection::connect_with(options).await?;
     let query = r#"
         select

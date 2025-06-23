@@ -17,9 +17,9 @@ use utoipa::ToSchema;
 
 use crate::db;
 use crate::db::destinations::{destination_exists, Destination, DestinationsDbError};
-use crate::db::images::Image;
+use crate::db::images::{Image, ImagesDbError};
 use crate::db::pipelines::{Pipeline, PipelineConfig, PipelinesDbError};
-use crate::db::replicators::Replicator;
+use crate::db::replicators::{Replicator, ReplicatorsDbError};
 use crate::db::sources::{source_exists, Source, SourceConfig, SourcesDbError};
 use crate::encryption::EncryptionKey;
 use crate::k8s_client::{
@@ -35,58 +35,63 @@ pub struct Secrets {
 
 #[derive(Debug, Error)]
 enum PipelineError {
-    #[error("database error: {0}")]
-    DatabaseError(sqlx::Error),
-
-    #[error("pipeline with id {0} not found")]
+    #[error("The pipeline with id {0} was not found")]
     PipelineNotFound(i64),
 
-    #[error("source with id {0} not found")]
+    #[error("The source with id {0} was not found")]
     SourceNotFound(i64),
 
-    #[error("destination with id {0} not found")]
+    #[error("The destination with id {0} was not found")]
     DestinationNotFound(i64),
 
-    #[error("replicator with pipeline id {0} not found")]
+    #[error("The replicator with pipeline id {0} was not found")]
     ReplicatorNotFound(i64),
 
-    #[error("image with replicator id {0} not found")]
+    #[error("The image with replicator id {0} was not found")]
     ImageNotFound(i64),
 
-    #[error("no default image found")]
+    #[error("No default image was found")]
     NoDefaultImageFound,
 
-    #[error("tenant id error: {0}")]
+    #[error(transparent)]
     TenantId(#[from] TenantIdError),
 
     #[error("invalid destination config")]
     InvalidConfig(#[from] serde_json::Error),
 
-    #[error("k8s error: {0}")]
-    K8sError(#[from] K8sError),
+    #[error("A K8s error occurred: {0}")]
+    K8s(#[from] K8sError),
 
-    #[error("sources db error: {0}")]
+    #[error(transparent)]
     SourcesDb(#[from] SourcesDbError),
 
-    #[error("destinations db error: {0}")]
+    #[error(transparent)]
     DestinationsDb(#[from] DestinationsDbError),
 
-    #[error("replicators db error: {0}")]
-    PipelinesDb(#[from] PipelinesDbError),
+    #[error(transparent)]
+    PipelinesDb(PipelinesDbError),
 
-    #[error("trusted root certs config not found")]
+    #[error(transparent)]
+    ReplicatorsDb(#[from] ReplicatorsDbError),
+
+    #[error(transparent)]
+    ImagesDb(#[from] ImagesDbError),
+
+    #[error("The trusted root certs config was not found")]
     TrustedRootCertsConfigMissing,
 
-    #[error("a pipeline already exists for this source and destination combination")]
+    #[error("A pipeline already exists for this source and destination combination")]
     DuplicatePipeline,
 }
 
-impl From<sqlx::Error> for PipelineError {
-    fn from(e: sqlx::Error) -> Self {
-        if db::pipelines::is_duplicate_pipeline_error(&e) {
-            return PipelineError::DuplicatePipeline;
+impl From<PipelinesDbError> for PipelineError {
+    fn from(e: PipelinesDbError) -> Self {
+        match e {
+            PipelinesDbError::Database(e) if db::pipelines::is_duplicate_pipeline_error(&e) => {
+                Self::DuplicatePipeline
+            }
+            e @ _ => Self::PipelinesDb(e),
         }
-        PipelineError::DatabaseError(e)
     }
 }
 
@@ -94,7 +99,13 @@ impl PipelineError {
     fn to_message(&self) -> String {
         match self {
             // Do not expose internal database details in error messages
-            PipelineError::DatabaseError(_) => "internal server error".to_string(),
+            PipelineError::SourcesDb(SourcesDbError::Database(_))
+            | PipelineError::DestinationsDb(DestinationsDbError::Database(_))
+            | PipelineError::PipelinesDb(PipelinesDbError::Database(_))
+            | PipelineError::ReplicatorsDb(ReplicatorsDbError::Database(_))
+            | PipelineError::ImagesDb(ImagesDbError::Database(_)) => {
+                "internal server error".to_string()
+            }
             // Every other message is ok, as they do not divulge sensitive information
             e => e.to_string(),
         }
@@ -104,15 +115,16 @@ impl PipelineError {
 impl ResponseError for PipelineError {
     fn status_code(&self) -> StatusCode {
         match self {
-            PipelineError::DatabaseError(_)
-            | PipelineError::InvalidConfig(_)
+            PipelineError::InvalidConfig(_)
             | PipelineError::ReplicatorNotFound(_)
             | PipelineError::ImageNotFound(_)
             | PipelineError::NoDefaultImageFound
             | PipelineError::SourcesDb(_)
             | PipelineError::DestinationsDb(_)
             | PipelineError::PipelinesDb(_)
-            | PipelineError::K8sError(_)
+            | PipelineError::ReplicatorsDb(_)
+            | PipelineError::ImagesDb(_)
+            | PipelineError::K8s(_)
             | PipelineError::TrustedRootCertsConfigMissing => StatusCode::INTERNAL_SERVER_ERROR,
             PipelineError::PipelineNotFound(_) => StatusCode::NOT_FOUND,
             PipelineError::TenantId(_)

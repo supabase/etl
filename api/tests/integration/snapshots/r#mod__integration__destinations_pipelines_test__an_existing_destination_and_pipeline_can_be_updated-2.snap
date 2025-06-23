@@ -1,0 +1,17 @@
+---
+source: api/tests/integration/destinations_pipelines_test.rs
+expression: response.config
+---
+PipelineConfig {
+    publication_name: "updated_publication",
+    batch: BatchConfig {
+        max_size: 2000,
+        max_fill_ms: 10,
+    },
+    apply_worker_init_retry: RetryConfig {
+        max_attempts: 10,
+        initial_delay_ms: 2000,
+        max_delay_ms: 4000,
+        backoff_factor: 1.0,
+    },
+}

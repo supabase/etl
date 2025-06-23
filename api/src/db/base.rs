@@ -3,25 +3,12 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 use thiserror::Error;
 
-// TODO: remove and use encryption nd decryption error types.
-#[derive(Debug, Error)]
-pub enum ToDbError {
-    #[error("An encryption error happened while converting to the db variant: {0}")]
-    Encryption(#[from] EncryptionError),
-}
-
-#[derive(Debug, Error)]
-pub enum ToMemoryError {
-    #[error("A decryption error happened while converting to the memory variant: {0}")]
-    Decryption(#[from] DecryptionError),
-}
-
 pub trait Encryptable<T> {
-    fn encrypt(self, encryption_key: &EncryptionKey) -> Result<T, ToDbError>;
+    fn encrypt(self, encryption_key: &EncryptionKey) -> Result<T, EncryptionError>;
 }
 
 pub trait Decryptable<T> {
-    fn decrypt(self, encryption_key: &EncryptionKey) -> Result<T, ToMemoryError>;
+    fn decrypt(self, encryption_key: &EncryptionKey) -> Result<T, DecryptionError>;
 }
 
 #[derive(Debug, Error)]
@@ -29,8 +16,8 @@ pub enum DbSerializationError {
     #[error("Error while serializing data to the db: {0}")]
     Serde(#[from] serde_json::Error),
 
-    #[error("An error occurred while converting to the db representation: {0}")]
-    ToDb(#[from] ToDbError),
+    #[error("An error occurred while encrypting data for the db representation: {0}")]
+    Encryption(#[from] EncryptionError),
 }
 
 #[derive(Debug, Error)]
@@ -38,8 +25,8 @@ pub enum DbDeserializationError {
     #[error("Error while deserializing data from the db: {0}")]
     Serde(#[from] serde_json::Error),
 
-    #[error("An error occurred while converting to the memory representation: {0}")]
-    ToMemory(#[from] ToMemoryError),
+    #[error("An error occurred while decrypting data from the db representation: {0}")]
+    Decryption(#[from] DecryptionError),
 }
 
 pub fn serialize<S>(value: S) -> Result<serde_json::Value, DbSerializationError>

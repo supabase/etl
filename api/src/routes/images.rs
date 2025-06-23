@@ -11,22 +11,23 @@ use thiserror::Error;
 use utoipa::ToSchema;
 
 use crate::db;
+use crate::db::images::ImagesDbError;
 use crate::routes::ErrorMessage;
 
 #[derive(Debug, Error)]
 enum ImageError {
-    #[error("database error: {0}")]
-    DatabaseError(#[from] sqlx::Error),
-
-    #[error("image with id {0} not found")]
+    #[error("The image with id {0} was not found")]
     ImageNotFound(i64),
+
+    #[error(transparent)]
+    ImagesDb(#[from] ImagesDbError),
 }
 
 impl ImageError {
     fn to_message(&self) -> String {
         match self {
             // Do not expose internal database details in error messages
-            ImageError::DatabaseError(_) => "internal server error".to_string(),
+            ImageError::ImagesDb(ImagesDbError::Database(_)) => "internal server error".to_string(),
             // Every other message is ok, as they do not divulge sensitive information
             e => e.to_string(),
         }
@@ -36,7 +37,7 @@ impl ImageError {
 impl ResponseError for ImageError {
     fn status_code(&self) -> StatusCode {
         match self {
-            ImageError::DatabaseError(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            ImageError::ImagesDb(_) => StatusCode::INTERNAL_SERVER_ERROR,
             ImageError::ImageNotFound(_) => StatusCode::NOT_FOUND,
         }
     }

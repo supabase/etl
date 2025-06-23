@@ -18,16 +18,13 @@ use crate::routes::{extract_tenant_id, ErrorMessage, TenantIdError};
 
 #[derive(Debug, Error)]
 pub enum DestinationError {
-    #[error("database error: {0}")]
-    DatabaseError(#[from] sqlx::Error),
-
-    #[error("destination with id {0} not found")]
+    #[error("The destination with id {0} was not found")]
     DestinationNotFound(i64),
 
-    #[error("tenant id error: {0}")]
+    #[error(transparent)]
     TenantId(#[from] TenantIdError),
 
-    #[error("destinations db error: {0}")]
+    #[error(transparent)]
     DestinationsDb(#[from] DestinationsDbError),
 }
 
@@ -35,7 +32,9 @@ impl DestinationError {
     pub fn to_message(&self) -> String {
         match self {
             // Do not expose internal database details in error messages
-            DestinationError::DatabaseError(_) => "internal server error".to_string(),
+            DestinationError::DestinationsDb(DestinationsDbError::Database(_)) => {
+                "internal server error".to_string()
+            }
             // Every other message is ok, as they do not divulge sensitive information
             e => e.to_string(),
         }
@@ -45,9 +44,7 @@ impl DestinationError {
 impl ResponseError for DestinationError {
     fn status_code(&self) -> StatusCode {
         match self {
-            DestinationError::DatabaseError(_) | DestinationError::DestinationsDb(_) => {
-                StatusCode::INTERNAL_SERVER_ERROR
-            }
+            DestinationError::DestinationsDb(_) => StatusCode::INTERNAL_SERVER_ERROR,
             DestinationError::DestinationNotFound(_) => StatusCode::NOT_FOUND,
             DestinationError::TenantId(_) => StatusCode::BAD_REQUEST,
         }

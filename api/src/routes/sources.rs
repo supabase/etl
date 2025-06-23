@@ -20,16 +20,13 @@ pub mod tables;
 
 #[derive(Debug, Error)]
 pub enum SourceError {
-    #[error("database error: {0}")]
-    DatabaseError(#[from] sqlx::Error),
-
-    #[error("source with id {0} not found")]
+    #[error("The source with id {0} was not found")]
     SourceNotFound(i64),
 
-    #[error("tenant id error: {0}")]
+    #[error(transparent)]
     TenantId(#[from] TenantIdError),
 
-    #[error("sources db error: {0}")]
+    #[error(transparent)]
     SourcesDb(#[from] SourcesDbError),
 }
 
@@ -37,7 +34,9 @@ impl SourceError {
     pub fn to_message(&self) -> String {
         match self {
             // Do not expose internal database details in error messages
-            SourceError::DatabaseError(_) => "internal server error".to_string(),
+            SourceError::SourcesDb(SourcesDbError::Database(_)) => {
+                "internal server error".to_string()
+            }
             // Every other message is ok, as they do not divulge sensitive information
             e => e.to_string(),
         }
@@ -47,9 +46,7 @@ impl SourceError {
 impl ResponseError for SourceError {
     fn status_code(&self) -> StatusCode {
         match self {
-            SourceError::DatabaseError(_) | SourceError::SourcesDb(_) => {
-                StatusCode::INTERNAL_SERVER_ERROR
-            }
+            SourceError::SourcesDb(_) => StatusCode::INTERNAL_SERVER_ERROR,
             SourceError::SourceNotFound(_) => StatusCode::NOT_FOUND,
             SourceError::TenantId(_) => StatusCode::BAD_REQUEST,
         }

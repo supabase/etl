@@ -12,6 +12,7 @@ use tracing_actix_web::RootSpan;
 use utoipa::ToSchema;
 
 use crate::db;
+use crate::db::tenants::TenantsDbError;
 use crate::routes::ErrorMessage;
 
 #[derive(Deserialize, ToSchema)]
@@ -35,18 +36,20 @@ pub struct PostTenantResponse {
 
 #[derive(Debug, Error)]
 pub enum TenantError {
-    #[error("database error: {0}")]
-    DatabaseError(#[from] sqlx::Error),
-
-    #[error("tenant with id {0} not found")]
+    #[error("The tenant with id {0} was not found")]
     TenantNotFound(String),
+
+    #[error(transparent)]
+    TenantsDb(#[from] TenantsDbError),
 }
 
 impl TenantError {
     pub fn to_message(&self) -> String {
         match self {
             // Do not expose internal database details in error messages
-            TenantError::DatabaseError(_) => "internal server error".to_string(),
+            TenantError::TenantsDb(TenantsDbError::Database(_)) => {
+                "internal server error".to_string()
+            }
             // Every other message is ok, as they do not divulge sensitive information
             e => e.to_string(),
         }
@@ -56,7 +59,7 @@ impl TenantError {
 impl ResponseError for TenantError {
     fn status_code(&self) -> StatusCode {
         match self {
-            TenantError::DatabaseError(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            TenantError::TenantsDb(_) => StatusCode::INTERNAL_SERVER_ERROR,
             TenantError::TenantNotFound(_) => StatusCode::NOT_FOUND,
         }
     }

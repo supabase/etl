@@ -3,19 +3,22 @@ use thiserror::Error;
 
 use crate::db::base::{encrypt_and_serialize, DbSerializationError};
 use crate::db::sources::{create_source_txn, SourceConfig, SourcesDbError};
-use crate::db::tenants::create_tenant_txn;
+use crate::db::tenants::{create_tenant_txn, TenantsDbError};
 use crate::encryption::EncryptionKey;
 
 #[derive(Debug, Error)]
 pub enum TenantSourceDbError {
-    #[error("Error while dealing with PostgreSQL: {0}")]
-    Sqlx(#[from] sqlx::Error),
+    #[error("Error while interacting with PostgreSQL for tenants and/or sources: {0}")]
+    Database(#[from] sqlx::Error),
 
-    #[error("Error while serializing source config: {0}")]
-    DbSerializationError(#[from] DbSerializationError),
+    #[error("Error while serializing tenant or source config: {0}")]
+    DbSerialization(#[from] DbSerializationError),
 
-    #[error("Error while dealing with the source for this tenant: {0}")]
+    #[error(transparent)]
     Sources(#[from] SourcesDbError),
+
+    #[error(transparent)]
+    Tenants(#[from] TenantsDbError),
 }
 
 pub async fn create_tenant_and_source(

@@ -7,9 +7,11 @@ use thiserror::Error;
 
 use crate::db::base::{
     decrypt_and_deserialize_from_value, encrypt_and_serialize, DbDeserializationError,
-    DbSerializationError, Decryptable, Encryptable, ToDbError, ToMemoryError,
+    DbSerializationError, Decryptable, Encryptable,
 };
-use crate::encryption::{decrypt_text, encrypt_text, EncryptedValue, EncryptionKey};
+use crate::encryption::{
+    decrypt_text, encrypt_text, DecryptionError, EncryptedValue, EncryptionError, EncryptionKey,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -36,7 +38,10 @@ impl SourceConfig {
 }
 
 impl Encryptable<EncryptedSourceConfig> for SourceConfig {
-    fn encrypt(self, encryption_key: &EncryptionKey) -> Result<EncryptedSourceConfig, ToDbError> {
+    fn encrypt(
+        self,
+        encryption_key: &EncryptionKey,
+    ) -> Result<EncryptedSourceConfig, EncryptionError> {
         let mut encrypted_password = None;
         if let Some(password) = self.password {
             encrypted_password = Some(encrypt_text(password, encryption_key)?);
@@ -63,7 +68,7 @@ pub struct EncryptedSourceConfig {
 }
 
 impl Decryptable<SourceConfig> for EncryptedSourceConfig {
-    fn decrypt(self, encryption_key: &EncryptionKey) -> Result<SourceConfig, ToMemoryError> {
+    fn decrypt(self, encryption_key: &EncryptionKey) -> Result<SourceConfig, DecryptionError> {
         let mut decrypted_password = None;
         if let Some(password) = self.password {
             decrypted_password = Some(decrypt_text(password, encryption_key)?);
@@ -90,13 +95,13 @@ pub struct Source {
 #[derive(Debug, Error)]
 pub enum SourcesDbError {
     #[error("Error while interacting with PostgreSQL for sources: {0}")]
-    Sqlx(#[from] sqlx::Error),
+    Database(#[from] sqlx::Error),
 
     #[error("Error while serializing source config: {0}")]
-    DbSerializationError(#[from] DbSerializationError),
+    DbSerialization(#[from] DbSerializationError),
 
     #[error("Error while deserializing source config: {0}")]
-    DbDeserializationError(#[from] DbDeserializationError),
+    DbDeserialization(#[from] DbDeserializationError),
 }
 
 pub async fn create_source(
@@ -209,7 +214,7 @@ pub async fn delete_source(
     pool: &PgPool,
     tenant_id: &str,
     source_id: i64,
-) -> Result<Option<i64>, sqlx::Error> {
+) -> Result<Option<i64>, SourcesDbError> {
     let record = sqlx::query!(
         r#"
         delete from app.sources
@@ -263,7 +268,7 @@ pub async fn source_exists(
     pool: &PgPool,
     tenant_id: &str,
     source_id: i64,
-) -> Result<bool, sqlx::Error> {
+) -> Result<bool, SourcesDbError> {
     let record = sqlx::query!(
         r#"
         select exists (select id

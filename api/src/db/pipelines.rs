@@ -6,7 +6,7 @@ use thiserror::Error;
 use crate::db::base::{
     deserialize_from_value, serialize, DbDeserializationError, DbSerializationError,
 };
-use crate::db::replicators::create_replicator_txn;
+use crate::db::replicators::{create_replicator_txn, ReplicatorsDbError};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PipelineConfig {
@@ -29,13 +29,16 @@ pub struct Pipeline {
 #[derive(Debug, Error)]
 pub enum PipelinesDbError {
     #[error("Error while interacting with PostgreSQL for pipelines: {0}")]
-    Sqlx(#[from] sqlx::Error),
+    Database(#[from] sqlx::Error),
 
     #[error("Error while serializing pipeline config: {0}")]
-    DbSerializationError(#[from] DbSerializationError),
+    DbSerialization(#[from] DbSerializationError),
 
     #[error("Error while deserializing pipeline config: {0}")]
-    DbDeserializationError(#[from] DbDeserializationError),
+    DbDeserialization(#[from] DbDeserializationError),
+
+    #[error(transparent)]
+    ReplicatorsDb(#[from] ReplicatorsDbError),
 }
 
 pub async fn create_pipeline(

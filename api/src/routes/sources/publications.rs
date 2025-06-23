@@ -10,6 +10,7 @@ use sqlx::PgPool;
 use thiserror::Error;
 use utoipa::ToSchema;
 
+use crate::db::publications::PublicationsDbError;
 use crate::{
     db::{self, publications::Publication, sources::SourcesDbError, tables::Table},
     encryption::EncryptionKey,
@@ -18,27 +19,30 @@ use crate::{
 
 #[derive(Debug, Error)]
 enum PublicationError {
-    #[error("database error: {0}")]
-    DatabaseError(#[from] sqlx::Error),
-
-    #[error("source with id {0} not found")]
+    #[error("The source with id {0} was not found")]
     SourceNotFound(i64),
 
-    #[error("publication with name {0} not found")]
+    #[error("The publication with name {0} was not found")]
     PublicationNotFound(String),
 
-    #[error("tenant id error: {0}")]
+    #[error(transparent)]
     TenantId(#[from] TenantIdError),
 
-    #[error("sources db error: {0}")]
+    #[error(transparent)]
     SourcesDb(#[from] SourcesDbError),
+
+    #[error(transparent)]
+    PublicationsDb(#[from] PublicationsDbError),
 }
 
 impl PublicationError {
     fn to_message(&self) -> String {
         match self {
             // Do not expose internal database details in error messages
-            PublicationError::DatabaseError(_) => "internal server error".to_string(),
+            PublicationError::SourcesDb(SourcesDbError::Database(_))
+            | PublicationError::PublicationsDb(PublicationsDbError::Database(_)) => {
+                "internal server error".to_string()
+            }
             // Every other message is ok, as they do not divulge sensitive information
             e => e.to_string(),
         }
@@ -48,7 +52,7 @@ impl PublicationError {
 impl ResponseError for PublicationError {
     fn status_code(&self) -> StatusCode {
         match self {
-            PublicationError::DatabaseError(_) | PublicationError::SourcesDb(_) => {
+            PublicationError::SourcesDb(_) | PublicationError::PublicationsDb(_) => {
                 StatusCode::INTERNAL_SERVER_ERROR
             }
             PublicationError::SourceNotFound(_) | PublicationError::PublicationNotFound(_) => {

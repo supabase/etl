@@ -14,9 +14,9 @@ use crate::db::pipelines::{
 use crate::encryption::EncryptionKey;
 
 #[derive(Debug, Error)]
-pub enum DestinationPipelineDbError {
-    #[error("Error while interacting with PostgreSQL for sources: {0}")]
-    Sqlx(#[from] sqlx::Error),
+pub enum DestinationPipelinesDbError {
+    #[error("Error while interacting with PostgreSQL for destination and/or pipelines: {0}")]
+    Database(#[from] sqlx::Error),
 
     #[error("The destination with id {0} was not found")]
     DestinationNotFound(i64),
@@ -30,11 +30,11 @@ pub enum DestinationPipelineDbError {
     #[error("Error while interacting with a destination: {0}")]
     DestinationsDb(#[from] DestinationsDbError),
 
-    #[error("Error while serializing destination or source config: {0}")]
-    DbSerializationError(#[from] DbSerializationError),
+    #[error("Error while serializing destination or pipeline config: {0}")]
+    DbSerialization(#[from] DbSerializationError),
 
     #[error("Error while deserializing destination or pipeline config: {0}")]
-    DbDeserializationError(#[from] DbDeserializationError),
+    DbDeserialization(#[from] DbDeserializationError),
 }
 
 #[expect(clippy::too_many_arguments)]
@@ -47,7 +47,7 @@ pub async fn create_destination_and_pipeline(
     image_id: i64,
     pipeline_config: PipelineConfig,
     encryption_key: &EncryptionKey,
-) -> Result<(i64, i64), DestinationPipelineDbError> {
+) -> Result<(i64, i64), DestinationPipelinesDbError> {
     let destination_config = encrypt_and_serialize(destination_config, encryption_key)?;
     let publication_name = pipeline_config.publication_name.clone();
     let pipeline_config = serialize(pipeline_config)?;
@@ -81,7 +81,7 @@ pub async fn update_destination_and_pipeline(
     destination_config: DestinationConfig,
     pipeline_config: PipelineConfig,
     encryption_key: &EncryptionKey,
-) -> Result<(), DestinationPipelineDbError> {
+) -> Result<(), DestinationPipelinesDbError> {
     let destination_config = encrypt_and_serialize(destination_config, encryption_key)?;
     let publication_name = pipeline_config.publication_name.clone();
     let pipeline_config = serialize(pipeline_config)?;
@@ -97,7 +97,7 @@ pub async fn update_destination_and_pipeline(
     .await?;
     if destination_id_res.is_none() {
         txn.rollback().await?;
-        return Err(DestinationPipelineDbError::DestinationNotFound(
+        return Err(DestinationPipelinesDbError::DestinationNotFound(
             destination_id,
         ));
     };
@@ -114,7 +114,7 @@ pub async fn update_destination_and_pipeline(
 
     if pipeline_id_res.is_none() {
         txn.rollback().await?;
-        return Err(DestinationPipelineDbError::PipelineNotFound(pipeline_id));
+        return Err(DestinationPipelinesDbError::PipelineNotFound(pipeline_id));
     };
 
     txn.commit().await?;

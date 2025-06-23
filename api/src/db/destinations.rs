@@ -6,15 +6,17 @@ use thiserror::Error;
 
 use crate::db::base::{
     decrypt_and_deserialize_from_value, encrypt_and_serialize, DbDeserializationError,
-    DbSerializationError, Decryptable, Encryptable, ToDbError, ToMemoryError,
+    DbSerializationError, Decryptable, Encryptable,
 };
-use crate::encryption::{decrypt_text, encrypt_text, EncryptedValue, EncryptionKey};
+use crate::encryption::{
+    decrypt_text, encrypt_text, DecryptionError, EncryptedValue, EncryptionError, EncryptionKey,
+};
 
 impl Encryptable<EncryptedDestinationConfig> for DestinationConfig {
     fn encrypt(
         self,
         encryption_key: &EncryptionKey,
-    ) -> Result<EncryptedDestinationConfig, ToDbError> {
+    ) -> Result<EncryptedDestinationConfig, EncryptionError> {
         match self {
             Self::Memory => Ok(EncryptedDestinationConfig::Memory),
             Self::BigQuery {
@@ -51,7 +53,7 @@ pub enum EncryptedDestinationConfig {
 }
 
 impl Decryptable<DestinationConfig> for EncryptedDestinationConfig {
-    fn decrypt(self, encryption_key: &EncryptionKey) -> Result<DestinationConfig, ToMemoryError> {
+    fn decrypt(self, encryption_key: &EncryptionKey) -> Result<DestinationConfig, DecryptionError> {
         match self {
             Self::Memory => Ok(DestinationConfig::Memory),
             Self::BigQuery {
@@ -77,13 +79,13 @@ impl Decryptable<DestinationConfig> for EncryptedDestinationConfig {
 #[derive(Debug, Error)]
 pub enum DestinationsDbError {
     #[error("Error while interacting with PostgreSQL for destinations: {0}")]
-    Sqlx(#[from] sqlx::Error),
+    Database(#[from] sqlx::Error),
 
     #[error("Error while serializing destination config: {0}")]
-    DbSerializationError(#[from] DbSerializationError),
+    DbSerialization(#[from] DbSerializationError),
 
     #[error("Error while deserializing destination config: {0}")]
-    DbDeserializationError(#[from] DbDeserializationError),
+    DbDeserialization(#[from] DbDeserializationError),
 }
 
 pub struct Destination {
@@ -217,7 +219,7 @@ pub async fn delete_destination(
     pool: &PgPool,
     tenant_id: &str,
     destination_id: i64,
-) -> Result<Option<i64>, sqlx::Error> {
+) -> Result<Option<i64>, DestinationsDbError> {
     let record = sqlx::query!(
         r#"
         delete from app.destinations
@@ -272,7 +274,7 @@ pub async fn destination_exists(
     pool: &PgPool,
     tenant_id: &str,
     destination_id: i64,
-) -> Result<bool, sqlx::Error> {
+) -> Result<bool, DestinationsDbError> {
     let record = sqlx::query!(
         r#"
         select exists (select id

@@ -2,9 +2,16 @@ use pg_escape::{quote_identifier, quote_literal};
 use serde::Serialize;
 use sqlx::{postgres::PgConnectOptions, Connection, Executor, PgConnection, Row};
 use std::collections::HashMap;
+use thiserror::Error;
 use utoipa::ToSchema;
 
 use crate::db::tables::Table;
+
+#[derive(Debug, Error)]
+pub enum PublicationsDbError {
+    #[error("Error while interacting with PostgreSQL for publications: {0}")]
+    Database(#[from] sqlx::Error),
+}
 
 #[derive(Serialize, ToSchema)]
 pub struct Publication {
@@ -15,7 +22,7 @@ pub struct Publication {
 pub async fn create_publication(
     publication: &Publication,
     options: &PgConnectOptions,
-) -> Result<(), sqlx::Error> {
+) -> Result<(), PublicationsDbError> {
     let mut query = String::new();
     let quoted_publication_name = quote_identifier(&publication.name);
     query.push_str("create publication ");
@@ -43,7 +50,7 @@ pub async fn create_publication(
 pub async fn update_publication(
     publication: &Publication,
     options: &PgConnectOptions,
-) -> Result<(), sqlx::Error> {
+) -> Result<(), PublicationsDbError> {
     let mut query = String::new();
     let quoted_publication_name = quote_identifier(&publication.name);
     query.push_str("alter publication ");
@@ -71,7 +78,7 @@ pub async fn update_publication(
 pub async fn drop_publication(
     publication_name: &str,
     options: &PgConnectOptions,
-) -> Result<(), sqlx::Error> {
+) -> Result<(), PublicationsDbError> {
     let mut query = String::new();
     query.push_str("drop publication if exists ");
     let quoted_publication_name = quote_identifier(publication_name);
@@ -86,7 +93,7 @@ pub async fn drop_publication(
 pub async fn read_publication(
     publication_name: &str,
     options: &PgConnectOptions,
-) -> Result<Option<Publication>, sqlx::Error> {
+) -> Result<Option<Publication>, PublicationsDbError> {
     let mut query = String::new();
     query.push_str(
         r#"
@@ -134,7 +141,7 @@ pub async fn read_publication(
 
 pub async fn read_all_publications(
     options: &PgConnectOptions,
-) -> Result<Vec<Publication>, sqlx::Error> {
+) -> Result<Vec<Publication>, PublicationsDbError> {
     let query = r#"
         select p.pubname,
             pt.schemaname as "schemaname?",

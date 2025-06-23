@@ -1,5 +1,5 @@
 ---
-source: api/tests/integration/destinations_pipelines.rs
+source: api/tests/integration/destinations_pipelines_test.rs
 expression: response.config
 ---
 BigQuery {

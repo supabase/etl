@@ -1,4 +1,11 @@
 use sqlx::{PgPool, Postgres, Transaction};
+use thiserror::Error;
+
+#[derive(Debug, Error)]
+pub enum ImagesDbError {
+    #[error("Error while interacting with PostgreSQL for images: {0}")]
+    Database(#[from] sqlx::Error),
+}
 
 pub struct Image {
     pub id: i64,
@@ -6,7 +13,11 @@ pub struct Image {
     pub is_default: bool,
 }
 
-pub async fn create_image(pool: &PgPool, name: &str, is_default: bool) -> Result<i64, sqlx::Error> {
+pub async fn create_image(
+    pool: &PgPool,
+    name: &str,
+    is_default: bool,
+) -> Result<i64, ImagesDbError> {
     let mut txn = pool.begin().await?;
     let res = create_image_txn(&mut txn, name, is_default).await;
     txn.commit().await?;
@@ -17,7 +28,7 @@ pub async fn create_image_txn(
     txn: &mut Transaction<'_, Postgres>,
     name: &str,
     is_default: bool,
-) -> Result<i64, sqlx::Error> {
+) -> Result<i64, ImagesDbError> {
     let record = sqlx::query!(
         r#"
         insert into app.images (name, is_default)
@@ -33,7 +44,7 @@ pub async fn create_image_txn(
     Ok(record.id)
 }
 
-pub async fn read_default_image(pool: &PgPool) -> Result<Option<Image>, sqlx::Error> {
+pub async fn read_default_image(pool: &PgPool) -> Result<Option<Image>, ImagesDbError> {
     let record = sqlx::query!(
         r#"
         select id, name, is_default
@@ -51,7 +62,7 @@ pub async fn read_default_image(pool: &PgPool) -> Result<Option<Image>, sqlx::Er
     }))
 }
 
-pub async fn read_image(pool: &PgPool, image_id: i64) -> Result<Option<Image>, sqlx::Error> {
+pub async fn read_image(pool: &PgPool, image_id: i64) -> Result<Option<Image>, ImagesDbError> {
     let record = sqlx::query!(
         r#"
         select id, name, is_default
@@ -75,7 +86,7 @@ pub async fn update_image(
     image_id: i64,
     name: &str,
     is_default: bool,
-) -> Result<Option<i64>, sqlx::Error> {
+) -> Result<Option<i64>, ImagesDbError> {
     let record = sqlx::query!(
         r#"
         update app.images
@@ -93,7 +104,7 @@ pub async fn update_image(
     Ok(record.map(|r| r.id))
 }
 
-pub async fn delete_image(pool: &PgPool, image_id: i64) -> Result<Option<i64>, sqlx::Error> {
+pub async fn delete_image(pool: &PgPool, image_id: i64) -> Result<Option<i64>, ImagesDbError> {
     let record = sqlx::query!(
         r#"
         delete from app.images
@@ -108,7 +119,7 @@ pub async fn delete_image(pool: &PgPool, image_id: i64) -> Result<Option<i64>, s
     Ok(record.map(|r| r.id))
 }
 
-pub async fn read_all_images(pool: &PgPool) -> Result<Vec<Image>, sqlx::Error> {
+pub async fn read_all_images(pool: &PgPool) -> Result<Vec<Image>, ImagesDbError> {
     let mut record = sqlx::query!(
         r#"
         select id, name, is_default
@@ -131,7 +142,7 @@ pub async fn read_all_images(pool: &PgPool) -> Result<Vec<Image>, sqlx::Error> {
 pub async fn read_image_by_replicator_id(
     pool: &PgPool,
     replicator_id: i64,
-) -> Result<Option<Image>, sqlx::Error> {
+) -> Result<Option<Image>, ImagesDbError> {
     let record = sqlx::query!(
         r#"
         select i.id, i.name, i.is_default

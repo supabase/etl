@@ -1,5 +1,6 @@
 ---
-source: api/tests/integration/destinations_pipelines.rs
+source: api/tests/integration/pipelines_test.rs
+assertion_line: 195
 expression: response.config
 ---
 PipelineConfig {
