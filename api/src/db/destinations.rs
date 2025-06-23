@@ -37,7 +37,7 @@ impl Encryptable<EncryptedDestinationConfig> for DestinationConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EncryptedDestinationConfig {
     Memory,
@@ -299,8 +299,8 @@ mod tests {
     use crate::encryption::EncryptionKey;
 
     #[test]
-    pub fn destination_config_json_roundtrip() {
-        let json = r#"{
+    pub fn destination_config_json_deserialization() {
+        let config = r#"{
             "big_query": {
                 "project_id": "project-id",
                 "dataset_id": "dataset-id",
@@ -308,42 +308,25 @@ mod tests {
                 "max_staleness_mins": 42
             }
         }"#;
-        let expected = DestinationConfig::BigQuery {
+
+        let deserialized = serde_json::from_str::<DestinationConfig>(config);
+        insta::assert_debug_snapshot!(deserialized.unwrap());
+    }
+
+    #[test]
+    pub fn destination_config_json_serialization() {
+        let config = DestinationConfig::BigQuery {
             project_id: "project-id".to_string(),
             dataset_id: "dataset-id".to_string(),
             service_account_key: "service-account-key".to_string(),
             max_staleness_mins: Some(42),
         };
 
-        let deserialized = serde_json::from_str::<DestinationConfig>(json);
-        assert!(deserialized.is_ok());
-        assert_eq!(expected, deserialized.as_ref().unwrap().to_owned());
-
-        let serialized = serde_json::to_string_pretty(&expected);
-        assert!(serialized.is_ok());
-        let re_deserialized = serde_json::from_str::<DestinationConfig>(&serialized.unwrap());
-        assert!(re_deserialized.is_ok());
-        assert_eq!(expected, re_deserialized.unwrap());
+        insta::assert_json_snapshot!(config);
     }
 
     #[test]
-    pub fn destination_config_json_memory_roundtrip() {
-        let json = r#"{
-            "memory": {}
-        }"#;
-        let expected = DestinationConfig::Memory;
-
-        let deserialized = serde_json::from_str::<DestinationConfig>(json);
-        assert!(deserialized.is_ok());
-        assert_eq!(expected, deserialized.as_ref().unwrap().to_owned());
-
-        let serialized = serde_json::to_string(&expected);
-        assert!(serialized.is_ok());
-        assert_eq!(json, serialized.unwrap());
-    }
-
-    #[test]
-    pub fn destination_config_in_db_encryption() {
+    pub fn destination_config_json_encryption() {
         let key_bytes = [42u8; 32];
         let key = RandomizedNonceKey::new(&aws_lc_rs::aead::AES_256_GCM, &key_bytes).unwrap();
         let encryption_key = EncryptionKey { id: 1, key };
@@ -360,24 +343,13 @@ mod tests {
             &encryption_key,
         )
         .unwrap();
-        let deserialized_config = decrypt_and_deserialize_from_value::<
-            EncryptedDestinationConfig,
-            DestinationConfig,
-        >(config_in_db, &encryption_key)
-        .unwrap();
-        assert_eq!(config, deserialized_config);
+        insta::assert_json_snapshot!(config_in_db);
 
-        let config = DestinationConfig::Memory;
-        let config_in_db = encrypt_and_serialize::<DestinationConfig, EncryptedDestinationConfig>(
-            config.clone(),
-            &encryption_key,
-        )
-        .unwrap();
         let deserialized_config = decrypt_and_deserialize_from_value::<
             EncryptedDestinationConfig,
             DestinationConfig,
         >(config_in_db, &encryption_key)
         .unwrap();
-        assert_eq!(config, deserialized_config);
+        insta::assert_debug_snapshot!(deserialized_config);
     }
 }

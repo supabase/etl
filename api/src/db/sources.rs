@@ -11,7 +11,7 @@ use crate::db::base::{
 };
 use crate::encryption::{decrypt_text, encrypt_text, EncryptedValue, EncryptionKey};
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct SourceConfig {
     host: String,
@@ -52,7 +52,7 @@ impl Encryptable<EncryptedSourceConfig> for SourceConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct EncryptedSourceConfig {
     host: String,
@@ -289,15 +289,22 @@ mod tests {
     use crate::encryption::EncryptionKey;
 
     #[test]
-    pub fn source_config_json_roundtrip() {
-        let json = r#"{
+    pub fn source_config_json_deserialization() {
+        let config = r#"{
             "host": "localhost",
             "port": 5432,
             "name": "postgres",
             "username": "postgres",
             "password": "postgres",
         }"#;
-        let expected = SourceConfig {
+
+        let deserialized = serde_json::from_str::<SourceConfig>(config);
+        insta::assert_debug_snapshot!(deserialized.unwrap());
+    }
+
+    #[test]
+    pub fn source_config_json_serialization() {
+        let config = SourceConfig {
             host: "localhost".to_string(),
             port: 5432,
             name: "postgres".to_string(),
@@ -305,17 +312,11 @@ mod tests {
             password: Some("postgres".to_string()),
         };
 
-        let deserialized = serde_json::from_str::<SourceConfig>(json);
-        assert!(deserialized.is_ok());
-        assert_eq!(expected, deserialized.as_ref().unwrap().to_owned());
-
-        let serialized = serde_json::to_string_pretty(&expected);
-        assert!(serialized.is_ok());
-        assert_eq!(json, serialized.unwrap());
+        insta::assert_json_snapshot!(config);
     }
 
     #[test]
-    pub fn source_config_in_db_password_encryption() {
+    pub fn source_config_json_encryption() {
         let key_bytes = [42u8; 32];
         let key = RandomizedNonceKey::new(&aws_lc_rs::aead::AES_256_GCM, &key_bytes).unwrap();
         let encryption_key = EncryptionKey { id: 1, key };
@@ -333,27 +334,13 @@ mod tests {
             &encryption_key,
         )
         .unwrap();
-        let deserialized_config = decrypt_and_deserialize_from_value::<
-            EncryptedSourceConfig,
-            SourceConfig,
-        >(config_in_db, &encryption_key)
-        .unwrap();
-        assert_eq!(config, deserialized_config);
+        insta::assert_json_snapshot!(config_in_db);
 
-        let config = SourceConfig {
-            password: None,
-            ..config.clone()
-        };
-        let config_in_db = encrypt_and_serialize::<SourceConfig, EncryptedSourceConfig>(
-            config.clone(),
-            &encryption_key,
-        )
-        .unwrap();
         let deserialized_config = decrypt_and_deserialize_from_value::<
             EncryptedSourceConfig,
             SourceConfig,
         >(config_in_db, &encryption_key)
         .unwrap();
-        assert_eq!(config, deserialized_config);
+        insta::assert_debug_snapshot!(deserialized_config);
     }
 }

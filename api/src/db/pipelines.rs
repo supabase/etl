@@ -286,55 +286,13 @@ pub fn is_duplicate_pipeline_error(err: &sqlx::Error) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use config::shared::{BatchConfig, RetryConfig};
     use serde_json;
 
-    #[test]
-    fn batch_config_json_roundtrip() {
-        let json = r#"{
-            "max_size": 1000,
-            "max_fill_ms": 5000
-        }"#;
-        let expected = BatchConfig {
-            max_size: 1000,
-            max_fill_ms: 5000,
-        };
-
-        let deserialized = serde_json::from_str::<BatchConfig>(json);
-        assert!(deserialized.is_ok());
-        assert_eq!(expected, deserialized.as_ref().unwrap().to_owned());
-
-        let serialized = serde_json::to_string_pretty(&expected);
-        assert!(serialized.is_ok());
-        assert_eq!(json, serialized.unwrap());
-    }
+    use crate::db::pipelines::PipelineConfig;
 
     #[test]
-    fn retry_config_json_roundtrip() {
-        let json = r#"{
-            "max_attempts": 3,
-            "initial_delay_ms": 100,
-            "max_delay_ms": 1000,
-            "backoff_factor": 2.0
-        }"#;
-        let expected = RetryConfig {
-            max_attempts: 3,
-            initial_delay_ms: 100,
-            max_delay_ms: 1000,
-            backoff_factor: 2.0,
-        };
-
-        let deserialized = serde_json::from_str::<RetryConfig>(json);
-        assert!(deserialized.is_ok());
-        assert_eq!(expected, deserialized.as_ref().unwrap().to_owned());
-
-        let serialized = serde_json::to_string_pretty(&expected);
-        assert!(serialized.is_ok());
-        assert_eq!(json, serialized.unwrap());
-    }
-
-    #[test]
-    fn pipeline_config_json_roundtrip() {
+    fn pipeline_config_json_deserialization() {
         let json = r#"{
             "publication_name": "pub1",
             "config": {
@@ -348,7 +306,14 @@ mod tests {
                 "backoff_factor": 2.0
             }
         }"#;
-        let expected = PipelineConfig {
+
+        let deserialized = serde_json::from_str::<PipelineConfig>(json);
+        insta::assert_debug_snapshot!(deserialized.unwrap());
+    }
+
+    #[test]
+    fn pipeline_config_json_serialization() {
+        let config = PipelineConfig {
             publication_name: "pub1".to_string(),
             config: BatchConfig {
                 max_size: 1000,
@@ -362,12 +327,6 @@ mod tests {
             },
         };
 
-        let deserialized = serde_json::from_str::<PipelineConfig>(json);
-        assert!(deserialized.is_ok());
-        assert_eq!(expected, deserialized.as_ref().unwrap().to_owned());
-
-        let serialized = serde_json::to_string_pretty(&expected);
-        assert!(serialized.is_ok());
-        assert_eq!(json, serialized.unwrap());
+        insta::assert_json_snapshot!(config);
     }
 }

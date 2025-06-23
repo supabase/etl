@@ -1,7 +1,7 @@
 use crate::db;
 use crate::db::destinations::{destination_exists, Destination, DestinationsDbError};
 use crate::db::images::Image;
-use crate::db::pipelines::{Pipeline, PipelineConfig};
+use crate::db::pipelines::{Pipeline, PipelineConfig, PipelinesDbError};
 use crate::db::replicators::Replicator;
 use crate::db::sources::{source_exists, Source, SourceConfig, SourcesDbError};
 use crate::encryption::EncryptionKey;
@@ -69,6 +69,9 @@ enum PipelineError {
     #[error("destinations db error: {0}")]
     DestinationsDb(#[from] DestinationsDbError),
 
+    #[error("replicators db error: {0}")]
+    PipelinesDb(#[from] PipelinesDbError),
+
     #[error("trusted root certs config not found")]
     TrustedRootCertsConfigMissing,
 
@@ -106,6 +109,7 @@ impl ResponseError for PipelineError {
             | PipelineError::NoDefaultImageFound
             | PipelineError::SourcesDb(_)
             | PipelineError::DestinationsDb(_)
+            | PipelineError::PipelinesDb(_)
             | PipelineError::K8sError(_)
             | PipelineError::TrustedRootCertsConfigMissing => StatusCode::INTERNAL_SERVER_ERROR,
             PipelineError::PipelineNotFound(_) => StatusCode::NOT_FOUND,
@@ -373,6 +377,8 @@ pub async fn start_pipeline(
     let (pipeline, replicator, image, source, destination) =
         read_data(&pool, tenant_id, pipeline_id, &encryption_key).await?;
 
+    let state_store = StateStoreConfig::Memory;
+
     let supabase_config = SupabaseConfig {
         project: tenant_id.to_owned(),
     };
@@ -380,7 +386,9 @@ pub async fn start_pipeline(
     let (secrets, config) = create_configs(
         &k8s_client,
         source.config,
+        state_store,
         destination.config,
+        pipeline.config,
         supabase_config,
     )
     .await?;

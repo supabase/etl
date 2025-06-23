@@ -1,6 +1,6 @@
 use crate::encryption::{DecryptionError, EncryptionError, EncryptionKey};
 use serde::de::DeserializeOwned;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use thiserror::Error;
 
 // TODO: remove and use encryption nd decryption error types.
