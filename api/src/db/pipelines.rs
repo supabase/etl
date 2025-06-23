@@ -23,7 +23,6 @@ pub struct Pipeline {
     pub destination_id: i64,
     pub destination_name: String,
     pub replicator_id: i64,
-    pub publication_name: String,
     pub config: PipelineConfig,
 }
 
@@ -136,7 +135,6 @@ pub async fn read_pipeline(
                 destination_id: record.destination_id,
                 destination_name: record.destination_name,
                 replicator_id: record.replicator_id,
-                publication_name: record.publication_name,
                 config,
             };
 
@@ -154,9 +152,9 @@ pub async fn update_pipeline(
     pipeline_id: i64,
     source_id: i64,
     destination_id: i64,
-    publication_name: &str,
     pipeline_config: &PipelineConfig,
 ) -> Result<Option<i64>, PipelinesDbError> {
+    let publication_name = &pipeline_config.publication_name.clone();
     let pipeline_config =
         serde_json::to_value(pipeline_config).expect("failed to serialize config");
     let mut txn = pool.begin().await?;
@@ -166,7 +164,7 @@ pub async fn update_pipeline(
         pipeline_id,
         source_id,
         destination_id,
-        publication_name,
+        &publication_name,
         pipeline_config,
     )
     .await?;
@@ -262,7 +260,6 @@ pub async fn read_all_pipelines(
             destination_id: record.destination_id,
             destination_name: record.destination_name,
             replicator_id: record.replicator_id,
-            publication_name: record.publication_name,
             config,
         });
     }

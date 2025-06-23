@@ -138,7 +138,6 @@ impl ResponseError for PipelineError {
 pub struct PostPipelineRequest {
     pub source_id: i64,
     pub destination_id: i64,
-    pub publication_name: String,
     pub config: PipelineConfig,
 }
 
@@ -156,7 +155,6 @@ pub struct GetPipelineResponse {
     destination_id: i64,
     destination_name: String,
     replicator_id: i64,
-    publication_name: String,
     config: PipelineConfig,
 }
 
@@ -240,7 +238,6 @@ pub async fn read_pipeline(
                 destination_id: s.destination_id,
                 destination_name: s.destination_name,
                 replicator_id: s.replicator_id,
-                publication_name: s.publication_name,
                 config: s.config,
             })
         })
@@ -275,7 +272,6 @@ pub async fn update_pipeline(
     let config = &pipeline.config;
     let source_id = pipeline.source_id;
     let destination_id = pipeline.destination_id;
-    let publication_name = pipeline.publication_name;
 
     if !source_exists(&pool, tenant_id, source_id).await? {
         return Err(PipelineError::SourceNotFound(source_id));
@@ -291,7 +287,6 @@ pub async fn update_pipeline(
         pipeline_id,
         source_id,
         destination_id,
-        &publication_name,
         config,
     )
     .await?
@@ -349,7 +344,6 @@ pub async fn read_all_pipelines(
             destination_id: pipeline.destination_id,
             destination_name: pipeline.destination_name,
             replicator_id: pipeline.replicator_id,
-            publication_name: pipeline.publication_name,
             config: pipeline.config,
         };
         pipelines.push(pipeline);
@@ -587,7 +581,7 @@ async fn build_replicator_config(
 
     let pipeline_config = SharedPipelineConfig {
         id: pipeline.id,
-        publication_name: pipeline.publication_name,
+        publication_name: pipeline.config.publication_name,
         batch: pipeline.config.batch,
         apply_worker_init_retry: pipeline.config.apply_worker_init_retry,
     };

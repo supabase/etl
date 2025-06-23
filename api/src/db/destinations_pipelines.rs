@@ -45,11 +45,11 @@ pub async fn create_destination_and_pipeline(
     destination_name: &str,
     destination_config: DestinationConfig,
     image_id: i64,
-    publication_name: &str,
     pipeline_config: PipelineConfig,
     encryption_key: &EncryptionKey,
 ) -> Result<(i64, i64), DestinationPipelineDbError> {
     let destination_config = encrypt_and_serialize(destination_config, encryption_key)?;
+    let publication_name = pipeline_config.publication_name.clone();
     let pipeline_config = serialize(pipeline_config)?;
 
     let mut txn = pool.begin().await?;
@@ -61,7 +61,7 @@ pub async fn create_destination_and_pipeline(
         source_id,
         destination_id,
         image_id,
-        publication_name,
+        &publication_name,
         pipeline_config,
     )
     .await?;
@@ -79,11 +79,11 @@ pub async fn update_destination_and_pipeline(
     source_id: i64,
     destination_name: &str,
     destination_config: DestinationConfig,
-    publication_name: &str,
     pipeline_config: PipelineConfig,
     encryption_key: &EncryptionKey,
 ) -> Result<(), DestinationPipelineDbError> {
     let destination_config = encrypt_and_serialize(destination_config, encryption_key)?;
+    let publication_name = pipeline_config.publication_name.clone();
     let pipeline_config = serialize(pipeline_config)?;
 
     let mut txn = pool.begin().await?;
@@ -107,7 +107,7 @@ pub async fn update_destination_and_pipeline(
         pipeline_id,
         source_id,
         destination_id,
-        publication_name,
+        &publication_name,
         pipeline_config,
     )
     .await?;

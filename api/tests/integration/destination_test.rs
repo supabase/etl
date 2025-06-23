@@ -1,5 +1,5 @@
-use reqwest::StatusCode;
 use config::shared::DestinationConfig;
+use reqwest::StatusCode;
 
 use crate::{
     common::test_app::{
@@ -105,7 +105,7 @@ async fn an_existing_destination_can_be_read() {
     assert_eq!(response.id, destination_id);
     assert_eq!(&response.tenant_id, tenant_id);
     assert_eq!(response.name, destination.name);
-    insta::assert_debug_snapshot!(destination.config); 
+    insta::assert_debug_snapshot!(response.config);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -157,7 +157,7 @@ async fn an_existing_destination_can_be_updated() {
     assert_eq!(response.id, destination_id);
     assert_eq!(&response.tenant_id, tenant_id);
     assert_eq!(response.name, updated_config.name);
-    insta::assert_debug_snapshot!(updated_config.config);
+    insta::assert_debug_snapshot!(response.config);
 }
 
 #[tokio::test(flavor = "multi_thread")]

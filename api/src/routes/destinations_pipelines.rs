@@ -30,9 +30,6 @@ pub struct PostDestinationPipelineRequest {
     pub source_id: i64,
 
     #[schema(required = true)]
-    pub publication_name: String,
-
-    #[schema(required = true)]
     pub pipeline_config: PipelineConfig,
 }
 
@@ -145,7 +142,6 @@ pub async fn create_destinations_and_pipelines(
         destination_name,
         destination_config,
         source_id,
-        publication_name,
         pipeline_config,
     } = destination_and_pipeline;
     let tenant_id = extract_tenant_id(&req)?;
@@ -165,7 +161,6 @@ pub async fn create_destinations_and_pipelines(
             &destination_name,
             destination_config,
             image.id,
-            &publication_name,
             pipeline_config,
             &encryption_key,
         )
@@ -199,7 +194,6 @@ pub async fn update_destinations_and_pipelines(
         destination_name,
         destination_config,
         source_id,
-        publication_name,
         pipeline_config,
     } = destination_and_pipeline;
     let tenant_id = extract_tenant_id(&req)?;
@@ -223,7 +217,6 @@ pub async fn update_destinations_and_pipelines(
         source_id,
         &destination_name,
         destination_config,
-        &publication_name,
         pipeline_config,
         &encryption_key,
     )

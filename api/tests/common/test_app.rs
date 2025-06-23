@@ -1,3 +1,4 @@
+use crate::common::database::create_etl_api_database;
 use api::{
     config::ApiConfig,
     db::{pipelines::PipelineConfig, sources::SourceConfig},
@@ -5,6 +6,7 @@ use api::{
     startup::run,
 };
 use config::load_config;
+use config::shared::DestinationConfig;
 use postgres::sqlx::config::PgConnectionConfig;
 use postgres::sqlx::test_utils::drop_pg_database;
 use reqwest::{IntoUrl, RequestBuilder};
@@ -13,8 +15,6 @@ use std::io;
 use std::net::TcpListener;
 use tokio::runtime::Handle;
 use uuid::Uuid;
-use config::shared::DestinationConfig;
-use crate::common::database::create_etl_api_database;
 
 #[derive(Serialize)]
 pub struct CreateTenantRequest {
@@ -92,7 +92,6 @@ pub struct PostDestinationPipelineRequest {
     pub destination_name: String,
     pub destination_config: DestinationConfig,
     pub source_id: i64,
-    pub publication_name: String,
     pub pipeline_config: PipelineConfig,
 }
 
@@ -136,7 +135,6 @@ pub struct DestinationsResponse {
 pub struct CreatePipelineRequest {
     pub source_id: i64,
     pub destination_id: i64,
-    pub publication_name: String,
     pub config: PipelineConfig,
 }
 
@@ -152,7 +150,6 @@ pub struct PipelineResponse {
     pub source_id: i64,
     pub destination_id: i64,
     pub replicator_id: i64,
-    pub publication_name: String,
     pub config: PipelineConfig,
 }
 
@@ -165,7 +162,6 @@ pub struct PipelinesResponse {
 pub struct UpdatePipelineRequest {
     pub source_id: i64,
     pub destination_id: i64,
-    pub publication_name: String,
     pub config: PipelineConfig,
 }
 
