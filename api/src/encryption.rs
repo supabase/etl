@@ -29,6 +29,14 @@ pub enum DecryptionError {
     MismatchedKeyId(u32, u32),
 }
 
+pub trait Encryptable<T> {
+    fn encrypt(self, encryption_key: &EncryptionKey) -> Result<T, EncryptionError>;
+}
+
+pub trait Decryptable<T> {
+    fn decrypt(self, encryption_key: &EncryptionKey) -> Result<T, DecryptionError>;
+}
+
 pub struct EncryptionKey {
     pub id: u32,
     pub key: RandomizedNonceKey,

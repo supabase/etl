@@ -6,10 +6,11 @@ use thiserror::Error;
 
 use crate::db::base::{
     decrypt_and_deserialize_from_value, encrypt_and_serialize, DbDeserializationError,
-    DbSerializationError, Decryptable, Encryptable,
+    DbSerializationError,
 };
 use crate::encryption::{
-    decrypt_text, encrypt_text, DecryptionError, EncryptedValue, EncryptionError, EncryptionKey,
+    decrypt_text, encrypt_text, Decryptable, DecryptionError, Encryptable, EncryptedValue,
+    EncryptionError, EncryptionKey,
 };
 
 impl Encryptable<EncryptedDestinationConfig> for DestinationConfig {

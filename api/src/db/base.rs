@@ -1,15 +1,9 @@
-use crate::encryption::{DecryptionError, EncryptionError, EncryptionKey};
+use crate::encryption::{
+    Decryptable, DecryptionError, Encryptable, EncryptionError, EncryptionKey,
+};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use thiserror::Error;
-
-pub trait Encryptable<T> {
-    fn encrypt(self, encryption_key: &EncryptionKey) -> Result<T, EncryptionError>;
-}
-
-pub trait Decryptable<T> {
-    fn decrypt(self, encryption_key: &EncryptionKey) -> Result<T, DecryptionError>;
-}
 
 #[derive(Debug, Error)]
 pub enum DbSerializationError {
