@@ -547,7 +547,7 @@ pub async fn spawn_test_app() -> TestApp {
         TcpListener::bind(format!("{base_address}:0")).expect("failed to bind random port");
     let port = listener.local_addr().unwrap().port();
 
-    let mut config = load_config::<'_, ApiConfig>().expect("Failed to read configuration");
+    let mut config = load_config::<ApiConfig>().expect("Failed to read configuration");
     // We use a random database name.
     config.database.name = Uuid::new_v4().to_string();
 

@@ -1,3 +1,4 @@
+use serde::de::DeserializeOwned;
 use serde::Deserialize;
 
 use crate::environment::{DEV_ENV_NAME, Environment};
@@ -36,9 +37,9 @@ const ENV_SEPARATOR: &str = "__";
 /// `APP_ENVIRONMENT` cannot be parsed into an [`Environment`].
 ///
 /// Returns an error if configuration loading or deserialization fails.
-pub fn load_config<'a, T>() -> Result<T, rust_cli_config::ConfigError>
+pub fn load_config<T>() -> Result<T, rust_cli_config::ConfigError>
 where
-    T: Deserialize<'a>,
+    T: DeserializeOwned,
 {
     let base_path = std::env::current_dir().expect("Failed to determine the current directory");
     let configuration_directory = base_path.join(CONFIGURATION_DIR);

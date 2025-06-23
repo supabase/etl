@@ -22,7 +22,7 @@ pub async fn main() -> anyhow::Result<()> {
     match args.len() {
         // Run the application server
         1 => {
-            let config = load_config::<'_, ApiConfig>()?;
+            let config = load_config::<ApiConfig>()?;
             log_pg_connection_config(&config.database);
             let application = Application::build(config.clone()).await?;
             application.run_until_stopped().await?;
@@ -32,7 +32,7 @@ pub async fn main() -> anyhow::Result<()> {
             let command = args.nth(1).unwrap();
             match command.as_str() {
                 "migrate" => {
-                    let config = load_config::<'_, PgConnectionConfig>()?;
+                    let config = load_config::<PgConnectionConfig>()?;
                     log_pg_connection_config(&config);
                     Application::migrate_database(config).await?;
                     info!("database migrated successfully");
