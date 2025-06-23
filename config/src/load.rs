@@ -1,5 +1,4 @@
 use serde::de::DeserializeOwned;
-use serde::Deserialize;
 
 use crate::environment::{DEV_ENV_NAME, Environment};
 

@@ -69,7 +69,7 @@ pub struct EncryptedValue {
 
 /// Encrypts a string value using the provided [`EncryptionKey`].
 ///
-/// The result is an [`EncryptedValue`] containing the key ID, base64-encoded nonce, 
+/// The result is an [`EncryptedValue`] containing the key ID, base64-encoded nonce,
 /// and base64-encoded ciphertext.
 pub fn encrypt_text(
     value: String,
@@ -88,7 +88,7 @@ pub fn encrypt_text(
 
 /// Decrypts an [`EncryptedValue`] using the provided [`EncryptionKey`].
 ///
-/// Returns the original string if decryption succeeds. Fails if the key ID does not match or if 
+/// Returns the original string if decryption succeeds. Fails if the key ID does not match or if
 /// decoding or decryption fails.
 pub fn decrypt_text(
     encrypted_value: EncryptedValue,

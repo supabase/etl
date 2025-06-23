@@ -38,7 +38,7 @@ where
     S: Serialize,
 {
     let serialized_value = serde_json::to_value(value)?;
-    
+
     Ok(serialized_value)
 }
 
@@ -56,7 +56,7 @@ where
 {
     let value = value.encrypt(encryption_key)?;
     let serialized_value = serde_json::to_value(value)?;
-    
+
     Ok(serialized_value)
 }
 
@@ -68,15 +68,15 @@ where
     S: DeserializeOwned,
 {
     let deserialized_value = serde_json::from_value(value)?;
-    
+
     Ok(deserialized_value)
 }
 
 /// Deserializes and decrypts a [`serde_json::Value`] into a value of type `S`.
 ///
-/// The value is first deserialized into a type implementing [`Decryptable`], then decrypted using 
+/// The value is first deserialized into a type implementing [`Decryptable`], then decrypted using
 /// the provided [`EncryptionKey`].
-/// 
+///
 /// Returns an error if deserialization or decryption fails.
 pub fn decrypt_and_deserialize_from_value<T, S>(
     value: serde_json::Value,
@@ -88,6 +88,6 @@ where
 {
     let deserialized_value: T = serde_json::from_value(value)?;
     let value = deserialized_value.decrypt(encryption_key)?;
-    
+
     Ok(value)
 }

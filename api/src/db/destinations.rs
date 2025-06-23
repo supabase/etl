@@ -296,8 +296,8 @@ mod tests {
     use aws_lc_rs::aead::RandomizedNonceKey;
     use config::shared::DestinationConfig;
 
-    use crate::db::serde::{decrypt_and_deserialize_from_value, encrypt_and_serialize};
     use crate::db::destinations::EncryptedDestinationConfig;
+    use crate::db::serde::{decrypt_and_deserialize_from_value, encrypt_and_serialize};
     use crate::encryption::EncryptionKey;
 
     #[test]

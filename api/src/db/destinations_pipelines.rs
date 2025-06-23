@@ -2,14 +2,14 @@ use config::shared::DestinationConfig;
 use sqlx::PgPool;
 use thiserror::Error;
 
-use crate::db::serde::{
-    encrypt_and_serialize, serialize, DbDeserializationError, DbSerializationError,
-};
 use crate::db::destinations::{
     create_destination_txn, update_destination_txn, DestinationsDbError,
 };
 use crate::db::pipelines::{
     create_pipeline_txn, update_pipeline_txn, PipelineConfig, PipelinesDbError,
+};
+use crate::db::serde::{
+    encrypt_and_serialize, serialize, DbDeserializationError, DbSerializationError,
 };
 use crate::encryption::EncryptionKey;
 
