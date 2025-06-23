@@ -24,10 +24,10 @@ pub enum DestinationPipelinesDbError {
     #[error("The pipeline with id {0} was not found")]
     PipelineNotFound(i64),
 
-    #[error("Error while interacting with a pipeline: {0}")]
+    #[error(transparent)]
     PipelinesDb(#[from] PipelinesDbError),
 
-    #[error("Error while interacting with a destination: {0}")]
+    #[error(transparent)]
     DestinationsDb(#[from] DestinationsDbError),
 
     #[error("Error while serializing destination or pipeline config: {0}")]
