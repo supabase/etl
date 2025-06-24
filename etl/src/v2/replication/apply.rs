@@ -231,7 +231,7 @@ where
 
     // We compute the slot name for the replication slot that we are going to use for the logical
     // replication. At this point we assume that the slot already exists.
-    let slot_name = get_slot_name(&identity, hook.worker_type())?;
+    let slot_name = get_slot_name(identity.id(), hook.worker_type())?;
 
     // We start the logical replication stream with the supplied parameters at a given lsn. That
     // lsn is the last lsn from which we need to start fetching events.

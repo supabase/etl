@@ -1,7 +1,7 @@
 use crate::v2::concurrency::shutdown::ShutdownRx;
 use crate::v2::config::pipeline::PipelineConfig;
 use crate::v2::destination::base::Destination;
-use crate::v2::pipeline::PipelineIdentity;
+use crate::v2::pipeline::{PipelineId, PipelineIdentity};
 use crate::v2::replication::apply::{start_apply_loop, ApplyLoopError, ApplyLoopHook};
 use crate::v2::replication::client::{PgReplicationClient, PgReplicationError};
 use crate::v2::replication::slot::{get_slot_name, SlotError};
@@ -118,7 +118,7 @@ where
         info!("Starting apply worker");
 
         let apply_worker = async move {
-            let start_lsn = get_start_lsn(&self.identity, &self.replication_client).await?;
+            let start_lsn = get_start_lsn(self.identity.id(), &self.replication_client).await?;
 
             start_apply_loop(
                 self.identity.clone(),
@@ -153,10 +153,10 @@ where
 }
 
 async fn get_start_lsn(
-    identity: &PipelineIdentity,
+    pipeline_id: PipelineId,
     replication_client: &PgReplicationClient,
 ) -> Result<PgLsn, ApplyWorkerError> {
-    let slot_name = get_slot_name(identity, WorkerType::Apply)?;
+    let slot_name = get_slot_name(pipeline_id, WorkerType::Apply)?;
     // TODO: validate that we only create the slot when we first start replication which
     // means when all tables are in the Init state. In any other case we should raise an
     // error because that means the apply slot was deleted and creating a fresh slot now

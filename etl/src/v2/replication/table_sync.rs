@@ -96,7 +96,7 @@ where
     // good to reduce the length of the critical section.
     drop(inner);
 
-    let slot_name = get_slot_name(&identity, WorkerType::TableSync { table_id })?;
+    let slot_name = get_slot_name(identity.id(), WorkerType::TableSync { table_id })?;
 
     // There are three phases in which the table can be in:
     // - `Init` -> this means that the table sync was never done, so we just perform it.
