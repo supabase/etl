@@ -1,15 +1,14 @@
-use postgres::schema::Oid;
+use postgres::schema::{Oid, TableId};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-use crate::v2::pipeline::PipelineId;
 use crate::v2::state::store::base::{StateStore, StateStoreError};
-use crate::v2::state::table::TableReplicationState;
+use crate::v2::state::table::TableReplicationPhase;
 
 #[derive(Debug)]
 struct Inner {
-    table_replication_states: HashMap<(PipelineId, Oid), TableReplicationState>,
+    table_replication_states: HashMap<Oid, TableReplicationPhase>,
 }
 
 #[derive(Debug, Clone)]
@@ -36,41 +35,38 @@ impl Default for MemoryStateStore {
 }
 
 impl StateStore for MemoryStateStore {
-    async fn load_table_replication_state(
+    async fn get_table_replication_state(
         &self,
-        pipeline_id: PipelineId,
-        table_id: Oid,
-    ) -> Result<Option<TableReplicationState>, StateStoreError> {
+        table_id: TableId,
+    ) -> Result<Option<TableReplicationPhase>, StateStoreError> {
         let inner = self.inner.read().await;
 
-        Ok(inner
-            .table_replication_states
-            .get(&(pipeline_id, table_id))
-            .cloned())
+        Ok(inner.table_replication_states.get(&table_id).cloned())
+    }
+
+    async fn get_table_replication_states(
+        &self,
+    ) -> Result<HashMap<TableId, TableReplicationPhase>, StateStoreError> {
+        let inner = self.inner.read().await;
+
+        Ok(inner.table_replication_states.clone())
     }
 
     async fn load_table_replication_states(
         &self,
-    ) -> Result<Vec<TableReplicationState>, StateStoreError> {
+    ) -> Result<HashMap<TableId, TableReplicationPhase>, StateStoreError> {
         let inner = self.inner.read().await;
 
-        Ok(inner.table_replication_states.values().cloned().collect())
+        Ok(inner.table_replication_states.clone())
     }
 
     async fn store_table_replication_state(
         &self,
-        state: TableReplicationState,
-        overwrite: bool,
-    ) -> Result<bool, StateStoreError> {
+        table_id: TableId,
+        state: TableReplicationPhase,
+    ) -> Result<(), StateStoreError> {
         let mut inner = self.inner.write().await;
-        let key = (state.pipeline_id, state.table_id);
-
-        if !overwrite && inner.table_replication_states.contains_key(&key) {
-            return Ok(false);
-        }
-
-        inner.table_replication_states.insert(key, state);
-
-        Ok(true)
+        inner.table_replication_states.insert(table_id, state);
+        Ok(())
     }
 }

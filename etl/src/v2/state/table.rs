@@ -1,43 +1,5 @@
-use crate::v2::pipeline::PipelineId;
-use postgres::schema::Oid;
 use std::fmt;
 use tokio_postgres::types::PgLsn;
-
-#[derive(Debug, Clone)]
-pub struct TableReplicationState {
-    /// The pipeline id to which this state refers.
-    pub pipeline_id: PipelineId,
-    /// The table (relation) OID to which this state refers.
-    pub table_id: Oid,
-    /// The phase of replication of the table.
-    pub phase: TableReplicationPhase,
-}
-
-impl TableReplicationState {
-    pub fn new(pipeline_id: PipelineId, table_id: Oid, phase: TableReplicationPhase) -> Self {
-        Self {
-            pipeline_id,
-            table_id,
-            phase,
-        }
-    }
-
-    pub fn init(pipeline_id: PipelineId, table_id: Oid) -> Self {
-        Self::new(pipeline_id, table_id, TableReplicationPhase::Init)
-    }
-
-    pub fn with_phase(self, phase: TableReplicationPhase) -> TableReplicationState {
-        TableReplicationState { phase, ..self }
-    }
-}
-
-impl PartialEq for TableReplicationState {
-    fn eq(&self, other: &Self) -> bool {
-        self.table_id == other.table_id
-    }
-}
-
-impl Eq for TableReplicationState {}
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum TableReplicationPhase {
@@ -53,10 +15,7 @@ pub enum TableReplicationPhase {
         /// The LSN up to which the table sync arrived.
         lsn: PgLsn,
     },
-    Ready {
-        /// The LSN of the apply worker which set this state to ready.
-        lsn: PgLsn,
-    },
+    Ready,
     Skipped,
     Unknown,
 }
@@ -126,7 +85,7 @@ impl<'a> From<&'a TableReplicationPhase> for TableReplicationPhaseType {
             TableReplicationPhase::SyncWait => Self::SyncWait,
             TableReplicationPhase::Catchup { .. } => Self::Catchup,
             TableReplicationPhase::SyncDone { .. } => Self::SyncDone,
-            TableReplicationPhase::Ready { .. } => Self::Ready,
+            TableReplicationPhase::Ready => Self::Ready,
             TableReplicationPhase::Skipped => Self::Skipped,
             TableReplicationPhase::Unknown => Self::Unknown,
         }

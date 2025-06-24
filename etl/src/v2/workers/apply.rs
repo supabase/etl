@@ -7,15 +7,14 @@ use crate::v2::replication::client::{PgReplicationClient, PgReplicationError};
 use crate::v2::replication::slot::{get_slot_name, SlotError};
 use crate::v2::schema::cache::SchemaCache;
 use crate::v2::state::store::base::{StateStore, StateStoreError};
-use crate::v2::state::table::{
-    TableReplicationPhase, TableReplicationPhaseType, TableReplicationState,
-};
+use crate::v2::state::table::{TableReplicationPhase, TableReplicationPhaseType};
 use crate::v2::workers::base::{Worker, WorkerHandle, WorkerType, WorkerWaitError};
 use crate::v2::workers::pool::TableSyncWorkerPool;
 use crate::v2::workers::table_sync::{
     TableSyncWorker, TableSyncWorkerError, TableSyncWorkerState, TableSyncWorkerStateError,
 };
-use postgres::schema::Oid;
+use postgres::schema::{Oid, TableId};
+use std::collections::HashMap;
 use std::sync::Arc;
 use thiserror::Error;
 use tokio::task::JoinHandle;
@@ -304,9 +303,14 @@ where
 
     async fn active_table_replication_states(
         &self,
-    ) -> Result<Vec<TableReplicationState>, ApplyWorkerHookError> {
-        let mut table_replication_states = self.state_store.load_table_replication_states().await?;
-        table_replication_states.retain(|s| !s.phase.as_type().is_done());
+        load: bool,
+    ) -> Result<HashMap<TableId, TableReplicationPhase>, ApplyWorkerHookError> {
+        let mut table_replication_states = if load {
+            self.state_store.load_table_replication_states().await?
+        } else {
+            self.state_store.get_table_replication_states().await?
+        };
+        table_replication_states.retain(|_table_id, state| !state.as_type().is_done());
 
         Ok(table_replication_states)
     }
@@ -320,19 +324,20 @@ where
     type Error = ApplyWorkerHookError;
 
     async fn initialize(&self) -> Result<(), Self::Error> {
-        let table_replication_states = self.active_table_replication_states().await?;
+        let table_replication_states = self.active_table_replication_states(true).await?;
 
-        for table_replication_state in table_replication_states {
-            let table_id = table_replication_state.table_id;
-
+        for table_id in table_replication_states.keys() {
             let table_sync_worker_state = {
                 let pool = self.pool.read().await;
-                pool.get_active_worker_state(table_id)
+                pool.get_active_worker_state(*table_id)
             };
 
             if table_sync_worker_state.is_none() {
-                if let Err(err) = self.start_table_sync_worker(table_id).await {
-                    error!("Error handling syncing table {}: {}", table_id, err);
+                if let Err(err) = self.start_table_sync_worker(*table_id).await {
+                    error!(
+                        "Error starting table-sync worker for table {}: {}",
+                        table_id, err
+                    );
                 }
             }
         }
@@ -341,27 +346,19 @@ where
     }
 
     async fn process_syncing_tables(&self, current_lsn: PgLsn) -> Result<bool, Self::Error> {
-        let table_replication_states = self.active_table_replication_states().await?;
+        let table_replication_states = self.active_table_replication_states(false).await?;
         info!(
             "Processing syncing tables for apply worker with LSN {}",
             current_lsn
         );
 
-        for table_replication_state in table_replication_states {
+        for (table_id, table_replication_state) in table_replication_states {
             // We read the state store state first, if we don't find `SyncDone` we will attempt to
             // read the shared state which can contain also non-persisted states.
-            let table_id = table_replication_state.table_id;
-            match table_replication_state.phase {
+            match table_replication_state {
                 TableReplicationPhase::SyncDone { lsn } if current_lsn >= lsn => {
-                    let updated_state = table_replication_state
-                        .with_phase(TableReplicationPhase::Ready { lsn: current_lsn });
-                    info!(
-                        "Table {} is ready, its events are now processed by the main apply worker",
-                        table_id
-                    );
-
                     self.state_store
-                        .store_table_replication_state(updated_state, true)
+                        .store_table_replication_state(table_id, TableReplicationPhase::Ready)
                         .await?;
                 }
                 _ => {
@@ -389,13 +386,8 @@ where
 
         // We store the new skipped state in the state store, since we want to still skip a table in
         // case of pipeline restarts.
-        let table_replication_state = TableReplicationState::new(
-            self.identity.id(),
-            table_id,
-            TableReplicationPhase::Skipped,
-        );
         self.state_store
-            .store_table_replication_state(table_replication_state, true)
+            .store_table_replication_state(table_id, TableReplicationPhase::Skipped)
             .await?;
 
         Ok(true)
@@ -418,19 +410,19 @@ where
             None => {
                 let Some(state) = self
                     .state_store
-                    .load_table_replication_state(self.identity.id(), table_id)
+                    .get_table_replication_state(table_id)
                     .await?
                 else {
                     // If we don't even find the state for this table, we skip the event entirely.
                     return Ok(false);
                 };
 
-                state.phase
+                state
             }
         };
 
         let should_apply_changes = match replication_phase {
-            TableReplicationPhase::Ready { .. } => true,
+            TableReplicationPhase::Ready => true,
             TableReplicationPhase::SyncDone { lsn } => lsn <= remote_final_lsn,
             _ => false,
         };
