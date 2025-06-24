@@ -73,9 +73,7 @@ where
     // successfully return.
     if matches!(
         phase_type,
-        TableReplicationPhaseType::SyncDone
-            | TableReplicationPhaseType::Ready
-            | TableReplicationPhaseType::Unknown
+        TableReplicationPhaseType::SyncDone | TableReplicationPhaseType::Ready
     ) {
         return Ok(TableSyncResult::SyncNotRequired);
     }
