@@ -1,4 +1,3 @@
-use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 
 use crate::SerializableSecretString;
@@ -29,7 +28,7 @@ pub struct SourceConfig {
 #[serde(rename_all = "snake_case")]
 pub struct TlsConfig {
     /// PEM-encoded trusted root certificates. Sensitive and redacted in debug output.
-    pub trusted_root_certs: SerializableSecretString,
+    pub trusted_root_certs: String,
     /// Whether TLS is enabled for the connection.
     pub enabled: bool,
 }
@@ -41,7 +40,7 @@ impl TlsConfig {
     ///
     /// Returns [`ValidationError::MissingTrustedRootCerts`] if TLS is enabled but no certificates are provided.
     pub fn validate(&self) -> Result<(), ValidationError> {
-        if self.enabled && self.trusted_root_certs.expose_secret().is_empty() {
+        if self.enabled && self.trusted_root_certs.is_empty() {
             return Err(ValidationError::MissingTrustedRootCerts);
         }
 

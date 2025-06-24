@@ -26,7 +26,6 @@ use crate::k8s_client::{
     HttpK8sClient, K8sClient, K8sError, PodPhase, TRUSTED_ROOT_CERT_CONFIG_MAP_NAME,
 };
 use crate::routes::{extract_tenant_id, ErrorMessage, TenantIdError};
-use config::SerializableSecretString;
 use secrecy::ExposeSecret;
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -592,7 +591,7 @@ async fn build_replicator_config(
         username: source_config.username,
         password: source_config.password,
         tls: TlsConfig {
-            trusted_root_certs: SerializableSecretString::from(trusted_root_certs),
+            trusted_root_certs,
             enabled: true,
         },
     };
