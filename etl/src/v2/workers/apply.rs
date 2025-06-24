@@ -357,6 +357,10 @@ where
             // read the shared state which can contain also non-persisted states.
             match table_replication_state {
                 TableReplicationPhase::SyncDone { lsn } if current_lsn >= lsn => {
+                    info!(
+                        "Table {} is ready, its events are now processed by the main apply worker",
+                        table_id
+                    );
                     self.state_store
                         .store_table_replication_state(table_id, TableReplicationPhase::Ready)
                         .await?;
