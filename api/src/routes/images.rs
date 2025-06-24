@@ -84,8 +84,10 @@ pub struct GetImagesResponse {
     request_body = PostImageRequest,
     responses(
         (status = 200, description = "Create new image", body = PostImageResponse),
-        (status = 500, description = "Internal server error")
-    )
+        (status = 400, description = "Bad request", body = ErrorMessage),
+        (status = 500, description = "Internal server error", body = ErrorMessage),
+    ),
+    tag = "Images"
 )]
 #[post("/images")]
 pub async fn create_image(
@@ -95,6 +97,7 @@ pub async fn create_image(
     let image = image.0;
     let id = db::images::create_image(&pool, &image.name, image.is_default).await?;
     let response = PostImageResponse { id };
+
     Ok(Json(response))
 }
 
@@ -105,9 +108,10 @@ pub async fn create_image(
     ),
     responses(
         (status = 200, description = "Return image with id = image_id", body = GetImageResponse),
-        (status = 404, description = "Image not found"),
-        (status = 500, description = "Internal server error")
-    )
+        (status = 404, description = "Image not found", body = ErrorMessage),
+        (status = 500, description = "Internal server error", body = ErrorMessage),
+    ),
+    tag = "Images"
 )]
 #[get("/images/{image_id}")]
 pub async fn read_image(
@@ -123,6 +127,7 @@ pub async fn read_image(
             is_default: s.is_default,
         })
         .ok_or(ImageError::ImageNotFound(image_id))?;
+
     Ok(Json(response))
 }
 
@@ -134,9 +139,10 @@ pub async fn read_image(
     ),
     responses(
         (status = 200, description = "Update image with id = image_id"),
-        (status = 404, description = "Image not found"),
-        (status = 500, description = "Internal server error")
-    )
+        (status = 404, description = "Image not found", body = ErrorMessage),
+        (status = 500, description = "Internal server error", body = ErrorMessage),
+    ),
+    tag = "Images"
 )]
 #[post("/images/{image_id}")]
 pub async fn update_image(
@@ -148,6 +154,7 @@ pub async fn update_image(
     db::images::update_image(&pool, image_id, &image.name, image.is_default)
         .await?
         .ok_or(ImageError::ImageNotFound(image_id))?;
+
     Ok(HttpResponse::Ok().finish())
 }
 
@@ -158,9 +165,10 @@ pub async fn update_image(
     ),
     responses(
         (status = 200, description = "Delete image with id = image_id"),
-        (status = 404, description = "Image not found"),
-        (status = 500, description = "Internal server error")
-    )
+        (status = 404, description = "Image not found", body = ErrorMessage),
+        (status = 500, description = "Internal server error", body = ErrorMessage),
+    ),
+    tag = "Images"
 )]
 #[delete("/images/{image_id}")]
 pub async fn delete_image(
@@ -171,15 +179,17 @@ pub async fn delete_image(
     db::images::delete_image(&pool, image_id)
         .await?
         .ok_or(ImageError::ImageNotFound(image_id))?;
+    
     Ok(HttpResponse::Ok().finish())
 }
 
 #[utoipa::path(
     context_path = "/v1",
     responses(
-        (status = 200, description = "Return all images"),
-        (status = 500, description = "Internal server error")
-    )
+        (status = 200, description = "Return all images", body = GetImagesResponse),
+        (status = 500, description = "Internal server error", body = ErrorMessage),
+    ),
+    tag = "Images"
 )]
 #[get("/images")]
 pub async fn read_all_images(pool: Data<PgPool>) -> Result<impl Responder, ImageError> {
@@ -193,5 +203,6 @@ pub async fn read_all_images(pool: Data<PgPool>) -> Result<impl Responder, Image
         images.push(image);
     }
     let response = GetImagesResponse { images };
+    
     Ok(Json(response))
 }

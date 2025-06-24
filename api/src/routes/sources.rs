@@ -97,8 +97,10 @@ pub struct GetSourcesResponse {
     request_body = PostSourceRequest,
     responses(
         (status = 200, description = "Create new source", body = PostSourceResponse),
-        (status = 500, description = "Internal server error")
-    )
+        (status = 400, description = "Bad request", body = ErrorMessage),
+        (status = 500, description = "Internal server error", body = ErrorMessage),
+    ),
+    tag = "Sources"
 )]
 #[post("/sources")]
 pub async fn create_source(
@@ -113,6 +115,7 @@ pub async fn create_source(
     let config = source.config;
     let id = db::sources::create_source(&pool, tenant_id, &name, config, &encryption_key).await?;
     let response = PostSourceResponse { id };
+
     Ok(Json(response))
 }
 
@@ -123,9 +126,10 @@ pub async fn create_source(
     ),
     responses(
         (status = 200, description = "Return source with id = source_id", body = GetSourceResponse),
-        (status = 404, description = "Source not found"),
-        (status = 500, description = "Internal server error")
-    )
+        (status = 404, description = "Source not found", body = ErrorMessage),
+        (status = 500, description = "Internal server error", body = ErrorMessage),
+    ),
+    tag = "Sources"
 )]
 #[get("/sources/{source_id}")]
 pub async fn read_source(
@@ -145,6 +149,7 @@ pub async fn read_source(
             config: s.config,
         })
         .ok_or(SourceError::SourceNotFound(source_id))?;
+
     Ok(Json(response))
 }
 
@@ -156,9 +161,10 @@ pub async fn read_source(
     ),
     responses(
         (status = 200, description = "Update source with id = source_id"),
-        (status = 404, description = "Source not found"),
-        (status = 500, description = "Internal server error")
-    )
+        (status = 404, description = "Source not found", body = ErrorMessage),
+        (status = 500, description = "Internal server error", body = ErrorMessage),
+    ),
+    tag = "Sources"
 )]
 #[post("/sources/{source_id}")]
 pub async fn update_source(
@@ -176,6 +182,7 @@ pub async fn update_source(
     db::sources::update_source(&pool, tenant_id, &name, source_id, config, &encryption_key)
         .await?
         .ok_or(SourceError::SourceNotFound(source_id))?;
+
     Ok(HttpResponse::Ok().finish())
 }
 
@@ -186,9 +193,10 @@ pub async fn update_source(
     ),
     responses(
         (status = 200, description = "Delete source with id = source_id"),
-        (status = 404, description = "Source not found"),
-        (status = 500, description = "Internal server error")
-    )
+        (status = 404, description = "Source not found", body = ErrorMessage),
+        (status = 500, description = "Internal server error", body = ErrorMessage),
+    ),
+    tag = "Sources"
 )]
 #[delete("/sources/{source_id}")]
 pub async fn delete_source(
@@ -201,15 +209,17 @@ pub async fn delete_source(
     db::sources::delete_source(&pool, tenant_id, source_id)
         .await?
         .ok_or(SourceError::SourceNotFound(source_id))?;
+    
     Ok(HttpResponse::Ok().finish())
 }
 
 #[utoipa::path(
     context_path = "/v1",
     responses(
-        (status = 200, description = "Return all sources"),
-        (status = 500, description = "Internal server error")
-    )
+        (status = 200, description = "Return all sources", body = GetSourcesResponse),
+        (status = 500, description = "Internal server error", body = ErrorMessage),
+    ),
+    tag = "Sources"
 )]
 #[get("/sources")]
 pub async fn read_all_sources(
@@ -229,5 +239,6 @@ pub async fn read_all_sources(
         sources.push(source);
     }
     let response = GetSourcesResponse { sources };
+    
     Ok(Json(response))
 }

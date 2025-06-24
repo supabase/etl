@@ -10,7 +10,6 @@ use sqlx::PgPool;
 use thiserror::Error;
 use utoipa::ToSchema;
 
-use super::{destinations::DestinationError, extract_tenant_id, ErrorMessage, TenantIdError};
 use crate::db;
 use crate::db::destinations::{destination_exists, DestinationsDbError};
 use crate::db::destinations_pipelines::DestinationPipelinesDbError;
@@ -19,20 +18,7 @@ use crate::db::pipelines::PipelineConfig;
 use crate::db::sources::{source_exists, SourcesDbError};
 use crate::encryption::EncryptionKey;
 
-#[derive(Deserialize, ToSchema)]
-pub struct PostDestinationPipelineRequest {
-    #[schema(example = "Destination Name", required = true)]
-    pub destination_name: String,
-
-    #[schema(required = true)]
-    pub destination_config: DestinationConfig,
-
-    #[schema(required = true)]
-    pub source_id: i64,
-
-    #[schema(required = true)]
-    pub pipeline_config: PipelineConfig,
-}
+use super::{destinations::DestinationError, extract_tenant_id, ErrorMessage, TenantIdError};
 
 #[derive(Debug, Error)]
 enum DestinationPipelineError {
@@ -130,9 +116,26 @@ impl ResponseError for DestinationPipelineError {
     }
 }
 
+#[derive(Deserialize, ToSchema)]
+pub struct PostDestinationPipelineRequest {
+    #[schema(example = "Destination Name", required = true)]
+    pub destination_name: String,
+
+    #[schema(required = true)]
+    pub destination_config: DestinationConfig,
+
+    #[schema(required = true, example = 123)]
+    pub source_id: i64,
+
+    #[schema(required = true)]
+    pub pipeline_config: PipelineConfig,
+}
+
 #[derive(Serialize, ToSchema)]
 pub struct PostDestinationPipelineResponse {
+    #[schema(example = 1)]
     destination_id: i64,
+    #[schema(example = 2)]
     pipeline_id: i64,
 }
 
@@ -141,8 +144,11 @@ pub struct PostDestinationPipelineResponse {
     request_body = PostDestinationPipelineRequest,
     responses(
         (status = 200, description = "Create a new destination and a pipeline", body = PostDestinationPipelineResponse),
-        (status = 500, description = "Internal server error")
-    )
+        (status = 409, description = "A pipeline already exists for this source and destination combination", body = ErrorMessage),
+        (status = 400, description = "Bad request", body = ErrorMessage),
+        (status = 500, description = "Internal server error", body = ErrorMessage)
+    ),
+    tag = "Destinations & Pipelines"
 )]
 #[post("/destinations-pipelines")]
 pub async fn create_destinations_and_pipelines(
@@ -183,17 +189,24 @@ pub async fn create_destinations_and_pipelines(
         destination_id,
         pipeline_id,
     };
+    
     Ok(Json(response))
 }
 
 #[utoipa::path(
     context_path = "/v1",
     request_body = PostDestinationPipelineRequest,
+    params(
+        ("destination_id" = i64, Path, description = "ID of the destination to update"),
+        ("pipeline_id" = i64, Path, description = "ID of the pipeline to update")
+    ),
     responses(
         (status = 200, description = "Update a destination and a pipeline", body = PostDestinationPipelineResponse),
-        (status = 404, description = "Pipeline or destination not found"),
-        (status = 500, description = "Internal server error")
-    )
+        (status = 404, description = "Pipeline or destination not found", body = ErrorMessage),
+        (status = 400, description = "Bad request", body = ErrorMessage),
+        (status = 500, description = "Internal server error", body = ErrorMessage)
+    ),
+    tag = "Destinations & Pipelines"
 )]
 #[post("/destinations-pipelines/{destination_id}/{pipeline_id}")]
 pub async fn update_destinations_and_pipelines(

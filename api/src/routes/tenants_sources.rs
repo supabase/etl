@@ -78,10 +78,18 @@ pub struct PostTenantSourceResponse {
 #[utoipa::path(
     context_path = "/v1",
     request_body = CreateTenantSourceRequest,
+    request_body_example = json!({
+        "tenant_id": "abcdefghijklmnopqrst",
+        "tenant_name": "Tenant Name",
+        "source_name": "Source Name",
+        "source_config": { /* ...example config... */ }
+    }),
     responses(
-        (status = 200, description = "Create a new tenant and a source", body = PostTenantSourceResponse),
-        (status = 500, description = "Internal server error")
-    )
+        (status = 200, description = "Create a new tenant and a source", body = PostTenantSourceResponse, example = json!({"tenant_id": "abcdefghijklmnopqrst", "source_id": 1})),
+        (status = 400, description = "Bad request", body = ErrorMessage, example = json!({"error": "Invalid request"})),
+        (status = 500, description = "Internal server error", body = ErrorMessage, example = json!({"error": "internal server error"})),
+    ),
+    tag = "Tenants & Sources"
 )]
 #[post("/tenants-sources")]
 pub async fn create_tenant_and_source(

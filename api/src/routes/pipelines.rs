@@ -27,12 +27,6 @@ use crate::k8s_client::{
 };
 use crate::routes::{extract_tenant_id, ErrorMessage, TenantIdError};
 
-#[derive(serde::Serialize, serde::Deserialize)]
-pub struct Secrets {
-    pub postgres_password: String,
-    pub big_query_service_account_key: Option<String>,
-}
-
 #[derive(Debug, Error)]
 enum PipelineError {
     #[error("The pipeline with id {0} was not found")]
@@ -180,8 +174,10 @@ pub struct GetPipelinesResponse {
     request_body = PostPipelineRequest,
     responses(
         (status = 200, description = "Create new pipeline", body = PostPipelineResponse),
-        (status = 500, description = "Internal server error")
-    )
+        (status = 400, description = "Bad request", body = ErrorMessage),
+        (status = 500, description = "Internal server error", body = ErrorMessage),
+    ),
+    tag = "Pipelines"
 )]
 #[post("/pipelines")]
 pub async fn create_pipeline(
@@ -216,6 +212,7 @@ pub async fn create_pipeline(
     .await?;
 
     let response = PostPipelineResponse { id };
+
     Ok(Json(response))
 }
 
@@ -226,9 +223,10 @@ pub async fn create_pipeline(
     ),
     responses(
         (status = 200, description = "Return pipeline with id = pipeline_id", body = GetPipelineResponse),
-        (status = 404, description = "Pipeline not found"),
-        (status = 500, description = "Internal server error")
-    )
+        (status = 404, description = "Pipeline not found", body = ErrorMessage),
+        (status = 500, description = "Internal server error", body = ErrorMessage)
+    ),
+    tag = "Pipelines"
 )]
 #[get("/pipelines/{pipeline_id}")]
 pub async fn read_pipeline(
@@ -261,17 +259,18 @@ pub async fn read_pipeline(
 
 #[utoipa::path(
     context_path = "/v1",
-    request_body = PostDestinationRequest,
+    request_body = PostPipelineRequest,
     params(
         ("pipeline_id" = i64, Path, description = "Id of the pipeline"),
     ),
     responses(
         (status = 200, description = "Update pipeline with id = pipeline_id"),
-        (status = 404, description = "Pipeline not found"),
-        (status = 500, description = "Internal server error")
-    )
+        (status = 404, description = "Pipeline not found", body = ErrorMessage),
+        (status = 500, description = "Internal server error", body = ErrorMessage)
+    ),
+    tag = "Pipelines"
 )]
-#[post("/pipelines/{pipeline_id:\\d+}")]
+#[post("/pipelines/{pipeline_id}")]
 pub async fn update_pipeline(
     req: HttpRequest,
     pool: Data<PgPool>,
@@ -314,9 +313,10 @@ pub async fn update_pipeline(
     ),
     responses(
         (status = 200, description = "Delete pipeline with id = pipeline_id"),
-        (status = 404, description = "Pipeline not found"),
-        (status = 500, description = "Internal server error")
-    )
+        (status = 404, description = "Pipeline not found", body = ErrorMessage),
+        (status = 500, description = "Internal server error", body = ErrorMessage)
+    ),
+    tag = "Pipelines"
 )]
 #[delete("/pipelines/{pipeline_id}")]
 pub async fn delete_pipeline(
@@ -329,15 +329,30 @@ pub async fn delete_pipeline(
     db::pipelines::delete_pipeline(&pool, tenant_id, pipeline_id)
         .await?
         .ok_or(PipelineError::PipelineNotFound(pipeline_id))?;
+
     Ok(HttpResponse::Ok().finish())
 }
 
 #[utoipa::path(
     context_path = "/v1",
     responses(
-        (status = 200, description = "Return all pipelines"),
-        (status = 500, description = "Internal server error")
-    )
+        (status = 200, description = "Return all pipelines", body = GetPipelinesResponse, example = json!({
+            "pipelines": [
+                {
+                    "id": 1,
+                    "tenant_id": "abcdefghijklmnopqrst",
+                    "source_id": 1,
+                    "source_name": "Source Name",
+                    "destination_id": 2,
+                    "destination_name": "Destination Name",
+                    "replicator_id": 3,
+                    "config": { /* ...example config... */ }
+                }
+            ]
+        })),
+        (status = 500, description = "Internal server error", body = ErrorMessage, example = json!({"error": "internal server error"}))
+    ),
+    tag = "Pipelines"
 )]
 #[get("/pipelines")]
 pub async fn read_all_pipelines(
@@ -511,6 +526,12 @@ pub async fn get_pipeline_status(
     };
 
     Ok(Json(status))
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct Secrets {
+    postgres_password: String,
+    big_query_service_account_key: Option<String>,
 }
 
 async fn read_data(

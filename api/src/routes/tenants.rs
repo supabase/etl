@@ -92,10 +92,16 @@ pub struct GetTenantsResponse {
 #[utoipa::path(
     context_path = "/v1",
     request_body = CreateTenantRequest,
+    request_body_example = json!({
+        "id": "abcdefghijklmnopqrst",
+        "name": "Tenant Name"
+    }),
     responses(
-        (status = 200, description = "Create new tenant", body = PostTenantResponse),
-        (status = 500, description = "Internal server error")
-    )
+        (status = 200, description = "Create new tenant", body = PostTenantResponse, example = json!({"id": "abcdefghijklmnopqrst"})),
+        (status = 400, description = "Bad request", body = ErrorMessage, example = json!({"error": "Invalid request"})),
+        (status = 500, description = "Internal server error", body = ErrorMessage, example = json!({"error": "internal server error"})),
+    ),
+    tag = "Tenants"
 )]
 #[post("/tenants")]
 pub async fn create_tenant(
@@ -115,10 +121,15 @@ pub async fn create_tenant(
 #[utoipa::path(
     context_path = "/v1",
     request_body = UpdateTenantRequest,
+    request_body_example = json!({
+        "name": "Tenant Name"
+    }),
     responses(
-        (status = 200, description = "Create a new tenant or update an existing one", body = PostTenantResponse),
-        (status = 500, description = "Internal server error")
-    )
+        (status = 200, description = "Create a new tenant or update an existing one", body = PostTenantResponse, example = json!({"id": "abcdefghijklmnopqrst"})),
+        (status = 400, description = "Bad request", body = ErrorMessage, example = json!({"error": "Invalid request"})),
+        (status = 500, description = "Internal server error", body = ErrorMessage, example = json!({"error": "internal server error"})),
+    ),
+    tag = "Tenants"
 )]
 #[put("/tenants/{tenant_id}")]
 pub async fn create_or_update_tenant(
@@ -139,13 +150,14 @@ pub async fn create_or_update_tenant(
 #[utoipa::path(
     context_path = "/v1",
     params(
-        ("tenant_id" = i64, Path, description = "Id of the tenant"),
+        ("tenant_id" = String, Path, description = "Id of the tenant", example = "abcdefghijklmnopqrst"),
     ),
     responses(
-        (status = 200, description = "Return tenant with id = tenant_id", body = GetTenantResponse),
-        (status = 404, description = "Tenant not found"),
-        (status = 500, description = "Internal server error")
-    )
+        (status = 200, description = "Return tenant with id = tenant_id", body = GetTenantResponse, example = json!({"id": "abcdefghijklmnopqrst", "name": "Tenant Name"})),
+        (status = 404, description = "Tenant not found", body = ErrorMessage, example = json!({"error": "Tenant not found"})),
+        (status = 500, description = "Internal server error", body = ErrorMessage, example = json!({"error": "internal server error"})),
+    ),
+    tag = "Tenants"
 )]
 #[get("/tenants/{tenant_id}")]
 pub async fn read_tenant(
@@ -168,14 +180,18 @@ pub async fn read_tenant(
 #[utoipa::path(
     context_path = "/v1",
     request_body = UpdateTenantRequest,
+    request_body_example = json!({
+        "name": "Tenant Name"
+    }),
     params(
-        ("tenant_id" = i64, Path, description = "Id of the tenant"),
+        ("tenant_id" = String, Path, description = "Id of the tenant", example = "abcdefghijklmnopqrst"),
     ),
     responses(
         (status = 200, description = "Update tenant with id = tenant_id"),
-        (status = 404, description = "Tenant not found"),
-        (status = 500, description = "Internal server error")
-    )
+        (status = 404, description = "Tenant not found", body = ErrorMessage, example = json!({"error": "Tenant not found"})),
+        (status = 500, description = "Internal server error", body = ErrorMessage, example = json!({"error": "internal server error"})),
+    ),
+    tag = "Tenants"
 )]
 #[post("/tenants/{tenant_id}")]
 pub async fn update_tenant(
@@ -195,13 +211,14 @@ pub async fn update_tenant(
 #[utoipa::path(
     context_path = "/v1",
     params(
-        ("tenant_id" = i64, Path, description = "Id of the tenant"),
+        ("tenant_id" = String, Path, description = "Id of the tenant", example = "abcdefghijklmnopqrst"),
     ),
     responses(
         (status = 200, description = "Delete tenant with id = tenant_id"),
-        (status = 404, description = "Tenant not found"),
-        (status = 500, description = "Internal server error")
-    )
+        (status = 404, description = "Tenant not found", body = ErrorMessage, example = json!({"error": "Tenant not found"})),
+        (status = 500, description = "Internal server error", body = ErrorMessage, example = json!({"error": "internal server error"})),
+    ),
+    tag = "Tenants"
 )]
 #[delete("/tenants/{tenant_id}")]
 pub async fn delete_tenant(
@@ -218,9 +235,10 @@ pub async fn delete_tenant(
 #[utoipa::path(
     context_path = "/v1",
     responses(
-        (status = 200, description = "Return all tenants"),
-        (status = 500, description = "Internal server error")
-    )
+        (status = 200, description = "Return all tenants", body = GetTenantsResponse, example = json!({"tenants": [{"id": "abcdefghijklmnopqrst", "name": "Tenant Name"}]})),
+        (status = 500, description = "Internal server error", body = ErrorMessage, example = json!({"error": "internal server error"})),
+    ),
+    tag = "Tenants"
 )]
 #[get("/tenants")]
 pub async fn read_all_tenants(pool: Data<PgPool>) -> Result<impl Responder, TenantError> {

@@ -11,7 +11,9 @@ use crate::db::serde::{
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PipelineConfig {
     pub publication_name: String,
+    #[serde(default)]
     pub batch: BatchConfig,
+    #[serde(default)]
     pub apply_worker_init_retry: RetryConfig,
 }
 

@@ -64,6 +64,7 @@ impl ResponseError for DestinationError {
 
 #[derive(Deserialize, ToSchema)]
 pub struct PostDestinationRequest {
+    #[schema(example = "BigQuery Destination")]
     pub name: String,
     #[schema(required = true)]
     pub config: DestinationConfig,
@@ -71,6 +72,7 @@ pub struct PostDestinationRequest {
 
 #[derive(Serialize, ToSchema)]
 pub struct PostDestinationResponse {
+    #[schema(example = 1)]
     id: i64,
 }
 
@@ -78,7 +80,7 @@ pub struct PostDestinationResponse {
 pub struct GetDestinationResponse {
     #[schema(example = 1)]
     id: i64,
-    #[schema(example = 1)]
+    #[schema(example = "abcdefghijklmnopqrst")]
     tenant_id: String,
     #[schema(example = "BigQuery Destination")]
     name: String,
@@ -94,9 +96,14 @@ pub struct GetDestinationsResponse {
     context_path = "/v1",
     request_body = PostDestinationRequest,
     responses(
-        (status = 200, description = "Create new destination", body = PostDestinationResponse),
-        (status = 500, description = "Internal server error")
-    )
+        (status = 200, description = "Create new destination", body = PostDestinationResponse, example = json!({"id": 1})),
+        (status = 400, description = "Invalid tenant ID or request body", body = ErrorMessage, example = json!({"error": "Invalid tenant ID"})),
+        (status = 500, description = "Internal server error", body = ErrorMessage, example = json!({"error": "internal server error"}))
+    ),
+    params(
+        ("tenant_id" = String, Header, description = "The tenant ID", example = "abcdefghijklmnopqrst")
+    ),
+    tag = "Destinations"
 )]
 #[post("/destinations")]
 pub async fn create_destination(
@@ -105,26 +112,34 @@ pub async fn create_destination(
     encryption_key: Data<EncryptionKey>,
     destination: Json<PostDestinationRequest>,
 ) -> Result<impl Responder, DestinationError> {
-    let destination = destination.0;
+    let destination = destination.into_inner();
     let tenant_id = extract_tenant_id(&req)?;
     let name = destination.name;
     let config = destination.config;
     let id = db::destinations::create_destination(&pool, tenant_id, &name, config, &encryption_key)
         .await?;
     let response = PostDestinationResponse { id };
+    
     Ok(Json(response))
 }
 
 #[utoipa::path(
     context_path = "/v1",
     params(
-        ("destination_id" = i64, Path, description = "Id of the destination"),
+        ("destination_id" = i64, Path, description = "Id of the destination to retrieve", example = 1),
+        ("tenant_id" = String, Header, description = "The tenant ID", example = "abcdefghijklmnopqrst")
     ),
     responses(
-        (status = 200, description = "Return destination with id = destination_id", body = GetSourceResponse),
-        (status = 404, description = "Destination not found"),
-        (status = 500, description = "Internal server error")
-    )
+        (status = 200, description = "The destination with the given id", body = GetDestinationResponse, example = json!({
+            "id": 1,
+            "tenant_id": "abcdefghijklmnopqrst",
+            "name": "BigQuery Destination",
+            "config": { /* ...example config... */ }
+        })),
+        (status = 404, description = "Destination not found", body = ErrorMessage, example = json!({"error": "Destination not found"})),
+        (status = 500, description = "Internal server error", body = ErrorMessage, example = json!({"error": "internal server error"}))
+    ),
+    tag = "Destinations"
 )]
 #[get("/destinations/{destination_id}")]
 pub async fn read_destination(
@@ -145,6 +160,7 @@ pub async fn read_destination(
                 config: s.config,
             })
             .ok_or(DestinationError::DestinationNotFound(destination_id))?;
+    
     Ok(Json(response))
 }
 
@@ -152,13 +168,15 @@ pub async fn read_destination(
     context_path = "/v1",
     request_body = PostDestinationRequest,
     params(
-        ("destination_id" = i64, Path, description = "Id of the destination"),
+        ("destination_id" = i64, Path, description = "Id of the destination to update"),
+        ("tenant_id" = String, Header, description = "The tenant ID")
     ),
     responses(
-        (status = 200, description = "Update destination with id = destination_id"),
-        (status = 404, description = "Destination not found"),
-        (status = 500, description = "Internal server error")
-    )
+        (status = 200, description = "Destination updated successfully"),
+        (status = 404, description = "Destination not found", body = ErrorMessage),
+        (status = 500, description = "Internal server error", body = ErrorMessage)
+    ),
+    tag = "Destinations"
 )]
 #[post("/destinations/{destination_id}")]
 pub async fn update_destination(
@@ -168,7 +186,7 @@ pub async fn update_destination(
     encryption_key: Data<EncryptionKey>,
     destination: Json<PostDestinationRequest>,
 ) -> Result<impl Responder, DestinationError> {
-    let destination = destination.0;
+    let destination = destination.into_inner();
     let tenant_id = extract_tenant_id(&req)?;
     let destination_id = destination_id.into_inner();
     let name = destination.name;
@@ -183,19 +201,22 @@ pub async fn update_destination(
     )
     .await?
     .ok_or(DestinationError::DestinationNotFound(destination_id))?;
+    
     Ok(HttpResponse::Ok().finish())
 }
 
 #[utoipa::path(
     context_path = "/v1",
     params(
-        ("destination_id" = i64, Path, description = "Id of the destination"),
+        ("destination_id" = i64, Path, description = "Id of the destination to delete"),
+        ("tenant_id" = String, Header, description = "The tenant ID")
     ),
     responses(
-        (status = 200, description = "Delete destination with id = destination_id"),
-        (status = 404, description = "Destination not found"),
-        (status = 500, description = "Internal server error")
-    )
+        (status = 200, description = "Destination deleted successfully"),
+        (status = 404, description = "Destination not found", body = ErrorMessage),
+        (status = 500, description = "Internal server error", body = ErrorMessage)
+    ),
+    tag = "Destinations"
 )]
 #[delete("/destinations/{destination_id}")]
 pub async fn delete_destination(
@@ -208,15 +229,20 @@ pub async fn delete_destination(
     db::destinations::delete_destination(&pool, tenant_id, destination_id)
         .await?
         .ok_or(DestinationError::DestinationNotFound(destination_id))?;
+    
     Ok(HttpResponse::Ok().finish())
 }
 
 #[utoipa::path(
     context_path = "/v1",
     responses(
-        (status = 200, description = "Return all destinations"),
-        (status = 500, description = "Internal server error")
-    )
+        (status = 200, description = "A list of all the destinations for a tenant", body = GetDestinationsResponse),
+        (status = 500, description = "Internal server error", body = ErrorMessage)
+    ),
+    params(
+        ("tenant_id" = String, Header, description = "The tenant ID")
+    ),
+    tag = "Destinations"
 )]
 #[get("/destinations")]
 pub async fn read_all_destinations(
@@ -238,5 +264,6 @@ pub async fn read_all_destinations(
         destinations.push(destination);
     }
     let response = GetDestinationsResponse { destinations };
+    
     Ok(Json(response))
 }

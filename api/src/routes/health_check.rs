@@ -1,8 +1,9 @@
 use actix_web::{get, HttpResponse, Responder};
 
 #[utoipa::path(
+    tag = "Health",
     responses(
-        (status = 200, description = "Api is healthy"),
+        (status = 200, description = "API is healthy", body = String),
     )
 )]
 #[get("/health_check")]
