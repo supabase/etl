@@ -10,8 +10,8 @@ use crate::db::serde::{
     DbSerializationError,
 };
 use crate::encryption::{
-    decrypt_text, encrypt_text, Decryptable, DecryptionError, Encryptable, EncryptedValue,
-    EncryptionError, EncryptionKey,
+    decrypt_text, encrypt_text, Decrypt, DecryptionError, Encrypt, EncryptedValue, EncryptionError,
+    EncryptionKey,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -38,7 +38,7 @@ impl SourceConfig {
     }
 }
 
-impl Encryptable<EncryptedSourceConfig> for SourceConfig {
+impl Encrypt<EncryptedSourceConfig> for SourceConfig {
     fn encrypt(
         self,
         encryption_key: &EncryptionKey,
@@ -68,7 +68,7 @@ pub struct EncryptedSourceConfig {
     password: Option<EncryptedValue>,
 }
 
-impl Decryptable<SourceConfig> for EncryptedSourceConfig {
+impl Decrypt<SourceConfig> for EncryptedSourceConfig {
     fn decrypt(self, encryption_key: &EncryptionKey) -> Result<SourceConfig, DecryptionError> {
         let mut decrypted_password = None;
         if let Some(password) = self.password {

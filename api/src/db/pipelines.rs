@@ -49,7 +49,7 @@ pub async fn create_pipeline(
     image_id: i64,
     config: PipelineConfig,
 ) -> Result<i64, PipelinesDbError> {
-    // TODO: remove publication name since it's in the config.
+    // TODO: remove publication name since it's in the config (only when the db column is removed).
     let publication_name = &config.publication_name;
     let config = serialize(&config)?;
     let config = serde_json::to_value(config).expect("failed to serialize config");

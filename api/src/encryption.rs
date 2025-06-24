@@ -37,13 +37,13 @@ pub enum DecryptionError {
 }
 
 /// Trait for types that can be encrypted into another type.
-pub trait Encryptable<T> {
+pub trait Encrypt<T> {
     /// Encrypts `self` using the provided [`EncryptionKey`].
     fn encrypt(self, encryption_key: &EncryptionKey) -> Result<T, EncryptionError>;
 }
 
 /// Trait for types that can be decrypted into another type.
-pub trait Decryptable<T> {
+pub trait Decrypt<T> {
     /// Decrypts `self` using the provided [`EncryptionKey`].
     fn decrypt(self, encryption_key: &EncryptionKey) -> Result<T, DecryptionError>;
 }

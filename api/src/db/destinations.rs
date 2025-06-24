@@ -9,11 +9,11 @@ use crate::db::serde::{
     DbSerializationError,
 };
 use crate::encryption::{
-    decrypt_text, encrypt_text, Decryptable, DecryptionError, Encryptable, EncryptedValue,
-    EncryptionError, EncryptionKey,
+    decrypt_text, encrypt_text, Decrypt, DecryptionError, Encrypt, EncryptedValue, EncryptionError,
+    EncryptionKey,
 };
 
-impl Encryptable<EncryptedDestinationConfig> for DestinationConfig {
+impl Encrypt<EncryptedDestinationConfig> for DestinationConfig {
     fn encrypt(
         self,
         encryption_key: &EncryptionKey,
@@ -53,7 +53,7 @@ pub enum EncryptedDestinationConfig {
     },
 }
 
-impl Decryptable<DestinationConfig> for EncryptedDestinationConfig {
+impl Decrypt<DestinationConfig> for EncryptedDestinationConfig {
     fn decrypt(self, encryption_key: &EncryptionKey) -> Result<DestinationConfig, DecryptionError> {
         match self {
             Self::Memory => Ok(DestinationConfig::Memory),
