@@ -309,21 +309,20 @@ where
             )
             .await;
 
-            let origin_start_lsn = match result {
+            let start_lsn = match result {
                 Ok(TableSyncResult::SyncStopped | TableSyncResult::SyncNotRequired) => {
                     return Ok(())
                 }
-                Ok(TableSyncResult::SyncCompleted { origin_start_lsn }) => origin_start_lsn,
+                Ok(TableSyncResult::SyncCompleted { start_lsn }) => start_lsn,
                 Err(err) => return Err(err.into()),
             };
 
             start_apply_loop(
                 self.identity,
-                origin_start_lsn,
+                start_lsn,
                 self.config,
                 self.replication_client,
                 self.schema_cache,
-                self.state_store.clone(),
                 self.destination,
                 Hook::new(self.table_id, state_clone, self.state_store),
                 self.shutdown_rx,
@@ -397,7 +396,7 @@ where
             // We drop the lock since we don't need to hold it while cleaning resources.
             drop(inner);
 
-            // TODO: implement cleanup of slot and replication origin.
+            // TODO: implement cleanup of slot.
 
             info!(
                 "Table sync worker for table {} has caught up with the apply worker, shutting down",

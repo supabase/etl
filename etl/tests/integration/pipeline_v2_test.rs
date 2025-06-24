@@ -15,7 +15,7 @@ use crate::common::destination_v2::TestDestination;
 use crate::common::event::{group_events_by_type, group_events_by_type_and_table_id};
 use crate::common::pipeline_v2::{create_pipeline_identity, spawn_pg_pipeline};
 use crate::common::state_store::{
-    FaultConfig, FaultInjectingStateStore, FaultType, StateStoreMethod, TestStateStore,
+    FaultConfig, FaultInjectingStateStore, FaultType, TestStateStore,
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -259,70 +259,6 @@ fn build_expected_orders_inserts(
     }
 
     events
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn test_pipeline_with_apply_worker_panic() {
-    let database = spawn_database().await;
-    let database_schema = setup_test_database_schema(&database, TableSelection::Both).await;
-
-    // Configure state store to panic when storing replication origin state.
-    let fault_config = FaultConfig {
-        store_replication_origin_state: Some(FaultType::Panic),
-        ..Default::default()
-    };
-    let state_store = FaultInjectingStateStore::wrap(TestStateStore::new(), fault_config);
-    let destination = TestDestination::new();
-
-    // Initialize pipeline with fault-injecting state store.
-    let mut pipeline = spawn_pg_pipeline(
-        &create_pipeline_identity(&database_schema.publication_name),
-        &database.config,
-        state_store.clone(),
-        destination.clone(),
-    );
-
-    pipeline.start().await.unwrap();
-
-    // Verify that pipeline shutdown returns expected error.
-    assert!(matches!(
-        pipeline.shutdown_and_wait().await,
-        Err(PipelineError::ApplyWorkerFailed(
-            WorkerWaitError::WorkerPanicked(_)
-        ))
-    ));
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn test_pipeline_with_apply_worker_error() {
-    let database = spawn_database().await;
-    let database_schema = setup_test_database_schema(&database, TableSelection::Both).await;
-
-    // Configure state store to return error when storing replication origin state.
-    let fault_config = FaultConfig {
-        store_replication_origin_state: Some(FaultType::Error),
-        ..Default::default()
-    };
-    let state_store = FaultInjectingStateStore::wrap(TestStateStore::new(), fault_config);
-    let destination = TestDestination::new();
-
-    // Initialize pipeline with fault-injecting state store.
-    let mut pipeline = spawn_pg_pipeline(
-        &create_pipeline_identity(&database_schema.publication_name),
-        &database.config,
-        state_store.clone(),
-        destination.clone(),
-    );
-
-    pipeline.start().await.unwrap();
-
-    // Verify that pipeline shutdown returns expected error type.
-    assert!(matches!(
-        pipeline.shutdown_and_wait().await,
-        Err(PipelineError::ApplyWorkerFailed(
-            WorkerWaitError::ApplyWorkerFailed(_)
-        ))
-    ));
 }
 
 // TODO: find a way to inject errors in a way that is predictable.
@@ -661,15 +597,7 @@ async fn test_table_schema_copy_with_finished_copy_retry() {
         destination.clone(),
     );
 
-    // We wait for the load replication origin state method to be called, since that is called in the
-    // branch where the copy was already finished.
-    let load_state_notify = state_store
-        .notify_on_method_call(StateStoreMethod::LoadReplicationOriginState)
-        .await;
-
     pipeline.start().await.unwrap();
-
-    load_state_notify.notified().await;
 
     pipeline.shutdown_and_wait().await.unwrap();
 

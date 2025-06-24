@@ -1,5 +1,4 @@
 use etl::v2::pipeline::PipelineId;
-use etl::v2::state::origin::ReplicationOriginState;
 use etl::v2::state::store::base::{StateStore, StateStoreError};
 use etl::v2::state::table::{TableReplicationPhaseType, TableReplicationState};
 use postgres::schema::Oid;
@@ -13,15 +12,12 @@ type TableStateCondition = Box<dyn Fn(&TableReplicationState) -> bool + Send + S
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum StateStoreMethod {
-    LoadReplicationOriginState,
-    StoreReplicationOriginState,
     LoadTableReplicationState,
     LoadTableReplicationStates,
     StoreTableReplicationState,
 }
 
 struct Inner {
-    replication_origin_states: HashMap<(PipelineId, Option<Oid>), ReplicationOriginState>,
     table_replication_states: HashMap<(PipelineId, Oid), TableReplicationState>,
     table_state_conditions: Vec<((PipelineId, Oid), TableStateCondition, Arc<Notify>)>,
     method_call_notifiers: HashMap<StateStoreMethod, Vec<Arc<Notify>>>,
@@ -61,7 +57,6 @@ pub struct TestStateStore {
 impl TestStateStore {
     pub fn new() -> Self {
         let inner = Inner {
-            replication_origin_states: HashMap::new(),
             table_replication_states: HashMap::new(),
             table_state_conditions: Vec::new(),
             method_call_notifiers: HashMap::new(),
@@ -110,18 +105,6 @@ impl TestStateStore {
         })
         .await
     }
-
-    pub async fn notify_on_method_call(&self, method: StateStoreMethod) -> Arc<Notify> {
-        let notify = Arc::new(Notify::new());
-        let mut inner = self.inner.write().await;
-        inner
-            .method_call_notifiers
-            .entry(method)
-            .or_insert_with(Vec::new)
-            .push(notify.clone());
-
-        notify
-    }
 }
 
 impl Default for TestStateStore {
@@ -131,44 +114,6 @@ impl Default for TestStateStore {
 }
 
 impl StateStore for TestStateStore {
-    async fn load_replication_origin_state(
-        &self,
-        pipeline_id: PipelineId,
-        table_id: Option<Oid>,
-    ) -> Result<Option<ReplicationOriginState>, StateStoreError> {
-        let inner = self.inner.read().await;
-        let result = Ok(inner
-            .replication_origin_states
-            .get(&(pipeline_id, table_id))
-            .cloned());
-
-        inner
-            .dispatch_method_notification(StateStoreMethod::LoadReplicationOriginState)
-            .await;
-
-        result
-    }
-
-    async fn store_replication_origin_state(
-        &self,
-        state: ReplicationOriginState,
-        overwrite: bool,
-    ) -> Result<bool, StateStoreError> {
-        let mut inner = self.inner.write().await;
-        let key = (state.pipeline_id, state.table_id);
-
-        if !overwrite && inner.replication_origin_states.contains_key(&key) {
-            return Ok(false);
-        }
-
-        inner.replication_origin_states.insert(key, state);
-        inner
-            .dispatch_method_notification(StateStoreMethod::StoreReplicationOriginState)
-            .await;
-
-        Ok(true)
-    }
-
     async fn load_table_replication_state(
         &self,
         pipeline_id: PipelineId,
@@ -228,10 +173,6 @@ impl fmt::Debug for TestStateStore {
             Handle::current().block_on(async move { self.inner.read().await })
         });
         f.debug_struct("TestStateStore")
-            .field(
-                "replication_origin_states",
-                &inner.replication_origin_states,
-            )
             .field("table_replication_states", &inner.table_replication_states)
             .finish()
     }
@@ -240,13 +181,10 @@ impl fmt::Debug for TestStateStore {
 #[derive(Debug, Clone)]
 pub enum FaultType {
     Panic,
-    Error,
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct FaultConfig {
-    pub load_replication_origin_state: Option<FaultType>,
-    pub store_replication_origin_state: Option<FaultType>,
     pub load_table_replication_state: Option<FaultType>,
     pub load_table_replication_states: Option<FaultType>,
     pub store_table_replication_state: Option<FaultType>,
@@ -280,8 +218,6 @@ where
         if let Some(fault_type) = fault {
             match fault_type {
                 FaultType::Panic => panic!("Fault injection: panic triggered"),
-                // We trigger a random error.
-                FaultType::Error => return Err(StateStoreError::ReplicationOriginStateNotFound),
             }
         }
 
@@ -293,28 +229,6 @@ impl<S> StateStore for FaultInjectingStateStore<S>
 where
     S: StateStore + Clone + Send + Sync + 'static,
 {
-    async fn load_replication_origin_state(
-        &self,
-        pipeline_id: PipelineId,
-        table_id: Option<Oid>,
-    ) -> Result<Option<ReplicationOriginState>, StateStoreError> {
-        self.trigger_fault(&self.config.load_replication_origin_state)?;
-        self.inner
-            .load_replication_origin_state(pipeline_id, table_id)
-            .await
-    }
-
-    async fn store_replication_origin_state(
-        &self,
-        state: ReplicationOriginState,
-        overwrite: bool,
-    ) -> Result<bool, StateStoreError> {
-        self.trigger_fault(&self.config.store_replication_origin_state)?;
-        self.inner
-            .store_replication_origin_state(state, overwrite)
-            .await
-    }
-
     async fn load_table_replication_state(
         &self,
         pipeline_id: PipelineId,
