@@ -16,6 +16,7 @@ use thiserror::Error;
 use tracing::{error, info, warn};
 
 use crate::config::load_replicator_config;
+use crate::migrations::migrate_state_store;
 
 #[derive(Debug, Error)]
 pub enum ReplicatorError {
@@ -107,6 +108,11 @@ async fn init_state_store(
 ) -> anyhow::Result<impl StateStore + Clone + Send + Sync + fmt::Debug + 'static> {
     match config.state_store {
         StateStoreConfig::Memory => Ok(MemoryStateStore::new()),
+        StateStoreConfig::Postgres => {
+            migrate_state_store(&config.source).await?;
+            // TODO: return Postgres state store
+            Ok(MemoryStateStore::new())
+        }
     }
 }
 

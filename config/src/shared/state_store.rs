@@ -6,6 +6,9 @@ use serde::{Deserialize, Serialize};
 pub enum StateStoreConfig {
     /// The in-memory state store.
     Memory,
+
+    /// The postgres state store.
+    Postgres,
 }
 
 impl Default for StateStoreConfig {
