@@ -9,10 +9,10 @@ use etl::v2::state::store::base::StateStore;
 use etl::v2::state::store::memory::MemoryStateStore;
 use etl::SslMode;
 use postgres::tokio::config::PgConnectionConfig;
+use secrecy::ExposeSecret;
 use std::fmt;
 use std::io::BufReader;
 use std::time::Duration;
-use secrecy::ExposeSecret;
 use thiserror::Error;
 use tracing::{error, info, warn};
 
@@ -30,8 +30,14 @@ pub async fn start_replicator() -> anyhow::Result<()> {
     // We set up the certificates and SSL mode.
     let mut trusted_root_certs = vec![];
     let ssl_mode = if replicator_config.source.tls.enabled {
-        let mut root_certs_reader =
-            BufReader::new(replicator_config.source.tls.trusted_root_certs.expose_secret().as_bytes());
+        let mut root_certs_reader = BufReader::new(
+            replicator_config
+                .source
+                .tls
+                .trusted_root_certs
+                .expose_secret()
+                .as_bytes(),
+        );
         for cert in rustls_pemfile::certs(&mut root_certs_reader) {
             let cert = cert?;
             trusted_root_certs.push(cert);

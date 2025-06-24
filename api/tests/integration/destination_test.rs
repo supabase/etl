@@ -1,6 +1,6 @@
-use config::shared::{DestinationConfig};
-use reqwest::StatusCode;
+use config::shared::DestinationConfig;
 use config::SerializableSecretString;
+use reqwest::StatusCode;
 
 use crate::{
     common::test_app::{
@@ -31,7 +31,9 @@ pub fn updated_destination_config() -> DestinationConfig {
     DestinationConfig::BigQuery {
         project_id: "project-id-updated".to_string(),
         dataset_id: "dataset-id-updated".to_string(),
-        service_account_key: SerializableSecretString::from("service-account-key-updated".to_string()),
+        service_account_key: SerializableSecretString::from(
+            "service-account-key-updated".to_string(),
+        ),
         max_staleness_mins: Some(10),
     }
 }

@@ -1,7 +1,7 @@
 mod environment;
 mod load;
-pub mod shared;
 mod secret;
+pub mod shared;
 
 pub use environment::*;
 pub use load::*;

@@ -26,8 +26,8 @@ use crate::k8s_client::{
     HttpK8sClient, K8sClient, K8sError, PodPhase, TRUSTED_ROOT_CERT_CONFIG_MAP_NAME,
 };
 use crate::routes::{extract_tenant_id, ErrorMessage, TenantIdError};
-use secrecy::ExposeSecret;
 use config::SerializableSecretString;
+use secrecy::ExposeSecret;
 
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct Secrets {

@@ -1,8 +1,8 @@
-use serde::{Deserialize, Serialize};
 use secrecy::ExposeSecret;
+use serde::{Deserialize, Serialize};
 
 use crate::SerializableSecretString;
-use crate::shared::{ValidationError};
+use crate::shared::ValidationError;
 
 /// Configuration for connecting to a Postgres source database.
 ///

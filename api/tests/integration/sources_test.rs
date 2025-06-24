@@ -1,6 +1,6 @@
 use api::db::sources::SourceConfig;
-use reqwest::StatusCode;
 use config::SerializableSecretString;
+use reqwest::StatusCode;
 
 use crate::{
     common::test_app::{

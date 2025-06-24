@@ -1,4 +1,4 @@
-use secrecy::{Secret, ExposeSecret};
+use secrecy::{ExposeSecret, Secret};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::fmt;
 use std::ops::Deref;
@@ -8,7 +8,6 @@ use std::ops::Deref;
 pub struct SerializableSecretString(Secret<String>);
 
 impl Deref for SerializableSecretString {
-
     type Target = Secret<String>;
 
     fn deref(&self) -> &Self::Target {
@@ -50,7 +49,7 @@ impl<'de> Deserialize<'de> for SerializableSecretString {
     {
         let string = String::deserialize(deserializer)?;
         let secret = Secret::new(string);
-        
+
         Ok(Self(secret))
     }
 }

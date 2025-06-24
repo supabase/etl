@@ -1,7 +1,7 @@
-use secrecy::Secret;
 use postgres::schema::TableName;
 use postgres::tokio::config::PgConnectionConfig;
 use postgres::tokio::test_utils::PgDatabase;
+use secrecy::Secret;
 use tokio_postgres::config::SslMode;
 use tokio_postgres::Client;
 use uuid::Uuid;
