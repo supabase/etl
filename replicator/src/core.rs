@@ -12,6 +12,7 @@ use postgres::tokio::config::PgConnectionConfig;
 use std::fmt;
 use std::io::BufReader;
 use std::time::Duration;
+use secrecy::ExposeSecret;
 use thiserror::Error;
 use tracing::{error, info, warn};
 
@@ -30,7 +31,7 @@ pub async fn start_replicator() -> anyhow::Result<()> {
     let mut trusted_root_certs = vec![];
     let ssl_mode = if replicator_config.source.tls.enabled {
         let mut root_certs_reader =
-            BufReader::new(replicator_config.source.tls.trusted_root_certs.as_bytes());
+            BufReader::new(replicator_config.source.tls.trusted_root_certs.expose_secret().as_bytes());
         for cert in rustls_pemfile::certs(&mut root_certs_reader) {
             let cert = cert?;
             trusted_root_certs.push(cert);
@@ -59,7 +60,7 @@ pub async fn start_replicator() -> anyhow::Result<()> {
             port: replicator_config.source.port,
             name: replicator_config.source.name,
             username: replicator_config.source.username,
-            password: replicator_config.source.password,
+            password: replicator_config.source.password.map(Into::into),
             ssl_mode,
         },
         batch: BatchConfig {

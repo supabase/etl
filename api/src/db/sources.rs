@@ -1,9 +1,10 @@
 use postgres::sqlx::config::PgConnectionConfig;
-use secrecy::Secret;
 use serde::{Deserialize, Serialize};
 use sqlx::{PgPool, Postgres, Transaction};
 use std::fmt::Debug;
+use secrecy::ExposeSecret;
 use thiserror::Error;
+use config::SerializableSecretString;
 
 use crate::db::serde::{
     decrypt_and_deserialize_from_value, encrypt_and_serialize, DbDeserializationError,
@@ -21,7 +22,7 @@ pub struct SourceConfig {
     pub port: u16,
     pub name: String,
     pub username: String,
-    pub password: Option<String>,
+    pub password: Option<SerializableSecretString>,
 }
 
 impl SourceConfig {
@@ -31,7 +32,7 @@ impl SourceConfig {
             port: self.port,
             name: self.name,
             username: self.username,
-            password: self.password.map(Secret::new),
+            password: self.password.map(Into::into),
             // TODO: check whether we want to require ssl.
             require_ssl: false,
         }
@@ -45,7 +46,7 @@ impl Encrypt<EncryptedSourceConfig> for SourceConfig {
     ) -> Result<EncryptedSourceConfig, EncryptionError> {
         let mut encrypted_password = None;
         if let Some(password) = self.password {
-            encrypted_password = Some(encrypt_text(password, encryption_key)?);
+            encrypted_password = Some(encrypt_text(password.expose_secret().to_owned(), encryption_key)?);
         }
 
         Ok(EncryptedSourceConfig {
@@ -72,7 +73,8 @@ impl Decrypt<SourceConfig> for EncryptedSourceConfig {
     fn decrypt(self, encryption_key: &EncryptionKey) -> Result<SourceConfig, DecryptionError> {
         let mut decrypted_password = None;
         if let Some(password) = self.password {
-            decrypted_password = Some(decrypt_text(password, encryption_key)?);
+            let pwd = decrypt_text(password, encryption_key)?;
+            decrypted_password = Some(SerializableSecretString::from(pwd));
         }
 
         Ok(SourceConfig {
@@ -289,7 +291,7 @@ pub async fn source_exists(
 mod tests {
     use aws_lc_rs::aead::RandomizedNonceKey;
     use serde_json;
-
+    use config::SerializableSecretString;
     use crate::db::serde::{decrypt_and_deserialize_from_value, encrypt_and_serialize};
     use crate::db::sources::{EncryptedSourceConfig, SourceConfig};
     use crate::encryption::EncryptionKey;
@@ -315,7 +317,7 @@ mod tests {
             port: 5432,
             name: "postgres".to_string(),
             username: "postgres".to_string(),
-            password: Some("postgres".to_string()),
+            password: Some(SerializableSecretString::from("postgres".to_string())),
         };
 
         insta::assert_json_snapshot!(config);
@@ -332,7 +334,7 @@ mod tests {
             port: 5432,
             name: "postgres".to_string(),
             username: "postgres".to_string(),
-            password: Some("supersecret".to_string()),
+            password: Some(SerializableSecretString::from("supersecret".to_string())),
         };
 
         let config_in_db = encrypt_and_serialize::<SourceConfig, EncryptedSourceConfig>(
