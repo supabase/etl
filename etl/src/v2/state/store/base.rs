@@ -1,5 +1,5 @@
 use postgres::schema::TableId;
-use std::{collections::HashMap, future::Future};
+use std::{collections::HashMap, sync::Arc};
 use thiserror::Error;
 
 use crate::v2::{
@@ -25,23 +25,69 @@ pub enum StateStoreError {
     ToTableState(#[from] ToTableStateError),
 }
 
-pub trait StateStore {
-    fn get_table_replication_state(
+#[async_trait::async_trait]
+pub trait StateStore: Send + Sync {
+    async fn get_table_replication_state(
         &self,
         table_id: TableId,
-    ) -> impl Future<Output = Result<Option<TableReplicationPhase>, StateStoreError>> + Send;
+    ) -> Result<Option<TableReplicationPhase>, StateStoreError>;
 
-    fn get_table_replication_states(
+    async fn get_table_replication_states(
         &self,
-    ) -> impl Future<Output = Result<HashMap<TableId, TableReplicationPhase>, StateStoreError>> + Send;
+    ) -> Result<HashMap<TableId, TableReplicationPhase>, StateStoreError>;
 
-    fn load_table_replication_states(
+    async fn load_table_replication_states(
         &self,
-    ) -> impl Future<Output = Result<HashMap<TableId, TableReplicationPhase>, StateStoreError>> + Send;
+    ) -> Result<HashMap<TableId, TableReplicationPhase>, StateStoreError>;
 
-    fn store_table_replication_state(
+    async fn store_table_replication_state(
         &self,
         table_id: TableId,
         state: TableReplicationPhase,
-    ) -> impl Future<Output = Result<(), StateStoreError>> + Send;
+    ) -> Result<(), StateStoreError>;
+}
+
+#[derive(Clone)]
+pub struct BoxedStateStore {
+    inner: Arc<dyn StateStore + Send + Sync>,
+}
+
+impl BoxedStateStore {
+    pub fn new<S: StateStore + Send + Sync + 'static>(store: S) -> Self {
+        BoxedStateStore {
+            inner: Arc::new(store),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl StateStore for BoxedStateStore {
+    async fn get_table_replication_state(
+        &self,
+        table_id: TableId,
+    ) -> Result<Option<TableReplicationPhase>, StateStoreError> {
+        self.inner.get_table_replication_state(table_id).await
+    }
+
+    async fn get_table_replication_states(
+        &self,
+    ) -> Result<HashMap<TableId, TableReplicationPhase>, StateStoreError> {
+        self.inner.get_table_replication_states().await
+    }
+
+    async fn load_table_replication_states(
+        &self,
+    ) -> Result<HashMap<TableId, TableReplicationPhase>, StateStoreError> {
+        self.inner.load_table_replication_states().await
+    }
+
+    async fn store_table_replication_state(
+        &self,
+        table_id: TableId,
+        state: TableReplicationPhase,
+    ) -> Result<(), StateStoreError> {
+        self.inner
+            .store_table_replication_state(table_id, state)
+            .await
+    }
 }

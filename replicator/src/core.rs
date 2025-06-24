@@ -1,11 +1,12 @@
-use config::shared::{DestinationConfig, ReplicatorConfig};
+use config::shared::{DestinationConfig, ReplicatorConfig, StateStoreConfig};
 use etl::v2::config::batch::BatchConfig;
 use etl::v2::config::pipeline::PipelineConfig;
 use etl::v2::config::retry::RetryConfig;
 use etl::v2::destination::base::Destination;
 use etl::v2::destination::memory::MemoryDestination;
 use etl::v2::pipeline::{Pipeline, PipelineIdentity};
-use etl::v2::state::store::base::StateStore;
+use etl::v2::state::store::base::{BoxedStateStore, StateStore};
+use etl::v2::state::store::memory::MemoryStateStore;
 use etl::v2::state::store::postgres::PostgresStateStore;
 use etl::SslMode;
 use postgres::tokio::config::PgConnectionConfig;
@@ -103,14 +104,17 @@ pub async fn start_replicator() -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn init_state_store(
-    config: &ReplicatorConfig,
-) -> anyhow::Result<impl StateStore + Clone + Send + Sync + fmt::Debug + 'static> {
-    migrate_state_store(&config.source).await?;
-    Ok(PostgresStateStore::new(
-        config.pipeline.id,
-        config.source.clone(),
-    ))
+async fn init_state_store(config: &ReplicatorConfig) -> anyhow::Result<BoxedStateStore> {
+    match config.state_store {
+        StateStoreConfig::Memory => Ok(BoxedStateStore::new(MemoryStateStore::new())),
+        StateStoreConfig::Postgres => {
+            migrate_state_store(&config.source).await?;
+            Ok(BoxedStateStore::new(PostgresStateStore::new(
+                config.pipeline.id,
+                config.source.clone(),
+            )))
+        }
+    }
 }
 
 async fn init_destination(
@@ -126,7 +130,7 @@ async fn init_destination(
 
 async fn start_pipeline<S, D>(mut pipeline: Pipeline<S, D>) -> anyhow::Result<()>
 where
-    S: StateStore + Clone + Send + Sync + fmt::Debug + 'static,
+    S: StateStore + Clone + Send + Sync + 'static,
     D: Destination + Clone + Send + Sync + fmt::Debug + 'static,
 {
     // Start the pipeline.

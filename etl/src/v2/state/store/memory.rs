@@ -34,6 +34,7 @@ impl Default for MemoryStateStore {
     }
 }
 
+#[async_trait::async_trait]
 impl StateStore for MemoryStateStore {
     async fn get_table_replication_state(
         &self,

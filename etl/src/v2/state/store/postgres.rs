@@ -218,6 +218,7 @@ impl PostgresStateStore {
     }
 }
 
+#[async_trait::async_trait]
 impl StateStore for PostgresStateStore {
     async fn get_table_replication_state(
         &self,
