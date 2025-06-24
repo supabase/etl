@@ -1,4 +1,4 @@
-use config::shared::{DestinationConfig, ReplicatorConfig, StateStoreConfig};
+use config::shared::{DestinationConfig, ReplicatorConfig};
 use etl::v2::config::batch::BatchConfig;
 use etl::v2::config::pipeline::PipelineConfig;
 use etl::v2::config::retry::RetryConfig;
@@ -6,7 +6,7 @@ use etl::v2::destination::base::Destination;
 use etl::v2::destination::memory::MemoryDestination;
 use etl::v2::pipeline::{Pipeline, PipelineIdentity};
 use etl::v2::state::store::base::StateStore;
-use etl::v2::state::store::memory::MemoryStateStore;
+use etl::v2::state::store::postgres::PostgresStateStore;
 use etl::SslMode;
 use postgres::tokio::config::PgConnectionConfig;
 use std::fmt;
@@ -106,14 +106,11 @@ pub async fn start_replicator() -> anyhow::Result<()> {
 async fn init_state_store(
     config: &ReplicatorConfig,
 ) -> anyhow::Result<impl StateStore + Clone + Send + Sync + fmt::Debug + 'static> {
-    match config.state_store {
-        StateStoreConfig::Memory => Ok(MemoryStateStore::new()),
-        StateStoreConfig::Postgres => {
-            migrate_state_store(&config.source).await?;
-            // TODO: return Postgres state store
-            Ok(MemoryStateStore::new())
-        }
-    }
+    migrate_state_store(&config.source).await?;
+    Ok(PostgresStateStore::new(
+        config.pipeline.id,
+        config.source.clone(),
+    ))
 }
 
 async fn init_destination(
