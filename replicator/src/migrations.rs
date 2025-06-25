@@ -5,6 +5,8 @@ use sqlx::{
     Executor,
 };
 
+const NUM_POOL_CONNECTIONS: u32 = 1;
+
 /// This function runs migrations on the source database when the source database acts
 /// as a state store.
 pub async fn migrate_state_store(source_config: &SourceConfig) -> Result<(), sqlx::Error> {
@@ -41,8 +43,8 @@ pub async fn migrate_state_store(source_config: &SourceConfig) -> Result<(), sql
     };
 
     let pool = PgPoolOptions::new()
-        .max_connections(1)
-        .min_connections(1)
+        .max_connections(NUM_POOL_CONNECTIONS)
+        .min_connections(NUM_POOL_CONNECTIONS)
         .after_connect(|conn, _meta| {
             Box::pin(async move {
                 // Create the etl schema if it doesn't exist
