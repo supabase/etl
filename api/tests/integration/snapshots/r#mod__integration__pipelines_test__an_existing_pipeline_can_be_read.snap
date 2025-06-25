@@ -4,14 +4,18 @@ expression: response.config
 ---
 PipelineConfig {
     publication_name: "publication",
-    batch: BatchConfig {
-        max_size: 1000,
-        max_fill_ms: 5,
-    },
-    apply_worker_init_retry: RetryConfig {
-        max_attempts: 5,
-        initial_delay_ms: 1000,
-        max_delay_ms: 2000,
-        backoff_factor: 0.5,
-    },
+    batch: Some(
+        BatchConfig {
+            max_size: 1000,
+            max_fill_ms: 5,
+        },
+    ),
+    apply_worker_init_retry: Some(
+        RetryConfig {
+            max_attempts: 5,
+            initial_delay_ms: 1000,
+            max_delay_ms: 2000,
+            backoff_factor: 0.5,
+        },
+    ),
 }

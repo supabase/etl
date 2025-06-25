@@ -17,32 +17,32 @@ use crate::{
 pub fn new_pipeline_config() -> PipelineConfig {
     PipelineConfig {
         publication_name: "publication".to_owned(),
-        batch: BatchConfig {
+        batch: Some(BatchConfig {
             max_size: 1000,
             max_fill_ms: 5,
-        },
-        apply_worker_init_retry: RetryConfig {
+        }),
+        apply_worker_init_retry: Some(RetryConfig {
             max_attempts: 5,
             initial_delay_ms: 1000,
             max_delay_ms: 2000,
             backoff_factor: 0.5,
-        },
+        }),
     }
 }
 
 pub fn updated_pipeline_config() -> PipelineConfig {
     PipelineConfig {
         publication_name: "updated_publication".to_owned(),
-        batch: BatchConfig {
+        batch: Some(BatchConfig {
             max_size: 2000,
             max_fill_ms: 10,
-        },
-        apply_worker_init_retry: RetryConfig {
+        }),
+        apply_worker_init_retry: Some(RetryConfig {
             max_attempts: 10,
             initial_delay_ms: 2000,
             max_delay_ms: 4000,
             backoff_factor: 1.0,
-        },
+        }),
     }
 }
 
