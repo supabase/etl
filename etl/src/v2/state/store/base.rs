@@ -36,7 +36,7 @@ pub enum StateStoreError {
 /// to keep reading from the backing persistent store again and again.
 pub trait StateStore {
     /// Returns table replication state for table with id `table_id` from the cache.
-    /// 
+    ///
     /// Does not load any new data into the cache.
     fn get_table_replication_state(
         &self,
