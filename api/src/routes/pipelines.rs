@@ -156,7 +156,7 @@ pub struct CreatePipelineResponse {
 pub struct UpdatePipelineRequest {
     pub source_id: i64,
     pub destination_id: i64,
-    pub config: Option<PipelineConfig>,
+    pub config: PipelineConfig,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
@@ -302,7 +302,7 @@ pub async fn update_pipeline(
         pipeline_id,
         pipeline.source_id,
         pipeline.destination_id,
-        pipeline.config.as_ref(),
+        &pipeline.config,
     )
     .await?
     .ok_or(PipelineError::PipelineNotFound(pipeline_id))?;

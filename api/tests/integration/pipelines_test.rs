@@ -236,54 +236,7 @@ async fn an_existing_pipeline_can_be_updated() {
     let updated_config = UpdatePipelineRequest {
         source_id,
         destination_id,
-        config: Some(updated_pipeline_config()),
-    };
-    let response = app
-        .update_pipeline(tenant_id, pipeline_id, &updated_config)
-        .await;
-
-    // Assert
-    assert!(response.status().is_success());
-    let response = app.read_pipeline(tenant_id, pipeline_id).await;
-    let response: ReadPipelineResponse = response
-        .json()
-        .await
-        .expect("failed to deserialize response");
-    assert_eq!(response.id, pipeline_id);
-    assert_eq!(&response.tenant_id, tenant_id);
-    assert_eq!(response.source_id, source_id);
-    assert_eq!(response.destination_id, destination_id);
-    insta::assert_debug_snapshot!(response.config);
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn an_existing_pipeline_can_be_updated_without_config() {
-    // Arrange
-    let app = spawn_test_app().await;
-    create_default_image(&app).await;
-    let tenant_id = &create_tenant(&app).await;
-    let source_id = create_source(&app, tenant_id).await;
-    let destination_id = create_destination(&app, tenant_id).await;
-
-    let pipeline = CreatePipelineRequest {
-        source_id,
-        destination_id,
-        config: new_pipeline_config(),
-    };
-    let response = app.create_pipeline(tenant_id, &pipeline).await;
-    let response: CreatePipelineResponse = response
-        .json()
-        .await
-        .expect("failed to deserialize response");
-    let pipeline_id = response.id;
-
-    // Act
-    let source_id = create_source(&app, tenant_id).await;
-    let destination_id = create_destination(&app, tenant_id).await;
-    let updated_config = UpdatePipelineRequest {
-        source_id,
-        destination_id,
-        config: None,
+        config: updated_pipeline_config(),
     };
     let response = app
         .update_pipeline(tenant_id, pipeline_id, &updated_config)
@@ -340,7 +293,7 @@ async fn pipeline_with_another_tenants_source_cant_be_updated() {
     let updated_config = UpdatePipelineRequest {
         source_id: source2_id,
         destination_id: destination1_id,
-        config: Some(updated_pipeline_config()),
+        config: updated_pipeline_config(),
     };
     let response = app
         .update_pipeline(tenant1_id, pipeline_id, &updated_config)
@@ -387,7 +340,7 @@ async fn pipeline_with_another_tenants_destination_cant_be_updated() {
     let updated_config = UpdatePipelineRequest {
         source_id: source1_id,
         destination_id: destination2_id,
-        config: Some(updated_pipeline_config()),
+        config: updated_pipeline_config(),
     };
     let response = app
         .update_pipeline(tenant1_id, pipeline_id, &updated_config)
@@ -409,7 +362,7 @@ async fn a_non_existing_pipeline_cant_be_updated() {
     let updated_config = UpdatePipelineRequest {
         source_id,
         destination_id,
-        config: Some(updated_pipeline_config()),
+        config: updated_pipeline_config(),
     };
     let response = app.update_pipeline(tenant_id, 42, &updated_config).await;
 
@@ -636,7 +589,7 @@ async fn updating_pipeline_to_duplicate_source_destination_combination_fails() {
     let updated_config = UpdatePipelineRequest {
         source_id: source1_id, // This would create a duplicate
         destination_id,
-        config: Some(updated_pipeline_config()),
+        config: updated_pipeline_config(),
     };
     let response = app
         .update_pipeline(tenant_id, pipeline2_id, &updated_config)

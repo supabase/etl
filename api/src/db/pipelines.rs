@@ -1,6 +1,6 @@
 use config::shared::{BatchConfig, RetryConfig};
 use serde::{Deserialize, Serialize};
-use sqlx::{PgPool, Postgres, QueryBuilder, Row, Transaction};
+use sqlx::{PgPool, Postgres, Transaction};
 use thiserror::Error;
 
 use crate::db::replicators::{create_replicator_txn, ReplicatorsDbError};
@@ -157,14 +157,10 @@ pub async fn update_pipeline(
     pipeline_id: i64,
     source_id: i64,
     destination_id: i64,
-    config: Option<&PipelineConfig>,
+    config: &PipelineConfig,
 ) -> Result<Option<i64>, PipelinesDbError> {
-    let mut publication_name = None;
-    let mut pipeline_config = None;
-    if let Some(config) = config {
-        publication_name = Some(config.publication_name.as_str());
-        pipeline_config = Some(serialize(config)?);
-    }
+    let publication_name = &config.publication_name;
+    let pipeline_config = serialize(config)?;
 
     let mut txn = pool.begin().await?;
     let res = update_pipeline_txn(
@@ -188,38 +184,27 @@ pub async fn update_pipeline_txn(
     pipeline_id: i64,
     source_id: i64,
     destination_id: i64,
-    publication_name: Option<&str>,
-    pipeline_config: Option<serde_json::Value>,
+    publication_name: &str,
+    pipeline_config: serde_json::Value,
 ) -> Result<Option<i64>, PipelinesDbError> {
-    // Build a dynamic UPDATE statement with only the provided fields
-    let mut builder = QueryBuilder::<Postgres>::new("UPDATE app.pipelines SET ");
+    let record = sqlx::query!(
+        r#"
+        update app.pipelines
+        set source_id = $1, destination_id = $2, publication_name = $3, config = $4
+        where tenant_id = $5 and id = $6
+        returning id
+        "#,
+        source_id,
+        destination_id,
+        publication_name,
+        pipeline_config,
+        tenant_id,
+        pipeline_id
+    )
+        .fetch_optional(&mut **txn)
+        .await?;
 
-    builder.push("source_id = ").push_bind(source_id);
-    builder
-        .push(", destination_id = ")
-        .push_bind(destination_id);
-
-    if let Some(pub_name) = publication_name {
-        builder.push(", publication_name = ").push_bind(pub_name);
-    }
-
-    if let Some(config_val) = pipeline_config {
-        builder.push(", config = ").push_bind(config_val);
-    }
-
-    builder
-        .push(" WHERE tenant_id = ")
-        .push_bind(tenant_id)
-        .push(" AND id = ")
-        .push_bind(pipeline_id)
-        .push(" RETURNING id");
-
-    let Some(row) = builder.build().fetch_optional(&mut **txn).await? else {
-        return Ok(None);
-    };
-
-    let id: i64 = row.try_get("id")?;
-    Ok(Some(id))
+    Ok(record.map(|r| r.id))
 }
 
 pub async fn delete_pipeline(
