@@ -70,6 +70,9 @@ pub enum ApplyLoopError {
     #[error("An invalid event {0} was received (expected {1})")]
     InvalidEvent(EventType, EventType),
 
+    #[error("The table schema for table {0} was not found in the cache")]
+    MissingTableSchema(Oid),
+
     #[error("The received table schema doesn't match the table schema loaded during table sync")]
     MismatchedTableSchema,
 }
@@ -608,37 +611,27 @@ where
         return Ok(None);
     }
 
-    // If a schema is missing, we add it to the schema cache. If we find an old schema in schema cache then we compare
-    // the new schema against it. And if we find that the schema has changed, we no longer apply the table events.
-    // This is a stop gap solution for detecting schema changes in tables. In future we'd like to automatically apply
-    // schema changes to the destination. But that requires full control over the destination event processing code.
-    // BigQuery's CDC doesn't allow us to update table schemas in the middle of processing CDC events because there
-    // might still be CDC events in its internal buffer. This means we probably will have to move away from BigQuery
-    // CDC to take full control.
-    // Note that the schema diffing is on a best effort basis for now. E.g. if the schema changes after the initial
-    // table copy has completed and the replicator process is shutdown, then this schema change won't be detected
-    // because the in-memory schema cache is not persistent. A solution here might be to load schema from the
-    // destination on startup.
-    if let Some(existing_table_schema) = schema_cache.get_table_schema(&message.rel_id()).await {
-        // We compare the table schema from the relation message with the existing schema (if any).
-        // The purpose of this comparison is that we want to throw an error and stop the processing
-        // of any table that incurs in a schema change after the initial table sync is performed.
-        if !existing_table_schema.partial_eq(&event.table_schema) {
-            let continue_loop = hook.skip_table(message.rel_id()).await?;
-
-            // If we are told to stop the loop, we want to break the batch processing and discard the
-            // current element being processed, in this case the `Relation` message.
-            if !continue_loop {
-                state.early_break = Some(BatchEarlyBreak::BreakAndDiscard);
-            }
-
-            return Ok(None);
-        }
-    } else {
-        schema_cache
-            .add_table_schema(event.table_schema.clone())
-            .await;
+    // If no table schema is found, it means that something went wrong and we throw an error, which is
+    // dealt with differently based on the worker type.
+    // TODO: explore how to deal with applying relation messages to the schema (creating it if missing).
+    let Some(existing_table_schema) = schema_cache.get_table_schema(&message.rel_id()).await else {
+        return Err(ApplyLoopError::MissingTableSchema(message.rel_id()));
     };
+
+    // We compare the table schema from the relation message with the existing schema (if any).
+    // The purpose of this comparison is that we want to throw an error and stop the processing
+    // of any table that incurs in a schema change after the initial table sync is performed.
+    if !existing_table_schema.partial_eq(&event.table_schema) {
+        let continue_loop = hook.skip_table(message.rel_id()).await?;
+
+        // If we are told to stop the loop, we want to break the batch processing and discard the
+        // current element being processed, in this case the `Relation` message.
+        if !continue_loop {
+            state.early_break = Some(BatchEarlyBreak::BreakAndDiscard);
+        }
+
+        return Ok(None);
+    }
 
     Ok(Some(Event::Relation(event)))
 }
