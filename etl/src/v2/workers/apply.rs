@@ -352,10 +352,10 @@ where
             current_lsn
         );
 
-        for (table_id, table_replication_state) in table_replication_states {
+        for (table_id, table_replication_phase) in table_replication_states {
             // We read the state store state first, if we don't find `SyncDone` we will attempt to
             // read the shared state which can contain also non-persisted states.
-            match table_replication_state {
+            match table_replication_phase {
                 TableReplicationPhase::SyncDone { lsn } if current_lsn >= lsn => {
                     info!(
                         "Table {} is ready, its events are now processed by the main apply worker",
