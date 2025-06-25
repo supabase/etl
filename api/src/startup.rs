@@ -19,8 +19,9 @@ use crate::{
     routes::{
         destinations::{
             create_destination, delete_destination, read_all_destinations, read_destination,
-            update_destination, GetDestinationResponse, PostDestinationRequest,
-            PostDestinationResponse,
+            update_destination, ReadDestinationResponse, ReadDestinationsResponse, CreateDestinationRequest,
+            CreateDestinationResponse,
+            UpdateDestinationRequest,
         },
         destinations_pipelines::{
             create_destinations_and_pipelines, update_destinations_and_pipelines,
@@ -188,9 +189,11 @@ pub async fn run(
             CreatePublicationRequest,
             UpdatePublicationRequest,
             Publication,
-            PostDestinationRequest,
-            PostDestinationResponse,
-            GetDestinationResponse,
+            CreateDestinationRequest,
+            CreateDestinationResponse,
+            UpdateDestinationRequest,
+            ReadDestinationResponse,
+            ReadDestinationsResponse,
             CreateTenantSourceRequest,
             PostTenantSourceResponse,
             PostDestinationPipelineRequest,

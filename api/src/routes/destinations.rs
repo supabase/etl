@@ -62,34 +62,42 @@ impl ResponseError for DestinationError {
     }
 }
 
-#[derive(Deserialize, ToSchema)]
-pub struct PostDestinationRequest {
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct CreateDestinationRequest {
     #[schema(example = "BigQuery Destination")]
     pub name: String,
     #[schema(required = true)]
     pub config: DestinationConfig,
 }
 
-#[derive(Serialize, ToSchema)]
-pub struct PostDestinationResponse {
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct CreateDestinationResponse {
     #[schema(example = 1)]
-    id: i64,
+    pub id: i64,
 }
 
-#[derive(Serialize, ToSchema)]
-pub struct GetDestinationResponse {
-    #[schema(example = 1)]
-    id: i64,
-    #[schema(example = "abcdefghijklmnopqrst")]
-    tenant_id: String,
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct UpdateDestinationRequest {
     #[schema(example = "BigQuery Destination")]
-    name: String,
-    config: DestinationConfig,
+    pub name: String,
+    // TODO: check if we want this to be optional.
+    pub config: DestinationConfig,
 }
 
-#[derive(Serialize, ToSchema)]
-pub struct GetDestinationsResponse {
-    destinations: Vec<GetDestinationResponse>,
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct ReadDestinationResponse {
+    #[schema(example = 1)]
+    pub id: i64,
+    #[schema(example = "abcdefghijklmnopqrst")]
+    pub tenant_id: String,
+    #[schema(example = "BigQuery Destination")]
+    pub name: String,
+    pub config: DestinationConfig,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct ReadDestinationsResponse {
+    pub destinations: Vec<ReadDestinationResponse>,
 }
 
 #[utoipa::path(
@@ -110,7 +118,7 @@ pub async fn create_destination(
     req: HttpRequest,
     pool: Data<PgPool>,
     encryption_key: Data<EncryptionKey>,
-    destination: Json<PostDestinationRequest>,
+    destination: Json<CreateDestinationRequest>,
 ) -> Result<impl Responder, DestinationError> {
     let destination = destination.into_inner();
     let tenant_id = extract_tenant_id(&req)?;
@@ -118,7 +126,7 @@ pub async fn create_destination(
     let config = destination.config;
     let id = db::destinations::create_destination(&pool, tenant_id, &name, config, &encryption_key)
         .await?;
-    let response = PostDestinationResponse { id };
+    let response = CreateDestinationResponse { id };
 
     Ok(Json(response))
 }
@@ -148,7 +156,7 @@ pub async fn read_destination(
     let response =
         db::destinations::read_destination(&pool, tenant_id, destination_id, &encryption_key)
             .await?
-            .map(|s| GetDestinationResponse {
+            .map(|s| ReadDestinationResponse {
                 id: s.id,
                 tenant_id: s.tenant_id,
                 name: s.name,
@@ -179,7 +187,7 @@ pub async fn update_destination(
     pool: Data<PgPool>,
     destination_id: Path<i64>,
     encryption_key: Data<EncryptionKey>,
-    destination: Json<PostDestinationRequest>,
+    destination: Json<UpdateDestinationRequest>,
 ) -> Result<impl Responder, DestinationError> {
     let destination = destination.into_inner();
     let tenant_id = extract_tenant_id(&req)?;
@@ -250,7 +258,7 @@ pub async fn read_all_destinations(
     for destination in
         db::destinations::read_all_destinations(&pool, tenant_id, &encryption_key).await?
     {
-        let destination = GetDestinationResponse {
+        let destination = ReadDestinationResponse {
             id: destination.id,
             tenant_id: destination.tenant_id,
             name: destination.name,
@@ -258,7 +266,7 @@ pub async fn read_all_destinations(
         };
         destinations.push(destination);
     }
-    let response = GetDestinationsResponse { destinations };
+    let response = ReadDestinationsResponse { destinations };
 
     Ok(Json(response))
 }

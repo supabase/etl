@@ -16,6 +16,7 @@ use std::io;
 use std::net::TcpListener;
 use tokio::runtime::Handle;
 use uuid::Uuid;
+use api::routes::destinations::{CreateDestinationRequest, UpdateDestinationRequest};
 
 #[derive(Serialize)]
 pub struct CreateTenantRequest {
@@ -100,36 +101,6 @@ pub struct PostDestinationPipelineRequest {
 pub struct CreateDestinationPipelineResponse {
     pub destination_id: i64,
     pub pipeline_id: i64,
-}
-
-#[derive(Serialize)]
-pub struct CreateDestinationRequest {
-    pub name: String,
-    pub config: DestinationConfig,
-}
-
-#[derive(Deserialize)]
-pub struct CreateDestinationResponse {
-    pub id: i64,
-}
-
-#[derive(Serialize)]
-pub struct UpdateDestinationRequest {
-    pub name: String,
-    pub config: DestinationConfig,
-}
-
-#[derive(Deserialize)]
-pub struct DestinationResponse {
-    pub id: i64,
-    pub tenant_id: String,
-    pub name: String,
-    pub config: DestinationConfig,
-}
-
-#[derive(Deserialize)]
-pub struct DestinationsResponse {
-    pub destinations: Vec<DestinationResponse>,
 }
 
 #[derive(Serialize)]

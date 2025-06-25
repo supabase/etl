@@ -1,10 +1,9 @@
 use config::shared::DestinationConfig;
 use reqwest::StatusCode;
-
+use api::routes::destinations::{CreateDestinationRequest, CreateDestinationResponse, ReadDestinationResponse, ReadDestinationsResponse, UpdateDestinationRequest};
 use crate::{
     common::test_app::{
-        spawn_test_app, CreateDestinationRequest, CreateDestinationResponse, DestinationResponse,
-        DestinationsResponse, TestApp, UpdateDestinationRequest,
+        spawn_test_app, TestApp
     },
     integration::tenants_test::create_tenant,
 };
@@ -98,7 +97,7 @@ async fn an_existing_destination_can_be_read() {
 
     // Assert
     assert!(response.status().is_success());
-    let response: DestinationResponse = response
+    let response: ReadDestinationResponse = response
         .json()
         .await
         .expect("failed to deserialize response");
@@ -150,7 +149,7 @@ async fn an_existing_destination_can_be_updated() {
     // Assert
     assert!(response.status().is_success());
     let response = app.read_destination(tenant_id, destination_id).await;
-    let response: DestinationResponse = response
+    let response: ReadDestinationResponse = response
         .json()
         .await
         .expect("failed to deserialize response");
@@ -236,7 +235,7 @@ async fn all_destinations_can_be_read() {
 
     // Assert
     assert!(response.status().is_success());
-    let response: DestinationsResponse = response
+    let response: ReadDestinationsResponse = response
         .json()
         .await
         .expect("failed to deserialize response");

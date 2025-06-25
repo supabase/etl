@@ -1,6 +1,6 @@
 use crate::{
     common::test_app::{
-        spawn_test_app, CreateDestinationPipelineResponse, DestinationResponse,
+        spawn_test_app, CreateDestinationPipelineResponse,
         PostDestinationPipelineRequest,
     },
     integration::destination_test::{
@@ -14,6 +14,7 @@ use crate::{
 };
 use api::routes::pipelines::{CreatePipelineRequest, ReadPipelineResponse};
 use reqwest::StatusCode;
+use api::routes::destinations::ReadDestinationResponse;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn destination_and_pipeline_can_be_created() {
@@ -47,7 +48,7 @@ async fn destination_and_pipeline_can_be_created() {
     let pipeline_id = response.pipeline_id;
 
     let response = app.read_destination(tenant_id, destination_id).await;
-    let response: DestinationResponse = response
+    let response: ReadDestinationResponse = response
         .json()
         .await
         .expect("failed to deserialize response");
@@ -147,7 +148,7 @@ async fn an_existing_destination_and_pipeline_can_be_updated() {
     assert!(response.status().is_success());
 
     let response = app.read_destination(tenant_id, destination_id).await;
-    let response: DestinationResponse = response
+    let response: ReadDestinationResponse = response
         .json()
         .await
         .expect("failed to deserialize response");
