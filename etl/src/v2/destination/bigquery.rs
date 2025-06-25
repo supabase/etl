@@ -1,19 +1,23 @@
+use crate::clients::bigquery::table_schema_to_descriptor;
+use crate::conversions::table_row::TableRow;
+use crate::conversions::Cell;
+use crate::v2::clients::bigquery::BigQueryClient;
+use crate::v2::conversions::event::Event;
+use crate::v2::destination::base::{Destination, DestinationError};
+use crate::v2::schema::cache::SchemaCache;
 use gcp_bigquery_client::error::BQError;
 use postgres::schema::{Oid, TableSchema};
 use std::sync::Arc;
 use thiserror::Error;
 use tokio::sync::RwLock;
 
-use crate::conversions::table_row::TableRow;
-use crate::v2::clients::bigquery::BigQueryClient;
-use crate::v2::conversions::event::Event;
-use crate::v2::destination::base::{Destination, DestinationError};
-use crate::v2::schema::cache::SchemaCache;
-
 #[derive(Debug, Error)]
 pub enum BigQueryDestinationError {
     #[error("An error occurred with BigQuery: {0}")]
     BigQuery(#[from] BQError),
+
+    #[error("The table schema for table id {0} was not found in the schema cache")]
+    MissingTableSchema(Oid),
 }
 
 #[derive(Debug)]
@@ -74,7 +78,7 @@ impl BigQueryDestination {
         &self,
         table_schema: TableSchema,
     ) -> Result<(), BigQueryDestinationError> {
-        let mut inner = self.inner.read().await;
+        let inner = self.inner.read().await;
 
         inner
             .client
@@ -97,9 +101,34 @@ impl BigQueryDestination {
     async fn write_table_rows(
         &self,
         table_id: Oid,
-        table_rows: Vec<TableRow>,
+        mut table_rows: Vec<TableRow>,
     ) -> Result<(), BigQueryDestinationError> {
-        todo!()
+        let mut inner = self.inner.write().await;
+
+        // TODO: figure out how we can avoid a clone.
+        let dataset_id = inner.dataset_id.clone();
+        let (table_name, table_descriptor) = {
+            let schema_cache = inner.schema_cache.read_inner().await;
+            let table_schema = schema_cache
+                .get_table_schema_ref(&table_id)
+                .ok_or(BigQueryDestinationError::MissingTableSchema(table_id))?;
+
+            let table_name = table_schema.name.as_bigquery_table_name();
+            let table_descriptor = table_schema_to_descriptor(table_schema);
+
+            (table_name, table_descriptor)
+        };
+
+        for table_row in &mut table_rows {
+            table_row.values.push(Cell::String("UPSERT".to_string()));
+        }
+
+        inner
+            .client
+            .stream_rows(&dataset_id, table_name, &table_descriptor, &table_rows)
+            .await?;
+
+        Ok(())
     }
 
     async fn write_events(&self, events: Vec<Event>) -> Result<(), BigQueryDestinationError> {

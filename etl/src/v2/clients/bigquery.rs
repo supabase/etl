@@ -159,12 +159,13 @@ impl BigQueryClient {
         max_staleness_mins: u16,
     ) -> Result<bool, BQError> {
         if self.table_exists(dataset_id, table_name).await? {
-            Ok(false)
-        } else {
-            self.create_table(dataset_id, table_name, column_schemas, max_staleness_mins)
-                .await?;
-            Ok(true)
+            return Ok(false);
         }
+
+        self.create_table(dataset_id, table_name, column_schemas, max_staleness_mins)
+            .await?;
+
+        Ok(true)
     }
 
     fn postgres_to_bigquery_type(typ: &Type) -> &'static str {
