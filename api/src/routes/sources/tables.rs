@@ -4,7 +4,7 @@ use actix_web::{
     web::{Data, Json, Path},
     HttpRequest, HttpResponse, Responder, ResponseError,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use thiserror::Error;
 use utoipa::ToSchema;
@@ -45,8 +45,8 @@ impl TableError {
     }
 }
 
-#[derive(Serialize, ToSchema)]
-pub struct GetTablesResponse {
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct ReadTablesResponse {
     pub tables: Vec<Table>,
 }
 
@@ -99,7 +99,7 @@ pub async fn read_table_names(
 
     let options = config.into_connection_config().with_db();
     let tables = db::tables::get_tables(&options).await?;
-    let response = GetTablesResponse { tables };
+    let response = ReadTablesResponse { tables };
 
     Ok(Json(response))
 }

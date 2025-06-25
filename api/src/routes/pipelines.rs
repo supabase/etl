@@ -142,8 +142,11 @@ impl ResponseError for PipelineError {
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct CreatePipelineRequest {
+    #[schema(required = true)]
     pub source_id: i64,
+    #[schema(required = true)]
     pub destination_id: i64,
+    #[schema(required = true)]
     pub config: PipelineConfig,
 }
 
@@ -154,8 +157,11 @@ pub struct CreatePipelineResponse {
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct UpdatePipelineRequest {
+    #[schema(example = 1, required = true)]
     pub source_id: i64,
+    #[schema(example = 1, required = true)]
     pub destination_id: i64,
+    #[schema(required = true)]
     pub config: PipelineConfig,
 }
 

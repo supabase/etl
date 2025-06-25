@@ -78,9 +78,10 @@ pub struct CreateDestinationResponse {
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct UpdateDestinationRequest {
-    #[schema(example = "BigQuery Destination")]
+    #[schema(example = "BigQuery Destination", required = true)]
     pub name: String,
     // TODO: check if we want this to be optional.
+    #[schema(required = true)]
     pub config: DestinationConfig,
 }
 

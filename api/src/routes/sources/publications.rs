@@ -76,12 +76,15 @@ impl ResponseError for PublicationError {
 
 #[derive(Deserialize, ToSchema)]
 pub struct CreatePublicationRequest {
+    #[schema(required = true)]
     name: String,
+    #[schema(required = true)]
     tables: Vec<Table>,
 }
 
 #[derive(Deserialize, ToSchema)]
 pub struct UpdatePublicationRequest {
+    #[schema(required = true)]
     tables: Vec<Table>,
 }
 

@@ -66,6 +66,7 @@ impl ResponseError for SourceError {
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct CreateSourceRequest {
+    #[schema(required = true)]
     pub name: String,
     #[schema(required = true)]
     pub config: SourceConfig,
@@ -78,6 +79,7 @@ pub struct CreateSourceResponse {
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct UpdateSourceRequest {
+    #[schema(example = "Postgres Source", required = true)]
     pub name: String,
     #[schema(required = true)]
     pub config: SourceConfig,

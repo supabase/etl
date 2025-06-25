@@ -68,7 +68,9 @@ pub struct CreateTenantSourceRequest {
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct CreateTenantSourceResponse {
+    #[schema(example = "abcdefghijklmnopqrst")]
     pub tenant_id: String,
+    #[schema(example = 1)]
     pub source_id: i64,
 }
 
