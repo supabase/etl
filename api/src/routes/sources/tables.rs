@@ -75,7 +75,7 @@ impl ResponseError for TableError {
     context_path = "/v1",
     tag = "Tables",
     params(
-        ("source_id" = i64, Path, example = 1, description = "Id of the source"),
+        ("source_id" = i64, Path, description = "Id of the source"),
     ),
     responses(
         (status = 200, description = "Return all tables from source with id = source_id", body = GetTablesResponse),

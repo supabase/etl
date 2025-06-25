@@ -210,7 +210,7 @@ pub async fn update_publication(
     context_path = "/v1",
     tag = "Publications",
     params(
-        ("source_id" = i64, description = "Id of the source"),
+        ("source_id" = i64, Path, description = "Id of the source"),
         ("publication_name" = String, Path, description = "Name of the publication"),
     ),
     responses(
