@@ -77,6 +77,8 @@ struct Inner {
     table_states: HashMap<TableId, TableReplicationPhase>,
 }
 
+/// A state store which saves the replication state in the source
+/// postgres database.
 #[derive(Debug, Clone)]
 pub struct PostgresStateStore {
     pipeline_id: PipelineId,
@@ -137,6 +139,10 @@ impl PostgresStateStore {
         state: TableState,
         sync_done_lsn: Option<String>,
     ) -> sqlx::Result<()> {
+        // We connect to source database each time we update because we assume that
+        // these updates will be infrequent. It has some overhead to establish a
+        // connection but it's better than holding a connection open for long periods
+        // when there's little activity on it.
         let pool = self.connect_to_source().await?;
         sqlx::query(
             r#"
