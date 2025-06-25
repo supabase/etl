@@ -26,6 +26,7 @@ use crate::k8s_client::{
     HttpK8sClient, K8sClient, K8sError, PodPhase, TRUSTED_ROOT_CERT_CONFIG_MAP_NAME,
 };
 use crate::routes::{extract_tenant_id, ErrorMessage, TenantIdError};
+use secrecy::ExposeSecret;
 
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct Secrets {
@@ -546,14 +547,18 @@ async fn read_data(
 }
 
 fn build_secrets(source_config: &SourceConfig, destination_config: &DestinationConfig) -> Secrets {
-    let postgres_password = source_config.password.clone().unwrap_or_default();
+    let postgres_password = source_config
+        .password
+        .as_ref()
+        .map(|p| p.expose_secret().to_owned())
+        .unwrap_or_default();
     let mut big_query_service_account_key = None;
     if let DestinationConfig::BigQuery {
         service_account_key,
         ..
     } = destination_config
     {
-        big_query_service_account_key = Some(service_account_key.clone());
+        big_query_service_account_key = Some(service_account_key.expose_secret().to_owned());
     };
 
     Secrets {

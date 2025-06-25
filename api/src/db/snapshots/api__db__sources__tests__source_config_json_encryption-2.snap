@@ -8,6 +8,6 @@ SourceConfig {
     name: "postgres",
     username: "postgres",
     password: Some(
-        "supersecret",
+        Secret([REDACTED alloc::string::String]),
     ),
 }

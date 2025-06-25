@@ -120,7 +120,7 @@ async fn main_impl() -> Result<(), Box<dyn Error>> {
         port: db_args.db_port,
         name: db_args.db_name,
         username: db_args.db_username,
-        password: db_args.db_password,
+        password: db_args.db_password.map(Into::into),
         ssl_mode: SslMode::Disable,
     };
 

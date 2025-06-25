@@ -1,11 +1,12 @@
 use serde::{Deserialize, Serialize};
-use std::fmt;
+
+use crate::SerializableSecretString;
 
 /// Configuration options for supported data destinations.
 ///
 /// This enum is used to specify the destination type and its configuration
 /// for the replicator. Variants correspond to different supported destinations.
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DestinationConfig {
     /// In-memory destination for ephemeral or test data.
@@ -21,7 +22,7 @@ pub enum DestinationConfig {
         /// BigQuery dataset identifier.
         dataset_id: String,
         /// Service account key for authenticating with BigQuery.
-        service_account_key: String,
+        service_account_key: SerializableSecretString,
         /// Maximum staleness in minutes for BigQuery CDC reads.
         ///
         /// If not set, the default staleness behavior is used. See
@@ -29,26 +30,6 @@ pub enum DestinationConfig {
         #[serde(skip_serializing_if = "Option::is_none")]
         max_staleness_mins: Option<u16>,
     },
-}
-
-impl fmt::Debug for DestinationConfig {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Memory => f.write_str("Memory"),
-            Self::BigQuery {
-                project_id,
-                dataset_id,
-                service_account_key: _,
-                max_staleness_mins,
-            } => f
-                .debug_struct("BigQuery")
-                .field("project_id", project_id)
-                .field("dataset_id", dataset_id)
-                .field("service_account_key", &"REDACTED")
-                .field("max_staleness_mins", max_staleness_mins)
-                .finish(),
-        }
-    }
 }
 
 impl Default for DestinationConfig {
