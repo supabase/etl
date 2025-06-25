@@ -335,7 +335,7 @@ where
             if table_sync_worker_state.is_none() {
                 if let Err(err) = self.start_table_sync_worker(*table_id).await {
                     error!(
-                        "Error starting table-sync worker for table {}: {}",
+                        "Error starting table sync worker for table {}: {}",
                         table_id, err
                     );
                 }
