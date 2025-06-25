@@ -64,7 +64,7 @@ impl ResponseError for DestinationError {
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct CreateDestinationRequest {
-    #[schema(example = "BigQuery Destination")]
+    #[schema(example = "My BigQuery Destination", required = true)]
     pub name: String,
     #[schema(required = true)]
     pub config: DestinationConfig,
@@ -78,9 +78,8 @@ pub struct CreateDestinationResponse {
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct UpdateDestinationRequest {
-    #[schema(example = "BigQuery Destination", required = true)]
+    #[schema(example = "My Updated BigQuery Destination", required = true)]
     pub name: String,
-    // TODO: check if we want this to be optional.
     #[schema(required = true)]
     pub config: DestinationConfig,
 }
@@ -89,9 +88,9 @@ pub struct UpdateDestinationRequest {
 pub struct ReadDestinationResponse {
     #[schema(example = 1)]
     pub id: i64,
-    #[schema(example = "abcdefghijklmnopqrst")]
+    #[schema(example = "abczjjlmfsijwrlnwatw")]
     pub tenant_id: String,
-    #[schema(example = "BigQuery Destination")]
+    #[schema(example = "My BigQuery Destination")]
     pub name: String,
     pub config: DestinationConfig,
 }
@@ -103,9 +102,9 @@ pub struct ReadDestinationsResponse {
 
 #[utoipa::path(
     context_path = "/v1",
-    request_body = PostDestinationRequest,
+    request_body = CreateDestinationRequest,
     responses(
-        (status = 200, description = "Create new destination", body = PostDestinationResponse),
+        (status = 200, description = "Create new destination", body = CreateDestinationResponse),
         (status = 400, description = "Invalid tenant ID or request body", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage)
     ),
@@ -139,7 +138,7 @@ pub async fn create_destination(
         ("tenant_id" = String, Header, description = "The tenant ID")
     ),
     responses(
-        (status = 200, description = "The destination with the given id", body = GetDestinationResponse),
+        (status = 200, description = "The destination with the given id", body = ReadDestinationResponse),
         (status = 404, description = "Destination not found", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage)
     ),
@@ -170,7 +169,7 @@ pub async fn read_destination(
 
 #[utoipa::path(
     context_path = "/v1",
-    request_body = PostDestinationRequest,
+    request_body = UpdateDestinationRequest,
     params(
         ("destination_id" = i64, Path, description = "Id of the destination to update"),
         ("tenant_id" = String, Header, description = "The tenant ID")
@@ -240,7 +239,7 @@ pub async fn delete_destination(
 #[utoipa::path(
     context_path = "/v1",
     responses(
-        (status = 200, description = "A list of all the destinations for a tenant", body = GetDestinationsResponse),
+        (status = 200, description = "A list of all the destinations for a tenant", body = ReadDestinationsResponse),
         (status = 500, description = "Internal server error", body = ErrorMessage)
     ),
     params(

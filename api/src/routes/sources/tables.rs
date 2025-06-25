@@ -45,8 +45,9 @@ impl TableError {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[derive(Serialize, Deserialize, ToSchema)]
 pub struct ReadTablesResponse {
+    #[schema(required = true)]
     pub tables: Vec<Table>,
 }
 
@@ -78,7 +79,7 @@ impl ResponseError for TableError {
         ("source_id" = i64, Path, description = "Id of the source"),
     ),
     responses(
-        (status = 200, description = "Return all tables from source with id = source_id", body = GetTablesResponse),
+        (status = 200, description = "Return all tables from source with id = source_id", body = ReadTablesResponse),
         (status = 500, description = "Internal server error", body = ErrorMessage)
     )
 )]

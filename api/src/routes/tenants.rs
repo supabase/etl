@@ -59,39 +59,41 @@ impl ResponseError for TenantError {
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct CreateTenantRequest {
-    #[schema(example = "abcdefghijklmnopqrst", required = true)]
+    #[schema(example = "abczjjlmfsijwrlnwatw", required = true)]
     pub id: String,
-    #[schema(example = "Tenant Name", required = true)]
+    #[schema(example = "My Tenant", required = true)]
     pub name: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct CreateTenantResponse {
+    #[schema(example = "abczjjlmfsijwrlnwatw")]
     pub id: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct CreateOrUpdateTenantRequest {
-    #[schema(example = "Tenant Name", required = true)]
+    #[schema(example = "My Updated Tenant", required = true)]
     pub name: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct CreateOrUpdateTenantResponse {
+    #[schema(example = "abczjjlmfsijwrlnwatw")]
     pub id: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct UpdateTenantRequest {
-    #[schema(example = "Tenant Name", required = true)]
+    #[schema(example = "My Updated Tenant", required = true)]
     pub name: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct ReadTenantResponse {
-    #[schema(example = 1)]
+    #[schema(example = "abczjjlmfsijwrlnwatw")]
     pub id: String,
-    #[schema(example = "Tenant name")]
+    #[schema(example = "My Tenant")]
     pub name: String,
 }
 
@@ -104,7 +106,7 @@ pub struct ReadTenantsResponse {
     context_path = "/v1",
     request_body = CreateTenantRequest,
     responses(
-        (status = 200, description = "Create new tenant", body = PostTenantResponse),
+        (status = 200, description = "Create new tenant", body = CreateTenantResponse),
         (status = 400, description = "Bad request", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage),
     ),
@@ -128,9 +130,9 @@ pub async fn create_tenant(
 
 #[utoipa::path(
     context_path = "/v1",
-    request_body = UpdateTenantRequest,
+    request_body = CreateOrUpdateTenantRequest,
     responses(
-        (status = 200, description = "Create a new tenant or update an existing one", body = PostTenantResponse),
+        (status = 200, description = "Create a new tenant or update an existing one", body = CreateOrUpdateTenantResponse),
         (status = 400, description = "Bad request", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage),
     ),
@@ -159,7 +161,7 @@ pub async fn create_or_update_tenant(
         ("tenant_id" = String, Path, description = "Id of the tenant"),
     ),
     responses(
-        (status = 200, description = "Return tenant with id = tenant_id", body = GetTenantResponse),
+        (status = 200, description = "Return tenant with id = tenant_id", body = ReadTenantResponse),
         (status = 404, description = "Tenant not found", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage),
     ),
@@ -240,7 +242,7 @@ pub async fn delete_tenant(
 #[utoipa::path(
     context_path = "/v1",
     responses(
-        (status = 200, description = "Return all tenants", body = GetTenantsResponse),
+        (status = 200, description = "Return all tenants", body = ReadTenantsResponse),
         (status = 500, description = "Internal server error", body = ErrorMessage),
     ),
     tag = "Tenants"

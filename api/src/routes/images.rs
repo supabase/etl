@@ -64,21 +64,25 @@ pub struct CreateImageRequest {
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct CreateImageResponse {
+    #[schema(example = 1)]
     pub id: i64,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct UpdateImageRequest {
-    #[schema(example = "supabase/replicator:1.2.3", required = true)]
+    #[schema(example = "supabase/replicator:1.2.4", required = true)]
     pub name: String,
-    #[schema(example = true, required = true)]
+    #[schema(example = false, required = true)]
     pub is_default: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct ReadImageResponse {
+    #[schema(example = 1)]
     pub id: i64,
+    #[schema(example = "supabase/replicator:1.2.3")]
     pub name: String,
+    #[schema(example = true)]
     pub is_default: bool,
 }
 
@@ -89,9 +93,9 @@ pub struct ReadImagesResponse {
 
 #[utoipa::path(
     context_path = "/v1",
-    request_body = PostImageRequest,
+    request_body = CreateImageRequest,
     responses(
-        (status = 200, description = "Create new image", body = PostImageResponse),
+        (status = 200, description = "Create new image", body = CreateImageResponse),
         (status = 400, description = "Bad request", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage),
     ),
@@ -115,7 +119,7 @@ pub async fn create_image(
         ("image_id" = i64, Path, description = "Id of the image"),
     ),
     responses(
-        (status = 200, description = "Return image with id = image_id", body = GetImageResponse),
+        (status = 200, description = "Return image with id = image_id", body = ReadImageResponse),
         (status = 404, description = "Image not found", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage),
     ),
@@ -141,7 +145,7 @@ pub async fn read_image(
 
 #[utoipa::path(
     context_path = "/v1",
-    request_body = PostImageRequest,
+    request_body = UpdateImageRequest,
     params(
         ("image_id" = i64, Path, description = "Id of the image"),
     ),
@@ -194,7 +198,7 @@ pub async fn delete_image(
 #[utoipa::path(
     context_path = "/v1",
     responses(
-        (status = 200, description = "Return all images", body = GetImagesResponse),
+        (status = 200, description = "Return all images", body = ReadImagesResponse),
         (status = 500, description = "Internal server error", body = ErrorMessage),
     ),
     tag = "Images"

@@ -76,7 +76,7 @@ impl ResponseError for PublicationError {
 
 #[derive(Deserialize, ToSchema)]
 pub struct CreatePublicationRequest {
-    #[schema(required = true)]
+    #[schema(example = "my_publication", required = true)]
     name: String,
     #[schema(required = true)]
     tables: Vec<Table>,
@@ -89,7 +89,7 @@ pub struct UpdatePublicationRequest {
 }
 
 #[derive(Serialize, ToSchema)]
-pub struct GetPublicationsResponse {
+pub struct ReadPublicationsResponse {
     pub publications: Vec<Publication>,
 }
 
@@ -250,7 +250,7 @@ pub async fn delete_publication(
         ("source_id" = i64, Path, description = "Id of the source"),
     ),
     responses(
-        (status = 200, description = "Return all publications", body = GetPublicationsResponse),
+        (status = 200, description = "Return all publications", body = ReadPublicationsResponse),
         (status = 500, description = "Internal server error", body = ErrorMessage)
     )
 )]
@@ -271,6 +271,7 @@ pub async fn read_all_publications(
 
     let options = config.into_connection_config().with_db();
     let publications = db::publications::read_all_publications(&options).await?;
-    let response = GetPublicationsResponse { publications };
+    let response = ReadPublicationsResponse { publications };
+
     Ok(Json(response))
 }

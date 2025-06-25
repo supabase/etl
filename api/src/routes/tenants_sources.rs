@@ -56,11 +56,11 @@ impl ResponseError for TenantSourceError {
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct CreateTenantSourceRequest {
-    #[schema(example = "abcdefghijklmnopqrst", required = true)]
+    #[schema(example = "abczjjlmfsijwrlnwatw", required = true)]
     pub tenant_id: String,
-    #[schema(example = "Tenant Name", required = true)]
+    #[schema(example = "My Tenant", required = true)]
     pub tenant_name: String,
-    #[schema(example = "Source Name", required = true)]
+    #[schema(example = "My Postgres Source", required = true)]
     pub source_name: String,
     #[schema(required = true)]
     pub source_config: SourceConfig,
@@ -68,7 +68,7 @@ pub struct CreateTenantSourceRequest {
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct CreateTenantSourceResponse {
-    #[schema(example = "abcdefghijklmnopqrst")]
+    #[schema(example = "abczjjlmfsijwrlnwatw")]
     pub tenant_id: String,
     #[schema(example = 1)]
     pub source_id: i64,
@@ -78,7 +78,7 @@ pub struct CreateTenantSourceResponse {
     context_path = "/v1",
     request_body = CreateTenantSourceRequest,
     responses(
-        (status = 200, description = "Create a new tenant and a source", body = PostTenantSourceResponse),
+        (status = 200, description = "Create a new tenant and a source", body = CreateTenantSourceResponse),
         (status = 400, description = "Bad request", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage),
     ),

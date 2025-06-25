@@ -66,7 +66,7 @@ impl ResponseError for SourceError {
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct CreateSourceRequest {
-    #[schema(required = true)]
+    #[schema(example = "My Postgres Source", required = true)]
     pub name: String,
     #[schema(required = true)]
     pub config: SourceConfig,
@@ -74,12 +74,13 @@ pub struct CreateSourceRequest {
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct CreateSourceResponse {
+    #[schema(example = 1)]
     pub id: i64,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct UpdateSourceRequest {
-    #[schema(example = "Postgres Source", required = true)]
+    #[schema(example = "My Updated Postgres Source", required = true)]
     pub name: String,
     #[schema(required = true)]
     pub config: SourceConfig,
@@ -89,9 +90,9 @@ pub struct UpdateSourceRequest {
 pub struct ReadSourceResponse {
     #[schema(example = 1)]
     pub id: i64,
-    #[schema(example = 1)]
+    #[schema(example = "abczjjlmfsijwrlnwatw")]
     pub tenant_id: String,
-    #[schema(example = "Postgres Source")]
+    #[schema(example = "My Postgres Source")]
     pub name: String,
     pub config: SourceConfig,
 }
@@ -103,9 +104,9 @@ pub struct ReadSourcesResponse {
 
 #[utoipa::path(
     context_path = "/v1",
-    request_body = PostSourceRequest,
+    request_body = CreateSourceRequest,
     responses(
-        (status = 200, description = "Create new source", body = PostSourceResponse),
+        (status = 200, description = "Create new source", body = CreateSourceResponse),
         (status = 400, description = "Bad request", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage),
     ),
@@ -134,7 +135,7 @@ pub async fn create_source(
         ("source_id" = i64, Path, description = "Id of the source"),
     ),
     responses(
-        (status = 200, description = "Return source with id = source_id", body = GetSourceResponse),
+        (status = 200, description = "Return source with id = source_id", body = ReadSourceResponse),
         (status = 404, description = "Source not found", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage),
     ),
@@ -164,7 +165,7 @@ pub async fn read_source(
 
 #[utoipa::path(
     context_path = "/v1",
-    request_body = PostSourceRequest,
+    request_body = UpdateSourceRequest,
     params(
         ("source_id" = i64, Path, description = "Id of the source"),
     ),
@@ -225,7 +226,7 @@ pub async fn delete_source(
 #[utoipa::path(
     context_path = "/v1",
     responses(
-        (status = 200, description = "Return all sources", body = GetSourcesResponse),
+        (status = 200, description = "Return all sources", body = ReadSourcesResponse),
         (status = 500, description = "Internal server error", body = ErrorMessage),
     ),
     tag = "Sources"

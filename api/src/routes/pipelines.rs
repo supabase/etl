@@ -142,9 +142,9 @@ impl ResponseError for PipelineError {
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct CreatePipelineRequest {
-    #[schema(required = true)]
+    #[schema(example = 1, required = true)]
     pub source_id: i64,
-    #[schema(required = true)]
+    #[schema(example = 1, required = true)]
     pub destination_id: i64,
     #[schema(required = true)]
     pub config: PipelineConfig,
@@ -152,6 +152,7 @@ pub struct CreatePipelineRequest {
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct CreatePipelineResponse {
+    #[schema(example = 1)]
     pub id: i64,
 }
 
@@ -167,12 +168,19 @@ pub struct UpdatePipelineRequest {
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct ReadPipelineResponse {
+    #[schema(example = 1)]
     pub id: i64,
+    #[schema(example = "abczjjlmfsijwrlnwatw")]
     pub tenant_id: String,
+    #[schema(example = 1)]
     pub source_id: i64,
+    #[schema(example = "My Postgres Source")]
     pub source_name: String,
+    #[schema(example = 1)]
     pub destination_id: i64,
+    #[schema(example = "My BigQuery Destination")]
     pub destination_name: String,
+    #[schema(example = 1)]
     pub replicator_id: i64,
     pub config: PipelineConfig,
 }
@@ -184,9 +192,9 @@ pub struct ReadPipelinesResponse {
 
 #[utoipa::path(
     context_path = "/v1",
-    request_body = PostPipelineRequest,
+    request_body = CreatePipelineRequest,
     responses(
-        (status = 200, description = "Create new pipeline", body = PostPipelineResponse),
+        (status = 200, description = "Create new pipeline", body = CreatePipelineResponse),
         (status = 400, description = "Bad request", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage),
     ),
@@ -235,7 +243,7 @@ pub async fn create_pipeline(
         ("pipeline_id" = i64, Path, description = "Id of the pipeline"),
     ),
     responses(
-        (status = 200, description = "Return pipeline with id = pipeline_id", body = GetPipelineResponse),
+        (status = 200, description = "Return pipeline with id = pipeline_id", body = ReadPipelineResponse),
         (status = 404, description = "Pipeline not found", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage)
     ),
@@ -264,15 +272,14 @@ pub async fn read_pipeline(
                 config: s.config,
             })
         })
-        .transpose()?
-        .ok_or(PipelineError::PipelineNotFound(pipeline_id))?;
+        .transpose()?;
 
     Ok(Json(response))
 }
 
 #[utoipa::path(
     context_path = "/v1",
-    request_body = PostPipelineRequest,
+    request_body = UpdatePipelineRequest,
     params(
         ("pipeline_id" = i64, Path, description = "Id of the pipeline"),
     ),
@@ -346,7 +353,7 @@ pub async fn delete_pipeline(
 #[utoipa::path(
     context_path = "/v1",
     responses(
-        (status = 200, description = "Return all pipelines", body = GetPipelinesResponse),
+        (status = 200, description = "Return all pipelines", body = ReadPipelinesResponse),
         (status = 500, description = "Internal server error", body = ErrorMessage)
     ),
     tag = "Pipelines"

@@ -118,11 +118,11 @@ impl ResponseError for DestinationPipelineError {
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct CreateDestinationPipelineRequest {
-    #[schema(example = "Destination Name", required = true)]
+    #[schema(example = "My New Destination", required = true)]
     pub destination_name: String,
     #[schema(required = true)]
     pub destination_config: DestinationConfig,
-    #[schema(required = true, example = 123)]
+    #[schema(required = true, example = 1)]
     pub source_id: i64,
     #[schema(required = true)]
     pub pipeline_config: PipelineConfig,
@@ -138,11 +138,11 @@ pub struct CreateDestinationPipelineResponse {
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct UpdateDestinationPipelineRequest {
-    #[schema(example = "Destination Name", required = true)]
+    #[schema(example = "My Updated Destination", required = true)]
     pub destination_name: String,
     #[schema(required = true)]
     pub destination_config: DestinationConfig,
-    #[schema(required = true, example = 123)]
+    #[schema(required = true, example = 1)]
     pub source_id: i64,
     #[schema(required = true)]
     pub pipeline_config: PipelineConfig,
@@ -150,9 +150,9 @@ pub struct UpdateDestinationPipelineRequest {
 
 #[utoipa::path(
     context_path = "/v1",
-    request_body = PostDestinationPipelineRequest,
+    request_body = CreateDestinationPipelineRequest,
     responses(
-        (status = 200, description = "Create a new destination and a pipeline", body = PostDestinationPipelineResponse),
+        (status = 200, description = "Create a new destination and a pipeline", body = CreateDestinationPipelineResponse),
         (status = 409, description = "A pipeline already exists for this source and destination combination", body = ErrorMessage),
         (status = 400, description = "Bad request", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage)
@@ -204,13 +204,13 @@ pub async fn create_destination_and_pipeline(
 
 #[utoipa::path(
     context_path = "/v1",
-    request_body = PostDestinationPipelineRequest,
+    request_body = UpdateDestinationPipelineRequest,
     params(
         ("destination_id" = i64, Path, description = "ID of the destination to update"),
         ("pipeline_id" = i64, Path, description = "ID of the pipeline to update")
     ),
     responses(
-        (status = 200, description = "Update a destination and a pipeline", body = PostDestinationPipelineResponse),
+        (status = 200, description = "Update a destination and a pipeline"),
         (status = 404, description = "Pipeline or destination not found", body = ErrorMessage),
         (status = 400, description = "Bad request", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage)
