@@ -201,8 +201,8 @@ pub async fn update_pipeline_txn(
         tenant_id,
         pipeline_id
     )
-        .fetch_optional(&mut **txn)
-        .await?;
+    .fetch_optional(&mut **txn)
+    .await?;
 
     Ok(record.map(|r| r.id))
 }
