@@ -605,8 +605,13 @@ async fn build_replicator_config(
         // is the same.
         id: pipeline.id as u64,
         publication_name: pipeline.config.publication_name,
-        batch: pipeline.config.batch,
-        apply_worker_init_retry: pipeline.config.apply_worker_init_retry,
+        // If these configs are not set, we default to the most recent default values.
+        //
+        // The reason for using `Option` fields in the config instead of automatically applying defaults
+        // is that we want to persist a config in storage with some unset values, allowing us to interpret
+        // them differently after deserialization without needing to run database migrations.
+        batch: pipeline.config.batch.unwrap_or_default(),
+        apply_worker_init_retry: pipeline.config.apply_worker_init_retry.unwrap_or_default(),
     };
 
     let config = ReplicatorConfig {

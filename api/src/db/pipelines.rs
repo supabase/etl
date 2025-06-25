@@ -11,10 +11,10 @@ use crate::db::serde::{
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PipelineConfig {
     pub publication_name: String,
-    #[serde(default)]
-    pub batch: BatchConfig,
-    #[serde(default)]
-    pub apply_worker_init_retry: RetryConfig,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub batch: Option<BatchConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub apply_worker_init_retry: Option<RetryConfig>,
 }
 
 pub struct Pipeline {
