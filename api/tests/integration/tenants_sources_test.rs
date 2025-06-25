@@ -1,8 +1,9 @@
+use api::routes::sources::ReadSourceResponse;
+use api::routes::tenants::ReadTenantResponse;
+use api::routes::tenants_sources::{CreateTenantSourceRequest, CreateTenantSourceResponse};
+
 use crate::{
-    common::test_app::{
-        spawn_test_app, CreateTenantSourceRequest, CreateTenantSourceResponse, SourceResponse,
-        TenantResponse,
-    },
+    common::test_app::spawn_test_app,
     integration::sources_test::{new_name, new_source_config},
 };
 
@@ -33,7 +34,7 @@ async fn tenant_and_source_can_be_created() {
     let source_id = response.source_id;
 
     let response = app.read_tenant(tenant_id).await;
-    let response: TenantResponse = response
+    let response: ReadTenantResponse = response
         .json()
         .await
         .expect("failed to deserialize response");
@@ -41,7 +42,7 @@ async fn tenant_and_source_can_be_created() {
     assert_eq!(response.name, tenant_source.tenant_name);
 
     let response = app.read_source(tenant_id, source_id).await;
-    let response: SourceResponse = response
+    let response: ReadSourceResponse = response
         .json()
         .await
         .expect("failed to deserialize response");

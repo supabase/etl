@@ -1,11 +1,12 @@
 use api::db::sources::SourceConfig;
+use api::routes::sources::{
+    CreateSourceRequest, CreateSourceResponse, ReadSourceResponse, ReadSourcesResponse,
+    UpdateSourceRequest,
+};
 use reqwest::StatusCode;
 
 use crate::{
-    common::test_app::{
-        spawn_test_app, CreateSourceRequest, CreateSourceResponse, SourceResponse, SourcesResponse,
-        TestApp, UpdateSourceRequest,
-    },
+    common::test_app::{spawn_test_app, TestApp},
     integration::tenants_test::create_tenant,
 };
 
@@ -100,7 +101,7 @@ async fn an_existing_source_can_be_read() {
 
     // Assert
     assert!(response.status().is_success());
-    let response: SourceResponse = response
+    let response: ReadSourceResponse = response
         .json()
         .await
         .expect("failed to deserialize response");
@@ -152,7 +153,7 @@ async fn an_existing_source_can_be_updated() {
     // Assert
     assert!(response.status().is_success());
     let response = app.read_source(tenant_id, source_id).await;
-    let response: SourceResponse = response
+    let response: ReadSourceResponse = response
         .json()
         .await
         .expect("failed to deserialize response");
@@ -233,7 +234,7 @@ async fn all_sources_can_be_read() {
 
     // Assert
     assert!(response.status().is_success());
-    let response: SourcesResponse = response
+    let response: ReadSourcesResponse = response
         .json()
         .await
         .expect("failed to deserialize response");

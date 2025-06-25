@@ -1,3 +1,11 @@
+use api::db::pipelines::PipelineConfig;
+use api::routes::pipelines::{
+    CreatePipelineRequest, CreatePipelineResponse, ReadPipelineResponse, ReadPipelinesResponse,
+    UpdatePipelineRequest,
+};
+use config::shared::{BatchConfig, RetryConfig};
+use reqwest::StatusCode;
+
 use crate::{
     common::test_app::{spawn_test_app, TestApp},
     integration::destination_test::create_destination,
@@ -6,13 +14,6 @@ use crate::{
     integration::tenants_test::create_tenant,
     integration::tenants_test::create_tenant_with_id_and_name,
 };
-use api::db::pipelines::PipelineConfig;
-use api::routes::pipelines::{
-    CreatePipelineRequest, CreatePipelineResponse, ReadPipelineResponse, ReadPipelinesResponse,
-    UpdatePipelineRequest,
-};
-use config::shared::{BatchConfig, RetryConfig};
-use reqwest::StatusCode;
 
 pub fn new_pipeline_config() -> PipelineConfig {
     PipelineConfig {

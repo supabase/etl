@@ -15,25 +15,6 @@ use crate::db;
 use crate::db::tenants::TenantsDbError;
 use crate::routes::ErrorMessage;
 
-#[derive(Deserialize, ToSchema)]
-pub struct CreateTenantRequest {
-    #[schema(example = "abcdefghijklmnopqrst", required = true)]
-    id: String,
-    #[schema(example = "Tenant Name", required = true)]
-    name: String,
-}
-
-#[derive(Deserialize, ToSchema)]
-pub struct UpdateTenantRequest {
-    #[schema(example = "Tenant Name", required = true)]
-    name: String,
-}
-
-#[derive(Serialize, ToSchema)]
-pub struct PostTenantResponse {
-    id: String,
-}
-
 #[derive(Debug, Error)]
 pub enum TenantError {
     #[error("The tenant with id {0} was not found")]
@@ -76,17 +57,47 @@ impl ResponseError for TenantError {
     }
 }
 
-#[derive(Serialize, ToSchema)]
-pub struct GetTenantResponse {
-    #[schema(example = 1)]
-    id: String,
-    #[schema(example = "Tenant name")]
-    name: String,
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct CreateTenantRequest {
+    #[schema(example = "abcdefghijklmnopqrst", required = true)]
+    pub id: String,
+    #[schema(example = "Tenant Name", required = true)]
+    pub name: String,
 }
 
-#[derive(Serialize, ToSchema)]
-pub struct GetTenantsResponse {
-    tenants: Vec<GetTenantResponse>,
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct CreateTenantResponse {
+    pub id: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct CreateOrUpdateTenantRequest {
+    #[schema(example = "Tenant Name", required = true)]
+    pub name: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct CreateOrUpdateTenantResponse {
+    pub id: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct UpdateTenantRequest {
+    #[schema(example = "Tenant Name", required = true)]
+    pub name: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct ReadTenantResponse {
+    #[schema(example = 1)]
+    pub id: String,
+    #[schema(example = "Tenant name")]
+    pub name: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct ReadTenantsResponse {
+    pub tenants: Vec<ReadTenantResponse>,
 }
 
 #[utoipa::path(
@@ -105,12 +116,13 @@ pub async fn create_tenant(
     tenant: Json<CreateTenantRequest>,
     root_span: RootSpan,
 ) -> Result<impl Responder, TenantError> {
-    let tenant = tenant.0;
+    let tenant = tenant.into_inner();
     let id = tenant.id;
     root_span.record("project", &id);
     let name = tenant.name;
     let id = db::tenants::create_tenant(&pool, &id, &name).await?;
-    let response = PostTenantResponse { id };
+    let response = CreateTenantResponse { id };
+
     Ok(Json(response))
 }
 
@@ -128,15 +140,16 @@ pub async fn create_tenant(
 pub async fn create_or_update_tenant(
     pool: Data<PgPool>,
     tenant_id: Path<String>,
-    tenant: Json<UpdateTenantRequest>,
+    tenant: Json<CreateOrUpdateTenantRequest>,
     root_span: RootSpan,
 ) -> Result<impl Responder, TenantError> {
-    let tenant = tenant.0;
+    let tenant = tenant.into_inner();
     let tenant_id = tenant_id.into_inner();
     root_span.record("project", &tenant_id);
     let name = tenant.name;
     let id = db::tenants::create_or_update_tenant(&pool, &tenant_id, &name).await?;
-    let response = PostTenantResponse { id };
+    let response = CreateOrUpdateTenantResponse { id };
+
     Ok(Json(response))
 }
 
@@ -162,11 +175,12 @@ pub async fn read_tenant(
     root_span.record("project", &tenant_id);
     let response = db::tenants::read_tenant(&pool, &tenant_id)
         .await?
-        .map(|t| GetTenantResponse {
+        .map(|t| ReadTenantResponse {
             id: t.id,
             name: t.name,
         })
         .ok_or(TenantError::TenantNotFound(tenant_id))?;
+
     Ok(Json(response))
 }
 
@@ -195,6 +209,7 @@ pub async fn update_tenant(
     db::tenants::update_tenant(&pool, &tenant_id, &tenant.0.name)
         .await?
         .ok_or(TenantError::TenantNotFound(tenant_id))?;
+
     Ok(HttpResponse::Ok().finish())
 }
 
@@ -232,14 +247,14 @@ pub async fn delete_tenant(
 )]
 #[get("/tenants")]
 pub async fn read_all_tenants(pool: Data<PgPool>) -> Result<impl Responder, TenantError> {
-    let tenants: Vec<GetTenantResponse> = db::tenants::read_all_tenants(&pool)
+    let tenants: Vec<ReadTenantResponse> = db::tenants::read_all_tenants(&pool)
         .await?
         .drain(..)
-        .map(|t| GetTenantResponse {
+        .map(|t| ReadTenantResponse {
             id: t.id,
             name: t.name,
         })
         .collect();
-    let response = GetTenantsResponse { tenants };
+    let response = ReadTenantsResponse { tenants };
     Ok(Json(response))
 }

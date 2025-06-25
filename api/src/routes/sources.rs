@@ -64,32 +64,39 @@ impl ResponseError for SourceError {
     }
 }
 
-#[derive(Deserialize, ToSchema)]
-pub struct PostSourceRequest {
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct CreateSourceRequest {
     pub name: String,
     #[schema(required = true)]
     pub config: SourceConfig,
 }
 
-#[derive(Serialize, ToSchema)]
-pub struct PostSourceResponse {
-    id: i64,
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct CreateSourceResponse {
+    pub id: i64,
 }
 
-#[derive(Serialize, ToSchema)]
-pub struct GetSourceResponse {
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct UpdateSourceRequest {
+    pub name: String,
+    #[schema(required = true)]
+    pub config: SourceConfig,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct ReadSourceResponse {
     #[schema(example = 1)]
-    id: i64,
+    pub id: i64,
     #[schema(example = 1)]
-    tenant_id: String,
+    pub tenant_id: String,
     #[schema(example = "Postgres Source")]
-    name: String,
-    config: SourceConfig,
+    pub name: String,
+    pub config: SourceConfig,
 }
 
-#[derive(Serialize, ToSchema)]
-pub struct GetSourcesResponse {
-    sources: Vec<GetSourceResponse>,
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct ReadSourcesResponse {
+    pub sources: Vec<ReadSourceResponse>,
 }
 
 #[utoipa::path(
@@ -107,14 +114,14 @@ pub async fn create_source(
     req: HttpRequest,
     pool: Data<PgPool>,
     encryption_key: Data<EncryptionKey>,
-    source: Json<PostSourceRequest>,
+    source: Json<CreateSourceRequest>,
 ) -> Result<impl Responder, SourceError> {
     let source = source.0;
     let tenant_id = extract_tenant_id(&req)?;
     let name = source.name;
     let config = source.config;
     let id = db::sources::create_source(&pool, tenant_id, &name, config, &encryption_key).await?;
-    let response = PostSourceResponse { id };
+    let response = CreateSourceResponse { id };
 
     Ok(Json(response))
 }
@@ -142,7 +149,7 @@ pub async fn read_source(
     let source_id = source_id.into_inner();
     let response = db::sources::read_source(&pool, tenant_id, source_id, &encryption_key)
         .await?
-        .map(|s| GetSourceResponse {
+        .map(|s| ReadSourceResponse {
             id: s.id,
             tenant_id: s.tenant_id,
             name: s.name,
@@ -172,7 +179,7 @@ pub async fn update_source(
     pool: Data<PgPool>,
     source_id: Path<i64>,
     encryption_key: Data<EncryptionKey>,
-    source: Json<PostSourceRequest>,
+    source: Json<UpdateSourceRequest>,
 ) -> Result<impl Responder, SourceError> {
     let source = source.0;
     let tenant_id = extract_tenant_id(&req)?;
@@ -230,7 +237,7 @@ pub async fn read_all_sources(
     let tenant_id = extract_tenant_id(&req)?;
     let mut sources = vec![];
     for source in db::sources::read_all_sources(&pool, tenant_id, &encryption_key).await? {
-        let source = GetSourceResponse {
+        let source = ReadSourceResponse {
             id: source.id,
             tenant_id: source.tenant_id,
             name: source.name,
@@ -238,7 +245,7 @@ pub async fn read_all_sources(
         };
         sources.push(source);
     }
-    let response = GetSourcesResponse { sources };
+    let response = ReadSourcesResponse { sources };
 
     Ok(Json(response))
 }

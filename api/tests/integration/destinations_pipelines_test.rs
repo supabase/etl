@@ -1,3 +1,11 @@
+use api::routes::destinations::ReadDestinationResponse;
+use api::routes::destinations_pipelines::{
+    CreateDestinationPipelineRequest, CreateDestinationPipelineResponse,
+    UpdateDestinationPipelineRequest,
+};
+use api::routes::pipelines::{CreatePipelineRequest, ReadPipelineResponse};
+use reqwest::StatusCode;
+
 use crate::{
     common::test_app::spawn_test_app,
     integration::destination_test::{
@@ -9,13 +17,6 @@ use crate::{
     integration::sources_test::create_source,
     integration::tenants_test::{create_tenant, create_tenant_with_id_and_name},
 };
-use api::routes::destinations::ReadDestinationResponse;
-use api::routes::destinations_pipelines::{
-    CreateDestinationPipelineRequest, CreateDestinationPipelineResponse,
-    UpdateDestinationPipelineRequest,
-};
-use api::routes::pipelines::{CreatePipelineRequest, ReadPipelineResponse};
-use reqwest::StatusCode;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn destination_and_pipeline_can_be_created() {

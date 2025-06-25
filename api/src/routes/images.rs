@@ -54,29 +54,37 @@ impl ResponseError for ImageError {
     }
 }
 
-#[derive(Deserialize, ToSchema)]
-pub struct PostImageRequest {
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct CreateImageRequest {
     #[schema(example = "supabase/replicator:1.2.3")]
     pub name: String,
     #[schema(example = true)]
     pub is_default: bool,
 }
 
-#[derive(Serialize, ToSchema)]
-pub struct PostImageResponse {
-    id: i64,
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct CreateImageResponse {
+    pub id: i64,
 }
 
-#[derive(Serialize, ToSchema)]
-pub struct GetImageResponse {
-    id: i64,
-    name: String,
-    is_default: bool,
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct UpdateImageRequest {
+    #[schema(example = "supabase/replicator:1.2.3")]
+    pub name: String,
+    #[schema(example = true)]
+    pub is_default: bool,
 }
 
-#[derive(Serialize, ToSchema)]
-pub struct GetImagesResponse {
-    images: Vec<GetImageResponse>,
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct ReadImageResponse {
+    pub id: i64,
+    pub name: String,
+    pub is_default: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct ReadImagesResponse {
+    pub images: Vec<ReadImageResponse>,
 }
 
 #[utoipa::path(
@@ -92,11 +100,11 @@ pub struct GetImagesResponse {
 #[post("/images")]
 pub async fn create_image(
     pool: Data<PgPool>,
-    image: Json<PostImageRequest>,
+    image: Json<CreateImageRequest>,
 ) -> Result<impl Responder, ImageError> {
     let image = image.0;
     let id = db::images::create_image(&pool, &image.name, image.is_default).await?;
-    let response = PostImageResponse { id };
+    let response = CreateImageResponse { id };
 
     Ok(Json(response))
 }
@@ -121,7 +129,7 @@ pub async fn read_image(
     let image_id = image_id.into_inner();
     let response = db::images::read_image(&pool, image_id)
         .await?
-        .map(|s| GetImageResponse {
+        .map(|s| ReadImageResponse {
             id: s.id,
             name: s.name,
             is_default: s.is_default,
@@ -148,7 +156,7 @@ pub async fn read_image(
 pub async fn update_image(
     pool: Data<PgPool>,
     image_id: Path<i64>,
-    image: Json<PostImageRequest>,
+    image: Json<UpdateImageRequest>,
 ) -> Result<impl Responder, ImageError> {
     let image_id = image_id.into_inner();
     db::images::update_image(&pool, image_id, &image.name, image.is_default)
@@ -195,14 +203,14 @@ pub async fn delete_image(
 pub async fn read_all_images(pool: Data<PgPool>) -> Result<impl Responder, ImageError> {
     let mut images = vec![];
     for image in db::images::read_all_images(&pool).await? {
-        let image = GetImageResponse {
+        let image = ReadImageResponse {
             id: image.id,
             name: image.name,
             is_default: image.is_default,
         };
         images.push(image);
     }
-    let response = GetImagesResponse { images };
+    let response = ReadImagesResponse { images };
 
     Ok(Json(response))
 }

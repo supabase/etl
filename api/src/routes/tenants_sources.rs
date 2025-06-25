@@ -16,21 +16,6 @@ use crate::db::tenants_sources::TenantSourceDbError;
 use crate::encryption::EncryptionKey;
 use crate::routes::ErrorMessage;
 
-#[derive(Deserialize, ToSchema)]
-pub struct CreateTenantSourceRequest {
-    #[schema(example = "abcdefghijklmnopqrst", required = true)]
-    tenant_id: String,
-
-    #[schema(example = "Tenant Name", required = true)]
-    tenant_name: String,
-
-    #[schema(example = "Source Name", required = true)]
-    source_name: String,
-
-    #[schema(required = true)]
-    source_config: SourceConfig,
-}
-
 #[derive(Debug, Error)]
 enum TenantSourceError {
     #[error(transparent)]
@@ -69,10 +54,22 @@ impl ResponseError for TenantSourceError {
     }
 }
 
-#[derive(Serialize, ToSchema)]
-pub struct PostTenantSourceResponse {
-    tenant_id: String,
-    source_id: i64,
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct CreateTenantSourceRequest {
+    #[schema(example = "abcdefghijklmnopqrst", required = true)]
+    pub tenant_id: String,
+    #[schema(example = "Tenant Name", required = true)]
+    pub tenant_name: String,
+    #[schema(example = "Source Name", required = true)]
+    pub source_name: String,
+    #[schema(required = true)]
+    pub source_config: SourceConfig,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct CreateTenantSourceResponse {
+    pub tenant_id: String,
+    pub source_id: i64,
 }
 
 #[utoipa::path(
@@ -92,7 +89,7 @@ pub async fn create_tenant_and_source(
     encryption_key: Data<EncryptionKey>,
     root_span: RootSpan,
 ) -> Result<impl Responder, TenantSourceError> {
-    let tenant_and_source = tenant_and_source.0;
+    let tenant_and_source = tenant_and_source.into_inner();
     let CreateTenantSourceRequest {
         tenant_id,
         tenant_name,
@@ -109,9 +106,10 @@ pub async fn create_tenant_and_source(
         &encryption_key,
     )
     .await?;
-    let response = PostTenantSourceResponse {
+    let response = CreateTenantSourceResponse {
         tenant_id,
         source_id,
     };
+
     Ok(Json(response))
 }
