@@ -8,7 +8,7 @@ pub enum StateStoreConfig {
     Memory,
 
     /// The postgres state store.
-    Postgres,
+    SourcePostgres,
 }
 
 impl Default for StateStoreConfig {
