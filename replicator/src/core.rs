@@ -59,7 +59,7 @@ pub async fn start_replicator() -> anyhow::Result<()> {
             port: replicator_config.source.port,
             name: replicator_config.source.name,
             username: replicator_config.source.username,
-            password: replicator_config.source.password,
+            password: replicator_config.source.password.map(Into::into),
             ssl_mode,
         },
         batch: BatchConfig {

@@ -1,3 +1,4 @@
+use secrecy::{ExposeSecret, Secret};
 use tokio_postgres::Config;
 use tokio_postgres::config::SslMode;
 
@@ -17,7 +18,7 @@ pub struct PgConnectionConfig {
     /// Username for authentication
     pub username: String,
     /// Optional password for authentication
-    pub password: Option<String>,
+    pub password: Option<Secret<String>>,
     /// SSL mode for the connection
     pub ssl_mode: SslMode,
 }
@@ -63,7 +64,7 @@ impl From<PgConnectionConfig> for Config {
             .ssl_mode(value.ssl_mode);
 
         if let Some(password) = value.password {
-            config.password(password);
+            config.password(password.expose_secret());
         }
 
         config

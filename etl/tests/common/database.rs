@@ -1,6 +1,7 @@
 use postgres::schema::TableName;
 use postgres::tokio::config::PgConnectionConfig;
 use postgres::tokio::test_utils::PgDatabase;
+use secrecy::Secret;
 use tokio_postgres::config::SslMode;
 use tokio_postgres::Client;
 use uuid::Uuid;
@@ -39,7 +40,7 @@ pub async fn spawn_database() -> PgDatabase<Client> {
         // We create a random database name to avoid conflicts with existing databases.
         name: Uuid::new_v4().to_string(),
         username: "postgres".to_owned(),
-        password: Some("postgres".to_owned()),
+        password: Some(Secret::from("postgres".to_owned())),
         ssl_mode: SslMode::Disable,
     };
 

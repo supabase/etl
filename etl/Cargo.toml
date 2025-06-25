@@ -38,6 +38,7 @@ postgres-replication = { workspace = true }
 prost = { workspace = true, optional = true }
 rustls = { workspace = true, features = ["aws-lc-rs", "logging"] }
 rand = { workspace = true, features = ["std"] }
+secrecy = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true, features = ["std"] }
 thiserror = { workspace = true }

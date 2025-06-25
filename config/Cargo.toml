@@ -7,5 +7,6 @@ edition = "2024"
 postgres = { workspace = true, features = ["sqlx"] }
 
 rust-cli-config = { workspace = true, features = ["yaml"] }
+secrecy = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 thiserror = { workspace = true }

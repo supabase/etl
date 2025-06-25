@@ -1,4 +1,6 @@
 use config::shared::DestinationConfig;
+use config::SerializableSecretString;
+use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 use sqlx::{PgPool, Postgres, Transaction};
 use std::fmt::Debug;
@@ -26,8 +28,10 @@ impl Encrypt<EncryptedDestinationConfig> for DestinationConfig {
                 service_account_key,
                 max_staleness_mins,
             } => {
-                let encrypted_service_account_key =
-                    encrypt_text(service_account_key, encryption_key)?;
+                let encrypted_service_account_key = encrypt_text(
+                    service_account_key.expose_secret().to_owned(),
+                    encryption_key,
+                )?;
 
                 Ok(EncryptedDestinationConfig::BigQuery {
                     project_id,
@@ -63,8 +67,10 @@ impl Decrypt<DestinationConfig> for EncryptedDestinationConfig {
                 service_account_key: encrypted_service_account_key,
                 max_staleness_mins,
             } => {
-                let service_account_key =
-                    decrypt_text(encrypted_service_account_key, encryption_key)?;
+                let service_account_key = SerializableSecretString::from(decrypt_text(
+                    encrypted_service_account_key,
+                    encryption_key,
+                )?);
 
                 Ok(DestinationConfig::BigQuery {
                     project_id,
@@ -295,6 +301,7 @@ pub async fn destination_exists(
 mod tests {
     use aws_lc_rs::aead::RandomizedNonceKey;
     use config::shared::DestinationConfig;
+    use config::SerializableSecretString;
 
     use crate::db::destinations::EncryptedDestinationConfig;
     use crate::db::serde::{decrypt_and_deserialize_from_value, encrypt_and_serialize};
@@ -320,7 +327,7 @@ mod tests {
         let config = DestinationConfig::BigQuery {
             project_id: "project-id".to_string(),
             dataset_id: "dataset-id".to_string(),
-            service_account_key: "service-account-key".to_string(),
+            service_account_key: SerializableSecretString::from("service-account-key".to_string()),
             max_staleness_mins: Some(42),
         };
 
@@ -336,7 +343,7 @@ mod tests {
         let config = DestinationConfig::BigQuery {
             project_id: "project-id".to_string(),
             dataset_id: "dataset-id".to_string(),
-            service_account_key: "supersecretkey".to_string(),
+            service_account_key: SerializableSecretString::from("supersecretkey".to_string()),
             max_staleness_mins: Some(99),
         };
 

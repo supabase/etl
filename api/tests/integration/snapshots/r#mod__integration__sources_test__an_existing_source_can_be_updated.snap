@@ -8,6 +8,6 @@ SourceConfig {
     name: "sergtsop",
     username: "sergtsop",
     password: Some(
-        "sergtsop",
+        Secret([REDACTED alloc::string::String]),
     ),
 }

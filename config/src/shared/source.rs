@@ -1,12 +1,12 @@
 use serde::{Deserialize, Serialize};
-use std::fmt;
 
+use crate::SerializableSecretString;
 use crate::shared::ValidationError;
 
 /// Configuration for connecting to a Postgres source database.
 ///
 /// This struct holds all necessary connection parameters and settings.
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct SourceConfig {
     /// Hostname or IP address of the Postgres server.
@@ -18,42 +18,19 @@ pub struct SourceConfig {
     /// Username for authenticating with the Postgres server.
     pub username: String,
     /// Password for the specified user. This field is sensitive and redacted in debug output.
-    pub password: Option<String>,
+    pub password: Option<SerializableSecretString>,
     /// TLS configuration for secure connections.
     pub tls: TlsConfig,
 }
 
-impl fmt::Debug for SourceConfig {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("SourceConfig")
-            .field("host", &self.host)
-            .field("port", &self.port)
-            .field("name", &self.name)
-            .field("username", &self.username)
-            .field("password", &"REDACTED")
-            .field("tls", &self.tls)
-            .finish()
-    }
-}
-
 /// TLS settings for secure Postgres connections.
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct TlsConfig {
     /// PEM-encoded trusted root certificates. Sensitive and redacted in debug output.
     pub trusted_root_certs: String,
     /// Whether TLS is enabled for the connection.
     pub enabled: bool,
-}
-
-impl fmt::Debug for TlsConfig {
-    /// Formats the [`TlsConfig`] for debugging, redacting sensitive fields.
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("TlsConfig")
-            .field("trusted_root_certs", &"REDACTED")
-            .field("enabled", &self.enabled)
-            .finish()
-    }
 }
 
 impl TlsConfig {

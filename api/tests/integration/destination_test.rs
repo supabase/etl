@@ -3,6 +3,7 @@ use api::routes::destinations::{
     ReadDestinationsResponse, UpdateDestinationRequest,
 };
 use config::shared::DestinationConfig;
+use config::SerializableSecretString;
 use reqwest::StatusCode;
 
 use crate::{
@@ -18,7 +19,7 @@ pub fn new_destination_config() -> DestinationConfig {
     DestinationConfig::BigQuery {
         project_id: "project-id".to_string(),
         dataset_id: "dataset-id".to_string(),
-        service_account_key: "service-account-key".to_string(),
+        service_account_key: SerializableSecretString::from("service-account-key".to_string()),
         max_staleness_mins: None,
     }
 }
@@ -31,7 +32,9 @@ pub fn updated_destination_config() -> DestinationConfig {
     DestinationConfig::BigQuery {
         project_id: "project-id-updated".to_string(),
         dataset_id: "dataset-id-updated".to_string(),
-        service_account_key: "service-account-key-updated".to_string(),
+        service_account_key: SerializableSecretString::from(
+            "service-account-key-updated".to_string(),
+        ),
         max_staleness_mins: Some(10),
     }
 }
