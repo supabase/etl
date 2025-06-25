@@ -123,9 +123,7 @@ impl StateStore for TestStateStore {
         result
     }
 
-    async fn load_table_replication_states(
-        &self,
-    ) -> Result<HashMap<TableId, TableReplicationPhase>, StateStoreError> {
+    async fn load_table_replication_states(&self) -> Result<usize, StateStoreError> {
         let inner = self.inner.read().await;
         let result = Ok(inner.table_replication_states.clone());
 
@@ -133,10 +131,10 @@ impl StateStore for TestStateStore {
             .dispatch_method_notification(StateStoreMethod::LoadTableReplicationStates)
             .await;
 
-        result
+        result.map(|states| states.len())
     }
 
-    async fn store_table_replication_state(
+    async fn update_table_replication_state(
         &self,
         table_id: TableId,
         state: TableReplicationPhase,
@@ -230,24 +228,22 @@ where
         &self,
     ) -> Result<HashMap<TableId, TableReplicationPhase>, StateStoreError> {
         self.trigger_fault(&self.config.load_table_replication_states)?;
-        self.inner.load_table_replication_states().await
+        self.inner.get_table_replication_states().await
     }
 
-    async fn load_table_replication_states(
-        &self,
-    ) -> Result<HashMap<TableId, TableReplicationPhase>, StateStoreError> {
+    async fn load_table_replication_states(&self) -> Result<usize, StateStoreError> {
         self.trigger_fault(&self.config.load_table_replication_states)?;
         self.inner.load_table_replication_states().await
     }
 
-    async fn store_table_replication_state(
+    async fn update_table_replication_state(
         &self,
         table_id: TableId,
         state: TableReplicationPhase,
     ) -> Result<(), StateStoreError> {
         self.trigger_fault(&self.config.store_table_replication_state)?;
         self.inner
-            .store_table_replication_state(table_id, state)
+            .update_table_replication_state(table_id, state)
             .await
     }
 }

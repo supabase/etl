@@ -31,21 +31,31 @@ pub enum StateStoreError {
     FromTableState(#[from] FromTableStateError),
 }
 
+/// This trait represents a state store for the replication state of all tables.
+/// It assumes that the implementers keep a cache of the state to avoid having
+/// to keep reading from the backing persistent store again and again.
 pub trait StateStore {
+    /// Returns table replication state for table with id `table_id` from the cache.
+    /// Does not read from the persistent store.
     fn get_table_replication_state(
         &self,
         table_id: TableId,
     ) -> impl Future<Output = Result<Option<TableReplicationPhase>, StateStoreError>> + Send;
 
+    /// Return the table replication states for all the tables from the cache.
+    /// Does not read from the persistent store.
     fn get_table_replication_states(
         &self,
     ) -> impl Future<Output = Result<HashMap<TableId, TableReplicationPhase>, StateStoreError>> + Send;
 
+    /// Loads the table replication states from the persistent state into the cache.
     fn load_table_replication_states(
         &self,
-    ) -> impl Future<Output = Result<HashMap<TableId, TableReplicationPhase>, StateStoreError>> + Send;
+    ) -> impl Future<Output = Result<usize, StateStoreError>> + Send;
 
-    fn store_table_replication_state(
+    /// Updates the table replicate state for a table with `table_id` in both the cache as well as
+    /// the persistent store.
+    fn update_table_replication_state(
         &self,
         table_id: TableId,
         state: TableReplicationPhase,

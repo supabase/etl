@@ -206,11 +206,12 @@ where
         let table_ids = replication_client
             .get_publication_table_ids(self.identity.publication_name())
             .await?;
-        let states = self.state_store.load_table_replication_states().await?;
+        self.state_store.load_table_replication_states().await?;
+        let states = self.state_store.get_table_replication_states().await?;
         for table_id in table_ids {
             if !states.contains_key(&table_id) {
                 self.state_store
-                    .store_table_replication_state(table_id, TableReplicationPhase::Init)
+                    .update_table_replication_state(table_id, TableReplicationPhase::Init)
                     .await?;
             }
         }

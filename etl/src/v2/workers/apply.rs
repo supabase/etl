@@ -305,11 +305,10 @@ where
         &self,
         load: bool,
     ) -> Result<HashMap<TableId, TableReplicationPhase>, ApplyWorkerHookError> {
-        let mut table_replication_states = if load {
-            self.state_store.load_table_replication_states().await?
-        } else {
-            self.state_store.get_table_replication_states().await?
-        };
+        if load {
+            self.state_store.load_table_replication_states().await?;
+        }
+        let mut table_replication_states = self.state_store.get_table_replication_states().await?;
         table_replication_states.retain(|_table_id, state| !state.as_type().is_done());
 
         Ok(table_replication_states)
@@ -362,7 +361,7 @@ where
                         table_id
                     );
                     self.state_store
-                        .store_table_replication_state(table_id, TableReplicationPhase::Ready)
+                        .update_table_replication_state(table_id, TableReplicationPhase::Ready)
                         .await?;
                 }
                 _ => {
@@ -391,7 +390,7 @@ where
         // We store the new skipped state in the state store, since we want to still skip a table in
         // case of pipeline restarts.
         self.state_store
-            .store_table_replication_state(table_id, TableReplicationPhase::Skipped)
+            .update_table_replication_state(table_id, TableReplicationPhase::Skipped)
             .await?;
 
         Ok(true)

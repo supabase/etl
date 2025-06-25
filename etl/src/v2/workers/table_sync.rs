@@ -89,7 +89,7 @@ impl TableSyncWorkerStateInner {
             );
 
             state_store
-                .store_table_replication_state(self.table_id, phase)
+                .update_table_replication_state(self.table_id, phase)
                 .await?;
         }
 

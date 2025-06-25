@@ -52,15 +52,13 @@ impl StateStore for MemoryStateStore {
         Ok(inner.table_replication_states.clone())
     }
 
-    async fn load_table_replication_states(
-        &self,
-    ) -> Result<HashMap<TableId, TableReplicationPhase>, StateStoreError> {
+    async fn load_table_replication_states(&self) -> Result<usize, StateStoreError> {
         let inner = self.inner.read().await;
 
-        Ok(inner.table_replication_states.clone())
+        Ok(inner.table_replication_states.len())
     }
 
-    async fn store_table_replication_state(
+    async fn update_table_replication_state(
         &self,
         table_id: TableId,
         state: TableReplicationPhase,

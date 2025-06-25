@@ -196,9 +196,7 @@ impl StateStore for PostgresStateStore {
         Ok(inner.table_states.clone())
     }
 
-    async fn load_table_replication_states(
-        &self,
-    ) -> Result<HashMap<TableId, TableReplicationPhase>, StateStoreError> {
+    async fn load_table_replication_states(&self) -> Result<usize, StateStoreError> {
         let pool = self.connect_to_source().await?;
         let replication_state_rows = self
             .get_all_replication_state_rows(&pool, self.pipeline_id)
@@ -212,10 +210,10 @@ impl StateStore for PostgresStateStore {
         }
         let mut inner = self.inner.write().await;
         inner.table_states = table_states.clone();
-        Ok(table_states)
+        Ok(table_states.len())
     }
 
-    async fn store_table_replication_state(
+    async fn update_table_replication_state(
         &self,
         table_id: TableId,
         state: TableReplicationPhase,
