@@ -109,7 +109,7 @@ async fn init_state_store(config: &ReplicatorConfig) -> anyhow::Result<BoxedStat
     match config.state_store {
         StateStoreConfig::Memory => Ok(BoxedStateStore::new(MemoryStateStore::new())),
         StateStoreConfig::Postgres => {
-            migrate_state_store(&config.source).await?;
+            migrate_state_store(config.source.clone()).await?;
             Ok(BoxedStateStore::new(PostgresStateStore::new(
                 config.pipeline.id,
                 config.source.clone(),

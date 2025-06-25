@@ -1,46 +1,12 @@
-use config::shared::{SourceConfig, TlsConfig};
-use secrecy::ExposeSecret;
-use sqlx::{
-    postgres::{PgConnectOptions, PgPoolOptions, PgSslMode},
-    Executor,
-};
+use config::shared::SourceConfig;
+use sqlx::{postgres::PgPoolOptions, Executor};
 
 const NUM_POOL_CONNECTIONS: u32 = 1;
 
 /// This function runs migrations on the source database when the source database acts
 /// as a state store.
-pub async fn migrate_state_store(source_config: &SourceConfig) -> Result<(), sqlx::Error> {
-    let SourceConfig {
-        host,
-        port,
-        name,
-        username,
-        password,
-        tls,
-    } = &source_config;
-    let options = PgConnectOptions::new()
-        .application_name("replicator_migrator")
-        .host(host)
-        .port(*port)
-        .username(username)
-        .database(name);
-    let options = if let Some(password) = password {
-        options.password(password.expose_secret())
-    } else {
-        options
-    };
-    let TlsConfig {
-        trusted_root_certs,
-        enabled: tls_enabled,
-    } = &tls;
-
-    let options = if *tls_enabled {
-        options
-            .ssl_root_cert_from_pem(trusted_root_certs.as_bytes().to_vec())
-            .ssl_mode(PgSslMode::VerifyFull)
-    } else {
-        options
-    };
+pub async fn migrate_state_store(source_config: SourceConfig) -> Result<(), sqlx::Error> {
+    let options = source_config.into_connection_config().with_db();
 
     let pool = PgPoolOptions::new()
         .max_connections(NUM_POOL_CONNECTIONS)

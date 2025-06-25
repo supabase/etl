@@ -1,10 +1,9 @@
 use std::{collections::HashMap, sync::Arc};
 
-use config::shared::{SourceConfig, TlsConfig};
+use config::shared::SourceConfig;
 use postgres::schema::TableId;
-use secrecy::ExposeSecret;
 use sqlx::{
-    postgres::{types::Oid as SqlxOid, PgConnectOptions, PgPoolOptions, PgSslMode},
+    postgres::{types::Oid as SqlxOid, PgPoolOptions},
     prelude::{FromRow, Type},
     PgPool, Row,
 };
@@ -89,37 +88,11 @@ impl PostgresStateStore {
     }
 
     async fn connect_to_source(&self) -> Result<PgPool, sqlx::Error> {
-        let SourceConfig {
-            host,
-            port,
-            name,
-            username,
-            password,
-            tls,
-        } = &self.source_config;
-        let options = PgConnectOptions::new()
-            .application_name("replicator_migrator")
-            .host(host)
-            .port(*port)
-            .username(username)
-            .database(name);
-        let options = if let Some(password) = password {
-            options.password(password.expose_secret())
-        } else {
-            options
-        };
-        let TlsConfig {
-            trusted_root_certs,
-            enabled: tls_enabled,
-        } = tls;
-
-        let options = if *tls_enabled {
-            options
-                .ssl_root_cert_from_pem(trusted_root_certs.as_bytes().to_vec())
-                .ssl_mode(PgSslMode::VerifyFull)
-        } else {
-            options
-        };
+        let options = self
+            .source_config
+            .clone()
+            .into_connection_config()
+            .with_db();
 
         let pool = PgPoolOptions::new()
             .max_connections(NUM_POOL_CONNECTIONS)
