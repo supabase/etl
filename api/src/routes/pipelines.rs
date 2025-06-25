@@ -336,21 +336,8 @@ pub async fn delete_pipeline(
 #[utoipa::path(
     context_path = "/v1",
     responses(
-        (status = 200, description = "Return all pipelines", body = GetPipelinesResponse, example = json!({
-            "pipelines": [
-                {
-                    "id": 1,
-                    "tenant_id": "abcdefghijklmnopqrst",
-                    "source_id": 1,
-                    "source_name": "Source Name",
-                    "destination_id": 2,
-                    "destination_name": "Destination Name",
-                    "replicator_id": 3,
-                    "config": { /* ...example config... */ }
-                }
-            ]
-        })),
-        (status = 500, description = "Internal server error", body = ErrorMessage, example = json!({"error": "internal server error"}))
+        (status = 200, description = "Return all pipelines", body = GetPipelinesResponse),
+        (status = 500, description = "Internal server error", body = ErrorMessage)
     ),
     tag = "Pipelines"
 )]

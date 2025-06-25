@@ -32,6 +32,6 @@ fn extract_tenant_id(req: &HttpRequest) -> Result<&str, TenantIdError> {
         .ok_or(TenantIdError::TenantIdMissing)?
         .to_str()
         .map_err(|_| TenantIdError::TenantIdIllFormed)?;
-    
+
     Ok(tenant_id)
 }

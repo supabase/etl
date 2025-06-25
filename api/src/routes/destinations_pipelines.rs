@@ -189,7 +189,7 @@ pub async fn create_destinations_and_pipelines(
         destination_id,
         pipeline_id,
     };
-    
+
     Ok(Json(response))
 }
 

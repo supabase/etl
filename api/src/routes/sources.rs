@@ -209,7 +209,7 @@ pub async fn delete_source(
     db::sources::delete_source(&pool, tenant_id, source_id)
         .await?
         .ok_or(SourceError::SourceNotFound(source_id))?;
-    
+
     Ok(HttpResponse::Ok().finish())
 }
 
@@ -239,6 +239,6 @@ pub async fn read_all_sources(
         sources.push(source);
     }
     let response = GetSourcesResponse { sources };
-    
+
     Ok(Json(response))
 }

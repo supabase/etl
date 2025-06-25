@@ -73,12 +73,13 @@ impl ResponseError for TableError {
 
 #[utoipa::path(
     context_path = "/v1",
+    tag = "Tables",
     params(
-        ("source_id" = i64, Path, description = "Id of the source"),
+        ("source_id" = i64, Path, example = 1, description = "Id of the source"),
     ),
     responses(
-        (status = 200, description = "Return all tables from source with id = source_id", body = Vec<Table>),
-        (status = 500, description = "Internal server error")
+        (status = 200, description = "Return all tables from source with id = source_id", body = GetTablesResponse),
+        (status = 500, description = "Internal server error", body = ErrorMessage)
     )
 )]
 #[get("/sources/{source_id}/tables")]
@@ -99,5 +100,6 @@ pub async fn read_table_names(
     let options = config.into_connection_config().with_db();
     let tables = db::tables::get_tables(&options).await?;
     let response = GetTablesResponse { tables };
+
     Ok(Json(response))
 }

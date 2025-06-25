@@ -179,7 +179,7 @@ pub async fn delete_image(
     db::images::delete_image(&pool, image_id)
         .await?
         .ok_or(ImageError::ImageNotFound(image_id))?;
-    
+
     Ok(HttpResponse::Ok().finish())
 }
 
@@ -203,6 +203,6 @@ pub async fn read_all_images(pool: Data<PgPool>) -> Result<impl Responder, Image
         images.push(image);
     }
     let response = GetImagesResponse { images };
-    
+
     Ok(Json(response))
 }

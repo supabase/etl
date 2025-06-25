@@ -96,12 +96,12 @@ pub struct GetDestinationsResponse {
     context_path = "/v1",
     request_body = PostDestinationRequest,
     responses(
-        (status = 200, description = "Create new destination", body = PostDestinationResponse, example = json!({"id": 1})),
-        (status = 400, description = "Invalid tenant ID or request body", body = ErrorMessage, example = json!({"error": "Invalid tenant ID"})),
-        (status = 500, description = "Internal server error", body = ErrorMessage, example = json!({"error": "internal server error"}))
+        (status = 200, description = "Create new destination", body = PostDestinationResponse),
+        (status = 400, description = "Invalid tenant ID or request body", body = ErrorMessage),
+        (status = 500, description = "Internal server error", body = ErrorMessage)
     ),
     params(
-        ("tenant_id" = String, Header, description = "The tenant ID", example = "abcdefghijklmnopqrst")
+        ("tenant_id" = String, Header, description = "The tenant ID")
     ),
     tag = "Destinations"
 )]
@@ -119,25 +119,20 @@ pub async fn create_destination(
     let id = db::destinations::create_destination(&pool, tenant_id, &name, config, &encryption_key)
         .await?;
     let response = PostDestinationResponse { id };
-    
+
     Ok(Json(response))
 }
 
 #[utoipa::path(
     context_path = "/v1",
     params(
-        ("destination_id" = i64, Path, description = "Id of the destination to retrieve", example = 1),
-        ("tenant_id" = String, Header, description = "The tenant ID", example = "abcdefghijklmnopqrst")
+        ("destination_id" = i64, Path, description = "Id of the destination to retrieve"),
+        ("tenant_id" = String, Header, description = "The tenant ID")
     ),
     responses(
-        (status = 200, description = "The destination with the given id", body = GetDestinationResponse, example = json!({
-            "id": 1,
-            "tenant_id": "abcdefghijklmnopqrst",
-            "name": "BigQuery Destination",
-            "config": { /* ...example config... */ }
-        })),
-        (status = 404, description = "Destination not found", body = ErrorMessage, example = json!({"error": "Destination not found"})),
-        (status = 500, description = "Internal server error", body = ErrorMessage, example = json!({"error": "internal server error"}))
+        (status = 200, description = "The destination with the given id", body = GetDestinationResponse),
+        (status = 404, description = "Destination not found", body = ErrorMessage),
+        (status = 500, description = "Internal server error", body = ErrorMessage)
     ),
     tag = "Destinations"
 )]
@@ -160,7 +155,7 @@ pub async fn read_destination(
                 config: s.config,
             })
             .ok_or(DestinationError::DestinationNotFound(destination_id))?;
-    
+
     Ok(Json(response))
 }
 
@@ -201,7 +196,7 @@ pub async fn update_destination(
     )
     .await?
     .ok_or(DestinationError::DestinationNotFound(destination_id))?;
-    
+
     Ok(HttpResponse::Ok().finish())
 }
 
@@ -229,7 +224,7 @@ pub async fn delete_destination(
     db::destinations::delete_destination(&pool, tenant_id, destination_id)
         .await?
         .ok_or(DestinationError::DestinationNotFound(destination_id))?;
-    
+
     Ok(HttpResponse::Ok().finish())
 }
 
@@ -264,6 +259,6 @@ pub async fn read_all_destinations(
         destinations.push(destination);
     }
     let response = GetDestinationsResponse { destinations };
-    
+
     Ok(Json(response))
 }
