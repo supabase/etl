@@ -25,7 +25,7 @@ pub enum StateStoreError {
     ToTableState(#[from] ToTableStateError),
 }
 
-pub trait StateStore: Send + Sync {
+pub trait StateStore {
     fn get_table_replication_state(
         &self,
         table_id: TableId,
