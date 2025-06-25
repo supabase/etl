@@ -19,13 +19,13 @@ use crate::{
     routes::{
         destinations::{
             create_destination, delete_destination, read_all_destinations, read_destination,
-            update_destination, ReadDestinationResponse, ReadDestinationsResponse, CreateDestinationRequest,
-            CreateDestinationResponse,
-            UpdateDestinationRequest,
+            update_destination, CreateDestinationRequest, CreateDestinationResponse,
+            ReadDestinationResponse, ReadDestinationsResponse, UpdateDestinationRequest,
         },
         destinations_pipelines::{
-            create_destinations_and_pipelines, update_destinations_and_pipelines,
-            PostDestinationPipelineRequest, PostDestinationPipelineResponse,
+            create_destination_and_pipeline, update_destination_and_pipeline,
+            CreateDestinationPipelineRequest, CreateDestinationPipelineResponse,
+            UpdateDestinationPipelineRequest,
         },
         health_check::health_check,
         images::{
@@ -168,8 +168,8 @@ pub async fn run(
             crate::routes::destinations::delete_destination,
             crate::routes::destinations::read_all_destinations,
             crate::routes::tenants_sources::create_tenant_and_source,
-            crate::routes::destinations_pipelines::create_destinations_and_pipelines,
-            crate::routes::destinations_pipelines::update_destinations_and_pipelines,
+            crate::routes::destinations_pipelines::create_destination_and_pipeline,
+            crate::routes::destinations_pipelines::update_destination_and_pipeline,
         ),
         components(schemas(
             PostImageRequest,
@@ -196,8 +196,9 @@ pub async fn run(
             ReadDestinationsResponse,
             CreateTenantSourceRequest,
             PostTenantSourceResponse,
-            PostDestinationPipelineRequest,
-            PostDestinationPipelineResponse,
+            CreateDestinationPipelineRequest,
+            CreateDestinationPipelineResponse,
+            UpdateDestinationPipelineRequest,
         ))
     )]
     struct ApiDoc;
@@ -264,8 +265,8 @@ pub async fn run(
                     //tenants_sources
                     .service(create_tenant_and_source)
                     // destinations-pipelines
-                    .service(create_destinations_and_pipelines)
-                    .service(update_destinations_and_pipelines),
+                    .service(create_destination_and_pipeline)
+                    .service(update_destination_and_pipeline),
             )
             .app_data(connection_pool.clone())
             .app_data(encryption_key.clone())

@@ -116,27 +116,36 @@ impl ResponseError for DestinationPipelineError {
     }
 }
 
-#[derive(Deserialize, ToSchema)]
-pub struct PostDestinationPipelineRequest {
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct CreateDestinationPipelineRequest {
     #[schema(example = "Destination Name", required = true)]
     pub destination_name: String,
-
     #[schema(required = true)]
     pub destination_config: DestinationConfig,
-
     #[schema(required = true, example = 123)]
     pub source_id: i64,
-
     #[schema(required = true)]
     pub pipeline_config: PipelineConfig,
 }
 
-#[derive(Serialize, ToSchema)]
-pub struct PostDestinationPipelineResponse {
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct CreateDestinationPipelineResponse {
     #[schema(example = 1)]
-    destination_id: i64,
+    pub destination_id: i64,
     #[schema(example = 2)]
-    pipeline_id: i64,
+    pub pipeline_id: i64,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct UpdateDestinationPipelineRequest {
+    #[schema(example = "Destination Name", required = true)]
+    pub destination_name: String,
+    #[schema(required = true)]
+    pub destination_config: DestinationConfig,
+    #[schema(required = true, example = 123)]
+    pub source_id: i64,
+    #[schema(required = true)]
+    pub pipeline_config: PipelineConfig,
 }
 
 #[utoipa::path(
@@ -151,14 +160,14 @@ pub struct PostDestinationPipelineResponse {
     tag = "Destinations & Pipelines"
 )]
 #[post("/destinations-pipelines")]
-pub async fn create_destinations_and_pipelines(
+pub async fn create_destination_and_pipeline(
     req: HttpRequest,
     pool: Data<PgPool>,
-    destination_and_pipeline: Json<PostDestinationPipelineRequest>,
+    destination_and_pipeline: Json<CreateDestinationPipelineRequest>,
     encryption_key: Data<EncryptionKey>,
 ) -> Result<impl Responder, DestinationPipelineError> {
-    let destination_and_pipeline = destination_and_pipeline.0;
-    let PostDestinationPipelineRequest {
+    let destination_and_pipeline = destination_and_pipeline.into_inner();
+    let CreateDestinationPipelineRequest {
         destination_name,
         destination_config,
         source_id,
@@ -185,7 +194,7 @@ pub async fn create_destinations_and_pipelines(
             &encryption_key,
         )
         .await?;
-    let response = PostDestinationPipelineResponse {
+    let response = CreateDestinationPipelineResponse {
         destination_id,
         pipeline_id,
     };
@@ -209,15 +218,15 @@ pub async fn create_destinations_and_pipelines(
     tag = "Destinations & Pipelines"
 )]
 #[post("/destinations-pipelines/{destination_id}/{pipeline_id}")]
-pub async fn update_destinations_and_pipelines(
+pub async fn update_destination_and_pipeline(
     req: HttpRequest,
     pool: Data<PgPool>,
     destination_and_pipeline_ids: Path<(i64, i64)>,
-    destination_and_pipeline: Json<PostDestinationPipelineRequest>,
+    destination_and_pipeline: Json<UpdateDestinationPipelineRequest>,
     encryption_key: Data<EncryptionKey>,
 ) -> Result<impl Responder, DestinationPipelineError> {
-    let destination_and_pipeline = destination_and_pipeline.0;
-    let PostDestinationPipelineRequest {
+    let destination_and_pipeline = destination_and_pipeline.into_inner();
+    let UpdateDestinationPipelineRequest {
         destination_name,
         destination_config,
         source_id,

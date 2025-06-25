@@ -1,12 +1,13 @@
-use config::shared::DestinationConfig;
-use reqwest::StatusCode;
-use api::routes::destinations::{CreateDestinationRequest, CreateDestinationResponse, ReadDestinationResponse, ReadDestinationsResponse, UpdateDestinationRequest};
 use crate::{
-    common::test_app::{
-        spawn_test_app, TestApp
-    },
+    common::test_app::{spawn_test_app, TestApp},
     integration::tenants_test::create_tenant,
 };
+use api::routes::destinations::{
+    CreateDestinationRequest, CreateDestinationResponse, ReadDestinationResponse,
+    ReadDestinationsResponse, UpdateDestinationRequest,
+};
+use config::shared::DestinationConfig;
+use reqwest::StatusCode;
 
 pub fn new_name() -> String {
     "BigQuery Destination".to_string()

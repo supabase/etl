@@ -1,13 +1,16 @@
 use crate::common::database::create_etl_api_database;
+use api::routes::destinations::{CreateDestinationRequest, UpdateDestinationRequest};
+use api::routes::destinations_pipelines::{
+    CreateDestinationPipelineRequest, UpdateDestinationPipelineRequest,
+};
 use api::routes::pipelines::{CreatePipelineRequest, UpdatePipelineRequest};
 use api::{
     config::ApiConfig,
-    db::{pipelines::PipelineConfig, sources::SourceConfig},
+    db::sources::SourceConfig,
     encryption::{self, generate_random_key},
     startup::run,
 };
 use config::load_config;
-use config::shared::DestinationConfig;
 use postgres::sqlx::config::PgConnectionConfig;
 use postgres::sqlx::test_utils::drop_pg_database;
 use reqwest::{IntoUrl, RequestBuilder};
@@ -16,7 +19,6 @@ use std::io;
 use std::net::TcpListener;
 use tokio::runtime::Handle;
 use uuid::Uuid;
-use api::routes::destinations::{CreateDestinationRequest, UpdateDestinationRequest};
 
 #[derive(Serialize)]
 pub struct CreateTenantRequest {
@@ -87,20 +89,6 @@ pub struct CreateTenantSourceRequest {
 pub struct CreateTenantSourceResponse {
     pub tenant_id: String,
     pub source_id: i64,
-}
-
-#[derive(Serialize)]
-pub struct PostDestinationPipelineRequest {
-    pub destination_name: String,
-    pub destination_config: DestinationConfig,
-    pub source_id: i64,
-    pub pipeline_config: PipelineConfig,
-}
-
-#[derive(Deserialize)]
-pub struct CreateDestinationPipelineResponse {
-    pub destination_id: i64,
-    pub pipeline_id: i64,
 }
 
 #[derive(Serialize)]
@@ -409,7 +397,7 @@ impl TestApp {
     pub async fn create_destination_pipeline(
         &self,
         tenant_id: &str,
-        destination_pipeline: &PostDestinationPipelineRequest,
+        destination_pipeline: &CreateDestinationPipelineRequest,
     ) -> reqwest::Response {
         self.post_authenticated(format!("{}/v1/destinations-pipelines", &self.address))
             .header("tenant_id", tenant_id)
@@ -424,7 +412,7 @@ impl TestApp {
         tenant_id: &str,
         destination_id: i64,
         pipeline_id: i64,
-        destination_pipeline: &PostDestinationPipelineRequest,
+        destination_pipeline: &UpdateDestinationPipelineRequest,
     ) -> reqwest::Response {
         self.post_authenticated(format!(
             "{}/v1/destinations-pipelines/{destination_id}/{pipeline_id}",
