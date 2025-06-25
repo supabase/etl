@@ -140,33 +140,40 @@ impl ResponseError for PipelineError {
     }
 }
 
-#[derive(Deserialize, ToSchema)]
-pub struct PostPipelineRequest {
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct CreatePipelineRequest {
     pub source_id: i64,
     pub destination_id: i64,
     pub config: PipelineConfig,
 }
 
-#[derive(Serialize, ToSchema)]
-pub struct PostPipelineResponse {
-    id: i64,
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct CreatePipelineResponse {
+    pub id: i64,
 }
 
-#[derive(Serialize, ToSchema)]
-pub struct GetPipelineResponse {
-    id: i64,
-    tenant_id: String,
-    source_id: i64,
-    source_name: String,
-    destination_id: i64,
-    destination_name: String,
-    replicator_id: i64,
-    config: PipelineConfig,
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct UpdatePipelineRequest {
+    pub source_id: i64,
+    pub destination_id: i64,
+    pub config: Option<PipelineConfig>,
 }
 
-#[derive(Serialize, ToSchema)]
-pub struct GetPipelinesResponse {
-    pipelines: Vec<GetPipelineResponse>,
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct ReadPipelineResponse {
+    pub id: i64,
+    pub tenant_id: String,
+    pub source_id: i64,
+    pub source_name: String,
+    pub destination_id: i64,
+    pub destination_name: String,
+    pub replicator_id: i64,
+    pub config: PipelineConfig,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct ReadPipelinesResponse {
+    pub pipelines: Vec<ReadPipelineResponse>,
 }
 
 #[utoipa::path(
@@ -183,7 +190,7 @@ pub struct GetPipelinesResponse {
 pub async fn create_pipeline(
     req: HttpRequest,
     pool: Data<PgPool>,
-    pipeline: Json<PostPipelineRequest>,
+    pipeline: Json<CreatePipelineRequest>,
 ) -> Result<impl Responder, PipelineError> {
     let pipeline = pipeline.0;
     let tenant_id = extract_tenant_id(&req)?;
@@ -211,7 +218,7 @@ pub async fn create_pipeline(
     )
     .await?;
 
-    let response = PostPipelineResponse { id };
+    let response = CreatePipelineResponse { id };
 
     Ok(Json(response))
 }
@@ -240,7 +247,7 @@ pub async fn read_pipeline(
     let response = db::pipelines::read_pipeline(&pool, tenant_id, pipeline_id)
         .await?
         .map(|s| {
-            Ok::<GetPipelineResponse, serde_json::Error>(GetPipelineResponse {
+            Ok::<ReadPipelineResponse, serde_json::Error>(ReadPipelineResponse {
                 id: s.id,
                 tenant_id: s.tenant_id,
                 source_id: s.source_id,
@@ -275,30 +282,27 @@ pub async fn update_pipeline(
     req: HttpRequest,
     pool: Data<PgPool>,
     pipeline_id: Path<i64>,
-    pipeline: Json<PostPipelineRequest>,
+    pipeline: Json<UpdatePipelineRequest>,
 ) -> Result<impl Responder, PipelineError> {
-    let pipeline = pipeline.0;
+    let pipeline = pipeline.into_inner();
     let tenant_id = extract_tenant_id(&req)?;
     let pipeline_id = pipeline_id.into_inner();
-    let config = &pipeline.config;
-    let source_id = pipeline.source_id;
-    let destination_id = pipeline.destination_id;
 
-    if !source_exists(&pool, tenant_id, source_id).await? {
-        return Err(PipelineError::SourceNotFound(source_id));
+    if !source_exists(&pool, tenant_id, pipeline.source_id).await? {
+        return Err(PipelineError::SourceNotFound(pipeline.source_id));
     }
 
-    if !destination_exists(&pool, tenant_id, destination_id).await? {
-        return Err(PipelineError::DestinationNotFound(destination_id));
+    if !destination_exists(&pool, tenant_id, pipeline.destination_id).await? {
+        return Err(PipelineError::DestinationNotFound(pipeline.destination_id));
     }
 
     db::pipelines::update_pipeline(
         &pool,
         tenant_id,
         pipeline_id,
-        source_id,
-        destination_id,
-        config,
+        pipeline.source_id,
+        pipeline.destination_id,
+        pipeline.config.as_ref(),
     )
     .await?
     .ok_or(PipelineError::PipelineNotFound(pipeline_id))?;
@@ -350,7 +354,7 @@ pub async fn read_all_pipelines(
 
     let mut pipelines = vec![];
     for pipeline in db::pipelines::read_all_pipelines(&pool, tenant_id).await? {
-        let pipeline = GetPipelineResponse {
+        let pipeline = ReadPipelineResponse {
             id: pipeline.id,
             tenant_id: pipeline.tenant_id,
             source_id: pipeline.source_id,
@@ -363,7 +367,7 @@ pub async fn read_all_pipelines(
         pipelines.push(pipeline);
     }
 
-    let response = GetPipelinesResponse { pipelines };
+    let response = ReadPipelinesResponse { pipelines };
 
     Ok(Json(response))
 }

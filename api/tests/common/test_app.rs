@@ -1,4 +1,5 @@
 use crate::common::database::create_etl_api_database;
+use api::routes::pipelines::{CreatePipelineRequest, UpdatePipelineRequest};
 use api::{
     config::ApiConfig,
     db::{pipelines::PipelineConfig, sources::SourceConfig},
@@ -129,40 +130,6 @@ pub struct DestinationResponse {
 #[derive(Deserialize)]
 pub struct DestinationsResponse {
     pub destinations: Vec<DestinationResponse>,
-}
-
-#[derive(Serialize)]
-pub struct CreatePipelineRequest {
-    pub source_id: i64,
-    pub destination_id: i64,
-    pub config: PipelineConfig,
-}
-
-#[derive(Deserialize)]
-pub struct CreatePipelineResponse {
-    pub id: i64,
-}
-
-#[derive(Deserialize)]
-pub struct PipelineResponse {
-    pub id: i64,
-    pub tenant_id: String,
-    pub source_id: i64,
-    pub destination_id: i64,
-    pub replicator_id: i64,
-    pub config: PipelineConfig,
-}
-
-#[derive(Deserialize)]
-pub struct PipelinesResponse {
-    pub pipelines: Vec<PipelineResponse>,
-}
-
-#[derive(Serialize)]
-pub struct UpdatePipelineRequest {
-    pub source_id: i64,
-    pub destination_id: i64,
-    pub config: PipelineConfig,
 }
 
 #[derive(Serialize)]

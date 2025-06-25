@@ -107,8 +107,8 @@ pub async fn update_destination_and_pipeline(
         pipeline_id,
         source_id,
         destination_id,
-        &publication_name,
-        pipeline_config,
+        Some(&publication_name),
+        Some(pipeline_config),
     )
     .await?;
 
