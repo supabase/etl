@@ -2,6 +2,7 @@ use std::{collections::HashMap, sync::Arc};
 
 use config::shared::{SourceConfig, TlsConfig};
 use postgres::schema::TableId;
+use secrecy::ExposeSecret;
 use sqlx::{
     postgres::{types::Oid as SqlxOid, PgConnectOptions, PgPoolOptions, PgSslMode},
     prelude::{FromRow, Type},
@@ -101,7 +102,7 @@ impl PostgresStateStore {
             .username(username)
             .database(name);
         let options = if let Some(password) = password {
-            options.password(password)
+            options.password(password.expose_secret())
         } else {
             options
         };
