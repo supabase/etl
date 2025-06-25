@@ -131,7 +131,7 @@ pub struct PgTlsConfig {
     /// The SSL verification to use when making a TLS connection to Postgres
     pub ssl_mode: PgSslMode,
 
-    /// The trusted root certificates to ues for the TLS connection verification.
+    /// The trusted root certificates to use for the TLS connection verification.
     /// The certificate should be in pem format
     pub trusted_root_certs: Vec<u8>,
 }
