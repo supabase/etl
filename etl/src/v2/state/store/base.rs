@@ -13,7 +13,7 @@ use crate::v2::{
 #[derive(Debug, Error)]
 pub enum StateStoreError {
     #[error("Sqlx error in state store: {0}")]
-    Sqlx(#[from] sqlx::Error),
+    Database(#[from] sqlx::Error),
 
     #[error("Slot error in state store: {0}")]
     Slot(#[from] SlotError),
