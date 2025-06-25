@@ -95,7 +95,6 @@ impl TestStateStore {
     }
 }
 
-#[async_trait::async_trait]
 impl StateStore for TestStateStore {
     async fn get_table_replication_state(
         &self,
@@ -215,7 +214,6 @@ where
     }
 }
 
-#[async_trait::async_trait]
 impl<S> StateStore for FaultInjectingStateStore<S>
 where
     S: StateStore + Clone + Send + Sync + 'static,

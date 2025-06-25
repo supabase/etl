@@ -1,5 +1,5 @@
 use postgres::schema::TableId;
-use std::collections::HashMap;
+use std::{collections::HashMap, future::Future};
 use thiserror::Error;
 
 use crate::v2::{
@@ -25,24 +25,23 @@ pub enum StateStoreError {
     ToTableState(#[from] ToTableStateError),
 }
 
-#[async_trait::async_trait]
 pub trait StateStore: Send + Sync {
-    async fn get_table_replication_state(
+    fn get_table_replication_state(
         &self,
         table_id: TableId,
-    ) -> Result<Option<TableReplicationPhase>, StateStoreError>;
+    ) -> impl Future<Output = Result<Option<TableReplicationPhase>, StateStoreError>> + Send;
 
-    async fn get_table_replication_states(
+    fn get_table_replication_states(
         &self,
-    ) -> Result<HashMap<TableId, TableReplicationPhase>, StateStoreError>;
+    ) -> impl Future<Output = Result<HashMap<TableId, TableReplicationPhase>, StateStoreError>> + Send;
 
-    async fn load_table_replication_states(
+    fn load_table_replication_states(
         &self,
-    ) -> Result<HashMap<TableId, TableReplicationPhase>, StateStoreError>;
+    ) -> impl Future<Output = Result<HashMap<TableId, TableReplicationPhase>, StateStoreError>> + Send;
 
-    async fn store_table_replication_state(
+    fn store_table_replication_state(
         &self,
         table_id: TableId,
         state: TableReplicationPhase,
-    ) -> Result<(), StateStoreError>;
+    ) -> impl Future<Output = Result<(), StateStoreError>> + Send;
 }

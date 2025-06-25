@@ -7,7 +7,7 @@ use actix_web::{
 };
 use config::shared::{
     DestinationConfig, PipelineConfig as SharedPipelineConfig, ReplicatorConfig,
-    SourceConfig as SharedSourceConfig, StateStoreConfig, SupabaseConfig, TlsConfig,
+    SourceConfig as SharedSourceConfig, SupabaseConfig, TlsConfig,
 };
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
@@ -388,9 +388,6 @@ pub async fn start_pipeline(
     let (pipeline, replicator, image, source, destination) =
         read_data(&pool, tenant_id, pipeline_id, &encryption_key).await?;
 
-    // TODO: load actual state store config.
-    let state_store = StateStoreConfig::Memory;
-
     // We wrap Supabase's related information within its own struct for a clear separation.
     let supabase_config = SupabaseConfig {
         project_ref: tenant_id.to_owned(),
@@ -401,7 +398,6 @@ pub async fn start_pipeline(
     let replicator_config = build_replicator_config(
         &k8s_client,
         source.config,
-        state_store,
         destination.config,
         pipeline,
         supabase_config,
@@ -570,7 +566,6 @@ fn build_secrets(source_config: &SourceConfig, destination_config: &DestinationC
 async fn build_replicator_config(
     k8s_client: &Arc<HttpK8sClient>,
     source_config: SourceConfig,
-    state_store_config: StateStoreConfig,
     destination_config: DestinationConfig,
     pipeline: Pipeline,
     supabase_config: SupabaseConfig,
@@ -608,7 +603,6 @@ async fn build_replicator_config(
 
     let config = ReplicatorConfig {
         source: source_config,
-        state_store: state_store_config,
         destination: destination_config,
         pipeline: pipeline_config,
         supabase: Some(supabase_config),
