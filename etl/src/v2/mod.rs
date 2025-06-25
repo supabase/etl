@@ -1,3 +1,4 @@
+pub mod clients;
 pub mod concurrency;
 pub mod config;
 pub mod conversions;

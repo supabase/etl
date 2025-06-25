@@ -1,7 +1,4 @@
-use std::{collections::HashSet, fs};
-
-use bytes::{Buf, BufMut};
-use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
+use chrono::{NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use futures::StreamExt;
 use gcp_bigquery_client::storage::{ColumnMode, StorageApi};
 use gcp_bigquery_client::yup_oauth2::parse_service_account_key;
@@ -16,14 +13,115 @@ use gcp_bigquery_client::{
     Client,
 };
 use postgres::schema::{ColumnSchema, TableId, TableSchema};
-use prost::Message;
+use std::{collections::HashSet, fmt, fs};
 use tokio_postgres::types::{PgLsn, Type};
 use tracing::info;
-use uuid::Uuid;
 
-use crate::conversions::numeric::PgNumeric;
 use crate::conversions::table_row::TableRow;
-use crate::conversions::{ArrayCell, Cell};
+use crate::conversions::Cell;
+
+/// Converts a [`TableSchema`] to [`TableDescriptor`].
+///
+/// This function is defined here and doesn't use the [`From`] trait because it's not possible since
+/// [`TableSchema`] is in another crate, and we don't want to pollute the `postgres` crate with destination
+/// specific internals.
+pub fn table_schema_to_descriptor(table_schema: &TableSchema) -> TableDescriptor {
+    let mut field_descriptors = Vec::with_capacity(table_schema.column_schemas.len());
+    let mut number = 1;
+    for column_schema in &table_schema.column_schemas {
+        let typ = match column_schema.typ {
+            Type::BOOL => ColumnType::Bool,
+            Type::CHAR | Type::BPCHAR | Type::VARCHAR | Type::NAME | Type::TEXT => {
+                ColumnType::String
+            }
+            Type::INT2 => ColumnType::Int32,
+            Type::INT4 => ColumnType::Int32,
+            Type::INT8 => ColumnType::Int64,
+            Type::FLOAT4 => ColumnType::Float,
+            Type::FLOAT8 => ColumnType::Double,
+            Type::NUMERIC => ColumnType::String,
+            Type::DATE => ColumnType::String,
+            Type::TIME => ColumnType::String,
+            Type::TIMESTAMP => ColumnType::String,
+            Type::TIMESTAMPTZ => ColumnType::String,
+            Type::UUID => ColumnType::String,
+            Type::JSON => ColumnType::String,
+            Type::JSONB => ColumnType::String,
+            Type::OID => ColumnType::Int32,
+            Type::BYTEA => ColumnType::Bytes,
+            Type::BOOL_ARRAY => ColumnType::Bool,
+            Type::CHAR_ARRAY
+            | Type::BPCHAR_ARRAY
+            | Type::VARCHAR_ARRAY
+            | Type::NAME_ARRAY
+            | Type::TEXT_ARRAY => ColumnType::String,
+            Type::INT2_ARRAY => ColumnType::Int32,
+            Type::INT4_ARRAY => ColumnType::Int32,
+            Type::INT8_ARRAY => ColumnType::Int64,
+            Type::FLOAT4_ARRAY => ColumnType::Float,
+            Type::FLOAT8_ARRAY => ColumnType::Double,
+            Type::NUMERIC_ARRAY => ColumnType::String,
+            Type::DATE_ARRAY => ColumnType::String,
+            Type::TIME_ARRAY => ColumnType::String,
+            Type::TIMESTAMP_ARRAY => ColumnType::String,
+            Type::TIMESTAMPTZ_ARRAY => ColumnType::String,
+            Type::UUID_ARRAY => ColumnType::String,
+            Type::JSON_ARRAY => ColumnType::String,
+            Type::JSONB_ARRAY => ColumnType::String,
+            Type::OID_ARRAY => ColumnType::Int32,
+            Type::BYTEA_ARRAY => ColumnType::Bytes,
+            _ => ColumnType::String,
+        };
+
+        let mode = match column_schema.typ {
+            Type::BOOL_ARRAY
+            | Type::CHAR_ARRAY
+            | Type::BPCHAR_ARRAY
+            | Type::VARCHAR_ARRAY
+            | Type::NAME_ARRAY
+            | Type::TEXT_ARRAY
+            | Type::INT2_ARRAY
+            | Type::INT4_ARRAY
+            | Type::INT8_ARRAY
+            | Type::FLOAT4_ARRAY
+            | Type::FLOAT8_ARRAY
+            | Type::NUMERIC_ARRAY
+            | Type::DATE_ARRAY
+            | Type::TIME_ARRAY
+            | Type::TIMESTAMP_ARRAY
+            | Type::TIMESTAMPTZ_ARRAY
+            | Type::UUID_ARRAY
+            | Type::JSON_ARRAY
+            | Type::JSONB_ARRAY
+            | Type::OID_ARRAY
+            | Type::BYTEA_ARRAY => ColumnMode::Repeated,
+            _ => {
+                if column_schema.nullable {
+                    ColumnMode::Nullable
+                } else {
+                    ColumnMode::Required
+                }
+            }
+        };
+
+        field_descriptors.push(FieldDescriptor {
+            number,
+            name: column_schema.name.clone(),
+            typ,
+            mode,
+        });
+        number += 1;
+    }
+
+    field_descriptors.push(FieldDescriptor {
+        number,
+        name: "_CHANGE_TYPE".to_string(),
+        typ: ColumnType::String,
+        mode: ColumnMode::Required,
+    });
+
+    TableDescriptor { field_descriptors }
+}
 
 pub struct BigQueryClient {
     project_id: String,
@@ -239,45 +337,6 @@ impl BigQueryClient {
         }
 
         Ok(exists)
-    }
-
-    pub async fn get_last_lsn(&self, dataset_id: &str) -> Result<PgLsn, BQError> {
-        let project_id = &self.project_id;
-        let query = format!("select lsn from `{project_id}.{dataset_id}.last_lsn`",);
-
-        let mut rs = self.query(query).await?;
-
-        let lsn: i64 = if rs.next_row() {
-            rs.get_i64_by_name("lsn")?
-                .expect("no column named `lsn` found in query result")
-        } else {
-            //TODO: return error instead of panicking
-            panic!("failed to get lsn");
-        };
-
-        Ok((lsn as u64).into())
-    }
-
-    pub async fn set_last_lsn(&self, dataset_id: &str, lsn: PgLsn) -> Result<(), BQError> {
-        let lsn: u64 = lsn.into();
-
-        let project_id = &self.project_id;
-        let query =
-            format!("update `{project_id}.{dataset_id}.last_lsn` set lsn = {lsn} where id = 1",);
-
-        let _ = self.query(query).await?;
-
-        Ok(())
-    }
-
-    pub async fn insert_last_lsn_row(&self, dataset_id: &str) -> Result<(), BQError> {
-        let project_id = &self.project_id;
-        let query =
-            format!("insert into `{project_id}.{dataset_id}.last_lsn` (id, lsn) values (1, 0)",);
-
-        let _ = self.query(query).await?;
-
-        Ok(())
     }
 
     pub async fn get_copied_table_ids(
@@ -559,125 +618,21 @@ impl BigQueryClient {
         Ok(())
     }
 
-    pub async fn set_last_lsn_and_commit_transaction(
-        &self,
-        dataset_id: &str,
-        last_lsn: PgLsn,
-    ) -> Result<(), BQError> {
-        self.set_last_lsn(dataset_id, last_lsn).await?;
-        self.commit_transaction().await?;
-        Ok(())
-    }
-
     async fn query(&self, query: String) -> Result<ResultSet, BQError> {
         let query_response = self
             .client
             .job()
             .query(&self.project_id, QueryRequest::new(query))
             .await?;
+
         Ok(ResultSet::new_from_query_response(query_response))
     }
 }
 
-/// Converts a [`TableSchema`] to [`TableDescriptor`].
-///
-/// This function is defined here and doesn't use the [`From`] trait because it's not possible since
-/// [`TableSchema`] is in another crate and we don't want to pollute the `postgres` crate with destination
-/// specific internals.
-pub fn table_schema_to_descriptor(table_schema: &TableSchema) -> TableDescriptor {
-    let mut field_descriptors = Vec::with_capacity(table_schema.column_schemas.len());
-    let mut number = 1;
-    for column_schema in &table_schema.column_schemas {
-        let typ = match column_schema.typ {
-            Type::BOOL => ColumnType::Bool,
-            Type::CHAR | Type::BPCHAR | Type::VARCHAR | Type::NAME | Type::TEXT => {
-                ColumnType::String
-            }
-            Type::INT2 => ColumnType::Int32,
-            Type::INT4 => ColumnType::Int32,
-            Type::INT8 => ColumnType::Int64,
-            Type::FLOAT4 => ColumnType::Float,
-            Type::FLOAT8 => ColumnType::Double,
-            Type::NUMERIC => ColumnType::String,
-            Type::DATE => ColumnType::String,
-            Type::TIME => ColumnType::String,
-            Type::TIMESTAMP => ColumnType::String,
-            Type::TIMESTAMPTZ => ColumnType::String,
-            Type::UUID => ColumnType::String,
-            Type::JSON => ColumnType::String,
-            Type::JSONB => ColumnType::String,
-            Type::OID => ColumnType::Int32,
-            Type::BYTEA => ColumnType::Bytes,
-            Type::BOOL_ARRAY => ColumnType::Bool,
-            Type::CHAR_ARRAY
-            | Type::BPCHAR_ARRAY
-            | Type::VARCHAR_ARRAY
-            | Type::NAME_ARRAY
-            | Type::TEXT_ARRAY => ColumnType::String,
-            Type::INT2_ARRAY => ColumnType::Int32,
-            Type::INT4_ARRAY => ColumnType::Int32,
-            Type::INT8_ARRAY => ColumnType::Int64,
-            Type::FLOAT4_ARRAY => ColumnType::Float,
-            Type::FLOAT8_ARRAY => ColumnType::Double,
-            Type::NUMERIC_ARRAY => ColumnType::String,
-            Type::DATE_ARRAY => ColumnType::String,
-            Type::TIME_ARRAY => ColumnType::String,
-            Type::TIMESTAMP_ARRAY => ColumnType::String,
-            Type::TIMESTAMPTZ_ARRAY => ColumnType::String,
-            Type::UUID_ARRAY => ColumnType::String,
-            Type::JSON_ARRAY => ColumnType::String,
-            Type::JSONB_ARRAY => ColumnType::String,
-            Type::OID_ARRAY => ColumnType::Int32,
-            Type::BYTEA_ARRAY => ColumnType::Bytes,
-            _ => ColumnType::String,
-        };
-
-        let mode = match column_schema.typ {
-            Type::BOOL_ARRAY
-            | Type::CHAR_ARRAY
-            | Type::BPCHAR_ARRAY
-            | Type::VARCHAR_ARRAY
-            | Type::NAME_ARRAY
-            | Type::TEXT_ARRAY
-            | Type::INT2_ARRAY
-            | Type::INT4_ARRAY
-            | Type::INT8_ARRAY
-            | Type::FLOAT4_ARRAY
-            | Type::FLOAT8_ARRAY
-            | Type::NUMERIC_ARRAY
-            | Type::DATE_ARRAY
-            | Type::TIME_ARRAY
-            | Type::TIMESTAMP_ARRAY
-            | Type::TIMESTAMPTZ_ARRAY
-            | Type::UUID_ARRAY
-            | Type::JSON_ARRAY
-            | Type::JSONB_ARRAY
-            | Type::OID_ARRAY
-            | Type::BYTEA_ARRAY => ColumnMode::Repeated,
-            _ => {
-                if column_schema.nullable {
-                    ColumnMode::Nullable
-                } else {
-                    ColumnMode::Required
-                }
-            }
-        };
-
-        field_descriptors.push(FieldDescriptor {
-            number,
-            name: column_schema.name.clone(),
-            typ,
-            mode,
-        });
-        number += 1;
+impl fmt::Debug for BigQueryClient {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("BigQueryClient")
+            .field("project_id", &self.project_id)
+            .finish()
     }
-
-    field_descriptors.push(FieldDescriptor {
-        number,
-        name: "_CHANGE_TYPE".to_string(),
-        typ: ColumnType::String,
-        mode: ColumnMode::Required,
-    });
-
-    TableDescriptor { field_descriptors }
 }

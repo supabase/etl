@@ -40,11 +40,11 @@ impl Default for MemoryDestination {
 }
 
 impl Destination for MemoryDestination {
-    async fn write_table_schema(&self, schema: TableSchema) -> Result<(), DestinationError> {
+    async fn write_table_schema(&self, table_schema: TableSchema) -> Result<(), DestinationError> {
         let mut inner = self.inner.write().await;
         info!("Writing table schema:");
-        info!("{:?}", schema);
-        inner.table_schemas.push(schema);
+        info!("{:?}", table_schema);
+        inner.table_schemas.push(table_schema);
         Ok(())
     }
 
@@ -56,17 +56,21 @@ impl Destination for MemoryDestination {
         Ok(schemas)
     }
 
-    async fn write_table_rows(&self, id: Oid, rows: Vec<TableRow>) -> Result<(), DestinationError> {
+    async fn write_table_rows(
+        &self,
+        table_id: Oid,
+        table_rows: Vec<TableRow>,
+    ) -> Result<(), DestinationError> {
         let mut inner = self.inner.write().await;
         info!(
             "Writing batch of {} table rows for table id {:?}:",
-            rows.len(),
-            id
+            table_rows.len(),
+            table_id
         );
-        for row in &rows {
-            info!("  {:?}", row);
+        for table_row in &table_rows {
+            info!("  {:?}", table_row);
         }
-        inner.table_rows.push((id, rows));
+        inner.table_rows.push((table_id, table_rows));
         Ok(())
     }
 

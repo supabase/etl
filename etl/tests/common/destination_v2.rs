@@ -150,9 +150,9 @@ impl Default for TestDestination {
 }
 
 impl Destination for TestDestination {
-    async fn write_table_schema(&self, schema: TableSchema) -> Result<(), DestinationError> {
+    async fn write_table_schema(&self, table_schema: TableSchema) -> Result<(), DestinationError> {
         let mut inner = self.inner.write().await;
-        inner.table_schemas.push(schema);
+        inner.table_schemas.push(table_schema);
         inner.check_conditions().await;
 
         Ok(())
@@ -165,9 +165,17 @@ impl Destination for TestDestination {
         Ok(table_schemas)
     }
 
-    async fn write_table_rows(&self, id: Oid, rows: Vec<TableRow>) -> Result<(), DestinationError> {
+    async fn write_table_rows(
+        &self,
+        table_id: Oid,
+        table_rows: Vec<TableRow>,
+    ) -> Result<(), DestinationError> {
         let mut inner = self.inner.write().await;
-        inner.table_rows.entry(id).or_default().extend(rows);
+        inner
+            .table_rows
+            .entry(table_id)
+            .or_default()
+            .extend(table_rows);
         inner.check_conditions().await;
 
         Ok(())

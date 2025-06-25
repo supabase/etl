@@ -1,7 +1,8 @@
+use bytes::{Buf, BufMut};
 use core::str;
-use std::str::Utf8Error;
-
 use postgres::schema::ColumnSchema;
+use prost::Message;
+use std::str::Utf8Error;
 use thiserror::Error;
 use tokio_postgres::types::Type;
 use tracing::error;
@@ -18,6 +19,49 @@ pub struct TableRow {
 impl BatchBoundaryV1 for TableRow {
     fn is_last_in_batch(&self) -> bool {
         true
+    }
+}
+
+#[cfg(feature = "bigquery")]
+impl Message for TableRow {
+    fn encode_raw(&self, buf: &mut impl BufMut)
+    where
+        Self: Sized,
+    {
+        let mut tag = 1;
+        for cell in &self.values {
+            cell.encode_raw(tag, buf);
+            tag += 1;
+        }
+    }
+
+    fn merge_field(
+        &mut self,
+        _tag: u32,
+        _wire_type: prost::encoding::WireType,
+        _buf: &mut impl Buf,
+        _ctx: prost::encoding::DecodeContext,
+    ) -> Result<(), prost::DecodeError>
+    where
+        Self: Sized,
+    {
+        unimplemented!("merge_field not implemented yet");
+    }
+
+    fn encoded_len(&self) -> usize {
+        let mut len = 0;
+        let mut tag = 1;
+        for cell in &self.values {
+            len += cell.encoded_len(tag);
+            tag += 1;
+        }
+        len
+    }
+
+    fn clear(&mut self) {
+        for cell in &mut self.values {
+            cell.clear();
+        }
     }
 }
 
