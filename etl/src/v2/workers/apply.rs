@@ -303,11 +303,7 @@ where
 
     async fn active_table_replication_states(
         &self,
-        load: bool,
     ) -> Result<HashMap<TableId, TableReplicationPhase>, ApplyWorkerHookError> {
-        if load {
-            self.state_store.load_table_replication_states().await?;
-        }
         let mut table_replication_states = self.state_store.get_table_replication_states().await?;
         table_replication_states.retain(|_table_id, state| !state.as_type().is_done());
 
@@ -323,7 +319,7 @@ where
     type Error = ApplyWorkerHookError;
 
     async fn initialize(&self) -> Result<(), Self::Error> {
-        let table_replication_states = self.active_table_replication_states(true).await?;
+        let table_replication_states = self.active_table_replication_states().await?;
 
         for table_id in table_replication_states.keys() {
             let table_sync_worker_state = {
@@ -345,7 +341,7 @@ where
     }
 
     async fn process_syncing_tables(&self, current_lsn: PgLsn) -> Result<bool, Self::Error> {
-        let table_replication_states = self.active_table_replication_states(false).await?;
+        let table_replication_states = self.active_table_replication_states().await?;
         info!(
             "Processing syncing tables for apply worker with LSN {}",
             current_lsn
