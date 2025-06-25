@@ -1,4 +1,5 @@
 use config::shared::{SourceConfig, TlsConfig};
+use secrecy::ExposeSecret;
 use sqlx::{
     postgres::{PgConnectOptions, PgPoolOptions, PgSslMode},
     Executor,
@@ -22,7 +23,7 @@ pub async fn migrate_state_store(source_config: &SourceConfig) -> Result<(), sql
         .username(username)
         .database(name);
     let options = if let Some(password) = password {
-        options.password(password)
+        options.password(password.expose_secret())
     } else {
         options
     };
