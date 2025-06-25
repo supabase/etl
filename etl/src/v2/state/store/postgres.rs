@@ -51,7 +51,9 @@ impl TryFrom<TableReplicationPhase> for TableState {
             TableReplicationPhase::SyncDone { .. } => TableState::SyncDone,
             TableReplicationPhase::Ready => TableState::Ready,
             TableReplicationPhase::Skipped => TableState::Skipped,
-            _ => return Err(ToTableStateError::InMemoryPhase),
+            TableReplicationPhase::SyncWait | TableReplicationPhase::Catchup { .. } => {
+                return Err(ToTableStateError::InMemoryPhase)
+            }
         })
     }
 }
