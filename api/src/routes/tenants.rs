@@ -206,9 +206,10 @@ pub async fn update_tenant(
     tenant: Json<UpdateTenantRequest>,
     root_span: RootSpan,
 ) -> Result<impl Responder, TenantError> {
+    let tenant = tenant.into_inner();
     let tenant_id = tenant_id.into_inner();
     root_span.record("project", &tenant_id);
-    db::tenants::update_tenant(&pool, &tenant_id, &tenant.0.name)
+    db::tenants::update_tenant(&pool, &tenant_id, &tenant.name)
         .await?
         .ok_or(TenantError::TenantNotFound(tenant_id))?;
 

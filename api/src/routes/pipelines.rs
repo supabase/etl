@@ -207,7 +207,7 @@ pub async fn create_pipeline(
     pool: Data<PgPool>,
     pipeline: Json<CreatePipelineRequest>,
 ) -> Result<impl Responder, PipelineError> {
-    let pipeline = pipeline.0;
+    let pipeline = pipeline.into_inner();
     let tenant_id = extract_tenant_id(&req)?;
     let config = pipeline.config;
 
@@ -273,7 +273,8 @@ pub async fn read_pipeline(
                 config: s.config,
             })
         })
-        .transpose()?;
+        .transpose()?
+        .ok_or(PipelineError::PipelineNotFound(pipeline_id))?;
 
     Ok(Json(response))
 }

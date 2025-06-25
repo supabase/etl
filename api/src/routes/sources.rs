@@ -119,7 +119,7 @@ pub async fn create_source(
     encryption_key: Data<EncryptionKey>,
     source: Json<CreateSourceRequest>,
 ) -> Result<impl Responder, SourceError> {
-    let source = source.0;
+    let source = source.into_inner();
     let tenant_id = extract_tenant_id(&req)?;
     let name = source.name;
     let config = source.config;
@@ -184,7 +184,7 @@ pub async fn update_source(
     encryption_key: Data<EncryptionKey>,
     source: Json<UpdateSourceRequest>,
 ) -> Result<impl Responder, SourceError> {
-    let source = source.0;
+    let source = source.into_inner();
     let tenant_id = extract_tenant_id(&req)?;
     let source_id = source_id.into_inner();
     let name = source.name;

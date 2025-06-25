@@ -106,7 +106,7 @@ pub async fn create_image(
     pool: Data<PgPool>,
     image: Json<CreateImageRequest>,
 ) -> Result<impl Responder, ImageError> {
-    let image = image.0;
+    let image = image.into_inner();
     let id = db::images::create_image(&pool, &image.name, image.is_default).await?;
     let response = CreateImageResponse { id };
 
