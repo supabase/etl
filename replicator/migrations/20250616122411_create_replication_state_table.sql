@@ -12,5 +12,6 @@ create table
         pipeline_id bigint not null,
         table_id oid not null,
         state table_state not null,
+        sync_done_lsn pg_lsn null,
         primary key (pipeline_id, table_id)
     );

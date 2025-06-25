@@ -4,7 +4,10 @@ use thiserror::Error;
 
 use crate::v2::{
     replication::slot::SlotError,
-    state::{store::postgres::ToTableStateError, table::TableReplicationPhase},
+    state::{
+        store::postgres::{FromTableStateError, ToTableStateError},
+        table::TableReplicationPhase,
+    },
 };
 
 #[derive(Debug, Error)]
@@ -23,6 +26,9 @@ pub enum StateStoreError {
 
     #[error("Error converting from table replication phase to table state")]
     ToTableState(#[from] ToTableStateError),
+
+    #[error("Error converting from table state to table replication phase")]
+    FromTableState(#[from] FromTableStateError),
 }
 
 pub trait StateStore {
