@@ -22,6 +22,8 @@ use crate::v2::{
     workers::base::WorkerType,
 };
 
+const NUM_POOL_CONNECTIONS: u32 = 1;
+
 #[derive(Debug, Clone, Copy, Type, PartialEq)]
 #[sqlx(type_name = "etl.table_state", rename_all = "snake_case")]
 pub enum TableState {
@@ -120,8 +122,8 @@ impl PostgresStateStore {
         };
 
         let pool = PgPoolOptions::new()
-            .max_connections(1)
-            .min_connections(1)
+            .max_connections(NUM_POOL_CONNECTIONS)
+            .min_connections(NUM_POOL_CONNECTIONS)
             .connect_with(options)
             .await?;
         Ok(pool)
