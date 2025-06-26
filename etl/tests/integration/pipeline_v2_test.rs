@@ -917,7 +917,6 @@ async fn test_table_copy_and_sync() {
     assert_eq!(*orders_inserts, expected_orders_inserts);
 }
 
-#[ignore = "gets stuck"]
 #[tokio::test(flavor = "multi_thread")]
 async fn test_table_copy_and_sync_with_changed_schema_in_table_sync_worker() {
     init_test_tracing();
@@ -1007,7 +1006,6 @@ async fn test_table_copy_and_sync_with_changed_schema_in_table_sync_worker() {
     assert_eq!(grouped_events.get(&EventType::Commit).unwrap().len(), 1);
 }
 
-#[ignore = "gets stuck"]
 #[tokio::test(flavor = "multi_thread")]
 async fn test_table_copy_and_sync_with_changed_schema_in_apply_worker() {
     init_test_tracing();
