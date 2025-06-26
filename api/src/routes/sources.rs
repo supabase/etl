@@ -105,6 +105,9 @@ pub struct ReadSourcesResponse {
 #[utoipa::path(
     context_path = "/v1",
     request_body = CreateSourceRequest,
+    params(
+        ("tenant_id" = String, Header, description = "The tenant ID")
+    ),
     responses(
         (status = 200, description = "Create new source", body = CreateSourceResponse),
         (status = 400, description = "Bad request", body = ErrorMessage),
@@ -133,6 +136,7 @@ pub async fn create_source(
     context_path = "/v1",
     params(
         ("source_id" = i64, Path, description = "Id of the source"),
+        ("tenant_id" = String, Header, description = "The tenant ID")
     ),
     responses(
         (status = 200, description = "Return source with id = source_id", body = ReadSourceResponse),
@@ -168,6 +172,7 @@ pub async fn read_source(
     request_body = UpdateSourceRequest,
     params(
         ("source_id" = i64, Path, description = "Id of the source"),
+        ("tenant_id" = String, Header, description = "The tenant ID")
     ),
     responses(
         (status = 200, description = "Update source with id = source_id"),
@@ -200,6 +205,7 @@ pub async fn update_source(
     context_path = "/v1",
     params(
         ("source_id" = i64, Path, description = "Id of the source"),
+        ("tenant_id" = String, Header, description = "The tenant ID")
     ),
     responses(
         (status = 200, description = "Delete source with id = source_id"),
@@ -225,6 +231,9 @@ pub async fn delete_source(
 
 #[utoipa::path(
     context_path = "/v1",
+    params(
+        ("tenant_id" = String, Header, description = "The tenant ID")
+    ),
     responses(
         (status = 200, description = "Return all sources", body = ReadSourcesResponse),
         (status = 500, description = "Internal server error", body = ErrorMessage),

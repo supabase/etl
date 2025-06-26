@@ -194,6 +194,9 @@ pub struct ReadPipelinesResponse {
 #[utoipa::path(
     context_path = "/v1",
     request_body = CreatePipelineRequest,
+    params(
+        ("tenant_id" = String, Header, description = "The tenant ID")
+    ),
     responses(
         (status = 200, description = "Create new pipeline", body = CreatePipelineResponse),
         (status = 400, description = "Bad request", body = ErrorMessage),
@@ -242,6 +245,7 @@ pub async fn create_pipeline(
     context_path = "/v1",
     params(
         ("pipeline_id" = i64, Path, description = "Id of the pipeline"),
+        ("tenant_id" = String, Header, description = "The tenant ID")
     ),
     responses(
         (status = 200, description = "Return pipeline with id = pipeline_id", body = ReadPipelineResponse),
@@ -284,6 +288,7 @@ pub async fn read_pipeline(
     request_body = UpdatePipelineRequest,
     params(
         ("pipeline_id" = i64, Path, description = "Id of the pipeline"),
+        ("tenant_id" = String, Header, description = "The tenant ID")
     ),
     responses(
         (status = 200, description = "Update pipeline with id = pipeline_id"),
@@ -329,6 +334,7 @@ pub async fn update_pipeline(
     context_path = "/v1",
     params(
         ("pipeline_id" = i64, Path, description = "Id of the pipeline"),
+        ("tenant_id" = String, Header, description = "The tenant ID")
     ),
     responses(
         (status = 200, description = "Delete pipeline with id = pipeline_id"),
@@ -354,6 +360,9 @@ pub async fn delete_pipeline(
 
 #[utoipa::path(
     context_path = "/v1",
+    params(
+        ("tenant_id" = String, Header, description = "The tenant ID")
+    ),
     responses(
         (status = 200, description = "Return all pipelines", body = ReadPipelinesResponse),
         (status = 500, description = "Internal server error", body = ErrorMessage)
@@ -389,6 +398,10 @@ pub async fn read_all_pipelines(
 
 #[utoipa::path(
     context_path = "/v1",
+    params(
+        ("pipeline_id" = i64, Path, description = "Id of the pipeline"),
+        ("tenant_id" = String, Header, description = "The tenant ID")
+    ),
     responses(
         (status = 200, description = "Start a pipeline"),
         (status = 500, description = "Internal server error")
@@ -438,6 +451,10 @@ pub async fn start_pipeline(
 
 #[utoipa::path(
     context_path = "/v1",
+    params(
+        ("pipeline_id" = i64, Path, description = "Id of the pipeline"),
+        ("tenant_id" = String, Header, description = "The tenant ID")
+    ),
     responses(
         (status = 200, description = "Stop a pipeline"),
         (status = 500, description = "Internal server error")
@@ -467,6 +484,9 @@ pub async fn stop_pipeline(
 
 #[utoipa::path(
     context_path = "/v1",
+    params(
+        ("tenant_id" = String, Header, description = "The tenant ID")
+    ),
     responses(
         (status = 200, description = "Stop all pipelines"),
         (status = 500, description = "Internal server error")
@@ -500,6 +520,10 @@ pub enum PipelineStatus {
 
 #[utoipa::path(
     context_path = "/v1",
+    params(
+        ("pipeline_id" = i64, Path, description = "Id of the pipeline"),
+        ("tenant_id" = String, Header, description = "The tenant ID")
+    ),
     responses(
         (status = 200, description = "Get pipeline status"),
         (status = 500, description = "Internal server error")

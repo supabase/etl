@@ -151,6 +151,9 @@ pub struct UpdateDestinationPipelineRequest {
 #[utoipa::path(
     context_path = "/v1",
     request_body = CreateDestinationPipelineRequest,
+    params(
+        ("tenant_id" = String, Header, description = "The tenant ID")
+    ),
     responses(
         (status = 200, description = "Create a new destination and a pipeline", body = CreateDestinationPipelineResponse),
         (status = 409, description = "A pipeline already exists for this source and destination combination", body = ErrorMessage),
@@ -207,7 +210,8 @@ pub async fn create_destination_and_pipeline(
     request_body = UpdateDestinationPipelineRequest,
     params(
         ("destination_id" = i64, Path, description = "ID of the destination to update"),
-        ("pipeline_id" = i64, Path, description = "ID of the pipeline to update")
+        ("pipeline_id" = i64, Path, description = "ID of the pipeline to update"),
+        ("tenant_id" = String, Header, description = "The tenant ID")
     ),
     responses(
         (status = 200, description = "Update a destination and a pipeline"),

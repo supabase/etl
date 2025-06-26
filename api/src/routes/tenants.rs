@@ -131,6 +131,9 @@ pub async fn create_tenant(
 #[utoipa::path(
     context_path = "/v1",
     request_body = CreateOrUpdateTenantRequest,
+    params(
+        ("tenant_id" = String, Path, description = "Id of the tenant"),
+    ),
     responses(
         (status = 200, description = "Create a new tenant or update an existing one", body = CreateOrUpdateTenantResponse),
         (status = 400, description = "Bad request", body = ErrorMessage),
@@ -259,5 +262,6 @@ pub async fn read_all_tenants(pool: Data<PgPool>) -> Result<impl Responder, Tena
         })
         .collect();
     let response = ReadTenantsResponse { tenants };
+
     Ok(Json(response))
 }
