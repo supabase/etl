@@ -1,24 +1,22 @@
-use chrono::{NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use futures::StreamExt;
 use gcp_bigquery_client::storage::{ColumnMode, StorageApi};
 use gcp_bigquery_client::yup_oauth2::parse_service_account_key;
 use gcp_bigquery_client::{
     error::BQError,
-    google::cloud::bigquery::storage::v1::{WriteStream, WriteStreamView},
     model::{
-        query_request::QueryRequest, query_response::ResultSet,
-        table_data_insert_all_request::TableDataInsertAllRequest,
+        query_parameter::QueryParameter, query_parameter_type::QueryParameterType,
+        query_parameter_value::QueryParameterValue, query_request::QueryRequest,
+        query_response::ResultSet,
     },
     storage::{ColumnType, FieldDescriptor, StreamName, TableDescriptor},
     Client,
 };
-use postgres::schema::{ColumnSchema, TableId, TableSchema};
-use std::{collections::HashSet, fmt, fs};
-use tokio_postgres::types::{PgLsn, Type};
+use postgres::schema::{ColumnSchema, TableSchema};
+use std::{fmt, fs};
+use tokio_postgres::types::Type;
 use tracing::info;
 
 use crate::conversions::table_row::TableRow;
-use crate::conversions::Cell;
 
 /// The maximum number of byte that can be sent by stream.
 const MAX_SIZE_BYTES: usize = 9 * 1024 * 1024;
@@ -35,7 +33,6 @@ pub struct BigQueryClient {
     client: Client,
 }
 
-//TODO: fix all SQL injections
 impl BigQueryClient {
     /// Creates a new [`BigQueryClient`] from a Google Cloud service account key file.
     ///
@@ -87,126 +84,6 @@ impl BigQueryClient {
         Ok(true)
     }
 
-    /// Maps a PostgreSQL [`Type`] to a BigQuery data type name.
-    fn postgres_to_bigquery_type(typ: &Type) -> &'static str {
-        match typ {
-            &Type::BOOL => "bool",
-            &Type::CHAR | &Type::BPCHAR | &Type::VARCHAR | &Type::NAME | &Type::TEXT => "string",
-            &Type::INT2 | &Type::INT4 | &Type::INT8 => "int64",
-            &Type::FLOAT4 | &Type::FLOAT8 => "float64",
-            &Type::NUMERIC => "bignumeric",
-            &Type::DATE => "date",
-            &Type::TIME => "time",
-            &Type::TIMESTAMP | &Type::TIMESTAMPTZ => "timestamp",
-            &Type::UUID => "string",
-            &Type::JSON | &Type::JSONB => "json",
-            &Type::OID => "int64",
-            &Type::BYTEA => "bytes",
-            &Type::BOOL_ARRAY => "array<bool>",
-            &Type::CHAR_ARRAY
-            | &Type::BPCHAR_ARRAY
-            | &Type::VARCHAR_ARRAY
-            | &Type::NAME_ARRAY
-            | &Type::TEXT_ARRAY => "array<string>",
-            &Type::INT2_ARRAY | &Type::INT4_ARRAY | &Type::INT8_ARRAY => "array<int64>",
-            &Type::FLOAT4_ARRAY | &Type::FLOAT8_ARRAY => "array<float64>",
-            &Type::NUMERIC_ARRAY => "array<bignumeric>",
-            &Type::DATE_ARRAY => "array<date>",
-            &Type::TIME_ARRAY => "array<time>",
-            &Type::TIMESTAMP_ARRAY | &Type::TIMESTAMPTZ_ARRAY => "array<timestamp>",
-            &Type::UUID_ARRAY => "array<string>",
-            &Type::JSON_ARRAY | &Type::JSONB_ARRAY => "array<json>",
-            &Type::OID_ARRAY => "array<int64>",
-            &Type::BYTEA_ARRAY => "array<bytes>",
-            _ => "string",
-        }
-    }
-
-    /// Checks if a PostgreSQL [`Type`] is an array type.
-    fn is_array_type(typ: &Type) -> bool {
-        matches!(
-            typ,
-            &Type::BOOL_ARRAY
-                | &Type::CHAR_ARRAY
-                | &Type::BPCHAR_ARRAY
-                | &Type::VARCHAR_ARRAY
-                | &Type::NAME_ARRAY
-                | &Type::TEXT_ARRAY
-                | &Type::INT2_ARRAY
-                | &Type::INT4_ARRAY
-                | &Type::INT8_ARRAY
-                | &Type::FLOAT4_ARRAY
-                | &Type::FLOAT8_ARRAY
-                | &Type::NUMERIC_ARRAY
-                | &Type::DATE_ARRAY
-                | &Type::TIME_ARRAY
-                | &Type::TIMESTAMP_ARRAY
-                | &Type::TIMESTAMPTZ_ARRAY
-                | &Type::UUID_ARRAY
-                | &Type::JSON_ARRAY
-                | &Type::JSONB_ARRAY
-                | &Type::OID_ARRAY
-                | &Type::BYTEA_ARRAY
-        )
-    }
-
-    /// Generates an SQL column specification for a `CREATE TABLE` statement.
-    fn column_spec(column_schema: &ColumnSchema, s: &mut String) {
-        s.push('`');
-        s.push_str(&column_schema.name);
-        s.push('`');
-        s.push(' ');
-        let typ = Self::postgres_to_bigquery_type(&column_schema.typ);
-        s.push_str(typ);
-        if !column_schema.nullable && !Self::is_array_type(&column_schema.typ) {
-            s.push_str(" not null");
-        };
-    }
-
-    /// Appends a `PRIMARY KEY` clause to a `CREATE TABLE` statement string.
-    fn add_primary_key_clause(column_schemas: &[ColumnSchema], s: &mut String) {
-        let identity_columns = column_schemas.iter().filter(|s| s.primary);
-
-        s.push_str("primary key (");
-
-        for column in identity_columns {
-            s.push('`');
-            s.push_str(&column.name);
-            s.push('`');
-            s.push(',');
-        }
-
-        s.pop(); //','
-        s.push_str(") not enforced");
-    }
-
-    /// Creates the full column specification clause for a `CREATE TABLE` statement.
-    fn create_columns_spec(column_schemas: &[ColumnSchema]) -> String {
-        let mut s = String::new();
-        s.push('(');
-
-        for column_schema in column_schemas.iter() {
-            Self::column_spec(column_schema, &mut s);
-            s.push(',');
-        }
-
-        let has_identity_cols = column_schemas.iter().any(|s| s.primary);
-        if has_identity_cols {
-            Self::add_primary_key_clause(column_schemas, &mut s);
-        } else {
-            s.pop(); //','
-        }
-
-        s.push(')');
-
-        s
-    }
-
-    /// Creates the `OPTIONS` clause for specifying max staleness in a `CREATE TABLE` statement.
-    fn max_staleness_option(max_staleness_mins: u16) -> String {
-        format!("options (max_staleness = interval {max_staleness_mins} minute)")
-    }
-
     /// Creates a table in a BigQuery dataset.
     pub async fn create_table(
         &self,
@@ -221,10 +98,12 @@ impl BigQueryClient {
 
         info!("creating table {project_id}.{dataset_id}.{table_name} in bigquery");
 
-        let query =
-            format!("create table `{project_id}.{dataset_id}.{table_name}` {columns_spec} {max_staleness_option}",);
+        let query = format!(
+            "create table `{}.{}.{}` {} {}",
+            project_id, dataset_id, table_name, columns_spec, max_staleness_option
+        );
 
-        let _ = self.query(query).await?;
+        let _ = self.query(QueryRequest::new(query)).await?;
 
         Ok(())
     }
@@ -236,15 +115,27 @@ impl BigQueryClient {
     /// Panics if the query result does not contain the expected `table_exists` column.
     pub async fn table_exists(&self, dataset_id: &str, table_name: &str) -> Result<bool, BQError> {
         let query = format!(
-            "select exists
-                (
-                    select * from
-                    {dataset_id}.INFORMATION_SCHEMA.TABLES
-                    where table_name = '{table_name}'
-                ) as table_exists;",
+            "select exists (select 1 from `{}.{}.INFORMATION_SCHEMA.TABLES` where table_name = @table_name) as table_exists",
+            self.project_id, dataset_id
         );
 
-        let mut result_set = self.query(query).await?;
+        let mut request = QueryRequest::new(query);
+        let parameter = QueryParameter {
+            name: Some("table_name".to_string()),
+            parameter_type: Some(QueryParameterType {
+                r#type: "string".to_string(),
+                array_type: None,
+                struct_types: None,
+            }),
+            parameter_value: Some(QueryParameterValue {
+                value: Some(table_name.to_string()),
+                array_values: None,
+                struct_values: None,
+            }),
+        };
+        request.query_parameters = Some(vec![parameter]);
+
+        let mut result_set = self.query(request).await?;
 
         let mut exists = false;
         if result_set.next_row() {
@@ -298,42 +189,137 @@ impl BigQueryClient {
         Ok(())
     }
 
-    /// Converts a [`Cell`] value into its SQL literal representation for a query.
-    fn cell_to_query_value(cell: &Cell, s: &mut String) {
-        match cell {
-            Cell::Null => s.push_str("null"),
-            Cell::Bool(b) => s.push_str(&format!("{b}")),
-            Cell::String(str) => s.push_str(&format!("'{str}'")),
-            Cell::I16(i) => s.push_str(&format!("{i}")),
-            Cell::I32(i) => s.push_str(&format!("{i}")),
-            Cell::I64(i) => s.push_str(&format!("{i}")),
-            Cell::F32(i) => s.push_str(&format!("{i}")),
-            Cell::F64(i) => s.push_str(&format!("{i}")),
-            Cell::Numeric(n) => s.push_str(&format!("{n}")),
-            Cell::Date(t) => s.push_str(&format!("'{t}'")),
-            Cell::Time(t) => s.push_str(&format!("'{t}'")),
-            Cell::TimeStamp(t) => s.push_str(&format!("'{t}'")),
-            Cell::TimeStampTz(t) => s.push_str(&format!("'{t}'")),
-            Cell::Uuid(t) => s.push_str(&format!("'{t}'")),
-            Cell::Json(j) => s.push_str(&format!("'{j}'")),
-            Cell::U32(u) => s.push_str(&format!("{u}")),
-            Cell::Bytes(b) => {
-                let bytes: String = b.iter().map(|b| *b as char).collect();
-                s.push_str(&format!("b'{bytes}'"))
-            }
-            Cell::Array(_) => unreachable!(),
-        }
-    }
-
     /// Executes an SQL query and returns the result set.
-    async fn query(&self, query: String) -> Result<ResultSet, BQError> {
-        let query_response = self
-            .client
-            .job()
-            .query(&self.project_id, QueryRequest::new(query))
-            .await?;
+    async fn query(&self, request: QueryRequest) -> Result<ResultSet, BQError> {
+        let query_response = self.client.job().query(&self.project_id, request).await?;
 
         Ok(ResultSet::new_from_query_response(query_response))
+    }
+
+    /// Generates an SQL column specification for a `CREATE TABLE` statement.
+    fn column_spec(column_schema: &ColumnSchema) -> String {
+        let mut column_spec = format!(
+            "`{}` {}",
+            column_schema.name,
+            Self::postgres_to_bigquery_type(&column_schema.typ)
+        );
+
+        if !column_schema.nullable && !Self::is_array_type(&column_schema.typ) {
+            column_spec.push_str(" not null");
+        };
+
+        column_spec
+    }
+
+    /// Appends a `PRIMARY KEY` clause to a `CREATE TABLE` statement string.
+    fn add_primary_key_clause(column_schemas: &[ColumnSchema]) -> String {
+        let identity_columns: Vec<String> = column_schemas
+            .iter()
+            .filter(|s| s.primary)
+            .map(|c| format!("`{}`", c.name))
+            .collect();
+
+        if identity_columns.is_empty() {
+            return "".to_string();
+        }
+
+        format!(
+            ", primary key ({}) not enforced",
+            identity_columns.join(",")
+        )
+    }
+
+    /// Creates the full column specification clause for a `CREATE TABLE` statement.
+    fn create_columns_spec(column_schemas: &[ColumnSchema]) -> String {
+        let mut s = column_schemas
+            .iter()
+            .map(Self::column_spec)
+            .collect::<Vec<_>>()
+            .join(",");
+
+        s.push_str(&Self::add_primary_key_clause(column_schemas));
+
+        format!("({})", s)
+    }
+
+    /// Creates the `OPTIONS` clause for specifying max staleness in a `CREATE TABLE` statement.
+    fn max_staleness_option(max_staleness_mins: u16) -> String {
+        format!(
+            "options (max_staleness = interval {} minute)",
+            max_staleness_mins
+        )
+    }
+
+    /// Maps a PostgreSQL [`Type`] to a BigQuery data type name.
+    fn postgres_to_bigquery_type(typ: &Type) -> String {
+        if Self::is_array_type(typ) {
+            let element_type = match typ {
+                &Type::BOOL_ARRAY => "bool",
+                &Type::CHAR_ARRAY
+                | &Type::BPCHAR_ARRAY
+                | &Type::VARCHAR_ARRAY
+                | &Type::NAME_ARRAY
+                | &Type::TEXT_ARRAY => "string",
+                &Type::INT2_ARRAY | &Type::INT4_ARRAY | &Type::INT8_ARRAY => "int64",
+                &Type::FLOAT4_ARRAY | &Type::FLOAT8_ARRAY => "float64",
+                &Type::NUMERIC_ARRAY => "bignumeric",
+                &Type::DATE_ARRAY => "date",
+                &Type::TIME_ARRAY => "time",
+                &Type::TIMESTAMP_ARRAY | &Type::TIMESTAMPTZ_ARRAY => "timestamp",
+                &Type::UUID_ARRAY => "string",
+                &Type::JSON_ARRAY | &Type::JSONB_ARRAY => "json",
+                &Type::OID_ARRAY => "int64",
+                &Type::BYTEA_ARRAY => "bytes",
+                _ => "string",
+            };
+
+            return format!("array<{}>", element_type);
+        }
+
+        match typ {
+            &Type::BOOL => "bool",
+            &Type::CHAR | &Type::BPCHAR | &Type::VARCHAR | &Type::NAME | &Type::TEXT => "string",
+            &Type::INT2 | &Type::INT4 | &Type::INT8 => "int64",
+            &Type::FLOAT4 | &Type::FLOAT8 => "float64",
+            &Type::NUMERIC => "bignumeric",
+            &Type::DATE => "date",
+            &Type::TIME => "time",
+            &Type::TIMESTAMP | &Type::TIMESTAMPTZ => "timestamp",
+            &Type::UUID => "string",
+            &Type::JSON | &Type::JSONB => "json",
+            &Type::OID => "int64",
+            &Type::BYTEA => "bytes",
+            _ => "string",
+        }
+        .to_string()
+    }
+
+    /// Checks if a PostgreSQL [`Type`] is an array type.
+    fn is_array_type(typ: &Type) -> bool {
+        matches!(
+            typ,
+            &Type::BOOL_ARRAY
+                | &Type::CHAR_ARRAY
+                | &Type::BPCHAR_ARRAY
+                | &Type::VARCHAR_ARRAY
+                | &Type::NAME_ARRAY
+                | &Type::TEXT_ARRAY
+                | &Type::INT2_ARRAY
+                | &Type::INT4_ARRAY
+                | &Type::INT8_ARRAY
+                | &Type::FLOAT4_ARRAY
+                | &Type::FLOAT8_ARRAY
+                | &Type::NUMERIC_ARRAY
+                | &Type::DATE_ARRAY
+                | &Type::TIME_ARRAY
+                | &Type::TIMESTAMP_ARRAY
+                | &Type::TIMESTAMPTZ_ARRAY
+                | &Type::UUID_ARRAY
+                | &Type::JSON_ARRAY
+                | &Type::JSONB_ARRAY
+                | &Type::OID_ARRAY
+                | &Type::BYTEA_ARRAY
+        )
     }
 
     /// Converts a PostgreSQL [`TableSchema`] to a BigQuery [`TableDescriptor`].
@@ -393,35 +379,12 @@ impl BigQueryClient {
                 _ => ColumnType::String,
             };
 
-            let mode = match column_schema.typ {
-                Type::BOOL_ARRAY
-                | Type::CHAR_ARRAY
-                | Type::BPCHAR_ARRAY
-                | Type::VARCHAR_ARRAY
-                | Type::NAME_ARRAY
-                | Type::TEXT_ARRAY
-                | Type::INT2_ARRAY
-                | Type::INT4_ARRAY
-                | Type::INT8_ARRAY
-                | Type::FLOAT4_ARRAY
-                | Type::FLOAT8_ARRAY
-                | Type::NUMERIC_ARRAY
-                | Type::DATE_ARRAY
-                | Type::TIME_ARRAY
-                | Type::TIMESTAMP_ARRAY
-                | Type::TIMESTAMPTZ_ARRAY
-                | Type::UUID_ARRAY
-                | Type::JSON_ARRAY
-                | Type::JSONB_ARRAY
-                | Type::OID_ARRAY
-                | Type::BYTEA_ARRAY => ColumnMode::Repeated,
-                _ => {
-                    if column_schema.nullable {
-                        ColumnMode::Nullable
-                    } else {
-                        ColumnMode::Required
-                    }
-                }
+            let mode = if Self::is_array_type(&column_schema.typ) {
+                ColumnMode::Repeated
+            } else if column_schema.nullable {
+                ColumnMode::Nullable
+            } else {
+                ColumnMode::Required
             };
 
             field_descriptors.push(FieldDescriptor {
