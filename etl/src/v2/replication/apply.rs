@@ -321,6 +321,10 @@ where
                         false
                     )
                     .await?;
+
+                if !hook.process_syncing_tables(state.next_status_update.flush_lsn).await? {
+                    break Ok(ApplyLoopResult::ApplyCompleted);
+                }
             }
         }
     }
