@@ -20,6 +20,16 @@ use tracing::info;
 use crate::conversions::table_row::TableRow;
 use crate::conversions::Cell;
 
+/// The maximum number of byte that can be sent by stream.
+const MAX_SIZE_BYTES: usize = 9 * 1024 * 1024;
+
+/// The trace id of the client.
+const ETL_TRACE_ID: &str = "ETL BigQueryClient";
+
+/// A client for interacting with Google BigQuery.
+///
+/// This client provides methods for managing tables, inserting data,
+/// and executing queries against a BigQuery project.
 pub struct BigQueryClient {
     project_id: String,
     client: Client,
@@ -27,6 +37,10 @@ pub struct BigQueryClient {
 
 //TODO: fix all SQL injections
 impl BigQueryClient {
+    /// Creates a new [`BigQueryClient`] from a Google Cloud service account key file.
+    ///
+    /// Reads the service account key from the specified file path and uses it to
+    /// authenticate with the BigQuery API.
     pub async fn new_with_key_path(
         project_id: String,
         gcp_sa_key_path: &str,
@@ -38,6 +52,10 @@ impl BigQueryClient {
         Ok(BigQueryClient { project_id, client })
     }
 
+    /// Creates a new [`BigQueryClient`] from a Google Cloud service account key string.
+    ///
+    /// Parses the provided service account key string to authenticate with the
+    /// BigQuery API.
     pub async fn new_with_key(
         project_id: String,
         gcp_sa_key: &str,
@@ -48,6 +66,10 @@ impl BigQueryClient {
         Ok(BigQueryClient { project_id, client })
     }
 
+    /// Creates a new table in the specified dataset if it does not already exist.
+    ///
+    /// Returns `true` if the table was created, and `false` if the table
+    /// already existed.
     pub async fn create_table_if_missing(
         &self,
         dataset_id: &str,
@@ -65,6 +87,7 @@ impl BigQueryClient {
         Ok(true)
     }
 
+    /// Maps a PostgreSQL [`Type`] to a BigQuery data type name.
     fn postgres_to_bigquery_type(typ: &Type) -> &'static str {
         match typ {
             &Type::BOOL => "bool",
@@ -99,6 +122,7 @@ impl BigQueryClient {
         }
     }
 
+    /// Checks if a PostgreSQL [`Type`] is an array type.
     fn is_array_type(typ: &Type) -> bool {
         matches!(
             typ,
@@ -126,6 +150,7 @@ impl BigQueryClient {
         )
     }
 
+    /// Generates an SQL column specification for a `CREATE TABLE` statement.
     fn column_spec(column_schema: &ColumnSchema, s: &mut String) {
         s.push('`');
         s.push_str(&column_schema.name);
@@ -138,6 +163,7 @@ impl BigQueryClient {
         };
     }
 
+    /// Appends a `PRIMARY KEY` clause to a `CREATE TABLE` statement string.
     fn add_primary_key_clause(column_schemas: &[ColumnSchema], s: &mut String) {
         let identity_columns = column_schemas.iter().filter(|s| s.primary);
 
@@ -154,6 +180,7 @@ impl BigQueryClient {
         s.push_str(") not enforced");
     }
 
+    /// Creates the full column specification clause for a `CREATE TABLE` statement.
     fn create_columns_spec(column_schemas: &[ColumnSchema]) -> String {
         let mut s = String::new();
         s.push('(');
@@ -175,10 +202,12 @@ impl BigQueryClient {
         s
     }
 
+    /// Creates the `OPTIONS` clause for specifying max staleness in a `CREATE TABLE` statement.
     fn max_staleness_option(max_staleness_mins: u16) -> String {
         format!("options (max_staleness = interval {max_staleness_mins} minute)")
     }
 
+    /// Creates a table in a BigQuery dataset.
     pub async fn create_table(
         &self,
         dataset_id: &str,
@@ -188,32 +217,23 @@ impl BigQueryClient {
     ) -> Result<(), BQError> {
         let columns_spec = Self::create_columns_spec(column_schemas);
         let max_staleness_option = Self::max_staleness_option(max_staleness_mins);
-        let project_id = &self.project_id;
+        let project_id = self.project_id.as_str();
+
         info!("creating table {project_id}.{dataset_id}.{table_name} in bigquery");
+
         let query =
             format!("create table `{project_id}.{dataset_id}.{table_name}` {columns_spec} {max_staleness_option}",);
+
         let _ = self.query(query).await?;
+
         Ok(())
     }
 
-    pub async fn get_default_stream(
-        &mut self,
-        dataset_id: &str,
-        table_name: &str,
-    ) -> Result<WriteStream, BQError> {
-        let stream_name = StreamName::new_default(
-            self.project_id.clone(),
-            dataset_id.to_string(),
-            table_name.to_string(),
-        );
-        let write_stream = self
-            .client
-            .storage_mut()
-            .get_write_stream(&stream_name, WriteStreamView::Full)
-            .await?;
-        Ok(write_stream)
-    }
-
+    /// Checks if a table exists in the specified dataset.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the query result does not contain the expected `table_exists` column.
     pub async fn table_exists(&self, dataset_id: &str, table_name: &str) -> Result<bool, BQError> {
         let query = format!(
             "select exists
@@ -224,12 +244,11 @@ impl BigQueryClient {
                 ) as table_exists;",
         );
 
-        let mut rs = self.query(query).await?;
+        let mut result_set = self.query(query).await?;
 
         let mut exists = false;
-
-        if rs.next_row() {
-            exists = rs
+        if result_set.next_row() {
+            exists = result_set
                 .get_bool_by_name("table_exists")?
                 .expect("no column named `table_exists` found in query result");
         }
@@ -237,76 +256,33 @@ impl BigQueryClient {
         Ok(exists)
     }
 
-    pub async fn get_copied_table_ids(
-        &self,
-        dataset_id: &str,
-    ) -> Result<HashSet<TableId>, BQError> {
-        let project_id = &self.project_id;
-        let query = format!("select table_id from `{project_id}.{dataset_id}.copied_tables`",);
-
-        let mut rs = self.query(query).await?;
-        let mut table_ids = HashSet::new();
-        while rs.next_row() {
-            let table_id = rs
-                .get_i64_by_name("table_id")?
-                .expect("no column named `table_id` found in query result");
-            table_ids.insert(table_id as TableId);
-        }
-
-        Ok(table_ids)
-    }
-
-    pub async fn insert_into_copied_tables(
-        &self,
-        dataset_id: &str,
-        table_id: TableId,
-    ) -> Result<(), BQError> {
-        let project_id = &self.project_id;
-        let query = format!(
-            "insert into `{project_id}.{dataset_id}.copied_tables` (table_id) values ({table_id})",
-        );
-
-        let _ = self.query(query).await?;
-
-        Ok(())
-    }
-
-    pub async fn insert_row(
-        &self,
-        dataset_id: &str,
-        table_name: &str,
-        table_row: &TableRow,
-    ) -> Result<(), BQError> {
-        let query = self.create_insert_row_query(dataset_id, table_name, table_row);
-
-        let _ = self.query(query).await?;
-
-        Ok(())
-    }
-
+    /// Streams rows to a BigQuery table using the Storage Write API.
+    ///
+    /// This method is efficient for high-throughput ingestion. It batches rows
+    /// to respect the maximum request size.
     pub async fn stream_rows(
         &mut self,
         dataset_id: &str,
         table_name: String,
         table_descriptor: &TableDescriptor,
-        mut table_rows: &[TableRow],
+        table_rows: Vec<TableRow>,
     ) -> Result<(), BQError> {
+        let mut table_rows = table_rows.as_slice();
+
         let default_stream = StreamName::new_default(
             self.project_id.clone(),
             dataset_id.to_string(),
             table_name.to_string(),
         );
 
-        const MAX_SIZE_BYTES: usize = 9 * 1024 * 1024; // 9 MB
-
         loop {
             let (rows, num_processed_rows) =
                 StorageApi::create_rows(table_descriptor, table_rows, MAX_SIZE_BYTES);
-            let trace_id = "etl bigquery client".to_string();
+
             let mut response_stream = self
                 .client
                 .storage_mut()
-                .append_rows(&default_stream, rows, trace_id)
+                .append_rows(&default_stream, rows, ETL_TRACE_ID.to_owned())
                 .await?;
 
             if let Some(r) = response_stream.next().await {
@@ -322,46 +298,7 @@ impl BigQueryClient {
         Ok(())
     }
 
-    pub async fn insert_rows(
-        &self,
-        dataset_id: &str,
-        table_name: &str,
-        insert_request: TableDataInsertAllRequest,
-    ) -> Result<(), BQError> {
-        self.client
-            .tabledata()
-            .insert_all(&self.project_id, dataset_id, table_name, insert_request)
-            .await?;
-        Ok(())
-    }
-
-    fn create_insert_row_query(
-        &self,
-        dataset_id: &str,
-        table_name: &str,
-        table_row: &TableRow,
-    ) -> String {
-        let mut s = String::new();
-
-        let project_id = &self.project_id;
-        s.push_str(&format!(
-            "insert into `{project_id}.{dataset_id}.{table_name}`"
-        ));
-        s.push_str(" values(");
-
-        for (i, value) in table_row.values.iter().enumerate() {
-            Self::cell_to_query_value(value, &mut s);
-
-            if i < table_row.values.len() - 1 {
-                s.push(',');
-            }
-        }
-
-        s.push(')');
-
-        s
-    }
-
+    /// Converts a [`Cell`] value into its SQL literal representation for a query.
     fn cell_to_query_value(cell: &Cell, s: &mut String) {
         match cell {
             Cell::Null => s.push_str("null"),
@@ -388,134 +325,7 @@ impl BigQueryClient {
         }
     }
 
-    pub async fn update_row(
-        &self,
-        dataset_id: &str,
-        table_schema: &TableSchema,
-        table_row: &TableRow,
-    ) -> Result<(), BQError> {
-        let project_id = &self.project_id;
-        let table_name = &table_schema.name.name;
-        let table_name = &format!("`{project_id}.{dataset_id}.{table_name}`");
-        let column_schemas = &table_schema.column_schemas;
-        let query = Self::create_update_row_query(table_name, column_schemas, table_row);
-        let _ = self.query(query).await?;
-        Ok(())
-    }
-
-    fn create_update_row_query(
-        table_name: &str,
-        column_schemas: &[ColumnSchema],
-        table_row: &TableRow,
-    ) -> String {
-        let mut s = String::new();
-
-        s.push_str("update ");
-        s.push_str(table_name);
-        s.push_str(" set ");
-
-        let mut remove_comma = false;
-
-        for (cell, column) in table_row.values.iter().zip(column_schemas) {
-            if !column.primary {
-                s.push_str(&column.name);
-                s.push_str(" = ");
-                Self::cell_to_query_value(cell, &mut s);
-                s.push(',');
-                remove_comma = true;
-            }
-        }
-
-        if remove_comma {
-            s.pop();
-        }
-
-        Self::add_identities_where_clause(&mut s, column_schemas, table_row);
-
-        s
-    }
-
-    /// Adds a where clause for the identity columns
-    fn add_identities_where_clause(
-        s: &mut String,
-        column_schemas: &[ColumnSchema],
-        table_row: &TableRow,
-    ) {
-        s.push_str(" where ");
-
-        let mut remove_and = false;
-        for (cell, column) in table_row.values.iter().zip(column_schemas) {
-            if column.primary {
-                s.push_str(&column.name);
-                s.push_str(" = ");
-                Self::cell_to_query_value(cell, s);
-                s.push_str(" and ");
-                remove_and = true;
-            }
-        }
-
-        if remove_and {
-            s.pop(); //' '
-            s.pop(); //'d'
-            s.pop(); //'n'
-            s.pop(); //'a'
-            s.pop(); //' '
-        }
-    }
-
-    pub async fn delete_row(
-        &self,
-        dataset_id: &str,
-        table_schema: &TableSchema,
-        table_row: &TableRow,
-    ) -> Result<(), BQError> {
-        let project_id = &self.project_id;
-        let table_name = &table_schema.name.name;
-        let table_name = &format!("`{project_id}.{dataset_id}.{table_name}`");
-        let column_schemas = &table_schema.column_schemas;
-        let query = Self::create_delete_row_query(table_name, column_schemas, table_row);
-        let _ = self.query(query).await?;
-
-        Ok(())
-    }
-
-    fn create_delete_row_query(
-        table_name: &str,
-        column_schemas: &[ColumnSchema],
-        table_row: &TableRow,
-    ) -> String {
-        let mut s = String::new();
-
-        s.push_str("delete from ");
-        s.push_str(table_name);
-
-        Self::add_identities_where_clause(&mut s, column_schemas, table_row);
-
-        s
-    }
-
-    pub async fn drop_table(&self, dataset_id: &str, table_name: &str) -> Result<(), BQError> {
-        let project_id = &self.project_id;
-        info!("dropping table {project_id}.{dataset_id}.{table_name} in bigquery");
-        let query = format!("drop table `{project_id}.{dataset_id}.{table_name}`",);
-
-        let _ = self.query(query).await?;
-
-        Ok(())
-    }
-
-    pub async fn begin_transaction(&self) -> Result<(), BQError> {
-        let _ = self.query("begin transaction".to_string()).await?;
-
-        Ok(())
-    }
-
-    pub async fn commit_transaction(&self) -> Result<(), BQError> {
-        let _ = self.query("commit".to_string()).await?;
-
-        Ok(())
-    }
-
+    /// Executes an SQL query and returns the result set.
     async fn query(&self, query: String) -> Result<ResultSet, BQError> {
         let query_response = self
             .client
@@ -526,11 +336,15 @@ impl BigQueryClient {
         Ok(ResultSet::new_from_query_response(query_response))
     }
 
-    /// Converts a [`TableSchema`] to [`TableDescriptor`].
+    /// Converts a PostgreSQL [`TableSchema`] to a BigQuery [`TableDescriptor`].
     ///
-    /// This function is defined here and doesn't use the [`From`] trait because it's not possible since
-    /// [`TableSchema`] is in another crate, and we don't want to pollute the `postgres` crate with destination
-    /// specific internals.
+    /// This conversion is necessary for using the BigQuery Storage Write API.
+    /// It maps PostgreSQL data types to their corresponding BigQuery counterparts
+    /// and sets the appropriate mode (e.g., `NULLABLE`, `REQUIRED`, `REPEATED`).
+    ///
+    /// This function is defined here and doesn't use the [`From`] trait because
+    /// [`TableSchema`] is in another crate, and we don't want to pollute the
+    /// `postgres` crate with destination-specific internals.
     pub fn table_schema_to_descriptor(table_schema: &TableSchema) -> TableDescriptor {
         let mut field_descriptors = Vec::with_capacity(table_schema.column_schemas.len());
         let mut number = 1;

@@ -133,7 +133,7 @@ impl BigQueryDestination {
         let dataset_id = inner.dataset_id.clone();
         inner
             .client
-            .stream_rows(&dataset_id, table_name, &table_descriptor, &table_rows)
+            .stream_rows(&dataset_id, table_name, &table_descriptor, table_rows)
             .await?;
 
         Ok(())
@@ -196,7 +196,7 @@ impl BigQueryDestination {
             let dataset_id = inner.dataset_id.clone();
             inner
                 .client
-                .stream_rows(&dataset_id, table_name, &table_descriptor, &table_rows)
+                .stream_rows(&dataset_id, table_name, &table_descriptor, table_rows)
                 .await?;
         }
 
