@@ -20,109 +20,6 @@ use tracing::info;
 use crate::conversions::table_row::TableRow;
 use crate::conversions::Cell;
 
-/// Converts a [`TableSchema`] to [`TableDescriptor`].
-///
-/// This function is defined here and doesn't use the [`From`] trait because it's not possible since
-/// [`TableSchema`] is in another crate, and we don't want to pollute the `postgres` crate with destination
-/// specific internals.
-pub fn table_schema_to_descriptor(table_schema: &TableSchema) -> TableDescriptor {
-    let mut field_descriptors = Vec::with_capacity(table_schema.column_schemas.len());
-    let mut number = 1;
-    for column_schema in &table_schema.column_schemas {
-        let typ = match column_schema.typ {
-            Type::BOOL => ColumnType::Bool,
-            Type::CHAR | Type::BPCHAR | Type::VARCHAR | Type::NAME | Type::TEXT => {
-                ColumnType::String
-            }
-            Type::INT2 => ColumnType::Int32,
-            Type::INT4 => ColumnType::Int32,
-            Type::INT8 => ColumnType::Int64,
-            Type::FLOAT4 => ColumnType::Float,
-            Type::FLOAT8 => ColumnType::Double,
-            Type::NUMERIC => ColumnType::String,
-            Type::DATE => ColumnType::String,
-            Type::TIME => ColumnType::String,
-            Type::TIMESTAMP => ColumnType::String,
-            Type::TIMESTAMPTZ => ColumnType::String,
-            Type::UUID => ColumnType::String,
-            Type::JSON => ColumnType::String,
-            Type::JSONB => ColumnType::String,
-            Type::OID => ColumnType::Int32,
-            Type::BYTEA => ColumnType::Bytes,
-            Type::BOOL_ARRAY => ColumnType::Bool,
-            Type::CHAR_ARRAY
-            | Type::BPCHAR_ARRAY
-            | Type::VARCHAR_ARRAY
-            | Type::NAME_ARRAY
-            | Type::TEXT_ARRAY => ColumnType::String,
-            Type::INT2_ARRAY => ColumnType::Int32,
-            Type::INT4_ARRAY => ColumnType::Int32,
-            Type::INT8_ARRAY => ColumnType::Int64,
-            Type::FLOAT4_ARRAY => ColumnType::Float,
-            Type::FLOAT8_ARRAY => ColumnType::Double,
-            Type::NUMERIC_ARRAY => ColumnType::String,
-            Type::DATE_ARRAY => ColumnType::String,
-            Type::TIME_ARRAY => ColumnType::String,
-            Type::TIMESTAMP_ARRAY => ColumnType::String,
-            Type::TIMESTAMPTZ_ARRAY => ColumnType::String,
-            Type::UUID_ARRAY => ColumnType::String,
-            Type::JSON_ARRAY => ColumnType::String,
-            Type::JSONB_ARRAY => ColumnType::String,
-            Type::OID_ARRAY => ColumnType::Int32,
-            Type::BYTEA_ARRAY => ColumnType::Bytes,
-            _ => ColumnType::String,
-        };
-
-        let mode = match column_schema.typ {
-            Type::BOOL_ARRAY
-            | Type::CHAR_ARRAY
-            | Type::BPCHAR_ARRAY
-            | Type::VARCHAR_ARRAY
-            | Type::NAME_ARRAY
-            | Type::TEXT_ARRAY
-            | Type::INT2_ARRAY
-            | Type::INT4_ARRAY
-            | Type::INT8_ARRAY
-            | Type::FLOAT4_ARRAY
-            | Type::FLOAT8_ARRAY
-            | Type::NUMERIC_ARRAY
-            | Type::DATE_ARRAY
-            | Type::TIME_ARRAY
-            | Type::TIMESTAMP_ARRAY
-            | Type::TIMESTAMPTZ_ARRAY
-            | Type::UUID_ARRAY
-            | Type::JSON_ARRAY
-            | Type::JSONB_ARRAY
-            | Type::OID_ARRAY
-            | Type::BYTEA_ARRAY => ColumnMode::Repeated,
-            _ => {
-                if column_schema.nullable {
-                    ColumnMode::Nullable
-                } else {
-                    ColumnMode::Required
-                }
-            }
-        };
-
-        field_descriptors.push(FieldDescriptor {
-            number,
-            name: column_schema.name.clone(),
-            typ,
-            mode,
-        });
-        number += 1;
-    }
-
-    field_descriptors.push(FieldDescriptor {
-        number,
-        name: "_CHANGE_TYPE".to_string(),
-        typ: ColumnType::String,
-        mode: ColumnMode::Required,
-    });
-
-    TableDescriptor { field_descriptors }
-}
-
 pub struct BigQueryClient {
     project_id: String,
     client: Client,
@@ -627,6 +524,109 @@ impl BigQueryClient {
             .await?;
 
         Ok(ResultSet::new_from_query_response(query_response))
+    }
+
+    /// Converts a [`TableSchema`] to [`TableDescriptor`].
+    ///
+    /// This function is defined here and doesn't use the [`From`] trait because it's not possible since
+    /// [`TableSchema`] is in another crate, and we don't want to pollute the `postgres` crate with destination
+    /// specific internals.
+    pub fn table_schema_to_descriptor(table_schema: &TableSchema) -> TableDescriptor {
+        let mut field_descriptors = Vec::with_capacity(table_schema.column_schemas.len());
+        let mut number = 1;
+        for column_schema in &table_schema.column_schemas {
+            let typ = match column_schema.typ {
+                Type::BOOL => ColumnType::Bool,
+                Type::CHAR | Type::BPCHAR | Type::VARCHAR | Type::NAME | Type::TEXT => {
+                    ColumnType::String
+                }
+                Type::INT2 => ColumnType::Int32,
+                Type::INT4 => ColumnType::Int32,
+                Type::INT8 => ColumnType::Int64,
+                Type::FLOAT4 => ColumnType::Float,
+                Type::FLOAT8 => ColumnType::Double,
+                Type::NUMERIC => ColumnType::String,
+                Type::DATE => ColumnType::String,
+                Type::TIME => ColumnType::String,
+                Type::TIMESTAMP => ColumnType::String,
+                Type::TIMESTAMPTZ => ColumnType::String,
+                Type::UUID => ColumnType::String,
+                Type::JSON => ColumnType::String,
+                Type::JSONB => ColumnType::String,
+                Type::OID => ColumnType::Int32,
+                Type::BYTEA => ColumnType::Bytes,
+                Type::BOOL_ARRAY => ColumnType::Bool,
+                Type::CHAR_ARRAY
+                | Type::BPCHAR_ARRAY
+                | Type::VARCHAR_ARRAY
+                | Type::NAME_ARRAY
+                | Type::TEXT_ARRAY => ColumnType::String,
+                Type::INT2_ARRAY => ColumnType::Int32,
+                Type::INT4_ARRAY => ColumnType::Int32,
+                Type::INT8_ARRAY => ColumnType::Int64,
+                Type::FLOAT4_ARRAY => ColumnType::Float,
+                Type::FLOAT8_ARRAY => ColumnType::Double,
+                Type::NUMERIC_ARRAY => ColumnType::String,
+                Type::DATE_ARRAY => ColumnType::String,
+                Type::TIME_ARRAY => ColumnType::String,
+                Type::TIMESTAMP_ARRAY => ColumnType::String,
+                Type::TIMESTAMPTZ_ARRAY => ColumnType::String,
+                Type::UUID_ARRAY => ColumnType::String,
+                Type::JSON_ARRAY => ColumnType::String,
+                Type::JSONB_ARRAY => ColumnType::String,
+                Type::OID_ARRAY => ColumnType::Int32,
+                Type::BYTEA_ARRAY => ColumnType::Bytes,
+                _ => ColumnType::String,
+            };
+
+            let mode = match column_schema.typ {
+                Type::BOOL_ARRAY
+                | Type::CHAR_ARRAY
+                | Type::BPCHAR_ARRAY
+                | Type::VARCHAR_ARRAY
+                | Type::NAME_ARRAY
+                | Type::TEXT_ARRAY
+                | Type::INT2_ARRAY
+                | Type::INT4_ARRAY
+                | Type::INT8_ARRAY
+                | Type::FLOAT4_ARRAY
+                | Type::FLOAT8_ARRAY
+                | Type::NUMERIC_ARRAY
+                | Type::DATE_ARRAY
+                | Type::TIME_ARRAY
+                | Type::TIMESTAMP_ARRAY
+                | Type::TIMESTAMPTZ_ARRAY
+                | Type::UUID_ARRAY
+                | Type::JSON_ARRAY
+                | Type::JSONB_ARRAY
+                | Type::OID_ARRAY
+                | Type::BYTEA_ARRAY => ColumnMode::Repeated,
+                _ => {
+                    if column_schema.nullable {
+                        ColumnMode::Nullable
+                    } else {
+                        ColumnMode::Required
+                    }
+                }
+            };
+
+            field_descriptors.push(FieldDescriptor {
+                number,
+                name: column_schema.name.clone(),
+                typ,
+                mode,
+            });
+            number += 1;
+        }
+
+        field_descriptors.push(FieldDescriptor {
+            number,
+            name: "_CHANGE_TYPE".to_string(),
+            typ: ColumnType::String,
+            mode: ColumnMode::Required,
+        });
+
+        TableDescriptor { field_descriptors }
     }
 }
 

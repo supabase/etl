@@ -31,6 +31,7 @@ impl TableName {
     pub fn as_quoted_identifier(&self) -> String {
         let quoted_schema = quote_identifier(&self.schema);
         let quoted_name = quote_identifier(&self.name);
+
         format!("{quoted_schema}.{quoted_name}")
     }
 }

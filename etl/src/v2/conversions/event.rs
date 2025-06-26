@@ -117,20 +117,26 @@ impl RelationEvent {
 #[derive(Debug, Clone, PartialEq)]
 pub struct InsertEvent {
     pub table_id: Oid,
-    pub row: TableRow,
+    pub table_row: TableRow,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct UpdateEvent {
     pub table_id: Oid,
-    pub row: TableRow,
-    pub identity_row: Option<TableRow>,
+    pub table_row: TableRow,
+    /// Represents the old table row that was deleted.
+    ///
+    /// The boolean represents whether the row contains only the `key` columns or not.
+    pub old_table_row: Option<(bool, TableRow)>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct DeleteEvent {
     pub table_id: Oid,
-    pub identity_row: Option<TableRow>,
+    /// Represents the old table row that was deleted.
+    ///
+    /// The boolean represents whether the row contains only the `key` columns or not.
+    pub old_table_row: Option<(bool, TableRow)>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -255,12 +261,16 @@ async fn convert_insert_to_event(
 ) -> Result<Event, EventConversionError> {
     let table_id = insert_body.rel_id();
     let table_schema = get_table_schema(schema_cache, table_id).await?;
-    let row = convert_tuple_to_row(
+
+    let table_row = convert_tuple_to_row(
         &table_schema.column_schemas,
         insert_body.tuple().tuple_data(),
     )?;
 
-    Ok(Event::Insert(InsertEvent { table_id, row }))
+    Ok(Event::Insert(InsertEvent {
+        table_id,
+        table_row,
+    }))
 }
 
 async fn convert_update_to_event(
@@ -270,24 +280,28 @@ async fn convert_update_to_event(
     let table_id = update_body.rel_id();
     let table_schema = get_table_schema(schema_cache, table_id).await?;
 
-    let row = convert_tuple_to_row(
+    let table_row = convert_tuple_to_row(
         &table_schema.column_schemas,
         update_body.new_tuple().tuple_data(),
     )?;
 
-    let identity = update_body.key_tuple().or(update_body.old_tuple());
-    let identity_row = match identity {
+    // We try to extract the old tuple by either taking the entire old tuple or the key of the old
+    // tuple.
+    let is_key = update_body.old_tuple().is_none();
+    let old_tuple = update_body.old_tuple().or(update_body.key_tuple());
+    let old_table_row = match old_tuple {
         Some(identity) => Some(convert_tuple_to_row(
             &table_schema.column_schemas,
             identity.tuple_data(),
         )?),
         None => None,
-    };
+    }
+    .map(|row| (is_key, row));
 
     Ok(Event::Update(UpdateEvent {
         table_id,
-        row,
-        identity_row,
+        table_row,
+        old_table_row,
     }))
 }
 
@@ -298,18 +312,22 @@ async fn convert_delete_to_event(
     let table_id = delete_body.rel_id();
     let table_schema = get_table_schema(schema_cache, table_id).await?;
 
-    let identity = delete_body.key_tuple().or(delete_body.old_tuple());
-    let identity_row = match identity {
+    // We try to extract the old tuple by either taking the entire old tuple or the key of the old
+    // tuple.
+    let is_key = delete_body.old_tuple().is_none();
+    let old_tuple = delete_body.old_tuple().or(delete_body.key_tuple());
+    let old_table_row = match old_tuple {
         Some(identity) => Some(convert_tuple_to_row(
             &table_schema.column_schemas,
             identity.tuple_data(),
         )?),
         None => None,
-    };
+    }
+    .map(|row| (is_key, row));
 
     Ok(Event::Delete(DeleteEvent {
         table_id,
-        identity_row,
+        old_table_row,
     }))
 }
 

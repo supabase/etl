@@ -225,7 +225,7 @@ fn build_expected_users_inserts(
     for (name, age) in expected_rows {
         events.push(Event::Insert(InsertEvent {
             table_id: users_table_id,
-            row: TableRow {
+            table_row: TableRow {
                 values: vec![
                     Cell::I64(starting_id),
                     Cell::String(name.to_owned()),
@@ -250,7 +250,7 @@ fn build_expected_orders_inserts(
     for name in expected_rows {
         events.push(Event::Insert(InsertEvent {
             table_id: orders_table_id,
-            row: TableRow {
+            table_row: TableRow {
                 values: vec![Cell::I64(starting_id), Cell::String(name.to_owned())],
             },
         }));

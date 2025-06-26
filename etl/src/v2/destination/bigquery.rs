@@ -1,15 +1,18 @@
-use crate::clients::bigquery::table_schema_to_descriptor;
+use gcp_bigquery_client::error::BQError;
+use gcp_bigquery_client::storage::TableDescriptor;
+use postgres::schema::{Oid, TableSchema};
+use std::collections::HashMap;
+use std::ops::Deref;
+use std::sync::Arc;
+use thiserror::Error;
+use tokio::sync::RwLock;
+
 use crate::conversions::table_row::TableRow;
 use crate::conversions::Cell;
 use crate::v2::clients::bigquery::BigQueryClient;
 use crate::v2::conversions::event::Event;
 use crate::v2::destination::base::{Destination, DestinationError};
 use crate::v2::schema::cache::SchemaCache;
-use gcp_bigquery_client::error::BQError;
-use postgres::schema::{Oid, TableSchema};
-use std::sync::Arc;
-use thiserror::Error;
-use tokio::sync::RwLock;
 
 #[derive(Debug, Error)]
 pub enum BigQueryDestinationError {
@@ -74,6 +77,21 @@ impl BigQueryDestination {
         })
     }
 
+    async fn load_table_name_and_descriptor<I: Deref<Target = Inner>>(
+        inner: &I,
+        table_id: &Oid,
+    ) -> Result<(String, TableDescriptor), BigQueryDestinationError> {
+        let schema_cache = inner.schema_cache.read_inner().await;
+        let table_schema = schema_cache
+            .get_table_schema_ref(table_id)
+            .ok_or(BigQueryDestinationError::MissingTableSchema(*table_id))?;
+
+        let table_name = table_schema.name.as_bigquery_table_name();
+        let table_descriptor = BigQueryClient::table_schema_to_descriptor(table_schema);
+
+        Ok((table_name, table_descriptor))
+    }
+
     async fn write_table_schema(
         &self,
         table_schema: TableSchema,
@@ -105,24 +123,14 @@ impl BigQueryDestination {
     ) -> Result<(), BigQueryDestinationError> {
         let mut inner = self.inner.write().await;
 
-        // TODO: figure out how we can avoid a clone.
-        let dataset_id = inner.dataset_id.clone();
-        let (table_name, table_descriptor) = {
-            let schema_cache = inner.schema_cache.read_inner().await;
-            let table_schema = schema_cache
-                .get_table_schema_ref(&table_id)
-                .ok_or(BigQueryDestinationError::MissingTableSchema(table_id))?;
-
-            let table_name = table_schema.name.as_bigquery_table_name();
-            let table_descriptor = table_schema_to_descriptor(table_schema);
-
-            (table_name, table_descriptor)
-        };
+        let (table_name, table_descriptor) =
+            Self::load_table_name_and_descriptor(&inner, &table_id).await?;
 
         for table_row in &mut table_rows {
             table_row.values.push(Cell::String("UPSERT".to_string()));
         }
 
+        let dataset_id = inner.dataset_id.clone();
         inner
             .client
             .stream_rows(&dataset_id, table_name, &table_descriptor, &table_rows)
@@ -132,7 +140,67 @@ impl BigQueryDestination {
     }
 
     async fn write_events(&self, events: Vec<Event>) -> Result<(), BigQueryDestinationError> {
-        todo!()
+        let mut table_id_to_table_rows = HashMap::new();
+
+        for event in events {
+            match event {
+                Event::Insert(mut insert) => {
+                    insert
+                        .table_row
+                        .values
+                        .push(Cell::String("UPSERT".to_owned()));
+                    let table_rows: &mut Vec<TableRow> =
+                        table_id_to_table_rows.entry(insert.table_id).or_default();
+                    table_rows.push(insert.table_row);
+                }
+                Event::Update(mut update) => {
+                    update
+                        .table_row
+                        .values
+                        .push(Cell::String("UPSERT".to_owned()));
+                    let table_rows: &mut Vec<TableRow> =
+                        table_id_to_table_rows.entry(update.table_id).or_default();
+                    table_rows.push(update.table_row);
+                }
+                Event::Delete(delete) => {
+                    let Some((is_key, mut old_table_row)) = delete.old_table_row else {
+                        continue;
+                    };
+
+                    // Only if the old table row is not a key, meaning it has all the columns, we
+                    // want to insert it, otherwise we might miss columns.
+                    if !is_key {
+                        old_table_row.values.push(Cell::String("DELETE".to_owned()));
+                        let table_rows: &mut Vec<TableRow> =
+                            table_id_to_table_rows.entry(delete.table_id).or_default();
+                        table_rows.push(old_table_row);
+                    }
+                }
+                Event::Truncate(_) => {
+                    // BigQuery doesn't support `TRUNCATE` DML statement when using the storage write API.
+                    // If you try to truncate a table that has a streaming buffer, you will get the following error:
+                    //  TRUNCATE DML statement over table <tablename> would affect rows in the streaming buffer, which is not supported
+                }
+                _ => {
+                    // Every other event type is currently not supported.
+                }
+            }
+        }
+
+        let mut inner = self.inner.write().await;
+
+        for (table_id, table_rows) in table_id_to_table_rows {
+            let (table_name, table_descriptor) =
+                Self::load_table_name_and_descriptor(&inner, &table_id).await?;
+
+            let dataset_id = inner.dataset_id.clone();
+            inner
+                .client
+                .stream_rows(&dataset_id, table_name, &table_descriptor, &table_rows)
+                .await?;
+        }
+
+        Ok(())
     }
 }
 
