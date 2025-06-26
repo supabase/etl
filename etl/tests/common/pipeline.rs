@@ -45,7 +45,10 @@ pub async fn spawn_pg_pipeline<Snk: BatchDestination>(
     mode: PipelineMode,
     destination: Snk,
 ) -> BatchDataPipeline<PostgresSource, Snk> {
-    let batch_config = BatchConfig::new(1000, Duration::from_secs(10));
+    // The batch size is set to the smallest value so that batches fill quickly in tests and
+    // hence the tests run faster. Without this the batches fill in 10 seconds (the max_batch_fill_time)
+    // and the tests run slow due to small amount of data in tests.
+    let batch_config = BatchConfig::new(1, Duration::from_secs(10));
 
     let pipeline = match mode {
         PipelineMode::CopyTable { table_names } => {

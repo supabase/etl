@@ -97,6 +97,15 @@ pub enum GetOrCreateSlotResult {
     GetSlot(GetSlotResult),
 }
 
+impl GetOrCreateSlotResult {
+    pub fn get_start_lsn(&self) -> PgLsn {
+        match self {
+            GetOrCreateSlotResult::CreateSlot(result) => result.consistent_point,
+            GetOrCreateSlotResult::GetSlot(result) => result.confirmed_flush_lsn,
+        }
+    }
+}
+
 /// A transaction that operates within the context of a replication slot.
 ///
 /// This type ensures that the parent connection remains active for the duration of any

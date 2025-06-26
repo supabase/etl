@@ -1,24 +1,20 @@
 use crate::v2::concurrency::shutdown::ShutdownRx;
 use crate::v2::config::pipeline::PipelineConfig;
 use crate::v2::destination::base::Destination;
-use crate::v2::pipeline::PipelineIdentity;
+use crate::v2::pipeline::{PipelineId, PipelineIdentity};
 use crate::v2::replication::apply::{start_apply_loop, ApplyLoopError, ApplyLoopHook};
-use crate::v2::replication::client::{
-    GetOrCreateSlotResult, PgReplicationClient, PgReplicationError,
-};
+use crate::v2::replication::client::{PgReplicationClient, PgReplicationError};
 use crate::v2::replication::slot::{get_slot_name, SlotError};
 use crate::v2::schema::cache::SchemaCache;
-use crate::v2::state::origin::ReplicationOriginState;
 use crate::v2::state::store::base::{StateStore, StateStoreError};
-use crate::v2::state::table::{
-    TableReplicationPhase, TableReplicationPhaseType, TableReplicationState,
-};
+use crate::v2::state::table::{TableReplicationPhase, TableReplicationPhaseType};
 use crate::v2::workers::base::{Worker, WorkerHandle, WorkerType, WorkerWaitError};
 use crate::v2::workers::pool::TableSyncWorkerPool;
 use crate::v2::workers::table_sync::{
     TableSyncWorker, TableSyncWorkerError, TableSyncWorkerState, TableSyncWorkerStateError,
 };
-use postgres::schema::Oid;
+use postgres::schema::{Oid, TableId};
+use std::collections::HashMap;
 use std::sync::Arc;
 use thiserror::Error;
 use tokio::task::JoinHandle;
@@ -38,11 +34,6 @@ pub enum ApplyWorkerError {
 
     #[error("Could not generate slot name in the apply loop: {0}")]
     Slot(#[from] SlotError),
-
-    #[error(
-        "The replication origin for the apply worker was not found even though the slot was active"
-    )]
-    ReplicationOriginMissing,
 }
 
 #[derive(Debug, Error)]
@@ -127,21 +118,14 @@ where
         info!("Starting apply worker");
 
         let apply_worker = async move {
-            let origin_start_lsn = initialize_apply_loop(
-                &self.identity,
-                &self.config,
-                &self.replication_client,
-                &self.state_store,
-            )
-            .await?;
+            let start_lsn = get_start_lsn(self.identity.id(), &self.replication_client).await?;
 
             start_apply_loop(
                 self.identity.clone(),
-                origin_start_lsn,
+                start_lsn,
                 self.config.clone(),
                 self.replication_client.clone(),
                 self.schema_cache.clone(),
-                self.state_store.clone(),
                 self.destination.clone(),
                 Hook::new(
                     self.identity,
@@ -168,62 +152,22 @@ where
     }
 }
 
-async fn initialize_apply_loop<S>(
-    identity: &PipelineIdentity,
-    config: &Arc<PipelineConfig>,
+async fn get_start_lsn(
+    pipeline_id: PipelineId,
     replication_client: &PgReplicationClient,
-    state_store: &S,
-) -> Result<PgLsn, ApplyWorkerError>
-where
-    S: StateStore + Clone + Send + Sync + 'static,
-{
-    let mut attempt = 0;
-    loop {
-        // We get or create the slot name for the apply worker.
-        let slot_name = get_slot_name(identity, WorkerType::Apply)?;
-        let slot = replication_client.get_or_create_slot(&slot_name).await?;
-
-        // If we just created a slot, we will use its consistent point to start the apply loop,
-        // otherwise we will load from the replication origin.
-        let origin_start_lsn = if let GetOrCreateSlotResult::CreateSlot(slot) = slot {
-            let replication_origin_state =
-                ReplicationOriginState::new(identity.id(), None, slot.consistent_point);
-
-            state_store
-                .store_replication_origin_state(replication_origin_state, true)
-                .await?;
-
-            slot.consistent_point
-        } else {
-            let replication_origin_state = state_store
-                .load_replication_origin_state(identity.id(), None)
-                .await?;
-
-            // If we didn't find any replication origin state but the slot was there, the
-            // apply worker might have crashed between creating a slot and storing the
-            // replication origin state. In this case, we optimistically delete the slot and
-            // start from scratch.
-            let Some(replication_origin_state) = replication_origin_state else {
-                replication_client.delete_slot(&slot_name).await?;
-                attempt += 1;
-
-                if attempt >= config.apply_worker_initialization_retry.max_attempts {
-                    return Err(ApplyWorkerError::ReplicationOriginMissing);
-                }
-
-                let delay = config
-                    .apply_worker_initialization_retry
-                    .calculate_delay(attempt);
-                tokio::time::sleep(delay).await;
-
-                continue;
-            };
-
-            replication_origin_state.remote_lsn
-        };
-
-        return Ok(origin_start_lsn);
-    }
+) -> Result<PgLsn, ApplyWorkerError> {
+    let slot_name = get_slot_name(pipeline_id, WorkerType::Apply)?;
+    // TODO: validate that we only create the slot when we first start replication which
+    // means when all tables are in the Init state. In any other case we should raise an
+    // error because that means the apply slot was deleted and creating a fresh slot now
+    // could cause inconsistent data to be read.
+    // Addendum: this might be hard to detect in all cases. E.g. what if the apply worker
+    // starts bunch of table sync wokers and before creating a slot the process crashes?
+    // In this case, the apply worker slot is missing not because someone deleted it but
+    // because it was never created in the first place. The answer here might be to create
+    // the apply worker slot as the first thing, before starting table sync workers.
+    let slot = replication_client.get_or_create_slot(&slot_name).await?;
+    Ok(slot.get_start_lsn())
 }
 
 #[derive(Debug)]
@@ -359,9 +303,9 @@ where
 
     async fn active_table_replication_states(
         &self,
-    ) -> Result<Vec<TableReplicationState>, ApplyWorkerHookError> {
-        let mut table_replication_states = self.state_store.load_table_replication_states().await?;
-        table_replication_states.retain(|s| !s.phase.as_type().is_done());
+    ) -> Result<HashMap<TableId, TableReplicationPhase>, ApplyWorkerHookError> {
+        let mut table_replication_states = self.state_store.get_table_replication_states().await?;
+        table_replication_states.retain(|_table_id, state| !state.as_type().is_done());
 
         Ok(table_replication_states)
     }
@@ -377,17 +321,18 @@ where
     async fn initialize(&self) -> Result<(), Self::Error> {
         let table_replication_states = self.active_table_replication_states().await?;
 
-        for table_replication_state in table_replication_states {
-            let table_id = table_replication_state.table_id;
-
+        for table_id in table_replication_states.keys() {
             let table_sync_worker_state = {
                 let pool = self.pool.read().await;
-                pool.get_active_worker_state(table_id)
+                pool.get_active_worker_state(*table_id)
             };
 
             if table_sync_worker_state.is_none() {
-                if let Err(err) = self.start_table_sync_worker(table_id).await {
-                    error!("Error handling syncing table {}: {}", table_id, err);
+                if let Err(err) = self.start_table_sync_worker(*table_id).await {
+                    error!(
+                        "Error starting table sync worker for table {}: {}",
+                        table_id, err
+                    );
                 }
             }
         }
@@ -402,21 +347,17 @@ where
             current_lsn
         );
 
-        for table_replication_state in table_replication_states {
+        for (table_id, table_replication_phase) in table_replication_states {
             // We read the state store state first, if we don't find `SyncDone` we will attempt to
             // read the shared state which can contain also non-persisted states.
-            let table_id = table_replication_state.table_id;
-            match table_replication_state.phase {
+            match table_replication_phase {
                 TableReplicationPhase::SyncDone { lsn } if current_lsn >= lsn => {
-                    let updated_state = table_replication_state
-                        .with_phase(TableReplicationPhase::Ready { lsn: current_lsn });
                     info!(
                         "Table {} is ready, its events are now processed by the main apply worker",
                         table_id
                     );
-
                     self.state_store
-                        .store_table_replication_state(updated_state, true)
+                        .update_table_replication_state(table_id, TableReplicationPhase::Ready)
                         .await?;
                 }
                 _ => {
@@ -444,13 +385,8 @@ where
 
         // We store the new skipped state in the state store, since we want to still skip a table in
         // case of pipeline restarts.
-        let table_replication_state = TableReplicationState::new(
-            self.identity.id(),
-            table_id,
-            TableReplicationPhase::Skipped,
-        );
         self.state_store
-            .store_table_replication_state(table_replication_state, true)
+            .update_table_replication_state(table_id, TableReplicationPhase::Skipped)
             .await?;
 
         Ok(true)
@@ -473,19 +409,19 @@ where
             None => {
                 let Some(state) = self
                     .state_store
-                    .load_table_replication_state(self.identity.id(), table_id)
+                    .get_table_replication_state(table_id)
                     .await?
                 else {
                     // If we don't even find the state for this table, we skip the event entirely.
                     return Ok(false);
                 };
 
-                state.phase
+                state
             }
         };
 
         let should_apply_changes = match replication_phase {
-            TableReplicationPhase::Ready { .. } => true,
+            TableReplicationPhase::Ready => true,
             TableReplicationPhase::SyncDone { lsn } => lsn <= remote_final_lsn,
             _ => false,
         };

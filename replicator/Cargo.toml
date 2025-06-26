@@ -13,5 +13,10 @@ anyhow = { workspace = true, features = ["std"] }
 thiserror = { workspace = true }
 rustls-pemfile = { workspace = true, features = ["std"] }
 secrecy = { workspace = true }
+sqlx = { workspace = true, features = [
+    "runtime-tokio-rustls",
+    "postgres",
+    "migrate",
+] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal"] }
 tracing = { workspace = true, default-features = true }

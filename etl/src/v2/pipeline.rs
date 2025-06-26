@@ -11,7 +11,7 @@ use crate::v2::destination::base::{Destination, DestinationError};
 use crate::v2::replication::client::{PgReplicationClient, PgReplicationError};
 use crate::v2::schema::cache::SchemaCache;
 use crate::v2::state::store::base::{StateStore, StateStoreError};
-use crate::v2::state::table::TableReplicationState;
+use crate::v2::state::table::TableReplicationPhase;
 use crate::v2::workers::apply::{ApplyWorker, ApplyWorkerError, ApplyWorkerHandle};
 use crate::v2::workers::base::{Worker, WorkerHandle, WorkerWaitError, WorkerWaitErrors};
 use crate::v2::workers::pool::TableSyncWorkerPool;
@@ -145,7 +145,7 @@ where
         // We synchronize the relation subscription states with the publication, to make sure we
         // always know which tables to work with. Maybe in the future we also want to react in real
         // time to new relation ids being sent over by the cdc event stream.
-        self.sync_relation_subscription_states(&replication_client)
+        self.initialize_replication_states(&replication_client)
             .await?;
 
         // We create the table sync workers pool to manage all table sync workers in a central place.
@@ -183,7 +183,7 @@ where
         Ok(schema_cache)
     }
 
-    async fn sync_relation_subscription_states(
+    async fn initialize_replication_states(
         &self,
         replication_client: &PgReplicationClient,
     ) -> Result<(), PipelineError> {
@@ -203,16 +203,17 @@ where
             ));
         }
 
-        // We fetch all the table ids for the publication to which the pipeline subscribes.
         let table_ids = replication_client
             .get_publication_table_ids(self.identity.publication_name())
             .await?;
+        self.state_store.load_table_replication_states().await?;
+        let states = self.state_store.get_table_replication_states().await?;
         for table_id in table_ids {
-            let state = TableReplicationState::init(self.identity.id, table_id);
-            // We store the init state only if it's not already present.
-            self.state_store
-                .store_table_replication_state(state, false)
-                .await?;
+            if !states.contains_key(&table_id) {
+                self.state_store
+                    .update_table_replication_state(table_id, TableReplicationPhase::Init)
+                    .await?;
+            }
         }
 
         Ok(())

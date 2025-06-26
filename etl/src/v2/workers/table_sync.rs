@@ -1,4 +1,4 @@
-use postgres::schema::Oid;
+use postgres::schema::{Oid, TableId};
 use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
@@ -17,9 +17,7 @@ use crate::v2::replication::client::PgReplicationClient;
 use crate::v2::replication::table_sync::{start_table_sync, TableSyncError, TableSyncResult};
 use crate::v2::schema::cache::SchemaCache;
 use crate::v2::state::store::base::{StateStore, StateStoreError};
-use crate::v2::state::table::{
-    TableReplicationPhase, TableReplicationPhaseType, TableReplicationState,
-};
+use crate::v2::state::table::{TableReplicationPhase, TableReplicationPhaseType};
 use crate::v2::workers::base::{Worker, WorkerHandle, WorkerType, WorkerWaitError};
 use crate::v2::workers::pool::TableSyncWorkerPool;
 
@@ -54,7 +52,8 @@ pub enum TableSyncWorkerStateError {
 
 #[derive(Debug)]
 pub struct TableSyncWorkerStateInner {
-    table_replication_state: TableReplicationState,
+    table_id: TableId,
+    table_replication_phase: TableReplicationPhase,
     phase_change: Arc<Notify>,
 }
 
@@ -62,10 +61,10 @@ impl TableSyncWorkerStateInner {
     pub fn set_phase(&mut self, phase: TableReplicationPhase) {
         info!(
             "Table {} phase changing from '{:?}' to '{:?}'",
-            self.table_replication_state.table_id, self.table_replication_state.phase, phase
+            self.table_id, self.table_replication_phase, phase
         );
 
-        self.table_replication_state.phase = phase;
+        self.table_replication_phase = phase;
         // We want to notify all waiters that there was a phase change.
         //
         // Note that this notify will not wake up waiters that will be coming in the future since
@@ -86,13 +85,11 @@ impl TableSyncWorkerStateInner {
         if phase.as_type().should_store() {
             info!(
                 "Storing phase change '{:?}' for table {:?}",
-                phase, self.table_replication_state.table_id,
+                phase, self.table_id,
             );
 
-            let new_table_replication_state =
-                self.table_replication_state.clone().with_phase(phase);
             state_store
-                .store_table_replication_state(new_table_replication_state, true)
+                .update_table_replication_state(self.table_id, phase)
                 .await?;
         }
 
@@ -100,11 +97,11 @@ impl TableSyncWorkerStateInner {
     }
 
     pub fn table_id(&self) -> Oid {
-        self.table_replication_state.table_id
+        self.table_id
     }
 
     pub fn replication_phase(&self) -> TableReplicationPhase {
-        self.table_replication_state.phase
+        self.table_replication_phase
     }
 }
 
@@ -116,9 +113,10 @@ pub struct TableSyncWorkerState {
 }
 
 impl TableSyncWorkerState {
-    fn new(table_replication_state: TableReplicationState) -> Self {
+    fn new(table_id: TableId, table_replication_phase: TableReplicationPhase) -> Self {
         let inner = TableSyncWorkerStateInner {
-            table_replication_state,
+            table_id,
+            table_replication_phase,
             phase_change: Arc::new(Notify::new()),
         };
 
@@ -139,7 +137,7 @@ impl TableSyncWorkerState {
         // that we want.
         let phase_change = {
             let inner = self.inner.read().await;
-            if inner.table_replication_state.phase.as_type() == phase_type {
+            if inner.table_replication_phase.as_type() == phase_type {
                 info!(
                     "Phase type '{:?}' was already set, no need to wait",
                     phase_type
@@ -156,10 +154,10 @@ impl TableSyncWorkerState {
 
         // We read the state and return the lock to the state.
         let inner = self.inner.read().await;
-        if inner.table_replication_state.phase.as_type() == phase_type {
+        if inner.table_replication_phase.as_type() == phase_type {
             info!(
                 "Phase type '{:?}' was reached for table {:?}",
-                phase_type, inner.table_replication_state.table_id
+                phase_type, inner.table_id
             );
             return Some(inner);
         }
@@ -174,7 +172,7 @@ impl TableSyncWorkerState {
     ) -> ShutdownResult<RwLockReadGuard<'_, TableSyncWorkerStateInner>, ()> {
         let table_id = {
             let inner = self.inner.read().await;
-            inner.table_replication_state.table_id
+            inner.table_id
         };
         info!(
             "Waiting for phase type '{:?}' for table {:?}",
@@ -281,7 +279,7 @@ where
         //  implementing a mechanism for table sync state to be updated after the fact.
         let Some(relation_subscription_state) = self
             .state_store
-            .load_table_replication_state(self.identity.id(), self.table_id)
+            .get_table_replication_state(self.table_id)
             .await?
         else {
             warn!(
@@ -292,7 +290,7 @@ where
             return Err(TableSyncWorkerError::ReplicationStateMissing(self.table_id));
         };
 
-        let state = TableSyncWorkerState::new(relation_subscription_state);
+        let state = TableSyncWorkerState::new(self.table_id, relation_subscription_state);
 
         let state_clone = state.clone();
         let table_sync_worker = async move {
@@ -309,21 +307,20 @@ where
             )
             .await;
 
-            let origin_start_lsn = match result {
+            let start_lsn = match result {
                 Ok(TableSyncResult::SyncStopped | TableSyncResult::SyncNotRequired) => {
                     return Ok(())
                 }
-                Ok(TableSyncResult::SyncCompleted { origin_start_lsn }) => origin_start_lsn,
+                Ok(TableSyncResult::SyncCompleted { start_lsn }) => start_lsn,
                 Err(err) => return Err(err.into()),
             };
 
             start_apply_loop(
                 self.identity,
-                origin_start_lsn,
+                start_lsn,
                 self.config,
                 self.replication_client,
                 self.schema_cache,
-                self.state_store.clone(),
                 self.destination,
                 Hook::new(self.table_id, state_clone, self.state_store),
                 self.shutdown_rx,
@@ -397,7 +394,7 @@ where
             // We drop the lock since we don't need to hold it while cleaning resources.
             drop(inner);
 
-            // TODO: implement cleanup of slot and replication origin.
+            // TODO: implement cleanup of slot.
 
             info!(
                 "Table sync worker for table {} has caught up with the apply worker, shutting down",
@@ -430,7 +427,7 @@ where
     ) -> Result<bool, Self::Error> {
         let inner = self.table_sync_worker_state.get_inner().write().await;
         let is_skipped = matches!(
-            inner.table_replication_state.phase.as_type(),
+            inner.table_replication_phase.as_type(),
             TableReplicationPhaseType::Skipped
         );
 

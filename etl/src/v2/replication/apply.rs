@@ -10,8 +10,7 @@ use crate::v2::replication::client::{PgReplicationClient, PgReplicationError};
 use crate::v2::replication::slot::{get_slot_name, SlotError};
 use crate::v2::replication::stream::{EventsStream, EventsStreamError};
 use crate::v2::schema::cache::SchemaCache;
-use crate::v2::state::origin::ReplicationOriginState;
-use crate::v2::state::store::base::{StateStore, StateStoreError};
+use crate::v2::state::store::base::StateStoreError;
 use crate::v2::workers::apply::ApplyWorkerHookError;
 use crate::v2::workers::base::WorkerType;
 use crate::v2::workers::table_sync::TableSyncWorkerHookError;
@@ -201,29 +200,27 @@ impl ApplyLoopState {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub async fn start_apply_loop<S, D, T>(
+pub async fn start_apply_loop<D, T>(
     identity: PipelineIdentity,
-    origin_start_lsn: PgLsn,
+    start_lsn: PgLsn,
     config: Arc<PipelineConfig>,
     replication_client: PgReplicationClient,
     schema_cache: SchemaCache,
-    state_store: S,
     destination: D,
     hook: T,
     mut shutdown_rx: ShutdownRx,
 ) -> Result<ApplyLoopResult, ApplyLoopError>
 where
-    S: StateStore + Clone + Send + 'static,
     D: Destination + Clone + Send + 'static,
     T: ApplyLoopHook,
     ApplyLoopError: From<<T as ApplyLoopHook>::Error>,
 {
-    // The first status update is defaulted from the origin start lsn since at this point we haven't
+    // The first status update is defaulted from the start lsn since at this point we haven't
     // processed anything.
     let first_status_update = StatusUpdate {
-        write_lsn: origin_start_lsn,
-        flush_lsn: origin_start_lsn,
-        apply_lsn: origin_start_lsn,
+        write_lsn: start_lsn,
+        flush_lsn: start_lsn,
+        apply_lsn: start_lsn,
     };
 
     // We initialize the shared state that is used throughout the loop to track progress.
@@ -234,12 +231,12 @@ where
 
     // We compute the slot name for the replication slot that we are going to use for the logical
     // replication. At this point we assume that the slot already exists.
-    let slot_name = get_slot_name(&identity, hook.worker_type())?;
+    let slot_name = get_slot_name(identity.id(), hook.worker_type())?;
 
     // We start the logical replication stream with the supplied parameters at a given lsn. That
     // lsn is the last lsn from which we need to start fetching events.
     let logical_replication_stream = replication_client
-        .start_logical_replication(identity.publication_name(), &slot_name, origin_start_lsn)
+        .start_logical_replication(identity.publication_name(), &slot_name, start_lsn)
         .await?;
     let logical_replication_stream = EventsStream::wrap(logical_replication_stream);
     let logical_replication_stream = BatchStream::wrap(
@@ -273,12 +270,10 @@ where
                 match result {
                     ShutdownResult::Ok(messages_batch) => {
                         let stop_apply_loop = handle_replication_message_batch(
-                            &identity,
                             &mut state,
                             events_stream,
                             messages_batch,
                             &schema_cache,
-                            &state_store,
                             &destination,
                             &hook,
                         )
@@ -329,18 +324,15 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn handle_replication_message_batch<S, D, T>(
-    identity: &PipelineIdentity,
+async fn handle_replication_message_batch<D, T>(
     state: &mut ApplyLoopState,
     mut stream: Pin<&mut EventsStream>,
     messages_batch: Vec<Result<ReplicationMessage<LogicalReplicationMessage>, EventsStreamError>>,
     schema_cache: &SchemaCache,
-    state_store: &S,
     destination: &D,
     hook: &T,
 ) -> Result<bool, ApplyLoopError>
 where
-    S: StateStore + Clone + Send + 'static,
     D: Destination + Clone + Send + 'static,
     T: ApplyLoopHook,
     ApplyLoopError: From<<T as ApplyLoopHook>::Error>,
@@ -405,14 +397,6 @@ where
     // At this point, the `last_commit_end_lsn` will contain the LSN of the next byte in the WAL after
     // the last `Commit` message that was processed in this batch or in the previous ones.
     if let Some(last_commit_end_lsn) = state.last_commit_end_lsn.take() {
-        // We store the LSN in the replication origin state in order to be able to restart from that
-        // LSN.
-        let replication_origin_state =
-            ReplicationOriginState::new(identity.id(), None, last_commit_end_lsn);
-        state_store
-            .store_replication_origin_state(replication_origin_state, true)
-            .await?;
-
         // We also prepare the next status update for Postgres, where we will confirm that we flushed
         // data up to this LSN to allow for WAL pruning on the database side.
         //

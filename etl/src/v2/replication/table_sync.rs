@@ -7,7 +7,6 @@ use crate::v2::replication::client::{PgReplicationClient, PgReplicationError};
 use crate::v2::replication::slot::{get_slot_name, SlotError};
 use crate::v2::replication::stream::{TableCopyStream, TableCopyStreamError};
 use crate::v2::schema::cache::SchemaCache;
-use crate::v2::state::origin::ReplicationOriginState;
 use crate::v2::state::store::base::{StateStore, StateStoreError};
 use crate::v2::state::table::{TableReplicationPhase, TableReplicationPhaseType};
 use crate::v2::workers::base::WorkerType;
@@ -42,16 +41,13 @@ pub enum TableSyncError {
 
     #[error("An error happened in the table copy stream")]
     TableCopyStream(#[from] TableCopyStreamError),
-
-    #[error("The replication origin state was not found but is required")]
-    ReplicationOriginStateNotFound,
 }
 
 #[derive(Debug)]
 pub enum TableSyncResult {
     SyncStopped,
     SyncNotRequired,
-    SyncCompleted { origin_start_lsn: PgLsn },
+    SyncCompleted { start_lsn: PgLsn },
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -77,9 +73,7 @@ where
     // successfully return.
     if matches!(
         phase_type,
-        TableReplicationPhaseType::SyncDone
-            | TableReplicationPhaseType::Ready
-            | TableReplicationPhaseType::Unknown
+        TableReplicationPhaseType::SyncDone | TableReplicationPhaseType::Ready
     ) {
         return Ok(TableSyncResult::SyncNotRequired);
     }
@@ -100,22 +94,32 @@ where
     // good to reduce the length of the critical section.
     drop(inner);
 
-    let slot_name = get_slot_name(&identity, WorkerType::TableSync { table_id })?;
+    let slot_name = get_slot_name(identity.id(), WorkerType::TableSync { table_id })?;
 
     // There are three phases in which the table can be in:
     // - `Init` -> this means that the table sync was never done, so we just perform it.
     // - `DataSync` -> this means that there was a failure during data sync, and we have to restart
     //  copying all the table data and delete the slot.
     // - `FinishedCopy` -> this means that the table was successfully copied, but we didn't manage to
-    //  complete the table sync function, so we just want to load the state from the origin to know
-    //  where we want to start the cdc stream.
+    //  complete the table sync function, so we just want to continue the cdc stream from the slot's
+    // confirmed_flush_lsn value.
     //
     // In case the phase is any other phase, we will return an error.
-    let replication_origin_state = match phase_type {
+    let start_lsn = match phase_type {
         TableReplicationPhaseType::Init | TableReplicationPhaseType::DataSync => {
             // If we are in `DataSync` it means we failed during table copying, so we want to delete the
             // existing slot before continuing.
             if phase_type == TableReplicationPhaseType::DataSync {
+                // TODO: After we delete the slot we will have to truncate the table in the destination,
+                // otherwise there can be an inconsistent copy of the data. E.g. consider this scenario:
+                // A table had a single row with id 1 and this was copied to the destination during initial
+                // table copy. Before the table's phase was set to FinishedCopy, the process crashed.
+                // While the process was down, row with id 1 in the source was deleted and another row with
+                // id 2 was inserted. The process comes back up to find the table's state in DataSync,
+                // deletes the slot and makes a copy again. This time it copies the row with id 2. Now
+                // the destinations contains two rows (with id 1 and 2) instead of only one (with id 2).
+                // The simplest fix here would be to unconditionally send a truncate to the destination
+                // before starting a table copy.
                 if let Err(err) = replication_client.delete_slot(&slot_name).await {
                     // If the slot is not found, we are safe to continue, for any other error, we bail.
                     if !matches!(err, PgReplicationError::SlotNotFound(_)) {
@@ -139,14 +143,6 @@ where
             // that the state was somehow reset without the slot being deleted, and we want to surface this.
             let (transaction, slot) = replication_client
                 .create_slot_with_transaction(&slot_name)
-                .await?;
-
-            // We create and overwrite (if already present) the replication origin state, to store important
-            // information about the replication.
-            let replication_origin_state =
-                ReplicationOriginState::new(identity.id(), Some(table_id), slot.consistent_point);
-            state_store
-                .store_replication_origin_state(replication_origin_state.clone(), true)
                 .await?;
 
             // We copy the table schema and write it both to the state store and destination.
@@ -184,7 +180,10 @@ where
                         // If we received a shutdown in the middle of a table copy, we bail knowing
                         // that the system can automatically recover if a table copy has failed in
                         // the middle of processing.
-                        info!("Shutting down table sync worker for table {} during table copy with origin state {:?}", table_id, replication_origin_state);
+                        info!(
+                            "Shutting down table sync worker for table {} during table copy",
+                            table_id
+                        );
                         return Ok(TableSyncResult::SyncStopped);
                     }
                 }
@@ -202,12 +201,12 @@ where
                     .await?;
             }
 
-            replication_origin_state
+            slot.consistent_point
         }
-        TableReplicationPhaseType::FinishedCopy => state_store
-            .load_replication_origin_state(identity.id(), Some(table_id))
-            .await?
-            .ok_or(TableSyncError::ReplicationOriginStateNotFound)?,
+        TableReplicationPhaseType::FinishedCopy => {
+            let slot = replication_client.get_slot(&slot_name).await?;
+            slot.confirmed_flush_lsn
+        }
         _ => unreachable!("Phase type already validated above"),
     };
 
@@ -228,11 +227,12 @@ where
     // If we are told to shut down while waiting for a phase change, we will signal this to
     // the caller.
     if result.should_shutdown() {
-        info!("Shutting down table sync worker for table {} while waiting for catchup with origin state {:?}", table_id, replication_origin_state);
+        info!(
+            "Shutting down table sync worker for table {} while waiting for catchup",
+            table_id
+        );
         return Ok(TableSyncResult::SyncStopped);
     }
 
-    Ok(TableSyncResult::SyncCompleted {
-        origin_start_lsn: replication_origin_state.remote_lsn,
-    })
+    Ok(TableSyncResult::SyncCompleted { start_lsn })
 }

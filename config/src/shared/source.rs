@@ -1,3 +1,4 @@
+use postgres::sqlx::config::{PgConnectionConfig, PgSslMode, PgTlsConfig};
 use serde::{Deserialize, Serialize};
 
 use crate::SerializableSecretString;
@@ -45,5 +46,29 @@ impl TlsConfig {
         }
 
         Ok(())
+    }
+}
+
+impl SourceConfig {
+    pub fn into_connection_config(self) -> PgConnectionConfig {
+        let ssl_mode = if self.tls.enabled {
+            PgSslMode::VerifyFull
+        } else {
+            PgSslMode::Prefer
+        };
+
+        let tls_config = PgTlsConfig {
+            ssl_mode,
+            trusted_root_certs: self.tls.trusted_root_certs.into_bytes(),
+        };
+
+        PgConnectionConfig {
+            host: self.host,
+            port: self.port,
+            name: self.name,
+            username: self.username,
+            password: self.password.map(Into::into),
+            tls_config,
+        }
     }
 }

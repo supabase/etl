@@ -1,64 +1,48 @@
-use crate::v2::pipeline::PipelineId;
-use postgres::schema::Oid;
 use std::fmt;
 use tokio_postgres::types::PgLsn;
 
-#[derive(Debug, Clone)]
-pub struct TableReplicationState {
-    /// The pipeline id to which this state refers.
-    pub pipeline_id: PipelineId,
-    /// The table (relation) OID to which this state refers.
-    pub table_id: Oid,
-    /// The phase of replication of the table.
-    pub phase: TableReplicationPhase,
-}
-
-impl TableReplicationState {
-    pub fn new(pipeline_id: PipelineId, table_id: Oid, phase: TableReplicationPhase) -> Self {
-        Self {
-            pipeline_id,
-            table_id,
-            phase,
-        }
-    }
-
-    pub fn init(pipeline_id: PipelineId, table_id: Oid) -> Self {
-        Self::new(pipeline_id, table_id, TableReplicationPhase::Init)
-    }
-
-    pub fn with_phase(self, phase: TableReplicationPhase) -> TableReplicationState {
-        TableReplicationState { phase, ..self }
-    }
-}
-
-impl PartialEq for TableReplicationState {
-    fn eq(&self, other: &Self) -> bool {
-        self.table_id == other.table_id
-    }
-}
-
-impl Eq for TableReplicationState {}
-
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum TableReplicationPhase {
+    /// Set by the pipeline when it first starts and encounters a table for the first time
     Init,
+
+    /// Set by table-sync worker just before starting initial table copy
     DataSync,
+
+    /// Set by table-sync worker when initial table copy is done
     FinishedCopy,
+
+    /// Set by table-sync worker when waiting for the apply worker to pause
+    /// On every transaction boundary the apply worker checks if any table-sync
+    /// worker is in the SyncWait state and pauses itself if it finds any.
+    /// This phase is stored in memory only and not persisted to the state store
     SyncWait,
+
+    /// Set by the apply worker when it is paused. The table-sync worker waits
+    /// for the apply worker to set this state after setting the state to SyncWait.
+    /// This phase is stored in memory only and not persisted to the state store
     Catchup {
-        /// The LSN to catch up to.
+        /// The lsn to catch up to. This is the location where the apply worker is paused
         lsn: PgLsn,
     },
+
+    /// Set by the table-sync worker when catch-up phase is completed and table-sync
+    /// worker has caught up with the apply worker's lsn position
     SyncDone {
-        /// The LSN up to which the table sync arrived.
+        /// The lsn up to which the table-sync worker has caught up
         lsn: PgLsn,
     },
-    Ready {
-        /// The LSN of the apply worker which set this state to ready.
-        lsn: PgLsn,
-    },
+
+    /// Set by apply worker when it has caught up with the table-sync worker's
+    /// catch up lsn position. Tables with this state have successfully run their
+    /// initial table copy and catch-up phases and any changes to them will now
+    /// be applied by the apply worker only
+    Ready,
+
+    /// Set by either the table-sync worker or the apply worker when a table is no
+    /// longer being synced because of an error. Tables in this state can only
+    /// start syncing again after a manual intervention from the user.
     Skipped,
-    Unknown,
 }
 
 impl TableReplicationPhase {
@@ -79,7 +63,6 @@ pub enum TableReplicationPhaseType {
     SyncDone,
     Ready,
     Skipped,
-    Unknown,
 }
 
 impl TableReplicationPhaseType {
@@ -94,7 +77,6 @@ impl TableReplicationPhaseType {
             Self::SyncDone => true,
             Self::Ready => true,
             Self::Skipped => true,
-            Self::Unknown => false,
         }
     }
 
@@ -112,7 +94,6 @@ impl TableReplicationPhaseType {
             Self::SyncDone => false,
             Self::Ready => true,
             Self::Skipped => true,
-            Self::Unknown => true,
         }
     }
 }
@@ -126,9 +107,8 @@ impl<'a> From<&'a TableReplicationPhase> for TableReplicationPhaseType {
             TableReplicationPhase::SyncWait => Self::SyncWait,
             TableReplicationPhase::Catchup { .. } => Self::Catchup,
             TableReplicationPhase::SyncDone { .. } => Self::SyncDone,
-            TableReplicationPhase::Ready { .. } => Self::Ready,
+            TableReplicationPhase::Ready => Self::Ready,
             TableReplicationPhase::Skipped => Self::Skipped,
-            TableReplicationPhase::Unknown => Self::Unknown,
         }
     }
 }
@@ -144,7 +124,6 @@ impl fmt::Display for TableReplicationPhaseType {
             Self::SyncDone => write!(f, "sync_done"),
             Self::Ready => write!(f, "ready"),
             Self::Skipped => write!(f, "skipped"),
-            Self::Unknown => write!(f, "unknown"),
         }
     }
 }

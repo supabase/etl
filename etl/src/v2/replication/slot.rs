@@ -1,6 +1,6 @@
 use thiserror::Error;
 
-use crate::v2::pipeline::PipelineIdentity;
+use crate::v2::pipeline::PipelineId;
 use crate::v2::workers::base::WorkerType;
 
 /// Maximum length for a PostgreSQL replication slot name in bytes.
@@ -19,15 +19,15 @@ pub enum SlotError {
 
 /// Generates a replication slot name.
 pub fn get_slot_name(
-    identity: &PipelineIdentity,
+    pipeline_id: PipelineId,
     worker_type: WorkerType,
 ) -> Result<String, SlotError> {
     let slot_name = match worker_type {
         WorkerType::Apply => {
-            format!("{}_{}", APPLY_WORKER_PREFIX, identity.id(),)
+            format!("{}_{}", APPLY_WORKER_PREFIX, pipeline_id,)
         }
         WorkerType::TableSync { table_id } => {
-            format!("{}_{}_{}", TABLE_SYNC_PREFIX, identity.id(), table_id)
+            format!("{}_{}_{}", TABLE_SYNC_PREFIX, pipeline_id, table_id)
         }
     };
 
@@ -44,16 +44,16 @@ mod tests {
 
     #[test]
     fn test_apply_worker_slot_name() {
-        let identity = PipelineIdentity::new(1, "test_pub");
-        let result = get_slot_name(&identity, WorkerType::Apply).unwrap();
+        let pipeline_id = 1;
+        let result = get_slot_name(pipeline_id, WorkerType::Apply).unwrap();
         assert!(result.starts_with(APPLY_WORKER_PREFIX));
         assert!(result.len() <= MAX_SLOT_NAME_LENGTH);
     }
 
     #[test]
     fn test_table_sync_slot_name() {
-        let identity = PipelineIdentity::new(1, "test_pub");
-        let result = get_slot_name(&identity, WorkerType::TableSync { table_id: 123 }).unwrap();
+        let pipeline_id = 1;
+        let result = get_slot_name(pipeline_id, WorkerType::TableSync { table_id: 123 }).unwrap();
         assert!(result.starts_with(TABLE_SYNC_PREFIX));
         assert!(result.len() <= MAX_SLOT_NAME_LENGTH);
     }

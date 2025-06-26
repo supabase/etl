@@ -1,12 +1,13 @@
 use api::db::pipelines::PipelineConfig;
+use api::routes::pipelines::{
+    CreatePipelineRequest, CreatePipelineResponse, ReadPipelineResponse, ReadPipelinesResponse,
+    UpdatePipelineRequest,
+};
 use config::shared::{BatchConfig, RetryConfig};
 use reqwest::StatusCode;
 
 use crate::{
-    common::test_app::{
-        spawn_test_app, CreatePipelineRequest, CreatePipelineResponse, PipelineResponse,
-        PipelinesResponse, TestApp, UpdatePipelineRequest,
-    },
+    common::test_app::{spawn_test_app, TestApp},
     integration::destination_test::create_destination,
     integration::images_test::create_default_image,
     integration::sources_test::create_source,
@@ -17,32 +18,32 @@ use crate::{
 pub fn new_pipeline_config() -> PipelineConfig {
     PipelineConfig {
         publication_name: "publication".to_owned(),
-        batch: BatchConfig {
+        batch: Some(BatchConfig {
             max_size: 1000,
             max_fill_ms: 5,
-        },
-        apply_worker_init_retry: RetryConfig {
+        }),
+        apply_worker_init_retry: Some(RetryConfig {
             max_attempts: 5,
             initial_delay_ms: 1000,
             max_delay_ms: 2000,
             backoff_factor: 0.5,
-        },
+        }),
     }
 }
 
 pub fn updated_pipeline_config() -> PipelineConfig {
     PipelineConfig {
         publication_name: "updated_publication".to_owned(),
-        batch: BatchConfig {
+        batch: Some(BatchConfig {
             max_size: 2000,
             max_fill_ms: 10,
-        },
-        apply_worker_init_retry: RetryConfig {
+        }),
+        apply_worker_init_retry: Some(RetryConfig {
             max_attempts: 10,
             initial_delay_ms: 2000,
             max_delay_ms: 4000,
             backoff_factor: 1.0,
-        },
+        }),
     }
 }
 
@@ -183,7 +184,7 @@ async fn an_existing_pipeline_can_be_read() {
 
     // Assert
     assert!(response.status().is_success());
-    let response: PipelineResponse = response
+    let response: ReadPipelineResponse = response
         .json()
         .await
         .expect("failed to deserialize response");
@@ -244,7 +245,7 @@ async fn an_existing_pipeline_can_be_updated() {
     // Assert
     assert!(response.status().is_success());
     let response = app.read_pipeline(tenant_id, pipeline_id).await;
-    let response: PipelineResponse = response
+    let response: ReadPipelineResponse = response
         .json()
         .await
         .expect("failed to deserialize response");
@@ -445,7 +446,7 @@ async fn all_pipelines_can_be_read() {
 
     // Assert
     assert!(response.status().is_success());
-    let response: PipelinesResponse = response
+    let response: ReadPipelinesResponse = response
         .json()
         .await
         .expect("failed to deserialize response");

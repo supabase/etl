@@ -60,7 +60,7 @@ fn log_pg_connection_config(config: &PgConnectionConfig) {
         port = config.port,
         dbname = config.name,
         username = config.username,
-        require_ssl = config.require_ssl,
+        ssl_mode = config.tls_config.ssl_mode.to_string(),
         "pg database options",
     );
 }

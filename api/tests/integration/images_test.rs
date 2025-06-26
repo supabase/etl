@@ -1,9 +1,10 @@
+use api::routes::images::{
+    CreateImageRequest, CreateImageResponse, ReadImageResponse, ReadImagesResponse,
+    UpdateImageRequest,
+};
 use reqwest::StatusCode;
 
-use crate::common::test_app::{
-    spawn_test_app, CreateImageRequest, CreateImageResponse, ImageResponse, ImagesResponse,
-    TestApp, UpdateImageRequest,
-};
+use crate::common::test_app::{spawn_test_app, TestApp};
 
 pub async fn create_default_image(app: &TestApp) -> i64 {
     create_image_with_name(app, "some/image".to_string(), true).await
@@ -63,7 +64,7 @@ async fn an_existing_image_can_be_read() {
 
     // Assert
     assert!(response.status().is_success());
-    let response: ImageResponse = response
+    let response: ReadImageResponse = response
         .json()
         .await
         .expect("failed to deserialize response");
@@ -114,7 +115,7 @@ async fn an_existing_image_can_be_updated() {
     // Assert
     assert!(response.status().is_success());
     let response = app.read_image(image_id).await;
-    let response: ImageResponse = response
+    let response: ReadImageResponse = response
         .json()
         .await
         .expect("failed to deserialize response");
@@ -192,7 +193,7 @@ async fn all_images_can_be_read() {
 
     // Assert
     assert!(response.status().is_success());
-    let response: ImagesResponse = response
+    let response: ReadImagesResponse = response
         .json()
         .await
         .expect("failed to deserialize response");

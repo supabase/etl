@@ -64,55 +64,71 @@ impl ResponseError for SourceError {
     }
 }
 
-#[derive(Deserialize, ToSchema)]
-pub struct PostSourceRequest {
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct CreateSourceRequest {
+    #[schema(example = "My Postgres Source", required = true)]
     pub name: String,
     #[schema(required = true)]
     pub config: SourceConfig,
 }
 
-#[derive(Serialize, ToSchema)]
-pub struct PostSourceResponse {
-    id: i64,
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct CreateSourceResponse {
+    #[schema(example = 1)]
+    pub id: i64,
 }
 
-#[derive(Serialize, ToSchema)]
-pub struct GetSourceResponse {
-    #[schema(example = 1)]
-    id: i64,
-    #[schema(example = 1)]
-    tenant_id: String,
-    #[schema(example = "Postgres Source")]
-    name: String,
-    config: SourceConfig,
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct UpdateSourceRequest {
+    #[schema(example = "My Updated Postgres Source", required = true)]
+    pub name: String,
+    #[schema(required = true)]
+    pub config: SourceConfig,
 }
 
-#[derive(Serialize, ToSchema)]
-pub struct GetSourcesResponse {
-    sources: Vec<GetSourceResponse>,
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct ReadSourceResponse {
+    #[schema(example = 1)]
+    pub id: i64,
+    #[schema(example = "abczjjlmfsijwrlnwatw")]
+    pub tenant_id: String,
+    #[schema(example = "My Postgres Source")]
+    pub name: String,
+    pub config: SourceConfig,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct ReadSourcesResponse {
+    pub sources: Vec<ReadSourceResponse>,
 }
 
 #[utoipa::path(
     context_path = "/v1",
-    request_body = PostSourceRequest,
+    request_body = CreateSourceRequest,
+    params(
+        ("tenant_id" = String, Header, description = "The tenant ID")
+    ),
     responses(
-        (status = 200, description = "Create new source", body = PostSourceResponse),
-        (status = 500, description = "Internal server error")
-    )
+        (status = 200, description = "Create new source", body = CreateSourceResponse),
+        (status = 400, description = "Bad request", body = ErrorMessage),
+        (status = 500, description = "Internal server error", body = ErrorMessage),
+    ),
+    tag = "Sources"
 )]
 #[post("/sources")]
 pub async fn create_source(
     req: HttpRequest,
     pool: Data<PgPool>,
     encryption_key: Data<EncryptionKey>,
-    source: Json<PostSourceRequest>,
+    source: Json<CreateSourceRequest>,
 ) -> Result<impl Responder, SourceError> {
-    let source = source.0;
+    let source = source.into_inner();
     let tenant_id = extract_tenant_id(&req)?;
     let name = source.name;
     let config = source.config;
     let id = db::sources::create_source(&pool, tenant_id, &name, config, &encryption_key).await?;
-    let response = PostSourceResponse { id };
+    let response = CreateSourceResponse { id };
+
     Ok(Json(response))
 }
 
@@ -120,12 +136,14 @@ pub async fn create_source(
     context_path = "/v1",
     params(
         ("source_id" = i64, Path, description = "Id of the source"),
+        ("tenant_id" = String, Header, description = "The tenant ID")
     ),
     responses(
-        (status = 200, description = "Return source with id = source_id", body = GetSourceResponse),
-        (status = 404, description = "Source not found"),
-        (status = 500, description = "Internal server error")
-    )
+        (status = 200, description = "Return source with id = source_id", body = ReadSourceResponse),
+        (status = 404, description = "Source not found", body = ErrorMessage),
+        (status = 500, description = "Internal server error", body = ErrorMessage),
+    ),
+    tag = "Sources"
 )]
 #[get("/sources/{source_id}")]
 pub async fn read_source(
@@ -138,27 +156,30 @@ pub async fn read_source(
     let source_id = source_id.into_inner();
     let response = db::sources::read_source(&pool, tenant_id, source_id, &encryption_key)
         .await?
-        .map(|s| GetSourceResponse {
+        .map(|s| ReadSourceResponse {
             id: s.id,
             tenant_id: s.tenant_id,
             name: s.name,
             config: s.config,
         })
         .ok_or(SourceError::SourceNotFound(source_id))?;
+
     Ok(Json(response))
 }
 
 #[utoipa::path(
     context_path = "/v1",
-    request_body = PostSourceRequest,
+    request_body = UpdateSourceRequest,
     params(
         ("source_id" = i64, Path, description = "Id of the source"),
+        ("tenant_id" = String, Header, description = "The tenant ID")
     ),
     responses(
         (status = 200, description = "Update source with id = source_id"),
-        (status = 404, description = "Source not found"),
-        (status = 500, description = "Internal server error")
-    )
+        (status = 404, description = "Source not found", body = ErrorMessage),
+        (status = 500, description = "Internal server error", body = ErrorMessage),
+    ),
+    tag = "Sources"
 )]
 #[post("/sources/{source_id}")]
 pub async fn update_source(
@@ -166,9 +187,9 @@ pub async fn update_source(
     pool: Data<PgPool>,
     source_id: Path<i64>,
     encryption_key: Data<EncryptionKey>,
-    source: Json<PostSourceRequest>,
+    source: Json<UpdateSourceRequest>,
 ) -> Result<impl Responder, SourceError> {
-    let source = source.0;
+    let source = source.into_inner();
     let tenant_id = extract_tenant_id(&req)?;
     let source_id = source_id.into_inner();
     let name = source.name;
@@ -176,6 +197,7 @@ pub async fn update_source(
     db::sources::update_source(&pool, tenant_id, &name, source_id, config, &encryption_key)
         .await?
         .ok_or(SourceError::SourceNotFound(source_id))?;
+
     Ok(HttpResponse::Ok().finish())
 }
 
@@ -183,12 +205,14 @@ pub async fn update_source(
     context_path = "/v1",
     params(
         ("source_id" = i64, Path, description = "Id of the source"),
+        ("tenant_id" = String, Header, description = "The tenant ID")
     ),
     responses(
         (status = 200, description = "Delete source with id = source_id"),
-        (status = 404, description = "Source not found"),
-        (status = 500, description = "Internal server error")
-    )
+        (status = 404, description = "Source not found", body = ErrorMessage),
+        (status = 500, description = "Internal server error", body = ErrorMessage),
+    ),
+    tag = "Sources"
 )]
 #[delete("/sources/{source_id}")]
 pub async fn delete_source(
@@ -201,15 +225,20 @@ pub async fn delete_source(
     db::sources::delete_source(&pool, tenant_id, source_id)
         .await?
         .ok_or(SourceError::SourceNotFound(source_id))?;
+
     Ok(HttpResponse::Ok().finish())
 }
 
 #[utoipa::path(
     context_path = "/v1",
+    params(
+        ("tenant_id" = String, Header, description = "The tenant ID")
+    ),
     responses(
-        (status = 200, description = "Return all sources"),
-        (status = 500, description = "Internal server error")
-    )
+        (status = 200, description = "Return all sources", body = ReadSourcesResponse),
+        (status = 500, description = "Internal server error", body = ErrorMessage),
+    ),
+    tag = "Sources"
 )]
 #[get("/sources")]
 pub async fn read_all_sources(
@@ -220,7 +249,7 @@ pub async fn read_all_sources(
     let tenant_id = extract_tenant_id(&req)?;
     let mut sources = vec![];
     for source in db::sources::read_all_sources(&pool, tenant_id, &encryption_key).await? {
-        let source = GetSourceResponse {
+        let source = ReadSourceResponse {
             id: source.id,
             tenant_id: source.tenant_id,
             name: source.name,
@@ -228,6 +257,7 @@ pub async fn read_all_sources(
         };
         sources.push(source);
     }
-    let response = GetSourcesResponse { sources };
+    let response = ReadSourcesResponse { sources };
+
     Ok(Json(response))
 }

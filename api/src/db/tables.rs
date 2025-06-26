@@ -8,7 +8,7 @@ pub enum TablesDbError {
     Database(#[from] sqlx::Error),
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Table {
     pub schema: String,
     pub name: String,
