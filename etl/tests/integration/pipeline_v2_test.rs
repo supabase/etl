@@ -596,7 +596,6 @@ async fn test_table_schema_copy_with_finished_copy_retry() {
     assert_eq!(table_schemas[1], database_schema.users_schema());
 }
 
-#[ignore = "gets stuck"]
 #[tokio::test(flavor = "multi_thread")]
 async fn test_table_schema_copy_survives_restarts() {
     init_test_tracing();
@@ -622,13 +621,13 @@ async fn test_table_schema_copy_survives_restarts() {
     let users_state_notify = state_store
         .notify_on_replication_phase(
             database_schema.users_schema().id,
-            TableReplicationPhaseType::FinishedCopy,
+            TableReplicationPhaseType::SyncDone,
         )
         .await;
     let orders_state_notify = state_store
         .notify_on_replication_phase(
             database_schema.orders_schema().id,
-            TableReplicationPhaseType::FinishedCopy,
+            TableReplicationPhaseType::SyncDone,
         )
         .await;
 
@@ -648,14 +647,14 @@ async fn test_table_schema_copy_survives_restarts() {
             .get(&database_schema.users_schema().id)
             .unwrap()
             .as_type(),
-        TableReplicationPhaseType::FinishedCopy
+        TableReplicationPhaseType::SyncDone
     );
     assert_eq!(
         table_replication_states
             .get(&database_schema.orders_schema().id)
             .unwrap()
             .as_type(),
-        TableReplicationPhaseType::FinishedCopy
+        TableReplicationPhaseType::SyncDone
     );
 
     // We check that the table schemas have been stored.
