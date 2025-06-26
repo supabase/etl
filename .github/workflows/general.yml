@@ -46,16 +46,6 @@ jobs:
           POSTGRES_DB: postgres
         ports:
           - 5430:5432
-      bigquery-emulator:
-        image: ghcr.io/goccy/bigquery-emulator:latest
-        ports:
-          - 9050:9050
-          - 9060:9060
-        options: >
-          --project=local-project
-          --dataset=local-dataset
-          --port=9050
-          --grpc-port=9060
     steps:
       - name: Checkout repository
         uses: actions/checkout@v3
@@ -66,6 +56,16 @@ jobs:
             echo "Waiting for Postgres..."
             sleep 1
           done
+
+      - name: Start BigQuery emulator
+        run: |
+          docker run -d --name bigquery-emulator \
+            -p 9050:9050 -p 9060:9060 \
+            ghcr.io/goccy/bigquery-emulator:latest \
+            --project=local-project \
+            --dataset=local-dataset \
+            --port=9050 \
+            --grpc-port=9060
 
       - name: Wait for BigQuery emulator to be ready
         run: |
