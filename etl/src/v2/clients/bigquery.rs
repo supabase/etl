@@ -1,4 +1,5 @@
 use futures::StreamExt;
+use gcp_bigquery_client::client_builder::ClientBuilder;
 use gcp_bigquery_client::storage::{ColumnMode, StorageApi};
 use gcp_bigquery_client::yup_oauth2::parse_service_account_key;
 use gcp_bigquery_client::{
@@ -40,11 +41,11 @@ impl BigQueryClient {
     /// authenticate with the BigQuery API.
     pub async fn new_with_key_path(
         project_id: String,
-        gcp_sa_key_path: &str,
+        sa_key_path: &str,
     ) -> Result<BigQueryClient, BQError> {
-        let gcp_sa_key = fs::read_to_string(gcp_sa_key_path)?;
-        let service_account_key = parse_service_account_key(gcp_sa_key)?;
-        let client = Client::from_service_account_key(service_account_key, false).await?;
+        let gcp_sa_key = fs::read_to_string(sa_key_path)?;
+        let key = parse_service_account_key(gcp_sa_key)?;
+        let client = Client::from_service_account_key(key, false).await?;
 
         Ok(BigQueryClient { project_id, client })
     }
@@ -53,12 +54,30 @@ impl BigQueryClient {
     ///
     /// Parses the provided service account key string to authenticate with the
     /// BigQuery API.
-    pub async fn new_with_key(
+    pub async fn new_with_key(project_id: String, sa_key: &str) -> Result<BigQueryClient, BQError> {
+        let sa_key = parse_service_account_key(sa_key)?;
+        let client = Client::from_service_account_key(sa_key, false).await?;
+
+        Ok(BigQueryClient { project_id, client })
+    }
+
+    /// Creates a new [`BigQueryClient`] from a service-account JSON key and allows overriding
+    /// the BigQuery endpoint URL—primarily useful for testing against emulators or mock servers.
+    ///
+    /// This override is intended only for integration tests and local development against
+    /// non-Google BigQuery implementations or emulators.
+    pub async fn new_with_custom_urls(
         project_id: String,
-        gcp_sa_key: &str,
+        auth_base_url: String,
+        v2_base_url: String,
+        sa_key: &str,
     ) -> Result<BigQueryClient, BQError> {
-        let service_account_key = parse_service_account_key(gcp_sa_key)?;
-        let client = Client::from_service_account_key(service_account_key, false).await?;
+        let sa_key = parse_service_account_key(sa_key)?;
+        let client = ClientBuilder::new()
+            .with_auth_base_url(auth_base_url)
+            .with_v2_base_url(v2_base_url)
+            .build_from_service_account_key(sa_key, false)
+            .await?;
 
         Ok(BigQueryClient { project_id, client })
     }

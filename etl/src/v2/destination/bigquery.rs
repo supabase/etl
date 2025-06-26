@@ -43,10 +43,10 @@ impl BigQueryDestination {
     pub async fn new_with_key_path(
         project_id: String,
         dataset_id: String,
-        gcp_sa_key_path: &str,
+        sa_key: &str,
         max_staleness_mins: u16,
     ) -> Result<Self, BigQueryDestinationError> {
-        let client = BigQueryClient::new_with_key_path(project_id, gcp_sa_key_path).await?;
+        let client = BigQueryClient::new_with_key_path(project_id, sa_key).await?;
         let inner = Inner {
             client,
             dataset_id,
@@ -62,10 +62,33 @@ impl BigQueryDestination {
     pub async fn new_with_key(
         project_id: String,
         dataset_id: String,
-        gcp_sa_key: &str,
+        sa_key: &str,
         max_staleness_mins: u16,
     ) -> Result<Self, BigQueryDestinationError> {
-        let client = BigQueryClient::new_with_key(project_id, gcp_sa_key).await?;
+        let client = BigQueryClient::new_with_key(project_id, sa_key).await?;
+        let inner = Inner {
+            client,
+            dataset_id,
+            max_staleness_mins,
+            schema_cache: None,
+        };
+
+        Ok(Self {
+            inner: Arc::new(RwLock::new(inner)),
+        })
+    }
+
+    pub async fn new_with_urls(
+        project_id: String,
+        dataset_id: String,
+        auth_base_url: String,
+        v2_base_url: String,
+        sa_key: &str,
+        max_staleness_mins: u16,
+    ) -> Result<Self, BigQueryDestinationError> {
+        let client =
+            BigQueryClient::new_with_custom_urls(project_id, auth_base_url, v2_base_url, sa_key)
+                .await?;
         let inner = Inner {
             client,
             dataset_id,

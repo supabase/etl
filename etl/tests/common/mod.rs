@@ -5,6 +5,8 @@
 /// It also includes common testing patterns like waiting for conditions to be met.
 use std::time::{Duration, Instant};
 
+#[cfg(feature = "bigquery")]
+pub mod bigquery;
 pub mod database;
 pub mod destination;
 pub mod destination_v2;

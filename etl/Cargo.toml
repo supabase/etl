@@ -65,6 +65,7 @@ clap = { workspace = true, default-features = true, features = [
     "std",
     "derive",
 ] }
+wiremock = { workspace = true}
 
 
 [features]

@@ -1,7 +1,5 @@
 use std::{collections::HashSet, fs};
 
-use bytes::{Buf, BufMut};
-use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use futures::StreamExt;
 use gcp_bigquery_client::storage::{ColumnMode, StorageApi};
 use gcp_bigquery_client::yup_oauth2::parse_service_account_key;
@@ -16,14 +14,11 @@ use gcp_bigquery_client::{
     Client,
 };
 use postgres::schema::{ColumnSchema, TableId, TableSchema};
-use prost::Message;
 use tokio_postgres::types::{PgLsn, Type};
 use tracing::info;
-use uuid::Uuid;
 
-use crate::conversions::numeric::PgNumeric;
 use crate::conversions::table_row::TableRow;
-use crate::conversions::{ArrayCell, Cell};
+use crate::conversions::Cell;
 
 pub struct BigQueryClient {
     project_id: String,
