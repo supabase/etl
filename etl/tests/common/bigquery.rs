@@ -1,10 +1,19 @@
 use etl::v2::destination::bigquery::BigQueryDestination;
+use gcp_bigquery_client::client_builder::ClientBuilder;
+use gcp_bigquery_client::model::dataset::Dataset;
+use gcp_bigquery_client::yup_oauth2::parse_service_account_key;
+use gcp_bigquery_client::Client;
 use serde::Serialize;
 use std::ops::Deref;
+use tokio::runtime::Handle;
+use uuid::Uuid;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate, Times};
 
-pub const AUTH_TOKEN_ENDPOINT: &str = "/:o/oauth2/token";
+const TEST_PROJECT_ID: &str = "local-project";
+const AUTH_TOKEN_ENDPOINT: &str = "/:o/oauth2/token";
+/// URL of the local instance of the BigQuery emulator HTTP server.
+const V2_BASE_URL: &str = "http://localhost:9050";
 
 pub struct GoogleAuthMock {
     server: MockServer,
@@ -74,18 +83,43 @@ fn mock_sa_key(oauth_server: &str) -> serde_json::Value {
 }
 
 pub struct BigQueryEmulator {
+    client: Option<Client>,
     google_auth: GoogleAuthMock,
     sa_key: String,
+    project_id: String,
+    dataset_id: String,
 }
 
 impl BigQueryEmulator {
+    async fn new(google_auth: GoogleAuthMock, sa_key: String) -> Self {
+        let parsed_sa_key = parse_service_account_key(&sa_key).unwrap();
+        let project_id = TEST_PROJECT_ID.to_owned();
+        let dataset_id = Uuid::new_v4().to_string();
+
+        let client = ClientBuilder::new()
+            .with_auth_base_url(google_auth.uri())
+            .with_v2_base_url(V2_BASE_URL.to_owned())
+            .build_from_service_account_key(parsed_sa_key, false)
+            .await
+            .unwrap();
+
+        initialize_bigquery(&client, &project_id, &dataset_id).await;
+
+        Self {
+            client: Some(client),
+            google_auth,
+            sa_key,
+            project_id,
+            dataset_id,
+        }
+    }
+
     pub async fn build_destination(&self) -> BigQueryDestination {
         BigQueryDestination::new_with_urls(
-            "local-project".to_owned(),
-            "local-dataset".to_owned(),
+            self.project_id.clone(),
+            self.dataset_id.clone(),
             self.google_auth.uri(),
-            // We point it to the local instance of the BigQuery emulator HTTP server.
-            "http://localhost:9050".to_owned(),
+            V2_BASE_URL.to_owned(),
             &self.sa_key,
             1,
         )
@@ -94,14 +128,40 @@ impl BigQueryEmulator {
     }
 }
 
+impl Drop for BigQueryEmulator {
+    fn drop(&mut self) {
+        let Some(client) = self.client.take() else {
+            return;
+        };
+
+        // To use `block_in_place,` we need a multithreaded runtime since when a blocking
+        // task is issued, the runtime will offload existing tasks to another worker.
+        tokio::task::block_in_place(move || {
+            Handle::current().block_on(async move {
+                destroy_bigquery(&client, &self.project_id, &self.dataset_id).await;
+            });
+        });
+    }
+}
+
+async fn initialize_bigquery(client: &Client, project_id: &str, dataset_id: &str) {
+    let dataset = Dataset::new(project_id, dataset_id);
+    client.dataset().create(dataset).await.unwrap();
+}
+
+async fn destroy_bigquery(client: &Client, project_id: &str, dataset_id: &str) {
+    client
+        .dataset()
+        .delete(project_id, dataset_id, true)
+        .await
+        .unwrap();
+}
+
 pub async fn setup_bigquery_connection() -> BigQueryEmulator {
     let google_auth = GoogleAuthMock::start().await;
     google_auth.mock_token(1).await;
 
     let sa_key = serde_json::to_string_pretty(&mock_sa_key(&google_auth.uri())).unwrap();
 
-    BigQueryEmulator {
-        google_auth,
-        sa_key,
-    }
+    BigQueryEmulator::new(google_auth, sa_key).await
 }

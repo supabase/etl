@@ -11,7 +11,6 @@ fi
 # Emulator Configuration
 echo "🔧 Configuring BigQuery emulator settings..."
 PROJECT_ID="${BIGQUERY_PROJECT_ID:=local-project}"
-DATASET_ID="${BIGQUERY_DATASET_ID:=local-dataset}"
 HTTP_PORT="${BIGQUERY_EMULATOR_PORT_HTTP:=9050}"
 GRPC_PORT="${BIGQUERY_EMULATOR_PORT_GRPC:=9060}"
 CONTAINER_NAME="bigquery-emulator"
@@ -45,9 +44,8 @@ if [[ -z "${SKIP_DOCKER}" ]]; then
       -p "${HTTP_PORT}:9050" 
       -p "${GRPC_PORT}:9060" 
       --name "${CONTAINER_NAME}" 
-      ghcr.io/goccy/bigquery-emulator:latest 
-      --project="${PROJECT_ID}" 
-      --dataset="${DATASET_ID}" 
+      ghcr.io/goccy/bigquery-emulator:latest
+      --project="${PROJECT_ID}"
       --port=9050 
       --grpc-port=9060)
 
@@ -66,6 +64,5 @@ done
 
 echo "✅ BigQuery emulator is up and running!"
 echo "   - Project ID: ${PROJECT_ID}"
-echo "   - Dataset ID: ${DATASET_ID}"
 echo "   - HTTP Port:  ${HTTP_PORT}"
 echo "   - gRPC Port:  ${GRPC_PORT}"
