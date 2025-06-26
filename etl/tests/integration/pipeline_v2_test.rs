@@ -708,7 +708,6 @@ async fn test_table_schema_copy_survives_restarts() {
     assert_eq!(orders_inserts.len(), 1);
 }
 
-#[ignore = "gets stuck"]
 #[tokio::test(flavor = "multi_thread")]
 async fn test_table_copy() {
     init_test_tracing();
@@ -773,7 +772,6 @@ async fn test_table_copy() {
     assert_eq!(age_sum, expected_age_sum);
 }
 
-#[ignore = "gets stuck"]
 #[tokio::test(flavor = "multi_thread")]
 async fn test_table_copy_and_sync() {
     init_test_tracing();
@@ -807,13 +805,13 @@ async fn test_table_copy_and_sync() {
     let users_state_notify = state_store
         .notify_on_replication_phase(
             database_schema.users_schema().id,
-            TableReplicationPhaseType::FinishedCopy,
+            TableReplicationPhaseType::SyncDone,
         )
         .await;
     let orders_state_notify = state_store
         .notify_on_replication_phase(
             database_schema.orders_schema().id,
-            TableReplicationPhaseType::FinishedCopy,
+            TableReplicationPhaseType::SyncDone,
         )
         .await;
 
@@ -821,20 +819,6 @@ async fn test_table_copy_and_sync() {
 
     users_state_notify.notified().await;
     orders_state_notify.notified().await;
-
-    // Register notifications for sync completion.
-    let users_state_notify = state_store
-        .notify_on_replication_phase(
-            database_schema.users_schema().id,
-            TableReplicationPhaseType::SyncDone,
-        )
-        .await;
-    let orders_state_notify = state_store
-        .notify_on_replication_phase(
-            database_schema.orders_schema().id,
-            TableReplicationPhaseType::SyncDone,
-        )
-        .await;
 
     // Insert additional data to test streaming.
     insert_mock_data(
@@ -845,9 +829,6 @@ async fn test_table_copy_and_sync() {
         true,
     )
     .await;
-
-    users_state_notify.notified().await;
-    orders_state_notify.notified().await;
 
     // Register notifications for ready state.
     let users_state_notify = state_store
