@@ -101,8 +101,7 @@ impl ColumnSchema {
 /// A type alias for PostgreSQL table OIDs.
 ///
 /// Table OIDs are unique identifiers assigned to tables in PostgreSQL.
-// TODO: delete this in favor of `Oid`.
-pub type TableId = u32;
+pub type TableId = Oid;
 
 /// Represents the complete schema of a PostgreSQL table.
 ///
@@ -111,7 +110,7 @@ pub type TableId = u32;
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct TableSchema {
     /// The PostgreSQL OID of the table
-    pub id: Oid,
+    pub id: TableId,
     /// The fully qualified name of the table
     pub name: TableName,
     /// The schemas of all columns in the table
@@ -119,7 +118,7 @@ pub struct TableSchema {
 }
 
 impl TableSchema {
-    pub fn new(id: Oid, name: TableName, column_schemas: Vec<ColumnSchema>) -> Self {
+    pub fn new(id: TableId, name: TableName, column_schemas: Vec<ColumnSchema>) -> Self {
         Self {
             id,
             name,

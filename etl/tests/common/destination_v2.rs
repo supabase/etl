@@ -1,7 +1,7 @@
 use etl::conversions::table_row::TableRow;
 use etl::v2::conversions::event::{Event, EventType};
 use etl::v2::destination::base::{Destination, DestinationError};
-use postgres::schema::{Oid, TableSchema};
+use postgres::schema::{TableId, TableSchema};
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
@@ -12,12 +12,12 @@ use crate::common::event::check_events_count;
 
 type EventCondition = Box<dyn Fn(&[Event]) -> bool + Send + Sync>;
 type SchemaCondition = Box<dyn Fn(&[TableSchema]) -> bool + Send + Sync>;
-type TableRowCondition = Box<dyn Fn(&HashMap<Oid, Vec<TableRow>>) -> bool + Send + Sync>;
+type TableRowCondition = Box<dyn Fn(&HashMap<TableId, Vec<TableRow>>) -> bool + Send + Sync>;
 
 struct Inner {
     events: Vec<Event>,
     table_schemas: Vec<TableSchema>,
-    table_rows: HashMap<Oid, Vec<TableRow>>,
+    table_rows: HashMap<TableId, Vec<TableRow>>,
     event_conditions: Vec<(EventCondition, Arc<Notify>)>,
     table_schema_conditions: Vec<(SchemaCondition, Arc<Notify>)>,
     table_row_conditions: Vec<(TableRowCondition, Arc<Notify>)>,
@@ -98,7 +98,7 @@ impl TestDestination {
         table_schemas
     }
 
-    pub async fn get_table_rows(&self) -> HashMap<Oid, Vec<TableRow>> {
+    pub async fn get_table_rows(&self) -> HashMap<TableId, Vec<TableRow>> {
         self.inner.read().await.table_rows.clone()
     }
 
@@ -165,9 +165,13 @@ impl Destination for TestDestination {
         Ok(table_schemas)
     }
 
-    async fn write_table_rows(&self, id: Oid, rows: Vec<TableRow>) -> Result<(), DestinationError> {
+    async fn write_table_rows(
+        &self,
+        table_id: TableId,
+        rows: Vec<TableRow>,
+    ) -> Result<(), DestinationError> {
         let mut inner = self.inner.write().await;
-        inner.table_rows.entry(id).or_default().extend(rows);
+        inner.table_rows.entry(table_id).or_default().extend(rows);
         inner.check_conditions().await;
 
         Ok(())

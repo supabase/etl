@@ -1,4 +1,4 @@
-use postgres::schema::{Oid, TableSchema};
+use postgres::schema::{TableId, TableSchema};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::info;
@@ -11,7 +11,7 @@ use crate::v2::destination::base::{Destination, DestinationError};
 struct Inner {
     events: Vec<Event>,
     table_schemas: Vec<TableSchema>,
-    table_rows: Vec<(Oid, Vec<TableRow>)>,
+    table_rows: Vec<(TableId, Vec<TableRow>)>,
 }
 
 #[derive(Debug, Clone)]
@@ -56,17 +56,21 @@ impl Destination for MemoryDestination {
         Ok(schemas)
     }
 
-    async fn write_table_rows(&self, id: Oid, rows: Vec<TableRow>) -> Result<(), DestinationError> {
+    async fn write_table_rows(
+        &self,
+        table_id: TableId,
+        rows: Vec<TableRow>,
+    ) -> Result<(), DestinationError> {
         let mut inner = self.inner.write().await;
         info!(
             "Writing batch of {} table rows for table id {:?}:",
             rows.len(),
-            id
+            table_id
         );
         for row in &rows {
             info!("  {:?}", row);
         }
-        inner.table_rows.push((id, rows));
+        inner.table_rows.push((table_id, rows));
         Ok(())
     }
 

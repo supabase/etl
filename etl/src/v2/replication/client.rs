@@ -1,5 +1,5 @@
 use pg_escape::{quote_identifier, quote_literal};
-use postgres::schema::{ColumnSchema, Oid, TableName, TableSchema};
+use postgres::schema::{ColumnSchema, TableId, TableName, TableSchema};
 use postgres::tokio::config::PgConnectionConfig;
 use postgres::types::convert_type_oid_to_type;
 use postgres_replication::LogicalReplicationStream;
@@ -135,9 +135,9 @@ impl PgReplicationSlotTransaction {
     /// will be returned.
     pub async fn get_table_schemas(
         &self,
-        table_ids: &[Oid],
+        table_ids: &[TableId],
         publication_name: Option<&str>,
-    ) -> PgReplicationResult<HashMap<Oid, TableSchema>> {
+    ) -> PgReplicationResult<HashMap<TableId, TableSchema>> {
         self.client
             .get_table_schemas(table_ids, publication_name)
             .await
@@ -149,7 +149,7 @@ impl PgReplicationSlotTransaction {
     /// will be returned.
     pub async fn get_table_schema(
         &self,
-        table_id: Oid,
+        table_id: TableId,
         publication: Option<&str>,
     ) -> PgReplicationResult<TableSchema> {
         self.client.get_table_schema(table_id, publication).await
@@ -160,7 +160,7 @@ impl PgReplicationSlotTransaction {
     /// The stream will include only the columns specified in `column_schemas`.
     pub async fn get_table_copy_stream(
         &self,
-        table_id: Oid,
+        table_id: TableId,
         column_schemas: &[ColumnSchema],
     ) -> PgReplicationResult<CopyOutStream> {
         self.client
@@ -406,7 +406,7 @@ impl PgReplicationClient {
     pub async fn get_publication_table_ids(
         &self,
         publication_name: &str,
-    ) -> PgReplicationResult<Vec<Oid>> {
+    ) -> PgReplicationResult<Vec<TableId>> {
         let publication_query = format!(
             "select c.oid from pg_publication_tables pt 
          join pg_class c on c.relname = pt.tablename 
@@ -418,7 +418,7 @@ impl PgReplicationClient {
         let mut table_oids = vec![];
         for msg in self.inner.client.simple_query(&publication_query).await? {
             if let SimpleQueryMessage::Row(row) = msg {
-                let oid = Self::get_row_value::<Oid>(&row, "oid", "pg_class").await?;
+                let oid = Self::get_row_value::<TableId>(&row, "oid", "pg_class").await?;
 
                 table_oids.push(oid);
             }
@@ -558,9 +558,9 @@ impl PgReplicationClient {
     /// Tables without primary keys will be skipped and logged with a warning.
     async fn get_table_schemas(
         &self,
-        table_ids: &[Oid],
+        table_ids: &[TableId],
         publication_name: Option<&str>,
-    ) -> PgReplicationResult<HashMap<Oid, TableSchema>> {
+    ) -> PgReplicationResult<HashMap<TableId, TableSchema>> {
         let mut table_schemas = HashMap::new();
 
         // TODO: consider if we want to fail when at least one table was missing or not.
@@ -589,7 +589,7 @@ impl PgReplicationClient {
     /// will be returned.
     async fn get_table_schema(
         &self,
-        table_id: Oid,
+        table_id: TableId,
         publication: Option<&str>,
     ) -> PgReplicationResult<TableSchema> {
         let table_name = self.get_table_name(table_id).await?;
@@ -605,7 +605,7 @@ impl PgReplicationClient {
     /// Loads the table name and schema information for a given table OID.
     ///
     /// Returns a `TableName` containing both the schema and table name.
-    async fn get_table_name(&self, table_id: Oid) -> PgReplicationResult<TableName> {
+    async fn get_table_name(&self, table_id: TableId) -> PgReplicationResult<TableName> {
         let table_info_query = format!(
             "select n.nspname as schema_name, c.relname as table_name
             from pg_class c
@@ -640,7 +640,7 @@ impl PgReplicationClient {
     /// will be returned.
     async fn get_column_schemas(
         &self,
-        table_id: Oid,
+        table_id: TableId,
         publication: Option<&str>,
     ) -> PgReplicationResult<Vec<ColumnSchema>> {
         let (pub_cte, pub_pred) = if let Some(publication) = publication {
@@ -720,7 +720,7 @@ impl PgReplicationClient {
     /// The stream will include only the specified columns and use text format.
     pub async fn get_table_copy_stream(
         &self,
-        table_id: Oid,
+        table_id: TableId,
         column_schemas: &[ColumnSchema],
     ) -> PgReplicationResult<CopyOutStream> {
         let column_list = column_schemas

@@ -16,7 +16,7 @@ use crate::v2::workers::base::WorkerType;
 use crate::v2::workers::table_sync::TableSyncWorkerHookError;
 
 use futures::StreamExt;
-use postgres::schema::Oid;
+use postgres::schema::TableId;
 use postgres_replication::protocol;
 use postgres_replication::protocol::{LogicalReplicationMessage, ReplicationMessage};
 use std::future::Future;
@@ -71,7 +71,7 @@ pub enum ApplyLoopError {
     InvalidEvent(EventType, EventType),
 
     #[error("The table schema for table {0} was not found in the cache")]
-    MissingTableSchema(Oid),
+    MissingTableSchema(TableId),
 
     #[error("The received table schema doesn't match the table schema loaded during table sync")]
     MismatchedTableSchema,
@@ -105,11 +105,14 @@ pub trait ApplyLoopHook {
         current_lsn: PgLsn,
     ) -> impl Future<Output = Result<bool, Self::Error>> + Send;
 
-    fn skip_table(&self, table_id: Oid) -> impl Future<Output = Result<bool, Self::Error>> + Send;
+    fn skip_table(
+        &self,
+        table_id: TableId,
+    ) -> impl Future<Output = Result<bool, Self::Error>> + Send;
 
     fn should_apply_changes(
         &self,
-        table_id: Oid,
+        table_id: TableId,
         remote_final_lsn: PgLsn,
     ) -> impl Future<Output = Result<bool, Self::Error>> + Send;
 

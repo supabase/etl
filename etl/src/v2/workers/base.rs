@@ -1,6 +1,6 @@
 use crate::v2::workers::apply::ApplyWorkerError;
 use crate::v2::workers::table_sync::TableSyncWorkerError;
-use postgres::schema::Oid;
+use postgres::schema::TableId;
 use std::fmt;
 use std::future::Future;
 use thiserror::Error;
@@ -62,7 +62,7 @@ impl fmt::Display for WorkerWaitErrors {
 #[derive(Debug)]
 pub enum WorkerType {
     Apply,
-    TableSync { table_id: Oid },
+    TableSync { table_id: TableId },
 }
 
 /// A trait for types that can be started as workers.

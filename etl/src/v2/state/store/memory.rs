@@ -1,4 +1,4 @@
-use postgres::schema::{Oid, TableId};
+use postgres::schema::TableId;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -8,7 +8,7 @@ use crate::v2::state::table::TableReplicationPhase;
 
 #[derive(Debug)]
 struct Inner {
-    table_replication_states: HashMap<Oid, TableReplicationPhase>,
+    table_replication_states: HashMap<TableId, TableReplicationPhase>,
 }
 
 #[derive(Debug, Clone)]

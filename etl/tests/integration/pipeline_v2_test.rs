@@ -4,7 +4,7 @@ use etl::v2::conversions::event::{Event, EventType, InsertEvent};
 use etl::v2::pipeline::PipelineError;
 use etl::v2::state::table::TableReplicationPhaseType;
 use etl::v2::workers::base::WorkerWaitError;
-use postgres::schema::{ColumnSchema, Oid, TableName, TableSchema};
+use postgres::schema::{ColumnSchema, TableId, TableName, TableSchema};
 use postgres::tokio::test_utils::{id_column_schema, PgDatabase, TableModification};
 use std::ops::RangeInclusive;
 use tokio_postgres::types::Type;
@@ -197,7 +197,7 @@ async fn insert_mock_data(
     }
 }
 
-async fn get_users_age_sum_from_rows(destination: &TestDestination, table_id: Oid) -> i32 {
+async fn get_users_age_sum_from_rows(destination: &TestDestination, table_id: TableId) -> i32 {
     let mut actual_sum = 0;
 
     let tables_rows = destination.get_table_rows().await;
@@ -217,7 +217,7 @@ fn get_n_integers_sum(n: usize) -> i32 {
 
 fn build_expected_users_inserts(
     mut starting_id: i64,
-    users_table_id: Oid,
+    users_table_id: TableId,
     expected_rows: Vec<(&str, i32)>,
 ) -> Vec<Event> {
     let mut events = Vec::new();
@@ -242,7 +242,7 @@ fn build_expected_users_inserts(
 
 fn build_expected_orders_inserts(
     mut starting_id: i64,
-    orders_table_id: Oid,
+    orders_table_id: TableId,
     expected_rows: Vec<&str>,
 ) -> Vec<Event> {
     let mut events = Vec::new();

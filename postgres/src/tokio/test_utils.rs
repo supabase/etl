@@ -1,4 +1,4 @@
-use crate::schema::{ColumnSchema, Oid, TableName};
+use crate::schema::{ColumnSchema, TableId, TableName};
 use crate::tokio::config::PgConnectionConfig;
 use tokio::runtime::Handle;
 use tokio_postgres::types::Type;
@@ -47,7 +47,7 @@ impl<G: GenericClient> PgDatabase<G> {
         &self,
         table_name: TableName,
         columns: &[(&str, &str)], // (column_name, column_type)
-    ) -> Result<Oid, tokio_postgres::Error> {
+    ) -> Result<TableId, tokio_postgres::Error> {
         let columns_str = columns
             .iter()
             .map(|(name, typ)| format!("{} {}", name, typ))
@@ -77,7 +77,7 @@ impl<G: GenericClient> PgDatabase<G> {
             )
             .await?;
 
-        let table_id: Oid = row.get(0);
+        let table_id: TableId = row.get(0);
 
         Ok(table_id)
     }

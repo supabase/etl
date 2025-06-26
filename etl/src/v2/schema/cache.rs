@@ -1,11 +1,11 @@
-use postgres::schema::{Oid, TableSchema};
+use postgres::schema::{TableId, TableSchema};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
 #[derive(Debug)]
 struct Inner {
-    table_schemas: HashMap<Oid, TableSchema>,
+    table_schemas: HashMap<TableId, TableSchema>,
 }
 
 // TODO: implement eviction of the entries if they go over a certain threshold.
@@ -37,7 +37,7 @@ impl SchemaCache {
         }
     }
 
-    pub async fn get_table_schema(&self, table_id: &Oid) -> Option<TableSchema> {
+    pub async fn get_table_schema(&self, table_id: &TableId) -> Option<TableSchema> {
         let inner = self.inner.read().await;
         inner.table_schemas.get(table_id).cloned()
     }

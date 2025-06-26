@@ -4,7 +4,7 @@ use crate::conversions::Cell;
 use crate::v2::schema::cache::SchemaCache;
 use crate::v2::state::store::base::StateStoreError;
 use core::str;
-use postgres::schema::{ColumnSchema, Oid, TableName, TableSchema};
+use postgres::schema::{ColumnSchema, TableId, TableName, TableSchema};
 use postgres::types::convert_type_oid_to_type;
 use postgres_replication::protocol;
 use postgres_replication::protocol::LogicalReplicationMessage;
@@ -23,7 +23,7 @@ pub enum EventConversionError {
     MissingTupleInDeleteBody,
 
     #[error("Table schema not found for table id {0}")]
-    MissingSchema(Oid),
+    MissingSchema(TableId),
 
     #[error("Error converting from bytes: {0}")]
     FromBytes(#[from] FromTextError),
@@ -116,20 +116,20 @@ impl RelationEvent {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct InsertEvent {
-    pub table_id: Oid,
+    pub table_id: TableId,
     pub row: TableRow,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct UpdateEvent {
-    pub table_id: Oid,
+    pub table_id: TableId,
     pub row: TableRow,
     pub identity_row: Option<TableRow>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct DeleteEvent {
-    pub table_id: Oid,
+    pub table_id: TableId,
     pub identity_row: Option<TableRow>,
 }
 
@@ -215,7 +215,7 @@ impl From<Event> for EventType {
 
 async fn get_table_schema(
     schema_cache: &SchemaCache,
-    table_id: Oid,
+    table_id: TableId,
 ) -> Result<TableSchema, EventConversionError> {
     schema_cache
         .get_table_schema(&table_id)

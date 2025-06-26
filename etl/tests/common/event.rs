@@ -1,5 +1,5 @@
 use etl::v2::conversions::event::{Event, EventType};
-use postgres::schema::Oid;
+use postgres::schema::TableId;
 use std::collections::HashMap;
 
 pub fn group_events_by_type(events: &[Event]) -> HashMap<EventType, Vec<Event>> {
@@ -17,7 +17,7 @@ pub fn group_events_by_type(events: &[Event]) -> HashMap<EventType, Vec<Event>> 
 
 pub fn group_events_by_type_and_table_id(
     events: &[Event],
-) -> HashMap<(EventType, Oid), Vec<Event>> {
+) -> HashMap<(EventType, TableId), Vec<Event>> {
     let mut grouped = HashMap::new();
     for event in events {
         let event_type = EventType::from(event);

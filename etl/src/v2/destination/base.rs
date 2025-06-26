@@ -1,4 +1,4 @@
-use postgres::schema::{Oid, TableSchema};
+use postgres::schema::{TableId, TableSchema};
 use std::future::Future;
 use thiserror::Error;
 
@@ -20,7 +20,7 @@ pub trait Destination {
 
     fn write_table_rows(
         &self,
-        id: Oid,
+        table_id: TableId,
         rows: Vec<TableRow>,
     ) -> impl Future<Output = Result<(), DestinationError>> + Send;
 
