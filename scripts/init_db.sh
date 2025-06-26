@@ -35,8 +35,8 @@ DB_HOST="${POSTGRES_HOST:=localhost}"
 if [[ -z "${SKIP_DOCKER}" ]]
 then
   echo "🐳 Checking Docker container status..."
-  RUNNING_POSTGRES_CONTAINER=$(docker ps --filter 'name=postgres' --format '{{.ID}}')
-  if [[ -n $RUNNING_POSTGRES_CONTAINER ]]; then
+  RUNNING_POSTGRES_CONTAINER_ID=$(docker ps --filter 'name=postgres' --format '{{.ID}}')
+  if [[ -n $RUNNING_POSTGRES_CONTAINER_ID ]]; then
     echo "✅ PostgreSQL container is already running"
   else
     echo "🚀 Starting new PostgreSQL container..."

@@ -21,6 +21,9 @@ pub enum BigQueryDestinationError {
 
     #[error("The table schema for table id {0} was not found in the schema cache")]
     MissingTableSchema(Oid),
+
+    #[error("The schema cache was not set on the destination")]
+    MissingSchemaCache,
 }
 
 #[derive(Debug)]
@@ -28,7 +31,7 @@ struct Inner {
     client: BigQueryClient,
     dataset_id: String,
     max_staleness_mins: u16,
-    schema_cache: SchemaCache,
+    schema_cache: Option<SchemaCache>,
 }
 
 #[derive(Debug, Clone)]
@@ -42,14 +45,13 @@ impl BigQueryDestination {
         dataset_id: String,
         gcp_sa_key_path: &str,
         max_staleness_mins: u16,
-        schema_cache: SchemaCache,
     ) -> Result<Self, BigQueryDestinationError> {
         let client = BigQueryClient::new_with_key_path(project_id, gcp_sa_key_path).await?;
         let inner = Inner {
             client,
             dataset_id,
             max_staleness_mins,
-            schema_cache,
+            schema_cache: None,
         };
 
         Ok(Self {
@@ -62,14 +64,13 @@ impl BigQueryDestination {
         dataset_id: String,
         gcp_sa_key: &str,
         max_staleness_mins: u16,
-        schema_cache: SchemaCache,
     ) -> Result<Self, BigQueryDestinationError> {
         let client = BigQueryClient::new_with_key(project_id, gcp_sa_key).await?;
         let inner = Inner {
             client,
             dataset_id,
             max_staleness_mins,
-            schema_cache,
+            schema_cache: None,
         };
 
         Ok(Self {
@@ -81,7 +82,12 @@ impl BigQueryDestination {
         inner: &I,
         table_id: &Oid,
     ) -> Result<(String, TableDescriptor), BigQueryDestinationError> {
-        let schema_cache = inner.schema_cache.read_inner().await;
+        let schema_cache = inner
+            .schema_cache
+            .as_ref()
+            .ok_or(BigQueryDestinationError::MissingSchemaCache)?
+            .read_inner()
+            .await;
         let table_schema = schema_cache
             .get_table_schema_ref(table_id)
             .ok_or(BigQueryDestinationError::MissingTableSchema(*table_id))?;

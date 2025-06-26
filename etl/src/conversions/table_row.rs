@@ -1,7 +1,5 @@
-use bytes::{Buf, BufMut};
 use core::str;
 use postgres::schema::ColumnSchema;
-use prost::Message;
 use std::str::Utf8Error;
 use thiserror::Error;
 use tokio_postgres::types::Type;
@@ -23,14 +21,14 @@ impl BatchBoundaryV1 for TableRow {
 }
 
 #[cfg(feature = "bigquery")]
-impl Message for TableRow {
-    fn encode_raw(&self, buf: &mut impl BufMut)
+impl prost::Message for TableRow {
+    fn encode_raw(&self, buf: &mut impl bytes::BufMut)
     where
         Self: Sized,
     {
         let mut tag = 1;
         for cell in &self.values {
-            cell.encode_raw(tag, buf);
+            cell.encode_prost(tag, buf);
             tag += 1;
         }
     }
@@ -39,7 +37,7 @@ impl Message for TableRow {
         &mut self,
         _tag: u32,
         _wire_type: prost::encoding::WireType,
-        _buf: &mut impl Buf,
+        _buf: &mut impl bytes::Buf,
         _ctx: prost::encoding::DecodeContext,
     ) -> Result<(), prost::DecodeError>
     where
@@ -52,7 +50,7 @@ impl Message for TableRow {
         let mut len = 0;
         let mut tag = 1;
         for cell in &self.values {
-            len += cell.encoded_len(tag);
+            len += cell.encoded_len_prost(tag);
             tag += 1;
         }
         len

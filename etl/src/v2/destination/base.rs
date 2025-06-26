@@ -4,10 +4,12 @@ use thiserror::Error;
 
 use crate::conversions::table_row::TableRow;
 use crate::v2::conversions::event::Event;
+#[cfg(feature = "bigquery")]
 use crate::v2::destination::bigquery::BigQueryDestinationError;
 
 #[derive(Debug, Error)]
 pub enum DestinationError {
+    #[cfg(feature = "bigquery")]
     #[error(transparent)]
     BigQuery(#[from] BigQueryDestinationError),
 }

@@ -13,6 +13,7 @@ pub mod pipeline;
 pub mod pipeline_v2;
 pub mod state_store;
 pub mod table;
+pub mod test_schema;
 
 /// The maximum duration to wait for test conditions to be met.
 ///
