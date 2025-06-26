@@ -10,6 +10,7 @@ use etl::conversions::Cell;
 use postgres::schema::{ColumnSchema, TableId};
 use postgres::tokio::test_utils::{id_column_schema, PgDatabase};
 use std::ops::Range;
+use telemetry::init_test_tracing;
 use tokio_postgres::types::Type;
 use tokio_postgres::GenericClient;
 
@@ -125,6 +126,7 @@ fn get_users_age_sum_from_events(
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_table_copy_with_insert_and_update() {
+    init_test_tracing();
     let database = spawn_database().await;
 
     // We insert 100 rows.
@@ -173,6 +175,7 @@ async fn test_table_copy_with_insert_and_update() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_cdc_with_multiple_inserts() {
+    init_test_tracing();
     let database = spawn_database().await;
 
     // We create the table and publication.

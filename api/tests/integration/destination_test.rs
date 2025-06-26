@@ -1,6 +1,7 @@
 use config::shared::DestinationConfig;
 use config::SerializableSecretString;
 use reqwest::StatusCode;
+use telemetry::init_test_tracing;
 
 use crate::{
     common::test_app::{
@@ -59,6 +60,7 @@ pub async fn create_destination(app: &TestApp, tenant_id: &str) -> i64 {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn destination_can_be_created() {
+    init_test_tracing();
     // Arrange
     let app = spawn_test_app().await;
     let tenant_id = &create_tenant(&app).await;
@@ -81,6 +83,7 @@ async fn destination_can_be_created() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn an_existing_destination_can_be_read() {
+    init_test_tracing();
     // Arrange
     let app = spawn_test_app().await;
     let tenant_id = &create_tenant(&app).await;
@@ -113,6 +116,7 @@ async fn an_existing_destination_can_be_read() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_non_existing_destination_cant_be_read() {
+    init_test_tracing();
     // Arrange
     let app = spawn_test_app().await;
     let tenant_id = &create_tenant(&app).await;
@@ -126,6 +130,7 @@ async fn a_non_existing_destination_cant_be_read() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn an_existing_destination_can_be_updated() {
+    init_test_tracing();
     // Arrange
     let app = spawn_test_app().await;
     let tenant_id = &create_tenant(&app).await;
@@ -165,6 +170,7 @@ async fn an_existing_destination_can_be_updated() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_non_existing_destination_cant_be_updated() {
+    init_test_tracing();
     // Arrange
     let app = spawn_test_app().await;
     let tenant_id = &create_tenant(&app).await;
@@ -182,6 +188,7 @@ async fn a_non_existing_destination_cant_be_updated() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn an_existing_destination_can_be_deleted() {
+    init_test_tracing();
     // Arrange
     let app = spawn_test_app().await;
     let tenant_id = &create_tenant(&app).await;
@@ -208,6 +215,7 @@ async fn an_existing_destination_can_be_deleted() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_non_existing_destination_cant_be_deleted() {
+    init_test_tracing();
     // Arrange
     let app = spawn_test_app().await;
     let tenant_id = &create_tenant(&app).await;
@@ -221,6 +229,7 @@ async fn a_non_existing_destination_cant_be_deleted() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn all_destinations_can_be_read() {
+    init_test_tracing();
     // Arrange
     let app = spawn_test_app().await;
     let tenant_id = &create_tenant(&app).await;

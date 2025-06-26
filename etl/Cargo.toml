@@ -60,6 +60,7 @@ uuid = { workspace = true, features = ["v4"] }
 
 [dev-dependencies]
 postgres = { workspace = true, features = ["test-utils", "tokio"] }
+telemetry = { workspace = true }
 
 clap = { workspace = true, default-features = true, features = [
     "std",

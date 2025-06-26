@@ -1,4 +1,5 @@
 use reqwest::StatusCode;
+use telemetry::init_test_tracing;
 
 use crate::{
     common::test_app::{
@@ -17,6 +18,7 @@ use crate::{
 
 #[tokio::test(flavor = "multi_thread")]
 async fn destination_and_pipeline_can_be_created() {
+    init_test_tracing();
     // Arrange
     let app = spawn_test_app().await;
     let tenant_id = &create_tenant(&app).await;
@@ -70,6 +72,7 @@ async fn destination_and_pipeline_can_be_created() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn destination_and_pipeline_with_another_tenants_source_cant_be_created() {
+    init_test_tracing();
     // Arrange
     let app = spawn_test_app().await;
     create_default_image(&app).await;
@@ -103,6 +106,7 @@ async fn destination_and_pipeline_with_another_tenants_source_cant_be_created() 
 
 #[tokio::test(flavor = "multi_thread")]
 async fn an_existing_destination_and_pipeline_can_be_updated() {
+    init_test_tracing();
     // Arrange
     let app = spawn_test_app().await;
     let tenant_id = &create_tenant(&app).await;
@@ -170,6 +174,7 @@ async fn an_existing_destination_and_pipeline_can_be_updated() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn destination_and_pipeline_with_another_tenants_source_cant_be_updated() {
+    init_test_tracing();
     // Arrange
     let app = spawn_test_app().await;
     create_default_image(&app).await;
@@ -228,6 +233,7 @@ async fn destination_and_pipeline_with_another_tenants_source_cant_be_updated() 
 
 #[tokio::test(flavor = "multi_thread")]
 async fn destination_and_pipeline_with_another_tenants_destination_cant_be_updated() {
+    init_test_tracing();
     // Arrange
     let app = spawn_test_app().await;
     create_default_image(&app).await;
@@ -283,6 +289,7 @@ async fn destination_and_pipeline_with_another_tenants_destination_cant_be_updat
 
 #[tokio::test(flavor = "multi_thread")]
 async fn destination_and_pipeline_with_another_tenants_pipeline_cant_be_updated() {
+    init_test_tracing();
     // Arrange
     let app = spawn_test_app().await;
     create_default_image(&app).await;
@@ -359,6 +366,7 @@ async fn destination_and_pipeline_with_another_tenants_pipeline_cant_be_updated(
 
 #[tokio::test(flavor = "multi_thread")]
 async fn duplicate_destination_pipeline_with_same_source_cant_be_created() {
+    init_test_tracing();
     // Arrange
     let app = spawn_test_app().await;
     create_default_image(&app).await;

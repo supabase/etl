@@ -7,6 +7,7 @@ use etl::v2::workers::base::WorkerWaitError;
 use postgres::schema::{ColumnSchema, Oid, TableName, TableSchema};
 use postgres::tokio::test_utils::{id_column_schema, PgDatabase, TableModification};
 use std::ops::RangeInclusive;
+use telemetry::init_test_tracing;
 use tokio_postgres::types::Type;
 use tokio_postgres::{Client, GenericClient};
 
@@ -265,6 +266,7 @@ fn build_expected_orders_inserts(
 #[ignore]
 #[tokio::test(flavor = "multi_thread")]
 async fn test_pipeline_with_table_sync_worker_panic() {
+    init_test_tracing();
     let database = spawn_database().await;
     let database_schema = setup_test_database_schema(&database, TableSelection::Both).await;
 
@@ -323,6 +325,7 @@ async fn test_pipeline_with_table_sync_worker_panic() {
 #[ignore]
 #[tokio::test(flavor = "multi_thread")]
 async fn test_pipeline_with_table_sync_worker_error() {
+    init_test_tracing();
     let database = spawn_database().await;
     let database_schema = setup_test_database_schema(&database, TableSelection::Both).await;
 
@@ -380,6 +383,7 @@ async fn test_pipeline_with_table_sync_worker_error() {
 #[ignore]
 #[tokio::test(flavor = "multi_thread")]
 async fn test_table_schema_copy_with_data_sync_retry() {
+    init_test_tracing();
     let database = spawn_database().await;
     let database_schema = setup_test_database_schema(&database, TableSelection::Both).await;
 
@@ -486,6 +490,7 @@ async fn test_table_schema_copy_with_data_sync_retry() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_table_schema_copy_with_finished_copy_retry() {
+    init_test_tracing();
     let database = spawn_database().await;
     let database_schema = setup_test_database_schema(&database, TableSelection::Both).await;
 
@@ -593,6 +598,7 @@ async fn test_table_schema_copy_with_finished_copy_retry() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_table_schema_copy_survives_restarts() {
+    init_test_tracing();
     let mut database = spawn_database().await;
     let database_schema = setup_test_database_schema(&database, TableSelection::Both).await;
 
@@ -704,6 +710,7 @@ async fn test_table_schema_copy_survives_restarts() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_table_copy() {
+    init_test_tracing();
     let mut database = spawn_database().await;
     let database_schema = setup_test_database_schema(&database, TableSelection::Both).await;
 
@@ -767,6 +774,7 @@ async fn test_table_copy() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_table_copy_and_sync() {
+    init_test_tracing();
     let mut database = spawn_database().await;
     let database_schema = setup_test_database_schema(&database, TableSelection::Both).await;
 
@@ -928,6 +936,7 @@ async fn test_table_copy_and_sync() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_table_copy_and_sync_with_changed_schema_in_table_sync_worker() {
+    init_test_tracing();
     let database = spawn_database().await;
     let database_schema = setup_test_database_schema(&database, TableSelection::OrdersOnly).await;
 
@@ -1016,6 +1025,7 @@ async fn test_table_copy_and_sync_with_changed_schema_in_table_sync_worker() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_table_copy_and_sync_with_changed_schema_in_apply_worker() {
+    init_test_tracing();
     let database = spawn_database().await;
     let database_schema = setup_test_database_schema(&database, TableSelection::OrdersOnly).await;
 
