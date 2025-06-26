@@ -1,6 +1,7 @@
 name: Rust
 
-pull_request:
+on:
+  pull_request:
     types: [opened, synchronize, reopened, labeled]
 
 env:
