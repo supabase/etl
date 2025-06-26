@@ -1,6 +1,7 @@
 name: Rust
 
-on: [pull_request]
+pull_request:
+    types: [opened, synchronize, reopened, labeled]
 
 env:
   CARGO_TERM_COLOR: always
