@@ -17,6 +17,7 @@ use postgres::schema::TableId;
 use std::collections::HashMap;
 use std::sync::Arc;
 use thiserror::Error;
+use tokio::sync::Semaphore;
 use tokio::task::JoinHandle;
 use tokio_postgres::types::PgLsn;
 use tracing::{error, info};
@@ -80,6 +81,7 @@ pub struct ApplyWorker<S, D> {
     state_store: S,
     destination: D,
     shutdown_rx: ShutdownRx,
+    table_sync_worker_permits: Arc<Semaphore>,
 }
 
 impl<S, D> ApplyWorker<S, D> {
@@ -93,6 +95,7 @@ impl<S, D> ApplyWorker<S, D> {
         state_store: S,
         destination: D,
         shutdown_rx: ShutdownRx,
+        table_sync_worker_permits: Arc<Semaphore>,
     ) -> Self {
         Self {
             identity,
@@ -103,6 +106,7 @@ impl<S, D> ApplyWorker<S, D> {
             state_store,
             destination,
             shutdown_rx,
+            table_sync_worker_permits,
         }
     }
 }
@@ -136,6 +140,7 @@ where
                     self.state_store,
                     self.destination,
                     self.shutdown_rx.clone(),
+                    self.table_sync_worker_permits.clone(),
                 ),
                 self.shutdown_rx,
             )
@@ -180,6 +185,7 @@ struct ApplyWorkerHook<S, D> {
     state_store: S,
     destination: D,
     shutdown_rx: ShutdownRx,
+    table_sync_worker_permits: Arc<Semaphore>,
 }
 
 impl<S, D> ApplyWorkerHook<S, D> {
@@ -193,6 +199,7 @@ impl<S, D> ApplyWorkerHook<S, D> {
         state_store: S,
         destination: D,
         shutdown_rx: ShutdownRx,
+        table_sync_worker_permits: Arc<Semaphore>,
     ) -> Self {
         Self {
             identity,
@@ -203,6 +210,7 @@ impl<S, D> ApplyWorkerHook<S, D> {
             state_store,
             destination,
             shutdown_rx,
+            table_sync_worker_permits,
         }
     }
 }
@@ -225,6 +233,7 @@ where
             self.state_store.clone(),
             self.destination.clone(),
             self.shutdown_rx.clone(),
+            self.table_sync_worker_permits.clone(),
         );
 
         let mut pool = self.pool.write().await;
