@@ -46,6 +46,16 @@ jobs:
           POSTGRES_DB: postgres
         ports:
           - 5430:5432
+      bigquery-emulator:
+        image: ghcr.io/goccy/bigquery-emulator:latest
+        ports:
+          - 9050:9050
+          - 9060:9060
+        command: >
+          --project=local-project
+          --dataset=local-dataset
+          --port=9050
+          --grpc-port=9060
     steps:
       - name: Checkout repository
         uses: actions/checkout@v3
@@ -54,6 +64,13 @@ jobs:
         run: |
           until pg_isready -h localhost -p 5430; do
             echo "Waiting for Postgres..."
+            sleep 1
+          done
+
+      - name: Wait for BigQuery emulator to be ready
+        run: |
+          until curl -s "http://localhost:9050/" > /dev/null; do
+            echo "Waiting for BigQuery emulator..."
             sleep 1
           done
 

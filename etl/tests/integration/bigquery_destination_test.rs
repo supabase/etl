@@ -1,12 +1,20 @@
+use std::time::Duration;
+use etl::v2::state::table::TableReplicationPhaseType;
+use rustls::crypto::aws_lc_rs;
+use tokio::time::timeout;
+
 use crate::common::bigquery::setup_bigquery_connection;
 use crate::common::database::spawn_database;
 use crate::common::pipeline_v2::{create_pipeline_identity, spawn_pg_pipeline};
 use crate::common::state_store::TestStateStore;
 use crate::common::test_schema::{insert_mock_data, setup_test_database_schema, TableSelection};
-use etl::v2::state::table::TableReplicationPhaseType;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_table_copy() {
+    aws_lc_rs::default_provider()
+        .install_default()
+        .expect("failed to install default crypto provider");
+
     let mut database = spawn_database().await;
     let database_schema = setup_test_database_schema(&database, TableSelection::Both).await;
 
@@ -50,9 +58,9 @@ async fn test_table_copy() {
         .await;
 
     pipeline.start().await.unwrap();
-
-    users_state_notify.notified().await;
-    orders_state_notify.notified().await;
-
+    
+    timeout(Duration::from_secs(1), users_state_notify.notified()).await;
+    timeout(Duration::from_secs(1), orders_state_notify.notified()).await;
+    
     pipeline.shutdown_and_wait().await.unwrap();
 }
