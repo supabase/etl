@@ -41,9 +41,9 @@ static INIT_TEST_TRACING: Once = Once::new();
 
 /// Call this function once at the beginning of a test and then set the ENABLE_TRACING
 /// environment variable to 1 to view tracing in the terminal:
-/// 
+///
 /// ENABLE_TRACING=1 cargo test <test_name>
-/// 
+///
 pub fn init_test_tracing() {
     INIT_TEST_TRACING.call_once(|| {
         if std::env::var("ENABLE_TRACING").is_ok() {
