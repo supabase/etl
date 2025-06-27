@@ -1,18 +1,20 @@
-use etl::v2::state::table::TableReplicationPhaseType;
-use telemetry::init_test_tracing;
 use crate::common::bigquery::setup_bigquery_connection;
 use crate::common::database::spawn_database;
+use crate::common::install_crypto_provider_once;
 use crate::common::pipeline_v2::{create_pipeline_identity, spawn_pg_pipeline};
 use crate::common::state_store::TestStateStore;
+use crate::common::test_schema::bigquery::{
+    parse_bigquery_table_rows, BigQueryOrder, BigQueryUser,
+};
 use crate::common::test_schema::{insert_mock_data, setup_test_database_schema, TableSelection};
-use crate::common::test_schema::bigquery::{parse_bigquery_table_rows, BigQueryOrder, BigQueryUser};
-use crate::common::install_crypto_provider_once;
+use etl::v2::state::table::TableReplicationPhaseType;
+use telemetry::init_test_tracing;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_table_schema_and_data_are_copied() {
     init_test_tracing();
     install_crypto_provider_once();
-    
+
     let mut database = spawn_database().await;
     let database_schema = setup_test_database_schema(&database, TableSelection::Both).await;
 

@@ -158,7 +158,7 @@ impl BigQueryDestination {
         for table_row in &mut table_rows {
             table_row.values.push(Cell::String("UPSERT".to_string()));
         }
-        
+
         let dataset_id = inner.dataset_id.clone();
         inner
             .client

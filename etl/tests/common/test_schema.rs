@@ -256,13 +256,16 @@ pub fn build_expected_orders_inserts(
 
 #[cfg(feature = "bigquery")]
 pub mod bigquery {
-    use std::fmt;
-    use std::str::FromStr;
     use gcp_bigquery_client::model::table_cell::TableCell;
     use gcp_bigquery_client::model::table_row::TableRow;
+    use std::fmt;
+    use std::str::FromStr;
 
     pub fn parse_table_cell<O>(table_cell: TableCell) -> O
-    where O: FromStr, <O as FromStr>::Err: fmt::Debug {
+    where
+        O: FromStr,
+        <O as FromStr>::Err: fmt::Debug,
+    {
         table_cell.value.unwrap().as_str().unwrap().parse().unwrap()
     }
 
@@ -272,14 +275,13 @@ pub mod bigquery {
         name: String,
         age: i32,
     }
-    
+
     impl BigQueryUser {
-        
         pub fn new(id: i32, name: &str, age: i32) -> Self {
             Self {
                 id,
                 name: name.to_owned(),
-                age
+                age,
             }
         }
     }
@@ -291,7 +293,7 @@ pub mod bigquery {
             BigQueryUser {
                 id: parse_table_cell(columns[0].clone()),
                 name: parse_table_cell(columns[1].clone()),
-                age: parse_table_cell(columns[2].clone())
+                age: parse_table_cell(columns[2].clone()),
             }
         }
     }
@@ -303,7 +305,6 @@ pub mod bigquery {
     }
 
     impl BigQueryOrder {
-
         pub fn new(id: i32, description: &str) -> Self {
             Self {
                 id,

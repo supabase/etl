@@ -1,10 +1,10 @@
+use std::sync::Once;
 /// Common utilities and helpers for testing PostgreSQL replication functionality.
 ///
 /// This module provides shared testing infrastructure including database management,
 /// pipeline testing utilities, destination testing helpers, and table manipulation utilities.
 /// It also includes common testing patterns like waiting for conditions to be met.
 use std::time::{Duration, Instant};
-use std::sync::Once;
 
 #[cfg(feature = "bigquery")]
 pub mod bigquery;
