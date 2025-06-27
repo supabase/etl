@@ -4,7 +4,6 @@ use gcp_bigquery_client::model::dataset::Dataset;
 use gcp_bigquery_client::yup_oauth2::parse_service_account_key;
 use gcp_bigquery_client::Client;
 use serde::Serialize;
-use std::fmt::format;
 use std::ops::Deref;
 use tokio::runtime::Handle;
 use uuid::Uuid;

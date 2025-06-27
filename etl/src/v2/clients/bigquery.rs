@@ -5,14 +5,13 @@ use gcp_bigquery_client::yup_oauth2::parse_service_account_key;
 use gcp_bigquery_client::{
     error::BQError,
     model::{
-        query_parameter_type::QueryParameterType, query_parameter_value::QueryParameterValue,
         query_request::QueryRequest, query_response::ResultSet,
     },
     storage::{ColumnType, FieldDescriptor, StreamName, TableDescriptor},
     Client,
 };
 use postgres::schema::{ColumnSchema, TableSchema};
-use std::{fmt, fs};
+use std::fmt;
 use tokio_postgres::types::Type;
 use tracing::info;
 

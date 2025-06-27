@@ -2,7 +2,6 @@ use gcp_bigquery_client::error::BQError;
 use gcp_bigquery_client::storage::TableDescriptor;
 use postgres::schema::{Oid, TableSchema};
 use std::collections::HashMap;
-use std::future::Future;
 use std::ops::Deref;
 use std::sync::Arc;
 use thiserror::Error;

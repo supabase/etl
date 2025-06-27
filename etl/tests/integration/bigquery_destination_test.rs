@@ -1,7 +1,5 @@
 use etl::v2::state::table::TableReplicationPhaseType;
 use rustls::crypto::aws_lc_rs;
-use std::time::Duration;
-use tokio::time::timeout;
 
 use crate::common::bigquery::setup_bigquery_connection;
 use crate::common::database::spawn_database;
@@ -59,8 +57,8 @@ async fn test_table_copy() {
 
     pipeline.start().await.unwrap();
 
-    timeout(Duration::from_secs(1), users_state_notify.notified()).await;
-    timeout(Duration::from_secs(1), orders_state_notify.notified()).await;
+    users_state_notify.notified().await;
+    orders_state_notify.notified().await;
 
     pipeline.shutdown_and_wait().await.unwrap();
 }
