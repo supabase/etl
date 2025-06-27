@@ -3,7 +3,7 @@ use postgres::schema::{ColumnSchema, TableId, TableName, TableSchema};
 use postgres::tokio::config::PgConnectionConfig;
 use postgres::types::convert_type_oid_to_type;
 use postgres_replication::LogicalReplicationStream;
-use rustls::{pki_types::CertificateDer, ClientConfig};
+use rustls::ClientConfig;
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
@@ -184,7 +184,6 @@ impl PgReplicationSlotTransaction {
 struct ClientInner {
     client: Client,
     pg_connection_config: PgConnectionConfig,
-    trusted_root_certs: Vec<CertificateDer<'static>>,
     with_tls: bool,
 }
 
@@ -218,7 +217,6 @@ impl PgReplicationClient {
         let inner = ClientInner {
             client,
             pg_connection_config,
-            trusted_root_certs: vec![],
             with_tls: false,
         };
         Ok(PgReplicationClient {
@@ -232,13 +230,12 @@ impl PgReplicationClient {
     /// trusted root certificates for TLS verification.
     pub async fn connect_tls(
         pg_connection_config: PgConnectionConfig,
-        trusted_root_certs: Vec<CertificateDer<'static>>,
     ) -> PgReplicationResult<Self> {
         let mut config: Config = pg_connection_config.clone().into();
         config.replication_mode(ReplicationMode::Logical);
 
         let mut root_store = rustls::RootCertStore::empty();
-        for trusted_root_cert in trusted_root_certs.iter() {
+        for trusted_root_cert in pg_connection_config.tls_config.trusted_root_certs.iter() {
             root_store.add(trusted_root_cert.clone())?;
         }
         let tls_config = ClientConfig::builder()
@@ -253,7 +250,6 @@ impl PgReplicationClient {
         let inner = ClientInner {
             client,
             pg_connection_config,
-            trusted_root_certs,
             with_tls: true,
         };
         Ok(PgReplicationClient {
@@ -464,11 +460,7 @@ impl PgReplicationClient {
     /// settings.
     pub async fn duplicate(&self) -> PgReplicationResult<PgReplicationClient> {
         let duplicated_client = if self.inner.with_tls {
-            PgReplicationClient::connect_tls(
-                self.inner.pg_connection_config.clone(),
-                self.inner.trusted_root_certs.clone(),
-            )
-            .await?
+            PgReplicationClient::connect_tls(self.inner.pg_connection_config.clone()).await?
         } else {
             PgReplicationClient::connect_no_tls(self.inner.pg_connection_config.clone()).await?
         };

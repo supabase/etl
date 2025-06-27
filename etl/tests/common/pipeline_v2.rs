@@ -37,5 +37,5 @@ where
         },
     };
 
-    Pipeline::new(identity.clone(), config, vec![], state_store, destination)
+    Pipeline::new(identity.clone(), config, state_store, destination)
 }

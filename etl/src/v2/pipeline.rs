@@ -1,4 +1,3 @@
-use rustls::pki_types::CertificateDer;
 use std::sync::Arc;
 use thiserror::Error;
 use tokio::sync::watch;
@@ -86,7 +85,6 @@ impl PipelineIdentity {
 pub struct Pipeline<S, D> {
     identity: PipelineIdentity,
     config: Arc<PipelineConfig>,
-    trusted_root_certs: Vec<CertificateDer<'static>>,
     state_store: S,
     destination: D,
     workers: PipelineWorkers,
@@ -101,7 +99,6 @@ where
     pub fn new(
         identity: PipelineIdentity,
         config: PipelineConfig,
-        trusted_root_certs: Vec<CertificateDer<'static>>,
         state_store: S,
         destination: D,
     ) -> Self {
@@ -115,7 +112,6 @@ where
         Self {
             identity,
             config: Arc::new(config),
-            trusted_root_certs,
             state_store,
             destination,
             workers: PipelineWorkers::NotStarted,
@@ -221,17 +217,11 @@ where
 
     async fn connect(&self) -> Result<PgReplicationClient, PipelineError> {
         // We create the main replication client that will be used by the apply worker.
-        let replication_client = match self.config.pg_connection.ssl_mode {
+        let replication_client = match self.config.pg_connection.tls_config.ssl_mode {
             SslMode::Disable => {
                 PgReplicationClient::connect_no_tls(self.config.pg_connection.clone()).await?
             }
-            _ => {
-                PgReplicationClient::connect_tls(
-                    self.config.pg_connection.clone(),
-                    self.trusted_root_certs.clone(),
-                )
-                .await?
-            }
+            _ => PgReplicationClient::connect_tls(self.config.pg_connection.clone()).await?,
         };
 
         Ok(replication_client)

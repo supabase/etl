@@ -8,7 +8,7 @@ use etl::v2::pipeline::{Pipeline, PipelineIdentity};
 use etl::v2::state::store::base::StateStore;
 use etl::v2::state::store::postgres::PostgresStateStore;
 use etl::SslMode;
-use postgres::tokio::config::PgConnectionConfig;
+use postgres::tokio::config::{PgConnectionConfig, PgTlsConfig};
 use std::fmt;
 use std::io::BufReader;
 use std::time::Duration;
@@ -61,7 +61,10 @@ pub async fn start_replicator() -> anyhow::Result<()> {
             name: replicator_config.source.name,
             username: replicator_config.source.username,
             password: replicator_config.source.password.map(Into::into),
-            ssl_mode,
+            tls_config: PgTlsConfig {
+                ssl_mode,
+                trusted_root_certs,
+            },
         },
         batch: BatchConfig {
             max_size: replicator_config.pipeline.batch.max_size,
@@ -91,13 +94,7 @@ pub async fn start_replicator() -> anyhow::Result<()> {
         },
     };
 
-    let pipeline = Pipeline::new(
-        identity,
-        pipeline_config,
-        trusted_root_certs,
-        state_store,
-        destination,
-    );
+    let pipeline = Pipeline::new(identity, pipeline_config, state_store, destination);
     start_pipeline(pipeline).await?;
 
     Ok(())

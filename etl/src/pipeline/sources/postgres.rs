@@ -59,7 +59,7 @@ impl PostgresSource {
         slot_name: Option<String>,
         table_names_from: TableNamesFrom,
     ) -> Result<PostgresSource, PostgresSourceError> {
-        let mut replication_client = match config.ssl_mode {
+        let mut replication_client = match config.tls_config.ssl_mode {
             SslMode::Disable => ReplicationClient::connect_no_tls(config).await?,
             _ => ReplicationClient::connect_tls(config, trusted_root_certs).await?,
         };

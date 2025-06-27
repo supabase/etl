@@ -1,17 +1,14 @@
 use std::{error::Error, time::Duration};
 
 use clap::{Args, Parser, Subcommand};
-use etl::{
-    pipeline::{
-        batching::{data_pipeline::BatchDataPipeline, BatchConfig},
-        destinations::bigquery::BigQueryBatchDestination,
-        sources::postgres::{PostgresSource, TableNamesFrom},
-        PipelineAction,
-    },
-    SslMode,
-};
-use postgres::schema::TableName;
+use etl::{pipeline::{
+    batching::{data_pipeline::BatchDataPipeline, BatchConfig},
+    destinations::bigquery::BigQueryBatchDestination,
+    sources::postgres::{PostgresSource, TableNamesFrom},
+    PipelineAction,
+}, SslMode};
 use postgres::tokio::config::PgConnectionConfig;
+use postgres::{schema::TableName, tokio::config::PgTlsConfig};
 use tracing::error;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -127,7 +124,10 @@ async fn main_impl() -> Result<(), Box<dyn Error>> {
         name: db_args.db_name,
         username: db_args.db_username,
         password: db_args.db_password.map(Into::into),
-        ssl_mode: SslMode::Disable,
+        tls_config: PgTlsConfig {
+            ssl_mode: SslMode::Disable,
+            trusted_root_certs: vec![],
+        },
     };
 
     let (postgres_source, action) = match args.command {

@@ -1,3 +1,4 @@
+use rustls::pki_types::CertificateDer;
 use secrecy::{ExposeSecret, Secret};
 use tokio_postgres::Config;
 use tokio_postgres::config::SslMode;
@@ -19,8 +20,8 @@ pub struct PgConnectionConfig {
     pub username: String,
     /// Optional password for authentication
     pub password: Option<Secret<String>>,
-    /// SSL mode for the connection
-    pub ssl_mode: SslMode,
+    /// TLS config for the connection
+    pub tls_config: PgTlsConfig,
 }
 
 impl PgConnectionConfig {
@@ -61,7 +62,16 @@ impl From<PgConnectionConfig> for Config {
             .port(value.port)
             .dbname(value.name)
             .user(value.username)
-            .ssl_mode(value.ssl_mode);
+            //
+            // We set only ssl_mode from the tls config here and not trusted_root_certs
+            // because we are using rustls for tls connections and rust_postgres
+            // crate doesn't yet support rustls. See the following for details:
+            //
+            // * PgReplicationClient::connect_tls method for details
+            // * https://github.com/sfackler/rust-postgres/issues/421
+            //
+            // TODO: Does setting ssl mode has an effect here?
+            .ssl_mode(value.tls_config.ssl_mode);
 
         if let Some(password) = value.password {
             config.password(password.expose_secret());
@@ -69,4 +79,13 @@ impl From<PgConnectionConfig> for Config {
 
         config
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct PgTlsConfig {
+    /// The SSL verification to use when making a TLS connection to Postgres
+    pub ssl_mode: SslMode,
+
+    /// The trusted root certificates to use for the TLS connection verification.
+    pub trusted_root_certs: Vec<CertificateDer<'static>>,
 }

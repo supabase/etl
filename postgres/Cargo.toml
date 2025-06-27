@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 pg_escape = { workspace = true }
+rustls = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 secrecy = { workspace = true, features = ["serde", "alloc"] }
 sqlx = { workspace = true, features = [
