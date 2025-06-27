@@ -89,15 +89,15 @@ impl BigQueryClient {
     pub async fn create_table_if_missing(
         &self,
         dataset_id: &str,
-        table_name: &str,
+        table_id: &str,
         column_schemas: &[ColumnSchema],
         max_staleness_mins: u16,
     ) -> Result<bool, BQError> {
-        if self.table_exists(dataset_id, table_name).await? {
+        if self.table_exists(dataset_id, table_id).await? {
             return Ok(false);
         }
 
-        self.create_table(dataset_id, table_name, column_schemas, max_staleness_mins)
+        self.create_table(dataset_id, table_id, column_schemas, max_staleness_mins)
             .await?;
 
         Ok(true)
@@ -107,7 +107,7 @@ impl BigQueryClient {
     pub async fn create_table(
         &self,
         dataset_id: &str,
-        table_name: &str,
+        table_id: &str,
         column_schemas: &[ColumnSchema],
         max_staleness_mins: u16,
     ) -> Result<(), BQError> {
@@ -115,11 +115,11 @@ impl BigQueryClient {
         let max_staleness_option = Self::max_staleness_option(max_staleness_mins);
         let project_id = self.project_id.as_str();
 
-        info!("creating table {project_id}.{dataset_id}.{table_name} in bigquery");
+        info!("creating table {project_id}.{dataset_id}.{table_id} in bigquery");
 
         let query = format!(
             "create table `{}.{}.{}` {} {}",
-            project_id, dataset_id, table_name, columns_spec, max_staleness_option
+            project_id, dataset_id, table_id, columns_spec, max_staleness_option
         );
 
         let _ = self.query(QueryRequest::new(query)).await?;
@@ -132,36 +132,17 @@ impl BigQueryClient {
     /// # Panics
     ///
     /// Panics if the query result does not contain the expected `table_exists` column.
-    pub async fn table_exists(&self, dataset_id: &str, table_name: &str) -> Result<bool, BQError> {
-        let query = format!(
-            "select exists (select 1 from `{}.{}.INFORMATION_SCHEMA.TABLES` where table_name = @table_name) as table_exists",
-            self.project_id, dataset_id
-        );
+    pub async fn table_exists(&self, dataset_id: &str, table_id: &str) -> Result<bool, BQError> {
+        let table = self
+            .client
+            .table()
+            .get(&self.project_id, dataset_id, table_id, None)
+            .await;
 
-        let mut request = QueryRequest::new(query);
-        let parameter = QueryParameter {
-            name: Some("table_name".to_string()),
-            parameter_type: Some(QueryParameterType {
-                r#type: "string".to_string(),
-                array_type: None,
-                struct_types: None,
-            }),
-            parameter_value: Some(QueryParameterValue {
-                value: Some(table_name.to_string()),
-                array_values: None,
-                struct_values: None,
-            }),
+        let exists = match table {
+            Err(BQError::ResponseError { error }) if error.error.code == 404 => true,
+            _ => false,
         };
-        request.query_parameters = Some(vec![parameter]);
-
-        let mut result_set = self.query(request).await?;
-
-        let mut exists = false;
-        if result_set.next_row() {
-            exists = result_set
-                .get_bool_by_name("table_exists")?
-                .expect("no column named `table_exists` found in query result");
-        }
 
         Ok(exists)
     }
@@ -173,7 +154,7 @@ impl BigQueryClient {
     pub async fn stream_rows(
         &mut self,
         dataset_id: &str,
-        table_name: String,
+        table_id: String,
         table_descriptor: &TableDescriptor,
         table_rows: Vec<TableRow>,
     ) -> Result<(), BQError> {
@@ -182,7 +163,7 @@ impl BigQueryClient {
         let default_stream = StreamName::new_default(
             self.project_id.clone(),
             dataset_id.to_string(),
-            table_name.to_string(),
+            table_id.to_string(),
         );
 
         loop {
@@ -211,7 +192,7 @@ impl BigQueryClient {
     /// Executes an SQL query and returns the result set.
     async fn query(&self, request: QueryRequest) -> Result<ResultSet, BQError> {
         let query_response = self.client.job().query(&self.project_id, request).await?;
-
+        println!("{:?}", query_response);
         Ok(ResultSet::new_from_query_response(query_response))
     }
 

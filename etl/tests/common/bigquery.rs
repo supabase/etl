@@ -130,6 +130,8 @@ impl BigQueryEmulator {
 
 impl Drop for BigQueryEmulator {
     fn drop(&mut self) {
+        // We take out the client since during destruction we know that the struct won't be used
+        // anymore.
         let Some(client) = self.client.take() else {
             return;
         };

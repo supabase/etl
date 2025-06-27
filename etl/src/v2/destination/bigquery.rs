@@ -101,7 +101,7 @@ impl BigQueryDestination {
         })
     }
 
-    async fn load_table_name_and_descriptor<I: Deref<Target = Inner>>(
+    async fn load_table_id_and_descriptor<I: Deref<Target = Inner>>(
         inner: &I,
         table_id: &Oid,
     ) -> Result<(String, TableDescriptor), BigQueryDestinationError> {
@@ -115,10 +115,10 @@ impl BigQueryDestination {
             .get_table_schema_ref(table_id)
             .ok_or(BigQueryDestinationError::MissingTableSchema(*table_id))?;
 
-        let table_name = table_schema.name.as_bigquery_table_name();
+        let table_id = table_schema.name.as_bigquery_table_id();
         let table_descriptor = BigQueryClient::table_schema_to_descriptor(table_schema);
 
-        Ok((table_name, table_descriptor))
+        Ok((table_id, table_descriptor))
     }
 
     async fn write_table_schema(
@@ -131,7 +131,7 @@ impl BigQueryDestination {
             .client
             .create_table_if_missing(
                 &inner.dataset_id,
-                &table_schema.name.as_bigquery_table_name(),
+                &table_schema.name.as_bigquery_table_id(),
                 &table_schema.column_schemas,
                 inner.max_staleness_mins,
             )
@@ -152,8 +152,8 @@ impl BigQueryDestination {
     ) -> Result<(), BigQueryDestinationError> {
         let mut inner = self.inner.write().await;
 
-        let (table_name, table_descriptor) =
-            Self::load_table_name_and_descriptor(&inner, &table_id).await?;
+        let (table_id, table_descriptor) =
+            Self::load_table_id_and_descriptor(&inner, &table_id).await?;
 
         for table_row in &mut table_rows {
             table_row.values.push(Cell::String("UPSERT".to_string()));
@@ -162,7 +162,7 @@ impl BigQueryDestination {
         let dataset_id = inner.dataset_id.clone();
         inner
             .client
-            .stream_rows(&dataset_id, table_name, &table_descriptor, table_rows)
+            .stream_rows(&dataset_id, table_id, &table_descriptor, table_rows)
             .await?;
 
         Ok(())
@@ -219,13 +219,13 @@ impl BigQueryDestination {
         let mut inner = self.inner.write().await;
 
         for (table_id, table_rows) in table_id_to_table_rows {
-            let (table_name, table_descriptor) =
-                Self::load_table_name_and_descriptor(&inner, &table_id).await?;
+            let (table_id, table_descriptor) =
+                Self::load_table_id_and_descriptor(&inner, &table_id).await?;
 
             let dataset_id = inner.dataset_id.clone();
             inner
                 .client
-                .stream_rows(&dataset_id, table_name, &table_descriptor, table_rows)
+                .stream_rows(&dataset_id, table_id, &table_descriptor, table_rows)
                 .await?;
         }
 

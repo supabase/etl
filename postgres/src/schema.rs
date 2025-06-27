@@ -38,8 +38,8 @@ impl TableName {
 
 #[cfg(feature = "bigquery")]
 impl TableName {
-    /// Returns the BigQuery table name as `String` for this [`TableName`].
-    pub fn as_bigquery_table_name(&self) -> String {
+    /// Returns the BigQuery table id as `String` for this [`TableName`].
+    pub fn as_bigquery_table_id(&self) -> String {
         format!("{}_{}", self.schema, self.name)
     }
 }
