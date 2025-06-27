@@ -76,26 +76,33 @@ impl ResponseError for PublicationError {
 
 #[derive(Deserialize, ToSchema)]
 pub struct CreatePublicationRequest {
+    #[schema(example = "my_publication", required = true)]
     name: String,
+    #[schema(required = true)]
     tables: Vec<Table>,
 }
 
 #[derive(Deserialize, ToSchema)]
 pub struct UpdatePublicationRequest {
+    #[schema(required = true)]
     tables: Vec<Table>,
 }
 
 #[derive(Serialize, ToSchema)]
-pub struct GetPublicationsResponse {
+pub struct ReadPublicationsResponse {
     pub publications: Vec<Publication>,
 }
 
 #[utoipa::path(
     context_path = "/v1",
+    tag = "Publications",
     request_body = CreatePublicationRequest,
+    params(
+        ("source_id" = i64, Path, description = "Id of the source"),
+    ),
     responses(
         (status = 200, description = "Create new publication"),
-        (status = 500, description = "Internal server error")
+        (status = 500, description = "Internal server error", body = ErrorMessage)
     )
 )]
 #[post("/sources/{source_id}/publications")]
@@ -127,14 +134,15 @@ pub async fn create_publication(
 
 #[utoipa::path(
     context_path = "/v1",
+    tag = "Publications",
     params(
         ("source_id" = i64, Path, description = "Id of the source"),
-        ("publication_name" = i64, Path, description = "Name of the publication"),
+        ("publication_name" = String, Path, description = "Name of the publication"),
     ),
     responses(
         (status = 200, description = "Return publication with name = publication_name from source with id = source_id", body = Publication),
-        (status = 404, description = "Publication not found"),
-        (status = 500, description = "Internal server error")
+        (status = 404, description = "Publication not found", body = ErrorMessage),
+        (status = 500, description = "Internal server error", body = ErrorMessage)
     )
 )]
 #[get("/sources/{source_id}/publications/{publication_name}")]
@@ -162,15 +170,16 @@ pub async fn read_publication(
 
 #[utoipa::path(
     context_path = "/v1",
+    tag = "Publications",
     request_body = UpdatePublicationRequest,
     params(
         ("source_id" = i64, Path, description = "Id of the source"),
-        ("publication_name" = i64, Path, description = "Name of the publication"),
+        ("publication_name" = String, Path, description = "Name of the publication"),
     ),
     responses(
         (status = 200, description = "Update publication with name = publication_name from source with id = source_id"),
-        (status = 404, description = "Publication not found"),
-        (status = 500, description = "Internal server error")
+        (status = 404, description = "Publication not found", body = ErrorMessage),
+        (status = 500, description = "Internal server error", body = ErrorMessage)
     )
 )]
 #[post("/sources/{source_id}/publications/{publication_name}")]
@@ -202,14 +211,15 @@ pub async fn update_publication(
 
 #[utoipa::path(
     context_path = "/v1",
+    tag = "Publications",
     params(
         ("source_id" = i64, Path, description = "Id of the source"),
-        ("publication_name" = i64, Path, description = "Name of the publication"),
+        ("publication_name" = String, Path, description = "Name of the publication"),
     ),
     responses(
         (status = 200, description = "Delete publication with name = publication_name from source with id = source_id"),
-        (status = 404, description = "Publication not found"),
-        (status = 500, description = "Internal server error")
+        (status = 404, description = "Publication not found", body = ErrorMessage),
+        (status = 500, description = "Internal server error", body = ErrorMessage)
     )
 )]
 #[delete("/sources/{source_id}/publications/{publication_name}")]
@@ -235,12 +245,13 @@ pub async fn delete_publication(
 
 #[utoipa::path(
     context_path = "/v1",
+    tag = "Publications",
     params(
         ("source_id" = i64, Path, description = "Id of the source"),
     ),
     responses(
-        (status = 200, description = "Return all publications"),
-        (status = 500, description = "Internal server error")
+        (status = 200, description = "Return all publications", body = ReadPublicationsResponse),
+        (status = 500, description = "Internal server error", body = ErrorMessage)
     )
 )]
 #[get("/sources/{source_id}/publications")]
@@ -260,6 +271,7 @@ pub async fn read_all_publications(
 
     let options = config.into_connection_config().with_db();
     let publications = db::publications::read_all_publications(&options).await?;
-    let response = GetPublicationsResponse { publications };
+    let response = ReadPublicationsResponse { publications };
+
     Ok(Json(response))
 }

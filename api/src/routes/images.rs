@@ -54,47 +54,62 @@ impl ResponseError for ImageError {
     }
 }
 
-#[derive(Deserialize, ToSchema)]
-pub struct PostImageRequest {
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct CreateImageRequest {
+    #[schema(example = "supabase/replicator:1.2.3", required = true)]
+    pub name: String,
+    #[schema(example = true, required = true)]
+    pub is_default: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct CreateImageResponse {
+    #[schema(example = 1)]
+    pub id: i64,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct UpdateImageRequest {
+    #[schema(example = "supabase/replicator:1.2.4", required = true)]
+    pub name: String,
+    #[schema(example = false, required = true)]
+    pub is_default: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct ReadImageResponse {
+    #[schema(example = 1)]
+    pub id: i64,
     #[schema(example = "supabase/replicator:1.2.3")]
     pub name: String,
     #[schema(example = true)]
     pub is_default: bool,
 }
 
-#[derive(Serialize, ToSchema)]
-pub struct PostImageResponse {
-    id: i64,
-}
-
-#[derive(Serialize, ToSchema)]
-pub struct GetImageResponse {
-    id: i64,
-    name: String,
-    is_default: bool,
-}
-
-#[derive(Serialize, ToSchema)]
-pub struct GetImagesResponse {
-    images: Vec<GetImageResponse>,
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct ReadImagesResponse {
+    pub images: Vec<ReadImageResponse>,
 }
 
 #[utoipa::path(
     context_path = "/v1",
-    request_body = PostImageRequest,
+    request_body = CreateImageRequest,
     responses(
-        (status = 200, description = "Create new image", body = PostImageResponse),
-        (status = 500, description = "Internal server error")
-    )
+        (status = 200, description = "Create new image", body = CreateImageResponse),
+        (status = 400, description = "Bad request", body = ErrorMessage),
+        (status = 500, description = "Internal server error", body = ErrorMessage),
+    ),
+    tag = "Images"
 )]
 #[post("/images")]
 pub async fn create_image(
     pool: Data<PgPool>,
-    image: Json<PostImageRequest>,
+    image: Json<CreateImageRequest>,
 ) -> Result<impl Responder, ImageError> {
-    let image = image.0;
+    let image = image.into_inner();
     let id = db::images::create_image(&pool, &image.name, image.is_default).await?;
-    let response = PostImageResponse { id };
+    let response = CreateImageResponse { id };
+
     Ok(Json(response))
 }
 
@@ -104,10 +119,11 @@ pub async fn create_image(
         ("image_id" = i64, Path, description = "Id of the image"),
     ),
     responses(
-        (status = 200, description = "Return image with id = image_id", body = GetImageResponse),
-        (status = 404, description = "Image not found"),
-        (status = 500, description = "Internal server error")
-    )
+        (status = 200, description = "Return image with id = image_id", body = ReadImageResponse),
+        (status = 404, description = "Image not found", body = ErrorMessage),
+        (status = 500, description = "Internal server error", body = ErrorMessage),
+    ),
+    tag = "Images"
 )]
 #[get("/images/{image_id}")]
 pub async fn read_image(
@@ -117,37 +133,40 @@ pub async fn read_image(
     let image_id = image_id.into_inner();
     let response = db::images::read_image(&pool, image_id)
         .await?
-        .map(|s| GetImageResponse {
+        .map(|s| ReadImageResponse {
             id: s.id,
             name: s.name,
             is_default: s.is_default,
         })
         .ok_or(ImageError::ImageNotFound(image_id))?;
+
     Ok(Json(response))
 }
 
 #[utoipa::path(
     context_path = "/v1",
-    request_body = PostImageRequest,
+    request_body = UpdateImageRequest,
     params(
         ("image_id" = i64, Path, description = "Id of the image"),
     ),
     responses(
         (status = 200, description = "Update image with id = image_id"),
-        (status = 404, description = "Image not found"),
-        (status = 500, description = "Internal server error")
-    )
+        (status = 404, description = "Image not found", body = ErrorMessage),
+        (status = 500, description = "Internal server error", body = ErrorMessage),
+    ),
+    tag = "Images"
 )]
 #[post("/images/{image_id}")]
 pub async fn update_image(
     pool: Data<PgPool>,
     image_id: Path<i64>,
-    image: Json<PostImageRequest>,
+    image: Json<UpdateImageRequest>,
 ) -> Result<impl Responder, ImageError> {
     let image_id = image_id.into_inner();
     db::images::update_image(&pool, image_id, &image.name, image.is_default)
         .await?
         .ok_or(ImageError::ImageNotFound(image_id))?;
+
     Ok(HttpResponse::Ok().finish())
 }
 
@@ -158,9 +177,10 @@ pub async fn update_image(
     ),
     responses(
         (status = 200, description = "Delete image with id = image_id"),
-        (status = 404, description = "Image not found"),
-        (status = 500, description = "Internal server error")
-    )
+        (status = 404, description = "Image not found", body = ErrorMessage),
+        (status = 500, description = "Internal server error", body = ErrorMessage),
+    ),
+    tag = "Images"
 )]
 #[delete("/images/{image_id}")]
 pub async fn delete_image(
@@ -171,27 +191,30 @@ pub async fn delete_image(
     db::images::delete_image(&pool, image_id)
         .await?
         .ok_or(ImageError::ImageNotFound(image_id))?;
+
     Ok(HttpResponse::Ok().finish())
 }
 
 #[utoipa::path(
     context_path = "/v1",
     responses(
-        (status = 200, description = "Return all images"),
-        (status = 500, description = "Internal server error")
-    )
+        (status = 200, description = "Return all images", body = ReadImagesResponse),
+        (status = 500, description = "Internal server error", body = ErrorMessage),
+    ),
+    tag = "Images"
 )]
 #[get("/images")]
 pub async fn read_all_images(pool: Data<PgPool>) -> Result<impl Responder, ImageError> {
     let mut images = vec![];
     for image in db::images::read_all_images(&pool).await? {
-        let image = GetImageResponse {
+        let image = ReadImageResponse {
             id: image.id,
             name: image.name,
             is_default: image.is_default,
         };
         images.push(image);
     }
-    let response = GetImagesResponse { images };
+    let response = ReadImagesResponse { images };
+
     Ok(Json(response))
 }

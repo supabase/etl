@@ -4,7 +4,7 @@ use actix_web::{
     web::{Data, Json, Path},
     HttpRequest, HttpResponse, Responder, ResponseError,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use thiserror::Error;
 use utoipa::ToSchema;
@@ -45,8 +45,9 @@ impl TableError {
     }
 }
 
-#[derive(Serialize, ToSchema)]
-pub struct GetTablesResponse {
+#[derive(Serialize, Deserialize, ToSchema)]
+pub struct ReadTablesResponse {
+    #[schema(required = true)]
     pub tables: Vec<Table>,
 }
 
@@ -73,12 +74,13 @@ impl ResponseError for TableError {
 
 #[utoipa::path(
     context_path = "/v1",
+    tag = "Tables",
     params(
         ("source_id" = i64, Path, description = "Id of the source"),
     ),
     responses(
-        (status = 200, description = "Return all tables from source with id = source_id", body = Vec<Table>),
-        (status = 500, description = "Internal server error")
+        (status = 200, description = "Return all tables from source with id = source_id", body = ReadTablesResponse),
+        (status = 500, description = "Internal server error", body = ErrorMessage)
     )
 )]
 #[get("/sources/{source_id}/tables")]
@@ -98,6 +100,7 @@ pub async fn read_table_names(
 
     let options = config.into_connection_config().with_db();
     let tables = db::tables::get_tables(&options).await?;
-    let response = GetTablesResponse { tables };
+    let response = ReadTablesResponse { tables };
+
     Ok(Json(response))
 }

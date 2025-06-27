@@ -62,69 +62,87 @@ impl ResponseError for DestinationError {
     }
 }
 
-#[derive(Deserialize, ToSchema)]
-pub struct PostDestinationRequest {
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct CreateDestinationRequest {
+    #[schema(example = "My BigQuery Destination", required = true)]
     pub name: String,
     #[schema(required = true)]
     pub config: DestinationConfig,
 }
 
-#[derive(Serialize, ToSchema)]
-pub struct PostDestinationResponse {
-    id: i64,
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct CreateDestinationResponse {
+    #[schema(example = 1)]
+    pub id: i64,
 }
 
-#[derive(Serialize, ToSchema)]
-pub struct GetDestinationResponse {
-    #[schema(example = 1)]
-    id: i64,
-    #[schema(example = 1)]
-    tenant_id: String,
-    #[schema(example = "BigQuery Destination")]
-    name: String,
-    config: DestinationConfig,
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct UpdateDestinationRequest {
+    #[schema(example = "My Updated BigQuery Destination", required = true)]
+    pub name: String,
+    #[schema(required = true)]
+    pub config: DestinationConfig,
 }
 
-#[derive(Serialize, ToSchema)]
-pub struct GetDestinationsResponse {
-    destinations: Vec<GetDestinationResponse>,
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct ReadDestinationResponse {
+    #[schema(example = 1)]
+    pub id: i64,
+    #[schema(example = "abczjjlmfsijwrlnwatw")]
+    pub tenant_id: String,
+    #[schema(example = "My BigQuery Destination")]
+    pub name: String,
+    pub config: DestinationConfig,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct ReadDestinationsResponse {
+    pub destinations: Vec<ReadDestinationResponse>,
 }
 
 #[utoipa::path(
     context_path = "/v1",
-    request_body = PostDestinationRequest,
+    request_body = CreateDestinationRequest,
     responses(
-        (status = 200, description = "Create new destination", body = PostDestinationResponse),
-        (status = 500, description = "Internal server error")
-    )
+        (status = 200, description = "Create new destination", body = CreateDestinationResponse),
+        (status = 400, description = "Invalid tenant ID or request body", body = ErrorMessage),
+        (status = 500, description = "Internal server error", body = ErrorMessage)
+    ),
+    params(
+        ("tenant_id" = String, Header, description = "The tenant ID")
+    ),
+    tag = "Destinations"
 )]
 #[post("/destinations")]
 pub async fn create_destination(
     req: HttpRequest,
     pool: Data<PgPool>,
     encryption_key: Data<EncryptionKey>,
-    destination: Json<PostDestinationRequest>,
+    destination: Json<CreateDestinationRequest>,
 ) -> Result<impl Responder, DestinationError> {
-    let destination = destination.0;
+    let destination = destination.into_inner();
     let tenant_id = extract_tenant_id(&req)?;
     let name = destination.name;
     let config = destination.config;
     let id = db::destinations::create_destination(&pool, tenant_id, &name, config, &encryption_key)
         .await?;
-    let response = PostDestinationResponse { id };
+    let response = CreateDestinationResponse { id };
+
     Ok(Json(response))
 }
 
 #[utoipa::path(
     context_path = "/v1",
     params(
-        ("destination_id" = i64, Path, description = "Id of the destination"),
+        ("destination_id" = i64, Path, description = "Id of the destination to retrieve"),
+        ("tenant_id" = String, Header, description = "The tenant ID")
     ),
     responses(
-        (status = 200, description = "Return destination with id = destination_id", body = GetSourceResponse),
-        (status = 404, description = "Destination not found"),
-        (status = 500, description = "Internal server error")
-    )
+        (status = 200, description = "The destination with the given id", body = ReadDestinationResponse),
+        (status = 404, description = "Destination not found", body = ErrorMessage),
+        (status = 500, description = "Internal server error", body = ErrorMessage)
+    ),
+    tag = "Destinations"
 )]
 #[get("/destinations/{destination_id}")]
 pub async fn read_destination(
@@ -138,27 +156,30 @@ pub async fn read_destination(
     let response =
         db::destinations::read_destination(&pool, tenant_id, destination_id, &encryption_key)
             .await?
-            .map(|s| GetDestinationResponse {
+            .map(|s| ReadDestinationResponse {
                 id: s.id,
                 tenant_id: s.tenant_id,
                 name: s.name,
                 config: s.config,
             })
             .ok_or(DestinationError::DestinationNotFound(destination_id))?;
+
     Ok(Json(response))
 }
 
 #[utoipa::path(
     context_path = "/v1",
-    request_body = PostDestinationRequest,
+    request_body = UpdateDestinationRequest,
     params(
-        ("destination_id" = i64, Path, description = "Id of the destination"),
+        ("destination_id" = i64, Path, description = "Id of the destination to update"),
+        ("tenant_id" = String, Header, description = "The tenant ID")
     ),
     responses(
-        (status = 200, description = "Update destination with id = destination_id"),
-        (status = 404, description = "Destination not found"),
-        (status = 500, description = "Internal server error")
-    )
+        (status = 200, description = "Destination updated successfully"),
+        (status = 404, description = "Destination not found", body = ErrorMessage),
+        (status = 500, description = "Internal server error", body = ErrorMessage)
+    ),
+    tag = "Destinations"
 )]
 #[post("/destinations/{destination_id}")]
 pub async fn update_destination(
@@ -166,9 +187,9 @@ pub async fn update_destination(
     pool: Data<PgPool>,
     destination_id: Path<i64>,
     encryption_key: Data<EncryptionKey>,
-    destination: Json<PostDestinationRequest>,
+    destination: Json<UpdateDestinationRequest>,
 ) -> Result<impl Responder, DestinationError> {
-    let destination = destination.0;
+    let destination = destination.into_inner();
     let tenant_id = extract_tenant_id(&req)?;
     let destination_id = destination_id.into_inner();
     let name = destination.name;
@@ -183,19 +204,22 @@ pub async fn update_destination(
     )
     .await?
     .ok_or(DestinationError::DestinationNotFound(destination_id))?;
+
     Ok(HttpResponse::Ok().finish())
 }
 
 #[utoipa::path(
     context_path = "/v1",
     params(
-        ("destination_id" = i64, Path, description = "Id of the destination"),
+        ("destination_id" = i64, Path, description = "Id of the destination to delete"),
+        ("tenant_id" = String, Header, description = "The tenant ID")
     ),
     responses(
-        (status = 200, description = "Delete destination with id = destination_id"),
-        (status = 404, description = "Destination not found"),
-        (status = 500, description = "Internal server error")
-    )
+        (status = 200, description = "Destination deleted successfully"),
+        (status = 404, description = "Destination not found", body = ErrorMessage),
+        (status = 500, description = "Internal server error", body = ErrorMessage)
+    ),
+    tag = "Destinations"
 )]
 #[delete("/destinations/{destination_id}")]
 pub async fn delete_destination(
@@ -208,15 +232,20 @@ pub async fn delete_destination(
     db::destinations::delete_destination(&pool, tenant_id, destination_id)
         .await?
         .ok_or(DestinationError::DestinationNotFound(destination_id))?;
+
     Ok(HttpResponse::Ok().finish())
 }
 
 #[utoipa::path(
     context_path = "/v1",
     responses(
-        (status = 200, description = "Return all destinations"),
-        (status = 500, description = "Internal server error")
-    )
+        (status = 200, description = "A list of all the destinations for a tenant", body = ReadDestinationsResponse),
+        (status = 500, description = "Internal server error", body = ErrorMessage)
+    ),
+    params(
+        ("tenant_id" = String, Header, description = "The tenant ID")
+    ),
+    tag = "Destinations"
 )]
 #[get("/destinations")]
 pub async fn read_all_destinations(
@@ -229,7 +258,7 @@ pub async fn read_all_destinations(
     for destination in
         db::destinations::read_all_destinations(&pool, tenant_id, &encryption_key).await?
     {
-        let destination = GetDestinationResponse {
+        let destination = ReadDestinationResponse {
             id: destination.id,
             tenant_id: destination.tenant_id,
             name: destination.name,
@@ -237,6 +266,7 @@ pub async fn read_all_destinations(
         };
         destinations.push(destination);
     }
-    let response = GetDestinationsResponse { destinations };
+    let response = ReadDestinationsResponse { destinations };
+
     Ok(Json(response))
 }

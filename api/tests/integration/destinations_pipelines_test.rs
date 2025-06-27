@@ -1,11 +1,14 @@
+use api::routes::destinations::ReadDestinationResponse;
+use api::routes::destinations_pipelines::{
+    CreateDestinationPipelineRequest, CreateDestinationPipelineResponse,
+    UpdateDestinationPipelineRequest,
+};
+use api::routes::pipelines::{CreatePipelineRequest, ReadPipelineResponse};
 use reqwest::StatusCode;
 use telemetry::init_test_tracing;
 
 use crate::{
-    common::test_app::{
-        spawn_test_app, CreateDestinationPipelineResponse, CreatePipelineRequest,
-        DestinationResponse, PipelineResponse, PostDestinationPipelineRequest,
-    },
+    common::test_app::spawn_test_app,
     integration::destination_test::{
         create_destination, new_destination_config, new_name, updated_destination_config,
         updated_name,
@@ -26,7 +29,7 @@ async fn destination_and_pipeline_can_be_created() {
     create_default_image(&app).await;
 
     // Act
-    let destination_pipeline = PostDestinationPipelineRequest {
+    let destination_pipeline = CreateDestinationPipelineRequest {
         destination_name: new_name(),
         destination_config: new_destination_config(),
         source_id,
@@ -49,7 +52,7 @@ async fn destination_and_pipeline_can_be_created() {
     let pipeline_id = response.pipeline_id;
 
     let response = app.read_destination(tenant_id, destination_id).await;
-    let response: DestinationResponse = response
+    let response: ReadDestinationResponse = response
         .json()
         .await
         .expect("failed to deserialize response");
@@ -58,7 +61,7 @@ async fn destination_and_pipeline_can_be_created() {
     insta::assert_debug_snapshot!(response.config);
 
     let response = app.read_pipeline(tenant_id, pipeline_id).await;
-    let response: PipelineResponse = response
+    let response: ReadPipelineResponse = response
         .json()
         .await
         .expect("failed to deserialize response");
@@ -90,7 +93,7 @@ async fn destination_and_pipeline_with_another_tenants_source_cant_be_created() 
     .await;
     let source2_id = create_source(&app, tenant2_id).await;
 
-    let destination_pipeline = PostDestinationPipelineRequest {
+    let destination_pipeline = CreateDestinationPipelineRequest {
         destination_name: new_name(),
         destination_config: new_destination_config(),
         source_id: source2_id,
@@ -112,7 +115,7 @@ async fn an_existing_destination_and_pipeline_can_be_updated() {
     let tenant_id = &create_tenant(&app).await;
     let source_id = create_source(&app, tenant_id).await;
     create_default_image(&app).await;
-    let destination_pipeline = PostDestinationPipelineRequest {
+    let destination_pipeline = CreateDestinationPipelineRequest {
         destination_name: new_name(),
         destination_config: new_destination_config(),
         source_id,
@@ -132,7 +135,7 @@ async fn an_existing_destination_and_pipeline_can_be_updated() {
     let new_source_id = create_source(&app, tenant_id).await;
 
     // Act
-    let destination_pipeline = PostDestinationPipelineRequest {
+    let destination_pipeline = UpdateDestinationPipelineRequest {
         destination_name: updated_name(),
         destination_config: updated_destination_config(),
         source_id: new_source_id,
@@ -151,7 +154,7 @@ async fn an_existing_destination_and_pipeline_can_be_updated() {
     assert!(response.status().is_success());
 
     let response = app.read_destination(tenant_id, destination_id).await;
-    let response: DestinationResponse = response
+    let response: ReadDestinationResponse = response
         .json()
         .await
         .expect("failed to deserialize response");
@@ -160,7 +163,7 @@ async fn an_existing_destination_and_pipeline_can_be_updated() {
     insta::assert_debug_snapshot!(response.config);
 
     let response = app.read_pipeline(tenant_id, pipeline_id).await;
-    let response: PipelineResponse = response
+    let response: ReadPipelineResponse = response
         .json()
         .await
         .expect("failed to deserialize response");
@@ -192,7 +195,7 @@ async fn destination_and_pipeline_with_another_tenants_source_cant_be_updated() 
     .await;
 
     let source1_id = create_source(&app, tenant1_id).await;
-    let destination_pipeline = PostDestinationPipelineRequest {
+    let destination_pipeline = CreateDestinationPipelineRequest {
         destination_name: new_name(),
         destination_config: new_destination_config(),
         source_id: source1_id,
@@ -212,7 +215,7 @@ async fn destination_and_pipeline_with_another_tenants_source_cant_be_updated() 
 
     // Act
     let source2_id = create_source(&app, tenant2_id).await;
-    let destination_pipeline = PostDestinationPipelineRequest {
+    let destination_pipeline = UpdateDestinationPipelineRequest {
         destination_name: updated_name(),
         destination_config: updated_destination_config(),
         source_id: source2_id,
@@ -251,7 +254,7 @@ async fn destination_and_pipeline_with_another_tenants_destination_cant_be_updat
     .await;
 
     let source1_id = create_source(&app, tenant1_id).await;
-    let destination_pipeline = PostDestinationPipelineRequest {
+    let destination_pipeline = CreateDestinationPipelineRequest {
         destination_name: new_name(),
         destination_config: new_destination_config(),
         source_id: source1_id,
@@ -268,7 +271,7 @@ async fn destination_and_pipeline_with_another_tenants_destination_cant_be_updat
 
     // Act
     let destination2_id = create_destination(&app, tenant2_id).await;
-    let destination_pipeline = PostDestinationPipelineRequest {
+    let destination_pipeline = UpdateDestinationPipelineRequest {
         destination_name: updated_name(),
         destination_config: updated_destination_config(),
         source_id: source1_id,
@@ -307,7 +310,7 @@ async fn destination_and_pipeline_with_another_tenants_pipeline_cant_be_updated(
     .await;
 
     let source1_id = create_source(&app, tenant1_id).await;
-    let destination_pipeline = PostDestinationPipelineRequest {
+    let destination_pipeline = CreateDestinationPipelineRequest {
         destination_name: new_name(),
         destination_config: new_destination_config(),
         source_id: source1_id,
@@ -326,7 +329,7 @@ async fn destination_and_pipeline_with_another_tenants_pipeline_cant_be_updated(
     } = response;
 
     let source2_id = create_source(&app, tenant2_id).await;
-    let destination_pipeline = PostDestinationPipelineRequest {
+    let destination_pipeline = CreateDestinationPipelineRequest {
         destination_name: new_name(),
         destination_config: new_destination_config(),
         source_id: source2_id,
@@ -345,7 +348,7 @@ async fn destination_and_pipeline_with_another_tenants_pipeline_cant_be_updated(
     } = response;
 
     // Act
-    let destination_pipeline = PostDestinationPipelineRequest {
+    let destination_pipeline = UpdateDestinationPipelineRequest {
         destination_name: updated_name(),
         destination_config: updated_destination_config(),
         source_id: source1_id,
@@ -374,7 +377,7 @@ async fn duplicate_destination_pipeline_with_same_source_cant_be_created() {
     let source_id = create_source(&app, tenant_id).await;
 
     // Create first destination and pipeline
-    let destination_pipeline = PostDestinationPipelineRequest {
+    let destination_pipeline = CreateDestinationPipelineRequest {
         destination_name: new_name(),
         destination_config: new_destination_config(),
         source_id,

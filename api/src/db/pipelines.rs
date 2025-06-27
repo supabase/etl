@@ -11,8 +11,10 @@ use crate::db::serde::{
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PipelineConfig {
     pub publication_name: String,
-    pub batch: BatchConfig,
-    pub apply_worker_init_retry: RetryConfig,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub batch: Option<BatchConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub apply_worker_init_retry: Option<RetryConfig>,
 }
 
 pub struct Pipeline {
@@ -155,11 +157,11 @@ pub async fn update_pipeline(
     pipeline_id: i64,
     source_id: i64,
     destination_id: i64,
-    pipeline_config: &PipelineConfig,
+    config: &PipelineConfig,
 ) -> Result<Option<i64>, PipelinesDbError> {
-    let publication_name = &pipeline_config.publication_name.clone();
-    let pipeline_config =
-        serde_json::to_value(pipeline_config).expect("failed to serialize config");
+    let publication_name = &config.publication_name;
+    let pipeline_config = serialize(config)?;
+
     let mut txn = pool.begin().await?;
     let res = update_pipeline_txn(
         &mut txn,

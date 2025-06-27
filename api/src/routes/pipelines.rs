@@ -28,12 +28,6 @@ use crate::k8s_client::{
 use crate::routes::{extract_tenant_id, ErrorMessage, TenantIdError};
 use secrecy::ExposeSecret;
 
-#[derive(serde::Serialize, serde::Deserialize)]
-pub struct Secrets {
-    pub postgres_password: String,
-    pub big_query_service_account_key: Option<String>,
-}
-
 #[derive(Debug, Error)]
 enum PipelineError {
     #[error("The pipeline with id {0} was not found")]
@@ -147,50 +141,76 @@ impl ResponseError for PipelineError {
     }
 }
 
-#[derive(Deserialize, ToSchema)]
-pub struct PostPipelineRequest {
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct CreatePipelineRequest {
+    #[schema(example = 1, required = true)]
     pub source_id: i64,
+    #[schema(example = 1, required = true)]
     pub destination_id: i64,
+    #[schema(required = true)]
     pub config: PipelineConfig,
 }
 
-#[derive(Serialize, ToSchema)]
-pub struct PostPipelineResponse {
-    id: i64,
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct CreatePipelineResponse {
+    #[schema(example = 1)]
+    pub id: i64,
 }
 
-#[derive(Serialize, ToSchema)]
-pub struct GetPipelineResponse {
-    id: i64,
-    tenant_id: String,
-    source_id: i64,
-    source_name: String,
-    destination_id: i64,
-    destination_name: String,
-    replicator_id: i64,
-    config: PipelineConfig,
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct UpdatePipelineRequest {
+    #[schema(example = 1, required = true)]
+    pub source_id: i64,
+    #[schema(example = 1, required = true)]
+    pub destination_id: i64,
+    #[schema(required = true)]
+    pub config: PipelineConfig,
 }
 
-#[derive(Serialize, ToSchema)]
-pub struct GetPipelinesResponse {
-    pipelines: Vec<GetPipelineResponse>,
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct ReadPipelineResponse {
+    #[schema(example = 1)]
+    pub id: i64,
+    #[schema(example = "abczjjlmfsijwrlnwatw")]
+    pub tenant_id: String,
+    #[schema(example = 1)]
+    pub source_id: i64,
+    #[schema(example = "My Postgres Source")]
+    pub source_name: String,
+    #[schema(example = 1)]
+    pub destination_id: i64,
+    #[schema(example = "My BigQuery Destination")]
+    pub destination_name: String,
+    #[schema(example = 1)]
+    pub replicator_id: i64,
+    pub config: PipelineConfig,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct ReadPipelinesResponse {
+    pub pipelines: Vec<ReadPipelineResponse>,
 }
 
 #[utoipa::path(
     context_path = "/v1",
-    request_body = PostPipelineRequest,
+    request_body = CreatePipelineRequest,
+    params(
+        ("tenant_id" = String, Header, description = "The tenant ID")
+    ),
     responses(
-        (status = 200, description = "Create new pipeline", body = PostPipelineResponse),
-        (status = 500, description = "Internal server error")
-    )
+        (status = 200, description = "Create new pipeline", body = CreatePipelineResponse),
+        (status = 400, description = "Bad request", body = ErrorMessage),
+        (status = 500, description = "Internal server error", body = ErrorMessage),
+    ),
+    tag = "Pipelines"
 )]
 #[post("/pipelines")]
 pub async fn create_pipeline(
     req: HttpRequest,
     pool: Data<PgPool>,
-    pipeline: Json<PostPipelineRequest>,
+    pipeline: Json<CreatePipelineRequest>,
 ) -> Result<impl Responder, PipelineError> {
-    let pipeline = pipeline.0;
+    let pipeline = pipeline.into_inner();
     let tenant_id = extract_tenant_id(&req)?;
     let config = pipeline.config;
 
@@ -216,7 +236,8 @@ pub async fn create_pipeline(
     )
     .await?;
 
-    let response = PostPipelineResponse { id };
+    let response = CreatePipelineResponse { id };
+
     Ok(Json(response))
 }
 
@@ -224,12 +245,14 @@ pub async fn create_pipeline(
     context_path = "/v1",
     params(
         ("pipeline_id" = i64, Path, description = "Id of the pipeline"),
+        ("tenant_id" = String, Header, description = "The tenant ID")
     ),
     responses(
-        (status = 200, description = "Return pipeline with id = pipeline_id", body = GetPipelineResponse),
-        (status = 404, description = "Pipeline not found"),
-        (status = 500, description = "Internal server error")
-    )
+        (status = 200, description = "Return pipeline with id = pipeline_id", body = ReadPipelineResponse),
+        (status = 404, description = "Pipeline not found", body = ErrorMessage),
+        (status = 500, description = "Internal server error", body = ErrorMessage)
+    ),
+    tag = "Pipelines"
 )]
 #[get("/pipelines/{pipeline_id}")]
 pub async fn read_pipeline(
@@ -243,7 +266,7 @@ pub async fn read_pipeline(
     let response = db::pipelines::read_pipeline(&pool, tenant_id, pipeline_id)
         .await?
         .map(|s| {
-            Ok::<GetPipelineResponse, serde_json::Error>(GetPipelineResponse {
+            Ok::<ReadPipelineResponse, serde_json::Error>(ReadPipelineResponse {
                 id: s.id,
                 tenant_id: s.tenant_id,
                 source_id: s.source_id,
@@ -262,45 +285,44 @@ pub async fn read_pipeline(
 
 #[utoipa::path(
     context_path = "/v1",
-    request_body = PostDestinationRequest,
+    request_body = UpdatePipelineRequest,
     params(
         ("pipeline_id" = i64, Path, description = "Id of the pipeline"),
+        ("tenant_id" = String, Header, description = "The tenant ID")
     ),
     responses(
         (status = 200, description = "Update pipeline with id = pipeline_id"),
-        (status = 404, description = "Pipeline not found"),
-        (status = 500, description = "Internal server error")
-    )
+        (status = 404, description = "Pipeline not found", body = ErrorMessage),
+        (status = 500, description = "Internal server error", body = ErrorMessage)
+    ),
+    tag = "Pipelines"
 )]
-#[post("/pipelines/{pipeline_id:\\d+}")]
+#[post("/pipelines/{pipeline_id}")]
 pub async fn update_pipeline(
     req: HttpRequest,
     pool: Data<PgPool>,
     pipeline_id: Path<i64>,
-    pipeline: Json<PostPipelineRequest>,
+    pipeline: Json<UpdatePipelineRequest>,
 ) -> Result<impl Responder, PipelineError> {
-    let pipeline = pipeline.0;
+    let pipeline = pipeline.into_inner();
     let tenant_id = extract_tenant_id(&req)?;
     let pipeline_id = pipeline_id.into_inner();
-    let config = &pipeline.config;
-    let source_id = pipeline.source_id;
-    let destination_id = pipeline.destination_id;
 
-    if !source_exists(&pool, tenant_id, source_id).await? {
-        return Err(PipelineError::SourceNotFound(source_id));
+    if !source_exists(&pool, tenant_id, pipeline.source_id).await? {
+        return Err(PipelineError::SourceNotFound(pipeline.source_id));
     }
 
-    if !destination_exists(&pool, tenant_id, destination_id).await? {
-        return Err(PipelineError::DestinationNotFound(destination_id));
+    if !destination_exists(&pool, tenant_id, pipeline.destination_id).await? {
+        return Err(PipelineError::DestinationNotFound(pipeline.destination_id));
     }
 
     db::pipelines::update_pipeline(
         &pool,
         tenant_id,
         pipeline_id,
-        source_id,
-        destination_id,
-        config,
+        pipeline.source_id,
+        pipeline.destination_id,
+        &pipeline.config,
     )
     .await?
     .ok_or(PipelineError::PipelineNotFound(pipeline_id))?;
@@ -312,12 +334,14 @@ pub async fn update_pipeline(
     context_path = "/v1",
     params(
         ("pipeline_id" = i64, Path, description = "Id of the pipeline"),
+        ("tenant_id" = String, Header, description = "The tenant ID")
     ),
     responses(
         (status = 200, description = "Delete pipeline with id = pipeline_id"),
-        (status = 404, description = "Pipeline not found"),
-        (status = 500, description = "Internal server error")
-    )
+        (status = 404, description = "Pipeline not found", body = ErrorMessage),
+        (status = 500, description = "Internal server error", body = ErrorMessage)
+    ),
+    tag = "Pipelines"
 )]
 #[delete("/pipelines/{pipeline_id}")]
 pub async fn delete_pipeline(
@@ -330,15 +354,20 @@ pub async fn delete_pipeline(
     db::pipelines::delete_pipeline(&pool, tenant_id, pipeline_id)
         .await?
         .ok_or(PipelineError::PipelineNotFound(pipeline_id))?;
+
     Ok(HttpResponse::Ok().finish())
 }
 
 #[utoipa::path(
     context_path = "/v1",
+    params(
+        ("tenant_id" = String, Header, description = "The tenant ID")
+    ),
     responses(
-        (status = 200, description = "Return all pipelines"),
-        (status = 500, description = "Internal server error")
-    )
+        (status = 200, description = "Return all pipelines", body = ReadPipelinesResponse),
+        (status = 500, description = "Internal server error", body = ErrorMessage)
+    ),
+    tag = "Pipelines"
 )]
 #[get("/pipelines")]
 pub async fn read_all_pipelines(
@@ -349,7 +378,7 @@ pub async fn read_all_pipelines(
 
     let mut pipelines = vec![];
     for pipeline in db::pipelines::read_all_pipelines(&pool, tenant_id).await? {
-        let pipeline = GetPipelineResponse {
+        let pipeline = ReadPipelineResponse {
             id: pipeline.id,
             tenant_id: pipeline.tenant_id,
             source_id: pipeline.source_id,
@@ -362,13 +391,17 @@ pub async fn read_all_pipelines(
         pipelines.push(pipeline);
     }
 
-    let response = GetPipelinesResponse { pipelines };
+    let response = ReadPipelinesResponse { pipelines };
 
     Ok(Json(response))
 }
 
 #[utoipa::path(
     context_path = "/v1",
+    params(
+        ("pipeline_id" = i64, Path, description = "Id of the pipeline"),
+        ("tenant_id" = String, Header, description = "The tenant ID")
+    ),
     responses(
         (status = 200, description = "Start a pipeline"),
         (status = 500, description = "Internal server error")
@@ -414,6 +447,10 @@ pub async fn start_pipeline(
 
 #[utoipa::path(
     context_path = "/v1",
+    params(
+        ("pipeline_id" = i64, Path, description = "Id of the pipeline"),
+        ("tenant_id" = String, Header, description = "The tenant ID")
+    ),
     responses(
         (status = 200, description = "Stop a pipeline"),
         (status = 500, description = "Internal server error")
@@ -443,6 +480,9 @@ pub async fn stop_pipeline(
 
 #[utoipa::path(
     context_path = "/v1",
+    params(
+        ("tenant_id" = String, Header, description = "The tenant ID")
+    ),
     responses(
         (status = 200, description = "Stop all pipelines"),
         (status = 500, description = "Internal server error")
@@ -476,6 +516,10 @@ pub enum PipelineStatus {
 
 #[utoipa::path(
     context_path = "/v1",
+    params(
+        ("pipeline_id" = i64, Path, description = "Id of the pipeline"),
+        ("tenant_id" = String, Header, description = "The tenant ID")
+    ),
     responses(
         (status = 200, description = "Get pipeline status"),
         (status = 500, description = "Internal server error")
@@ -508,6 +552,12 @@ pub async fn get_pipeline_status(
     };
 
     Ok(Json(status))
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct Secrets {
+    postgres_password: String,
+    big_query_service_account_key: Option<String>,
 }
 
 async fn read_data(
@@ -597,8 +647,13 @@ async fn build_replicator_config(
         // is the same.
         id: pipeline.id as u64,
         publication_name: pipeline.config.publication_name,
-        batch: pipeline.config.batch,
-        apply_worker_init_retry: pipeline.config.apply_worker_init_retry,
+        // If these configs are not set, we default to the most recent default values.
+        //
+        // The reason for using `Option` fields in the config instead of automatically applying defaults
+        // is that we want to persist a config in storage with some unset values, allowing us to interpret
+        // them differently after deserialization without needing to run database migrations.
+        batch: pipeline.config.batch.unwrap_or_default(),
+        apply_worker_init_retry: pipeline.config.apply_worker_init_retry.unwrap_or_default(),
     };
 
     let config = ReplicatorConfig {

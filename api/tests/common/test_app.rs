@@ -1,198 +1,26 @@
 use crate::common::database::create_etl_api_database;
+use api::routes::destinations::{CreateDestinationRequest, UpdateDestinationRequest};
+use api::routes::destinations_pipelines::{
+    CreateDestinationPipelineRequest, UpdateDestinationPipelineRequest,
+};
+use api::routes::images::{CreateImageRequest, UpdateImageRequest};
+use api::routes::pipelines::{CreatePipelineRequest, UpdatePipelineRequest};
+use api::routes::sources::{CreateSourceRequest, UpdateSourceRequest};
+use api::routes::tenants::{CreateOrUpdateTenantRequest, CreateTenantRequest, UpdateTenantRequest};
+use api::routes::tenants_sources::CreateTenantSourceRequest;
 use api::{
     config::ApiConfig,
-    db::{pipelines::PipelineConfig, sources::SourceConfig},
     encryption::{self, generate_random_key},
     startup::run,
 };
 use config::load_config;
-use config::shared::DestinationConfig;
 use postgres::sqlx::config::PgConnectionConfig;
 use postgres::sqlx::test_utils::drop_pg_database;
 use reqwest::{IntoUrl, RequestBuilder};
-use serde::{Deserialize, Serialize};
 use std::io;
 use std::net::TcpListener;
 use tokio::runtime::Handle;
 use uuid::Uuid;
-
-#[derive(Serialize)]
-pub struct CreateTenantRequest {
-    pub id: String,
-    pub name: String,
-}
-
-#[derive(Serialize)]
-pub struct UpdateTenantRequest {
-    pub name: String,
-}
-
-#[derive(Deserialize)]
-pub struct CreateTenantResponse {
-    pub id: String,
-}
-
-#[derive(Deserialize)]
-pub struct TenantResponse {
-    pub id: String,
-    pub name: String,
-}
-
-#[derive(Deserialize)]
-pub struct TenantsResponse {
-    pub tenants: Vec<TenantResponse>,
-}
-
-#[derive(Serialize)]
-pub struct CreateSourceRequest {
-    pub name: String,
-    pub config: SourceConfig,
-}
-
-#[derive(Deserialize)]
-pub struct CreateSourceResponse {
-    pub id: i64,
-}
-
-#[derive(Serialize)]
-pub struct UpdateSourceRequest {
-    pub name: String,
-    pub config: SourceConfig,
-}
-
-#[derive(Deserialize)]
-pub struct SourceResponse {
-    pub id: i64,
-    pub tenant_id: String,
-    pub name: String,
-    pub config: SourceConfig,
-}
-
-#[derive(Deserialize)]
-pub struct SourcesResponse {
-    pub sources: Vec<SourceResponse>,
-}
-
-#[derive(Serialize)]
-pub struct CreateTenantSourceRequest {
-    pub tenant_id: String,
-    pub tenant_name: String,
-    pub source_name: String,
-    pub source_config: SourceConfig,
-}
-
-#[derive(Deserialize)]
-pub struct CreateTenantSourceResponse {
-    pub tenant_id: String,
-    pub source_id: i64,
-}
-
-#[derive(Serialize)]
-pub struct PostDestinationPipelineRequest {
-    pub destination_name: String,
-    pub destination_config: DestinationConfig,
-    pub source_id: i64,
-    pub pipeline_config: PipelineConfig,
-}
-
-#[derive(Deserialize)]
-pub struct CreateDestinationPipelineResponse {
-    pub destination_id: i64,
-    pub pipeline_id: i64,
-}
-
-#[derive(Serialize)]
-pub struct CreateDestinationRequest {
-    pub name: String,
-    pub config: DestinationConfig,
-}
-
-#[derive(Deserialize)]
-pub struct CreateDestinationResponse {
-    pub id: i64,
-}
-
-#[derive(Serialize)]
-pub struct UpdateDestinationRequest {
-    pub name: String,
-    pub config: DestinationConfig,
-}
-
-#[derive(Deserialize)]
-pub struct DestinationResponse {
-    pub id: i64,
-    pub tenant_id: String,
-    pub name: String,
-    pub config: DestinationConfig,
-}
-
-#[derive(Deserialize)]
-pub struct DestinationsResponse {
-    pub destinations: Vec<DestinationResponse>,
-}
-
-#[derive(Serialize)]
-pub struct CreatePipelineRequest {
-    pub source_id: i64,
-    pub destination_id: i64,
-    pub config: PipelineConfig,
-}
-
-#[derive(Deserialize)]
-pub struct CreatePipelineResponse {
-    pub id: i64,
-}
-
-#[derive(Deserialize)]
-pub struct PipelineResponse {
-    pub id: i64,
-    pub tenant_id: String,
-    pub source_id: i64,
-    pub destination_id: i64,
-    pub replicator_id: i64,
-    pub config: PipelineConfig,
-}
-
-#[derive(Deserialize)]
-pub struct PipelinesResponse {
-    pub pipelines: Vec<PipelineResponse>,
-}
-
-#[derive(Serialize)]
-pub struct UpdatePipelineRequest {
-    pub source_id: i64,
-    pub destination_id: i64,
-    pub config: PipelineConfig,
-}
-
-#[derive(Serialize)]
-pub struct CreateImageRequest {
-    pub name: String,
-    pub is_default: bool,
-}
-
-#[derive(Deserialize)]
-pub struct CreateImageResponse {
-    pub id: i64,
-}
-
-#[derive(Deserialize)]
-pub struct ImageResponse {
-    pub id: i64,
-    pub name: String,
-    pub is_default: bool,
-}
-
-#[derive(Deserialize)]
-pub struct ImagesResponse {
-    pub images: Vec<ImageResponse>,
-}
-
-#[derive(Serialize)]
-pub struct UpdateImageRequest {
-    pub name: String,
-    pub is_default: bool,
-}
 
 pub struct TestApp {
     pub address: String,
@@ -256,7 +84,7 @@ impl TestApp {
     pub async fn create_or_update_tenant(
         &self,
         tenant_id: &str,
-        tenant: &UpdateTenantRequest,
+        tenant: &CreateOrUpdateTenantRequest,
     ) -> reqwest::Response {
         self.put_authenticated(format!("{}/v1/tenants/{tenant_id}", &self.address))
             .json(tenant)
@@ -471,7 +299,7 @@ impl TestApp {
     pub async fn create_destination_pipeline(
         &self,
         tenant_id: &str,
-        destination_pipeline: &PostDestinationPipelineRequest,
+        destination_pipeline: &CreateDestinationPipelineRequest,
     ) -> reqwest::Response {
         self.post_authenticated(format!("{}/v1/destinations-pipelines", &self.address))
             .header("tenant_id", tenant_id)
@@ -486,7 +314,7 @@ impl TestApp {
         tenant_id: &str,
         destination_id: i64,
         pipeline_id: i64,
-        destination_pipeline: &PostDestinationPipelineRequest,
+        destination_pipeline: &UpdateDestinationPipelineRequest,
     ) -> reqwest::Response {
         self.post_authenticated(format!(
             "{}/v1/destinations-pipelines/{destination_id}/{pipeline_id}",

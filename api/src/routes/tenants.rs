@@ -15,25 +15,6 @@ use crate::db;
 use crate::db::tenants::TenantsDbError;
 use crate::routes::ErrorMessage;
 
-#[derive(Deserialize, ToSchema)]
-pub struct CreateTenantRequest {
-    #[schema(example = "abcdefghijklmnopqrst", required = true)]
-    id: String,
-    #[schema(example = "Tenant Name", required = true)]
-    name: String,
-}
-
-#[derive(Deserialize, ToSchema)]
-pub struct UpdateTenantRequest {
-    #[schema(example = "Tenant Name", required = true)]
-    name: String,
-}
-
-#[derive(Serialize, ToSchema)]
-pub struct PostTenantResponse {
-    id: String,
-}
-
 #[derive(Debug, Error)]
 pub enum TenantError {
     #[error("The tenant with id {0} was not found")]
@@ -76,26 +57,60 @@ impl ResponseError for TenantError {
     }
 }
 
-#[derive(Serialize, ToSchema)]
-pub struct GetTenantResponse {
-    #[schema(example = 1)]
-    id: String,
-    #[schema(example = "Tenant name")]
-    name: String,
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct CreateTenantRequest {
+    #[schema(example = "abczjjlmfsijwrlnwatw", required = true)]
+    pub id: String,
+    #[schema(example = "My Tenant", required = true)]
+    pub name: String,
 }
 
-#[derive(Serialize, ToSchema)]
-pub struct GetTenantsResponse {
-    tenants: Vec<GetTenantResponse>,
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct CreateTenantResponse {
+    #[schema(example = "abczjjlmfsijwrlnwatw")]
+    pub id: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct CreateOrUpdateTenantRequest {
+    #[schema(example = "My Updated Tenant", required = true)]
+    pub name: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct CreateOrUpdateTenantResponse {
+    #[schema(example = "abczjjlmfsijwrlnwatw")]
+    pub id: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct UpdateTenantRequest {
+    #[schema(example = "My Updated Tenant", required = true)]
+    pub name: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct ReadTenantResponse {
+    #[schema(example = "abczjjlmfsijwrlnwatw")]
+    pub id: String,
+    #[schema(example = "My Tenant")]
+    pub name: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct ReadTenantsResponse {
+    pub tenants: Vec<ReadTenantResponse>,
 }
 
 #[utoipa::path(
     context_path = "/v1",
     request_body = CreateTenantRequest,
     responses(
-        (status = 200, description = "Create new tenant", body = PostTenantResponse),
-        (status = 500, description = "Internal server error")
-    )
+        (status = 200, description = "Create new tenant", body = CreateTenantResponse),
+        (status = 400, description = "Bad request", body = ErrorMessage),
+        (status = 500, description = "Internal server error", body = ErrorMessage),
+    ),
+    tag = "Tenants"
 )]
 #[post("/tenants")]
 pub async fn create_tenant(
@@ -103,49 +118,57 @@ pub async fn create_tenant(
     tenant: Json<CreateTenantRequest>,
     root_span: RootSpan,
 ) -> Result<impl Responder, TenantError> {
-    let tenant = tenant.0;
+    let tenant = tenant.into_inner();
     let id = tenant.id;
     root_span.record("project", &id);
     let name = tenant.name;
     let id = db::tenants::create_tenant(&pool, &id, &name).await?;
-    let response = PostTenantResponse { id };
+    let response = CreateTenantResponse { id };
+
     Ok(Json(response))
 }
 
 #[utoipa::path(
     context_path = "/v1",
-    request_body = UpdateTenantRequest,
+    request_body = CreateOrUpdateTenantRequest,
+    params(
+        ("tenant_id" = String, Path, description = "Id of the tenant"),
+    ),
     responses(
-        (status = 200, description = "Create a new tenant or update an existing one", body = PostTenantResponse),
-        (status = 500, description = "Internal server error")
-    )
+        (status = 200, description = "Create a new tenant or update an existing one", body = CreateOrUpdateTenantResponse),
+        (status = 400, description = "Bad request", body = ErrorMessage),
+        (status = 500, description = "Internal server error", body = ErrorMessage),
+    ),
+    tag = "Tenants"
 )]
 #[put("/tenants/{tenant_id}")]
 pub async fn create_or_update_tenant(
     pool: Data<PgPool>,
     tenant_id: Path<String>,
-    tenant: Json<UpdateTenantRequest>,
+    tenant: Json<CreateOrUpdateTenantRequest>,
     root_span: RootSpan,
 ) -> Result<impl Responder, TenantError> {
-    let tenant = tenant.0;
+    let tenant = tenant.into_inner();
     let tenant_id = tenant_id.into_inner();
     root_span.record("project", &tenant_id);
     let name = tenant.name;
     let id = db::tenants::create_or_update_tenant(&pool, &tenant_id, &name).await?;
-    let response = PostTenantResponse { id };
+    let response = CreateOrUpdateTenantResponse { id };
+
     Ok(Json(response))
 }
 
 #[utoipa::path(
     context_path = "/v1",
     params(
-        ("tenant_id" = i64, Path, description = "Id of the tenant"),
+        ("tenant_id" = String, Path, description = "Id of the tenant"),
     ),
     responses(
-        (status = 200, description = "Return tenant with id = tenant_id", body = GetTenantResponse),
-        (status = 404, description = "Tenant not found"),
-        (status = 500, description = "Internal server error")
-    )
+        (status = 200, description = "Return tenant with id = tenant_id", body = ReadTenantResponse),
+        (status = 404, description = "Tenant not found", body = ErrorMessage),
+        (status = 500, description = "Internal server error", body = ErrorMessage),
+    ),
+    tag = "Tenants"
 )]
 #[get("/tenants/{tenant_id}")]
 pub async fn read_tenant(
@@ -157,11 +180,12 @@ pub async fn read_tenant(
     root_span.record("project", &tenant_id);
     let response = db::tenants::read_tenant(&pool, &tenant_id)
         .await?
-        .map(|t| GetTenantResponse {
+        .map(|t| ReadTenantResponse {
             id: t.id,
             name: t.name,
         })
         .ok_or(TenantError::TenantNotFound(tenant_id))?;
+
     Ok(Json(response))
 }
 
@@ -169,13 +193,14 @@ pub async fn read_tenant(
     context_path = "/v1",
     request_body = UpdateTenantRequest,
     params(
-        ("tenant_id" = i64, Path, description = "Id of the tenant"),
+        ("tenant_id" = String, Path, description = "Id of the tenant"),
     ),
     responses(
         (status = 200, description = "Update tenant with id = tenant_id"),
-        (status = 404, description = "Tenant not found"),
-        (status = 500, description = "Internal server error")
-    )
+        (status = 404, description = "Tenant not found", body = ErrorMessage),
+        (status = 500, description = "Internal server error", body = ErrorMessage),
+    ),
+    tag = "Tenants"
 )]
 #[post("/tenants/{tenant_id}")]
 pub async fn update_tenant(
@@ -184,24 +209,27 @@ pub async fn update_tenant(
     tenant: Json<UpdateTenantRequest>,
     root_span: RootSpan,
 ) -> Result<impl Responder, TenantError> {
+    let tenant = tenant.into_inner();
     let tenant_id = tenant_id.into_inner();
     root_span.record("project", &tenant_id);
-    db::tenants::update_tenant(&pool, &tenant_id, &tenant.0.name)
+    db::tenants::update_tenant(&pool, &tenant_id, &tenant.name)
         .await?
         .ok_or(TenantError::TenantNotFound(tenant_id))?;
+
     Ok(HttpResponse::Ok().finish())
 }
 
 #[utoipa::path(
     context_path = "/v1",
     params(
-        ("tenant_id" = i64, Path, description = "Id of the tenant"),
+        ("tenant_id" = String, Path, description = "Id of the tenant"),
     ),
     responses(
         (status = 200, description = "Delete tenant with id = tenant_id"),
-        (status = 404, description = "Tenant not found"),
-        (status = 500, description = "Internal server error")
-    )
+        (status = 404, description = "Tenant not found", body = ErrorMessage),
+        (status = 500, description = "Internal server error", body = ErrorMessage),
+    ),
+    tag = "Tenants"
 )]
 #[delete("/tenants/{tenant_id}")]
 pub async fn delete_tenant(
@@ -218,20 +246,22 @@ pub async fn delete_tenant(
 #[utoipa::path(
     context_path = "/v1",
     responses(
-        (status = 200, description = "Return all tenants"),
-        (status = 500, description = "Internal server error")
-    )
+        (status = 200, description = "Return all tenants", body = ReadTenantsResponse),
+        (status = 500, description = "Internal server error", body = ErrorMessage),
+    ),
+    tag = "Tenants"
 )]
 #[get("/tenants")]
 pub async fn read_all_tenants(pool: Data<PgPool>) -> Result<impl Responder, TenantError> {
-    let tenants: Vec<GetTenantResponse> = db::tenants::read_all_tenants(&pool)
+    let tenants: Vec<ReadTenantResponse> = db::tenants::read_all_tenants(&pool)
         .await?
         .drain(..)
-        .map(|t| GetTenantResponse {
+        .map(|t| ReadTenantResponse {
             id: t.id,
             name: t.name,
         })
         .collect();
-    let response = GetTenantsResponse { tenants };
+    let response = ReadTenantsResponse { tenants };
+
     Ok(Json(response))
 }

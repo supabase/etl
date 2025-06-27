@@ -10,7 +10,6 @@ use sqlx::PgPool;
 use thiserror::Error;
 use utoipa::ToSchema;
 
-use super::{destinations::DestinationError, extract_tenant_id, ErrorMessage, TenantIdError};
 use crate::db;
 use crate::db::destinations::{destination_exists, DestinationsDbError};
 use crate::db::destinations_pipelines::DestinationPipelinesDbError;
@@ -19,20 +18,7 @@ use crate::db::pipelines::PipelineConfig;
 use crate::db::sources::{source_exists, SourcesDbError};
 use crate::encryption::EncryptionKey;
 
-#[derive(Deserialize, ToSchema)]
-pub struct PostDestinationPipelineRequest {
-    #[schema(example = "Destination Name", required = true)]
-    pub destination_name: String,
-
-    #[schema(required = true)]
-    pub destination_config: DestinationConfig,
-
-    #[schema(required = true)]
-    pub source_id: i64,
-
-    #[schema(required = true)]
-    pub pipeline_config: PipelineConfig,
-}
+use super::{destinations::DestinationError, extract_tenant_id, ErrorMessage, TenantIdError};
 
 #[derive(Debug, Error)]
 enum DestinationPipelineError {
@@ -130,29 +116,61 @@ impl ResponseError for DestinationPipelineError {
     }
 }
 
-#[derive(Serialize, ToSchema)]
-pub struct PostDestinationPipelineResponse {
-    destination_id: i64,
-    pipeline_id: i64,
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct CreateDestinationPipelineRequest {
+    #[schema(example = "My New Destination", required = true)]
+    pub destination_name: String,
+    #[schema(required = true)]
+    pub destination_config: DestinationConfig,
+    #[schema(required = true, example = 1)]
+    pub source_id: i64,
+    #[schema(required = true)]
+    pub pipeline_config: PipelineConfig,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct CreateDestinationPipelineResponse {
+    #[schema(example = 1)]
+    pub destination_id: i64,
+    #[schema(example = 2)]
+    pub pipeline_id: i64,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct UpdateDestinationPipelineRequest {
+    #[schema(example = "My Updated Destination", required = true)]
+    pub destination_name: String,
+    #[schema(required = true)]
+    pub destination_config: DestinationConfig,
+    #[schema(required = true, example = 1)]
+    pub source_id: i64,
+    #[schema(required = true)]
+    pub pipeline_config: PipelineConfig,
 }
 
 #[utoipa::path(
     context_path = "/v1",
-    request_body = PostDestinationPipelineRequest,
+    request_body = CreateDestinationPipelineRequest,
+    params(
+        ("tenant_id" = String, Header, description = "The tenant ID")
+    ),
     responses(
-        (status = 200, description = "Create a new destination and a pipeline", body = PostDestinationPipelineResponse),
-        (status = 500, description = "Internal server error")
-    )
+        (status = 200, description = "Create a new destination and a pipeline", body = CreateDestinationPipelineResponse),
+        (status = 409, description = "A pipeline already exists for this source and destination combination", body = ErrorMessage),
+        (status = 400, description = "Bad request", body = ErrorMessage),
+        (status = 500, description = "Internal server error", body = ErrorMessage)
+    ),
+    tag = "Destinations & Pipelines"
 )]
 #[post("/destinations-pipelines")]
-pub async fn create_destinations_and_pipelines(
+pub async fn create_destination_and_pipeline(
     req: HttpRequest,
     pool: Data<PgPool>,
-    destination_and_pipeline: Json<PostDestinationPipelineRequest>,
+    destination_and_pipeline: Json<CreateDestinationPipelineRequest>,
     encryption_key: Data<EncryptionKey>,
 ) -> Result<impl Responder, DestinationPipelineError> {
-    let destination_and_pipeline = destination_and_pipeline.0;
-    let PostDestinationPipelineRequest {
+    let destination_and_pipeline = destination_and_pipeline.into_inner();
+    let CreateDestinationPipelineRequest {
         destination_name,
         destination_config,
         source_id,
@@ -179,32 +197,40 @@ pub async fn create_destinations_and_pipelines(
             &encryption_key,
         )
         .await?;
-    let response = PostDestinationPipelineResponse {
+    let response = CreateDestinationPipelineResponse {
         destination_id,
         pipeline_id,
     };
+
     Ok(Json(response))
 }
 
 #[utoipa::path(
     context_path = "/v1",
-    request_body = PostDestinationPipelineRequest,
+    request_body = UpdateDestinationPipelineRequest,
+    params(
+        ("destination_id" = i64, Path, description = "ID of the destination to update"),
+        ("pipeline_id" = i64, Path, description = "ID of the pipeline to update"),
+        ("tenant_id" = String, Header, description = "The tenant ID")
+    ),
     responses(
-        (status = 200, description = "Update a destination and a pipeline", body = PostDestinationPipelineResponse),
-        (status = 404, description = "Pipeline or destination not found"),
-        (status = 500, description = "Internal server error")
-    )
+        (status = 200, description = "Update a destination and a pipeline"),
+        (status = 404, description = "Pipeline or destination not found", body = ErrorMessage),
+        (status = 400, description = "Bad request", body = ErrorMessage),
+        (status = 500, description = "Internal server error", body = ErrorMessage)
+    ),
+    tag = "Destinations & Pipelines"
 )]
 #[post("/destinations-pipelines/{destination_id}/{pipeline_id}")]
-pub async fn update_destinations_and_pipelines(
+pub async fn update_destination_and_pipeline(
     req: HttpRequest,
     pool: Data<PgPool>,
     destination_and_pipeline_ids: Path<(i64, i64)>,
-    destination_and_pipeline: Json<PostDestinationPipelineRequest>,
+    destination_and_pipeline: Json<UpdateDestinationPipelineRequest>,
     encryption_key: Data<EncryptionKey>,
 ) -> Result<impl Responder, DestinationPipelineError> {
-    let destination_and_pipeline = destination_and_pipeline.0;
-    let PostDestinationPipelineRequest {
+    let destination_and_pipeline = destination_and_pipeline.into_inner();
+    let UpdateDestinationPipelineRequest {
         destination_name,
         destination_config,
         source_id,

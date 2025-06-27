@@ -29,9 +29,9 @@ fn extract_tenant_id(req: &HttpRequest) -> Result<&str, TenantIdError> {
     let headers = req.headers();
     let tenant_id = headers
         .get("tenant_id")
-        .ok_or(TenantIdError::TenantIdMissing)?;
-    let tenant_id = tenant_id
+        .ok_or(TenantIdError::TenantIdMissing)?
         .to_str()
         .map_err(|_| TenantIdError::TenantIdIllFormed)?;
+
     Ok(tenant_id)
 }
