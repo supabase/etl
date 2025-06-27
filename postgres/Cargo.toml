@@ -21,6 +21,7 @@ tokio-postgres = { workspace = true, features = [
     "with-uuid-1",
     "with-serde_json-1",
 ] }
+tracing = { workspace = true }
 
 
 [features]

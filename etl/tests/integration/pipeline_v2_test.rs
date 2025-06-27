@@ -151,7 +151,7 @@ async fn insert_mock_data(
                 .insert_values(
                     users_table_name.clone(),
                     &["name", "age"],
-                    &[&format!("user_{}", i), &(i as i32)],
+                    &[&format!("user_{i}"), &(i as i32)],
                 )
                 .await
                 .expect("Failed to insert users");
@@ -163,7 +163,7 @@ async fn insert_mock_data(
                 .insert_values(
                     orders_table_name.clone(),
                     &["description"],
-                    &[&format!("description_{}", i)],
+                    &[&format!("description_{i}")],
                 )
                 .await
                 .expect("Failed to insert orders");
@@ -178,7 +178,7 @@ async fn insert_mock_data(
                 .insert_values(
                     users_table_name.clone(),
                     &["name", "age"],
-                    &[&format!("user_{}", i), &(i as i32)],
+                    &[&format!("user_{i}"), &(i as i32)],
                 )
                 .await
                 .expect("Failed to insert users");
@@ -190,7 +190,7 @@ async fn insert_mock_data(
                 .insert_values(
                     orders_table_name.clone(),
                     &["description"],
-                    &[&format!("description_{}", i)],
+                    &[&format!("description_{i}")],
                 )
                 .await
                 .expect("Failed to insert orders");

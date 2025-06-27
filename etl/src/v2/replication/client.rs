@@ -610,8 +610,7 @@ impl PgReplicationClient {
             "select n.nspname as schema_name, c.relname as table_name
             from pg_class c
             join pg_namespace n on c.relnamespace = n.oid
-            where c.oid = {}",
-            table_id
+            where c.oid = {table_id}",
         );
 
         for message in self.inner.client.simple_query(&table_info_query).await? {
@@ -630,7 +629,7 @@ impl PgReplicationClient {
 
         Err(PgReplicationError::TableNotFound(TableName {
             schema: String::new(),
-            name: format!("oid: {}", table_id),
+            name: format!("oid: {table_id}"),
         }))
     }
 
@@ -765,7 +764,7 @@ impl PgReplicationClient {
             PgReplicationError::ColumnParsingFailed(
                 column_name.to_string(),
                 table_name.to_string(),
-                format!("{:?}", e),
+                format!("{e:?}"),
             )
         })
     }

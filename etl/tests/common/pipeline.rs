@@ -29,7 +29,7 @@ pub enum PipelineMode {
 /// with other replication slots and other tests running in parallel.
 pub fn test_slot_name(slot_name: &str) -> String {
     let uuid = Uuid::new_v4().simple().to_string();
-    format!("test_{}_{}", slot_name, uuid)
+    format!("test_{slot_name}_{uuid}")
 }
 
 /// Creates a new PostgreSQL replication pipeline.
