@@ -17,6 +17,7 @@ use postgres::schema::TableId;
 use std::collections::HashMap;
 use std::sync::Arc;
 use thiserror::Error;
+use tokio::sync::Semaphore;
 use tokio::task::JoinHandle;
 use tokio_postgres::types::PgLsn;
 use tracing::{error, info};
@@ -80,6 +81,7 @@ pub struct ApplyWorker<S, D> {
     state_store: S,
     destination: D,
     shutdown_rx: ShutdownRx,
+    table_sync_worker_permits: Arc<Semaphore>,
 }
 
 impl<S, D> ApplyWorker<S, D> {
@@ -93,6 +95,7 @@ impl<S, D> ApplyWorker<S, D> {
         state_store: S,
         destination: D,
         shutdown_rx: ShutdownRx,
+        table_sync_worker_permits: Arc<Semaphore>,
     ) -> Self {
         Self {
             identity,
@@ -103,6 +106,7 @@ impl<S, D> ApplyWorker<S, D> {
             state_store,
             destination,
             shutdown_rx,
+            table_sync_worker_permits,
         }
     }
 }
@@ -130,12 +134,12 @@ where
                 ApplyWorkerHook::new(
                     self.identity,
                     self.config,
-                    self.replication_client,
                     self.pool,
                     self.schema_cache,
                     self.state_store,
                     self.destination,
                     self.shutdown_rx.clone(),
+                    self.table_sync_worker_permits.clone(),
                 ),
                 self.shutdown_rx,
             )
@@ -174,12 +178,12 @@ async fn get_start_lsn(
 struct ApplyWorkerHook<S, D> {
     identity: PipelineIdentity,
     config: Arc<PipelineConfig>,
-    replication_client: PgReplicationClient,
     pool: TableSyncWorkerPool,
     schema_cache: SchemaCache,
     state_store: S,
     destination: D,
     shutdown_rx: ShutdownRx,
+    table_sync_worker_permits: Arc<Semaphore>,
 }
 
 impl<S, D> ApplyWorkerHook<S, D> {
@@ -187,22 +191,22 @@ impl<S, D> ApplyWorkerHook<S, D> {
     fn new(
         identity: PipelineIdentity,
         config: Arc<PipelineConfig>,
-        replication_client: PgReplicationClient,
         pool: TableSyncWorkerPool,
         schema_cache: SchemaCache,
         state_store: S,
         destination: D,
         shutdown_rx: ShutdownRx,
+        table_sync_worker_permits: Arc<Semaphore>,
     ) -> Self {
         Self {
             identity,
             config,
-            replication_client,
             pool,
             schema_cache,
             state_store,
             destination,
             shutdown_rx,
+            table_sync_worker_permits,
         }
     }
 }
@@ -213,18 +217,16 @@ where
     D: Destination + Clone + Send + Sync + 'static,
 {
     async fn start_table_sync_worker(&self, table_id: TableId) -> Result<(), ApplyWorkerHookError> {
-        // TODO: switch to a connection pool which hands out connections.
-        let replication_client = self.replication_client.duplicate().await?;
         let worker = TableSyncWorker::new(
             self.identity.clone(),
             self.config.clone(),
-            replication_client,
             self.pool.clone(),
             table_id,
             self.schema_cache.clone(),
             self.state_store.clone(),
             self.destination.clone(),
             self.shutdown_rx.clone(),
+            self.table_sync_worker_permits.clone(),
         );
 
         let mut pool = self.pool.write().await;

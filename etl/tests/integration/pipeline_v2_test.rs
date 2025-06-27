@@ -513,13 +513,13 @@ async fn test_table_schema_copy_with_finished_copy_retry() {
     let users_state_notify = state_store
         .notify_on_replication_phase(
             database_schema.users_schema().id,
-            TableReplicationPhaseType::FinishedCopy,
+            TableReplicationPhaseType::SyncDone,
         )
         .await;
     let orders_state_notify = state_store
         .notify_on_replication_phase(
             database_schema.orders_schema().id,
-            TableReplicationPhaseType::FinishedCopy,
+            TableReplicationPhaseType::SyncDone,
         )
         .await;
 
@@ -539,14 +539,14 @@ async fn test_table_schema_copy_with_finished_copy_retry() {
             .get(&database_schema.users_schema().id)
             .unwrap()
             .as_type(),
-        TableReplicationPhaseType::FinishedCopy
+        TableReplicationPhaseType::SyncDone
     );
     assert_eq!(
         table_replication_states
             .get(&database_schema.orders_schema().id)
             .unwrap()
             .as_type(),
-        TableReplicationPhaseType::FinishedCopy
+        TableReplicationPhaseType::SyncDone
     );
 
     // We check that the table schemas have been stored.
@@ -621,13 +621,13 @@ async fn test_table_schema_copy_survives_restarts() {
     let users_state_notify = state_store
         .notify_on_replication_phase(
             database_schema.users_schema().id,
-            TableReplicationPhaseType::FinishedCopy,
+            TableReplicationPhaseType::SyncDone,
         )
         .await;
     let orders_state_notify = state_store
         .notify_on_replication_phase(
             database_schema.orders_schema().id,
-            TableReplicationPhaseType::FinishedCopy,
+            TableReplicationPhaseType::SyncDone,
         )
         .await;
 
@@ -647,14 +647,14 @@ async fn test_table_schema_copy_survives_restarts() {
             .get(&database_schema.users_schema().id)
             .unwrap()
             .as_type(),
-        TableReplicationPhaseType::FinishedCopy
+        TableReplicationPhaseType::SyncDone
     );
     assert_eq!(
         table_replication_states
             .get(&database_schema.orders_schema().id)
             .unwrap()
             .as_type(),
-        TableReplicationPhaseType::FinishedCopy
+        TableReplicationPhaseType::SyncDone
     );
 
     // We check that the table schemas have been stored.
@@ -805,13 +805,13 @@ async fn test_table_copy_and_sync() {
     let users_state_notify = state_store
         .notify_on_replication_phase(
             database_schema.users_schema().id,
-            TableReplicationPhaseType::FinishedCopy,
+            TableReplicationPhaseType::SyncDone,
         )
         .await;
     let orders_state_notify = state_store
         .notify_on_replication_phase(
             database_schema.orders_schema().id,
-            TableReplicationPhaseType::FinishedCopy,
+            TableReplicationPhaseType::SyncDone,
         )
         .await;
 
@@ -819,20 +819,6 @@ async fn test_table_copy_and_sync() {
 
     users_state_notify.notified().await;
     orders_state_notify.notified().await;
-
-    // Register notifications for sync completion.
-    let users_state_notify = state_store
-        .notify_on_replication_phase(
-            database_schema.users_schema().id,
-            TableReplicationPhaseType::SyncDone,
-        )
-        .await;
-    let orders_state_notify = state_store
-        .notify_on_replication_phase(
-            database_schema.orders_schema().id,
-            TableReplicationPhaseType::SyncDone,
-        )
-        .await;
 
     // Insert additional data to test streaming.
     insert_mock_data(
@@ -843,9 +829,6 @@ async fn test_table_copy_and_sync() {
         true,
     )
     .await;
-
-    users_state_notify.notified().await;
-    orders_state_notify.notified().await;
 
     // Register notifications for ready state.
     let users_state_notify = state_store

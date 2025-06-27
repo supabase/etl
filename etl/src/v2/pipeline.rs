@@ -1,7 +1,6 @@
 use std::sync::Arc;
 use thiserror::Error;
-use tokio::sync::watch;
-use tokio_postgres::config::SslMode;
+use tokio::sync::{watch, Semaphore};
 use tracing::{error, info};
 
 use crate::v2::concurrency::shutdown::{create_shutdown_channel, ShutdownTx};
@@ -134,9 +133,9 @@ where
             self.identity.publication_name()
         );
 
-        // We create the first connection to Postgres. Note that other connections will be created
-        // by duplicating this first one.
-        let replication_client = self.connect().await?;
+        // We create the first connection to Postgres.
+        let replication_client =
+            PgReplicationClient::connect(self.config.pg_connection.clone()).await?;
 
         // We synchronize the relation subscription states with the publication, to make sure we
         // always know which tables to work with. Maybe in the future we also want to react in real
@@ -150,6 +149,8 @@ where
         // We prepare the schema cache with table schemas loaded, in case there is the need.
         let schema_cache = self.prepare_schema_cache().await?;
 
+        let table_sync_worker_permits = Arc::new(Semaphore::new(1));
+
         // We create and start the apply worker.
         let apply_worker = ApplyWorker::new(
             self.identity.clone(),
@@ -160,6 +161,7 @@ where
             self.state_store.clone(),
             self.destination.clone(),
             self.shutdown_tx.subscribe(),
+            table_sync_worker_permits,
         )
         .start()
         .await?;
@@ -213,18 +215,6 @@ where
         }
 
         Ok(())
-    }
-
-    async fn connect(&self) -> Result<PgReplicationClient, PipelineError> {
-        // We create the main replication client that will be used by the apply worker.
-        let replication_client = match self.config.pg_connection.tls_config.ssl_mode {
-            SslMode::Disable => {
-                PgReplicationClient::connect_no_tls(self.config.pg_connection.clone()).await?
-            }
-            _ => PgReplicationClient::connect_tls(self.config.pg_connection.clone()).await?,
-        };
-
-        Ok(replication_client)
     }
 
     pub async fn wait(self) -> Result<(), PipelineError> {

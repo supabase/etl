@@ -2,7 +2,7 @@ use postgres::schema::TableId;
 use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
-use tokio::sync::{Notify, RwLock, RwLockReadGuard};
+use tokio::sync::{AcquireError, Notify, RwLock, RwLockReadGuard, Semaphore};
 use tokio::task::JoinHandle;
 use tokio_postgres::types::PgLsn;
 use tracing::{info, warn};
@@ -13,7 +13,7 @@ use crate::v2::config::pipeline::PipelineConfig;
 use crate::v2::destination::base::Destination;
 use crate::v2::pipeline::PipelineIdentity;
 use crate::v2::replication::apply::{start_apply_loop, ApplyLoopError, ApplyLoopHook};
-use crate::v2::replication::client::PgReplicationClient;
+use crate::v2::replication::client::{PgReplicationClient, PgReplicationError};
 use crate::v2::replication::table_sync::{start_table_sync, TableSyncError, TableSyncResult};
 use crate::v2::schema::cache::SchemaCache;
 use crate::v2::state::store::base::{StateStore, StateStoreError};
@@ -36,6 +36,12 @@ pub enum TableSyncWorkerError {
 
     #[error("An error occurred in the apply loop: {0}")]
     ApplyLoop(#[from] ApplyLoopError),
+
+    #[error("Failed to acquire a permit to run a table sync worker")]
+    PermitAcquire(#[from] AcquireError),
+
+    #[error("A Postgres replication error occurred in the table sync worker: {0}")]
+    PgReplication(#[from] PgReplicationError),
 }
 
 #[derive(Debug, Error)]
@@ -225,13 +231,13 @@ impl WorkerHandle<TableSyncWorkerState> for TableSyncWorkerHandle {
 pub struct TableSyncWorker<S, D> {
     identity: PipelineIdentity,
     config: Arc<PipelineConfig>,
-    replication_client: PgReplicationClient,
     pool: TableSyncWorkerPool,
     table_id: TableId,
     schema_cache: SchemaCache,
     state_store: S,
     destination: D,
     shutdown_rx: ShutdownRx,
+    run_permit: Arc<Semaphore>,
 }
 
 impl<S, D> TableSyncWorker<S, D> {
@@ -239,24 +245,24 @@ impl<S, D> TableSyncWorker<S, D> {
     pub fn new(
         identity: PipelineIdentity,
         config: Arc<PipelineConfig>,
-        replication_client: PgReplicationClient,
         pool: TableSyncWorkerPool,
         table_id: TableId,
         schema_cache: SchemaCache,
         state_store: S,
         destination: D,
         shutdown_rx: ShutdownRx,
+        run_permit: Arc<Semaphore>,
     ) -> Self {
         Self {
             identity,
             config,
-            replication_client,
             pool,
             table_id,
             schema_cache,
             state_store,
             destination,
             shutdown_rx,
+            run_permit,
         }
     }
 
@@ -272,7 +278,7 @@ where
 {
     type Error = TableSyncWorkerError;
 
-    async fn start(self) -> Result<TableSyncWorkerHandle, Self::Error> {
+    async fn start(mut self) -> Result<TableSyncWorkerHandle, Self::Error> {
         info!("Starting table sync worker for table {}", self.table_id);
 
         // TODO: maybe we can optimize the performance by doing this loading within the task and
@@ -294,10 +300,32 @@ where
 
         let state_clone = state.clone();
         let table_sync_worker = async move {
+            info!(
+                "Waiting to acquire a running permit for table sync worker for table {}",
+                self.table_id
+            );
+
+            // We acquire a permit to run the table sync worker. This helps us limit the number
+            // of table sync workers running in parallel which in turn helps limit the max
+            // number of cocurrent connections to the source database.
+            let permit = tokio::select! {
+                // Shutdown signal received, exit loop.
+                _ = self.shutdown_rx.changed() => {
+                    info!("Shutting down table sync worker while waiting for a run permit");
+                    return Ok(());
+                }
+                permit = self.run_permit.acquire() => {
+                    permit
+                }
+            };
+
+            let replication_client =
+                PgReplicationClient::connect(self.config.pg_connection.clone()).await?;
+
             let result = start_table_sync(
                 self.identity.clone(),
                 self.config.clone(),
-                self.replication_client.clone(),
+                replication_client.clone(),
                 self.table_id,
                 state_clone.clone(),
                 self.schema_cache.clone(),
@@ -319,13 +347,18 @@ where
                 self.identity,
                 start_lsn,
                 self.config,
-                self.replication_client,
+                replication_client,
                 self.schema_cache,
                 self.destination,
                 TableSyncWorkerHook::new(self.table_id, state_clone, self.state_store),
                 self.shutdown_rx,
             )
             .await?;
+
+            // This explicit drop is not strictly necessary but is added to make it extra clear
+            // that the scope of the run permit is needed upto here to avoid multiple parallel
+            // connections
+            drop(permit);
 
             Ok(())
         };
