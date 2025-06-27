@@ -4,8 +4,8 @@ use etl::v2::state::table::TableReplicationPhaseType;
 use etl::v2::workers::base::WorkerWaitError;
 use postgres::schema::ColumnSchema;
 use postgres::tokio::test_utils::TableModification;
-use tokio_postgres::types::Type;
 use telemetry::init_test_tracing;
+use tokio_postgres::types::Type;
 
 use crate::common::database::spawn_database;
 use crate::common::destination_v2::TestDestination;
