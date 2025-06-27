@@ -1,5 +1,6 @@
-# copied from Luca Palmieri's gist here: https://gist.github.com/LukeMathWalker/5ae1107432ce283310c3e601fac915f3
+# Copied from Luca Palmieri's gist here: https://gist.github.com/LukeMathWalker/5ae1107432ce283310c3e601fac915f3
 name: Security audit
+
 on:
   schedule:
     - cron: "0 0 * * *"
