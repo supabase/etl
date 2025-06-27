@@ -2,7 +2,7 @@ use postgres::schema::{Oid, TableId};
 use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
-use tokio::sync::{AcquireError, Notify, RwLock, RwLockReadGuard, Semaphore};
+use tokio::sync::{Notify, RwLock, RwLockReadGuard};
 use tokio::task::JoinHandle;
 use tokio_postgres::types::PgLsn;
 use tracing::{info, warn};
@@ -36,9 +36,6 @@ pub enum TableSyncWorkerError {
 
     #[error("An error occurred in the apply loop: {0}")]
     ApplyLoop(#[from] ApplyLoopError),
-
-    #[error("Failed to acquire a permit to run a table sync worker")]
-    PermitAcquire(#[from] AcquireError),
 }
 
 #[derive(Debug, Error)]
@@ -235,7 +232,6 @@ pub struct TableSyncWorker<S, D> {
     state_store: S,
     destination: D,
     shutdown_rx: ShutdownRx,
-    running_permit: Arc<Semaphore>,
 }
 
 impl<S, D> TableSyncWorker<S, D> {
@@ -250,7 +246,6 @@ impl<S, D> TableSyncWorker<S, D> {
         state_store: S,
         destination: D,
         shutdown_rx: ShutdownRx,
-        running_permit: Arc<Semaphore>,
     ) -> Self {
         Self {
             identity,
@@ -262,7 +257,6 @@ impl<S, D> TableSyncWorker<S, D> {
             state_store,
             destination,
             shutdown_rx,
-            running_permit,
         }
     }
 
@@ -279,16 +273,6 @@ where
     type Error = TableSyncWorkerError;
 
     async fn start(self) -> Result<TableSyncWorkerHandle, Self::Error> {
-        info!(
-            "Waiting to acquire a running permit for table sync worker for table {}",
-            self.table_id
-        );
-
-        // We acquire a permit to run the table sync worker. This helps us limit the numer
-        // of table sync workers running in parallel which in turn helps limit the max
-        // number of cocurrent connections to the source database.
-        let permit = self.running_permit.acquire_owned().await?;
-
         info!("Starting table sync worker for table {}", self.table_id);
 
         // TODO: maybe we can optimize the performance by doing this loading within the task and
@@ -342,10 +326,6 @@ where
                 self.shutdown_rx,
             )
             .await?;
-
-            // The permit is dropped at the end of the table sync worker to allow another worker
-            // to run
-            drop(permit);
 
             Ok(())
         };

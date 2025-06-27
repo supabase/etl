@@ -1,7 +1,7 @@
 use rustls::pki_types::CertificateDer;
 use std::sync::Arc;
 use thiserror::Error;
-use tokio::sync::{watch, Semaphore};
+use tokio::sync::watch;
 use tokio_postgres::config::SslMode;
 use tracing::{error, info};
 
@@ -154,8 +154,6 @@ where
         // We prepare the schema cache with table schemas loaded, in case there is the need.
         let schema_cache = self.prepare_schema_cache().await?;
 
-        let table_sync_worker_permits = Arc::new(Semaphore::new(10));
-
         // We create and start the apply worker.
         let apply_worker = ApplyWorker::new(
             self.identity.clone(),
@@ -166,7 +164,6 @@ where
             self.state_store.clone(),
             self.destination.clone(),
             self.shutdown_tx.subscribe(),
-            table_sync_worker_permits,
         )
         .start()
         .await?;
