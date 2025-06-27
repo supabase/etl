@@ -308,7 +308,7 @@ where
             // We acquire a permit to run the table sync worker. This helps us limit the number
             // of table sync workers running in parallel which in turn helps limit the max
             // number of cocurrent connections to the source database.
-            let _permit = tokio::select! {
+            let permit = tokio::select! {
                 // Shutdown signal received, exit loop.
                 _ = self.shutdown_rx.changed() => {
                     info!("Shutting down table sync worker while waiting for a run permit");
@@ -351,6 +351,11 @@ where
                 self.shutdown_rx,
             )
             .await?;
+
+            // This explicit drop is not strictly necessary but is added to make it extra clear
+            // that the scope of the run permit is needed upto here to avoid multiple parallel
+            // connections
+            drop(permit);
 
             Ok(())
         };
