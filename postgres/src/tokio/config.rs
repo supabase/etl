@@ -67,7 +67,7 @@ impl From<PgConnectionConfig> for Config {
             // because we are using rustls for tls connections and rust_postgres
             // crate doesn't yet support rustls. See the following for details:
             //
-            // * PgReplicationClient::connect_tls method for details
+            // * PgReplicationClient::connect_tls method
             // * https://github.com/sfackler/rust-postgres/issues/421
             //
             // TODO: Does setting ssl mode has an effect here?
