@@ -1,12 +1,15 @@
 use std::{error::Error, time::Duration};
 
 use clap::{Args, Parser, Subcommand};
-use etl::{pipeline::{
-    batching::{data_pipeline::BatchDataPipeline, BatchConfig},
-    destinations::bigquery::BigQueryBatchDestination,
-    sources::postgres::{PostgresSource, TableNamesFrom},
-    PipelineAction,
-}, SslMode};
+use etl::{
+    pipeline::{
+        batching::{data_pipeline::BatchDataPipeline, BatchConfig},
+        destinations::bigquery::BigQueryBatchDestination,
+        sources::postgres::{PostgresSource, TableNamesFrom},
+        PipelineAction,
+    },
+    SslMode,
+};
 use postgres::tokio::config::PgConnectionConfig;
 use postgres::{schema::TableName, tokio::config::PgTlsConfig};
 use tracing::error;
