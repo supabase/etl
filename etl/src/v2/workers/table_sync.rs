@@ -235,7 +235,7 @@ pub struct TableSyncWorker<S, D> {
     state_store: S,
     destination: D,
     shutdown_rx: ShutdownRx,
-    running_permit: Arc<Semaphore>,
+    run_permit: Arc<Semaphore>,
 }
 
 impl<S, D> TableSyncWorker<S, D> {
@@ -250,7 +250,7 @@ impl<S, D> TableSyncWorker<S, D> {
         state_store: S,
         destination: D,
         shutdown_rx: ShutdownRx,
-        running_permit: Arc<Semaphore>,
+        run_permit: Arc<Semaphore>,
     ) -> Self {
         Self {
             identity,
@@ -262,7 +262,7 @@ impl<S, D> TableSyncWorker<S, D> {
             state_store,
             destination,
             shutdown_rx,
-            running_permit,
+            run_permit,
         }
     }
 
@@ -278,7 +278,7 @@ where
 {
     type Error = TableSyncWorkerError;
 
-    async fn start(self) -> Result<TableSyncWorkerHandle, Self::Error> {
+    async fn start(mut self) -> Result<TableSyncWorkerHandle, Self::Error> {
         info!("Starting table sync worker for table {}", self.table_id);
 
         // TODO: maybe we can optimize the performance by doing this loading within the task and
@@ -305,10 +305,19 @@ where
                 self.table_id
             );
 
-            // We acquire a permit to run the table sync worker. This helps us limit the numer
+            // We acquire a permit to run the table sync worker. This helps us limit the number
             // of table sync workers running in parallel which in turn helps limit the max
             // number of cocurrent connections to the source database.
-            let _permit = self.running_permit.acquire().await?;
+            let _permit = tokio::select! {
+                // Shutdown signal received, exit loop.
+                _ = self.shutdown_rx.changed() => {
+                    info!("Shutting down table sync worker while waiting for a run permit");
+                    return Ok(());
+                }
+                permit = self.run_permit.acquire() => {
+                    permit
+                }
+            };
 
             let result = start_table_sync(
                 self.identity.clone(),
