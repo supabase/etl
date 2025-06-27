@@ -108,7 +108,7 @@ jobs:
 
       - name: Set up BigQuery environment variables and credentials
         run: |
-          echo "${{ secrets.TESTS_BIGQUERY_SA_KEY_JSON }}" > /tmp/bigquery-sa-key.json
+          printf '%s' '${{ secrets.TESTS_BIGQUERY_SA_KEY_JSON }}' > /tmp/bigquery-sa-key.json
           echo "TESTS_BIGQUERY_PROJECT_ID=${{ secrets.TESTS_BIGQUERY_PROJECT_ID }}" >> $GITHUB_ENV
           echo "TESTS_BIGQUERY_SA_KEY_PATH=/tmp/bigquery-sa-key.json" >> $GITHUB_ENV
 
