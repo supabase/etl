@@ -5,9 +5,8 @@ use gcp_bigquery_client::yup_oauth2::parse_service_account_key;
 use gcp_bigquery_client::{
     error::BQError,
     model::{
-        query_parameter::QueryParameter, query_parameter_type::QueryParameterType,
-        query_parameter_value::QueryParameterValue, query_request::QueryRequest,
-        query_response::ResultSet,
+        query_parameter_type::QueryParameterType, query_parameter_value::QueryParameterValue,
+        query_request::QueryRequest, query_response::ResultSet,
     },
     storage::{ColumnType, FieldDescriptor, StreamName, TableDescriptor},
     Client,
@@ -43,9 +42,7 @@ impl BigQueryClient {
         project_id: String,
         sa_key_path: &str,
     ) -> Result<BigQueryClient, BQError> {
-        let gcp_sa_key = fs::read_to_string(sa_key_path)?;
-        let key = parse_service_account_key(gcp_sa_key)?;
-        let client = Client::from_service_account_key(key, false).await?;
+        let client = Client::from_service_account_key_file(sa_key_path).await?;
 
         Ok(BigQueryClient { project_id, client })
     }
@@ -140,8 +137,8 @@ impl BigQueryClient {
             .await;
 
         let exists = match table {
-            Err(BQError::ResponseError { error }) if error.error.code == 404 => true,
-            _ => false,
+            Err(BQError::ResponseError { error }) if error.error.code == 404 => false,
+            _ => true,
         };
 
         Ok(exists)
@@ -192,7 +189,7 @@ impl BigQueryClient {
     /// Executes an SQL query and returns the result set.
     async fn query(&self, request: QueryRequest) -> Result<ResultSet, BQError> {
         let query_response = self.client.job().query(&self.project_id, request).await?;
-        println!("{:?}", query_response);
+
         Ok(ResultSet::new_from_query_response(query_response))
     }
 
@@ -331,6 +328,7 @@ impl BigQueryClient {
     pub fn table_schema_to_descriptor(table_schema: &TableSchema) -> TableDescriptor {
         let mut field_descriptors = Vec::with_capacity(table_schema.column_schemas.len());
         let mut number = 1;
+
         for column_schema in &table_schema.column_schemas {
             let typ = match column_schema.typ {
                 Type::BOOL => ColumnType::Bool,
