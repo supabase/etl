@@ -6,6 +6,7 @@ use crate::conversions::table_row::TableRow;
 use crate::v2::conversions::event::Event;
 #[cfg(feature = "bigquery")]
 use crate::v2::destination::bigquery::BigQueryDestinationError;
+use crate::v2::schema::cache::SchemaCache;
 
 #[derive(Debug, Error)]
 pub enum DestinationError {
@@ -15,6 +16,15 @@ pub enum DestinationError {
 }
 
 pub trait Destination {
+    fn inject(
+        &self,
+        _schema_cache: SchemaCache,
+    ) -> impl Future<Output = Result<(), DestinationError>> + Send {
+        // By default, the injection code is a noop, since not all destinations need dependencies
+        // to be injected.
+        async move { Ok(()) }
+    }
+
     fn write_table_schema(
         &self,
         table_schema: TableSchema,

@@ -220,7 +220,10 @@ impl BigQueryClient {
             return "".to_string();
         }
 
-        format!(", primary key ({})", identity_columns.join(","))
+        format!(
+            ", primary key ({}) not enforced",
+            identity_columns.join(",")
+        )
     }
 
     /// Creates the full column specification clause for a `CREATE TABLE` statement.

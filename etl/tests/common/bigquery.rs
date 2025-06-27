@@ -181,11 +181,14 @@ impl BigQueryDatabase {
                 sa_key_path,
                 project_id,
                 dataset_id,
-            } => {
-                BigQueryDestination::new_with_key_path(project_id.clone(), dataset_id.clone(), sa_key_path, 1)
-                    .await
-                    .unwrap()
-            }
+            } => BigQueryDestination::new_with_key_path(
+                project_id.clone(),
+                dataset_id.clone(),
+                sa_key_path,
+                1,
+            )
+            .await
+            .unwrap(),
         }
     }
 
@@ -205,8 +208,8 @@ impl BigQueryDatabase {
 
     fn take_client(&mut self) -> Option<Client> {
         match self {
-            Self::Real { client, .. } => client.take(),
             Self::Emulated { client, .. } => client.take(),
+            Self::Real { client, .. } => client.take(),
         }
     }
 }

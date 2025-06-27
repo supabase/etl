@@ -2,6 +2,7 @@ use gcp_bigquery_client::error::BQError;
 use gcp_bigquery_client::storage::TableDescriptor;
 use postgres::schema::{Oid, TableSchema};
 use std::collections::HashMap;
+use std::future::Future;
 use std::ops::Deref;
 use std::sync::Arc;
 use thiserror::Error;
@@ -234,6 +235,13 @@ impl BigQueryDestination {
 }
 
 impl Destination for BigQueryDestination {
+    async fn inject(&self, schema_cache: SchemaCache) -> Result<(), DestinationError> {
+        let mut inner = self.inner.write().await;
+        inner.schema_cache = Some(schema_cache);
+        
+        Ok(())
+    }
+    
     async fn write_table_schema(&self, table_schema: TableSchema) -> Result<(), DestinationError> {
         self.write_table_schema(table_schema).await?;
 
