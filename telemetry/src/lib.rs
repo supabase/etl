@@ -1,6 +1,7 @@
 use std::{
     backtrace::{Backtrace, BacktraceStatus},
     panic::PanicHookInfo,
+    sync::Once,
 };
 
 use thiserror::Error;
@@ -34,6 +35,22 @@ pub enum TracingError {
 pub enum LogFlusher {
     Flusher(WorkerGuard),
     NullFlusher,
+}
+
+static INIT_TEST_TRACING: Once = Once::new();
+
+/// Call this function once at the beginning of a test and then set the ENABLE_TRACING
+/// environment variable to 1 to view tracing in the terminal:
+///
+/// ENABLE_TRACING=1 cargo test <test_name>
+///
+pub fn init_test_tracing() {
+    INIT_TEST_TRACING.call_once(|| {
+        if std::env::var("ENABLE_TRACING").is_ok() {
+            let _log_flusher =
+                init_tracing("test", false).expect("Failed to initialize tracing for tests");
+        }
+    });
 }
 
 /// Initializes tracing for the application.

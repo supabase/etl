@@ -13,7 +13,7 @@ use crate::v2::workers::pool::TableSyncWorkerPool;
 use crate::v2::workers::table_sync::{
     TableSyncWorker, TableSyncWorkerError, TableSyncWorkerState, TableSyncWorkerStateError,
 };
-use postgres::schema::{Oid, TableId};
+use postgres::schema::TableId;
 use std::collections::HashMap;
 use std::sync::Arc;
 use thiserror::Error;
@@ -127,7 +127,7 @@ where
                 self.replication_client.clone(),
                 self.schema_cache.clone(),
                 self.destination.clone(),
-                Hook::new(
+                ApplyWorkerHook::new(
                     self.identity,
                     self.config,
                     self.replication_client,
@@ -171,7 +171,7 @@ async fn get_start_lsn(
 }
 
 #[derive(Debug)]
-struct Hook<S, D> {
+struct ApplyWorkerHook<S, D> {
     identity: PipelineIdentity,
     config: Arc<PipelineConfig>,
     replication_client: PgReplicationClient,
@@ -182,7 +182,7 @@ struct Hook<S, D> {
     shutdown_rx: ShutdownRx,
 }
 
-impl<S, D> Hook<S, D> {
+impl<S, D> ApplyWorkerHook<S, D> {
     #[allow(clippy::too_many_arguments)]
     fn new(
         identity: PipelineIdentity,
@@ -207,12 +207,12 @@ impl<S, D> Hook<S, D> {
     }
 }
 
-impl<S, D> Hook<S, D>
+impl<S, D> ApplyWorkerHook<S, D>
 where
     S: StateStore + Clone + Send + Sync + 'static,
     D: Destination + Clone + Send + Sync + 'static,
 {
-    async fn start_table_sync_worker(&self, table_id: Oid) -> Result<(), ApplyWorkerHookError> {
+    async fn start_table_sync_worker(&self, table_id: TableId) -> Result<(), ApplyWorkerHookError> {
         // TODO: switch to a connection pool which hands out connections.
         let replication_client = self.replication_client.duplicate().await?;
         let worker = TableSyncWorker::new(
@@ -241,7 +241,7 @@ where
 
     async fn handle_syncing_table(
         &self,
-        table_id: Oid,
+        table_id: TableId,
         current_lsn: PgLsn,
     ) -> Result<bool, ApplyWorkerHookError> {
         let table_sync_worker_state = {
@@ -262,7 +262,7 @@ where
 
     async fn handle_existing_worker(
         &self,
-        table_id: Oid,
+        table_id: TableId,
         table_sync_worker_state: TableSyncWorkerState,
         current_lsn: PgLsn,
     ) -> Result<bool, ApplyWorkerHookError> {
@@ -311,7 +311,7 @@ where
     }
 }
 
-impl<S, D> ApplyLoopHook for Hook<S, D>
+impl<S, D> ApplyLoopHook for ApplyWorkerHook<S, D>
 where
     S: StateStore + Clone + Send + Sync + 'static,
     D: Destination + Clone + Send + Sync + 'static,
@@ -371,7 +371,7 @@ where
         Ok(true)
     }
 
-    async fn skip_table(&self, table_id: Oid) -> Result<bool, Self::Error> {
+    async fn skip_table(&self, table_id: TableId) -> Result<bool, Self::Error> {
         let table_sync_worker_state = {
             let pool = self.pool.read().await;
             pool.get_active_worker_state(table_id)
@@ -394,7 +394,7 @@ where
 
     async fn should_apply_changes(
         &self,
-        table_id: Oid,
+        table_id: TableId,
         remote_final_lsn: PgLsn,
     ) -> Result<bool, Self::Error> {
         let pool = self.pool.read().await;

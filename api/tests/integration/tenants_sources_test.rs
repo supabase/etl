@@ -1,6 +1,7 @@
 use api::routes::sources::ReadSourceResponse;
 use api::routes::tenants::ReadTenantResponse;
 use api::routes::tenants_sources::{CreateTenantSourceRequest, CreateTenantSourceResponse};
+use telemetry::init_test_tracing;
 
 use crate::{
     common::test_app::spawn_test_app,
@@ -9,6 +10,7 @@ use crate::{
 
 #[tokio::test(flavor = "multi_thread")]
 async fn tenant_and_source_can_be_created() {
+    init_test_tracing();
     // Arrange
     let app = spawn_test_app().await;
 

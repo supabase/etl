@@ -12,7 +12,7 @@ use crate::v2::state::table::{TableReplicationPhase, TableReplicationPhaseType};
 use crate::v2::workers::base::WorkerType;
 use crate::v2::workers::table_sync::{TableSyncWorkerState, TableSyncWorkerStateError};
 use futures::StreamExt;
-use postgres::schema::Oid;
+use postgres::schema::TableId;
 use std::sync::Arc;
 use thiserror::Error;
 use tokio::pin;
@@ -55,7 +55,7 @@ pub async fn start_table_sync<S, D>(
     identity: PipelineIdentity,
     config: Arc<PipelineConfig>,
     replication_client: PgReplicationClient,
-    table_id: Oid,
+    table_id: TableId,
     table_sync_worker_state: TableSyncWorkerState,
     schema_cache: SchemaCache,
     state_store: S,

@@ -1,4 +1,4 @@
-use postgres::schema::Oid;
+use postgres::schema::TableId;
 use std::collections::HashMap;
 use std::mem;
 use std::ops::Deref;
@@ -23,14 +23,14 @@ pub enum TableSyncWorkerInactiveReason {
 #[derive(Debug)]
 pub struct TableSyncWorkerPoolInner {
     /// The table sync workers that are currently active.
-    active: HashMap<Oid, TableSyncWorkerHandle>,
+    active: HashMap<TableId, TableSyncWorkerHandle>,
     /// The table sync workers that are inactive, meaning that they are completed or errored.
     ///
     /// Having the state of finished workers gives us the power to reschedule failed table sync
     /// workers very cheaply since the state can be fed into a new table worker future as if it was
     /// read initially from the state store.
     // TODO: make it a bounded history to guard memory usage.
-    inactive: HashMap<Oid, Vec<(TableSyncWorkerInactiveReason, TableSyncWorkerHandle)>>,
+    inactive: HashMap<TableId, Vec<(TableSyncWorkerInactiveReason, TableSyncWorkerHandle)>>,
     waiting: Option<Arc<Notify>>,
 }
 
@@ -67,14 +67,18 @@ impl TableSyncWorkerPoolInner {
         Ok(true)
     }
 
-    pub fn get_active_worker_state(&self, table_id: Oid) -> Option<TableSyncWorkerState> {
+    pub fn get_active_worker_state(&self, table_id: TableId) -> Option<TableSyncWorkerState> {
         let state = self.active.get(&table_id)?.state().clone();
         info!("Retrieved worker state for table {}", table_id);
 
         Some(state)
     }
 
-    pub fn set_worker_finished(&mut self, table_id: Oid, reason: TableSyncWorkerInactiveReason) {
+    pub fn set_worker_finished(
+        &mut self,
+        table_id: TableId,
+        reason: TableSyncWorkerInactiveReason,
+    ) {
         let removed_worker = self.active.remove(&table_id);
 
         if let Some(waiting) = self.waiting.take() {
@@ -136,12 +140,12 @@ impl TableSyncWorkerPoolInner {
     }
 }
 
-impl ReactiveFutureCallback<Oid> for TableSyncWorkerPoolInner {
-    fn on_complete(&mut self, id: Oid) {
+impl ReactiveFutureCallback<TableId> for TableSyncWorkerPoolInner {
+    fn on_complete(&mut self, id: TableId) {
         self.set_worker_finished(id, TableSyncWorkerInactiveReason::Completed);
     }
 
-    fn on_error(&mut self, id: Oid, error: String) {
+    fn on_error(&mut self, id: TableId, error: String) {
         self.set_worker_finished(id, TableSyncWorkerInactiveReason::Errored(error));
     }
 }

@@ -237,10 +237,10 @@ impl Destination for BigQueryDestination {
     async fn inject(&self, schema_cache: SchemaCache) -> Result<(), DestinationError> {
         let mut inner = self.inner.write().await;
         inner.schema_cache = Some(schema_cache);
-        
+
         Ok(())
     }
-    
+
     async fn write_table_schema(&self, table_schema: TableSchema) -> Result<(), DestinationError> {
         self.write_table_schema(table_schema).await?;
 

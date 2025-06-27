@@ -1,4 +1,4 @@
-use postgres::schema::{Oid, TableId};
+use postgres::schema::TableId;
 use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
@@ -29,7 +29,7 @@ pub enum TableSyncWorkerError {
     TableSync(#[from] TableSyncError),
 
     #[error("The replication state is missing for table {0}")]
-    ReplicationStateMissing(Oid),
+    ReplicationStateMissing(TableId),
 
     #[error("An error occurred while interacting with the state store: {0}")]
     StateStore(#[from] StateStoreError),
@@ -96,7 +96,7 @@ impl TableSyncWorkerStateInner {
         Ok(())
     }
 
-    pub fn table_id(&self) -> Oid {
+    pub fn table_id(&self) -> TableId {
         self.table_id
     }
 
@@ -227,7 +227,7 @@ pub struct TableSyncWorker<S, D> {
     config: Arc<PipelineConfig>,
     replication_client: PgReplicationClient,
     pool: TableSyncWorkerPool,
-    table_id: Oid,
+    table_id: TableId,
     schema_cache: SchemaCache,
     state_store: S,
     destination: D,
@@ -241,7 +241,7 @@ impl<S, D> TableSyncWorker<S, D> {
         config: Arc<PipelineConfig>,
         replication_client: PgReplicationClient,
         pool: TableSyncWorkerPool,
-        table_id: Oid,
+        table_id: TableId,
         schema_cache: SchemaCache,
         state_store: S,
         destination: D,
@@ -260,7 +260,7 @@ impl<S, D> TableSyncWorker<S, D> {
         }
     }
 
-    pub fn table_id(&self) -> Oid {
+    pub fn table_id(&self) -> TableId {
         self.table_id
     }
 }
@@ -322,7 +322,7 @@ where
                 self.replication_client,
                 self.schema_cache,
                 self.destination,
-                Hook::new(self.table_id, state_clone, self.state_store),
+                TableSyncWorkerHook::new(self.table_id, state_clone, self.state_store),
                 self.shutdown_rx,
             )
             .await?;
@@ -346,14 +346,18 @@ where
 }
 
 #[derive(Debug)]
-struct Hook<S> {
-    table_id: Oid,
+struct TableSyncWorkerHook<S> {
+    table_id: TableId,
     table_sync_worker_state: TableSyncWorkerState,
     state_store: S,
 }
 
-impl<S> Hook<S> {
-    fn new(table_id: Oid, table_sync_worker_state: TableSyncWorkerState, state_store: S) -> Self {
+impl<S> TableSyncWorkerHook<S> {
+    fn new(
+        table_id: TableId,
+        table_sync_worker_state: TableSyncWorkerState,
+        state_store: S,
+    ) -> Self {
         Self {
             table_id,
             table_sync_worker_state,
@@ -362,7 +366,7 @@ impl<S> Hook<S> {
     }
 }
 
-impl<S> ApplyLoopHook for Hook<S>
+impl<S> ApplyLoopHook for TableSyncWorkerHook<S>
 where
     S: StateStore + Clone + Send + Sync + 'static,
 {
@@ -407,7 +411,7 @@ where
         Ok(true)
     }
 
-    async fn skip_table(&self, table_id: Oid) -> Result<bool, Self::Error> {
+    async fn skip_table(&self, table_id: TableId) -> Result<bool, Self::Error> {
         if self.table_id != table_id {
             return Ok(true);
         }
@@ -422,7 +426,7 @@ where
 
     async fn should_apply_changes(
         &self,
-        table_id: Oid,
+        table_id: TableId,
         _remote_final_lsn: PgLsn,
     ) -> Result<bool, Self::Error> {
         let inner = self.table_sync_worker_state.get_inner().write().await;

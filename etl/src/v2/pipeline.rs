@@ -137,13 +137,13 @@ where
             self.identity.id(),
             self.identity.publication_name()
         );
-        
+
         // We create the schema cache, which will be shared also with the destination.
         let schema_cache = SchemaCache::default();
-        
+
         // We inject pipeline specific dependencies within the destination.
         self.destination.inject(schema_cache.clone()).await?;
-        
+
         // We prepare the schema cache with table schemas loaded, in case there is the need.
         self.prepare_schema_cache(&schema_cache).await?;
 
@@ -184,7 +184,7 @@ where
         // schemas that were previously stored at the destination (if any).
         let table_schemas = self.destination.load_table_schemas().await?;
         schema_cache.add_table_schemas(table_schemas).await;
-        
+
         Ok(())
     }
 

@@ -51,7 +51,7 @@ pub async fn spawn_database() -> PgDatabase<Client> {
         .client
         .as_ref()
         .unwrap()
-        .execute(&format!("CREATE SCHEMA {}", TEST_DATABASE_SCHEMA), &[])
+        .execute(&format!("CREATE SCHEMA {TEST_DATABASE_SCHEMA}"), &[])
         .await
         .expect("Failed to create test schema");
 

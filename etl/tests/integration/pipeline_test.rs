@@ -1,3 +1,12 @@
+use etl::conversions::cdc_event::CdcEvent;
+use etl::conversions::Cell;
+use postgres::schema::{ColumnSchema, TableId};
+use postgres::tokio::test_utils::{id_column_schema, PgDatabase};
+use std::ops::Range;
+use telemetry::init_test_tracing;
+use tokio_postgres::types::Type;
+use tokio_postgres::GenericClient;
+
 use crate::common::database::{spawn_database, test_table_name};
 use crate::common::destination::TestDestination;
 use crate::common::pipeline::{
@@ -5,13 +14,6 @@ use crate::common::pipeline::{
 };
 use crate::common::table::assert_table_schema_from_destination;
 use crate::common::wait_for_condition;
-use etl::conversions::cdc_event::CdcEvent;
-use etl::conversions::Cell;
-use postgres::schema::{ColumnSchema, TableId};
-use postgres::tokio::test_utils::{id_column_schema, PgDatabase};
-use std::ops::Range;
-use tokio_postgres::types::Type;
-use tokio_postgres::GenericClient;
 
 fn get_expected_ages_sum(num_users: usize) -> i32 {
     ((num_users * (num_users + 1)) / 2) as i32
@@ -125,6 +127,7 @@ fn get_users_age_sum_from_events(
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_table_copy_with_insert_and_update() {
+    init_test_tracing();
     let database = spawn_database().await;
 
     // We insert 100 rows.
@@ -173,6 +176,7 @@ async fn test_table_copy_with_insert_and_update() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_cdc_with_multiple_inserts() {
+    init_test_tracing();
     let database = spawn_database().await;
 
     // We create the table and publication.

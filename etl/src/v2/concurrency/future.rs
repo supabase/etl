@@ -97,7 +97,7 @@ where
                             *this.state = ReactiveFutureState::InvokeCallback(None);
                         }
                         Err(err) => {
-                            let casted_err = format!("{}", err);
+                            let casted_err = format!("{err}");
 
                             *this.original_error = Some(err);
                             *this.state = ReactiveFutureState::InvokeCallback(Some(casted_err));

@@ -1,15 +1,15 @@
-use postgres::schema::{Oid, TableSchema};
+use postgres::schema::{TableId, TableSchema};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{RwLock, RwLockReadGuard};
 
 #[derive(Debug)]
 pub struct Inner {
-    table_schemas: HashMap<Oid, TableSchema>,
+    table_schemas: HashMap<TableId, TableSchema>,
 }
 
 impl Inner {
-    pub fn get_table_schema_ref(&self, table_id: &Oid) -> Option<&TableSchema> {
+    pub fn get_table_schema_ref(&self, table_id: &TableId) -> Option<&TableSchema> {
         self.table_schemas.get(&table_id)
     }
 }
@@ -43,7 +43,7 @@ impl SchemaCache {
         }
     }
 
-    pub async fn get_table_schema(&self, table_id: &Oid) -> Option<TableSchema> {
+    pub async fn get_table_schema(&self, table_id: &TableId) -> Option<TableSchema> {
         let inner = self.inner.read().await;
         inner.table_schemas.get(table_id).cloned()
     }

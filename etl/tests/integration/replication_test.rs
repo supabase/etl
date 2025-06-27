@@ -4,6 +4,7 @@ use postgres::schema::ColumnSchema;
 use postgres::tokio::test_utils::{id_column_schema, TableModification};
 use postgres_replication::protocol::{LogicalReplicationMessage, ReplicationMessage};
 use postgres_replication::LogicalReplicationStream;
+use telemetry::init_test_tracing;
 use tokio::pin;
 use tokio_postgres::types::{ToSql, Type};
 use tokio_postgres::CopyOutStream;
@@ -77,6 +78,7 @@ where
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_replication_client_creates_slot() {
+    init_test_tracing();
     let database = spawn_database().await;
 
     let client = PgReplicationClient::connect_no_tls(database.config.clone())
@@ -97,6 +99,7 @@ async fn test_replication_client_creates_slot() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_create_and_delete_slot() {
+    init_test_tracing();
     let database = spawn_database().await;
 
     let client = PgReplicationClient::connect_no_tls(database.config.clone())
@@ -122,6 +125,7 @@ async fn test_create_and_delete_slot() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_delete_nonexistent_slot() {
+    init_test_tracing();
     let database = spawn_database().await;
 
     let client = PgReplicationClient::connect_no_tls(database.config.clone())
@@ -137,6 +141,7 @@ async fn test_delete_nonexistent_slot() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_replication_client_doesnt_recreate_slot() {
+    init_test_tracing();
     let database = spawn_database().await;
 
     let client = PgReplicationClient::connect_no_tls(database.config.clone())
@@ -153,6 +158,7 @@ async fn test_replication_client_doesnt_recreate_slot() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_table_schema_copy_is_consistent() {
+    init_test_tracing();
     let database = spawn_database().await;
 
     let client = PgReplicationClient::connect_no_tls(database.config.clone())
@@ -194,6 +200,7 @@ async fn test_table_schema_copy_is_consistent() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_table_schema_copy_across_multiple_connections() {
+    init_test_tracing();
     let database = spawn_database().await;
 
     let first_client = PgReplicationClient::connect_no_tls(database.config.clone())
@@ -288,6 +295,7 @@ async fn test_table_schema_copy_across_multiple_connections() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_table_copy_stream_is_consistent() {
+    init_test_tracing();
     let database = spawn_database().await;
 
     let parent_client = PgReplicationClient::connect_no_tls(database.config.clone())
@@ -351,6 +359,7 @@ async fn test_table_copy_stream_is_consistent() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_publication_creation_and_check() {
+    init_test_tracing();
     let database = spawn_database().await;
 
     let parent_client = PgReplicationClient::connect_no_tls(database.config.clone())
@@ -401,6 +410,7 @@ async fn test_publication_creation_and_check() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_start_logical_replication() {
+    init_test_tracing();
     let database = spawn_database().await;
 
     let parent_client = PgReplicationClient::connect_no_tls(database.config.clone())

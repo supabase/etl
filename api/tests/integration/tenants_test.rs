@@ -3,6 +3,7 @@ use api::routes::tenants::{
     ReadTenantsResponse, UpdateTenantRequest,
 };
 use reqwest::StatusCode;
+use telemetry::init_test_tracing;
 
 use crate::common::test_app::{spawn_test_app, TestApp};
 
@@ -27,6 +28,7 @@ pub async fn create_tenant_with_id_and_name(app: &TestApp, id: String, name: Str
 
 #[tokio::test(flavor = "multi_thread")]
 async fn tenant_can_be_created() {
+    init_test_tracing();
     // Arrange
     let app = spawn_test_app().await;
 
@@ -58,6 +60,7 @@ async fn tenant_can_be_created() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn create_or_update_tenant_creates_a_new_tenant() {
+    init_test_tracing();
     // Arrange
     let app = spawn_test_app().await;
 
@@ -89,6 +92,7 @@ async fn create_or_update_tenant_creates_a_new_tenant() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn create_or_update_tenant_updates_an_existing_tenant() {
+    init_test_tracing();
     // Arrange
     let app = spawn_test_app().await;
 
@@ -125,6 +129,7 @@ async fn create_or_update_tenant_updates_an_existing_tenant() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn an_existing_tenant_can_be_read() {
+    init_test_tracing();
     // Arrange
     let app = spawn_test_app().await;
     let tenant = CreateTenantRequest {
@@ -153,6 +158,7 @@ async fn an_existing_tenant_can_be_read() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_non_existing_tenant_cant_be_read() {
+    init_test_tracing();
     // Arrange
     let app = spawn_test_app().await;
 
@@ -165,6 +171,7 @@ async fn a_non_existing_tenant_cant_be_read() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn an_existing_tenant_can_be_updated() {
+    init_test_tracing();
     // Arrange
     let app = spawn_test_app().await;
     let tenant = CreateTenantRequest {
@@ -197,6 +204,7 @@ async fn an_existing_tenant_can_be_updated() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_non_existing_tenant_cant_be_updated() {
+    init_test_tracing();
     // Arrange
     let app = spawn_test_app().await;
 
@@ -212,6 +220,7 @@ async fn a_non_existing_tenant_cant_be_updated() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn an_existing_tenant_can_be_deleted() {
+    init_test_tracing();
     // Arrange
     let app = spawn_test_app().await;
     let tenant = CreateTenantRequest {
@@ -236,6 +245,7 @@ async fn an_existing_tenant_can_be_deleted() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_non_existing_tenant_returns_ok_when_deleted() {
+    init_test_tracing();
     // Arrange
     let app = spawn_test_app().await;
 
@@ -248,6 +258,7 @@ async fn a_non_existing_tenant_returns_ok_when_deleted() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn all_tenants_can_be_read() {
+    init_test_tracing();
     // Arrange
     let app = spawn_test_app().await;
     let tenant1_id = create_tenant_with_id_and_name(

@@ -1,6 +1,6 @@
 use etl::v2::state::store::base::{StateStore, StateStoreError};
 use etl::v2::state::table::{TableReplicationPhase, TableReplicationPhaseType};
-use postgres::schema::{Oid, TableId};
+use postgres::schema::TableId;
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
@@ -72,7 +72,11 @@ impl TestStateStore {
         inner.table_replication_states.clone()
     }
 
-    pub async fn notify_on_replication_state<F>(&self, table_id: Oid, condition: F) -> Arc<Notify>
+    pub async fn notify_on_replication_state<F>(
+        &self,
+        table_id: TableId,
+        condition: F,
+    ) -> Arc<Notify>
     where
         F: Fn(&TableReplicationPhase) -> bool + Send + Sync + 'static,
     {
@@ -87,7 +91,7 @@ impl TestStateStore {
 
     pub async fn notify_on_replication_phase(
         &self,
-        table_id: Oid,
+        table_id: TableId,
         phase_type: TableReplicationPhaseType,
     ) -> Arc<Notify> {
         self.notify_on_replication_state(table_id, move |state| state.as_type() == phase_type)
@@ -98,7 +102,7 @@ impl TestStateStore {
 impl StateStore for TestStateStore {
     async fn get_table_replication_state(
         &self,
-        table_id: Oid,
+        table_id: TableId,
     ) -> Result<Option<TableReplicationPhase>, StateStoreError> {
         let inner = self.inner.read().await;
         let result = Ok(inner.table_replication_states.get(&table_id).cloned());
@@ -218,7 +222,7 @@ where
 {
     async fn get_table_replication_state(
         &self,
-        table_id: Oid,
+        table_id: TableId,
     ) -> Result<Option<TableReplicationPhase>, StateStoreError> {
         self.trigger_fault(&self.config.load_table_replication_state)?;
         self.inner.get_table_replication_state(table_id).await

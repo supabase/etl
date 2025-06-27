@@ -24,10 +24,10 @@ pub fn get_slot_name(
 ) -> Result<String, SlotError> {
     let slot_name = match worker_type {
         WorkerType::Apply => {
-            format!("{}_{}", APPLY_WORKER_PREFIX, pipeline_id,)
+            format!("{APPLY_WORKER_PREFIX}_{pipeline_id}")
         }
         WorkerType::TableSync { table_id } => {
-            format!("{}_{}_{}", TABLE_SYNC_PREFIX, pipeline_id, table_id)
+            format!("{TABLE_SYNC_PREFIX}_{pipeline_id}_{table_id}")
         }
     };
 

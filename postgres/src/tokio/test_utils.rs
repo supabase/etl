@@ -1,8 +1,9 @@
-use crate::schema::{ColumnSchema, Oid, TableName};
+use crate::schema::{ColumnSchema, TableId, TableName};
 use crate::tokio::config::PgConnectionConfig;
 use tokio::runtime::Handle;
 use tokio_postgres::types::Type;
 use tokio_postgres::{Client, GenericClient, NoTls, Transaction};
+use tracing::info;
 
 pub enum TableModification<'a> {
     AddColumn { name: &'a str, data_type: &'a str },
@@ -47,10 +48,10 @@ impl<G: GenericClient> PgDatabase<G> {
         &self,
         table_name: TableName,
         columns: &[(&str, &str)], // (column_name, column_type)
-    ) -> Result<Oid, tokio_postgres::Error> {
+    ) -> Result<TableId, tokio_postgres::Error> {
         let columns_str = columns
             .iter()
-            .map(|(name, typ)| format!("{} {}", name, typ))
+            .map(|(name, typ)| format!("{name} {typ}"))
             .collect::<Vec<_>>()
             .join(", ");
 
@@ -77,7 +78,7 @@ impl<G: GenericClient> PgDatabase<G> {
             )
             .await?;
 
-        let table_id: Oid = row.get(0);
+        let table_id: TableId = row.get(0);
 
         Ok(table_id)
     }
@@ -92,13 +93,13 @@ impl<G: GenericClient> PgDatabase<G> {
             .iter()
             .map(|modification| match modification {
                 TableModification::AddColumn { name, data_type } => {
-                    format!("add column {} {}", name, data_type)
+                    format!("add column {name} {data_type}")
                 }
                 TableModification::DropColumn { name } => {
-                    format!("drop column {}", name)
+                    format!("drop column {name}")
                 }
                 TableModification::AlterColumn { name, alteration } => {
-                    format!("alter column {} {}", name, alteration)
+                    format!("alter column {name} {alteration}")
                 }
             })
             .collect::<Vec<_>>()
@@ -126,7 +127,7 @@ impl<G: GenericClient> PgDatabase<G> {
         values: &[&(dyn tokio_postgres::types::ToSql + Sync)],
     ) -> Result<u64, tokio_postgres::Error> {
         let columns_str = columns.join(", ");
-        let placeholders: Vec<String> = (1..=values.len()).map(|i| format!("${}", i)).collect();
+        let placeholders: Vec<String> = (1..=values.len()).map(|i| format!("${i}")).collect();
         let placeholders_str = placeholders.join(", ");
 
         let insert_query = format!(
@@ -155,7 +156,7 @@ impl<G: GenericClient> PgDatabase<G> {
     ) -> Result<u64, tokio_postgres::Error> {
         let columns_str = columns.join(", ");
         let values = (1..=columns.len())
-            .map(|_| format!("generate_series({}, {}, {})", start, end, step))
+            .map(|_| format!("generate_series({start}, {end}, {step})"))
             .collect::<Vec<_>>()
             .join(", ");
 
@@ -181,7 +182,7 @@ impl<G: GenericClient> PgDatabase<G> {
         let set_clauses: Vec<String> = columns
             .iter()
             .zip(values.iter())
-            .map(|(col, val)| format!("{} = {}", col, val))
+            .map(|(col, val)| format!("{col} = {val}"))
             .collect();
         let set_clause = set_clauses.join(", ");
 
@@ -208,7 +209,7 @@ impl<G: GenericClient> PgDatabase<G> {
     where
         T: for<'a> tokio_postgres::types::FromSql<'a>,
     {
-        let where_str = where_clause.map_or(String::new(), |w| format!(" where {}", w));
+        let where_str = where_clause.map_or(String::new(), |w| format!(" where {w}"));
         let query = format!(
             "select {} from {}{}",
             column,
@@ -296,7 +297,7 @@ pub async fn create_pg_database(config: &PgConnectionConfig) -> Client {
     // Spawn the connection on a new task
     tokio::spawn(async move {
         if let Err(e) = connection.await {
-            eprintln!("connection error: {}", e);
+            info!("connection error: {e}");
         }
     });
 
@@ -316,7 +317,7 @@ pub async fn create_pg_database(config: &PgConnectionConfig) -> Client {
     // Spawn the connection on a new task
     tokio::spawn(async move {
         if let Err(e) = connection.await {
-            eprintln!("connection error: {}", e);
+            info!("connection error: {e}");
         }
     });
 
@@ -340,7 +341,7 @@ pub async fn drop_pg_database(config: &PgConnectionConfig) {
     // Spawn the connection on a new task
     tokio::spawn(async move {
         if let Err(e) = connection.await {
-            eprintln!("connection error: {}", e);
+            info!("connection error: {e}");
         }
     });
 

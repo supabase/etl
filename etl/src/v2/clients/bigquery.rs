@@ -4,9 +4,7 @@ use gcp_bigquery_client::storage::{ColumnMode, StorageApi};
 use gcp_bigquery_client::yup_oauth2::parse_service_account_key;
 use gcp_bigquery_client::{
     error::BQError,
-    model::{
-        query_request::QueryRequest, query_response::ResultSet,
-    },
+    model::{query_request::QueryRequest, query_response::ResultSet},
     storage::{ColumnType, FieldDescriptor, StreamName, TableDescriptor},
     Client,
 };

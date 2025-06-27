@@ -3,7 +3,7 @@ use std::{collections::HashMap, sync::Arc};
 use config::shared::SourceConfig;
 use postgres::schema::TableId;
 use sqlx::{
-    postgres::{types::Oid as SqlxOid, PgPoolOptions},
+    postgres::{types::Oid as SqlxTableId, PgPoolOptions},
     prelude::{FromRow, Type},
     PgPool,
 };
@@ -67,7 +67,7 @@ pub enum FromTableStateError {
 #[derive(Debug, FromRow)]
 pub struct ReplicationStateRow {
     pub pipeline_id: i64,
-    pub table_id: SqlxOid,
+    pub table_id: SqlxTableId,
     pub state: TableState,
     pub sync_done_lsn: Option<String>,
 }
@@ -153,7 +153,7 @@ impl PostgresStateStore {
         "#,
         )
         .bind(pipeline_id as i64)
-        .bind(SqlxOid(table_id))
+        .bind(SqlxTableId(table_id))
         .bind(state)
         .bind(sync_done_lsn)
         .execute(&pool)

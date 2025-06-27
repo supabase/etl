@@ -354,10 +354,9 @@ impl ReplicationClient {
             from pg_class c
             join pg_namespace n
                 on (c.relnamespace = n.oid)
-            where n.nspname = {}
-                and c.relname = {}
-            ",
-            quoted_schema, quoted_name
+            where n.nspname = {quoted_schema}
+                and c.relname = {quoted_name}
+            "
         );
 
         for message in self.postgres_client.simple_query(&table_info_query).await? {
