@@ -1,8 +1,11 @@
 use etl::v2::destination::bigquery::BigQueryDestination;
 use gcp_bigquery_client::client_builder::ClientBuilder;
 use gcp_bigquery_client::model::dataset::Dataset;
+use gcp_bigquery_client::model::query_request::QueryRequest;
+use gcp_bigquery_client::model::table_row::TableRow;
 use gcp_bigquery_client::yup_oauth2::parse_service_account_key;
 use gcp_bigquery_client::Client;
+use postgres::schema::TableName;
 use serde::Serialize;
 use std::ops::Deref;
 use tokio::runtime::Handle;
@@ -171,7 +174,9 @@ impl BigQueryDatabase {
                 google_auth.uri(),
                 V2_BASE_URL.to_owned(),
                 sa_key,
-                1,
+                // We set a `max_staleness_mins` to 0 since we want the changes to be applied at
+                // query time.
+                0,
             )
             .await
             .unwrap(),
@@ -184,11 +189,32 @@ impl BigQueryDatabase {
                 project_id.clone(),
                 dataset_id.clone(),
                 sa_key_path,
-                1,
+                // We set a `max_staleness_mins` to 0 since we want the changes to be applied at
+                // query time.
+                0,
             )
             .await
             .unwrap(),
         }
+    }
+
+    pub async fn query_table(&self, table_name: TableName) -> Vec<TableRow> {
+        let client = self.client().unwrap();
+
+        let project_id = self.project_id();
+        let dataset_id = self.dataset_id();
+        let table_id = table_name.as_bigquery_table_id();
+
+        let full_table_path = format!("`{}.{}.{}`", project_id, dataset_id, table_id);
+
+        let query = format!("SELECT * FROM {}", full_table_path);
+        client
+            .job()
+            .query(project_id, QueryRequest::new(query))
+            .await
+            .unwrap()
+            .rows
+            .unwrap()
     }
 
     fn project_id(&self) -> &str {
@@ -202,6 +228,13 @@ impl BigQueryDatabase {
         match self {
             Self::Emulated { dataset_id, .. } => dataset_id,
             Self::Real { dataset_id, .. } => dataset_id,
+        }
+    }
+
+    fn client(&self) -> Option<&Client> {
+        match self {
+            Self::Emulated { client, .. } => client.as_ref(),
+            Self::Real { client, .. } => client.as_ref(),
         }
     }
 

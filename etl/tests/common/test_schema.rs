@@ -253,3 +253,88 @@ pub fn build_expected_orders_inserts(
 
     events
 }
+
+#[cfg(feature = "bigquery")]
+pub mod bigquery {
+    use std::fmt;
+    use std::str::FromStr;
+    use gcp_bigquery_client::model::table_cell::TableCell;
+    use gcp_bigquery_client::model::table_row::TableRow;
+
+    pub fn parse_table_cell<O>(table_cell: TableCell) -> O
+    where O: FromStr, <O as FromStr>::Err: fmt::Debug {
+        table_cell.value.unwrap().as_str().unwrap().parse().unwrap()
+    }
+
+    #[derive(Debug, Eq, PartialEq, Ord, PartialOrd)]
+    pub struct BigQueryUser {
+        id: i32,
+        name: String,
+        age: i32,
+    }
+    
+    impl BigQueryUser {
+        
+        pub fn new(id: i32, name: &str, age: i32) -> Self {
+            Self {
+                id,
+                name: name.to_owned(),
+                age
+            }
+        }
+    }
+
+    impl From<TableRow> for BigQueryUser {
+        fn from(value: TableRow) -> Self {
+            let columns = value.columns.unwrap();
+
+            BigQueryUser {
+                id: parse_table_cell(columns[0].clone()),
+                name: parse_table_cell(columns[1].clone()),
+                age: parse_table_cell(columns[2].clone())
+            }
+        }
+    }
+
+    #[derive(Debug, Eq, PartialEq, Ord, PartialOrd)]
+    pub struct BigQueryOrder {
+        id: i32,
+        description: String,
+    }
+
+    impl BigQueryOrder {
+
+        pub fn new(id: i32, description: &str) -> Self {
+            Self {
+                id,
+                description: description.to_owned(),
+            }
+        }
+    }
+
+    impl From<TableRow> for BigQueryOrder {
+        fn from(value: TableRow) -> Self {
+            let columns = value.columns.unwrap();
+
+            BigQueryOrder {
+                id: parse_table_cell(columns[0].clone()),
+                description: parse_table_cell(columns[1].clone()),
+            }
+        }
+    }
+
+    pub fn parse_bigquery_table_rows<T>(table_rows: Vec<TableRow>) -> Vec<T>
+    where
+        T: Ord,
+        T: From<TableRow>,
+    {
+        let mut parsed_table_rows = Vec::with_capacity(table_rows.len());
+
+        for table_row in table_rows {
+            parsed_table_rows.push(table_row.into());
+        }
+        parsed_table_rows.sort();
+
+        parsed_table_rows
+    }
+}

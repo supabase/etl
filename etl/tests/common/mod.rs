@@ -4,6 +4,7 @@
 /// pipeline testing utilities, destination testing helpers, and table manipulation utilities.
 /// It also includes common testing patterns like waiting for conditions to be met.
 use std::time::{Duration, Instant};
+use std::sync::Once;
 
 #[cfg(feature = "bigquery")]
 pub mod bigquery;
@@ -52,4 +53,15 @@ where
     }
 
     panic!("Failed to process all events within timeout")
+}
+
+static INIT_CRYPTO: Once = Once::new();
+
+#[cfg(feature = "bigquery")]
+pub fn install_crypto_provider_once() {
+    INIT_CRYPTO.call_once(|| {
+        rustls::crypto::aws_lc_rs::default_provider()
+            .install_default()
+            .expect("failed to install default crypto provider");
+    });
 }
