@@ -24,18 +24,26 @@ const AUTH_TOKEN_ENDPOINT: &str = "/:o/oauth2/token";
 /// URL of the local instance of the BigQuery emulator HTTP server.
 const V2_BASE_URL: &str = "http://localhost:9050";
 
+/// Mock server for Google OAuth authentication endpoints used in BigQuery testing.
+///
+/// Provides a mock implementation of Google's OAuth token endpoint to enable
+/// testing without requiring real Google Cloud credentials.
 pub struct GoogleAuthMock {
     server: MockServer,
 }
 
 impl GoogleAuthMock {
+    /// Creates and starts a new mock Google OAuth server.
     pub async fn start() -> Self {
         Self {
             server: MockServer::start().await,
         }
     }
 
-    /// Mock token, given how many times the endpoint will be called.
+    /// Configures the mock server to respond to OAuth token requests.
+    ///
+    /// Sets up the server to return fake OAuth tokens for the specified number
+    /// of requests to the token endpoint.
     pub async fn mock_token<T: Into<Times>>(&self, n_times: T) {
         let response = ResponseTemplate::new(200).set_body_json(Token::fake());
 
@@ -52,11 +60,15 @@ impl GoogleAuthMock {
 impl Deref for GoogleAuthMock {
     type Target = MockServer;
 
+    /// Provides access to the underlying mock server for additional configuration.
     fn deref(&self) -> &Self::Target {
         &self.server
     }
 }
 
+/// OAuth access token structure used for mocking Google Cloud authentication.
+///
+/// Represents the JSON response returned by Google's OAuth token endpoint.
 #[derive(Eq, PartialEq, Serialize, Debug, Clone)]
 pub struct Token {
     access_token: String,
@@ -65,6 +77,10 @@ pub struct Token {
 }
 
 impl Token {
+    /// Creates a fake OAuth token for testing purposes.
+    ///
+    /// Returns a [`Token`] with dummy values suitable for mocking authentication
+    /// in test scenarios.
     fn fake() -> Self {
         Self {
             access_token: "aaaa".to_string(),
@@ -74,6 +90,10 @@ impl Token {
     }
 }
 
+/// Generates a mock Google Cloud service account key JSON.
+///
+/// Creates a fake service account key with dummy credentials and configures
+/// OAuth endpoints to point to the provided mock server URL.
 fn mock_sa_key(oauth_server: &str) -> serde_json::Value {
     let oauth_endpoint = format!("{oauth_server}/:o/oauth2");
 
@@ -91,13 +111,24 @@ fn mock_sa_key(oauth_server: &str) -> serde_json::Value {
     })
 }
 
+/// Generates a unique dataset ID for test isolation.
+///
+/// Creates a random dataset name prefixed with "etl_tests_" to ensure
+/// each test run uses a fresh dataset and avoid conflicts.
 fn random_dataset_id() -> String {
     let uuid = Uuid::new_v4().simple().to_string();
 
     format!("etl_tests_{}", uuid)
 }
 
+/// BigQuery database connection for testing, supporting both emulated and real instances.
+///
+/// Provides a unified interface for BigQuery operations in tests, automatically
+/// handling setup and teardown of test datasets. Can connect to either a local
+/// BigQuery emulator or a real Google Cloud BigQuery instance based on environment
+/// variable configuration.
 pub enum BigQueryDatabase {
+    /// Emulated BigQuery using local mock servers and fake credentials.
     Emulated {
         client: Option<Client>,
         google_auth: GoogleAuthMock,
@@ -105,6 +136,7 @@ pub enum BigQueryDatabase {
         project_id: String,
         dataset_id: String,
     },
+    /// Real BigQuery instance using actual Google Cloud credentials.
     Real {
         client: Option<Client>,
         sa_key_path: String,
@@ -114,6 +146,10 @@ pub enum BigQueryDatabase {
 }
 
 impl BigQueryDatabase {
+    /// Creates a new emulated BigQuery database instance.
+    ///
+    /// Sets up a [`BigQueryDatabase`] that connects to a local BigQuery emulator
+    /// using the provided mock authentication server and service account key.
     async fn new_emulated(google_auth: GoogleAuthMock, sa_key: String) -> Self {
         let parsed_sa_key = parse_service_account_key(&sa_key).unwrap();
 
@@ -138,6 +174,15 @@ impl BigQueryDatabase {
         }
     }
 
+    /// Creates a new real BigQuery database instance.
+    ///
+    /// Sets up a [`BigQueryDatabase`] that connects to Google Cloud BigQuery
+    /// using the provided service account key file path and project ID from
+    /// environment variables.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the `TESTS_BIGQUERY_PROJECT_ID` environment variable is not set.
     async fn new_real(sa_key_path: String) -> Self {
         let project_id = std::env::var(BIGQUERY_PROJECT_ID_ENV_NAME).expect(&format!(
             "The env variable {} to be set to a project id",
@@ -160,6 +205,10 @@ impl BigQueryDatabase {
         }
     }
 
+    /// Creates a [`BigQueryDestination`] configured for this database instance.
+    ///
+    /// Returns a destination suitable for ETL operations, configured with
+    /// zero staleness to ensure immediate consistency for testing.
     pub async fn build_destination(&self) -> BigQueryDestination {
         match self {
             Self::Emulated {
@@ -198,6 +247,10 @@ impl BigQueryDatabase {
         }
     }
 
+    /// Executes a SELECT * query against the specified table.
+    ///
+    /// Returns all rows from the table in the test dataset. Useful for
+    /// verifying data after ETL operations in tests.
     pub async fn query_table(&self, table_name: TableName) -> Vec<TableRow> {
         let client = self.client().unwrap();
 
@@ -217,6 +270,7 @@ impl BigQueryDatabase {
             .unwrap()
     }
 
+    /// Returns the Google Cloud project ID for this database instance.
     fn project_id(&self) -> &str {
         match self {
             Self::Emulated { project_id, .. } => project_id,
@@ -224,6 +278,7 @@ impl BigQueryDatabase {
         }
     }
 
+    /// Returns the BigQuery dataset ID for this database instance.
     fn dataset_id(&self) -> &str {
         match self {
             Self::Emulated { dataset_id, .. } => dataset_id,
@@ -231,6 +286,7 @@ impl BigQueryDatabase {
         }
     }
 
+    /// Returns a reference to the BigQuery client, if available.
     fn client(&self) -> Option<&Client> {
         match self {
             Self::Emulated { client, .. } => client.as_ref(),
@@ -238,6 +294,9 @@ impl BigQueryDatabase {
         }
     }
 
+    /// Takes ownership of the BigQuery client, leaving [`None`] in its place.
+    ///
+    /// Used during cleanup to move the client out for async dataset deletion.
     fn take_client(&mut self) -> Option<Client> {
         match self {
             Self::Emulated { client, .. } => client.take(),
@@ -247,6 +306,10 @@ impl BigQueryDatabase {
 }
 
 impl Drop for BigQueryDatabase {
+    /// Cleans up the test dataset when the database instance is dropped.
+    ///
+    /// Automatically deletes the BigQuery dataset and all its tables to
+    /// ensure test isolation and prevent resource leaks.
     fn drop(&mut self) {
         // We take out the client since during destruction we know that the struct won't be used
         // anymore.
@@ -264,11 +327,19 @@ impl Drop for BigQueryDatabase {
     }
 }
 
+/// Creates a new BigQuery dataset for testing.
+///
+/// Sets up a fresh dataset in the specified project that will be used
+/// for all table operations during the test.
 async fn initialize_bigquery(client: &Client, project_id: &str, dataset_id: &str) {
     let dataset = Dataset::new(project_id, dataset_id);
     client.dataset().create(dataset).await.unwrap();
 }
 
+/// Deletes a BigQuery dataset and all its contents.
+///
+/// Removes the test dataset and all tables within it to clean up
+/// resources after testing.
 async fn destroy_bigquery(client: &Client, project_id: &str, dataset_id: &str) {
     client
         .dataset()
@@ -277,6 +348,14 @@ async fn destroy_bigquery(client: &Client, project_id: &str, dataset_id: &str) {
         .unwrap();
 }
 
+/// Sets up a BigQuery database connection for testing.
+///
+/// Automatically detects whether to use real Google Cloud BigQuery or the local
+/// emulator based on environment variables. If `TESTS_BIGQUERY_SA_KEY_PATH` is
+/// set, connects to real BigQuery; otherwise uses the emulated version.
+///
+/// Creates a fresh dataset for test isolation and configures mock authentication
+/// when using the emulator.
 pub async fn setup_bigquery_connection() -> BigQueryDatabase {
     let sa_key_path = std::env::var(BIGQUERY_SA_KEY_PATH_ENV_NAME);
 
