@@ -237,9 +237,9 @@ impl<G: GenericClient> PgDatabase<G> {
     where
         T: for<'a> tokio_postgres::types::FromSql<'a>,
     {
-        let where_str = where_clause.map_or(String::new(), |w| format!(" where {w}"));
+        let where_str = where_clause.map_or(String::new(), |w| format!("where {w}"));
         let query = format!(
-            "select {} from {}{}",
+            "select {} from {} {}",
             column,
             table_name.as_quoted_identifier(),
             where_str
@@ -247,6 +247,14 @@ impl<G: GenericClient> PgDatabase<G> {
 
         let rows = self.client.as_ref().unwrap().query(&query, &[]).await?;
         Ok(rows.iter().map(|row| row.get(0)).collect())
+    }
+
+    pub async fn truncate_table(&self, table_name: TableName) -> Result<(), tokio_postgres::Error> {
+        let query = format!("truncate table {}", table_name.as_quoted_identifier(),);
+
+        self.client.as_ref().unwrap().execute(&query, &[]).await?;
+
+        Ok(())
     }
 }
 

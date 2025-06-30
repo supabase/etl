@@ -172,7 +172,6 @@ async fn test_table_schema_and_data_and_events_are_copied() {
     )
     .await;
 
-    // When the 4 inserts have been received, we can be sure they have been inserted into BigQuery.
     event_notify.notified().await;
 
     pipeline.shutdown_and_wait().await.unwrap();
@@ -266,7 +265,6 @@ async fn test_table_insert_update_delete() {
         .await
         .unwrap();
 
-    // When the 4 inserts have been received, we can be sure they have been inserted into BigQuery.
     event_notify.notified().await;
 
     // We query BigQuery to check for the insert.
@@ -330,4 +328,119 @@ async fn test_table_insert_update_delete() {
         .query_table(database_schema.users_schema().name)
         .await;
     assert!(users_rows.is_none());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_table_truncate() {
+    init_test_tracing();
+    install_crypto_provider_once();
+
+    let mut database = spawn_database().await;
+    let database_schema = setup_test_database_schema(&database, TableSelection::Both).await;
+
+    let bigquery_database = setup_bigquery_connection().await;
+
+    let state_store = TestStateStore::new();
+    let raw_destination = bigquery_database.build_destination().await;
+    let destination = TestDestinationWrapper::wrap(raw_destination);
+
+    // Start pipeline from scratch.
+    let identity = create_pipeline_identity(database_schema.publication_name());
+    let mut pipeline = spawn_pg_pipeline(
+        &identity,
+        &database.config,
+        state_store.clone(),
+        destination.clone(),
+    );
+
+    // Register notifications for table copy completion.
+    let users_state_notify = state_store
+        .notify_on_replication_phase(
+            database_schema.users_schema().id,
+            TableReplicationPhaseType::FinishedCopy,
+        )
+        .await;
+    let orders_state_notify = state_store
+        .notify_on_replication_phase(
+            database_schema.orders_schema().id,
+            TableReplicationPhaseType::FinishedCopy,
+        )
+        .await;
+
+    pipeline.start().await.unwrap();
+
+    users_state_notify.notified().await;
+    orders_state_notify.notified().await;
+
+    // Wait for the 4 inserts (2 per table).
+    let event_notify = destination
+        .wait_for_events_count(vec![(EventType::Insert, 4)])
+        .await;
+
+    // Insert test data.
+    insert_mock_data(
+        &mut database,
+        &database_schema.users_schema().name,
+        &database_schema.orders_schema().name,
+        1..=2,
+        false,
+    )
+    .await;
+
+    event_notify.notified().await;
+
+    // We query BigQuery directly to get the data which has been inserted by tests.
+    let users_rows = bigquery_database
+        .query_table(database_schema.users_schema().name)
+        .await
+        .unwrap();
+    let parsed_users_rows = parse_bigquery_table_rows::<BigQueryUser>(users_rows);
+    assert_eq!(parsed_users_rows.len(), 2);
+    assert_eq!(
+        parsed_users_rows,
+        vec![
+            BigQueryUser::new(1, "user_1", 1),
+            BigQueryUser::new(2, "user_2", 2),
+        ]
+    );
+    let orders_rows = bigquery_database
+        .query_table(database_schema.orders_schema().name)
+        .await
+        .unwrap();
+    let parsed_orders_rows = parse_bigquery_table_rows::<BigQueryOrder>(orders_rows);
+    assert_eq!(parsed_orders_rows.len(), 2);
+    assert_eq!(
+        parsed_orders_rows,
+        vec![
+            BigQueryOrder::new(1, "description_1"),
+            BigQueryOrder::new(2, "description_2"),
+        ]
+    );
+
+    // Wait for the truncate event for each table.
+    let event_notify = destination
+        .wait_for_events_count(vec![(EventType::Truncate, 2)])
+        .await;
+
+    // We truncate both tables.
+    database
+        .truncate_table(database_schema.users_schema().name.clone())
+        .await
+        .unwrap();
+    database
+        .truncate_table(database_schema.orders_schema().name.clone())
+        .await
+        .unwrap();
+
+    event_notify.notified().await;
+
+    // We query BigQuery to check that both tables are empty.
+    let users_rows = bigquery_database
+        .query_table(database_schema.users_schema().name)
+        .await;
+    assert!(users_rows.is_none());
+    let orders_rows = bigquery_database
+        .query_table(database_schema.orders_schema().name)
+        .await;
+    assert!(orders_rows.is_none());
 }

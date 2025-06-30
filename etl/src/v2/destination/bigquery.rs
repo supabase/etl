@@ -367,65 +367,131 @@ impl BigQueryDestination {
     }
 
     async fn write_events(&self, events: Vec<Event>) -> Result<(), BigQueryDestinationError> {
-        let mut table_id_to_table_rows = HashMap::new();
+        let mut event_iter = events.into_iter().peekable();
 
-        for event in events {
-            match event {
-                Event::Insert(mut insert) => {
-                    insert
-                        .table_row
-                        .values
-                        .push(BigQueryCdcMode::UPSERT.into_cell());
-                    let table_rows: &mut Vec<TableRow> =
-                        table_id_to_table_rows.entry(insert.table_id).or_default();
-                    table_rows.push(insert.table_row);
-                }
-                Event::Update(mut update) => {
-                    update
-                        .table_row
-                        .values
-                        .push(BigQueryCdcMode::UPSERT.into_cell());
-                    let table_rows: &mut Vec<TableRow> =
-                        table_id_to_table_rows.entry(update.table_id).or_default();
-                    table_rows.push(update.table_row);
-                }
-                Event::Delete(delete) => {
-                    let Some((_, mut old_table_row)) = delete.old_table_row else {
-                        info!("The `DELETE` event has no row, so it was skipped");
-                        continue;
-                    };
+        while event_iter.peek().is_some() {
+            let mut table_id_to_table_rows = HashMap::new();
+            let mut truncate_events = Vec::new();
 
-                    old_table_row
-                        .values
-                        .push(BigQueryCdcMode::DELETE.into_cell());
-                    let table_rows: &mut Vec<TableRow> =
-                        table_id_to_table_rows.entry(delete.table_id).or_default();
-                    table_rows.push(old_table_row);
+            // Process events until we hit a truncate or run out of events
+            while let Some(event) = event_iter.peek() {
+                if matches!(event, Event::Truncate(_)) {
+                    break;
                 }
-                Event::Truncate(_) => {
-                    // TODO: implement truncation by breaking the stream into multiple streams and
-                    //  interleaving it with truncate messages.
-                    // BigQuery doesn't support `TRUNCATE` DML statement when using the storage write API.
-                    // If you try to truncate a table that has a streaming buffer, you will get the following error:
-                    //  TRUNCATE DML statement over table <tablename> would affect rows in the streaming buffer, which is not supported
+
+                let event = event_iter.next().unwrap();
+                match event {
+                    Event::Insert(mut insert) => {
+                        insert
+                            .table_row
+                            .values
+                            .push(BigQueryCdcMode::UPSERT.into_cell());
+                        let table_rows: &mut Vec<TableRow> =
+                            table_id_to_table_rows.entry(insert.table_id).or_default();
+                        table_rows.push(insert.table_row);
+                    }
+                    Event::Update(mut update) => {
+                        update
+                            .table_row
+                            .values
+                            .push(BigQueryCdcMode::UPSERT.into_cell());
+                        let table_rows: &mut Vec<TableRow> =
+                            table_id_to_table_rows.entry(update.table_id).or_default();
+                        table_rows.push(update.table_row);
+                    }
+                    Event::Delete(delete) => {
+                        let Some((_, mut old_table_row)) = delete.old_table_row else {
+                            info!("The `DELETE` event has no row, so it was skipped");
+                            continue;
+                        };
+
+                        old_table_row
+                            .values
+                            .push(BigQueryCdcMode::DELETE.into_cell());
+                        let table_rows: &mut Vec<TableRow> =
+                            table_id_to_table_rows.entry(delete.table_id).or_default();
+                        table_rows.push(old_table_row);
+                    }
+                    _ => {
+                        // Every other event type is currently not supported.
+                    }
                 }
-                _ => {
-                    // Every other event type is currently not supported.
+            }
+
+            // Process accumulated streaming operations
+            if !table_id_to_table_rows.is_empty() {
+                let mut inner = self.inner.write().await;
+
+                for (table_id, table_rows) in table_id_to_table_rows {
+                    let (table_id, table_descriptor) =
+                        Self::load_table_id_and_descriptor(&inner, &table_id).await?;
+
+                    let dataset_id = inner.dataset_id.clone();
+                    inner
+                        .client
+                        .stream_rows(&dataset_id, table_id, &table_descriptor, table_rows)
+                        .await?;
                 }
+            }
+
+            // Collect all consecutive truncate events
+            while let Some(Event::Truncate(_)) = event_iter.peek() {
+                truncate_events.push(event_iter.next().unwrap());
+            }
+
+            // Process truncate events
+            if !truncate_events.is_empty() {
+                self.process_truncate_events(truncate_events).await?;
             }
         }
 
-        let mut inner = self.inner.write().await;
+        Ok(())
+    }
 
-        for (table_id, table_rows) in table_id_to_table_rows {
-            let (table_id, table_descriptor) =
-                Self::load_table_id_and_descriptor(&inner, &table_id).await?;
+    async fn process_truncate_events(
+        &self,
+        events: Vec<Event>,
+    ) -> Result<(), BigQueryDestinationError> {
+        let inner = self.inner.read().await;
 
-            let dataset_id = inner.dataset_id.clone();
-            inner
-                .client
-                .stream_rows(&dataset_id, table_id, &table_descriptor, table_rows)
-                .await?;
+        for event in events {
+            if let Event::Truncate(truncate) = event {
+                for rel_id in truncate.rel_ids {
+                    // Convert rel_id to table_id (Oid)
+                    let table_id = rel_id;
+
+                    // Get table information from schema cache
+                    let schema_cache = inner
+                        .schema_cache
+                        .as_ref()
+                        .ok_or(BigQueryDestinationError::MissingSchemaCache)?
+                        .read_inner()
+                        .await;
+
+                    if let Some(table_schema) = schema_cache.get_table_schema_ref(&table_id) {
+                        let bigquery_table_id = table_schema.name.as_bigquery_table_id();
+
+                        // Use DELETE statement to clear the table
+                        // This is more efficient than TRUNCATE for BigQuery streaming tables
+                        let delete_query = format!(
+                            "truncate table `{}.{}.{}`",
+                            inner.client.project_id(),
+                            inner.dataset_id,
+                            bigquery_table_id
+                        );
+
+                        let query_request = QueryRequest::new(delete_query);
+                        inner.client.query(query_request).await?;
+
+                        info!("Truncated table: {}", bigquery_table_id);
+                    } else {
+                        info!(
+                            "Table schema not found for table_id: {}, skipping truncate",
+                            table_id
+                        );
+                    }
+                }
+            }
         }
 
         Ok(())
