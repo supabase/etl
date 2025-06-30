@@ -17,24 +17,24 @@ use thiserror::Error;
 use tokio_postgres::types::Type;
 use tracing::info;
 
-/// The maximum number of byte that can be sent by stream.
+/// Maximum byte size for streaming data to BigQuery.
 const MAX_SIZE_BYTES: usize = 9 * 1024 * 1024;
 
-/// The trace id of the client.
+/// Trace identifier for ETL operations in BigQuery client.
 const ETL_TRACE_ID: &str = "ETL BigQueryClient";
 
-/// In BigQuery CDC, the pseudocolumn `_CHANGE_TYPE` indicates the type of change to be processed for
-/// each row. To use CDC, set `_CHANGE_TYPE` when you stream row modifications using the Storage Write API.
-/// The pseudocolumn `_CHANGE_TYPE` only accepts the values `UPSERT` and `DELETE`. A table is considered CDC-enabled
-/// while the Storage Write API is streaming row modifications to the table in this manner.
+/// Special column name for Change Data Capture operations in BigQuery.
 const BIGQUERY_CDC_SPECIAL_COLUMN: &str = "_CHANGE_TYPE";
 
+/// Change Data Capture operation types for BigQuery streaming.
+#[derive(Debug)]
 pub enum BigQueryCdcMode {
     UPSERT,
     DELETE,
 }
 
 impl BigQueryCdcMode {
+    /// Converts the CDC mode into a [`Cell`] value.
     pub fn into_cell(self) -> Cell {
         Cell::String(self.to_string())
     }
@@ -49,6 +49,7 @@ impl fmt::Display for BigQueryCdcMode {
     }
 }
 
+/// Collection of row errors returned from BigQuery streaming operations.
 #[derive(Debug, Error)]
 pub struct RowErrors(pub Vec<RowError>);
 
@@ -64,6 +65,7 @@ impl fmt::Display for RowErrors {
     }
 }
 
+/// Errors that can occur when interacting with BigQuery.
 #[derive(Debug, Error)]
 pub enum BigQueryClientError {
     #[error("An error occurred with BigQuery: {0}")]
@@ -131,9 +133,9 @@ impl BigQueryClient {
         Ok(BigQueryClient { project_id, client })
     }
 
-    /// Returns the project ID for this client.
-    pub fn project_id(&self) -> &str {
-        &self.project_id
+    /// Returns the full BigQuery table name in the form `project_id.dataset_id.table_id`.
+    pub fn full_table_name(&self, dataset_id: &str, table_id: &str) -> String {
+        format!("`{}.{}.{}`", self.project_id, dataset_id, table_id)
     }
 
     /// Creates a new table in the specified dataset if it does not already exist.
@@ -165,17 +167,33 @@ impl BigQueryClient {
         column_schemas: &[ColumnSchema],
         max_staleness_mins: u16,
     ) -> Result<(), BigQueryClientError> {
+        let full_table_name = self.full_table_name(dataset_id, table_id);
+
         let columns_spec = Self::create_columns_spec(column_schemas);
         let max_staleness_option = Self::max_staleness_option(max_staleness_mins);
-        let project_id = self.project_id.as_str();
 
-        info!("creating table {project_id}.{dataset_id}.{table_id} in bigquery");
+        info!("Creating table {full_table_name} in BigQuery");
 
-        let query = format!(
-            "create table `{project_id}.{dataset_id}.{table_id}` {columns_spec} {max_staleness_option}"
-        );
+        let query = format!("create table {full_table_name} {columns_spec} {max_staleness_option}");
 
         let _ = self.query(QueryRequest::new(query)).await?;
+
+        Ok(())
+    }
+
+    /// Truncates a table in a BigQuery dataset.
+    pub async fn truncate_table(
+        &self,
+        dataset_id: &str,
+        table_id: &str,
+    ) -> Result<(), BigQueryClientError> {
+        let full_table_name = self.full_table_name(dataset_id, table_id);
+
+        info!("Truncating table {full_table_name} in BigQuery");
+
+        let delete_query = format!("truncate table {full_table_name}",);
+
+        let _ = self.query(QueryRequest::new(delete_query)).await?;
 
         Ok(())
     }
@@ -275,7 +293,7 @@ impl BigQueryClient {
         column_spec
     }
 
-    /// Appends a `PRIMARY KEY` clause to a `CREATE TABLE` statement string.
+    /// Creates a primary key clause string for table creation.
     fn add_primary_key_clause(column_schemas: &[ColumnSchema]) -> String {
         let identity_columns: Vec<String> = column_schemas
             .iter()
@@ -293,7 +311,7 @@ impl BigQueryClient {
         )
     }
 
-    /// Creates the full column specification clause for a `CREATE TABLE` statement.
+    /// Builds the complete column specification clause for table creation.
     fn create_columns_spec(column_schemas: &[ColumnSchema]) -> String {
         let mut s = column_schemas
             .iter()
@@ -306,12 +324,12 @@ impl BigQueryClient {
         format!("({s})")
     }
 
-    /// Creates the `OPTIONS` clause for specifying max staleness in a `CREATE TABLE` statement.
+    /// Creates the max staleness option clause for table creation.
     fn max_staleness_option(max_staleness_mins: u16) -> String {
         format!("options (max_staleness = interval {max_staleness_mins} minute)")
     }
 
-    /// Maps a PostgreSQL [`Type`] to a BigQuery data type name.
+    /// Converts a PostgreSQL [`Type`] to its BigQuery equivalent data type string.
     fn postgres_to_bigquery_type(typ: &Type) -> String {
         if Self::is_array_type(typ) {
             let element_type = match typ {
@@ -355,7 +373,7 @@ impl BigQueryClient {
         .to_string()
     }
 
-    /// Checks if a PostgreSQL [`Type`] is an array type.
+    /// Returns true if the PostgreSQL [`Type`] represents an array type.
     fn is_array_type(typ: &Type) -> bool {
         matches!(
             typ,
@@ -383,11 +401,11 @@ impl BigQueryClient {
         )
     }
 
-    /// Converts a slice of PostgreSQL [`ColumnSchema`] to a BigQuery [`TableDescriptor`].
+    /// Converts PostgreSQL column schemas to a BigQuery [`TableDescriptor`] for Storage Write API.
     ///
-    /// This conversion is necessary for using the BigQuery Storage Write API.
-    /// It maps PostgreSQL data types to their corresponding BigQuery counterparts
-    /// and sets the appropriate mode (e.g., `NULLABLE`, `REQUIRED`, `REPEATED`).
+    /// Maps PostgreSQL data types to BigQuery column types and sets the appropriate
+    /// column mode (`NULLABLE`, `REQUIRED`, or `REPEATED`). Automatically adds the
+    /// Change Data Capture special column.
     pub fn column_schemas_to_table_descriptor(column_schemas: &[ColumnSchema]) -> TableDescriptor {
         let mut field_descriptors = Vec::with_capacity(column_schemas.len());
         let mut number = 1;

@@ -326,6 +326,12 @@ impl BigQueryDestination {
         }
 
         // Query to get table schemas with their columns
+        let table_schemas_full_table_name = inner
+            .client
+            .full_table_name(&inner.dataset_id, ETL_TABLE_SCHEMAS_NAME);
+        let table_columns_full_table_name = inner
+            .client
+            .full_table_name(&inner.dataset_id, ETL_TABLE_COLUMNS_NAME);
         let query = format!(
             r#"
             select
@@ -338,14 +344,10 @@ impl BigQueryDestination {
                 tc.nullable,
                 tc.primary_key,
                 tc.column_order
-            from `{}.{}.{ETL_TABLE_SCHEMAS_NAME}` ts
-            join `{}.{}.{ETL_TABLE_COLUMNS_NAME}` tc on ts.table_id = tc.table_id
+            from {table_schemas_full_table_name} ts
+            join {table_columns_full_table_name} tc on ts.table_id = tc.table_id
             order by ts.table_id, tc.column_order
-            "#,
-            inner.client.project_id(),
-            inner.dataset_id,
-            inner.client.project_id(),
-            inner.dataset_id
+            "#
         );
 
         let mut query_results = inner.client.query(QueryRequest::new(query)).await?;
@@ -552,19 +554,13 @@ impl BigQueryDestination {
                     .await;
 
                 if let Some(table_schema) = schema_cache.get_table_schema_ref(&table_id) {
-                    let table_id = table_schema.name.as_bigquery_table_id();
-
-                    let delete_query = format!(
-                        "truncate table `{}.{}.{}`",
-                        inner.client.project_id(),
-                        inner.dataset_id,
-                        table_id
-                    );
-
-                    let query_request = QueryRequest::new(delete_query);
-                    inner.client.query(query_request).await?;
-
-                    info!("Truncated table `{}` in BigQuery", table_id);
+                    inner
+                        .client
+                        .truncate_table(
+                            &inner.dataset_id,
+                            &table_schema.name.as_bigquery_table_id(),
+                        )
+                        .await?;
                 } else {
                     info!(
                         "Table schema not found for table_id: {}, skipping truncate",

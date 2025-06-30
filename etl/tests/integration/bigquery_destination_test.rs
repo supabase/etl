@@ -104,7 +104,8 @@ async fn test_table_copy_and_streaming_with_restart() {
         ]
     );
 
-    // We restart the pipeline and check that we can process events since we load the table schema.
+    // We restart the pipeline and check that we can process events since we have load the table
+    // schema from the destination.
     let mut pipeline = spawn_pg_pipeline(
         &identity,
         &database.config,
