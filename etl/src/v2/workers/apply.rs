@@ -130,7 +130,6 @@ where
                 ApplyWorkerHook::new(
                     self.identity,
                     self.config,
-                    self.replication_client,
                     self.pool,
                     self.schema_cache,
                     self.state_store,
@@ -174,7 +173,6 @@ async fn get_start_lsn(
 struct ApplyWorkerHook<S, D> {
     identity: PipelineIdentity,
     config: Arc<PipelineConfig>,
-    replication_client: PgReplicationClient,
     pool: TableSyncWorkerPool,
     schema_cache: SchemaCache,
     state_store: S,
@@ -187,7 +185,6 @@ impl<S, D> ApplyWorkerHook<S, D> {
     fn new(
         identity: PipelineIdentity,
         config: Arc<PipelineConfig>,
-        replication_client: PgReplicationClient,
         pool: TableSyncWorkerPool,
         schema_cache: SchemaCache,
         state_store: S,
@@ -197,7 +194,6 @@ impl<S, D> ApplyWorkerHook<S, D> {
         Self {
             identity,
             config,
-            replication_client,
             pool,
             schema_cache,
             state_store,
@@ -214,11 +210,9 @@ where
 {
     async fn start_table_sync_worker(&self, table_id: TableId) -> Result<(), ApplyWorkerHookError> {
         // TODO: switch to a connection pool which hands out connections.
-        let replication_client = self.replication_client.duplicate().await?;
         let worker = TableSyncWorker::new(
             self.identity.clone(),
             self.config.clone(),
-            replication_client,
             self.pool.clone(),
             table_id,
             self.schema_cache.clone(),

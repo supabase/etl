@@ -13,7 +13,7 @@ use crate::v2::config::pipeline::PipelineConfig;
 use crate::v2::destination::base::Destination;
 use crate::v2::pipeline::PipelineIdentity;
 use crate::v2::replication::apply::{start_apply_loop, ApplyLoopError, ApplyLoopHook};
-use crate::v2::replication::client::PgReplicationClient;
+use crate::v2::replication::client::{PgReplicationClient, PgReplicationError};
 use crate::v2::replication::table_sync::{start_table_sync, TableSyncError, TableSyncResult};
 use crate::v2::schema::cache::SchemaCache;
 use crate::v2::state::store::base::{StateStore, StateStoreError};
@@ -36,6 +36,9 @@ pub enum TableSyncWorkerError {
 
     #[error("An error occurred in the apply loop: {0}")]
     ApplyLoop(#[from] ApplyLoopError),
+
+    #[error("A Postgres replication error occurred in the table sync worker: {0}")]
+    PgReplication(#[from] PgReplicationError),
 }
 
 #[derive(Debug, Error)]
@@ -225,7 +228,6 @@ impl WorkerHandle<TableSyncWorkerState> for TableSyncWorkerHandle {
 pub struct TableSyncWorker<S, D> {
     identity: PipelineIdentity,
     config: Arc<PipelineConfig>,
-    replication_client: PgReplicationClient,
     pool: TableSyncWorkerPool,
     table_id: TableId,
     schema_cache: SchemaCache,
@@ -239,7 +241,6 @@ impl<S, D> TableSyncWorker<S, D> {
     pub fn new(
         identity: PipelineIdentity,
         config: Arc<PipelineConfig>,
-        replication_client: PgReplicationClient,
         pool: TableSyncWorkerPool,
         table_id: TableId,
         schema_cache: SchemaCache,
@@ -250,7 +251,6 @@ impl<S, D> TableSyncWorker<S, D> {
         Self {
             identity,
             config,
-            replication_client,
             pool,
             table_id,
             schema_cache,
@@ -294,10 +294,12 @@ where
 
         let state_clone = state.clone();
         let table_sync_worker = async move {
+            let replication_client =
+                PgReplicationClient::connect(self.config.pg_connection.clone()).await?;
             let result = start_table_sync(
                 self.identity.clone(),
                 self.config.clone(),
-                self.replication_client.clone(),
+                replication_client.clone(),
                 self.table_id,
                 state_clone.clone(),
                 self.schema_cache.clone(),
@@ -319,7 +321,7 @@ where
                 self.identity,
                 start_lsn,
                 self.config,
-                self.replication_client,
+                replication_client,
                 self.schema_cache,
                 self.destination,
                 TableSyncWorkerHook::new(self.table_id, state_clone, self.state_store),
