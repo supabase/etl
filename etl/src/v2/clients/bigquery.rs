@@ -132,10 +132,7 @@ impl BigQueryClient {
             .get(&self.project_id, dataset_id, table_id, None)
             .await;
 
-        let exists = match table {
-            Err(BQError::ResponseError { error }) if error.error.code == 404 => false,
-            _ => true,
-        };
+        let exists = !matches!(table, Err(BQError::ResponseError { error }) if error.error.code == 404);
 
         Ok(exists)
     }
