@@ -1,6 +1,6 @@
 use gcp_bigquery_client::model::query_request::QueryRequest;
 use gcp_bigquery_client::storage::TableDescriptor;
-use postgres::schema::{ColumnSchema, Oid, TableName, TableSchema};
+use postgres::schema::{ColumnSchema, TableId, TableName, TableSchema};
 use std::collections::HashMap;
 use std::ops::Deref;
 use std::sync::{Arc, LazyLock};
@@ -16,44 +16,87 @@ use crate::v2::conversions::event::{Event, TruncateEvent};
 use crate::v2::destination::base::{Destination, DestinationError};
 use crate::v2::schema::cache::SchemaCache;
 
+/// Table name for storing ETL table schema metadata in BigQuery.
 const ETL_TABLE_SCHEMAS_NAME: &str = "etl_table_schemas";
 
+/// Column name constants for the ETL table schemas metadata table.
+const TABLE_ID_COLUMN: &str = "table_id";
+const SCHEMA_NAME_COLUMN: &str = "schema_name";
+const TABLE_NAME_COLUMN: &str = "table_name";
+
+/// Column definitions for the ETL table schemas metadata table.
+/// Defines the structure used to store table-level schema information in BigQuery.
 static ETL_TABLE_SCHEMAS_COLUMNS: LazyLock<Vec<ColumnSchema>> = LazyLock::new(|| {
     vec![
-        ColumnSchema::new("table_id".to_string(), Type::INT8, -1, false, true),
-        ColumnSchema::new("schema_name".to_string(), Type::TEXT, -1, false, false),
-        ColumnSchema::new("table_name".to_string(), Type::TEXT, -1, false, false),
+        ColumnSchema::new(TABLE_ID_COLUMN.to_string(), Type::INT8, -1, false, true),
+        ColumnSchema::new(SCHEMA_NAME_COLUMN.to_string(), Type::TEXT, -1, false, false),
+        ColumnSchema::new(TABLE_NAME_COLUMN.to_string(), Type::TEXT, -1, false, false),
     ]
 });
 
+/// Table name for storing ETL column schema metadata in BigQuery.
 const ETL_TABLE_COLUMNS_NAME: &str = "etl_table_columns";
+
+/// Column name constants for the ETL table columns metadata table.
+const COLUMN_NAME_COLUMN: &str = "column_name";
+const COLUMN_TYPE_COLUMN: &str = "column_type";
+const TYPE_MODIFIER_COLUMN: &str = "type_modifier";
+const NULLABLE_COLUMN: &str = "nullable";
+const PRIMARY_KEY_COLUMN: &str = "primary_key";
+const COLUMN_ORDER_COLUMN: &str = "column_order";
+
+/// Column definitions for the ETL table columns metadata table.
+/// Defines the structure used to store column-level schema information in BigQuery.
 static ETL_TABLE_COLUMNS_COLUMNS: LazyLock<Vec<ColumnSchema>> = LazyLock::new(|| {
     vec![
-        ColumnSchema::new("table_id".to_string(), Type::INT8, -1, false, true),
-        ColumnSchema::new("column_name".to_string(), Type::TEXT, -1, false, true),
-        ColumnSchema::new("column_type".to_string(), Type::TEXT, -1, false, false),
-        ColumnSchema::new("type_modifier".to_string(), Type::INT4, -1, false, false),
-        ColumnSchema::new("nullable".to_string(), Type::BOOL, -1, false, false),
-        ColumnSchema::new("primary_key".to_string(), Type::BOOL, -1, false, false),
-        ColumnSchema::new("column_order".to_string(), Type::INT4, -1, false, false),
+        ColumnSchema::new(TABLE_ID_COLUMN.to_string(), Type::INT8, -1, false, true),
+        ColumnSchema::new(COLUMN_NAME_COLUMN.to_string(), Type::TEXT, -1, false, true),
+        ColumnSchema::new(COLUMN_TYPE_COLUMN.to_string(), Type::TEXT, -1, false, false),
+        ColumnSchema::new(
+            TYPE_MODIFIER_COLUMN.to_string(),
+            Type::INT4,
+            -1,
+            false,
+            false,
+        ),
+        ColumnSchema::new(NULLABLE_COLUMN.to_string(), Type::BOOL, -1, false, false),
+        ColumnSchema::new(PRIMARY_KEY_COLUMN.to_string(), Type::BOOL, -1, false, false),
+        ColumnSchema::new(
+            COLUMN_ORDER_COLUMN.to_string(),
+            Type::INT4,
+            -1,
+            false,
+            false,
+        ),
     ]
 });
 
+/// Errors that can occur when using [`BigQueryDestination`].
+///
+/// This error type covers BigQuery client failures, schema cache issues,
+/// missing table schemas, and serialization problems.
 #[derive(Debug, Error)]
 pub enum BigQueryDestinationError {
+    /// Wraps errors from the underlying [`BigQueryClient`].
     #[error("An error occurred with the BigQuery client: {0}")]
     BigQueryClient(#[from] BigQueryClientError),
 
+    /// The requested table schema was not found in the schema cache.
     #[error("The table schema for table id {0} was not found in the schema cache")]
-    MissingTableSchema(Oid),
+    MissingTableSchema(TableId),
 
+    /// No schema cache has been injected into this destination instance.
     #[error("The schema cache was not set on the destination")]
     MissingSchemaCache,
 
+    /// JSON serialization failed while processing table schema data.
     #[error("Failed to serialize table schema: {0}")]
     SerializationError(#[from] serde_json::Error),
 }
 
+/// Internal state for [`BigQueryDestination`] wrapped in `Arc<RwLock<>>`.
+///
+/// Contains the BigQuery client, dataset configuration, and injected schema cache.
 #[derive(Debug)]
 struct Inner {
     client: BigQueryClient,
@@ -63,6 +106,9 @@ struct Inner {
 }
 
 impl Inner {
+    /// Ensures the ETL metadata tables exist in BigQuery.
+    ///
+    /// Creates `etl_table_schemas` and `etl_table_columns` tables if they don't exist.
     async fn ensure_schema_tables_exist(&self) -> Result<(), BigQueryDestinationError> {
         // Create etl_table_schemas table - use ColumnSchema for compatibility
         self.client
@@ -88,12 +134,25 @@ impl Inner {
     }
 }
 
+/// A BigQuery destination that implements the ETL [`Destination`] trait.
+///
+/// Provides PostgreSQL-to-BigQuery data pipeline functionality including schema mapping,
+/// table creation, streaming inserts, and CDC operation handling. Maintains schema metadata
+/// in dedicated BigQuery tables for persistence across pipeline runs.
+///
+/// The destination creates and manages two metadata tables:
+/// - `etl_table_schemas`: Stores table-level schema information
+/// - `etl_table_columns`: Stores column-level schema details
 #[derive(Debug, Clone)]
 pub struct BigQueryDestination {
     inner: Arc<RwLock<Inner>>,
 }
 
 impl BigQueryDestination {
+    /// Creates a new [`BigQueryDestination`] using a service account key file path.
+    ///
+    /// Initializes the BigQuery client with the provided credentials and project settings.
+    /// The `max_staleness_mins` parameter controls table metadata cache freshness.
     pub async fn new_with_key_path(
         project_id: String,
         dataset_id: String,
@@ -113,6 +172,10 @@ impl BigQueryDestination {
         })
     }
 
+    /// Creates a new [`BigQueryDestination`] using a service account key JSON string.
+    ///
+    /// Similar to [`BigQueryDestination::new_with_key_path`] but accepts the key content directly
+    /// rather than a file path. Useful when credentials are stored in environment variables.
     pub async fn new_with_key(
         project_id: String,
         dataset_id: String,
@@ -132,6 +195,10 @@ impl BigQueryDestination {
         })
     }
 
+    /// Creates a new [`BigQueryDestination`] with custom BigQuery API endpoints.
+    ///
+    /// Allows overriding the default BigQuery service URLs for testing or private deployments.
+    /// The `auth_base_url` is used for authentication, while `v2_base_url` handles data operations.
     pub async fn new_with_urls(
         project_id: String,
         dataset_id: String,
@@ -155,9 +222,12 @@ impl BigQueryDestination {
         })
     }
 
+    /// Loads BigQuery table ID and descriptor that are used for streaming operations.
+    ///
+    /// Returns the BigQuery-formatted table name and its column descriptor for streaming operations.
     async fn load_table_id_and_descriptor<I: Deref<Target = Inner>>(
         inner: &I,
-        table_id: &Oid,
+        table_id: &TableId,
     ) -> Result<(String, TableDescriptor), BigQueryDestinationError> {
         let schema_cache = inner
             .schema_cache
@@ -176,6 +246,9 @@ impl BigQueryDestination {
         Ok((table_id, table_descriptor))
     }
 
+    /// Writes a table schema to BigQuery, creating the data table and storing metadata.
+    ///
+    /// This method creates the actual data table and inserts schema information into the ETL metadata tables.
     async fn write_table_schema(
         &self,
         table_schema: TableSchema,
@@ -199,7 +272,7 @@ impl BigQueryDestination {
         inner.ensure_schema_tables_exist().await?;
 
         // Store table schema metadata
-        let mut table_schema_row = table_schema_to_table_row(&table_schema);
+        let mut table_schema_row = Self::table_schema_to_table_row(&table_schema);
         table_schema_row
             .values
             .push(BigQueryCdcMode::UPSERT.into_cell());
@@ -216,7 +289,7 @@ impl BigQueryDestination {
             .await?;
 
         // Store column schemas metadata
-        let mut column_rows = column_schemas_to_table_rows(&table_schema);
+        let mut column_rows = Self::column_schemas_to_table_rows(&table_schema);
         for column_row in column_rows.iter_mut() {
             column_row.values.push(BigQueryCdcMode::UPSERT.into_cell());
         }
@@ -237,6 +310,9 @@ impl BigQueryDestination {
         Ok(())
     }
 
+    /// Loads all table schemas from BigQuery ETL metadata tables.
+    ///
+    /// Reconstructs [`TableSchema`] objects by joining data from schema and column metadata tables.
     async fn load_table_schemas(&self) -> Result<Vec<TableSchema>, BigQueryDestinationError> {
         let inner = self.inner.read().await;
 
@@ -278,46 +354,46 @@ impl BigQueryDestination {
 
         while query_results.next_row() {
             let table_id: u32 = query_results
-                .get_i64_by_name("table_id")
+                .get_i64_by_name(TABLE_ID_COLUMN)
                 .map(|opt| opt.unwrap_or(0) as u32)
                 .unwrap_or(0);
 
             let schema_name: String = query_results
-                .get_string_by_name("schema_name")
+                .get_string_by_name(SCHEMA_NAME_COLUMN)
                 .map(|opt| opt.unwrap_or_default())
                 .unwrap_or_default();
 
             let table_name: String = query_results
-                .get_string_by_name("table_name")
+                .get_string_by_name(TABLE_NAME_COLUMN)
                 .map(|opt| opt.unwrap_or_default())
                 .unwrap_or_default();
 
             let column_name: String = query_results
-                .get_string_by_name("column_name")
+                .get_string_by_name(COLUMN_NAME_COLUMN)
                 .map(|opt| opt.unwrap_or_default())
                 .unwrap_or_default();
 
             let column_type_str: String = query_results
-                .get_string_by_name("column_type")
+                .get_string_by_name(COLUMN_TYPE_COLUMN)
                 .map(|opt| opt.unwrap_or_default())
                 .unwrap_or_default();
 
             let type_modifier: i32 = query_results
-                .get_i64_by_name("type_modifier")
+                .get_i64_by_name(TYPE_MODIFIER_COLUMN)
                 .map(|opt| opt.unwrap_or(-1) as i32)
                 .unwrap_or(-1);
 
             let nullable: bool = query_results
-                .get_bool_by_name("nullable")
+                .get_bool_by_name(NULLABLE_COLUMN)
                 .map(|opt| opt.unwrap_or(true))
                 .unwrap_or(true);
 
             let primary_key: bool = query_results
-                .get_bool_by_name("primary_key")
+                .get_bool_by_name(PRIMARY_KEY_COLUMN)
                 .map(|opt| opt.unwrap_or(false))
                 .unwrap_or(false);
 
-            let column_type = string_to_postgres_type(&column_type_str)?;
+            let column_type = Self::string_to_postgres_type(&column_type_str)?;
             let column_schema = ColumnSchema::new(
                 column_name,
                 column_type,
@@ -344,9 +420,12 @@ impl BigQueryDestination {
         Ok(result)
     }
 
+    /// Writes data rows to a BigQuery table, adding CDC mode metadata.
+    ///
+    /// Each row gets a CDC mode column appended before streaming to BigQuery.
     async fn write_table_rows(
         &self,
-        table_id: Oid,
+        table_id: TableId,
         mut table_rows: Vec<TableRow>,
     ) -> Result<(), BigQueryDestinationError> {
         let mut inner = self.inner.write().await;
@@ -366,6 +445,9 @@ impl BigQueryDestination {
         Ok(())
     }
 
+    /// Processes and writes a batch of CDC events to BigQuery.
+    ///
+    /// Groups events by type, handles inserts/updates/deletes via streaming, and processes truncates separately.
     async fn write_events(&self, events: Vec<Event>) -> Result<(), BigQueryDestinationError> {
         let mut event_iter = events.into_iter().peekable();
 
@@ -450,6 +532,9 @@ impl BigQueryDestination {
         Ok(())
     }
 
+    /// Processes truncate events by executing `TRUNCATE TABLE` statements in BigQuery.
+    ///
+    /// Maps PostgreSQL table OIDs to BigQuery table names and issues truncate commands.
     async fn process_truncate_events(
         &self,
         truncate_events: Vec<TruncateEvent>,
@@ -491,6 +576,102 @@ impl BigQueryDestination {
 
         Ok(())
     }
+
+    /// Converts a [`TableSchema`] to a [`TableRow`] for insertion into the ETL metadata table.
+    ///
+    /// Extracts table ID, schema name, and table name for storage in `etl_table_schemas`.
+    fn table_schema_to_table_row(table_schema: &TableSchema) -> TableRow {
+        let columns = vec![
+            Cell::U32(table_schema.id),
+            Cell::String(table_schema.name.schema.clone()),
+            Cell::String(table_schema.name.name.clone()),
+        ];
+
+        TableRow::new(columns)
+    }
+
+    /// Converts column schemas from a [`TableSchema`] to [`TableRow`] objects for metadata storage.
+    ///
+    /// Creates one row per column for insertion into the `etl_table_columns` table.
+    fn column_schemas_to_table_rows(table_schema: &TableSchema) -> Vec<TableRow> {
+        let mut table_rows = Vec::with_capacity(table_schema.column_schemas.len());
+
+        for (column_order, column_schema) in table_schema.column_schemas.iter().enumerate() {
+            let columns = vec![
+                Cell::U32(table_schema.id),
+                Cell::String(column_schema.name.clone()),
+                Cell::String(Self::postgres_type_to_string(&column_schema.typ)),
+                Cell::I32(column_schema.modifier),
+                Cell::Bool(column_schema.nullable),
+                Cell::Bool(column_schema.primary),
+                // We store the index of the column since the order of columns is important while generating the
+                // vector of `ColumnSchema`.
+                Cell::U32(column_order as u32),
+            ];
+
+            table_rows.push(TableRow::new(columns));
+        }
+
+        table_rows
+    }
+
+    /// Converts a PostgreSQL [`Type`] to its string representation for metadata storage.
+    ///
+    /// Maps common PostgreSQL types to their string equivalents, with fallback for unknown types.
+    fn postgres_type_to_string(pg_type: &Type) -> String {
+        match *pg_type {
+            Type::BOOL => "BOOL".to_string(),
+            Type::CHAR => "CHAR".to_string(),
+            Type::INT2 => "INT2".to_string(),
+            Type::INT4 => "INT4".to_string(),
+            Type::INT8 => "INT8".to_string(),
+            Type::FLOAT4 => "FLOAT4".to_string(),
+            Type::FLOAT8 => "FLOAT8".to_string(),
+            Type::TEXT => "TEXT".to_string(),
+            Type::VARCHAR => "VARCHAR".to_string(),
+            Type::TIMESTAMP => "TIMESTAMP".to_string(),
+            Type::TIMESTAMPTZ => "TIMESTAMPTZ".to_string(),
+            Type::DATE => "DATE".to_string(),
+            Type::TIME => "TIME".to_string(),
+            Type::TIMETZ => "TIMETZ".to_string(),
+            Type::BYTEA => "BYTEA".to_string(),
+            Type::UUID => "UUID".to_string(),
+            Type::JSON => "JSON".to_string(),
+            Type::JSONB => "JSONB".to_string(),
+            _ => format!("UNKNOWN({})", pg_type.name()),
+        }
+    }
+
+    /// Converts a string representation back to a PostgreSQL [`Type`].
+    ///
+    /// Used when reconstructing schemas from BigQuery metadata tables. Falls back to `TEXT` for unknown types.
+    #[allow(clippy::result_large_err)]
+    fn string_to_postgres_type(type_str: &str) -> Result<Type, BigQueryDestinationError> {
+        match type_str {
+            "BOOL" => Ok(Type::BOOL),
+            "CHAR" => Ok(Type::CHAR),
+            "INT2" => Ok(Type::INT2),
+            "INT4" => Ok(Type::INT4),
+            "INT8" => Ok(Type::INT8),
+            "FLOAT4" => Ok(Type::FLOAT4),
+            "FLOAT8" => Ok(Type::FLOAT8),
+            "TEXT" => Ok(Type::TEXT),
+            "VARCHAR" => Ok(Type::VARCHAR),
+            "TIMESTAMP" => Ok(Type::TIMESTAMP),
+            "TIMESTAMPTZ" => Ok(Type::TIMESTAMPTZ),
+            "DATE" => Ok(Type::DATE),
+            "TIME" => Ok(Type::TIME),
+            "TIMETZ" => Ok(Type::TIMETZ),
+            "BYTEA" => Ok(Type::BYTEA),
+            "UUID" => Ok(Type::UUID),
+            "JSON" => Ok(Type::JSON),
+            "JSONB" => Ok(Type::JSONB),
+            _ => {
+                // For unknown types, we'll use TEXT as a fallback
+                Ok(Type::TEXT)
+            }
+        }
+    }
 }
 
 impl Destination for BigQueryDestination {
@@ -515,7 +696,7 @@ impl Destination for BigQueryDestination {
 
     async fn write_table_rows(
         &self,
-        table_id: Oid,
+        table_id: TableId,
         table_rows: Vec<TableRow>,
     ) -> Result<(), DestinationError> {
         self.write_table_rows(table_id, table_rows).await?;
@@ -527,89 +708,5 @@ impl Destination for BigQueryDestination {
         self.write_events(events).await?;
 
         Ok(())
-    }
-}
-
-fn table_schema_to_table_row(table_schema: &TableSchema) -> TableRow {
-    let columns = vec![
-        Cell::U32(table_schema.id),
-        Cell::String(table_schema.name.schema.clone()),
-        Cell::String(table_schema.name.name.clone()),
-    ];
-
-    TableRow::new(columns)
-}
-
-fn column_schemas_to_table_rows(table_schema: &TableSchema) -> Vec<TableRow> {
-    let mut table_rows = Vec::with_capacity(table_schema.column_schemas.len());
-
-    for (column_order, column_schema) in table_schema.column_schemas.iter().enumerate() {
-        let columns = vec![
-            Cell::U32(table_schema.id),
-            Cell::String(column_schema.name.clone()),
-            Cell::String(postgres_type_to_string(&column_schema.typ)),
-            Cell::I32(column_schema.modifier),
-            Cell::Bool(column_schema.nullable),
-            Cell::Bool(column_schema.primary),
-            // We store the index of the column since the order of columns is important while generating the
-            // vector of `ColumnSchema`.
-            Cell::U32(column_order as u32),
-        ];
-
-        table_rows.push(TableRow::new(columns));
-    }
-
-    table_rows
-}
-
-fn postgres_type_to_string(pg_type: &Type) -> String {
-    match *pg_type {
-        Type::BOOL => "BOOL".to_string(),
-        Type::CHAR => "CHAR".to_string(),
-        Type::INT2 => "INT2".to_string(),
-        Type::INT4 => "INT4".to_string(),
-        Type::INT8 => "INT8".to_string(),
-        Type::FLOAT4 => "FLOAT4".to_string(),
-        Type::FLOAT8 => "FLOAT8".to_string(),
-        Type::TEXT => "TEXT".to_string(),
-        Type::VARCHAR => "VARCHAR".to_string(),
-        Type::TIMESTAMP => "TIMESTAMP".to_string(),
-        Type::TIMESTAMPTZ => "TIMESTAMPTZ".to_string(),
-        Type::DATE => "DATE".to_string(),
-        Type::TIME => "TIME".to_string(),
-        Type::TIMETZ => "TIMETZ".to_string(),
-        Type::BYTEA => "BYTEA".to_string(),
-        Type::UUID => "UUID".to_string(),
-        Type::JSON => "JSON".to_string(),
-        Type::JSONB => "JSONB".to_string(),
-        _ => format!("UNKNOWN({})", pg_type.name()),
-    }
-}
-
-#[allow(clippy::result_large_err)]
-fn string_to_postgres_type(type_str: &str) -> Result<Type, BigQueryDestinationError> {
-    match type_str {
-        "BOOL" => Ok(Type::BOOL),
-        "CHAR" => Ok(Type::CHAR),
-        "INT2" => Ok(Type::INT2),
-        "INT4" => Ok(Type::INT4),
-        "INT8" => Ok(Type::INT8),
-        "FLOAT4" => Ok(Type::FLOAT4),
-        "FLOAT8" => Ok(Type::FLOAT8),
-        "TEXT" => Ok(Type::TEXT),
-        "VARCHAR" => Ok(Type::VARCHAR),
-        "TIMESTAMP" => Ok(Type::TIMESTAMP),
-        "TIMESTAMPTZ" => Ok(Type::TIMESTAMPTZ),
-        "DATE" => Ok(Type::DATE),
-        "TIME" => Ok(Type::TIME),
-        "TIMETZ" => Ok(Type::TIMETZ),
-        "BYTEA" => Ok(Type::BYTEA),
-        "UUID" => Ok(Type::UUID),
-        "JSON" => Ok(Type::JSON),
-        "JSONB" => Ok(Type::JSONB),
-        _ => {
-            // For unknown types, we'll use TEXT as a fallback
-            Ok(Type::TEXT)
-        }
     }
 }
