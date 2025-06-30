@@ -1,6 +1,8 @@
 name: Rust
 
-on: [push, pull_request]
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled]
 
 env:
   CARGO_TERM_COLOR: always
@@ -57,6 +59,23 @@ jobs:
             sleep 1
           done
 
+      - name: Start BigQuery emulator
+        run: |
+          docker run -d --name bigquery-emulator \
+            -p 9050:9050 -p 9060:9060 \
+            ghcr.io/goccy/bigquery-emulator:latest \
+            --project=local-project \
+            --dataset=local-dataset \
+            --port=9050 \
+            --grpc-port=9060
+
+      - name: Wait for BigQuery emulator to be ready
+        run: |
+          until curl -s "http://localhost:9050/" > /dev/null; do
+            echo "Waiting for BigQuery emulator..."
+            sleep 1
+          done
+
       - name: Update WAL Settings
         # This step is necessary to enable logical replication for the tests
         # wal_level = logical is needed because we use logical replication in tests
@@ -86,6 +105,12 @@ jobs:
 
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
+
+      - name: Set up BigQuery environment variables and credentials
+        run: |
+          printf '%s' '${{ secrets.TESTS_BIGQUERY_SA_KEY_JSON }}' > /tmp/bigquery-sa-key.json
+          echo "TESTS_BIGQUERY_PROJECT_ID=${{ secrets.TESTS_BIGQUERY_PROJECT_ID }}" >> $GITHUB_ENV
+          echo "TESTS_BIGQUERY_SA_KEY_PATH=/tmp/bigquery-sa-key.json" >> $GITHUB_ENV
 
       - name: Generate code coverage
         id: coverage

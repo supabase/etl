@@ -66,10 +66,11 @@ clap = { workspace = true, default-features = true, features = [
     "std",
     "derive",
 ] }
+wiremock = { workspace = true}
 
 
 [features]
-bigquery = ["dep:gcp-bigquery-client", "dep:prost"]
+bigquery = ["dep:gcp-bigquery-client", "dep:prost", "postgres/bigquery"]
 duckdb = ["dep:duckdb"]
 stdout = []
 # When enabled converts unknown types to bytes

@@ -617,7 +617,8 @@ where
     // If no table schema is found, it means that something went wrong and we throw an error, which is
     // dealt with differently based on the worker type.
     // TODO: explore how to deal with applying relation messages to the schema (creating it if missing).
-    let Some(existing_table_schema) = schema_cache.get_table_schema(&message.rel_id()).await else {
+    let schema_cache = schema_cache.read_inner().await;
+    let Some(existing_table_schema) = schema_cache.get_table_schema_ref(&message.rel_id()) else {
         return Err(ApplyLoopError::MissingTableSchema(message.rel_id()));
     };
 
