@@ -19,7 +19,7 @@ use crate::common::test_schema::bigquery::{
 use crate::common::test_schema::{insert_mock_data, setup_test_database_schema, TableSelection};
 
 #[tokio::test(flavor = "multi_thread")]
-async fn test_table_schema_and_data_are_copied() {
+async fn test_table_copy_and_streaming_with_restart() {
     init_test_tracing();
     install_crypto_provider_once();
 
@@ -103,34 +103,8 @@ async fn test_table_schema_and_data_are_copied() {
             BigQueryOrder::new(2, "description_2"),
         ]
     );
-}
 
-#[tokio::test(flavor = "multi_thread")]
-async fn test_table_schema_and_data_and_events_are_copied() {
-    init_test_tracing();
-    install_crypto_provider_once();
-
-    let mut database = spawn_database().await;
-    let database_schema = setup_test_database_schema(&database, TableSelection::Both).await;
-
-    let bigquery_database = setup_bigquery_connection().await;
-
-    // Insert initial test data.
-    insert_mock_data(
-        &mut database,
-        &database_schema.users_schema().name,
-        &database_schema.orders_schema().name,
-        1..=2,
-        false,
-    )
-    .await;
-
-    let state_store = TestStateStore::new();
-    let raw_destination = bigquery_database.build_destination().await;
-    let destination = TestDestinationWrapper::wrap(raw_destination);
-
-    // Start pipeline from scratch.
-    let identity = create_pipeline_identity(database_schema.publication_name());
+    // We restart the pipeline and check that we can process events since we load the table schema.
     let mut pipeline = spawn_pg_pipeline(
         &identity,
         &database.config,
@@ -138,28 +112,9 @@ async fn test_table_schema_and_data_and_events_are_copied() {
         destination.clone(),
     );
 
-    // Register notifications for table copy completion.
-    let users_state_notify = state_store
-        .notify_on_replication_phase(
-            database_schema.users_schema().id,
-            TableReplicationPhaseType::FinishedCopy,
-        )
-        .await;
-    let orders_state_notify = state_store
-        .notify_on_replication_phase(
-            database_schema.orders_schema().id,
-            TableReplicationPhaseType::FinishedCopy,
-        )
-        .await;
-
     pipeline.start().await.unwrap();
 
-    users_state_notify.notified().await;
-    orders_state_notify.notified().await;
-
-    // Wait for the destination to receive the required number of events after the copy phase
-    // We expect 2 insert events for each table (4 total), plus some begin/commit events, which we
-    // are not interested at.
+    // We expect 2 insert events for each table (4 total).
     let event_notify = destination
         .wait_for_events_count(vec![(EventType::Insert, 4)])
         .await;
