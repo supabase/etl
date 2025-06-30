@@ -1,5 +1,5 @@
 use postgres::schema::TableName;
-use postgres::tokio::config::PgConnectionConfig;
+use postgres::tokio::config::{PgConnectionConfig, PgTlsConfig};
 use postgres::tokio::test_utils::PgDatabase;
 use secrecy::Secret;
 use tokio_postgres::config::SslMode;
@@ -41,7 +41,10 @@ pub async fn spawn_database() -> PgDatabase<Client> {
         name: Uuid::new_v4().to_string(),
         username: "postgres".to_owned(),
         password: Some(Secret::from("postgres".to_owned())),
-        ssl_mode: SslMode::Disable,
+        tls_config: PgTlsConfig {
+            ssl_mode: SslMode::Disable,
+            trusted_root_certs: vec![],
+        },
     };
 
     let database = PgDatabase::new(options).await;
