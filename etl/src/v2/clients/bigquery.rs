@@ -1,5 +1,3 @@
-use crate::conversions::table_row::TableRow;
-use crate::conversions::Cell;
 use futures::StreamExt;
 use gcp_bigquery_client::client_builder::ClientBuilder;
 use gcp_bigquery_client::google::cloud::bigquery::storage::v1::RowError;
@@ -16,6 +14,9 @@ use std::fmt;
 use thiserror::Error;
 use tokio_postgres::types::Type;
 use tracing::info;
+
+use crate::conversions::table_row::TableRow;
+use crate::conversions::Cell;
 
 /// Maximum byte size for streaming data to BigQuery.
 const MAX_SIZE_BYTES: usize = 9 * 1024 * 1024;
