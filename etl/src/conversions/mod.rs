@@ -107,9 +107,7 @@ impl Cell {
     #[cfg(feature = "bigquery")]
     pub fn encoded_len_prost(&self, tag: u32) -> usize {
         match self {
-            Cell::Null(typ) => {
-                TextFormatConverter::default_value(typ).encoded_len_prost(tag)
-            },
+            Cell::Null(typ) => TextFormatConverter::default_value(typ).encoded_len_prost(tag),
             Cell::Bool(b) => prost::encoding::bool::encoded_len(tag, b),
             Cell::String(s) => prost::encoding::string::encoded_len(tag, s),
             Cell::I16(i) => {

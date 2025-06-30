@@ -242,7 +242,10 @@ fn convert_tuple_to_row(
         // We are expecting that for each column, there is corresponding tuple data, even for null
         // values.
         let Some(tuple_data) = &tuple_data.get(i) else {
-            return Err(EventConversionError::TupleDataNotFound(column_schema.name.clone(), i))
+            return Err(EventConversionError::TupleDataNotFound(
+                column_schema.name.clone(),
+                i,
+            ));
         };
 
         let cell = match tuple_data {

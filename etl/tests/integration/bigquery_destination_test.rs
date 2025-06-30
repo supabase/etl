@@ -275,12 +275,7 @@ async fn test_table_insert_update_delete() {
         .await
         .unwrap();
     let parsed_users_rows = parse_bigquery_table_rows::<BigQueryUser>(users_rows);
-    assert_eq!(
-        parsed_users_rows,
-        vec![
-            BigQueryUser::new(1, "user_1", 1),
-        ]
-    );
+    assert_eq!(parsed_users_rows, vec![BigQueryUser::new(1, "user_1", 1),]);
 
     // Wait for the update.
     let event_notify = destination
@@ -307,9 +302,7 @@ async fn test_table_insert_update_delete() {
     let parsed_users_rows = parse_bigquery_table_rows::<BigQueryUser>(users_rows);
     assert_eq!(
         parsed_users_rows,
-        vec![
-            BigQueryUser::new(1, "user_10", 10),
-        ]
+        vec![BigQueryUser::new(1, "user_10", 10),]
     );
 
     // Wait for the update.
@@ -323,7 +316,7 @@ async fn test_table_insert_update_delete() {
             database_schema.users_schema().name.clone(),
             &["name"],
             &["'user_10'"],
-            ""
+            "",
         )
         .await
         .unwrap();

@@ -2,6 +2,7 @@ use crate::conversions::table_row::TableRow;
 use crate::conversions::Cell;
 use futures::StreamExt;
 use gcp_bigquery_client::client_builder::ClientBuilder;
+use gcp_bigquery_client::google::cloud::bigquery::storage::v1::RowError;
 use gcp_bigquery_client::storage::{ColumnMode, StorageApi};
 use gcp_bigquery_client::yup_oauth2::parse_service_account_key;
 use gcp_bigquery_client::{
@@ -12,7 +13,6 @@ use gcp_bigquery_client::{
 };
 use postgres::schema::ColumnSchema;
 use std::fmt;
-use gcp_bigquery_client::google::cloud::bigquery::storage::v1::RowError;
 use thiserror::Error;
 use tokio_postgres::types::Type;
 use tracing::info;
@@ -100,7 +100,10 @@ impl BigQueryClient {
     ///
     /// Parses the provided service account key string to authenticate with the
     /// BigQuery API.
-    pub async fn new_with_key(project_id: String, sa_key: &str) -> Result<BigQueryClient, BigQueryClientError> {
+    pub async fn new_with_key(
+        project_id: String,
+        sa_key: &str,
+    ) -> Result<BigQueryClient, BigQueryClientError> {
         let sa_key = parse_service_account_key(sa_key).map_err(BQError::from)?;
         let client = Client::from_service_account_key(sa_key, false).await?;
 
@@ -182,7 +185,11 @@ impl BigQueryClient {
     /// # Panics
     ///
     /// Panics if the query result does not contain the expected `table_exists` column.
-    pub async fn table_exists(&self, dataset_id: &str, table_id: &str) -> Result<bool, BigQueryClientError> {
+    pub async fn table_exists(
+        &self,
+        dataset_id: &str,
+        table_id: &str,
+    ) -> Result<bool, BigQueryClientError> {
         let table = self
             .client
             .table()
@@ -232,7 +239,9 @@ impl BigQueryClient {
                 let append_rows_response = append_rows_response.map_err(BQError::from)?;
                 if !append_rows_response.row_errors.is_empty() {
                     println!("ERRORS {:?}", append_rows_response.row_errors);
-                    return Err(BigQueryClientError::AppendRowErrors(RowErrors(append_rows_response.row_errors)));
+                    return Err(BigQueryClientError::AppendRowErrors(RowErrors(
+                        append_rows_response.row_errors,
+                    )));
                 }
             }
 

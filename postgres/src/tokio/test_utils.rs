@@ -205,7 +205,7 @@ impl<G: GenericClient> PgDatabase<G> {
         table_name: TableName,
         columns: &[&str],
         expressions: &[&str],
-        operator: &str
+        operator: &str,
     ) -> Result<u64, tokio_postgres::Error> {
         let delete_clauses: Vec<String> = columns
             .iter()
