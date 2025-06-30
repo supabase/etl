@@ -36,7 +36,7 @@ async fn test_pipeline_with_table_sync_worker_panic() {
 
     // We start the pipeline from scratch.
     let mut pipeline = spawn_pg_pipeline(
-        &create_pipeline_identity(&database_schema.publication_name()),
+        &create_pipeline_identity(database_schema.publication_name()),
         &database.config,
         state_store.clone(),
         destination.clone(),
@@ -94,7 +94,7 @@ async fn test_pipeline_with_table_sync_worker_error() {
 
     // We start the pipeline from scratch.
     let mut pipeline = spawn_pg_pipeline(
-        &create_pipeline_identity(&database_schema.publication_name()),
+        &create_pipeline_identity(database_schema.publication_name()),
         &database.config,
         state_store.clone(),
         destination.clone(),
@@ -152,7 +152,7 @@ async fn test_table_schema_copy_with_data_sync_retry() {
         ..Default::default()
     };
     let failing_state_store = FaultInjectingStateStore::wrap(state_store.clone(), fault_config);
-    let identity = create_pipeline_identity(&database_schema.publication_name());
+    let identity = create_pipeline_identity(database_schema.publication_name());
     let mut pipeline = spawn_pg_pipeline(
         &identity,
         &database.config,
@@ -255,7 +255,7 @@ async fn test_table_schema_copy_with_finished_copy_retry() {
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
 
     // We start the pipeline from scratch.
-    let identity = create_pipeline_identity(&database_schema.publication_name());
+    let identity = create_pipeline_identity(database_schema.publication_name());
     let mut pipeline = spawn_pg_pipeline(
         &identity,
         &database.config,
@@ -363,7 +363,7 @@ async fn test_table_schema_copy_survives_restarts() {
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
 
     // We start the pipeline from scratch.
-    let identity = create_pipeline_identity(&database_schema.publication_name());
+    let identity = create_pipeline_identity(database_schema.publication_name());
     let mut pipeline = spawn_pg_pipeline(
         &identity,
         &database.config,
@@ -486,7 +486,7 @@ async fn test_table_copy() {
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
 
     // Start pipeline from scratch.
-    let identity = create_pipeline_identity(&database_schema.publication_name());
+    let identity = create_pipeline_identity(database_schema.publication_name());
     let mut pipeline = spawn_pg_pipeline(
         &identity,
         &database.config,
@@ -550,7 +550,7 @@ async fn test_table_copy_and_sync() {
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
 
     // Start pipeline from scratch.
-    let identity = create_pipeline_identity(&database_schema.publication_name());
+    let identity = create_pipeline_identity(database_schema.publication_name());
     let mut pipeline = spawn_pg_pipeline(
         &identity,
         &database.config,
@@ -711,7 +711,7 @@ async fn test_table_copy_and_sync_with_changed_schema_in_table_sync_worker() {
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
 
     // Start pipeline from scratch.
-    let identity = create_pipeline_identity(&database_schema.publication_name());
+    let identity = create_pipeline_identity(database_schema.publication_name());
     let mut pipeline = spawn_pg_pipeline(
         &identity,
         &database.config,
@@ -800,7 +800,7 @@ async fn test_table_copy_and_sync_with_changed_schema_in_apply_worker() {
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
 
     // Start pipeline from scratch.
-    let identity = create_pipeline_identity(&database_schema.publication_name());
+    let identity = create_pipeline_identity(database_schema.publication_name());
     let mut pipeline = spawn_pg_pipeline(
         &identity,
         &database.config,

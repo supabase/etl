@@ -112,8 +112,7 @@ impl BigQueryClient {
         info!("creating table {project_id}.{dataset_id}.{table_id} in bigquery");
 
         let query = format!(
-            "create table `{}.{}.{}` {} {}",
-            project_id, dataset_id, table_id, columns_spec, max_staleness_option
+            "create table `{project_id}.{dataset_id}.{table_id}` {columns_spec} {max_staleness_option}"
         );
 
         let _ = self.query(QueryRequest::new(query)).await?;
@@ -233,14 +232,13 @@ impl BigQueryClient {
 
         s.push_str(&Self::add_primary_key_clause(column_schemas));
 
-        format!("({})", s)
+        format!("({s})")
     }
 
     /// Creates the `OPTIONS` clause for specifying max staleness in a `CREATE TABLE` statement.
     fn max_staleness_option(max_staleness_mins: u16) -> String {
         format!(
-            "options (max_staleness = interval {} minute)",
-            max_staleness_mins
+            "options (max_staleness = interval {max_staleness_mins} minute)"
         )
     }
 
@@ -267,7 +265,7 @@ impl BigQueryClient {
                 _ => "string",
             };
 
-            return format!("array<{}>", element_type);
+            return format!("array<{element_type}>");
         }
 
         match typ {

@@ -118,7 +118,7 @@ fn mock_sa_key(oauth_server: &str) -> serde_json::Value {
 fn random_dataset_id() -> String {
     let uuid = Uuid::new_v4().simple().to_string();
 
-    format!("etl_tests_{}", uuid)
+    format!("etl_tests_{uuid}")
 }
 
 /// BigQuery database connection for testing, supporting both emulated and real instances.
@@ -184,10 +184,7 @@ impl BigQueryDatabase {
     ///
     /// Panics if the `TESTS_BIGQUERY_PROJECT_ID` environment variable is not set.
     async fn new_real(sa_key_path: String) -> Self {
-        let project_id = std::env::var(BIGQUERY_PROJECT_ID_ENV_NAME).expect(&format!(
-            "The env variable {} to be set to a project id",
-            BIGQUERY_PROJECT_ID_ENV_NAME
-        ));
+        let project_id = std::env::var(BIGQUERY_PROJECT_ID_ENV_NAME).unwrap_or_else(|_| panic!("The env variable {BIGQUERY_PROJECT_ID_ENV_NAME} to be set to a project id"));
         let dataset_id = random_dataset_id();
 
         let client = ClientBuilder::new()
@@ -258,9 +255,9 @@ impl BigQueryDatabase {
         let dataset_id = self.dataset_id();
         let table_id = table_name.as_bigquery_table_id();
 
-        let full_table_path = format!("`{}.{}.{}`", project_id, dataset_id, table_id);
+        let full_table_path = format!("`{project_id}.{dataset_id}.{table_id}`");
 
-        let query = format!("SELECT * FROM {}", full_table_path);
+        let query = format!("SELECT * FROM {full_table_path}");
         client
             .job()
             .query(project_id, QueryRequest::new(query))

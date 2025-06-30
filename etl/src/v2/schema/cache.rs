@@ -10,7 +10,7 @@ pub struct Inner {
 
 impl Inner {
     pub fn get_table_schema_ref(&self, table_id: &TableId) -> Option<&TableSchema> {
-        self.table_schemas.get(&table_id)
+        self.table_schemas.get(table_id)
     }
 }
 

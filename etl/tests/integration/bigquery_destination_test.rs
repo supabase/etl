@@ -38,7 +38,7 @@ async fn test_table_schema_and_data_are_copied() {
     let destination = TestDestinationWrapper::wrap(raw_destination);
 
     // Start pipeline from scratch.
-    let identity = create_pipeline_identity(&database_schema.publication_name());
+    let identity = create_pipeline_identity(database_schema.publication_name());
     let mut pipeline = spawn_pg_pipeline(
         &identity,
         &database.config,
@@ -119,7 +119,7 @@ async fn test_table_schema_and_events_are_copied() {
     let destination = TestDestinationWrapper::wrap(raw_destination);
 
     // Start pipeline from scratch.
-    let identity = create_pipeline_identity(&database_schema.publication_name());
+    let identity = create_pipeline_identity(database_schema.publication_name());
     let mut pipeline = spawn_pg_pipeline(
         &identity,
         &database.config,
