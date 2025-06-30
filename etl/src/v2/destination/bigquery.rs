@@ -879,8 +879,7 @@ mod tests {
                 BigQueryDestination::string_to_postgres_type(&type_string).unwrap();
             assert_eq!(
                 pg_type, converted_back,
-                "Type conversion failed for: {:?}",
-                pg_type
+                "Type conversion failed for: {pg_type:?}"
             );
         }
     }

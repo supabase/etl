@@ -754,7 +754,7 @@ mod tests {
         let table_id = "test_table";
 
         // Simulate the full_table_name method logic without creating a client
-        let full_name = format!("`{}.{}.{}`", project_id, dataset_id, table_id);
+        let full_name = format!("`{project_id}.{dataset_id}.{table_id}`");
         assert_eq!(full_name, "`test-project.test_dataset.test_table`");
     }
 }
