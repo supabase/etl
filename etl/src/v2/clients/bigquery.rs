@@ -12,8 +12,11 @@ use gcp_bigquery_client::{
 };
 use postgres::schema::ColumnSchema;
 use std::fmt;
+use gcp_bigquery_client::google::cloud::bigquery::storage::v1::RowError;
+use thiserror::Error;
 use tokio_postgres::types::Type;
 use tracing::info;
+use crate::v2::workers::base::WorkerWaitError;
 
 /// The maximum number of byte that can be sent by stream.
 const MAX_SIZE_BYTES: usize = 9 * 1024 * 1024;
@@ -47,6 +50,30 @@ impl fmt::Display for BigQueryCdcMode {
     }
 }
 
+#[derive(Debug, Error)]
+pub struct RowErrors(pub Vec<RowError>);
+
+impl fmt::Display for RowErrors {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if !self.0.is_empty() {
+            for row_error in self.0.iter() {
+                writeln!(f, "{:?}", row_error)?;
+            }
+        }
+
+        Ok(())
+    }
+}
+
+#[derive(Debug, Error)]
+pub enum BigQueryClientError {
+    #[error("An error occurred with BigQuery: {0}")]
+    BigQuery(#[from] BQError),
+
+    #[error("One or multiple errors: {0}")]
+    AppendRowErrors(#[from] RowErrors),
+}
+
 /// A client for interacting with Google BigQuery.
 ///
 /// This client provides methods for managing tables, inserting data,
@@ -64,7 +91,7 @@ impl BigQueryClient {
     pub async fn new_with_key_path(
         project_id: String,
         sa_key_path: &str,
-    ) -> Result<BigQueryClient, BQError> {
+    ) -> Result<BigQueryClient, BigQueryClientError> {
         let client = Client::from_service_account_key_file(sa_key_path).await?;
 
         Ok(BigQueryClient { project_id, client })
@@ -74,8 +101,8 @@ impl BigQueryClient {
     ///
     /// Parses the provided service account key string to authenticate with the
     /// BigQuery API.
-    pub async fn new_with_key(project_id: String, sa_key: &str) -> Result<BigQueryClient, BQError> {
-        let sa_key = parse_service_account_key(sa_key)?;
+    pub async fn new_with_key(project_id: String, sa_key: &str) -> Result<BigQueryClient, BigQueryClientError> {
+        let sa_key = parse_service_account_key(sa_key).map_err(|e| BQError::from(e))?;
         let client = Client::from_service_account_key(sa_key, false).await?;
 
         Ok(BigQueryClient { project_id, client })
@@ -91,8 +118,8 @@ impl BigQueryClient {
         auth_base_url: String,
         v2_base_url: String,
         sa_key: &str,
-    ) -> Result<BigQueryClient, BQError> {
-        let sa_key = parse_service_account_key(sa_key)?;
+    ) -> Result<BigQueryClient, BigQueryClientError> {
+        let sa_key = parse_service_account_key(sa_key).map_err(|e| BQError::from(e))?;
         let client = ClientBuilder::new()
             .with_auth_base_url(auth_base_url)
             .with_v2_base_url(v2_base_url)
@@ -117,7 +144,7 @@ impl BigQueryClient {
         table_id: &str,
         column_schemas: &[ColumnSchema],
         max_staleness_mins: u16,
-    ) -> Result<bool, BQError> {
+    ) -> Result<bool, BigQueryClientError> {
         if self.table_exists(dataset_id, table_id).await? {
             return Ok(false);
         }
@@ -135,7 +162,7 @@ impl BigQueryClient {
         table_id: &str,
         column_schemas: &[ColumnSchema],
         max_staleness_mins: u16,
-    ) -> Result<(), BQError> {
+    ) -> Result<(), BigQueryClientError> {
         let columns_spec = Self::create_columns_spec(column_schemas);
         let max_staleness_option = Self::max_staleness_option(max_staleness_mins);
         let project_id = self.project_id.as_str();
@@ -156,7 +183,7 @@ impl BigQueryClient {
     /// # Panics
     ///
     /// Panics if the query result does not contain the expected `table_exists` column.
-    pub async fn table_exists(&self, dataset_id: &str, table_id: &str) -> Result<bool, BQError> {
+    pub async fn table_exists(&self, dataset_id: &str, table_id: &str) -> Result<bool, BigQueryClientError> {
         let table = self
             .client
             .table()
@@ -179,7 +206,7 @@ impl BigQueryClient {
         table_id: String,
         table_descriptor: &TableDescriptor,
         table_rows: Vec<TableRow>,
-    ) -> Result<(), BQError> {
+    ) -> Result<(), BigQueryClientError> {
         // We create a slice on table rows, which will be updated while the streaming progresses.
         //
         // Using a slice allows us to deallocate the vector only at the end of streaming, which leads
@@ -196,14 +223,18 @@ impl BigQueryClient {
             let (rows, num_processed_rows) =
                 StorageApi::create_rows(table_descriptor, table_rows, MAX_SIZE_BYTES);
 
-            let mut response_stream = self
+            let mut append_rows_stream = self
                 .client
                 .storage_mut()
                 .append_rows(&default_stream, rows, ETL_TRACE_ID.to_owned())
                 .await?;
 
-            if let Some(r) = response_stream.next().await {
-                let _ = r?;
+            if let Some(append_rows_response) = append_rows_stream.next().await {
+                let append_rows_response = append_rows_response.map_err(|e| BQError::from(e))?;
+                if !append_rows_response.row_errors.is_empty() {
+                    println!("ERRORS {:?}", append_rows_response.row_errors);
+                    return Err(BigQueryClientError::AppendRowErrors(RowErrors(append_rows_response.row_errors)));
+                }
             }
 
             table_rows = &table_rows[num_processed_rows..];
@@ -216,7 +247,7 @@ impl BigQueryClient {
     }
 
     /// Executes an SQL query and returns the result set.
-    pub async fn query(&self, request: QueryRequest) -> Result<ResultSet, BQError> {
+    pub async fn query(&self, request: QueryRequest) -> Result<ResultSet, BigQueryClientError> {
         let query_response = self.client.job().query(&self.project_id, request).await?;
 
         Ok(ResultSet::new_from_query_response(query_response))

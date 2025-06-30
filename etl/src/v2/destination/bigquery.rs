@@ -8,10 +8,10 @@ use std::sync::{Arc, LazyLock};
 use thiserror::Error;
 use tokio::sync::RwLock;
 use tokio_postgres::types::Type;
-
+use tracing::info;
 use crate::conversions::table_row::TableRow;
 use crate::conversions::Cell;
-use crate::v2::clients::bigquery::{BigQueryCdcMode, BigQueryClient};
+use crate::v2::clients::bigquery::{BigQueryCdcMode, BigQueryClient, BigQueryClientError};
 use crate::v2::conversions::event::Event;
 use crate::v2::destination::base::{Destination, DestinationError};
 use crate::v2::schema::cache::SchemaCache;
@@ -41,8 +41,8 @@ static ETL_TABLE_COLUMNS_COLUMNS: LazyLock<Vec<ColumnSchema>> = LazyLock::new(||
 
 #[derive(Debug, Error)]
 pub enum BigQueryDestinationError {
-    #[error("An error occurred with BigQuery: {0}")]
-    BigQuery(#[from] BQError),
+    #[error("An error occurred with the BigQuery client: {0}")]
+    BigQueryClient(#[from] BigQueryClientError),
 
     #[error("The table schema for table id {0} was not found in the schema cache")]
     MissingTableSchema(Oid),
@@ -390,22 +390,21 @@ impl BigQueryDestination {
                     table_rows.push(update.table_row);
                 }
                 Event::Delete(delete) => {
-                    let Some((is_key, mut old_table_row)) = delete.old_table_row else {
+                    let Some((_, mut old_table_row)) = delete.old_table_row else {
+                        info!("The `DELETE` event has no row, so it was skipped");
                         continue;
                     };
 
-                    // Only if the old table row is not a key, meaning it has all the columns, we
-                    // want to insert it, otherwise we might miss columns.
-                    if !is_key {
-                        old_table_row
-                            .values
-                            .push(BigQueryCdcMode::DELETE.into_cell());
-                        let table_rows: &mut Vec<TableRow> =
-                            table_id_to_table_rows.entry(delete.table_id).or_default();
-                        table_rows.push(old_table_row);
-                    }
+                    old_table_row
+                        .values
+                        .push(BigQueryCdcMode::DELETE.into_cell());
+                    let table_rows: &mut Vec<TableRow> =
+                        table_id_to_table_rows.entry(delete.table_id).or_default();
+                    table_rows.push(old_table_row);
                 }
                 Event::Truncate(_) => {
+                    // TODO: implement truncation by breaking the stream into multiple streams and
+                    //  interleaving it with truncate messages.
                     // BigQuery doesn't support `TRUNCATE` DML statement when using the storage write API.
                     // If you try to truncate a table that has a streaming buffer, you will get the following error:
                     //  TRUNCATE DML statement over table <tablename> would affect rows in the streaming buffer, which is not supported

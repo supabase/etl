@@ -340,11 +340,11 @@ async fn initialize_bigquery(client: &Client, project_id: &str, dataset_id: &str
 /// Removes the test dataset and all tables within it to clean up
 /// resources after testing.
 async fn destroy_bigquery(client: &Client, project_id: &str, dataset_id: &str) {
-    client
-        .dataset()
-        .delete(project_id, dataset_id, true)
-        .await
-        .unwrap();
+    // client
+    //     .dataset()
+    //     .delete(project_id, dataset_id, true)
+    //     .await
+    //     .unwrap();
 }
 
 /// Sets up a BigQuery database connection for testing.

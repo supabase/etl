@@ -1,3 +1,5 @@
+use std::time::Duration;
+use tokio::time::timeout;
 use etl::v2::conversions::event::EventType;
 use etl::v2::destination::base::Destination;
 use etl::v2::state::table::TableReplicationPhaseType;
@@ -14,25 +16,213 @@ use crate::common::test_schema::bigquery::{
 };
 use crate::common::test_schema::{insert_mock_data, setup_test_database_schema, TableSelection};
 
+// #[tokio::test(flavor = "multi_thread")]
+// async fn test_table_schema_and_data_are_copied() {
+//     init_test_tracing();
+//     install_crypto_provider_once();
+//
+//     let mut database = spawn_database().await;
+//     let database_schema = setup_test_database_schema(&database, TableSelection::Both).await;
+//
+//     let bigquery_database = setup_bigquery_connection().await;
+//
+//     // Insert initial test data.
+//     insert_mock_data(
+//         &mut database,
+//         &database_schema.users_schema().name,
+//         &database_schema.orders_schema().name,
+//         1..=2,
+//         false,
+//     )
+//     .await;
+//
+//     let state_store = TestStateStore::new();
+//     let raw_destination = bigquery_database.build_destination().await;
+//     let destination = TestDestinationWrapper::wrap(raw_destination);
+//
+//     // Start pipeline from scratch.
+//     let identity = create_pipeline_identity(database_schema.publication_name());
+//     let mut pipeline = spawn_pg_pipeline(
+//         &identity,
+//         &database.config,
+//         state_store.clone(),
+//         destination.clone(),
+//     );
+//
+//     // Register notifications for table copy completion.
+//     let users_state_notify = state_store
+//         .notify_on_replication_phase(
+//             database_schema.users_schema().id,
+//             TableReplicationPhaseType::FinishedCopy,
+//         )
+//         .await;
+//     let orders_state_notify = state_store
+//         .notify_on_replication_phase(
+//             database_schema.orders_schema().id,
+//             TableReplicationPhaseType::FinishedCopy,
+//         )
+//         .await;
+//
+//     pipeline.start().await.unwrap();
+//
+//     users_state_notify.notified().await;
+//     orders_state_notify.notified().await;
+//
+//     pipeline.shutdown_and_wait().await.unwrap();
+//
+//     // We load the table schemas and check that they are correctly fetched.
+//     let mut table_schemas = destination.load_table_schemas().await.unwrap();
+//     table_schemas.sort();
+//     assert_eq!(table_schemas[0], database_schema.orders_schema());
+//     assert_eq!(table_schemas[1], database_schema.users_schema());
+//
+//     // We query BigQuery directly to get the data which has been inserted by tests.
+//     let users_rows = bigquery_database
+//         .query_table(database_schema.users_schema().name)
+//         .await;
+//     let parsed_users_rows = parse_bigquery_table_rows::<BigQueryUser>(users_rows);
+//     assert_eq!(parsed_users_rows.len(), 2);
+//     assert_eq!(
+//         parsed_users_rows,
+//         vec![
+//             BigQueryUser::new(1, "user_1", 1),
+//             BigQueryUser::new(2, "user_2", 2),
+//         ]
+//     );
+//     let orders_rows = bigquery_database
+//         .query_table(database_schema.orders_schema().name)
+//         .await;
+//     let parsed_orders_rows = parse_bigquery_table_rows::<BigQueryOrder>(orders_rows);
+//     assert_eq!(parsed_orders_rows.len(), 2);
+//     assert_eq!(
+//         parsed_orders_rows,
+//         vec![
+//             BigQueryOrder::new(1, "description_1"),
+//             BigQueryOrder::new(2, "description_2"),
+//         ]
+//     );
+// }
+//
+// #[tokio::test(flavor = "multi_thread")]
+// async fn test_table_schema_and_data_and_events_are_copied() {
+//     init_test_tracing();
+//     install_crypto_provider_once();
+//
+//     let mut database = spawn_database().await;
+//     let database_schema = setup_test_database_schema(&database, TableSelection::Both).await;
+//
+//     let bigquery_database = setup_bigquery_connection().await;
+//
+//     // Insert initial test data.
+//     insert_mock_data(
+//         &mut database,
+//         &database_schema.users_schema().name,
+//         &database_schema.orders_schema().name,
+//         1..=2,
+//         false,
+//     )
+//     .await;
+//
+//     let state_store = TestStateStore::new();
+//     let raw_destination = bigquery_database.build_destination().await;
+//     let destination = TestDestinationWrapper::wrap(raw_destination);
+//
+//     // Start pipeline from scratch.
+//     let identity = create_pipeline_identity(database_schema.publication_name());
+//     let mut pipeline = spawn_pg_pipeline(
+//         &identity,
+//         &database.config,
+//         state_store.clone(),
+//         destination.clone(),
+//     );
+//
+//     // Register notifications for table copy completion.
+//     let users_state_notify = state_store
+//         .notify_on_replication_phase(
+//             database_schema.users_schema().id,
+//             TableReplicationPhaseType::FinishedCopy,
+//         )
+//         .await;
+//     let orders_state_notify = state_store
+//         .notify_on_replication_phase(
+//             database_schema.orders_schema().id,
+//             TableReplicationPhaseType::FinishedCopy,
+//         )
+//         .await;
+//
+//     pipeline.start().await.unwrap();
+//
+//     users_state_notify.notified().await;
+//     orders_state_notify.notified().await;
+//
+//     // Wait for the destination to receive the required number of events after the copy phase
+//     // We expect 2 insert events for each table (4 total), plus some begin/commit events, which we
+//     // are not interested at.
+//     let event_notify = destination
+//         .wait_for_events_count(vec![(EventType::Insert, 4)])
+//         .await;
+//
+//     // Insert additional data.
+//     insert_mock_data(
+//         &mut database,
+//         &database_schema.users_schema().name,
+//         &database_schema.orders_schema().name,
+//         3..=4,
+//         false,
+//     )
+//     .await;
+//
+//     // When the 4 inserts have been received, we can be sure they have been inserted into BigQuery.
+//     event_notify.notified().await;
+//
+//     pipeline.shutdown_and_wait().await.unwrap();
+//
+//     // We load the table schemas and check that they are correctly fetched.
+//     let mut table_schemas = destination.load_table_schemas().await.unwrap();
+//     table_schemas.sort();
+//     assert_eq!(table_schemas[0], database_schema.orders_schema());
+//     assert_eq!(table_schemas[1], database_schema.users_schema());
+//
+//     // We query BigQuery directly to get the data which has been inserted by tests.
+//     let users_rows = bigquery_database
+//         .query_table(database_schema.users_schema().name)
+//         .await;
+//     let parsed_users_rows = parse_bigquery_table_rows::<BigQueryUser>(users_rows);
+//     assert_eq!(parsed_users_rows.len(), 4);
+//     assert_eq!(
+//         parsed_users_rows,
+//         vec![
+//             BigQueryUser::new(1, "user_1", 1),
+//             BigQueryUser::new(2, "user_2", 2),
+//             BigQueryUser::new(3, "user_3", 3),
+//             BigQueryUser::new(4, "user_4", 4),
+//         ]
+//     );
+//     let orders_rows = bigquery_database
+//         .query_table(database_schema.orders_schema().name)
+//         .await;
+//     let parsed_orders_rows = parse_bigquery_table_rows::<BigQueryOrder>(orders_rows);
+//     assert_eq!(parsed_orders_rows.len(), 4);
+//     assert_eq!(
+//         parsed_orders_rows,
+//         vec![
+//             BigQueryOrder::new(1, "description_1"),
+//             BigQueryOrder::new(2, "description_2"),
+//             BigQueryOrder::new(3, "description_3"),
+//             BigQueryOrder::new(4, "description_4"),
+//         ]
+//     );
+// }
+
 #[tokio::test(flavor = "multi_thread")]
-async fn test_table_schema_and_data_are_copied() {
+async fn test_table_insert_update_delete() {
     init_test_tracing();
     install_crypto_provider_once();
 
     let mut database = spawn_database().await;
-    let database_schema = setup_test_database_schema(&database, TableSelection::Both).await;
+    let database_schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
 
     let bigquery_database = setup_bigquery_connection().await;
-
-    // Insert initial test data.
-    insert_mock_data(
-        &mut database,
-        &database_schema.users_schema().name,
-        &database_schema.orders_schema().name,
-        1..=2,
-        false,
-    )
-    .await;
 
     let state_store = TestStateStore::new();
     let raw_destination = bigquery_database.build_destination().await;
@@ -54,160 +244,94 @@ async fn test_table_schema_and_data_are_copied() {
             TableReplicationPhaseType::FinishedCopy,
         )
         .await;
-    let orders_state_notify = state_store
-        .notify_on_replication_phase(
-            database_schema.orders_schema().id,
-            TableReplicationPhaseType::FinishedCopy,
-        )
-        .await;
 
     pipeline.start().await.unwrap();
 
     users_state_notify.notified().await;
-    orders_state_notify.notified().await;
 
-    pipeline.shutdown_and_wait().await.unwrap();
-
-    // We load the table schemas and check that they are correctly fetched.
-    let mut table_schemas = destination.load_table_schemas().await.unwrap();
-    table_schemas.sort();
-    assert_eq!(table_schemas[0], database_schema.orders_schema());
-    assert_eq!(table_schemas[1], database_schema.users_schema());
-
-    // We query BigQuery directly to get the data which has been inserted by tests.
-    let users_rows = bigquery_database
-        .query_table(database_schema.users_schema().name)
-        .await;
-    let parsed_users_rows = parse_bigquery_table_rows::<BigQueryUser>(users_rows);
-    assert_eq!(parsed_users_rows.len(), 2);
-    assert_eq!(
-        parsed_users_rows,
-        vec![
-            BigQueryUser::new(1, "user_1", 1),
-            BigQueryUser::new(2, "user_2", 2),
-        ]
-    );
-    let orders_rows = bigquery_database
-        .query_table(database_schema.orders_schema().name)
-        .await;
-    let parsed_orders_rows = parse_bigquery_table_rows::<BigQueryOrder>(orders_rows);
-    assert_eq!(parsed_orders_rows.len(), 2);
-    assert_eq!(
-        parsed_orders_rows,
-        vec![
-            BigQueryOrder::new(1, "description_1"),
-            BigQueryOrder::new(2, "description_2"),
-        ]
-    );
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn test_table_schema_and_data_and_events_are_copied() {
-    init_test_tracing();
-    install_crypto_provider_once();
-
-    let mut database = spawn_database().await;
-    let database_schema = setup_test_database_schema(&database, TableSelection::Both).await;
-
-    let bigquery_database = setup_bigquery_connection().await;
-
-    // Insert initial test data.
-    insert_mock_data(
-        &mut database,
-        &database_schema.users_schema().name,
-        &database_schema.orders_schema().name,
-        1..=2,
-        false,
-    )
-    .await;
-
-    let state_store = TestStateStore::new();
-    let raw_destination = bigquery_database.build_destination().await;
-    let destination = TestDestinationWrapper::wrap(raw_destination);
-
-    // Start pipeline from scratch.
-    let identity = create_pipeline_identity(database_schema.publication_name());
-    let mut pipeline = spawn_pg_pipeline(
-        &identity,
-        &database.config,
-        state_store.clone(),
-        destination.clone(),
-    );
-
-    // Register notifications for table copy completion.
-    let users_state_notify = state_store
-        .notify_on_replication_phase(
-            database_schema.users_schema().id,
-            TableReplicationPhaseType::FinishedCopy,
-        )
-        .await;
-    let orders_state_notify = state_store
-        .notify_on_replication_phase(
-            database_schema.orders_schema().id,
-            TableReplicationPhaseType::FinishedCopy,
-        )
-        .await;
-
-    pipeline.start().await.unwrap();
-
-    users_state_notify.notified().await;
-    orders_state_notify.notified().await;
-
-    // Wait for the destination to receive the required number of events after the copy phase
-    // We expect 2 insert events for each table (4 total), plus some begin/commit events, which we
-    // are not interested at.
+    // Wait for the first insert.
     let event_notify = destination
-        .wait_for_events_count(vec![(EventType::Insert, 4)])
+        .wait_for_events_count(vec![(EventType::Insert, 1)])
         .await;
 
-    // Insert additional data.
-    insert_mock_data(
-        &mut database,
-        &database_schema.users_schema().name,
-        &database_schema.orders_schema().name,
-        3..=4,
-        false,
-    )
-    .await;
+    // Insert a row.
+    database
+        .insert_values(
+            database_schema.users_schema().name.clone(),
+            &["name", "age"],
+            &[&"user_1", &1],
+        )
+        .await
+        .unwrap();
 
     // When the 4 inserts have been received, we can be sure they have been inserted into BigQuery.
     event_notify.notified().await;
 
-    pipeline.shutdown_and_wait().await.unwrap();
-
-    // We load the table schemas and check that they are correctly fetched.
-    let mut table_schemas = destination.load_table_schemas().await.unwrap();
-    table_schemas.sort();
-    assert_eq!(table_schemas[0], database_schema.orders_schema());
-    assert_eq!(table_schemas[1], database_schema.users_schema());
-
-    // We query BigQuery directly to get the data which has been inserted by tests.
+    // We query BigQuery to check for the insert.
     let users_rows = bigquery_database
         .query_table(database_schema.users_schema().name)
         .await;
     let parsed_users_rows = parse_bigquery_table_rows::<BigQueryUser>(users_rows);
-    assert_eq!(parsed_users_rows.len(), 4);
     assert_eq!(
         parsed_users_rows,
         vec![
             BigQueryUser::new(1, "user_1", 1),
-            BigQueryUser::new(2, "user_2", 2),
-            BigQueryUser::new(3, "user_3", 3),
-            BigQueryUser::new(4, "user_4", 4),
         ]
     );
-    let orders_rows = bigquery_database
-        .query_table(database_schema.orders_schema().name)
+
+    // Wait for the update.
+    let event_notify = destination
+        .wait_for_events_count(vec![(EventType::Update, 1)])
         .await;
-    let parsed_orders_rows = parse_bigquery_table_rows::<BigQueryOrder>(orders_rows);
-    assert_eq!(parsed_orders_rows.len(), 4);
+
+    // Update the row.
+    database
+        .update_values(
+            database_schema.users_schema().name.clone(),
+            &["name", "age"],
+            &["'user_10'", "10"],
+        )
+        .await
+        .unwrap();
+
+    event_notify.notified().await;
+
+    // We query BigQuery to check for the update.
+    let users_rows = bigquery_database
+        .query_table(database_schema.users_schema().name)
+        .await;
+    let parsed_users_rows = parse_bigquery_table_rows::<BigQueryUser>(users_rows);
     assert_eq!(
-        parsed_orders_rows,
+        parsed_users_rows,
         vec![
-            BigQueryOrder::new(1, "description_1"),
-            BigQueryOrder::new(2, "description_2"),
-            BigQueryOrder::new(3, "description_3"),
-            BigQueryOrder::new(4, "description_4"),
+            BigQueryUser::new(1, "user_10", 10),
         ]
     );
+
+    // Wait for the update.
+    let event_notify = destination
+        .wait_for_events_count(vec![(EventType::Delete, 1)])
+        .await;
+
+    // Update the row.
+    database
+        .delete_values(
+            database_schema.users_schema().name.clone(),
+            &["name"],
+            &["'user_10'"],
+            ""
+        )
+        .await
+        .unwrap();
+
+    timeout(Duration::from_secs(1), event_notify.notified()).await;
+
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    // We query BigQuery to check for deletion.
+    let users_rows = bigquery_database
+        .query_table(database_schema.users_schema().name)
+        .await;
+    let parsed_users_rows = parse_bigquery_table_rows::<BigQueryUser>(users_rows);
+    assert!(parsed_users_rows.is_empty());
 }

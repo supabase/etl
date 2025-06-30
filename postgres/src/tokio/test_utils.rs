@@ -177,11 +177,11 @@ impl<G: GenericClient> PgDatabase<G> {
         &self,
         table_name: TableName,
         columns: &[&str],
-        values: &[&str],
+        expressions: &[&str],
     ) -> Result<u64, tokio_postgres::Error> {
         let set_clauses: Vec<String> = columns
             .iter()
-            .zip(values.iter())
+            .zip(expressions.iter())
             .map(|(col, val)| format!("{col} = {val}"))
             .collect();
         let set_clause = set_clauses.join(", ");
@@ -196,6 +196,34 @@ impl<G: GenericClient> PgDatabase<G> {
             .as_ref()
             .unwrap()
             .execute(&update_query, &[])
+            .await
+    }
+
+    /// Updates all rows in the specified table with the given values.
+    pub async fn delete_values(
+        &self,
+        table_name: TableName,
+        columns: &[&str],
+        expressions: &[&str],
+        operator: &str
+    ) -> Result<u64, tokio_postgres::Error> {
+        let delete_clauses: Vec<String> = columns
+            .iter()
+            .zip(expressions.iter())
+            .map(|(col, val)| format!("{col} = {val}"))
+            .collect();
+        let delete_clauses = delete_clauses.join(operator);
+
+        let delete_query = format!(
+            "delete from {} where {}",
+            table_name.as_quoted_identifier(),
+            delete_clauses
+        );
+
+        self.client
+            .as_ref()
+            .unwrap()
+            .execute(&delete_query, &[])
             .await
     }
 
