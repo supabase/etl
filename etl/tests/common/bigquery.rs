@@ -184,7 +184,9 @@ impl BigQueryDatabase {
     ///
     /// Panics if the `TESTS_BIGQUERY_PROJECT_ID` environment variable is not set.
     async fn new_real(sa_key_path: String) -> Self {
-        let project_id = std::env::var(BIGQUERY_PROJECT_ID_ENV_NAME).unwrap_or_else(|_| panic!("The env variable {BIGQUERY_PROJECT_ID_ENV_NAME} to be set to a project id"));
+        let project_id = std::env::var(BIGQUERY_PROJECT_ID_ENV_NAME).unwrap_or_else(|_| {
+            panic!("The env variable {BIGQUERY_PROJECT_ID_ENV_NAME} to be set to a project id")
+        });
         let dataset_id = random_dataset_id();
 
         let client = ClientBuilder::new()

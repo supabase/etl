@@ -153,20 +153,6 @@ impl<D> TestDestinationWrapper<D> {
         self.notify_on_schemas(move |schemas| schemas.len() == n)
             .await
     }
-
-    /// Wait for a specific condition on table rows
-    pub async fn notify_on_table_rows<F>(&self, condition: F) -> Arc<Notify>
-    where
-        F: Fn(&HashMap<TableId, Vec<TableRow>>) -> bool + Send + Sync + 'static,
-    {
-        let notify = Arc::new(Notify::new());
-        let mut inner = self.inner.write().await;
-        inner
-            .table_row_conditions
-            .push((Box::new(condition), notify.clone()));
-
-        notify
-    }
 }
 
 impl<D: Destination + Send + Sync + Clone> Destination for TestDestinationWrapper<D> {

@@ -1,3 +1,5 @@
+use crate::conversions::table_row::TableRow;
+use crate::conversions::Cell;
 use futures::StreamExt;
 use gcp_bigquery_client::client_builder::ClientBuilder;
 use gcp_bigquery_client::storage::{ColumnMode, StorageApi};
@@ -8,18 +10,42 @@ use gcp_bigquery_client::{
     storage::{ColumnType, FieldDescriptor, StreamName, TableDescriptor},
     Client,
 };
-use postgres::schema::{ColumnSchema, TableSchema};
+use postgres::schema::ColumnSchema;
 use std::fmt;
 use tokio_postgres::types::Type;
 use tracing::info;
-
-use crate::conversions::table_row::TableRow;
 
 /// The maximum number of byte that can be sent by stream.
 const MAX_SIZE_BYTES: usize = 9 * 1024 * 1024;
 
 /// The trace id of the client.
 const ETL_TRACE_ID: &str = "ETL BigQueryClient";
+
+/// In BigQuery CDC, the pseudocolumn `_CHANGE_TYPE` indicates the type of change to be processed for
+/// each row. To use CDC, set `_CHANGE_TYPE` when you stream row modifications using the Storage Write API.
+/// The pseudocolumn `_CHANGE_TYPE` only accepts the values `UPSERT` and `DELETE`. A table is considered CDC-enabled
+/// while the Storage Write API is streaming row modifications to the table in this manner.
+const BIGQUERY_CDC_SPECIAL_COLUMN: &str = "_CHANGE_TYPE";
+
+pub enum BigQueryCdcMode {
+    UPSERT,
+    DELETE,
+}
+
+impl BigQueryCdcMode {
+    pub fn into_cell(self) -> Cell {
+        Cell::String(self.to_string())
+    }
+}
+
+impl fmt::Display for BigQueryCdcMode {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            BigQueryCdcMode::UPSERT => write!(f, "UPSERT"),
+            BigQueryCdcMode::DELETE => write!(f, "DELETE"),
+        }
+    }
+}
 
 /// A client for interacting with Google BigQuery.
 ///
@@ -74,6 +100,11 @@ impl BigQueryClient {
             .await?;
 
         Ok(BigQueryClient { project_id, client })
+    }
+
+    /// Returns the project ID for this client.
+    pub fn project_id(&self) -> &str {
+        &self.project_id
     }
 
     /// Creates a new table in the specified dataset if it does not already exist.
@@ -132,7 +163,8 @@ impl BigQueryClient {
             .get(&self.project_id, dataset_id, table_id, None)
             .await;
 
-        let exists = !matches!(table, Err(BQError::ResponseError { error }) if error.error.code == 404);
+        let exists =
+            !matches!(table, Err(BQError::ResponseError { error }) if error.error.code == 404);
 
         Ok(exists)
     }
@@ -148,6 +180,10 @@ impl BigQueryClient {
         table_descriptor: &TableDescriptor,
         table_rows: Vec<TableRow>,
     ) -> Result<(), BQError> {
+        // We create a slice on table rows, which will be updated while the streaming progresses.
+        //
+        // Using a slice allows us to deallocate the vector only at the end of streaming, which leads
+        // to fewer operations being performed.
         let mut table_rows = table_rows.as_slice();
 
         let default_stream = StreamName::new_default(
@@ -180,7 +216,7 @@ impl BigQueryClient {
     }
 
     /// Executes an SQL query and returns the result set.
-    async fn query(&self, request: QueryRequest) -> Result<ResultSet, BQError> {
+    pub async fn query(&self, request: QueryRequest) -> Result<ResultSet, BQError> {
         let query_response = self.client.job().query(&self.project_id, request).await?;
 
         Ok(ResultSet::new_from_query_response(query_response))
@@ -234,9 +270,7 @@ impl BigQueryClient {
 
     /// Creates the `OPTIONS` clause for specifying max staleness in a `CREATE TABLE` statement.
     fn max_staleness_option(max_staleness_mins: u16) -> String {
-        format!(
-            "options (max_staleness = interval {max_staleness_mins} minute)"
-        )
+        format!("options (max_staleness = interval {max_staleness_mins} minute)")
     }
 
     /// Maps a PostgreSQL [`Type`] to a BigQuery data type name.
@@ -311,20 +345,16 @@ impl BigQueryClient {
         )
     }
 
-    /// Converts a PostgreSQL [`TableSchema`] to a BigQuery [`TableDescriptor`].
+    /// Converts a slice of PostgreSQL [`ColumnSchema`] to a BigQuery [`TableDescriptor`].
     ///
     /// This conversion is necessary for using the BigQuery Storage Write API.
     /// It maps PostgreSQL data types to their corresponding BigQuery counterparts
     /// and sets the appropriate mode (e.g., `NULLABLE`, `REQUIRED`, `REPEATED`).
-    ///
-    /// This function is defined here and doesn't use the [`From`] trait because
-    /// [`TableSchema`] is in another crate, and we don't want to pollute the
-    /// `postgres` crate with destination-specific internals.
-    pub fn table_schema_to_descriptor(table_schema: &TableSchema) -> TableDescriptor {
-        let mut field_descriptors = Vec::with_capacity(table_schema.column_schemas.len());
+    pub fn column_schemas_to_table_descriptor(column_schemas: &[ColumnSchema]) -> TableDescriptor {
+        let mut field_descriptors = Vec::with_capacity(column_schemas.len());
         let mut number = 1;
 
-        for column_schema in &table_schema.column_schemas {
+        for column_schema in column_schemas {
             let typ = match column_schema.typ {
                 Type::BOOL => ColumnType::Bool,
                 Type::CHAR | Type::BPCHAR | Type::VARCHAR | Type::NAME | Type::TEXT => {
@@ -388,7 +418,7 @@ impl BigQueryClient {
 
         field_descriptors.push(FieldDescriptor {
             number,
-            name: "_CHANGE_TYPE".to_string(),
+            name: BIGQUERY_CDC_SPECIAL_COLUMN.to_string(),
             typ: ColumnType::String,
             mode: ColumnMode::Required,
         });

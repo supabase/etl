@@ -14,6 +14,12 @@ pub struct TableRow {
     pub values: Vec<Cell>,
 }
 
+impl TableRow {
+    pub fn new(values: Vec<Cell>) -> Self {
+        Self { values }
+    }
+}
+
 impl BatchBoundaryV1 for TableRow {
     fn is_last_in_batch(&self) -> bool {
         true
@@ -53,6 +59,7 @@ impl prost::Message for TableRow {
             len += cell.encoded_len_prost(tag);
             tag += 1;
         }
+
         len
     }
 
