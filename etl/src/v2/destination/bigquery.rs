@@ -706,3 +706,232 @@ impl Destination for BigQueryDestination {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use postgres::schema::{ColumnSchema, TableName, TableSchema};
+    use tokio_postgres::types::Type;
+
+    use crate::conversions::Cell;
+
+    use super::*;
+
+    #[test]
+    fn test_postgres_type_to_string() {
+        assert_eq!(
+            BigQueryDestination::postgres_type_to_string(&Type::BOOL),
+            "BOOL"
+        );
+        assert_eq!(
+            BigQueryDestination::postgres_type_to_string(&Type::INT4),
+            "INT4"
+        );
+        assert_eq!(
+            BigQueryDestination::postgres_type_to_string(&Type::INT8),
+            "INT8"
+        );
+        assert_eq!(
+            BigQueryDestination::postgres_type_to_string(&Type::TEXT),
+            "TEXT"
+        );
+        assert_eq!(
+            BigQueryDestination::postgres_type_to_string(&Type::VARCHAR),
+            "VARCHAR"
+        );
+        assert_eq!(
+            BigQueryDestination::postgres_type_to_string(&Type::TIMESTAMP),
+            "TIMESTAMP"
+        );
+        assert_eq!(
+            BigQueryDestination::postgres_type_to_string(&Type::TIMESTAMPTZ),
+            "TIMESTAMPTZ"
+        );
+        assert_eq!(
+            BigQueryDestination::postgres_type_to_string(&Type::DATE),
+            "DATE"
+        );
+        assert_eq!(
+            BigQueryDestination::postgres_type_to_string(&Type::TIME),
+            "TIME"
+        );
+        assert_eq!(
+            BigQueryDestination::postgres_type_to_string(&Type::BYTEA),
+            "BYTEA"
+        );
+        assert_eq!(
+            BigQueryDestination::postgres_type_to_string(&Type::UUID),
+            "UUID"
+        );
+        assert_eq!(
+            BigQueryDestination::postgres_type_to_string(&Type::JSON),
+            "JSON"
+        );
+        assert_eq!(
+            BigQueryDestination::postgres_type_to_string(&Type::JSONB),
+            "JSONB"
+        );
+        assert_eq!(
+            BigQueryDestination::postgres_type_to_string(&Type::FLOAT4),
+            "FLOAT4"
+        );
+        assert_eq!(
+            BigQueryDestination::postgres_type_to_string(&Type::FLOAT8),
+            "FLOAT8"
+        );
+    }
+
+    #[test]
+    fn test_string_to_postgres_type() {
+        assert_eq!(
+            BigQueryDestination::string_to_postgres_type("BOOL").unwrap(),
+            Type::BOOL
+        );
+        assert_eq!(
+            BigQueryDestination::string_to_postgres_type("INT4").unwrap(),
+            Type::INT4
+        );
+        assert_eq!(
+            BigQueryDestination::string_to_postgres_type("INT8").unwrap(),
+            Type::INT8
+        );
+        assert_eq!(
+            BigQueryDestination::string_to_postgres_type("TEXT").unwrap(),
+            Type::TEXT
+        );
+        assert_eq!(
+            BigQueryDestination::string_to_postgres_type("VARCHAR").unwrap(),
+            Type::VARCHAR
+        );
+        assert_eq!(
+            BigQueryDestination::string_to_postgres_type("TIMESTAMP").unwrap(),
+            Type::TIMESTAMP
+        );
+        assert_eq!(
+            BigQueryDestination::string_to_postgres_type("TIMESTAMPTZ").unwrap(),
+            Type::TIMESTAMPTZ
+        );
+        assert_eq!(
+            BigQueryDestination::string_to_postgres_type("DATE").unwrap(),
+            Type::DATE
+        );
+        assert_eq!(
+            BigQueryDestination::string_to_postgres_type("TIME").unwrap(),
+            Type::TIME
+        );
+        assert_eq!(
+            BigQueryDestination::string_to_postgres_type("BYTEA").unwrap(),
+            Type::BYTEA
+        );
+        assert_eq!(
+            BigQueryDestination::string_to_postgres_type("UUID").unwrap(),
+            Type::UUID
+        );
+        assert_eq!(
+            BigQueryDestination::string_to_postgres_type("JSON").unwrap(),
+            Type::JSON
+        );
+        assert_eq!(
+            BigQueryDestination::string_to_postgres_type("JSONB").unwrap(),
+            Type::JSONB
+        );
+        assert_eq!(
+            BigQueryDestination::string_to_postgres_type("FLOAT4").unwrap(),
+            Type::FLOAT4
+        );
+        assert_eq!(
+            BigQueryDestination::string_to_postgres_type("FLOAT8").unwrap(),
+            Type::FLOAT8
+        );
+
+        // Test unknown type fallback
+        assert_eq!(
+            BigQueryDestination::string_to_postgres_type("UNKNOWN_TYPE").unwrap(),
+            Type::TEXT
+        );
+    }
+
+    #[test]
+    fn test_column_type_roundtrip() {
+        let types = vec![
+            Type::BOOL,
+            Type::CHAR,
+            Type::INT2,
+            Type::INT4,
+            Type::INT8,
+            Type::FLOAT4,
+            Type::FLOAT8,
+            Type::TEXT,
+            Type::VARCHAR,
+            Type::TIMESTAMP,
+            Type::TIMESTAMPTZ,
+            Type::DATE,
+            Type::TIME,
+            Type::TIMETZ,
+            Type::BYTEA,
+            Type::UUID,
+            Type::JSON,
+            Type::JSONB,
+        ];
+
+        for pg_type in types {
+            let type_string = BigQueryDestination::postgres_type_to_string(&pg_type);
+            let converted_back =
+                BigQueryDestination::string_to_postgres_type(&type_string).unwrap();
+            assert_eq!(
+                pg_type, converted_back,
+                "Type conversion failed for: {:?}",
+                pg_type
+            );
+        }
+    }
+
+    #[test]
+    fn test_table_schema_with_mixed_column_types() {
+        let table_name = TableName::new("test_schema".to_string(), "mixed_table".to_string());
+        let columns = vec![
+            ColumnSchema::new("id".to_string(), Type::INT8, -1, false, true),
+            ColumnSchema::new("name".to_string(), Type::VARCHAR, 255, true, false),
+            ColumnSchema::new(
+                "created_at".to_string(),
+                Type::TIMESTAMPTZ,
+                -1,
+                false,
+                false,
+            ),
+            ColumnSchema::new("data".to_string(), Type::JSONB, -1, true, false),
+            ColumnSchema::new("active".to_string(), Type::BOOL, -1, false, false),
+        ];
+        let table_schema = TableSchema::new(456, table_name, columns);
+
+        let schema_row = BigQueryDestination::table_schema_to_table_row(&table_schema);
+        assert_eq!(schema_row.values[0], Cell::U32(456));
+        assert_eq!(
+            schema_row.values[1],
+            Cell::String("test_schema".to_string())
+        );
+        assert_eq!(
+            schema_row.values[2],
+            Cell::String("mixed_table".to_string())
+        );
+
+        let column_rows = BigQueryDestination::column_schemas_to_table_rows(&table_schema);
+        assert_eq!(column_rows.len(), 5);
+
+        // Verify column order is preserved
+        assert_eq!(column_rows[0].values[1], Cell::String("id".to_string()));
+        assert_eq!(column_rows[1].values[1], Cell::String("name".to_string()));
+        assert_eq!(
+            column_rows[2].values[1],
+            Cell::String("created_at".to_string())
+        );
+        assert_eq!(column_rows[3].values[1], Cell::String("data".to_string()));
+        assert_eq!(column_rows[4].values[1], Cell::String("active".to_string()));
+
+        // Verify column order values
+        assert_eq!(column_rows[0].values[6], Cell::U32(0));
+        assert_eq!(column_rows[1].values[6], Cell::U32(1));
+        assert_eq!(column_rows[2].values[6], Cell::U32(2));
+        assert_eq!(column_rows[3].values[6], Cell::U32(3));
+        assert_eq!(column_rows[4].values[6], Cell::U32(4));
+    }
+}

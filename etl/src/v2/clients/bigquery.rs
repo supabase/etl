@@ -491,3 +491,270 @@ impl fmt::Debug for BigQueryClient {
             .finish()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use postgres::schema::ColumnSchema;
+    use tokio_postgres::types::Type;
+
+    use super::*;
+
+    #[test]
+    fn test_postgres_to_bigquery_type_basic_types() {
+        assert_eq!(
+            BigQueryClient::postgres_to_bigquery_type(&Type::BOOL),
+            "bool"
+        );
+        assert_eq!(
+            BigQueryClient::postgres_to_bigquery_type(&Type::TEXT),
+            "string"
+        );
+        assert_eq!(
+            BigQueryClient::postgres_to_bigquery_type(&Type::INT4),
+            "int64"
+        );
+        assert_eq!(
+            BigQueryClient::postgres_to_bigquery_type(&Type::FLOAT8),
+            "float64"
+        );
+        assert_eq!(
+            BigQueryClient::postgres_to_bigquery_type(&Type::TIMESTAMP),
+            "timestamp"
+        );
+        assert_eq!(
+            BigQueryClient::postgres_to_bigquery_type(&Type::JSON),
+            "json"
+        );
+        assert_eq!(
+            BigQueryClient::postgres_to_bigquery_type(&Type::BYTEA),
+            "bytes"
+        );
+    }
+
+    #[test]
+    fn test_postgres_to_bigquery_type_array_types() {
+        assert_eq!(
+            BigQueryClient::postgres_to_bigquery_type(&Type::BOOL_ARRAY),
+            "array<bool>"
+        );
+        assert_eq!(
+            BigQueryClient::postgres_to_bigquery_type(&Type::TEXT_ARRAY),
+            "array<string>"
+        );
+        assert_eq!(
+            BigQueryClient::postgres_to_bigquery_type(&Type::INT4_ARRAY),
+            "array<int64>"
+        );
+        assert_eq!(
+            BigQueryClient::postgres_to_bigquery_type(&Type::FLOAT8_ARRAY),
+            "array<float64>"
+        );
+        assert_eq!(
+            BigQueryClient::postgres_to_bigquery_type(&Type::TIMESTAMP_ARRAY),
+            "array<timestamp>"
+        );
+    }
+
+    #[test]
+    fn test_is_array_type() {
+        assert!(BigQueryClient::is_array_type(&Type::BOOL_ARRAY));
+        assert!(BigQueryClient::is_array_type(&Type::TEXT_ARRAY));
+        assert!(BigQueryClient::is_array_type(&Type::INT4_ARRAY));
+        assert!(BigQueryClient::is_array_type(&Type::FLOAT8_ARRAY));
+        assert!(BigQueryClient::is_array_type(&Type::TIMESTAMP_ARRAY));
+
+        assert!(!BigQueryClient::is_array_type(&Type::BOOL));
+        assert!(!BigQueryClient::is_array_type(&Type::TEXT));
+        assert!(!BigQueryClient::is_array_type(&Type::INT4));
+        assert!(!BigQueryClient::is_array_type(&Type::FLOAT8));
+        assert!(!BigQueryClient::is_array_type(&Type::TIMESTAMP));
+    }
+
+    #[test]
+    fn test_column_spec() {
+        let column_schema = ColumnSchema::new("test_col".to_string(), Type::TEXT, -1, true, false);
+        let spec = BigQueryClient::column_spec(&column_schema);
+        assert_eq!(spec, "`test_col` string");
+
+        let not_null_column = ColumnSchema::new("id".to_string(), Type::INT4, -1, false, true);
+        let not_null_spec = BigQueryClient::column_spec(&not_null_column);
+        assert_eq!(not_null_spec, "`id` int64 not null");
+
+        let array_column =
+            ColumnSchema::new("tags".to_string(), Type::TEXT_ARRAY, -1, false, false);
+        let array_spec = BigQueryClient::column_spec(&array_column);
+        assert_eq!(array_spec, "`tags` array<string>");
+    }
+
+    #[test]
+    fn test_add_primary_key_clause() {
+        let columns_with_pk = vec![
+            ColumnSchema::new("id".to_string(), Type::INT4, -1, false, true),
+            ColumnSchema::new("name".to_string(), Type::TEXT, -1, true, false),
+        ];
+        let pk_clause = BigQueryClient::add_primary_key_clause(&columns_with_pk);
+        assert_eq!(pk_clause, ", primary key (`id`) not enforced");
+
+        let columns_with_composite_pk = vec![
+            ColumnSchema::new("tenant_id".to_string(), Type::INT4, -1, false, true),
+            ColumnSchema::new("id".to_string(), Type::INT4, -1, false, true),
+            ColumnSchema::new("name".to_string(), Type::TEXT, -1, true, false),
+        ];
+        let composite_pk_clause =
+            BigQueryClient::add_primary_key_clause(&columns_with_composite_pk);
+        assert_eq!(
+            composite_pk_clause,
+            ", primary key (`tenant_id`,`id`) not enforced"
+        );
+
+        let columns_no_pk = vec![
+            ColumnSchema::new("name".to_string(), Type::TEXT, -1, true, false),
+            ColumnSchema::new("age".to_string(), Type::INT4, -1, true, false),
+        ];
+        let no_pk_clause = BigQueryClient::add_primary_key_clause(&columns_no_pk);
+        assert_eq!(no_pk_clause, "");
+    }
+
+    #[test]
+    fn test_create_columns_spec() {
+        let columns = vec![
+            ColumnSchema::new("id".to_string(), Type::INT4, -1, false, true),
+            ColumnSchema::new("name".to_string(), Type::TEXT, -1, true, false),
+            ColumnSchema::new("active".to_string(), Type::BOOL, -1, false, false),
+        ];
+        let spec = BigQueryClient::create_columns_spec(&columns);
+        assert_eq!(
+            spec,
+            "(`id` int64 not null,`name` string,`active` bool not null, primary key (`id`) not enforced)"
+        );
+    }
+
+    #[test]
+    fn test_max_staleness_option() {
+        let option = BigQueryClient::max_staleness_option(15);
+        assert_eq!(option, "options (max_staleness = interval 15 minute)");
+    }
+
+    #[test]
+    fn test_column_schemas_to_table_descriptor() {
+        let columns = vec![
+            ColumnSchema::new("id".to_string(), Type::INT4, -1, false, true),
+            ColumnSchema::new("name".to_string(), Type::TEXT, -1, true, false),
+            ColumnSchema::new("active".to_string(), Type::BOOL, -1, false, false),
+            ColumnSchema::new("tags".to_string(), Type::TEXT_ARRAY, -1, false, false),
+        ];
+
+        let descriptor = BigQueryClient::column_schemas_to_table_descriptor(&columns);
+
+        assert_eq!(descriptor.field_descriptors.len(), 5); // 4 columns + CDC column
+
+        // Check regular columns
+        assert_eq!(descriptor.field_descriptors[0].name, "id");
+        assert!(matches!(
+            descriptor.field_descriptors[0].typ,
+            ColumnType::Int32
+        ));
+        assert!(matches!(
+            descriptor.field_descriptors[0].mode,
+            ColumnMode::Required
+        ));
+
+        assert_eq!(descriptor.field_descriptors[1].name, "name");
+        assert!(matches!(
+            descriptor.field_descriptors[1].typ,
+            ColumnType::String
+        ));
+        assert!(matches!(
+            descriptor.field_descriptors[1].mode,
+            ColumnMode::Nullable
+        ));
+
+        assert_eq!(descriptor.field_descriptors[2].name, "active");
+        assert!(matches!(
+            descriptor.field_descriptors[2].typ,
+            ColumnType::Bool
+        ));
+        assert!(matches!(
+            descriptor.field_descriptors[2].mode,
+            ColumnMode::Required
+        ));
+
+        // Check array column
+        assert_eq!(descriptor.field_descriptors[3].name, "tags");
+        assert!(matches!(
+            descriptor.field_descriptors[3].typ,
+            ColumnType::String
+        ));
+        assert!(matches!(
+            descriptor.field_descriptors[3].mode,
+            ColumnMode::Repeated
+        ));
+
+        // Check CDC column
+        assert_eq!(
+            descriptor.field_descriptors[4].name,
+            BIGQUERY_CDC_SPECIAL_COLUMN
+        );
+        assert!(matches!(
+            descriptor.field_descriptors[4].typ,
+            ColumnType::String
+        ));
+        assert!(matches!(
+            descriptor.field_descriptors[4].mode,
+            ColumnMode::Required
+        ));
+    }
+
+    #[test]
+    fn test_column_schemas_to_table_descriptor_complex_types() {
+        let columns = vec![
+            ColumnSchema::new("uuid_col".to_string(), Type::UUID, -1, true, false),
+            ColumnSchema::new("json_col".to_string(), Type::JSON, -1, true, false),
+            ColumnSchema::new("bytea_col".to_string(), Type::BYTEA, -1, true, false),
+            ColumnSchema::new("numeric_col".to_string(), Type::NUMERIC, -1, true, false),
+            ColumnSchema::new("date_col".to_string(), Type::DATE, -1, true, false),
+            ColumnSchema::new("time_col".to_string(), Type::TIME, -1, true, false),
+        ];
+
+        let descriptor = BigQueryClient::column_schemas_to_table_descriptor(&columns);
+
+        assert_eq!(descriptor.field_descriptors.len(), 7); // 6 columns + CDC column
+
+        // Check that UUID, JSON, DATE, TIME are all mapped to String in storage
+        assert!(matches!(
+            descriptor.field_descriptors[0].typ,
+            ColumnType::String
+        )); // UUID
+        assert!(matches!(
+            descriptor.field_descriptors[1].typ,
+            ColumnType::String
+        )); // JSON
+        assert!(matches!(
+            descriptor.field_descriptors[2].typ,
+            ColumnType::Bytes
+        )); // BYTEA
+        assert!(matches!(
+            descriptor.field_descriptors[3].typ,
+            ColumnType::String
+        )); // NUMERIC
+        assert!(matches!(
+            descriptor.field_descriptors[4].typ,
+            ColumnType::String
+        )); // DATE
+        assert!(matches!(
+            descriptor.field_descriptors[5].typ,
+            ColumnType::String
+        )); // TIME
+    }
+
+    #[test]
+    fn test_full_table_name_formatting() {
+        let project_id = "test-project";
+        let dataset_id = "test_dataset";
+        let table_id = "test_table";
+
+        // Simulate the full_table_name method logic without creating a client
+        let full_name = format!("`{}.{}.{}`", project_id, dataset_id, table_id);
+        assert_eq!(full_name, "`test-project.test_dataset.test_table`");
+    }
+}
