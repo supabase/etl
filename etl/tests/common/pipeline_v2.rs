@@ -39,3 +39,33 @@ where
 
     Pipeline::new(identity.clone(), config, vec![], state_store, destination)
 }
+
+pub fn spawn_pg_pipeline_with<S, D>(
+    identity: &PipelineIdentity,
+    pg_connection_config: &PgConnectionConfig,
+    state_store: S,
+    destination: D,
+    batch_config: Option<BatchConfig>,
+) -> Pipeline<S, D>
+where
+    S: StateStore + Clone + Send + Sync + 'static,
+    D: Destination + Clone + Send + Sync + 'static,
+{
+    let batch = batch_config.unwrap_or(BatchConfig {
+        max_size: 1,
+        max_fill: Duration::from_secs(1),
+    });
+
+    let config = PipelineConfig {
+        pg_connection: pg_connection_config.clone(),
+        batch,
+        apply_worker_initialization_retry: RetryConfig {
+            max_attempts: 2,
+            initial_delay: Duration::from_secs(1),
+            max_delay: Duration::from_secs(5),
+            backoff_factor: 2.0,
+        },
+    };
+
+    Pipeline::new(identity.clone(), config, vec![], state_store, destination)
+}

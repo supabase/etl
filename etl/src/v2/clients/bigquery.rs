@@ -238,7 +238,6 @@ impl BigQueryClient {
             if let Some(append_rows_response) = append_rows_stream.next().await {
                 let append_rows_response = append_rows_response.map_err(BQError::from)?;
                 if !append_rows_response.row_errors.is_empty() {
-                    println!("ERRORS {:?}", append_rows_response.row_errors);
                     return Err(BigQueryClientError::AppendRowErrors(RowErrors(
                         append_rows_response.row_errors,
                     )));

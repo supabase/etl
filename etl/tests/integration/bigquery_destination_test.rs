@@ -1,12 +1,16 @@
+use etl::v2::config::batch::BatchConfig;
 use etl::v2::conversions::event::EventType;
 use etl::v2::destination::base::Destination;
 use etl::v2::state::table::TableReplicationPhaseType;
+use std::time::Duration;
 use telemetry::init_test_tracing;
 
 use crate::common::bigquery::setup_bigquery_connection;
 use crate::common::database::spawn_database;
 use crate::common::encryption::bigquery::install_crypto_provider_once;
-use crate::common::pipeline_v2::{create_pipeline_identity, spawn_pg_pipeline};
+use crate::common::pipeline_v2::{
+    create_pipeline_identity, spawn_pg_pipeline, spawn_pg_pipeline_with,
+};
 use crate::common::state_store::TestStateStore;
 use crate::common::test_destination_wrapper::TestDestinationWrapper;
 use crate::common::test_schema::bigquery::{
@@ -80,7 +84,6 @@ async fn test_table_schema_and_data_are_copied() {
         .await
         .unwrap();
     let parsed_users_rows = parse_bigquery_table_rows::<BigQueryUser>(users_rows);
-    assert_eq!(parsed_users_rows.len(), 2);
     assert_eq!(
         parsed_users_rows,
         vec![
@@ -93,7 +96,6 @@ async fn test_table_schema_and_data_are_copied() {
         .await
         .unwrap();
     let parsed_orders_rows = parse_bigquery_table_rows::<BigQueryOrder>(orders_rows);
-    assert_eq!(parsed_orders_rows.len(), 2);
     assert_eq!(
         parsed_orders_rows,
         vec![
@@ -188,7 +190,6 @@ async fn test_table_schema_and_data_and_events_are_copied() {
         .await
         .unwrap();
     let parsed_users_rows = parse_bigquery_table_rows::<BigQueryUser>(users_rows);
-    assert_eq!(parsed_users_rows.len(), 4);
     assert_eq!(
         parsed_users_rows,
         vec![
@@ -203,7 +204,6 @@ async fn test_table_schema_and_data_and_events_are_copied() {
         .await
         .unwrap();
     let parsed_orders_rows = parse_bigquery_table_rows::<BigQueryOrder>(orders_rows);
-    assert_eq!(parsed_orders_rows.len(), 4);
     assert_eq!(
         parsed_orders_rows,
         vec![
@@ -331,7 +331,7 @@ async fn test_table_insert_update_delete() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn test_table_truncate() {
+async fn test_table_truncate_with_batching() {
     init_test_tracing();
     install_crypto_provider_once();
 
@@ -346,11 +346,17 @@ async fn test_table_truncate() {
 
     // Start pipeline from scratch.
     let identity = create_pipeline_identity(database_schema.publication_name());
-    let mut pipeline = spawn_pg_pipeline(
+    let mut pipeline = spawn_pg_pipeline_with(
         &identity,
         &database.config,
         state_store.clone(),
         destination.clone(),
+        // We use a batch size > 1, so that we can make sure that interleaved truncate statements
+        // work well with multiple batches of events.
+        Some(BatchConfig {
+            max_size: 10,
+            max_fill: Duration::from_secs(1),
+        }),
     );
 
     // Register notifications for table copy completion.
@@ -372,55 +378,20 @@ async fn test_table_truncate() {
     users_state_notify.notified().await;
     orders_state_notify.notified().await;
 
-    // Wait for the 4 inserts (2 per table).
+    // Wait for the 4 inserts (2 per table) and 2 truncates (one per table).
     let event_notify = destination
-        .wait_for_events_count(vec![(EventType::Insert, 4)])
+        .wait_for_events_count(vec![(EventType::Insert, 4), (EventType::Truncate, 2)])
         .await;
 
-    // Insert test data.
+    // Insert 1 row per each table.
     insert_mock_data(
         &mut database,
         &database_schema.users_schema().name,
         &database_schema.orders_schema().name,
-        1..=2,
+        1..=1,
         false,
     )
     .await;
-
-    event_notify.notified().await;
-
-    // We query BigQuery directly to get the data which has been inserted by tests.
-    let users_rows = bigquery_database
-        .query_table(database_schema.users_schema().name)
-        .await
-        .unwrap();
-    let parsed_users_rows = parse_bigquery_table_rows::<BigQueryUser>(users_rows);
-    assert_eq!(parsed_users_rows.len(), 2);
-    assert_eq!(
-        parsed_users_rows,
-        vec![
-            BigQueryUser::new(1, "user_1", 1),
-            BigQueryUser::new(2, "user_2", 2),
-        ]
-    );
-    let orders_rows = bigquery_database
-        .query_table(database_schema.orders_schema().name)
-        .await
-        .unwrap();
-    let parsed_orders_rows = parse_bigquery_table_rows::<BigQueryOrder>(orders_rows);
-    assert_eq!(parsed_orders_rows.len(), 2);
-    assert_eq!(
-        parsed_orders_rows,
-        vec![
-            BigQueryOrder::new(1, "description_1"),
-            BigQueryOrder::new(2, "description_2"),
-        ]
-    );
-
-    // Wait for the truncate event for each table.
-    let event_notify = destination
-        .wait_for_events_count(vec![(EventType::Truncate, 2)])
-        .await;
 
     // We truncate both tables.
     database
@@ -432,15 +403,33 @@ async fn test_table_truncate() {
         .await
         .unwrap();
 
+    // Insert 1 extra row per each table.
+    insert_mock_data(
+        &mut database,
+        &database_schema.users_schema().name,
+        &database_schema.orders_schema().name,
+        2..=2,
+        false,
+    )
+    .await;
+
     event_notify.notified().await;
 
-    // We query BigQuery to check that both tables are empty.
+    // We query BigQuery directly to get the data which has been inserted by tests expecting that
+    // only the rows after truncation are there.
     let users_rows = bigquery_database
         .query_table(database_schema.users_schema().name)
-        .await;
-    assert!(users_rows.is_none());
+        .await
+        .unwrap();
+    let parsed_users_rows = parse_bigquery_table_rows::<BigQueryUser>(users_rows);
+    assert_eq!(parsed_users_rows, vec![BigQueryUser::new(2, "user_2", 2),]);
     let orders_rows = bigquery_database
         .query_table(database_schema.orders_schema().name)
-        .await;
-    assert!(orders_rows.is_none());
+        .await
+        .unwrap();
+    let parsed_orders_rows = parse_bigquery_table_rows::<BigQueryOrder>(orders_rows);
+    assert_eq!(
+        parsed_orders_rows,
+        vec![BigQueryOrder::new(2, "description_2"),]
+    );
 }
