@@ -1,4 +1,5 @@
 use etl::v2::conversions::event::EventType;
+use etl::v2::destination::base::Destination;
 use etl::v2::state::table::TableReplicationPhaseType;
 use telemetry::init_test_tracing;
 
@@ -67,6 +68,13 @@ async fn test_table_schema_and_data_are_copied() {
 
     pipeline.shutdown_and_wait().await.unwrap();
 
+    // We load the table schemas and check that they are correctly fetched.
+    let mut table_schemas = destination.load_table_schemas().await.unwrap();
+    table_schemas.sort();
+    assert_eq!(table_schemas[0], database_schema.orders_schema());
+    assert_eq!(table_schemas[1], database_schema.users_schema());
+
+    // We query BigQuery directly to get the data which has been inserted by tests.
     let users_rows = bigquery_database
         .query_table(database_schema.users_schema().name)
         .await;
@@ -79,7 +87,6 @@ async fn test_table_schema_and_data_are_copied() {
             BigQueryUser::new(2, "user_2", 2),
         ]
     );
-
     let orders_rows = bigquery_database
         .query_table(database_schema.orders_schema().name)
         .await;
@@ -95,7 +102,7 @@ async fn test_table_schema_and_data_are_copied() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn test_table_schema_and_events_are_copied() {
+async fn test_table_schema_and_data_and_events_are_copied() {
     init_test_tracing();
     install_crypto_provider_once();
 
@@ -168,6 +175,13 @@ async fn test_table_schema_and_events_are_copied() {
 
     pipeline.shutdown_and_wait().await.unwrap();
 
+    // We load the table schemas and check that they are correctly fetched.
+    let mut table_schemas = destination.load_table_schemas().await.unwrap();
+    table_schemas.sort();
+    assert_eq!(table_schemas[0], database_schema.orders_schema());
+    assert_eq!(table_schemas[1], database_schema.users_schema());
+
+    // We query BigQuery directly to get the data which has been inserted by tests.
     let users_rows = bigquery_database
         .query_table(database_schema.users_schema().name)
         .await;
@@ -182,7 +196,6 @@ async fn test_table_schema_and_events_are_copied() {
             BigQueryUser::new(4, "user_4", 4),
         ]
     );
-
     let orders_rows = bigquery_database
         .query_table(database_schema.orders_schema().name)
         .await;

@@ -20,7 +20,7 @@ const ETL_TABLE_SCHEMAS_NAME: &str = "etl_table_schemas";
 
 static ETL_TABLE_SCHEMAS_COLUMNS: LazyLock<Vec<ColumnSchema>> = LazyLock::new(|| {
     vec![
-        ColumnSchema::new("table_id".to_string(), Type::INT8, -1, false, false),
+        ColumnSchema::new("table_id".to_string(), Type::INT8, -1, false, true),
         ColumnSchema::new("schema_name".to_string(), Type::TEXT, -1, false, false),
         ColumnSchema::new("table_name".to_string(), Type::TEXT, -1, false, false),
     ]
@@ -29,8 +29,8 @@ static ETL_TABLE_SCHEMAS_COLUMNS: LazyLock<Vec<ColumnSchema>> = LazyLock::new(||
 const ETL_TABLE_COLUMNS_NAME: &str = "etl_table_columns";
 static ETL_TABLE_COLUMNS_COLUMNS: LazyLock<Vec<ColumnSchema>> = LazyLock::new(|| {
     vec![
-        ColumnSchema::new("table_id".to_string(), Type::INT8, -1, false, false),
-        ColumnSchema::new("column_name".to_string(), Type::TEXT, -1, false, false),
+        ColumnSchema::new("table_id".to_string(), Type::INT8, -1, false, true),
+        ColumnSchema::new("column_name".to_string(), Type::TEXT, -1, false, true),
         ColumnSchema::new("column_type".to_string(), Type::TEXT, -1, false, false),
         ColumnSchema::new("type_modifier".to_string(), Type::INT4, -1, false, false),
         ColumnSchema::new("nullable".to_string(), Type::BOOL, -1, false, false),
@@ -526,6 +526,7 @@ fn postgres_type_to_string(pg_type: &Type) -> String {
     }
 }
 
+#[allow(clippy::result_large_err)]
 fn string_to_postgres_type(type_str: &str) -> Result<Type, BigQueryDestinationError> {
     match type_str {
         "BOOL" => Ok(Type::BOOL),

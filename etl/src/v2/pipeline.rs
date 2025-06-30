@@ -287,6 +287,7 @@ where
         }
     }
 
+    #[allow(clippy::result_large_err)]
     pub fn shutdown(&self) -> Result<(), PipelineError> {
         info!("Trying to shut down the pipeline");
         self.shutdown_tx.shutdown()?;
