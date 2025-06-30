@@ -482,9 +482,9 @@ impl BigQueryDestination {
                     info!("Truncated table `{}` in BigQuery", table_id);
                 } else {
                     info!(
-                            "Table schema not found for table_id: {}, skipping truncate",
-                            table_id
-                        );
+                        "Table schema not found for table_id: {}, skipping truncate",
+                        table_id
+                    );
                 }
             }
         }
