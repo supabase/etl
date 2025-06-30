@@ -1,4 +1,3 @@
-use gcp_bigquery_client::error::BQError;
 use gcp_bigquery_client::model::query_request::QueryRequest;
 use gcp_bigquery_client::storage::TableDescriptor;
 use postgres::schema::{ColumnSchema, Oid, TableName, TableSchema};
@@ -9,6 +8,7 @@ use thiserror::Error;
 use tokio::sync::RwLock;
 use tokio_postgres::types::Type;
 use tracing::info;
+
 use crate::conversions::table_row::TableRow;
 use crate::conversions::Cell;
 use crate::v2::clients::bigquery::{BigQueryCdcMode, BigQueryClient, BigQueryClientError};

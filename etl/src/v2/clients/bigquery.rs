@@ -16,7 +16,6 @@ use gcp_bigquery_client::google::cloud::bigquery::storage::v1::RowError;
 use thiserror::Error;
 use tokio_postgres::types::Type;
 use tracing::info;
-use crate::v2::workers::base::WorkerWaitError;
 
 /// The maximum number of byte that can be sent by stream.
 const MAX_SIZE_BYTES: usize = 9 * 1024 * 1024;
@@ -57,7 +56,7 @@ impl fmt::Display for RowErrors {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if !self.0.is_empty() {
             for row_error in self.0.iter() {
-                writeln!(f, "{:?}", row_error)?;
+                writeln!(f, "{row_error:?}")?;
             }
         }
 
@@ -102,7 +101,7 @@ impl BigQueryClient {
     /// Parses the provided service account key string to authenticate with the
     /// BigQuery API.
     pub async fn new_with_key(project_id: String, sa_key: &str) -> Result<BigQueryClient, BigQueryClientError> {
-        let sa_key = parse_service_account_key(sa_key).map_err(|e| BQError::from(e))?;
+        let sa_key = parse_service_account_key(sa_key).map_err(BQError::from)?;
         let client = Client::from_service_account_key(sa_key, false).await?;
 
         Ok(BigQueryClient { project_id, client })
@@ -119,7 +118,7 @@ impl BigQueryClient {
         v2_base_url: String,
         sa_key: &str,
     ) -> Result<BigQueryClient, BigQueryClientError> {
-        let sa_key = parse_service_account_key(sa_key).map_err(|e| BQError::from(e))?;
+        let sa_key = parse_service_account_key(sa_key).map_err(BQError::from)?;
         let client = ClientBuilder::new()
             .with_auth_base_url(auth_base_url)
             .with_v2_base_url(v2_base_url)
@@ -230,7 +229,7 @@ impl BigQueryClient {
                 .await?;
 
             if let Some(append_rows_response) = append_rows_stream.next().await {
-                let append_rows_response = append_rows_response.map_err(|e| BQError::from(e))?;
+                let append_rows_response = append_rows_response.map_err(BQError::from)?;
                 if !append_rows_response.row_errors.is_empty() {
                     println!("ERRORS {:?}", append_rows_response.row_errors);
                     return Err(BigQueryClientError::AppendRowErrors(RowErrors(append_rows_response.row_errors)));

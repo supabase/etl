@@ -19,6 +19,9 @@ pub enum EventConversionError {
     #[error("Binary format is not supported for data conversion")]
     BinaryFormatNotSupported,
 
+    #[error("The tuple data was not found for column {0} at index {0}")]
+    TupleDataNotFound(String, usize),
+
     #[error("Missing tuple data in delete body")]
     MissingTupleInDeleteBody,
 
@@ -236,8 +239,16 @@ fn convert_tuple_to_row(
     let mut values = Vec::with_capacity(column_schemas.len());
 
     for (i, column_schema) in column_schemas.iter().enumerate() {
-        let cell = match &tuple_data[i] {
-            protocol::TupleData::Null => Cell::Null,
+        // We are expecting that for each column, there is corresponding tuple data, even for null
+        // values.
+        let Some(tuple_data) = &tuple_data.get(i) else {
+            return Err(EventConversionError::TupleDataNotFound(column_schema.name.clone(), i))
+        };
+
+        let cell = match tuple_data {
+            // In case of a null value, we store the type information since that will be used to
+            // correctly compute default values when needed.
+            protocol::TupleData::Null => Cell::Null(column_schema.typ.clone()),
             protocol::TupleData::UnchangedToast => {
                 TextFormatConverter::default_value(&column_schema.typ)
             }
@@ -249,6 +260,7 @@ fn convert_tuple_to_row(
                 TextFormatConverter::try_from_str(&column_schema.typ, str)?
             }
         };
+
         values.push(cell);
     }
 

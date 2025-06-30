@@ -250,7 +250,7 @@ impl BigQueryDatabase {
     ///
     /// Returns all rows from the table in the test dataset. Useful for
     /// verifying data after ETL operations in tests.
-    pub async fn query_table(&self, table_name: TableName) -> Vec<TableRow> {
+    pub async fn query_table(&self, table_name: TableName) -> Option<Vec<TableRow>> {
         let client = self.client().unwrap();
 
         let project_id = self.project_id();
@@ -266,7 +266,6 @@ impl BigQueryDatabase {
             .await
             .unwrap()
             .rows
-            .unwrap()
     }
 
     /// Returns the Google Cloud project ID for this database instance.
@@ -340,11 +339,11 @@ async fn initialize_bigquery(client: &Client, project_id: &str, dataset_id: &str
 /// Removes the test dataset and all tables within it to clean up
 /// resources after testing.
 async fn destroy_bigquery(client: &Client, project_id: &str, dataset_id: &str) {
-    // client
-    //     .dataset()
-    //     .delete(project_id, dataset_id, true)
-    //     .await
-    //     .unwrap();
+    client
+        .dataset()
+        .delete(project_id, dataset_id, true)
+        .await
+        .unwrap();
 }
 
 /// Sets up a BigQuery database connection for testing.

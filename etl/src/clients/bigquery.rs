@@ -402,7 +402,7 @@ impl BigQueryClient {
 
     fn cell_to_query_value(cell: &Cell, s: &mut String) {
         match cell {
-            Cell::Null => s.push_str("null"),
+            Cell::Null(_) => s.push_str("null"),
             Cell::Bool(b) => s.push_str(&format!("{b}")),
             Cell::String(str) => s.push_str(&format!("'{str}'")),
             Cell::I16(i) => s.push_str(&format!("{i}")),

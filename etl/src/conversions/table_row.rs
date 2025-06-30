@@ -159,7 +159,9 @@ impl TableRowConverter {
                 };
 
                 let value = if val_str == "\\N" {
-                    Cell::Null
+                    // In case of a null value, we store the type information since that will be used to
+                    // correctly compute default values when needed.
+                    Cell::Null(column_schema.typ.clone())
                 } else {
                     match TextFormatConverter::try_from_str(&column_schema.typ, &val_str) {
                         Ok(value) => value,
