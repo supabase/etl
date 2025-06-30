@@ -12,7 +12,7 @@ use tracing::info;
 use crate::conversions::table_row::TableRow;
 use crate::conversions::Cell;
 use crate::v2::clients::bigquery::{BigQueryCdcMode, BigQueryClient, BigQueryClientError};
-use crate::v2::conversions::event::Event;
+use crate::v2::conversions::event::{Event, TruncateEvent};
 use crate::v2::destination::base::{Destination, DestinationError};
 use crate::v2::schema::cache::SchemaCache;
 
@@ -436,7 +436,9 @@ impl BigQueryDestination {
 
             // Collect all consecutive truncate events
             while let Some(Event::Truncate(_)) = event_iter.peek() {
-                truncate_events.push(event_iter.next().unwrap());
+                if let Some(Event::Truncate(truncate_event)) = event_iter.next() {
+                    truncate_events.push(truncate_event);
+                }
             }
 
             // Process truncate events
@@ -450,46 +452,39 @@ impl BigQueryDestination {
 
     async fn process_truncate_events(
         &self,
-        events: Vec<Event>,
+        truncate_events: Vec<TruncateEvent>,
     ) -> Result<(), BigQueryDestinationError> {
         let inner = self.inner.read().await;
 
-        for event in events {
-            if let Event::Truncate(truncate) = event {
-                for rel_id in truncate.rel_ids {
-                    // Convert rel_id to table_id (Oid)
-                    let table_id = rel_id;
+        for truncate_event in truncate_events {
+            for table_id in truncate_event.rel_ids {
+                // Get table information from schema cache
+                let schema_cache = inner
+                    .schema_cache
+                    .as_ref()
+                    .ok_or(BigQueryDestinationError::MissingSchemaCache)?
+                    .read_inner()
+                    .await;
 
-                    // Get table information from schema cache
-                    let schema_cache = inner
-                        .schema_cache
-                        .as_ref()
-                        .ok_or(BigQueryDestinationError::MissingSchemaCache)?
-                        .read_inner()
-                        .await;
+                if let Some(table_schema) = schema_cache.get_table_schema_ref(&table_id) {
+                    let table_id = table_schema.name.as_bigquery_table_id();
 
-                    if let Some(table_schema) = schema_cache.get_table_schema_ref(&table_id) {
-                        let bigquery_table_id = table_schema.name.as_bigquery_table_id();
+                    let delete_query = format!(
+                        "truncate table `{}.{}.{}`",
+                        inner.client.project_id(),
+                        inner.dataset_id,
+                        table_id
+                    );
 
-                        // Use DELETE statement to clear the table
-                        // This is more efficient than TRUNCATE for BigQuery streaming tables
-                        let delete_query = format!(
-                            "truncate table `{}.{}.{}`",
-                            inner.client.project_id(),
-                            inner.dataset_id,
-                            bigquery_table_id
-                        );
+                    let query_request = QueryRequest::new(delete_query);
+                    inner.client.query(query_request).await?;
 
-                        let query_request = QueryRequest::new(delete_query);
-                        inner.client.query(query_request).await?;
-
-                        info!("Truncated table: {}", bigquery_table_id);
-                    } else {
-                        info!(
+                    info!("Truncated table `{}` in BigQuery", table_id);
+                } else {
+                    info!(
                             "Table schema not found for table_id: {}, skipping truncate",
                             table_id
                         );
-                    }
                 }
             }
         }
