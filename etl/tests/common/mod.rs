@@ -1,4 +1,3 @@
-use std::sync::Once;
 /// Common utilities and helpers for testing PostgreSQL replication functionality.
 ///
 /// This module provides shared testing infrastructure including database management,
@@ -10,12 +9,13 @@ use std::time::{Duration, Instant};
 pub mod bigquery;
 pub mod database;
 pub mod destination;
-pub mod destination_v2;
+pub mod encryption;
 pub mod event;
 pub mod pipeline;
 pub mod pipeline_v2;
 pub mod state_store;
 pub mod table;
+pub mod test_destination_wrapper;
 pub mod test_schema;
 
 /// The maximum duration to wait for test conditions to be met.
@@ -53,15 +53,4 @@ where
     }
 
     panic!("Failed to process all events within timeout")
-}
-
-static INIT_CRYPTO: Once = Once::new();
-
-#[cfg(feature = "bigquery")]
-pub fn install_crypto_provider_once() {
-    INIT_CRYPTO.call_once(|| {
-        rustls::crypto::aws_lc_rs::default_provider()
-            .install_default()
-            .expect("failed to install default crypto provider");
-    });
 }

@@ -1,4 +1,5 @@
 use etl::v2::conversions::event::EventType;
+use etl::v2::destination::memory::MemoryDestination;
 use etl::v2::pipeline::PipelineError;
 use etl::v2::state::table::TableReplicationPhaseType;
 use etl::v2::workers::base::WorkerWaitError;
@@ -8,12 +9,12 @@ use telemetry::init_test_tracing;
 use tokio_postgres::types::Type;
 
 use crate::common::database::spawn_database;
-use crate::common::destination_v2::TestDestination;
 use crate::common::event::{group_events_by_type, group_events_by_type_and_table_id};
 use crate::common::pipeline_v2::{create_pipeline_identity, spawn_pg_pipeline};
 use crate::common::state_store::{
     FaultConfig, FaultInjectingStateStore, FaultType, TestStateStore,
 };
+use crate::common::test_destination_wrapper::TestDestinationWrapper;
 use crate::common::test_schema::{
     build_expected_orders_inserts, build_expected_users_inserts, get_n_integers_sum,
     get_users_age_sum_from_rows, insert_mock_data, setup_test_database_schema, TableSelection,
@@ -31,7 +32,7 @@ async fn test_pipeline_with_table_sync_worker_panic() {
         ..Default::default()
     };
     let state_store = FaultInjectingStateStore::wrap(TestStateStore::new(), fault_config);
-    let destination = TestDestination::new();
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
 
     // We start the pipeline from scratch.
     let mut pipeline = spawn_pg_pipeline(
@@ -89,7 +90,7 @@ async fn test_pipeline_with_table_sync_worker_error() {
         ..Default::default()
     };
     let state_store = FaultInjectingStateStore::wrap(TestStateStore::new(), fault_config);
-    let destination = TestDestination::new();
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
 
     // We start the pipeline from scratch.
     let mut pipeline = spawn_pg_pipeline(
@@ -144,7 +145,7 @@ async fn test_table_schema_copy_with_data_sync_retry() {
     let database_schema = setup_test_database_schema(&database, TableSelection::Both).await;
 
     let state_store = TestStateStore::new();
-    let destination = TestDestination::new();
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
 
     // Configure state store to fail during data sync.
     let fault_config = FaultConfig {
@@ -251,7 +252,7 @@ async fn test_table_schema_copy_with_finished_copy_retry() {
     let database_schema = setup_test_database_schema(&database, TableSelection::Both).await;
 
     let state_store = TestStateStore::new();
-    let destination = TestDestination::new();
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
 
     // We start the pipeline from scratch.
     let identity = create_pipeline_identity(&database_schema.publication_name());
@@ -359,7 +360,7 @@ async fn test_table_schema_copy_survives_restarts() {
     let database_schema = setup_test_database_schema(&database, TableSelection::Both).await;
 
     let state_store = TestStateStore::new();
-    let destination = TestDestination::new();
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
 
     // We start the pipeline from scratch.
     let identity = create_pipeline_identity(&database_schema.publication_name());
@@ -482,7 +483,7 @@ async fn test_table_copy() {
     .await;
 
     let state_store = TestStateStore::new();
-    let destination = TestDestination::new();
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
 
     // Start pipeline from scratch.
     let identity = create_pipeline_identity(&database_schema.publication_name());
@@ -546,7 +547,7 @@ async fn test_table_copy_and_sync() {
     .await;
 
     let state_store = TestStateStore::new();
-    let destination = TestDestination::new();
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
 
     // Start pipeline from scratch.
     let identity = create_pipeline_identity(&database_schema.publication_name());
@@ -707,7 +708,7 @@ async fn test_table_copy_and_sync_with_changed_schema_in_table_sync_worker() {
         .unwrap();
 
     let state_store = TestStateStore::new();
-    let destination = TestDestination::new();
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
 
     // Start pipeline from scratch.
     let identity = create_pipeline_identity(&database_schema.publication_name());
@@ -796,7 +797,7 @@ async fn test_table_copy_and_sync_with_changed_schema_in_apply_worker() {
         .unwrap();
 
     let state_store = TestStateStore::new();
-    let destination = TestDestination::new();
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
 
     // Start pipeline from scratch.
     let identity = create_pipeline_identity(&database_schema.publication_name());

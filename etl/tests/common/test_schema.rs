@@ -1,5 +1,3 @@
-use crate::common::database::test_table_name;
-use crate::common::destination_v2::TestDestination;
 use etl::conversions::table_row::TableRow;
 use etl::conversions::Cell;
 use etl::v2::conversions::event::{Event, InsertEvent};
@@ -8,6 +6,9 @@ use postgres::tokio::test_utils::{id_column_schema, PgDatabase};
 use std::ops::RangeInclusive;
 use tokio_postgres::types::Type;
 use tokio_postgres::{Client, GenericClient};
+
+use crate::common::database::test_table_name;
+use crate::common::test_destination_wrapper::TestDestinationWrapper;
 
 #[derive(Debug, Clone, Copy)]
 pub enum TableSelection {
@@ -190,7 +191,10 @@ pub async fn insert_mock_data(
     }
 }
 
-pub async fn get_users_age_sum_from_rows(destination: &TestDestination, table_id: Oid) -> i32 {
+pub async fn get_users_age_sum_from_rows<D>(
+    destination: &TestDestinationWrapper<D>,
+    table_id: Oid,
+) -> i32 {
     let mut actual_sum = 0;
 
     let tables_rows = destination.get_table_rows().await;
