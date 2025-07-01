@@ -17,8 +17,8 @@ pub enum WorkerType {
 impl fmt::Display for WorkerType {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
-            WorkerType::Apply => write!(f, "apply worker"),
-            WorkerType::TableSync { table_id } => write!(f, "table sync worker: {table_id}"),
+            WorkerType::Apply => write!(f, "apply"),
+            WorkerType::TableSync { table_id } => write!(f, "table sync: {table_id}"),
         }
     }
 }

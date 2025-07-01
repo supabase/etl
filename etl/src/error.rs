@@ -1024,7 +1024,7 @@ mod tests {
             worker_type: WorkerType::Apply,
         });
         let display = format!("{error}");
-        assert!(display.contains("Apply worker panicked"));
+        assert!(display.contains("apply worker panicked"));
 
         let error = Error::new(ErrorKind::DataConversionFailed {
             from_type: "postgres".to_string(),
