@@ -192,6 +192,11 @@ impl WorkerHandle<TableSyncWorkerState> for TableSyncWorkerHandle {
             Ok(Ok(())) => Ok(()),
             Ok(Err(err)) => Err(err),
             Err(err) => {
+                let table_id = {
+                    let inner = self.state.get_inner().read().await;
+                    inner.table_id
+                };
+
                 if err.is_cancelled() {
                     return Err(Error::with_source(
                         ErrorKind::WorkerCancelled {

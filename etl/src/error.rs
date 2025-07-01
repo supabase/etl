@@ -15,12 +15,13 @@ struct ErrorInner {
 
 /// Comprehensive error classification for ETL operations.
 ///
-/// This enum covers all major error categories found in PostgreSQL replication
-/// applications, providing structured error information for proper handling
-/// and recovery strategies.
+/// Groups error variants by functional area to provide structured error information
+/// for proper handling and recovery strategies. Unused variants have been removed
+/// to keep the enum focused on actual use cases.
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub enum ErrorKind {
+    // === Database & Connection Errors ===
     /// Database connection failure with connection details
     ConnectionFailed {
         host: String,
@@ -38,10 +39,8 @@ pub enum ErrorKind {
     /// Connection lost during ongoing operations
     ConnectionLost,
 
-    /// The table replication state is missing for a table
-    TableReplicationStateMissing { table_name: String },
-
-    /// Replication slot operation failure
+    // === Replication & Streaming Errors ===
+    /// Replication slot operation failure during creation or modification
     ReplicationSlotNotCreated {
         slot_name: String,
         reason: String
@@ -50,28 +49,27 @@ pub enum ErrorKind {
     ReplicationSlotNotFound { slot_name: String },
     /// Attempt to create replication slot that already exists
     ReplicationSlotAlreadyExists { slot_name: String },
-    /// Publication not found or empty
+    /// Publication not found or inaccessible
     PublicationNotFound { publication_name: String },
-    /// CDC stream parsing or processing failure
-    CdcStreamFailed,
-    /// CDC stream connection timeout or loss
-    CdcStreamConnectionLost,
-    /// Table copy stream failure
+    /// Table copy stream processing failure
     TableCopyStreamFailed { table_name: String },
-    /// Events stream failure
+    /// Events stream processing failure
     EventsStreamFailed,
-    /// LSN inconsistency or invalid state transition
+    /// LSN inconsistency indicating replication state corruption
     LsnConsistencyError {
         expected: String,
         actual: String,
     },
-    /// The transaction did not start but a `COMMIT` message was encountered
+    /// Transaction state mismatch during replication
     TransactionNotStarted,
-    /// The event type that we received was not expected
+    /// Unexpected event type received during replication
     EventTypeMismatch { expected: String, actual: String },
-    /// The replication phase was unexpected
+    /// Invalid table replication phase transition
     TableReplicationPhaseInvalid { expected: String, actual: String },
+    /// Table replication state missing for an active table
+    TableReplicationStateMissing { table_name: String },
 
+    // === Schema & Data Structure Errors ===
     /// Table not found in database schema
     TableNotFound { table_name: String },
     /// Column not found in table schema
@@ -87,18 +85,17 @@ pub enum ErrorKind {
     },
     /// Schema validation failure during replication setup
     SchemaValidationFailed { table_name: String, reason: String },
-    /// Missing or inadequate replica identity for table
-    ReplicaIdentityIssue { table_name: String },
+    /// Tuple data format not supported by conversion logic
+    TupleDataNotSupported { type_name: String },
 
-    /// Worker startup failure
-    WorkerStartupFailed { worker_type: String },
-    /// Pipeline shutdown failed
+    // === Worker & Pipeline Errors ===
+    /// Pipeline shutdown operation failed
     PipelineShutdownFailed,
     /// Worker task panicked during execution
     WorkerPanicked { worker_type: WorkerType },
     /// Worker task cancelled during execution
     WorkerCancelled { worker_type: WorkerType },
-    /// A table sync worker experienced a silent failure
+    /// Table sync worker experienced a silent failure
     WorkerFailedSilently {
         worker_type: WorkerType,
         reason: String,
@@ -106,61 +103,19 @@ pub enum ErrorKind {
     /// Worker pool capacity or coordination failure
     WorkerPoolFailed { reason: String },
 
-    /// Destination connection or authentication failure
-    DestinationConnectionFailed { destination_type: String },
-    /// Destination table creation failure
-    DestinationTableCreationFailed {
-        table_name: String,
-        destination_type: String,
-    },
-    /// Schema mismatch between source and destination
-    DestinationSchemaMismatch { table_name: String, reason: String },
-    /// Data insertion failure at destination
-    DestinationInsertionFailed {
-        table_name: String,
-        destination_type: String,
-    },
-    /// Destination-specific provider error
-    DestinationProviderError {
-        provider: String,
-        error_code: Option<String>,
-    },
-    /// Write capacity or quota exceeded
-    DestinationQuotaExceeded { destination_type: String },
-
-    /// The data of the tuple is not supported
-    TupleDataNotSupported { type_name: String },
-
-    /// State store read operation failure
-    StateStoreReadFailed { key: String },
-    /// State store write operation failure
-    StateStoreWriteFailed { key: String },
-    /// State store delete operation failure
-    StateStoreDeleteFailed { key: String },
-    /// State corruption detected
+    // === State Management Errors ===
+    /// State corruption detected in persistent storage
     StateCorrupted { description: String },
-    /// State lock acquisition timeout
-    StateLockTimeout { resource: String },
-    /// Checkpoint operation failure
-    CheckpointFailed { reason: String },
-    /// Recovery operation failure
-    RecoveryFailed { reason: String },
 
-    /// Data type conversion failure
+    // === Data Processing Errors ===
+    /// Data type conversion failure between systems
     DataConversionFailed {
         from_type: String,
         to_type: String,
         value: Option<String>,
     },
-    /// JSON serialization failure
-    JsonSerializationFailed,
-    /// JSON deserialization failure
-    JsonDeserializationFailed,
-    /// Encryption operation failure
-    EncryptionFailed,
-    /// Decryption operation failure
-    DecryptionFailed,
 
+    // === System & Infrastructure Errors ===
     /// Configuration parsing or validation failure
     ConfigurationError { parameter: String, reason: String },
     /// Resource limit exceeded (memory, disk, connections)
@@ -169,12 +124,12 @@ pub enum ErrorKind {
     IoError,
     /// Network operation failure
     NetworkError,
-    /// Timeout during operation
+    /// Operation timeout exceeded
     Timeout { operation: String, duration_ms: u64 },
 
-    /// Error that contains many errors
+    // === Aggregate & Fallback Errors ===
+    /// Multiple errors occurred during batch operations
     Many { amount: u64 },
-
     /// Error that doesn't fit other categories
     Other { description: String },
 }
@@ -207,6 +162,10 @@ pub enum RecoveryStrategy {
     ManualIntervention,
 }
 
+/// Error collection for handling multiple failures in batch operations.
+///
+/// Displays errors with numbered formatting and recursive source chains
+/// for comprehensive error reporting in batch processing scenarios.
 pub struct Errors(Vec<Error>);
 
 impl From<Vec<Error>> for Errors {
@@ -230,12 +189,12 @@ impl fmt::Display for Errors {
             0 => write!(f, "no errors"),
             1 => write!(f, "{}", self.0[0]),
             count => {
-                write!(f, "{count} errors: ")?;
+                writeln!(f, "batch operation failed with {count} errors:")?;
                 for (i, error) in self.0.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, "; ")?;
+                    write!(f, "  {}. {}", i + 1, error.display_chain())?;
+                    if i < count - 1 {
+                        writeln!(f)?;
                     }
-                    write!(f, "{error}")?;
                 }
                 Ok(())
             }
@@ -245,7 +204,8 @@ impl fmt::Display for Errors {
 
 impl error::Error for Errors {
     fn source(&self) -> Option<&(dyn error::Error + 'static)> {
-        // We return only the first error as the source, since we can't do better.
+        // Return the first error as the primary source since std::error::Error
+        // doesn't support multiple sources.
         self.0.first().and_then(|err| err.source())
     }
 }
@@ -274,6 +234,7 @@ impl Error {
         }))
     }
 
+    /// Creates an error containing multiple errors from batch operations.
     pub fn from_many(errors: impl Into<Errors>) -> Self {
         let errors = errors.into();
         Error::with_source(
@@ -284,10 +245,12 @@ impl Error {
         )
     }
 
+    /// Creates a transaction not started error.
     pub fn transaction_not_started() -> Self {
         Self::new(ErrorKind::TransactionNotStarted)
     }
 
+    /// Creates an event type mismatch error.
     pub fn event_type_mismatch(expected: impl Into<String>, actual: impl Into<String>) -> Self {
         Self::new(ErrorKind::EventTypeMismatch {
             expected: expected.into(),
@@ -317,94 +280,105 @@ impl Error {
         })
     }
 
-    /// Creates an external error.
+    /// Creates a fallback error for cases not covered by specific variants.
     pub fn other(description: impl Into<String>) -> Self {
         Self::new(ErrorKind::Other {
             description: description.into(),
         })
     }
 
-    /// Returns the error kind.
+    /// Returns the error kind classification.
     pub fn kind(&self) -> &ErrorKind {
         &self.0.kind
     }
 
-    /// Returns the severity level of this error.
+    /// Returns a formatted string showing this error and all its source errors recursively.
+    pub fn display_chain(&self) -> String {
+        let mut result = self.to_string();
+        let mut current_source = error::Error::source(self);
+        
+        while let Some(source) = current_source {
+            result.push_str(&format!("\n  ↳ caused by: {source}"));
+            current_source = error::Error::source(source);
+        }
+        
+        result
+    }
+
+    /// Returns the severity level of this error for monitoring and alerting.
     pub fn severity(&self) -> ErrorSeverity {
         use ErrorKind::*;
         match &self.0.kind {
-            // Critical errors
+            // Critical errors - system integrity or consistency issues
             StateCorrupted { .. } | WorkerPanicked { .. } | LsnConsistencyError { .. } => {
                 ErrorSeverity::Critical
             }
 
-            // High severity errors
+            // High severity errors - significant operational issues
             ConnectionLost
             | ReplicationSlotNotCreated { .. }
-            | DestinationQuotaExceeded { .. }
             | WorkerPoolFailed { .. }
-            | CheckpointFailed { .. }
-            | RecoveryFailed { .. } => ErrorSeverity::High,
+            | PipelineShutdownFailed => ErrorSeverity::High,
 
-            // Medium severity errors
+            // Medium severity errors - unexpected but recoverable
             ConnectionFailed { .. }
             | AuthenticationFailed { .. }
             | QueryExecutionFailed { .. }
             | TableNotFound { .. }
             | UnsupportedDataType { .. }
-            | DestinationConnectionFailed { .. }
-            | StateStoreReadFailed { .. }
-            | StateStoreWriteFailed { .. }
-            | ResourceLimitExceeded { .. } => ErrorSeverity::Medium,
+            | SchemaValidationFailed { .. }
+            | ResourceLimitExceeded { .. }
+            | TransactionNotStarted
+            | EventTypeMismatch { .. }
+            | TableReplicationPhaseInvalid { .. } => ErrorSeverity::Medium,
 
-            // Low severity errors (transient or expected)
-            CdcStreamConnectionLost
-            | Timeout { .. }
+            // Low severity errors - transient or expected during normal operations
+            Timeout { .. }
             | NetworkError
-            | StateLockTimeout { .. }
-            | DataConversionFailed { .. } => ErrorSeverity::Low,
+            | DataConversionFailed { .. }
+            | WorkerCancelled { .. }
+            | WorkerFailedSilently { .. }
+            | IoError => ErrorSeverity::Low,
 
-            // Default to medium for unclassified errors
+            // Default to medium for remaining variants
             _ => ErrorSeverity::Medium,
         }
     }
 
-    /// Returns the recommended recovery strategy for this error.
+    /// Returns the recommended recovery strategy for automated error handling.
     pub fn recovery_strategy(&self) -> RecoveryStrategy {
         use ErrorKind::*;
         match &self.0.kind {
-            // No retry errors
+            // No retry - permanent failures requiring code changes or configuration fixes
             AuthenticationFailed { .. }
             | ConfigurationError { .. }
             | UnsupportedDataType { .. }
             | StateCorrupted { .. }
             | SchemaValidationFailed { .. }
-            | ReplicaIdentityIssue { .. } => RecoveryStrategy::NoRetry,
+            | TupleDataNotSupported { .. } => RecoveryStrategy::NoRetry,
 
-            // Immediate retry errors
-            CdcStreamConnectionLost | NetworkError => RecoveryStrategy::RetryImmediate,
+            // Immediate retry - transient network issues
+            NetworkError | WorkerCancelled { .. } => RecoveryStrategy::RetryImmediate,
 
-            // Retry with backoff errors
+            // Retry with backoff - infrastructure issues that may resolve
             ConnectionFailed { .. }
             | ConnectionLost
             | QueryExecutionFailed { .. }
-            | DestinationConnectionFailed { .. }
-            | StateStoreReadFailed { .. }
-            | StateStoreWriteFailed { .. }
-            | IoError => RecoveryStrategy::RetryWithBackoff,
+            | TransactionFailed
+            | IoError
+            | TableCopyStreamFailed { .. }
+            | EventsStreamFailed => RecoveryStrategy::RetryWithBackoff,
 
-            // Retry after delay errors
-            DestinationQuotaExceeded { .. }
-            | ResourceLimitExceeded { .. }
-            | StateLockTimeout { .. } => RecoveryStrategy::RetryAfterDelay,
+            // Retry after delay - resource or capacity issues
+            ResourceLimitExceeded { .. }
+            | Timeout { .. } => RecoveryStrategy::RetryAfterDelay,
 
-            // Manual intervention required
+            // Manual intervention - critical system issues
             WorkerPanicked { .. }
-            | CheckpointFailed { .. }
-            | RecoveryFailed { .. }
-            | LsnConsistencyError { .. } => RecoveryStrategy::ManualIntervention,
+            | LsnConsistencyError { .. }
+            | PipelineShutdownFailed => RecoveryStrategy::ManualIntervention,
 
-            // Default to retry with backoff
+            // Default to retry with backoff for safety
             _ => RecoveryStrategy::RetryWithBackoff,
         }
     }
@@ -467,11 +441,11 @@ impl fmt::Display for Error {
 
             ReplicationSlotNotCreated {
                 slot_name,
-                operation,
+                reason,
             } => {
                 write!(
                     f,
-                    "replication slot '{slot_name}' operation '{operation}' failed"
+                    "failed to create replication slot '{slot_name}': {reason}"
                 )
             }
             ReplicationSlotNotFound { slot_name } => {
@@ -483,8 +457,6 @@ impl fmt::Display for Error {
             PublicationNotFound { publication_name } => {
                 write!(f, "publication '{publication_name}' operation failed")
             }
-            CdcStreamFailed => write!(f, "cdc stream processing failed"),
-            CdcStreamConnectionLost => write!(f, "cdc stream connection lost"),
             TableCopyStreamFailed { table_name } => {
                 write!(f, "table copy stream failed for table '{table_name}'")
             }
@@ -512,6 +484,9 @@ impl fmt::Display for Error {
             }
             WorkerCancelled { worker_type } => {
                 write!(f, "{worker_type} worker cancelled")
+            }
+            WorkerFailedSilently { worker_type, reason } => {
+                write!(f, "{worker_type} worker failed silently: {reason}")
             }
 
             TableNotFound { table_name } => {
@@ -542,12 +517,11 @@ impl fmt::Display for Error {
                     "schema validation failed for table '{table_name}': {reason}"
                 )
             }
-            ReplicaIdentityIssue { table_name } => {
-                write!(f, "replica identity issue for table '{table_name}'")
+            TableReplicationStateMissing { table_name } => {
+                write!(f, "replication state missing for table '{table_name}'")
             }
-
-            WorkerStartupFailed { worker_type } => {
-                write!(f, "{worker_type} worker startup failed")
+            TupleDataNotSupported { type_name } => {
+                write!(f, "tuple data not supported for type '{type_name}'")
             }
             PipelineShutdownFailed => {
                 write!(f, "pipeline shutdown failed")
@@ -555,71 +529,13 @@ impl fmt::Display for Error {
             WorkerPanicked { worker_type } => {
                 write!(f, "{worker_type} worker panicked")
             }
-            TableSyncWorkerFailed { table_name } => {
-                write!(f, "table sync worker failed for table '{table_name}'")
-            }
-            ApplyWorkerFailed => write!(f, "apply worker failed"),
             WorkerPoolFailed { reason } => {
                 write!(f, "worker pool failed: {reason}")
             }
 
-            DestinationConnectionFailed { destination_type } => {
-                write!(f, "{destination_type} destination connection failed")
-            }
-            DestinationTableCreationFailed {
-                table_name,
-                destination_type,
-            } => {
-                write!(
-                    f,
-                    "failed to create table '{table_name}' in {destination_type} destination"
-                )
-            }
-            DestinationSchemaMismatch { table_name, reason } => {
-                write!(f, "schema mismatch for table '{table_name}': {reason}")
-            }
-            DestinationInsertionFailed {
-                table_name,
-                destination_type,
-            } => {
-                write!(
-                    f,
-                    "failed to insert data into table '{table_name}' in {destination_type} destination"
-                )
-            }
-            DestinationProviderError {
-                provider,
-                error_code,
-            } => match error_code {
-                Some(code) => write!(f, "{provider} provider error (code: {code})"),
-                None => write!(f, "{provider} provider error"),
-            },
-            DestinationQuotaExceeded { destination_type } => {
-                write!(f, "{destination_type} destination quota exceeded")
-            }
-
-            StateStoreReadFailed { key } => {
-                write!(f, "failed to read from state store (key: {key})")
-            }
-            StateStoreWriteFailed { key } => {
-                write!(f, "failed to write to state store (key: {key})")
-            }
-            StateStoreDeleteFailed { key } => {
-                write!(f, "failed to delete from state store (key: {key})")
-            }
             StateCorrupted { description } => {
                 write!(f, "state corrupted: {description}")
             }
-            StateLockTimeout { resource } => {
-                write!(f, "state lock timeout for resource '{resource}'")
-            }
-            CheckpointFailed { reason } => {
-                write!(f, "checkpoint failed: {reason}")
-            }
-            RecoveryFailed { reason } => {
-                write!(f, "recovery failed: {reason}")
-            }
-
             DataConversionFailed {
                 from_type,
                 to_type,
@@ -628,20 +544,13 @@ impl fmt::Display for Error {
                 Some(value) => {
                     write!(
                         f,
-                        "failed to convert '{value}' from {from_type} to {to_type}"
+                        "failed to convert value '{value}' from {from_type} to {to_type}"
                     )
                 }
                 None => {
-                    write!(f, "failed to convert '{from_type}' to '{to_type}'")
+                    write!(f, "failed to convert from {from_type} to {to_type}")
                 }
             },
-            JsonSerializationFailed => write!(f, "json serialization failed"),
-            JsonDeserializationFailed => write!(f, "json deserialization failed"),
-            BinaryParsingFailed { data_type } => {
-                write!(f, "binary parsing failed for data type '{data_type}'")
-            }
-            EncryptionFailed => write!(f, "encryption failed"),
-            DecryptionFailed => write!(f, "decryption failed"),
 
             ConfigurationError { parameter, reason } => {
                 write!(
@@ -665,11 +574,10 @@ impl fmt::Display for Error {
             }
 
             Many { amount } => {
-                write!(f, "{amount} errors occurred")
+                write!(f, "batch operation failed with {amount} errors")
             }
-
             Other { description } => {
-                write!(f, "other error: {description}")
+                write!(f, "{description}")
             }
         }
     }
@@ -768,7 +676,7 @@ impl From<tokio_postgres::Error> for Error {
                 "55000" | "55006" => Self::with_source(
                     ErrorKind::ReplicationSlotNotCreated {
                         slot_name: "unknown".to_string(),
-                        operation: "unknown".to_string(),
+                        reason: "replication_slot_error".to_string(),
                     },
                     err,
                 ),
@@ -941,8 +849,8 @@ impl From<sqlx::Error> for Error {
 
             // Data handling errors
             sqlx::Error::RowNotFound => Self::with_source(
-                ErrorKind::StateStoreReadFailed {
-                    key: "unknown".to_string(),
+                ErrorKind::Other {
+                    description: "database row not found".to_string(),
                 },
                 err,
             ),
@@ -964,7 +872,7 @@ impl From<sqlx::Error> for Error {
             sqlx::Error::ColumnIndexOutOfBounds { index, .. } => Self::with_source(
                 ErrorKind::ColumnNotFound {
                     table_name: "unknown".to_string(),
-                    column_name: format!("index_{}", index),
+                    column_name: format!("index_{index}"),
                 },
                 err,
             ),
@@ -974,7 +882,7 @@ impl From<sqlx::Error> for Error {
                 ErrorKind::DataConversionFailed {
                     from_type: "database".to_string(),
                     to_type: "rust".to_string(),
-                    value: Some(format!("column_{}", index)),
+                    value: Some(format!("column_{index}")),
                 },
                 err,
             ),
@@ -1026,9 +934,16 @@ impl From<rustls::Error> for Error {
     }
 }
 
-// Helper function to extract replication slot name from error messages
+impl From<std::io::Error> for Error {
+    fn from(err: std::io::Error) -> Self {
+        Self::with_source(ErrorKind::IoError, err)
+    }
+}
+
+/// Extracts replication slot name from PostgreSQL error messages.
+/// 
+/// Searches for quoted slot names in error text using common PostgreSQL patterns.
 fn extract_slot_name_from_error(error_msg: &str) -> Option<String> {
-    // Look for patterns like 'slot "slot_name"' or 'slot `slot_name`'
     if let Some(start) = error_msg.find("slot \"") {
         let start = start + 6; // Skip 'slot "'
         if let Some(end) = error_msg[start..].find('"') {
@@ -1044,4 +959,408 @@ fn extract_slot_name_from_error(error_msg: &str) -> Option<String> {
     }
 
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::v2::workers::base::WorkerType;
+    use std::io;
+
+    #[test]
+    fn test_error_kind_creation() {
+        let error = Error::table_not_found("users");
+        assert!(matches!(error.kind(), ErrorKind::TableNotFound { .. }));
+        
+        let error = Error::column_not_found("posts", "invalid_col");
+        assert!(matches!(error.kind(), ErrorKind::ColumnNotFound { .. }));
+        
+        let error = Error::replication_slot_not_found("test_slot");
+        assert!(matches!(error.kind(), ErrorKind::ReplicationSlotNotFound { .. }));
+        
+        let error = Error::transaction_not_started();
+        assert!(matches!(error.kind(), ErrorKind::TransactionNotStarted));
+        
+        let error = Error::event_type_mismatch("INSERT", "DELETE");
+        assert!(matches!(error.kind(), ErrorKind::EventTypeMismatch { .. }));
+        
+        let error = Error::other("custom error message");
+        assert!(matches!(error.kind(), ErrorKind::Other { .. }));
+    }
+
+    #[test]
+    fn test_error_display_messages() {
+        let error = Error::new(ErrorKind::ConnectionFailed {
+            host: "localhost".to_string(),
+            port: 5432,
+            database: "test_db".to_string(),
+        });
+        let display = format!("{error}");
+        assert!(display.contains("failed to connect to database 'test_db' at localhost:5432"));
+
+        let error = Error::new(ErrorKind::AuthenticationFailed {
+            user: "testuser".to_string(),
+            database: "testdb".to_string(),
+        });
+        let display = format!("{error}");
+        assert!(display.contains("authentication failed for user 'testuser' on database 'testdb'"));
+
+        let error = Error::new(ErrorKind::ReplicationSlotNotCreated {
+            slot_name: "test_slot".to_string(),
+            reason: "already_exists".to_string(),
+        });
+        let display = format!("{error}");
+        assert!(display.contains("failed to create replication slot 'test_slot': already_exists"));
+
+        let error = Error::new(ErrorKind::UnsupportedDataType {
+            type_name: "unknown_type".to_string(),
+            type_oid: 12345,
+            table_name: "test_table".to_string(),
+        });
+        let display = format!("{error}");
+        assert!(display.contains("unsupported data type 'unknown_type' (oid: 12345) in table 'test_table'"));
+
+        let error = Error::new(ErrorKind::WorkerPanicked {
+            worker_type: WorkerType::Apply,
+        });
+        let display = format!("{error}");
+        assert!(display.contains("Apply worker panicked"));
+
+        let error = Error::new(ErrorKind::DataConversionFailed {
+            from_type: "postgres".to_string(),
+            to_type: "rust".to_string(),
+            value: Some("invalid_value".to_string()),
+        });
+        let display = format!("{error}");
+        assert!(display.contains("failed to convert value 'invalid_value' from postgres to rust"));
+
+        let error = Error::new(ErrorKind::DataConversionFailed {
+            from_type: "postgres".to_string(),
+            to_type: "rust".to_string(),
+            value: None,
+        });
+        let display = format!("{error}");
+        assert!(display.contains("failed to convert from postgres to rust"));
+
+        let error = Error::new(ErrorKind::Many { amount: 3 });
+        let display = format!("{error}");
+        assert!(display.contains("batch operation failed with 3 errors"));
+
+        let error = Error::new(ErrorKind::Other {
+            description: "something went wrong".to_string(),
+        });
+        let display = format!("{error}");
+        assert_eq!(display, "something went wrong");
+    }
+
+    #[test]
+    fn test_error_display_chain_single_error() {
+        let error = Error::table_not_found("users");
+        let chain = error.display_chain();
+        assert_eq!(chain, "table 'users' not found");
+    }
+
+    #[test]
+    fn test_error_display_chain_with_source() {
+        let io_error = io::Error::new(io::ErrorKind::ConnectionRefused, "TCP connection refused");
+        let error = Error::with_source(
+            ErrorKind::ConnectionFailed {
+                host: "localhost".to_string(),
+                port: 5432,
+                database: "test_db".to_string(),
+            },
+            io_error,
+        );
+        
+        let chain = error.display_chain();
+        assert!(chain.contains("failed to connect to database 'test_db' at localhost:5432"));
+        assert!(chain.contains("↳ caused by: TCP connection refused"));
+    }
+
+    #[test]
+    fn test_error_display_chain_nested_sources() {
+        // Create a chain: IO Error -> Connection Error -> Worker Pool Error
+        let io_error = io::Error::new(io::ErrorKind::TimedOut, "operation timed out");
+        
+        let connection_error = Error::with_source(
+            ErrorKind::ConnectionFailed {
+                host: "db.example.com".to_string(),
+                port: 5432,
+                database: "production".to_string(),
+            },
+            io_error,
+        );
+        
+        let worker_error = Error::with_source(
+            ErrorKind::WorkerPoolFailed {
+                reason: "database_unavailable".to_string(),
+            },
+            connection_error,
+        );
+        
+        let chain = worker_error.display_chain();
+        let lines: Vec<&str> = chain.lines().collect();
+        
+        assert_eq!(lines.len(), 3);
+        assert!(lines[0].contains("worker pool failed: database_unavailable"));
+        assert!(lines[1].contains("↳ caused by: failed to connect to database 'production' at db.example.com:5432"));
+        assert!(lines[2].contains("↳ caused by: operation timed out"));
+    }
+
+    #[test]
+    fn test_errors_collection_empty() {
+        let errors = Errors::from(vec![]);
+        let display = format!("{errors}");
+        assert_eq!(display, "no errors");
+    }
+
+    #[test]
+    fn test_errors_collection_single() {
+        let error = Error::table_not_found("users");
+        let errors = Errors::from(vec![error]);
+        let display = format!("{errors}");
+        assert_eq!(display, "table 'users' not found");
+    }
+
+    #[test]
+    fn test_errors_collection_multiple() {
+        let error1 = Error::table_not_found("users");
+        let error2 = Error::column_not_found("posts", "invalid_column");
+        let error3 = Error::other("custom error");
+        
+        let errors = Errors::from(vec![error1, error2, error3]);
+        let display = format!("{errors}");
+        
+        let lines: Vec<&str> = display.lines().collect();
+        assert!(lines[0].contains("batch operation failed with 3 errors:"));
+        assert!(lines[1].contains("1. table 'users' not found"));
+        assert!(lines[2].contains("2. column 'invalid_column' not found in table 'posts'"));
+        assert!(lines[3].contains("3. custom error"));
+    }
+
+    #[test]
+    fn test_errors_collection_with_chained_errors() {
+        let io_error = io::Error::new(io::ErrorKind::PermissionDenied, "access denied");
+        let chained_error = Error::with_source(
+            ErrorKind::ConnectionFailed {
+                host: "localhost".to_string(),
+                port: 5432,
+                database: "secure_db".to_string(),
+            },
+            io_error,
+        );
+        
+        let simple_error = Error::table_not_found("missing_table");
+        
+        let errors = Errors::from(vec![chained_error, simple_error]);
+        let display = format!("{errors}");
+        
+        assert!(display.contains("batch operation failed with 2 errors:"));
+        assert!(display.contains("1. failed to connect to database 'secure_db' at localhost:5432"));
+        assert!(display.contains("↳ caused by: access denied"));
+        assert!(display.contains("2. table 'missing_table' not found"));
+    }
+
+    #[test]
+    fn test_error_from_many() {
+        let errors = vec![
+            Error::table_not_found("users"),
+            Error::column_not_found("posts", "title"),
+        ];
+        
+        let many_error = Error::from_many(errors);
+        assert!(matches!(many_error.kind(), ErrorKind::Many { amount: 2 }));
+        
+        let display = format!("{many_error}");
+        assert!(display.contains("batch operation failed with 2 errors"));
+    }
+
+    #[test]
+    fn test_error_severity_levels() {
+        // Critical errors
+        let error = Error::new(ErrorKind::StateCorrupted {
+            description: "state file corrupted".to_string(),
+        });
+        assert_eq!(error.severity(), ErrorSeverity::Critical);
+        
+        let error = Error::new(ErrorKind::WorkerPanicked {
+            worker_type: WorkerType::Apply,
+        });
+        assert_eq!(error.severity(), ErrorSeverity::Critical);
+        
+        let error = Error::new(ErrorKind::LsnConsistencyError {
+            expected: "0/1234".to_string(),
+            actual: "0/5678".to_string(),
+        });
+        assert_eq!(error.severity(), ErrorSeverity::Critical);
+
+        // High severity errors
+        let error = Error::new(ErrorKind::ConnectionLost);
+        assert_eq!(error.severity(), ErrorSeverity::High);
+        
+        let error = Error::new(ErrorKind::ReplicationSlotNotCreated {
+            slot_name: "test".to_string(),
+            reason: "conflict".to_string(),
+        });
+        assert_eq!(error.severity(), ErrorSeverity::High);
+
+        // Medium severity errors
+        let error = Error::new(ErrorKind::ConnectionFailed {
+            host: "localhost".to_string(),
+            port: 5432,
+            database: "test".to_string(),
+        });
+        assert_eq!(error.severity(), ErrorSeverity::Medium);
+        
+        let error = Error::new(ErrorKind::TableNotFound {
+            table_name: "users".to_string(),
+        });
+        assert_eq!(error.severity(), ErrorSeverity::Medium);
+
+        // Low severity errors
+        let error = Error::new(ErrorKind::NetworkError);
+        assert_eq!(error.severity(), ErrorSeverity::Low);
+        
+        let error = Error::new(ErrorKind::DataConversionFailed {
+            from_type: "postgres".to_string(),
+            to_type: "rust".to_string(),
+            value: None,
+        });
+        assert_eq!(error.severity(), ErrorSeverity::Low);
+    }
+
+    #[test]
+    fn test_error_recovery_strategies() {
+        // No retry
+        let error = Error::new(ErrorKind::AuthenticationFailed {
+            user: "test".to_string(),
+            database: "test".to_string(),
+        });
+        assert_eq!(error.recovery_strategy(), RecoveryStrategy::NoRetry);
+        assert!(error.is_permanent());
+        assert!(!error.is_retryable());
+        
+        let error = Error::new(ErrorKind::UnsupportedDataType {
+            type_name: "unknown".to_string(),
+            type_oid: 0,
+            table_name: "test".to_string(),
+        });
+        assert_eq!(error.recovery_strategy(), RecoveryStrategy::NoRetry);
+
+        // Immediate retry
+        let error = Error::new(ErrorKind::NetworkError);
+        assert_eq!(error.recovery_strategy(), RecoveryStrategy::RetryImmediate);
+        assert!(error.is_retryable());
+        assert!(!error.is_permanent());
+
+        // Retry with backoff
+        let error = Error::new(ErrorKind::ConnectionLost);
+        assert_eq!(error.recovery_strategy(), RecoveryStrategy::RetryWithBackoff);
+        assert!(error.is_retryable());
+        
+        let error = Error::new(ErrorKind::QueryExecutionFailed {
+            query: "SELECT * FROM test".to_string(),
+        });
+        assert_eq!(error.recovery_strategy(), RecoveryStrategy::RetryWithBackoff);
+
+        // Retry after delay
+        let error = Error::new(ErrorKind::ResourceLimitExceeded {
+            resource: "memory".to_string(),
+            limit: "1GB".to_string(),
+        });
+        assert_eq!(error.recovery_strategy(), RecoveryStrategy::RetryAfterDelay);
+        assert!(error.is_retryable());
+
+        // Manual intervention
+        let error = Error::new(ErrorKind::WorkerPanicked {
+            worker_type: WorkerType::Apply,
+        });
+        assert_eq!(error.recovery_strategy(), RecoveryStrategy::ManualIntervention);
+        assert!(error.is_permanent());
+        
+        let error = Error::new(ErrorKind::LsnConsistencyError {
+            expected: "0/1234".to_string(),
+            actual: "0/5678".to_string(),
+        });
+        assert_eq!(error.recovery_strategy(), RecoveryStrategy::ManualIntervention);
+    }
+
+    #[test]
+    fn test_extract_slot_name_from_error() {
+        // Test double quotes
+        let msg = "replication slot \"my_slot\" already exists";
+        assert_eq!(extract_slot_name_from_error(msg), Some("my_slot".to_string()));
+        
+        // Test backticks
+        let msg = "cannot create slot `another_slot` due to conflict";
+        assert_eq!(extract_slot_name_from_error(msg), Some("another_slot".to_string()));
+        
+        // Test no slot name found
+        let msg = "some other database error occurred";
+        assert_eq!(extract_slot_name_from_error(msg), None);
+        
+        // Test malformed slot reference
+        let msg = "slot without quotes mentioned here";
+        assert_eq!(extract_slot_name_from_error(msg), None);
+        
+        // Test slot name with special characters
+        let msg = "slot \"my-slot_123\" operation failed";
+        assert_eq!(extract_slot_name_from_error(msg), Some("my-slot_123".to_string()));
+        
+        // Test empty slot name
+        let msg = "slot \"\" is invalid";
+        assert_eq!(extract_slot_name_from_error(msg), Some("".to_string()));
+        
+        // Test unclosed quote
+        let msg = "slot \"unclosed_slot operation failed";
+        assert_eq!(extract_slot_name_from_error(msg), None);
+    }
+
+    #[test]
+    fn test_from_implementations() {
+        // Test basic io::Error conversion
+        let io_err = io::Error::new(io::ErrorKind::PermissionDenied, "permission denied");
+        let error: Error = io_err.into();
+        
+        // Should map to IoError kind
+        assert!(matches!(error.kind(), ErrorKind::IoError));
+        let display = format!("{error}");
+        assert_eq!(display, "i/o operation failed");
+        
+        // Test that source is preserved
+        let chain = error.display_chain();
+        assert!(chain.contains("i/o operation failed"));
+        assert!(chain.contains("caused by: permission denied"));
+        
+        // Test rustls::Error conversion
+        let tls_err = rustls::Error::General("invalid certificate".to_string());
+        let error: Error = tls_err.into();
+        assert!(matches!(error.kind(), ErrorKind::TlsConfigurationFailed));
+    }
+
+    #[test]
+    fn test_error_debug_format() {
+        let error = Error::with_source(
+            ErrorKind::TableNotFound {
+                table_name: "users".to_string(),
+            },
+            io::Error::new(io::ErrorKind::NotFound, "file not found"),
+        );
+        
+        let debug = format!("{error:?}");
+        assert!(debug.contains("TableNotFound"));
+        assert!(debug.contains("users"));
+    }
+
+    #[test]
+    fn test_errors_debug_format() {
+        let errors = Errors::from(vec![
+            Error::table_not_found("users"),
+            Error::column_not_found("posts", "title"),
+        ]);
+        
+        let debug = format!("{errors:?}");
+        assert!(debug.contains("count"));
+        assert!(debug.contains("2"));
+    }
 }
