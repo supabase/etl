@@ -56,8 +56,14 @@ pub struct RelationEvent {
 impl RelationEvent {
     pub fn from_protocol(relation_body: &protocol::RelationBody) -> Result<Self> {
         let table_name = TableName::new(
-            relation_body.namespace()?.to_string(),
-            relation_body.name()?.to_string(),
+            relation_body
+                .namespace()
+                .map_err(|err| Error::with_source(Self::bytes_to_string_failure_error_kind(), err))?
+                .to_string(),
+            relation_body
+                .name()
+                .map_err(|err| Error::with_source(Self::bytes_to_string_failure_error_kind(), err))?
+                .to_string(),
         );
         let column_schemas = relation_body
             .columns()
@@ -71,7 +77,10 @@ impl RelationEvent {
 
     fn build_column_schema(column: &protocol::Column) -> Result<ColumnSchema> {
         Ok(ColumnSchema::new(
-            column.name()?.to_string(),
+            column
+                .name()
+                .map_err(|err| Error::with_source(Self::bytes_to_string_failure_error_kind(), err))?
+                .to_string(),
             convert_type_oid_to_type(column.type_id() as u32),
             column.type_modifier(),
             // We do not have access to this information, so we default it to `false`.
@@ -81,6 +90,14 @@ impl RelationEvent {
             // Currently 1 means that the column is part of the primary key.
             column.flags() == 1,
         ))
+    }
+
+    fn bytes_to_string_failure_error_kind() -> ErrorKind {
+        ErrorKind::DataConversionFailed {
+            from_type: any::type_name::<&[u8]>().to_string(),
+            to_type: any::type_name::<&str>().to_string(),
+            value: None,
+        }
     }
 }
 

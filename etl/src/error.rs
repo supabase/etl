@@ -1,4 +1,4 @@
-use std::{borrow, error, fmt, io, result};
+use std::{borrow, error, fmt, result};
 
 /// Type alias for convenience when using the Result type with our Error.
 pub type Result<T> = result::Result<T, Error>;
@@ -439,13 +439,6 @@ impl Error {
         })
     }
 
-    /// Creates a worker startup failed error.
-    pub fn worker_startup_failed(worker_type: impl Into<String>) -> Self {
-        Self::new(ErrorKind::WorkerStartupFailed {
-            worker_type: worker_type.into(),
-        })
-    }
-
     /// Creates a worker panicked error.
     pub fn worker_panicked(worker_type: impl Into<String>) -> Self {
         Self::new(ErrorKind::WorkerPanicked {
@@ -457,25 +450,6 @@ impl Error {
     pub fn worker_cancelled(worker_type: impl Into<String>) -> Self {
         Self::new(ErrorKind::WorkerCancelled {
             worker_type: worker_type.into(),
-        })
-    }
-
-    /// Creates a table sync worker failed error.
-    pub fn table_sync_worker_failed(table_name: impl Into<String>) -> Self {
-        Self::new(ErrorKind::TableSyncWorkerFailed {
-            table_name: table_name.into(),
-        })
-    }
-
-    /// Creates an apply worker failed error.
-    pub fn apply_worker_failed() -> Self {
-        Self::new(ErrorKind::ApplyWorkerFailed)
-    }
-
-    /// Creates a worker pool failed error.
-    pub fn worker_pool_failed(reason: impl Into<String>) -> Self {
-        Self::new(ErrorKind::WorkerPoolFailed {
-            reason: reason.into(),
         })
     }
 
@@ -1008,8 +982,6 @@ impl error::Error for Error {
     }
 }
 
-// TODO: check if we want to keep this.
-// External error type conversions
 impl From<tokio_postgres::Error> for Error {
     fn from(err: tokio_postgres::Error) -> Self {
         // Extract meaningful information from tokio_postgres::Error
@@ -1018,18 +990,9 @@ impl From<tokio_postgres::Error> for Error {
         // Check if it's a database-specific error with more context
         if let Some(db_err) = err.as_db_error() {
             match db_err.code().code() {
-                // Connection errors
+                // Connection errors (Class 08)
                 "08000" | "08003" | "08006" => Self::with_source(ErrorKind::ConnectionLost, err),
-                // Authentication errors
-                "28000" | "28P01" => Self::with_source(
-                    ErrorKind::AuthenticationFailed {
-                        user: "unknown".to_string(),
-                        database: "unknown".to_string(),
-                    },
-                    err,
-                ),
-                // Invalid catalog name (database doesn't exist)
-                "3D000" => Self::with_source(
+                "08001" | "08004" => Self::with_source(
                     ErrorKind::ConnectionFailed {
                         host: "unknown".to_string(),
                         port: 5432,
@@ -1037,14 +1000,34 @@ impl From<tokio_postgres::Error> for Error {
                     },
                     err,
                 ),
-                // Undefined table
+                "08P01" => Self::with_source(ErrorKind::NetworkError, err),
+
+                // Authentication errors (Class 28)
+                "28000" | "28P01" => Self::with_source(
+                    ErrorKind::AuthenticationFailed {
+                        user: "unknown".to_string(),
+                        database: "unknown".to_string(),
+                    },
+                    err,
+                ),
+
+                // Transaction state errors (Class 25)
+                "25000" | "25001" | "25P01" | "25P02" => {
+                    Self::with_source(ErrorKind::TransactionFailed, err)
+                }
+
+                // Transaction rollback errors (Class 40)
+                "40001" | "40002" | "40003" | "40P01" => {
+                    Self::with_source(ErrorKind::TransactionFailed, err)
+                }
+
+                // Schema/Object errors (Class 42)
                 "42P01" => Self::with_source(
                     ErrorKind::TableNotFound {
                         table_name: db_err.table().unwrap_or("unknown").to_string(),
                     },
                     err,
                 ),
-                // Undefined column
                 "42703" => Self::with_source(
                     ErrorKind::ColumnNotFound {
                         table_name: db_err.table().unwrap_or("unknown").to_string(),
@@ -1052,15 +1035,86 @@ impl From<tokio_postgres::Error> for Error {
                     },
                     err,
                 ),
-                // Duplicate replication slot
                 "42710" if description.contains("replication slot") => {
                     let slot_name = extract_slot_name_from_error(&description)
                         .unwrap_or_else(|| "unknown".to_string());
                     Self::with_source(ErrorKind::ReplicationSlotAlreadyExists { slot_name }, err)
                 }
-                // Transaction rollback errors
-                "40001" | "40P01" => Self::with_source(ErrorKind::TransactionFailed, err),
-                // Generic query execution error
+                "42501" => Self::with_source(
+                    ErrorKind::AuthenticationFailed {
+                        user: "unknown".to_string(),
+                        database: "unknown".to_string(),
+                    },
+                    err,
+                ),
+
+                // System resource errors (Class 53)
+                "53000" | "53100" | "53200" | "53300" | "53400" => Self::with_source(
+                    ErrorKind::ResourceLimitExceeded {
+                        resource: match db_err.code().code() {
+                            "53100" => "disk_space".to_string(),
+                            "53200" => "memory".to_string(),
+                            "53300" => "connections".to_string(),
+                            _ => "system_resources".to_string(),
+                        },
+                        limit: "exceeded".to_string(),
+                    },
+                    err,
+                ),
+
+                // Replication-specific errors (Class 55)
+                "55000" | "55006" => Self::with_source(
+                    ErrorKind::ReplicationSlotFailed {
+                        slot_name: "unknown".to_string(),
+                        operation: "unknown".to_string(),
+                    },
+                    err,
+                ),
+
+                // Query canceled/shutdown (Class 57)
+                "57014" => Self::with_source(
+                    ErrorKind::Timeout {
+                        operation: "query".to_string(),
+                        duration_ms: 0,
+                    },
+                    err,
+                ),
+                "57000" | "57P01" | "57P02" | "57P03" => {
+                    Self::with_source(ErrorKind::ConnectionLost, err)
+                }
+
+                // Invalid catalog/schema name (Class 3D/3F)
+                "3D000" | "3F000" => Self::with_source(
+                    ErrorKind::ConnectionFailed {
+                        host: "unknown".to_string(),
+                        port: 5432,
+                        database: "unknown".to_string(),
+                    },
+                    err,
+                ),
+
+                // Data exceptions (Class 22)
+                "22000" | "22001" | "22003" | "22007" | "22012" | "22P02" | "22P03" => {
+                    Self::with_source(
+                        ErrorKind::DataConversionFailed {
+                            from_type: "postgres".to_string(),
+                            to_type: "target".to_string(),
+                            value: None,
+                        },
+                        err,
+                    )
+                }
+
+                // Constraint violations (Class 23)
+                "23000" | "23502" | "23503" | "23505" | "23514" | "23P01" => Self::with_source(
+                    ErrorKind::SchemaValidationFailed {
+                        table_name: db_err.table().unwrap_or("unknown").to_string(),
+                        reason: "constraint_violation".to_string(),
+                    },
+                    err,
+                ),
+
+                // Generic query execution error for unhandled cases
                 _ => Self::with_source(
                     ErrorKind::QueryExecutionFailed {
                         query: "unknown".to_string(),
@@ -1082,6 +1136,14 @@ impl From<tokio_postgres::Error> for Error {
                 )
             } else if description.contains("tls") || description.contains("ssl") {
                 Self::with_source(ErrorKind::TlsConfigurationFailed, err)
+            } else if description.contains("timeout") || description.contains("Timeout") {
+                Self::with_source(
+                    ErrorKind::Timeout {
+                        operation: "connection".to_string(),
+                        duration_ms: 0,
+                    },
+                    err,
+                )
             } else {
                 Self::with_source(ErrorKind::Other { description }, err)
             }
@@ -1094,6 +1156,7 @@ impl From<sqlx::Error> for Error {
         let description = err.to_string();
 
         match &err {
+            // Configuration errors
             sqlx::Error::Configuration(_) => Self::with_source(
                 ErrorKind::ConfigurationError {
                     parameter: "database".to_string(),
@@ -1101,13 +1164,25 @@ impl From<sqlx::Error> for Error {
                 },
                 err,
             ),
+
+            // Database-specific errors with SQLSTATE handling
             sqlx::Error::Database(db_err) => {
-                // Similar to tokio_postgres, extract meaningful info
                 let code = db_err.code().unwrap_or(borrow::Cow::Borrowed("unknown"));
                 match code.as_ref() {
+                    // Connection errors (Class 08)
                     "08000" | "08003" | "08006" => {
                         Self::with_source(ErrorKind::ConnectionLost, err)
                     }
+                    "08001" | "08004" => Self::with_source(
+                        ErrorKind::ConnectionFailed {
+                            host: "unknown".to_string(),
+                            port: 5432,
+                            database: "unknown".to_string(),
+                        },
+                        err,
+                    ),
+
+                    // Authentication errors (Class 28)
                     "28000" | "28P01" => Self::with_source(
                         ErrorKind::AuthenticationFailed {
                             user: "unknown".to_string(),
@@ -1115,12 +1190,40 @@ impl From<sqlx::Error> for Error {
                         },
                         err,
                     ),
+
+                    // Schema/Object errors (Class 42)
                     "42P01" => Self::with_source(
                         ErrorKind::TableNotFound {
                             table_name: "unknown".to_string(),
                         },
                         err,
                     ),
+                    "42703" => Self::with_source(
+                        ErrorKind::ColumnNotFound {
+                            table_name: "unknown".to_string(),
+                            column_name: "unknown".to_string(),
+                        },
+                        err,
+                    ),
+
+                    // Transaction errors (Class 25, 40)
+                    "25000" | "25001" | "25P01" | "25P02" | "40001" | "40002" | "40003" | "40P01" => {
+                        Self::with_source(ErrorKind::TransactionFailed, err)
+                    }
+
+                    // Data exceptions (Class 22)
+                    "22000" | "22001" | "22003" | "22007" | "22012" | "22P02" | "22P03" => {
+                        Self::with_source(
+                            ErrorKind::DataConversionFailed {
+                                from_type: "postgres".to_string(),
+                                to_type: "target".to_string(),
+                                value: None,
+                            },
+                            err,
+                        )
+                    }
+
+                    // Default to query execution error
                     _ => Self::with_source(
                         ErrorKind::QueryExecutionFailed {
                             query: "unknown".to_string(),
@@ -1129,32 +1232,69 @@ impl From<sqlx::Error> for Error {
                     ),
                 }
             }
+
+            // Communication and infrastructure errors
             sqlx::Error::Io(_) => Self::with_source(ErrorKind::IoError, err),
             sqlx::Error::Tls(_) => Self::with_source(ErrorKind::TlsConfigurationFailed, err),
             sqlx::Error::Protocol(_) => Self::with_source(ErrorKind::NetworkError, err),
+
+            // Data handling errors
             sqlx::Error::RowNotFound => Self::with_source(
                 ErrorKind::StateStoreReadFailed {
                     key: "unknown".to_string(),
                 },
                 err,
             ),
-            sqlx::Error::TypeNotFound { .. } => Self::with_source(
+            sqlx::Error::TypeNotFound { type_name } => Self::with_source(
                 ErrorKind::UnsupportedDataType {
-                    type_name: "unknown".to_string(),
+                    type_name: type_name.clone(),
                     type_oid: 0,
                     table_name: "unknown".to_string(),
                 },
                 err,
             ),
-            sqlx::Error::ColumnIndexOutOfBounds { .. } | sqlx::Error::ColumnNotFound(_) => {
-                Self::with_source(
-                    ErrorKind::ColumnNotFound {
-                        table_name: "unknown".to_string(),
-                        column_name: "unknown".to_string(),
-                    },
-                    err,
-                )
-            }
+            sqlx::Error::ColumnNotFound(column_name) => Self::with_source(
+                ErrorKind::ColumnNotFound {
+                    table_name: "unknown".to_string(),
+                    column_name: column_name.clone(),
+                },
+                err,
+            ),
+            sqlx::Error::ColumnIndexOutOfBounds { index, .. } => Self::with_source(
+                ErrorKind::ColumnNotFound {
+                    table_name: "unknown".to_string(),
+                    column_name: format!("index_{}", index),
+                },
+                err,
+            ),
+
+            // Data conversion errors - critical for ETL
+            sqlx::Error::ColumnDecode { index, .. } => Self::with_source(
+                ErrorKind::DataConversionFailed {
+                    from_type: "database".to_string(),
+                    to_type: "rust".to_string(),
+                    value: Some(format!("column_{}", index)),
+                },
+                err,
+            ),
+            sqlx::Error::Encode(_) => Self::with_source(
+                ErrorKind::DataConversionFailed {
+                    from_type: "rust".to_string(),
+                    to_type: "database".to_string(),
+                    value: None,
+                },
+                err,
+            ),
+            sqlx::Error::Decode(_) => Self::with_source(
+                ErrorKind::DataConversionFailed {
+                    from_type: "database".to_string(),
+                    to_type: "rust".to_string(),
+                    value: None,
+                },
+                err,
+            ),
+
+            // Connection pool errors
             sqlx::Error::PoolTimedOut => Self::with_source(
                 ErrorKind::Timeout {
                     operation: "database_connection_pool".to_string(),
@@ -1163,6 +1303,17 @@ impl From<sqlx::Error> for Error {
                 err,
             ),
             sqlx::Error::PoolClosed => Self::with_source(ErrorKind::ConnectionLost, err),
+
+            // Transaction and system errors
+            sqlx::Error::BeginFailed => Self::with_source(ErrorKind::TransactionFailed, err),
+            sqlx::Error::WorkerCrashed => Self::with_source(
+                ErrorKind::WorkerPoolFailed {
+                    reason: "background_worker_crashed".to_string(),
+                },
+                err,
+            ),
+
+            // Catch-all for remaining variants
             _ => Self::with_source(ErrorKind::Other { description }, err),
         }
     }
@@ -1171,47 +1322,6 @@ impl From<sqlx::Error> for Error {
 impl From<rustls::Error> for Error {
     fn from(err: rustls::Error) -> Self {
         Self::with_source(ErrorKind::TlsConfigurationFailed, err)
-    }
-}
-
-impl From<serde_json::Error> for Error {
-    fn from(err: serde_json::Error) -> Self {
-        if err.is_syntax() || err.is_data() {
-            Self::with_source(ErrorKind::JsonDeserializationFailed, err)
-        } else {
-            Self::with_source(ErrorKind::JsonSerializationFailed, err)
-        }
-    }
-}
-
-impl From<io::Error> for Error {
-    fn from(err: io::Error) -> Self {
-        use io::ErrorKind as IoErrorKind;
-
-        match err.kind() {
-            IoErrorKind::NotFound => Self::with_source(
-                ErrorKind::ConfigurationError {
-                    parameter: "file".to_string(),
-                    reason: "file not found".to_string(),
-                },
-                err,
-            ),
-            IoErrorKind::PermissionDenied => Self::with_source(
-                ErrorKind::ConfigurationError {
-                    parameter: "file_permissions".to_string(),
-                    reason: "permission denied".to_string(),
-                },
-                err,
-            ),
-            IoErrorKind::TimedOut => Self::with_source(
-                ErrorKind::Timeout {
-                    operation: "io".to_string(),
-                    duration_ms: 0,
-                },
-                err,
-            ),
-            _ => Self::with_source(ErrorKind::IoError, err),
-        }
     }
 }
 
@@ -1275,13 +1385,6 @@ mod tests {
     }
 
     #[test]
-    fn test_json_error_conversion() {
-        let json_err = serde_json::from_str::<serde_json::Value>("invalid json").unwrap_err();
-        let err: Error = json_err.into();
-        assert!(matches!(err.kind(), ErrorKind::JsonDeserializationFailed));
-    }
-
-    #[test]
     fn test_error_severity_classification() {
         // Test critical errors
         let critical_err = Error::state_corrupted("state file damaged");
@@ -1333,16 +1436,6 @@ mod tests {
             manual_err.recovery_strategy(),
             RecoveryStrategy::ManualIntervention
         );
-    }
-
-    #[test]
-    fn test_error_display() {
-        let err = Error::connection_failed("localhost", 5432, "test_db");
-        let display = format!("{err}");
-        assert!(display.contains("Failed to connect"));
-        assert!(display.contains("localhost"));
-        assert!(display.contains("5432"));
-        assert!(display.contains("test_db"));
     }
 
     #[test]

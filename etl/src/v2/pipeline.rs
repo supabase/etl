@@ -237,9 +237,9 @@ where
 
         match (apply_worker_result, table_sync_workers_result) {
             (Ok(_), Ok(_)) => Ok(()),
-            (Err(_err), Ok(_)) => Err(Error::apply_worker_failed()),
-            (Ok(_), Err(_)) => Err(Error::worker_pool_failed("table sync workers failed")),
-            (Err(_), Err(_)) => Err(Error::worker_pool_failed(
+            (Err(err), Ok(_)) => Err(Error::apply_worker_failed()),
+            (Ok(_), Err(err)) => Err(Error::worker_pool_failed("table sync workers failed")),
+            (Err(apply_err), Err(table_sync_err)) => Err(Error::worker_pool_failed(
                 "both apply worker and table sync workers failed",
             )),
         }
