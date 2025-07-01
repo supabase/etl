@@ -16,39 +16,12 @@ use crate::v2::replication::apply::{start_apply_loop, ApplyLoopError, ApplyLoopH
 use crate::v2::replication::client::PgReplicationClient;
 use crate::v2::replication::table_sync::{start_table_sync, TableSyncError, TableSyncResult};
 use crate::v2::schema::cache::SchemaCache;
-use crate::v2::state::store::base::{StateStore, StateStoreError};
+use crate::v2::state::store::base::StateStore;
 use crate::v2::state::table::{TableReplicationPhase, TableReplicationPhaseType};
-use crate::v2::workers::base::{Worker, WorkerHandle, WorkerType, WorkerWaitError};
+use crate::v2::workers::base::{Worker, WorkerHandle, WorkerType};
 use crate::v2::workers::pool::TableSyncWorkerPool;
 
 const PHASE_CHANGE_REFRESH_FREQUENCY: Duration = Duration::from_millis(100);
-
-#[derive(Debug, Error)]
-pub enum TableSyncWorkerError {
-    #[error("An error occurred while syncing a table: {0}")]
-    TableSync(#[from] TableSyncError),
-
-    #[error("The replication state is missing for table {0}")]
-    ReplicationStateMissing(TableId),
-
-    #[error("An error occurred while interacting with the state store: {0}")]
-    StateStore(#[from] StateStoreError),
-
-    #[error("An error occurred in the apply loop: {0}")]
-    ApplyLoop(#[from] ApplyLoopError),
-}
-
-#[derive(Debug, Error)]
-pub enum TableSyncWorkerHookError {
-    #[error("An error occurred while updating the table sync worker state: {0}")]
-    TableSyncWorkerState(#[from] TableSyncWorkerStateError),
-}
-
-#[derive(Debug, Error)]
-pub enum TableSyncWorkerStateError {
-    #[error("An error occurred while interacting with the state store: {0}")]
-    StateStore(#[from] StateStoreError),
-}
 
 #[derive(Debug)]
 pub struct TableSyncWorkerStateInner {
@@ -78,7 +51,7 @@ impl TableSyncWorkerStateInner {
         &mut self,
         phase: TableReplicationPhase,
         state_store: S,
-    ) -> Result<(), TableSyncWorkerStateError> {
+    ) -> crate::error::Result<()> {
         self.set_phase(phase);
 
         // If we should store this phase change, we want to do it via the supplied state store.
@@ -202,7 +175,7 @@ impl TableSyncWorkerState {
 #[derive(Debug)]
 pub struct TableSyncWorkerHandle {
     state: TableSyncWorkerState,
-    handle: Option<JoinHandle<Result<(), TableSyncWorkerError>>>,
+    handle: Option<JoinHandle<crate::error::Result<()>>>,
 }
 
 impl WorkerHandle<TableSyncWorkerState> for TableSyncWorkerHandle {
@@ -210,14 +183,16 @@ impl WorkerHandle<TableSyncWorkerState> for TableSyncWorkerHandle {
         self.state.clone()
     }
 
-    async fn wait(mut self) -> Result<(), WorkerWaitError> {
+    async fn wait(mut self) -> Result<(), Error> {
         let Some(handle) = self.handle.take() else {
             return Ok(());
         };
 
-        handle.await??;
-
-        Ok(())
+        match handle.await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(e)) => Err(e),
+            Err(join_err) => Err(Error::worker_panicked("table_sync")),
+        }
     }
 }
 
@@ -270,7 +245,7 @@ where
     S: StateStore + Clone + Send + Sync + 'static,
     D: Destination + Clone + Send + Sync + 'static,
 {
-    type Error = TableSyncWorkerError;
+    type Error = Error;
 
     async fn start(self) -> Result<TableSyncWorkerHandle, Self::Error> {
         info!("Starting table sync worker for table {}", self.table_id);
@@ -287,7 +262,10 @@ where
                 self.table_id
             );
 
-            return Err(TableSyncWorkerError::ReplicationStateMissing(self.table_id));
+            return Err(Error::table_sync_worker_failed(format!(
+                "Replication state missing for table {}",
+                self.table_id
+            )));
         };
 
         let state = TableSyncWorkerState::new(self.table_id, relation_subscription_state);
@@ -312,7 +290,14 @@ where
                     return Ok(())
                 }
                 Ok(TableSyncResult::SyncCompleted { start_lsn }) => start_lsn,
-                Err(err) => return Err(err.into()),
+                Err(err) => {
+                    return Err(Error::with_source(
+                        Error::table_sync_worker_failed(format!("{}", self.table_id))
+                            .kind()
+                            .clone(),
+                        err,
+                    ))
+                }
             };
 
             start_apply_loop(
@@ -325,7 +310,15 @@ where
                 TableSyncWorkerHook::new(self.table_id, state_clone, self.state_store),
                 self.shutdown_rx,
             )
-            .await?;
+            .await
+            .map_err(|e| {
+                Error::with_source(
+                    Error::table_sync_worker_failed(format!("{}", self.table_id))
+                        .kind()
+                        .clone(),
+                    e,
+                )
+            })?;
 
             Ok(())
         };

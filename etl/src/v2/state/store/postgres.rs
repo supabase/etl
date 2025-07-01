@@ -7,15 +7,14 @@ use sqlx::{
     prelude::{FromRow, Type},
     PgPool,
 };
-use thiserror::Error;
 use tokio::sync::RwLock;
 use tokio_postgres::types::PgLsn;
 
-use crate::v2::{
-    pipeline::PipelineId,
-    state::{
-        store::base::{StateStore, StateStoreError},
-        table::TableReplicationPhase,
+use crate::{
+    error::{Error, Result},
+    v2::{
+        pipeline::PipelineId,
+        state::{store::base::StateStore, table::TableReplicationPhase},
     },
 };
 
@@ -32,16 +31,10 @@ pub enum TableState {
     Skipped,
 }
 
-#[derive(Debug, Error)]
-pub enum ToTableStateError {
-    #[error("In-memory table replication phase can't be saved in the state store")]
-    InMemoryPhase,
-}
-
 impl TryFrom<TableReplicationPhase> for (TableState, Option<String>) {
-    type Error = ToTableStateError;
+    type Error = Error;
 
-    fn try_from(value: TableReplicationPhase) -> Result<Self, Self::Error> {
+    fn try_from(value: TableReplicationPhase) -> std::result::Result<Self, Self::Error> {
         Ok(match value {
             TableReplicationPhase::Init => (TableState::Init, None),
             TableReplicationPhase::DataSync => (TableState::DataSync, None),
@@ -52,16 +45,12 @@ impl TryFrom<TableReplicationPhase> for (TableState, Option<String>) {
             TableReplicationPhase::Ready => (TableState::Ready, None),
             TableReplicationPhase::Skipped => (TableState::Skipped, None),
             TableReplicationPhase::SyncWait | TableReplicationPhase::Catchup { .. } => {
-                return Err(ToTableStateError::InMemoryPhase)
+                return Err(Error::state_corrupted(
+                    "In-memory table replication phase can't be saved in the state store",
+                ))
             }
         })
     }
-}
-
-#[derive(Debug, Error)]
-pub enum FromTableStateError {
-    #[error("Lsn can't be missing from the state store if state is SyncDone")]
-    MissingSyncDoneLsn,
 }
 
 #[derive(Debug, FromRow)]
@@ -98,7 +87,7 @@ impl PostgresStateStore {
         }
     }
 
-    async fn connect_to_source(&self) -> Result<PgPool, sqlx::Error> {
+    async fn connect_to_source(&self) -> Result<PgPool> {
         let options = self
             .source_config
             .clone()
@@ -117,7 +106,7 @@ impl PostgresStateStore {
         &self,
         pool: &PgPool,
         pipeline_id: PipelineId,
-    ) -> sqlx::Result<Vec<ReplicationStateRow>> {
+    ) -> Result<Vec<ReplicationStateRow>> {
         let states = sqlx::query_as::<_, ReplicationStateRow>(
             r#"
             select pipeline_id, table_id, state, sync_done_lsn
@@ -138,7 +127,7 @@ impl PostgresStateStore {
         table_id: TableId,
         state: TableState,
         sync_done_lsn: Option<String>,
-    ) -> sqlx::Result<()> {
+    ) -> Result<()> {
         // We connect to source database each time we update because we assume that
         // these updates will be infrequent. It has some overhead to establish a
         // connection but it's better than holding a connection open for long periods
@@ -166,7 +155,7 @@ impl PostgresStateStore {
         &self,
         state: &TableState,
         sync_done_lsn: Option<String>,
-    ) -> Result<TableReplicationPhase, StateStoreError> {
+    ) -> Result<TableReplicationPhase> {
         Ok(match state {
             TableState::Init => TableReplicationPhase::Init,
             TableState::DataSync => TableReplicationPhase::DataSync,
@@ -175,10 +164,14 @@ impl PostgresStateStore {
                 Some(lsn_str) => {
                     let lsn = lsn_str
                         .parse::<PgLsn>()
-                        .map_err(|_| StateStoreError::InvalidConfirmedFlushLsn(lsn_str))?;
+                        .map_err(|_| Error::data_conversion_failed("string", "PgLsn", lsn_str))?;
                     TableReplicationPhase::SyncDone { lsn }
                 }
-                None => return Err(FromTableStateError::MissingSyncDoneLsn)?,
+                None => {
+                    return Err(Error::state_corrupted(
+                        "Lsn can't be missing from the state store if state is SyncDone",
+                    ))
+                }
             },
             TableState::Ready => TableReplicationPhase::Ready,
             TableState::Skipped => TableReplicationPhase::Skipped,
@@ -190,19 +183,19 @@ impl StateStore for PostgresStateStore {
     async fn get_table_replication_state(
         &self,
         table_id: TableId,
-    ) -> Result<Option<TableReplicationPhase>, StateStoreError> {
+    ) -> Result<Option<TableReplicationPhase>> {
         let inner = self.inner.read().await;
         Ok(inner.table_states.get(&table_id).cloned())
     }
 
     async fn get_table_replication_states(
         &self,
-    ) -> Result<HashMap<TableId, TableReplicationPhase>, StateStoreError> {
+    ) -> Result<HashMap<TableId, TableReplicationPhase>> {
         let inner = self.inner.read().await;
         Ok(inner.table_states.clone())
     }
 
-    async fn load_table_replication_states(&self) -> Result<usize, StateStoreError> {
+    async fn load_table_replication_states(&self) -> Result<usize> {
         let pool = self.connect_to_source().await?;
         let replication_state_rows = self
             .get_all_replication_state_rows(&pool, self.pipeline_id)
@@ -223,7 +216,7 @@ impl StateStore for PostgresStateStore {
         &self,
         table_id: TableId,
         state: TableReplicationPhase,
-    ) -> Result<(), StateStoreError> {
+    ) -> Result<()> {
         let (table_state, sync_done_lsn) = state.try_into()?;
         self.update_replication_state(self.pipeline_id, table_id, table_state, sync_done_lsn)
             .await?;

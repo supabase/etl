@@ -6,12 +6,13 @@ use std::sync::Arc;
 use tokio::sync::{Notify, RwLock};
 use tracing::{info, warn};
 
+use crate::error::{Error, Result};
 use crate::v2::concurrency::future::ReactiveFutureCallback;
 use crate::v2::destination::base::Destination;
 use crate::v2::state::store::base::StateStore;
 use crate::v2::workers::base::{Worker, WorkerHandle, WorkerWaitError, WorkerWaitErrors};
 use crate::v2::workers::table_sync::{
-    TableSyncWorker, TableSyncWorkerError, TableSyncWorkerHandle, TableSyncWorkerState,
+    TableSyncWorker, TableSyncWorkerHandle, TableSyncWorkerState,
 };
 
 #[derive(Debug)]
@@ -46,7 +47,7 @@ impl TableSyncWorkerPoolInner {
     pub async fn start_worker<S, D>(
         &mut self,
         worker: TableSyncWorker<S, D>,
-    ) -> Result<bool, TableSyncWorkerError>
+    ) -> std::result::Result<bool, Error>
     where
         S: StateStore + Clone + Send + Sync + 'static,
         D: Destination + Clone + Send + Sync + 'static,
@@ -98,7 +99,7 @@ impl TableSyncWorkerPoolInner {
         }
     }
 
-    pub async fn wait_all(&mut self) -> Result<Option<Arc<Notify>>, WorkerWaitErrors> {
+    pub async fn wait_all(&mut self) -> std::result::Result<Option<Arc<Notify>>, WorkerWaitErrors> {
         // If there are active workers, we return the notify, signaling that not all of them are
         // ready.
         //
@@ -127,7 +128,10 @@ impl TableSyncWorkerPoolInner {
                 // This should not happen since right now the `ReactiveFuture` is configured to
                 // re-propagate the error after marking a table sync worker as finished.
                 if let TableSyncWorkerInactiveReason::Errored(err) = finish {
-                    errors.push(WorkerWaitError::WorkerSilentlyFailed(err));
+                    errors.push(Error::worker_pool_failed(format!(
+                        "Worker task failed silently: {}",
+                        err
+                    )));
                 }
             }
         }
@@ -166,13 +170,13 @@ impl TableSyncWorkerPool {
         self.workers.clone()
     }
 
-    pub async fn wait_all(&self) -> Result<(), WorkerWaitErrors> {
+    pub async fn wait_all(&self) -> std::result::Result<(), WorkerWaitErrors> {
         loop {
             // We try first to wait for all workers to be finished, in case there are still active
             // workers, we get back a `Notify` which we will use to try again once new workers reported
             // their finished status.
             let mut workers = self.workers.write().await;
-            let Some(notify) = workers.wait_all().await? else {
+            let Some(notify) = workers.wait_all().await.map_err(|e| e)? else {
                 return Ok(());
             };
             // We must drop the lock here, otherwise the system will deadlock since we will be

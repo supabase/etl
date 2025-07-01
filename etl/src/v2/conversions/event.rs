@@ -1,42 +1,16 @@
-use crate::conversions::table_row::TableRow;
-use crate::conversions::text::{FromTextError, TextFormatConverter};
-use crate::conversions::Cell;
-use crate::v2::schema::cache::SchemaCache;
-use crate::v2::state::store::base::StateStoreError;
 use core::str;
 use postgres::schema::{ColumnSchema, TableId, TableName, TableSchema};
 use postgres::types::convert_type_oid_to_type;
 use postgres_replication::protocol;
 use postgres_replication::protocol::LogicalReplicationMessage;
-use std::{fmt, io, str::Utf8Error};
-use thiserror::Error;
+use std::fmt;
+use std::fmt::format;
 
-#[derive(Debug, Error)]
-pub enum EventConversionError {
-    #[error("An unknown replication message type was encountered")]
-    UnknownReplicationMessage,
-
-    #[error("Binary format is not supported for data conversion")]
-    BinaryFormatNotSupported,
-
-    #[error("Missing tuple data in delete body")]
-    MissingTupleInDeleteBody,
-
-    #[error("Table schema not found for table id {0}")]
-    MissingSchema(TableId),
-
-    #[error("Error converting from bytes: {0}")]
-    FromBytes(#[from] FromTextError),
-
-    #[error("Invalid string value encountered: {0}")]
-    InvalidStr(#[from] Utf8Error),
-
-    #[error("IO error encountered: {0}")]
-    Io(#[from] io::Error),
-
-    #[error("An error occurred in the state store: {0}")]
-    StateStore(#[from] StateStoreError),
-}
+use crate::conversions::table_row::TableRow;
+use crate::conversions::text::TextFormatConverter;
+use crate::conversions::Cell;
+use crate::error::{Error, Result};
+use crate::v2::schema::cache::SchemaCache;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct BeginEvent {
@@ -80,9 +54,7 @@ pub struct RelationEvent {
 }
 
 impl RelationEvent {
-    pub fn from_protocol(
-        relation_body: &protocol::RelationBody,
-    ) -> Result<Self, EventConversionError> {
+    pub fn from_protocol(relation_body: &protocol::RelationBody) -> Result<Self> {
         let table_name = TableName::new(
             relation_body.namespace()?.to_string(),
             relation_body.name()?.to_string(),
@@ -91,15 +63,13 @@ impl RelationEvent {
             .columns()
             .iter()
             .map(Self::build_column_schema)
-            .collect::<Result<Vec<ColumnSchema>, _>>()?;
+            .collect::<Result<Vec<ColumnSchema>>>()?;
         let table_schema = TableSchema::new(relation_body.rel_id(), table_name, column_schemas);
 
         Ok(Self { table_schema })
     }
 
-    fn build_column_schema(
-        column: &protocol::Column,
-    ) -> Result<ColumnSchema, EventConversionError> {
+    fn build_column_schema(column: &protocol::Column) -> Result<ColumnSchema> {
         Ok(ColumnSchema::new(
             column.name()?.to_string(),
             convert_type_oid_to_type(column.type_id() as u32),
@@ -213,20 +183,17 @@ impl From<Event> for EventType {
     }
 }
 
-async fn get_table_schema(
-    schema_cache: &SchemaCache,
-    table_id: TableId,
-) -> Result<TableSchema, EventConversionError> {
+async fn get_table_schema(schema_cache: &SchemaCache, table_id: TableId) -> Result<TableSchema> {
     schema_cache
         .get_table_schema(&table_id)
         .await
-        .ok_or(EventConversionError::MissingSchema(table_id))
+        .ok_or_else(|| Error::table_not_found(table_id.to_string()))
 }
 
 fn convert_tuple_to_row(
     column_schemas: &[ColumnSchema],
     tuple_data: &[protocol::TupleData],
-) -> Result<TableRow, EventConversionError> {
+) -> Result<TableRow> {
     let mut values = Vec::with_capacity(column_schemas.len());
 
     for (i, column_schema) in column_schemas.iter().enumerate() {
@@ -236,11 +203,15 @@ fn convert_tuple_to_row(
                 TextFormatConverter::default_value(&column_schema.typ)
             }
             protocol::TupleData::Binary(_) => {
-                return Err(EventConversionError::BinaryFormatNotSupported)
+                return Err(Error::binary_parsing_failed("replication_message"))
             }
             protocol::TupleData::Text(bytes) => {
-                let str = str::from_utf8(&bytes[..])?;
-                TextFormatConverter::try_from_str(&column_schema.typ, str)?
+                let str = str::from_utf8(&bytes[..])
+                    .map_err(|_| Error::data_conversion_failed("bytes", "utf8_string", bytes))?;
+
+                TextFormatConverter::try_from_str(&column_schema.typ, str).map_err(|e| {
+                    Error::data_conversion_failed("string", &column_schema.typ.to_string(), str)
+                })?
             }
         };
         values.push(cell);
@@ -252,7 +223,7 @@ fn convert_tuple_to_row(
 async fn convert_insert_to_event(
     schema_cache: &SchemaCache,
     insert_body: &protocol::InsertBody,
-) -> Result<Event, EventConversionError> {
+) -> Result<Event> {
     let table_id = insert_body.rel_id();
     let table_schema = get_table_schema(schema_cache, table_id).await?;
     let row = convert_tuple_to_row(
@@ -266,7 +237,7 @@ async fn convert_insert_to_event(
 async fn convert_update_to_event(
     schema_cache: &SchemaCache,
     update_body: &protocol::UpdateBody,
-) -> Result<Event, EventConversionError> {
+) -> Result<Event> {
     let table_id = update_body.rel_id();
     let table_schema = get_table_schema(schema_cache, table_id).await?;
 
@@ -294,7 +265,7 @@ async fn convert_update_to_event(
 async fn convert_delete_to_event(
     schema_cache: &SchemaCache,
     delete_body: &protocol::DeleteBody,
-) -> Result<Event, EventConversionError> {
+) -> Result<Event> {
     let table_id = delete_body.rel_id();
     let table_schema = get_table_schema(schema_cache, table_id).await?;
 
@@ -316,7 +287,7 @@ async fn convert_delete_to_event(
 pub async fn convert_message_to_event(
     schema_cache: &SchemaCache,
     message: &LogicalReplicationMessage,
-) -> Result<Event, EventConversionError> {
+) -> Result<Event> {
     match message {
         LogicalReplicationMessage::Begin(begin_body) => {
             Ok(Event::Begin(BeginEvent::from_protocol(begin_body)))
@@ -342,6 +313,8 @@ pub async fn convert_message_to_event(
         LogicalReplicationMessage::Origin(_) | LogicalReplicationMessage::Type(_) => {
             Ok(Event::Unsupported)
         }
-        _ => Err(EventConversionError::UnknownReplicationMessage),
+        _ => Err(Error::other(
+            "An unknown replication message type was encountered",
+        )),
     }
 }

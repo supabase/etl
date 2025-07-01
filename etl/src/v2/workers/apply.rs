@@ -6,13 +6,13 @@ use crate::v2::replication::apply::{start_apply_loop, ApplyLoopError, ApplyLoopH
 use crate::v2::replication::client::{PgReplicationClient, PgReplicationError};
 use crate::v2::replication::slot::{get_slot_name, SlotError};
 use crate::v2::schema::cache::SchemaCache;
-use crate::v2::state::store::base::{StateStore, StateStoreError};
 use crate::v2::state::table::{TableReplicationPhase, TableReplicationPhaseType};
 use crate::v2::workers::base::{Worker, WorkerHandle, WorkerType, WorkerWaitError};
 use crate::v2::workers::pool::TableSyncWorkerPool;
 use crate::v2::workers::table_sync::{
     TableSyncWorker, TableSyncWorkerError, TableSyncWorkerState, TableSyncWorkerStateError,
 };
+use crate::{error::Error, v2::state::store::base::StateStore};
 use postgres::schema::TableId;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -24,7 +24,7 @@ use tracing::{error, info};
 #[derive(Debug, Error)]
 pub enum ApplyWorkerError {
     #[error("An error occurred while interacting with the state store: {0}")]
-    StateStore(#[from] StateStoreError),
+    StateStore(#[from] Error),
 
     #[error("An error occurred in the apply loop: {0}")]
     ApplyLoop(#[from] ApplyLoopError),
@@ -39,7 +39,7 @@ pub enum ApplyWorkerError {
 #[derive(Debug, Error)]
 pub enum ApplyWorkerHookError {
     #[error("An error occurred while interacting with the state store: {0}")]
-    StateStore(#[from] StateStoreError),
+    StateStore(#[from] Error),
 
     #[error("An error occurred while interacting with the table sync worker state: {0}")]
     TableSyncWorkerState(#[from] TableSyncWorkerStateError),
@@ -59,14 +59,16 @@ pub struct ApplyWorkerHandle {
 impl WorkerHandle<()> for ApplyWorkerHandle {
     fn state(&self) {}
 
-    async fn wait(mut self) -> Result<(), WorkerWaitError> {
+    async fn wait(mut self) -> Result<(), Error> {
         let Some(handle) = self.handle.take() else {
             return Ok(());
         };
 
-        handle.await??;
-
-        Ok(())
+        match handle.await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(e)) => Err(e),
+            Err(join_err) => Err(Error::worker_panicked("apply")),
+        }
     }
 }
 
@@ -212,7 +214,7 @@ where
     S: StateStore + Clone + Send + Sync + 'static,
     D: Destination + Clone + Send + Sync + 'static,
 {
-    async fn start_table_sync_worker(&self, table_id: TableId) -> Result<(), ApplyWorkerHookError> {
+    async fn start_table_sync_worker(&self, table_id: TableId) -> crate::error::Result<()> {
         // TODO: switch to a connection pool which hands out connections.
         let replication_client = self.replication_client.duplicate().await?;
         let worker = TableSyncWorker::new(
@@ -243,7 +245,7 @@ where
         &self,
         table_id: TableId,
         current_lsn: PgLsn,
-    ) -> Result<bool, ApplyWorkerHookError> {
+    ) -> crate::error::Result<bool> {
         let table_sync_worker_state = {
             let pool = self.pool.read().await;
             pool.get_active_worker_state(table_id)
@@ -265,7 +267,7 @@ where
         table_id: TableId,
         table_sync_worker_state: TableSyncWorkerState,
         current_lsn: PgLsn,
-    ) -> Result<bool, ApplyWorkerHookError> {
+    ) -> crate::error::Result<bool> {
         let mut catchup_started = false;
         {
             let mut inner = table_sync_worker_state.get_inner().write().await;
@@ -303,8 +305,12 @@ where
 
     async fn active_table_replication_states(
         &self,
-    ) -> Result<HashMap<TableId, TableReplicationPhase>, ApplyWorkerHookError> {
-        let mut table_replication_states = self.state_store.get_table_replication_states().await?;
+    ) -> Result<HashMap<TableId, TableReplicationPhase>, Error> {
+        let mut table_replication_states = self
+            .state_store
+            .get_table_replication_states()
+            .await
+            .map_err(|e| Error::with_source(Error::apply_worker_failed().kind().clone(), e))?;
         table_replication_states.retain(|_table_id, state| !state.as_type().is_done());
 
         Ok(table_replication_states)
@@ -410,7 +416,10 @@ where
                 let Some(state) = self
                     .state_store
                     .get_table_replication_state(table_id)
-                    .await?
+                    .await
+                    .map_err(|e| {
+                        Error::with_source(Error::apply_worker_failed().kind().clone(), e)
+                    })?
                 else {
                     // If we don't even find the state for this table, we skip the event entirely.
                     return Ok(false);
