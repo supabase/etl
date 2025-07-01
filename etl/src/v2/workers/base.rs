@@ -8,7 +8,7 @@ use crate::error::Result;
 /// The type of worker that is currently running.
 ///
 /// A worker type can also have properties that uniquely identify it.
-#[derive(Debug)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum WorkerType {
     Apply,
     TableSync { table_id: TableId },

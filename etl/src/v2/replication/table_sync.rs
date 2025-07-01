@@ -71,10 +71,11 @@ where
             TableReplicationPhaseType::DataSync,
             TableReplicationPhaseType::FinishedCopy
         );
-        return Err(Error::table_replication_phase_invalid(
-            expected_phases,
-            phase_type.to_string(),
-        ));
+
+        return Err(Error::new(ErrorKind::TableReplicationPhaseInvalid {
+            expected: expected_phases,
+            actual: phase_type.to_string(),
+        }));
     }
 
     // We are safe to unlock the state here, since we know that the state will be changed by the

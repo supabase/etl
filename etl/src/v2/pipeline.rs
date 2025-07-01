@@ -163,9 +163,10 @@ where
                 "The publication '{}' does not exist in the database",
                 self.identity.publication_name()
             );
-            return Err(Error::publication_not_found(
-                self.identity.publication_name().to_owned(),
-            ));
+
+            return Err(Error::new(ErrorKind::PublicationNotFound {
+                publication_name: self.identity.publication_name().to_string(),
+            }));
         }
 
         // We load the replication states to have them ready to be read.
@@ -237,11 +238,12 @@ where
 
         match (apply_worker_result, table_sync_workers_result) {
             (Ok(_), Ok(_)) => Ok(()),
-            (Err(err), Ok(_)) => Err(Error::apply_worker_failed()),
-            (Ok(_), Err(err)) => Err(Error::worker_pool_failed("table sync workers failed")),
-            (Err(apply_err), Err(table_sync_err)) => Err(Error::worker_pool_failed(
-                "both apply worker and table sync workers failed",
-            )),
+            (Err(err), Ok(_)) => Err(err),
+            (Ok(_), Err(err)) => Err(err),
+            (Err(apply_err), Err(table_sync_err)) => {
+                let err = Error::from_many(vec![apply_err, table_sync_err]);
+                Err(err)
+            },
         }
     }
 

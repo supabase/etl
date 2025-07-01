@@ -220,7 +220,9 @@ fn convert_tuple_to_row(
                 TextFormatConverter::default_value(&column_schema.typ)
             }
             protocol::TupleData::Binary(_) => {
-                return Err(Error::binary_parsing_failed("replication_message"))
+                return Err(Error::new(ErrorKind::TupleDataNotSupported {
+                    type_name: "binary".to_string(),
+                }));
             }
             protocol::TupleData::Text(bytes) => {
                 let str = str::from_utf8(&bytes[..]).map_err(|err| {

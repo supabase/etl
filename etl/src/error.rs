@@ -1,3 +1,4 @@
+use crate::v2::workers::base::WorkerType;
 use std::{borrow, error, fmt, result};
 
 /// Type alias for convenience when using the Result type with our Error.
@@ -37,10 +38,13 @@ pub enum ErrorKind {
     /// Connection lost during ongoing operations
     ConnectionLost,
 
+    /// The table replication state is missing for a table
+    TableReplicationStateMissing { table_name: String },
+
     /// Replication slot operation failure
-    ReplicationSlotFailed {
+    ReplicationSlotNotCreated {
         slot_name: String,
-        operation: String,
+        reason: String
     },
     /// Replication slot not found in database
     ReplicationSlotNotFound { slot_name: String },
@@ -58,8 +62,8 @@ pub enum ErrorKind {
     EventsStreamFailed,
     /// LSN inconsistency or invalid state transition
     LsnConsistencyError {
-        expected_lsn: String,
-        actual_lsn: String,
+        expected: String,
+        actual: String,
     },
     /// The transaction did not start but a `COMMIT` message was encountered
     TransactionNotStarted,
@@ -91,13 +95,14 @@ pub enum ErrorKind {
     /// Pipeline shutdown failed
     PipelineShutdownFailed,
     /// Worker task panicked during execution
-    WorkerPanicked { worker_type: String },
+    WorkerPanicked { worker_type: WorkerType },
     /// Worker task cancelled during execution
-    WorkerCancelled { worker_type: String },
-    /// Table sync worker specific failure
-    TableSyncWorkerFailed { table_name: String },
-    /// Apply worker specific failure
-    ApplyWorkerFailed,
+    WorkerCancelled { worker_type: WorkerType },
+    /// A table sync worker experienced a silent failure
+    WorkerFailedSilently {
+        worker_type: WorkerType,
+        reason: String,
+    },
     /// Worker pool capacity or coordination failure
     WorkerPoolFailed { reason: String },
 
@@ -122,6 +127,9 @@ pub enum ErrorKind {
     },
     /// Write capacity or quota exceeded
     DestinationQuotaExceeded { destination_type: String },
+
+    /// The data of the tuple is not supported
+    TupleDataNotSupported { type_name: String },
 
     /// State store read operation failure
     StateStoreReadFailed { key: String },
@@ -148,8 +156,6 @@ pub enum ErrorKind {
     JsonSerializationFailed,
     /// JSON deserialization failure
     JsonDeserializationFailed,
-    /// Binary data parsing failure
-    BinaryParsingFailed { data_type: String },
     /// Encryption operation failure
     EncryptionFailed,
     /// Decryption operation failure
@@ -278,116 +284,12 @@ impl Error {
         )
     }
 
-    /// Creates a connection failed error.
-    pub fn connection_failed(
-        host: impl Into<String>,
-        port: u16,
-        database: impl Into<String>,
-    ) -> Self {
-        Self::new(ErrorKind::ConnectionFailed {
-            host: host.into(),
-            port,
-            database: database.into(),
-        })
-    }
-
-    /// Creates an authentication failed error.
-    pub fn authentication_failed(user: impl Into<String>, database: impl Into<String>) -> Self {
-        Self::new(ErrorKind::AuthenticationFailed {
-            user: user.into(),
-            database: database.into(),
-        })
-    }
-
-    /// Creates a TLS configuration failed error.
-    pub fn tls_configuration_failed() -> Self {
-        Self::new(ErrorKind::TlsConfigurationFailed)
-    }
-
-    /// Creates a query execution failed error.
-    pub fn query_execution_failed(query: impl Into<String>) -> Self {
-        Self::new(ErrorKind::QueryExecutionFailed {
-            query: query.into(),
-        })
-    }
-
-    /// Creates a connection lost error.
-    pub fn connection_lost() -> Self {
-        Self::new(ErrorKind::ConnectionLost)
-    }
-
-    // Replication error builders
-    /// Creates a replication slot operation failed error.
-    pub fn replication_slot_failed(
-        slot_name: impl Into<String>,
-        operation: impl Into<String>,
-    ) -> Self {
-        Self::new(ErrorKind::ReplicationSlotFailed {
-            slot_name: slot_name.into(),
-            operation: operation.into(),
-        })
-    }
-
-    /// Creates a replication slot not found error.
-    pub fn replication_slot_not_found(slot_name: impl Into<String>) -> Self {
-        Self::new(ErrorKind::ReplicationSlotNotFound {
-            slot_name: slot_name.into(),
-        })
-    }
-
-    /// Creates a replication slot already exists error.
-    pub fn replication_slot_already_exists(slot_name: impl Into<String>) -> Self {
-        Self::new(ErrorKind::ReplicationSlotAlreadyExists {
-            slot_name: slot_name.into(),
-        })
-    }
-
-    /// Creates a publication not found error.
-    pub fn publication_not_found(publication_name: impl Into<String>) -> Self {
-        Self::new(ErrorKind::PublicationNotFound {
-            publication_name: publication_name.into(),
-        })
-    }
-
-    /// Creates a CDC stream connection lost error.
-    pub fn cdc_stream_connection_lost() -> Self {
-        Self::new(ErrorKind::CdcStreamConnectionLost)
-    }
-
-    /// Creates a table copy stream failed error.
-    pub fn table_copy_stream_failed(table_name: impl Into<String>) -> Self {
-        Self::new(ErrorKind::TableCopyStreamFailed {
-            table_name: table_name.into(),
-        })
-    }
-
-    /// Creates an LSN consistency error.
-    pub fn lsn_consistency_error(
-        expected_lsn: impl Into<String>,
-        actual_lsn: impl Into<String>,
-    ) -> Self {
-        Self::new(ErrorKind::LsnConsistencyError {
-            expected_lsn: expected_lsn.into(),
-            actual_lsn: actual_lsn.into(),
-        })
-    }
-
     pub fn transaction_not_started() -> Self {
         Self::new(ErrorKind::TransactionNotStarted)
     }
 
     pub fn event_type_mismatch(expected: impl Into<String>, actual: impl Into<String>) -> Self {
         Self::new(ErrorKind::EventTypeMismatch {
-            expected: expected.into(),
-            actual: actual.into(),
-        })
-    }
-
-    pub fn table_replication_phase_invalid(
-        expected: impl Into<String>,
-        actual: impl Into<String>,
-    ) -> Self {
-        Self::new(ErrorKind::TableReplicationPhaseInvalid {
             expected: expected.into(),
             actual: actual.into(),
         })
@@ -408,210 +310,10 @@ impl Error {
         })
     }
 
-    /// Creates an unsupported data type error.
-    pub fn unsupported_data_type(
-        type_name: impl Into<String>,
-        type_oid: u32,
-        table_name: impl Into<String>,
-    ) -> Self {
-        Self::new(ErrorKind::UnsupportedDataType {
-            type_name: type_name.into(),
-            type_oid,
-            table_name: table_name.into(),
-        })
-    }
-
-    /// Creates a schema validation failed error.
-    pub fn schema_validation_failed(
-        table_name: impl Into<String>,
-        reason: impl Into<String>,
-    ) -> Self {
-        Self::new(ErrorKind::SchemaValidationFailed {
-            table_name: table_name.into(),
-            reason: reason.into(),
-        })
-    }
-
-    /// Creates a replica identity issue error.
-    pub fn replica_identity_issue(table_name: impl Into<String>) -> Self {
-        Self::new(ErrorKind::ReplicaIdentityIssue {
-            table_name: table_name.into(),
-        })
-    }
-
-    /// Creates a worker panicked error.
-    pub fn worker_panicked(worker_type: impl Into<String>) -> Self {
-        Self::new(ErrorKind::WorkerPanicked {
-            worker_type: worker_type.into(),
-        })
-    }
-
-    /// Creates a worker cancelled error.
-    pub fn worker_cancelled(worker_type: impl Into<String>) -> Self {
-        Self::new(ErrorKind::WorkerCancelled {
-            worker_type: worker_type.into(),
-        })
-    }
-
-    /// Creates a destination connection failed error.
-    pub fn destination_connection_failed(destination_type: impl Into<String>) -> Self {
-        Self::new(ErrorKind::DestinationConnectionFailed {
-            destination_type: destination_type.into(),
-        })
-    }
-
-    /// Creates a destination table creation failed error.
-    pub fn destination_table_creation_failed(
-        table_name: impl Into<String>,
-        destination_type: impl Into<String>,
-    ) -> Self {
-        Self::new(ErrorKind::DestinationTableCreationFailed {
-            table_name: table_name.into(),
-            destination_type: destination_type.into(),
-        })
-    }
-
-    /// Creates a destination schema mismatch error.
-    pub fn destination_schema_mismatch(
-        table_name: impl Into<String>,
-        reason: impl Into<String>,
-    ) -> Self {
-        Self::new(ErrorKind::DestinationSchemaMismatch {
-            table_name: table_name.into(),
-            reason: reason.into(),
-        })
-    }
-
-    /// Creates a destination insertion failed error.
-    pub fn destination_insertion_failed(
-        table_name: impl Into<String>,
-        destination_type: impl Into<String>,
-    ) -> Self {
-        Self::new(ErrorKind::DestinationInsertionFailed {
-            table_name: table_name.into(),
-            destination_type: destination_type.into(),
-        })
-    }
-
-    /// Creates a destination provider error.
-    pub fn destination_provider_error(
-        provider: impl Into<String>,
-        error_code: Option<String>,
-    ) -> Self {
-        Self::new(ErrorKind::DestinationProviderError {
-            provider: provider.into(),
-            error_code,
-        })
-    }
-
-    /// Creates a destination quota exceeded error.
-    pub fn destination_quota_exceeded(destination_type: impl Into<String>) -> Self {
-        Self::new(ErrorKind::DestinationQuotaExceeded {
-            destination_type: destination_type.into(),
-        })
-    }
-
-    /// Creates a state store read failed error.
-    pub fn state_store_read_failed(key: impl Into<String>) -> Self {
-        Self::new(ErrorKind::StateStoreReadFailed { key: key.into() })
-    }
-
-    /// Creates a state store write failed error.
-    pub fn state_store_write_failed(key: impl Into<String>) -> Self {
-        Self::new(ErrorKind::StateStoreWriteFailed { key: key.into() })
-    }
-
-    /// Creates a state store delete failed error.
-    pub fn state_store_delete_failed(key: impl Into<String>) -> Self {
-        Self::new(ErrorKind::StateStoreDeleteFailed { key: key.into() })
-    }
-
-    /// Creates a state corrupted error.
-    pub fn state_corrupted(description: impl Into<String>) -> Self {
-        Self::new(ErrorKind::StateCorrupted {
-            description: description.into(),
-        })
-    }
-
-    /// Creates a state lock timeout error.
-    pub fn state_lock_timeout(resource: impl Into<String>) -> Self {
-        Self::new(ErrorKind::StateLockTimeout {
-            resource: resource.into(),
-        })
-    }
-
-    /// Creates a checkpoint failed error.
-    pub fn checkpoint_failed(reason: impl Into<String>) -> Self {
-        Self::new(ErrorKind::CheckpointFailed {
-            reason: reason.into(),
-        })
-    }
-
-    /// Creates a recovery failed error.
-    pub fn recovery_failed(reason: impl Into<String>) -> Self {
-        Self::new(ErrorKind::RecoveryFailed {
-            reason: reason.into(),
-        })
-    }
-
-    /// Creates a JSON serialization failed error.
-    pub fn json_serialization_failed() -> Self {
-        Self::new(ErrorKind::JsonSerializationFailed)
-    }
-
-    /// Creates a JSON deserialization failed error.
-    pub fn json_deserialization_failed() -> Self {
-        Self::new(ErrorKind::JsonDeserializationFailed)
-    }
-
-    /// Creates a binary parsing failed error.
-    pub fn binary_parsing_failed(data_type: impl Into<String>) -> Self {
-        Self::new(ErrorKind::BinaryParsingFailed {
-            data_type: data_type.into(),
-        })
-    }
-
-    /// Creates an encryption failed error.
-    pub fn encryption_failed() -> Self {
-        Self::new(ErrorKind::EncryptionFailed)
-    }
-
-    /// Creates a decryption failed error.
-    pub fn decryption_failed() -> Self {
-        Self::new(ErrorKind::DecryptionFailed)
-    }
-
-    /// Creates a configuration error.
-    pub fn configuration_error(parameter: impl Into<String>, reason: impl Into<String>) -> Self {
-        Self::new(ErrorKind::ConfigurationError {
-            parameter: parameter.into(),
-            reason: reason.into(),
-        })
-    }
-
-    /// Creates a resource limit exceeded error.
-    pub fn resource_limit_exceeded(resource: impl Into<String>, limit: impl Into<String>) -> Self {
-        Self::new(ErrorKind::ResourceLimitExceeded {
-            resource: resource.into(),
-            limit: limit.into(),
-        })
-    }
-
-    /// Creates an I/O error.
-    pub fn io_error() -> Self {
-        Self::new(ErrorKind::IoError)
-    }
-
-    /// Creates a network error.
-    pub fn network_error() -> Self {
-        Self::new(ErrorKind::NetworkError)
-    }
-
-    /// Creates a timeout error.
-    pub fn timeout(operation: impl Into<String>, duration_ms: u64) -> Self {
-        Self::new(ErrorKind::Timeout {
-            operation: operation.into(),
-            duration_ms,
+    /// Creates a replication slot not found error.
+    pub fn replication_slot_not_found(slot_name: impl Into<String>) -> Self {
+        Self::new(ErrorKind::ReplicationSlotNotFound {
+            slot_name: slot_name.into(),
         })
     }
 
@@ -638,7 +340,7 @@ impl Error {
 
             // High severity errors
             ConnectionLost
-            | ReplicationSlotFailed { .. }
+            | ReplicationSlotNotCreated { .. }
             | DestinationQuotaExceeded { .. }
             | WorkerPoolFailed { .. }
             | CheckpointFailed { .. }
@@ -763,7 +465,7 @@ impl fmt::Display for Error {
             TransactionFailed => write!(f, "database transaction failed"),
             ConnectionLost => write!(f, "database connection lost"),
 
-            ReplicationSlotFailed {
+            ReplicationSlotNotCreated {
                 slot_name,
                 operation,
             } => {
@@ -788,8 +490,8 @@ impl fmt::Display for Error {
             }
             EventsStreamFailed => write!(f, "events stream processing failed"),
             LsnConsistencyError {
-                expected_lsn,
-                actual_lsn,
+                expected: expected_lsn,
+                actual: actual_lsn,
             } => {
                 write!(
                     f,
@@ -1064,7 +766,7 @@ impl From<tokio_postgres::Error> for Error {
 
                 // Replication-specific errors (Class 55)
                 "55000" | "55006" => Self::with_source(
-                    ErrorKind::ReplicationSlotFailed {
+                    ErrorKind::ReplicationSlotNotCreated {
                         slot_name: "unknown".to_string(),
                         operation: "unknown".to_string(),
                     },
@@ -1207,9 +909,8 @@ impl From<sqlx::Error> for Error {
                     ),
 
                     // Transaction errors (Class 25, 40)
-                    "25000" | "25001" | "25P01" | "25P02" | "40001" | "40002" | "40003" | "40P01" => {
-                        Self::with_source(ErrorKind::TransactionFailed, err)
-                    }
+                    "25000" | "25001" | "25P01" | "25P02" | "40001" | "40002" | "40003"
+                    | "40P01" => Self::with_source(ErrorKind::TransactionFailed, err),
 
                     // Data exceptions (Class 22)
                     "22000" | "22001" | "22003" | "22007" | "22012" | "22P02" | "22P03" => {
@@ -1343,106 +1044,4 @@ fn extract_slot_name_from_error(error_msg: &str) -> Option<String> {
     }
 
     None
-}
-
-#[cfg(test)]
-mod tests {
-    use crate::error::{Error, ErrorKind, ErrorSeverity, RecoveryStrategy};
-    use std::error::Error as StdError;
-    use std::io;
-
-    #[test]
-    fn test_error_creation() {
-        let err = Error::connection_failed("localhost", 5432, "test_db");
-        assert!(matches!(err.kind(), ErrorKind::ConnectionFailed { .. }));
-        assert_eq!(err.severity(), ErrorSeverity::Medium);
-        assert_eq!(err.recovery_strategy(), RecoveryStrategy::RetryWithBackoff);
-        assert!(err.is_retryable());
-        assert!(!err.is_permanent());
-    }
-
-    #[test]
-    fn test_error_with_source() {
-        let io_err = io::Error::new(io::ErrorKind::NotFound, "file not found");
-        let err = Error::with_source(
-            ErrorKind::ConfigurationError {
-                parameter: "config_file".to_string(),
-                reason: "missing".to_string(),
-            },
-            io_err,
-        );
-
-        assert!(err.source().is_some());
-        assert_eq!(err.recovery_strategy(), RecoveryStrategy::NoRetry);
-        assert!(err.is_permanent());
-    }
-
-    #[test]
-    fn test_tokio_postgres_error_conversion() {
-        // This would require a real tokio_postgres::Error, but we can test the basic structure
-        let err = Error::query_execution_failed("SELECT * FROM missing_table");
-        assert!(matches!(err.kind(), ErrorKind::QueryExecutionFailed { .. }));
-    }
-
-    #[test]
-    fn test_error_severity_classification() {
-        // Test critical errors
-        let critical_err = Error::state_corrupted("state file damaged");
-        assert_eq!(critical_err.severity(), ErrorSeverity::Critical);
-
-        // Test high severity errors
-        let high_err = Error::connection_lost();
-        assert_eq!(high_err.severity(), ErrorSeverity::High);
-
-        // Test medium severity errors
-        let medium_err = Error::connection_failed("localhost", 5432, "db");
-        assert_eq!(medium_err.severity(), ErrorSeverity::Medium);
-
-        // Test low severity errors
-        let low_err = Error::timeout("operation", 5000);
-        assert_eq!(low_err.severity(), ErrorSeverity::Low);
-    }
-
-    #[test]
-    fn test_recovery_strategy_classification() {
-        // Test no retry
-        let no_retry_err = Error::authentication_failed("user", "db");
-        assert_eq!(no_retry_err.recovery_strategy(), RecoveryStrategy::NoRetry);
-
-        // Test immediate retry
-        let immediate_err = Error::cdc_stream_connection_lost();
-        assert_eq!(
-            immediate_err.recovery_strategy(),
-            RecoveryStrategy::RetryImmediate
-        );
-
-        // Test retry with backoff
-        let backoff_err = Error::connection_failed("host", 5432, "db");
-        assert_eq!(
-            backoff_err.recovery_strategy(),
-            RecoveryStrategy::RetryWithBackoff
-        );
-
-        // Test retry after delay
-        let delay_err = Error::destination_quota_exceeded("BigQuery");
-        assert_eq!(
-            delay_err.recovery_strategy(),
-            RecoveryStrategy::RetryAfterDelay
-        );
-
-        // Test manual intervention
-        let manual_err = Error::worker_panicked("apply_worker");
-        assert_eq!(
-            manual_err.recovery_strategy(),
-            RecoveryStrategy::ManualIntervention
-        );
-    }
-
-    #[test]
-    fn test_error_debug() {
-        let err = Error::connection_failed("localhost", 5432, "test_db");
-        let debug = format!("{err:?}");
-        assert!(debug.contains("Error"));
-        assert!(debug.contains("ConnectionFailed"));
-    }
 }

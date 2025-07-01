@@ -1,7 +1,6 @@
 use std::{any, collections::HashMap, sync::Arc};
 
 use crate::error::ErrorKind;
-use crate::v2::state::table::TableReplicationPhaseType;
 use crate::{
     error::{Error, Result},
     v2::{
@@ -47,9 +46,11 @@ impl TryFrom<TableReplicationPhase> for (TableState, Option<String>) {
             TableReplicationPhase::Ready => (TableState::Ready, None),
             TableReplicationPhase::Skipped => (TableState::Skipped, None),
             TableReplicationPhase::SyncWait | TableReplicationPhase::Catchup { .. } => {
-                return Err(Error::state_corrupted(
-                    "In-memory table replication phase can't be saved in the state store",
-                ))
+                return Err(Error::new(ErrorKind::StateCorrupted {
+                    description:
+                        "In-memory table replication phase can't be saved in the state store"
+                            .to_string(),
+                }))
             }
         })
     }
@@ -180,10 +181,13 @@ impl PostgresStateStore {
                     TableReplicationPhase::SyncDone { lsn: lsn.into() }
                 }
                 None => {
-                    return Err(Error::state_corrupted(format!(
-                        "The LSN can't be missing from the state store if state is {}",
-                        TableReplicationPhaseType::SyncDone
-                    )))
+                    return Err(
+                        Error::new(
+                            ErrorKind::StateCorrupted {
+                                description: "the lsn can't be missing from the state store if state is {}".to_string()
+                            }
+                        )
+                    );
                 }
             },
             TableState::Ready => TableReplicationPhase::Ready,

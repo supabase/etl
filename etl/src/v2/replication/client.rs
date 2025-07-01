@@ -467,7 +467,7 @@ impl PgReplicationClient {
                             "consistent_point",
                             "pg_replication_slots",
                         )
-                        .await?;
+                            .await?;
                         let slot = CreateSlotResult {
                             consistent_point: consistent_point.into(),
                         };
@@ -475,19 +475,28 @@ impl PgReplicationClient {
                         return Ok(slot);
                     }
                 }
+
+                Err(Error::new(ErrorKind::ReplicationSlotNotCreated {
+                    slot_name: slot_name.to_string(),
+                    reason: "no response received from postgres".to_string()
+                }))
             }
             Err(err) => {
                 if let Some(code) = err.code() {
                     if *code == SqlState::DUPLICATE_OBJECT {
-                        return Err(Error::replication_slot_already_exists(slot_name));
+                        return Err(
+                            Error::new(
+                                ErrorKind::ReplicationSlotAlreadyExists {
+                                    slot_name: slot_name.to_string(),
+                                }
+                            )
+                        );
                     }
                 }
 
-                return Err(err.into());
+                Err(err.into())
             }
         }
-
-        Err(Error::replication_slot_failed(slot_name, "creation"))
     }
 
     /// Retrieves schema information for multiple tables.

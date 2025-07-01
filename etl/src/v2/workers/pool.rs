@@ -6,11 +6,11 @@ use std::sync::Arc;
 use tokio::sync::{Notify, RwLock};
 use tracing::{info, warn};
 
-use crate::error::{Error, Result};
+use crate::error::{Error, ErrorKind, Result};
 use crate::v2::concurrency::future::ReactiveFutureCallback;
 use crate::v2::destination::base::Destination;
 use crate::v2::state::store::base::StateStore;
-use crate::v2::workers::base::{Worker, WorkerHandle};
+use crate::v2::workers::base::{Worker, WorkerHandle, WorkerType};
 use crate::v2::workers::table_sync::{
     TableSyncWorker, TableSyncWorkerHandle, TableSyncWorkerState,
 };
@@ -44,10 +44,7 @@ impl TableSyncWorkerPoolInner {
         }
     }
 
-    pub async fn start_worker<S, D>(
-        &mut self,
-        worker: TableSyncWorker<S, D>,
-    ) -> std::result::Result<bool, Error>
+    pub async fn start_worker<S, D>(&mut self, worker: TableSyncWorker<S, D>) -> Result<bool>
     where
         S: StateStore + Clone + Send + Sync + 'static,
         D: Destination + Clone + Send + Sync + 'static,
@@ -116,6 +113,12 @@ impl TableSyncWorkerPoolInner {
         let mut errors = Vec::new();
         for (_, workers) in mem::take(&mut self.inactive) {
             for (finish, worker) in workers {
+                let table_id = {
+                    let state = worker.state();
+                    let inner = state.get_inner().read().await;
+                    inner.table_id()
+                };
+
                 // If there is an error while waiting for the task, we can assume that there was un
                 // uncaught panic or a propagated error.
                 if let Err(err) = worker.wait().await {
@@ -128,9 +131,10 @@ impl TableSyncWorkerPoolInner {
                 // This should not happen since right now the `ReactiveFuture` is configured to
                 // re-propagate the error after marking a table sync worker as finished.
                 if let TableSyncWorkerInactiveReason::Errored(err) = finish {
-                    errors.push(Error::worker_pool_failed(format!(
-                        "Worker task failed silently: {err}"
-                    )));
+                    errors.push(Error::new(ErrorKind::WorkerFailedSilently {
+                        worker_type: WorkerType::TableSync { table_id },
+                        reason: err,
+                    }));
                 }
             }
         }

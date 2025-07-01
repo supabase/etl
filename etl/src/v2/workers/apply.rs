@@ -5,7 +5,7 @@ use tokio::task::JoinHandle;
 use tokio_postgres::types::PgLsn;
 use tracing::{error, info};
 
-use crate::error::Result;
+use crate::error::{ErrorKind, Result};
 use crate::v2::concurrency::shutdown::ShutdownRx;
 use crate::v2::config::pipeline::PipelineConfig;
 use crate::v2::destination::base::Destination;
@@ -38,10 +38,20 @@ impl WorkerHandle<()> for ApplyWorkerHandle {
             Ok(Err(err)) => Err(err),
             Err(err) => {
                 if err.is_cancelled() {
-                    return Err(Error::worker_cancelled(WorkerType::Apply.to_string()));
+                    return Err(Error::with_source(
+                        ErrorKind::WorkerCancelled {
+                            worker_type: WorkerType::Apply,
+                        },
+                        err,
+                    ));
                 }
 
-                Err(Error::worker_panicked(WorkerType::Apply.to_string()))
+                Err(Error::with_source(
+                    ErrorKind::WorkerPanicked {
+                        worker_type: WorkerType::Apply,
+                    },
+                    err,
+                ))
             }
         }
     }
@@ -379,10 +389,7 @@ where
                 let Some(state) = self
                     .state_store
                     .get_table_replication_state(table_id)
-                    .await
-                    .map_err(|e| {
-                        Error::with_source(Error::apply_worker_failed().kind().clone(), e)
-                    })?
+                    .await?
                 else {
                     // If we don't even find the state for this table, we skip the event entirely.
                     return Ok(false);

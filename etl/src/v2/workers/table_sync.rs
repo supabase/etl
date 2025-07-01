@@ -6,7 +6,7 @@ use tokio::task::JoinHandle;
 use tokio_postgres::types::PgLsn;
 use tracing::{info, warn};
 
-use crate::error::{Error, Result};
+use crate::error::{Error, ErrorKind, Result};
 use crate::v2::concurrency::future::ReactiveFuture;
 use crate::v2::concurrency::shutdown::{ShutdownResult, ShutdownRx};
 use crate::v2::config::pipeline::PipelineConfig;
@@ -192,19 +192,20 @@ impl WorkerHandle<TableSyncWorkerState> for TableSyncWorkerHandle {
             Ok(Ok(())) => Ok(()),
             Ok(Err(err)) => Err(err),
             Err(err) => {
-                let table_id = {
-                    let inner = self.state.inner.read().await;
-                    inner.table_id
-                };
-
                 if err.is_cancelled() {
-                    return Err(Error::worker_cancelled(
-                        WorkerType::TableSync { table_id }.to_string(),
+                    return Err(Error::with_source(
+                        ErrorKind::WorkerCancelled {
+                            worker_type: WorkerType::TableSync { table_id },
+                        },
+                        err,
                     ));
                 }
 
-                Err(Error::worker_panicked(
-                    WorkerType::TableSync { table_id }.to_string(),
+                Err(Error::with_source(
+                    ErrorKind::WorkerPanicked {
+                        worker_type: WorkerType::TableSync { table_id },
+                    },
+                    err,
                 ))
             }
         }
@@ -275,10 +276,9 @@ where
                 self.table_id
             );
 
-            return Err(Error::table_sync_worker_failed(format!(
-                "Replication state missing for table {}",
-                self.table_id
-            )));
+            return Err(Error::new(ErrorKind::TableReplicationStateMissing {
+                table_name: self.table_id.to_string(),
+            }));
         };
 
         let state = TableSyncWorkerState::new(self.table_id, relation_subscription_state);
@@ -304,12 +304,9 @@ where
                 }
                 Ok(TableSyncResult::SyncCompleted { start_lsn }) => start_lsn,
                 Err(err) => {
-                    return Err(Error::with_source(
-                        Error::table_sync_worker_failed(format!("{}", self.table_id))
-                            .kind()
-                            .clone(),
-                        err,
-                    ))
+                    // Right now, in case of error, we just stop the table sync worker and return
+                    // the error.
+                    return Err(err);
                 }
             };
 
@@ -323,15 +320,7 @@ where
                 TableSyncWorkerHook::new(self.table_id, state_clone, self.state_store),
                 self.shutdown_rx,
             )
-            .await
-            .map_err(|e| {
-                Error::with_source(
-                    Error::table_sync_worker_failed(format!("{}", self.table_id))
-                        .kind()
-                        .clone(),
-                    e,
-                )
-            })?;
+            .await?;
 
             Ok(())
         };
