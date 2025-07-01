@@ -1,7 +1,6 @@
 use crate::error::{Error, Result};
 use crate::v2::pipeline::PipelineId;
 use crate::v2::workers::base::WorkerType;
-use tracing_subscriber::fmt::format;
 
 /// Maximum length for a PostgreSQL replication slot name in bytes.
 const MAX_SLOT_NAME_LENGTH: usize = 63;

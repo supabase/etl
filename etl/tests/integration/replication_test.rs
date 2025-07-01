@@ -1,4 +1,8 @@
-use etl::v2::replication::client::{PgReplicationClient, PgReplicationError};
+use crate::common::database::{spawn_database, test_table_name};
+use crate::common::pipeline::test_slot_name;
+use crate::common::table::assert_table_schema;
+use etl::error::ErrorKind;
+use etl::v2::replication::client::PgReplicationClient;
 use futures::StreamExt;
 use postgres::schema::ColumnSchema;
 use postgres::tokio::test_utils::{id_column_schema, TableModification};
@@ -8,10 +12,6 @@ use telemetry::init_test_tracing;
 use tokio::pin;
 use tokio_postgres::types::{ToSql, Type};
 use tokio_postgres::CopyOutStream;
-
-use crate::common::database::{spawn_database, test_table_name};
-use crate::common::pipeline::test_slot_name;
-use crate::common::table::assert_table_schema;
 
 async fn count_stream_rows(stream: CopyOutStream) -> u64 {
     pin!(stream);
@@ -119,8 +119,10 @@ async fn test_create_and_delete_slot() {
     client.delete_slot(&slot_name).await.unwrap();
 
     // Verify the slot no longer exists
-    let result = client.get_slot(&slot_name).await;
-    assert!(matches!(result, Err(PgReplicationError::SlotNotFound(_))));
+    assert!(matches!(
+        client.get_slot(&slot_name).await.err().unwrap().kind(),
+        ErrorKind::ReplicationSlotNotFound { .. }
+    ));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -135,8 +137,10 @@ async fn test_delete_nonexistent_slot() {
     let slot_name = test_slot_name("nonexistent_slot");
 
     // Attempt to delete a slot that doesn't exist
-    let result = client.delete_slot(&slot_name).await;
-    assert!(matches!(result, Err(PgReplicationError::SlotNotFound(_))));
+    assert!(matches!(
+        client.delete_slot(&slot_name).await.err().unwrap().kind(),
+        ErrorKind::ReplicationSlotNotFound { .. }
+    ));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -151,8 +155,8 @@ async fn test_replication_client_doesnt_recreate_slot() {
     let slot_name = test_slot_name("my_slot");
     assert!(client.create_slot(&slot_name).await.is_ok());
     assert!(matches!(
-        client.create_slot(&slot_name).await,
-        Err(PgReplicationError::SlotAlreadyExists(_))
+        client.create_slot(&slot_name).await.err().unwrap().kind(),
+        ErrorKind::ReplicationSlotAlreadyExists { .. }
     ));
 }
 

@@ -1,3 +1,4 @@
+use crate::error::ErrorKind;
 use crate::v2::concurrency::shutdown::{ShutdownResult, ShutdownRx};
 use crate::v2::concurrency::stream::BatchStream;
 use crate::v2::config::pipeline::PipelineConfig;
@@ -64,12 +65,15 @@ where
             | TableReplicationPhaseType::DataSync
             | TableReplicationPhaseType::FinishedCopy
     ) {
-        return Err(Error::other(
-            "table_sync",
-            format!(
-                "Invalid replication phase '{}': expected Init, DataSync, or FinishedCopy",
-                phase_type
-            ),
+        let expected_phases = format!(
+            "{} or {} or {}",
+            TableReplicationPhaseType::Init,
+            TableReplicationPhaseType::DataSync,
+            TableReplicationPhaseType::FinishedCopy
+        );
+        return Err(Error::table_replication_phase_invalid(
+            expected_phases,
+            phase_type.to_string(),
         ));
     }
 
@@ -106,11 +110,8 @@ where
                 // before starting a table copy.
                 if let Err(err) = replication_client.delete_slot(&slot_name).await {
                     // If the slot is not found, we are safe to continue, for any other error, we bail.
-                    // Convert PgReplicationError to our centralized Error type
-                    // For slot not found, we continue; for other errors, we propagate
-                    let error_message = err.to_string();
-                    if !error_message.contains("slot") || !error_message.contains("not found") {
-                        return Err(Error::other("postgres_replication", error_message));
+                    if !matches!(err.kind(), ErrorKind::ReplicationSlotNotFound { .. }) {
+                        return Err(err);
                     }
                 }
             }
@@ -160,7 +161,7 @@ where
             while let Some(result) = table_copy_stream.next().await {
                 match result {
                     ShutdownResult::Ok(table_rows) => {
-                        let table_rows = table_rows.into_iter().collect::<Result<Vec<_>, _>>()?;
+                        let table_rows = table_rows.into_iter().collect::<Result<Vec<_>>>()?;
                         destination.write_table_rows(table_id, table_rows).await?;
                     }
                     ShutdownResult::Shutdown(_) => {

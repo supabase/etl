@@ -1,16 +1,16 @@
+use crate::conversions::table_row::TableRow;
+use crate::conversions::text::TextFormatConverter;
+use crate::conversions::Cell;
+use crate::error::{Error, ErrorKind, Result};
+use crate::v2::schema::cache::SchemaCache;
+use bytes::Bytes;
 use core::str;
 use postgres::schema::{ColumnSchema, TableId, TableName, TableSchema};
 use postgres::types::convert_type_oid_to_type;
 use postgres_replication::protocol;
 use postgres_replication::protocol::LogicalReplicationMessage;
-use std::fmt;
-use std::fmt::format;
-
-use crate::conversions::table_row::TableRow;
-use crate::conversions::text::TextFormatConverter;
-use crate::conversions::Cell;
-use crate::error::{Error, Result};
-use crate::v2::schema::cache::SchemaCache;
+use std::{any, fmt};
+use tokio_postgres::types::Type;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct BeginEvent {
@@ -206,11 +206,26 @@ fn convert_tuple_to_row(
                 return Err(Error::binary_parsing_failed("replication_message"))
             }
             protocol::TupleData::Text(bytes) => {
-                let str = str::from_utf8(&bytes[..])
-                    .map_err(|_| Error::data_conversion_failed("bytes", "utf8_string", bytes))?;
+                let str = str::from_utf8(&bytes[..]).map_err(|err| {
+                    Error::with_source(
+                        ErrorKind::DataConversionFailed {
+                            from_type: any::type_name::<Bytes>().to_string(),
+                            to_type: any::type_name::<&str>().to_string(),
+                            value: None,
+                        },
+                        err,
+                    )
+                })?;
 
-                TextFormatConverter::try_from_str(&column_schema.typ, str).map_err(|e| {
-                    Error::data_conversion_failed("string", &column_schema.typ.to_string(), str)
+                TextFormatConverter::try_from_str(&column_schema.typ, str).map_err(|err| {
+                    Error::with_source(
+                        ErrorKind::DataConversionFailed {
+                            from_type: any::type_name::<String>().to_string(),
+                            to_type: any::type_name::<Type>().to_string(),
+                            value: Some(str.to_string()),
+                        },
+                        err,
+                    )
                 })?
             }
         };

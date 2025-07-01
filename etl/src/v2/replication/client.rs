@@ -1,12 +1,12 @@
 use pg_escape::{quote_identifier, quote_literal};
 use postgres::schema::{ColumnSchema, TableId, TableName, TableSchema};
 use postgres::tokio::config::PgConnectionConfig;
-use postgres::types::convert_type_oid_to_type;
+use postgres::types::{convert_type_oid_to_type, InnerPgLsn};
 use postgres_replication::LogicalReplicationStream;
 use rustls::ClientConfig;
 use std::collections::HashMap;
-use std::fmt;
 use std::sync::Arc;
+use std::{any, error};
 use tokio_postgres::error::SqlState;
 use tokio_postgres::tls::MakeTlsConnect;
 use tokio_postgres::{
@@ -237,14 +237,14 @@ impl PgReplicationClient {
         let results = self.inner.client.simple_query(&query).await?;
         for result in results {
             if let SimpleQueryMessage::Row(row) = result {
-                let confirmed_flush_lsn = Self::get_row_value::<PgLsn>(
+                let confirmed_flush_lsn = Self::get_row_value::<InnerPgLsn>(
                     &row,
                     "confirmed_flush_lsn",
                     "pg_replication_slots",
                 )
                 .await?;
                 let slot = GetSlotResult {
-                    confirmed_flush_lsn,
+                    confirmed_flush_lsn: confirmed_flush_lsn.into(),
                 };
 
                 return Ok(slot);
@@ -266,11 +266,11 @@ impl PgReplicationClient {
     pub async fn get_or_create_slot(&self, slot_name: &str) -> Result<GetOrCreateSlotResult> {
         match self.get_slot(slot_name).await {
             Ok(slot) => Ok(GetOrCreateSlotResult::GetSlot(slot)),
-            Err(e) if matches!(e.kind(), ErrorKind::ReplicationSlotNotFound { .. }) => {
+            Err(err) if matches!(err.kind(), ErrorKind::ReplicationSlotNotFound { .. }) => {
                 let create_result = self.create_slot_internal(slot_name, false).await?;
                 Ok(GetOrCreateSlotResult::CreateSlot(create_result))
             }
-            Err(e) => Err(e),
+            Err(err) => Err(err),
         }
     }
 
@@ -462,13 +462,15 @@ impl PgReplicationClient {
             Ok(results) => {
                 for result in results {
                     if let SimpleQueryMessage::Row(row) = result {
-                        let consistent_point = Self::get_row_value::<PgLsn>(
+                        let consistent_point = Self::get_row_value::<InnerPgLsn>(
                             &row,
                             "consistent_point",
                             "pg_replication_slots",
                         )
                         .await?;
-                        let slot = CreateSlotResult { consistent_point };
+                        let slot = CreateSlotResult {
+                            consistent_point: consistent_point.into(),
+                        };
 
                         return Ok(slot);
                     }
@@ -677,23 +679,27 @@ impl PgReplicationClient {
     /// Helper function to extract a value from a SimpleQueryMessage::Row
     ///
     /// Returns an error if the column is not found or if the value cannot be parsed to the target type.
-    async fn get_row_value<T: std::str::FromStr>(
+    async fn get_row_value<T>(
         row: &SimpleQueryRow,
         column_name: &str,
         table_name: &str,
     ) -> Result<T>
     where
-        T::Err: fmt::Debug,
+        T: std::str::FromStr,
+        <T as std::str::FromStr>::Err: error::Error + Send + Sync + 'static,
     {
         let value = row
             .try_get(column_name)?
             .ok_or_else(|| Error::column_not_found(table_name, column_name))?;
 
-        value.parse().map_err(|e: T::Err| {
-            Error::data_conversion_failed(
-                "postgres_value",
-                std::any::type_name::<T>(),
-                format!("{e:?}"),
+        value.parse().map_err(|err| {
+            Error::with_source(
+                ErrorKind::DataConversionFailed {
+                    from_type: any::type_name::<&str>().to_string(),
+                    to_type: any::type_name::<T>().to_string(),
+                    value: Some(value.to_string()),
+                },
+                err,
             )
         })
     }

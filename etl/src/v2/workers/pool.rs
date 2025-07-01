@@ -10,7 +10,7 @@ use crate::error::{Error, Result};
 use crate::v2::concurrency::future::ReactiveFutureCallback;
 use crate::v2::destination::base::Destination;
 use crate::v2::state::store::base::StateStore;
-use crate::v2::workers::base::{Worker, WorkerHandle, WorkerWaitError, WorkerWaitErrors};
+use crate::v2::workers::base::{Worker, WorkerHandle};
 use crate::v2::workers::table_sync::{
     TableSyncWorker, TableSyncWorkerHandle, TableSyncWorkerState,
 };
@@ -99,7 +99,7 @@ impl TableSyncWorkerPoolInner {
         }
     }
 
-    pub async fn wait_all(&mut self) -> std::result::Result<Option<Arc<Notify>>, WorkerWaitErrors> {
+    pub async fn wait_all(&mut self) -> Result<Option<Arc<Notify>>> {
         // If there are active workers, we return the notify, signaling that not all of them are
         // ready.
         //
@@ -129,18 +129,17 @@ impl TableSyncWorkerPoolInner {
                 // re-propagate the error after marking a table sync worker as finished.
                 if let TableSyncWorkerInactiveReason::Errored(err) = finish {
                     errors.push(Error::worker_pool_failed(format!(
-                        "Worker task failed silently: {}",
-                        err
+                        "Worker task failed silently: {err}"
                     )));
                 }
             }
         }
 
         if errors.is_empty() {
-            Ok(None)
-        } else {
-            Err(WorkerWaitErrors(errors))
+            return Ok(None);
         }
+
+        Err(Error::from_many(errors))
     }
 }
 
@@ -170,13 +169,13 @@ impl TableSyncWorkerPool {
         self.workers.clone()
     }
 
-    pub async fn wait_all(&self) -> std::result::Result<(), WorkerWaitErrors> {
+    pub async fn wait_all(&self) -> Result<()> {
         loop {
             // We try first to wait for all workers to be finished, in case there are still active
             // workers, we get back a `Notify` which we will use to try again once new workers reported
             // their finished status.
             let mut workers = self.workers.write().await;
-            let Some(notify) = workers.wait_all().await.map_err(|e| e)? else {
+            let Some(notify) = workers.wait_all().await? else {
                 return Ok(());
             };
             // We must drop the lock here, otherwise the system will deadlock since we will be

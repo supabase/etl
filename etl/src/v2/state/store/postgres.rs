@@ -1,15 +1,7 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{any, collections::HashMap, sync::Arc};
 
-use config::shared::SourceConfig;
-use postgres::schema::TableId;
-use sqlx::{
-    postgres::{types::Oid as SqlxTableId, PgPoolOptions},
-    prelude::{FromRow, Type},
-    PgPool,
-};
-use tokio::sync::RwLock;
-use tokio_postgres::types::PgLsn;
-
+use crate::error::ErrorKind;
+use crate::v2::state::table::TableReplicationPhaseType;
 use crate::{
     error::{Error, Result},
     v2::{
@@ -17,6 +9,16 @@ use crate::{
         state::{store::base::StateStore, table::TableReplicationPhase},
     },
 };
+use config::shared::SourceConfig;
+use postgres::schema::TableId;
+use postgres::types::InnerPgLsn;
+use sqlx::{
+    postgres::{types::Oid as SqlxTableId, PgPoolOptions},
+    prelude::{FromRow, Type},
+    PgPool,
+};
+use tokio::sync::RwLock;
+use tokio_postgres::types::PgLsn;
 
 const NUM_POOL_CONNECTIONS: u32 = 1;
 
@@ -80,6 +82,7 @@ impl PostgresStateStore {
         let inner = Inner {
             table_states: HashMap::new(),
         };
+
         PostgresStateStore {
             pipeline_id,
             source_config,
@@ -99,6 +102,7 @@ impl PostgresStateStore {
             .min_connections(NUM_POOL_CONNECTIONS)
             .connect_with(options)
             .await?;
+
         Ok(pool)
     }
 
@@ -130,7 +134,7 @@ impl PostgresStateStore {
     ) -> Result<()> {
         // We connect to source database each time we update because we assume that
         // these updates will be infrequent. It has some overhead to establish a
-        // connection but it's better than holding a connection open for long periods
+        // connection, but it's better than holding a connection open for long periods
         // when there's little activity on it.
         let pool = self.connect_to_source().await?;
         sqlx::query(
@@ -162,15 +166,24 @@ impl PostgresStateStore {
             TableState::FinishedCopy => TableReplicationPhase::FinishedCopy,
             TableState::SyncDone => match sync_done_lsn {
                 Some(lsn_str) => {
-                    let lsn = lsn_str
-                        .parse::<PgLsn>()
-                        .map_err(|_| Error::data_conversion_failed("string", "PgLsn", lsn_str))?;
-                    TableReplicationPhase::SyncDone { lsn }
+                    let lsn = lsn_str.parse::<InnerPgLsn>().map_err(|err| {
+                        Error::with_source(
+                            ErrorKind::DataConversionFailed {
+                                from_type: any::type_name::<String>().to_string(),
+                                to_type: any::type_name::<PgLsn>().to_string(),
+                                value: Some(lsn_str),
+                            },
+                            err,
+                        )
+                    })?;
+
+                    TableReplicationPhase::SyncDone { lsn: lsn.into() }
                 }
                 None => {
-                    return Err(Error::state_corrupted(
-                        "Lsn can't be missing from the state store if state is SyncDone",
-                    ))
+                    return Err(Error::state_corrupted(format!(
+                        "The LSN can't be missing from the state store if state is {}",
+                        TableReplicationPhaseType::SyncDone
+                    )))
                 }
             },
             TableState::Ready => TableReplicationPhase::Ready,
@@ -185,6 +198,7 @@ impl StateStore for PostgresStateStore {
         table_id: TableId,
     ) -> Result<Option<TableReplicationPhase>> {
         let inner = self.inner.read().await;
+
         Ok(inner.table_states.get(&table_id).cloned())
     }
 
@@ -192,6 +206,7 @@ impl StateStore for PostgresStateStore {
         &self,
     ) -> Result<HashMap<TableId, TableReplicationPhase>> {
         let inner = self.inner.read().await;
+
         Ok(inner.table_states.clone())
     }
 
@@ -209,6 +224,7 @@ impl StateStore for PostgresStateStore {
         }
         let mut inner = self.inner.write().await;
         inner.table_states = table_states.clone();
+
         Ok(table_states.len())
     }
 
@@ -222,6 +238,7 @@ impl StateStore for PostgresStateStore {
             .await?;
         let mut inner = self.inner.write().await;
         inner.table_states.insert(table_id, state);
+
         Ok(())
     }
 }

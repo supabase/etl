@@ -1,9 +1,8 @@
 use std::sync::Arc;
-use tokio::sync::watch;
 use tokio_postgres::config::SslMode;
 use tracing::{error, info};
 
-use crate::error::{Error, Result};
+use crate::error::{Error, ErrorKind, Result};
 use crate::v2::concurrency::shutdown::{create_shutdown_channel, ShutdownTx};
 use crate::v2::config::pipeline::PipelineConfig;
 use crate::v2::destination::base::Destination;
@@ -164,15 +163,17 @@ where
                 "The publication '{}' does not exist in the database",
                 self.identity.publication_name()
             );
-            return Err(Error::publication_failed(
+            return Err(Error::publication_not_found(
                 self.identity.publication_name().to_owned(),
             ));
         }
 
+        // We load the replication states to have them ready to be read.
+        self.state_store.load_table_replication_states().await?;
+
         let table_ids = replication_client
             .get_publication_table_ids(self.identity.publication_name())
             .await?;
-        self.state_store.load_table_replication_states().await?;
         let states = self.state_store.get_table_replication_states().await?;
         for table_id in table_ids {
             if !states.contains_key(&table_id) {
@@ -236,7 +237,7 @@ where
 
         match (apply_worker_result, table_sync_workers_result) {
             (Ok(_), Ok(_)) => Ok(()),
-            (Err(err), Ok(_)) => Err(Error::apply_worker_failed()),
+            (Err(_err), Ok(_)) => Err(Error::apply_worker_failed()),
             (Ok(_), Err(_)) => Err(Error::worker_pool_failed("table sync workers failed")),
             (Err(_), Err(_)) => Err(Error::worker_pool_failed(
                 "both apply worker and table sync workers failed",
@@ -248,7 +249,7 @@ where
         info!("Trying to shut down the pipeline");
         self.shutdown_tx
             .shutdown()
-            .map_err(|e| Error::worker_shutdown_failed("pipeline"))?;
+            .map_err(|err| Error::with_source(ErrorKind::PipelineShutdownFailed, err))?;
         info!("Shut down signal successfully sent to all workers");
 
         Ok(())

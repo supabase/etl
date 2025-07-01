@@ -1,8 +1,5 @@
 use etl::v2::state::table::{TableReplicationPhase, TableReplicationPhaseType};
-use etl::{
-    error::{Error, Result},
-    v2::state::store::base::StateStore,
-};
+use etl::{error::Result, v2::state::store::base::StateStore};
 use postgres::schema::TableId;
 use std::collections::HashMap;
 use std::fmt;
@@ -106,7 +103,7 @@ impl StateStore for TestStateStore {
     async fn get_table_replication_state(
         &self,
         table_id: TableId,
-    ) -> Result<Option<TableReplicationPhase>, Error> {
+    ) -> Result<Option<TableReplicationPhase>> {
         let inner = self.inner.read().await;
         let result = Ok(inner.table_replication_states.get(&table_id).cloned());
 
@@ -119,7 +116,7 @@ impl StateStore for TestStateStore {
 
     async fn get_table_replication_states(
         &self,
-    ) -> Result<HashMap<TableId, TableReplicationPhase>, Error> {
+    ) -> Result<HashMap<TableId, TableReplicationPhase>> {
         let inner = self.inner.read().await;
         let result = Ok(inner.table_replication_states.clone());
 
@@ -130,7 +127,7 @@ impl StateStore for TestStateStore {
         result
     }
 
-    async fn load_table_replication_states(&self) -> Result<usize, Error> {
+    async fn load_table_replication_states(&self) -> Result<usize> {
         let inner = self.inner.read().await;
         let result = Ok(inner.table_replication_states.clone());
 
@@ -145,7 +142,7 @@ impl StateStore for TestStateStore {
         &self,
         table_id: TableId,
         state: TableReplicationPhase,
-    ) -> Result<(), Error> {
+    ) -> Result<()> {
         let mut inner = self.inner.write().await;
         inner.table_replication_states.insert(table_id, state);
         inner.check_conditions().await;
@@ -205,7 +202,7 @@ where
         &self.inner
     }
 
-    fn trigger_fault(&self, fault: &Option<FaultType>) -> Result<(), Error> {
+    fn trigger_fault(&self, fault: &Option<FaultType>) -> Result<()> {
         if let Some(fault_type) = fault {
             match fault_type {
                 FaultType::Panic => panic!("Fault injection: panic triggered"),
@@ -226,19 +223,19 @@ where
     async fn get_table_replication_state(
         &self,
         table_id: TableId,
-    ) -> Result<Option<TableReplicationPhase>, Error> {
+    ) -> Result<Option<TableReplicationPhase>> {
         self.trigger_fault(&self.config.load_table_replication_state)?;
         self.inner.get_table_replication_state(table_id).await
     }
 
     async fn get_table_replication_states(
         &self,
-    ) -> Result<HashMap<TableId, TableReplicationPhase>, Error> {
+    ) -> Result<HashMap<TableId, TableReplicationPhase>> {
         self.trigger_fault(&self.config.load_table_replication_states)?;
         self.inner.get_table_replication_states().await
     }
 
-    async fn load_table_replication_states(&self) -> Result<usize, Error> {
+    async fn load_table_replication_states(&self) -> Result<usize> {
         self.trigger_fault(&self.config.load_table_replication_states)?;
         self.inner.load_table_replication_states().await
     }
@@ -247,7 +244,7 @@ where
         &self,
         table_id: TableId,
         state: TableReplicationPhase,
-    ) -> Result<(), Error> {
+    ) -> Result<()> {
         self.trigger_fault(&self.config.store_table_replication_state)?;
         self.inner
             .update_table_replication_state(table_id, state)

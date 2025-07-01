@@ -20,8 +20,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::pin;
 use tokio_postgres::types::PgLsn;
-use tracing::{error, info};
-use tracing_subscriber::fmt::format;
+use tracing::info;
 
 /// The amount of milliseconds that pass between one refresh and the other of the system, in case no
 /// events or shutdown signal are received.

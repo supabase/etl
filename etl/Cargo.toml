@@ -57,7 +57,6 @@ tracing-subscriber = { workspace = true, default-features = true, features = [
     "env-filter",
 ] }
 uuid = { workspace = true, features = ["v4"] }
-log = "0.4.27"
 
 [dev-dependencies]
 postgres = { workspace = true, features = ["test-utils", "tokio"] }

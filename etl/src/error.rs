@@ -3,13 +3,6 @@ use std::{borrow, error, fmt, io, result};
 /// Type alias for convenience when using the Result type with our Error.
 pub type Result<T> = result::Result<T, Error>;
 
-/// A stable error type for the ETL library using the ErrorInner pattern.
-///
-/// This error type provides a stable public API while allowing internal error details
-/// to evolve. It supports error chaining, structured error data, and classification
-/// for recovery strategies.
-pub struct Error(Box<ErrorInner>);
-
 /// Internal error representation with kind and optional source error.
 ///
 /// Uses boxing to keep the public Error type size consistent and enable
@@ -54,7 +47,7 @@ pub enum ErrorKind {
     /// Attempt to create replication slot that already exists
     ReplicationSlotAlreadyExists { slot_name: String },
     /// Publication not found or empty
-    PublicationFailed { publication_name: String },
+    PublicationNotFound { publication_name: String },
     /// CDC stream parsing or processing failure
     CdcStreamFailed,
     /// CDC stream connection timeout or loss
@@ -72,6 +65,8 @@ pub enum ErrorKind {
     TransactionNotStarted,
     /// The event type that we received was not expected
     EventTypeMismatch { expected: String, actual: String },
+    /// The replication phase was unexpected
+    TableReplicationPhaseInvalid { expected: String, actual: String },
 
     /// Table not found in database schema
     TableNotFound { table_name: String },
@@ -93,10 +88,12 @@ pub enum ErrorKind {
 
     /// Worker startup failure
     WorkerStartupFailed { worker_type: String },
-    /// Worker shutdown timeout or failure
-    WorkerShutdownFailed { worker_type: String },
+    /// Pipeline shutdown failed
+    PipelineShutdownFailed,
     /// Worker task panicked during execution
     WorkerPanicked { worker_type: String },
+    /// Worker task cancelled during execution
+    WorkerCancelled { worker_type: String },
     /// Table sync worker specific failure
     TableSyncWorkerFailed { table_name: String },
     /// Apply worker specific failure
@@ -145,7 +142,7 @@ pub enum ErrorKind {
     DataConversionFailed {
         from_type: String,
         to_type: String,
-        value: String,
+        value: Option<String>,
     },
     /// JSON serialization failure
     JsonSerializationFailed,
@@ -168,6 +165,9 @@ pub enum ErrorKind {
     NetworkError,
     /// Timeout during operation
     Timeout { operation: String, duration_ms: u64 },
+
+    /// Error that contains many errors
+    Many { amount: u64 },
 
     /// Error that doesn't fit other categories
     Other { description: String },
@@ -201,6 +201,56 @@ pub enum RecoveryStrategy {
     ManualIntervention,
 }
 
+pub struct Errors(Vec<Error>);
+
+impl From<Vec<Error>> for Errors {
+    fn from(value: Vec<Error>) -> Self {
+        Errors(value)
+    }
+}
+
+impl fmt::Debug for Errors {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Errors")
+            .field("count", &self.0.len())
+            .field("errors", &self.0)
+            .finish()
+    }
+}
+
+impl fmt::Display for Errors {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.0.len() {
+            0 => write!(f, "no errors"),
+            1 => write!(f, "{}", self.0[0]),
+            count => {
+                write!(f, "{count} errors: ")?;
+                for (i, error) in self.0.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, "; ")?;
+                    }
+                    write!(f, "{error}")?;
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+impl error::Error for Errors {
+    fn source(&self) -> Option<&(dyn error::Error + 'static)> {
+        // We return only the first error as the source, since we can't do better.
+        self.0.first().and_then(|err| err.source())
+    }
+}
+
+/// A stable error type for the ETL library using the ErrorInner pattern.
+///
+/// This error type provides a stable public API while allowing internal error details
+/// to evolve. It supports error chaining, structured error data, and classification
+/// for recovery strategies.
+pub struct Error(Box<ErrorInner>);
+
 impl Error {
     /// Creates a new error with the specified kind.
     pub fn new(kind: ErrorKind) -> Self {
@@ -216,6 +266,16 @@ impl Error {
             kind,
             source: Some(source.into()),
         }))
+    }
+
+    pub fn from_many(errors: impl Into<Errors>) -> Self {
+        let errors = errors.into();
+        Error::with_source(
+            ErrorKind::Many {
+                amount: errors.0.len() as u64,
+            },
+            errors,
+        )
     }
 
     /// Creates a connection failed error.
@@ -282,9 +342,9 @@ impl Error {
         })
     }
 
-    /// Creates a publication failed error.
-    pub fn publication_failed(publication_name: impl Into<String>) -> Self {
-        Self::new(ErrorKind::PublicationFailed {
+    /// Creates a publication not found error.
+    pub fn publication_not_found(publication_name: impl Into<String>) -> Self {
+        Self::new(ErrorKind::PublicationNotFound {
             publication_name: publication_name.into(),
         })
     }
@@ -317,7 +377,20 @@ impl Error {
     }
 
     pub fn event_type_mismatch(expected: impl Into<String>, actual: impl Into<String>) -> Self {
-        Self::new(ErrorKind::EventTypeMismatch { expected, actual })
+        Self::new(ErrorKind::EventTypeMismatch {
+            expected: expected.into(),
+            actual: actual.into(),
+        })
+    }
+
+    pub fn table_replication_phase_invalid(
+        expected: impl Into<String>,
+        actual: impl Into<String>,
+    ) -> Self {
+        Self::new(ErrorKind::TableReplicationPhaseInvalid {
+            expected: expected.into(),
+            actual: actual.into(),
+        })
     }
 
     /// Creates a table not found error.
@@ -373,16 +446,16 @@ impl Error {
         })
     }
 
-    /// Creates a worker shutdown failed error.
-    pub fn worker_shutdown_failed(worker_type: impl Into<String>) -> Self {
-        Self::new(ErrorKind::WorkerShutdownFailed {
+    /// Creates a worker panicked error.
+    pub fn worker_panicked(worker_type: impl Into<String>) -> Self {
+        Self::new(ErrorKind::WorkerPanicked {
             worker_type: worker_type.into(),
         })
     }
 
-    /// Creates a worker panicked error.
-    pub fn worker_panicked(worker_type: impl Into<String>) -> Self {
-        Self::new(ErrorKind::WorkerPanicked {
+    /// Creates a worker cancelled error.
+    pub fn worker_cancelled(worker_type: impl Into<String>) -> Self {
+        Self::new(ErrorKind::WorkerCancelled {
             worker_type: worker_type.into(),
         })
     }
@@ -504,19 +577,6 @@ impl Error {
     pub fn recovery_failed(reason: impl Into<String>) -> Self {
         Self::new(ErrorKind::RecoveryFailed {
             reason: reason.into(),
-        })
-    }
-
-    /// Creates a data conversion failed error.
-    pub fn data_conversion_failed(
-        from_type: impl Into<String>,
-        to_type: impl Into<String>,
-        value: impl Into<String>,
-    ) -> Self {
-        Self::new(ErrorKind::DataConversionFailed {
-            from_type: from_type.into(),
-            to_type: to_type.into(),
-            value: value.into(),
         })
     }
 
@@ -704,6 +764,7 @@ impl fmt::Debug for Error {
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         use ErrorKind::*;
+
         match &self.0.kind {
             ConnectionFailed {
                 host,
@@ -712,23 +773,21 @@ impl fmt::Display for Error {
             } => {
                 write!(
                     f,
-                    "Failed to connect to database '{}' at {}:{}",
-                    database, host, port
+                    "failed to connect to database '{database}' at {host}:{port}"
                 )
             }
             AuthenticationFailed { user, database } => {
                 write!(
                     f,
-                    "Authentication failed for user '{}' on database '{}'",
-                    user, database
+                    "authentication failed for user '{user}' on database '{database}'"
                 )
             }
-            TlsConfigurationFailed => write!(f, "TLS configuration failed"),
+            TlsConfigurationFailed => write!(f, "tls configuration failed"),
             QueryExecutionFailed { query } => {
-                write!(f, "Query execution failed: {}", query)
+                write!(f, "query execution failed: {query}")
             }
-            TransactionFailed => write!(f, "Database transaction failed"),
-            ConnectionLost => write!(f, "Database connection lost"),
+            TransactionFailed => write!(f, "database transaction failed"),
+            ConnectionLost => write!(f, "database connection lost"),
 
             ReplicationSlotFailed {
                 slot_name,
@@ -736,37 +795,51 @@ impl fmt::Display for Error {
             } => {
                 write!(
                     f,
-                    "Replication slot '{}' operation '{}' failed",
-                    slot_name, operation
+                    "replication slot '{slot_name}' operation '{operation}' failed"
                 )
             }
             ReplicationSlotNotFound { slot_name } => {
-                write!(f, "Replication slot '{}' not found", slot_name)
+                write!(f, "replication slot '{slot_name}' not found")
             }
             ReplicationSlotAlreadyExists { slot_name } => {
-                write!(f, "Replication slot '{}' already exists", slot_name)
+                write!(f, "replication slot '{slot_name}' already exists")
             }
-            PublicationFailed { publication_name } => {
-                write!(f, "Publication '{}' operation failed", publication_name)
+            PublicationNotFound { publication_name } => {
+                write!(f, "publication '{publication_name}' operation failed")
             }
-            CdcStreamFailed => write!(f, "CDC stream processing failed"),
-            CdcStreamConnectionLost => write!(f, "CDC stream connection lost"),
+            CdcStreamFailed => write!(f, "cdc stream processing failed"),
+            CdcStreamConnectionLost => write!(f, "cdc stream connection lost"),
             TableCopyStreamFailed { table_name } => {
-                write!(f, "Table copy stream failed for table '{}'", table_name)
+                write!(f, "table copy stream failed for table '{table_name}'")
             }
+            EventsStreamFailed => write!(f, "events stream processing failed"),
             LsnConsistencyError {
                 expected_lsn,
                 actual_lsn,
             } => {
                 write!(
                     f,
-                    "LSN consistency error: expected {}, got {}",
-                    expected_lsn, actual_lsn
+                    "lsn consistency error: expected {expected_lsn}, got {actual_lsn}"
                 )
+            }
+            TransactionNotStarted => {
+                write!(f, "transaction not started but commit message received")
+            }
+            EventTypeMismatch { expected, actual } => {
+                write!(f, "event type mismatch: expected {expected}, got {actual}")
+            }
+            TableReplicationPhaseInvalid { expected, actual } => {
+                write!(
+                    f,
+                    "table replication phase invalid: expected {expected}, got {actual}"
+                )
+            }
+            WorkerCancelled { worker_type } => {
+                write!(f, "{worker_type} worker cancelled")
             }
 
             TableNotFound { table_name } => {
-                write!(f, "Table '{}' not found", table_name)
+                write!(f, "table '{table_name}' not found")
             }
             ColumnNotFound {
                 table_name,
@@ -774,8 +847,7 @@ impl fmt::Display for Error {
             } => {
                 write!(
                     f,
-                    "Column '{}' not found in table '{}'",
-                    column_name, table_name
+                    "column '{column_name}' not found in table '{table_name}'"
                 )
             }
             UnsupportedDataType {
@@ -785,40 +857,38 @@ impl fmt::Display for Error {
             } => {
                 write!(
                     f,
-                    "Unsupported data type '{}' (OID: {}) in table '{}'",
-                    type_name, type_oid, table_name
+                    "unsupported data type '{type_name}' (oid: {type_oid}) in table '{table_name}'"
                 )
             }
             SchemaValidationFailed { table_name, reason } => {
                 write!(
                     f,
-                    "Schema validation failed for table '{}': {}",
-                    table_name, reason
+                    "schema validation failed for table '{table_name}': {reason}"
                 )
             }
             ReplicaIdentityIssue { table_name } => {
-                write!(f, "Replica identity issue for table '{}'", table_name)
+                write!(f, "replica identity issue for table '{table_name}'")
             }
 
             WorkerStartupFailed { worker_type } => {
-                write!(f, "{} worker startup failed", worker_type)
+                write!(f, "{worker_type} worker startup failed")
             }
-            WorkerShutdownFailed { worker_type } => {
-                write!(f, "{} worker shutdown failed", worker_type)
+            PipelineShutdownFailed => {
+                write!(f, "pipeline shutdown failed")
             }
             WorkerPanicked { worker_type } => {
-                write!(f, "{} worker panicked", worker_type)
+                write!(f, "{worker_type} worker panicked")
             }
             TableSyncWorkerFailed { table_name } => {
-                write!(f, "Table sync worker failed for table '{}'", table_name)
+                write!(f, "table sync worker failed for table '{table_name}'")
             }
-            ApplyWorkerFailed => write!(f, "Apply worker failed"),
+            ApplyWorkerFailed => write!(f, "apply worker failed"),
             WorkerPoolFailed { reason } => {
-                write!(f, "Worker pool failed: {}", reason)
+                write!(f, "worker pool failed: {reason}")
             }
 
             DestinationConnectionFailed { destination_type } => {
-                write!(f, "{} destination connection failed", destination_type)
+                write!(f, "{destination_type} destination connection failed")
             }
             DestinationTableCreationFailed {
                 table_name,
@@ -826,12 +896,11 @@ impl fmt::Display for Error {
             } => {
                 write!(
                     f,
-                    "Failed to create table '{}' in {} destination",
-                    table_name, destination_type
+                    "failed to create table '{table_name}' in {destination_type} destination"
                 )
             }
             DestinationSchemaMismatch { table_name, reason } => {
-                write!(f, "Schema mismatch for table '{}': {}", table_name, reason)
+                write!(f, "schema mismatch for table '{table_name}': {reason}")
             }
             DestinationInsertionFailed {
                 table_name,
@@ -839,91 +908,92 @@ impl fmt::Display for Error {
             } => {
                 write!(
                     f,
-                    "Failed to insert data into table '{}' in {} destination",
-                    table_name, destination_type
+                    "failed to insert data into table '{table_name}' in {destination_type} destination"
                 )
             }
             DestinationProviderError {
                 provider,
                 error_code,
             } => match error_code {
-                Some(code) => write!(f, "{} provider error (code: {})", provider, code),
-                None => write!(f, "{} provider error", provider),
+                Some(code) => write!(f, "{provider} provider error (code: {code})"),
+                None => write!(f, "{provider} provider error"),
             },
             DestinationQuotaExceeded { destination_type } => {
-                write!(f, "{} destination quota exceeded", destination_type)
+                write!(f, "{destination_type} destination quota exceeded")
             }
 
             StateStoreReadFailed { key } => {
-                write!(f, "Failed to read from state store (key: {})", key)
+                write!(f, "failed to read from state store (key: {key})")
             }
             StateStoreWriteFailed { key } => {
-                write!(f, "Failed to write to state store (key: {})", key)
+                write!(f, "failed to write to state store (key: {key})")
             }
             StateStoreDeleteFailed { key } => {
-                write!(f, "Failed to delete from state store (key: {})", key)
+                write!(f, "failed to delete from state store (key: {key})")
             }
             StateCorrupted { description } => {
-                write!(f, "State corrupted: {}", description)
+                write!(f, "state corrupted: {description}")
             }
             StateLockTimeout { resource } => {
-                write!(f, "State lock timeout for resource '{}'", resource)
+                write!(f, "state lock timeout for resource '{resource}'")
             }
             CheckpointFailed { reason } => {
-                write!(f, "Checkpoint failed: {}", reason)
+                write!(f, "checkpoint failed: {reason}")
             }
             RecoveryFailed { reason } => {
-                write!(f, "Recovery failed: {}", reason)
+                write!(f, "recovery failed: {reason}")
             }
 
             DataConversionFailed {
                 from_type,
                 to_type,
                 value,
-            } => {
-                write!(
-                    f,
-                    "Failed to convert '{}' from {} to {}",
-                    value, from_type, to_type
-                )
-            }
-            JsonSerializationFailed => write!(f, "JSON serialization failed"),
-            JsonDeserializationFailed => write!(f, "JSON deserialization failed"),
+            } => match value {
+                Some(value) => {
+                    write!(
+                        f,
+                        "failed to convert '{value}' from {from_type} to {to_type}"
+                    )
+                }
+                None => {
+                    write!(f, "failed to convert '{from_type}' to '{to_type}'")
+                }
+            },
+            JsonSerializationFailed => write!(f, "json serialization failed"),
+            JsonDeserializationFailed => write!(f, "json deserialization failed"),
             BinaryParsingFailed { data_type } => {
-                write!(f, "Binary parsing failed for data type '{}'", data_type)
+                write!(f, "binary parsing failed for data type '{data_type}'")
             }
-            EncryptionFailed => write!(f, "Encryption failed"),
-            DecryptionFailed => write!(f, "Decryption failed"),
+            EncryptionFailed => write!(f, "encryption failed"),
+            DecryptionFailed => write!(f, "decryption failed"),
 
             ConfigurationError { parameter, reason } => {
                 write!(
                     f,
-                    "Configuration error for parameter '{}': {}",
-                    parameter, reason
+                    "configuration error for parameter '{parameter}': {reason}"
                 )
             }
             ResourceLimitExceeded { resource, limit } => {
                 write!(
                     f,
-                    "Resource limit exceeded for '{}' (limit: {})",
-                    resource, limit
+                    "resource limit exceeded for '{resource}' (limit: {limit})"
                 )
             }
-            IoError => write!(f, "I/O operation failed"),
-            NetworkError => write!(f, "Network operation failed"),
+            IoError => write!(f, "i/o operation failed"),
+            NetworkError => write!(f, "network operation failed"),
             Timeout {
                 operation,
                 duration_ms,
             } => {
-                write!(
-                    f,
-                    "Operation '{}' timed out after {}ms",
-                    operation, duration_ms
-                )
+                write!(f, "operation '{operation}' timed out after {duration_ms}ms")
+            }
+
+            Many { amount } => {
+                write!(f, "{amount} errors occurred")
             }
 
             Other { description } => {
-                write!(f, "Other error: {}", description)
+                write!(f, "other error: {description}")
             }
         }
     }
@@ -1114,45 +1184,6 @@ impl From<serde_json::Error> for Error {
     }
 }
 
-impl From<uuid::Error> for Error {
-    fn from(err: uuid::Error) -> Self {
-        Self::with_source(
-            ErrorKind::DataConversionFailed {
-                from_type: "string".to_string(),
-                to_type: "uuid".to_string(),
-                value: "invalid".to_string(),
-            },
-            err,
-        )
-    }
-}
-
-impl From<chrono::ParseError> for Error {
-    fn from(err: chrono::ParseError) -> Self {
-        Self::with_source(
-            ErrorKind::DataConversionFailed {
-                from_type: "string".to_string(),
-                to_type: "datetime".to_string(),
-                value: "invalid".to_string(),
-            },
-            err,
-        )
-    }
-}
-
-impl From<bigdecimal::ParseBigDecimalError> for Error {
-    fn from(err: bigdecimal::ParseBigDecimalError) -> Self {
-        Self::with_source(
-            ErrorKind::DataConversionFailed {
-                from_type: "string".to_string(),
-                to_type: "numeric".to_string(),
-                value: "invalid".to_string(),
-            },
-            err,
-        )
-    }
-}
-
 impl From<io::Error> for Error {
     fn from(err: io::Error) -> Self {
         use io::ErrorKind as IoErrorKind;
@@ -1251,13 +1282,6 @@ mod tests {
     }
 
     #[test]
-    fn test_uuid_error_conversion() {
-        let uuid_err = uuid::Uuid::parse_str("invalid-uuid").unwrap_err();
-        let err: Error = uuid_err.into();
-        assert!(matches!(err.kind(), ErrorKind::DataConversionFailed { .. }));
-    }
-
-    #[test]
     fn test_error_severity_classification() {
         // Test critical errors
         let critical_err = Error::state_corrupted("state file damaged");
@@ -1314,7 +1338,7 @@ mod tests {
     #[test]
     fn test_error_display() {
         let err = Error::connection_failed("localhost", 5432, "test_db");
-        let display = format!("{}", err);
+        let display = format!("{err}");
         assert!(display.contains("Failed to connect"));
         assert!(display.contains("localhost"));
         assert!(display.contains("5432"));
@@ -1324,7 +1348,7 @@ mod tests {
     #[test]
     fn test_error_debug() {
         let err = Error::connection_failed("localhost", 5432, "test_db");
-        let debug = format!("{:?}", err);
+        let debug = format!("{err:?}");
         assert!(debug.contains("Error"));
         assert!(debug.contains("ConnectionFailed"));
     }
