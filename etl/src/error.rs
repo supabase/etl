@@ -128,14 +128,8 @@ pub enum ErrorSeverity {
 pub enum RecoveryStrategy {
     /// No retry - permanent failure
     NoRetry,
-    /// Immediate retry recommended
-    RetryImmediate,
-    /// Retry with exponential backoff
-    RetryWithBackoff,
-    /// Retry after specific delay
-    RetryAfterDelay,
-    /// Manual intervention required
-    ManualIntervention,
+    /// Retry
+    Retry,
 }
 
 /// Formatting mode for error chains.
@@ -194,12 +188,13 @@ impl Error {
         I: IntoIterator<Item = E>,
         E: Into<Box<dyn error::Error + Send + Sync>>,
     {
-        let sources = sources.into_iter().map(|e| e.into()).collect();
+        let sources = sources.into_iter().map(|e| e.into()).collect::<Vec<_>>();
+
         Error(Box::new(ErrorInner {
             kind: ErrorKind::Many {
                 amount: sources.len() as u64,
             },
-            sources: sources.into_iter().map(|e| e.into()).collect(),
+            sources,
         }))
     }
 
@@ -322,22 +317,25 @@ impl Error {
     pub fn recovery_strategy(&self) -> RecoveryStrategy {
         use ErrorKind::*;
         match &self.0.kind {
-            // No retry - permanent failures requiring configuration fixes or schema changes
             AuthenticationFailed { .. }
             | TableNotFound { .. }
             | ColumnNotFound { .. }
             | TupleDataNotSupported { .. }
             | TlsConfigurationFailed
             | PublicationNotFound { .. }
-            | ReplicationSlotAlreadyExists { .. } => RecoveryStrategy::NoRetry,
+            | ReplicationSlotAlreadyExists { .. }
+            | WorkerPanicked { .. }
+            | LsnConsistencyError { .. }
+            | PipelineShutdownFailed
+            | StateStoreCorrupted { .. }
+            | TableReplicationPhaseInvalid { .. }
+            | Other { .. }
+            | Many { .. } => RecoveryStrategy::NoRetry,
 
-            // Immediate retry - transient operational issues that resolve quickly
-            WorkerCancelled { .. } | TransactionNotStarted | EventTypeMismatch { .. } => {
-                RecoveryStrategy::RetryImmediate
-            }
-
-            // Retry with backoff - infrastructure issues that may take time to resolve
-            ConnectionFailed { .. }
+            WorkerCancelled { .. }
+            | TransactionNotStarted
+            | EventTypeMismatch { .. }
+            | ConnectionFailed { .. }
             | ConnectionLost { .. }
             | TransactionFailed { .. }
             | IoError { .. }
@@ -346,90 +344,58 @@ impl Error {
             | ReplicationSlotNotCreated { .. }
             | ReplicationSlotNotFound { .. }
             | TableReplicationStateMissing { .. }
-            | PostgresError { .. } => RecoveryStrategy::RetryWithBackoff,
-
-            // Retry after delay - resource or capacity constraints
-            ResourceLimitExceeded { .. } => RecoveryStrategy::RetryAfterDelay,
-
-            // Manual intervention - critical system integrity issues
-            WorkerPanicked { .. }
-            | LsnConsistencyError { .. }
-            | PipelineShutdownFailed
-            | StateStoreCorrupted { .. }
-            | TableReplicationPhaseInvalid { .. } => RecoveryStrategy::ManualIntervention,
-
-            // Context-sensitive defaults
-            DataConversionFailed { .. } => RecoveryStrategy::RetryWithBackoff, // May be transient data format issue
-            WorkerFailedSilently { .. } => RecoveryStrategy::RetryWithBackoff, // Unknown cause, be cautious
-            Other { .. } => RecoveryStrategy::RetryWithBackoff, // Unknown issue, be conservative
-            Many { .. } => RecoveryStrategy::RetryAfterDelay, // Multiple failures suggest systematic issue
+            | PostgresError { .. }
+            | ResourceLimitExceeded { .. }
+            | DataConversionFailed { .. }
+            | WorkerFailedSilently { .. } => RecoveryStrategy::Retry,
         }
     }
 
     /// Returns true if this error is likely transient and retryable.
     pub fn is_retryable(&self) -> bool {
-        matches!(
-            self.recovery_strategy(),
-            RecoveryStrategy::RetryImmediate
-                | RecoveryStrategy::RetryWithBackoff
-                | RecoveryStrategy::RetryAfterDelay
-        )
+        matches!(self.recovery_strategy(), RecoveryStrategy::Retry)
     }
 
     /// Returns true if this error represents a permanent failure.
     pub fn is_permanent(&self) -> bool {
-        matches!(
-            self.recovery_strategy(),
-            RecoveryStrategy::NoRetry | RecoveryStrategy::ManualIntervention
-        )
+        matches!(self.recovery_strategy(), RecoveryStrategy::NoRetry)
     }
 
     /// Returns a formatted string showing this error and all its source errors recursively.
     pub fn error_chain(&self, format: ChainFormat) -> String {
+        self.error_chain_with_indent(format, "")
+    }
+
+    /// Internal method for error_chain that handles proper indentation for tree hierarchy.
+    fn error_chain_with_indent(&self, format: ChainFormat, indent: &str) -> String {
         let mut result = self.error_message();
 
         // Handle multiple sources
         match self.0.sources.len() {
             0 => {} // No sources
             1 => {
-                // Single source - traditional chain format
-                result.push_str("\n  ↳ caused by: ");
+                // Single source - check if it's an Error type to use proper tree formatting
                 let source = &self.0.sources[0];
-                match format {
-                    ChainFormat::Debug => result.push_str(&format!("{source:?}")),
-                    ChainFormat::Display => result.push_str(&format!("{source}")),
-                    ChainFormat::DisplayAlternate => result.push_str(&format!("{source:#}")),
-                }
 
-                // Continue with traditional chaining for nested sources
-                let mut current_source = error::Error::source(source.as_ref());
-                while let Some(nested_source) = current_source {
-                    result.push_str("\n    ↳ caused by: ");
-                    match format {
-                        ChainFormat::Debug => result.push_str(&format!("{nested_source:?}")),
-                        ChainFormat::Display => result.push_str(&format!("{nested_source}")),
-                        ChainFormat::DisplayAlternate => {
-                            result.push_str(&format!("{nested_source:#}"))
-                        }
-                    }
-                    current_source = error::Error::source(nested_source);
-                }
-            }
-            count => {
-                // Multiple sources - list them
-                result.push_str(&format!("\n  ↳ caused by {count} errors:"));
-                for (i, source) in self.0.sources.iter().enumerate() {
-                    result.push_str(&format!("\n    {}. ", i + 1));
+                if let Some(error_source) = source.downcast_ref::<Error>() {
+                    // It's our Error type, use proper tree formatting with "caused by" arrow
+                    result.push_str(&format!("\n{indent}  ↳ caused by: "));
+                    result.push_str(
+                        &error_source.error_chain_with_indent(format, &format!("{indent}    ")),
+                    );
+                } else {
+                    // Regular error type, use traditional chaining
+                    result.push_str(&format!("\n{indent}  ↳ caused by: "));
                     match format {
                         ChainFormat::Debug => result.push_str(&format!("{source:?}")),
                         ChainFormat::Display => result.push_str(&format!("{source}")),
                         ChainFormat::DisplayAlternate => result.push_str(&format!("{source:#}")),
                     }
 
-                    // Show nested sources for each error
+                    // Continue with traditional chaining for nested sources
                     let mut current_source = error::Error::source(source.as_ref());
                     while let Some(nested_source) = current_source {
-                        result.push_str("\n      ↳ caused by: ");
+                        result.push_str(&format!("\n{indent}    ↳ caused by: "));
                         match format {
                             ChainFormat::Debug => result.push_str(&format!("{nested_source:?}")),
                             ChainFormat::Display => result.push_str(&format!("{nested_source}")),
@@ -438,6 +404,50 @@ impl Error {
                             }
                         }
                         current_source = error::Error::source(nested_source);
+                    }
+                }
+            }
+            _ => {
+                // Multiple sources - add the "caused by" header first
+                result.push_str(&format!("\n{indent}  ↳ caused by multiple errors:"));
+
+                // Then list them with proper tree hierarchy
+                for (i, source) in self.0.sources.iter().enumerate() {
+                    result.push_str(&format!("\n{}    {}. ", indent, i + 1));
+
+                    if let Some(error_source) = source.downcast_ref::<Error>() {
+                        // It's our Error type, use proper tree formatting
+                        result.push_str(
+                            &error_source
+                                .error_chain_with_indent(format, &format!("{indent}       ")),
+                        );
+                    } else {
+                        // Regular error type
+                        match format {
+                            ChainFormat::Debug => result.push_str(&format!("{source:?}")),
+                            ChainFormat::Display => result.push_str(&format!("{source}")),
+                            ChainFormat::DisplayAlternate => {
+                                result.push_str(&format!("{source:#}"))
+                            }
+                        }
+
+                        // Show nested sources for each error
+                        let mut current_source = error::Error::source(source.as_ref());
+                        while let Some(nested_source) = current_source {
+                            result.push_str(&format!("\n{indent}       ↳ caused by: "));
+                            match format {
+                                ChainFormat::Debug => {
+                                    result.push_str(&format!("{nested_source:?}"))
+                                }
+                                ChainFormat::Display => {
+                                    result.push_str(&format!("{nested_source}"))
+                                }
+                                ChainFormat::DisplayAlternate => {
+                                    result.push_str(&format!("{nested_source:#}"))
+                                }
+                            }
+                            current_source = error::Error::source(nested_source);
+                        }
                     }
                 }
             }
@@ -548,9 +558,11 @@ impl Error {
             IoError { description } => format!("i/o operation failed: {description}"),
             PostgresError { description } => format!("postgres operation failed: {description}"),
 
-            Many { amount } => {
-                format!("{amount} errors occurred")
-            }
+            Many { amount } => match amount {
+                0 => "no errors occurred".to_string(),
+                1 => "an error occurred".to_string(),
+                _ => format!("{amount} errors occurred"),
+            },
             Other { description } => description.clone(),
         }
     }
@@ -767,25 +779,5 @@ mod tests {
         assert!(debug.contains("failed to connect to database"));
         assert!(debug.contains("↳ caused by:"));
         assert!(debug.contains("TCP connection refused"));
-    }
-
-    #[test]
-    fn test_errors_collection_formats() {
-        let error1 = Error::table_not_found("users");
-        let error2 = Error::column_not_found("posts", "invalid_column");
-
-        // let errors = Errors::from(vec![error1, error2]);
-
-        // Display format
-        let display = format!("{errors}");
-        assert!(display.contains("batch operation failed with 2 errors:"));
-        assert!(display.contains("1. table 'users' not found"));
-        assert!(display.contains("2. column 'invalid_column' not found in table 'posts'"));
-
-        // Debug format
-        let debug = format!("{errors:?}");
-        assert!(debug.contains("batch operation failed with 2 errors:"));
-        assert!(debug.contains("1. table 'users' not found"));
-        assert!(debug.contains("2. column 'invalid_column' not found in table 'posts'"));
     }
 }
