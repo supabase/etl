@@ -51,7 +51,7 @@ impl TlsConfig {
     }
 }
 
-/// A trait which can be used to convert the implementation into a crate 
+/// A trait which can be used to convert the implementation into a crate
 /// specific connect options. Since we have two crates for Postgres: sqlx
 /// and tokio_postgres, we keep the connection options centralized in
 /// [`PgConnectionConfig`] and implement this trait twice, once for each
