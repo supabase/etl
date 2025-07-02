@@ -3,7 +3,7 @@ use std::{collections::HashMap, sync::Arc};
 use config::shared::{IntoConnectOptions, PgConnectionConfig};
 use postgres::schema::TableId;
 use sqlx::{
-    postgres::{types::Oid as SqlxTableId, PgPoolOptions},
+    postgres::{types::Oid as SqlxTableId, PgConnectOptions, PgPoolOptions},
     prelude::{FromRow, Type},
     PgPool,
 };
@@ -99,8 +99,7 @@ impl PostgresStateStore {
     }
 
     async fn connect_to_source(&self) -> Result<PgPool, sqlx::Error> {
-        let options =
-            IntoConnectOptions::<sqlx::postgres::PgConnectOptions>::with_db(&self.source_config);
+        let options: PgConnectOptions = self.source_config.with_db();
 
         let pool = PgPoolOptions::new()
             .max_connections(NUM_POOL_CONNECTIONS)
