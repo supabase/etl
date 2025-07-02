@@ -1,13 +1,13 @@
 use etl::v2::config::batch::BatchConfig;
 use etl::v2::conversions::event::EventType;
 use etl::v2::destination::base::Destination;
+use etl::v2::encryption::bigquery::install_crypto_provider_once;
 use etl::v2::state::table::TableReplicationPhaseType;
 use std::time::Duration;
 use telemetry::init_test_tracing;
 
 use crate::common::bigquery::setup_bigquery_connection;
 use crate::common::database::spawn_database;
-use crate::common::encryption::bigquery::install_crypto_provider_once;
 use crate::common::pipeline_v2::{
     create_pipeline_identity, spawn_pg_pipeline, spawn_pg_pipeline_with,
 };
@@ -286,7 +286,10 @@ async fn test_table_insert_update_delete() {
     assert!(users_rows.is_none());
 }
 
+// This test is disabled since truncation is currently not supported by BigQuery when doing CDC
+// streaming. The test is kept just for future use.
 #[tokio::test(flavor = "multi_thread")]
+#[ignore]
 async fn test_table_truncate_with_batching() {
     init_test_tracing();
     install_crypto_provider_once();

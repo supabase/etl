@@ -4,8 +4,6 @@ use std::fmt::Debug;
 use tokio_postgres::types::Type;
 use uuid::Uuid;
 
-use crate::conversions::text::TextFormatConverter;
-
 pub mod bool;
 pub mod cdc_event;
 pub mod hex;
@@ -38,6 +36,8 @@ pub enum Cell {
 impl Cell {
     #[cfg(feature = "bigquery")]
     pub fn encode_prost(&self, tag: u32, buf: &mut impl bytes::BufMut) {
+        use crate::conversions::text::TextFormatConverter;
+
         match self {
             Cell::Null(typ) => {
                 TextFormatConverter::default_value(typ).encode_prost(tag, buf);
@@ -106,6 +106,8 @@ impl Cell {
 
     #[cfg(feature = "bigquery")]
     pub fn encoded_len_prost(&self, tag: u32) -> usize {
+        use crate::conversions::text::TextFormatConverter;
+
         match self {
             Cell::Null(typ) => TextFormatConverter::default_value(typ).encoded_len_prost(tag),
             Cell::Bool(b) => prost::encoding::bool::encoded_len(tag, b),

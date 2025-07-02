@@ -7,11 +7,11 @@ use std::sync::{Arc, LazyLock};
 use thiserror::Error;
 use tokio::sync::RwLock;
 use tokio_postgres::types::Type;
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::conversions::table_row::TableRow;
 use crate::conversions::Cell;
-use crate::v2::clients::bigquery::{BigQueryCdcMode, BigQueryClient, BigQueryClientError};
+use crate::v2::clients::bigquery::{BigQueryClient, BigQueryClientError, BigQueryOperationType};
 use crate::v2::conversions::event::{Event, TruncateEvent};
 use crate::v2::destination::base::{Destination, DestinationError};
 use crate::v2::schema::cache::SchemaCache;
@@ -275,7 +275,7 @@ impl BigQueryDestination {
         let mut table_schema_row = Self::table_schema_to_table_row(&table_schema);
         table_schema_row
             .values
-            .push(BigQueryCdcMode::UPSERT.into_cell());
+            .push(BigQueryOperationType::UPSERT.into_cell());
         let table_schema_descriptor =
             BigQueryClient::column_schemas_to_table_descriptor(&ETL_TABLE_SCHEMAS_COLUMNS);
         inner
@@ -291,7 +291,9 @@ impl BigQueryDestination {
         // Store column schemas metadata
         let mut column_rows = Self::column_schemas_to_table_rows(&table_schema);
         for column_row in column_rows.iter_mut() {
-            column_row.values.push(BigQueryCdcMode::UPSERT.into_cell());
+            column_row
+                .values
+                .push(BigQueryOperationType::UPSERT.into_cell());
         }
         let column_descriptors =
             BigQueryClient::column_schemas_to_table_descriptor(&ETL_TABLE_COLUMNS_COLUMNS);
@@ -437,7 +439,9 @@ impl BigQueryDestination {
 
         let dataset_id = inner.dataset_id.clone();
         for table_row in table_rows.iter_mut() {
-            table_row.values.push(BigQueryCdcMode::UPSERT.into_cell());
+            table_row
+                .values
+                .push(BigQueryOperationType::UPSERT.into_cell());
         }
         inner
             .client
@@ -469,7 +473,7 @@ impl BigQueryDestination {
                         insert
                             .table_row
                             .values
-                            .push(BigQueryCdcMode::UPSERT.into_cell());
+                            .push(BigQueryOperationType::UPSERT.into_cell());
                         let table_rows: &mut Vec<TableRow> =
                             table_id_to_table_rows.entry(insert.table_id).or_default();
                         table_rows.push(insert.table_row);
@@ -478,7 +482,7 @@ impl BigQueryDestination {
                         update
                             .table_row
                             .values
-                            .push(BigQueryCdcMode::UPSERT.into_cell());
+                            .push(BigQueryOperationType::UPSERT.into_cell());
                         let table_rows: &mut Vec<TableRow> =
                             table_id_to_table_rows.entry(update.table_id).or_default();
                         table_rows.push(update.table_row);
@@ -491,7 +495,7 @@ impl BigQueryDestination {
 
                         old_table_row
                             .values
-                            .push(BigQueryCdcMode::DELETE.into_cell());
+                            .push(BigQueryOperationType::DELETE.into_cell());
                         let table_rows: &mut Vec<TableRow> =
                             table_id_to_table_rows.entry(delete.table_id).or_default();
                         table_rows.push(old_table_row);
@@ -527,7 +531,13 @@ impl BigQueryDestination {
 
             // Process truncate events
             if !truncate_events.is_empty() {
-                self.process_truncate_events(truncate_events).await?;
+                // Right now we are not processing truncate messages, but we do the streaming split
+                // just to try out if splitting the streaming affects performance so that we might
+                // need it down the line once we figure out a solution for truncation.
+                warn!(
+                    "'TRUNCATE' events are not supported, skipping apply of {} 'TRUNCATE' events",
+                    truncate_events.len()
+                );
             }
         }
 

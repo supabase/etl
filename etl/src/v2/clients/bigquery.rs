@@ -29,23 +29,23 @@ const BIGQUERY_CDC_SPECIAL_COLUMN: &str = "_CHANGE_TYPE";
 
 /// Change Data Capture operation types for BigQuery streaming.
 #[derive(Debug)]
-pub enum BigQueryCdcMode {
+pub enum BigQueryOperationType {
     UPSERT,
     DELETE,
 }
 
-impl BigQueryCdcMode {
-    /// Converts the CDC mode into a [`Cell`] value.
+impl BigQueryOperationType {
+    /// Converts the [`BigQueryOperationType`] into a [`Cell`] value.
     pub fn into_cell(self) -> Cell {
         Cell::String(self.to_string())
     }
 }
 
-impl fmt::Display for BigQueryCdcMode {
+impl fmt::Display for BigQueryOperationType {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            BigQueryCdcMode::UPSERT => write!(f, "UPSERT"),
-            BigQueryCdcMode::DELETE => write!(f, "DELETE"),
+            BigQueryOperationType::UPSERT => write!(f, "UPSERT"),
+            BigQueryOperationType::DELETE => write!(f, "DELETE"),
         }
     }
 }

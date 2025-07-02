@@ -9,7 +9,6 @@ use std::time::{Duration, Instant};
 pub mod bigquery;
 pub mod database;
 pub mod destination;
-pub mod encryption;
 pub mod event;
 pub mod pipeline;
 pub mod pipeline_v2;

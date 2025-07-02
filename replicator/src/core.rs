@@ -1,9 +1,13 @@
+use crate::config::load_replicator_config;
+use crate::migrations::migrate_state_store;
 use config::shared::{DestinationConfig, ReplicatorConfig};
 use etl::v2::config::batch::BatchConfig;
 use etl::v2::config::pipeline::PipelineConfig;
 use etl::v2::config::retry::RetryConfig;
 use etl::v2::destination::base::Destination;
+use etl::v2::destination::bigquery::BigQueryDestination;
 use etl::v2::destination::memory::MemoryDestination;
+use etl::v2::encryption::bigquery::install_crypto_provider_once;
 use etl::v2::pipeline::{Pipeline, PipelineIdentity};
 use etl::v2::state::store::base::StateStore;
 use etl::v2::state::store::postgres::PostgresStateStore;
@@ -14,9 +18,6 @@ use std::io::BufReader;
 use std::time::Duration;
 use thiserror::Error;
 use tracing::{error, info, warn};
-
-use crate::config::load_replicator_config;
-use crate::migrations::migrate_state_store;
 
 #[derive(Debug, Error)]
 pub enum ReplicatorError {
@@ -113,8 +114,15 @@ async fn init_destination(
 ) -> anyhow::Result<impl Destination + Clone + Send + Sync + fmt::Debug + 'static> {
     match config.destination {
         DestinationConfig::Memory => Ok(MemoryDestination::new()),
-        _ => {
-            Err(ReplicatorError::UnsupportedDestination(format!("{:?}", config.destination)).into())
+        DestinationConfig::BigQuery {
+            project_id,
+            dataset_id,
+            service_account_key,
+            max_staleness_mins,
+        } => {
+            // The crypto provider is required when using BigQuery.
+            install_crypto_provider_once();
+            BigQueryDestination::new_with_key()
         }
     }
 }
