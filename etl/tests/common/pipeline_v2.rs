@@ -1,10 +1,10 @@
+use config::shared::PgConnectionConfig;
 use etl::v2::config::batch::BatchConfig;
 use etl::v2::config::pipeline::PipelineConfig;
 use etl::v2::config::retry::RetryConfig;
 use etl::v2::destination::base::Destination;
 use etl::v2::pipeline::{Pipeline, PipelineIdentity};
 use etl::v2::state::store::base::StateStore;
-use postgres::tokio::config::PgConnectionConfig;
 use rand::random;
 use std::time::Duration;
 

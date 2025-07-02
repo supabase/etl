@@ -7,10 +7,7 @@ use etl::v2::destination::memory::MemoryDestination;
 use etl::v2::pipeline::{Pipeline, PipelineIdentity};
 use etl::v2::state::store::base::StateStore;
 use etl::v2::state::store::postgres::PostgresStateStore;
-use etl::SslMode;
-use postgres::tokio::config::{PgConnectionConfig, PgTlsConfig};
 use std::fmt;
-use std::io::BufReader;
 use std::time::Duration;
 use thiserror::Error;
 use tracing::{error, info, warn};
@@ -27,21 +24,6 @@ pub enum ReplicatorError {
 pub async fn start_replicator() -> anyhow::Result<()> {
     let replicator_config = load_replicator_config()?;
 
-    // We set up the certificates and SSL mode.
-    let mut trusted_root_certs = vec![];
-    let ssl_mode = if replicator_config.source.tls.enabled {
-        let mut root_certs_reader =
-            BufReader::new(replicator_config.source.tls.trusted_root_certs.as_bytes());
-        for cert in rustls_pemfile::certs(&mut root_certs_reader) {
-            let cert = cert?;
-            trusted_root_certs.push(cert);
-        }
-
-        SslMode::VerifyFull
-    } else {
-        SslMode::Disable
-    };
-
     // We initialize the state store and destination.
     let state_store = init_state_store(&replicator_config).await?;
     let destination = init_destination(&replicator_config).await?;
@@ -55,17 +37,7 @@ pub async fn start_replicator() -> anyhow::Result<()> {
     // We prepare the configuration of the pipeline.
     // TODO: improve v2 pipeline config to make conversions nicer.
     let pipeline_config = PipelineConfig {
-        pg_connection: PgConnectionConfig {
-            host: replicator_config.source.host,
-            port: replicator_config.source.port,
-            name: replicator_config.source.name,
-            username: replicator_config.source.username,
-            password: replicator_config.source.password.map(Into::into),
-            tls_config: PgTlsConfig {
-                ssl_mode,
-                trusted_root_certs,
-            },
-        },
+        pg_connection: replicator_config.source,
         batch: BatchConfig {
             max_size: replicator_config.pipeline.batch.max_size,
             max_fill: Duration::from_millis(replicator_config.pipeline.batch.max_fill_ms),

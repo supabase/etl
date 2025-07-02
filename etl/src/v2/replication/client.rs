@@ -6,6 +6,7 @@ use postgres_replication::LogicalReplicationStream;
 use rustls::ClientConfig;
 use std::collections::HashMap;
 use std::fmt;
+use std::io::BufReader;
 use std::sync::Arc;
 use thiserror::Error;
 use tokio_postgres::error::SqlState;
@@ -79,6 +80,9 @@ pub enum PgReplicationError {
 
     #[error("Unsupported replica identity '{0}' in table: only 'default' or 'full' replica identities are supported")]
     UnsupportedReplicaIdentity(String),
+
+    #[error("Io error: {0}")]
+    Io(#[from] std::io::Error),
 }
 
 #[derive(Debug, Clone)]
@@ -235,9 +239,15 @@ impl PgReplicationClient {
         config.replication_mode(ReplicationMode::Logical);
 
         let mut root_store = rustls::RootCertStore::empty();
-        for trusted_root_cert in pg_connection_config.tls.trusted_root_certs.iter() {
-            root_store.add(trusted_root_cert.clone())?;
-        }
+        if pg_connection_config.tls.enabled {
+            let mut root_certs_reader =
+                BufReader::new(pg_connection_config.tls.trusted_root_certs.as_bytes());
+            for cert in rustls_pemfile::certs(&mut root_certs_reader) {
+                let cert = cert?;
+                root_store.add(cert)?;
+            }
+        };
+
         let tls_config = ClientConfig::builder()
             .with_root_certificates(root_store)
             .with_no_client_auth();
