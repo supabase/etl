@@ -14,7 +14,7 @@ use api::{
     startup::run,
 };
 use config::load_config;
-use postgres::sqlx::config::PgConnectionConfig;
+use config::shared::PgConnectionConfig;
 use postgres::sqlx::test_utils::drop_pg_database;
 use reqwest::{IntoUrl, RequestBuilder};
 use std::io;
