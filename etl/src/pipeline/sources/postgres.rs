@@ -6,14 +6,14 @@ use std::{
 };
 
 use async_trait::async_trait;
+use config::shared::PgConnectionConfig;
 use futures::{ready, Stream};
 use pin_project_lite::pin_project;
 use postgres::schema::{ColumnSchema, TableId, TableName, TableSchema};
-use postgres::tokio::config::PgConnectionConfig;
 use postgres_replication::LogicalReplicationStream;
 use rustls::pki_types::CertificateDer;
 use thiserror::Error;
-use tokio_postgres::{config::SslMode, types::PgLsn, CopyOutStream};
+use tokio_postgres::{types::PgLsn, CopyOutStream};
 use tracing::info;
 
 use crate::{
@@ -59,9 +59,9 @@ impl PostgresSource {
         slot_name: Option<String>,
         table_names_from: TableNamesFrom,
     ) -> Result<PostgresSource, PostgresSourceError> {
-        let mut replication_client = match config.tls_config.ssl_mode {
-            SslMode::Disable => ReplicationClient::connect_no_tls(config).await?,
-            _ => ReplicationClient::connect_tls(config, trusted_root_certs).await?,
+        let mut replication_client = match config.tls.enabled {
+            true => ReplicationClient::connect_tls(config, trusted_root_certs).await?,
+            false => ReplicationClient::connect_no_tls(config).await?,
         };
 
         // TODO: we have to fix this whole block which starts the transaction and loads the data.

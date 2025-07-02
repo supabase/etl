@@ -1,6 +1,7 @@
+use config::shared::PgConnectionConfig;
+
 use crate::v2::config::batch::BatchConfig;
 use crate::v2::config::retry::RetryConfig;
-use postgres::tokio::config::PgConnectionConfig;
 
 #[derive(Debug, Clone)]
 pub struct PipelineConfig {

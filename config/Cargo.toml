@@ -4,9 +4,22 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-postgres = { workspace = true, features = ["sqlx"] }
+# postgres = { workspace = true, features = ["sqlx"] }
 
 rust-cli-config = { workspace = true, features = ["yaml"] }
 secrecy = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
+sqlx = { workspace = true, features = [
+    # "runtime-tokio-rustls",
+    # "macros",
+    "postgres",
+    # "json",
+    # "migrate",
+] }
 thiserror = { workspace = true }
+tokio-postgres = { workspace = true, features = [
+    "runtime",
+    # "with-chrono-0_4",
+    # "with-uuid-1",
+    # "with-serde_json-1",
+] }

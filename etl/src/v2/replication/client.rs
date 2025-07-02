@@ -1,6 +1,6 @@
+use config::shared::{IntoConnectOptions, PgConnectionConfig};
 use pg_escape::{quote_identifier, quote_literal};
 use postgres::schema::{ColumnSchema, TableId, TableName, TableSchema};
-use postgres::tokio::config::PgConnectionConfig;
 use postgres::types::convert_type_oid_to_type;
 use postgres_replication::LogicalReplicationStream;
 use rustls::ClientConfig;
@@ -206,7 +206,7 @@ impl PgReplicationClient {
     pub async fn connect_no_tls(
         pg_connection_config: PgConnectionConfig,
     ) -> PgReplicationResult<Self> {
-        let mut config: Config = pg_connection_config.clone().into();
+        let mut config: Config = pg_connection_config.clone().with_db();
         config.replication_mode(ReplicationMode::Logical);
 
         let (client, connection) = config.connect(NoTls).await?;
@@ -231,11 +231,11 @@ impl PgReplicationClient {
     pub async fn connect_tls(
         pg_connection_config: PgConnectionConfig,
     ) -> PgReplicationResult<Self> {
-        let mut config: Config = pg_connection_config.clone().into();
+        let mut config: Config = pg_connection_config.clone().with_db();
         config.replication_mode(ReplicationMode::Logical);
 
         let mut root_store = rustls::RootCertStore::empty();
-        for trusted_root_cert in pg_connection_config.tls_config.trusted_root_certs.iter() {
+        for trusted_root_cert in pg_connection_config.tls.trusted_root_certs.iter() {
             root_store.add(trusted_root_cert.clone())?;
         }
         let tls_config = ClientConfig::builder()

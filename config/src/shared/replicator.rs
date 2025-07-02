@@ -1,5 +1,5 @@
 use crate::shared::pipeline::PipelineConfig;
-use crate::shared::{DestinationConfig, SourceConfig, SupabaseConfig, ValidationError};
+use crate::shared::{DestinationConfig, PgConnectionConfig, SupabaseConfig, ValidationError};
 use serde::{Deserialize, Serialize};
 
 /// Configuration for the replicator service.
@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "snake_case")]
 pub struct ReplicatorConfig {
     /// Configuration for the source Postgres instance.
-    pub source: SourceConfig,
+    pub source: PgConnectionConfig,
     /// Configuration for the replication destination.
     pub destination: DestinationConfig,
     /// Configuration for the replication pipeline.

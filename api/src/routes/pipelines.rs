@@ -6,8 +6,8 @@ use actix_web::{
     HttpRequest, HttpResponse, Responder, ResponseError,
 };
 use config::shared::{
-    DestinationConfig, PipelineConfig as SharedPipelineConfig, ReplicatorConfig,
-    SourceConfig as SharedSourceConfig, SupabaseConfig, TlsConfig,
+    DestinationConfig, PgConnectionConfig as SharedSourceConfig,
+    PipelineConfig as SharedPipelineConfig, ReplicatorConfig, SupabaseConfig, TlsConfig,
 };
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;

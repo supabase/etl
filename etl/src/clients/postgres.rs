@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 
+use config::shared::{IntoConnectOptions, PgConnectionConfig};
 use pg_escape::{quote_identifier, quote_literal};
 use postgres::schema::{ColumnSchema, TableId, TableName, TableSchema};
-use postgres::tokio::config::PgConnectionConfig;
 use postgres_replication::LogicalReplicationStream;
 use rustls::{pki_types::CertificateDer, ClientConfig};
 use thiserror::Error;
@@ -67,7 +67,7 @@ impl ReplicationClient {
     ) -> Result<ReplicationClient, ReplicationClientError> {
         info!("connecting to postgres without TLS");
 
-        let mut config: Config = config.into();
+        let mut config: Config = config.with_db();
         config.replication_mode(ReplicationMode::Logical);
 
         let (postgres_client, connection) = config.connect(NoTls).await?;
@@ -96,7 +96,7 @@ impl ReplicationClient {
     ) -> Result<ReplicationClient, ReplicationClientError> {
         info!("connecting to postgres with TLS");
 
-        let mut config: Config = config.into();
+        let mut config: Config = config.with_db();
         config.replication_mode(ReplicationMode::Logical);
 
         let mut root_store = rustls::RootCertStore::empty();

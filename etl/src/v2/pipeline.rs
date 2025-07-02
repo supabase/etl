@@ -1,7 +1,6 @@
 use std::sync::Arc;
 use thiserror::Error;
 use tokio::sync::watch;
-use tokio_postgres::config::SslMode;
 use tracing::{error, info};
 
 use crate::v2::concurrency::shutdown::{create_shutdown_channel, ShutdownTx};
@@ -217,11 +216,9 @@ where
 
     async fn connect(&self) -> Result<PgReplicationClient, PipelineError> {
         // We create the main replication client that will be used by the apply worker.
-        let replication_client = match self.config.pg_connection.tls_config.ssl_mode {
-            SslMode::Disable => {
-                PgReplicationClient::connect_no_tls(self.config.pg_connection.clone()).await?
-            }
-            _ => PgReplicationClient::connect_tls(self.config.pg_connection.clone()).await?,
+        let replication_client = match self.config.pg_connection.tls.enabled {
+            true => PgReplicationClient::connect_tls(self.config.pg_connection.clone()).await?,
+            false => PgReplicationClient::connect_no_tls(self.config.pg_connection.clone()).await?,
         };
 
         Ok(replication_client)
