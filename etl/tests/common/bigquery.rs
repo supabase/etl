@@ -224,7 +224,7 @@ impl BigQueryDatabase {
                 sa_key,
                 // We set a `max_staleness_mins` to 0 since we want the changes to be applied at
                 // query time.
-                0,
+                Some(0),
             )
             .await
             .unwrap(),
@@ -239,7 +239,7 @@ impl BigQueryDatabase {
                 sa_key_path,
                 // We set a `max_staleness_mins` to 0 since we want the changes to be applied at
                 // query time.
-                0,
+                Some(0),
             )
             .await
             .unwrap(),

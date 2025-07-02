@@ -11,6 +11,7 @@ use etl::v2::encryption::bigquery::install_crypto_provider_once;
 use etl::v2::pipeline::{Pipeline, PipelineIdentity};
 use etl::v2::state::store::base::StateStore;
 use etl::v2::state::store::postgres::PostgresStateStore;
+use etl::v2::state::store::memory::MemoryStateStore;
 use etl::SslMode;
 use postgres::tokio::config::{PgConnectionConfig, PgTlsConfig};
 use std::fmt;
@@ -26,6 +27,14 @@ pub enum ReplicatorError {
     UnsupportedDestination(String),
 }
 
+// Macro to statically dispatch pipeline creation and starting
+macro_rules! start_pipeline_dispatch {
+    ($identity:expr, $pipeline_config:expr, $state_store:expr, $destination:expr) => {{
+        let pipeline = Pipeline::new($identity, $pipeline_config, $state_store, $destination);
+        start_pipeline(pipeline).await
+    }};
+}
+
 pub async fn start_replicator() -> anyhow::Result<()> {
     let replicator_config = load_replicator_config()?;
 
@@ -38,34 +47,23 @@ pub async fn start_replicator() -> anyhow::Result<()> {
             let cert = cert?;
             trusted_root_certs.push(cert);
         }
-
         SslMode::VerifyFull
     } else {
         SslMode::Disable
     };
 
-    // We initialize the state store and destination.
-    let state_store = init_state_store(&replicator_config).await?;
-    let destination = init_destination(&replicator_config).await?;
-
-    // We create the identity of this pipeline.
-    let identity = PipelineIdentity::new(
-        replicator_config.pipeline.id,
-        &replicator_config.pipeline.publication_name,
-    );
-
-    // We prepare the configuration of the pipeline.
-    // TODO: improve v2 pipeline config to make conversions nicer.
+    // We create the configuration that is used by the pipeline, which is separate from the configs
+    // found in the 'config' crate.
     let pipeline_config = PipelineConfig {
         pg_connection: PgConnectionConfig {
-            host: replicator_config.source.host,
+            host: replicator_config.source.host.clone(),
             port: replicator_config.source.port,
-            name: replicator_config.source.name,
-            username: replicator_config.source.username,
-            password: replicator_config.source.password.map(Into::into),
+            name: replicator_config.source.name.clone(),
+            username: replicator_config.source.username.clone(),
+            password: replicator_config.source.password.clone().map(Into::into),
             tls_config: PgTlsConfig {
-                ssl_mode,
-                trusted_root_certs,
+                ssl_mode: ssl_mode.clone(),
+                trusted_root_certs: trusted_root_certs.clone(),
             },
         },
         batch: BatchConfig {
@@ -96,44 +94,50 @@ pub async fn start_replicator() -> anyhow::Result<()> {
         },
     };
 
-    let pipeline = Pipeline::new(identity, pipeline_config, state_store, destination);
-    start_pipeline(pipeline).await?;
+    let identity = PipelineIdentity::new(
+        replicator_config.pipeline.id,
+        &replicator_config.pipeline.publication_name,
+    );
 
-    Ok(())
-}
+    // We initialize the state store, which for the replicator is not configurable.
+    let state_store = init_state_store(&replicator_config).await?;
 
-async fn init_state_store(config: &ReplicatorConfig) -> anyhow::Result<impl StateStore + Clone> {
-    migrate_state_store(config.source.clone()).await?;
-    Ok(PostgresStateStore::new(
-        config.pipeline.id,
-        config.source.clone(),
-    ))
-}
+    // For each destination, we start the pipeline. This is more verbose due to static dispatch, but
+    // we prefer more performance at the cost of ergonomics.
+    match &replicator_config.destination {
+        DestinationConfig::Memory => {
+            let destination = MemoryDestination::new();
 
-async fn init_destination(
-    config: &ReplicatorConfig,
-) -> anyhow::Result<impl Destination + Clone + Send + Sync + fmt::Debug + 'static> {
-    match &config.destination {
-        DestinationConfig::Memory => Ok(MemoryDestination::new()),
+            start_pipeline_dispatch!(identity, pipeline_config, state_store, destination)?;
+        }
         DestinationConfig::BigQuery {
             project_id,
             dataset_id,
             service_account_key,
             max_staleness_mins,
         } => {
-            // The crypto provider is required when using BigQuery.
             install_crypto_provider_once();
-
-            let service_account_key = service_account_key.expose_secret();
-
-            BigQueryDestination::new_with_key(
+            let destination = BigQueryDestination::new_with_key(
                 project_id.clone(),
                 dataset_id.clone(),
-                service_account_key,
-                max_staleness_mins.clone()
-            )
+                service_account_key.expose_secret(),
+                max_staleness_mins.clone(),
+            ).await?;
+
+            start_pipeline_dispatch!(identity, pipeline_config, state_store, destination)?;
         }
     }
+
+    Ok(())
+}
+
+async fn init_state_store(config: &ReplicatorConfig) -> anyhow::Result<PostgresStateStore> {
+    migrate_state_store(config.source.clone()).await?;
+
+    Ok(PostgresStateStore::new(
+        config.pipeline.id,
+        config.source.clone(),
+    ))
 }
 
 async fn start_pipeline<S, D>(mut pipeline: Pipeline<S, D>) -> anyhow::Result<()>

@@ -547,6 +547,7 @@ impl BigQueryDestination {
     /// Processes truncate events by executing `TRUNCATE TABLE` statements in BigQuery.
     ///
     /// Maps PostgreSQL table OIDs to BigQuery table names and issues truncate commands.
+    #[allow(dead_code)]
     async fn process_truncate_events(
         &self,
         truncate_events: Vec<TruncateEvent>,
