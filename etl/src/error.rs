@@ -1,6 +1,7 @@
-use crate::v2::workers::base::WorkerType;
 use std::{borrow, error, fmt, result};
 use tokio_postgres::error::SqlState;
+
+use crate::v2::workers::base::WorkerType;
 
 /// Type alias for convenience when using the Result type with our Error.
 pub type Result<T> = result::Result<T, Error>;
@@ -9,17 +10,14 @@ pub type Result<T> = result::Result<T, Error>;
 ///
 /// Uses boxing to keep the public Error type size consistent and enable
 /// rich error context without performance penalties for the success path.
+///
 /// Supports both single and multiple source errors for comprehensive error chaining.
 struct ErrorInner {
     kind: ErrorKind,
     sources: Vec<Box<dyn error::Error + Send + Sync>>,
 }
 
-/// Comprehensive error classification for ETL operations.
-///
-/// Groups error variants by functional area to provide structured error information
-/// for proper handling and recovery strategies. Unused variants have been removed
-/// to keep the enum focused on actual use cases.
+/// Kind of errors that can happen in ETL.
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub enum ErrorKind {
@@ -110,19 +108,6 @@ pub enum ErrorKind {
     Other { description: String },
 }
 
-/// Error severity level for monitoring and alerting.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ErrorSeverity {
-    /// Low severity - expected transient error
-    Low,
-    /// Medium severity - unexpected but recoverable error
-    Medium,
-    /// High severity - significant operational issue
-    High,
-    /// Critical severity - system-threatening error
-    Critical,
-}
-
 /// Error recovery strategy hint for automated error handling.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RecoveryStrategy {
@@ -134,7 +119,7 @@ pub enum RecoveryStrategy {
 
 /// Formatting mode for error chains.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ChainFormat {
+enum ChainFormat {
     /// Debug format with full details
     Debug,
     /// Display format with basic message
@@ -146,8 +131,7 @@ pub enum ChainFormat {
 /// A stable error type for the ETL library using the ErrorInner pattern.
 ///
 /// This error type provides a stable public API while allowing internal error details
-/// to evolve. It supports error chaining, structured error data, and classification
-/// for recovery strategies.
+/// to evolve.
 pub struct Error(Box<ErrorInner>);
 
 impl Error {
@@ -240,20 +224,6 @@ impl Error {
         })
     }
 
-    /// Adds an additional source error to this error.
-    pub fn add_source<E>(mut self, source: E) -> Self
-    where
-        E: Into<Box<dyn error::Error + Send + Sync>>,
-    {
-        self.0.sources.push(source.into());
-        self
-    }
-
-    /// Returns all source errors.
-    pub fn sources(&self) -> &[Box<dyn error::Error + Send + Sync>] {
-        &self.0.sources
-    }
-
     /// Returns the primary (first) source error for std::error::Error compatibility.
     pub fn primary_source(&self) -> Option<&(dyn error::Error + 'static)> {
         self.0
@@ -265,52 +235,6 @@ impl Error {
     /// Returns the error kind classification.
     pub fn kind(&self) -> &ErrorKind {
         &self.0.kind
-    }
-
-    /// Returns the severity level of this error for monitoring and alerting.
-    pub fn severity(&self) -> ErrorSeverity {
-        use ErrorKind::*;
-        match &self.0.kind {
-            // Critical errors - system integrity or data consistency issues that require immediate attention
-            StateStoreCorrupted { .. }
-            | WorkerPanicked { .. }
-            | LsnConsistencyError { .. }
-            | PipelineShutdownFailed => ErrorSeverity::Critical,
-
-            // High severity errors - operational failures that significantly impact functionality
-            ConnectionLost { .. }
-            | ReplicationSlotNotCreated { .. }
-            | AuthenticationFailed { .. }
-            | TransactionFailed { .. }
-            | EventsStreamFailed
-            | TableCopyStreamFailed { .. }
-            | TransactionNotStarted => ErrorSeverity::High,
-
-            // Medium severity errors - recoverable issues that may affect specific operations
-            ConnectionFailed { .. }
-            | TableNotFound { .. }
-            | ColumnNotFound { .. }
-            | ReplicationSlotNotFound { .. }
-            | ReplicationSlotAlreadyExists { .. }
-            | PublicationNotFound { .. }
-            | ResourceLimitExceeded { .. }
-            | EventTypeMismatch { .. }
-            | TableReplicationPhaseInvalid { .. }
-            | TableReplicationStateMissing { .. }
-            | TupleDataNotSupported { .. }
-            | TlsConfigurationFailed => ErrorSeverity::Medium,
-
-            // Low severity errors - transient issues or expected operational events
-            DataConversionFailed { .. }
-            | WorkerCancelled { .. }
-            | WorkerFailedSilently { .. }
-            | IoError { .. }
-            | PostgresError { .. }
-            | Other { .. } => ErrorSeverity::Low,
-
-            // Aggregate errors inherit severity from their constituent errors
-            Many { .. } => ErrorSeverity::Medium,
-        }
     }
 
     /// Returns the recommended recovery strategy for automated error handling.
@@ -362,7 +286,7 @@ impl Error {
     }
 
     /// Returns a formatted string showing this error and all its source errors recursively.
-    pub fn error_chain(&self, format: ChainFormat) -> String {
+    fn error_chain(&self, format: ChainFormat) -> String {
         self.error_chain_with_indent(format, "")
     }
 
@@ -395,7 +319,7 @@ impl Error {
                     // Continue with traditional chaining for nested sources
                     let mut current_source = error::Error::source(source.as_ref());
                     while let Some(nested_source) = current_source {
-                        result.push_str(&format!("\n{indent}    ↳ caused by: "));
+                        result.push_str(&format!("\n{indent}  ↳ caused by: "));
                         match format {
                             ChainFormat::Debug => result.push_str(&format!("{nested_source:?}")),
                             ChainFormat::Display => result.push_str(&format!("{nested_source}")),
@@ -434,7 +358,7 @@ impl Error {
                         // Show nested sources for each error
                         let mut current_source = error::Error::source(source.as_ref());
                         while let Some(nested_source) = current_source {
-                            result.push_str(&format!("\n{indent}       ↳ caused by: "));
+                            result.push_str(&format!("\n{indent}  ↳ caused by: "));
                             match format {
                                 ChainFormat::Debug => {
                                     result.push_str(&format!("{nested_source:?}"))
