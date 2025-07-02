@@ -1,17 +1,12 @@
 use config::shared::{BatchConfig, PgConnectionConfig, PipelineConfig, RetryConfig};
 use etl::v2::destination::base::Destination;
-use etl::v2::pipeline::{Pipeline, PipelineIdentity};
+use etl::v2::pipeline::{Pipeline, PipelineId};
 use etl::v2::state::store::base::StateStore;
-use rand::random;
-
-pub fn create_pipeline_identity(publication_name: &str) -> PipelineIdentity {
-    let pipeline_id = random();
-    PipelineIdentity::new(pipeline_id, publication_name)
-}
 
 pub fn create_pipeline<S, D>(
-    identity: &PipelineIdentity,
     pg_connection_config: &PgConnectionConfig,
+    pipeline_id: PipelineId,
+    publication_name: String,
     state_store: S,
     destination: D,
 ) -> Pipeline<S, D>
@@ -20,7 +15,7 @@ where
     D: Destination + Clone + Send + Sync + 'static,
 {
     let config = PipelineConfig {
-        id: identity.id(),
+        id: pipeline_id,
         pg_connection: pg_connection_config.clone(),
         batch: BatchConfig {
             max_size: 1,
@@ -32,8 +27,8 @@ where
             max_delay_ms: 5000,
             backoff_factor: 2.0,
         },
-        publication_name: identity.publication_name().to_string(),
+        publication_name,
     };
 
-    Pipeline::new(identity.clone(), config, state_store, destination)
+    Pipeline::new(pipeline_id, config, state_store, destination)
 }

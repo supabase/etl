@@ -57,32 +57,9 @@ enum PipelineWorkers {
 
 pub type PipelineId = u64;
 
-#[derive(Debug, Clone)]
-pub struct PipelineIdentity {
-    id: PipelineId,
-    publication_name: String,
-}
-
-impl PipelineIdentity {
-    pub fn new(id: PipelineId, publication_name: &str) -> Self {
-        Self {
-            id,
-            publication_name: publication_name.to_owned(),
-        }
-    }
-
-    pub fn id(&self) -> PipelineId {
-        self.id
-    }
-
-    pub fn publication_name(&self) -> &str {
-        &self.publication_name
-    }
-}
-
 #[derive(Debug)]
 pub struct Pipeline<S, D> {
-    identity: PipelineIdentity,
+    id: PipelineId,
     config: Arc<PipelineConfig>,
     state_store: S,
     destination: D,
@@ -95,12 +72,7 @@ where
     S: StateStore + Clone + Send + Sync + 'static,
     D: Destination + Clone + Send + Sync + 'static,
 {
-    pub fn new(
-        identity: PipelineIdentity,
-        config: PipelineConfig,
-        state_store: S,
-        destination: D,
-    ) -> Self {
+    pub fn new(id: PipelineId, config: PipelineConfig, state_store: S, destination: D) -> Self {
         // We create a watch channel of unit types since this is just used to notify all subscribers
         // that shutdown is needed.
         //
@@ -109,17 +81,13 @@ where
         let (shutdown_tx, _) = create_shutdown_channel();
 
         Self {
-            identity,
+            id,
             config: Arc::new(config),
             state_store,
             destination,
             workers: PipelineWorkers::NotStarted,
             shutdown_tx,
         }
-    }
-
-    pub fn identity(&self) -> &PipelineIdentity {
-        &self.identity
     }
 
     pub fn shutdown_tx(&self) -> ShutdownTx {
@@ -129,8 +97,7 @@ where
     pub async fn start(&mut self) -> Result<(), PipelineError> {
         info!(
             "Starting pipeline for publication '{}' with id {}",
-            self.identity.id(),
-            self.identity.publication_name()
+            self.config.publication_name, self.id
         );
 
         // We create the first connection to Postgres. Note that other connections will be created
@@ -151,7 +118,7 @@ where
 
         // We create and start the apply worker.
         let apply_worker = ApplyWorker::new(
-            self.identity.clone(),
+            self.id,
             self.config.clone(),
             replication_client,
             pool.clone(),
@@ -186,20 +153,20 @@ where
 
         // We need to make sure that the publication exists.
         if !replication_client
-            .publication_exists(self.identity.publication_name())
+            .publication_exists(&self.config.publication_name)
             .await?
         {
             error!(
                 "The publication '{}' does not exist in the database",
-                self.identity.publication_name()
+                self.config.publication_name
             );
             return Err(PipelineError::MissingPublication(
-                self.identity.publication_name().to_owned(),
+                self.config.publication_name.clone(),
             ));
         }
 
         let table_ids = replication_client
-            .get_publication_table_ids(self.identity.publication_name())
+            .get_publication_table_ids(&self.config.publication_name)
             .await?;
         self.state_store.load_table_replication_states().await?;
         let states = self.state_store.get_table_replication_states().await?;

@@ -1,7 +1,7 @@
 use config::shared::{DestinationConfig, ReplicatorConfig};
 use etl::v2::destination::base::Destination;
 use etl::v2::destination::memory::MemoryDestination;
-use etl::v2::pipeline::{Pipeline, PipelineIdentity};
+use etl::v2::pipeline::Pipeline;
 use etl::v2::state::store::base::StateStore;
 use etl::v2::state::store::postgres::PostgresStateStore;
 use std::fmt;
@@ -24,14 +24,8 @@ pub async fn start_replicator() -> anyhow::Result<()> {
     let state_store = init_state_store(&replicator_config).await?;
     let destination = init_destination(&replicator_config).await?;
 
-    // We create the identity of this pipeline.
-    let identity = PipelineIdentity::new(
-        replicator_config.pipeline.id,
-        &replicator_config.pipeline.publication_name,
-    );
-
     let pipeline = Pipeline::new(
-        identity,
+        replicator_config.pipeline.id,
         replicator_config.pipeline,
         state_store,
         destination,
