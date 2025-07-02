@@ -85,6 +85,11 @@ impl TestStateStore {
         inner
             .table_state_conditions
             .push((table_id, Box::new(condition), notify.clone()));
+        // Checking conditions here as well because it is possible that the state
+        // the conditions are checking for is already reached by the time the
+        // `notify_on_replication_state` method is called, in which case this
+        // notification will not ever fire if conditions are not checked here.
+        inner.check_conditions().await;
 
         notify
     }
