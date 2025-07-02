@@ -243,7 +243,7 @@ where
             (Err(apply_err), Err(table_sync_err)) => {
                 let err = Error::from_many(vec![apply_err, table_sync_err]);
                 Err(err)
-            },
+            }
         }
     }
 

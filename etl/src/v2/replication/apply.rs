@@ -480,13 +480,10 @@ where
     // we want to bail assuming we are in an inconsistent state.
     let commit_lsn = PgLsn::from(message.commit_lsn());
     if commit_lsn != remote_final_lsn {
-        return Err(
-            Error::new(
-            ErrorKind::LsnConsistencyError {
-                expected: remote_final_lsn.to_string(),
-                actual: commit_lsn.to_string()
-            })
-        );
+        return Err(Error::new(ErrorKind::LsnConsistencyError {
+            expected: remote_final_lsn.to_string(),
+            actual: commit_lsn.to_string(),
+        }));
     }
 
     let end_lsn = PgLsn::from(message.end_lsn());

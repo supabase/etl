@@ -2,6 +2,7 @@ use config::shared::{BatchConfig, RetryConfig};
 use serde::{Deserialize, Serialize};
 use sqlx::{PgPool, Postgres, Transaction};
 use thiserror::Error;
+use tokio_postgres::error::SqlState;
 
 use crate::db::replicators::{create_replicator_txn, ReplicatorsDbError};
 use crate::db::serde::{
@@ -276,11 +277,16 @@ pub async fn read_all_pipelines(
 pub fn is_duplicate_pipeline_error(err: &sqlx::Error) -> bool {
     match err {
         sqlx::Error::Database(ref db_err) => {
-            // 23505 is PostgreSQL's unique constraint violation code
+            // Check for unique constraint violation using SqlState constant
             // Check for our unique constraint name defined
             // in the migrations/20250605064229_add_unique_constraint_pipelines_source_destination.sql file
-            db_err.code().as_deref() == Some("23505")
-                && db_err.constraint() == Some("pipelines_tenant_source_destination_unique")
+            if let Some(code_str) = db_err.code() {
+                let sql_state = SqlState::from_code(&code_str);
+                sql_state == SqlState::UNIQUE_VIOLATION
+                    && db_err.constraint() == Some("pipelines_tenant_source_destination_unique")
+            } else {
+                false
+            }
         }
         _ => false,
     }

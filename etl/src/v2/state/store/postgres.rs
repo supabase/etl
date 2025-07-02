@@ -46,7 +46,7 @@ impl TryFrom<TableReplicationPhase> for (TableState, Option<String>) {
             TableReplicationPhase::Ready => (TableState::Ready, None),
             TableReplicationPhase::Skipped => (TableState::Skipped, None),
             TableReplicationPhase::SyncWait | TableReplicationPhase::Catchup { .. } => {
-                return Err(Error::new(ErrorKind::StateCorrupted {
+                return Err(Error::new(ErrorKind::StateStoreCorrupted {
                     description:
                         "In-memory table replication phase can't be saved in the state store"
                             .to_string(),
@@ -181,13 +181,10 @@ impl PostgresStateStore {
                     TableReplicationPhase::SyncDone { lsn: lsn.into() }
                 }
                 None => {
-                    return Err(
-                        Error::new(
-                            ErrorKind::StateCorrupted {
-                                description: "the lsn can't be missing from the state store if state is {}".to_string()
-                            }
-                        )
-                    );
+                    return Err(Error::new(ErrorKind::StateStoreCorrupted {
+                        description: "the lsn can't be missing from the state store if state is {}"
+                            .to_string(),
+                    }));
                 }
             },
             TableState::Ready => TableReplicationPhase::Ready,
