@@ -200,6 +200,11 @@ impl ApplyLoopState {
 
         *last_commit_end_lsn = new_last_commit_end_lsn;
     }
+
+    /// Returns true if the apply loop is in the middle of processing a trasaction, false otherwise.
+    fn handling_transaction(&self) -> bool {
+        self.remote_final_lsn.is_some()
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -322,8 +327,11 @@ where
                     )
                     .await?;
 
-                if !hook.process_syncing_tables(state.next_status_update.flush_lsn).await? {
-                    break Ok(ApplyLoopResult::ApplyCompleted);
+                if !state.handling_transaction() {
+                    let continue_loop = hook.process_syncing_tables(state.next_status_update.flush_lsn).await?;
+                    if !continue_loop {
+                        break Ok(ApplyLoopResult::ApplyStopped);
+                    }
                 }
             }
         }
