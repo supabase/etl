@@ -1,5 +1,13 @@
 pipeline:
   id: 1
   publication_name: "replicator_publication"
+  batch:
+    max_size: 10000
+    max_fill_ms: 1000
+  apply_worker_init_retry:
+    max_attempts: 3
+    initial_delay_ms: 250
+    max_delay_ms: 5000
+    backoff_factor: 2.0
 supabase:
   project_ref: "abcdefghijklmnopqrst"

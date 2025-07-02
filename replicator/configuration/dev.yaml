@@ -1,13 +1,12 @@
-source:
-  host: "localhost"
-  port: 5430
-  name: "postgres"
-  username: "postgres"
-  password: "postgres"
-  tls:
-    trusted_root_certs: ""
-    enabled: false
-state_store:
-  memory:
 destination:
   memory:
+pipeline:
+  pg_connection:
+    host: "localhost"
+    port: 5430
+    name: "postgres"
+    username: "postgres"
+    password: "postgres"
+    tls:
+      trusted_root_certs: ""
+      enabled: false
