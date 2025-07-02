@@ -1,5 +1,3 @@
-use crate::config::load_replicator_config;
-use crate::migrations::migrate_state_store;
 use config::shared::{DestinationConfig, ReplicatorConfig};
 use etl::v2::config::batch::BatchConfig;
 use etl::v2::config::pipeline::PipelineConfig;
@@ -11,21 +9,16 @@ use etl::v2::encryption::bigquery::install_crypto_provider_once;
 use etl::v2::pipeline::{Pipeline, PipelineIdentity};
 use etl::v2::state::store::base::StateStore;
 use etl::v2::state::store::postgres::PostgresStateStore;
-use etl::v2::state::store::memory::MemoryStateStore;
 use etl::SslMode;
 use postgres::tokio::config::{PgConnectionConfig, PgTlsConfig};
+use secrecy::ExposeSecret;
 use std::fmt;
 use std::io::BufReader;
 use std::time::Duration;
-use secrecy::ExposeSecret;
-use thiserror::Error;
 use tracing::{error, info, warn};
 
-#[derive(Debug, Error)]
-pub enum ReplicatorError {
-    #[error("The destination {0} is currently unsupported")]
-    UnsupportedDestination(String),
-}
+use crate::config::load_replicator_config;
+use crate::migrations::migrate_state_store;
 
 // Macro to statically dispatch pipeline creation and starting
 macro_rules! start_pipeline_dispatch {
@@ -62,7 +55,7 @@ pub async fn start_replicator() -> anyhow::Result<()> {
             username: replicator_config.source.username.clone(),
             password: replicator_config.source.password.clone().map(Into::into),
             tls_config: PgTlsConfig {
-                ssl_mode: ssl_mode.clone(),
+                ssl_mode,
                 trusted_root_certs: trusted_root_certs.clone(),
             },
         },
@@ -121,8 +114,9 @@ pub async fn start_replicator() -> anyhow::Result<()> {
                 project_id.clone(),
                 dataset_id.clone(),
                 service_account_key.expose_secret(),
-                max_staleness_mins.clone(),
-            ).await?;
+                *max_staleness_mins,
+            )
+            .await?;
 
             start_pipeline_dispatch!(identity, pipeline_config, state_store, destination)?;
         }
