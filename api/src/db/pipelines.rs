@@ -277,6 +277,7 @@ pub fn is_duplicate_pipeline_error(err: &sqlx::Error) -> bool {
     match err {
         sqlx::Error::Database(ref db_err) => {
             // 23505 is PostgreSQL's unique constraint violation code
+            // Check for unique constraint violation using SqlState constant
             // Check for our unique constraint name defined
             // in the migrations/20250605064229_add_unique_constraint_pipelines_source_destination.sql file
             db_err.code().as_deref() == Some("23505")

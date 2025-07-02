@@ -1,72 +1,59 @@
-use crate::v2::concurrency::shutdown::ShutdownRx;
-use crate::v2::config::pipeline::PipelineConfig;
-use crate::v2::destination::base::Destination;
-use crate::v2::pipeline::{PipelineId, PipelineIdentity};
-use crate::v2::replication::apply::{start_apply_loop, ApplyLoopError, ApplyLoopHook};
-use crate::v2::replication::client::{PgReplicationClient, PgReplicationError};
-use crate::v2::replication::slot::{get_slot_name, SlotError};
-use crate::v2::schema::cache::SchemaCache;
-use crate::v2::state::store::base::{StateStore, StateStoreError};
-use crate::v2::state::table::{TableReplicationPhase, TableReplicationPhaseType};
-use crate::v2::workers::base::{Worker, WorkerHandle, WorkerType, WorkerWaitError};
-use crate::v2::workers::pool::TableSyncWorkerPool;
-use crate::v2::workers::table_sync::{
-    TableSyncWorker, TableSyncWorkerError, TableSyncWorkerState, TableSyncWorkerStateError,
-};
 use postgres::schema::TableId;
 use std::collections::HashMap;
 use std::sync::Arc;
-use thiserror::Error;
 use tokio::task::JoinHandle;
 use tokio_postgres::types::PgLsn;
 use tracing::{error, info};
 
-#[derive(Debug, Error)]
-pub enum ApplyWorkerError {
-    #[error("An error occurred while interacting with the state store: {0}")]
-    StateStore(#[from] StateStoreError),
-
-    #[error("An error occurred in the apply loop: {0}")]
-    ApplyLoop(#[from] ApplyLoopError),
-
-    #[error("A Postgres replication error occurred in the apply loop: {0}")]
-    PgReplication(#[from] PgReplicationError),
-
-    #[error("Could not generate slot name in the apply loop: {0}")]
-    Slot(#[from] SlotError),
-}
-
-#[derive(Debug, Error)]
-pub enum ApplyWorkerHookError {
-    #[error("An error occurred while interacting with the state store: {0}")]
-    StateStore(#[from] StateStoreError),
-
-    #[error("An error occurred while interacting with the table sync worker state: {0}")]
-    TableSyncWorkerState(#[from] TableSyncWorkerStateError),
-
-    #[error("An error occurred while trying to start the table sync worker: {0}")]
-    TableSyncWorkerStartedFailed(#[from] TableSyncWorkerError),
-
-    #[error("A Postgres replication error occurred in the apply worker: {0}")]
-    PgReplication(#[from] PgReplicationError),
-}
+use crate::error::{ErrorKind, Result};
+use crate::v2::concurrency::shutdown::ShutdownRx;
+use crate::v2::config::pipeline::PipelineConfig;
+use crate::v2::destination::base::Destination;
+use crate::v2::pipeline::{PipelineId, PipelineIdentity};
+use crate::v2::replication::apply::{start_apply_loop, ApplyLoopHook};
+use crate::v2::replication::client::PgReplicationClient;
+use crate::v2::replication::slot::get_slot_name;
+use crate::v2::schema::cache::SchemaCache;
+use crate::v2::state::table::{TableReplicationPhase, TableReplicationPhaseType};
+use crate::v2::workers::base::{Worker, WorkerHandle, WorkerType};
+use crate::v2::workers::pool::TableSyncWorkerPool;
+use crate::v2::workers::table_sync::{TableSyncWorker, TableSyncWorkerState};
+use crate::{error::Error, v2::state::store::base::StateStore};
 
 #[derive(Debug)]
 pub struct ApplyWorkerHandle {
-    handle: Option<JoinHandle<Result<(), ApplyWorkerError>>>,
+    handle: Option<JoinHandle<Result<()>>>,
 }
 
 impl WorkerHandle<()> for ApplyWorkerHandle {
     fn state(&self) {}
 
-    async fn wait(mut self) -> Result<(), WorkerWaitError> {
+    async fn wait(mut self) -> Result<()> {
         let Some(handle) = self.handle.take() else {
             return Ok(());
         };
 
-        handle.await??;
+        match handle.await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(err)) => Err(err),
+            Err(err) => {
+                if err.is_cancelled() {
+                    return Err(Error::with_source(
+                        ErrorKind::WorkerCancelled {
+                            worker_type: WorkerType::Apply,
+                        },
+                        err,
+                    ));
+                }
 
-        Ok(())
+                Err(Error::with_source(
+                    ErrorKind::WorkerPanicked {
+                        worker_type: WorkerType::Apply,
+                    },
+                    err,
+                ))
+            }
+        }
     }
 }
 
@@ -112,9 +99,7 @@ where
     S: StateStore + Clone + Send + Sync + 'static,
     D: Destination + Clone + Send + Sync + 'static,
 {
-    type Error = ApplyWorkerError;
-
-    async fn start(self) -> Result<ApplyWorkerHandle, Self::Error> {
+    async fn start(self) -> Result<ApplyWorkerHandle> {
         info!("Starting apply worker");
 
         let apply_worker = async move {
@@ -155,7 +140,7 @@ where
 async fn get_start_lsn(
     pipeline_id: PipelineId,
     replication_client: &PgReplicationClient,
-) -> Result<PgLsn, ApplyWorkerError> {
+) -> Result<PgLsn> {
     let slot_name = get_slot_name(pipeline_id, WorkerType::Apply)?;
     // TODO: validate that we only create the slot when we first start replication which
     // means when all tables are in the Init state. In any other case we should raise an
@@ -212,7 +197,7 @@ where
     S: StateStore + Clone + Send + Sync + 'static,
     D: Destination + Clone + Send + Sync + 'static,
 {
-    async fn start_table_sync_worker(&self, table_id: TableId) -> Result<(), ApplyWorkerHookError> {
+    async fn start_table_sync_worker(&self, table_id: TableId) -> Result<()> {
         // TODO: switch to a connection pool which hands out connections.
         let replication_client = self.replication_client.duplicate().await?;
         let worker = TableSyncWorker::new(
@@ -233,17 +218,13 @@ where
             //  spawning of new table sync workers.
             error!("Failed to start table sync worker: {}", err);
 
-            return Err(err.into());
+            return Err(err);
         }
 
         Ok(())
     }
 
-    async fn handle_syncing_table(
-        &self,
-        table_id: TableId,
-        current_lsn: PgLsn,
-    ) -> Result<bool, ApplyWorkerHookError> {
+    async fn handle_syncing_table(&self, table_id: TableId, current_lsn: PgLsn) -> Result<bool> {
         let table_sync_worker_state = {
             let pool = self.pool.read().await;
             pool.get_active_worker_state(table_id)
@@ -265,7 +246,7 @@ where
         table_id: TableId,
         table_sync_worker_state: TableSyncWorkerState,
         current_lsn: PgLsn,
-    ) -> Result<bool, ApplyWorkerHookError> {
+    ) -> Result<bool> {
         let mut catchup_started = false;
         {
             let mut inner = table_sync_worker_state.get_inner().write().await;
@@ -303,7 +284,7 @@ where
 
     async fn active_table_replication_states(
         &self,
-    ) -> Result<HashMap<TableId, TableReplicationPhase>, ApplyWorkerHookError> {
+    ) -> Result<HashMap<TableId, TableReplicationPhase>> {
         let mut table_replication_states = self.state_store.get_table_replication_states().await?;
         table_replication_states.retain(|_table_id, state| !state.as_type().is_done());
 
@@ -316,9 +297,7 @@ where
     S: StateStore + Clone + Send + Sync + 'static,
     D: Destination + Clone + Send + Sync + 'static,
 {
-    type Error = ApplyWorkerHookError;
-
-    async fn initialize(&self) -> Result<(), Self::Error> {
+    async fn initialize(&self) -> Result<()> {
         let table_replication_states = self.active_table_replication_states().await?;
 
         for table_id in table_replication_states.keys() {
@@ -340,7 +319,7 @@ where
         Ok(())
     }
 
-    async fn process_syncing_tables(&self, current_lsn: PgLsn) -> Result<bool, Self::Error> {
+    async fn process_syncing_tables(&self, current_lsn: PgLsn) -> Result<bool> {
         let table_replication_states = self.active_table_replication_states().await?;
         info!(
             "Processing syncing tables for apply worker with LSN {}",
@@ -371,7 +350,7 @@ where
         Ok(true)
     }
 
-    async fn skip_table(&self, table_id: TableId) -> Result<bool, Self::Error> {
+    async fn skip_table(&self, table_id: TableId) -> Result<bool> {
         let table_sync_worker_state = {
             let pool = self.pool.read().await;
             pool.get_active_worker_state(table_id)
@@ -396,7 +375,7 @@ where
         &self,
         table_id: TableId,
         remote_final_lsn: PgLsn,
-    ) -> Result<bool, Self::Error> {
+    ) -> Result<bool> {
         let pool = self.pool.read().await;
 
         // We try to load the state first from memory, if we don't find it, we try to load from the

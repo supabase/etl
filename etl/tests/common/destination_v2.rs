@@ -1,6 +1,7 @@
 use etl::conversions::table_row::TableRow;
+use etl::error::Result;
 use etl::v2::conversions::event::{Event, EventType};
-use etl::v2::destination::base::{Destination, DestinationError};
+use etl::v2::destination::base::Destination;
 use postgres::schema::{TableId, TableSchema};
 use std::collections::HashMap;
 use std::fmt;
@@ -150,7 +151,7 @@ impl Default for TestDestination {
 }
 
 impl Destination for TestDestination {
-    async fn write_table_schema(&self, schema: TableSchema) -> Result<(), DestinationError> {
+    async fn write_table_schema(&self, schema: TableSchema) -> Result<()> {
         let mut inner = self.inner.write().await;
         inner.table_schemas.push(schema);
         inner.check_conditions().await;
@@ -158,18 +159,14 @@ impl Destination for TestDestination {
         Ok(())
     }
 
-    async fn load_table_schemas(&self) -> Result<Vec<TableSchema>, DestinationError> {
+    async fn load_table_schemas(&self) -> Result<Vec<TableSchema>> {
         let inner = self.inner.read().await;
         let table_schemas = inner.table_schemas.to_vec();
 
         Ok(table_schemas)
     }
 
-    async fn write_table_rows(
-        &self,
-        table_id: TableId,
-        rows: Vec<TableRow>,
-    ) -> Result<(), DestinationError> {
+    async fn write_table_rows(&self, table_id: TableId, rows: Vec<TableRow>) -> Result<()> {
         let mut inner = self.inner.write().await;
         inner.table_rows.entry(table_id).or_default().extend(rows);
         inner.check_conditions().await;
@@ -177,7 +174,7 @@ impl Destination for TestDestination {
         Ok(())
     }
 
-    async fn write_events(&self, events: Vec<Event>) -> Result<(), DestinationError> {
+    async fn write_events(&self, events: Vec<Event>) -> Result<()> {
         let mut inner = self.inner.write().await;
         inner.events.extend(events);
         inner.check_conditions().await;

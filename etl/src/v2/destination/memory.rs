@@ -4,8 +4,9 @@ use tokio::sync::RwLock;
 use tracing::info;
 
 use crate::conversions::table_row::TableRow;
+use crate::error::Result;
 use crate::v2::conversions::event::Event;
-use crate::v2::destination::base::{Destination, DestinationError};
+use crate::v2::destination::base::Destination;
 
 #[derive(Debug)]
 struct Inner {
@@ -40,27 +41,25 @@ impl Default for MemoryDestination {
 }
 
 impl Destination for MemoryDestination {
-    async fn write_table_schema(&self, schema: TableSchema) -> Result<(), DestinationError> {
+    async fn write_table_schema(&self, schema: TableSchema) -> Result<()> {
         let mut inner = self.inner.write().await;
         info!("Writing table schema:");
         info!("{:?}", schema);
         inner.table_schemas.push(schema);
+
         Ok(())
     }
 
-    async fn load_table_schemas(&self) -> Result<Vec<TableSchema>, DestinationError> {
+    async fn load_table_schemas(&self) -> Result<Vec<TableSchema>> {
         let inner = self.inner.read().await;
         let schemas = inner.table_schemas.to_vec();
         info!("Loaded {} table schemas:", schemas.len());
         info!("{:?}", schemas);
+
         Ok(schemas)
     }
 
-    async fn write_table_rows(
-        &self,
-        table_id: TableId,
-        rows: Vec<TableRow>,
-    ) -> Result<(), DestinationError> {
+    async fn write_table_rows(&self, table_id: TableId, rows: Vec<TableRow>) -> Result<()> {
         let mut inner = self.inner.write().await;
         info!(
             "Writing batch of {} table rows for table id {:?}:",
@@ -71,16 +70,18 @@ impl Destination for MemoryDestination {
             info!("  {:?}", row);
         }
         inner.table_rows.push((table_id, rows));
+
         Ok(())
     }
 
-    async fn write_events(&self, events: Vec<Event>) -> Result<(), DestinationError> {
+    async fn write_events(&self, events: Vec<Event>) -> Result<()> {
         let mut inner = self.inner.write().await;
         info!("Writing batch of {} events:", events.len());
         for event in &events {
             info!("  {:?}", event);
         }
         inner.events.extend(events);
+
         Ok(())
     }
 }

@@ -1,33 +1,21 @@
 use futures::{ready, Stream};
 use pin_project_lite::pin_project;
-use postgres::schema::ColumnSchema;
+use postgres::schema::{ColumnSchema, TableId};
 use postgres::time::POSTGRES_EPOCH;
 use postgres_replication::protocol::{LogicalReplicationMessage, ReplicationMessage};
 use postgres_replication::LogicalReplicationStream;
 use std::pin::Pin;
 use std::task::{Context, Poll};
-use std::time::{Duration, Instant, SystemTimeError};
-use thiserror::Error;
+use std::time::{Duration, Instant};
 use tokio_postgres::types::PgLsn;
 use tokio_postgres::CopyOutStream;
 
-use crate::conversions::table_row::{TableRow, TableRowConversionError, TableRowConverter};
+use crate::conversions::table_row::{TableRow, TableRowConverter};
+use crate::error::{Error, ErrorKind, Result};
 
 /// The amount of milliseconds between two consecutive status updates in case no forced update
 /// is requested.
 const STATUS_UPDATE_INTERVAL: Duration = Duration::from_millis(100);
-
-/// Errors that can occur while streaming table copy data.
-#[derive(Debug, Error)]
-pub enum TableCopyStreamError {
-    /// An error occurred when copying table data from the stream.
-    #[error("An error occurred when copying table data from the stream: {0}")]
-    TableCopyFailed(#[from] tokio_postgres::Error),
-
-    /// An error occurred while converting a table row during table copy.
-    #[error("An error occurred while converting a table row during table copy: {0}")]
-    Conversion(#[from] TableRowConversionError),
-}
 
 pin_project! {
     /// A stream that yields rows from a PostgreSQL COPY operation.
@@ -37,6 +25,7 @@ pin_project! {
     /// binary format data.
     #[must_use = "streams do nothing unless polled"]
     pub struct TableCopyStream<'a> {
+        table_id: TableId,
         #[pin]
         stream: CopyOutStream,
         column_schemas: &'a [ColumnSchema],
@@ -47,8 +36,13 @@ impl<'a> TableCopyStream<'a> {
     /// Creates a new [`TableCopyStream`] from a [`CopyOutStream`] and column schemas.
     ///
     /// The column schemas are used to convert the raw PostgreSQL data into [`TableRow`]s.
-    pub fn wrap(stream: CopyOutStream, column_schemas: &'a [ColumnSchema]) -> Self {
+    pub fn wrap(
+        table_id: TableId,
+        stream: CopyOutStream,
+        column_schemas: &'a [ColumnSchema],
+    ) -> Self {
         Self {
+            table_id,
             stream,
             column_schemas,
         }
@@ -56,7 +50,7 @@ impl<'a> TableCopyStream<'a> {
 }
 
 impl<'a> Stream for TableCopyStream<'a> {
-    type Item = Result<TableRow, TableCopyStreamError>;
+    type Item = Result<TableRow>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.project();
@@ -64,24 +58,22 @@ impl<'a> Stream for TableCopyStream<'a> {
             // TODO: allow pluggable table row conversion based on if the data is in text or binary format.
             Some(Ok(row)) => match TableRowConverter::try_from(&row, this.column_schemas) {
                 Ok(row) => Poll::Ready(Some(Ok(row))),
-                Err(err) => Poll::Ready(Some(Err(err.into()))),
+                Err(err) => Poll::Ready(Some(Err(Error::with_source(
+                    ErrorKind::TableCopyStreamFailed {
+                        table_name: this.table_id.to_string(),
+                    },
+                    err,
+                )))),
             },
-            Some(Err(err)) => Poll::Ready(Some(Err(err.into()))),
+            Some(Err(err)) => Poll::Ready(Some(Err(Error::with_source(
+                ErrorKind::TableCopyStreamFailed {
+                    table_name: this.table_id.to_string(),
+                },
+                err,
+            )))),
             None => Poll::Ready(None),
         }
     }
-}
-
-/// Errors that can occur while streaming logical replication events.
-#[derive(Debug, Error)]
-pub enum EventsStreamError {
-    /// An error occurred when copying table data from the stream.
-    #[error("An error occurred when copying table data from the stream: {0}")]
-    TableCopyFailed(#[from] tokio_postgres::Error),
-
-    /// An error occurred while calculating the elapsed time since PostgreSQL epoch.
-    #[error("An error occurred while determining the elapsed time: {0}")]
-    EpochCalculationFailed(#[from] SystemTimeError),
 }
 
 pin_project! {
@@ -120,7 +112,7 @@ impl EventsStream {
         flush_lsn: PgLsn,
         apply_lsn: PgLsn,
         force: bool,
-    ) -> Result<(), EventsStreamError> {
+    ) -> Result<()> {
         let this = self.project();
 
         // If we are not forced to send an update, we can willingly do so based on a set of conditions.
@@ -151,11 +143,15 @@ impl EventsStream {
 
         // The client's system clock at the time of transmission, as microseconds since midnight
         // on 2000-01-01.
-        let ts = POSTGRES_EPOCH.elapsed()?.as_micros() as i64;
+        let ts = POSTGRES_EPOCH
+            .elapsed()
+            .map_err(|err| Error::with_source(ErrorKind::EventsStreamFailed, err))?
+            .as_micros() as i64;
 
         this.stream
             .standby_status_update(write_lsn, flush_lsn, apply_lsn, ts, 0)
-            .await?;
+            .await
+            .map_err(|err| Error::with_source(ErrorKind::EventsStreamFailed, err))?;
 
         // Update the state after successful send.
         *this.last_update = Some(Instant::now());
@@ -167,13 +163,16 @@ impl EventsStream {
 }
 
 impl Stream for EventsStream {
-    type Item = Result<ReplicationMessage<LogicalReplicationMessage>, EventsStreamError>;
+    type Item = Result<ReplicationMessage<LogicalReplicationMessage>>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.project();
         match this.stream.poll_next(cx) {
             Poll::Ready(Some(Ok(item))) => Poll::Ready(Some(Ok(item))),
-            Poll::Ready(Some(Err(err))) => Poll::Ready(Some(Err(err.into()))),
+            Poll::Ready(Some(Err(err))) => Poll::Ready(Some(Err(Error::with_source(
+                ErrorKind::EventsStreamFailed,
+                err,
+            )))),
             Poll::Ready(None) => Poll::Ready(None),
             Poll::Pending => Poll::Pending,
         }

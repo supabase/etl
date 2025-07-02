@@ -1,54 +1,27 @@
 use postgres::schema::TableId;
 use std::sync::Arc;
 use std::time::Duration;
-use thiserror::Error;
 use tokio::sync::{Notify, RwLock, RwLockReadGuard};
 use tokio::task::JoinHandle;
 use tokio_postgres::types::PgLsn;
 use tracing::{info, warn};
 
+use crate::error::{Error, ErrorKind, Result};
 use crate::v2::concurrency::future::ReactiveFuture;
 use crate::v2::concurrency::shutdown::{ShutdownResult, ShutdownRx};
 use crate::v2::config::pipeline::PipelineConfig;
 use crate::v2::destination::base::Destination;
 use crate::v2::pipeline::PipelineIdentity;
-use crate::v2::replication::apply::{start_apply_loop, ApplyLoopError, ApplyLoopHook};
+use crate::v2::replication::apply::{start_apply_loop, ApplyLoopHook};
 use crate::v2::replication::client::PgReplicationClient;
-use crate::v2::replication::table_sync::{start_table_sync, TableSyncError, TableSyncResult};
+use crate::v2::replication::table_sync::{start_table_sync, TableSyncResult};
 use crate::v2::schema::cache::SchemaCache;
-use crate::v2::state::store::base::{StateStore, StateStoreError};
+use crate::v2::state::store::base::StateStore;
 use crate::v2::state::table::{TableReplicationPhase, TableReplicationPhaseType};
-use crate::v2::workers::base::{Worker, WorkerHandle, WorkerType, WorkerWaitError};
+use crate::v2::workers::base::{Worker, WorkerHandle, WorkerType};
 use crate::v2::workers::pool::TableSyncWorkerPool;
 
 const PHASE_CHANGE_REFRESH_FREQUENCY: Duration = Duration::from_millis(100);
-
-#[derive(Debug, Error)]
-pub enum TableSyncWorkerError {
-    #[error("An error occurred while syncing a table: {0}")]
-    TableSync(#[from] TableSyncError),
-
-    #[error("The replication state is missing for table {0}")]
-    ReplicationStateMissing(TableId),
-
-    #[error("An error occurred while interacting with the state store: {0}")]
-    StateStore(#[from] StateStoreError),
-
-    #[error("An error occurred in the apply loop: {0}")]
-    ApplyLoop(#[from] ApplyLoopError),
-}
-
-#[derive(Debug, Error)]
-pub enum TableSyncWorkerHookError {
-    #[error("An error occurred while updating the table sync worker state: {0}")]
-    TableSyncWorkerState(#[from] TableSyncWorkerStateError),
-}
-
-#[derive(Debug, Error)]
-pub enum TableSyncWorkerStateError {
-    #[error("An error occurred while interacting with the state store: {0}")]
-    StateStore(#[from] StateStoreError),
-}
 
 #[derive(Debug)]
 pub struct TableSyncWorkerStateInner {
@@ -78,7 +51,7 @@ impl TableSyncWorkerStateInner {
         &mut self,
         phase: TableReplicationPhase,
         state_store: S,
-    ) -> Result<(), TableSyncWorkerStateError> {
+    ) -> Result<()> {
         self.set_phase(phase);
 
         // If we should store this phase change, we want to do it via the supplied state store.
@@ -202,7 +175,7 @@ impl TableSyncWorkerState {
 #[derive(Debug)]
 pub struct TableSyncWorkerHandle {
     state: TableSyncWorkerState,
-    handle: Option<JoinHandle<Result<(), TableSyncWorkerError>>>,
+    handle: Option<JoinHandle<Result<()>>>,
 }
 
 impl WorkerHandle<TableSyncWorkerState> for TableSyncWorkerHandle {
@@ -210,14 +183,37 @@ impl WorkerHandle<TableSyncWorkerState> for TableSyncWorkerHandle {
         self.state.clone()
     }
 
-    async fn wait(mut self) -> Result<(), WorkerWaitError> {
+    async fn wait(mut self) -> Result<()> {
         let Some(handle) = self.handle.take() else {
             return Ok(());
         };
 
-        handle.await??;
+        match handle.await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(err)) => Err(err),
+            Err(err) => {
+                let table_id = {
+                    let inner = self.state.get_inner().read().await;
+                    inner.table_id
+                };
 
-        Ok(())
+                if err.is_cancelled() {
+                    return Err(Error::with_source(
+                        ErrorKind::WorkerCancelled {
+                            worker_type: WorkerType::TableSync { table_id },
+                        },
+                        err,
+                    ));
+                }
+
+                Err(Error::with_source(
+                    ErrorKind::WorkerPanicked {
+                        worker_type: WorkerType::TableSync { table_id },
+                    },
+                    err,
+                ))
+            }
+        }
     }
 }
 
@@ -270,9 +266,7 @@ where
     S: StateStore + Clone + Send + Sync + 'static,
     D: Destination + Clone + Send + Sync + 'static,
 {
-    type Error = TableSyncWorkerError;
-
-    async fn start(self) -> Result<TableSyncWorkerHandle, Self::Error> {
+    async fn start(self) -> Result<TableSyncWorkerHandle> {
         info!("Starting table sync worker for table {}", self.table_id);
 
         // TODO: maybe we can optimize the performance by doing this loading within the task and
@@ -287,7 +281,9 @@ where
                 self.table_id
             );
 
-            return Err(TableSyncWorkerError::ReplicationStateMissing(self.table_id));
+            return Err(Error::new(ErrorKind::TableReplicationStateMissing {
+                table_name: self.table_id.to_string(),
+            }));
         };
 
         let state = TableSyncWorkerState::new(self.table_id, relation_subscription_state);
@@ -312,7 +308,11 @@ where
                     return Ok(())
                 }
                 Ok(TableSyncResult::SyncCompleted { start_lsn }) => start_lsn,
-                Err(err) => return Err(err.into()),
+                Err(err) => {
+                    // Right now, in case of error, we just stop the table sync worker and return
+                    // the error.
+                    return Err(err);
+                }
             };
 
             start_apply_loop(
@@ -370,13 +370,11 @@ impl<S> ApplyLoopHook for TableSyncWorkerHook<S>
 where
     S: StateStore + Clone + Send + Sync + 'static,
 {
-    type Error = TableSyncWorkerHookError;
-
-    async fn initialize(&self) -> Result<(), Self::Error> {
+    async fn initialize(&self) -> Result<()> {
         Ok(())
     }
 
-    async fn process_syncing_tables(&self, current_lsn: PgLsn) -> Result<bool, Self::Error> {
+    async fn process_syncing_tables(&self, current_lsn: PgLsn) -> Result<bool> {
         info!(
             "Processing syncing tables for table sync worker with LSN {}",
             current_lsn
@@ -411,7 +409,7 @@ where
         Ok(true)
     }
 
-    async fn skip_table(&self, table_id: TableId) -> Result<bool, Self::Error> {
+    async fn skip_table(&self, table_id: TableId) -> Result<bool> {
         if self.table_id != table_id {
             return Ok(true);
         }
@@ -428,7 +426,7 @@ where
         &self,
         table_id: TableId,
         _remote_final_lsn: PgLsn,
-    ) -> Result<bool, Self::Error> {
+    ) -> Result<bool> {
         let inner = self.table_sync_worker_state.get_inner().write().await;
         let is_skipped = matches!(
             inner.table_replication_phase.as_type(),

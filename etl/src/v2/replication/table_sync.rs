@@ -1,47 +1,26 @@
+use crate::error::ErrorKind;
 use crate::v2::concurrency::shutdown::{ShutdownResult, ShutdownRx};
 use crate::v2::concurrency::stream::BatchStream;
 use crate::v2::config::pipeline::PipelineConfig;
-use crate::v2::destination::base::{Destination, DestinationError};
+use crate::v2::destination::base::Destination;
 use crate::v2::pipeline::PipelineIdentity;
-use crate::v2::replication::client::{PgReplicationClient, PgReplicationError};
-use crate::v2::replication::slot::{get_slot_name, SlotError};
-use crate::v2::replication::stream::{TableCopyStream, TableCopyStreamError};
+use crate::v2::replication::client::PgReplicationClient;
+use crate::v2::replication::slot::get_slot_name;
+use crate::v2::replication::stream::TableCopyStream;
 use crate::v2::schema::cache::SchemaCache;
-use crate::v2::state::store::base::{StateStore, StateStoreError};
 use crate::v2::state::table::{TableReplicationPhase, TableReplicationPhaseType};
 use crate::v2::workers::base::WorkerType;
-use crate::v2::workers::table_sync::{TableSyncWorkerState, TableSyncWorkerStateError};
+use crate::v2::workers::table_sync::TableSyncWorkerState;
+use crate::{
+    error::{Error, Result},
+    v2::state::store::base::StateStore,
+};
 use futures::StreamExt;
 use postgres::schema::TableId;
 use std::sync::Arc;
-use thiserror::Error;
 use tokio::pin;
 use tokio_postgres::types::PgLsn;
 use tracing::info;
-
-#[derive(Debug, Error)]
-pub enum TableSyncError {
-    #[error("Invalid replication phase '{0}': expected Init, DataSync, or FinishedCopy")]
-    InvalidPhase(TableReplicationPhaseType),
-
-    #[error("Invalid replication slot name: {0}")]
-    InvalidSlotName(#[from] SlotError),
-
-    #[error("PostgreSQL replication operation failed: {0}")]
-    PgReplication(#[from] PgReplicationError),
-
-    #[error("An error occurred while interacting with the table sync worker state: {0}")]
-    TableSyncWorkerState(#[from] TableSyncWorkerStateError),
-
-    #[error("An error occurred while writing to the destination: {0}")]
-    Destination(#[from] DestinationError),
-
-    #[error("An error happened in the state store: {0}")]
-    StateStore(#[from] StateStoreError),
-
-    #[error("An error happened in the table copy stream")]
-    TableCopyStream(#[from] TableCopyStreamError),
-}
 
 #[derive(Debug)]
 pub enum TableSyncResult {
@@ -61,7 +40,7 @@ pub async fn start_table_sync<S, D>(
     state_store: S,
     destination: D,
     shutdown_rx: ShutdownRx,
-) -> Result<TableSyncResult, TableSyncError>
+) -> Result<TableSyncResult>
 where
     S: StateStore + Clone + Send + 'static,
     D: Destination + Clone + Send + 'static,
@@ -86,7 +65,17 @@ where
             | TableReplicationPhaseType::DataSync
             | TableReplicationPhaseType::FinishedCopy
     ) {
-        return Err(TableSyncError::InvalidPhase(phase_type));
+        let expected_phases = format!(
+            "{} or {} or {}",
+            TableReplicationPhaseType::Init,
+            TableReplicationPhaseType::DataSync,
+            TableReplicationPhaseType::FinishedCopy
+        );
+
+        return Err(Error::new(ErrorKind::TableReplicationPhaseInvalid {
+            expected: expected_phases,
+            actual: phase_type.to_string(),
+        }));
     }
 
     // We are safe to unlock the state here, since we know that the state will be changed by the
@@ -122,8 +111,8 @@ where
                 // before starting a table copy.
                 if let Err(err) = replication_client.delete_slot(&slot_name).await {
                     // If the slot is not found, we are safe to continue, for any other error, we bail.
-                    if !matches!(err, PgReplicationError::SlotNotFound(_)) {
-                        return Err(err.into());
+                    if !matches!(err.kind(), ErrorKind::ReplicationSlotNotFound { .. }) {
+                        return Err(err);
                     }
                 }
             }
@@ -163,7 +152,7 @@ where
                 .get_table_copy_stream(table_id, &table_schema.column_schemas)
                 .await?;
             let table_copy_stream =
-                TableCopyStream::wrap(table_copy_stream, &table_schema.column_schemas);
+                TableCopyStream::wrap(table_id, table_copy_stream, &table_schema.column_schemas);
             let table_copy_stream =
                 BatchStream::wrap(table_copy_stream, config.batch.clone(), shutdown_rx.clone());
             pin!(table_copy_stream);
@@ -173,7 +162,7 @@ where
             while let Some(result) = table_copy_stream.next().await {
                 match result {
                     ShutdownResult::Ok(table_rows) => {
-                        let table_rows = table_rows.into_iter().collect::<Result<Vec<_>, _>>()?;
+                        let table_rows = table_rows.into_iter().collect::<Result<Vec<_>>>()?;
                         destination.write_table_rows(table_id, table_rows).await?;
                     }
                     ShutdownResult::Shutdown(_) => {

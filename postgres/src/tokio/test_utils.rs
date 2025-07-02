@@ -168,7 +168,7 @@ impl<G: GenericClient> PgDatabase<G> {
         self.client
             .as_ref()
             .unwrap()
-            .execute(&dbg!(insert_query), &[])
+            .execute(&insert_query, &[])
             .await
     }
 
