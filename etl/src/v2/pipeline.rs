@@ -1,10 +1,10 @@
+use config::shared::PipelineConfig;
 use std::sync::Arc;
 use thiserror::Error;
 use tokio::sync::watch;
 use tracing::{error, info};
 
 use crate::v2::concurrency::shutdown::{create_shutdown_channel, ShutdownTx};
-use crate::v2::config::pipeline::PipelineConfig;
 use crate::v2::destination::base::{Destination, DestinationError};
 use crate::v2::replication::client::{PgReplicationClient, PgReplicationError};
 use crate::v2::schema::cache::SchemaCache;

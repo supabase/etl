@@ -1,3 +1,4 @@
+use config::shared::PipelineConfig;
 use postgres::schema::TableId;
 use std::sync::Arc;
 use std::time::Duration;
@@ -9,7 +10,6 @@ use tracing::{info, warn};
 
 use crate::v2::concurrency::future::ReactiveFuture;
 use crate::v2::concurrency::shutdown::{ShutdownResult, ShutdownRx};
-use crate::v2::config::pipeline::PipelineConfig;
 use crate::v2::destination::base::Destination;
 use crate::v2::pipeline::PipelineIdentity;
 use crate::v2::replication::apply::{start_apply_loop, ApplyLoopError, ApplyLoopHook};

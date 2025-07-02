@@ -6,8 +6,8 @@ use actix_web::{
     HttpRequest, HttpResponse, Responder, ResponseError,
 };
 use config::shared::{
-    DestinationConfig, PgConnectionConfig as SharedSourceConfig,
-    PipelineConfig as SharedPipelineConfig, ReplicatorConfig, SupabaseConfig, TlsConfig,
+    DestinationConfig, PgConnectionConfig, PipelineConfig as SharedPipelineConfig,
+    ReplicatorConfig, SupabaseConfig, TlsConfig,
 };
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
@@ -629,7 +629,7 @@ async fn build_replicator_config(
         .ok_or(PipelineError::TrustedRootCertsConfigMissing)?
         .clone();
 
-    let source_config = SharedSourceConfig {
+    let pg_connection = PgConnectionConfig {
         host: source_config.host,
         port: source_config.port,
         name: source_config.name,
@@ -654,10 +654,10 @@ async fn build_replicator_config(
         // them differently after deserialization without needing to run database migrations.
         batch: pipeline.config.batch.unwrap_or_default(),
         apply_worker_init_retry: pipeline.config.apply_worker_init_retry.unwrap_or_default(),
+        pg_connection,
     };
 
     let config = ReplicatorConfig {
-        source: source_config,
         destination: destination_config,
         pipeline: pipeline_config,
         supabase: Some(supabase_config),

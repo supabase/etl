@@ -1,9 +1,10 @@
 use crate::v2::concurrency::shutdown::{ShutdownResult, ShutdownRx};
-use crate::v2::config::batch::BatchConfig;
+use config::shared::BatchConfig;
 use core::pin::Pin;
 use core::task::{Context, Poll};
 use futures::{ready, Future, Stream};
 use pin_project_lite::pin_project;
+use std::time::Duration;
 use tracing::info;
 
 // Implementation adapted from:
@@ -95,7 +96,9 @@ impl<B, S: Stream<Item = B>> Stream for BatchStream<B, S> {
 
             if *this.reset_timer {
                 this.deadline
-                    .set(Some(tokio::time::sleep(this.batch_config.max_fill)));
+                    .set(Some(tokio::time::sleep(Duration::from_millis(
+                        this.batch_config.max_fill_ms,
+                    ))));
                 *this.reset_timer = false;
             }
 

@@ -1,19 +1,15 @@
-use config::shared::PgConnectionConfig;
-use etl::v2::config::batch::BatchConfig;
-use etl::v2::config::pipeline::PipelineConfig;
-use etl::v2::config::retry::RetryConfig;
+use config::shared::{BatchConfig, PgConnectionConfig, PipelineConfig, RetryConfig};
 use etl::v2::destination::base::Destination;
 use etl::v2::pipeline::{Pipeline, PipelineIdentity};
 use etl::v2::state::store::base::StateStore;
 use rand::random;
-use std::time::Duration;
 
 pub fn create_pipeline_identity(publication_name: &str) -> PipelineIdentity {
     let pipeline_id = random();
     PipelineIdentity::new(pipeline_id, publication_name)
 }
 
-pub fn spawn_pg_pipeline<S, D>(
+pub fn create_pipeline<S, D>(
     identity: &PipelineIdentity,
     pg_connection_config: &PgConnectionConfig,
     state_store: S,
@@ -24,17 +20,19 @@ where
     D: Destination + Clone + Send + Sync + 'static,
 {
     let config = PipelineConfig {
+        id: identity.id(),
         pg_connection: pg_connection_config.clone(),
         batch: BatchConfig {
             max_size: 1,
-            max_fill: Duration::from_secs(1),
+            max_fill_ms: 1000,
         },
-        apply_worker_initialization_retry: RetryConfig {
+        apply_worker_init_retry: RetryConfig {
             max_attempts: 2,
-            initial_delay: Duration::from_secs(1),
-            max_delay: Duration::from_secs(5),
+            initial_delay_ms: 1000,
+            max_delay_ms: 5000,
             backoff_factor: 2.0,
         },
+        publication_name: identity.publication_name().to_string(),
     };
 
     Pipeline::new(identity.clone(), config, state_store, destination)

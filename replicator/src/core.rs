@@ -1,14 +1,10 @@
 use config::shared::{DestinationConfig, ReplicatorConfig};
-use etl::v2::config::batch::BatchConfig;
-use etl::v2::config::pipeline::PipelineConfig;
-use etl::v2::config::retry::RetryConfig;
 use etl::v2::destination::base::Destination;
 use etl::v2::destination::memory::MemoryDestination;
 use etl::v2::pipeline::{Pipeline, PipelineIdentity};
 use etl::v2::state::store::base::StateStore;
 use etl::v2::state::store::postgres::PostgresStateStore;
 use std::fmt;
-use std::time::Duration;
 use thiserror::Error;
 use tracing::{error, info, warn};
 
@@ -34,49 +30,22 @@ pub async fn start_replicator() -> anyhow::Result<()> {
         &replicator_config.pipeline.publication_name,
     );
 
-    // We prepare the configuration of the pipeline.
-    // TODO: improve v2 pipeline config to make conversions nicer.
-    let pipeline_config = PipelineConfig {
-        pg_connection: replicator_config.source,
-        batch: BatchConfig {
-            max_size: replicator_config.pipeline.batch.max_size,
-            max_fill: Duration::from_millis(replicator_config.pipeline.batch.max_fill_ms),
-        },
-        apply_worker_initialization_retry: RetryConfig {
-            max_attempts: replicator_config
-                .pipeline
-                .apply_worker_init_retry
-                .max_attempts,
-            initial_delay: Duration::from_millis(
-                replicator_config
-                    .pipeline
-                    .apply_worker_init_retry
-                    .initial_delay_ms,
-            ),
-            max_delay: Duration::from_millis(
-                replicator_config
-                    .pipeline
-                    .apply_worker_init_retry
-                    .max_delay_ms,
-            ),
-            backoff_factor: replicator_config
-                .pipeline
-                .apply_worker_init_retry
-                .backoff_factor,
-        },
-    };
-
-    let pipeline = Pipeline::new(identity, pipeline_config, state_store, destination);
+    let pipeline = Pipeline::new(
+        identity,
+        replicator_config.pipeline,
+        state_store,
+        destination,
+    );
     start_pipeline(pipeline).await?;
 
     Ok(())
 }
 
 async fn init_state_store(config: &ReplicatorConfig) -> anyhow::Result<impl StateStore + Clone> {
-    migrate_state_store(config.source.clone()).await?;
+    migrate_state_store(config.pipeline.pg_connection.clone()).await?;
     Ok(PostgresStateStore::new(
         config.pipeline.id,
-        config.source.clone(),
+        config.pipeline.pg_connection.clone(),
     ))
 }
 

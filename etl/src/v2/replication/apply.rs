@@ -1,6 +1,5 @@
 use crate::v2::concurrency::shutdown::{ShutdownResult, ShutdownRx};
 use crate::v2::concurrency::stream::BatchStream;
-use crate::v2::config::pipeline::PipelineConfig;
 use crate::v2::conversions::event::{
     convert_message_to_event, Event, EventConversionError, EventType,
 };
@@ -15,6 +14,7 @@ use crate::v2::workers::apply::ApplyWorkerHookError;
 use crate::v2::workers::base::WorkerType;
 use crate::v2::workers::table_sync::TableSyncWorkerHookError;
 
+use config::shared::PipelineConfig;
 use futures::StreamExt;
 use postgres::schema::TableId;
 use postgres_replication::protocol;

@@ -1,5 +1,5 @@
 use crate::shared::pipeline::PipelineConfig;
-use crate::shared::{DestinationConfig, PgConnectionConfig, SupabaseConfig, ValidationError};
+use crate::shared::{DestinationConfig, SupabaseConfig, ValidationError};
 use serde::{Deserialize, Serialize};
 
 /// Configuration for the replicator service.
@@ -12,8 +12,6 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct ReplicatorConfig {
-    /// Configuration for the source Postgres instance.
-    pub source: PgConnectionConfig,
     /// Configuration for the replication destination.
     pub destination: DestinationConfig,
     /// Configuration for the replication pipeline.
@@ -34,6 +32,6 @@ impl ReplicatorConfig {
     ///
     /// Returns [`ValidationError`] if validation fails.
     pub fn validate(&self) -> Result<(), ValidationError> {
-        self.source.tls.validate()
+        self.pipeline.pg_connection.tls.validate()
     }
 }

@@ -1,6 +1,5 @@
 use crate::v2::concurrency::shutdown::{ShutdownResult, ShutdownRx};
 use crate::v2::concurrency::stream::BatchStream;
-use crate::v2::config::pipeline::PipelineConfig;
 use crate::v2::destination::base::{Destination, DestinationError};
 use crate::v2::pipeline::PipelineIdentity;
 use crate::v2::replication::client::{PgReplicationClient, PgReplicationError};
@@ -11,6 +10,7 @@ use crate::v2::state::store::base::{StateStore, StateStoreError};
 use crate::v2::state::table::{TableReplicationPhase, TableReplicationPhaseType};
 use crate::v2::workers::base::WorkerType;
 use crate::v2::workers::table_sync::{TableSyncWorkerState, TableSyncWorkerStateError};
+use config::shared::PipelineConfig;
 use futures::StreamExt;
 use postgres::schema::TableId;
 use std::sync::Arc;

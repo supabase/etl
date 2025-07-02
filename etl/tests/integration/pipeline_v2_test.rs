@@ -14,7 +14,7 @@ use tokio_postgres::{Client, GenericClient};
 use crate::common::database::{spawn_database, test_table_name};
 use crate::common::destination_v2::TestDestination;
 use crate::common::event::{group_events_by_type, group_events_by_type_and_table_id};
-use crate::common::pipeline_v2::{create_pipeline_identity, spawn_pg_pipeline};
+use crate::common::pipeline_v2::{create_pipeline, create_pipeline_identity};
 use crate::common::state_store::{
     FaultConfig, FaultInjectingStateStore, FaultType, TestStateStore,
 };
@@ -278,7 +278,7 @@ async fn test_pipeline_with_table_sync_worker_panic() {
     let destination = TestDestination::new();
 
     // We start the pipeline from scratch.
-    let mut pipeline = spawn_pg_pipeline(
+    let mut pipeline = create_pipeline(
         &create_pipeline_identity(&database_schema.publication_name),
         &database.config,
         state_store.clone(),
@@ -336,7 +336,7 @@ async fn test_pipeline_with_table_sync_worker_error() {
     let destination = TestDestination::new();
 
     // We start the pipeline from scratch.
-    let mut pipeline = spawn_pg_pipeline(
+    let mut pipeline = create_pipeline(
         &create_pipeline_identity(&database_schema.publication_name),
         &database.config,
         state_store.clone(),
@@ -396,7 +396,7 @@ async fn test_table_schema_copy_with_data_sync_retry() {
     };
     let failing_state_store = FaultInjectingStateStore::wrap(state_store.clone(), fault_config);
     let identity = create_pipeline_identity(&database_schema.publication_name);
-    let mut pipeline = spawn_pg_pipeline(
+    let mut pipeline = create_pipeline(
         &identity,
         &database.config,
         failing_state_store.clone(),
@@ -431,7 +431,7 @@ async fn test_table_schema_copy_with_data_sync_retry() {
     let _ = pipeline.shutdown_and_wait().await;
 
     // Restart pipeline with normal state store to verify recovery.
-    let mut pipeline = spawn_pg_pipeline(
+    let mut pipeline = create_pipeline(
         &identity,
         &database.config,
         state_store.clone(),
@@ -499,7 +499,7 @@ async fn test_table_schema_copy_with_finished_copy_retry() {
 
     // We start the pipeline from scratch.
     let identity = create_pipeline_identity(&database_schema.publication_name);
-    let mut pipeline = spawn_pg_pipeline(
+    let mut pipeline = create_pipeline(
         &identity,
         &database.config,
         state_store.clone(),
@@ -578,7 +578,7 @@ async fn test_table_schema_copy_with_finished_copy_retry() {
         });
 
     // We recreate a pipeline, assuming the other one was stopped, using the same state and destination.
-    let mut pipeline = spawn_pg_pipeline(
+    let mut pipeline = create_pipeline(
         &identity,
         &database.config,
         state_store.clone(),
@@ -607,7 +607,7 @@ async fn test_table_schema_copy_survives_restarts() {
 
     // We start the pipeline from scratch.
     let identity = create_pipeline_identity(&database_schema.publication_name);
-    let mut pipeline = spawn_pg_pipeline(
+    let mut pipeline = create_pipeline(
         &identity,
         &database.config,
         state_store.clone(),
@@ -664,7 +664,7 @@ async fn test_table_schema_copy_survives_restarts() {
     assert_eq!(table_schemas[1], database_schema.users_schema());
 
     // We recreate a pipeline, assuming the other one was stopped, using the same state and destination.
-    let mut pipeline = spawn_pg_pipeline(
+    let mut pipeline = create_pipeline(
         &identity,
         &database.config,
         state_store.clone(),
@@ -730,7 +730,7 @@ async fn test_table_copy() {
 
     // Start pipeline from scratch.
     let identity = create_pipeline_identity(&database_schema.publication_name);
-    let mut pipeline = spawn_pg_pipeline(
+    let mut pipeline = create_pipeline(
         &identity,
         &database.config,
         state_store.clone(),
@@ -794,7 +794,7 @@ async fn test_table_copy_and_sync() {
 
     // Start pipeline from scratch.
     let identity = create_pipeline_identity(&database_schema.publication_name);
-    let mut pipeline = spawn_pg_pipeline(
+    let mut pipeline = create_pipeline(
         &identity,
         &database.config,
         state_store.clone(),
@@ -955,7 +955,7 @@ async fn test_table_copy_and_sync_with_changed_schema_in_table_sync_worker() {
 
     // Start pipeline from scratch.
     let identity = create_pipeline_identity(&database_schema.publication_name);
-    let mut pipeline = spawn_pg_pipeline(
+    let mut pipeline = create_pipeline(
         &identity,
         &database.config,
         state_store.clone(),
@@ -1044,7 +1044,7 @@ async fn test_table_copy_and_sync_with_changed_schema_in_apply_worker() {
 
     // Start pipeline from scratch.
     let identity = create_pipeline_identity(&database_schema.publication_name);
-    let mut pipeline = spawn_pg_pipeline(
+    let mut pipeline = create_pipeline(
         &identity,
         &database.config,
         state_store.clone(),

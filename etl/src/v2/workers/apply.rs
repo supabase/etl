@@ -1,5 +1,4 @@
 use crate::v2::concurrency::shutdown::ShutdownRx;
-use crate::v2::config::pipeline::PipelineConfig;
 use crate::v2::destination::base::Destination;
 use crate::v2::pipeline::{PipelineId, PipelineIdentity};
 use crate::v2::replication::apply::{start_apply_loop, ApplyLoopError, ApplyLoopHook};
@@ -13,6 +12,7 @@ use crate::v2::workers::pool::TableSyncWorkerPool;
 use crate::v2::workers::table_sync::{
     TableSyncWorker, TableSyncWorkerError, TableSyncWorkerState, TableSyncWorkerStateError,
 };
+use config::shared::PipelineConfig;
 use postgres::schema::TableId;
 use std::collections::HashMap;
 use std::sync::Arc;
