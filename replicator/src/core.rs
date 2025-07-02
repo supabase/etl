@@ -1,96 +1,19 @@
+use crate::config::load_replicator_config;
+use crate::migrations::migrate_state_store;
 use config::shared::{DestinationConfig, ReplicatorConfig};
-use etl::v2::config::batch::BatchConfig;
-use etl::v2::config::pipeline::PipelineConfig;
-use etl::v2::config::retry::RetryConfig;
 use etl::v2::destination::base::Destination;
 use etl::v2::destination::bigquery::BigQueryDestination;
 use etl::v2::destination::memory::MemoryDestination;
 use etl::v2::encryption::bigquery::install_crypto_provider_once;
-use etl::v2::pipeline::{Pipeline, PipelineIdentity};
+use etl::v2::pipeline::Pipeline;
 use etl::v2::state::store::base::StateStore;
 use etl::v2::state::store::postgres::PostgresStateStore;
-use etl::SslMode;
-use postgres::tokio::config::{PgConnectionConfig, PgTlsConfig};
 use secrecy::ExposeSecret;
 use std::fmt;
-use std::io::BufReader;
-use std::time::Duration;
 use tracing::{error, info, warn};
-
-use crate::config::load_replicator_config;
-use crate::migrations::migrate_state_store;
-
-// Macro to statically dispatch pipeline creation and starting
-macro_rules! start_pipeline_dispatch {
-    ($identity:expr, $pipeline_config:expr, $state_store:expr, $destination:expr) => {{
-        let pipeline = Pipeline::new($identity, $pipeline_config, $state_store, $destination);
-        start_pipeline(pipeline).await
-    }};
-}
 
 pub async fn start_replicator() -> anyhow::Result<()> {
     let replicator_config = load_replicator_config()?;
-
-    // We set up the certificates and SSL mode.
-    let mut trusted_root_certs = vec![];
-    let ssl_mode = if replicator_config.source.tls.enabled {
-        let mut root_certs_reader =
-            BufReader::new(replicator_config.source.tls.trusted_root_certs.as_bytes());
-        for cert in rustls_pemfile::certs(&mut root_certs_reader) {
-            let cert = cert?;
-            trusted_root_certs.push(cert);
-        }
-        SslMode::VerifyFull
-    } else {
-        SslMode::Disable
-    };
-
-    // We create the configuration that is used by the pipeline, which is separate from the configs
-    // found in the 'config' crate.
-    let pipeline_config = PipelineConfig {
-        pg_connection: PgConnectionConfig {
-            host: replicator_config.source.host.clone(),
-            port: replicator_config.source.port,
-            name: replicator_config.source.name.clone(),
-            username: replicator_config.source.username.clone(),
-            password: replicator_config.source.password.clone().map(Into::into),
-            tls_config: PgTlsConfig {
-                ssl_mode,
-                trusted_root_certs: trusted_root_certs.clone(),
-            },
-        },
-        batch: BatchConfig {
-            max_size: replicator_config.pipeline.batch.max_size,
-            max_fill: Duration::from_millis(replicator_config.pipeline.batch.max_fill_ms),
-        },
-        apply_worker_initialization_retry: RetryConfig {
-            max_attempts: replicator_config
-                .pipeline
-                .apply_worker_init_retry
-                .max_attempts,
-            initial_delay: Duration::from_millis(
-                replicator_config
-                    .pipeline
-                    .apply_worker_init_retry
-                    .initial_delay_ms,
-            ),
-            max_delay: Duration::from_millis(
-                replicator_config
-                    .pipeline
-                    .apply_worker_init_retry
-                    .max_delay_ms,
-            ),
-            backoff_factor: replicator_config
-                .pipeline
-                .apply_worker_init_retry
-                .backoff_factor,
-        },
-    };
-
-    let identity = PipelineIdentity::new(
-        replicator_config.pipeline.id,
-        &replicator_config.pipeline.publication_name,
-    );
 
     // We initialize the state store, which for the replicator is not configurable.
     let state_store = init_state_store(&replicator_config).await?;
@@ -101,7 +24,13 @@ pub async fn start_replicator() -> anyhow::Result<()> {
         DestinationConfig::Memory => {
             let destination = MemoryDestination::new();
 
-            start_pipeline_dispatch!(identity, pipeline_config, state_store, destination)?;
+            let pipeline = Pipeline::new(
+                replicator_config.pipeline.id,
+                replicator_config.pipeline,
+                state_store,
+                destination,
+            );
+            start_pipeline(pipeline).await?;
         }
         DestinationConfig::BigQuery {
             project_id,
@@ -118,19 +47,24 @@ pub async fn start_replicator() -> anyhow::Result<()> {
             )
             .await?;
 
-            start_pipeline_dispatch!(identity, pipeline_config, state_store, destination)?;
+            let pipeline = Pipeline::new(
+                replicator_config.pipeline.id,
+                replicator_config.pipeline,
+                state_store,
+                destination,
+            );
+            start_pipeline(pipeline).await?;
         }
     }
 
     Ok(())
 }
 
-async fn init_state_store(config: &ReplicatorConfig) -> anyhow::Result<PostgresStateStore> {
-    migrate_state_store(config.source.clone()).await?;
-
+async fn init_state_store(config: &ReplicatorConfig) -> anyhow::Result<impl StateStore + Clone> {
+    migrate_state_store(config.pipeline.pg_connection.clone()).await?;
     Ok(PostgresStateStore::new(
         config.pipeline.id,
-        config.source.clone(),
+        config.pipeline.pg_connection.clone(),
     ))
 }
 

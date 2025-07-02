@@ -26,8 +26,8 @@ pub struct TestDatabaseSchema {
 }
 
 impl TestDatabaseSchema {
-    pub fn publication_name(&self) -> &str {
-        &self.publication_name
+    pub fn publication_name(&self) -> String {
+        self.publication_name.clone()
     }
 
     pub fn users_schema(&self) -> TableSchema {

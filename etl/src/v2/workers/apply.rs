@@ -1,7 +1,6 @@
 use crate::v2::concurrency::shutdown::ShutdownRx;
-use crate::v2::config::pipeline::PipelineConfig;
 use crate::v2::destination::base::Destination;
-use crate::v2::pipeline::{PipelineId, PipelineIdentity};
+use crate::v2::pipeline::PipelineId;
 use crate::v2::replication::apply::{start_apply_loop, ApplyLoopError, ApplyLoopHook};
 use crate::v2::replication::client::{PgReplicationClient, PgReplicationError};
 use crate::v2::replication::slot::{get_slot_name, SlotError};
@@ -13,6 +12,7 @@ use crate::v2::workers::pool::TableSyncWorkerPool;
 use crate::v2::workers::table_sync::{
     TableSyncWorker, TableSyncWorkerError, TableSyncWorkerState, TableSyncWorkerStateError,
 };
+use config::shared::PipelineConfig;
 use postgres::schema::TableId;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -72,7 +72,7 @@ impl WorkerHandle<()> for ApplyWorkerHandle {
 
 #[derive(Debug)]
 pub struct ApplyWorker<S, D> {
-    identity: PipelineIdentity,
+    pipeline_id: PipelineId,
     config: Arc<PipelineConfig>,
     replication_client: PgReplicationClient,
     pool: TableSyncWorkerPool,
@@ -85,7 +85,7 @@ pub struct ApplyWorker<S, D> {
 impl<S, D> ApplyWorker<S, D> {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        identity: PipelineIdentity,
+        pipeline_id: PipelineId,
         config: Arc<PipelineConfig>,
         replication_client: PgReplicationClient,
         pool: TableSyncWorkerPool,
@@ -95,7 +95,7 @@ impl<S, D> ApplyWorker<S, D> {
         shutdown_rx: ShutdownRx,
     ) -> Self {
         Self {
-            identity,
+            pipeline_id,
             config,
             replication_client,
             pool,
@@ -118,17 +118,17 @@ where
         info!("Starting apply worker");
 
         let apply_worker = async move {
-            let start_lsn = get_start_lsn(self.identity.id(), &self.replication_client).await?;
+            let start_lsn = get_start_lsn(self.pipeline_id, &self.replication_client).await?;
 
             start_apply_loop(
-                self.identity.clone(),
+                self.pipeline_id,
                 start_lsn,
                 self.config.clone(),
                 self.replication_client.clone(),
                 self.schema_cache.clone(),
                 self.destination.clone(),
                 ApplyWorkerHook::new(
-                    self.identity,
+                    self.pipeline_id,
                     self.config,
                     self.replication_client,
                     self.pool,
@@ -172,7 +172,7 @@ async fn get_start_lsn(
 
 #[derive(Debug)]
 struct ApplyWorkerHook<S, D> {
-    identity: PipelineIdentity,
+    pipeline_id: PipelineId,
     config: Arc<PipelineConfig>,
     replication_client: PgReplicationClient,
     pool: TableSyncWorkerPool,
@@ -185,7 +185,7 @@ struct ApplyWorkerHook<S, D> {
 impl<S, D> ApplyWorkerHook<S, D> {
     #[allow(clippy::too_many_arguments)]
     fn new(
-        identity: PipelineIdentity,
+        pipeline_id: PipelineId,
         config: Arc<PipelineConfig>,
         replication_client: PgReplicationClient,
         pool: TableSyncWorkerPool,
@@ -195,7 +195,7 @@ impl<S, D> ApplyWorkerHook<S, D> {
         shutdown_rx: ShutdownRx,
     ) -> Self {
         Self {
-            identity,
+            pipeline_id,
             config,
             replication_client,
             pool,
@@ -216,7 +216,7 @@ where
         // TODO: switch to a connection pool which hands out connections.
         let replication_client = self.replication_client.duplicate().await?;
         let worker = TableSyncWorker::new(
-            self.identity.clone(),
+            self.pipeline_id,
             self.config.clone(),
             replication_client,
             self.pool.clone(),

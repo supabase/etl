@@ -38,6 +38,7 @@ postgres-protocol = { workspace = true }
 postgres-replication = { workspace = true }
 prost = { workspace = true, optional = true }
 rustls = { workspace = true, features = ["aws-lc-rs", "logging"] }
+rustls-pemfile = { workspace = true }
 rand = { workspace = true, features = ["std"] }
 secrecy = { workspace = true }
 serde = { workspace = true, features = ["derive"] }

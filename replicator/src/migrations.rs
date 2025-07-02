@@ -1,12 +1,15 @@
-use config::shared::SourceConfig;
-use sqlx::{postgres::PgPoolOptions, Executor};
+use config::shared::{IntoConnectOptions, PgConnectionConfig};
+use sqlx::{
+    postgres::{PgConnectOptions, PgPoolOptions},
+    Executor,
+};
 
 const NUM_POOL_CONNECTIONS: u32 = 1;
 
 /// This function runs migrations on the source database when the source database acts
 /// as a state store.
-pub async fn migrate_state_store(source_config: SourceConfig) -> Result<(), sqlx::Error> {
-    let options = source_config.into_connection_config().with_db();
+pub async fn migrate_state_store(connection_config: PgConnectionConfig) -> Result<(), sqlx::Error> {
+    let options: PgConnectOptions = connection_config.with_db();
 
     let pool = PgPoolOptions::new()
         .max_connections(NUM_POOL_CONNECTIONS)

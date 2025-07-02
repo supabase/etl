@@ -1,6 +1,5 @@
 pub mod clients;
 pub mod concurrency;
-pub mod config;
 pub mod conversions;
 pub mod destination;
 pub mod encryption;

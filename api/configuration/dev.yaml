@@ -4,9 +4,9 @@ database:
   name: "postgres"
   username: "postgres"
   password: "postgres"
-  tls_config:
-    ssl_mode: prefer
-    trusted_root_certs: []
+  tls:
+    enabled: false
+    trusted_root_certs: ""
   require_ssl: false
 application:
   host: "127.0.0.1"

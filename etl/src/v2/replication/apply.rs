@@ -1,11 +1,10 @@
 use crate::v2::concurrency::shutdown::{ShutdownResult, ShutdownRx};
 use crate::v2::concurrency::stream::BatchStream;
-use crate::v2::config::pipeline::PipelineConfig;
 use crate::v2::conversions::event::{
     convert_message_to_event, Event, EventConversionError, EventType,
 };
 use crate::v2::destination::base::{Destination, DestinationError};
-use crate::v2::pipeline::PipelineIdentity;
+use crate::v2::pipeline::PipelineId;
 use crate::v2::replication::client::{PgReplicationClient, PgReplicationError};
 use crate::v2::replication::slot::{get_slot_name, SlotError};
 use crate::v2::replication::stream::{EventsStream, EventsStreamError};
@@ -15,6 +14,7 @@ use crate::v2::workers::apply::ApplyWorkerHookError;
 use crate::v2::workers::base::WorkerType;
 use crate::v2::workers::table_sync::TableSyncWorkerHookError;
 
+use config::shared::PipelineConfig;
 use futures::StreamExt;
 use postgres::schema::TableId;
 use postgres_replication::protocol;
@@ -204,7 +204,7 @@ impl ApplyLoopState {
 
 #[allow(clippy::too_many_arguments)]
 pub async fn start_apply_loop<D, T>(
-    identity: PipelineIdentity,
+    pipeline_id: PipelineId,
     start_lsn: PgLsn,
     config: Arc<PipelineConfig>,
     replication_client: PgReplicationClient,
@@ -234,12 +234,12 @@ where
 
     // We compute the slot name for the replication slot that we are going to use for the logical
     // replication. At this point we assume that the slot already exists.
-    let slot_name = get_slot_name(identity.id(), hook.worker_type())?;
+    let slot_name = get_slot_name(pipeline_id, hook.worker_type())?;
 
     // We start the logical replication stream with the supplied parameters at a given lsn. That
     // lsn is the last lsn from which we need to start fetching events.
     let logical_replication_stream = replication_client
-        .start_logical_replication(identity.publication_name(), &slot_name, start_lsn)
+        .start_logical_replication(&config.publication_name, &slot_name, start_lsn)
         .await?;
     let logical_replication_stream = EventsStream::wrap(logical_replication_stream);
     let logical_replication_stream = BatchStream::wrap(

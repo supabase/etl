@@ -5,6 +5,7 @@ use actix_web::{
     web::{Data, Json, Path},
     HttpRequest, HttpResponse, Responder, ResponseError,
 };
+use config::shared::IntoConnectOptions;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use thiserror::Error;

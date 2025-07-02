@@ -1,4 +1,4 @@
-use crate::sqlx::config::PgConnectionConfig;
+use config::shared::{IntoConnectOptions, PgConnectionConfig};
 use sqlx::{Connection, Executor, PgConnection, PgPool};
 
 /// Creates a new PostgreSQL database and returns a connection pool to it.

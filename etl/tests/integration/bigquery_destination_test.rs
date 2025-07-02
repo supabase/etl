@@ -1,16 +1,15 @@
-use etl::v2::config::batch::BatchConfig;
 use etl::v2::conversions::event::EventType;
 use etl::v2::destination::base::Destination;
 use etl::v2::encryption::bigquery::install_crypto_provider_once;
 use etl::v2::state::table::TableReplicationPhaseType;
-use std::time::Duration;
+use rand::random;
+use config::shared::BatchConfig;
+use etl::v2::pipeline::PipelineId;
 use telemetry::init_test_tracing;
 
 use crate::common::bigquery::setup_bigquery_connection;
 use crate::common::database::spawn_database;
-use crate::common::pipeline_v2::{
-    create_pipeline_identity, spawn_pg_pipeline, spawn_pg_pipeline_with,
-};
+use crate::common::pipeline_v2::{create_pipeline, create_pipeline_with};
 use crate::common::state_store::TestStateStore;
 use crate::common::test_destination_wrapper::TestDestinationWrapper;
 use crate::common::test_schema::bigquery::{
@@ -43,10 +42,11 @@ async fn test_table_copy_and_streaming_with_restart() {
     let destination = TestDestinationWrapper::wrap(raw_destination);
 
     // Start pipeline from scratch.
-    let identity = create_pipeline_identity(database_schema.publication_name());
-    let mut pipeline = spawn_pg_pipeline(
-        &identity,
+    let pipeline_id: PipelineId = random();
+    let mut pipeline = create_pipeline(
         &database.config,
+        pipeline_id,
+        database_schema.publication_name(),
         state_store.clone(),
         destination.clone(),
     );
@@ -106,9 +106,11 @@ async fn test_table_copy_and_streaming_with_restart() {
 
     // We restart the pipeline and check that we can process events since we have load the table
     // schema from the destination.
-    let mut pipeline = spawn_pg_pipeline(
-        &identity,
+    let pipeline_id: PipelineId = random();
+    let mut pipeline = create_pipeline(
         &database.config,
+        pipeline_id,
+        database_schema.publication_name(),
         state_store.clone(),
         destination.clone(),
     );
@@ -186,10 +188,11 @@ async fn test_table_insert_update_delete() {
     let destination = TestDestinationWrapper::wrap(raw_destination);
 
     // Start pipeline from scratch.
-    let identity = create_pipeline_identity(database_schema.publication_name());
-    let mut pipeline = spawn_pg_pipeline(
-        &identity,
+    let pipeline_id: PipelineId = random();
+    let mut pipeline = create_pipeline(
         &database.config,
+        pipeline_id,
+        database_schema.publication_name(),
         state_store.clone(),
         destination.clone(),
     );
@@ -304,17 +307,18 @@ async fn test_table_truncate_with_batching() {
     let destination = TestDestinationWrapper::wrap(raw_destination);
 
     // Start pipeline from scratch.
-    let identity = create_pipeline_identity(database_schema.publication_name());
-    let mut pipeline = spawn_pg_pipeline_with(
-        &identity,
+    let pipeline_id: PipelineId = random();
+    let mut pipeline = create_pipeline_with(
         &database.config,
+        pipeline_id,
+        database_schema.publication_name(),
         state_store.clone(),
         destination.clone(),
         // We use a batch size > 1, so that we can make sure that interleaved truncate statements
         // work well with multiple batches of events.
         Some(BatchConfig {
             max_size: 10,
-            max_fill: Duration::from_secs(1),
+            max_fill_ms: 1000,
         }),
     );
 

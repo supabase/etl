@@ -1,8 +1,7 @@
 use crate::v2::concurrency::shutdown::{ShutdownResult, ShutdownRx};
 use crate::v2::concurrency::stream::BatchStream;
-use crate::v2::config::pipeline::PipelineConfig;
 use crate::v2::destination::base::{Destination, DestinationError};
-use crate::v2::pipeline::PipelineIdentity;
+use crate::v2::pipeline::PipelineId;
 use crate::v2::replication::client::{PgReplicationClient, PgReplicationError};
 use crate::v2::replication::slot::{get_slot_name, SlotError};
 use crate::v2::replication::stream::{TableCopyStream, TableCopyStreamError};
@@ -11,6 +10,7 @@ use crate::v2::state::store::base::{StateStore, StateStoreError};
 use crate::v2::state::table::{TableReplicationPhase, TableReplicationPhaseType};
 use crate::v2::workers::base::WorkerType;
 use crate::v2::workers::table_sync::{TableSyncWorkerState, TableSyncWorkerStateError};
+use config::shared::PipelineConfig;
 use futures::StreamExt;
 use postgres::schema::TableId;
 use std::sync::Arc;
@@ -52,7 +52,7 @@ pub enum TableSyncResult {
 
 #[allow(clippy::too_many_arguments)]
 pub async fn start_table_sync<S, D>(
-    identity: PipelineIdentity,
+    pipeline_id: PipelineId,
     config: Arc<PipelineConfig>,
     replication_client: PgReplicationClient,
     table_id: TableId,
@@ -94,7 +94,7 @@ where
     // good to reduce the length of the critical section.
     drop(inner);
 
-    let slot_name = get_slot_name(identity.id(), WorkerType::TableSync { table_id })?;
+    let slot_name = get_slot_name(pipeline_id, WorkerType::TableSync { table_id })?;
 
     // There are three phases in which the table can be in:
     // - `Init` -> this means that the table sync was never done, so we just perform it.
@@ -153,7 +153,7 @@ where
             // - Destination -> we write here because some consumers might want to have the schema of incoming
             //  data.
             let table_schema = transaction
-                .get_table_schema(table_id, Some(identity.publication_name()))
+                .get_table_schema(table_id, Some(&config.publication_name))
                 .await?;
             schema_cache.add_table_schema(table_schema.clone()).await;
             destination.write_table_schema(table_schema.clone()).await?;
