@@ -5,13 +5,14 @@ use tokio_postgres::error::SqlState;
 /// Type alias for convenience when using the Result type with our Error.
 pub type Result<T> = result::Result<T, Error>;
 
-/// Internal error representation with kind and optional source error.
+/// Internal error representation with kind and optional source errors.
 ///
 /// Uses boxing to keep the public Error type size consistent and enable
 /// rich error context without performance penalties for the success path.
+/// Supports both single and multiple source errors for comprehensive error chaining.
 struct ErrorInner {
     kind: ErrorKind,
-    source: Option<Box<dyn error::Error + Send + Sync>>,
+    sources: Vec<Box<dyn error::Error + Send + Sync>>,
 }
 
 /// Comprehensive error classification for ETL operations.
@@ -103,7 +104,7 @@ pub enum ErrorKind {
     PostgresError { description: String },
 
     // === Aggregate & Fallback Errors ===
-    /// Multiple errors occurred during batch operations
+    /// Multiple errors occurred and need to be collected
     Many { amount: u64 },
     /// Error that doesn't fit other categories
     Other { description: String },
@@ -148,69 +149,6 @@ pub enum ChainFormat {
     DisplayAlternate,
 }
 
-/// Error collection for handling multiple failures in batch operations.
-///
-/// Displays errors with numbered formatting and recursive source chains
-/// for comprehensive error reporting in batch processing scenarios.
-pub struct Errors(Vec<Error>);
-
-impl From<Vec<Error>> for Errors {
-    fn from(value: Vec<Error>) -> Self {
-        Errors(value)
-    }
-}
-
-impl fmt::Debug for Errors {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self.0.len() {
-            0 => write!(f, "no errors"),
-            1 => write!(f, "{:?}", self.0[0]),
-            count => {
-                writeln!(f, "batch operation failed with {count} errors:")?;
-                for (i, error) in self.0.iter().enumerate() {
-                    write!(f, "  {}. {}", i + 1, error.error_chain(ChainFormat::Debug))?;
-                    if i < count - 1 {
-                        writeln!(f)?;
-                    }
-                }
-                Ok(())
-            }
-        }
-    }
-}
-
-impl fmt::Display for Errors {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self.0.len() {
-            0 => write!(f, "no errors"),
-            1 => write!(f, "{}", self.0[0]),
-            count => {
-                writeln!(f, "batch operation failed with {count} errors:")?;
-                for (i, error) in self.0.iter().enumerate() {
-                    write!(
-                        f,
-                        "  {}. {}",
-                        i + 1,
-                        error.error_chain(ChainFormat::Display)
-                    )?;
-                    if i < count - 1 {
-                        writeln!(f)?;
-                    }
-                }
-                Ok(())
-            }
-        }
-    }
-}
-
-impl error::Error for Errors {
-    fn source(&self) -> Option<&(dyn error::Error + 'static)> {
-        // Return the first error as the primary source since std::error::Error
-        // doesn't support multiple sources.
-        self.0.first().and_then(|err| err.source())
-    }
-}
-
 /// A stable error type for the ETL library using the ErrorInner pattern.
 ///
 /// This error type provides a stable public API while allowing internal error details
@@ -221,29 +159,48 @@ pub struct Error(Box<ErrorInner>);
 impl Error {
     /// Creates a new error with the specified kind.
     pub fn new(kind: ErrorKind) -> Self {
-        Error(Box::new(ErrorInner { kind, source: None }))
+        Error(Box::new(ErrorInner {
+            kind,
+            sources: Vec::new(),
+        }))
     }
 
-    /// Creates a new error with the specified kind and source error.
+    /// Creates a new error with the specified kind and single source error.
     pub fn with_source<E>(kind: ErrorKind, source: E) -> Self
     where
         E: Into<Box<dyn error::Error + Send + Sync>>,
     {
         Error(Box::new(ErrorInner {
             kind,
-            source: Some(source.into()),
+            sources: vec![source.into()],
         }))
     }
 
-    /// Creates an error containing multiple errors from batch operations.
-    pub fn from_many(errors: impl Into<Errors>) -> Self {
-        let errors = errors.into();
-        Error::with_source(
-            ErrorKind::Many {
-                amount: errors.0.len() as u64,
+    /// Creates a new error with the specified kind and multiple source errors.
+    pub fn with_sources<I, E>(kind: ErrorKind, sources: I) -> Self
+    where
+        I: IntoIterator<Item = E>,
+        E: Into<Box<dyn error::Error + Send + Sync>>,
+    {
+        Error(Box::new(ErrorInner {
+            kind,
+            sources: sources.into_iter().map(|e| e.into()).collect(),
+        }))
+    }
+
+    /// Creates a new error with kind [`ErrorKind::Many`] from a collection of other errors.
+    pub fn from_many<I, E>(sources: I) -> Self
+    where
+        I: IntoIterator<Item = E>,
+        E: Into<Box<dyn error::Error + Send + Sync>>,
+    {
+        let sources = sources.into_iter().map(|e| e.into()).collect();
+        Error(Box::new(ErrorInner {
+            kind: ErrorKind::Many {
+                amount: sources.len() as u64,
             },
-            errors,
-        )
+            sources: sources.into_iter().map(|e| e.into()).collect(),
+        }))
     }
 
     /// Creates a transaction not started error.
@@ -286,6 +243,28 @@ impl Error {
         Self::new(ErrorKind::Other {
             description: description.into(),
         })
+    }
+
+    /// Adds an additional source error to this error.
+    pub fn add_source<E>(mut self, source: E) -> Self
+    where
+        E: Into<Box<dyn error::Error + Send + Sync>>,
+    {
+        self.0.sources.push(source.into());
+        self
+    }
+
+    /// Returns all source errors.
+    pub fn sources(&self) -> &[Box<dyn error::Error + Send + Sync>] {
+        &self.0.sources
+    }
+
+    /// Returns the primary (first) source error for std::error::Error compatibility.
+    pub fn primary_source(&self) -> Option<&(dyn error::Error + 'static)> {
+        self.0
+            .sources
+            .first()
+            .map(|e| e.as_ref() as &(dyn error::Error + 'static))
     }
 
     /// Returns the error kind classification.
@@ -408,25 +387,60 @@ impl Error {
     /// Returns a formatted string showing this error and all its source errors recursively.
     pub fn error_chain(&self, format: ChainFormat) -> String {
         let mut result = self.error_message();
-        let mut current_source = error::Error::source(self);
 
-        while let Some(source) = current_source {
-            result.push_str("\n  ↳ caused by: ");
+        // Handle multiple sources
+        match self.0.sources.len() {
+            0 => {} // No sources
+            1 => {
+                // Single source - traditional chain format
+                result.push_str("\n  ↳ caused by: ");
+                let source = &self.0.sources[0];
+                match format {
+                    ChainFormat::Debug => result.push_str(&format!("{source:?}")),
+                    ChainFormat::Display => result.push_str(&format!("{source}")),
+                    ChainFormat::DisplayAlternate => result.push_str(&format!("{source:#}")),
+                }
 
-            // Format the source error based on the requested format
-            match format {
-                ChainFormat::Debug => {
-                    result.push_str(&format!("{source:?}"));
-                }
-                ChainFormat::Display => {
-                    result.push_str(&format!("{source}"));
-                }
-                ChainFormat::DisplayAlternate => {
-                    result.push_str(&format!("{source:#}"));
+                // Continue with traditional chaining for nested sources
+                let mut current_source = error::Error::source(source.as_ref());
+                while let Some(nested_source) = current_source {
+                    result.push_str("\n    ↳ caused by: ");
+                    match format {
+                        ChainFormat::Debug => result.push_str(&format!("{nested_source:?}")),
+                        ChainFormat::Display => result.push_str(&format!("{nested_source}")),
+                        ChainFormat::DisplayAlternate => {
+                            result.push_str(&format!("{nested_source:#}"))
+                        }
+                    }
+                    current_source = error::Error::source(nested_source);
                 }
             }
+            count => {
+                // Multiple sources - list them
+                result.push_str(&format!("\n  ↳ caused by {count} errors:"));
+                for (i, source) in self.0.sources.iter().enumerate() {
+                    result.push_str(&format!("\n    {}. ", i + 1));
+                    match format {
+                        ChainFormat::Debug => result.push_str(&format!("{source:?}")),
+                        ChainFormat::Display => result.push_str(&format!("{source}")),
+                        ChainFormat::DisplayAlternate => result.push_str(&format!("{source:#}")),
+                    }
 
-            current_source = error::Error::source(source);
+                    // Show nested sources for each error
+                    let mut current_source = error::Error::source(source.as_ref());
+                    while let Some(nested_source) = current_source {
+                        result.push_str("\n      ↳ caused by: ");
+                        match format {
+                            ChainFormat::Debug => result.push_str(&format!("{nested_source:?}")),
+                            ChainFormat::Display => result.push_str(&format!("{nested_source}")),
+                            ChainFormat::DisplayAlternate => {
+                                result.push_str(&format!("{nested_source:#}"))
+                            }
+                        }
+                        current_source = error::Error::source(nested_source);
+                    }
+                }
+            }
         }
 
         result
@@ -535,7 +549,7 @@ impl Error {
             PostgresError { description } => format!("postgres operation failed: {description}"),
 
             Many { amount } => {
-                format!("batch operation failed with {amount} errors")
+                format!("{amount} errors occurred")
             }
             Other { description } => description.clone(),
         }
@@ -562,10 +576,8 @@ impl fmt::Display for Error {
 
 impl error::Error for Error {
     fn source(&self) -> Option<&(dyn error::Error + 'static)> {
-        self.0
-            .source
-            .as_ref()
-            .map(|e| e.as_ref() as &(dyn error::Error + 'static))
+        // Return the first source for std::error::Error compatibility
+        self.primary_source()
     }
 }
 
@@ -762,7 +774,7 @@ mod tests {
         let error1 = Error::table_not_found("users");
         let error2 = Error::column_not_found("posts", "invalid_column");
 
-        let errors = Errors::from(vec![error1, error2]);
+        // let errors = Errors::from(vec![error1, error2]);
 
         // Display format
         let display = format!("{errors}");
