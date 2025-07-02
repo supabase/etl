@@ -148,7 +148,7 @@ impl BigQueryClient {
         dataset_id: &str,
         table_id: &str,
         column_schemas: &[ColumnSchema],
-        max_staleness_mins: u16,
+        max_staleness_mins: Option<u16>,
     ) -> Result<bool, BigQueryClientError> {
         if self.table_exists(dataset_id, table_id).await? {
             return Ok(false);
@@ -166,12 +166,16 @@ impl BigQueryClient {
         dataset_id: &str,
         table_id: &str,
         column_schemas: &[ColumnSchema],
-        max_staleness_mins: u16,
+        max_staleness_mins: Option<u16>,
     ) -> Result<(), BigQueryClientError> {
         let full_table_name = self.full_table_name(dataset_id, table_id);
 
         let columns_spec = Self::create_columns_spec(column_schemas);
-        let max_staleness_option = Self::max_staleness_option(max_staleness_mins);
+        let max_staleness_option = if let Some(max_staleness_mins) = max_staleness_mins {
+            Self::max_staleness_option(max_staleness_mins)
+        } else {
+            "".to_string()
+        };
 
         info!("Creating table {full_table_name} in BigQuery");
 

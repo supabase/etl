@@ -101,7 +101,7 @@ pub enum BigQueryDestinationError {
 struct Inner {
     client: BigQueryClient,
     dataset_id: String,
-    max_staleness_mins: u16,
+    max_staleness_mins: Option<u16>,
     schema_cache: Option<SchemaCache>,
 }
 
@@ -157,7 +157,7 @@ impl BigQueryDestination {
         project_id: String,
         dataset_id: String,
         sa_key: &str,
-        max_staleness_mins: u16,
+        max_staleness_mins: Option<u16>,
     ) -> Result<Self, BigQueryDestinationError> {
         let client = BigQueryClient::new_with_key_path(project_id, sa_key).await?;
         let inner = Inner {
@@ -180,7 +180,7 @@ impl BigQueryDestination {
         project_id: String,
         dataset_id: String,
         sa_key: &str,
-        max_staleness_mins: u16,
+        max_staleness_mins: Option<u16>,
     ) -> Result<Self, BigQueryDestinationError> {
         let client = BigQueryClient::new_with_key(project_id, sa_key).await?;
         let inner = Inner {
@@ -205,7 +205,7 @@ impl BigQueryDestination {
         auth_base_url: String,
         v2_base_url: String,
         sa_key: &str,
-        max_staleness_mins: u16,
+        max_staleness_mins: Option<u16>,
     ) -> Result<Self, BigQueryDestinationError> {
         let client =
             BigQueryClient::new_with_custom_urls(project_id, auth_base_url, v2_base_url, sa_key)

@@ -16,6 +16,7 @@ use postgres::tokio::config::{PgConnectionConfig, PgTlsConfig};
 use std::fmt;
 use std::io::BufReader;
 use std::time::Duration;
+use secrecy::ExposeSecret;
 use thiserror::Error;
 use tracing::{error, info, warn};
 
@@ -112,7 +113,7 @@ async fn init_state_store(config: &ReplicatorConfig) -> anyhow::Result<impl Stat
 async fn init_destination(
     config: &ReplicatorConfig,
 ) -> anyhow::Result<impl Destination + Clone + Send + Sync + fmt::Debug + 'static> {
-    match config.destination {
+    match &config.destination {
         DestinationConfig::Memory => Ok(MemoryDestination::new()),
         DestinationConfig::BigQuery {
             project_id,
@@ -122,7 +123,15 @@ async fn init_destination(
         } => {
             // The crypto provider is required when using BigQuery.
             install_crypto_provider_once();
-            BigQueryDestination::new_with_key()
+
+            let service_account_key = service_account_key.expose_secret();
+
+            BigQueryDestination::new_with_key(
+                project_id.clone(),
+                dataset_id.clone(),
+                service_account_key,
+                max_staleness_mins.clone()
+            )
         }
     }
 }
