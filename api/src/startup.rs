@@ -5,10 +5,7 @@ use actix_web_httpauth::middleware::HttpAuthentication;
 use aws_lc_rs::aead::{RandomizedNonceKey, AES_256_GCM};
 use base64::{prelude::BASE64_STANDARD, Engine};
 use config::shared::{IntoConnectOptions, PgConnectionConfig};
-use sqlx::{
-    postgres::{PgConnectOptions, PgPoolOptions},
-    PgPool,
-};
+use sqlx::{postgres::PgPoolOptions, PgPool};
 use tracing_actix_web::TracingLogger;
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
@@ -119,8 +116,7 @@ impl Application {
 }
 
 pub fn get_connection_pool(config: &PgConnectionConfig) -> PgPool {
-    let config: PgConnectOptions = config.with_db();
-    PgPoolOptions::new().connect_lazy_with(config)
+    PgPoolOptions::new().connect_lazy_with(config.with_db())
 }
 
 // HttpK8sClient is wrapped in an option because creating it

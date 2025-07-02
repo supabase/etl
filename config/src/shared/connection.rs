@@ -6,7 +6,7 @@ use tokio_postgres::{Config as TokioPgConnectOptions, config::SslMode as TokioPg
 use crate::SerializableSecretString;
 use crate::shared::ValidationError;
 
-/// Configuration for connecting to a Postgres source database.
+/// Configuration for connecting to a Postgres database.
 ///
 /// This struct holds all necessary connection parameters and settings.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -55,7 +55,7 @@ pub trait IntoConnectOptions<Output> {
     /// Creates connection options for connecting to the PostgreSQL server without
     /// specifying a database.
     ///
-    /// Returns [`Self::Output`] configured with the host, port, username, SSL mode
+    /// Returns [`Output`] configured with the host, port, username, SSL mode
     /// and optional password from this instance. Useful for administrative operations
     /// that must be performed before connecting to a specific database, like database
     /// creation.
@@ -63,7 +63,7 @@ pub trait IntoConnectOptions<Output> {
 
     /// Creates connection options for connecting to a specific database.
     ///
-    /// Returns [`Self::Output`] configured with all connection parameters including
+    /// Returns [`Output`] configured with all connection parameters including
     /// the database name from this instance.
     fn with_db(&self) -> Output;
 }
@@ -90,8 +90,8 @@ impl IntoConnectOptions<SqlxConnectOptions> for PgConnectionConfig {
     }
 
     fn with_db(&self) -> SqlxConnectOptions {
-        let without_db: SqlxConnectOptions = self.without_db();
-        without_db.database(&self.name)
+        let options: SqlxConnectOptions = self.without_db();
+        options.database(&self.name)
     }
 }
 
@@ -126,8 +126,8 @@ impl IntoConnectOptions<TokioPgConnectOptions> for PgConnectionConfig {
     }
 
     fn with_db(&self) -> TokioPgConnectOptions {
-        let mut without_db: TokioPgConnectOptions = self.without_db();
-        without_db.dbname(self.name.clone());
-        without_db
+        let mut options: TokioPgConnectOptions = self.without_db();
+        options.dbname(self.name.clone());
+        options
     }
 }
