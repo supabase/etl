@@ -1,4 +1,4 @@
-use std::{borrow, error, fmt, result};
+use std::{error, fmt, io, result};
 use tokio_postgres::error::SqlState;
 
 use crate::v2::workers::base::WorkerType;
@@ -113,13 +113,13 @@ pub enum ErrorKind {
 pub enum RecoveryStrategy {
     /// No retry - permanent failure
     NoRetry,
-    /// Retry
+    /// Retry immediately or via backoff (up to the caller)
     Retry,
 }
 
-/// Formatting mode for error chains.
+/// Formatting mode for errors and chains.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ChainFormat {
+enum Format {
     /// Debug format with full details
     Debug,
     /// Display format with basic message
@@ -224,7 +224,7 @@ impl Error {
         })
     }
 
-    /// Returns the primary (first) source error for std::error::Error compatibility.
+    /// Returns the primary (first) source error for error::Error compatibility.
     pub fn primary_source(&self) -> Option<&(dyn error::Error + 'static)> {
         self.0
             .sources
@@ -286,13 +286,13 @@ impl Error {
     }
 
     /// Returns a formatted string showing this error and all its source errors recursively.
-    fn error_chain(&self, format: ChainFormat) -> String {
+    fn error_chain(&self, format: Format) -> String {
         self.error_chain_with_indent(format, "")
     }
 
     /// Internal method for error_chain that handles proper indentation for tree hierarchy.
-    fn error_chain_with_indent(&self, format: ChainFormat, indent: &str) -> String {
-        let mut result = self.error_message();
+    fn error_chain_with_indent(&self, format: Format, indent: &str) -> String {
+        let mut result = self.error_message(format);
 
         // Handle multiple sources
         match self.0.sources.len() {
@@ -311,9 +311,9 @@ impl Error {
                     // Regular error type, use traditional chaining
                     result.push_str(&format!("\n{indent}  ↳ caused by: "));
                     match format {
-                        ChainFormat::Debug => result.push_str(&format!("{source:?}")),
-                        ChainFormat::Display => result.push_str(&format!("{source}")),
-                        ChainFormat::DisplayAlternate => result.push_str(&format!("{source:#}")),
+                        Format::Debug => result.push_str(&format!("{source:?}")),
+                        Format::Display => result.push_str(&format!("{source}")),
+                        Format::DisplayAlternate => result.push_str(&format!("{source:#}")),
                     }
 
                     // Continue with traditional chaining for nested sources
@@ -321,9 +321,9 @@ impl Error {
                     while let Some(nested_source) = current_source {
                         result.push_str(&format!("\n{indent}  ↳ caused by: "));
                         match format {
-                            ChainFormat::Debug => result.push_str(&format!("{nested_source:?}")),
-                            ChainFormat::Display => result.push_str(&format!("{nested_source}")),
-                            ChainFormat::DisplayAlternate => {
+                            Format::Debug => result.push_str(&format!("{nested_source:?}")),
+                            Format::Display => result.push_str(&format!("{nested_source}")),
+                            Format::DisplayAlternate => {
                                 result.push_str(&format!("{nested_source:#}"))
                             }
                         }
@@ -333,7 +333,7 @@ impl Error {
             }
             _ => {
                 // Multiple sources - add the "caused by" header first
-                result.push_str(&format!("\n{indent}  ↳ caused by multiple errors:"));
+                result.push_str(&format!("\n{indent}  ↳ caused by:"));
 
                 // Then list them with proper tree hierarchy
                 for (i, source) in self.0.sources.iter().enumerate() {
@@ -348,11 +348,9 @@ impl Error {
                     } else {
                         // Regular error type
                         match format {
-                            ChainFormat::Debug => result.push_str(&format!("{source:?}")),
-                            ChainFormat::Display => result.push_str(&format!("{source}")),
-                            ChainFormat::DisplayAlternate => {
-                                result.push_str(&format!("{source:#}"))
-                            }
+                            Format::Debug => result.push_str(&format!("{source:?}")),
+                            Format::Display => result.push_str(&format!("{source}")),
+                            Format::DisplayAlternate => result.push_str(&format!("{source:#}")),
                         }
 
                         // Show nested sources for each error
@@ -360,13 +358,9 @@ impl Error {
                         while let Some(nested_source) = current_source {
                             result.push_str(&format!("\n{indent}  ↳ caused by: "));
                             match format {
-                                ChainFormat::Debug => {
-                                    result.push_str(&format!("{nested_source:?}"))
-                                }
-                                ChainFormat::Display => {
-                                    result.push_str(&format!("{nested_source}"))
-                                }
-                                ChainFormat::DisplayAlternate => {
+                                Format::Debug => result.push_str(&format!("{nested_source:?}")),
+                                Format::Display => result.push_str(&format!("{nested_source}")),
+                                Format::DisplayAlternate => {
                                     result.push_str(&format!("{nested_source:#}"))
                                 }
                             }
@@ -381,7 +375,17 @@ impl Error {
     }
 
     /// Returns just the primary error message without source chain.
-    fn error_message(&self) -> String {
+    fn error_message(&self, format: Format) -> String {
+        match format {
+            Format::Debug => {
+                format!("{:?}", self.0.kind)
+            }
+            Format::Display | Format::DisplayAlternate => self.display_error_message(),
+        }
+    }
+
+    /// Returns the display-formatted error message.
+    fn display_error_message(&self) -> String {
         use ErrorKind::*;
 
         match &self.0.kind {
@@ -495,7 +499,7 @@ impl Error {
 impl fmt::Debug for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // Always display error with chain
-        write!(f, "{}", self.error_chain(ChainFormat::Debug))
+        write!(f, "{}", self.error_chain(Format::Debug))
     }
 }
 
@@ -503,16 +507,16 @@ impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // Display shows first error, chain only if alternate format
         if f.alternate() {
-            write!(f, "{}", self.error_chain(ChainFormat::DisplayAlternate))
+            write!(f, "{}", self.error_chain(Format::DisplayAlternate))
         } else {
-            write!(f, "{}", self.error_message())
+            write!(f, "{}", self.error_message(Format::Display))
         }
     }
 }
 
 impl error::Error for Error {
     fn source(&self) -> Option<&(dyn error::Error + 'static)> {
-        // Return the first source for std::error::Error compatibility
+        // Return the first source for error::Error compatibility
         self.primary_source()
     }
 }
@@ -541,12 +545,14 @@ impl From<sqlx::Error> for Error {
         let description = err.to_string();
 
         if let sqlx::Error::Database(db_err) = &err {
-            let code_str = db_err.code().unwrap_or(borrow::Cow::Borrowed("unknown"));
-            let sql_state = SqlState::from_code(&code_str);
-            let error_kind = map_postgres_sqlstate_to_error_kind(&sql_state, db_err.table(), None);
+            if let Some(code) = db_err.code() {
+                let sql_state = SqlState::from_code(&code);
+                let error_kind =
+                    map_postgres_sqlstate_to_error_kind(&sql_state, db_err.table(), None);
 
-            if let Some(error_kind) = error_kind {
-                return Self::with_source(error_kind, err);
+                if let Some(error_kind) = error_kind {
+                    return Self::with_source(error_kind, err);
+                }
             }
         }
 
@@ -560,8 +566,8 @@ impl From<rustls::Error> for Error {
     }
 }
 
-impl From<std::io::Error> for Error {
-    fn from(err: std::io::Error) -> Self {
+impl From<io::Error> for Error {
+    fn from(err: io::Error) -> Self {
         Self::with_source(
             ErrorKind::IoError {
                 description: err.kind().to_string(),
@@ -659,7 +665,6 @@ fn map_postgres_sqlstate_to_error_kind(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io;
 
     #[test]
     fn test_error_display_formats() {
@@ -668,15 +673,15 @@ mod tests {
 
         // Display format (normal) - just the error message
         let display_normal = format!("{error}");
-        assert_eq!(display_normal, "table 'users' not found");
+        insta::assert_snapshot!(display_normal, @"table 'users' not found");
 
         // Display format (alternate) - error with chain (same as normal since no source)
         let display_alternate = format!("{error:#}");
-        assert_eq!(display_alternate, "table 'users' not found");
+        insta::assert_snapshot!(display_alternate, @"table 'users' not found");
 
-        // Debug format - error with chain (same as normal since no source)
+        // Debug format - shows the actual struct representation
         let debug = format!("{error:?}");
-        assert_eq!(debug, "table 'users' not found");
+        insta::assert_snapshot!(debug, @"TableNotFound { table_name: \"users\" }");
     }
 
     #[test]
@@ -691,17 +696,94 @@ mod tests {
 
         // Display format (normal) - just the primary error message
         let display_normal = format!("{error}");
-        assert!(display_normal.contains("failed to connect to database"));
+        insta::assert_snapshot!(display_normal, @"failed to connect to database (source: test)");
 
         // Display format (alternate) - error with full chain
         let display_alternate = format!("{error:#}");
-        assert!(display_alternate.contains("failed to connect to database"));
-        assert!(display_alternate.contains("↳ caused by: TCP connection refused"));
+        insta::assert_snapshot!(display_alternate, @r#"
+        failed to connect to database (source: test)
+          ↳ caused by: TCP connection refused
+        "#);
 
-        // Debug format - error with full chain
+        // Debug format - shows struct representation with chain
         let debug = format!("{error:?}");
-        assert!(debug.contains("failed to connect to database"));
-        assert!(debug.contains("↳ caused by:"));
-        assert!(debug.contains("TCP connection refused"));
+        insta::assert_snapshot!(debug, @r#"
+        ConnectionFailed { source: "test" }
+          ↳ caused by: Custom { kind: ConnectionRefused, error: "TCP connection refused" }
+        "#);
+    }
+
+    #[test]
+    fn test_error_nested_from_many() {
+        // Create some base errors
+        let io_error1 = io::Error::new(io::ErrorKind::PermissionDenied, "Permission denied");
+        let io_error2 = io::Error::new(io::ErrorKind::NotFound, "File not found");
+
+        // Create a simple error to mix in
+        let table_error = Error::table_not_found("products");
+
+        // Create first Error::from_many with mixed error types
+        let inner_many = Error::from_many([
+            Box::new(io_error1) as Box<dyn error::Error + Send + Sync>,
+            Box::new(table_error) as Box<dyn error::Error + Send + Sync>,
+            Box::new(io_error2) as Box<dyn error::Error + Send + Sync>,
+        ]);
+
+        // Create another Error::from_many with different errors
+        let other_many = Error::from_many([
+            Box::new(Error::other("Custom failure")) as Box<dyn error::Error + Send + Sync>,
+            Box::new(Error::with_source(
+                ErrorKind::ReplicationSlotNotFound {
+                    slot_name: "test_slot".to_string(),
+                },
+                io::Error::new(io::ErrorKind::TimedOut, "Connection timeout"),
+            )) as Box<dyn error::Error + Send + Sync>,
+        ]);
+
+        // Create the final nested Error::from_many that wraps everything
+        let nested_error = Error::from_many([
+            Box::new(inner_many) as Box<dyn error::Error + Send + Sync>,
+            Box::new(Error::column_not_found("users", "email"))
+                as Box<dyn error::Error + Send + Sync>,
+            Box::new(other_many) as Box<dyn error::Error + Send + Sync>,
+        ]);
+
+        // Test all format variations
+        let display_normal = format!("{nested_error}");
+        insta::assert_snapshot!(display_normal, @"3 errors occurred");
+
+        let display_alternate = format!("{nested_error:#}");
+        insta::assert_snapshot!(display_alternate, @r"
+        3 errors occurred
+          ↳ caused by:
+            1. 3 errors occurred
+                 ↳ caused by:
+                   1. Permission denied
+                   2. table 'products' not found
+                   3. File not found
+            2. column 'email' not found in table 'users'
+            3. 2 errors occurred
+                 ↳ caused by:
+                   1. Custom failure
+                   2. replication slot 'test_slot' not found
+                        ↳ caused by: Connection timeout
+        ");
+
+        let debug = format!("{nested_error:?}");
+        insta::assert_snapshot!(debug, @r#"
+        Many { amount: 3 }
+          ↳ caused by:
+            1. Many { amount: 3 }
+                 ↳ caused by:
+                   1. Custom { kind: PermissionDenied, error: "Permission denied" }
+                   2. TableNotFound { table_name: "products" }
+                   3. Custom { kind: NotFound, error: "File not found" }
+            2. ColumnNotFound { table_name: "users", column_name: "email" }
+            3. Many { amount: 2 }
+                 ↳ caused by:
+                   1. Other { description: "Custom failure" }
+                   2. ReplicationSlotNotFound { slot_name: "test_slot" }
+                        ↳ caused by: Custom { kind: TimedOut, error: "Connection timeout" }
+        "#);
     }
 }
