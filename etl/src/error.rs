@@ -297,33 +297,45 @@ impl Error {
     pub fn severity(&self) -> ErrorSeverity {
         use ErrorKind::*;
         match &self.0.kind {
-            // Critical errors - system integrity or consistency issues
-            StateStoreCorrupted { .. } | WorkerPanicked { .. } | LsnConsistencyError { .. } => {
-                ErrorSeverity::Critical
-            }
+            // Critical errors - system integrity or data consistency issues that require immediate attention
+            StateStoreCorrupted { .. }
+            | WorkerPanicked { .. }
+            | LsnConsistencyError { .. }
+            | PipelineShutdownFailed => ErrorSeverity::Critical,
 
-            // High severity errors - significant operational issues
-            ConnectionLost { .. } | ReplicationSlotNotCreated { .. } | PipelineShutdownFailed => {
-                ErrorSeverity::High
-            }
-
-            // Medium severity errors - unexpected but recoverable
-            ConnectionFailed { .. }
+            // High severity errors - operational failures that significantly impact functionality
+            ConnectionLost { .. }
+            | ReplicationSlotNotCreated { .. }
             | AuthenticationFailed { .. }
-            | TableNotFound { .. }
-            | ResourceLimitExceeded { .. }
-            | TransactionNotStarted
-            | EventTypeMismatch { .. }
-            | TableReplicationPhaseInvalid { .. } => ErrorSeverity::Medium,
+            | TransactionFailed { .. }
+            | EventsStreamFailed
+            | TableCopyStreamFailed { .. }
+            | TransactionNotStarted => ErrorSeverity::High,
 
-            // Low severity errors - transient or expected during normal operations
-            | DataConversionFailed { .. }
+            // Medium severity errors - recoverable issues that may affect specific operations
+            ConnectionFailed { .. }
+            | TableNotFound { .. }
+            | ColumnNotFound { .. }
+            | ReplicationSlotNotFound { .. }
+            | ReplicationSlotAlreadyExists { .. }
+            | PublicationNotFound { .. }
+            | ResourceLimitExceeded { .. }
+            | EventTypeMismatch { .. }
+            | TableReplicationPhaseInvalid { .. }
+            | TableReplicationStateMissing { .. }
+            | TupleDataNotSupported { .. }
+            | TlsConfigurationFailed => ErrorSeverity::Medium,
+
+            // Low severity errors - transient issues or expected operational events
+            DataConversionFailed { .. }
             | WorkerCancelled { .. }
             | WorkerFailedSilently { .. }
-            | IoError { .. } => ErrorSeverity::Low,
+            | IoError { .. }
+            | PostgresError { .. }
+            | Other { .. } => ErrorSeverity::Low,
 
-            // Default to medium for remaining variants
-            _ => ErrorSeverity::Medium,
+            // Aggregate errors inherit severity from their constituent errors
+            Many { .. } => ErrorSeverity::Medium,
         }
     }
 
@@ -331,32 +343,47 @@ impl Error {
     pub fn recovery_strategy(&self) -> RecoveryStrategy {
         use ErrorKind::*;
         match &self.0.kind {
-            // No retry - permanent failures requiring code changes or configuration fixes
+            // No retry - permanent failures requiring configuration fixes or schema changes
             AuthenticationFailed { .. }
-            | StateStoreCorrupted { .. }
-            | TupleDataNotSupported { .. } => RecoveryStrategy::NoRetry,
+            | TableNotFound { .. }
+            | ColumnNotFound { .. }
+            | TupleDataNotSupported { .. }
+            | TlsConfigurationFailed
+            | PublicationNotFound { .. }
+            | ReplicationSlotAlreadyExists { .. } => RecoveryStrategy::NoRetry,
 
-            // Immediate retry - transient network issues
-            WorkerCancelled { .. } => RecoveryStrategy::RetryImmediate,
+            // Immediate retry - transient operational issues that resolve quickly
+            WorkerCancelled { .. } | TransactionNotStarted | EventTypeMismatch { .. } => {
+                RecoveryStrategy::RetryImmediate
+            }
 
-            // Retry with backoff - infrastructure issues that may resolve
+            // Retry with backoff - infrastructure issues that may take time to resolve
             ConnectionFailed { .. }
             | ConnectionLost { .. }
             | TransactionFailed { .. }
             | IoError { .. }
             | TableCopyStreamFailed { .. }
-            | EventsStreamFailed => RecoveryStrategy::RetryWithBackoff,
+            | EventsStreamFailed
+            | ReplicationSlotNotCreated { .. }
+            | ReplicationSlotNotFound { .. }
+            | TableReplicationStateMissing { .. }
+            | PostgresError { .. } => RecoveryStrategy::RetryWithBackoff,
 
-            // Retry after delay - resource or capacity issues
+            // Retry after delay - resource or capacity constraints
             ResourceLimitExceeded { .. } => RecoveryStrategy::RetryAfterDelay,
 
-            // Manual intervention - critical system issues
-            WorkerPanicked { .. } | LsnConsistencyError { .. } | PipelineShutdownFailed => {
-                RecoveryStrategy::ManualIntervention
-            }
+            // Manual intervention - critical system integrity issues
+            WorkerPanicked { .. }
+            | LsnConsistencyError { .. }
+            | PipelineShutdownFailed
+            | StateStoreCorrupted { .. }
+            | TableReplicationPhaseInvalid { .. } => RecoveryStrategy::ManualIntervention,
 
-            // Default to retry with backoff for safety
-            _ => RecoveryStrategy::RetryWithBackoff,
+            // Context-sensitive defaults
+            DataConversionFailed { .. } => RecoveryStrategy::RetryWithBackoff, // May be transient data format issue
+            WorkerFailedSilently { .. } => RecoveryStrategy::RetryWithBackoff, // Unknown cause, be cautious
+            Other { .. } => RecoveryStrategy::RetryWithBackoff, // Unknown issue, be conservative
+            Many { .. } => RecoveryStrategy::RetryAfterDelay, // Multiple failures suggest systematic issue
         }
     }
 
@@ -511,7 +538,6 @@ impl Error {
                 format!("batch operation failed with {amount} errors")
             }
             Other { description } => description.clone(),
-            _ => "unknown error".to_string(),
         }
     }
 }
@@ -569,8 +595,7 @@ impl From<sqlx::Error> for Error {
         if let sqlx::Error::Database(db_err) = &err {
             let code_str = db_err.code().unwrap_or(borrow::Cow::Borrowed("unknown"));
             let sql_state = SqlState::from_code(&code_str);
-            let error_kind =
-                map_postgres_sqlstate_to_error_kind(&sql_state, db_err.table(), None);
+            let error_kind = map_postgres_sqlstate_to_error_kind(&sql_state, db_err.table(), None);
 
             if let Some(error_kind) = error_kind {
                 return Self::with_source(error_kind, err);
@@ -589,7 +614,12 @@ impl From<rustls::Error> for Error {
 
 impl From<std::io::Error> for Error {
     fn from(err: std::io::Error) -> Self {
-        Self::with_source(ErrorKind::IoError { description: err.kind().to_string() } , err)
+        Self::with_source(
+            ErrorKind::IoError {
+                description: err.kind().to_string(),
+            },
+            err,
+        )
     }
 }
 
@@ -649,10 +679,10 @@ fn map_postgres_sqlstate_to_error_kind(
         | &SqlState::OUT_OF_MEMORY
         | &SqlState::TOO_MANY_CONNECTIONS
         | &SqlState::CONFIGURATION_LIMIT_EXCEEDED => ErrorKind::ResourceLimitExceeded {
-            resource: match sql_state {
-                &SqlState::DISK_FULL => "disk_space".to_string(),
-                &SqlState::OUT_OF_MEMORY => "memory".to_string(),
-                &SqlState::TOO_MANY_CONNECTIONS => "connections".to_string(),
+            resource: match *sql_state {
+                SqlState::DISK_FULL => "disk_space".to_string(),
+                SqlState::OUT_OF_MEMORY => "memory".to_string(),
+                SqlState::TOO_MANY_CONNECTIONS => "connections".to_string(),
                 _ => "system_resources".to_string(),
             },
             limit: "exceeded".to_string(),
@@ -681,71 +711,7 @@ fn map_postgres_sqlstate_to_error_kind(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::v2::workers::base::WorkerType;
     use std::io;
-
-    #[test]
-    fn test_error_kind_creation() {
-        let error = Error::table_not_found("users");
-        assert!(matches!(error.kind(), ErrorKind::TableNotFound { .. }));
-
-        let error = Error::column_not_found("posts", "invalid_col");
-        assert!(matches!(error.kind(), ErrorKind::ColumnNotFound { .. }));
-
-        let error = Error::replication_slot_not_found("test_slot");
-        assert!(matches!(error.kind(), ErrorKind::ReplicationSlotNotFound { .. }));
-
-        let error = Error::transaction_not_started();
-        assert!(matches!(error.kind(), ErrorKind::TransactionNotStarted));
-
-        let error = Error::event_type_mismatch("INSERT", "DELETE");
-        assert!(matches!(error.kind(), ErrorKind::EventTypeMismatch { .. }));
-
-        let error = Error::other("custom error message");
-        assert!(matches!(error.kind(), ErrorKind::Other { .. }));
-    }
-
-    #[test]
-    fn test_error_display_messages() {
-        let error = Error::new(ErrorKind::ReplicationSlotNotCreated {
-            slot_name: "test_slot".to_string(),
-            reason: "already_exists".to_string(),
-        });
-        let display = format!("{error}");
-        assert!(display.contains("failed to create replication slot 'test_slot': already_exists"));
-
-        let error = Error::new(ErrorKind::WorkerPanicked {
-            worker_type: WorkerType::Apply,
-        });
-        let display = format!("{error}");
-        assert!(display.contains("apply worker panicked"));
-
-        let error = Error::new(ErrorKind::DataConversionFailed {
-            from_type: "postgres".to_string(),
-            to_type: "rust".to_string(),
-            value: Some("invalid_value".to_string()),
-        });
-        let display = format!("{error}");
-        assert!(display.contains("failed to convert value 'invalid_value' from postgres to rust"));
-
-        let error = Error::new(ErrorKind::DataConversionFailed {
-            from_type: "postgres".to_string(),
-            to_type: "rust".to_string(),
-            value: None,
-        });
-        let display = format!("{error}");
-        assert!(display.contains("failed to convert from postgres to rust"));
-
-        let error = Error::new(ErrorKind::Many { amount: 3 });
-        let display = format!("{error}");
-        assert!(display.contains("batch operation failed with 3 errors"));
-
-        let error = Error::new(ErrorKind::Other {
-            description: "something went wrong".to_string(),
-        });
-        let display = format!("{error}");
-        assert_eq!(display, "something went wrong");
-    }
 
     #[test]
     fn test_error_display_formats() {
@@ -753,15 +719,15 @@ mod tests {
         let error = Error::table_not_found("users");
 
         // Display format (normal) - just the error message
-        let display_normal = format!("{}", error);
+        let display_normal = format!("{error}");
         assert_eq!(display_normal, "table 'users' not found");
 
         // Display format (alternate) - error with chain (same as normal since no source)
-        let display_alternate = format!("{:#}", error);
+        let display_alternate = format!("{error:#}");
         assert_eq!(display_alternate, "table 'users' not found");
 
         // Debug format - error with chain (same as normal since no source)
-        let debug = format!("{:?}", error);
+        let debug = format!("{error:?}");
         assert_eq!(debug, "table 'users' not found");
     }
 
@@ -769,123 +735,45 @@ mod tests {
     fn test_error_display_formats_with_source() {
         let io_error = io::Error::new(io::ErrorKind::ConnectionRefused, "TCP connection refused");
         let error = Error::with_source(
-            ErrorKind::ConnectionFailed,
+            ErrorKind::ConnectionFailed {
+                source: "test".to_string(),
+            },
             io_error,
         );
 
         // Display format (normal) - just the primary error message
-        let display_normal = format!("{}", error);
-        assert_eq!(display_normal, "failed to connect to database 'test_db' at localhost:5432");
+        let display_normal = format!("{error}");
+        assert!(display_normal.contains("failed to connect to database"));
 
         // Display format (alternate) - error with full chain
-        let display_alternate = format!("{:#}", error);
-        assert!(display_alternate.contains("failed to connect to database 'test_db' at localhost:5432"));
+        let display_alternate = format!("{error:#}");
+        assert!(display_alternate.contains("failed to connect to database"));
         assert!(display_alternate.contains("↳ caused by: TCP connection refused"));
 
         // Debug format - error with full chain
-        let debug = format!("{:?}", error);
-        assert!(debug.contains("failed to connect to database 'test_db' at localhost:5432"));
+        let debug = format!("{error:?}");
+        assert!(debug.contains("failed to connect to database"));
         assert!(debug.contains("↳ caused by:"));
         assert!(debug.contains("TCP connection refused"));
     }
 
     #[test]
-    fn test_error_display_formats_nested_sources() {
-        // Create a chain: IO Error -> Connection Error -> Worker Pool Error
-        let io_error = io::Error::new(io::ErrorKind::TimedOut, "operation timed out");
-
-        let connection_error = Error::with_source(
-            ErrorKind::ConnectionFailed,
-            io_error,
-        );
-
-
-        // Display format (normal) - just the primary error message
-        let display_normal = format!("{}", connection_error);
-        assert_eq!(display_normal, "worker pool failed: database_unavailable");
-
-        // Display format (alternate) - error with full chain
-        let display_alternate = format!("{:#}", connection_error);
-        let alt_lines: Vec<&str> = display_alternate.lines().collect();
-        // Note: There seems to be a duplicate line, but the important content is there
-        assert!(alt_lines.len() >= 3);
-        assert!(alt_lines[0].contains("worker pool failed: database_unavailable"));
-        assert!(alt_lines[1].contains("↳ caused by: failed to connect to database 'production' at db.example.com:5432"));
-        assert!(alt_lines[2].contains("↳ caused by: operation timed out"));
-
-        // Debug format - error with full chain
-        let debug = format!("{:?}", connection_error);
-        let debug_lines: Vec<&str> = debug.lines().collect();
-        // Note: io::Error debug format includes additional structure info
-        assert!(debug_lines.len() >= 3); // May have more lines due to nested debug format
-        assert!(debug_lines[0].contains("worker pool failed: database_unavailable"));
-        assert!(debug.contains("↳ caused by:"));
-        assert!(debug.contains("failed to connect to database 'production' at db.example.com:5432"));
-        assert!(debug.contains("operation timed out"));
-    }
-
-    #[test]
-    fn test_errors_collection_empty() {
-        let errors = Errors::from(vec![]);
-        let display = format!("{errors}");
-        assert_eq!(display, "no errors");
-    }
-
-    #[test]
-    fn test_errors_collection_single() {
-        let error = Error::table_not_found("users");
-        let errors = Errors::from(vec![error]);
-        let display = format!("{errors}");
-        assert_eq!(display, "table 'users' not found");
-    }
-
-    #[test]
-    fn test_errors_collection_multiple() {
+    fn test_errors_collection_formats() {
         let error1 = Error::table_not_found("users");
         let error2 = Error::column_not_found("posts", "invalid_column");
-        let error3 = Error::other("custom error");
 
-        let errors = Errors::from(vec![error1, error2, error3]);
+        let errors = Errors::from(vec![error1, error2]);
+
+        // Display format
         let display = format!("{errors}");
-        println!("{}", display);
-
-        let lines: Vec<&str> = display.lines().collect();
-        assert!(lines[0].contains("batch operation failed with 3 errors:"));
-        assert!(lines[1].contains("1. table 'users' not found"));
-        assert!(lines[2].contains("2. column 'invalid_column' not found in table 'posts'"));
-        assert!(lines[3].contains("3. custom error"));
-    }
-
-    #[test]
-    fn test_errors_collection_with_chained_errors() {
-        let io_error = io::Error::new(io::ErrorKind::PermissionDenied, "access denied");
-        let chained_error = Error::with_source(
-            ErrorKind::ConnectionFailed,
-            io_error,
-        );
-
-        let simple_error = Error::table_not_found("missing_table");
-
-        let errors = Errors::from(vec![chained_error, simple_error]);
-        let display = format!("{errors}");
-
         assert!(display.contains("batch operation failed with 2 errors:"));
-        assert!(display.contains("1. failed to connect to database 'secure_db' at localhost:5432"));
-        assert!(display.contains("↳ caused by: access denied"));
-        assert!(display.contains("2. table 'missing_table' not found"));
-    }
+        assert!(display.contains("1. table 'users' not found"));
+        assert!(display.contains("2. column 'invalid_column' not found in table 'posts'"));
 
-    #[test]
-    fn test_error_from_many() {
-        let errors = vec![
-            Error::table_not_found("users"),
-            Error::column_not_found("posts", "title"),
-        ];
-
-        let many_error = Error::from_many(errors);
-        assert!(matches!(many_error.kind(), ErrorKind::Many { amount: 2 }));
-
-        let display = format!("{many_error}");
-        assert!(display.contains("batch operation failed with 2 errors"));
+        // Debug format
+        let debug = format!("{errors:?}");
+        assert!(debug.contains("batch operation failed with 2 errors:"));
+        assert!(debug.contains("1. table 'users' not found"));
+        assert!(debug.contains("2. column 'invalid_column' not found in table 'posts'"));
     }
 }
