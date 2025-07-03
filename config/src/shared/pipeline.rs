@@ -40,7 +40,7 @@ impl PipelineConfig {
     pub fn validate(&self) -> Result<(), ValidationError> {
         self.pg_connection.tls.validate()?;
 
-        if self.max_table_sync_workers == 1 {
+        if self.max_table_sync_workers == 0 {
             return Err(ValidationError::MaxTableSyncWorkersZero);
         }
 
