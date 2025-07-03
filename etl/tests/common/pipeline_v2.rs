@@ -28,6 +28,7 @@ where
             backoff_factor: 2.0,
         },
         publication_name,
+        max_table_sync_workers: 1,
     };
 
     Pipeline::new(pipeline_id, config, state_store, destination)

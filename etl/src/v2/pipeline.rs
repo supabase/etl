@@ -116,7 +116,8 @@ where
         // We prepare the schema cache with table schemas loaded, in case there is the need.
         let schema_cache = self.prepare_schema_cache().await?;
 
-        let table_sync_worker_permits = Arc::new(Semaphore::new(1));
+        let table_sync_worker_permits =
+            Arc::new(Semaphore::new(self.config.max_table_sync_workers as usize));
 
         // We create and start the apply worker.
         let apply_worker = ApplyWorker::new(

@@ -29,6 +29,7 @@ pub fn new_pipeline_config() -> PipelineConfig {
             max_delay_ms: 2000,
             backoff_factor: 0.5,
         }),
+        max_table_sync_workers: Some(2),
     }
 }
 
@@ -45,6 +46,7 @@ pub fn updated_pipeline_config() -> PipelineConfig {
             max_delay_ms: 4000,
             backoff_factor: 1.0,
         }),
+        max_table_sync_workers: Some(4),
     }
 }
 

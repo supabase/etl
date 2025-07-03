@@ -647,6 +647,7 @@ async fn build_replicator_config(
         // is the same.
         id: pipeline.id as u64,
         publication_name: pipeline.config.publication_name,
+        pg_connection,
         // If these configs are not set, we default to the most recent default values.
         //
         // The reason for using `Option` fields in the config instead of automatically applying defaults
@@ -654,7 +655,8 @@ async fn build_replicator_config(
         // them differently after deserialization without needing to run database migrations.
         batch: pipeline.config.batch.unwrap_or_default(),
         apply_worker_init_retry: pipeline.config.apply_worker_init_retry.unwrap_or_default(),
-        pg_connection,
+        // Hardcoding a value of 4 for now for maximum number of parallel table sync workers
+        max_table_sync_workers: pipeline.config.max_table_sync_workers.unwrap_or(4),
     };
 
     let config = ReplicatorConfig {

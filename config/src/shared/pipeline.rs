@@ -26,4 +26,7 @@ pub struct PipelineConfig {
     /// Retry configuration for initializing apply workers.
     #[serde(default)]
     pub apply_worker_init_retry: RetryConfig,
+
+    /// Maximum number of table sync workers that can run at a time
+    pub max_table_sync_workers: u16,
 }

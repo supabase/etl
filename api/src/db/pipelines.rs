@@ -15,6 +15,8 @@ pub struct PipelineConfig {
     pub batch: Option<BatchConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub apply_worker_init_retry: Option<RetryConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_table_sync_workers: Option<u16>,
 }
 
 pub struct Pipeline {
