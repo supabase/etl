@@ -254,6 +254,8 @@ where
     );
     pin!(logical_replication_stream);
 
+    let mut called_processed_syncing_tables_once = false;
+
     loop {
         tokio::select! {
             biased;
@@ -339,11 +341,24 @@ where
                 //
                 // This is done here as well in addition to at a commit boundary because we do not want
                 // the table sync workers to get stuck if there are no changes in the cdc stream.
-                if !state.handling_transaction() {
+                //
+                // We only call process_syncing_tables here if:
+                // a) We are not in the middle of handling a transaction and
+                // b) We are in the apply worker or we are in the table sync worker and we haven't
+                // already called it in the past. This is because for table sync worker we only
+                // need to check if it can be marked as sync done. If the first time this is called
+                // the loop doesn't end because the table sync worker hasn't caught up, the calling
+                // it again won't cause it end either because no new events have arrived (if the
+                // events had arrive we would have called `process_syncing_tables` at receiving
+                // the commit event)
+                // TODO: also avoid calling `process_syncing_tables` for the apply worker and instead
+                // rely on the table sync worker notifying the apply worker.
+                if !state.handling_transaction() && (matches!(hook.worker_type(), WorkerType::Apply) || !called_processed_syncing_tables_once) {
                     let continue_loop = hook.process_syncing_tables(state.next_status_update.flush_lsn).await?;
                     if !continue_loop {
                         break Ok(ApplyLoopResult::ApplyStopped);
                     }
+                    called_processed_syncing_tables_once = true;
                 }
             }
         }
