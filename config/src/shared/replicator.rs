@@ -26,12 +26,12 @@ pub struct ReplicatorConfig {
 impl ReplicatorConfig {
     /// Validates the loaded [`ReplicatorConfig`].
     ///
-    /// Checks the validity of the TLS configuration.
+    /// Checks the validity of the configuration.
     ///
     /// # Errors
     ///
     /// Returns [`ValidationError`] if validation fails.
     pub fn validate(&self) -> Result<(), ValidationError> {
-        self.pipeline.pg_connection.tls.validate()
+        self.pipeline.validate()
     }
 }
