@@ -1,7 +1,3 @@
-use crate::db;
-use crate::db::destinations::DestinationsDbError;
-use crate::encryption::EncryptionKey;
-use crate::routes::{extract_tenant_id, ErrorMessage, TenantIdError};
 use actix_web::{
     delete, get,
     http::{header::ContentType, StatusCode},
@@ -14,6 +10,11 @@ use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use thiserror::Error;
 use utoipa::ToSchema;
+
+use crate::db;
+use crate::db::destinations::DestinationsDbError;
+use crate::encryption::EncryptionKey;
+use crate::routes::{extract_tenant_id, ErrorMessage, TenantIdError};
 
 #[derive(Debug, Error)]
 pub enum DestinationError {
