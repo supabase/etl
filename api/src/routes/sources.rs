@@ -1,3 +1,7 @@
+use crate::db;
+use crate::db::sources::{SourceConfig, SourcesDbError};
+use crate::encryption::EncryptionKey;
+use crate::routes::{extract_tenant_id, ErrorMessage, TenantIdError};
 use actix_web::{
     delete, get,
     http::{header::ContentType, StatusCode},
@@ -9,11 +13,6 @@ use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use thiserror::Error;
 use utoipa::ToSchema;
-
-use crate::db;
-use crate::db::sources::{SourceConfig, SourcesDbError};
-use crate::encryption::EncryptionKey;
-use crate::routes::{extract_tenant_id, ErrorMessage, TenantIdError};
 
 pub mod publications;
 pub mod tables;
@@ -64,6 +63,26 @@ impl ResponseError for SourceError {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct StrippedSourceConfig {
+    pub host: String,
+    pub port: u16,
+    pub name: String,
+    pub username: String,
+}
+
+impl From<SourceConfig> for StrippedSourceConfig {
+    fn from(source: SourceConfig) -> Self {
+        Self {
+            host: source.host,
+            port: source.port,
+            name: source.name,
+            username: source.username,
+        }
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct CreateSourceRequest {
     #[schema(example = "My Postgres Source", required = true)]
@@ -94,7 +113,7 @@ pub struct ReadSourceResponse {
     pub tenant_id: String,
     #[schema(example = "My Postgres Source")]
     pub name: String,
-    pub config: SourceConfig,
+    pub config: StrippedSourceConfig,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
@@ -160,7 +179,7 @@ pub async fn read_source(
             id: s.id,
             tenant_id: s.tenant_id,
             name: s.name,
-            config: s.config,
+            config: s.config.into(),
         })
         .ok_or(SourceError::SourceNotFound(source_id))?;
 
@@ -253,7 +272,7 @@ pub async fn read_all_sources(
             id: source.id,
             tenant_id: source.tenant_id,
             name: source.name,
-            config: source.config,
+            config: source.config.into(),
         };
         sources.push(source);
     }

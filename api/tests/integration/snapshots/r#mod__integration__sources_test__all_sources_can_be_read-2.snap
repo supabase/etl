@@ -2,12 +2,9 @@
 source: api/tests/integration/sources_test.rs
 expression: source.config
 ---
-SourceConfig {
+StrippedSourceConfig {
     host: "example.com",
     port: 2345,
     name: "sergtsop",
     username: "sergtsop",
-    password: Some(
-        Secret([REDACTED alloc::string::String]),
-    ),
 }

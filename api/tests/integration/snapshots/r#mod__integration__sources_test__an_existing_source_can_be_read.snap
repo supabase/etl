@@ -2,12 +2,9 @@
 source: api/tests/integration/sources_test.rs
 expression: response.config
 ---
-SourceConfig {
+StrippedSourceConfig {
     host: "localhost",
     port: 5432,
     name: "postgres",
     username: "postgres",
-    password: Some(
-        Secret([REDACTED alloc::string::String]),
-    ),
 }

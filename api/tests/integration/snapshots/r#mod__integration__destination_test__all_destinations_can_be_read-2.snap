@@ -5,7 +5,6 @@ expression: destination.config
 BigQuery {
     project_id: "project-id-updated",
     dataset_id: "dataset-id-updated",
-    service_account_key: Secret([REDACTED alloc::string::String]),
     max_staleness_mins: Some(
         10,
     ),
