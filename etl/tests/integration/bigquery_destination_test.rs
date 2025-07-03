@@ -55,13 +55,13 @@ async fn test_table_copy_and_streaming_with_restart() {
     let users_state_notify = state_store
         .notify_on_replication_phase(
             database_schema.users_schema().id,
-            TableReplicationPhaseType::FinishedCopy,
+            TableReplicationPhaseType::SyncDone,
         )
         .await;
     let orders_state_notify = state_store
         .notify_on_replication_phase(
             database_schema.orders_schema().id,
-            TableReplicationPhaseType::FinishedCopy,
+            TableReplicationPhaseType::SyncDone,
         )
         .await;
 
@@ -200,7 +200,7 @@ async fn test_table_insert_update_delete() {
     let users_state_notify = state_store
         .notify_on_replication_phase(
             database_schema.users_schema().id,
-            TableReplicationPhaseType::FinishedCopy,
+            TableReplicationPhaseType::SyncDone,
         )
         .await;
 
@@ -325,13 +325,13 @@ async fn test_table_truncate_with_batching() {
     let users_state_notify = state_store
         .notify_on_replication_phase(
             database_schema.users_schema().id,
-            TableReplicationPhaseType::FinishedCopy,
+            TableReplicationPhaseType::SyncDone,
         )
         .await;
     let orders_state_notify = state_store
         .notify_on_replication_phase(
             database_schema.orders_schema().id,
-            TableReplicationPhaseType::FinishedCopy,
+            TableReplicationPhaseType::SyncDone,
         )
         .await;
 
