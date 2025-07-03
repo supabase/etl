@@ -67,7 +67,7 @@ pub async fn start_replicator() -> anyhow::Result<()> {
 async fn init_state_store(
     pipeline_id: PipelineId,
     pg_connection_config: PgConnectionConfig,
-) -> anyhow::Result<impl StateStore + Clone + use<>> {
+) -> anyhow::Result<impl StateStore + Clone> {
     migrate_state_store(&pg_connection_config).await?;
     Ok(PostgresStateStore::new(pipeline_id, pg_connection_config))
 }
