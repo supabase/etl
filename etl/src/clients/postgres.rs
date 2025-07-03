@@ -4,12 +4,12 @@ use config::shared::{IntoConnectOptions, PgConnectionConfig};
 use pg_escape::{quote_identifier, quote_literal};
 use postgres::schema::{ColumnSchema, TableId, TableName, TableSchema};
 use postgres_replication::LogicalReplicationStream;
-use rustls::{pki_types::CertificateDer, ClientConfig};
+use rustls::{ClientConfig, pki_types::CertificateDer};
 use thiserror::Error;
 use tokio_postgres::{
+    Client as PostgresClient, Config, CopyOutStream, NoTls, SimpleQueryMessage,
     config::ReplicationMode,
     types::{Kind, PgLsn, Type},
-    Client as PostgresClient, Config, CopyOutStream, NoTls, SimpleQueryMessage,
 };
 use tokio_postgres_rustls::MakeRustlsConnect;
 use tracing::{info, warn};

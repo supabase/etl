@@ -1,5 +1,5 @@
-use serde::de::DeserializeOwned;
 use serde::Serialize;
+use serde::de::DeserializeOwned;
 use thiserror::Error;
 
 use crate::encryption::{Decrypt, DecryptionError, Encrypt, EncryptionError, EncryptionKey};

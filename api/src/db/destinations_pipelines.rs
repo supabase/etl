@@ -3,13 +3,13 @@ use sqlx::PgPool;
 use thiserror::Error;
 
 use crate::db::destinations::{
-    create_destination_txn, update_destination_txn, DestinationsDbError,
+    DestinationsDbError, create_destination_txn, update_destination_txn,
 };
 use crate::db::pipelines::{
-    create_pipeline_txn, update_pipeline_txn, PipelineConfig, PipelinesDbError,
+    PipelineConfig, PipelinesDbError, create_pipeline_txn, update_pipeline_txn,
 };
 use crate::db::serde::{
-    encrypt_and_serialize, serialize, DbDeserializationError, DbSerializationError,
+    DbDeserializationError, DbSerializationError, encrypt_and_serialize, serialize,
 };
 use crate::encryption::EncryptionKey;
 

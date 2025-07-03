@@ -4,6 +4,7 @@ use futures::StreamExt;
 use gcp_bigquery_client::storage::{ColumnMode, StorageApi};
 use gcp_bigquery_client::yup_oauth2::parse_service_account_key;
 use gcp_bigquery_client::{
+    Client,
     error::BQError,
     google::cloud::bigquery::storage::v1::{WriteStream, WriteStreamView},
     model::{
@@ -11,14 +12,13 @@ use gcp_bigquery_client::{
         table_data_insert_all_request::TableDataInsertAllRequest,
     },
     storage::{ColumnType, FieldDescriptor, StreamName, TableDescriptor},
-    Client,
 };
 use postgres::schema::{ColumnSchema, TableId, TableSchema};
 use tokio_postgres::types::{PgLsn, Type};
 use tracing::info;
 
-use crate::conversions::table_row::TableRow;
 use crate::conversions::Cell;
+use crate::conversions::table_row::TableRow;
 
 pub struct BigQueryClient {
     project_id: String,
@@ -189,8 +189,9 @@ impl BigQueryClient {
         let max_staleness_option = Self::max_staleness_option(max_staleness_mins);
         let project_id = &self.project_id;
         info!("creating table {project_id}.{dataset_id}.{table_name} in bigquery");
-        let query =
-            format!("create table `{project_id}.{dataset_id}.{table_name}` {columns_spec} {max_staleness_option}",);
+        let query = format!(
+            "create table `{project_id}.{dataset_id}.{table_name}` {columns_spec} {max_staleness_option}",
+        );
         let _ = self.query(query).await?;
         Ok(())
     }

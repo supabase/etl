@@ -5,7 +5,7 @@ use api::routes::tenants::{
 use reqwest::StatusCode;
 use telemetry::init_test_tracing;
 
-use crate::common::test_app::{spawn_test_app, TestApp};
+use crate::common::test_app::{TestApp, spawn_test_app};
 
 pub async fn create_tenant(app: &TestApp) -> String {
     create_tenant_with_id_and_name(

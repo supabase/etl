@@ -10,10 +10,10 @@ use tracing::{debug, info};
 use crate::{
     conversions::cdc_event::{CdcEvent, CdcEventConversionError},
     pipeline::{
+        PipelineAction, PipelineError,
         batching::stream::BatchTimeoutStream,
         destinations::BatchDestination,
-        sources::{postgres::CdcStreamError, CommonSourceError, Source},
-        PipelineAction, PipelineError,
+        sources::{CommonSourceError, Source, postgres::CdcStreamError},
     },
 };
 

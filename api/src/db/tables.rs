@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use sqlx::{postgres::PgConnectOptions, Connection, Executor, PgConnection, Row};
+use sqlx::{Connection, Executor, PgConnection, Row, postgres::PgConnectOptions};
 use thiserror::Error;
 
 #[derive(Debug, Error)]

@@ -3,7 +3,7 @@ use crate::v2::concurrency::stream::BatchStream;
 use crate::v2::destination::base::{Destination, DestinationError};
 use crate::v2::pipeline::PipelineId;
 use crate::v2::replication::client::{PgReplicationClient, PgReplicationError};
-use crate::v2::replication::slot::{get_slot_name, SlotError};
+use crate::v2::replication::slot::{SlotError, get_slot_name};
 use crate::v2::replication::stream::{TableCopyStream, TableCopyStreamError};
 use crate::v2::schema::cache::SchemaCache;
 use crate::v2::state::store::base::{StateStore, StateStoreError};

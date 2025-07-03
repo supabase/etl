@@ -12,8 +12,8 @@ use thiserror::Error;
 use tokio_postgres::error::SqlState;
 use tokio_postgres::tls::MakeTlsConnect;
 use tokio_postgres::{
-    config::ReplicationMode, types::PgLsn, Client, Config, Connection, CopyOutStream, NoTls,
-    SimpleQueryMessage, SimpleQueryRow, Socket,
+    Client, Config, Connection, CopyOutStream, NoTls, SimpleQueryMessage, SimpleQueryRow, Socket,
+    config::ReplicationMode, types::PgLsn,
 };
 use tokio_postgres_rustls::MakeRustlsConnect;
 use tracing::{error, info, warn};
@@ -75,10 +75,14 @@ pub enum PgReplicationError {
     PublicationNotFound(String),
 
     /// Errors related to data type handling
-    #[error("Unsupported column type '{0}' (OID: {1}) in table '{2}': type is not supported for replication")]
+    #[error(
+        "Unsupported column type '{0}' (OID: {1}) in table '{2}': type is not supported for replication"
+    )]
     UnsupportedColumnType(String, u32, String),
 
-    #[error("Unsupported replica identity '{0}' in table: only 'default' or 'full' replica identities are supported")]
+    #[error(
+        "Unsupported replica identity '{0}' in table: only 'default' or 'full' replica identities are supported"
+    )]
     UnsupportedReplicaIdentity(String),
 
     #[error("Io error: {0}")]

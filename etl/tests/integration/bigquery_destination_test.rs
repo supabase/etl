@@ -13,9 +13,9 @@ use crate::common::pipeline_v2::{create_pipeline, create_pipeline_with};
 use crate::common::state_store::TestStateStore;
 use crate::common::test_destination_wrapper::TestDestinationWrapper;
 use crate::common::test_schema::bigquery::{
-    parse_bigquery_table_rows, BigQueryOrder, BigQueryUser,
+    BigQueryOrder, BigQueryUser, parse_bigquery_table_rows,
 };
-use crate::common::test_schema::{insert_mock_data, setup_test_database_schema, TableSelection};
+use crate::common::test_schema::{TableSelection, insert_mock_data, setup_test_database_schema};
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_table_copy_and_streaming_with_restart() {

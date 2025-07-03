@@ -1,8 +1,8 @@
 use async_trait::async_trait;
 use etl::conversions::cdc_event::CdcEvent;
 use etl::conversions::table_row::TableRow;
-use etl::pipeline::destinations::{BatchDestination, InfallibleDestinationError};
 use etl::pipeline::PipelineResumptionState;
+use etl::pipeline::destinations::{BatchDestination, InfallibleDestinationError};
 use postgres::schema::{TableId, TableSchema};
 use std::cmp::max;
 use std::collections::{HashMap, HashSet};

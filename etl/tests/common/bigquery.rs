@@ -1,10 +1,10 @@
 use etl::v2::destination::bigquery::BigQueryDestination;
+use gcp_bigquery_client::Client;
 use gcp_bigquery_client::client_builder::ClientBuilder;
 use gcp_bigquery_client::model::dataset::Dataset;
 use gcp_bigquery_client::model::query_request::QueryRequest;
 use gcp_bigquery_client::model::table_row::TableRow;
 use gcp_bigquery_client::yup_oauth2::parse_service_account_key;
-use gcp_bigquery_client::Client;
 use postgres::schema::TableName;
 use serde::Serialize;
 use std::ops::Deref;

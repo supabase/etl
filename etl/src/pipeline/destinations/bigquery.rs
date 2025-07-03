@@ -11,7 +11,7 @@ use super::{BatchDestination, DestinationError};
 use crate::clients::bigquery::table_schema_to_descriptor;
 use crate::{
     clients::bigquery::BigQueryClient,
-    conversions::{cdc_event::CdcEvent, table_row::TableRow, Cell},
+    conversions::{Cell, cdc_event::CdcEvent, table_row::TableRow},
     pipeline::PipelineResumptionState,
 };
 

@@ -1,9 +1,9 @@
 use crate::v2::concurrency::shutdown::ShutdownRx;
 use crate::v2::destination::base::Destination;
 use crate::v2::pipeline::PipelineId;
-use crate::v2::replication::apply::{start_apply_loop, ApplyLoopError, ApplyLoopHook};
+use crate::v2::replication::apply::{ApplyLoopError, ApplyLoopHook, start_apply_loop};
 use crate::v2::replication::client::{PgReplicationClient, PgReplicationError};
-use crate::v2::replication::slot::{get_slot_name, SlotError};
+use crate::v2::replication::slot::{SlotError, get_slot_name};
 use crate::v2::schema::cache::SchemaCache;
 use crate::v2::state::store::base::{StateStore, StateStoreError};
 use crate::v2::state::table::{TableReplicationPhase, TableReplicationPhaseType};

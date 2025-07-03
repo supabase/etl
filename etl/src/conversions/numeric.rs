@@ -1,7 +1,7 @@
 // adapted from the bigdecimal crate
 use bigdecimal::{
-    num_bigint::{BigInt, BigUint, Sign},
     BigDecimal, ParseBigDecimalError,
+    num_bigint::{BigInt, BigUint, Sign},
 };
 use byteorder::{BigEndian, ReadBytesExt};
 use std::{fmt::Display, io::Cursor, str::FromStr};
@@ -61,7 +61,7 @@ impl<'a> FromSql<'a> for PgNumeric {
                     std::io::ErrorKind::InvalidData,
                     format!("invalid sign {v:#04x}"),
                 )
-                .into())
+                .into());
             }
         };
         let scale = rdr.read_u16::<BigEndian>()?;
