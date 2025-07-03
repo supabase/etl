@@ -1,267 +1,25 @@
-use etl::conversions::table_row::TableRow;
-use etl::conversions::Cell;
-use etl::v2::conversions::event::{Event, EventType, InsertEvent};
+use etl::v2::conversions::event::EventType;
+use etl::v2::destination::memory::MemoryDestination;
 use etl::v2::pipeline::{PipelineError, PipelineId};
 use etl::v2::state::table::TableReplicationPhaseType;
 use etl::v2::workers::base::WorkerWaitError;
-use postgres::schema::{ColumnSchema, TableId, TableName, TableSchema};
-use postgres::tokio::test_utils::{id_column_schema, PgDatabase, TableModification};
+use postgres::schema::ColumnSchema;
+use postgres::tokio::test_utils::TableModification;
 use rand::random;
-use std::ops::RangeInclusive;
 use telemetry::init_test_tracing;
 use tokio_postgres::types::Type;
-use tokio_postgres::{Client, GenericClient};
 
-use crate::common::database::{spawn_database, test_table_name};
-use crate::common::destination_v2::TestDestination;
+use crate::common::database::spawn_database;
 use crate::common::event::{group_events_by_type, group_events_by_type_and_table_id};
 use crate::common::pipeline_v2::create_pipeline;
 use crate::common::state_store::{
     FaultConfig, FaultInjectingStateStore, FaultType, TestStateStore,
 };
-
-#[derive(Debug, Clone, Copy)]
-enum TableSelection {
-    Both,
-    #[allow(dead_code)]
-    UsersOnly,
-    OrdersOnly,
-}
-
-#[derive(Debug)]
-struct TestDatabaseSchema {
-    users_table_schema: Option<TableSchema>,
-    orders_table_schema: Option<TableSchema>,
-    publication_name: String,
-}
-
-impl TestDatabaseSchema {
-    /// Returns a clone of the users table schema, panicking if it doesn't exist.
-    fn users_schema(&self) -> TableSchema {
-        self.users_table_schema
-            .clone()
-            .expect("Users table schema not found")
-    }
-
-    /// Returns a clone of the orders table schema, panicking if it doesn't exist.
-    fn orders_schema(&self) -> TableSchema {
-        self.orders_table_schema
-            .clone()
-            .expect("Orders table schema not found")
-    }
-}
-
-async fn setup_test_database_schema<G: GenericClient>(
-    database: &PgDatabase<G>,
-    selection: TableSelection,
-) -> TestDatabaseSchema {
-    let mut tables_to_publish = Vec::new();
-    let mut users_table_schema = None;
-    let mut orders_table_schema = None;
-
-    if matches!(selection, TableSelection::Both | TableSelection::UsersOnly) {
-        let users_table_name = test_table_name("users");
-        let users_table_id = database
-            .create_table(
-                users_table_name.clone(),
-                &[("name", "text not null"), ("age", "integer not null")],
-            )
-            .await
-            .expect("Failed to create users table");
-
-        tables_to_publish.push(users_table_name.clone());
-
-        users_table_schema = Some(TableSchema::new(
-            users_table_id,
-            users_table_name,
-            vec![
-                id_column_schema(),
-                ColumnSchema {
-                    name: "name".to_string(),
-                    typ: Type::TEXT,
-                    modifier: -1,
-                    nullable: false,
-                    primary: false,
-                },
-                ColumnSchema {
-                    name: "age".to_string(),
-                    typ: Type::INT4,
-                    modifier: -1,
-                    nullable: false,
-                    primary: false,
-                },
-            ],
-        ));
-    }
-
-    if matches!(selection, TableSelection::Both | TableSelection::OrdersOnly) {
-        let orders_table_name = test_table_name("orders");
-        let orders_table_id = database
-            .create_table(
-                orders_table_name.clone(),
-                &[("description", "text not null")],
-            )
-            .await
-            .expect("Failed to create orders table");
-
-        tables_to_publish.push(orders_table_name.clone());
-
-        orders_table_schema = Some(TableSchema::new(
-            orders_table_id,
-            orders_table_name,
-            vec![
-                id_column_schema(),
-                ColumnSchema {
-                    name: "description".to_string(),
-                    typ: Type::TEXT,
-                    modifier: -1,
-                    nullable: false,
-                    primary: false,
-                },
-            ],
-        ));
-    }
-
-    // Create publication for selected tables
-    let publication_name = "test_pub";
-    database
-        .create_publication(publication_name, &tables_to_publish)
-        .await
-        .expect("Failed to create publication");
-
-    TestDatabaseSchema {
-        users_table_schema,
-        orders_table_schema,
-        publication_name: publication_name.to_owned(),
-    }
-}
-
-async fn insert_mock_data(
-    database: &mut PgDatabase<Client>,
-    users_table_name: &TableName,
-    orders_table_name: &TableName,
-    range: RangeInclusive<usize>,
-    use_transaction: bool,
-) {
-    if use_transaction {
-        let mut transaction = database.begin_transaction().await;
-
-        // Insert users with deterministic data.
-        for i in range.clone() {
-            transaction
-                .insert_values(
-                    users_table_name.clone(),
-                    &["name", "age"],
-                    &[&format!("user_{i}"), &(i as i32)],
-                )
-                .await
-                .expect("Failed to insert users");
-        }
-
-        // Insert orders with deterministic data.
-        for i in range {
-            transaction
-                .insert_values(
-                    orders_table_name.clone(),
-                    &["description"],
-                    &[&format!("description_{i}")],
-                )
-                .await
-                .expect("Failed to insert orders");
-        }
-
-        // Commit the transaction.
-        transaction.commit_transaction().await;
-    } else {
-        // Insert users with deterministic data.
-        for i in range.clone() {
-            database
-                .insert_values(
-                    users_table_name.clone(),
-                    &["name", "age"],
-                    &[&format!("user_{i}"), &(i as i32)],
-                )
-                .await
-                .expect("Failed to insert users");
-        }
-
-        // Insert orders with deterministic data.
-        for i in range {
-            database
-                .insert_values(
-                    orders_table_name.clone(),
-                    &["description"],
-                    &[&format!("description_{i}")],
-                )
-                .await
-                .expect("Failed to insert orders");
-        }
-    }
-}
-
-async fn get_users_age_sum_from_rows(destination: &TestDestination, table_id: TableId) -> i32 {
-    let mut actual_sum = 0;
-
-    let tables_rows = destination.get_table_rows().await;
-    let table_rows = tables_rows.get(&table_id).unwrap();
-    for table_row in table_rows {
-        if let Cell::I32(age) = &table_row.values[2] {
-            actual_sum += age;
-        }
-    }
-
-    actual_sum
-}
-
-fn get_n_integers_sum(n: usize) -> i32 {
-    ((n * (n + 1)) / 2) as i32
-}
-
-fn build_expected_users_inserts(
-    mut starting_id: i64,
-    users_table_id: TableId,
-    expected_rows: Vec<(&str, i32)>,
-) -> Vec<Event> {
-    let mut events = Vec::new();
-
-    for (name, age) in expected_rows {
-        events.push(Event::Insert(InsertEvent {
-            table_id: users_table_id,
-            row: TableRow {
-                values: vec![
-                    Cell::I64(starting_id),
-                    Cell::String(name.to_owned()),
-                    Cell::I32(age),
-                ],
-            },
-        }));
-
-        starting_id += 1;
-    }
-
-    events
-}
-
-fn build_expected_orders_inserts(
-    mut starting_id: i64,
-    orders_table_id: TableId,
-    expected_rows: Vec<&str>,
-) -> Vec<Event> {
-    let mut events = Vec::new();
-
-    for name in expected_rows {
-        events.push(Event::Insert(InsertEvent {
-            table_id: orders_table_id,
-            row: TableRow {
-                values: vec![Cell::I64(starting_id), Cell::String(name.to_owned())],
-            },
-        }));
-
-        starting_id += 1;
-    }
-
-    events
-}
+use crate::common::test_destination_wrapper::TestDestinationWrapper;
+use crate::common::test_schema::{
+    build_expected_orders_inserts, build_expected_users_inserts, get_n_integers_sum,
+    get_users_age_sum_from_rows, insert_mock_data, setup_test_database_schema, TableSelection,
+};
 
 // TODO: find a way to inject errors in a way that is predictable.
 #[ignore]
@@ -276,14 +34,14 @@ async fn test_pipeline_with_table_sync_worker_panic() {
         ..Default::default()
     };
     let state_store = FaultInjectingStateStore::wrap(TestStateStore::new(), fault_config);
-    let destination = TestDestination::new();
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
 
-    let pipeline_id: PipelineId = random();
     // We start the pipeline from scratch.
+    let pipeline_id: PipelineId = random();
     let mut pipeline = create_pipeline(
         &database.config,
         pipeline_id,
-        database_schema.publication_name.clone(),
+        database_schema.publication_name(),
         state_store.clone(),
         destination.clone(),
     );
@@ -336,14 +94,14 @@ async fn test_pipeline_with_table_sync_worker_error() {
         ..Default::default()
     };
     let state_store = FaultInjectingStateStore::wrap(TestStateStore::new(), fault_config);
-    let destination = TestDestination::new();
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
 
     // We start the pipeline from scratch.
     let pipeline_id: PipelineId = random();
     let mut pipeline = create_pipeline(
         &database.config,
         pipeline_id,
-        database_schema.publication_name.clone(),
+        database_schema.publication_name(),
         state_store.clone(),
         destination.clone(),
     );
@@ -393,18 +151,20 @@ async fn test_table_schema_copy_with_data_sync_retry() {
     let database_schema = setup_test_database_schema(&database, TableSelection::Both).await;
 
     let state_store = TestStateStore::new();
-    let destination = TestDestination::new();
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
 
     // Configure state store to fail during data sync.
     let fault_config = FaultConfig {
         ..Default::default()
     };
     let failing_state_store = FaultInjectingStateStore::wrap(state_store.clone(), fault_config);
+
+    // We start the pipeline from scratch.
     let pipeline_id: PipelineId = random();
     let mut pipeline = create_pipeline(
         &database.config,
         pipeline_id,
-        database_schema.publication_name.clone(),
+        database_schema.publication_name(),
         failing_state_store.clone(),
         destination.clone(),
     );
@@ -440,7 +200,7 @@ async fn test_table_schema_copy_with_data_sync_retry() {
     let mut pipeline = create_pipeline(
         &database.config,
         pipeline_id,
-        database_schema.publication_name.clone(),
+        database_schema.publication_name(),
         state_store.clone(),
         destination.clone(),
     );
@@ -502,14 +262,14 @@ async fn test_table_schema_copy_with_finished_copy_retry() {
     let database_schema = setup_test_database_schema(&database, TableSelection::Both).await;
 
     let state_store = TestStateStore::new();
-    let destination = TestDestination::new();
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
 
     // We start the pipeline from scratch.
     let pipeline_id: PipelineId = random();
     let mut pipeline = create_pipeline(
         &database.config,
         pipeline_id,
-        database_schema.publication_name.clone(),
+        database_schema.publication_name(),
         state_store.clone(),
         destination.clone(),
     );
@@ -589,7 +349,7 @@ async fn test_table_schema_copy_with_finished_copy_retry() {
     let mut pipeline = create_pipeline(
         &database.config,
         pipeline_id,
-        database_schema.publication_name.clone(),
+        database_schema.publication_name(),
         state_store.clone(),
         destination.clone(),
     );
@@ -612,14 +372,14 @@ async fn test_table_schema_copy_survives_restarts() {
     let database_schema = setup_test_database_schema(&database, TableSelection::Both).await;
 
     let state_store = TestStateStore::new();
-    let destination = TestDestination::new();
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
 
     // We start the pipeline from scratch.
     let pipeline_id: PipelineId = random();
     let mut pipeline = create_pipeline(
         &database.config,
         pipeline_id,
-        database_schema.publication_name.clone(),
+        database_schema.publication_name(),
         state_store.clone(),
         destination.clone(),
     );
@@ -677,7 +437,7 @@ async fn test_table_schema_copy_survives_restarts() {
     let mut pipeline = create_pipeline(
         &database.config,
         pipeline_id,
-        database_schema.publication_name.clone(),
+        database_schema.publication_name(),
         state_store.clone(),
         destination.clone(),
     );
@@ -737,14 +497,14 @@ async fn test_table_copy() {
     .await;
 
     let state_store = TestStateStore::new();
-    let destination = TestDestination::new();
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
 
     // Start pipeline from scratch.
     let pipeline_id: PipelineId = random();
     let mut pipeline = create_pipeline(
         &database.config,
         pipeline_id,
-        database_schema.publication_name.clone(),
+        database_schema.publication_name(),
         state_store.clone(),
         destination.clone(),
     );
@@ -802,14 +562,14 @@ async fn test_table_copy_and_sync() {
     .await;
 
     let state_store = TestStateStore::new();
-    let destination = TestDestination::new();
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
 
     // Start pipeline from scratch.
     let pipeline_id: PipelineId = random();
     let mut pipeline = create_pipeline(
         &database.config,
         pipeline_id,
-        database_schema.publication_name.clone(),
+        database_schema.publication_name(),
         state_store.clone(),
         destination.clone(),
     );
@@ -947,14 +707,14 @@ async fn test_table_copy_and_sync_with_changed_schema_in_table_sync_worker() {
         .unwrap();
 
     let state_store = TestStateStore::new();
-    let destination = TestDestination::new();
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
 
     // Start pipeline from scratch.
     let pipeline_id: PipelineId = random();
     let mut pipeline = create_pipeline(
         &database.config,
         pipeline_id,
-        database_schema.publication_name.clone(),
+        database_schema.publication_name(),
         state_store.clone(),
         destination.clone(),
     );
@@ -1037,14 +797,14 @@ async fn test_table_copy_and_sync_with_changed_schema_in_apply_worker() {
         .unwrap();
 
     let state_store = TestStateStore::new();
-    let destination = TestDestination::new();
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
 
     // Start pipeline from scratch.
     let pipeline_id: PipelineId = random();
     let mut pipeline = create_pipeline(
         &database.config,
         pipeline_id,
-        database_schema.publication_name.clone(),
+        database_schema.publication_name(),
         state_store.clone(),
         destination.clone(),
     );

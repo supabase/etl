@@ -31,7 +31,16 @@ impl TableName {
     pub fn as_quoted_identifier(&self) -> String {
         let quoted_schema = quote_identifier(&self.schema);
         let quoted_name = quote_identifier(&self.name);
+
         format!("{quoted_schema}.{quoted_name}")
+    }
+}
+
+#[cfg(feature = "bigquery")]
+impl TableName {
+    /// Returns the BigQuery table id as `String` for this [`TableName`].
+    pub fn as_bigquery_table_id(&self) -> String {
+        format!("{}_{}", self.schema, self.name)
     }
 }
 

@@ -30,3 +30,4 @@ tracing = { workspace = true }
 test-utils = []
 tokio = []
 sqlx = []
+bigquery = []

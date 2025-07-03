@@ -38,7 +38,7 @@ postgres-protocol = { workspace = true }
 postgres-replication = { workspace = true }
 prost = { workspace = true, optional = true }
 rustls = { workspace = true, features = ["aws-lc-rs", "logging"] }
-rustls-pemfile = { workspace = true }
+rustls-pemfile = { workspace = true, features = ["std"] }
 rand = { workspace = true, features = ["std"] }
 secrecy = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
@@ -67,10 +67,11 @@ clap = { workspace = true, default-features = true, features = [
     "std",
     "derive",
 ] }
+wiremock = { workspace = true}
 
 
 [features]
-bigquery = ["dep:gcp-bigquery-client", "dep:prost"]
+bigquery = ["dep:gcp-bigquery-client", "dep:prost", "postgres/bigquery"]
 duckdb = ["dep:duckdb"]
 stdout = []
 # When enabled converts unknown types to bytes

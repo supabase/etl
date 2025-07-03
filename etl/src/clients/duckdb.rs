@@ -378,7 +378,7 @@ impl DuckDbClient {
 impl From<Cell> for Value {
     fn from(value: Cell) -> Self {
         match value {
-            Cell::Null => Value::Null,
+            Cell::Null(_) => Value::Null,
             Cell::Bool(b) => Value::Boolean(b),
             Cell::String(s) => Value::Text(s),
             Cell::I16(i) => Value::SmallInt(i),

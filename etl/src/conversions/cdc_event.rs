@@ -50,7 +50,9 @@ impl CdcEventConverter {
 
         for (i, column_schema) in column_schemas.iter().enumerate() {
             let cell = match &tuple_data[i] {
-                TupleData::Null => Cell::Null,
+                // In case of a null value, we store the type information since that will be used to
+                // correctly compute default values when needed.
+                TupleData::Null => Cell::Null(column_schema.typ.clone()),
                 TupleData::UnchangedToast => TextFormatConverter::default_value(&column_schema.typ),
                 TupleData::Binary(_) => {
                     return Err(CdcEventConversionError::BinaryFormatNotSupported)

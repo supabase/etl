@@ -177,11 +177,11 @@ impl<G: GenericClient> PgDatabase<G> {
         &self,
         table_name: TableName,
         columns: &[&str],
-        values: &[&str],
+        expressions: &[&str],
     ) -> Result<u64, tokio_postgres::Error> {
         let set_clauses: Vec<String> = columns
             .iter()
-            .zip(values.iter())
+            .zip(expressions.iter())
             .map(|(col, val)| format!("{col} = {val}"))
             .collect();
         let set_clause = set_clauses.join(", ");
@@ -199,6 +199,34 @@ impl<G: GenericClient> PgDatabase<G> {
             .await
     }
 
+    /// Updates all rows in the specified table with the given values.
+    pub async fn delete_values(
+        &self,
+        table_name: TableName,
+        columns: &[&str],
+        expressions: &[&str],
+        operator: &str,
+    ) -> Result<u64, tokio_postgres::Error> {
+        let delete_clauses: Vec<String> = columns
+            .iter()
+            .zip(expressions.iter())
+            .map(|(col, val)| format!("{col} = {val}"))
+            .collect();
+        let delete_clauses = delete_clauses.join(operator);
+
+        let delete_query = format!(
+            "delete from {} where {}",
+            table_name.as_quoted_identifier(),
+            delete_clauses
+        );
+
+        self.client
+            .as_ref()
+            .unwrap()
+            .execute(&delete_query, &[])
+            .await
+    }
+
     /// Queries rows from a single column of a table.
     pub async fn query_table<T>(
         &self,
@@ -209,9 +237,9 @@ impl<G: GenericClient> PgDatabase<G> {
     where
         T: for<'a> tokio_postgres::types::FromSql<'a>,
     {
-        let where_str = where_clause.map_or(String::new(), |w| format!(" where {w}"));
+        let where_str = where_clause.map_or(String::new(), |w| format!("where {w}"));
         let query = format!(
-            "select {} from {}{}",
+            "select {} from {} {}",
             column,
             table_name.as_quoted_identifier(),
             where_str
@@ -219,6 +247,14 @@ impl<G: GenericClient> PgDatabase<G> {
 
         let rows = self.client.as_ref().unwrap().query(&query, &[]).await?;
         Ok(rows.iter().map(|row| row.get(0)).collect())
+    }
+
+    pub async fn truncate_table(&self, table_name: TableName) -> Result<(), tokio_postgres::Error> {
+        let query = format!("truncate table {}", table_name.as_quoted_identifier(),);
+
+        self.client.as_ref().unwrap().execute(&query, &[]).await?;
+
+        Ok(())
     }
 }
 

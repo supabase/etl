@@ -1,10 +1,3 @@
-use crate::common::database::{spawn_database, test_table_name};
-use crate::common::destination::TestDestination;
-use crate::common::pipeline::{
-    spawn_async_pg_pipeline, spawn_pg_pipeline, test_slot_name, PipelineMode,
-};
-use crate::common::table::assert_table_schema_from_destination;
-use crate::common::wait_for_condition;
 use etl::conversions::cdc_event::CdcEvent;
 use etl::conversions::Cell;
 use postgres::schema::{ColumnSchema, TableId};
@@ -13,6 +6,14 @@ use std::ops::Range;
 use telemetry::init_test_tracing;
 use tokio_postgres::types::Type;
 use tokio_postgres::GenericClient;
+
+use crate::common::database::{spawn_database, test_table_name};
+use crate::common::destination::TestDestination;
+use crate::common::pipeline::{
+    spawn_async_pg_pipeline, spawn_pg_pipeline, test_slot_name, PipelineMode,
+};
+use crate::common::table::assert_table_schema_from_destination;
+use crate::common::wait_for_condition;
 
 fn get_expected_ages_sum(num_users: usize) -> i32 {
     ((num_users * (num_users + 1)) / 2) as i32

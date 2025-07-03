@@ -1,7 +1,6 @@
 use core::str;
-use std::str::Utf8Error;
-
 use postgres::schema::ColumnSchema;
+use std::str::Utf8Error;
 use thiserror::Error;
 use tokio_postgres::types::Type;
 use tracing::error;
@@ -15,9 +14,59 @@ pub struct TableRow {
     pub values: Vec<Cell>,
 }
 
+impl TableRow {
+    pub fn new(values: Vec<Cell>) -> Self {
+        Self { values }
+    }
+}
+
 impl BatchBoundaryV1 for TableRow {
     fn is_last_in_batch(&self) -> bool {
         true
+    }
+}
+
+#[cfg(feature = "bigquery")]
+impl prost::Message for TableRow {
+    fn encode_raw(&self, buf: &mut impl bytes::BufMut)
+    where
+        Self: Sized,
+    {
+        let mut tag = 1;
+        for cell in &self.values {
+            cell.encode_prost(tag, buf);
+            tag += 1;
+        }
+    }
+
+    fn merge_field(
+        &mut self,
+        _tag: u32,
+        _wire_type: prost::encoding::WireType,
+        _buf: &mut impl bytes::Buf,
+        _ctx: prost::encoding::DecodeContext,
+    ) -> Result<(), prost::DecodeError>
+    where
+        Self: Sized,
+    {
+        unimplemented!("merge_field not implemented yet");
+    }
+
+    fn encoded_len(&self) -> usize {
+        let mut len = 0;
+        let mut tag = 1;
+        for cell in &self.values {
+            len += cell.encoded_len_prost(tag);
+            tag += 1;
+        }
+
+        len
+    }
+
+    fn clear(&mut self) {
+        for cell in &mut self.values {
+            cell.clear();
+        }
     }
 }
 
@@ -110,7 +159,9 @@ impl TableRowConverter {
                 };
 
                 let value = if val_str == "\\N" {
-                    Cell::Null
+                    // In case of a null value, we store the type information since that will be used to
+                    // correctly compute default values when needed.
+                    Cell::Null(column_schema.typ.clone())
                 } else {
                     match TextFormatConverter::try_from_str(&column_schema.typ, &val_str) {
                         Ok(value) => value,

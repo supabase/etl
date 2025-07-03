@@ -100,6 +100,15 @@ where
             self.config.publication_name, self.id
         );
 
+        // We create the schema cache, which will be shared also with the destination.
+        let schema_cache = SchemaCache::default();
+
+        // We inject pipeline specific dependencies within the destination.
+        self.destination.inject(schema_cache.clone()).await?;
+
+        // We prepare the schema cache with table schemas loaded, in case there is the need.
+        self.prepare_schema_cache(&schema_cache).await?;
+
         // We create the first connection to Postgres.
         let replication_client =
             PgReplicationClient::connect(self.config.pg_connection.clone()).await?;
@@ -112,9 +121,6 @@ where
 
         // We create the table sync workers pool to manage all table sync workers in a central place.
         let pool = TableSyncWorkerPool::new();
-
-        // We prepare the schema cache with table schemas loaded, in case there is the need.
-        let schema_cache = self.prepare_schema_cache().await?;
 
         let table_sync_worker_permits =
             Arc::new(Semaphore::new(self.config.max_table_sync_workers as usize));
@@ -139,14 +145,13 @@ where
         Ok(())
     }
 
-    async fn prepare_schema_cache(&self) -> Result<SchemaCache, PipelineError> {
+    async fn prepare_schema_cache(&self, schema_cache: &SchemaCache) -> Result<(), PipelineError> {
         // We initialize the schema cache, which is local to a pipeline, and we try to load existing
         // schemas that were previously stored at the destination (if any).
-        let schema_cache = SchemaCache::default();
         let table_schemas = self.destination.load_table_schemas().await?;
         schema_cache.add_table_schemas(table_schemas).await;
 
-        Ok(schema_cache)
+        Ok(())
     }
 
     async fn initialize_replication_states(
@@ -230,6 +235,7 @@ where
         }
     }
 
+    #[allow(clippy::result_large_err)]
     pub fn shutdown(&self) -> Result<(), PipelineError> {
         info!("Trying to shut down the pipeline");
         self.shutdown_tx.shutdown()?;

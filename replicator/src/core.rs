@@ -1,36 +1,61 @@
+use crate::config::load_replicator_config;
+use crate::migrations::migrate_state_store;
 use config::shared::{DestinationConfig, ReplicatorConfig};
 use etl::v2::destination::base::Destination;
+use etl::v2::destination::bigquery::BigQueryDestination;
 use etl::v2::destination::memory::MemoryDestination;
+use etl::v2::encryption::bigquery::install_crypto_provider_once;
 use etl::v2::pipeline::Pipeline;
 use etl::v2::state::store::base::StateStore;
 use etl::v2::state::store::postgres::PostgresStateStore;
+use secrecy::ExposeSecret;
 use std::fmt;
-use thiserror::Error;
 use tracing::{error, info, warn};
-
-use crate::config::load_replicator_config;
-use crate::migrations::migrate_state_store;
-
-#[derive(Debug, Error)]
-pub enum ReplicatorError {
-    #[error("The destination {0} is currently unsupported")]
-    UnsupportedDestination(String),
-}
 
 pub async fn start_replicator() -> anyhow::Result<()> {
     let replicator_config = load_replicator_config()?;
 
-    // We initialize the state store and destination.
+    // We initialize the state store, which for the replicator is not configurable.
     let state_store = init_state_store(&replicator_config).await?;
-    let destination = init_destination(&replicator_config).await?;
 
-    let pipeline = Pipeline::new(
-        replicator_config.pipeline.id,
-        replicator_config.pipeline,
-        state_store,
-        destination,
-    );
-    start_pipeline(pipeline).await?;
+    // For each destination, we start the pipeline. This is more verbose due to static dispatch, but
+    // we prefer more performance at the cost of ergonomics.
+    match &replicator_config.destination {
+        DestinationConfig::Memory => {
+            let destination = MemoryDestination::new();
+
+            let pipeline = Pipeline::new(
+                replicator_config.pipeline.id,
+                replicator_config.pipeline,
+                state_store,
+                destination,
+            );
+            start_pipeline(pipeline).await?;
+        }
+        DestinationConfig::BigQuery {
+            project_id,
+            dataset_id,
+            service_account_key,
+            max_staleness_mins,
+        } => {
+            install_crypto_provider_once();
+            let destination = BigQueryDestination::new_with_key(
+                project_id.clone(),
+                dataset_id.clone(),
+                service_account_key.expose_secret(),
+                *max_staleness_mins,
+            )
+            .await?;
+
+            let pipeline = Pipeline::new(
+                replicator_config.pipeline.id,
+                replicator_config.pipeline,
+                state_store,
+                destination,
+            );
+            start_pipeline(pipeline).await?;
+        }
+    }
 
     Ok(())
 }
@@ -41,17 +66,6 @@ async fn init_state_store(config: &ReplicatorConfig) -> anyhow::Result<impl Stat
         config.pipeline.id,
         config.pipeline.pg_connection.clone(),
     ))
-}
-
-async fn init_destination(
-    config: &ReplicatorConfig,
-) -> anyhow::Result<impl Destination + Clone + Send + Sync + fmt::Debug + 'static> {
-    match config.destination {
-        DestinationConfig::Memory => Ok(MemoryDestination::new()),
-        _ => {
-            Err(ReplicatorError::UnsupportedDestination(format!("{:?}", config.destination)).into())
-        }
-    }
 }
 
 async fn start_pipeline<S, D>(mut pipeline: Pipeline<S, D>) -> anyhow::Result<()>
