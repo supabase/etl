@@ -1,17 +1,10 @@
 use config::shared::{DestinationConfig, ReplicatorConfig};
-use etl::v2::config::batch::BatchConfig;
-use etl::v2::config::pipeline::PipelineConfig;
-use etl::v2::config::retry::RetryConfig;
 use etl::v2::destination::base::Destination;
 use etl::v2::destination::memory::MemoryDestination;
-use etl::v2::pipeline::{Pipeline, PipelineIdentity};
+use etl::v2::pipeline::Pipeline;
 use etl::v2::state::store::base::StateStore;
 use etl::v2::state::store::postgres::PostgresStateStore;
-use etl::SslMode;
-use postgres::tokio::config::{PgConnectionConfig, PgTlsConfig};
 use std::fmt;
-use std::io::BufReader;
-use std::time::Duration;
 use thiserror::Error;
 use tracing::{error, info, warn};
 
@@ -27,84 +20,26 @@ pub enum ReplicatorError {
 pub async fn start_replicator() -> anyhow::Result<()> {
     let replicator_config = load_replicator_config()?;
 
-    // We set up the certificates and SSL mode.
-    let mut trusted_root_certs = vec![];
-    let ssl_mode = if replicator_config.source.tls.enabled {
-        let mut root_certs_reader =
-            BufReader::new(replicator_config.source.tls.trusted_root_certs.as_bytes());
-        for cert in rustls_pemfile::certs(&mut root_certs_reader) {
-            let cert = cert?;
-            trusted_root_certs.push(cert);
-        }
-
-        SslMode::VerifyFull
-    } else {
-        SslMode::Disable
-    };
-
     // We initialize the state store and destination.
     let state_store = init_state_store(&replicator_config).await?;
     let destination = init_destination(&replicator_config).await?;
 
-    // We create the identity of this pipeline.
-    let identity = PipelineIdentity::new(
+    let pipeline = Pipeline::new(
         replicator_config.pipeline.id,
-        &replicator_config.pipeline.publication_name,
+        replicator_config.pipeline,
+        state_store,
+        destination,
     );
-
-    // We prepare the configuration of the pipeline.
-    // TODO: improve v2 pipeline config to make conversions nicer.
-    let pipeline_config = PipelineConfig {
-        pg_connection: PgConnectionConfig {
-            host: replicator_config.source.host,
-            port: replicator_config.source.port,
-            name: replicator_config.source.name,
-            username: replicator_config.source.username,
-            password: replicator_config.source.password.map(Into::into),
-            tls_config: PgTlsConfig {
-                ssl_mode,
-                trusted_root_certs,
-            },
-        },
-        batch: BatchConfig {
-            max_size: replicator_config.pipeline.batch.max_size,
-            max_fill: Duration::from_millis(replicator_config.pipeline.batch.max_fill_ms),
-        },
-        apply_worker_initialization_retry: RetryConfig {
-            max_attempts: replicator_config
-                .pipeline
-                .apply_worker_init_retry
-                .max_attempts,
-            initial_delay: Duration::from_millis(
-                replicator_config
-                    .pipeline
-                    .apply_worker_init_retry
-                    .initial_delay_ms,
-            ),
-            max_delay: Duration::from_millis(
-                replicator_config
-                    .pipeline
-                    .apply_worker_init_retry
-                    .max_delay_ms,
-            ),
-            backoff_factor: replicator_config
-                .pipeline
-                .apply_worker_init_retry
-                .backoff_factor,
-        },
-    };
-
-    let pipeline = Pipeline::new(identity, pipeline_config, state_store, destination);
     start_pipeline(pipeline).await?;
 
     Ok(())
 }
 
 async fn init_state_store(config: &ReplicatorConfig) -> anyhow::Result<impl StateStore + Clone> {
-    migrate_state_store(config.source.clone()).await?;
+    migrate_state_store(config.pipeline.pg_connection.clone()).await?;
     Ok(PostgresStateStore::new(
         config.pipeline.id,
-        config.source.clone(),
+        config.pipeline.pg_connection.clone(),
     ))
 }
 

@@ -2,8 +2,7 @@ use std::env;
 
 use anyhow::anyhow;
 use api::{config::ApiConfig, startup::Application};
-use config::load_config;
-use postgres::sqlx::config::PgConnectionConfig;
+use config::{load_config, shared::PgConnectionConfig};
 use telemetry::init_tracing;
 use tracing::{error, info};
 
@@ -60,7 +59,7 @@ fn log_pg_connection_config(config: &PgConnectionConfig) {
         port = config.port,
         dbname = config.name,
         username = config.username,
-        ssl_mode = config.tls_config.ssl_mode.to_string(),
+        tls_enabled = config.tls.enabled,
         "pg database options",
     );
 }

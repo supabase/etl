@@ -1,4 +1,4 @@
-use postgres::sqlx::config::PgConnectionConfig;
+use config::shared::PgConnectionConfig;
 use postgres::sqlx::test_utils::create_pg_database;
 use sqlx::PgPool;
 

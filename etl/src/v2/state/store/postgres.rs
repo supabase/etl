@@ -1,9 +1,9 @@
 use std::{collections::HashMap, sync::Arc};
 
-use config::shared::SourceConfig;
+use config::shared::{IntoConnectOptions, PgConnectionConfig};
 use postgres::schema::TableId;
 use sqlx::{
-    postgres::{types::Oid as SqlxTableId, PgPoolOptions},
+    postgres::{types::Oid as SqlxTableId, PgConnectOptions, PgPoolOptions},
     prelude::{FromRow, Type},
     PgPool,
 };
@@ -82,12 +82,12 @@ struct Inner {
 #[derive(Debug, Clone)]
 pub struct PostgresStateStore {
     pipeline_id: PipelineId,
-    source_config: SourceConfig,
+    source_config: PgConnectionConfig,
     inner: Arc<RwLock<Inner>>,
 }
 
 impl PostgresStateStore {
-    pub fn new(pipeline_id: PipelineId, source_config: SourceConfig) -> PostgresStateStore {
+    pub fn new(pipeline_id: PipelineId, source_config: PgConnectionConfig) -> PostgresStateStore {
         let inner = Inner {
             table_states: HashMap::new(),
         };
@@ -99,11 +99,7 @@ impl PostgresStateStore {
     }
 
     async fn connect_to_source(&self) -> Result<PgPool, sqlx::Error> {
-        let options = self
-            .source_config
-            .clone()
-            .into_connection_config()
-            .with_db();
+        let options: PgConnectOptions = self.source_config.with_db();
 
         let pool = PgPoolOptions::new()
             .max_connections(NUM_POOL_CONNECTIONS)

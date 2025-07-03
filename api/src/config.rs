@@ -1,5 +1,5 @@
 use base64::{prelude::BASE64_STANDARD, Engine};
-use postgres::sqlx::config::PgConnectionConfig;
+use config::shared::PgConnectionConfig;
 use serde::de::{MapAccess, Visitor};
 use serde::{de, Deserialize, Deserializer};
 use std::fmt;

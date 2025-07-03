@@ -1,5 +1,5 @@
+use config::shared::{PgConnectionConfig, TlsConfig};
 use config::SerializableSecretString;
-use postgres::sqlx::config::{PgConnectionConfig, PgSslMode, PgTlsConfig};
 use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 use sqlx::{PgPool, Postgres, Transaction};
@@ -32,11 +32,11 @@ impl SourceConfig {
             port: self.port,
             name: self.name,
             username: self.username,
-            password: self.password.map(Into::into),
+            password: self.password,
             // TODO: enable TLS
-            tls_config: PgTlsConfig {
-                ssl_mode: PgSslMode::Prefer,
-                trusted_root_certs: vec![],
+            tls: TlsConfig {
+                trusted_root_certs: String::new(),
+                enabled: false,
             },
         }
     }

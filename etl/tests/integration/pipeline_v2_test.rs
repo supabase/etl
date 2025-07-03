@@ -1,11 +1,12 @@
 use etl::conversions::table_row::TableRow;
 use etl::conversions::Cell;
 use etl::v2::conversions::event::{Event, EventType, InsertEvent};
-use etl::v2::pipeline::PipelineError;
+use etl::v2::pipeline::{PipelineError, PipelineId};
 use etl::v2::state::table::TableReplicationPhaseType;
 use etl::v2::workers::base::WorkerWaitError;
 use postgres::schema::{ColumnSchema, TableId, TableName, TableSchema};
 use postgres::tokio::test_utils::{id_column_schema, PgDatabase, TableModification};
+use rand::random;
 use std::ops::RangeInclusive;
 use telemetry::init_test_tracing;
 use tokio_postgres::types::Type;
@@ -14,7 +15,7 @@ use tokio_postgres::{Client, GenericClient};
 use crate::common::database::{spawn_database, test_table_name};
 use crate::common::destination_v2::TestDestination;
 use crate::common::event::{group_events_by_type, group_events_by_type_and_table_id};
-use crate::common::pipeline_v2::{create_pipeline_identity, spawn_pg_pipeline};
+use crate::common::pipeline_v2::create_pipeline;
 use crate::common::state_store::{
     FaultConfig, FaultInjectingStateStore, FaultType, TestStateStore,
 };
@@ -277,10 +278,12 @@ async fn test_pipeline_with_table_sync_worker_panic() {
     let state_store = FaultInjectingStateStore::wrap(TestStateStore::new(), fault_config);
     let destination = TestDestination::new();
 
+    let pipeline_id: PipelineId = random();
     // We start the pipeline from scratch.
-    let mut pipeline = spawn_pg_pipeline(
-        &create_pipeline_identity(&database_schema.publication_name),
+    let mut pipeline = create_pipeline(
         &database.config,
+        pipeline_id,
+        database_schema.publication_name.clone(),
         state_store.clone(),
         destination.clone(),
     );
@@ -336,9 +339,11 @@ async fn test_pipeline_with_table_sync_worker_error() {
     let destination = TestDestination::new();
 
     // We start the pipeline from scratch.
-    let mut pipeline = spawn_pg_pipeline(
-        &create_pipeline_identity(&database_schema.publication_name),
+    let pipeline_id: PipelineId = random();
+    let mut pipeline = create_pipeline(
         &database.config,
+        pipeline_id,
+        database_schema.publication_name.clone(),
         state_store.clone(),
         destination.clone(),
     );
@@ -395,10 +400,11 @@ async fn test_table_schema_copy_with_data_sync_retry() {
         ..Default::default()
     };
     let failing_state_store = FaultInjectingStateStore::wrap(state_store.clone(), fault_config);
-    let identity = create_pipeline_identity(&database_schema.publication_name);
-    let mut pipeline = spawn_pg_pipeline(
-        &identity,
+    let pipeline_id: PipelineId = random();
+    let mut pipeline = create_pipeline(
         &database.config,
+        pipeline_id,
+        database_schema.publication_name.clone(),
         failing_state_store.clone(),
         destination.clone(),
     );
@@ -431,9 +437,10 @@ async fn test_table_schema_copy_with_data_sync_retry() {
     let _ = pipeline.shutdown_and_wait().await;
 
     // Restart pipeline with normal state store to verify recovery.
-    let mut pipeline = spawn_pg_pipeline(
-        &identity,
+    let mut pipeline = create_pipeline(
         &database.config,
+        pipeline_id,
+        database_schema.publication_name.clone(),
         state_store.clone(),
         destination.clone(),
     );
@@ -498,10 +505,11 @@ async fn test_table_schema_copy_with_finished_copy_retry() {
     let destination = TestDestination::new();
 
     // We start the pipeline from scratch.
-    let identity = create_pipeline_identity(&database_schema.publication_name);
-    let mut pipeline = spawn_pg_pipeline(
-        &identity,
+    let pipeline_id: PipelineId = random();
+    let mut pipeline = create_pipeline(
         &database.config,
+        pipeline_id,
+        database_schema.publication_name.clone(),
         state_store.clone(),
         destination.clone(),
     );
@@ -578,9 +586,10 @@ async fn test_table_schema_copy_with_finished_copy_retry() {
         });
 
     // We recreate a pipeline, assuming the other one was stopped, using the same state and destination.
-    let mut pipeline = spawn_pg_pipeline(
-        &identity,
+    let mut pipeline = create_pipeline(
         &database.config,
+        pipeline_id,
+        database_schema.publication_name.clone(),
         state_store.clone(),
         destination.clone(),
     );
@@ -606,10 +615,11 @@ async fn test_table_schema_copy_survives_restarts() {
     let destination = TestDestination::new();
 
     // We start the pipeline from scratch.
-    let identity = create_pipeline_identity(&database_schema.publication_name);
-    let mut pipeline = spawn_pg_pipeline(
-        &identity,
+    let pipeline_id: PipelineId = random();
+    let mut pipeline = create_pipeline(
         &database.config,
+        pipeline_id,
+        database_schema.publication_name.clone(),
         state_store.clone(),
         destination.clone(),
     );
@@ -664,9 +674,10 @@ async fn test_table_schema_copy_survives_restarts() {
     assert_eq!(table_schemas[1], database_schema.users_schema());
 
     // We recreate a pipeline, assuming the other one was stopped, using the same state and destination.
-    let mut pipeline = spawn_pg_pipeline(
-        &identity,
+    let mut pipeline = create_pipeline(
         &database.config,
+        pipeline_id,
+        database_schema.publication_name.clone(),
         state_store.clone(),
         destination.clone(),
     );
@@ -729,10 +740,11 @@ async fn test_table_copy() {
     let destination = TestDestination::new();
 
     // Start pipeline from scratch.
-    let identity = create_pipeline_identity(&database_schema.publication_name);
-    let mut pipeline = spawn_pg_pipeline(
-        &identity,
+    let pipeline_id: PipelineId = random();
+    let mut pipeline = create_pipeline(
         &database.config,
+        pipeline_id,
+        database_schema.publication_name.clone(),
         state_store.clone(),
         destination.clone(),
     );
@@ -793,10 +805,11 @@ async fn test_table_copy_and_sync() {
     let destination = TestDestination::new();
 
     // Start pipeline from scratch.
-    let identity = create_pipeline_identity(&database_schema.publication_name);
-    let mut pipeline = spawn_pg_pipeline(
-        &identity,
+    let pipeline_id: PipelineId = random();
+    let mut pipeline = create_pipeline(
         &database.config,
+        pipeline_id,
+        database_schema.publication_name.clone(),
         state_store.clone(),
         destination.clone(),
     );
@@ -937,10 +950,11 @@ async fn test_table_copy_and_sync_with_changed_schema_in_table_sync_worker() {
     let destination = TestDestination::new();
 
     // Start pipeline from scratch.
-    let identity = create_pipeline_identity(&database_schema.publication_name);
-    let mut pipeline = spawn_pg_pipeline(
-        &identity,
+    let pipeline_id: PipelineId = random();
+    let mut pipeline = create_pipeline(
         &database.config,
+        pipeline_id,
+        database_schema.publication_name.clone(),
         state_store.clone(),
         destination.clone(),
     );
@@ -1026,10 +1040,11 @@ async fn test_table_copy_and_sync_with_changed_schema_in_apply_worker() {
     let destination = TestDestination::new();
 
     // Start pipeline from scratch.
-    let identity = create_pipeline_identity(&database_schema.publication_name);
-    let mut pipeline = spawn_pg_pipeline(
-        &identity,
+    let pipeline_id: PipelineId = random();
+    let mut pipeline = create_pipeline(
         &database.config,
+        pipeline_id,
+        database_schema.publication_name.clone(),
         state_store.clone(),
         destination.clone(),
     );

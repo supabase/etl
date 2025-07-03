@@ -1,3 +1,4 @@
+use config::shared::PipelineConfig;
 use postgres::schema::TableId;
 use std::sync::Arc;
 use std::time::Duration;
@@ -9,9 +10,8 @@ use tracing::{info, warn};
 
 use crate::v2::concurrency::future::ReactiveFuture;
 use crate::v2::concurrency::shutdown::{ShutdownResult, ShutdownRx};
-use crate::v2::config::pipeline::PipelineConfig;
 use crate::v2::destination::base::Destination;
-use crate::v2::pipeline::PipelineIdentity;
+use crate::v2::pipeline::PipelineId;
 use crate::v2::replication::apply::{start_apply_loop, ApplyLoopError, ApplyLoopHook};
 use crate::v2::replication::client::{PgReplicationClient, PgReplicationError};
 use crate::v2::replication::table_sync::{start_table_sync, TableSyncError, TableSyncResult};
@@ -229,7 +229,7 @@ impl WorkerHandle<TableSyncWorkerState> for TableSyncWorkerHandle {
 
 #[derive(Debug)]
 pub struct TableSyncWorker<S, D> {
-    identity: PipelineIdentity,
+    pipeline_id: PipelineId,
     config: Arc<PipelineConfig>,
     pool: TableSyncWorkerPool,
     table_id: TableId,
@@ -243,7 +243,7 @@ pub struct TableSyncWorker<S, D> {
 impl<S, D> TableSyncWorker<S, D> {
     #[expect(clippy::too_many_arguments)]
     pub fn new(
-        identity: PipelineIdentity,
+        pipeline_id: PipelineId,
         config: Arc<PipelineConfig>,
         pool: TableSyncWorkerPool,
         table_id: TableId,
@@ -254,7 +254,7 @@ impl<S, D> TableSyncWorker<S, D> {
         run_permit: Arc<Semaphore>,
     ) -> Self {
         Self {
-            identity,
+            pipeline_id,
             config,
             pool,
             table_id,
@@ -323,7 +323,7 @@ where
                 PgReplicationClient::connect(self.config.pg_connection.clone()).await?;
 
             let result = start_table_sync(
-                self.identity.clone(),
+                self.pipeline_id,
                 self.config.clone(),
                 replication_client.clone(),
                 self.table_id,
@@ -344,7 +344,7 @@ where
             };
 
             start_apply_loop(
-                self.identity,
+                self.pipeline_id,
                 start_lsn,
                 self.config,
                 replication_client,

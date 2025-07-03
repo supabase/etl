@@ -1,17 +1,14 @@
 use std::{error::Error, time::Duration};
 
 use clap::{Args, Parser, Subcommand};
-use etl::{
-    pipeline::{
-        batching::{data_pipeline::BatchDataPipeline, BatchConfig},
-        destinations::stdout::StdoutDestination,
-        sources::postgres::{PostgresSource, TableNamesFrom},
-        PipelineAction,
-    },
-    SslMode,
+use config::shared::{PgConnectionConfig, TlsConfig};
+use etl::pipeline::{
+    batching::{data_pipeline::BatchDataPipeline, BatchConfig},
+    destinations::stdout::StdoutDestination,
+    sources::postgres::{PostgresSource, TableNamesFrom},
+    PipelineAction,
 };
-use postgres::tokio::config::PgConnectionConfig;
-use postgres::{schema::TableName, tokio::config::PgTlsConfig};
+use postgres::schema::TableName;
 use tracing::error;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -97,9 +94,9 @@ async fn main_impl() -> Result<(), Box<dyn Error>> {
         name: db_args.db_name,
         username: db_args.db_username,
         password: db_args.db_password.map(Into::into),
-        tls_config: PgTlsConfig {
-            ssl_mode: SslMode::Disable,
-            trusted_root_certs: vec![],
+        tls: TlsConfig {
+            trusted_root_certs: String::new(),
+            enabled: false,
         },
     };
 

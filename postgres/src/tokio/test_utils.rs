@@ -1,5 +1,5 @@
 use crate::schema::{ColumnSchema, TableId, TableName};
-use crate::tokio::config::PgConnectionConfig;
+use config::shared::{IntoConnectOptions, PgConnectionConfig};
 use tokio::runtime::Handle;
 use tokio_postgres::types::Type;
 use tokio_postgres::{Client, GenericClient, NoTls, Transaction};
@@ -288,11 +288,13 @@ pub fn id_column_schema() -> ColumnSchema {
 /// Panics if the connection fails or if database creation fails.
 pub async fn create_pg_database(config: &PgConnectionConfig) -> Client {
     // Create the database via a single connection
-    let (client, connection) = config
-        .without_db()
-        .connect(NoTls)
-        .await
-        .expect("Failed to connect to Postgres");
+    let (client, connection) = {
+        let config: tokio_postgres::Config = config.without_db();
+        config
+            .connect(NoTls)
+            .await
+            .expect("Failed to connect to Postgres")
+    };
 
     // Spawn the connection on a new task
     tokio::spawn(async move {
@@ -308,11 +310,13 @@ pub async fn create_pg_database(config: &PgConnectionConfig) -> Client {
         .expect("Failed to create database");
 
     // Create a new client connected to the created database
-    let (client, connection) = config
-        .with_db()
-        .connect(NoTls)
-        .await
-        .expect("Failed to connect to Postgres");
+    let (client, connection) = {
+        let config: tokio_postgres::Config = config.with_db();
+        config
+            .connect(NoTls)
+            .await
+            .expect("Failed to connect to Postgres")
+    };
 
     // Spawn the connection on a new task
     tokio::spawn(async move {
@@ -332,11 +336,13 @@ pub async fn create_pg_database(config: &PgConnectionConfig) -> Client {
 /// to drop. Panics if any operation fails.
 pub async fn drop_pg_database(config: &PgConnectionConfig) {
     // Connect to the default database
-    let (client, connection) = config
-        .without_db()
-        .connect(NoTls)
-        .await
-        .expect("Failed to connect to Postgres");
+    let (client, connection) = {
+        let config: tokio_postgres::Config = config.without_db();
+        config
+            .connect(NoTls)
+            .await
+            .expect("Failed to connect to Postgres")
+    };
 
     // Spawn the connection on a new task
     tokio::spawn(async move {
