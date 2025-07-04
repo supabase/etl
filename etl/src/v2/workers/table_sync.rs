@@ -1,4 +1,3 @@
-use crate::clients::postgres::ReplicationClient;
 use crate::v2::concurrency::future::ReactiveFuture;
 use crate::v2::concurrency::shutdown::{ShutdownResult, ShutdownRx};
 use crate::v2::destination::base::Destination;

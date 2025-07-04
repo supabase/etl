@@ -353,7 +353,7 @@ where
                 // were not cleaned after the table sync worker terminated. This could happen in case
                 // there was a failure in a table sync worker while terminating.
                 if let WorkerType::Apply = hook.worker_type() {
-                    cleanup_unused_table_sync_worker_slots(&state_store).await?;
+                    cleanup_unused_table_sync_worker_slots(pipeline_id, &replication_client, &state_store).await?;
                 }
             }
         }
