@@ -358,7 +358,7 @@ where
                 // ready, we do not want to call the `handle_syncing_table` method on such tables because
                 // it will unnecessarily lauch a table sync worker for it which will anyway exit because
                 // table sync workers do not process tables in either sync done or ready states. Preventing
-                // launch of such workers has become even more important after we started calling 
+                // launch of such workers has become even more important after we started calling
                 // `process_syncing_tables` at regular intervals, because now such spurious launches
                 // have become extremely common, which is just wasteful.
                 TableReplicationPhase::SyncDone { lsn } => {
