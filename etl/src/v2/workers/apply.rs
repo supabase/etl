@@ -353,14 +353,24 @@ where
             // We read the state store state first, if we don't find `SyncDone` we will attempt to
             // read the shared state which can contain also non-persisted states.
             match table_replication_phase {
-                TableReplicationPhase::SyncDone { lsn } if current_lsn >= lsn => {
-                    info!(
+                // It is important that the `if current_lsn >= lsn` is inside the match arm rather than
+                // as a guard on it because while we do want to mark any tables in sync done state as
+                // ready, we do not want to call the `handle_syncing_table` method on such tables because
+                // it will unnecessarily lauch a table sync worker for it which will anyway exit because
+                // table sync workers do not process tables in either sync done or ready states. Preventing
+                // launch of such workers has become even more important after we started calling 
+                // `process_syncing_tables` at regular intervals, because now such spurious launches
+                // have become extremely common, which is just wasteful.
+                TableReplicationPhase::SyncDone { lsn } => {
+                    if current_lsn >= lsn {
+                        info!(
                         "Table {} is ready, its events are now processed by the main apply worker",
                         table_id
                     );
-                    self.state_store
-                        .update_table_replication_state(table_id, TableReplicationPhase::Ready)
-                        .await?;
+                        self.state_store
+                            .update_table_replication_state(table_id, TableReplicationPhase::Ready)
+                            .await?;
+                    }
                 }
                 _ => {
                     if let Err(err) = self.handle_syncing_table(table_id, current_lsn).await {
