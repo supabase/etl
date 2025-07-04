@@ -1,3 +1,17 @@
+use crate::clients::postgres::ReplicationClient;
+use crate::v2::concurrency::future::ReactiveFuture;
+use crate::v2::concurrency::shutdown::{ShutdownResult, ShutdownRx};
+use crate::v2::destination::base::Destination;
+use crate::v2::pipeline::PipelineId;
+use crate::v2::replication::apply::{start_apply_loop, ApplyLoopError, ApplyLoopHook};
+use crate::v2::replication::client::{PgReplicationClient, PgReplicationError};
+use crate::v2::replication::slot::{get_slot_name, SlotError};
+use crate::v2::replication::table_sync::{start_table_sync, TableSyncError, TableSyncResult};
+use crate::v2::schema::cache::SchemaCache;
+use crate::v2::state::store::base::{StateStore, StateStoreError};
+use crate::v2::state::table::{TableReplicationPhase, TableReplicationPhaseType};
+use crate::v2::workers::base::{Worker, WorkerHandle, WorkerType, WorkerWaitError};
+use crate::v2::workers::pool::TableSyncWorkerPool;
 use config::shared::PipelineConfig;
 use postgres::schema::TableId;
 use std::sync::Arc;
@@ -7,19 +21,6 @@ use tokio::sync::{AcquireError, Notify, RwLock, RwLockReadGuard, Semaphore};
 use tokio::task::JoinHandle;
 use tokio_postgres::types::PgLsn;
 use tracing::{info, warn};
-
-use crate::v2::concurrency::future::ReactiveFuture;
-use crate::v2::concurrency::shutdown::{ShutdownResult, ShutdownRx};
-use crate::v2::destination::base::Destination;
-use crate::v2::pipeline::PipelineId;
-use crate::v2::replication::apply::{start_apply_loop, ApplyLoopError, ApplyLoopHook};
-use crate::v2::replication::client::{PgReplicationClient, PgReplicationError};
-use crate::v2::replication::table_sync::{start_table_sync, TableSyncError, TableSyncResult};
-use crate::v2::schema::cache::SchemaCache;
-use crate::v2::state::store::base::{StateStore, StateStoreError};
-use crate::v2::state::table::{TableReplicationPhase, TableReplicationPhaseType};
-use crate::v2::workers::base::{Worker, WorkerHandle, WorkerType, WorkerWaitError};
-use crate::v2::workers::pool::TableSyncWorkerPool;
 
 const PHASE_CHANGE_REFRESH_FREQUENCY: Duration = Duration::from_millis(100);
 
@@ -48,6 +49,12 @@ pub enum TableSyncWorkerError {
 pub enum TableSyncWorkerHookError {
     #[error("An error occurred while updating the table sync worker state: {0}")]
     TableSyncWorkerState(#[from] TableSyncWorkerStateError),
+
+    #[error("Could not generate slot name in the apply loop: {0}")]
+    Slot(#[from] SlotError),
+
+    #[error("A Postgres replication error occurred in the table sync worker: {0}")]
+    PgReplication(#[from] PgReplicationError),
 }
 
 #[derive(Debug, Error)]
@@ -309,11 +316,12 @@ where
             // of table sync workers running in parallel which in turn helps limit the max
             // number of cocurrent connections to the source database.
             let permit = tokio::select! {
-                // Shutdown signal received, exit loop.
                 _ = self.shutdown_rx.changed() => {
                     info!("Shutting down table sync worker while waiting for a run permit");
+
                     return Ok(());
                 }
+
                 permit = self.run_permit.acquire() => {
                     permit
                 }
@@ -347,17 +355,24 @@ where
                 self.pipeline_id,
                 start_lsn,
                 self.config,
-                replication_client,
+                replication_client.clone(),
                 self.schema_cache,
+                self.state_store.clone(),
                 self.destination,
-                TableSyncWorkerHook::new(self.table_id, state_clone, self.state_store),
+                TableSyncWorkerHook::new(
+                    self.pipeline_id,
+                    self.table_id,
+                    state_clone,
+                    self.state_store,
+                    replication_client,
+                ),
                 self.shutdown_rx,
             )
             .await?;
 
             // This explicit drop is not strictly necessary but is added to make it extra clear
             // that the scope of the run permit is needed upto here to avoid multiple parallel
-            // connections
+            // connections.
             drop(permit);
 
             Ok(())
@@ -380,21 +395,27 @@ where
 
 #[derive(Debug)]
 struct TableSyncWorkerHook<S> {
+    pipeline_id: PipelineId,
     table_id: TableId,
     table_sync_worker_state: TableSyncWorkerState,
     state_store: S,
+    replication_client: PgReplicationClient,
 }
 
 impl<S> TableSyncWorkerHook<S> {
     fn new(
+        pipeline_id: PipelineId,
         table_id: TableId,
         table_sync_worker_state: TableSyncWorkerState,
         state_store: S,
+        replication_client: PgReplicationClient,
     ) -> Self {
         Self {
+            pipeline_id,
             table_id,
             table_sync_worker_state,
             state_store,
+            replication_client,
         }
     }
 }
@@ -419,6 +440,14 @@ where
 
         // If we caught up with the lsn, we mark this table as `SyncDone` and stop the worker.
         if let TableReplicationPhase::Catchup { lsn } = inner.replication_phase() {
+            // TODO: there is currently a correctness bug in which we mark this table as sync done
+            //  before we actually acknowledged writes to dis  (since they are acknowledged after the
+            //  batch is processed). This is fine for apply workers since progress is tracked after
+            //  the batch is written, but for table sync workers this causes the problem where we might
+            //  crash after marking ourselves as `SynCdONE` and we end up not actually sending that data
+            //  and the apply worker still assumes that data is there so it will be lost forever.
+            //  Postgres doesn't have this problem since they process and acknowledge each commit message
+            //  individually.
             if current_lsn >= lsn {
                 inner
                     .set_phase_with(
@@ -431,12 +460,16 @@ where
             // We drop the lock since we don't need to hold it while cleaning resources.
             drop(inner);
 
-            // TODO: implement cleanup of slot.
-
             info!(
-                "Table sync worker for table {} has caught up with the apply worker, shutting down",
+                "Table sync worker for table {} has caught up with the apply worker, cleaning up replication slot and shutting down",
                 self.table_id
             );
+
+            // We try to delete the replication slot since it's not used anymore. If we fail to delete
+            // it, it will be clean up by a background job since at this point this table worker will
+            // never be restarted again by the main apply worker.
+            let slot_name = get_slot_name(self.pipeline_id, self.worker_type())?;
+            self.replication_client.delete_slot(&slot_name).await?;
 
             return Ok(false);
         }

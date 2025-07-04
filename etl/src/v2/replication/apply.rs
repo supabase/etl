@@ -9,11 +9,12 @@ use crate::v2::replication::client::{PgReplicationClient, PgReplicationError};
 use crate::v2::replication::slot::{get_slot_name, SlotError};
 use crate::v2::replication::stream::{EventsStream, EventsStreamError};
 use crate::v2::schema::cache::SchemaCache;
-use crate::v2::state::store::base::StateStoreError;
+use crate::v2::state::store::base::{StateStore, StateStoreError};
 use crate::v2::workers::apply::ApplyWorkerHookError;
 use crate::v2::workers::base::WorkerType;
 use crate::v2::workers::table_sync::TableSyncWorkerHookError;
 
+use crate::v2::replication::common::get_table_replication_states;
 use config::shared::PipelineConfig;
 use futures::StreamExt;
 use postgres::schema::TableId;
@@ -26,7 +27,7 @@ use std::time::Duration;
 use thiserror::Error;
 use tokio::pin;
 use tokio_postgres::types::PgLsn;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 /// The amount of milliseconds that pass between one refresh and the other of the system, in case no
 /// events or shutdown signal are received.
@@ -208,17 +209,19 @@ impl ApplyLoopState {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub async fn start_apply_loop<D, T>(
+pub async fn start_apply_loop<S, D, T>(
     pipeline_id: PipelineId,
     start_lsn: PgLsn,
     config: Arc<PipelineConfig>,
     replication_client: PgReplicationClient,
     schema_cache: SchemaCache,
+    state_store: S,
     destination: D,
     hook: T,
     mut shutdown_rx: ShutdownRx,
 ) -> Result<ApplyLoopResult, ApplyLoopError>
 where
+    S: StateStore + Clone + Send + Sync + 'static,
     D: Destination + Clone + Send + 'static,
     T: ApplyLoopHook,
     ApplyLoopError: From<<T as ApplyLoopHook>::Error>,
@@ -345,9 +348,42 @@ where
                         break Ok(ApplyLoopResult::ApplyStopped);
                     }
                 }
+
+                // If we are an apply worker, we can perform slots cleanup for all those slots that
+                // were not cleaned after the table sync worker terminated. This could happen in case
+                // there was a failure in a table sync worker while terminating.
+                if let WorkerType::Apply = hook.worker_type() {
+                    cleanup_unused_table_sync_worker_slots(&state_store).await?;
+                }
             }
         }
     }
+}
+
+async fn cleanup_unused_table_sync_worker_slots<S>(
+    pipeline_id: PipelineId,
+    replication_client: &PgReplicationClient,
+    state_store: &S,
+) -> Result<(), ApplyLoopError>
+where
+    S: StateStore + Clone + Send + Sync + 'static,
+{
+    let done_table_replication_states = get_table_replication_states(state_store, true).await?;
+
+    for table_id in done_table_replication_states.keys() {
+        let slot_name = get_slot_name(
+            pipeline_id,
+            WorkerType::TableSync {
+                table_id: *table_id,
+            },
+        )?;
+        // In case we fail the deletion, we emit a warning but do not fail the entire worker.
+        if let Err(err) = replication_client.delete_slot(&slot_name).await {
+            warn!("Could not delete replication slot {slot_name}: {err}")
+        }
+    }
+
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]

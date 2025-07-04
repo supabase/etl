@@ -3,6 +3,7 @@ use crate::v2::destination::base::Destination;
 use crate::v2::pipeline::PipelineId;
 use crate::v2::replication::apply::{start_apply_loop, ApplyLoopError, ApplyLoopHook};
 use crate::v2::replication::client::{PgReplicationClient, PgReplicationError};
+use crate::v2::replication::common::get_table_replication_states;
 use crate::v2::replication::slot::{get_slot_name, SlotError};
 use crate::v2::schema::cache::SchemaCache;
 use crate::v2::state::store::base::{StateStore, StateStoreError};
@@ -130,6 +131,7 @@ where
                 self.config.clone(),
                 self.replication_client.clone(),
                 self.schema_cache.clone(),
+                self.state_store.clone(),
                 self.destination.clone(),
                 ApplyWorkerHook::new(
                     self.pipeline_id,
@@ -162,14 +164,14 @@ async fn get_start_lsn(
 ) -> Result<PgLsn, ApplyWorkerError> {
     let slot_name = get_slot_name(pipeline_id, WorkerType::Apply)?;
     // TODO: validate that we only create the slot when we first start replication which
-    // means when all tables are in the Init state. In any other case we should raise an
-    // error because that means the apply slot was deleted and creating a fresh slot now
-    // could cause inconsistent data to be read.
-    // Addendum: this might be hard to detect in all cases. E.g. what if the apply worker
-    // starts bunch of table sync wokers and before creating a slot the process crashes?
-    // In this case, the apply worker slot is missing not because someone deleted it but
-    // because it was never created in the first place. The answer here might be to create
-    // the apply worker slot as the first thing, before starting table sync workers.
+    //  means when all tables are in the Init state. In any other case we should raise an
+    //  error because that means the apply slot was deleted and creating a fresh slot now
+    //  could cause inconsistent data to be read.
+    //  Addendum: this might be hard to detect in all cases. E.g. what if the apply worker
+    //  starts bunch of table sync workers and before creating a slot the process crashes?
+    //  In this case, the apply worker slot is missing not because someone deleted it but
+    //  because it was never created in the first place. The answer here might be to create
+    //  the apply worker slot as the first thing, before starting table sync workers.
     let slot = replication_client.get_or_create_slot(&slot_name).await?;
     Ok(slot.get_start_lsn())
 }
@@ -302,15 +304,6 @@ where
 
         Ok(true)
     }
-
-    async fn active_table_replication_states(
-        &self,
-    ) -> Result<HashMap<TableId, TableReplicationPhase>, ApplyWorkerHookError> {
-        let mut table_replication_states = self.state_store.get_table_replication_states().await?;
-        table_replication_states.retain(|_table_id, state| !state.as_type().is_done());
-
-        Ok(table_replication_states)
-    }
 }
 
 impl<S, D> ApplyLoopHook for ApplyWorkerHook<S, D>
@@ -321,9 +314,10 @@ where
     type Error = ApplyWorkerHookError;
 
     async fn initialize(&self) -> Result<(), Self::Error> {
-        let table_replication_states = self.active_table_replication_states().await?;
+        let active_table_replication_states =
+            get_table_replication_states(&self.state_store, false).await?;
 
-        for table_id in table_replication_states.keys() {
+        for table_id in active_table_replication_states.keys() {
             let table_sync_worker_state = {
                 let pool = self.pool.read().await;
                 pool.get_active_worker_state(*table_id)
@@ -343,13 +337,14 @@ where
     }
 
     async fn process_syncing_tables(&self, current_lsn: PgLsn) -> Result<bool, Self::Error> {
-        let table_replication_states = self.active_table_replication_states().await?;
+        let active_table_replication_states =
+            get_table_replication_states(&self.state_store, false).await?;
         info!(
             "Processing syncing tables for apply worker with LSN {}",
             current_lsn
         );
 
-        for (table_id, table_replication_phase) in table_replication_states {
+        for (table_id, table_replication_phase) in active_table_replication_states {
             // We read the state store state first, if we don't find `SyncDone` we will attempt to
             // read the shared state which can contain also non-persisted states.
             match table_replication_phase {
