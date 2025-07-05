@@ -206,7 +206,9 @@ async fn test_table_schema_copy_across_multiple_connections() {
     let first_client = PgReplicationClient::connect(database.config.clone())
         .await
         .unwrap();
-    let second_client = first_client.duplicate().await.unwrap();
+    let second_client = PgReplicationClient::connect(database.config.clone())
+        .await
+        .unwrap();
 
     let age_schema = ColumnSchema {
         name: "age".to_string(),

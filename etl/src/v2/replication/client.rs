@@ -183,21 +183,13 @@ impl PgReplicationSlotTransaction {
     }
 }
 
-/// Internal state for a PostgreSQL replication client.
-#[derive(Debug)]
-struct ClientInner {
-    client: Client,
-    pg_connection_config: PgConnectionConfig,
-    with_tls: bool,
-}
-
 /// A client for interacting with PostgreSQL's logical replication features.
 ///
 /// This client provides methods for creating replication slots, managing transactions,
 /// and streaming changes from the database.
 #[derive(Debug, Clone)]
 pub struct PgReplicationClient {
-    inner: Arc<ClientInner>,
+    client: Arc<Client>,
 }
 
 /// Update the type alias to use the new error type
@@ -227,13 +219,8 @@ impl PgReplicationClient {
 
         info!("Successfully connected to Postgres without TLS");
 
-        let inner = ClientInner {
-            client,
-            pg_connection_config,
-            with_tls: false,
-        };
         Ok(PgReplicationClient {
-            inner: Arc::new(inner),
+            client: Arc::new(client),
         })
     }
 
@@ -263,13 +250,8 @@ impl PgReplicationClient {
 
         info!("Successfully connected to Postgres with TLS");
 
-        let inner = ClientInner {
-            client,
-            pg_connection_config,
-            with_tls: true,
-        };
         Ok(PgReplicationClient {
-            inner: Arc::new(inner),
+            client: Arc::new(client),
         })
     }
 
@@ -301,7 +283,7 @@ impl PgReplicationClient {
             quote_literal(slot_name)
         );
 
-        let results = self.inner.client.simple_query(&query).await?;
+        let results = self.client.simple_query(&query).await?;
         for result in results {
             if let SimpleQueryMessage::Row(row) = result {
                 let confirmed_flush_lsn = Self::get_row_value::<PgLsn>(
@@ -354,7 +336,7 @@ impl PgReplicationClient {
             quote_identifier(slot_name)
         );
 
-        match self.inner.client.simple_query(&query).await {
+        match self.client.simple_query(&query).await {
             Ok(_) => Ok(()),
             Err(err) => {
                 if let Some(code) = err.code() {
@@ -374,12 +356,7 @@ impl PgReplicationClient {
             "select 1 as exists from pg_publication where pubname = {};",
             quote_literal(publication)
         );
-        for msg in self
-            .inner
-            .client
-            .simple_query(&publication_exists_query)
-            .await?
-        {
+        for msg in self.client.simple_query(&publication_exists_query).await? {
             if let SimpleQueryMessage::Row(_) = msg {
                 return Ok(true);
             }
@@ -398,7 +375,7 @@ impl PgReplicationClient {
         );
 
         let mut table_names = vec![];
-        for msg in self.inner.client.simple_query(&publication_query).await? {
+        for msg in self.client.simple_query(&publication_query).await? {
             if let SimpleQueryMessage::Row(row) = msg {
                 let schema =
                     Self::get_row_value::<String>(&row, "schemaname", "pg_publication_tables")
@@ -428,7 +405,7 @@ impl PgReplicationClient {
         );
 
         let mut table_oids = vec![];
-        for msg in self.inner.client.simple_query(&publication_query).await? {
+        for msg in self.client.simple_query(&publication_query).await? {
             if let SimpleQueryMessage::Row(row) = msg {
                 let oid = Self::get_row_value::<TableId>(&row, "oid", "pg_class").await?;
 
@@ -461,27 +438,11 @@ impl PgReplicationClient {
             options
         );
 
-        let copy_stream = self
-            .inner
-            .client
-            .copy_both_simple::<bytes::Bytes>(&query)
-            .await?;
+        let copy_stream = self.client.copy_both_simple::<bytes::Bytes>(&query).await?;
 
         let stream = LogicalReplicationStream::new(copy_stream);
 
         Ok(stream)
-    }
-
-    /// Duplicates this [`PgReplicationClient`] with another instance that inherits all its
-    /// settings.
-    pub async fn duplicate(&self) -> PgReplicationResult<PgReplicationClient> {
-        let duplicated_client = if self.inner.with_tls {
-            PgReplicationClient::connect_tls(self.inner.pg_connection_config.clone()).await?
-        } else {
-            PgReplicationClient::connect_no_tls(self.inner.pg_connection_config.clone()).await?
-        };
-
-        Ok(duplicated_client)
     }
 
     /// Begins a new transaction with repeatable read isolation level.
@@ -489,8 +450,7 @@ impl PgReplicationClient {
     /// The transaction doesn't make any assumptions about the snapshot in use, since this is a
     /// concern of the statements issued within the transaction.
     async fn begin_tx(&self) -> PgReplicationResult<()> {
-        self.inner
-            .client
+        self.client
             .simple_query("begin read only isolation level repeatable read;")
             .await?;
 
@@ -499,13 +459,13 @@ impl PgReplicationClient {
 
     /// Commits the current transaction.
     async fn commit_tx(&self) -> PgReplicationResult<()> {
-        self.inner.client.simple_query("commit;").await?;
+        self.client.simple_query("commit;").await?;
         Ok(())
     }
 
     /// Rolls back the current transaction.
     async fn rollback_tx(&self) -> PgReplicationResult<()> {
-        self.inner.client.simple_query("rollback;").await?;
+        self.client.simple_query("rollback;").await?;
         Ok(())
     }
 
@@ -531,7 +491,7 @@ impl PgReplicationClient {
             quote_identifier(slot_name),
             snapshot_option
         );
-        match self.inner.client.simple_query(&query).await {
+        match self.client.simple_query(&query).await {
             Ok(results) => {
                 for result in results {
                     if let SimpleQueryMessage::Row(row) = result {
@@ -621,7 +581,7 @@ impl PgReplicationClient {
             where c.oid = {table_id}",
         );
 
-        for message in self.inner.client.simple_query(&table_info_query).await? {
+        for message in self.client.simple_query(&table_info_query).await? {
             if let SimpleQueryMessage::Row(row) = message {
                 let schema_name =
                     Self::get_row_value::<String>(&row, "schema_name", "pg_namespace").await?;
@@ -696,7 +656,7 @@ impl PgReplicationClient {
 
         let mut column_schemas = vec![];
 
-        for message in self.inner.client.simple_query(&column_info_query).await? {
+        for message in self.client.simple_query(&column_info_query).await? {
             if let SimpleQueryMessage::Row(row) = message {
                 let name = Self::get_row_value::<String>(&row, "attname", "pg_attribute").await?;
                 let type_oid = Self::get_row_value::<u32>(&row, "atttypid", "pg_attribute").await?;
@@ -745,7 +705,7 @@ impl PgReplicationClient {
             column_list
         );
 
-        let stream = self.inner.client.copy_out_simple(&copy_query).await?;
+        let stream = self.client.copy_out_simple(&copy_query).await?;
 
         Ok(stream)
     }
