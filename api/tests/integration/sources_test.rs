@@ -8,7 +8,7 @@ use reqwest::StatusCode;
 use telemetry::init_test_tracing;
 
 use crate::{
-    common::test_app::{spawn_test_app, TestApp},
+    common::test_app::{TestApp, spawn_test_app},
     integration::tenants_test::create_tenant,
 };
 

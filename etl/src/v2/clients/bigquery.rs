@@ -4,10 +4,10 @@ use gcp_bigquery_client::google::cloud::bigquery::storage::v1::RowError;
 use gcp_bigquery_client::storage::{ColumnMode, StorageApi};
 use gcp_bigquery_client::yup_oauth2::parse_service_account_key;
 use gcp_bigquery_client::{
+    Client,
     error::BQError,
     model::{query_request::QueryRequest, query_response::ResultSet},
     storage::{ColumnType, FieldDescriptor, StreamName, TableDescriptor},
-    Client,
 };
 use postgres::schema::ColumnSchema;
 use std::fmt;
@@ -15,8 +15,8 @@ use thiserror::Error;
 use tokio_postgres::types::Type;
 use tracing::info;
 
-use crate::conversions::table_row::TableRow;
 use crate::conversions::Cell;
+use crate::conversions::table_row::TableRow;
 
 /// Maximum byte size for streaming data to BigQuery.
 const MAX_SIZE_BYTES: usize = 9 * 1024 * 1024;

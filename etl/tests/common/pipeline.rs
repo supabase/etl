@@ -1,9 +1,9 @@
 use config::shared::PgConnectionConfig;
-use etl::pipeline::batching::data_pipeline::{BatchDataPipeline, BatchDataPipelineHandle};
+use etl::pipeline::PipelineAction;
 use etl::pipeline::batching::BatchConfig;
+use etl::pipeline::batching::data_pipeline::{BatchDataPipeline, BatchDataPipelineHandle};
 use etl::pipeline::destinations::BatchDestination;
 use etl::pipeline::sources::postgres::{PostgresSource, TableNamesFrom};
-use etl::pipeline::PipelineAction;
 use postgres::schema::TableName;
 use std::time::Duration;
 use tokio::task::JoinHandle;
@@ -50,7 +50,7 @@ pub async fn spawn_pg_pipeline<Snk: BatchDestination>(
     // and the tests run slow due to small amount of data in tests.
     let batch_config = BatchConfig::new(1, Duration::from_secs(10));
 
-    let pipeline = match mode {
+    match mode {
         PipelineMode::CopyTable { table_names } => {
             let source = PostgresSource::new(
                 config.clone(),
@@ -78,9 +78,7 @@ pub async fn spawn_pg_pipeline<Snk: BatchDestination>(
             let action = PipelineAction::CdcOnly;
             BatchDataPipeline::new(source, destination, action, batch_config)
         }
-    };
-
-    pipeline
+    }
 }
 
 /// Creates and spawns a new asynchronous PostgreSQL replication pipeline.

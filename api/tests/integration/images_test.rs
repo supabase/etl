@@ -5,7 +5,7 @@ use api::routes::images::{
 use reqwest::StatusCode;
 use telemetry::init_test_tracing;
 
-use crate::common::test_app::{spawn_test_app, TestApp};
+use crate::common::test_app::{TestApp, spawn_test_app};
 
 pub async fn create_default_image(app: &TestApp) -> i64 {
     create_image_with_name(app, "some/image".to_string(), true).await

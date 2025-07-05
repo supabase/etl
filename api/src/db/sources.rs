@@ -1,5 +1,5 @@
-use config::shared::{PgConnectionConfig, TlsConfig};
 use config::SerializableSecretString;
+use config::shared::{PgConnectionConfig, TlsConfig};
 use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 use sqlx::{PgPool, Postgres, Transaction};
@@ -7,12 +7,12 @@ use std::fmt::Debug;
 use thiserror::Error;
 
 use crate::db::serde::{
-    decrypt_and_deserialize_from_value, encrypt_and_serialize, DbDeserializationError,
-    DbSerializationError,
+    DbDeserializationError, DbSerializationError, decrypt_and_deserialize_from_value,
+    encrypt_and_serialize,
 };
 use crate::encryption::{
-    decrypt_text, encrypt_text, Decrypt, DecryptionError, Encrypt, EncryptedValue, EncryptionError,
-    EncryptionKey,
+    Decrypt, DecryptionError, Encrypt, EncryptedValue, EncryptionError, EncryptionKey,
+    decrypt_text, encrypt_text,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

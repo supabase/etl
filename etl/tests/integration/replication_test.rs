@@ -1,13 +1,13 @@
 use etl::v2::replication::client::{PgReplicationClient, PgReplicationError};
 use futures::StreamExt;
 use postgres::schema::ColumnSchema;
-use postgres::tokio::test_utils::{id_column_schema, TableModification};
-use postgres_replication::protocol::{LogicalReplicationMessage, ReplicationMessage};
+use postgres::tokio::test_utils::{TableModification, id_column_schema};
 use postgres_replication::LogicalReplicationStream;
+use postgres_replication::protocol::{LogicalReplicationMessage, ReplicationMessage};
 use telemetry::init_test_tracing;
 use tokio::pin;
-use tokio_postgres::types::{ToSql, Type};
 use tokio_postgres::CopyOutStream;
+use tokio_postgres::types::{ToSql, Type};
 
 use crate::common::database::{spawn_database, test_table_name};
 use crate::common::pipeline::test_slot_name;

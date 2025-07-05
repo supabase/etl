@@ -1,9 +1,8 @@
 use actix_web::{
-    delete, get,
-    http::{header::ContentType, StatusCode},
+    HttpResponse, Responder, ResponseError, delete, get,
+    http::{StatusCode, header::ContentType},
     post, put,
     web::{Data, Json, Path},
-    HttpResponse, Responder, ResponseError,
 };
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;

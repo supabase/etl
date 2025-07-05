@@ -2,13 +2,13 @@ use api::routes::destinations::{
     CreateDestinationRequest, CreateDestinationResponse, ReadDestinationResponse,
     ReadDestinationsResponse, UpdateDestinationRequest,
 };
-use config::shared::DestinationConfig;
 use config::SerializableSecretString;
+use config::shared::DestinationConfig;
 use reqwest::StatusCode;
 use telemetry::init_test_tracing;
 
 use crate::{
-    common::test_app::{spawn_test_app, TestApp},
+    common::test_app::{TestApp, spawn_test_app},
     integration::tenants_test::create_tenant,
 };
 

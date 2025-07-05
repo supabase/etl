@@ -1,11 +1,11 @@
 use std::{net::TcpListener, sync::Arc};
 
-use actix_web::{dev::Server, web, App, HttpServer};
+use actix_web::{App, HttpServer, dev::Server, web};
 use actix_web_httpauth::middleware::HttpAuthentication;
-use aws_lc_rs::aead::{RandomizedNonceKey, AES_256_GCM};
-use base64::{prelude::BASE64_STANDARD, Engine};
+use aws_lc_rs::aead::{AES_256_GCM, RandomizedNonceKey};
+use base64::{Engine, prelude::BASE64_STANDARD};
 use config::shared::{IntoConnectOptions, PgConnectionConfig};
-use sqlx::{postgres::PgPoolOptions, PgPool};
+use sqlx::{PgPool, postgres::PgPoolOptions};
 use tracing_actix_web::TracingLogger;
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
@@ -18,46 +18,46 @@ use crate::{
     k8s_client::HttpK8sClient,
     routes::{
         destinations::{
-            create_destination, delete_destination, read_all_destinations, read_destination,
-            update_destination, CreateDestinationRequest, CreateDestinationResponse,
-            ReadDestinationResponse, ReadDestinationsResponse, UpdateDestinationRequest,
+            CreateDestinationRequest, CreateDestinationResponse, ReadDestinationResponse,
+            ReadDestinationsResponse, UpdateDestinationRequest, create_destination,
+            delete_destination, read_all_destinations, read_destination, update_destination,
         },
         destinations_pipelines::{
-            create_destination_and_pipeline, update_destination_and_pipeline,
             CreateDestinationPipelineRequest, CreateDestinationPipelineResponse,
-            UpdateDestinationPipelineRequest,
+            UpdateDestinationPipelineRequest, create_destination_and_pipeline,
+            update_destination_and_pipeline,
         },
         health_check::health_check,
         images::{
-            create_image, delete_image, read_all_images, read_image, update_image,
             CreateImageRequest, CreateImageResponse, ReadImageResponse, ReadImagesResponse,
-            UpdateImageRequest,
+            UpdateImageRequest, create_image, delete_image, read_all_images, read_image,
+            update_image,
         },
         pipelines::{
-            create_pipeline, delete_pipeline, get_pipeline_status, read_all_pipelines,
-            read_pipeline, start_pipeline, stop_all_pipelines, stop_pipeline, update_pipeline,
             CreatePipelineRequest, CreatePipelineResponse, ReadPipelineResponse,
-            ReadPipelinesResponse, UpdatePipelineRequest,
+            ReadPipelinesResponse, UpdatePipelineRequest, create_pipeline, delete_pipeline,
+            get_pipeline_status, read_all_pipelines, read_pipeline, start_pipeline,
+            stop_all_pipelines, stop_pipeline, update_pipeline,
         },
         sources::{
-            create_source, delete_source,
+            CreateSourceRequest, CreateSourceResponse, ReadSourceResponse, ReadSourcesResponse,
+            UpdateSourceRequest, create_source, delete_source,
             publications::{
-                create_publication, delete_publication, read_all_publications, read_publication,
-                update_publication, CreatePublicationRequest, UpdatePublicationRequest,
+                CreatePublicationRequest, UpdatePublicationRequest, create_publication,
+                delete_publication, read_all_publications, read_publication, update_publication,
             },
             read_all_sources, read_source,
             tables::read_table_names,
-            update_source, CreateSourceRequest, CreateSourceResponse, ReadSourceResponse,
-            ReadSourcesResponse, UpdateSourceRequest,
+            update_source,
         },
         tenants::{
+            CreateOrUpdateTenantRequest, CreateOrUpdateTenantResponse, CreateTenantRequest,
+            CreateTenantResponse, ReadTenantResponse, ReadTenantsResponse, UpdateTenantRequest,
             create_or_update_tenant, create_tenant, delete_tenant, read_all_tenants, read_tenant,
-            update_tenant, CreateOrUpdateTenantRequest, CreateOrUpdateTenantResponse,
-            CreateTenantRequest, CreateTenantResponse, ReadTenantResponse, ReadTenantsResponse,
-            UpdateTenantRequest,
+            update_tenant,
         },
         tenants_sources::{
-            create_tenant_and_source, CreateTenantSourceRequest, CreateTenantSourceResponse,
+            CreateTenantSourceRequest, CreateTenantSourceResponse, create_tenant_and_source,
         },
     },
     span_builder::ApiRootSpanBuilder,

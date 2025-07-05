@@ -1,14 +1,13 @@
 use std::{collections::HashSet, path::Path};
 
 use duckdb::{
-    params_from_iter,
+    Config, Connection, ToSql, params_from_iter,
     types::{ToSqlOutput, Value},
-    Config, Connection, ToSql,
 };
 use postgres::schema::{ColumnSchema, TableId, TableName, TableSchema};
 use tokio_postgres::types::{PgLsn, Type};
 
-use crate::conversions::{table_row::TableRow, ArrayCell, Cell};
+use crate::conversions::{ArrayCell, Cell, table_row::TableRow};
 
 pub struct DuckDbClient {
     conn: Connection,
@@ -176,8 +175,7 @@ impl DuckDbClient {
     }
 
     pub fn table_exists(&self, table_name: &TableName) -> Result<bool, duckdb::Error> {
-        let query =
-            "select * from information_schema.tables where table_catalog = ? and table_schema = ? and table_name = ?;";
+        let query = "select * from information_schema.tables where table_catalog = ? and table_schema = ? and table_name = ?;";
         let mut stmt = self.conn.prepare(query)?;
         let exists = stmt.exists([&self.current_database, &table_name.schema, &table_name.name])?;
         Ok(exists)

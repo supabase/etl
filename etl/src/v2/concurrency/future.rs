@@ -1,5 +1,5 @@
-use futures::future::{BoxFuture, CatchUnwind};
 use futures::FutureExt;
+use futures::future::{BoxFuture, CatchUnwind};
 use pin_project_lite::pin_project;
 use std::any::Any;
 use std::future::Future;

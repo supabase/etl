@@ -12,9 +12,9 @@ use crate::v2::concurrency::future::ReactiveFuture;
 use crate::v2::concurrency::shutdown::{ShutdownResult, ShutdownRx};
 use crate::v2::destination::base::Destination;
 use crate::v2::pipeline::PipelineId;
-use crate::v2::replication::apply::{start_apply_loop, ApplyLoopError, ApplyLoopHook};
+use crate::v2::replication::apply::{ApplyLoopError, ApplyLoopHook, start_apply_loop};
 use crate::v2::replication::client::{PgReplicationClient, PgReplicationError};
-use crate::v2::replication::table_sync::{start_table_sync, TableSyncError, TableSyncResult};
+use crate::v2::replication::table_sync::{TableSyncError, TableSyncResult, start_table_sync};
 use crate::v2::schema::cache::SchemaCache;
 use crate::v2::state::store::base::{StateStore, StateStoreError};
 use crate::v2::state::table::{TableReplicationPhase, TableReplicationPhaseType};
@@ -337,7 +337,7 @@ where
 
             let start_lsn = match result {
                 Ok(TableSyncResult::SyncStopped | TableSyncResult::SyncNotRequired) => {
-                    return Ok(())
+                    return Ok(());
                 }
                 Ok(TableSyncResult::SyncCompleted { start_lsn }) => start_lsn,
                 Err(err) => return Err(err.into()),

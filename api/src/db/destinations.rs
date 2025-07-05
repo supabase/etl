@@ -1,5 +1,5 @@
-use config::shared::DestinationConfig;
 use config::SerializableSecretString;
+use config::shared::DestinationConfig;
 use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 use sqlx::{PgPool, Postgres, Transaction};
@@ -7,12 +7,12 @@ use std::fmt::Debug;
 use thiserror::Error;
 
 use crate::db::serde::{
-    decrypt_and_deserialize_from_value, encrypt_and_serialize, DbDeserializationError,
-    DbSerializationError,
+    DbDeserializationError, DbSerializationError, decrypt_and_deserialize_from_value,
+    encrypt_and_serialize,
 };
 use crate::encryption::{
-    decrypt_text, encrypt_text, Decrypt, DecryptionError, Encrypt, EncryptedValue, EncryptionError,
-    EncryptionKey,
+    Decrypt, DecryptionError, Encrypt, EncryptedValue, EncryptionError, EncryptionKey,
+    decrypt_text, encrypt_text,
 };
 
 impl Encrypt<EncryptedDestinationConfig> for DestinationConfig {
@@ -300,8 +300,8 @@ pub async fn destination_exists(
 #[cfg(test)]
 mod tests {
     use aws_lc_rs::aead::RandomizedNonceKey;
-    use config::shared::DestinationConfig;
     use config::SerializableSecretString;
+    use config::shared::DestinationConfig;
 
     use crate::db::destinations::EncryptedDestinationConfig;
     use crate::db::serde::{decrypt_and_deserialize_from_value, encrypt_and_serialize};

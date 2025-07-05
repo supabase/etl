@@ -3,9 +3,9 @@ use std::{collections::HashMap, sync::Arc};
 use config::shared::{IntoConnectOptions, PgConnectionConfig};
 use postgres::schema::TableId;
 use sqlx::{
-    postgres::{types::Oid as SqlxTableId, PgConnectOptions, PgPoolOptions},
-    prelude::{FromRow, Type},
     PgPool,
+    postgres::{PgConnectOptions, PgPoolOptions, types::Oid as SqlxTableId},
+    prelude::{FromRow, Type},
 };
 use thiserror::Error;
 use tokio::sync::RwLock;
@@ -52,7 +52,7 @@ impl TryFrom<TableReplicationPhase> for (TableState, Option<String>) {
             TableReplicationPhase::Ready => (TableState::Ready, None),
             TableReplicationPhase::Skipped => (TableState::Skipped, None),
             TableReplicationPhase::SyncWait | TableReplicationPhase::Catchup { .. } => {
-                return Err(ToTableStateError::InMemoryPhase)
+                return Err(ToTableStateError::InMemoryPhase);
             }
         })
     }

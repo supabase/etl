@@ -7,13 +7,13 @@ use std::{
 
 use async_trait::async_trait;
 use config::shared::PgConnectionConfig;
-use futures::{ready, Stream};
+use futures::{Stream, ready};
 use pin_project_lite::pin_project;
 use postgres::schema::{ColumnSchema, TableId, TableName, TableSchema};
 use postgres_replication::LogicalReplicationStream;
 use rustls::pki_types::CertificateDer;
 use thiserror::Error;
-use tokio_postgres::{types::PgLsn, CopyOutStream};
+use tokio_postgres::{CopyOutStream, types::PgLsn};
 use tracing::info;
 
 use crate::{

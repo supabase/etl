@@ -1,6 +1,6 @@
 use pg_escape::{quote_identifier, quote_literal};
 use serde::Serialize;
-use sqlx::{postgres::PgConnectOptions, Connection, Executor, PgConnection, Row};
+use sqlx::{Connection, Executor, PgConnection, Row, postgres::PgConnectOptions};
 use std::collections::HashMap;
 use thiserror::Error;
 use utoipa::ToSchema;

@@ -1,6 +1,6 @@
+use crate::conversions::Cell;
 use crate::conversions::table_row::TableRow;
 use crate::conversions::text::{FromTextError, TextFormatConverter};
-use crate::conversions::Cell;
 use crate::v2::schema::cache::SchemaCache;
 use crate::v2::state::store::base::StateStoreError;
 use core::str;
@@ -256,7 +256,7 @@ fn convert_tuple_to_row(
                 TextFormatConverter::default_value(&column_schema.typ)
             }
             protocol::TupleData::Binary(_) => {
-                return Err(EventConversionError::BinaryFormatNotSupported)
+                return Err(EventConversionError::BinaryFormatNotSupported);
             }
             protocol::TupleData::Text(bytes) => {
                 let str = str::from_utf8(&bytes[..])?;

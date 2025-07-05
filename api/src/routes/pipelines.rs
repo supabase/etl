@@ -1,9 +1,8 @@
 use actix_web::{
-    delete, get,
-    http::{header::ContentType, StatusCode},
+    HttpRequest, HttpResponse, Responder, ResponseError, delete, get,
+    http::{StatusCode, header::ContentType},
     post,
     web::{Data, Json, Path},
-    HttpRequest, HttpResponse, Responder, ResponseError,
 };
 use config::shared::{
     DestinationConfig, PgConnectionConfig, PipelineConfig as SharedPipelineConfig,
@@ -16,16 +15,16 @@ use thiserror::Error;
 use utoipa::ToSchema;
 
 use crate::db;
-use crate::db::destinations::{destination_exists, Destination, DestinationsDbError};
+use crate::db::destinations::{Destination, DestinationsDbError, destination_exists};
 use crate::db::images::{Image, ImagesDbError};
 use crate::db::pipelines::{Pipeline, PipelineConfig, PipelinesDbError};
 use crate::db::replicators::{Replicator, ReplicatorsDbError};
-use crate::db::sources::{source_exists, Source, SourceConfig, SourcesDbError};
+use crate::db::sources::{Source, SourceConfig, SourcesDbError, source_exists};
 use crate::encryption::EncryptionKey;
 use crate::k8s_client::{
     HttpK8sClient, K8sClient, K8sError, PodPhase, TRUSTED_ROOT_CERT_CONFIG_MAP_NAME,
 };
-use crate::routes::{extract_tenant_id, ErrorMessage, TenantIdError};
+use crate::routes::{ErrorMessage, TenantIdError, extract_tenant_id};
 use secrecy::ExposeSecret;
 
 #[derive(Debug, Error)]

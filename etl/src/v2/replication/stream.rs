@@ -1,15 +1,15 @@
-use futures::{ready, Stream};
+use futures::{Stream, ready};
 use pin_project_lite::pin_project;
 use postgres::schema::ColumnSchema;
 use postgres::time::POSTGRES_EPOCH;
-use postgres_replication::protocol::{LogicalReplicationMessage, ReplicationMessage};
 use postgres_replication::LogicalReplicationStream;
+use postgres_replication::protocol::{LogicalReplicationMessage, ReplicationMessage};
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant, SystemTimeError};
 use thiserror::Error;
-use tokio_postgres::types::PgLsn;
 use tokio_postgres::CopyOutStream;
+use tokio_postgres::types::PgLsn;
 
 use crate::conversions::table_row::{TableRow, TableRowConversionError, TableRowConverter};
 

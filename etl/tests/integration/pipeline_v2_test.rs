@@ -17,8 +17,8 @@ use crate::common::state_store::{
 };
 use crate::common::test_destination_wrapper::TestDestinationWrapper;
 use crate::common::test_schema::{
-    build_expected_orders_inserts, build_expected_users_inserts, get_n_integers_sum,
-    get_users_age_sum_from_rows, insert_mock_data, setup_test_database_schema, TableSelection,
+    TableSelection, build_expected_orders_inserts, build_expected_users_inserts,
+    get_n_integers_sum, get_users_age_sum_from_rows, insert_mock_data, setup_test_database_schema,
 };
 
 // TODO: find a way to inject errors in a way that is predictable.

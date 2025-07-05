@@ -1,7 +1,7 @@
-use actix_web::{dev::ServiceRequest, web::Data, Error};
+use actix_web::{Error, dev::ServiceRequest, web::Data};
 use actix_web_httpauth::extractors::{
-    bearer::{BearerAuth, Config},
     AuthenticationError,
+    bearer::{BearerAuth, Config},
 };
 use constant_time_eq::constant_time_eq_n;
 

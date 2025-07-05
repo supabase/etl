@@ -2,7 +2,7 @@ use crate::v2::concurrency::shutdown::{ShutdownResult, ShutdownRx};
 use config::shared::BatchConfig;
 use core::pin::Pin;
 use core::task::{Context, Poll};
-use futures::{ready, Future, Stream};
+use futures::{Future, Stream, ready};
 use pin_project_lite::pin_project;
 use std::time::Duration;
 use tracing::info;

@@ -1,6 +1,6 @@
-use futures::{ready, Future, Stream};
+use futures::{Future, Stream, ready};
 use pin_project_lite::pin_project;
-use tokio::time::{sleep, Sleep};
+use tokio::time::{Sleep, sleep};
 
 use super::{BatchBoundaryV1, BatchConfig};
 use core::pin::Pin;

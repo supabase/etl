@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use base64::{prelude::BASE64_STANDARD, Engine};
+use base64::{Engine, prelude::BASE64_STANDARD};
 use k8s_openapi::api::{
     apps::v1::StatefulSet,
     core::v1::{ConfigMap, Pod, Secret},
@@ -9,8 +9,8 @@ use thiserror::Error;
 use tracing::*;
 
 use kube::{
-    api::{Api, DeleteParams, Patch, PatchParams},
     Client,
+    api::{Api, DeleteParams, Patch, PatchParams},
 };
 
 #[derive(Debug, Error)]

@@ -5,15 +5,15 @@ use std::{
 };
 
 use thiserror::Error;
-use tracing::subscriber::{set_global_default, SetGlobalDefaultError};
+use tracing::subscriber::{SetGlobalDefaultError, set_global_default};
 use tracing_appender::{
     non_blocking::WorkerGuard,
     rolling::{self, InitError},
 };
-use tracing_log::{log_tracer::SetLoggerError, LogTracer};
+use tracing_log::{LogTracer, log_tracer::SetLoggerError};
 use tracing_subscriber::{
-    fmt::{self, format::FmtSpan},
     EnvFilter, FmtSubscriber,
+    fmt::{self, format::FmtSpan},
 };
 
 const DEV_ENV_NAME: &str = "dev";

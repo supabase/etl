@@ -1,9 +1,8 @@
 use actix_web::{
-    delete, get,
-    http::{header::ContentType, StatusCode},
+    HttpRequest, HttpResponse, Responder, ResponseError, delete, get,
+    http::{StatusCode, header::ContentType},
     post,
     web::{Data, Json, Path},
-    HttpRequest, HttpResponse, Responder, ResponseError,
 };
 use config::shared::DestinationConfig;
 use serde::{Deserialize, Serialize};
@@ -14,7 +13,7 @@ use utoipa::ToSchema;
 use crate::db;
 use crate::db::destinations::DestinationsDbError;
 use crate::encryption::EncryptionKey;
-use crate::routes::{extract_tenant_id, ErrorMessage, TenantIdError};
+use crate::routes::{ErrorMessage, TenantIdError, extract_tenant_id};
 
 #[derive(Debug, Error)]
 pub enum DestinationError {

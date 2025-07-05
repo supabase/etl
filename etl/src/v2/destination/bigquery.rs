@@ -9,8 +9,8 @@ use tokio::sync::RwLock;
 use tokio_postgres::types::Type;
 use tracing::{info, warn};
 
-use crate::conversions::table_row::TableRow;
 use crate::conversions::Cell;
+use crate::conversions::table_row::TableRow;
 use crate::v2::clients::bigquery::{BigQueryClient, BigQueryClientError, BigQueryOperationType};
 use crate::v2::conversions::event::{Event, TruncateEvent};
 use crate::v2::destination::base::{Destination, DestinationError};

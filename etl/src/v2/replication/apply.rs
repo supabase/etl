@@ -1,12 +1,12 @@
 use crate::v2::concurrency::shutdown::{ShutdownResult, ShutdownRx};
 use crate::v2::concurrency::stream::BatchStream;
 use crate::v2::conversions::event::{
-    convert_message_to_event, Event, EventConversionError, EventType,
+    Event, EventConversionError, EventType, convert_message_to_event,
 };
 use crate::v2::destination::base::{Destination, DestinationError};
 use crate::v2::pipeline::PipelineId;
 use crate::v2::replication::client::{PgReplicationClient, PgReplicationError};
-use crate::v2::replication::slot::{get_slot_name, SlotError};
+use crate::v2::replication::slot::{SlotError, get_slot_name};
 use crate::v2::replication::stream::{EventsStream, EventsStreamError};
 use crate::v2::schema::cache::SchemaCache;
 use crate::v2::state::store::base::StateStoreError;
@@ -44,9 +44,7 @@ pub enum ApplyLoopError {
     #[error("A Postgres replication error occurred in the apply loop: {0}")]
     PgReplication(#[from] PgReplicationError),
 
-    #[error(
-        "An error occurred while streaming logical replication changes in the apply loop: {0}"
-    )]
+    #[error("An error occurred while streaming logical replication changes in the apply loop: {0}")]
     LogicalReplicationStreamFailed(#[from] EventsStreamError),
 
     #[error("Could not generate slot name in the apply loop: {0}")]

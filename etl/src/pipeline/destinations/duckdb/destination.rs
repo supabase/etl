@@ -1,6 +1,6 @@
 use std::{collections::HashMap, path::Path};
 
-use tokio::sync::mpsc::{channel, Receiver, Sender};
+use tokio::sync::mpsc::{Receiver, Sender, channel};
 
 use async_trait::async_trait;
 use postgres::schema::{TableId, TableSchema};
@@ -9,12 +9,12 @@ use tokio_postgres::types::PgLsn;
 use crate::{
     clients::duckdb::DuckDbClient,
     conversions::{cdc_event::CdcEvent, table_row::TableRow},
-    pipeline::{destinations::BatchDestination, PipelineResumptionState},
+    pipeline::{PipelineResumptionState, destinations::BatchDestination},
 };
 
 use super::{
-    executor::{DuckDbExecutor, DuckDbExecutorError, DuckDbResponse},
     DuckDbRequest,
+    executor::{DuckDbExecutor, DuckDbExecutorError, DuckDbResponse},
 };
 pub struct DuckDbDestination {
     req_sender: Sender<DuckDbRequest>,
