@@ -105,6 +105,8 @@ const REPLICATOR_CONFIG_FILE_VOLUME_NAME: &str = "replicator-config-file";
 const VECTOR_CONFIG_FILE_VOLUME_NAME: &str = "vector-config-file";
 const LOGS_VOLUME_NAME: &str = "logs";
 pub const TRUSTED_ROOT_CERT_CONFIG_MAP_NAME: &str = "trusted-root-certs-config";
+const PG_PASSWORD_ENV_VAR_NAME: &str = "APP_PIPELINE__PG_CONNECTION__PASSWORD";
+const BIG_QUERY_SA_KEY_ENV_VAR_NAME: &str = "APP_DESTINATION__BIG_QUERY__SERVICE_ACCOUNT_KEY";
 
 impl HttpK8sClient {
     pub async fn new() -> Result<HttpK8sClient, K8sError> {
@@ -354,7 +356,7 @@ impl K8sClient for HttpK8sClient {
                         "value": "prod"
                       },
                       {
-                        "name": "APP_SOURCE__POSTGRES__PASSWORD",
+                        "name": PG_PASSWORD_ENV_VAR_NAME,
                         "valueFrom": {
                           "secretKeyRef": {
                             "name": postgres_secret_name,
@@ -363,7 +365,7 @@ impl K8sClient for HttpK8sClient {
                         }
                       },
                       {
-                        "name": "APP_DESTINATION__BIG_QUERY__SERVICE_ACCOUNT_KEY",
+                        "name": BIG_QUERY_SA_KEY_ENV_VAR_NAME,
                         "valueFrom": {
                           "secretKeyRef": {
                             "name": bq_secret_name,
