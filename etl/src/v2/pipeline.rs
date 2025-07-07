@@ -120,8 +120,7 @@ where
         // We synchronize the relation subscription states with the publication, to make sure we
         // always know which tables to work with. Maybe in the future we also want to react in real
         // time to new relation ids being sent over by the cdc event stream.
-        self.initialize_replication_states(&replication_client)
-            .await?;
+        self.initialize_table_states(&replication_client).await?;
 
         // We create the table sync workers pool to manage all table sync workers in a central place.
         let pool = TableSyncWorkerPool::new();
@@ -158,11 +157,11 @@ where
         Ok(())
     }
 
-    async fn initialize_replication_states(
+    async fn initialize_table_states(
         &self,
         replication_client: &PgReplicationClient,
     ) -> Result<(), PipelineError> {
-        info!("Synchronizing relation subscription states");
+        info!("Initializing table states");
 
         // We need to make sure that the publication exists.
         if !replication_client
@@ -170,7 +169,7 @@ where
             .await?
         {
             error!(
-                "The publication '{}' does not exist in the database",
+                "Publication '{}' does not exist in the database",
                 self.config.publication_name
             );
             return Err(PipelineError::MissingPublication(
@@ -181,6 +180,14 @@ where
         let table_ids = replication_client
             .get_publication_table_ids(&self.config.publication_name)
             .await?;
+        info!(
+            "Got table ids from publication: {}",
+            table_ids
+                .iter()
+                .map(|id| id.to_string())
+                .collect::<Vec<String>>()
+                .join(", ")
+        );
         self.state_store.load_table_replication_states().await?;
         let states = self.state_store.get_table_replication_states().await?;
         for table_id in table_ids {

@@ -20,7 +20,7 @@ use thiserror::Error;
 use tokio::sync::Semaphore;
 use tokio::task::JoinHandle;
 use tokio_postgres::types::PgLsn;
-use tracing::{error, info};
+use tracing::{Instrument, debug, error, info};
 
 #[derive(Debug, Error)]
 pub enum ApplyWorkerError {
@@ -121,6 +121,7 @@ where
     async fn start(self) -> Result<ApplyWorkerHandle, Self::Error> {
         info!("Starting apply worker");
 
+        let apply_worker_span = tracing::info_span!("apply_worker");
         let apply_worker = async move {
             let start_lsn = get_start_lsn(self.pipeline_id, &self.replication_client).await?;
 
@@ -146,7 +147,8 @@ where
             .await?;
 
             Ok(())
-        };
+        }
+        .instrument(apply_worker_span);
 
         let handle = tokio::spawn(apply_worker);
 
@@ -252,7 +254,7 @@ where
         };
 
         let Some(table_sync_worker_state) = table_sync_worker_state else {
-            info!("Creating new sync worker for table {}", table_id);
+            info!("Creating a new table sync worker for table {}", table_id);
             self.start_table_sync_worker(table_id).await?;
 
             return Ok(true);
@@ -344,7 +346,7 @@ where
 
     async fn process_syncing_tables(&self, current_lsn: PgLsn) -> Result<bool, Self::Error> {
         let table_replication_states = self.active_table_replication_states().await?;
-        info!(
+        debug!(
             "Processing syncing tables for apply worker with LSN {}",
             current_lsn
         );
