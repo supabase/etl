@@ -9,12 +9,10 @@ use crate::v2::replication::client::{PgReplicationClient, PgReplicationError};
 use crate::v2::replication::slot::{get_slot_name, SlotError};
 use crate::v2::replication::stream::{EventsStream, EventsStreamError};
 use crate::v2::schema::cache::SchemaCache;
-use crate::v2::state::store::base::{StateStore, StateStoreError};
 use crate::v2::workers::apply::ApplyWorkerHookError;
 use crate::v2::workers::base::WorkerType;
 use crate::v2::workers::table_sync::TableSyncWorkerHookError;
 
-use crate::v2::replication::common::get_table_replication_states;
 use config::shared::PipelineConfig;
 use futures::StreamExt;
 use postgres::schema::TableId;
@@ -27,7 +25,7 @@ use std::time::Duration;
 use thiserror::Error;
 use tokio::pin;
 use tokio_postgres::types::PgLsn;
-use tracing::{error, info, warn};
+use tracing::{error, info};
 
 /// The amount of milliseconds that pass between one refresh and the other of the system, in case no
 /// events or shutdown signal are received.
@@ -52,9 +50,6 @@ pub enum ApplyLoopError {
 
     #[error("Could not generate slot name in the apply loop: {0}")]
     Slot(#[from] SlotError),
-
-    #[error("An error happened in the state store while in the apply loop: {0}")]
-    StateStore(#[from] StateStoreError),
 
     #[error("An error occurred while building an event from a message in the apply loop: {0}")]
     EventConversion(#[from] EventConversionError),
@@ -208,19 +203,17 @@ impl ApplyLoopState {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub async fn start_apply_loop<S, D, T>(
+pub async fn start_apply_loop<D, T>(
     pipeline_id: PipelineId,
     start_lsn: PgLsn,
     config: Arc<PipelineConfig>,
     replication_client: PgReplicationClient,
     schema_cache: SchemaCache,
-    state_store: S,
     destination: D,
     hook: T,
     mut shutdown_rx: ShutdownRx,
 ) -> Result<ApplyLoopResult, ApplyLoopError>
 where
-    S: StateStore + Clone + Send + Sync + 'static,
     D: Destination + Clone + Send + 'static,
     T: ApplyLoopHook,
     ApplyLoopError: From<<T as ApplyLoopHook>::Error>,

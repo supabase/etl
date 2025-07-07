@@ -1,4 +1,3 @@
-use std::future::Future;
 use std::time::Duration;
 use thiserror::Error;
 use tokio::sync::{mpsc, oneshot};

@@ -18,9 +18,7 @@ use etl::v2::workers::base::{WorkerType, WorkerWaitError};
 use postgres::schema::ColumnSchema;
 use postgres::tokio::test_utils::TableModification;
 use rand::random;
-use std::time::Duration;
 use telemetry::init_test_tracing;
-use tokio::time::timeout;
 use tokio_postgres::types::Type;
 
 // TODO: find a way to inject errors in a way that is predictable.
@@ -530,9 +528,7 @@ async fn test_table_copy() {
     users_state_notify.notified().await;
     orders_state_notify.notified().await;
 
-    timeout(Duration::from_secs(3), pipeline.shutdown_and_wait())
-        .await
-        .unwrap();
+    pipeline.shutdown_and_wait().await.unwrap();
 
     // Verify copied data.
     let table_rows = destination.get_table_rows().await;

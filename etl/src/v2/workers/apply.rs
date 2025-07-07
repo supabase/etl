@@ -135,7 +135,6 @@ where
                 self.config.clone(),
                 self.replication_client.clone(),
                 self.schema_cache.clone(),
-                self.state_store.clone(),
                 self.destination.clone(),
                 ApplyWorkerHook::new(
                     self.pipeline_id,

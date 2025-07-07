@@ -14,7 +14,7 @@ use crate::v2::workers::apply::{ApplyWorker, ApplyWorkerError, ApplyWorkerHandle
 use crate::v2::workers::background::{
     BackgroundWorker, BackgroundWorkerError, BackgroundWorkerHandle,
 };
-use crate::v2::workers::base::{Worker, WorkerHandle, WorkerWaitError, WorkerWaitErrors};
+use crate::v2::workers::base::{Worker, WorkerHandle, WorkerWaitErrors};
 use crate::v2::workers::pool::TableSyncWorkerPool;
 
 #[derive(Debug, Error)]

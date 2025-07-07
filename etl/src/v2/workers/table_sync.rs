@@ -4,7 +4,6 @@ use crate::v2::destination::base::Destination;
 use crate::v2::pipeline::PipelineId;
 use crate::v2::replication::apply::{start_apply_loop, ApplyLoopError, ApplyLoopHook};
 use crate::v2::replication::client::{PgReplicationClient, PgReplicationError};
-use crate::v2::replication::slot::{get_slot_name, SlotError};
 use crate::v2::replication::table_sync::{start_table_sync, TableSyncError, TableSyncResult};
 use crate::v2::schema::cache::SchemaCache;
 use crate::v2::state::store::base::{StateStore, StateStoreError};
@@ -49,9 +48,6 @@ pub enum TableSyncWorkerError {
 pub enum TableSyncWorkerHookError {
     #[error("An error occurred while updating the table sync worker state: {0}")]
     TableSyncWorkerState(#[from] TableSyncWorkerStateError),
-
-    #[error("Could not generate slot name in the apply loop: {0}")]
-    Slot(#[from] SlotError),
 
     #[error("A Postgres replication error occurred in the table sync worker: {0}")]
     PgReplication(#[from] PgReplicationError),
@@ -330,6 +326,10 @@ where
                 }
             };
 
+            // We create a new replication connection specifically for this table sync worker.
+            //
+            // Note that this connection must be tied to the lifetime of this worker, otherwise
+            // there will be problems when cleaning up the replication slot.
             let replication_client =
                 PgReplicationClient::connect(self.config.pg_connection.clone()).await?;
 
@@ -360,10 +360,8 @@ where
                 self.config,
                 replication_client,
                 self.schema_cache,
-                self.state_store.clone(),
                 self.destination,
                 TableSyncWorkerHook::new(
-                    self.pipeline_id,
                     self.table_id,
                     state_clone,
                     self.state_store,
@@ -385,7 +383,7 @@ where
                 ))
                 .await;
             if let Err(err) = result {
-                error!("Failed to delete the replication slot of the table sync worker {}, it will be deleted in the future by the periodic cleanup job", self.table_id)
+                error!("Failed to delete the replication slot of the table sync worker {}, it will be deleted in the future by the periodic cleanup job: {err}", self.table_id)
             }
 
             // This explicit drop is not strictly necessary but is added to make it extra clear
@@ -413,7 +411,6 @@ where
 
 #[derive(Debug)]
 struct TableSyncWorkerHook<S> {
-    pipeline_id: PipelineId,
     table_id: TableId,
     table_sync_worker_state: TableSyncWorkerState,
     state_store: S,
@@ -421,13 +418,11 @@ struct TableSyncWorkerHook<S> {
 
 impl<S> TableSyncWorkerHook<S> {
     fn new(
-        pipeline_id: PipelineId,
         table_id: TableId,
         table_sync_worker_state: TableSyncWorkerState,
         state_store: S,
     ) -> Self {
         Self {
-            pipeline_id,
             table_id,
             table_sync_worker_state,
             state_store,
