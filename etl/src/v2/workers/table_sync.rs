@@ -1,3 +1,13 @@
+use config::shared::PipelineConfig;
+use postgres::schema::TableId;
+use std::sync::Arc;
+use std::time::Duration;
+use thiserror::Error;
+use tokio::sync::{AcquireError, Notify, RwLock, RwLockReadGuard, Semaphore};
+use tokio::task::JoinHandle;
+use tokio_postgres::types::PgLsn;
+use tracing::{error, info, warn};
+
 use crate::v2::concurrency::future::ReactiveFuture;
 use crate::v2::concurrency::shutdown::{ShutdownResult, ShutdownRx};
 use crate::v2::destination::base::Destination;
@@ -11,15 +21,6 @@ use crate::v2::state::table::{TableReplicationPhase, TableReplicationPhaseType};
 use crate::v2::workers::background::{BackgroundWorkerMessage, BackgroundWorkerState};
 use crate::v2::workers::base::{Worker, WorkerHandle, WorkerType, WorkerWaitError};
 use crate::v2::workers::pool::TableSyncWorkerPool;
-use config::shared::PipelineConfig;
-use postgres::schema::TableId;
-use std::sync::Arc;
-use std::time::Duration;
-use thiserror::Error;
-use tokio::sync::{AcquireError, Notify, RwLock, RwLockReadGuard, Semaphore};
-use tokio::task::JoinHandle;
-use tokio_postgres::types::PgLsn;
-use tracing::{error, info, warn};
 
 const PHASE_CHANGE_REFRESH_FREQUENCY: Duration = Duration::from_millis(100);
 
