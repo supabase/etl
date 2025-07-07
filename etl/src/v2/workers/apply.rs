@@ -364,9 +364,9 @@ where
                 TableReplicationPhase::SyncDone { lsn } => {
                     if current_lsn >= lsn {
                         info!(
-                        "Table {} is ready, its events are now processed by the main apply worker",
-                        table_id
-                    );
+                            "Table {} is ready, its events are now processed by the main apply worker",
+                            table_id
+                        );
                         self.state_store
                             .update_table_replication_state(table_id, TableReplicationPhase::Ready)
                             .await?;

@@ -409,6 +409,13 @@ where
         Ok(())
     }
 
+    /// This function compares `current_lsn` against the table's catch up lsn
+    /// and if it is greater than or equal to the catch up `lsn`:
+    ///
+    /// * Marks the table as sync done in state store.
+    /// * Returns Ok(false) to indicate to the callers that this table has been marked sync done.
+    ///
+    /// In all other cases it returns Ok(true)
     async fn process_syncing_tables(&self, current_lsn: PgLsn) -> Result<bool, Self::Error> {
         info!(
             "Processing syncing tables for table sync worker with LSN {}",
@@ -426,19 +433,19 @@ where
                         self.state_store.clone(),
                     )
                     .await?;
+
+                // We drop the lock since we don't need to hold it while cleaning resources.
+                drop(inner);
+
+                // TODO: implement cleanup of slot.
+
+                info!(
+                    "Table sync worker for table {} has caught up with the apply worker, shutting down",
+                    self.table_id
+                );
+
+                return Ok(false);
             }
-
-            // We drop the lock since we don't need to hold it while cleaning resources.
-            drop(inner);
-
-            // TODO: implement cleanup of slot.
-
-            info!(
-                "Table sync worker for table {} has caught up with the apply worker, shutting down",
-                self.table_id
-            );
-
-            return Ok(false);
         }
 
         Ok(true)
