@@ -93,7 +93,6 @@ impl From<TableSyncWorkerHookError> for ApplyLoopError {
 #[derive(Debug, Copy, Clone)]
 pub enum ApplyLoopResult {
     ApplyStopped,
-    ApplyCompleted,
 }
 
 pub trait ApplyLoopHook {
@@ -348,42 +347,9 @@ where
                         break Ok(ApplyLoopResult::ApplyStopped);
                     }
                 }
-
-                // If we are an apply worker, we can perform slots cleanup for all those slots that
-                // were not cleaned after the table sync worker terminated. This could happen in case
-                // there was a failure in a table sync worker while terminating.
-                if let WorkerType::Apply = hook.worker_type() {
-                    cleanup_unused_table_sync_worker_slots(pipeline_id, &replication_client, &state_store).await?;
-                }
             }
         }
     }
-}
-
-async fn cleanup_unused_table_sync_worker_slots<S>(
-    pipeline_id: PipelineId,
-    replication_client: &PgReplicationClient,
-    state_store: &S,
-) -> Result<(), ApplyLoopError>
-where
-    S: StateStore + Clone + Send + Sync + 'static,
-{
-    let done_table_replication_states = get_table_replication_states(state_store, true).await?;
-
-    for table_id in done_table_replication_states.keys() {
-        let slot_name = get_slot_name(
-            pipeline_id,
-            WorkerType::TableSync {
-                table_id: *table_id,
-            },
-        )?;
-        // In case we fail the deletion, we emit a warning but do not fail the entire worker.
-        if let Err(err) = replication_client.delete_slot(&slot_name).await {
-            warn!("Could not delete replication slot {slot_name}: {err}")
-        }
-    }
-
-    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]

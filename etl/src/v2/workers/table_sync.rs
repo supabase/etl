@@ -9,6 +9,7 @@ use crate::v2::replication::table_sync::{start_table_sync, TableSyncError, Table
 use crate::v2::schema::cache::SchemaCache;
 use crate::v2::state::store::base::{StateStore, StateStoreError};
 use crate::v2::state::table::{TableReplicationPhase, TableReplicationPhaseType};
+use crate::v2::workers::background::{BackgroundWorkerMessage, BackgroundWorkerState};
 use crate::v2::workers::base::{Worker, WorkerHandle, WorkerType, WorkerWaitError};
 use crate::v2::workers::pool::TableSyncWorkerPool;
 use config::shared::PipelineConfig;
@@ -19,7 +20,7 @@ use thiserror::Error;
 use tokio::sync::{AcquireError, Notify, RwLock, RwLockReadGuard, Semaphore};
 use tokio::task::JoinHandle;
 use tokio_postgres::types::PgLsn;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 const PHASE_CHANGE_REFRESH_FREQUENCY: Duration = Duration::from_millis(100);
 
@@ -244,6 +245,7 @@ pub struct TableSyncWorker<S, D> {
     destination: D,
     shutdown_rx: ShutdownRx,
     run_permit: Arc<Semaphore>,
+    background_worker_state: BackgroundWorkerState,
 }
 
 impl<S, D> TableSyncWorker<S, D> {
@@ -258,6 +260,7 @@ impl<S, D> TableSyncWorker<S, D> {
         destination: D,
         shutdown_rx: ShutdownRx,
         run_permit: Arc<Semaphore>,
+        background_worker_state: BackgroundWorkerState,
     ) -> Self {
         Self {
             pipeline_id,
@@ -269,6 +272,7 @@ impl<S, D> TableSyncWorker<S, D> {
             destination,
             shutdown_rx,
             run_permit,
+            background_worker_state,
         }
     }
 
@@ -354,7 +358,7 @@ where
                 self.pipeline_id,
                 start_lsn,
                 self.config,
-                replication_client.clone(),
+                replication_client,
                 self.schema_cache,
                 self.state_store.clone(),
                 self.destination,
@@ -363,11 +367,26 @@ where
                     self.table_id,
                     state_clone,
                     self.state_store,
-                    replication_client,
                 ),
                 self.shutdown_rx,
             )
             .await?;
+
+            // We delete the replication slot used by this table sync worker.
+            //
+            // It's very important to terminate the connection before cleaning up its slot, otherwise
+            // the deletion will halt indefinitely.
+            let result = self
+                .background_worker_state
+                .send_sync_message(BackgroundWorkerMessage::DeleteReplicationSlot(
+                    WorkerType::TableSync {
+                        table_id: self.table_id,
+                    },
+                ))
+                .await;
+            if let Err(err) = result {
+                error!("Failed to delete the replication slot of the table sync worker {}, it will be deleted in the future by the periodic cleanup job", self.table_id)
+            }
 
             // This explicit drop is not strictly necessary but is added to make it extra clear
             // that the scope of the run permit is needed upto here to avoid multiple parallel
@@ -398,7 +417,6 @@ struct TableSyncWorkerHook<S> {
     table_id: TableId,
     table_sync_worker_state: TableSyncWorkerState,
     state_store: S,
-    replication_client: PgReplicationClient,
 }
 
 impl<S> TableSyncWorkerHook<S> {
@@ -407,14 +425,12 @@ impl<S> TableSyncWorkerHook<S> {
         table_id: TableId,
         table_sync_worker_state: TableSyncWorkerState,
         state_store: S,
-        replication_client: PgReplicationClient,
     ) -> Self {
         Self {
             pipeline_id,
             table_id,
             table_sync_worker_state,
             state_store,
-            replication_client,
         }
     }
 }
@@ -454,23 +470,14 @@ where
                         self.state_store.clone(),
                     )
                     .await?;
+
+                info!(
+                    "Table sync worker for table {} has caught up with the apply worker, shutting down",
+                    self.table_id
+                );
+
+                return Ok(false);
             }
-
-            // We drop the lock since we don't need to hold it while cleaning resources.
-            drop(inner);
-
-            info!(
-                "Table sync worker for table {} has caught up with the apply worker, cleaning up replication slot and shutting down",
-                self.table_id
-            );
-
-            // We try to delete the replication slot since it's not used anymore. If we fail to delete
-            // it, it will be clean up by a background job since at this point this table worker will
-            // never be restarted again by the main apply worker.
-            let slot_name = get_slot_name(self.pipeline_id, self.worker_type())?;
-            self.replication_client.delete_slot(&slot_name).await?;
-
-            return Ok(false);
         }
 
         Ok(true)

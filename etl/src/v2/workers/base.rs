@@ -1,10 +1,12 @@
-use crate::v2::workers::apply::ApplyWorkerError;
-use crate::v2::workers::table_sync::TableSyncWorkerError;
 use postgres::schema::TableId;
 use std::fmt;
 use std::future::Future;
 use thiserror::Error;
 use tokio::task;
+
+use crate::v2::workers::apply::ApplyWorkerError;
+use crate::v2::workers::background::BackgroundWorkerError;
+use crate::v2::workers::table_sync::TableSyncWorkerError;
 
 /// Represents all possible errors that can occur while waiting for a worker to complete.
 ///
@@ -29,14 +31,17 @@ pub enum WorkerWaitError {
     /// The apply worker encountered an error that was propagated via the handle's return value.
     ///
     /// This variant wraps the specific error returned by the apply worker.
-    #[error("Apply worker terminated with an unrecoverable error: {0}")]
+    #[error("Apply worker terminated with an error: {0}")]
     ApplyWorkerFailed(#[from] ApplyWorkerError),
 
     /// The table sync worker encountered an error that was propagated via the handle's return value.
     ///
     /// This variant wraps the specific error returned by the table sync worker.
-    #[error("Table sync worker terminated with an unrecoverable error: {0}")]
+    #[error("Table sync worker terminated with an error: {0}")]
     TableSyncWorkerFailed(#[from] TableSyncWorkerError),
+
+    #[error("Background worker terminated with an error: {0}")]
+    BackgroundWorkerFailed(#[from] BackgroundWorkerError),
 }
 
 #[derive(Debug)]
@@ -59,7 +64,7 @@ impl fmt::Display for WorkerWaitErrors {
 /// The type of worker that is currently running.
 ///
 /// A worker type can also have properties that uniquely identify it.
-#[derive(Debug)]
+#[derive(Debug, Copy, Clone)]
 pub enum WorkerType {
     Apply,
     TableSync { table_id: TableId },

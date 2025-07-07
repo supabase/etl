@@ -258,9 +258,17 @@ impl<G: GenericClient> PgDatabase<G> {
     }
 
     /// Checks if a replication slot exists.
-    pub async fn replication_slot_exists(&self, slot_name: &str) -> Result<bool, tokio_postgres::Error> {
+    pub async fn replication_slot_exists(
+        &self,
+        slot_name: &str,
+    ) -> Result<bool, tokio_postgres::Error> {
         let query = "select exists(select 1 from pg_replication_slots where slot_name = $1)";
-        let row = self.client.as_ref().unwrap().query_one(query, &[&slot_name]).await?;
+        let row = self
+            .client
+            .as_ref()
+            .unwrap()
+            .query_one(query, &[&slot_name])
+            .await?;
         Ok(row.get(0))
     }
 }

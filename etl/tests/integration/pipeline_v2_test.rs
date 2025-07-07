@@ -1,16 +1,3 @@
-use std::time::Duration;
-use etl::v2::conversions::event::EventType;
-use etl::v2::destination::memory::MemoryDestination;
-use etl::v2::pipeline::{PipelineError, PipelineId};
-use etl::v2::state::table::TableReplicationPhaseType;
-use etl::v2::workers::base::{WorkerType, WorkerWaitError};
-use postgres::schema::ColumnSchema;
-use postgres::tokio::test_utils::TableModification;
-use rand::random;
-use tokio::time::timeout;
-use telemetry::init_test_tracing;
-use tokio_postgres::types::Type;
-use etl::v2::replication::slot::get_slot_name;
 use crate::common::database::spawn_database;
 use crate::common::event::{group_events_by_type, group_events_by_type_and_table_id};
 use crate::common::pipeline_v2::create_pipeline;
@@ -22,6 +9,19 @@ use crate::common::test_schema::{
     build_expected_orders_inserts, build_expected_users_inserts, get_n_integers_sum,
     get_users_age_sum_from_rows, insert_mock_data, setup_test_database_schema, TableSelection,
 };
+use etl::v2::conversions::event::EventType;
+use etl::v2::destination::memory::MemoryDestination;
+use etl::v2::pipeline::{PipelineError, PipelineId};
+use etl::v2::replication::slot::get_slot_name;
+use etl::v2::state::table::TableReplicationPhaseType;
+use etl::v2::workers::base::{WorkerType, WorkerWaitError};
+use postgres::schema::ColumnSchema;
+use postgres::tokio::test_utils::TableModification;
+use rand::random;
+use std::time::Duration;
+use telemetry::init_test_tracing;
+use tokio::time::timeout;
+use tokio_postgres::types::Type;
 
 // TODO: find a way to inject errors in a way that is predictable.
 #[ignore]
@@ -71,7 +71,7 @@ async fn test_pipeline_with_table_sync_worker_panic() {
 
     // We stop and inspect errors.
     match pipeline.shutdown_and_wait().await.err().unwrap() {
-        PipelineError::TableSyncWorkersFailed(err) => {
+        PipelineError::OneOrMoreWorkersFailed(err) => {
             assert!(matches!(
                 err.0.as_slice(),
                 [
@@ -131,7 +131,7 @@ async fn test_pipeline_with_table_sync_worker_error() {
 
     // We stop and inspect errors.
     match pipeline.shutdown_and_wait().await.err().unwrap() {
-        PipelineError::TableSyncWorkersFailed(err) => {
+        PipelineError::OneOrMoreWorkersFailed(err) => {
             assert!(matches!(
                 err.0.as_slice(),
                 [
@@ -515,22 +515,24 @@ async fn test_table_copy() {
     let users_state_notify = state_store
         .notify_on_replication_phase(
             database_schema.users_schema().id,
-            TableReplicationPhaseType::FinishedCopy,
+            TableReplicationPhaseType::SyncDone,
         )
         .await;
     let orders_state_notify = state_store
         .notify_on_replication_phase(
             database_schema.orders_schema().id,
-            TableReplicationPhaseType::FinishedCopy,
+            TableReplicationPhaseType::SyncDone,
         )
         .await;
 
     pipeline.start().await.unwrap();
 
-    timeout(Duration::from_secs(1), users_state_notify.notified()).await;
-    timeout(Duration::from_secs(1), orders_state_notify.notified()).await;
+    users_state_notify.notified().await;
+    orders_state_notify.notified().await;
 
-    pipeline.shutdown_and_wait().await.unwrap();
+    timeout(Duration::from_secs(3), pipeline.shutdown_and_wait())
+        .await
+        .unwrap();
 
     // Verify copied data.
     let table_rows = destination.get_table_rows().await;
@@ -546,10 +548,28 @@ async fn test_table_copy() {
     assert_eq!(age_sum, expected_age_sum);
 
     // Check that the replication slots for the two tables have been removed.
-    let users_replication_slot = get_slot_name(pipeline_id, WorkerType::TableSync { table_id: database_schema.users_schema().id }).unwrap();
-    let orders_replication_slot = get_slot_name(pipeline_id, WorkerType::TableSync { table_id: database_schema.orders_schema().id }).unwrap();
-    assert!(database.replication_slot_exists(&users_replication_slot).await.unwrap());
-    assert!(database.replication_slot_exists(&orders_replication_slot).await.unwrap());
+    let users_replication_slot = get_slot_name(
+        pipeline_id,
+        WorkerType::TableSync {
+            table_id: database_schema.users_schema().id,
+        },
+    )
+    .unwrap();
+    let orders_replication_slot = get_slot_name(
+        pipeline_id,
+        WorkerType::TableSync {
+            table_id: database_schema.orders_schema().id,
+        },
+    )
+    .unwrap();
+    assert!(database
+        .replication_slot_exists(&users_replication_slot)
+        .await
+        .unwrap());
+    assert!(database
+        .replication_slot_exists(&orders_replication_slot)
+        .await
+        .unwrap());
 }
 
 #[tokio::test(flavor = "multi_thread")]

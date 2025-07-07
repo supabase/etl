@@ -11,25 +11,25 @@ use crate::v2::schema::cache::SchemaCache;
 use crate::v2::state::store::base::{StateStore, StateStoreError};
 use crate::v2::state::table::TableReplicationPhase;
 use crate::v2::workers::apply::{ApplyWorker, ApplyWorkerError, ApplyWorkerHandle};
+use crate::v2::workers::background::{
+    BackgroundWorker, BackgroundWorkerError, BackgroundWorkerHandle,
+};
 use crate::v2::workers::base::{Worker, WorkerHandle, WorkerWaitError, WorkerWaitErrors};
 use crate::v2::workers::pool::TableSyncWorkerPool;
 
 #[derive(Debug, Error)]
 pub enum PipelineError {
-    #[error("Both the apply worker and table sync workers failed. Apply worker error: {0}, Table sync workers errors: {1}")]
-    BothWorkerTypesFailed(WorkerWaitError, WorkerWaitErrors),
-
-    #[error("The apply worker failed: {0}")]
-    ApplyWorkerFailed(#[from] WorkerWaitError),
-
-    #[error("Table sync workers failed: {0}")]
-    TableSyncWorkersFailed(WorkerWaitErrors),
+    #[error("One or more workers failed: {0}")]
+    OneOrMoreWorkersFailed(WorkerWaitErrors),
 
     #[error("PostgreSQL replication operation failed: {0}")]
     PgReplicationClient(#[from] PgReplicationError),
 
     #[error("Apply worker failed to start in the pipeline: {0}")]
     ApplyWorkerFailedOnStart(#[from] ApplyWorkerError),
+
+    #[error("Background worker failed to start in the pipeline: {0}")]
+    BackgroundWorkerFailedOnStart(#[from] BackgroundWorkerError),
 
     #[error("An error happened in the state store: {0}")]
     StateStore(#[from] StateStoreError),
@@ -51,6 +51,7 @@ enum PipelineWorkers {
         // TODO: investigate whether we could benefit from a central launcher that deals at a high-level
         //  with workers management, which should not be done in the pipeline.
         apply_worker: ApplyWorkerHandle,
+        background_worker: BackgroundWorkerHandle,
         pool: TableSyncWorkerPool,
     },
 }
@@ -125,7 +126,19 @@ where
         let table_sync_worker_permits =
             Arc::new(Semaphore::new(self.config.max_table_sync_workers as usize));
 
-        // We create and start the apply worker.
+        // We start the background worker.
+        let background_worker = BackgroundWorker::new(
+            self.id,
+            replication_client,
+            self.state_store.clone(),
+            self.shutdown_tx.subscribe(),
+        )
+        .start()
+        .await?;
+
+        // We create and start the apply worker with its own connection.
+        let replication_client =
+            PgReplicationClient::connect(self.config.pg_connection.clone()).await?;
         let apply_worker = ApplyWorker::new(
             self.id,
             self.config.clone(),
@@ -136,11 +149,16 @@ where
             self.destination.clone(),
             self.shutdown_tx.subscribe(),
             table_sync_worker_permits,
+            background_worker.state(),
         )
         .start()
         .await?;
 
-        self.workers = PipelineWorkers::Started { apply_worker, pool };
+        self.workers = PipelineWorkers::Started {
+            apply_worker,
+            background_worker,
+            pool,
+        };
 
         Ok(())
     }
@@ -191,7 +209,12 @@ where
     }
 
     pub async fn wait(self) -> Result<(), PipelineError> {
-        let PipelineWorkers::Started { apply_worker, pool } = self.workers else {
+        let PipelineWorkers::Started {
+            apply_worker,
+            background_worker,
+            pool,
+        } = self.workers
+        else {
             info!("Pipeline was not started, nothing to wait for");
 
             return Ok(());
@@ -199,12 +222,16 @@ where
 
         info!("Waiting for apply worker to complete");
 
+        let mut errors = vec![];
+
         // We first wait for the apply worker to finish, since that must be done before waiting for
         // the table sync workers to finish, otherwise if we wait for sync workers first, we might
         // be having the apply worker that spawns new sync workers after we waited for the current
         // ones to finish.
         let apply_worker_result = apply_worker.wait().await;
-        if apply_worker_result.is_err() {
+        if let Err(err) = apply_worker_result {
+            errors.push(err);
+
             // TODO: in the future we might build a system based on the `ReactiveFuture` that
             //  automatically sends a shutdown signal to table sync workers on apply worker failure.
             // If there was an error in the apply worker, we want to shut down all table sync
@@ -220,19 +247,35 @@ where
 
         info!("Waiting for table sync workers to complete");
 
+        // We wait for all table sync workers to finish.
         let table_sync_workers_result = pool.wait_all().await;
-        if table_sync_workers_result.is_err() {
+        if let Err(err) = table_sync_workers_result {
+            errors.extend(err.0);
+
             info!("One or more table sync workers failed with an error");
         } else {
             info!("All table sync workers completed successfully");
         }
 
-        match (apply_worker_result, table_sync_workers_result) {
-            (Ok(_), Ok(_)) => Ok(()),
-            (Err(err), Ok(_)) => Err(PipelineError::ApplyWorkerFailed(err)),
-            (Ok(_), Err(err)) => Err(PipelineError::TableSyncWorkersFailed(err)),
-            (Err(err), Err(errs)) => Err(PipelineError::BothWorkerTypesFailed(err, errs)),
+        info!("Waiting for background worker to complete");
+
+        // We wait for the background worker to finish.
+        let background_worker_result = background_worker.wait().await;
+        if let Err(err) = background_worker_result {
+            errors.push(err);
+
+            info!("Background worker completed with en error");
+        } else {
+            info!("Background worker completed successfully");
         }
+
+        if !errors.is_empty() {
+            return Err(PipelineError::OneOrMoreWorkersFailed(WorkerWaitErrors(
+                errors,
+            )));
+        }
+
+        Ok(())
     }
 
     #[allow(clippy::result_large_err)]

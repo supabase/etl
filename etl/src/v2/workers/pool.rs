@@ -171,14 +171,14 @@ impl TableSyncWorkerPool {
             // We try first to wait for all workers to be finished, in case there are still active
             // workers, we get back a `Notify` which we will use to try again once new workers reported
             // their finished status.
-            let mut workers = self.workers.write().await;
-            let Some(notify) = workers.wait_all().await? else {
-                return Ok(());
+            let notify = {
+                let mut workers = self.workers.write().await;
+                let Some(notify) = workers.wait_all().await? else {
+                    return Ok(());
+                };
+
+                notify
             };
-            // We must drop the lock here, otherwise the system will deadlock since we will be
-            // waiting for new workers to be marked as finished, but the marking will fail since
-            // we hold an exclusive lock.
-            drop(workers);
 
             notify.notified().await;
         }
