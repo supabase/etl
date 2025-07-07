@@ -151,14 +151,19 @@ where
                 tokio::select! {
                     biased;
 
+                    // We prioritize the handling of incoming messages, since in case we are told
+                    // to shutdown, we want to go through all remaining messages to make sure we do
+                    // not miss any important work.
+                    //
+                    // This mechanism can work only if the producers of messages for this worker stop
+                    // sending messages when they also receive a shutdown signal.
+                    Some(message) = rx.recv() => {
+                        handle_message(self.pipeline_id, &self.replication_client, message).await;
+                    }
+
                     // Shutdown signal received, exit loop.
                     _ = self.shutdown_rx.changed() => {
                         return Ok(());
-                    }
-
-                    // Incoming message.
-                    Some(message) = rx.recv() => {
-                        handle_message(self.pipeline_id, &self.replication_client, message).await;
                     }
 
                     // At regular intervals, we perform background operations.
@@ -230,16 +235,14 @@ where
     let done_table_replication_states = get_table_replication_states(state_store, true).await?;
 
     for table_id in done_table_replication_states.keys() {
-        let slot_name = get_slot_name(
-            pipeline_id,
-            WorkerType::TableSync {
-                table_id: *table_id,
-            },
-        )?;
-
         // In case we fail the deletion, we emit a warning but do not fail the entire worker.
-        if let Err(err) = replication_client.delete_slot(&slot_name).await {
-            warn!("Could not delete replication slot {slot_name} in the background: {err}")
+        let worker_type = WorkerType::TableSync {
+            table_id: *table_id,
+        };
+        if let Err(err) =
+            delete_replication_slot(pipeline_id, replication_client, worker_type).await
+        {
+            warn!("Could not delete replication slot in the background: {err}");
         }
     }
 

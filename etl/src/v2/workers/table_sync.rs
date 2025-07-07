@@ -361,11 +361,7 @@ where
                 replication_client,
                 self.schema_cache,
                 self.destination,
-                TableSyncWorkerHook::new(
-                    self.table_id,
-                    state_clone,
-                    self.state_store,
-                ),
+                TableSyncWorkerHook::new(self.table_id, state_clone, self.state_store),
                 self.shutdown_rx,
             )
             .await?;

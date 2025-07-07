@@ -259,7 +259,8 @@ where
 
         info!("Waiting for background worker to complete");
 
-        // We wait for the background worker to finish.
+        // We wait for the background worker to finish after all the other workers, since the other
+        // workers depend on the background worker for some tasks.
         let background_worker_result = background_worker.wait().await;
         if let Err(err) = background_worker_result {
             errors.push(err);
