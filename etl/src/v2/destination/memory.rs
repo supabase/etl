@@ -62,11 +62,7 @@ impl Destination for MemoryDestination {
         table_rows: Vec<TableRow>,
     ) -> Result<(), DestinationError> {
         let mut inner = self.inner.write().await;
-        info!(
-            "Writing a batch of {} table rows for table id {:?}:",
-            table_rows.len(),
-            table_id
-        );
+        info!("Writing a batch of {} table rows:", table_rows.len());
         for table_row in &table_rows {
             info!("  {:?}", table_row);
         }

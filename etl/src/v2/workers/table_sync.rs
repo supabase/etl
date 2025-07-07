@@ -66,8 +66,8 @@ pub struct TableSyncWorkerStateInner {
 impl TableSyncWorkerStateInner {
     pub fn set_phase(&mut self, phase: TableReplicationPhase) {
         info!(
-            "Table {} phase changing from '{:?}' to '{:?}'",
-            self.table_id, self.table_replication_phase, phase
+            "Table phase changing from '{:?}' to '{:?}'",
+            self.table_replication_phase, phase
         );
 
         self.table_replication_phase = phase;
@@ -89,10 +89,7 @@ impl TableSyncWorkerStateInner {
 
         // If we should store this phase change, we want to do it via the supplied state store.
         if phase.as_type().should_store() {
-            info!(
-                "Storing phase change '{:?}' for table {:?}",
-                phase, self.table_id,
-            );
+            info!("Storing phase change '{:?}' for table", phase);
 
             state_store
                 .update_table_replication_state(self.table_id, phase)
@@ -368,16 +365,13 @@ where
             drop(permit);
 
             Ok(())
-        }
-        .instrument(table_sync_worker_span);
+        };
 
         // We spawn the table sync worker with a safe future, so that we can have controlled teardown
         // on completion or error.
-        let handle = tokio::spawn(ReactiveFuture::new(
-            table_sync_worker,
-            self.table_id,
-            self.pool.workers(),
-        ));
+        let fut = ReactiveFuture::new(table_sync_worker, self.table_id, self.pool.workers())
+            .instrument(table_sync_worker_span);
+        let handle = tokio::spawn(fut);
 
         Ok(TableSyncWorkerHandle {
             state,
