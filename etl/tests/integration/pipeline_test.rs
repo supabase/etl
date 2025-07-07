@@ -1,16 +1,16 @@
-use etl::conversions::cdc_event::CdcEvent;
 use etl::conversions::Cell;
+use etl::conversions::cdc_event::CdcEvent;
 use postgres::schema::{ColumnSchema, TableId};
-use postgres::tokio::test_utils::{id_column_schema, PgDatabase};
+use postgres::tokio::test_utils::{PgDatabase, id_column_schema};
 use std::ops::Range;
 use telemetry::init_test_tracing;
-use tokio_postgres::types::Type;
 use tokio_postgres::GenericClient;
+use tokio_postgres::types::Type;
 
 use crate::common::database::{spawn_database, test_table_name};
 use crate::common::destination::TestDestination;
 use crate::common::pipeline::{
-    spawn_async_pg_pipeline, spawn_pg_pipeline, test_slot_name, PipelineMode,
+    PipelineMode, spawn_async_pg_pipeline, spawn_pg_pipeline, test_slot_name,
 };
 use crate::common::table::assert_table_schema_from_destination;
 use crate::common::wait_for_condition;
@@ -20,12 +20,10 @@ fn get_expected_ages_sum(num_users: usize) -> i32 {
 }
 
 async fn create_users_table<G: GenericClient>(database: &PgDatabase<G>) -> TableId {
-    let table_id = database
+    database
         .create_table(test_table_name("users"), &[("age", "integer")])
         .await
-        .unwrap();
-
-    table_id
+        .unwrap()
 }
 
 async fn create_users_table_with_publication<G: GenericClient>(

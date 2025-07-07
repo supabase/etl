@@ -9,9 +9,9 @@ use postgres_replication::protocol::{
 use thiserror::Error;
 
 use super::{
+    Cell,
     table_row::TableRow,
     text::{FromTextError, TextFormatConverter},
-    Cell,
 };
 use crate::pipeline::batching::BatchBoundaryV1;
 
@@ -55,7 +55,7 @@ impl CdcEventConverter {
                 TupleData::Null => Cell::Null(column_schema.typ.clone()),
                 TupleData::UnchangedToast => TextFormatConverter::default_value(&column_schema.typ),
                 TupleData::Binary(_) => {
-                    return Err(CdcEventConversionError::BinaryFormatNotSupported)
+                    return Err(CdcEventConversionError::BinaryFormatNotSupported);
                 }
                 TupleData::Text(bytes) => {
                     let str = str::from_utf8(&bytes[..])?;

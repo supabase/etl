@@ -1,13 +1,13 @@
 use crate::config::load_replicator_config;
 use crate::migrations::migrate_state_store;
-use config::shared::{DestinationConfig, ReplicatorConfig};
-use etl::v2::destination::base::Destination;
+use config::shared::{DestinationConfig, PgConnectionConfig};
 use etl::v2::destination::bigquery::BigQueryDestination;
 use etl::v2::destination::memory::MemoryDestination;
 use etl::v2::encryption::bigquery::install_crypto_provider_once;
 use etl::v2::pipeline::Pipeline;
 use etl::v2::state::store::base::StateStore;
 use etl::v2::state::store::postgres::PostgresStateStore;
+use etl::v2::{destination::base::Destination, pipeline::PipelineId};
 use secrecy::ExposeSecret;
 use std::fmt;
 use tracing::{error, info, warn};
@@ -16,7 +16,11 @@ pub async fn start_replicator() -> anyhow::Result<()> {
     let replicator_config = load_replicator_config()?;
 
     // We initialize the state store, which for the replicator is not configurable.
-    let state_store = init_state_store(&replicator_config).await?;
+    let state_store = init_state_store(
+        replicator_config.pipeline.id,
+        replicator_config.pipeline.pg_connection.clone(),
+    )
+    .await?;
 
     // For each destination, we start the pipeline. This is more verbose due to static dispatch, but
     // we prefer more performance at the cost of ergonomics.
@@ -60,12 +64,12 @@ pub async fn start_replicator() -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn init_state_store(config: &ReplicatorConfig) -> anyhow::Result<impl StateStore + Clone> {
-    migrate_state_store(config.pipeline.pg_connection.clone()).await?;
-    Ok(PostgresStateStore::new(
-        config.pipeline.id,
-        config.pipeline.pg_connection.clone(),
-    ))
+async fn init_state_store(
+    pipeline_id: PipelineId,
+    pg_connection_config: PgConnectionConfig,
+) -> anyhow::Result<impl StateStore + Clone> {
+    migrate_state_store(&pg_connection_config).await?;
+    Ok(PostgresStateStore::new(pipeline_id, pg_connection_config))
 }
 
 async fn start_pipeline<S, D>(mut pipeline: Pipeline<S, D>) -> anyhow::Result<()>

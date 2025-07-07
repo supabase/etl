@@ -2,14 +2,14 @@ use std::collections::HashMap;
 
 use postgres::schema::{ColumnSchema, TableId, TableName, TableSchema};
 use thiserror::Error;
-use tokio::sync::mpsc::{error::SendError, Receiver, Sender};
+use tokio::sync::mpsc::{Receiver, Sender, error::SendError};
 use tokio_postgres::types::{PgLsn, Type};
 use tracing::error;
 
 use crate::{
     clients::duckdb::DuckDbClient,
     conversions::{cdc_event::CdcEvent, table_row::TableRow},
-    pipeline::{destinations::DestinationError, PipelineResumptionState},
+    pipeline::{PipelineResumptionState, destinations::DestinationError},
 };
 
 pub enum DuckDbRequest {

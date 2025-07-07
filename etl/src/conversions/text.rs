@@ -9,7 +9,7 @@ use uuid::Uuid;
 
 use crate::conversions::{bool::parse_bool, hex};
 
-use super::{bool::ParseBoolError, hex::ByteaHexParseError, numeric::PgNumeric, ArrayCell, Cell};
+use super::{ArrayCell, Cell, bool::ParseBoolError, hex::ByteaHexParseError, numeric::PgNumeric};
 
 #[derive(Debug, Error)]
 pub enum FromTextError {

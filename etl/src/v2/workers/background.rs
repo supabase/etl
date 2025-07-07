@@ -10,7 +10,7 @@ use crate::v2::pipeline::PipelineId;
 use crate::v2::replication::apply::ApplyLoopError;
 use crate::v2::replication::client::{PgReplicationClient, PgReplicationError};
 use crate::v2::replication::common::get_table_replication_states;
-use crate::v2::replication::slot::{get_slot_name, SlotError};
+use crate::v2::replication::slot::{SlotError, get_slot_name};
 use crate::v2::state::store::base::StateStore;
 use crate::v2::workers::base::{Worker, WorkerHandle, WorkerType, WorkerWaitError};
 
@@ -98,11 +98,9 @@ impl BackgroundWorkerState {
         // We wait for a response from the worker and in case we don't get any, we propagate the
         // error, since not getting a response and silently failing, might cause consistency issues
         // since the caller uses a sync message exactly to have a guarantee that something happened.
-        let result = response_rx
+        response_rx
             .await
-            .map_err(|_| BackgroundWorkerError::WaitingForResponseFailed)?;
-
-        result
+            .map_err(|_| BackgroundWorkerError::WaitingForResponseFailed)?
     }
 }
 
@@ -246,7 +244,9 @@ async fn delete_replication_slot(
     )
     .await
     else {
-        warn!("Could not delete replication slot {slot_name} within the timeout, maybe a connection is still holding it");
+        warn!(
+            "Could not delete replication slot {slot_name} within the timeout, maybe a connection is still holding it"
+        );
         return Err(BackgroundWorkerError::DeleteSlotTimeout);
     };
 

@@ -49,9 +49,7 @@ impl SchemaCache {
     }
 
     pub async fn read_inner(&self) -> RwLockReadGuard<Inner> {
-        let inner = self.inner.read().await;
-
-        inner
+        self.inner.read().await
     }
 }
 

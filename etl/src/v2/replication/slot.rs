@@ -13,7 +13,9 @@ const TABLE_SYNC_PREFIX: &str = "supabase_etl_table_sync";
 /// Error types that can occur when working with replication slots
 #[derive(Debug, Error)]
 pub enum SlotError {
-    #[error("Replication slot name exceeds maximum length of {MAX_SLOT_NAME_LENGTH} characters: name must be shorter")]
+    #[error(
+        "Replication slot name exceeds maximum length of {MAX_SLOT_NAME_LENGTH} characters: name must be shorter"
+    )]
     NameTooLong,
 }
 

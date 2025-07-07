@@ -3,10 +3,10 @@ use std::{error::Error, time::Duration};
 use clap::{Args, Parser, Subcommand};
 use config::shared::{PgConnectionConfig, TlsConfig};
 use etl::pipeline::{
-    batching::{data_pipeline::BatchDataPipeline, BatchConfig},
+    PipelineAction,
+    batching::{BatchConfig, data_pipeline::BatchDataPipeline},
     destinations::stdout::StdoutDestination,
     sources::postgres::{PostgresSource, TableNamesFrom},
-    PipelineAction,
 };
 use postgres::schema::TableName;
 use tracing::error;
@@ -78,7 +78,9 @@ fn init_tracing() {
 
 fn set_log_level() {
     if std::env::var("RUST_LOG").is_err() {
-        std::env::set_var("RUST_LOG", "info");
+        unsafe {
+            std::env::set_var("RUST_LOG", "info");
+        }
     }
 }
 

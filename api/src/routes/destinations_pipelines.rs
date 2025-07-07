@@ -1,8 +1,8 @@
 use actix_web::{
-    http::{header::ContentType, StatusCode},
+    HttpRequest, HttpResponse, Responder, ResponseError,
+    http::{StatusCode, header::ContentType},
     post,
     web::{Data, Json, Path},
-    HttpRequest, HttpResponse, Responder, ResponseError,
 };
 use config::shared::DestinationConfig;
 use serde::{Deserialize, Serialize};
@@ -11,14 +11,14 @@ use thiserror::Error;
 use utoipa::ToSchema;
 
 use crate::db;
-use crate::db::destinations::{destination_exists, DestinationsDbError};
+use crate::db::destinations::{DestinationsDbError, destination_exists};
 use crate::db::destinations_pipelines::DestinationPipelinesDbError;
 use crate::db::images::ImagesDbError;
 use crate::db::pipelines::PipelineConfig;
-use crate::db::sources::{source_exists, SourcesDbError};
+use crate::db::sources::{SourcesDbError, source_exists};
 use crate::encryption::EncryptionKey;
 
-use super::{destinations::DestinationError, extract_tenant_id, ErrorMessage, TenantIdError};
+use super::{ErrorMessage, TenantIdError, destinations::DestinationError, extract_tenant_id};
 
 #[derive(Debug, Error)]
 enum DestinationPipelineError {

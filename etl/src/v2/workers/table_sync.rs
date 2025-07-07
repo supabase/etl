@@ -2,9 +2,9 @@ use crate::v2::concurrency::future::ReactiveFuture;
 use crate::v2::concurrency::shutdown::{ShutdownResult, ShutdownRx};
 use crate::v2::destination::base::Destination;
 use crate::v2::pipeline::PipelineId;
-use crate::v2::replication::apply::{start_apply_loop, ApplyLoopError, ApplyLoopHook};
+use crate::v2::replication::apply::{ApplyLoopError, ApplyLoopHook, start_apply_loop};
 use crate::v2::replication::client::{PgReplicationClient, PgReplicationError};
-use crate::v2::replication::table_sync::{start_table_sync, TableSyncError, TableSyncResult};
+use crate::v2::replication::table_sync::{TableSyncError, TableSyncResult, start_table_sync};
 use crate::v2::schema::cache::SchemaCache;
 use crate::v2::state::store::base::{StateStore, StateStoreError};
 use crate::v2::state::table::{TableReplicationPhase, TableReplicationPhaseType};
@@ -348,7 +348,7 @@ where
 
             let start_lsn = match result {
                 Ok(TableSyncResult::SyncStopped | TableSyncResult::SyncNotRequired) => {
-                    return Ok(())
+                    return Ok(());
                 }
                 Ok(TableSyncResult::SyncCompleted { start_lsn }) => start_lsn,
                 Err(err) => return Err(err.into()),
@@ -379,7 +379,10 @@ where
                 ))
                 .await;
             if let Err(err) = result {
-                error!("Failed to delete the replication slot of the table sync worker {}, it will be deleted in the future by the periodic cleanup job: {err}", self.table_id)
+                error!(
+                    "Failed to delete the replication slot of the table sync worker {}, it will be deleted in the future by the periodic cleanup job: {err}",
+                    self.table_id
+                )
             }
 
             // This explicit drop is not strictly necessary but is added to make it extra clear
@@ -436,6 +439,13 @@ where
         Ok(())
     }
 
+    /// This function compares `current_lsn` against the table's catch up lsn
+    /// and if it is greater than or equal to the catch up `lsn`:
+    ///
+    /// * Marks the table as sync done in state store.
+    /// * Returns Ok(false) to indicate to the callers that this table has been marked sync done.
+    ///
+    /// In all other cases it returns Ok(true)
     async fn process_syncing_tables(&self, current_lsn: PgLsn) -> Result<bool, Self::Error> {
         info!(
             "Processing syncing tables for table sync worker with LSN {}",

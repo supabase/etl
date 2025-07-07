@@ -1,8 +1,8 @@
-use etl::conversions::table_row::TableRow;
 use etl::conversions::Cell;
+use etl::conversions::table_row::TableRow;
 use etl::v2::conversions::event::{Event, InsertEvent};
 use postgres::schema::{ColumnSchema, Oid, TableName, TableSchema};
-use postgres::tokio::test_utils::{id_column_schema, PgDatabase};
+use postgres::tokio::test_utils::{PgDatabase, id_column_schema};
 use std::ops::RangeInclusive;
 use tokio_postgres::types::Type;
 use tokio_postgres::{Client, GenericClient};

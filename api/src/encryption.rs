@@ -1,9 +1,9 @@
 use aws_lc_rs::{
-    aead::{Aad, Nonce, RandomizedNonceKey, AES_256_GCM},
+    aead::{AES_256_GCM, Aad, Nonce, RandomizedNonceKey},
     rand::fill,
 };
-use base64::prelude::BASE64_STANDARD;
 use base64::Engine;
+use base64::prelude::BASE64_STANDARD;
 use serde::{Deserialize, Serialize};
 use std::string;
 use thiserror::Error;
@@ -144,8 +144,8 @@ fn decrypt(
 /// # Panics
 ///
 /// Panics if `T` does not match the required key length for the cipher.
-pub fn generate_random_key<const T: usize>(
-) -> Result<RandomizedNonceKey, aws_lc_rs::error::Unspecified> {
+pub fn generate_random_key<const T: usize>()
+-> Result<RandomizedNonceKey, aws_lc_rs::error::Unspecified> {
     let mut key_bytes = [0u8; T];
     fill(&mut key_bytes)?;
 
