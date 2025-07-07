@@ -720,14 +720,14 @@ async fn test_table_copy_and_sync() {
             table_id: database_schema.users_schema().id,
         },
     )
-        .unwrap();
+    .unwrap();
     let orders_replication_slot = get_slot_name(
         pipeline_id,
         WorkerType::TableSync {
             table_id: database_schema.orders_schema().id,
         },
     )
-        .unwrap();
+    .unwrap();
     assert!(!database
         .replication_slot_exists(&users_replication_slot)
         .await

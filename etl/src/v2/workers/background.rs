@@ -2,6 +2,7 @@ use std::time::Duration;
 use thiserror::Error;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
+use tokio::time::timeout;
 use tracing::{error, warn};
 
 use crate::v2::concurrency::shutdown::ShutdownRx;
@@ -16,6 +17,9 @@ use crate::v2::workers::base::{Worker, WorkerHandle, WorkerType, WorkerWaitError
 /// The interval between background work tasks when no messages are received.
 const BACKGROUND_WORK_INTERVAL: Duration = Duration::from_secs(1);
 
+/// The maximum amount of time to wait for a slot to be deleted.
+const MAX_DELETE_SLOT_WAIT: Duration = Duration::from_secs(10);
+
 /// Errors that can occur during background worker operations.
 #[derive(Debug, Error)]
 pub enum BackgroundWorkerError {
@@ -24,6 +28,9 @@ pub enum BackgroundWorkerError {
 
     #[error("Could not wait for a response, likely because the background worker crashed")]
     WaitingForResponseFailed,
+
+    #[error("Could not delete the replication slot within the expected time")]
+    DeleteSlotTimeout,
 
     #[error("Could not generate slot name in the background worker: {0}")]
     Slot(#[from] SlotError),
@@ -74,7 +81,7 @@ pub struct BackgroundWorkerState {
 
 impl BackgroundWorkerState {
     /// Sends a message to the background worker and waits for a response.
-    /// 
+    ///
     /// This method ensures that the requested operation completes before returning,
     /// providing consistency guarantees to the caller.
     pub async fn send_sync_message(
@@ -124,10 +131,10 @@ impl WorkerHandle<BackgroundWorkerState> for BackgroundWorkerHandle {
     }
 }
 
-/// Background worker that performs periodic maintenance tasks and handles administrative operations.
-/// 
+/// Background worker that performs periodic maintenance tasks.
+///
 /// This worker runs continuously in the background, handling cleanup operations like removing
-/// unused replication slots and responding to administrative commands.
+/// unused replication slots.
 #[derive(Debug)]
 pub struct BackgroundWorker<S> {
     pipeline_id: PipelineId,
@@ -160,7 +167,7 @@ where
     type Error = BackgroundWorkerError;
 
     /// Starts the background worker and returns a handle for communication.
-    /// 
+    ///
     /// The worker runs in a loop, prioritizing message handling over periodic tasks,
     /// and responds to shutdown signals gracefully.
     async fn start(mut self) -> Result<BackgroundWorkerHandle, Self::Error> {
@@ -221,7 +228,7 @@ async fn handle_message(
 }
 
 /// Deletes a replication slot for the specified worker type.
-/// 
+///
 /// If the slot is not found, logs a warning but returns success since the
 /// desired outcome (slot not existing) is achieved.
 async fn delete_replication_slot(
@@ -230,7 +237,19 @@ async fn delete_replication_slot(
     worker_type: WorkerType,
 ) -> Result<(), BackgroundWorkerError> {
     let slot_name = get_slot_name(pipeline_id, worker_type)?;
-    let result = replication_client.delete_slot(&slot_name).await;
+    // Since we are using the `WAIT` option while deleting a slot, there is a non-zero chance that we
+    // will be blocked indefinitely. To avoid this, we want to put an upper bound in time when executing
+    // this query. If we fail to execute it, we return an error.
+    let Ok(result) = timeout(
+        MAX_DELETE_SLOT_WAIT,
+        replication_client.delete_slot(&slot_name),
+    )
+    .await
+    else {
+        warn!("Could not delete replication slot {slot_name} within the timeout, maybe a connection is still holding it");
+        return Err(BackgroundWorkerError::DeleteSlotTimeout);
+    };
+
     if let Err(PgReplicationError::SlotNotFound(_)) = result {
         warn!(
             "Attempted to delete replication slot {} but it was not found",
@@ -246,8 +265,8 @@ async fn delete_replication_slot(
 }
 
 /// Performs periodic background maintenance tasks.
-/// 
-/// Currently handles cleanup of unused table sync worker replication slots.
+///
+/// Currently, handles cleanup of unused table sync worker replication slots.
 /// Errors are logged but do not stop the background worker.
 async fn perform_periodic_background_work<S>(
     pipeline_id: PipelineId,
@@ -266,7 +285,7 @@ async fn perform_periodic_background_work<S>(
 }
 
 /// Cleans up replication slots for table sync workers that have completed their work.
-/// 
+///
 /// Retrieves all completed table replication states and attempts to delete their
 /// corresponding replication slots. Individual deletion failures are logged but
 /// do not prevent cleanup of other slots.
