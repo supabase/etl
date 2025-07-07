@@ -558,11 +558,11 @@ async fn test_table_copy() {
         },
     )
     .unwrap();
-    assert!(database
+    assert!(!database
         .replication_slot_exists(&users_replication_slot)
         .await
         .unwrap());
-    assert!(database
+    assert!(!database
         .replication_slot_exists(&orders_replication_slot)
         .await
         .unwrap());

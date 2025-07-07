@@ -203,7 +203,17 @@ async fn delete_replication_slot(
     worker_type: WorkerType,
 ) -> Result<(), BackgroundWorkerError> {
     let slot_name = get_slot_name(pipeline_id, worker_type)?;
-    replication_client.delete_slot(&slot_name).await?;
+    let result = replication_client.delete_slot(&slot_name).await;
+    if let Err(PgReplicationError::SlotNotFound(_)) = result {
+        warn!(
+            "Attempted to delete replication slot {} but it was not found",
+            slot_name
+        );
+
+        return Ok(());
+    }
+
+    result?;
 
     Ok(())
 }
