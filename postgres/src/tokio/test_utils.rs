@@ -269,7 +269,7 @@ impl<G: GenericClient> PgDatabase<G> {
             .unwrap()
             .query_one(query, &[&slot_name])
             .await?;
-        
+
         Ok(row.get(0))
     }
 }
