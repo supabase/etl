@@ -712,6 +712,30 @@ async fn test_table_copy_and_sync() {
     );
     assert_eq!(*users_inserts, expected_users_inserts);
     assert_eq!(*orders_inserts, expected_orders_inserts);
+
+    // Check that the replication slots for the two tables have been removed.
+    let users_replication_slot = get_slot_name(
+        pipeline_id,
+        WorkerType::TableSync {
+            table_id: database_schema.users_schema().id,
+        },
+    )
+        .unwrap();
+    let orders_replication_slot = get_slot_name(
+        pipeline_id,
+        WorkerType::TableSync {
+            table_id: database_schema.orders_schema().id,
+        },
+    )
+        .unwrap();
+    assert!(!database
+        .replication_slot_exists(&users_replication_slot)
+        .await
+        .unwrap());
+    assert!(!database
+        .replication_slot_exists(&orders_replication_slot)
+        .await
+        .unwrap());
 }
 
 #[tokio::test(flavor = "multi_thread")]
