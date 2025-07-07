@@ -13,10 +13,10 @@ use crate::v2::replication::slot::{get_slot_name, SlotError};
 use crate::v2::state::store::base::StateStore;
 use crate::v2::workers::base::{Worker, WorkerHandle, WorkerType, WorkerWaitError};
 
-/// The interval between background work tasks, assuming no messages are received by the background
-/// worker.
+/// The interval between background work tasks when no messages are received.
 const BACKGROUND_WORK_INTERVAL: Duration = Duration::from_secs(1);
 
+/// Errors that can occur during background worker operations.
 #[derive(Debug, Error)]
 pub enum BackgroundWorkerError {
     #[error("Could not send message to the background worker")]
@@ -32,11 +32,14 @@ pub enum BackgroundWorkerError {
     PgReplicationClient(#[from] PgReplicationError),
 }
 
+/// Messages that can be sent to the background worker.
 #[derive(Debug)]
 pub enum BackgroundWorkerMessage {
+    /// Request to delete a replication slot for the specified worker type.
     DeleteReplicationSlot(WorkerType),
 }
 
+/// Internal wrapper for background worker messages that includes an optional response channel.
 #[derive(Debug)]
 struct BackgroundWorkerMessageWrapper {
     message: BackgroundWorkerMessage,
@@ -44,6 +47,7 @@ struct BackgroundWorkerMessageWrapper {
 }
 
 impl BackgroundWorkerMessageWrapper {
+    /// Creates a new message wrapper with a response channel.
     fn wrap_with_response(
         message: BackgroundWorkerMessage,
         response_tx: oneshot::Sender<Result<(), BackgroundWorkerError>>,
@@ -54,6 +58,7 @@ impl BackgroundWorkerMessageWrapper {
         }
     }
 
+    /// Sends a response back to the caller if a response channel is available.
     fn respond(mut self, result: Result<(), BackgroundWorkerError>) {
         if let Some(response_tx) = self.response_tx.take() {
             let _ = response_tx.send(result);
@@ -61,12 +66,17 @@ impl BackgroundWorkerMessageWrapper {
     }
 }
 
+/// State handle for communicating with the background worker.
 #[derive(Debug, Clone)]
 pub struct BackgroundWorkerState {
     tx: mpsc::UnboundedSender<BackgroundWorkerMessageWrapper>,
 }
 
 impl BackgroundWorkerState {
+    /// Sends a message to the background worker and waits for a response.
+    /// 
+    /// This method ensures that the requested operation completes before returning,
+    /// providing consistency guarantees to the caller.
     pub async fn send_sync_message(
         &self,
         message: BackgroundWorkerMessage,
@@ -89,6 +99,7 @@ impl BackgroundWorkerState {
     }
 }
 
+/// Handle for managing the background worker lifecycle.
 #[derive(Debug)]
 pub struct BackgroundWorkerHandle {
     state: BackgroundWorkerState,
@@ -96,10 +107,12 @@ pub struct BackgroundWorkerHandle {
 }
 
 impl WorkerHandle<BackgroundWorkerState> for BackgroundWorkerHandle {
+    /// Returns a clone of the background worker state for communication.
     fn state(&self) -> BackgroundWorkerState {
         self.state.clone()
     }
 
+    /// Waits for the background worker to complete and returns its result.
     async fn wait(mut self) -> Result<(), WorkerWaitError> {
         let Some(handle) = self.handle.take() else {
             return Ok(());
@@ -111,6 +124,10 @@ impl WorkerHandle<BackgroundWorkerState> for BackgroundWorkerHandle {
     }
 }
 
+/// Background worker that performs periodic maintenance tasks and handles administrative operations.
+/// 
+/// This worker runs continuously in the background, handling cleanup operations like removing
+/// unused replication slots and responding to administrative commands.
 #[derive(Debug)]
 pub struct BackgroundWorker<S> {
     pipeline_id: PipelineId,
@@ -120,6 +137,7 @@ pub struct BackgroundWorker<S> {
 }
 
 impl<S> BackgroundWorker<S> {
+    /// Creates a new background worker with the specified components.
     pub fn new(
         pipeline_id: PipelineId,
         replication_client: PgReplicationClient,
@@ -141,6 +159,10 @@ where
 {
     type Error = BackgroundWorkerError;
 
+    /// Starts the background worker and returns a handle for communication.
+    /// 
+    /// The worker runs in a loop, prioritizing message handling over periodic tasks,
+    /// and responds to shutdown signals gracefully.
     async fn start(mut self) -> Result<BackgroundWorkerHandle, Self::Error> {
         // We do use an unbounded channel since we expect in the future to have the system react to
         // memory usage.
@@ -183,6 +205,7 @@ where
     }
 }
 
+/// Handles incoming messages from clients and sends responses back.
 async fn handle_message(
     pipeline_id: PipelineId,
     replication_client: &PgReplicationClient,
@@ -197,6 +220,10 @@ async fn handle_message(
     }
 }
 
+/// Deletes a replication slot for the specified worker type.
+/// 
+/// If the slot is not found, logs a warning but returns success since the
+/// desired outcome (slot not existing) is achieved.
 async fn delete_replication_slot(
     pipeline_id: PipelineId,
     replication_client: &PgReplicationClient,
@@ -218,6 +245,10 @@ async fn delete_replication_slot(
     Ok(())
 }
 
+/// Performs periodic background maintenance tasks.
+/// 
+/// Currently handles cleanup of unused table sync worker replication slots.
+/// Errors are logged but do not stop the background worker.
 async fn perform_periodic_background_work<S>(
     pipeline_id: PipelineId,
     replication_client: &PgReplicationClient,
@@ -234,6 +265,11 @@ async fn perform_periodic_background_work<S>(
     }
 }
 
+/// Cleans up replication slots for table sync workers that have completed their work.
+/// 
+/// Retrieves all completed table replication states and attempts to delete their
+/// corresponding replication slots. Individual deletion failures are logged but
+/// do not prevent cleanup of other slots.
 async fn cleanup_unused_table_sync_worker_slots<S>(
     pipeline_id: PipelineId,
     replication_client: &PgReplicationClient,
