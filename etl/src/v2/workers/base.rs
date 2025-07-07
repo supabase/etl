@@ -5,7 +5,6 @@ use thiserror::Error;
 use tokio::task;
 
 use crate::v2::workers::apply::ApplyWorkerError;
-use crate::v2::workers::background::BackgroundWorkerError;
 use crate::v2::workers::table_sync::TableSyncWorkerError;
 
 /// Represents all possible errors that can occur while waiting for a worker to complete.
@@ -39,9 +38,6 @@ pub enum WorkerWaitError {
     /// This variant wraps the specific error returned by the table sync worker.
     #[error("Table sync worker terminated with an error: {0}")]
     TableSyncWorkerFailed(#[from] TableSyncWorkerError),
-
-    #[error("Background worker terminated with an error: {0}")]
-    BackgroundWorkerFailed(#[from] BackgroundWorkerError),
 }
 
 #[derive(Debug)]

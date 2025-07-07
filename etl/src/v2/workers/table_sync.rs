@@ -14,11 +14,11 @@ use crate::v2::destination::base::Destination;
 use crate::v2::pipeline::PipelineId;
 use crate::v2::replication::apply::{ApplyLoopError, ApplyLoopHook, start_apply_loop};
 use crate::v2::replication::client::{PgReplicationClient, PgReplicationError};
+use crate::v2::replication::slot::get_slot_name;
 use crate::v2::replication::table_sync::{TableSyncError, TableSyncResult, start_table_sync};
 use crate::v2::schema::cache::SchemaCache;
 use crate::v2::state::store::base::{StateStore, StateStoreError};
 use crate::v2::state::table::{TableReplicationPhase, TableReplicationPhaseType};
-use crate::v2::workers::background::{BackgroundWorkerMessage, BackgroundWorkerState};
 use crate::v2::workers::base::{Worker, WorkerHandle, WorkerType, WorkerWaitError};
 use crate::v2::workers::pool::TableSyncWorkerPool;
 
@@ -242,7 +242,6 @@ pub struct TableSyncWorker<S, D> {
     destination: D,
     shutdown_rx: ShutdownRx,
     run_permit: Arc<Semaphore>,
-    background_worker_state: BackgroundWorkerState,
 }
 
 impl<S, D> TableSyncWorker<S, D> {
@@ -257,7 +256,6 @@ impl<S, D> TableSyncWorker<S, D> {
         destination: D,
         shutdown_rx: ShutdownRx,
         run_permit: Arc<Semaphore>,
-        background_worker_state: BackgroundWorkerState,
     ) -> Self {
         Self {
             pipeline_id,
@@ -269,7 +267,6 @@ impl<S, D> TableSyncWorker<S, D> {
             destination,
             shutdown_rx,
             run_permit,
-            background_worker_state,
         }
     }
 
@@ -358,7 +355,7 @@ where
             start_apply_loop(
                 self.pipeline_id,
                 start_lsn,
-                self.config,
+                self.config.clone(),
                 replication_client,
                 self.schema_cache,
                 self.destination,
@@ -371,14 +368,13 @@ where
             //
             // It's very important to terminate the connection before cleaning up its slot, otherwise
             // the deletion will halt indefinitely.
-            let result = self
-                .background_worker_state
-                .send_sync_message(BackgroundWorkerMessage::DeleteReplicationSlot(
-                    WorkerType::TableSync {
-                        table_id: self.table_id,
-                    },
-                ))
-                .await;
+            let replication_client =
+                PgReplicationClient::connect(self.config.pg_connection.clone()).await?;
+            let worker_type = WorkerType::TableSync {
+                table_id: self.table_id,
+            };
+            let slot_name = get_slot_name(self.pipeline_id, worker_type).unwrap();
+            let result = replication_client.delete_slot(&slot_name).await;
             if let Err(err) = result {
                 error!(
                     "Failed to delete the replication slot of the table sync worker {}, it will be deleted in the future by the periodic cleanup job: {err}",

@@ -17,7 +17,6 @@ use crate::v2::replication::slot::{SlotError, get_slot_name};
 use crate::v2::schema::cache::SchemaCache;
 use crate::v2::state::store::base::{StateStore, StateStoreError};
 use crate::v2::state::table::{TableReplicationPhase, TableReplicationPhaseType};
-use crate::v2::workers::background::BackgroundWorkerState;
 use crate::v2::workers::base::{Worker, WorkerHandle, WorkerType, WorkerWaitError};
 use crate::v2::workers::pool::TableSyncWorkerPool;
 use crate::v2::workers::table_sync::{
@@ -84,7 +83,6 @@ pub struct ApplyWorker<S, D> {
     destination: D,
     shutdown_rx: ShutdownRx,
     table_sync_worker_permits: Arc<Semaphore>,
-    background_worker_state: BackgroundWorkerState,
 }
 
 impl<S, D> ApplyWorker<S, D> {
@@ -99,7 +97,6 @@ impl<S, D> ApplyWorker<S, D> {
         destination: D,
         shutdown_rx: ShutdownRx,
         table_sync_worker_permits: Arc<Semaphore>,
-        background_worker_state: BackgroundWorkerState,
     ) -> Self {
         Self {
             pipeline_id,
@@ -111,7 +108,6 @@ impl<S, D> ApplyWorker<S, D> {
             destination,
             shutdown_rx,
             table_sync_worker_permits,
-            background_worker_state,
         }
     }
 }
@@ -145,7 +141,6 @@ where
                     self.destination,
                     self.shutdown_rx.clone(),
                     self.table_sync_worker_permits.clone(),
-                    self.background_worker_state.clone(),
                 ),
                 self.shutdown_rx,
             )
@@ -190,7 +185,6 @@ struct ApplyWorkerHook<S, D> {
     destination: D,
     shutdown_rx: ShutdownRx,
     table_sync_worker_permits: Arc<Semaphore>,
-    background_worker_state: BackgroundWorkerState,
 }
 
 impl<S, D> ApplyWorkerHook<S, D> {
@@ -204,7 +198,6 @@ impl<S, D> ApplyWorkerHook<S, D> {
         destination: D,
         shutdown_rx: ShutdownRx,
         table_sync_worker_permits: Arc<Semaphore>,
-        background_worker_state: BackgroundWorkerState,
     ) -> Self {
         Self {
             pipeline_id,
@@ -215,7 +208,6 @@ impl<S, D> ApplyWorkerHook<S, D> {
             destination,
             shutdown_rx,
             table_sync_worker_permits,
-            background_worker_state,
         }
     }
 }
@@ -236,7 +228,6 @@ where
             self.destination.clone(),
             self.shutdown_rx.clone(),
             self.table_sync_worker_permits.clone(),
-            self.background_worker_state.clone(),
         );
 
         let mut pool = self.pool.write().await;
