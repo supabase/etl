@@ -85,13 +85,19 @@ impl Application {
             key,
         };
         let api_key = configuration.api_key;
-        let k8s_client = HttpK8sClient::new().await?;
+        let k8s_client = match HttpK8sClient::new().await {
+            Ok(client) => Some(client),
+            Err(e) => {
+                tracing::warn!("Failed to create Kubernetes client: {}. Running without Kubernetes support.", e);
+                None
+            }
+        };
         let server = run(
             listener,
             connection_pool,
             encryption_key,
             api_key,
-            Some(k8s_client),
+            k8s_client,
         )
         .await?;
 
@@ -223,6 +229,7 @@ pub async fn run(
         let tracing_middleware = TracingLogger::<ApiRootSpanBuilder>::new();
         let authentication = HttpAuthentication::bearer(auth_validator);
         let app = App::new()
+            .wrap(sentry_actix::Sentry::new())
             .wrap(tracing_middleware)
             .service(health_check)
             .service(
@@ -283,6 +290,7 @@ pub async fn run(
             .app_data(connection_pool.clone())
             .app_data(encryption_key.clone())
             .app_data(api_key.clone());
+
         if let Some(k8s_client) = k8s_client.clone() {
             app.app_data(k8s_client.clone())
         } else {

@@ -10,7 +10,7 @@ const API_KEY_LENGTH_IN_BYTES: usize = 32;
 
 /// Top-level configuration for the API service.
 ///
-/// Contains database, application, encryption, and API key settings.
+/// Contains database, application, encryption, API key, and optional Sentry settings.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ApiConfig {
     /// Database connection configuration.
@@ -21,6 +21,15 @@ pub struct ApiConfig {
     pub encryption_key: EncryptionKey,
     /// Base64-encoded API key string.
     pub api_key: String,
+    /// Optional Sentry configuration for error tracking.
+    pub sentry: Option<SentryConfig>,
+}
+
+/// Configuration for Sentry error tracking.
+#[derive(Debug, Clone, Deserialize)]
+pub struct SentryConfig {
+    /// Sentry DSN (Data Source Name) for error reporting.
+    pub dsn: String,
 }
 
 /// Network and server settings for the API.

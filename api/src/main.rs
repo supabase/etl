@@ -6,9 +6,11 @@ use config::{load_config, shared::PgConnectionConfig};
 use telemetry::init_tracing;
 use tracing::{error, info};
 
-#[actix_web::main]
-pub async fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<()> {
     let app_name = env!("CARGO_BIN_NAME");
+
+    // Initialize Sentry before the async runtime starts
+    let _sentry_guard = init_sentry()?;
 
     // We pass emit_on_span_close = true to emit logs on span close
     // for the api because it is a web server, and we need to emit logs
@@ -17,6 +19,12 @@ pub async fn main() -> anyhow::Result<()> {
     // request end, but it doesn't do that yet.
     let _log_flusher = init_tracing(app_name, true)?;
 
+    // Start the async runtime
+    let rt = tokio::runtime::Runtime::new()?;
+    rt.block_on(async_main())
+}
+
+async fn async_main() -> anyhow::Result<()> {
     let mut args = env::args();
     match args.len() {
         // Run the application server
@@ -51,6 +59,23 @@ pub async fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+fn init_sentry() -> anyhow::Result<Option<sentry::ClientInitGuard>> {
+    if let Ok(config) = load_config::<ApiConfig>() {
+        if let Some(sentry_config) = &config.sentry {
+            info!("Initializing Sentry with DSN");
+            let guard = sentry::init(sentry::ClientOptions {
+                dsn: Some(sentry_config.dsn.parse()?),
+                traces_sample_rate: 1.0,
+                ..Default::default()
+            });
+            return Ok(Some(guard));
+        }
+    }
+    
+    info!("Sentry not configured, skipping initialization");
+    Ok(None)
 }
 
 fn log_pg_connection_config(config: &PgConnectionConfig) {
