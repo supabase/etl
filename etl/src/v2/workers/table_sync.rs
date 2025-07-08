@@ -395,13 +395,14 @@ where
             match result {
                 Ok(Err(err)) => {
                     error!(
-                        "Failed to delete the replication slot {slot_name} of the table sync worker {}, it will be deleted in the future by the periodic cleanup job: {err}",
+                        "Failed to delete the replication slot {slot_name} of the table sync worker {}: {err}",
                         self.table_id
                     )
                 }
                 Err(_) => {
                     error!(
-                        "Could not delete the replication slot {slot_name} of the table sync worker due to timeout"
+                        "Failed to delete the replication slot {slot_name} of the table sync worker {} due to timeout",
+                        self.table_id
                     );
                 }
                 _ => {}
