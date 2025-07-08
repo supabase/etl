@@ -5,7 +5,6 @@ use std::time::Duration;
 use thiserror::Error;
 use tokio::sync::{AcquireError, Notify, RwLock, RwLockReadGuard, Semaphore};
 use tokio::task::JoinHandle;
-use tokio::time::timeout;
 use tokio_postgres::types::PgLsn;
 use tracing::{error, info, warn};
 
@@ -23,9 +22,16 @@ use crate::v2::state::table::{TableReplicationPhase, TableReplicationPhaseType};
 use crate::v2::workers::base::{Worker, WorkerHandle, WorkerType, WorkerWaitError};
 use crate::v2::workers::pool::TableSyncWorkerPool;
 
+/// Maximum time to wait for a phase change before trying again.
 const PHASE_CHANGE_REFRESH_FREQUENCY: Duration = Duration::from_millis(100);
 
-const MAX_DELETE_SLOT_WAIT: Duration = Duration::from_secs(10);
+/// Maximum time to wait for the slot deletion call to complete.
+///
+/// The reason for setting a timer on deletion is that we wait for the slot to become unused before
+/// deleting it. We want to avoid an infinite wait in case the slot fails to be released,
+/// as this could result in a connection being held indefinitely, potentially stalling the processing
+/// of new tables.
+const MAX_DELETE_SLOT_WAIT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Error)]
 pub enum TableSyncWorkerError {
@@ -367,11 +373,17 @@ where
             )
             .await?;
 
+            // We delete the replication slot used by this table sync worker.
+            //
+            // Note that if the deletion fails, the slot will remain in the database and will not be
+            // removed later, so manual intervention will be required. The reason for not implementing
+            // an automatic cleanup mechanism is that it would introduce performance overhead,
+            // and we expect this call to fail only rarely.
             let worker_type = WorkerType::TableSync {
                 table_id: self.table_id,
             };
             let slot_name = get_slot_name(self.pipeline_id, worker_type).unwrap();
-            let result = timeout(
+            let result = tokio::time::timeout(
                 MAX_DELETE_SLOT_WAIT,
                 replication_client.delete_slot(&slot_name),
             )
