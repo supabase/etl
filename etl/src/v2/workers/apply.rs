@@ -5,7 +5,7 @@ use thiserror::Error;
 use tokio::sync::Semaphore;
 use tokio::task::JoinHandle;
 use tokio_postgres::types::PgLsn;
-use tracing::{error, info};
+use tracing::{Instrument, debug, error, info};
 
 use crate::v2::concurrency::shutdown::ShutdownRx;
 use crate::v2::destination::base::Destination;
