@@ -43,7 +43,7 @@ sqlx = { workspace = true, features = [
     "migrate",
 ] }
 thiserror = { workspace = true }
-tokio = { workspace = true, features = ["rt-multi-thread", "macros", "rt"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 tracing = { workspace = true, default-features = false }
 tracing-actix-web = { workspace = true, features = ["emit_event_on_error"] }
 utoipa = { workspace = true, features = ["actix_extras"] }
