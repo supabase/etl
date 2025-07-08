@@ -28,16 +28,6 @@ impl Environment {
             .unwrap_or_else(|_| DEV_ENV_NAME.into())
             .try_into()
     }
-
-    /// Returns the string name of the environment.
-    ///
-    /// The returned value matches the corresponding constant, such as [`DEV_ENV_NAME`] or [`PROD_ENV_NAME`].
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Environment::Dev => DEV_ENV_NAME,
-            Environment::Prod => PROD_ENV_NAME,
-        }
-    }
 }
 
 impl fmt::Display for Environment {
