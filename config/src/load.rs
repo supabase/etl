@@ -47,7 +47,7 @@ where
     // Default to `dev` if unspecified.
     let environment = Environment::load().expect("Failed to parse APP_ENVIRONMENT.");
 
-    let environment_filename = format!("{}.yaml", environment);
+    let environment_filename = format!("{environment}.yaml");
     let settings = rust_cli_config::Config::builder()
         .add_source(rust_cli_config::File::from(
             configuration_directory.join(BASE_CONFIG_FILE),
