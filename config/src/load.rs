@@ -1,6 +1,6 @@
 use serde::de::DeserializeOwned;
 
-use crate::environment::{DEV_ENV_NAME, Environment};
+use crate::environment::Environment;
 
 /// Directory containing configuration files relative to the application root.
 const CONFIGURATION_DIR: &str = "configuration";
@@ -45,10 +45,7 @@ where
 
     // Detect the running environment.
     // Default to `dev` if unspecified.
-    let environment: Environment = std::env::var("APP_ENVIRONMENT")
-        .unwrap_or_else(|_| DEV_ENV_NAME.into())
-        .try_into()
-        .expect("Failed to parse APP_ENVIRONMENT.");
+    let environment = Environment::load().expect("Failed to parse APP_ENVIRONMENT.");
 
     let environment_filename = format!("{}.yaml", environment.as_str());
     let settings = rust_cli_config::Config::builder()

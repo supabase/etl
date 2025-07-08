@@ -2,7 +2,7 @@ use std::env;
 
 use anyhow::anyhow;
 use api::{config::ApiConfig, startup::Application};
-use config::{load_config, shared::PgConnectionConfig};
+use config::{Environment, load_config, shared::PgConnectionConfig};
 use telemetry::init_tracing;
 use tracing::{error, info};
 
@@ -67,8 +67,10 @@ fn init_sentry() -> anyhow::Result<Option<sentry::ClientInitGuard>> {
         if let Some(sentry_config) = &config.sentry {
             info!("Initializing Sentry with DSN");
 
+            let environment = Environment::load()?;
             let guard = sentry::init(sentry::ClientOptions {
                 dsn: Some(sentry_config.dsn.parse()?),
+                environment: Some(environment.to_string().into()),
                 traces_sample_rate: 1.0,
                 send_default_pii: false,
                 max_request_body_size: sentry::MaxRequestBodySize::Always,
@@ -78,7 +80,7 @@ fn init_sentry() -> anyhow::Result<Option<sentry::ClientInitGuard>> {
             return Ok(Some(guard));
         }
     }
-    
+
     info!("Sentry not configured, skipping initialization");
     Ok(None)
 }

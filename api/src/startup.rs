@@ -89,7 +89,10 @@ impl Application {
         let k8s_client = match HttpK8sClient::new().await {
             Ok(client) => Some(client),
             Err(e) => {
-                warn!("Failed to create Kubernetes client: {}. Running without Kubernetes support.", e);
+                warn!(
+                    "Failed to create Kubernetes client: {}. Running without Kubernetes support.",
+                    e
+                );
                 None
             }
         };
