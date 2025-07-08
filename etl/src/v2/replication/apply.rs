@@ -151,6 +151,14 @@ enum BatchEarlyBreak {
     BreakAndDiscard,
 }
 
+#[derive(Default)]
+struct HandleMessageResult {
+    event: Option<Event>,
+    /// An enum indicating whether the processing of a batch should be terminated early, with a consequent
+    /// termination of the main apply loop too.
+    early_break: Option<BatchEarlyBreak>,
+}
+
 #[derive(Debug, Clone)]
 struct ApplyLoopState {
     /// The highest LSN received from the `end_lsn` field of a `Commit` message.
@@ -166,9 +174,6 @@ struct ApplyLoopState {
     remote_final_lsn: Option<PgLsn>,
     /// The LSNs of the status update that we want to send to Postgres.
     next_status_update: StatusUpdate,
-    /// An enum indicating whether the processing of a batch should be terminated early, with a consequent
-    /// termination of the main apply loop too.
-    early_break: Option<BatchEarlyBreak>,
 }
 
 impl ApplyLoopState {
@@ -177,7 +182,6 @@ impl ApplyLoopState {
             last_commit_end_lsn: None,
             remote_final_lsn: None,
             next_status_update,
-            early_break: None,
         }
     }
 
@@ -369,12 +373,12 @@ where
         let previous_state = state.clone();
 
         // An error while processing a message in a batch will lead to the entire batch being discarded.
-        let event =
+        let result =
             handle_replication_message(state, stream.as_mut(), message?, schema_cache, hook)
                 .await?;
 
-        if !matches!(state.early_break, Some(BatchEarlyBreak::BreakAndDiscard)) {
-            if let Some(event) = event {
+        if !matches!(result.early_break, Some(BatchEarlyBreak::BreakAndDiscard)) {
+            if let Some(event) = result.event {
                 events_batch.push(event);
             }
         }
@@ -391,7 +395,7 @@ where
         // but its batch contained more elements after the caught up element, in that case we don't
         // want to process those elements, otherwise if we do, the apply worker will process them too
         // causing duplicate data.
-        match state.early_break {
+        match result.early_break {
             Some(BatchEarlyBreak::Break) => {
                 stop_apply_loop = true;
 
@@ -442,7 +446,7 @@ async fn handle_replication_message<T>(
     message: ReplicationMessage<LogicalReplicationMessage>,
     schema_cache: &SchemaCache,
     hook: &T,
-) -> Result<Option<Event>, ApplyLoopError>
+) -> Result<HandleMessageResult, ApplyLoopError>
 where
     T: ApplyLoopHook,
     ApplyLoopError: From<<T as ApplyLoopHook>::Error>,
@@ -470,9 +474,9 @@ where
                 )
                 .await?;
 
-            Ok(None)
+            Ok(HandleMessageResult::default())
         }
-        _ => Ok(None),
+        _ => Ok(HandleMessageResult::default()),
     }
 }
 
@@ -481,7 +485,7 @@ async fn handle_logical_replication_message<T>(
     message: LogicalReplicationMessage,
     schema_cache: &SchemaCache,
     hook: &T,
-) -> Result<Option<Event>, ApplyLoopError>
+) -> Result<HandleMessageResult, ApplyLoopError>
 where
     T: ApplyLoopHook,
     ApplyLoopError: From<<T as ApplyLoopHook>::Error>,
@@ -512,9 +516,9 @@ where
         LogicalReplicationMessage::Truncate(message) => {
             handle_truncate_message(state, event, &message, hook).await
         }
-        LogicalReplicationMessage::Origin(_) => Ok(None),
-        LogicalReplicationMessage::Type(_) => Ok(None),
-        _ => Ok(None),
+        LogicalReplicationMessage::Origin(_) => Ok(HandleMessageResult::default()),
+        LogicalReplicationMessage::Type(_) => Ok(HandleMessageResult::default()),
+        _ => Ok(HandleMessageResult::default()),
     }
 }
 
@@ -522,7 +526,7 @@ async fn handle_begin_message(
     state: &mut ApplyLoopState,
     event: Event,
     message: &protocol::BeginBody,
-) -> Result<Option<Event>, ApplyLoopError> {
+) -> Result<HandleMessageResult, ApplyLoopError> {
     let Event::Begin(event) = event else {
         return Err(ApplyLoopError::InvalidEvent(event.into(), EventType::Begin));
     };
@@ -532,7 +536,10 @@ async fn handle_begin_message(
     let final_lsn = PgLsn::from(message.final_lsn());
     state.remote_final_lsn = Some(final_lsn);
 
-    Ok(Some(Event::Begin(event)))
+    Ok(HandleMessageResult {
+        event: Some(Event::Begin(event)),
+        early_break: None,
+    })
 }
 
 async fn handle_commit_message<T>(
@@ -540,7 +547,7 @@ async fn handle_commit_message<T>(
     event: Event,
     message: &protocol::CommitBody,
     hook: &T,
-) -> Result<Option<Event>, ApplyLoopError>
+) -> Result<HandleMessageResult, ApplyLoopError>
 where
     T: ApplyLoopHook,
     ApplyLoopError: From<<T as ApplyLoopHook>::Error>,
@@ -590,14 +597,16 @@ where
     // The `end_lsn` here refers to the LSN of the record right after the commit record.
     let continue_loop = hook.process_syncing_tables(end_lsn).await?;
 
+    let mut result = HandleMessageResult::default();
     // If we are told to stop the loop, it means we reached the end of processing for this specific
     // worker, so we gracefully stop processing the batch, but we include in the batch the last processed
     // element, in this case the `Commit` message.
     if !continue_loop {
-        state.early_break = Some(BatchEarlyBreak::Break);
+        result.early_break = Some(BatchEarlyBreak::Break);
     }
 
-    Ok(Some(Event::Commit(event)))
+    result.event = Some(Event::Commit(event));
+    Ok(result)
 }
 
 async fn handle_relation_message<T>(
@@ -606,7 +615,7 @@ async fn handle_relation_message<T>(
     message: &protocol::RelationBody,
     schema_cache: &SchemaCache,
     hook: &T,
-) -> Result<Option<Event>, ApplyLoopError>
+) -> Result<HandleMessageResult, ApplyLoopError>
 where
     T: ApplyLoopHook,
     ApplyLoopError: From<<T as ApplyLoopHook>::Error>,
@@ -628,7 +637,7 @@ where
         .should_apply_changes(message.rel_id(), remote_final_lsn)
         .await?
     {
-        return Ok(None);
+        return Ok(HandleMessageResult::default());
     }
 
     // If no table schema is found, it means that something went wrong and we throw an error, which is
@@ -645,16 +654,20 @@ where
     if !existing_table_schema.partial_eq(&event.table_schema) {
         let continue_loop = hook.skip_table(message.rel_id()).await?;
 
+        let mut result = HandleMessageResult::default();
         // If we are told to stop the loop, we want to break the batch processing and discard the
         // current element being processed, in this case the `Relation` message.
         if !continue_loop {
-            state.early_break = Some(BatchEarlyBreak::BreakAndDiscard);
+            result.early_break = Some(BatchEarlyBreak::BreakAndDiscard);
         }
 
-        return Ok(None);
+        return Ok(result);
     }
 
-    Ok(Some(Event::Relation(event)))
+    Ok(HandleMessageResult {
+        event: Some(Event::Relation(event)),
+        early_break: None,
+    })
 }
 
 async fn handle_insert_message<T>(
@@ -662,7 +675,7 @@ async fn handle_insert_message<T>(
     event: Event,
     message: &protocol::InsertBody,
     hook: &T,
-) -> Result<Option<Event>, ApplyLoopError>
+) -> Result<HandleMessageResult, ApplyLoopError>
 where
     T: ApplyLoopHook,
     ApplyLoopError: From<<T as ApplyLoopHook>::Error>,
@@ -684,10 +697,13 @@ where
         .should_apply_changes(message.rel_id(), remote_final_lsn)
         .await?
     {
-        return Ok(None);
+        return Ok(HandleMessageResult::default());
     }
 
-    Ok(Some(Event::Insert(event)))
+    Ok(HandleMessageResult {
+        event: Some(Event::Insert(event)),
+        early_break: None,
+    })
 }
 
 async fn handle_update_message<T>(
@@ -695,7 +711,7 @@ async fn handle_update_message<T>(
     event: Event,
     message: &protocol::UpdateBody,
     hook: &T,
-) -> Result<Option<Event>, ApplyLoopError>
+) -> Result<HandleMessageResult, ApplyLoopError>
 where
     T: ApplyLoopHook,
     ApplyLoopError: From<<T as ApplyLoopHook>::Error>,
@@ -717,10 +733,13 @@ where
         .should_apply_changes(message.rel_id(), remote_final_lsn)
         .await?
     {
-        return Ok(None);
+        return Ok(HandleMessageResult::default());
     }
 
-    Ok(Some(Event::Update(event)))
+    Ok(HandleMessageResult {
+        event: Some(Event::Update(event)),
+        early_break: None,
+    })
 }
 
 async fn handle_delete_message<T>(
@@ -728,7 +747,7 @@ async fn handle_delete_message<T>(
     event: Event,
     message: &protocol::DeleteBody,
     hook: &T,
-) -> Result<Option<Event>, ApplyLoopError>
+) -> Result<HandleMessageResult, ApplyLoopError>
 where
     T: ApplyLoopHook,
     ApplyLoopError: From<<T as ApplyLoopHook>::Error>,
@@ -750,10 +769,13 @@ where
         .should_apply_changes(message.rel_id(), remote_final_lsn)
         .await?
     {
-        return Ok(None);
+        return Ok(HandleMessageResult::default());
     }
 
-    Ok(Some(Event::Delete(event)))
+    Ok(HandleMessageResult {
+        event: Some(Event::Delete(event)),
+        early_break: None,
+    })
 }
 
 async fn handle_truncate_message<T>(
@@ -761,7 +783,7 @@ async fn handle_truncate_message<T>(
     event: Event,
     message: &protocol::TruncateBody,
     hook: &T,
-) -> Result<Option<Event>, ApplyLoopError>
+) -> Result<HandleMessageResult, ApplyLoopError>
 where
     T: ApplyLoopHook,
     ApplyLoopError: From<<T as ApplyLoopHook>::Error>,
@@ -790,5 +812,8 @@ where
     }
     event.rel_ids = rel_ids;
 
-    Ok(Some(Event::Truncate(event)))
+    Ok(HandleMessageResult {
+        event: Some(Event::Truncate(event)),
+        early_break: None,
+    })
 }
