@@ -336,7 +336,7 @@ where
                 "Acquired a running permit for table sync worker for table {}",
                 self.table_id
             );
-          
+
             // We create a new replication connection specifically for this table sync worker.
             //
             // Note that this connection must be tied to the lifetime of this worker, otherwise
