@@ -5,6 +5,7 @@ use std::time::Duration;
 use thiserror::Error;
 use tokio::sync::{AcquireError, Notify, RwLock, RwLockReadGuard, Semaphore};
 use tokio::task::JoinHandle;
+use tokio::time::timeout;
 use tokio_postgres::types::PgLsn;
 use tracing::{error, info, warn};
 
@@ -23,6 +24,8 @@ use crate::v2::workers::base::{Worker, WorkerHandle, WorkerType, WorkerWaitError
 use crate::v2::workers::pool::TableSyncWorkerPool;
 
 const PHASE_CHANGE_REFRESH_FREQUENCY: Duration = Duration::from_millis(100);
+
+const MAX_DELETE_SLOT_WAIT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Error)]
 pub enum TableSyncWorkerError {
@@ -356,7 +359,7 @@ where
                 self.pipeline_id,
                 start_lsn,
                 self.config.clone(),
-                replication_client,
+                replication_client.clone(),
                 self.schema_cache,
                 self.destination,
                 TableSyncWorkerHook::new(self.table_id, state_clone, self.state_store),
@@ -364,22 +367,28 @@ where
             )
             .await?;
 
-            // We delete the replication slot used by this table sync worker.
-            //
-            // It's very important to terminate the connection before cleaning up its slot, otherwise
-            // the deletion will halt indefinitely.
-            let replication_client =
-                PgReplicationClient::connect(self.config.pg_connection.clone()).await?;
             let worker_type = WorkerType::TableSync {
                 table_id: self.table_id,
             };
             let slot_name = get_slot_name(self.pipeline_id, worker_type).unwrap();
-            let result = replication_client.delete_slot(&slot_name).await;
-            if let Err(err) = result {
-                error!(
-                    "Failed to delete the replication slot of the table sync worker {}, it will be deleted in the future by the periodic cleanup job: {err}",
-                    self.table_id
-                )
+            let result = timeout(
+                MAX_DELETE_SLOT_WAIT,
+                replication_client.delete_slot(&slot_name),
+            )
+            .await;
+            match result {
+                Ok(Err(err)) => {
+                    error!(
+                        "Failed to delete the replication slot {slot_name} of the table sync worker {}, it will be deleted in the future by the periodic cleanup job: {err}",
+                        self.table_id
+                    )
+                }
+                Err(_) => {
+                    error!(
+                        "Could not delete the replication slot {slot_name} of the table sync worker due to timeout"
+                    );
+                }
+                _ => {}
             }
 
             // This explicit drop is not strictly necessary but is added to make it extra clear
