@@ -261,7 +261,7 @@ pub async fn read_all_destinations(
             id: destination.id,
             tenant_id: destination.tenant_id,
             name: destination.name,
-            config: destination.config.into(),
+            config: destination.config,
         };
         destinations.push(destination);
     }
