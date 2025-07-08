@@ -62,11 +62,7 @@ impl Destination for MemoryDestination {
         table_rows: Vec<TableRow>,
     ) -> Result<(), DestinationError> {
         let mut inner = self.inner.write().await;
-        info!(
-            "Writing batch of {} table rows for table id {:?}:",
-            table_rows.len(),
-            table_id
-        );
+        info!("Writing a batch of {} table rows:", table_rows.len());
         for table_row in &table_rows {
             info!("  {:?}", table_row);
         }
@@ -76,7 +72,7 @@ impl Destination for MemoryDestination {
 
     async fn write_events(&self, events: Vec<Event>) -> Result<(), DestinationError> {
         let mut inner = self.inner.write().await;
-        info!("Writing batch of {} events:", events.len());
+        info!("Writing a batch of {} events:", events.len());
         for event in &events {
             info!("  {:?}", event);
         }

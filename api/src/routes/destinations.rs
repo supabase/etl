@@ -61,36 +61,6 @@ impl ResponseError for DestinationError {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum StrippedDestinationConfig {
-    Memory,
-    BigQuery {
-        project_id: String,
-        dataset_id: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        max_staleness_mins: Option<u16>,
-    },
-}
-
-impl From<DestinationConfig> for StrippedDestinationConfig {
-    fn from(config: DestinationConfig) -> Self {
-        match config {
-            DestinationConfig::Memory => Self::Memory,
-            DestinationConfig::BigQuery {
-                project_id,
-                dataset_id,
-                max_staleness_mins,
-                ..
-            } => Self::BigQuery {
-                project_id,
-                dataset_id,
-                max_staleness_mins,
-            },
-        }
-    }
-}
-
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct CreateDestinationRequest {
     #[schema(example = "My BigQuery Destination", required = true)]
@@ -121,7 +91,7 @@ pub struct ReadDestinationResponse {
     pub tenant_id: String,
     #[schema(example = "My BigQuery Destination")]
     pub name: String,
-    pub config: StrippedDestinationConfig,
+    pub config: DestinationConfig,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
@@ -189,7 +159,7 @@ pub async fn read_destination(
                 id: s.id,
                 tenant_id: s.tenant_id,
                 name: s.name,
-                config: s.config.into(),
+                config: s.config,
             })
             .ok_or(DestinationError::DestinationNotFound(destination_id))?;
 
@@ -291,7 +261,7 @@ pub async fn read_all_destinations(
             id: destination.id,
             tenant_id: destination.tenant_id,
             name: destination.name,
-            config: destination.config.into(),
+            config: destination.config,
         };
         destinations.push(destination);
     }

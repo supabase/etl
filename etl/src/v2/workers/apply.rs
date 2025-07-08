@@ -122,6 +122,7 @@ where
     async fn start(self) -> Result<ApplyWorkerHandle, Self::Error> {
         info!("Starting apply worker");
 
+        let apply_worker_span = tracing::info_span!("apply_worker");
         let apply_worker = async move {
             let start_lsn = get_start_lsn(self.pipeline_id, &self.replication_client).await?;
 
@@ -147,7 +148,8 @@ where
             .await?;
 
             Ok(())
-        };
+        }
+        .instrument(apply_worker_span);
 
         let handle = tokio::spawn(apply_worker);
 
@@ -253,7 +255,7 @@ where
         };
 
         let Some(table_sync_worker_state) = table_sync_worker_state else {
-            info!("Creating new sync worker for table {}", table_id);
+            info!("Creating a new table sync worker for table {}", table_id);
             self.start_table_sync_worker(table_id).await?;
 
             return Ok(true);
@@ -338,7 +340,7 @@ where
     async fn process_syncing_tables(&self, current_lsn: PgLsn) -> Result<bool, Self::Error> {
         let active_table_replication_states =
             get_table_replication_states(&self.state_store, false).await?;
-        info!(
+        debug!(
             "Processing syncing tables for apply worker with LSN {}",
             current_lsn
         );

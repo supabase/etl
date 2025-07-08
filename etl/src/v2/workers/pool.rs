@@ -4,7 +4,7 @@ use std::mem;
 use std::ops::Deref;
 use std::sync::Arc;
 use tokio::sync::{Notify, RwLock};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::v2::concurrency::future::ReactiveFutureCallback;
 use crate::v2::destination::base::Destination;
@@ -69,7 +69,7 @@ impl TableSyncWorkerPoolInner {
 
     pub fn get_active_worker_state(&self, table_id: TableId) -> Option<TableSyncWorkerState> {
         let state = self.active.get(&table_id)?.state().clone();
-        info!("Retrieved worker state for table {}", table_id);
+        debug!("Retrieved worker state for table {table_id}");
 
         Some(state)
     }
@@ -86,10 +86,7 @@ impl TableSyncWorkerPoolInner {
         }
 
         if let Some(removed_worker) = removed_worker {
-            info!(
-                "Marked table sync worker for table {} as inactive with reason: {:?}",
-                table_id, reason
-            );
+            info!("Marked table sync worker inactive with reason: {reason:?}",);
 
             self.inactive
                 .entry(table_id)

@@ -140,7 +140,7 @@ fn configure_dev_tracing(
         // to reduce noise in the logs
         .with_line_number(false)
         .with_file(false)
-        .with_target(false);
+        .with_target(true);
 
     let subscriber_builder = FmtSubscriber::builder()
         .event_format(format)

@@ -16,7 +16,7 @@ use tokio_postgres::{
     config::ReplicationMode, types::PgLsn,
 };
 use tokio_postgres_rustls::MakeRustlsConnect;
-use tracing::{error, info, warn};
+use tracing::{Instrument, error, info, warn};
 
 /// Spawns a background task to monitor a PostgreSQL connection until it terminates.
 ///
@@ -27,14 +27,17 @@ where
     T::Stream: Send + 'static,
 {
     // TODO: maybe return a handle for this task to keep track of it.
-    tokio::spawn(async move {
+    let span = tracing::Span::current();
+    let task = async move {
         if let Err(e) = connection.await {
             error!("An error occurred during the Postgres connection: {}", e);
             return;
         }
 
         info!("Postgres connection terminated successfully")
-    });
+    }
+    .instrument(span);
+    tokio::spawn(task);
 }
 
 /// Errors that can occur when using the PostgreSQL replication client.
