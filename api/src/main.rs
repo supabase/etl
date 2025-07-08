@@ -70,7 +70,7 @@ fn init_sentry() -> anyhow::Result<Option<sentry::ClientInitGuard>> {
             let environment = Environment::load()?;
             let guard = sentry::init(sentry::ClientOptions {
                 dsn: Some(sentry_config.dsn.parse()?),
-                environment: Some(environment.into()),
+                environment: Some(environment.to_string().into()),
                 traces_sample_rate: 1.0,
                 send_default_pii: false,
                 max_request_body_size: sentry::MaxRequestBodySize::Always,
