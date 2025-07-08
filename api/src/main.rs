@@ -9,9 +9,6 @@ use tracing::{error, info};
 fn main() -> anyhow::Result<()> {
     let app_name = env!("CARGO_BIN_NAME");
 
-    // Initialize Sentry before the async runtime starts
-    let _sentry_guard = init_sentry()?;
-
     // We pass emit_on_span_close = true to emit logs on span close
     // for the api because it is a web server, and we need to emit logs
     // for every closing request. This is a bit of a hack, but it works
@@ -19,9 +16,13 @@ fn main() -> anyhow::Result<()> {
     // request end, but it doesn't do that yet.
     let _log_flusher = init_tracing(app_name, true)?;
 
-    // Start the async runtime
-    let rt = tokio::runtime::Runtime::new()?;
-    rt.block_on(async_main())
+    // Initialize Sentry before the async runtime starts
+    let _sentry_guard = init_sentry()?;
+
+    // We start the runtime.
+    actix_web::rt::System::new().block_on(async_main())?;
+
+    Ok(())
 }
 
 async fn async_main() -> anyhow::Result<()> {
@@ -65,11 +66,15 @@ fn init_sentry() -> anyhow::Result<Option<sentry::ClientInitGuard>> {
     if let Ok(config) = load_config::<ApiConfig>() {
         if let Some(sentry_config) = &config.sentry {
             info!("Initializing Sentry with DSN");
+
             let guard = sentry::init(sentry::ClientOptions {
                 dsn: Some(sentry_config.dsn.parse()?),
                 traces_sample_rate: 1.0,
+                send_default_pii: false,
+                max_request_body_size: sentry::MaxRequestBodySize::Always,
                 ..Default::default()
             });
+
             return Ok(Some(guard));
         }
     }

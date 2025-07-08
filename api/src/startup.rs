@@ -6,6 +6,7 @@ use aws_lc_rs::aead::{AES_256_GCM, RandomizedNonceKey};
 use base64::{Engine, prelude::BASE64_STANDARD};
 use config::shared::{IntoConnectOptions, PgConnectionConfig};
 use sqlx::{PgPool, postgres::PgPoolOptions};
+use tracing::warn;
 use tracing_actix_web::TracingLogger;
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
@@ -88,7 +89,7 @@ impl Application {
         let k8s_client = match HttpK8sClient::new().await {
             Ok(client) => Some(client),
             Err(e) => {
-                tracing::warn!("Failed to create Kubernetes client: {}. Running without Kubernetes support.", e);
+                warn!("Failed to create Kubernetes client: {}. Running without Kubernetes support.", e);
                 None
             }
         };
