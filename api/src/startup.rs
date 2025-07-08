@@ -230,7 +230,12 @@ pub async fn run(
         let tracing_middleware = TracingLogger::<ApiRootSpanBuilder>::new();
         let authentication = HttpAuthentication::bearer(auth_validator);
         let app = App::new()
-            .wrap(sentry_actix::Sentry::new())
+            .wrap(
+                sentry::integrations::actix::Sentry::builder()
+                    .capture_server_errors(true)
+                    .start_transaction(true)
+                    .finish(),
+            )
             .wrap(tracing_middleware)
             .service(health_check)
             .service(
