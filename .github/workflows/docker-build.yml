@@ -3,6 +3,7 @@ name: Docker Build
 on:
   push:
     branches: [main]
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
