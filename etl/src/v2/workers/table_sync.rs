@@ -467,7 +467,11 @@ where
     /// * Returns Ok(false) to indicate to the callers that this table has been marked sync done.
     ///
     /// In all other cases it returns Ok(true)
-    async fn process_syncing_tables(&self, current_lsn: PgLsn) -> Result<bool, Self::Error> {
+    async fn process_syncing_tables(
+        &self,
+        current_lsn: PgLsn,
+        update_state: bool,
+    ) -> Result<bool, Self::Error> {
         info!(
             "Processing syncing tables for table sync worker with LSN {}",
             current_lsn
@@ -486,17 +490,19 @@ where
             //  Postgres doesn't have this problem since they process and acknowledge each commit message
             //  individually.
             if current_lsn >= lsn {
-                inner
-                    .set_phase_with(
-                        TableReplicationPhase::SyncDone { lsn: current_lsn },
-                        self.state_store.clone(),
-                    )
-                    .await?;
+                if update_state {
+                    inner
+                        .set_phase_with(
+                            TableReplicationPhase::SyncDone { lsn: current_lsn },
+                            self.state_store.clone(),
+                        )
+                        .await?;
 
-                info!(
-                    "Table sync worker for table {} has caught up with the apply worker, shutting down",
-                    self.table_id
-                );
+                    info!(
+                        "Table sync worker for table {} has caught up with the apply worker, shutting down",
+                        self.table_id
+                    );
+                }
 
                 return Ok(false);
             }

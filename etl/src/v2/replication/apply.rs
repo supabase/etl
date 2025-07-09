@@ -96,6 +96,7 @@ pub trait ApplyLoopHook {
     fn process_syncing_tables(
         &self,
         current_lsn: PgLsn,
+        update_state: bool,
     ) -> impl Future<Output = Result<bool, Self::Error>> + Send;
 
     fn skip_table(
@@ -157,16 +158,12 @@ struct HandleMessageResult {
     /// An enum indicating whether the processing of a batch should be terminated early, with a consequent
     /// termination of the main apply loop too.
     early_break: Option<BatchEarlyBreak>,
+
+    end_lsn: Option<PgLsn>,
 }
 
 #[derive(Debug, Clone)]
 struct ApplyLoopState {
-    /// The highest LSN received from the `end_lsn` field of a `Commit` message.
-    ///
-    /// This LSN is used to determine the next WAL entry that we should receive from Postgres in case
-    /// of restarts and allows Postgres to determine whether some old entries could be pruned from the
-    /// WAL.
-    last_commit_end_lsn: Option<PgLsn>,
     /// The LSN of the commit WAL entry of the transaction that is currently being processed.
     ///
     /// This LSN is set at every `BEGIN` of a new transaction, and it's used to know the `commit_lsn`
@@ -179,23 +176,9 @@ struct ApplyLoopState {
 impl ApplyLoopState {
     fn new(next_status_update: StatusUpdate) -> Self {
         Self {
-            last_commit_end_lsn: None,
             remote_final_lsn: None,
             next_status_update,
         }
-    }
-
-    fn update_last_commit_end_lsn(&mut self, new_last_commit_end_lsn: PgLsn) {
-        let Some(last_commit_end_lsn) = &mut self.last_commit_end_lsn else {
-            self.last_commit_end_lsn = Some(new_last_commit_end_lsn);
-            return;
-        };
-
-        if new_last_commit_end_lsn <= *last_commit_end_lsn {
-            return;
-        }
-
-        *last_commit_end_lsn = new_last_commit_end_lsn;
     }
 
     /// Returns true if the apply loop is in the middle of processing a trasaction, false otherwise.
@@ -337,7 +320,7 @@ where
                 // This is done here as well in addition to at a commit boundary because we do not want
                 // the table sync workers to get stuck if there are no changes in the cdc stream.
                 if !state.handling_transaction() {
-                    let continue_loop = hook.process_syncing_tables(state.next_status_update.flush_lsn).await?;
+                    let continue_loop = hook.process_syncing_tables(state.next_status_update.flush_lsn, true).await?;
                     if !continue_loop {
                         break Ok(ApplyLoopResult::ApplyStopped);
                     }
@@ -364,6 +347,7 @@ where
     let mut stop_apply_loop = false;
     let mut events_batch = Vec::with_capacity(messages_batch.len());
 
+    let mut last_commit_end_lsn = None;
     for message in messages_batch {
         // We store the previous state to use it in case we have to restore it because we processed
         // a message that lead to an early break and discard.
@@ -376,6 +360,19 @@ where
         let result =
             handle_replication_message(state, stream.as_mut(), message?, schema_cache, hook)
                 .await?;
+
+        match (last_commit_end_lsn, result.end_lsn) {
+            (None, Some(end_lsn)) => {
+                last_commit_end_lsn = Some(end_lsn);
+            }
+            (Some(old_last_commit_end_lsn), Some(end_lsn)) => {
+                if end_lsn > old_last_commit_end_lsn {
+                    last_commit_end_lsn = Some(end_lsn);
+                }
+            }
+            (None, None) => {}
+            (Some(_), None) => {}
+        }
 
         if !matches!(result.early_break, Some(BatchEarlyBreak::BreakAndDiscard)) {
             if let Some(event) = result.event {
@@ -420,7 +417,10 @@ where
 
     // At this point, the `last_commit_end_lsn` will contain the LSN of the next byte in the WAL after
     // the last `Commit` message that was processed in this batch or in the previous ones.
-    if let Some(last_commit_end_lsn) = state.last_commit_end_lsn.take() {
+    if let Some(last_commit_end_lsn) = last_commit_end_lsn {
+        let _continue_loop = hook
+            .process_syncing_tables(last_commit_end_lsn, true)
+            .await?;
         // We also prepare the next status update for Postgres, where we will confirm that we flushed
         // data up to this LSN to allow for WAL pruning on the database side.
         //
@@ -539,6 +539,7 @@ async fn handle_begin_message(
     Ok(HandleMessageResult {
         event: Some(Event::Begin(event)),
         early_break: None,
+        end_lsn: None,
     })
 }
 
@@ -581,21 +582,11 @@ where
 
     let end_lsn = PgLsn::from(message.end_lsn());
 
-    // We mark this as the last commit end LSN since we want to be able to track from the outside
-    // what was the biggest transaction boundary LSN which was successfully applied.
-    //
-    // The rationale for using only the `end_lsn` of the `Commit` message is that once we found a
-    // commit and successfully processed it, we can say that the next byte we want is the next transaction
-    // since if we were to store an intermediate `end_lsn` (from a dml operation within a transaction)
-    // the replication will still start from a transaction boundary, that is, a `Begin` statement in
-    // our case.
-    state.update_last_commit_end_lsn(end_lsn);
-
     // We process syncing tables since we just arrived at the end of a transaction, and we want to
     // synchronize all the workers.
     //
     // The `end_lsn` here refers to the LSN of the record right after the commit record.
-    let continue_loop = hook.process_syncing_tables(end_lsn).await?;
+    let continue_loop = hook.process_syncing_tables(end_lsn, false).await?;
 
     let mut result = HandleMessageResult::default();
     // If we are told to stop the loop, it means we reached the end of processing for this specific
@@ -606,6 +597,17 @@ where
     }
 
     result.event = Some(Event::Commit(event));
+
+    // We mark this as the last commit end LSN since we want to be able to track from the outside
+    // what was the biggest transaction boundary LSN which was successfully applied.
+    //
+    // The rationale for using only the `end_lsn` of the `Commit` message is that once we found a
+    // commit and successfully processed it, we can say that the next byte we want is the next transaction
+    // since if we were to store an intermediate `end_lsn` (from a dml operation within a transaction)
+    // the replication will still start from a transaction boundary, that is, a `Begin` statement in
+    // our case.
+    result.end_lsn = Some(end_lsn);
+
     Ok(result)
 }
 
@@ -667,6 +669,7 @@ where
     Ok(HandleMessageResult {
         event: Some(Event::Relation(event)),
         early_break: None,
+        end_lsn: None,
     })
 }
 
@@ -703,6 +706,7 @@ where
     Ok(HandleMessageResult {
         event: Some(Event::Insert(event)),
         early_break: None,
+        end_lsn: None,
     })
 }
 
@@ -739,6 +743,7 @@ where
     Ok(HandleMessageResult {
         event: Some(Event::Update(event)),
         early_break: None,
+        end_lsn: None,
     })
 }
 
@@ -775,6 +780,7 @@ where
     Ok(HandleMessageResult {
         event: Some(Event::Delete(event)),
         early_break: None,
+        end_lsn: None,
     })
 }
 
@@ -815,5 +821,6 @@ where
     Ok(HandleMessageResult {
         event: Some(Event::Truncate(event)),
         early_break: None,
+        end_lsn: None,
     })
 }
