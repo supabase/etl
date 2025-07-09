@@ -47,5 +47,5 @@ jobs:
       - name: Output image information
         run: |          
           echo "✅ Successfully built and pushed ${{ matrix.image }} image"
-          echo "🏷️  Tags: latest, ${{ github.ref_name }}, ${{ github.sha }}"
+          echo "🏷️ Tags: latest, ${{ github.ref_name }}, ${{ github.sha }}"
           echo "🔗 View at: https://hub.docker.com/r/${{ vars.DOCKERHUB_USERNAME }}/${{ matrix.image }}"
