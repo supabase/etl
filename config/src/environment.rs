@@ -28,10 +28,16 @@ pub enum Environment {
 
 impl Environment {
     /// Loads the environment from the `APP_ENVIRONMENT` env variable.
+    ///
+    /// In case no environment is specified, we default to [`Environment::Prod`].
     pub fn load() -> Result<Environment, Error> {
         std::env::var(APP_ENVIRONMENT_ENV_NAME)
-            .unwrap_or_else(|_| DEV_ENV_NAME.into())
+            .unwrap_or_else(|_| PROD_ENV_NAME.into())
             .try_into()
+    }
+
+    pub fn is_prod(&self) -> bool {
+        matches!(self, Self::Prod | Self::Staging)
     }
 }
 
@@ -57,7 +63,7 @@ impl TryFrom<String> for Environment {
             STAGING_ENV_NAME => Ok(Self::Staging),
             DEV_ENV_NAME => Ok(Self::Dev),
             other => Err(Error::other(format!(
-                "{other} is not a supported environment. Use either `{DEV_ENV_NAME}` or `{PROD_ENV_NAME}`.",
+                "{other} is not a supported environment. Use either `{PROD_ENV_NAME}`/`{STAGING_ENV_NAME}`/`{DEV_ENV_NAME}`.",
             ))),
         }
     }

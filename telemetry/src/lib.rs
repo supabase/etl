@@ -3,7 +3,7 @@ use std::{
     panic::PanicHookInfo,
     sync::Once,
 };
-
+use std::io::Error;
 use thiserror::Error;
 use tracing::subscriber::{SetGlobalDefaultError, set_global_default};
 use tracing_appender::{
@@ -15,6 +15,7 @@ use tracing_subscriber::{
     EnvFilter, FmtSubscriber,
     fmt::{self, format::FmtSpan},
 };
+use config::Environment;
 
 const DEV_ENV_NAME: &str = "dev";
 const PROD_ENV_NAME: &str = "prod";
@@ -29,6 +30,9 @@ pub enum TracingError {
 
     #[error("failed to set global default subscriber: {0}")]
     SetGlobalDefault(#[from] SetGlobalDefaultError),
+
+    #[error("an io error occurred: {0}")]
+    Io(#[from] Error)
 }
 
 #[must_use]
@@ -60,8 +64,7 @@ pub fn init_tracing(app_name: &str, emit_on_span_close: bool) -> Result<LogFlush
     // from libraries that use the `log` crate.
     LogTracer::init()?;
 
-    let is_prod =
-        std::env::var("APP_ENVIRONMENT").unwrap_or_else(|_| DEV_ENV_NAME.into()) == PROD_ENV_NAME;
+    let is_prod = Environment::load()?.is_prod();
 
     // Set the default log level to `info` if not specified in the RUST_LOG environment variable.
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into());
