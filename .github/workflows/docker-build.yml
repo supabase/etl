@@ -29,14 +29,41 @@ jobs:
 
       - name: Build and push api image
         uses: docker/build-push-action@v6
+        id: api_build
         with:
           file: ./api/Dockerfile
           push: true
-          tags: ${{ vars.DOCKERHUB_USERNAME }}/api:${{ github.ref_name }}.${{ github.sha }}
+          tags: |
+            ${{ vars.DOCKERHUB_USERNAME }}/api:latest
+            ${{ vars.DOCKERHUB_USERNAME }}/api:${{ github.ref_name }}
+            ${{ vars.DOCKERHUB_USERNAME }}/api:${{ github.sha }}
 
       - name: Build and push replicator image
         uses: docker/build-push-action@v6
+        id: replicator_build
         with:
           file: ./replicator/Dockerfile
           push: true
-          tags: ${{ vars.DOCKERHUB_USERNAME }}/replicator:${{ github.ref_name }}.${{ github.sha }}
+          tags: |
+            ${{ vars.DOCKERHUB_USERNAME }}/replicator:latest
+            ${{ vars.DOCKERHUB_USERNAME }}/replicator:${{ github.ref_name }}
+            ${{ vars.DOCKERHUB_USERNAME }}/replicator:${{ github.sha }}
+
+      - name: Output image information
+        run: |
+          echo "## 📦 Published Docker Images" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### API Image" >> $GITHUB_STEP_SUMMARY
+          echo "- **Docker Hub**: https://hub.docker.com/r/${{ vars.DOCKERHUB_USERNAME }}/api" >> $GITHUB_STEP_SUMMARY
+          echo "- **Latest**: \`${{ vars.DOCKERHUB_USERNAME }}/api:latest\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Branch**: \`${{ vars.DOCKERHUB_USERNAME }}/api:${{ github.ref_name }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Commit**: \`${{ vars.DOCKERHUB_USERNAME }}/api:${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Digest**: \`${{ steps.api_build.outputs.digest }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Replicator Image" >> $GITHUB_STEP_SUMMARY
+          echo "- **Docker Hub**: https://hub.docker.com/r/${{ vars.DOCKERHUB_USERNAME }}/replicator" >> $GITHUB_STEP_SUMMARY
+          echo "- **Latest**: \`${{ vars.DOCKERHUB_USERNAME }}/replicator:latest\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Branch**: \`${{ vars.DOCKERHUB_USERNAME }}/replicator:${{ github.ref_name }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Commit**: \`${{ vars.DOCKERHUB_USERNAME }}/replicator:${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Digest**: \`${{ steps.replicator_build.outputs.digest }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
