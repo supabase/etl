@@ -1,9 +1,10 @@
+use config::Environment;
+use std::io::Error;
 use std::{
     backtrace::{Backtrace, BacktraceStatus},
     panic::PanicHookInfo,
     sync::Once,
 };
-use std::io::Error;
 use thiserror::Error;
 use tracing::subscriber::{SetGlobalDefaultError, set_global_default};
 use tracing_appender::{
@@ -15,7 +16,6 @@ use tracing_subscriber::{
     EnvFilter, FmtSubscriber,
     fmt::{self, format::FmtSpan},
 };
-use config::Environment;
 
 const DEV_ENV_NAME: &str = "dev";
 const PROD_ENV_NAME: &str = "prod";
@@ -32,7 +32,7 @@ pub enum TracingError {
     SetGlobalDefault(#[from] SetGlobalDefaultError),
 
     #[error("an io error occurred: {0}")]
-    Io(#[from] Error)
+    Io(#[from] Error),
 }
 
 #[must_use]
