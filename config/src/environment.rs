@@ -36,6 +36,10 @@ impl Environment {
             .try_into()
     }
 
+    pub fn set(&self) {
+        unsafe { std::env::set_var(APP_ENVIRONMENT_ENV_NAME, self.to_string()) }
+    }
+
     pub fn is_prod(&self) -> bool {
         matches!(self, Self::Prod | Self::Staging)
     }

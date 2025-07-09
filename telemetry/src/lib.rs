@@ -17,9 +17,6 @@ use tracing_subscriber::{
     fmt::{self, format::FmtSpan},
 };
 
-const DEV_ENV_NAME: &str = "dev";
-const PROD_ENV_NAME: &str = "prod";
-
 #[derive(Debug, Error)]
 pub enum TracingError {
     #[error("failed to build rolling file appender: {0}")]
