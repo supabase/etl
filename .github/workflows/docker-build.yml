@@ -45,18 +45,7 @@ jobs:
             ${{ vars.DOCKERHUB_USERNAME }}/${{ matrix.image }}:${{ github.sha }}
 
       - name: Output image information
-        run: |
-          {
-            echo "## 📦 Published Docker Image: ${{ matrix.image }}"
-            echo ""
-            echo "- **Docker Hub**: https://hub.docker.com/r/${{ vars.DOCKERHUB_USERNAME }}/${{ matrix.image }}"
-            echo "- **Latest**: \`${{ vars.DOCKERHUB_USERNAME }}/${{ matrix.image }}:latest\`"
-            echo "- **Branch**: \`${{ vars.DOCKERHUB_USERNAME }}/${{ matrix.image }}:${{ github.ref_name }}\`"
-            echo "- **Commit**: \`${{ vars.DOCKERHUB_USERNAME }}/${{ matrix.image }}:${{ github.sha }}\`"
-            echo "- **Digest**: \`${{ steps.build.outputs.digest }}\`"
-            echo ""
-          } >> $GITHUB_STEP_SUMMARY
-          
+        run: |          
           echo "✅ Successfully built and pushed ${{ matrix.image }} image"
           echo "🏷️  Tags: latest, ${{ github.ref_name }}, ${{ github.sha }}"
           echo "🔗 View at: https://hub.docker.com/r/${{ vars.DOCKERHUB_USERNAME }}/${{ matrix.image }}"
