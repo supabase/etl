@@ -19,16 +19,23 @@ jobs:
       matrix:
         check: [fmt, clippy]
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
         with:
           components: ${{ matrix.check == 'fmt' && 'rustfmt' || 'clippy' }}
-      - uses: Swatinem/rust-cache@v2
+
+      - name: Setup Rust cache
+        uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.check }}
+
       - name: Run cargo fmt
         if: matrix.check == 'fmt'
         run: cargo fmt --check
+
       - name: Run cargo clippy
         if: matrix.check == 'clippy'
         run: cargo clippy --all-targets --all-features -- -D warnings
@@ -104,7 +111,9 @@ jobs:
           sudo apt-get install libpq-dev -y
           SKIP_DOCKER=true ./scripts/init_db.sh
 
-      - uses: Swatinem/rust-cache@v2
+      - name: Setup Rust cache
+        uses: Swatinem/rust-cache@v2
+
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
 
@@ -121,7 +130,7 @@ jobs:
             --workspace --no-fail-fast \
             --lcov --output-path lcov.info
 
-      - name: Coveralls upload
+      - name: Upload coverage to Coveralls
         uses: coverallsapp/github-action@v2
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
