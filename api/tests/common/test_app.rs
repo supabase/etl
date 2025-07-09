@@ -13,8 +13,8 @@ use api::{
     encryption::{self, generate_random_key},
     startup::run,
 };
-use config::{load_config, Environment};
 use config::shared::PgConnectionConfig;
+use config::{Environment, load_config};
 use postgres::sqlx::test_utils::drop_pg_database;
 use reqwest::{IntoUrl, RequestBuilder};
 use std::io;
