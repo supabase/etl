@@ -4,7 +4,6 @@ WORKDIR /app
 
 # Install system dependencies
 FROM chef AS planner
-# TODO: remove protobuf-compiler once the upstream gcp-bigquery-client remove it from its deps
 COPY . .
 RUN cargo chef prepare --recipe-path recipe.json
 
