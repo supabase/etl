@@ -236,7 +236,7 @@ where
 
     // We start the logical replication stream with the supplied parameters at a given lsn. That
     // lsn is the last lsn from which we need to start fetching events.
-    info!("starting logical replication from LSN {}", start_lsn);
+    info!("starting logical replication from lsn {}", start_lsn);
     let logical_replication_stream = replication_client
         .start_logical_replication(&config.publication_name, &slot_name, start_lsn)
         .await?;
@@ -402,7 +402,9 @@ where
                 break;
             }
             Some(BatchEarlyBreak::BreakAndDiscard) => {
-                debug!("early break and discard requested, resetting state and stopping apply loop");
+                debug!(
+                    "early break and discard requested, resetting state and stopping apply loop"
+                );
                 *state = previous_state;
                 stop_apply_loop = true;
 

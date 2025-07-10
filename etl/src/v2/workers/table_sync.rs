@@ -362,7 +362,10 @@ where
                     return Ok(());
                 }
                 Ok(TableSyncResult::SyncCompleted { start_lsn }) => {
-                    info!("table {} sync completed, starting apply loop from LSN {}", self.table_id, start_lsn);
+                    info!(
+                        "table {} sync completed, starting apply loop from lsn {}",
+                        self.table_id, start_lsn
+                    );
                     start_lsn
                 }
                 Err(err) => {

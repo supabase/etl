@@ -68,7 +68,10 @@ where
 {
     let inner = table_sync_worker_state.get_inner().read().await;
     let phase_type = inner.replication_phase().as_type();
-    debug!("starting table sync for table {} in phase {:?}", table_id, phase_type);
+    debug!(
+        "starting table sync for table {} in phase {:?}",
+        table_id, phase_type
+    );
 
     // In case the work for this table has been already done, we don't want to continue and we
     // successfully return.
@@ -76,7 +79,10 @@ where
         phase_type,
         TableReplicationPhaseType::SyncDone | TableReplicationPhaseType::Ready
     ) {
-        info!("table {} sync not required, already in phase {:?}", table_id, phase_type);
+        info!(
+            "table {} sync not required, already in phase {:?}",
+            table_id, phase_type
+        );
         return Ok(TableSyncResult::SyncNotRequired);
     }
 
@@ -88,7 +94,10 @@ where
             | TableReplicationPhaseType::DataSync
             | TableReplicationPhaseType::FinishedCopy
     ) {
-        error!("invalid replication phase {:?} for table {}, cannot perform table sync", phase_type, table_id);
+        error!(
+            "invalid replication phase {:?} for table {}, cannot perform table sync",
+            phase_type, table_id
+        );
         return Err(TableSyncError::InvalidPhase(phase_type));
     }
 

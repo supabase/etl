@@ -214,7 +214,10 @@ impl StateStore for PostgresStateStore {
         }
         let mut inner = self.inner.write().await;
         inner.table_states = table_states.clone();
-        info!("loaded {} table replication states from postgres state store", table_states.len());
+        info!(
+            "loaded {} table replication states from postgres state store",
+            table_states.len()
+        );
         Ok(table_states.len())
     }
 

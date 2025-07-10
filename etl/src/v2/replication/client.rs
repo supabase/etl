@@ -358,7 +358,10 @@ impl PgReplicationClient {
             Err(err) => {
                 if let Some(code) = err.code() {
                     if *code == SqlState::UNDEFINED_OBJECT {
-                        warn!("attempted to delete non-existent replication slot '{}'", slot_name);
+                        warn!(
+                            "attempted to delete non-existent replication slot '{}'",
+                            slot_name
+                        );
                         return Err(PgReplicationError::SlotNotFound(slot_name.to_string()));
                     }
                 }
@@ -444,7 +447,10 @@ impl PgReplicationClient {
         slot_name: &str,
         start_lsn: PgLsn,
     ) -> PgReplicationResult<LogicalReplicationStream> {
-        info!("starting logical replication from publication '{}' slot '{}' at LSN {}", publication_name, slot_name, start_lsn);
+        info!(
+            "starting logical replication from publication '{}' slot '{}' at lsn {}",
+            publication_name, slot_name, start_lsn
+        );
         // Do not convert the query or the options to lowercase, see comment in `create_slot_internal`.
         let options = format!(
             r#"("proto_version" '1', "publication_names" {})"#,
