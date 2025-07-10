@@ -1,5 +1,5 @@
 use std::env;
-
+use std::sync::Arc;
 use anyhow::anyhow;
 use api::{config::ApiConfig, startup::Application};
 use config::{Environment, load_config, shared::PgConnectionConfig};
@@ -65,7 +65,7 @@ async fn async_main() -> anyhow::Result<()> {
 fn init_sentry() -> anyhow::Result<Option<sentry::ClientInitGuard>> {
     if let Ok(config) = load_config::<ApiConfig>() {
         if let Some(sentry_config) = &config.sentry {
-            info!("Initializing Sentry with DSN");
+            info!("initializing sentry with supplied dsn");
 
             let environment = Environment::load()?;
             let guard = sentry::init(sentry::ClientOptions {
@@ -73,6 +73,9 @@ fn init_sentry() -> anyhow::Result<Option<sentry::ClientInitGuard>> {
                 environment: Some(environment.to_string().into()),
                 traces_sample_rate: 1.0,
                 max_request_body_size: sentry::MaxRequestBodySize::Always,
+                integrations: vec![
+                    Arc::new(sentry::integrations::panic::PanicIntegration::new()),
+                ],
                 ..Default::default()
             });
 
@@ -85,7 +88,8 @@ fn init_sentry() -> anyhow::Result<Option<sentry::ClientInitGuard>> {
         }
     }
 
-    info!("Sentry not configured, skipping initialization");
+    info!("sentry not configured for api, skipping initialization");
+
     Ok(None)
 }
 
