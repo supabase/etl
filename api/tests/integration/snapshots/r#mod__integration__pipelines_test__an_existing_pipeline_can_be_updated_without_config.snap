@@ -3,7 +3,6 @@ source: api/tests/integration/pipelines_test.rs
 expression: response.config
 ---
 PipelineConfig {
-    publication_name: "publication",
     batch: Some(
         BatchConfig {
             max_size: 1000,
