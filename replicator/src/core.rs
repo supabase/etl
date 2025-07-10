@@ -13,28 +13,25 @@ use etl::v2::state::store::postgres::PostgresStateStore;
 use etl::v2::{destination::base::Destination, pipeline::PipelineId};
 use secrecy::ExposeSecret;
 use std::fmt;
-use tracing::{debug, error, info, instrument, warn};
+use tracing::{error, info, instrument, warn};
 
 pub async fn start_replicator() -> anyhow::Result<()> {
-    info!("starting replicator instance");
+    info!("starting replicator service");
     let replicator_config = load_replicator_config()?;
 
     log_config(&replicator_config);
 
     // We initialize the state store, which for the replicator is not configurable.
-    debug!("initializing postgres state store");
     let state_store = init_state_store(
         replicator_config.pipeline.id,
         replicator_config.pipeline.pg_connection.clone(),
     )
     .await?;
-    info!("state store initialized successfully");
 
     // For each destination, we start the pipeline. This is more verbose due to static dispatch, but
     // we prefer more performance at the cost of ergonomics.
     match &replicator_config.destination {
         DestinationConfig::Memory => {
-            info!("creating memory destination");
             let destination = MemoryDestination::new();
 
             let pipeline = Pipeline::new(
@@ -51,7 +48,6 @@ pub async fn start_replicator() -> anyhow::Result<()> {
             service_account_key,
             max_staleness_mins,
         } => {
-            info!("creating bigquery destination");
             install_crypto_provider_once();
 
             let destination = BigQueryDestination::new_with_key(
@@ -72,7 +68,7 @@ pub async fn start_replicator() -> anyhow::Result<()> {
         }
     }
 
-    info!("replicator instance completed successfully");
+    info!("replicator service completed");
     Ok(())
 }
 
@@ -145,9 +141,7 @@ async fn init_state_store(
     pipeline_id: PipelineId,
     pg_connection_config: PgConnectionConfig,
 ) -> anyhow::Result<impl StateStore + Clone> {
-    debug!("running state store migrations");
     migrate_state_store(&pg_connection_config).await?;
-    debug!("state store migrations completed");
     Ok(PostgresStateStore::new(pipeline_id, pg_connection_config))
 }
 
@@ -158,9 +152,7 @@ where
     D: Destination + Clone + Send + Sync + fmt::Debug + 'static,
 {
     // Start the pipeline.
-    info!("starting pipeline");
     pipeline.start().await?;
-    info!("pipeline started successfully");
 
     // Spawn a task to listen for Ctrl+C and trigger shutdown.
     let shutdown_tx = pipeline.shutdown_tx();
@@ -177,7 +169,6 @@ where
     });
 
     // Wait for the pipeline to finish (either normally or via shutdown).
-    info!("waiting for pipeline to complete");
     let result = pipeline.wait().await;
 
     // Ensure the shutdown task is finished before returning.
@@ -189,7 +180,6 @@ where
 
     // Propagate any pipeline error as anyhow error.
     result?;
-    info!("pipeline completed successfully");
 
     Ok(())
 }

@@ -3,7 +3,6 @@ use sqlx::{
     Executor,
     postgres::{PgConnectOptions, PgPoolOptions},
 };
-use tracing::{debug, info};
 
 const NUM_POOL_CONNECTIONS: u32 = 1;
 
@@ -12,7 +11,6 @@ const NUM_POOL_CONNECTIONS: u32 = 1;
 pub async fn migrate_state_store(
     connection_config: &PgConnectionConfig,
 ) -> Result<(), sqlx::Error> {
-    debug!("connecting to postgres for state store migrations");
     let options: PgConnectOptions = connection_config.with_db();
 
     let pool = PgPoolOptions::new()
@@ -31,14 +29,9 @@ pub async fn migrate_state_store(
         })
         .connect_with(options)
         .await?;
-    debug!("postgres connection established for migrations");
 
-    debug!("running state store migrations");
     let migrator = sqlx::migrate!("./migrations");
     migrator.run(&pool).await?;
-    info!("state store migrations completed successfully");
-
-    debug!("closing migration connection pool");
 
     Ok(())
 }

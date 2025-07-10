@@ -223,13 +223,11 @@ impl StateStore for PostgresStateStore {
         table_id: TableId,
         state: TableReplicationPhase,
     ) -> Result<(), StateStoreError> {
-        debug!("updating table {} replication state to {:?}", table_id, state);
         let (table_state, sync_done_lsn) = state.try_into()?;
         self.update_replication_state(self.pipeline_id, table_id, table_state, sync_done_lsn)
             .await?;
         let mut inner = self.inner.write().await;
         inner.table_states.insert(table_id, state);
-        debug!("successfully updated table {} replication state", table_id);
         Ok(())
     }
 }

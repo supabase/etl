@@ -341,12 +341,9 @@ where
             //
             // Note that this connection must be tied to the lifetime of this worker, otherwise
             // there will be problems when cleaning up the replication slot.
-            debug!("establishing replication connection for table sync worker");
             let replication_client =
                 PgReplicationClient::connect(self.config.pg_connection.clone()).await?;
-            debug!("successfully established replication connection for table sync worker");
 
-            debug!("starting table sync for table {}", self.table_id);
             let result = start_table_sync(
                 self.pipeline_id,
                 self.config.clone(),
@@ -362,11 +359,10 @@ where
 
             let start_lsn = match result {
                 Ok(TableSyncResult::SyncStopped | TableSyncResult::SyncNotRequired) => {
-                    debug!("table sync completed without requiring apply loop for table {}", self.table_id);
                     return Ok(());
                 }
                 Ok(TableSyncResult::SyncCompleted { start_lsn }) => {
-                    debug!("table sync completed, starting apply loop from LSN {} for table {}", start_lsn, self.table_id);
+                    info!("table {} sync completed, starting apply loop from LSN {}", self.table_id, start_lsn);
                     start_lsn
                 }
                 Err(err) => {
@@ -375,7 +371,6 @@ where
                 }
             };
 
-            debug!("starting apply loop for table sync worker");
             start_apply_loop(
                 self.pipeline_id,
                 start_lsn,
@@ -387,7 +382,6 @@ where
                 self.shutdown_rx,
             )
             .await?;
-            debug!("apply loop completed for table sync worker");
 
             // We delete the replication slot used by this table sync worker.
             //
@@ -481,7 +475,7 @@ where
     /// In all other cases it returns Ok(true)
     async fn process_syncing_tables(&self, current_lsn: PgLsn) -> Result<bool, Self::Error> {
         info!(
-            "processing syncing tables for table sync worker with LSN {}",
+            "processing syncing tables for table sync worker with lsn {}",
             current_lsn
         );
 

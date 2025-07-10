@@ -253,13 +253,11 @@ impl BigQueryDestination {
         &self,
         table_schema: TableSchema,
     ) -> Result<(), BigQueryDestinationError> {
-        debug!("writing table schema for table '{}' (id: {})", table_schema.name, table_schema.id);
         let mut inner = self.inner.write().await;
 
         let dataset_id = inner.dataset_id.clone();
 
         // Create the actual data table
-        debug!("creating BigQuery table '{}' if missing", table_schema.name.as_bigquery_table_id());
         inner
             .client
             .create_table_if_missing(
@@ -311,7 +309,7 @@ impl BigQueryDestination {
                 .await?;
         }
 
-        info!("successfully wrote table schema for table '{}'", table_schema.name);
+        debug!("wrote table schema for table '{}'", table_schema.name);
         Ok(())
     }
 
@@ -458,7 +456,6 @@ impl BigQueryDestination {
     ///
     /// Groups events by type, handles inserts/updates/deletes via streaming, and processes truncates separately.
     async fn write_events(&self, events: Vec<Event>) -> Result<(), BigQueryDestinationError> {
-        debug!("processing {} events for BigQuery destination", events.len());
         let mut event_iter = events.into_iter().peekable();
 
         while event_iter.peek().is_some() {
@@ -512,14 +509,12 @@ impl BigQueryDestination {
 
             // Process accumulated streaming operations
             if !table_id_to_table_rows.is_empty() {
-                debug!("streaming {} table operations to BigQuery", table_id_to_table_rows.len());
                 let mut inner = self.inner.write().await;
 
                 for (table_id, table_rows) in table_id_to_table_rows {
                     let (table_id, table_descriptor) =
                         Self::load_table_id_and_descriptor(&inner, &table_id).await?;
 
-                    debug!("streaming {} rows for table {}", table_rows.len(), table_id);
                     let dataset_id = inner.dataset_id.clone();
                     inner
                         .client

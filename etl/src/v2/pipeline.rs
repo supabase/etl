@@ -2,7 +2,7 @@ use config::shared::PipelineConfig;
 use std::sync::Arc;
 use thiserror::Error;
 use tokio::sync::{Semaphore, watch};
-use tracing::{debug, error, info};
+use tracing::{error, info};
 
 use crate::v2::concurrency::shutdown::{ShutdownTx, create_shutdown_channel};
 use crate::v2::destination::base::{Destination, DestinationError};
@@ -95,25 +95,19 @@ where
             "starting pipeline for publication '{}' with id {}",
             self.config.publication_name, self.id
         );
-        debug!("pipeline configuration: max_table_sync_workers={}", self.config.max_table_sync_workers);
 
         // We create the schema cache, which will be shared also with the destination.
         let schema_cache = SchemaCache::default();
-        debug!("initialized schema cache");
 
         // We inject pipeline specific dependencies within the destination.
-        debug!("injecting dependencies into destination");
         self.destination.inject(schema_cache.clone()).await?;
-        debug!("successfully injected dependencies into destination");
 
         // We prepare the schema cache with table schemas loaded, in case there is the need.
         self.prepare_schema_cache(&schema_cache).await?;
 
         // We create the first connection to Postgres.
-        debug!("establishing replication connection to postgres");
         let replication_client =
             PgReplicationClient::connect(self.config.pg_connection.clone()).await?;
-        debug!("successfully established replication connection");
 
         // We synchronize the relation subscription states with the publication, to make sure we
         // always know which tables to work with. Maybe in the future we also want to react in real

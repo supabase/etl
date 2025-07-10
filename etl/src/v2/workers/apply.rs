@@ -341,7 +341,7 @@ where
         let active_table_replication_states =
             get_table_replication_states(&self.state_store, false).await?;
         debug!(
-            "Processing syncing tables for apply worker with LSN {}",
+            "Processing syncing tables for apply worker with lsn {}",
             current_lsn
         );
 

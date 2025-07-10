@@ -228,9 +228,7 @@ where
     let mut state = ApplyLoopState::new(first_status_update);
 
     // We initialize the apply loop which is based on the hook implementation.
-    debug!("initializing apply loop hook");
     hook.initialize().await?;
-    debug!("apply loop hook initialized successfully");
 
     // We compute the slot name for the replication slot that we are going to use for the logical
     // replication. At this point we assume that the slot already exists.
@@ -238,7 +236,7 @@ where
 
     // We start the logical replication stream with the supplied parameters at a given lsn. That
     // lsn is the last lsn from which we need to start fetching events.
-    info!("starting logical replication stream from LSN {}", start_lsn);
+    info!("starting logical replication from LSN {}", start_lsn);
     let logical_replication_stream = replication_client
         .start_logical_replication(&config.publication_name, &slot_name, start_lsn)
         .await?;
@@ -295,7 +293,7 @@ where
                         // handler also in the `select!`, however this code path could react faster
                         // in case we have a shutdown signal sent while we are running the blocking
                         // loop in the stream.
-                        info!("shutting down apply worker before processing batch");
+                        info!("shutting down apply worker before processing batch, the messages in the batch should be re-consumed");
                         return Ok(ApplyLoopResult::ApplyStopped);
                     }
                 }
@@ -336,6 +334,8 @@ where
                 // This is done here as well in addition to at a commit boundary because we do not want
                 // the table sync workers to get stuck if there are no changes in the cdc stream.
                 if !state.handling_transaction() {
+                    info!("processing syncing tables after a period of inactivity of {} seconds", REFRESH_INTERVAL.as_secs());
+
                     let continue_loop = hook.process_syncing_tables(state.next_status_update.flush_lsn).await?;
                     if !continue_loop {
                         break Ok(ApplyLoopResult::ApplyStopped);
@@ -360,7 +360,6 @@ where
     T: ApplyLoopHook,
     ApplyLoopError: From<<T as ApplyLoopHook>::Error>,
 {
-    debug!("processing batch of {} replication messages", messages_batch.len());
     let mut stop_apply_loop = false;
     let mut events_batch = Vec::with_capacity(messages_batch.len());
 
