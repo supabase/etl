@@ -43,7 +43,6 @@ jobs:
   test:
     name: Test
     runs-on: ubuntu-latest
-    needs: check
     permissions:
       contents: read
       id-token: write
@@ -141,4 +140,3 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           path-to-lcov: lcov.info
           debug: true
-
