@@ -11,18 +11,27 @@ mod config;
 mod core;
 mod migrations;
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<()> {
     let app_name = env!("CARGO_BIN_NAME");
-
-    // Initialize Sentry with replicator-specific tag
-    let _sentry_guard = init_sentry()?;
 
     // We pass `emit_on_span_close = false` to avoid emitting logs on span close
     // for replicator because it is not a web server, and we don't need to emit logs
     // for every closing span.
     let _log_flusher = init_tracing(app_name, false)?;
 
+    // Initialize Sentry before the async runtime starts
+    let _sentry_guard = init_sentry()?;
+
+    // We start the runtime.
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(async_main())?;
+
+    Ok(())
+}
+
+async fn async_main() -> anyhow::Result<()> {
     // We start the replicator.
     if let Err(err) = start_replicator().await {
         sentry::capture_error(err.as_dyn_error());
@@ -40,7 +49,7 @@ async fn main() -> anyhow::Result<()> {
 fn init_sentry() -> anyhow::Result<Option<sentry::ClientInitGuard>> {
     if let Ok(config) = load_replicator_config() {
         if let Some(sentry_config) = &config.sentry {
-            info!("Initializing Sentry for replicator with DSN and panic handling");
+            info!("initializing sentry with supplied dsn");
 
             let environment = Environment::load()?;
             let guard = sentry::init(sentry::ClientOptions {
@@ -61,7 +70,7 @@ fn init_sentry() -> anyhow::Result<Option<sentry::ClientInitGuard>> {
         }
     }
 
-    info!("Sentry not configured for replicator, skipping initialization");
+    info!("sentry not configured for replicator, skipping initialization");
 
     Ok(None)
 }
