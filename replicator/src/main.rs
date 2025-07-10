@@ -1,3 +1,4 @@
+use thiserror::__private::AsDynError;
 use ::config::Environment;
 use telemetry::init_tracing;
 use tracing::info;
@@ -22,7 +23,10 @@ async fn main() -> anyhow::Result<()> {
     let _log_flusher = init_tracing(app_name, false)?;
 
     // We start the replicator.
-    start_replicator().await?;
+    if let Err(err) = start_replicator().await {
+        sentry::capture_error(err.as_dyn_error());
+        return Err(err);
+    }
 
     Ok(())
 }
