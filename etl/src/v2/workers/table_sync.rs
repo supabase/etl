@@ -463,7 +463,7 @@ where
     /// This function compares `current_lsn` against the table's catch up lsn
     /// and if it is greater than or equal to the catch up `lsn`:
     ///
-    /// * Marks the table as sync done in state store.
+    /// * Marks the table as sync done in state store if `update_state` is true.
     /// * Returns Ok(false) to indicate to the callers that this table has been marked sync done.
     ///
     /// In all other cases it returns Ok(true)

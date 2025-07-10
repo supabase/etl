@@ -152,13 +152,19 @@ enum BatchEarlyBreak {
     BreakAndDiscard,
 }
 
+/// A result returned from [`handle_replication_message`] and related functions
 #[derive(Default)]
 struct HandleMessageResult {
+    /// Event returned from the [`handle_replication_message`] function.
+    /// Could be none if the replication message needs to be skipped, e.g. when
+    /// the apply loop receives replication messages from tables not yet ready.
     event: Option<Event>,
+
     /// An enum indicating whether the processing of a batch should be terminated early, with a consequent
     /// termination of the main apply loop too.
     early_break: Option<BatchEarlyBreak>,
 
+    /// End LSN of the commit message, None otherwise.
     end_lsn: Option<PgLsn>,
 }
 
@@ -361,6 +367,8 @@ where
             handle_replication_message(state, stream.as_mut(), message?, schema_cache, hook)
                 .await?;
 
+        // Update last_commit_end_lsn if the end_lsn returned from the result is greater than
+        // last_commit_end_lsn's previous value.
         match (last_commit_end_lsn, result.end_lsn) {
             (None, Some(end_lsn)) => {
                 last_commit_end_lsn = Some(end_lsn);
@@ -370,8 +378,7 @@ where
                     last_commit_end_lsn = Some(end_lsn);
                 }
             }
-            (None, None) => {}
-            (Some(_), None) => {}
+            (_, None) => {}
         }
 
         if !matches!(result.early_break, Some(BatchEarlyBreak::BreakAndDiscard)) {
@@ -418,8 +425,11 @@ where
     // At this point, the `last_commit_end_lsn` will contain the LSN of the next byte in the WAL after
     // the last `Commit` message that was processed in this batch or in the previous ones.
     if let Some(last_commit_end_lsn) = last_commit_end_lsn {
-        let _continue_loop = hook
-            .process_syncing_tables(last_commit_end_lsn, true)
+        // We call `process_syncing_tables` with `update_state` set to true here *after* we've received
+        // and ack for the batch from the destination. This is important to keep a consistent state.
+        // Without this order it could happen that the table's state was updated but sending the batch
+        // to the destination failed.
+        hook.process_syncing_tables(last_commit_end_lsn, true)
             .await?;
         // We also prepare the next status update for Postgres, where we will confirm that we flushed
         // data up to this LSN to allow for WAL pruning on the database side.
@@ -582,10 +592,11 @@ where
 
     let end_lsn = PgLsn::from(message.end_lsn());
 
-    // We process syncing tables since we just arrived at the end of a transaction, and we want to
-    // synchronize all the workers.
-    //
-    // The `end_lsn` here refers to the LSN of the record right after the commit record.
+    // We call `process_syncing_tables` with `update_state` set to false here because we do not yet want
+    // to update the table state. This function will be called again in `handle_replication_message_batch`
+    // with `update_state` set to true *after* sending the batch to the destination. This order is needed
+    // for consistency because otherwise we might update the table state before receiving an ack from the
+    // destination.
     let continue_loop = hook.process_syncing_tables(end_lsn, false).await?;
 
     let mut result = HandleMessageResult::default();
