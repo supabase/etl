@@ -25,7 +25,7 @@ use std::time::Duration;
 use thiserror::Error;
 use tokio::pin;
 use tokio_postgres::types::PgLsn;
-use tracing::{error, info};
+use tracing::{debug, error, info};
 
 /// The amount of milliseconds that pass between one refresh and the other of the system, in case no
 /// events or shutdown signal are received.
@@ -228,7 +228,9 @@ where
     let mut state = ApplyLoopState::new(first_status_update);
 
     // We initialize the apply loop which is based on the hook implementation.
+    debug!("initializing apply loop hook");
     hook.initialize().await?;
+    debug!("apply loop hook initialized successfully");
 
     // We compute the slot name for the replication slot that we are going to use for the logical
     // replication. At this point we assume that the slot already exists.
@@ -236,6 +238,7 @@ where
 
     // We start the logical replication stream with the supplied parameters at a given lsn. That
     // lsn is the last lsn from which we need to start fetching events.
+    info!("starting logical replication stream from LSN {}", start_lsn);
     let logical_replication_stream = replication_client
         .start_logical_replication(&config.publication_name, &slot_name, start_lsn)
         .await?;
@@ -253,7 +256,7 @@ where
 
             // Shutdown signal received, exit loop.
             _ = shutdown_rx.changed() => {
-                info!("Shutting down apply worker while waiting for incoming events");
+                info!("shutting down apply worker while waiting for incoming events");
                 return Ok(ApplyLoopResult::ApplyStopped);
             }
 
@@ -292,7 +295,7 @@ where
                         // handler also in the `select!`, however this code path could react faster
                         // in case we have a shutdown signal sent while we are running the blocking
                         // loop in the stream.
-                        info!("Shutting down apply worker before processing batch");
+                        info!("shutting down apply worker before processing batch");
                         return Ok(ApplyLoopResult::ApplyStopped);
                     }
                 }
@@ -357,6 +360,7 @@ where
     T: ApplyLoopHook,
     ApplyLoopError: From<<T as ApplyLoopHook>::Error>,
 {
+    debug!("processing batch of {} replication messages", messages_batch.len());
     let mut stop_apply_loop = false;
     let mut events_batch = Vec::with_capacity(messages_batch.len());
 
@@ -393,11 +397,13 @@ where
         // causing duplicate data.
         match state.early_break {
             Some(BatchEarlyBreak::Break) => {
+                debug!("early break requested, stopping apply loop");
                 stop_apply_loop = true;
 
                 break;
             }
             Some(BatchEarlyBreak::BreakAndDiscard) => {
+                debug!("early break and discard requested, resetting state and stopping apply loop");
                 *state = previous_state;
                 stop_apply_loop = true;
 

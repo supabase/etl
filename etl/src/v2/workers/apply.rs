@@ -120,7 +120,7 @@ where
     type Error = ApplyWorkerError;
 
     async fn start(self) -> Result<ApplyWorkerHandle, Self::Error> {
-        info!("Starting apply worker");
+        info!("starting apply worker");
 
         let apply_worker_span = tracing::info_span!("apply_worker");
         let apply_worker = async move {
@@ -236,7 +236,7 @@ where
         if let Err(err) = pool.start_worker(worker).await {
             // TODO: check if we want to build a backoff mechanism for retrying the
             //  spawning of new table sync workers.
-            error!("Failed to start table sync worker: {}", err);
+            error!("failed to start table sync worker: {}", err);
 
             return Err(err.into());
         }
@@ -255,7 +255,7 @@ where
         };
 
         let Some(table_sync_worker_state) = table_sync_worker_state else {
-            info!("Creating a new table sync worker for table {}", table_id);
+            info!("creating a new table sync worker for table {}", table_id);
             self.start_table_sync_worker(table_id).await?;
 
             return Ok(true);
@@ -300,7 +300,7 @@ where
                 return Ok(false);
             }
 
-            info!("Sync completed for table {}", table_id);
+            info!("sync completed for table {}", table_id);
         }
 
         Ok(true)
@@ -370,7 +370,7 @@ where
                 }
                 _ => {
                     if let Err(err) = self.handle_syncing_table(table_id, current_lsn).await {
-                        error!("Error handling syncing table {}: {}", table_id, err);
+                        error!("error handling syncing table {}: {}", table_id, err);
                     }
                 }
             }

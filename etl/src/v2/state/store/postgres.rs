@@ -10,6 +10,7 @@ use sqlx::{
 use thiserror::Error;
 use tokio::sync::RwLock;
 use tokio_postgres::types::PgLsn;
+use tracing::{debug, info};
 
 use crate::v2::{
     pipeline::PipelineId,
@@ -199,6 +200,7 @@ impl StateStore for PostgresStateStore {
     }
 
     async fn load_table_replication_states(&self) -> Result<usize, StateStoreError> {
+        debug!("loading table replication states from postgres state store");
         let pool = self.connect_to_source().await?;
         let replication_state_rows = self
             .get_all_replication_state_rows(&pool, self.pipeline_id)
@@ -212,6 +214,7 @@ impl StateStore for PostgresStateStore {
         }
         let mut inner = self.inner.write().await;
         inner.table_states = table_states.clone();
+        info!("loaded {} table replication states from postgres state store", table_states.len());
         Ok(table_states.len())
     }
 
@@ -220,11 +223,13 @@ impl StateStore for PostgresStateStore {
         table_id: TableId,
         state: TableReplicationPhase,
     ) -> Result<(), StateStoreError> {
+        debug!("updating table {} replication state to {:?}", table_id, state);
         let (table_state, sync_done_lsn) = state.try_into()?;
         self.update_replication_state(self.pipeline_id, table_id, table_state, sync_done_lsn)
             .await?;
         let mut inner = self.inner.write().await;
         inner.table_states.insert(table_id, state);
+        debug!("successfully updated table {} replication state", table_id);
         Ok(())
     }
 }

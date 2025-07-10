@@ -79,7 +79,7 @@ pub struct TableSyncWorkerStateInner {
 impl TableSyncWorkerStateInner {
     pub fn set_phase(&mut self, phase: TableReplicationPhase) {
         info!(
-            "Table phase changing from '{:?}' to '{:?}'",
+            "table phase changing from '{:?}' to '{:?}'",
             self.table_replication_phase, phase
         );
 
@@ -102,7 +102,7 @@ impl TableSyncWorkerStateInner {
 
         // If we should store this phase change, we want to do it via the supplied state store.
         if phase.as_type().should_store() {
-            info!("Storing phase change '{:?}' for table", phase);
+            info!("storing phase change '{:?}' for table", phase);
 
             state_store
                 .update_table_replication_state(self.table_id, phase)
@@ -155,7 +155,7 @@ impl TableSyncWorkerState {
             let inner = self.inner.read().await;
             if inner.table_replication_phase.as_type() == phase_type {
                 info!(
-                    "Phase type '{:?}' was already set, no need to wait",
+                    "phase type '{:?}' was already set, no need to wait",
                     phase_type
                 );
                 return Some(inner);
@@ -172,7 +172,7 @@ impl TableSyncWorkerState {
         let inner = self.inner.read().await;
         if inner.table_replication_phase.as_type() == phase_type {
             info!(
-                "Phase type '{:?}' was reached for table {:?}",
+                "phase type '{:?}' was reached for table {:?}",
                 phase_type, inner.table_id
             );
             return Some(inner);
@@ -191,7 +191,7 @@ impl TableSyncWorkerState {
             inner.table_id
         };
         info!(
-            "Waiting for phase type '{:?}' for table {:?}",
+            "waiting for phase type '{:?}' for table {:?}",
             phase_type, table_id
         );
 
@@ -289,7 +289,7 @@ where
     type Error = TableSyncWorkerError;
 
     async fn start(mut self) -> Result<TableSyncWorkerHandle, Self::Error> {
-        info!("Starting table sync worker for table {}", self.table_id);
+        info!("starting table sync worker for table {}", self.table_id);
 
         // TODO: maybe we can optimize the performance by doing this loading within the task and
         //  implementing a mechanism for table sync state to be updated after the fact.
@@ -299,7 +299,7 @@ where
             .await?
         else {
             error!(
-                "No replication state found for table {}, cannot start sync worker",
+                "no replication state found for table {}, cannot start sync worker",
                 self.table_id
             );
 
@@ -313,7 +313,7 @@ where
             tracing::info_span!("table_sync_worker", table_id = self.table_id);
         let table_sync_worker = async move {
             debug!(
-                "Waiting to acquire a running permit for table sync worker for table {}",
+                "waiting to acquire a running permit for table sync worker for table {}",
                 self.table_id
             );
 
@@ -322,7 +322,7 @@ where
             // number of cocurrent connections to the source database.
             let permit = tokio::select! {
                 _ = self.shutdown_rx.changed() => {
-                    info!("Shutting down table sync worker while waiting for a run permit");
+                    info!("shutting down table sync worker while waiting for a run permit");
 
                     return Ok(());
                 }
@@ -333,7 +333,7 @@ where
             };
 
             debug!(
-                "Acquired a running permit for table sync worker for table {}",
+                "acquired a running permit for table sync worker for table {}",
                 self.table_id
             );
 
@@ -341,9 +341,12 @@ where
             //
             // Note that this connection must be tied to the lifetime of this worker, otherwise
             // there will be problems when cleaning up the replication slot.
+            debug!("establishing replication connection for table sync worker");
             let replication_client =
                 PgReplicationClient::connect(self.config.pg_connection.clone()).await?;
+            debug!("successfully established replication connection for table sync worker");
 
+            debug!("starting table sync for table {}", self.table_id);
             let result = start_table_sync(
                 self.pipeline_id,
                 self.config.clone(),
@@ -359,12 +362,20 @@ where
 
             let start_lsn = match result {
                 Ok(TableSyncResult::SyncStopped | TableSyncResult::SyncNotRequired) => {
+                    debug!("table sync completed without requiring apply loop for table {}", self.table_id);
                     return Ok(());
                 }
-                Ok(TableSyncResult::SyncCompleted { start_lsn }) => start_lsn,
-                Err(err) => return Err(err.into()),
+                Ok(TableSyncResult::SyncCompleted { start_lsn }) => {
+                    debug!("table sync completed, starting apply loop from LSN {} for table {}", start_lsn, self.table_id);
+                    start_lsn
+                }
+                Err(err) => {
+                    error!("table sync failed for table {}: {}", self.table_id, err);
+                    return Err(err.into());
+                }
             };
 
+            debug!("starting apply loop for table sync worker");
             start_apply_loop(
                 self.pipeline_id,
                 start_lsn,
@@ -376,6 +387,7 @@ where
                 self.shutdown_rx,
             )
             .await?;
+            debug!("apply loop completed for table sync worker");
 
             // We delete the replication slot used by this table sync worker.
             //
@@ -395,13 +407,13 @@ where
             match result {
                 Ok(Err(err)) => {
                     error!(
-                        "Failed to delete the replication slot {slot_name} of the table sync worker {}: {err}",
+                        "failed to delete the replication slot {slot_name} of the table sync worker {}: {err}",
                         self.table_id
                     )
                 }
                 Err(_) => {
                     error!(
-                        "Failed to delete the replication slot {slot_name} of the table sync worker {} due to timeout",
+                        "failed to delete the replication slot {slot_name} of the table sync worker {} due to timeout",
                         self.table_id
                     );
                 }
@@ -469,7 +481,7 @@ where
     /// In all other cases it returns Ok(true)
     async fn process_syncing_tables(&self, current_lsn: PgLsn) -> Result<bool, Self::Error> {
         info!(
-            "Processing syncing tables for table sync worker with LSN {}",
+            "processing syncing tables for table sync worker with LSN {}",
             current_lsn
         );
 
@@ -494,7 +506,7 @@ where
                     .await?;
 
                 info!(
-                    "Table sync worker for table {} has caught up with the apply worker, shutting down",
+                    "table sync worker for table {} has caught up with the apply worker, shutting down",
                     self.table_id
                 );
 
