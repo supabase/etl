@@ -37,7 +37,8 @@ impl Drop for TestApp {
         // To use `block_in_place,` we need a multithreaded runtime since when a blocking
         // task is issued, the runtime will offload existing tasks to another worker.
         tokio::task::block_in_place(move || {
-            Handle::current().block_on(async move { drop_pg_database(&self.config.database).await });
+            Handle::current()
+                .block_on(async move { drop_pg_database(&self.config.database).await });
         });
     }
 }
