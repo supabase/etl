@@ -302,7 +302,7 @@ where
 
             Some(message) = logical_replication_stream.next() => {
                 let end_loop =
-                    batch_send_message(&mut state, logical_replication_stream.as_mut(), message?, &schema_cache, &destination, &hook, config.batch.max_size).await?;
+                    handle_replication_message_batch(&mut state, logical_replication_stream.as_mut(), message?, &schema_cache, &destination, &hook, config.batch.max_size).await?;
 
                 if end_loop {
                     return Ok(ApplyLoopResult::ApplyStopped);
@@ -345,7 +345,7 @@ where
     }
 }
 
-async fn batch_send_message<D, T>(
+async fn handle_replication_message_batch<D, T>(
     state: &mut ApplyLoopState,
     events_stream: Pin<&mut EventsStream>,
     message: ReplicationMessage<LogicalReplicationMessage>,
