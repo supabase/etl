@@ -1,6 +1,7 @@
-use thiserror::__private::AsDynError;
 use ::config::Environment;
+use std::sync::Arc;
 use telemetry::init_tracing;
+use thiserror::__private::AsDynError;
 use tracing::info;
 
 use crate::config::load_replicator_config;
@@ -35,15 +36,19 @@ async fn main() -> anyhow::Result<()> {
 ///
 /// Loads the configuration and initializes Sentry if a DSN is provided.
 /// Tags all errors and transactions with the "replicator" service identifier.
+/// Configures panic handling to automatically capture panics and send them to Sentry.
 fn init_sentry() -> anyhow::Result<Option<sentry::ClientInitGuard>> {
     if let Ok(config) = load_replicator_config() {
         if let Some(sentry_config) = &config.sentry {
-            info!("Initializing Sentry for replicator with DSN");
+            info!("Initializing Sentry for replicator with DSN and panic handling");
 
             let environment = Environment::load()?;
             let guard = sentry::init(sentry::ClientOptions {
                 dsn: Some(sentry_config.dsn.parse()?),
                 environment: Some(environment.to_string().into()),
+                integrations: vec![Arc::new(
+                    sentry::integrations::panic::PanicIntegration::new(),
+                )],
                 ..Default::default()
             });
 
