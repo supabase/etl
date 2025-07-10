@@ -5,6 +5,7 @@ mod destination;
 mod pipeline;
 mod replicator;
 mod retry;
+mod sentry;
 mod supabase;
 
 pub use base::*;
@@ -14,4 +15,5 @@ pub use destination::*;
 pub use pipeline::*;
 pub use replicator::*;
 pub use retry::*;
+pub use sentry::*;
 pub use supabase::*;

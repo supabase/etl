@@ -72,9 +72,13 @@ fn init_sentry() -> anyhow::Result<Option<sentry::ClientInitGuard>> {
                 dsn: Some(sentry_config.dsn.parse()?),
                 environment: Some(environment.to_string().into()),
                 traces_sample_rate: 1.0,
-                send_default_pii: false,
                 max_request_body_size: sentry::MaxRequestBodySize::Always,
                 ..Default::default()
+            });
+
+            // Set service tag to differentiate API from other services
+            sentry::configure_scope(|scope| {
+                scope.set_tag("service", "api");
             });
 
             return Ok(Some(guard));

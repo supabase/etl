@@ -49,7 +49,7 @@ tracing-actix-web = { workspace = true, features = ["emit_event_on_error"] }
 utoipa = { workspace = true, features = ["actix_extras"] }
 utoipa-swagger-ui = { workspace = true, features = ["actix-web", "reqwest"] }
 uuid = { version = "1.10.0", features = ["v4"] }
-sentry = { version = "0.41.0", features = ["actix"] }
+sentry = { workspace = true, features = ["actix"] }
 
 [dev-dependencies]
 postgres = { workspace = true, features = ["test-utils", "sqlx"] }
