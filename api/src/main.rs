@@ -1,8 +1,8 @@
-use std::env;
-use std::sync::Arc;
 use anyhow::anyhow;
 use api::{config::ApiConfig, startup::Application};
 use config::{Environment, load_config, shared::PgConnectionConfig};
+use std::env;
+use std::sync::Arc;
 use telemetry::init_tracing;
 use tracing::{error, info};
 
@@ -73,9 +73,9 @@ fn init_sentry() -> anyhow::Result<Option<sentry::ClientInitGuard>> {
                 environment: Some(environment.to_string().into()),
                 traces_sample_rate: 1.0,
                 max_request_body_size: sentry::MaxRequestBodySize::Always,
-                integrations: vec![
-                    Arc::new(sentry::integrations::panic::PanicIntegration::new()),
-                ],
+                integrations: vec![Arc::new(
+                    sentry::integrations::panic::PanicIntegration::new(),
+                )],
                 ..Default::default()
             });
 
