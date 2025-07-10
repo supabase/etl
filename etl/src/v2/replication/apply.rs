@@ -391,13 +391,6 @@ where
     // At this point, the `last_commit_end_lsn` will contain the LSN of the next byte in the WAL after
     // the last `Commit` message that was processed in this batch or in the previous ones.
     if let Some(last_commit_end_lsn) = state.last_commit_end_lsn {
-        // We call `process_syncing_tables` with `update_state` set to true here *after* we've received
-        // and ack for the batch from the destination. This is important to keep a consistent state.
-        // Without this order it could happen that the table's state was updated but sending the batch
-        // to the destination failed.
-        end_loop |= !hook
-            .process_syncing_tables(last_commit_end_lsn, true)
-            .await?;
         // We also prepare the next status update for Postgres, where we will confirm that we flushed
         // data up to this LSN to allow for WAL pruning on the database side.
         //
@@ -412,6 +405,13 @@ where
         state
             .next_status_update
             .update_apply_lsn(last_commit_end_lsn);
+        // We call `process_syncing_tables` with `update_state` set to true here *after* we've received
+        // and ack for the batch from the destination. This is important to keep a consistent state.
+        // Without this order it could happen that the table's state was updated but sending the batch
+        // to the destination failed.
+        end_loop |= !hook
+            .process_syncing_tables(state.next_status_update.flush_lsn, true)
+            .await?;
     }
 
     Ok(end_loop)
