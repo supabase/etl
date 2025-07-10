@@ -1,6 +1,6 @@
+use ::config::Environment;
 use telemetry::init_tracing;
 use tracing::info;
-use ::config::Environment;
 
 use crate::config::load_replicator_config;
 use crate::core::start_replicator;

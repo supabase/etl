@@ -14,6 +14,7 @@ use std::sync::Arc;
 use thiserror::Error;
 use utoipa::ToSchema;
 
+use crate::config::ApiConfig;
 use crate::db;
 use crate::db::destinations::{Destination, DestinationsDbError, destination_exists};
 use crate::db::images::{Image, ImagesDbError};
@@ -409,6 +410,7 @@ pub async fn read_all_pipelines(
 #[post("/pipelines/{pipeline_id}/start")]
 pub async fn start_pipeline(
     req: HttpRequest,
+    api_config: Data<ApiConfig>,
     pool: Data<PgPool>,
     encryption_key: Data<EncryptionKey>,
     k8s_client: Data<Arc<HttpK8sClient>>,
@@ -429,6 +431,7 @@ pub async fn start_pipeline(
 
     let replicator_config = build_replicator_config(
         &k8s_client,
+        &api_config,
         source.config,
         destination.config,
         pipeline,
@@ -614,11 +617,13 @@ fn build_secrets(source_config: &SourceConfig, destination_config: &DestinationC
 
 async fn build_replicator_config(
     k8s_client: &Arc<HttpK8sClient>,
+    api_config: &ApiConfig,
     source_config: SourceConfig,
     destination_config: DestinationConfig,
     pipeline: Pipeline,
     supabase_config: SupabaseConfig,
 ) -> Result<ReplicatorConfig, PipelineError> {
+    // We load the trusted root certificates from the config map.
     let trusted_root_certs = k8s_client
         .get_config_map(TRUSTED_ROOT_CERT_CONFIG_MAP_NAME)
         .await?
@@ -661,6 +666,7 @@ async fn build_replicator_config(
     let config = ReplicatorConfig {
         destination: destination_config,
         pipeline: pipeline_config,
+        sentry: api_config.sentry.clone(),
         supabase: Some(supabase_config),
     };
 
