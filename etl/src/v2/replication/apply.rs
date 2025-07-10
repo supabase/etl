@@ -146,6 +146,7 @@ impl StatusUpdate {
 }
 
 /// An enum representing if the batch should be ended or not
+#[derive(Debug)]
 enum EndBatch {
     /// The batch should include the last processed event and end.
     Inclusive,
@@ -155,7 +156,7 @@ enum EndBatch {
 }
 
 /// Result returned from `handle_replication_message` and related functions
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct HandleMessageResult {
     /// The event converted from the replication message.
     /// Could be None if this event should not be added to the batch
@@ -363,7 +364,7 @@ where
         handle_replication_message(state, events_stream, message, schema_cache, hook).await?;
 
     if let Some(event) = result.event
-        && let Some(EndBatch::Inclusive) = result.end_batch
+        && !matches!(result.end_batch, Some(EndBatch::Exclusive))
     {
         state.events_batch.push(event);
     }
