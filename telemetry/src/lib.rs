@@ -48,6 +48,9 @@ static INIT_TEST_TRACING: Once = Once::new();
 pub fn init_test_tracing() {
     INIT_TEST_TRACING.call_once(|| {
         if std::env::var("ENABLE_TRACING").is_ok() {
+            // Needed because if no env is set, it defaults to prod, which logs to files instead of terminal,
+            // and we need to log to terminal when `ENABLE_TRACING` env var is set.
+            Environment::Dev.set();
             let _log_flusher =
                 init_tracing("test", false).expect("Failed to initialize tracing for tests");
         }
