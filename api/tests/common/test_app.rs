@@ -4,7 +4,7 @@ use api::routes::destinations_pipelines::{
     CreateDestinationPipelineRequest, UpdateDestinationPipelineRequest,
 };
 use api::routes::images::{CreateImageRequest, UpdateImageRequest};
-use api::routes::pipelines::{CreatePipelineRequest, UpdatePipelineRequest, SwapImageRequest};
+use api::routes::pipelines::{CreatePipelineRequest, SwapImageRequest, UpdatePipelineRequest};
 use api::routes::sources::{CreateSourceRequest, UpdateSourceRequest};
 use api::routes::tenants::{CreateOrUpdateTenantRequest, CreateTenantRequest, UpdateTenantRequest};
 use api::routes::tenants_sources::CreateTenantSourceRequest;

@@ -1,7 +1,7 @@
 use api::db::pipelines::PipelineConfig;
 use api::routes::pipelines::{
     CreatePipelineRequest, CreatePipelineResponse, ReadPipelineResponse, ReadPipelinesResponse,
-    UpdatePipelineRequest, SwapImageRequest,
+    SwapImageRequest, UpdatePipelineRequest,
 };
 use config::shared::{BatchConfig, RetryConfig};
 use reqwest::StatusCode;
@@ -641,7 +641,9 @@ async fn pipeline_image_can_be_swapped_with_specific_image() {
     let swap_request = SwapImageRequest {
         image_id: Some(1), // Use the default image ID
     };
-    let response = app.swap_pipeline_image(tenant_id, pipeline_id, &swap_request).await;
+    let response = app
+        .swap_pipeline_image(tenant_id, pipeline_id, &swap_request)
+        .await;
 
     // Assert
     assert!(response.status().is_success());
@@ -667,10 +669,10 @@ async fn pipeline_image_can_be_swapped_to_default_image() {
     .await;
 
     // Act - swap to default image (no image_id specified)
-    let swap_request = SwapImageRequest {
-        image_id: None,
-    };
-    let response = app.swap_pipeline_image(tenant_id, pipeline_id, &swap_request).await;
+    let swap_request = SwapImageRequest { image_id: None };
+    let response = app
+        .swap_pipeline_image(tenant_id, pipeline_id, &swap_request)
+        .await;
 
     // Assert
     assert!(response.status().is_success());
@@ -684,9 +686,7 @@ async fn swap_image_fails_for_non_existing_pipeline() {
     let tenant_id = &create_tenant(&app).await;
 
     // Act
-    let swap_request = SwapImageRequest {
-        image_id: None,
-    };
+    let swap_request = SwapImageRequest { image_id: None };
     let response = app.swap_pipeline_image(tenant_id, 42, &swap_request).await;
 
     // Assert
@@ -716,7 +716,9 @@ async fn swap_image_fails_for_non_existing_image() {
     let swap_request = SwapImageRequest {
         image_id: Some(999), // Non-existing image ID
     };
-    let response = app.swap_pipeline_image(tenant_id, pipeline_id, &swap_request).await;
+    let response = app
+        .swap_pipeline_image(tenant_id, pipeline_id, &swap_request)
+        .await;
 
     // Assert
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
@@ -729,7 +731,7 @@ async fn swap_image_fails_for_pipeline_from_another_tenant() {
     let app = spawn_test_app().await;
     create_default_image(&app).await;
     let tenant1_id = &create_tenant(&app).await;
-    
+
     let source1_id = create_source(&app, tenant1_id).await;
     let destination1_id = create_destination(&app, tenant1_id).await;
 
@@ -743,10 +745,10 @@ async fn swap_image_fails_for_pipeline_from_another_tenant() {
     .await;
 
     // Act - Try to swap image using wrong tenant credentials
-    let swap_request = SwapImageRequest {
-        image_id: None,
-    };
-    let response = app.swap_pipeline_image("wrong-tenant-id", pipeline_id, &swap_request).await;
+    let swap_request = SwapImageRequest { image_id: None };
+    let response = app
+        .swap_pipeline_image("wrong-tenant-id", pipeline_id, &swap_request)
+        .await;
 
     // Assert
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
@@ -761,9 +763,7 @@ async fn swap_image_fails_when_no_default_image_exists() {
     let tenant_id = &create_tenant(&app).await;
 
     // Act - Try to swap to default image when none exists
-    let swap_request = SwapImageRequest {
-        image_id: None,
-    };
+    let swap_request = SwapImageRequest { image_id: None };
     let response = app.swap_pipeline_image(tenant_id, 1, &swap_request).await;
 
     // Assert
