@@ -84,6 +84,7 @@ pub trait K8sClient {
     async fn delete_pod(&self, prefix: &str) -> Result<(), K8sError>;
 }
 
+#[derive(Debug)]
 pub struct HttpK8sClient {
     secrets_api: Api<Secret>,
     config_maps_api: Api<ConfigMap>,

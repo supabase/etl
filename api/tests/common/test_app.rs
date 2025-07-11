@@ -4,7 +4,7 @@ use api::routes::destinations_pipelines::{
     CreateDestinationPipelineRequest, UpdateDestinationPipelineRequest,
 };
 use api::routes::images::{CreateImageRequest, UpdateImageRequest};
-use api::routes::pipelines::{CreatePipelineRequest, UpdatePipelineRequest};
+use api::routes::pipelines::{CreatePipelineRequest, UpdatePipelineRequest, SwapImageRequest};
 use api::routes::sources::{CreateSourceRequest, UpdateSourceRequest};
 use api::routes::tenants::{CreateOrUpdateTenantRequest, CreateTenantRequest, UpdateTenantRequest};
 use api::routes::tenants_sources::CreateTenantSourceRequest;
@@ -366,6 +366,23 @@ impl TestApp {
             .send()
             .await
             .expect("failed to execute request")
+    }
+
+    pub async fn swap_pipeline_image(
+        &self,
+        tenant_id: &str,
+        pipeline_id: i64,
+        swap_request: &SwapImageRequest,
+    ) -> reqwest::Response {
+        self.post_authenticated(format!(
+            "{}/v1/pipelines/{pipeline_id}/swap-image",
+            &self.address
+        ))
+        .header("tenant_id", tenant_id)
+        .json(swap_request)
+        .send()
+        .await
+        .expect("Failed to execute request.")
     }
 }
 

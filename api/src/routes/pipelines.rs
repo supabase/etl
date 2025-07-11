@@ -592,7 +592,7 @@ pub async fn swap_pipeline_image(
     api_config: Data<ApiConfig>,
     pool: Data<PgPool>,
     encryption_key: Data<EncryptionKey>,
-    k8s_client: Data<Arc<HttpK8sClient>>,
+    k8s_client: Option<Data<Arc<HttpK8sClient>>>,
     pipeline_id: Path<i64>,
     swap_request: Json<SwapImageRequest>,
 ) -> Result<impl Responder, PipelineError> {
@@ -633,18 +633,20 @@ pub async fn swap_pipeline_image(
         return Ok(HttpResponse::Ok().finish());
     }
 
-    // We update the pipeline in K8s.
-    create_or_update_pipeline_in_k8s(
-        &k8s_client,
-        tenant_id,
-        &api_config,
-        pipeline,
-        replicator,
-        target_image,
-        source,
-        destination,
-    )
-    .await?;
+    // We update the pipeline in K8s if client is available.
+    if let Some(k8s_client) = k8s_client {
+        create_or_update_pipeline_in_k8s(
+            &k8s_client,
+            tenant_id,
+            &api_config,
+            pipeline,
+            replicator,
+            target_image,
+            source,
+            destination,
+        )
+        .await?;
+    }
     txn.commit().await?;
 
     Ok(HttpResponse::Ok().finish())
