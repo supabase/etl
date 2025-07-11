@@ -24,7 +24,7 @@ use std::time::{Duration, Instant};
 use thiserror::Error;
 use tokio::pin;
 use tokio_postgres::types::PgLsn;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 /// The amount of milliseconds that pass between one refresh and the other of the system, in case no
 /// events or shutdown signal are received.
@@ -373,6 +373,7 @@ where
         state.events_batch.push(event);
         state.update_last_commit_end_lsn(result.end_lsn);
     }
+
     try_send_batch(
         state,
         result.end_batch,
@@ -398,10 +399,21 @@ where
     ApplyLoopError: From<<T as ApplyLoopHook>::Error>,
 {
     let now = Instant::now();
-    if now - state.last_batch_send_time >= state.max_batch_fill_duration
-        || state.events_batch.len() >= max_batch_size
-        || end_batch.is_some()
+    let time_to_send_batch = if let Some(duration_since_last_batch_sent) =
+        now.checked_duration_since(state.last_batch_send_time)
     {
+        duration_since_last_batch_sent >= state.max_batch_fill_duration
+    } else {
+        warn!(
+            "clock skew detected, now: {now:#?}, last batch send time: {:#?}",
+            state.last_batch_send_time
+        );
+        // sending true in case of clock skew so that we fix the value of
+        // state.last_batch_send_time
+        true
+    };
+
+    if time_to_send_batch || state.events_batch.len() >= max_batch_size || end_batch.is_some() {
         if !state.events_batch.is_empty() {
             // TODO: figure out if we can send a slice to the destination instead of a vec
             // that would allow use to avoid new allocations of the `events_batch` vec and
