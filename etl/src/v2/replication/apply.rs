@@ -374,7 +374,6 @@ where
         state.update_last_commit_end_lsn(result.end_lsn);
     }
 
-    let mut batch_written = false;
     let now = Instant::now();
     if now - state.last_batch_send_time >= state.max_batch_fill_duration
         || state.events_batch.len() >= max_batch_size
@@ -389,10 +388,7 @@ where
             destination.write_events(events_batch).await?;
             state.last_batch_send_time = Instant::now();
         }
-        batch_written = true;
-    }
 
-    if batch_written {
         let mut end_loop = false;
         if let Some(table_id) = result.skip_table {
             end_loop |= !hook.skip_table(table_id).await?;
