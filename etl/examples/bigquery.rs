@@ -11,7 +11,7 @@ Key differences from the original bigquery.rs example:
 4. Provides more granular configuration of pipeline behavior
 
 Usage:
-    cargo run --example bigquery --features bigquery cdc \
+    cargo run --example bigquery --features bigquery \
         --db-host localhost \
         --db-port 5432 \
         --db-name mydb \
@@ -25,7 +25,7 @@ Usage:
 
 use std::error::Error;
 
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser};
 use config::shared::{BatchConfig, PgConnectionConfig, PipelineConfig, RetryConfig, TlsConfig};
 use etl::v2::{
     destination::bigquery::BigQueryDestination, pipeline::Pipeline,
@@ -43,8 +43,14 @@ struct AppArgs {
     #[clap(flatten)]
     bq_args: BqArgs,
 
-    #[clap(subcommand)]
-    command: Command,
+    /// PostgreSQL publication name
+    #[arg(long)]
+    publication: String,
+
+    /// Optional replication slot name (will be generated if not provided)
+    #[arg(long)]
+    #[allow(dead_code)] // TODO: Use this field for custom slot names
+    slot_name: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -95,19 +101,6 @@ struct BqArgs {
     /// Maximum number of table sync workers
     #[arg(long, default_value = "4")]
     max_table_sync_workers: u16,
-}
-
-#[derive(Debug, Subcommand)]
-enum Command {
-    /// Start a change data capture pipeline
-    Cdc {
-        /// PostgreSQL publication name
-        publication: String,
-
-        /// Optional replication slot name (will be generated if not provided)
-        #[arg(long)]
-        slot_name: Option<String>,
-    },
 }
 
 #[tokio::main]
@@ -162,65 +155,58 @@ async fn main_impl() -> Result<(), Box<dyn Error>> {
         },
     };
 
-    match args.command {
-        Command::Cdc {
-            publication,
-            slot_name: _slot_name, // Marked as unused for now
-        } => {
-            // Create BigQuery destination using the v2 architecture
-            // This destination handles table schema creation and data insertion
-            let bigquery_destination = BigQueryDestination::new_with_key_path(
-                bq_args.bq_project_id,
-                bq_args.bq_dataset_id,
-                &bq_args.bq_sa_key_file,
-                None, // Use default max_staleness_mins
-            )
-            .await?;
+    // Create BigQuery destination using the v2 architecture
+    // This destination handles table schema creation and data insertion
+    let bigquery_destination = BigQueryDestination::new_with_key_path(
+        bq_args.bq_project_id,
+        bq_args.bq_dataset_id,
+        &bq_args.bq_sa_key_file,
+        None, // Use default max_staleness_mins
+    )
+    .await?;
 
-            // Create in-memory state store for tracking table replication states
-            // In production, you might want to use a persistent state store like PostgresStateStore
-            let state_store = MemoryStateStore::new();
+    // Create in-memory state store for tracking table replication states
+    // In production, you might want to use a persistent state store like PostgresStateStore
+    let state_store = MemoryStateStore::new();
 
-            // Create pipeline configuration with all necessary settings
-            let pipeline_config = PipelineConfig {
-                id: 1, // Using a simple ID for the example
-                pg_connection: pg_connection_config,
-                batch: BatchConfig {
-                    max_size: bq_args.max_batch_size,
-                    max_fill_ms: bq_args.max_batch_fill_duration_ms,
-                },
-                apply_worker_init_retry: RetryConfig {
-                    max_attempts: 3,
-                    initial_delay_ms: 1000,
-                    max_delay_ms: 10000,
-                    backoff_factor: 2.0,
-                },
-                publication_name: publication,
-                max_table_sync_workers: bq_args.max_table_sync_workers,
-            };
+    // Create pipeline configuration with all necessary settings
+    let pipeline_config = PipelineConfig {
+        id: 1, // Using a simple ID for the example
+        pg_connection: pg_connection_config,
+        batch: BatchConfig {
+            max_size: bq_args.max_batch_size,
+            max_fill_ms: bq_args.max_batch_fill_duration_ms,
+        },
+        apply_worker_init_retry: RetryConfig {
+            max_attempts: 3,
+            initial_delay_ms: 1000,
+            max_delay_ms: 10000,
+            backoff_factor: 2.0,
+        },
+        publication_name: args.publication,
+        max_table_sync_workers: bq_args.max_table_sync_workers,
+    };
 
-            // Create the v2 pipeline with state store and destination
-            let mut pipeline = Pipeline::new(1, pipeline_config, state_store, bigquery_destination);
+    // Create the v2 pipeline with state store and destination
+    let mut pipeline = Pipeline::new(1, pipeline_config, state_store, bigquery_destination);
 
-            println!("Starting BigQuery CDC pipeline...");
+    println!("Starting BigQuery CDC pipeline...");
 
-            // Start the pipeline - this will:
-            // 1. Connect to PostgreSQL
-            // 2. Initialize table states based on the publication
-            // 3. Start apply and table sync workers
-            // 4. Begin streaming replication data
-            pipeline.start().await?;
+    // Start the pipeline - this will:
+    // 1. Connect to PostgreSQL
+    // 2. Initialize table states based on the publication
+    // 3. Start apply and table sync workers
+    // 4. Begin streaming replication data
+    pipeline.start().await?;
 
-            println!("Pipeline started successfully. Running indefinitely...");
+    println!("Pipeline started successfully. Running indefinitely...");
 
-            // Wait for the pipeline to complete (it runs indefinitely unless shutdown)
-            let result = pipeline.wait().await;
+    // Wait for the pipeline to complete (it runs indefinitely unless shutdown)
+    let result = pipeline.wait().await;
 
-            println!("Pipeline stopped.");
+    println!("Pipeline stopped.");
 
-            result?;
-        }
-    }
+    result?;
 
     Ok(())
 }
