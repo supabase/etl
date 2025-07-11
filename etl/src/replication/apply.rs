@@ -1,5 +1,4 @@
-use crate::concurrency::shutdown::{ShutdownResult, ShutdownRx};
-use crate::concurrency::stream::BatchStream;
+use crate::concurrency::shutdown::ShutdownRx;
 use crate::conversions::event::{Event, EventConversionError, EventType, convert_message_to_event};
 use crate::destination::base::{Destination, DestinationError};
 use crate::pipeline::PipelineId;
@@ -19,7 +18,7 @@ use postgres_replication::protocol::{LogicalReplicationMessage, ReplicationMessa
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use thiserror::Error;
 use tokio::pin;
 use tokio_postgres::types::PgLsn;
@@ -94,6 +93,7 @@ pub trait ApplyLoopHook {
     fn process_syncing_tables(
         &self,
         current_lsn: PgLsn,
+        update_state: bool,
     ) -> impl Future<Output = Result<bool, Self::Error>> + Send;
 
     fn skip_table(
@@ -143,10 +143,52 @@ impl StatusUpdate {
     }
 }
 
-#[derive(Debug, Clone)]
-enum BatchEarlyBreak {
-    Break,
-    BreakAndDiscard,
+/// An enum representing if the batch should be ended or not
+#[derive(Debug)]
+enum EndBatch {
+    /// The batch should include the last processed event and end.
+    Inclusive,
+
+    /// The batch should exclude the last processed event and end.
+    Exclusive,
+}
+
+/// Result returned from `handle_replication_message` and related functions
+#[derive(Debug, Default)]
+struct HandleMessageResult {
+    /// The event converted from the replication message.
+    /// Could be None if this event should not be added to the batch
+    /// Will be None in the following cases:
+    ///
+    /// * When the apply worker receives an event for a table which is not ready
+    /// * When the apply or table sync workers receive an event from a table which was skipped
+    /// * When the table sync worker receives an event from a table other than its own
+    /// * When the message is a primary keepalive message
+    ///
+    event: Option<Event>,
+
+    /// Set to a commit message's end_lsn value, None otherwise
+    end_lsn: Option<PgLsn>,
+
+    /// Set when a batch should be ended earlier than the normal batching parameters of
+    /// max size and max fill duration. Currently this will be set in the following
+    /// conditions:
+    ///
+    /// * Set to [`EndBatch::Inclusive`]` when a commit message indicates that it will
+    ///   mark the table sync worker as caught up. We want to end the batch in this
+    ///   case because we do not want to sent events after this commit message because
+    ///   these events will also be sent by the apply worker later, leading to
+    ///   duplicate events being sent. The commit event will be included in the
+    ///   batch.
+    /// * Set to [`EndBatch::Exclusive`] when a replication message indicates a change
+    ///   in schema. Since currently we are not handling any changes in schema, we
+    ///   mark the table as skipped in this case. The replication event will be excluded
+    ///   from the batch.
+    ///
+    end_batch: Option<EndBatch>,
+
+    /// Set when a replication message indicates a change in schema, otherwise None
+    skip_table: Option<TableId>,
 }
 
 #[derive(Debug, Clone)]
@@ -157,39 +199,46 @@ struct ApplyLoopState {
     /// of restarts and allows Postgres to determine whether some old entries could be pruned from the
     /// WAL.
     last_commit_end_lsn: Option<PgLsn>,
+
     /// The LSN of the commit WAL entry of the transaction that is currently being processed.
     ///
     /// This LSN is set at every `BEGIN` of a new transaction, and it's used to know the `commit_lsn`
     /// of the transaction which is currently being processed.
     remote_final_lsn: Option<PgLsn>,
+
     /// The LSNs of the status update that we want to send to Postgres.
     next_status_update: StatusUpdate,
-    /// An enum indicating whether the processing of a batch should be terminated early, with a consequent
-    /// termination of the main apply loop too.
-    early_break: Option<BatchEarlyBreak>,
+
+    /// Last time when the batch was sent (or since when the apply loop started)
+    last_batch_send_time: Instant,
+
+    /// A batch of events to send to the destination
+    events_batch: Vec<Event>,
 }
 
 impl ApplyLoopState {
-    fn new(next_status_update: StatusUpdate) -> Self {
+    fn new(next_status_update: StatusUpdate, events_batch: Vec<Event>) -> Self {
         Self {
             last_commit_end_lsn: None,
             remote_final_lsn: None,
             next_status_update,
-            early_break: None,
+            last_batch_send_time: Instant::now(),
+            events_batch,
         }
     }
 
-    fn update_last_commit_end_lsn(&mut self, new_last_commit_end_lsn: PgLsn) {
-        let Some(last_commit_end_lsn) = &mut self.last_commit_end_lsn else {
-            self.last_commit_end_lsn = Some(new_last_commit_end_lsn);
-            return;
-        };
-
-        if new_last_commit_end_lsn <= *last_commit_end_lsn {
-            return;
+    fn update_last_commit_end_lsn(&mut self, end_lsn: Option<PgLsn>) {
+        match (self.last_commit_end_lsn, end_lsn) {
+            (None, Some(end_lsn)) => {
+                self.last_commit_end_lsn = Some(end_lsn);
+            }
+            (Some(old_last_commit_end_lsn), Some(end_lsn)) => {
+                if end_lsn > old_last_commit_end_lsn {
+                    self.last_commit_end_lsn = Some(end_lsn);
+                }
+            }
+            (_, None) => {}
         }
-
-        *last_commit_end_lsn = new_last_commit_end_lsn;
     }
 
     /// Returns true if the apply loop is in the middle of processing a trasaction, false otherwise.
@@ -222,9 +271,6 @@ where
         apply_lsn: start_lsn,
     };
 
-    // We initialize the shared state that is used throughout the loop to track progress.
-    let mut state = ApplyLoopState::new(first_status_update);
-
     // We initialize the apply loop which is based on the hook implementation.
     hook.initialize().await?;
 
@@ -239,12 +285,16 @@ where
         .start_logical_replication(&config.publication_name, &slot_name, start_lsn)
         .await?;
     let logical_replication_stream = EventsStream::wrap(logical_replication_stream);
-    let logical_replication_stream = BatchStream::wrap(
-        logical_replication_stream,
-        config.batch.clone(),
-        shutdown_rx.clone(),
-    );
+
     pin!(logical_replication_stream);
+
+    // We initialize the shared state that is used throughout the loop to track progress.
+    let mut state = ApplyLoopState::new(
+        first_status_update,
+        Vec::with_capacity(config.batch.max_size),
+    );
+
+    let max_batch_fill_duration = Duration::from_millis(config.batch.max_fill_ms);
 
     loop {
         tokio::select! {
@@ -256,61 +306,29 @@ where
                 return Ok(ApplyLoopResult::ApplyStopped);
             }
 
-            // Process a batch of replication messages.
-            Some(result) = logical_replication_stream.next() => {
-                let logical_replication_stream = logical_replication_stream.as_mut();
-                let events_stream = unsafe {
-                    Pin::new_unchecked(
-                        logical_replication_stream
-                            .get_unchecked_mut()
-                            .get_inner_mut()
-                    )
-                };
+            Some(message) = logical_replication_stream.next() => {
+                let end_loop = handle_replication_message_batch(
+                    &mut state,
+                    logical_replication_stream.as_mut(),
+                    message?,
+                    &schema_cache,
+                    &destination,
+                    &hook,
+                    config.batch.max_size,
+                    max_batch_fill_duration,
+                )
+                .await?;
 
-                match result {
-                    ShutdownResult::Ok(messages_batch) => {
-                        let stop_apply_loop = handle_replication_message_batch(
-                            &mut state,
-                            events_stream,
-                            messages_batch,
-                            &schema_cache,
-                            &destination,
-                            &hook,
-                        )
-                        .await?;
-
-                        // If we are told to stop the apply loop, we will do it.
-                        if stop_apply_loop {
-                            return Ok(ApplyLoopResult::ApplyStopped);
-                        }
-                    }
-                    ShutdownResult::Shutdown(_) => {
-                        // If we incurred in a shutdown within the stream, we also return that we
-                        // stopped.
-                        // This branch is technically not really needed since we have the shutdown
-                        // handler also in the `select!`, however this code path could react faster
-                        // in case we have a shutdown signal sent while we are running the blocking
-                        // loop in the stream.
-                        info!("shutting down apply worker before processing batch, the messages in the batch should be re-consumed");
-                        return Ok(ApplyLoopResult::ApplyStopped);
-                    }
+                if end_loop {
+                    return Ok(ApplyLoopResult::ApplyStopped);
                 }
             }
 
             // At regular intervals, if nothing happens, perform housekeeping and send status updates
             // to Postgres.
             _ = tokio::time::sleep(REFRESH_INTERVAL) => {
-                // TODO: implement housekeeping like slot deletion.
-                let logical_replication_stream = logical_replication_stream.as_mut();
-                let events_stream = unsafe {
-                    Pin::new_unchecked(
-                        logical_replication_stream
-                            .get_unchecked_mut()
-                            .get_inner_mut()
-                    )
-                };
 
-                events_stream
+                logical_replication_stream.as_mut()
                     .send_status_update(
                         state.next_status_update.write_lsn,
                         state.next_status_update.flush_lsn,
@@ -332,9 +350,8 @@ where
                 // This is done here as well in addition to at a commit boundary because we do not want
                 // the table sync workers to get stuck if there are no changes in the cdc stream.
                 if !state.handling_transaction() {
-                    info!("processing syncing tables after a period of inactivity of {} seconds", REFRESH_INTERVAL.as_secs());
-
-                    let continue_loop = hook.process_syncing_tables(state.next_status_update.flush_lsn).await?;
+                    debug!("processing syncing tables after a period of inactivity of {} seconds", REFRESH_INTERVAL.as_secs());
+                    let continue_loop = hook.process_syncing_tables(state.next_status_update.flush_lsn, true).await?;
                     if !continue_loop {
                         break Ok(ApplyLoopResult::ApplyStopped);
                     }
@@ -344,101 +361,111 @@ where
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 async fn handle_replication_message_batch<D, T>(
     state: &mut ApplyLoopState,
-    mut stream: Pin<&mut EventsStream>,
-    messages_batch: Vec<Result<ReplicationMessage<LogicalReplicationMessage>, EventsStreamError>>,
+    events_stream: Pin<&mut EventsStream>,
+    message: ReplicationMessage<LogicalReplicationMessage>,
     schema_cache: &SchemaCache,
     destination: &D,
     hook: &T,
+    max_batch_size: usize,
+    max_batch_fill_duration: Duration,
 ) -> Result<bool, ApplyLoopError>
 where
     D: Destination + Clone + Send + 'static,
     T: ApplyLoopHook,
     ApplyLoopError: From<<T as ApplyLoopHook>::Error>,
 {
-    let mut stop_apply_loop = false;
-    let mut events_batch = Vec::with_capacity(messages_batch.len());
+    let result =
+        handle_replication_message(state, events_stream, message, schema_cache, hook).await?;
 
-    for message in messages_batch {
-        // We store the previous state to use it in case we have to restore it because we processed
-        // a message that lead to an early break and discard.
-        //
-        // Note that the `shared` part of the state will be shared amongst the clones, so you have to
-        // make sure the data there is expected to be shared.
-        let previous_state = state.clone();
+    if let Some(event) = result.event
+        && matches!(result.end_batch, None | Some(EndBatch::Inclusive))
+    {
+        state.events_batch.push(event);
+        state.update_last_commit_end_lsn(result.end_lsn);
+    }
 
-        // An error while processing a message in a batch will lead to the entire batch being discarded.
-        let event =
-            handle_replication_message(state, stream.as_mut(), message?, schema_cache, hook)
+    try_send_batch(
+        state,
+        result.end_batch,
+        result.skip_table,
+        destination,
+        hook,
+        max_batch_size,
+        max_batch_fill_duration,
+    )
+    .await
+}
+
+async fn try_send_batch<D, T>(
+    state: &mut ApplyLoopState,
+    end_batch: Option<EndBatch>,
+    skip_table: Option<TableId>,
+    destination: &D,
+    hook: &T,
+    max_batch_size: usize,
+    max_batch_fill_duration: Duration,
+) -> Result<bool, ApplyLoopError>
+where
+    D: Destination + Clone + Send + 'static,
+    T: ApplyLoopHook,
+    ApplyLoopError: From<<T as ApplyLoopHook>::Error>,
+{
+    let elapsed = state.last_batch_send_time.elapsed();
+    // `elapsed` could be zero in case current time is earlier than `last_batch_send_time`.
+    // We send the batch even in this case to make sure `last_batch_send_time` is reset to
+    // a new value and to avoid getting stuck with some events in the batch.
+    let time_to_send_batch = elapsed.is_zero() || elapsed > max_batch_fill_duration;
+
+    if time_to_send_batch || state.events_batch.len() >= max_batch_size || end_batch.is_some() {
+        if !state.events_batch.is_empty() {
+            // TODO: figure out if we can send a slice to the destination instead of a vec
+            // that would allow use to avoid new allocations of the `events_batch` vec and
+            // we could just call clear() on it.
+            let events_batch =
+                std::mem::replace(&mut state.events_batch, Vec::with_capacity(max_batch_size));
+            destination.write_events(events_batch).await?;
+            state.last_batch_send_time = Instant::now();
+        }
+
+        let mut end_loop = false;
+        if let Some(table_id) = skip_table {
+            end_loop |= !hook.skip_table(table_id).await?;
+        }
+
+        // At this point, the `last_commit_end_lsn` will contain the LSN of the next byte in the WAL after
+        // the last `Commit` message that was processed in this batch or in the previous ones.
+        if let Some(last_commit_end_lsn) = state.last_commit_end_lsn.take() {
+            // We also prepare the next status update for Postgres, where we will confirm that we flushed
+            // data up to this LSN to allow for WAL pruning on the database side.
+            //
+            // Note that we do this ONLY once a batch is fully saved, since that is the only place where
+            // we are guaranteed that data has been safely persisted. In all the other cases, we just update
+            // the `write_lsn` which is used by Postgres to get an acknowledgement of how far we have processed
+            // messages but not flushed them.
+            // TODO: check if we want to send `apply_lsn` as a different value.
+            state
+                .next_status_update
+                .update_flush_lsn(last_commit_end_lsn);
+            state
+                .next_status_update
+                .update_apply_lsn(last_commit_end_lsn);
+
+            // We call `process_syncing_tables` with `update_state` set to true here *after* we've received
+            // and ack for the batch from the destination. This is important to keep a consistent state.
+            // Without this order it could happen that the table's state was updated but sending the batch
+            // to the destination failed.
+            end_loop |= !hook
+                .process_syncing_tables(state.next_status_update.flush_lsn, true)
                 .await?;
-
-        if !matches!(state.early_break, Some(BatchEarlyBreak::BreakAndDiscard)) {
-            if let Some(event) = event {
-                events_batch.push(event);
-            }
         }
 
-        // If we should break early after processing a message, we can do this in many ways:
-        // - break -> this breaks out of the loop and assumes that the last processed message was
-        //  successfully processed, so we apply all the messages up to this one.
-        // - break and discard -> this breaks out of the loop and assumes that the last processed
-        //  message was not fully processed, so we reset the `last_end_lsn` to the one of the message
-        //  before this one, so that when we apply events and notify Postgres, it's done as if the
-        //  last message was not processed.
-        //
-        // Early breaking can happen for example when a table sync worker has caught up with the apply worker
-        // but its batch contained more elements after the caught up element, in that case we don't
-        // want to process those elements, otherwise if we do, the apply worker will process them too
-        // causing duplicate data.
-        match state.early_break {
-            Some(BatchEarlyBreak::Break) => {
-                debug!("early break requested, stopping apply loop");
-                stop_apply_loop = true;
-
-                break;
-            }
-            Some(BatchEarlyBreak::BreakAndDiscard) => {
-                debug!(
-                    "early break and discard requested, resetting state and stopping apply loop"
-                );
-                *state = previous_state;
-                stop_apply_loop = true;
-
-                break;
-            }
-            None => {}
-        }
+        return Ok(end_loop);
     }
 
-    if events_batch.is_empty() {
-        return Ok(stop_apply_loop);
-    }
-
-    // We apply the batch of events to the destination.
-    destination.write_events(events_batch).await?;
-
-    // At this point, the `last_commit_end_lsn` will contain the LSN of the next byte in the WAL after
-    // the last `Commit` message that was processed in this batch or in the previous ones.
-    if let Some(last_commit_end_lsn) = state.last_commit_end_lsn.take() {
-        // We also prepare the next status update for Postgres, where we will confirm that we flushed
-        // data up to this LSN to allow for WAL pruning on the database side.
-        //
-        // Note that we do this ONLY once a batch is fully saved, since that is the only place where
-        // we are guaranteed that data has been safely persisted. In all the other cases, we just update
-        // the `write_lsn` which is used by Postgres to get an acknowledgement of how far we have processed
-        // messages but not flushed them.
-        // TODO: check if we want to send `apply_lsn` as a different value.
-        state
-            .next_status_update
-            .update_flush_lsn(last_commit_end_lsn);
-        state
-            .next_status_update
-            .update_apply_lsn(last_commit_end_lsn);
-    }
-
-    Ok(stop_apply_loop)
+    Ok(false)
 }
 
 async fn handle_replication_message<T>(
@@ -447,7 +474,7 @@ async fn handle_replication_message<T>(
     message: ReplicationMessage<LogicalReplicationMessage>,
     schema_cache: &SchemaCache,
     hook: &T,
-) -> Result<Option<Event>, ApplyLoopError>
+) -> Result<HandleMessageResult, ApplyLoopError>
 where
     T: ApplyLoopHook,
     ApplyLoopError: From<<T as ApplyLoopHook>::Error>,
@@ -475,9 +502,9 @@ where
                 )
                 .await?;
 
-            Ok(None)
+            Ok(HandleMessageResult::default())
         }
-        _ => Ok(None),
+        _ => Ok(HandleMessageResult::default()),
     }
 }
 
@@ -486,7 +513,7 @@ async fn handle_logical_replication_message<T>(
     message: LogicalReplicationMessage,
     schema_cache: &SchemaCache,
     hook: &T,
-) -> Result<Option<Event>, ApplyLoopError>
+) -> Result<HandleMessageResult, ApplyLoopError>
 where
     T: ApplyLoopHook,
     ApplyLoopError: From<<T as ApplyLoopHook>::Error>,
@@ -517,9 +544,9 @@ where
         LogicalReplicationMessage::Truncate(message) => {
             handle_truncate_message(state, event, &message, hook).await
         }
-        LogicalReplicationMessage::Origin(_) => Ok(None),
-        LogicalReplicationMessage::Type(_) => Ok(None),
-        _ => Ok(None),
+        LogicalReplicationMessage::Origin(_) => Ok(HandleMessageResult::default()),
+        LogicalReplicationMessage::Type(_) => Ok(HandleMessageResult::default()),
+        _ => Ok(HandleMessageResult::default()),
     }
 }
 
@@ -527,7 +554,7 @@ async fn handle_begin_message(
     state: &mut ApplyLoopState,
     event: Event,
     message: &protocol::BeginBody,
-) -> Result<Option<Event>, ApplyLoopError> {
+) -> Result<HandleMessageResult, ApplyLoopError> {
     let Event::Begin(event) = event else {
         return Err(ApplyLoopError::InvalidEvent(event.into(), EventType::Begin));
     };
@@ -537,7 +564,12 @@ async fn handle_begin_message(
     let final_lsn = PgLsn::from(message.final_lsn());
     state.remote_final_lsn = Some(final_lsn);
 
-    Ok(Some(Event::Begin(event)))
+    Ok(HandleMessageResult {
+        event: Some(Event::Begin(event)),
+        end_lsn: None,
+        end_batch: None,
+        skip_table: None,
+    })
 }
 
 async fn handle_commit_message<T>(
@@ -545,7 +577,7 @@ async fn handle_commit_message<T>(
     event: Event,
     message: &protocol::CommitBody,
     hook: &T,
-) -> Result<Option<Event>, ApplyLoopError>
+) -> Result<HandleMessageResult, ApplyLoopError>
 where
     T: ApplyLoopHook,
     ApplyLoopError: From<<T as ApplyLoopHook>::Error>,
@@ -579,30 +611,35 @@ where
 
     let end_lsn = PgLsn::from(message.end_lsn());
 
-    // We mark this as the last commit end LSN since we want to be able to track from the outside
-    // what was the biggest transaction boundary LSN which was successfully applied.
-    //
-    // The rationale for using only the `end_lsn` of the `Commit` message is that once we found a
-    // commit and successfully processed it, we can say that the next byte we want is the next transaction
-    // since if we were to store an intermediate `end_lsn` (from a dml operation within a transaction)
-    // the replication will still start from a transaction boundary, that is, a `Begin` statement in
-    // our case.
-    state.update_last_commit_end_lsn(end_lsn);
+    // We call `process_syncing_tables` with `update_state` set to false here because we do not yet want
+    // to update the table state. This function will be called again in `handle_replication_message_batch`
+    // with `update_state` set to true *after* sending the batch to the destination. This order is needed
+    // for consistency because otherwise we might update the table state before receiving an ack from the
+    // destination.
+    let continue_loop = hook.process_syncing_tables(end_lsn, false).await?;
 
-    // We process syncing tables since we just arrived at the end of a transaction, and we want to
-    // synchronize all the workers.
-    //
-    // The `end_lsn` here refers to the LSN of the record right after the commit record.
-    let continue_loop = hook.process_syncing_tables(end_lsn).await?;
+    let mut result = HandleMessageResult {
+        event: Some(Event::Commit(event)),
+        // We mark this as the last commit end LSN since we want to be able to track from the outside
+        // what was the biggest transaction boundary LSN which was successfully applied.
+        //
+        // The rationale for using only the `end_lsn` of the `Commit` message is that once we found a
+        // commit and successfully processed it, we can say that the next byte we want is the next transaction
+        // since if we were to store an intermediate `end_lsn` (from a dml operation within a transaction)
+        // the replication will still start from a transaction boundary, that is, a `Begin` statement in
+        // our case.
+        end_lsn: Some(end_lsn),
+        ..Default::default()
+    };
 
     // If we are told to stop the loop, it means we reached the end of processing for this specific
     // worker, so we gracefully stop processing the batch, but we include in the batch the last processed
     // element, in this case the `Commit` message.
     if !continue_loop {
-        state.early_break = Some(BatchEarlyBreak::Break);
+        result.end_batch = Some(EndBatch::Inclusive);
     }
 
-    Ok(Some(Event::Commit(event)))
+    Ok(result)
 }
 
 async fn handle_relation_message<T>(
@@ -611,7 +648,7 @@ async fn handle_relation_message<T>(
     message: &protocol::RelationBody,
     schema_cache: &SchemaCache,
     hook: &T,
-) -> Result<Option<Event>, ApplyLoopError>
+) -> Result<HandleMessageResult, ApplyLoopError>
 where
     T: ApplyLoopHook,
     ApplyLoopError: From<<T as ApplyLoopHook>::Error>,
@@ -633,7 +670,7 @@ where
         .should_apply_changes(message.rel_id(), remote_final_lsn)
         .await?
     {
-        return Ok(None);
+        return Ok(HandleMessageResult::default());
     }
 
     // If no table schema is found, it means that something went wrong and we throw an error, which is
@@ -648,18 +685,19 @@ where
     // The purpose of this comparison is that we want to throw an error and stop the processing
     // of any table that incurs in a schema change after the initial table sync is performed.
     if !existing_table_schema.partial_eq(&event.table_schema) {
-        let continue_loop = hook.skip_table(message.rel_id()).await?;
-
-        // If we are told to stop the loop, we want to break the batch processing and discard the
-        // current element being processed, in this case the `Relation` message.
-        if !continue_loop {
-            state.early_break = Some(BatchEarlyBreak::BreakAndDiscard);
-        }
-
-        return Ok(None);
+        return Ok(HandleMessageResult {
+            end_batch: Some(EndBatch::Exclusive),
+            skip_table: Some(message.rel_id()),
+            ..Default::default()
+        });
     }
 
-    Ok(Some(Event::Relation(event)))
+    Ok(HandleMessageResult {
+        event: Some(Event::Relation(event)),
+        end_lsn: None,
+        end_batch: None,
+        skip_table: None,
+    })
 }
 
 async fn handle_insert_message<T>(
@@ -667,7 +705,7 @@ async fn handle_insert_message<T>(
     event: Event,
     message: &protocol::InsertBody,
     hook: &T,
-) -> Result<Option<Event>, ApplyLoopError>
+) -> Result<HandleMessageResult, ApplyLoopError>
 where
     T: ApplyLoopHook,
     ApplyLoopError: From<<T as ApplyLoopHook>::Error>,
@@ -689,10 +727,15 @@ where
         .should_apply_changes(message.rel_id(), remote_final_lsn)
         .await?
     {
-        return Ok(None);
+        return Ok(HandleMessageResult::default());
     }
 
-    Ok(Some(Event::Insert(event)))
+    Ok(HandleMessageResult {
+        event: Some(Event::Insert(event)),
+        end_lsn: None,
+        end_batch: None,
+        skip_table: None,
+    })
 }
 
 async fn handle_update_message<T>(
@@ -700,7 +743,7 @@ async fn handle_update_message<T>(
     event: Event,
     message: &protocol::UpdateBody,
     hook: &T,
-) -> Result<Option<Event>, ApplyLoopError>
+) -> Result<HandleMessageResult, ApplyLoopError>
 where
     T: ApplyLoopHook,
     ApplyLoopError: From<<T as ApplyLoopHook>::Error>,
@@ -722,10 +765,15 @@ where
         .should_apply_changes(message.rel_id(), remote_final_lsn)
         .await?
     {
-        return Ok(None);
+        return Ok(HandleMessageResult::default());
     }
 
-    Ok(Some(Event::Update(event)))
+    Ok(HandleMessageResult {
+        event: Some(Event::Update(event)),
+        end_lsn: None,
+        end_batch: None,
+        skip_table: None,
+    })
 }
 
 async fn handle_delete_message<T>(
@@ -733,7 +781,7 @@ async fn handle_delete_message<T>(
     event: Event,
     message: &protocol::DeleteBody,
     hook: &T,
-) -> Result<Option<Event>, ApplyLoopError>
+) -> Result<HandleMessageResult, ApplyLoopError>
 where
     T: ApplyLoopHook,
     ApplyLoopError: From<<T as ApplyLoopHook>::Error>,
@@ -755,10 +803,15 @@ where
         .should_apply_changes(message.rel_id(), remote_final_lsn)
         .await?
     {
-        return Ok(None);
+        return Ok(HandleMessageResult::default());
     }
 
-    Ok(Some(Event::Delete(event)))
+    Ok(HandleMessageResult {
+        event: Some(Event::Delete(event)),
+        end_lsn: None,
+        end_batch: None,
+        skip_table: None,
+    })
 }
 
 async fn handle_truncate_message<T>(
@@ -766,7 +819,7 @@ async fn handle_truncate_message<T>(
     event: Event,
     message: &protocol::TruncateBody,
     hook: &T,
-) -> Result<Option<Event>, ApplyLoopError>
+) -> Result<HandleMessageResult, ApplyLoopError>
 where
     T: ApplyLoopHook,
     ApplyLoopError: From<<T as ApplyLoopHook>::Error>,
@@ -795,5 +848,10 @@ where
     }
     event.rel_ids = rel_ids;
 
-    Ok(Some(Event::Truncate(event)))
+    Ok(HandleMessageResult {
+        event: Some(Event::Truncate(event)),
+        end_lsn: None,
+        end_batch: None,
+        skip_table: None,
+    })
 }

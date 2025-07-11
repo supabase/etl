@@ -337,7 +337,11 @@ where
         Ok(())
     }
 
-    async fn process_syncing_tables(&self, current_lsn: PgLsn) -> Result<bool, Self::Error> {
+    async fn process_syncing_tables(
+        &self,
+        current_lsn: PgLsn,
+        update_state: bool,
+    ) -> Result<bool, Self::Error> {
         let active_table_replication_states =
             get_table_replication_states(&self.state_store, false).await?;
         debug!(
@@ -358,7 +362,7 @@ where
                 // `process_syncing_tables` at regular intervals, because now such spurious launches
                 // have become extremely common, which is just wasteful.
                 TableReplicationPhase::SyncDone { lsn } => {
-                    if current_lsn >= lsn {
+                    if current_lsn >= lsn && update_state {
                         info!(
                             "Table {} is ready, its events are now processed by the main apply worker",
                             table_id
