@@ -9,14 +9,6 @@ edition = "2024"
 name = "bigquery"
 required-features = ["bigquery"]
 
-[[example]]
-name = "duckdb"
-required-features = ["duckdb"]
-
-[[example]]
-name = "stdout"
-required-features = ["stdout"]
-
 [dependencies]
 config = { workspace = true }
 postgres = { workspace = true, features = ["tokio"] }
@@ -67,13 +59,11 @@ clap = { workspace = true, default-features = true, features = [
     "std",
     "derive",
 ] }
-wiremock = { workspace = true}
+wiremock = { workspace = true }
 
 
 [features]
 bigquery = ["dep:gcp-bigquery-client", "dep:prost", "postgres/bigquery"]
-duckdb = ["dep:duckdb"]
-stdout = []
 # When enabled converts unknown types to bytes
 unknown_types_to_bytes = []
 default = ["unknown_types_to_bytes"]

@@ -1,4 +1,3 @@
-pub mod clients;
 pub mod conversions;
 pub mod v2;
 
