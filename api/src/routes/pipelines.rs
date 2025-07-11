@@ -628,9 +628,7 @@ pub async fn swap_pipeline_image(
     // If the images have equal name, we don't care about their id from the K8S perspective, so we
     // won't update any resources.
     if target_image.name == current_image.name {
-        txn.commit()
-            .await
-            .map_err(|e| PipelineError::ReplicatorsDb(e.into()))?;
+        txn.commit().await?;
 
         return Ok(HttpResponse::Ok().finish());
     }
@@ -647,10 +645,7 @@ pub async fn swap_pipeline_image(
         destination,
     )
     .await?;
-
-    txn.commit()
-        .await
-        .map_err(|e| PipelineError::ReplicatorsDb(e.into()))?;
+    txn.commit().await?;
 
     Ok(HttpResponse::Ok().finish())
 }
