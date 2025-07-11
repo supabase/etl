@@ -140,11 +140,18 @@ pub async fn create_source(
     encryption_key: Data<EncryptionKey>,
     source: Json<CreateSourceRequest>,
 ) -> Result<impl Responder, SourceError> {
-    let source = source.into_inner();
     let tenant_id = extract_tenant_id(&req)?;
-    let name = source.name;
-    let config = source.config;
-    let id = db::sources::create_source(&**pool, tenant_id, &name, config, &encryption_key).await?;
+    let source = source.into_inner();
+
+    let id = db::sources::create_source(
+        &**pool,
+        tenant_id,
+        &source.name,
+        source.config,
+        &encryption_key,
+    )
+    .await?;
+
     let response = CreateSourceResponse { id };
 
     Ok(Json(response))
@@ -172,6 +179,7 @@ pub async fn read_source(
 ) -> Result<impl Responder, SourceError> {
     let tenant_id = extract_tenant_id(&req)?;
     let source_id = source_id.into_inner();
+
     let response = db::sources::read_source(&**pool, tenant_id, source_id, &encryption_key)
         .await?
         .map(|s| ReadSourceResponse {
@@ -207,17 +215,16 @@ pub async fn update_source(
     encryption_key: Data<EncryptionKey>,
     source: Json<UpdateSourceRequest>,
 ) -> Result<impl Responder, SourceError> {
-    let source = source.into_inner();
     let tenant_id = extract_tenant_id(&req)?;
     let source_id = source_id.into_inner();
-    let name = source.name;
-    let config = source.config;
+    let source = source.into_inner();
+
     db::sources::update_source(
         &**pool,
         tenant_id,
-        &name,
+        &source.name,
         source_id,
-        config,
+        source.config,
         &encryption_key,
     )
     .await?
@@ -247,6 +254,7 @@ pub async fn delete_source(
 ) -> Result<impl Responder, SourceError> {
     let tenant_id = extract_tenant_id(&req)?;
     let source_id = source_id.into_inner();
+
     db::sources::delete_source(&**pool, tenant_id, source_id)
         .await?
         .ok_or(SourceError::SourceNotFound(source_id))?;
@@ -272,6 +280,7 @@ pub async fn read_all_sources(
     encryption_key: Data<EncryptionKey>,
 ) -> Result<impl Responder, SourceError> {
     let tenant_id = extract_tenant_id(&req)?;
+
     let mut sources = vec![];
     for source in db::sources::read_all_sources(&**pool, tenant_id, &encryption_key).await? {
         let source = ReadSourceResponse {
@@ -282,6 +291,7 @@ pub async fn read_all_sources(
         };
         sources.push(source);
     }
+
     let response = ReadSourcesResponse { sources };
 
     Ok(Json(response))

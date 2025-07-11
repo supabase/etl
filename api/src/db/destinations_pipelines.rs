@@ -1,5 +1,5 @@
 use config::shared::DestinationConfig;
-use sqlx::PgPool;
+use sqlx::{Executor, PgPool, Postgres, Transaction};
 use thiserror::Error;
 
 use crate::db::destinations::{DestinationsDbError, create_destination, update_destination};
@@ -32,8 +32,8 @@ pub enum DestinationPipelinesDbError {
 }
 
 #[expect(clippy::too_many_arguments)]
-pub async fn create_destination_and_pipeline(
-    pool: &PgPool,
+pub async fn create_destination_and_pipeline<'c, E>(
+    executor: E,
     tenant_id: &str,
     source_id: i64,
     destination_name: &str,
@@ -41,21 +41,21 @@ pub async fn create_destination_and_pipeline(
     image_id: i64,
     pipeline_config: PipelineConfig,
     encryption_key: &EncryptionKey,
-) -> Result<(i64, i64), DestinationPipelinesDbError> {
-    let serialized_config = serialize(pipeline_config.clone())?;
-
-    let mut txn = pool.begin().await?;
+) -> Result<(i64, i64), DestinationPipelinesDbError>
+where
+    E: Executor<'c, Database = Postgres>,
+{
     let destination_id = create_destination(
-        &mut *txn,
+        executor,
         tenant_id,
         destination_name,
         destination_config,
         encryption_key,
     )
     .await?;
-    txn.commit().await?;
+
     let pipeline_id = create_pipeline(
-        pool,
+        executor,
         tenant_id,
         source_id,
         destination_id,
@@ -68,8 +68,8 @@ pub async fn create_destination_and_pipeline(
 }
 
 #[expect(clippy::too_many_arguments)]
-pub async fn update_destination_and_pipeline(
-    pool: &PgPool,
+pub async fn update_destination_and_pipeline<'c, E>(
+    txn: Transaction<Postgres>,
     tenant_id: &str,
     destination_id: i64,
     pipeline_id: i64,
@@ -78,12 +78,12 @@ pub async fn update_destination_and_pipeline(
     destination_config: DestinationConfig,
     pipeline_config: PipelineConfig,
     encryption_key: &EncryptionKey,
-) -> Result<(), DestinationPipelinesDbError> {
-    let serialized_config = serialize(pipeline_config.clone())?;
-
-    let txn = pool.begin().await?;
+) -> Result<(), DestinationPipelinesDbError>
+where
+    E: Executor<'c, Database = Postgres>,
+{
     let destination_id_res = update_destination(
-        pool,
+        &mut *txn,
         tenant_id,
         destination_name,
         destination_id,
@@ -91,14 +91,16 @@ pub async fn update_destination_and_pipeline(
         encryption_key,
     )
     .await?;
+
     if destination_id_res.is_none() {
         txn.rollback().await?;
         return Err(DestinationPipelinesDbError::DestinationNotFound(
             destination_id,
         ));
     };
+
     let pipeline_id_res = update_pipeline(
-        pool,
+        &mut *txn,
         tenant_id,
         pipeline_id,
         source_id,

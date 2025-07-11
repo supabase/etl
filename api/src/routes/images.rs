@@ -106,7 +106,9 @@ pub async fn create_image(
     image: Json<CreateImageRequest>,
 ) -> Result<impl Responder, ImageError> {
     let image = image.into_inner();
+
     let id = db::images::create_image(&**pool, &image.name, image.is_default).await?;
+
     let response = CreateImageResponse { id };
 
     Ok(Json(response))
@@ -130,6 +132,7 @@ pub async fn read_image(
     image_id: Path<i64>,
 ) -> Result<impl Responder, ImageError> {
     let image_id = image_id.into_inner();
+
     let response = db::images::read_image(&**pool, image_id)
         .await?
         .map(|s| ReadImageResponse {
@@ -162,6 +165,7 @@ pub async fn update_image(
     image: Json<UpdateImageRequest>,
 ) -> Result<impl Responder, ImageError> {
     let image_id = image_id.into_inner();
+
     db::images::update_image(&**pool, image_id, &image.name, image.is_default)
         .await?
         .ok_or(ImageError::ImageNotFound(image_id))?;
@@ -187,6 +191,7 @@ pub async fn delete_image(
     image_id: Path<i64>,
 ) -> Result<impl Responder, ImageError> {
     let image_id = image_id.into_inner();
+
     db::images::delete_image(&**pool, image_id)
         .await?
         .ok_or(ImageError::ImageNotFound(image_id))?;
@@ -213,6 +218,7 @@ pub async fn read_all_images(pool: Data<PgPool>) -> Result<impl Responder, Image
         };
         images.push(image);
     }
+
     let response = ReadImagesResponse { images };
 
     Ok(Json(response))

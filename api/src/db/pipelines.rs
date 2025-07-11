@@ -45,19 +45,20 @@ pub enum PipelinesDbError {
     ReplicatorsDb(#[from] ReplicatorsDbError),
 }
 
-pub async fn create_pipeline(
-    pool: &PgPool,
+pub async fn create_pipeline<'c, E>(
+    executor: E,
     tenant_id: &str,
     source_id: i64,
     destination_id: i64,
     image_id: i64,
     config: PipelineConfig,
-) -> Result<i64, PipelinesDbError> {
+) -> Result<i64, PipelinesDbError>
+where
+    E: Executor<'c, Database = Postgres>,
+{
     let config = serialize(&config)?;
-    let config = serde_json::to_value(config).expect("failed to serialize config");
 
-    let mut txn = pool.begin().await?;
-    let replicator_id = create_replicator(&mut *txn, tenant_id, image_id).await?;
+    let replicator_id = create_replicator(executor, tenant_id, image_id).await?;
     let record = sqlx::query!(
         r#"
         insert into app.pipelines (tenant_id, source_id, destination_id, replicator_id, config)
@@ -70,10 +71,9 @@ pub async fn create_pipeline(
         replicator_id,
         config
     )
-    .fetch_one(&mut *txn)
+    .fetch_one(executor)
     .await?;
 
-    txn.commit().await?;
     Ok(record.id)
 }
 

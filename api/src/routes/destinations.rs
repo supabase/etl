@@ -119,13 +119,18 @@ pub async fn create_destination(
     encryption_key: Data<EncryptionKey>,
     destination: Json<CreateDestinationRequest>,
 ) -> Result<impl Responder, DestinationError> {
-    let destination = destination.into_inner();
     let tenant_id = extract_tenant_id(&req)?;
-    let name = destination.name;
-    let config = destination.config;
-    let id =
-        db::destinations::create_destination(&**pool, tenant_id, &name, config, &encryption_key)
-            .await?;
+    let destination = destination.into_inner();
+
+    let id = db::destinations::create_destination(
+        &**pool,
+        tenant_id,
+        &destination.name,
+        destination.config,
+        &encryption_key,
+    )
+    .await?;
+
     let response = CreateDestinationResponse { id };
 
     Ok(Json(response))
@@ -153,6 +158,7 @@ pub async fn read_destination(
 ) -> Result<impl Responder, DestinationError> {
     let tenant_id = extract_tenant_id(&req)?;
     let destination_id = destination_id.into_inner();
+
     let response =
         db::destinations::read_destination(&**pool, tenant_id, destination_id, &encryption_key)
             .await?
@@ -189,17 +195,16 @@ pub async fn update_destination(
     encryption_key: Data<EncryptionKey>,
     destination: Json<UpdateDestinationRequest>,
 ) -> Result<impl Responder, DestinationError> {
-    let destination = destination.into_inner();
     let tenant_id = extract_tenant_id(&req)?;
     let destination_id = destination_id.into_inner();
-    let name = destination.name;
-    let config = destination.config;
+    let destination = destination.into_inner();
+
     db::destinations::update_destination(
         &**pool,
         tenant_id,
-        &name,
+        &destination.name,
         destination_id,
-        config,
+        destination.config,
         &encryption_key,
     )
     .await?
@@ -229,6 +234,7 @@ pub async fn delete_destination(
 ) -> Result<impl Responder, DestinationError> {
     let tenant_id = extract_tenant_id(&req)?;
     let destination_id = destination_id.into_inner();
+
     db::destinations::delete_destination(&**pool, tenant_id, destination_id)
         .await?
         .ok_or(DestinationError::DestinationNotFound(destination_id))?;
@@ -254,6 +260,7 @@ pub async fn read_all_destinations(
     encryption_key: Data<EncryptionKey>,
 ) -> Result<impl Responder, DestinationError> {
     let tenant_id = extract_tenant_id(&req)?;
+
     let mut destinations = vec![];
     for destination in
         db::destinations::read_all_destinations(&**pool, tenant_id, &encryption_key).await?
@@ -266,6 +273,7 @@ pub async fn read_all_destinations(
         };
         destinations.push(destination);
     }
+
     let response = ReadDestinationsResponse { destinations };
 
     Ok(Json(response))

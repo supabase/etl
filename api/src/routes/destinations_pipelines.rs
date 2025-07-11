@@ -169,17 +169,14 @@ pub async fn create_destination_and_pipeline(
     destination_and_pipeline: Json<CreateDestinationPipelineRequest>,
     encryption_key: Data<EncryptionKey>,
 ) -> Result<impl Responder, DestinationPipelineError> {
-    let destination_and_pipeline = destination_and_pipeline.into_inner();
-    let CreateDestinationPipelineRequest {
-        destination_name,
-        destination_config,
-        source_id,
-        pipeline_config,
-    } = destination_and_pipeline;
     let tenant_id = extract_tenant_id(&req)?;
+    let destination_and_pipeline = destination_and_pipeline.into_inner();
 
-    if !source_exists(&**pool, tenant_id, source_id).await? {
-        return Err(DestinationPipelineError::SourceNotFound(source_id));
+    let txn = pool.begin().await?;
+    if !source_exists(&mut *txn, tenant_id, destination_and_pipeline.source_id).await? {
+        return Err(DestinationPipelineError::SourceNotFound(
+            destination_and_pipeline.source_id,
+        ));
     }
 
     let image = db::images::read_default_image(&**pool)
@@ -187,16 +184,18 @@ pub async fn create_destination_and_pipeline(
         .ok_or(DestinationPipelineError::NoDefaultImageFound)?;
     let (destination_id, pipeline_id) =
         db::destinations_pipelines::create_destination_and_pipeline(
-            &pool,
+            &mut *txn,
             tenant_id,
-            source_id,
-            &destination_name,
-            destination_config,
+            destination_and_pipeline.source_id,
+            &destination_and_pipeline.destination_name,
+            destination_and_pipeline.destination_config,
             image.id,
-            pipeline_config,
+            destination_and_pipeline.pipeline_config,
             &encryption_key,
         )
         .await?;
+    txn.commit().await?;
+
     let response = CreateDestinationPipelineResponse {
         destination_id,
         pipeline_id,
@@ -229,35 +228,32 @@ pub async fn update_destination_and_pipeline(
     destination_and_pipeline: Json<UpdateDestinationPipelineRequest>,
     encryption_key: Data<EncryptionKey>,
 ) -> Result<impl Responder, DestinationPipelineError> {
-    let destination_and_pipeline = destination_and_pipeline.into_inner();
-    let UpdateDestinationPipelineRequest {
-        destination_name,
-        destination_config,
-        source_id,
-        pipeline_config,
-    } = destination_and_pipeline;
     let tenant_id = extract_tenant_id(&req)?;
     let (destination_id, pipeline_id) = destination_and_pipeline_ids.into_inner();
+    let destination_and_pipeline = destination_and_pipeline.into_inner();
 
-    if !source_exists(&**pool, tenant_id, source_id).await? {
-        return Err(DestinationPipelineError::SourceNotFound(source_id));
+    let txn = pool.begin().await?;
+    if !source_exists(&mut *txn, tenant_id, destination_and_pipeline.source_id).await? {
+        return Err(DestinationPipelineError::SourceNotFound(
+            destination_and_pipeline.source_id,
+        ));
     }
 
-    if !destination_exists(&**pool, tenant_id, destination_id).await? {
+    if !destination_exists(&mut *txn, tenant_id, destination_id).await? {
         return Err(DestinationPipelineError::DestinationNotFound(
             destination_id,
         ));
     }
 
     db::destinations_pipelines::update_destination_and_pipeline(
-        &pool,
+        txn,
         tenant_id,
         destination_id,
         pipeline_id,
-        source_id,
-        &destination_name,
-        destination_config,
-        pipeline_config,
+        destination_and_pipeline.source_id,
+        &destination_and_pipeline.destination_name,
+        destination_and_pipeline.destination_config,
+        destination_and_pipeline.pipeline_config,
         &encryption_key,
     )
     .await

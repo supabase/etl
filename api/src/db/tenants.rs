@@ -1,4 +1,4 @@
-use sqlx::{PgPool, Postgres, Transaction};
+use sqlx::{Executor, Postgres};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -12,22 +12,14 @@ pub struct Tenant {
     pub name: String,
 }
 
-pub async fn create_tenant(
-    pool: &PgPool,
+pub async fn create_tenant<'c, E>(
+    executor: E,
     tenant_id: &str,
     tenant_name: &str,
-) -> Result<String, TenantsDbError> {
-    let mut txn = pool.begin().await?;
-    let res = create_tenant_txn(&mut txn, tenant_id, tenant_name).await;
-    txn.commit().await?;
-    res
-}
-
-pub async fn create_tenant_txn(
-    txn: &mut Transaction<'_, Postgres>,
-    tenant_id: &str,
-    tenant_name: &str,
-) -> Result<String, TenantsDbError> {
+) -> Result<String, TenantsDbError>
+where
+    E: Executor<'c, Database = Postgres>,
+{
     let record = sqlx::query!(
         r#"
         insert into app.tenants (id, name)
@@ -37,17 +29,20 @@ pub async fn create_tenant_txn(
         tenant_id,
         tenant_name,
     )
-    .fetch_one(&mut **txn)
+    .fetch_one(executor)
     .await?;
 
     Ok(record.id)
 }
 
-pub async fn create_or_update_tenant(
-    pool: &PgPool,
+pub async fn create_or_update_tenant<'c, E>(
+    executor: E,
     tenant_id: &str,
     tenant_name: &str,
-) -> Result<String, TenantsDbError> {
+) -> Result<String, TenantsDbError>
+where
+    E: Executor<'c, Database = Postgres>,
+{
     let record = sqlx::query!(
         r#"
         insert into app.tenants (id, name)
@@ -58,13 +53,19 @@ pub async fn create_or_update_tenant(
         tenant_id,
         tenant_name,
     )
-    .fetch_one(pool)
+    .fetch_one(executor)
     .await?;
 
     Ok(record.id)
 }
 
-pub async fn read_tenant(pool: &PgPool, tenant_id: &str) -> Result<Option<Tenant>, TenantsDbError> {
+pub async fn read_tenant<'c, E>(
+    executor: E,
+    tenant_id: &str,
+) -> Result<Option<Tenant>, TenantsDbError>
+where
+    E: Executor<'c, Database = Postgres>,
+{
     let record = sqlx::query!(
         r#"
         select id, name
@@ -73,7 +74,7 @@ pub async fn read_tenant(pool: &PgPool, tenant_id: &str) -> Result<Option<Tenant
         "#,
         tenant_id
     )
-    .fetch_optional(pool)
+    .fetch_optional(executor)
     .await?;
 
     Ok(record.map(|r| Tenant {
@@ -82,11 +83,14 @@ pub async fn read_tenant(pool: &PgPool, tenant_id: &str) -> Result<Option<Tenant
     }))
 }
 
-pub async fn update_tenant(
-    pool: &PgPool,
+pub async fn update_tenant<'c, E>(
+    executor: E,
     tenant_id: &str,
     tenant_name: &str,
-) -> Result<Option<String>, TenantsDbError> {
+) -> Result<Option<String>, TenantsDbError>
+where
+    E: Executor<'c, Database = Postgres>,
+{
     let record = sqlx::query!(
         r#"
         update app.tenants
@@ -97,16 +101,19 @@ pub async fn update_tenant(
         tenant_name,
         tenant_id
     )
-    .fetch_optional(pool)
+    .fetch_optional(executor)
     .await?;
 
     Ok(record.map(|r| r.id))
 }
 
-pub async fn delete_tenant(
-    pool: &PgPool,
+pub async fn delete_tenant<'c, E>(
+    executor: E,
     tenant_id: &str,
-) -> Result<Option<String>, TenantsDbError> {
+) -> Result<Option<String>, TenantsDbError>
+where
+    E: Executor<'c, Database = Postgres>,
+{
     let record = sqlx::query!(
         r#"
         delete from app.tenants
@@ -115,20 +122,23 @@ pub async fn delete_tenant(
         "#,
         tenant_id
     )
-    .fetch_optional(pool)
+    .fetch_optional(executor)
     .await?;
 
     Ok(record.map(|r| r.id))
 }
 
-pub async fn read_all_tenants(pool: &PgPool) -> Result<Vec<Tenant>, TenantsDbError> {
+pub async fn read_all_tenants<'c, E>(executor: E) -> Result<Vec<Tenant>, TenantsDbError>
+where
+    E: Executor<'c, Database = Postgres>,
+{
     let mut record = sqlx::query!(
         r#"
         select id, name
         from app.tenants
         "#,
     )
-    .fetch_all(pool)
+    .fetch_all(executor)
     .await?;
 
     Ok(record
