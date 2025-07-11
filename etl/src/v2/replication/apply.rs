@@ -172,10 +172,21 @@ struct HandleMessageResult {
     /// Set to a commit message's end_lsn value, None otherwise
     end_lsn: Option<PgLsn>,
 
-    /// Set when a batch should be ended. Can be set to Inclusive when a commit
-    /// message indicates that it will mark the table sync worker as caught up.
-    /// Can be set to Exclusive when a replication message indicates a change in
-    /// schema
+    /// Set when a batch should be ended earlier than the normal batching parameters of
+    /// max size and max fill duration. Currently this will be set in the following
+    /// conditions:
+    ///
+    /// * Set to [`EndBatch::Inclusive`]` when a commit message indicates that it will
+    ///   mark the table sync worker as caught up. We want to end the batch in this
+    ///   case because we do not want to sent events after this commit message because
+    ///   these events will also be sent by the apply worker later, leading to
+    ///   duplicate events being sent. The commit event will be included in the
+    ///   batch.
+    /// * Set to [`EndBatch::Exclusive`] when a replication message indicates a change
+    ///   in schema. Since currently we are not handling any changes in schema, we
+    ///   mark the table as skipped in this case. The replication event will be excluded
+    ///   from the batch.
+    ///
     end_batch: Option<EndBatch>,
 
     /// Set when a replication message indicates a change in schema, otherwise None
