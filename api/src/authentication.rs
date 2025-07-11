@@ -5,7 +5,7 @@ use actix_web_httpauth::extractors::{
 };
 use constant_time_eq::constant_time_eq_n;
 
-use crate::config::ApiKey;
+use crate::config::{ApiConfig, ApiKey};
 
 pub async fn auth_validator(
     req: ServiceRequest,
@@ -17,7 +17,12 @@ pub async fn auth_validator(
         .unwrap_or_default()
         .scope("v1");
 
-    let api_key: &str = req.app_data::<Data<String>>().expect("missing api_key");
+    let api_key = req
+        .app_data::<Data<ApiConfig>>()
+        .expect("missing api configuration")
+        .api_key
+        .as_str();
+
     let token = credentials.token();
 
     let api_key: ApiKey = match api_key.try_into() {

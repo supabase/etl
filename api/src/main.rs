@@ -1,8 +1,8 @@
-use std::env;
-
 use anyhow::anyhow;
 use api::{config::ApiConfig, startup::Application};
 use config::{Environment, load_config, shared::PgConnectionConfig};
+use std::env;
+use std::sync::Arc;
 use telemetry::init_tracing;
 use tracing::{error, info};
 
@@ -65,23 +65,31 @@ async fn async_main() -> anyhow::Result<()> {
 fn init_sentry() -> anyhow::Result<Option<sentry::ClientInitGuard>> {
     if let Ok(config) = load_config::<ApiConfig>() {
         if let Some(sentry_config) = &config.sentry {
-            info!("Initializing Sentry with DSN");
+            info!("initializing sentry with supplied dsn");
 
             let environment = Environment::load()?;
             let guard = sentry::init(sentry::ClientOptions {
                 dsn: Some(sentry_config.dsn.parse()?),
                 environment: Some(environment.to_string().into()),
                 traces_sample_rate: 1.0,
-                send_default_pii: false,
                 max_request_body_size: sentry::MaxRequestBodySize::Always,
+                integrations: vec![Arc::new(
+                    sentry::integrations::panic::PanicIntegration::new(),
+                )],
                 ..Default::default()
+            });
+
+            // Set service tag to differentiate API from other services
+            sentry::configure_scope(|scope| {
+                scope.set_tag("service", "api");
             });
 
             return Ok(Some(guard));
         }
     }
 
-    info!("Sentry not configured, skipping initialization");
+    info!("sentry not configured for api, skipping initialization");
+
     Ok(None)
 }
 

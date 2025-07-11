@@ -70,22 +70,20 @@ pub struct Application {
 }
 
 impl Application {
-    pub async fn build(configuration: ApiConfig) -> Result<Self, anyhow::Error> {
-        let connection_pool = get_connection_pool(&configuration.database);
+    pub async fn build(config: ApiConfig) -> Result<Self, anyhow::Error> {
+        let connection_pool = get_connection_pool(&config.database);
 
-        let address = format!(
-            "{}:{}",
-            configuration.application.host, configuration.application.port
-        );
+        let address = format!("{}:{}", config.application.host, config.application.port);
         let listener = TcpListener::bind(address)?;
         let port = listener.local_addr()?.port();
-        let key_bytes = BASE64_STANDARD.decode(&configuration.encryption_key.key)?;
+
+        let key_bytes = BASE64_STANDARD.decode(&config.encryption_key.key)?;
         let key = RandomizedNonceKey::new(&AES_256_GCM, &key_bytes)?;
         let encryption_key = encryption::EncryptionKey {
-            id: configuration.encryption_key.id,
+            id: config.encryption_key.id,
             key,
         };
-        let api_key = configuration.api_key;
+
         let k8s_client = match HttpK8sClient::new().await {
             Ok(client) => Some(client),
             Err(e) => {
@@ -96,11 +94,12 @@ impl Application {
                 None
             }
         };
+
         let server = run(
+            config,
             listener,
             connection_pool,
             encryption_key,
-            api_key,
             k8s_client,
         )
         .await?;
@@ -133,15 +132,15 @@ pub fn get_connection_pool(config: &PgConnectionConfig) -> PgPool {
 // in tests involves setting a default CryptoProvider and it
 // interferes with parallel tasks because only one can be set.
 pub async fn run(
+    config: ApiConfig,
     listener: TcpListener,
     connection_pool: PgPool,
     encryption_key: encryption::EncryptionKey,
-    api_key: String,
     http_k8s_client: Option<HttpK8sClient>,
 ) -> Result<Server, anyhow::Error> {
+    let config = web::Data::new(config);
     let connection_pool = web::Data::new(connection_pool);
     let encryption_key = web::Data::new(encryption_key);
-    let api_key = web::Data::new(api_key);
     let k8s_client = http_k8s_client.map(|client| web::Data::new(Arc::new(client)));
 
     #[derive(OpenApi)]
@@ -296,9 +295,9 @@ pub async fn run(
                     .service(create_destination_and_pipeline)
                     .service(update_destination_and_pipeline),
             )
+            .app_data(config.clone())
             .app_data(connection_pool.clone())
-            .app_data(encryption_key.clone())
-            .app_data(api_key.clone());
+            .app_data(encryption_key.clone());
 
         if let Some(k8s_client) = k8s_client.clone() {
             app.app_data(k8s_client.clone())

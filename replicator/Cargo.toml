@@ -12,6 +12,7 @@ telemetry = { workspace = true }
 anyhow = { workspace = true, features = ["std"] }
 thiserror = { workspace = true }
 secrecy = { workspace = true }
+sentry = { workspace = true }
 sqlx = { workspace = true, features = [
     "runtime-tokio-rustls",
     "postgres",

@@ -1,5 +1,5 @@
 use base64::{Engine, prelude::BASE64_STANDARD};
-use config::shared::PgConnectionConfig;
+use config::shared::{PgConnectionConfig, SentryConfig};
 use serde::de::{MapAccess, Visitor};
 use serde::{Deserialize, Deserializer, de};
 use std::fmt;
@@ -23,13 +23,6 @@ pub struct ApiConfig {
     pub api_key: String,
     /// Optional Sentry configuration for error tracking.
     pub sentry: Option<SentryConfig>,
-}
-
-/// Configuration for Sentry error tracking.
-#[derive(Debug, Clone, Deserialize)]
-pub struct SentryConfig {
-    /// Sentry DSN (Data Source Name) for error reporting.
-    pub dsn: String,
 }
 
 /// Network and server settings for the API.

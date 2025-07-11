@@ -1,5 +1,5 @@
 use crate::shared::pipeline::PipelineConfig;
-use crate::shared::{DestinationConfig, SupabaseConfig, ValidationError};
+use crate::shared::{DestinationConfig, SentryConfig, SupabaseConfig, ValidationError};
 use serde::{Deserialize, Serialize};
 
 /// Configuration for the replicator service.
@@ -16,6 +16,11 @@ pub struct ReplicatorConfig {
     pub destination: DestinationConfig,
     /// Configuration for the replication pipeline.
     pub pipeline: PipelineConfig,
+    /// Optional Sentry configuration for error tracking.
+    ///
+    /// If provided, enables Sentry error reporting and performance monitoring. If `None`, the replicator operates without Sentry integration.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sentry: Option<SentryConfig>,
     /// Optional Supabase-specific configuration.
     ///
     /// If provided, enables Supabase-specific features or reporting. If `None`, the replicator operates independently of Supabase.

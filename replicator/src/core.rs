@@ -16,6 +16,7 @@ use std::fmt;
 use tracing::{error, info, instrument, warn};
 
 pub async fn start_replicator() -> anyhow::Result<()> {
+    info!("starting replicator service");
     let replicator_config = load_replicator_config()?;
 
     log_config(&replicator_config);
@@ -48,6 +49,7 @@ pub async fn start_replicator() -> anyhow::Result<()> {
             max_staleness_mins,
         } => {
             install_crypto_provider_once();
+
             let destination = BigQueryDestination::new_with_key(
                 project_id.clone(),
                 dataset_id.clone(),
@@ -66,6 +68,7 @@ pub async fn start_replicator() -> anyhow::Result<()> {
         }
     }
 
+    info!("replicator service completed");
     Ok(())
 }
 
@@ -77,7 +80,7 @@ fn log_config(config: &ReplicatorConfig) {
 fn log_destination_config(config: &DestinationConfig) {
     match config {
         DestinationConfig::Memory => {
-            info!("Memory config");
+            info!("memory config");
         }
         DestinationConfig::BigQuery {
             project_id,
@@ -87,7 +90,7 @@ fn log_destination_config(config: &DestinationConfig) {
         } => {
             info!(
                 project_id,
-                dataset_id, max_staleness_mins, "BigQuery config"
+                dataset_id, max_staleness_mins, "bigquery config"
             )
         }
     }
@@ -98,7 +101,7 @@ fn log_pipeline_config(config: &PipelineConfig) {
         pipeline_id = config.id,
         publication_name = config.publication_name,
         max_table_sync_workers = config.max_table_sync_workers,
-        "Pipeline config"
+        "pipeline config"
     );
     log_pg_connection_config(&config.pg_connection);
     log_batch_config(&config.batch);
@@ -112,7 +115,7 @@ fn log_pg_connection_config(config: &PgConnectionConfig) {
         dbname = config.name,
         username = config.username,
         tls_enabled = config.tls.enabled,
-        "Source Postgres connection config",
+        "source postgres connection config",
     );
 }
 
@@ -120,7 +123,7 @@ fn log_batch_config(config: &BatchConfig) {
     info!(
         max_size = config.max_size,
         max_fill_ms = config.max_fill_ms,
-        "Batch config"
+        "batch config"
     );
 }
 
@@ -130,7 +133,7 @@ fn log_apply_worker_init_retry(config: &RetryConfig) {
         initial_delay_ms = config.initial_delay_ms,
         max_delay_ms = config.max_delay_ms,
         backoff_factor = config.backoff_factor,
-        "Apply worker init retry config"
+        "apply worker init retry config"
     )
 }
 
@@ -155,13 +158,13 @@ where
     let shutdown_tx = pipeline.shutdown_tx();
     let shutdown_handle = tokio::spawn(async move {
         if let Err(e) = tokio::signal::ctrl_c().await {
-            error!("Failed to listen for Ctrl+C: {:?}", e);
+            error!("failed to listen for Ctrl+C: {:?}", e);
             return;
         }
 
-        info!("Ctrl+C received, shutting down pipeline...");
+        info!("ctrl+C received, shutting down pipeline");
         if let Err(e) = shutdown_tx.shutdown() {
-            warn!("Failed to send shutdown signal: {:?}", e);
+            warn!("failed to send shutdown signal: {:?}", e);
         }
     });
 

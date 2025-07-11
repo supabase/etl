@@ -24,7 +24,7 @@ use std::time::{Duration, Instant};
 use thiserror::Error;
 use tokio::pin;
 use tokio_postgres::types::PgLsn;
-use tracing::{error, info};
+use tracing::{debug, error, info};
 
 /// The amount of milliseconds that pass between one refresh and the other of the system, in case no
 /// events or shutdown signal are received.
@@ -255,6 +255,7 @@ where
 
     // We start the logical replication stream with the supplied parameters at a given lsn. That
     // lsn is the last lsn from which we need to start fetching events.
+    info!("starting logical replication from lsn {}", start_lsn);
     let logical_replication_stream = replication_client
         .start_logical_replication(&config.publication_name, &slot_name, start_lsn)
         .await?;
@@ -275,7 +276,7 @@ where
 
             // Shutdown signal received, exit loop.
             _ = shutdown_rx.changed() => {
-                info!("Shutting down apply worker while waiting for incoming events");
+                info!("shutting down apply worker while waiting for incoming events");
                 return Ok(ApplyLoopResult::ApplyStopped);
             }
 
@@ -314,6 +315,7 @@ where
                 // This is done here as well in addition to at a commit boundary because we do not want
                 // the table sync workers to get stuck if there are no changes in the cdc stream.
                 if !state.handling_transaction() {
+                    debug!("processing syncing tables after a period of inactivity of {} seconds", REFRESH_INTERVAL.as_secs());
                     let continue_loop = hook.process_syncing_tables(state.next_status_update.flush_lsn, true).await?;
                     if !continue_loop {
                         break Ok(ApplyLoopResult::ApplyStopped);

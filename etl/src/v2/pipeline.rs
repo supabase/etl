@@ -92,7 +92,7 @@ where
 
     pub async fn start(&mut self) -> Result<(), PipelineError> {
         info!(
-            "Starting pipeline for publication '{}' with id {}",
+            "starting pipeline for publication '{}' with id {}",
             self.config.publication_name, self.id
         );
 
@@ -136,6 +136,7 @@ where
         .await?;
 
         self.workers = PipelineWorkers::Started { apply_worker, pool };
+        info!("pipeline started successfully");
 
         Ok(())
     }
@@ -153,7 +154,7 @@ where
         &self,
         replication_client: &PgReplicationClient,
     ) -> Result<(), PipelineError> {
-        info!("Initializing table states");
+        info!("initializing table states");
 
         // We need to make sure that the publication exists.
         if !replication_client
@@ -161,7 +162,7 @@ where
             .await?
         {
             error!(
-                "Publication '{}' does not exist in the database",
+                "publication '{}' does not exist in the database",
                 self.config.publication_name
             );
             return Err(PipelineError::MissingPublication(
@@ -173,7 +174,7 @@ where
             .get_publication_table_ids(&self.config.publication_name)
             .await?;
         info!(
-            "Got table ids from publication: {}",
+            "got table ids from publication: {}",
             table_ids
                 .iter()
                 .map(|id| id.to_string())
@@ -195,12 +196,12 @@ where
 
     pub async fn wait(self) -> Result<(), PipelineError> {
         let PipelineWorkers::Started { apply_worker, pool } = self.workers else {
-            info!("Pipeline was not started, nothing to wait for");
+            info!("pipeline was not started, nothing to wait for");
 
             return Ok(());
         };
 
-        info!("Waiting for apply worker to complete");
+        info!("waiting for apply worker to complete");
 
         let mut errors = vec![];
 
@@ -218,26 +219,26 @@ where
             // workers, since without an apply worker they are lost.
             if let Err(err) = self.shutdown_tx.shutdown() {
                 info!(
-                    "Shut down signal could not be delivered, likely because no workers are running: {:?}",
+                    "shut down signal could not be delivered, likely because no workers are running: {:?}",
                     err
                 );
             }
 
-            info!("Apply worker completed with an error, shutting down table sync workers");
+            info!("apply worker completed with an error, shutting down table sync workers");
         } else {
-            info!("Apply worker completed successfully");
+            info!("apply worker completed successfully");
         }
 
-        info!("Waiting for table sync workers to complete");
+        info!("waiting for table sync workers to complete");
 
         // We wait for all table sync workers to finish.
         let table_sync_workers_result = pool.wait_all().await;
         if let Err(err) = table_sync_workers_result {
             errors.extend(err.0);
 
-            info!("One or more table sync workers failed with an error");
+            info!("one or more table sync workers failed with an error");
         } else {
-            info!("All table sync workers completed successfully");
+            info!("all table sync workers completed successfully");
         }
 
         if !errors.is_empty() {
@@ -251,9 +252,9 @@ where
 
     #[allow(clippy::result_large_err)]
     pub fn shutdown(&self) -> Result<(), PipelineError> {
-        info!("Trying to shut down the pipeline");
+        info!("trying to shut down the pipeline");
         self.shutdown_tx.shutdown()?;
-        info!("Shut down signal successfully sent to all workers");
+        info!("shut down signal successfully sent to all workers");
 
         Ok(())
     }

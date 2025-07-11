@@ -7,7 +7,7 @@ use std::sync::{Arc, LazyLock};
 use thiserror::Error;
 use tokio::sync::RwLock;
 use tokio_postgres::types::Type;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::conversions::Cell;
 use crate::conversions::table_row::TableRow;
@@ -309,6 +309,7 @@ impl BigQueryDestination {
                 .await?;
         }
 
+        debug!("wrote table schema for table '{}'", table_schema.name);
         Ok(())
     }
 
@@ -489,7 +490,7 @@ impl BigQueryDestination {
                     }
                     Event::Delete(delete) => {
                         let Some((_, mut old_table_row)) = delete.old_table_row else {
-                            info!("The `DELETE` event has no row, so it was skipped");
+                            info!("the `DELETE` event has no row, so it was skipped");
                             continue;
                         };
 
@@ -574,7 +575,7 @@ impl BigQueryDestination {
                         .await?;
                 } else {
                     info!(
-                        "Table schema not found for table_id: {}, skipping truncate",
+                        "table schema not found for table_id: {}, skipping truncate",
                         table_id
                     );
                 }

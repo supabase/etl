@@ -13,7 +13,6 @@ use api::{
     encryption::{self, generate_random_key},
     startup::run,
 };
-use config::shared::PgConnectionConfig;
 use config::{Environment, load_config};
 use postgres::sqlx::test_utils::drop_pg_database;
 use reqwest::{IntoUrl, RequestBuilder};
@@ -26,7 +25,7 @@ pub struct TestApp {
     pub address: String,
     pub api_client: reqwest::Client,
     pub api_key: String,
-    config: PgConnectionConfig,
+    config: ApiConfig,
     server_handle: tokio::task::JoinHandle<io::Result<()>>,
 }
 
@@ -38,7 +37,8 @@ impl Drop for TestApp {
         // To use `block_in_place,` we need a multithreaded runtime since when a blocking
         // task is issued, the runtime will offload existing tasks to another worker.
         tokio::task::block_in_place(move || {
-            Handle::current().block_on(async move { drop_pg_database(&self.config).await });
+            Handle::current()
+                .block_on(async move { drop_pg_database(&self.config.database).await });
         });
     }
 }
@@ -389,10 +389,10 @@ pub async fn spawn_test_app() -> TestApp {
     let api_key = "XOUbHmWbt9h7nWl15wWwyWQnctmFGNjpawMc3lT5CFs=".to_string();
 
     let server = run(
+        config.clone(),
         listener,
         connection_pool,
         encryption_key,
-        api_key.clone(),
         None,
     )
     .await
@@ -404,7 +404,7 @@ pub async fn spawn_test_app() -> TestApp {
         address: format!("http://{base_address}:{port}"),
         api_client: reqwest::Client::new(),
         api_key,
-        config: config.database,
+        config,
         server_handle,
     }
 }

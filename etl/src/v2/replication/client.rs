@@ -16,7 +16,7 @@ use tokio_postgres::{
     config::ReplicationMode, types::PgLsn,
 };
 use tokio_postgres_rustls::MakeRustlsConnect;
-use tracing::{Instrument, error, info, warn};
+use tracing::{Instrument, debug, error, info, warn};
 
 /// Spawns a background task to monitor a PostgreSQL connection until it terminates.
 ///
@@ -30,11 +30,11 @@ where
     let span = tracing::Span::current();
     let task = async move {
         if let Err(e) = connection.await {
-            error!("An error occurred during the Postgres connection: {}", e);
+            error!("an error occurred during the Postgres connection: {}", e);
             return;
         }
 
-        info!("Postgres connection terminated successfully")
+        info!("postgres connection terminated successfully")
     }
     .instrument(span);
     tokio::spawn(task);
@@ -224,7 +224,7 @@ impl PgReplicationClient {
         let (client, connection) = config.connect(NoTls).await?;
         spawn_postgres_connection::<NoTls>(connection);
 
-        info!("Successfully connected to Postgres without TLS");
+        info!("successfully connected to Postgres without TLS");
 
         Ok(PgReplicationClient {
             client: Arc::new(client),
@@ -255,7 +255,7 @@ impl PgReplicationClient {
         let (client, connection) = config.connect(MakeRustlsConnect::new(tls_config)).await?;
         spawn_postgres_connection::<MakeRustlsConnect>(connection);
 
-        info!("Successfully connected to Postgres with TLS");
+        info!("successfully connected to Postgres with TLS");
 
         Ok(PgReplicationClient {
             client: Arc::new(client),
@@ -323,10 +323,16 @@ impl PgReplicationClient {
         &self,
         slot_name: &str,
     ) -> PgReplicationResult<GetOrCreateSlotResult> {
+        debug!("checking for existing replication slot '{}'...", slot_name);
         match self.get_slot(slot_name).await {
-            Ok(slot) => Ok(GetOrCreateSlotResult::GetSlot(slot)),
+            Ok(slot) => {
+                info!("using existing replication slot '{}'", slot_name);
+                Ok(GetOrCreateSlotResult::GetSlot(slot))
+            }
             Err(PgReplicationError::SlotNotFound(_)) => {
+                info!("creating new replication slot '{}'", slot_name);
                 let create_result = self.create_slot_internal(slot_name, false).await?;
+                info!("successfully created replication slot '{}'", slot_name);
                 Ok(GetOrCreateSlotResult::CreateSlot(create_result))
             }
             Err(e) => Err(e),
@@ -337,6 +343,7 @@ impl PgReplicationClient {
     ///
     /// Returns an error if the slot doesn't exist or if there are any issues with the deletion.
     pub async fn delete_slot(&self, slot_name: &str) -> PgReplicationResult<()> {
+        info!("deleting replication slot '{}'", slot_name);
         // Do not convert the query or the options to lowercase, see comment in `create_slot_internal`.
         let query = format!(
             r#"DROP_REPLICATION_SLOT {} WAIT;"#,
@@ -344,14 +351,22 @@ impl PgReplicationClient {
         );
 
         match self.client.simple_query(&query).await {
-            Ok(_) => Ok(()),
+            Ok(_) => {
+                info!("successfully deleted replication slot '{}'", slot_name);
+                Ok(())
+            }
             Err(err) => {
                 if let Some(code) = err.code() {
                     if *code == SqlState::UNDEFINED_OBJECT {
+                        warn!(
+                            "attempted to delete non-existent replication slot '{}'",
+                            slot_name
+                        );
                         return Err(PgReplicationError::SlotNotFound(slot_name.to_string()));
                     }
                 }
 
+                error!("failed to delete replication slot '{}': {}", slot_name, err);
                 Err(err.into())
             }
         }
@@ -432,6 +447,10 @@ impl PgReplicationClient {
         slot_name: &str,
         start_lsn: PgLsn,
     ) -> PgReplicationResult<LogicalReplicationStream> {
+        info!(
+            "starting logical replication from publication '{}' slot '{}' at lsn {}",
+            publication_name, slot_name, start_lsn
+        );
         // Do not convert the query or the options to lowercase, see comment in `create_slot_internal`.
         let options = format!(
             r#"("proto_version" '1', "publication_names" {})"#,
