@@ -375,18 +375,19 @@ where
 
     let mut batch_written = false;
     let now = Instant::now();
-    if (now - state.last_batch_send_time >= state.max_batch_fill_duration
+    if now - state.last_batch_send_time >= state.max_batch_fill_duration
         || state.events_batch.len() >= max_batch_size
-        || result.end_batch.is_some())
-        && !state.events_batch.is_empty()
+        || result.end_batch.is_some()
     {
-        // TODO: figure out if we can send a slice to the destination instead of a vec
-        // that would allow use to avoid new allocations of the `events_batch` vec and
-        // we could just call clear() on it.
-        let events_batch =
-            std::mem::replace(&mut state.events_batch, Vec::with_capacity(max_batch_size));
-        destination.write_events(events_batch).await?;
-        state.last_batch_send_time = Instant::now();
+        if !state.events_batch.is_empty() {
+            // TODO: figure out if we can send a slice to the destination instead of a vec
+            // that would allow use to avoid new allocations of the `events_batch` vec and
+            // we could just call clear() on it.
+            let events_batch =
+                std::mem::replace(&mut state.events_batch, Vec::with_capacity(max_batch_size));
+            destination.write_events(events_batch).await?;
+            state.last_batch_send_time = Instant::now();
+        }
         batch_written = true;
     }
 
