@@ -13,7 +13,6 @@ use super::{
     table_row::TableRow,
     text::{FromTextError, TextFormatConverter},
 };
-use crate::pipeline::batching::BatchBoundaryV1;
 
 #[derive(Debug, Error)]
 pub enum CdcEventConversionError {
@@ -180,13 +179,4 @@ pub enum CdcEvent {
     Origin(OriginBody),
     Truncate(TruncateBody),
     KeepAliveRequested { reply: bool },
-}
-
-impl BatchBoundaryV1 for CdcEvent {
-    fn is_last_in_batch(&self) -> bool {
-        matches!(
-            self,
-            CdcEvent::Commit(_) | CdcEvent::KeepAliveRequested { reply: _ }
-        )
-    }
 }

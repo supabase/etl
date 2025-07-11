@@ -1,29 +1,5 @@
-use crate::common::destination::TestDestination;
 use postgres::schema::{ColumnSchema, TableId, TableName, TableSchema};
 use std::collections::HashMap;
-
-/// Asserts that a table schema in a [`TestSink`] matches the expected schema.
-///
-/// # Panics
-///
-/// Panics if the table schema at the given index doesn't match the expected schema,
-/// or if the table ID doesn't exist in the sink's schemas.
-pub fn assert_table_schema_from_destination(
-    destination: &TestDestination,
-    table_id: TableId,
-    schema_index: usize,
-    expected_table_name: TableName,
-    expected_columns: &[ColumnSchema],
-) {
-    let table_schemas = &destination.get_table_schemas()[schema_index];
-
-    assert_table_schema(
-        table_schemas,
-        table_id,
-        expected_table_name,
-        expected_columns,
-    )
-}
 
 /// Asserts that a table schema matches the expected schema.
 ///

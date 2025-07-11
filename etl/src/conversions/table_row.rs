@@ -5,7 +5,7 @@ use thiserror::Error;
 use tokio_postgres::types::Type;
 use tracing::error;
 
-use crate::{conversions::text::TextFormatConverter, pipeline::batching::BatchBoundaryV1};
+use crate::conversions::text::TextFormatConverter;
 
 use super::{Cell, text::FromTextError};
 
@@ -17,12 +17,6 @@ pub struct TableRow {
 impl TableRow {
     pub fn new(values: Vec<Cell>) -> Self {
         Self { values }
-    }
-}
-
-impl BatchBoundaryV1 for TableRow {
-    fn is_last_in_batch(&self) -> bool {
-        true
     }
 }
 
