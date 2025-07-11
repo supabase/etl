@@ -159,8 +159,10 @@ where
     let shutdown_handle = tokio::spawn(async move {
         use tokio::signal::unix::{signal, SignalKind};
 
-        // We want to listen for `SIGTERM` since this is sent by K8S before `SIGKILL` when shutting
-        // down the pod.
+        // Listen for SIGTERM, sent by Kubernetes before SIGKILL during pod termination.
+        //
+        // If the process is killed before shutdown completes, the pipeline may become corrupted,
+        // depending on the state store and destination implementations.
         let mut sigterm = signal(SignalKind::terminate())
             .expect("failed to register SIGTERM handler");
         
@@ -175,7 +177,10 @@ where
 
         if let Err(e) = shutdown_tx.shutdown() {
             warn!("failed to send shutdown signal: {:?}", e);
+            return;
         }
+
+        info!("pipeline shutdown successfully")
     });
 
     // Wait for the pipeline to finish (either normally or via shutdown).
