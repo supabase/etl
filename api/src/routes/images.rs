@@ -165,6 +165,7 @@ pub async fn update_image(
     image: Json<UpdateImageRequest>,
 ) -> Result<impl Responder, ImageError> {
     let image_id = image_id.into_inner();
+    let image = image.into_inner();
 
     db::images::update_image(&**pool, image_id, &image.name, image.is_default)
         .await?

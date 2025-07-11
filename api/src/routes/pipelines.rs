@@ -613,22 +613,27 @@ pub async fn swap_pipeline_image(
             .ok_or(PipelineError::NoDefaultImageFound)?,
     };
 
-    if target_image.id == current_image.id {
+    // If the image ids are different, we change the database entry.
+    if target_image.id != current_image.id {
+        db::replicators::update_replicator_image(
+            txn.deref_mut(),
+            tenant_id,
+            replicator.id,
+            target_image.id,
+        )
+            .await?
+            .ok_or(PipelineError::ReplicatorNotFound(pipeline_id))?;
+    }
+
+    // If the images have equal name, we don't care about their id from the K8S perspective, so we
+    // won't update any resources.
+    if target_image.name == current_image.name {
         txn.commit()
             .await
             .map_err(|e| PipelineError::ReplicatorsDb(e.into()))?;
 
         return Ok(HttpResponse::Ok().finish());
     }
-
-    db::replicators::update_replicator_image(
-        txn.deref_mut(),
-        tenant_id,
-        replicator.id,
-        target_image.id,
-    )
-    .await?
-    .ok_or(PipelineError::ReplicatorNotFound(pipeline_id))?;
 
     // We update the pipeline in K8s.
     create_or_update_pipeline_in_k8s(
