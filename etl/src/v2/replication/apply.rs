@@ -165,6 +165,8 @@ struct HandleMessageResult {
     /// * When the apply worker receives an event for a table which is not ready
     /// * When the apply or table sync workers receive an event from a table which was skipped
     /// * When the table sync worker receives an event from a table other than its own
+    /// * When the message is a primary keepalive message
+    ///
     event: Option<Event>,
 
     /// Set to a commit message's end_lsn value, None otherwise
@@ -182,6 +184,13 @@ struct HandleMessageResult {
 
 #[derive(Debug, Clone)]
 struct ApplyLoopState {
+    /// The highest LSN received from the `end_lsn` field of a `Commit` message.
+    ///
+    /// This LSN is used to determine the next WAL entry that we should receive from Postgres in case
+    /// of restarts and allows Postgres to determine whether some old entries could be pruned from the
+    /// WAL.
+    last_commit_end_lsn: Option<PgLsn>,
+
     /// The LSN of the commit WAL entry of the transaction that is currently being processed.
     ///
     /// This LSN is set at every `BEGIN` of a new transaction, and it's used to know the `commit_lsn`
@@ -208,11 +217,26 @@ impl ApplyLoopState {
         events_batch: Vec<Event>,
     ) -> Self {
         Self {
+            last_commit_end_lsn: None,
             remote_final_lsn: None,
             next_status_update,
             max_batch_fill_duration,
             last_batch_send_time: Instant::now(),
             events_batch,
+        }
+    }
+
+    fn update_last_commit_end_lsn(&mut self, end_lsn: Option<PgLsn>) {
+        match (self.last_commit_end_lsn, end_lsn) {
+            (None, Some(end_lsn)) => {
+                self.last_commit_end_lsn = Some(end_lsn);
+            }
+            (Some(old_last_commit_end_lsn), Some(end_lsn)) => {
+                if end_lsn > old_last_commit_end_lsn {
+                    self.last_commit_end_lsn = Some(end_lsn);
+                }
+            }
+            (_, None) => {}
         }
     }
 
@@ -349,47 +373,62 @@ where
         state.events_batch.push(event);
     }
 
+    let mut batch_written = false;
     let now = Instant::now();
     if (now - state.last_batch_send_time >= state.max_batch_fill_duration
         || state.events_batch.len() >= max_batch_size
         || result.end_batch.is_some())
         && !state.events_batch.is_empty()
     {
+        // TODO: figure out if we can send a slice to the destination instead of a vec
+        // that would allow use to avoid new allocations of the `events_batch` vec and
+        // we could just call clear() on it.
         let events_batch =
             std::mem::replace(&mut state.events_batch, Vec::with_capacity(max_batch_size));
         destination.write_events(events_batch).await?;
         state.last_batch_send_time = Instant::now();
+        batch_written = true;
     }
 
-    let mut end_loop = false;
-    if let Some(table_id) = result.skip_table {
-        end_loop |= !hook.skip_table(table_id).await?;
+    state.update_last_commit_end_lsn(result.end_lsn);
+
+    if batch_written {
+        let mut end_loop = false;
+        if let Some(table_id) = result.skip_table {
+            end_loop |= !hook.skip_table(table_id).await?;
+        }
+
+        // At this point, the `last_commit_end_lsn` will contain the LSN of the next byte in the WAL after
+        // the last `Commit` message that was processed in this batch or in the previous ones.
+        if let Some(last_commit_end_lsn) = state.last_commit_end_lsn {
+            // We also prepare the next status update for Postgres, where we will confirm that we flushed
+            // data up to this LSN to allow for WAL pruning on the database side.
+            //
+            // Note that we do this ONLY once a batch is fully saved, since that is the only place where
+            // we are guaranteed that data has been safely persisted. In all the other cases, we just update
+            // the `write_lsn` which is used by Postgres to get an acknowledgement of how far we have processed
+            // messages but not flushed them.
+            // TODO: check if we want to send `apply_lsn` as a different value.
+            state
+                .next_status_update
+                .update_flush_lsn(last_commit_end_lsn);
+            state
+                .next_status_update
+                .update_apply_lsn(last_commit_end_lsn);
+
+            // We call `process_syncing_tables` with `update_state` set to true here *after* we've received
+            // and ack for the batch from the destination. This is important to keep a consistent state.
+            // Without this order it could happen that the table's state was updated but sending the batch
+            // to the destination failed.
+            end_loop |= !hook
+                .process_syncing_tables(state.next_status_update.flush_lsn, true)
+                .await?;
+        }
+
+        return Ok(end_loop);
     }
 
-    // At this point, the `last_commit_end_lsn` will contain the LSN of the next byte in the WAL after
-    // the last `Commit` message that was processed in this batch or in the previous ones.
-    if let Some(end_lsn) = result.end_lsn {
-        // We also prepare the next status update for Postgres, where we will confirm that we flushed
-        // data up to this LSN to allow for WAL pruning on the database side.
-        //
-        // Note that we do this ONLY once a batch is fully saved, since that is the only place where
-        // we are guaranteed that data has been safely persisted. In all the other cases, we just update
-        // the `write_lsn` which is used by Postgres to get an acknowledgement of how far we have processed
-        // messages but not flushed them.
-        // TODO: check if we want to send `apply_lsn` as a different value.
-        state.next_status_update.update_flush_lsn(end_lsn);
-        state.next_status_update.update_apply_lsn(end_lsn);
-
-        // We call `process_syncing_tables` with `update_state` set to true here *after* we've received
-        // and ack for the batch from the destination. This is important to keep a consistent state.
-        // Without this order it could happen that the table's state was updated but sending the batch
-        // to the destination failed.
-        end_loop |= !hook
-            .process_syncing_tables(state.next_status_update.flush_lsn, true)
-            .await?;
-    }
-
-    Ok(end_loop)
+    Ok(false)
 }
 
 async fn handle_replication_message<T>(
