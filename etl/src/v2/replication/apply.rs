@@ -368,7 +368,7 @@ where
         handle_replication_message(state, events_stream, message, schema_cache, hook).await?;
 
     if let Some(event) = result.event
-        && !matches!(result.end_batch, Some(EndBatch::Exclusive))
+        && matches!(result.end_batch, None | Some(EndBatch::Inclusive))
     {
         state.events_batch.push(event);
         state.update_last_commit_end_lsn(result.end_lsn);
