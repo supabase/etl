@@ -187,7 +187,7 @@ pub async fn create_destination_and_pipeline(
         .ok_or(DestinationPipelineError::NoDefaultImageFound)?;
     let (destination_id, pipeline_id) =
         db::destinations_pipelines::create_destination_and_pipeline(
-            &**pool,
+            &pool,
             tenant_id,
             source_id,
             &destination_name,

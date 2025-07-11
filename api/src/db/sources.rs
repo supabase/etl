@@ -2,7 +2,7 @@ use config::SerializableSecretString;
 use config::shared::{PgConnectionConfig, TlsConfig};
 use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
-use sqlx::{Executor, PgPool, Postgres, Transaction};
+use sqlx::{Executor, Postgres};
 use std::fmt::Debug;
 use thiserror::Error;
 

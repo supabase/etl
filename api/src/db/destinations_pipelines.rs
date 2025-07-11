@@ -4,9 +4,7 @@ use thiserror::Error;
 
 use crate::db::destinations::{DestinationsDbError, create_destination, update_destination};
 use crate::db::pipelines::{PipelineConfig, PipelinesDbError, create_pipeline, update_pipeline};
-use crate::db::serde::{
-    DbDeserializationError, DbSerializationError, encrypt_and_serialize, serialize,
-};
+use crate::db::serde::{DbDeserializationError, DbSerializationError, serialize};
 use crate::encryption::EncryptionKey;
 
 #[derive(Debug, Error)]
@@ -83,7 +81,7 @@ pub async fn update_destination_and_pipeline(
 ) -> Result<(), DestinationPipelinesDbError> {
     let serialized_config = serialize(pipeline_config.clone())?;
 
-    let mut txn = pool.begin().await?;
+    let txn = pool.begin().await?;
     let destination_id_res = update_destination(
         pool,
         tenant_id,

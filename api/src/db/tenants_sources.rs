@@ -1,7 +1,7 @@
 use sqlx::PgPool;
 use thiserror::Error;
 
-use crate::db::serde::{DbSerializationError, encrypt_and_serialize};
+use crate::db::serde::DbSerializationError;
 use crate::db::sources::{SourceConfig, SourcesDbError, create_source};
 use crate::db::tenants::{TenantsDbError, create_tenant_txn};
 use crate::encryption::EncryptionKey;

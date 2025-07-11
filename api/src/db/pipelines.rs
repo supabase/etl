@@ -1,6 +1,6 @@
 use config::shared::{BatchConfig, RetryConfig};
 use serde::{Deserialize, Serialize};
-use sqlx::{Executor, PgPool, Postgres, Transaction};
+use sqlx::{Executor, PgPool, Postgres};
 use thiserror::Error;
 
 use crate::db::replicators::{ReplicatorsDbError, create_replicator};

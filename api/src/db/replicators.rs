@@ -1,4 +1,4 @@
-use sqlx::{Executor, PgPool, Postgres, Transaction};
+use sqlx::{Executor, Postgres};
 use thiserror::Error;
 
 #[derive(Debug, Error)]

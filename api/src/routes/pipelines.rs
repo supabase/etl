@@ -245,7 +245,7 @@ pub async fn create_pipeline(
         .ok_or(PipelineError::NoDefaultImageFound)?;
 
     let id = db::pipelines::create_pipeline(
-        &**pool,
+        &pool,
         tenant_id,
         pipeline.source_id,
         pipeline.destination_id,
@@ -438,7 +438,7 @@ pub async fn start_pipeline(
     let pipeline_id = pipeline_id.into_inner();
 
     let (pipeline, replicator, image, source, destination) =
-        read_data_pool(&**pool, tenant_id, pipeline_id, &encryption_key).await?;
+        read_data_pool(&pool, tenant_id, pipeline_id, &encryption_key).await?;
 
     // We wrap Supabase's related information within its own struct for a clear separation.
     let supabase_config = SupabaseConfig {
@@ -619,18 +619,12 @@ pub async fn swap_pipeline_image(
     }
 
     let target_image = match swap_request.image_id {
-        Some(image_id) => {
-            let image = db::images::read_image(&mut *txn, image_id)
-                .await?
-                .ok_or(PipelineError::ImageNotFoundById(image_id))?;
-            image
-        }
-        None => {
-            let image = db::images::read_default_image(&mut *txn)
-                .await?
-                .ok_or(PipelineError::NoDefaultImageFound)?;
-            image
-        }
+        Some(image_id) => db::images::read_image(&mut *txn, image_id)
+            .await?
+            .ok_or(PipelineError::ImageNotFoundById(image_id))?,
+        None => db::images::read_default_image(&mut *txn)
+            .await?
+            .ok_or(PipelineError::NoDefaultImageFound)?,
     };
 
     if target_image.id == current_image.id {
