@@ -1,6 +1,7 @@
 use config::shared::{BatchConfig, RetryConfig};
 use serde::{Deserialize, Serialize};
-use sqlx::{Executor, PgPool, Postgres};
+use sqlx::{Executor, Postgres, Transaction};
+use std::ops::DerefMut;
 use thiserror::Error;
 
 use crate::db::replicators::{ReplicatorsDbError, create_replicator};
@@ -45,20 +46,17 @@ pub enum PipelinesDbError {
     ReplicatorsDb(#[from] ReplicatorsDbError),
 }
 
-pub async fn create_pipeline<'c, E>(
-    executor: E,
+pub async fn create_pipeline(
+    txn: &mut Transaction<'_, Postgres>,
     tenant_id: &str,
     source_id: i64,
     destination_id: i64,
     image_id: i64,
     config: PipelineConfig,
-) -> Result<i64, PipelinesDbError>
-where
-    E: Executor<'c, Database = Postgres>,
-{
+) -> Result<i64, PipelinesDbError> {
     let config = serialize(&config)?;
 
-    let replicator_id = create_replicator(executor, tenant_id, image_id).await?;
+    let replicator_id = create_replicator(txn.deref_mut(), tenant_id, image_id).await?;
     let record = sqlx::query!(
         r#"
         insert into app.pipelines (tenant_id, source_id, destination_id, replicator_id, config)
@@ -71,7 +69,7 @@ where
         replicator_id,
         config
     )
-    .fetch_one(executor)
+    .fetch_one(txn.deref_mut())
     .await?;
 
     Ok(record.id)

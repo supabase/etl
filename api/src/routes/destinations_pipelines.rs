@@ -7,6 +7,7 @@ use actix_web::{
 use config::shared::DestinationConfig;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
+use std::ops::DerefMut;
 use thiserror::Error;
 use utoipa::ToSchema;
 
@@ -54,6 +55,9 @@ enum DestinationPipelineError {
 
     #[error(transparent)]
     SourcesDb(#[from] SourcesDbError),
+
+    #[error("Database error: {0}")]
+    Database(#[from] sqlx::Error),
 }
 
 impl From<DestinationPipelinesDbError> for DestinationPipelineError {
@@ -78,9 +82,8 @@ impl DestinationPipelineError {
             )
             | DestinationPipelineError::DestinationsDb(DestinationsDbError::Database(_))
             | DestinationPipelineError::ImagesDb(ImagesDbError::Database(_))
-            | DestinationPipelineError::SourcesDb(SourcesDbError::Database(_)) => {
-                "internal server error".to_string()
-            }
+            | DestinationPipelineError::SourcesDb(SourcesDbError::Database(_))
+            | DestinationPipelineError::Database(_) => "internal server error".to_string(),
             // Every other message is ok, as they do not divulge sensitive information
             e => e.to_string(),
         }
@@ -95,7 +98,8 @@ impl ResponseError for DestinationPipelineError {
             | DestinationPipelineError::DestinationPipelinesDb(_)
             | DestinationPipelineError::DestinationsDb(_)
             | DestinationPipelineError::ImagesDb(_)
-            | DestinationPipelineError::SourcesDb(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            | DestinationPipelineError::SourcesDb(_)
+            | DestinationPipelineError::Database(_) => StatusCode::INTERNAL_SERVER_ERROR,
             DestinationPipelineError::TenantId(_)
             | DestinationPipelineError::SourceNotFound(_)
             | DestinationPipelineError::DestinationNotFound(_)
@@ -172,8 +176,14 @@ pub async fn create_destination_and_pipeline(
     let tenant_id = extract_tenant_id(&req)?;
     let destination_and_pipeline = destination_and_pipeline.into_inner();
 
-    let txn = pool.begin().await?;
-    if !source_exists(&mut *txn, tenant_id, destination_and_pipeline.source_id).await? {
+    let mut txn = pool.begin().await?;
+    if !source_exists(
+        txn.deref_mut(),
+        tenant_id,
+        destination_and_pipeline.source_id,
+    )
+    .await?
+    {
         return Err(DestinationPipelineError::SourceNotFound(
             destination_and_pipeline.source_id,
         ));
@@ -184,7 +194,7 @@ pub async fn create_destination_and_pipeline(
         .ok_or(DestinationPipelineError::NoDefaultImageFound)?;
     let (destination_id, pipeline_id) =
         db::destinations_pipelines::create_destination_and_pipeline(
-            &mut *txn,
+            &mut txn,
             tenant_id,
             destination_and_pipeline.source_id,
             &destination_and_pipeline.destination_name,
@@ -232,14 +242,20 @@ pub async fn update_destination_and_pipeline(
     let (destination_id, pipeline_id) = destination_and_pipeline_ids.into_inner();
     let destination_and_pipeline = destination_and_pipeline.into_inner();
 
-    let txn = pool.begin().await?;
-    if !source_exists(&mut *txn, tenant_id, destination_and_pipeline.source_id).await? {
+    let mut txn = pool.begin().await?;
+    if !source_exists(
+        txn.deref_mut(),
+        tenant_id,
+        destination_and_pipeline.source_id,
+    )
+    .await?
+    {
         return Err(DestinationPipelineError::SourceNotFound(
             destination_and_pipeline.source_id,
         ));
     }
 
-    if !destination_exists(&mut *txn, tenant_id, destination_id).await? {
+    if !destination_exists(txn.deref_mut(), tenant_id, destination_id).await? {
         return Err(DestinationPipelineError::DestinationNotFound(
             destination_id,
         ));

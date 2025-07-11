@@ -1,10 +1,11 @@
 use config::shared::DestinationConfig;
-use sqlx::{Executor, PgPool, Postgres, Transaction};
+use sqlx::{Postgres, Transaction};
+use std::ops::DerefMut;
 use thiserror::Error;
 
 use crate::db::destinations::{DestinationsDbError, create_destination, update_destination};
 use crate::db::pipelines::{PipelineConfig, PipelinesDbError, create_pipeline, update_pipeline};
-use crate::db::serde::{DbDeserializationError, DbSerializationError, serialize};
+use crate::db::serde::{DbDeserializationError, DbSerializationError};
 use crate::encryption::EncryptionKey;
 
 #[derive(Debug, Error)]
@@ -32,8 +33,8 @@ pub enum DestinationPipelinesDbError {
 }
 
 #[expect(clippy::too_many_arguments)]
-pub async fn create_destination_and_pipeline<'c, E>(
-    executor: E,
+pub async fn create_destination_and_pipeline(
+    txn: &mut Transaction<'_, Postgres>,
     tenant_id: &str,
     source_id: i64,
     destination_name: &str,
@@ -41,12 +42,9 @@ pub async fn create_destination_and_pipeline<'c, E>(
     image_id: i64,
     pipeline_config: PipelineConfig,
     encryption_key: &EncryptionKey,
-) -> Result<(i64, i64), DestinationPipelinesDbError>
-where
-    E: Executor<'c, Database = Postgres>,
-{
+) -> Result<(i64, i64), DestinationPipelinesDbError> {
     let destination_id = create_destination(
-        executor,
+        txn.deref_mut(),
         tenant_id,
         destination_name,
         destination_config,
@@ -55,7 +53,7 @@ where
     .await?;
 
     let pipeline_id = create_pipeline(
-        executor,
+        txn,
         tenant_id,
         source_id,
         destination_id,
@@ -68,8 +66,8 @@ where
 }
 
 #[expect(clippy::too_many_arguments)]
-pub async fn update_destination_and_pipeline<'c, E>(
-    txn: Transaction<Postgres>,
+pub async fn update_destination_and_pipeline(
+    mut txn: Transaction<'_, Postgres>,
     tenant_id: &str,
     destination_id: i64,
     pipeline_id: i64,
@@ -78,12 +76,9 @@ pub async fn update_destination_and_pipeline<'c, E>(
     destination_config: DestinationConfig,
     pipeline_config: PipelineConfig,
     encryption_key: &EncryptionKey,
-) -> Result<(), DestinationPipelinesDbError>
-where
-    E: Executor<'c, Database = Postgres>,
-{
+) -> Result<(), DestinationPipelinesDbError> {
     let destination_id_res = update_destination(
-        &mut *txn,
+        txn.deref_mut(),
         tenant_id,
         destination_name,
         destination_id,
@@ -100,7 +95,7 @@ where
     };
 
     let pipeline_id_res = update_pipeline(
-        &mut *txn,
+        txn.deref_mut(),
         tenant_id,
         pipeline_id,
         source_id,
@@ -113,7 +108,6 @@ where
         txn.rollback().await?;
         return Err(DestinationPipelinesDbError::PipelineNotFound(pipeline_id));
     };
-
     txn.commit().await?;
 
     Ok(())

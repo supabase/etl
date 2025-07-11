@@ -10,6 +10,7 @@ use config::shared::{
 };
 use serde::{Deserialize, Serialize};
 use sqlx::{PgPool, Postgres, Transaction};
+use std::ops::DerefMut;
 use std::sync::Arc;
 use thiserror::Error;
 use utoipa::ToSchema;
@@ -78,9 +79,6 @@ enum PipelineError {
     #[error("A pipeline already exists for this source and destination combination")]
     DuplicatePipeline,
 
-    #[error("The pipeline with id {0} is not running")]
-    PipelineNotRunning(i64),
-
     #[error("The specified image with id {0} was not found")]
     ImageNotFoundById(i64),
 
@@ -135,8 +133,7 @@ impl ResponseError for PipelineError {
             }
             PipelineError::TenantId(_)
             | PipelineError::SourceNotFound(_)
-            | PipelineError::DestinationNotFound(_)
-            | PipelineError::PipelineNotRunning(_) => StatusCode::BAD_REQUEST,
+            | PipelineError::DestinationNotFound(_) => StatusCode::BAD_REQUEST,
             PipelineError::DuplicatePipeline => StatusCode::CONFLICT,
         }
     }
@@ -231,21 +228,21 @@ pub async fn create_pipeline(
     let tenant_id = extract_tenant_id(&req)?;
     let pipeline = pipeline.into_inner();
 
-    let txn = pool.begin().await?;
-    if !source_exists(&mut *txn, tenant_id, pipeline.source_id).await? {
+    let mut txn = pool.begin().await?;
+    if !source_exists(txn.deref_mut(), tenant_id, pipeline.source_id).await? {
         return Err(PipelineError::SourceNotFound(pipeline.source_id));
     }
 
-    if !destination_exists(&mut *txn, tenant_id, pipeline.destination_id).await? {
+    if !destination_exists(txn.deref_mut(), tenant_id, pipeline.destination_id).await? {
         return Err(PipelineError::DestinationNotFound(pipeline.destination_id));
     }
 
-    let image = db::images::read_default_image(&mut *txn)
+    let image = db::images::read_default_image(txn.deref_mut())
         .await?
         .ok_or(PipelineError::NoDefaultImageFound)?;
 
     let id = db::pipelines::create_pipeline(
-        &mut *txn,
+        &mut txn,
         tenant_id,
         pipeline.source_id,
         pipeline.destination_id,
@@ -327,17 +324,17 @@ pub async fn update_pipeline(
     let pipeline_id = pipeline_id.into_inner();
     let pipeline = pipeline.into_inner();
 
-    let txn = pool.begin().await?;
-    if !source_exists(&mut *txn, tenant_id, pipeline.source_id).await? {
+    let mut txn = pool.begin().await?;
+    if !source_exists(txn.deref_mut(), tenant_id, pipeline.source_id).await? {
         return Err(PipelineError::SourceNotFound(pipeline.source_id));
     }
 
-    if !destination_exists(&mut *txn, tenant_id, pipeline.destination_id).await? {
+    if !destination_exists(txn.deref_mut(), tenant_id, pipeline.destination_id).await? {
         return Err(PipelineError::DestinationNotFound(pipeline.destination_id));
     }
 
     db::pipelines::update_pipeline(
-        &mut *txn,
+        txn.deref_mut(),
         tenant_id,
         pipeline_id,
         pipeline.source_id,
@@ -442,14 +439,21 @@ pub async fn start_pipeline(
     let pipeline_id = pipeline_id.into_inner();
 
     let mut txn = pool.begin().await?;
+    let (pipeline, replicator, image, source, destination) =
+        read_all_required_data(&mut txn, tenant_id, pipeline_id, &encryption_key).await?;
+
+    // We update the pipeline in K8s.
     create_or_update_pipeline_in_k8s(
-        &mut txn,
         &k8s_client,
-        &*api_config,
         tenant_id,
-        pipeline_id,
-        &encryption_key,
-    ).await?;
+        &api_config,
+        pipeline,
+        replicator,
+        image,
+        source,
+        destination,
+    )
+    .await?;
     txn.commit().await?;
 
     Ok(HttpResponse::Ok().finish())
@@ -476,17 +480,13 @@ pub async fn stop_pipeline(
     let tenant_id = extract_tenant_id(&req)?;
     let pipeline_id = pipeline_id.into_inner();
 
-    let txn = pool.begin().await?;
+    let mut txn = pool.begin().await?;
     let replicator =
-        db::replicators::read_replicator_by_pipeline_id(&mut *txn, tenant_id, pipeline_id)
+        db::replicators::read_replicator_by_pipeline_id(txn.deref_mut(), tenant_id, pipeline_id)
             .await?
             .ok_or(PipelineError::ReplicatorNotFound(pipeline_id))?;
 
-    let prefix = create_k8s_object_prefix(tenant_id, replicator.id);
-
-    delete_secrets(&k8s_client, &prefix).await?;
-    delete_config(&k8s_client, &prefix).await?;
-    delete_replicator(&k8s_client, &prefix).await?;
+    delete_pipeline_in_k8s(k8s_client.as_ref(), tenant_id, replicator).await?;
     txn.commit().await?;
 
     Ok(HttpResponse::Ok().finish())
@@ -510,14 +510,10 @@ pub async fn stop_all_pipelines(
 ) -> Result<impl Responder, PipelineError> {
     let tenant_id = extract_tenant_id(&req)?;
 
-    let txn = pool.begin().await?;
-    let replicators = db::replicators::read_replicators(&mut *txn, tenant_id).await?;
+    let mut txn = pool.begin().await?;
+    let replicators = db::replicators::read_replicators(txn.deref_mut(), tenant_id).await?;
     for replicator in replicators {
-        let prefix = create_k8s_object_prefix(tenant_id, replicator.id);
-
-        delete_secrets(&k8s_client, &prefix).await?;
-        delete_config(&k8s_client, &prefix).await?;
-        delete_replicator(&k8s_client, &prefix).await?;
+        delete_pipeline_in_k8s(k8s_client.as_ref(), tenant_id, replicator).await?;
     }
     txn.commit().await?;
 
@@ -609,10 +605,10 @@ pub async fn swap_pipeline_image(
         read_all_required_data(&mut txn, tenant_id, pipeline_id, &encryption_key).await?;
 
     let target_image = match swap_request.image_id {
-        Some(image_id) => db::images::read_image(&mut *txn, image_id)
+        Some(image_id) => db::images::read_image(txn.deref_mut(), image_id)
             .await?
             .ok_or(PipelineError::ImageNotFoundById(image_id))?,
-        None => db::images::read_default_image(&mut *txn)
+        None => db::images::read_default_image(txn.deref_mut())
             .await?
             .ok_or(PipelineError::NoDefaultImageFound)?,
     };
@@ -625,18 +621,27 @@ pub async fn swap_pipeline_image(
         return Ok(HttpResponse::Ok().finish());
     }
 
-    db::replicators::update_replicator_image(&mut *txn, tenant_id, replicator.id, target_image.id)
-        .await?
-        .ok_or(PipelineError::ReplicatorNotFound(pipeline_id))?;
-
-    create_or_update_pipeline_in_k8s(
-        &mut txn,
-        &k8s_client,
-        &*api_config,
+    db::replicators::update_replicator_image(
+        txn.deref_mut(),
         tenant_id,
-        pipeline_id,
-        &encryption_key,
-    ).await?;
+        replicator.id,
+        target_image.id,
+    )
+    .await?
+    .ok_or(PipelineError::ReplicatorNotFound(pipeline_id))?;
+
+    // We update the pipeline in K8s.
+    create_or_update_pipeline_in_k8s(
+        &k8s_client,
+        tenant_id,
+        &api_config,
+        pipeline,
+        replicator,
+        target_image,
+        source,
+        destination,
+    )
+    .await?;
 
     txn.commit()
         .await
@@ -651,17 +656,17 @@ struct Secrets {
     big_query_service_account_key: Option<String>,
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn create_or_update_pipeline_in_k8s(
-    txn: &mut Transaction<Postgres>,
     k8s_client: &HttpK8sClient,
-    api_config: ApiConfig,
     tenant_id: &str,
-    pipeline_id: i64,
-    encryption_key: &EncryptionKey,
+    api_config: &ApiConfig,
+    pipeline: Pipeline,
+    replicator: Replicator,
+    image: Image,
+    source: Source,
+    destination: Destination,
 ) -> Result<(), PipelineError> {
-    let (pipeline, replicator, image, source, destination) =
-        read_all_required_data(&mut txn, tenant_id, pipeline_id, &encryption_key).await?;
-
     let prefix = create_k8s_object_prefix(tenant_id, replicator.id);
 
     // We create the secrets.
@@ -671,7 +676,7 @@ async fn create_or_update_pipeline_in_k8s(
     // We create the replicator configuration.
     let replicator_config = build_replicator_config(
         k8s_client,
-        &api_config,
+        api_config,
         source.config,
         destination.config,
         pipeline,
@@ -680,43 +685,61 @@ async fn create_or_update_pipeline_in_k8s(
         },
     )
     .await?;
-    create_or_update_config(&k8s_client, &prefix, replicator_config).await?;
+    create_or_update_config(k8s_client, &prefix, replicator_config).await?;
 
     // We create the replicator stateful set.
-    create_or_update_replicator(&k8s_client, &prefix, image.name).await?;
+    create_or_update_replicator(k8s_client, &prefix, image.name).await?;
+
+    Ok(())
 }
 
-async fn read_all_required_data<'c, E>(
-    txn: &mut Transaction<Postgres>,
+async fn delete_pipeline_in_k8s(
+    k8s_client: &HttpK8sClient,
+    tenant_id: &str,
+    replicator: Replicator,
+) -> Result<(), PipelineError> {
+    let prefix = create_k8s_object_prefix(tenant_id, replicator.id);
+
+    delete_secrets(k8s_client, &prefix).await?;
+    delete_config(k8s_client, &prefix).await?;
+    delete_replicator(k8s_client, &prefix).await?;
+
+    Ok(())
+}
+
+async fn read_all_required_data(
+    txn: &mut Transaction<'_, Postgres>,
     tenant_id: &str,
     pipeline_id: i64,
     encryption_key: &EncryptionKey,
-) -> Result<(Pipeline, Replicator, Image, Source, Destination), PipelineError>
-where
-    E: sqlx::Executor<'c, Database = Postgres> + Copy,
-{
-    let pipeline = db::pipelines::read_pipeline(txn, tenant_id, pipeline_id)
+) -> Result<(Pipeline, Replicator, Image, Source, Destination), PipelineError> {
+    let pipeline = db::pipelines::read_pipeline(txn.deref_mut(), tenant_id, pipeline_id)
         .await?
         .ok_or(PipelineError::PipelineNotFound(pipeline_id))?;
 
-    let replicator = db::replicators::read_replicator_by_pipeline_id(txn, tenant_id, pipeline_id)
-        .await?
-        .ok_or(PipelineError::ReplicatorNotFound(pipeline_id))?;
+    let replicator =
+        db::replicators::read_replicator_by_pipeline_id(txn.deref_mut(), tenant_id, pipeline_id)
+            .await?
+            .ok_or(PipelineError::ReplicatorNotFound(pipeline_id))?;
 
-    let image = db::images::read_image_by_replicator_id(txn, replicator.id)
+    let image = db::images::read_image_by_replicator_id(txn.deref_mut(), replicator.id)
         .await?
         .ok_or(PipelineError::ImageNotFound(replicator.id))?;
 
     let source_id = pipeline.source_id;
-    let source = db::sources::read_source(txn, tenant_id, source_id, encryption_key)
+    let source = db::sources::read_source(txn.deref_mut(), tenant_id, source_id, encryption_key)
         .await?
         .ok_or(PipelineError::SourceNotFound(source_id))?;
 
     let destination_id = pipeline.destination_id;
-    let destination =
-        db::destinations::read_destination(txn, tenant_id, destination_id, encryption_key)
-            .await?
-            .ok_or(PipelineError::DestinationNotFound(destination_id))?;
+    let destination = db::destinations::read_destination(
+        txn.deref_mut(),
+        tenant_id,
+        destination_id,
+        encryption_key,
+    )
+    .await?
+    .ok_or(PipelineError::DestinationNotFound(destination_id))?;
 
     Ok((pipeline, replicator, image, source, destination))
 }
