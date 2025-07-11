@@ -38,7 +38,7 @@ jobs:
 
       - name: Run cargo clippy
         if: matrix.check == 'clippy'
-        run: cargo clippy --all-targets --features "test-utils tokio sqlx bigquery duckdb stdout unknown_types_to_bytes" -- -D warnings
+        run: cargo clippy --all-targets --all-features --no-deps -- -D warnings
 
   test:
     name: Test
