@@ -621,8 +621,8 @@ pub async fn swap_pipeline_image(
             replicator.id,
             target_image.id,
         )
-            .await?
-            .ok_or(PipelineError::ReplicatorNotFound(pipeline_id))?;
+        .await?
+        .ok_or(PipelineError::ReplicatorNotFound(pipeline_id))?;
     }
 
     // If the images have equal name, we don't care about their id from the K8S perspective, so we
