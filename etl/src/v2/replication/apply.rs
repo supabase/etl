@@ -373,11 +373,34 @@ where
         state.events_batch.push(event);
         state.update_last_commit_end_lsn(result.end_lsn);
     }
+    try_send_batch(
+        state,
+        result.end_batch,
+        result.skip_table,
+        destination,
+        hook,
+        max_batch_size,
+    )
+    .await
+}
 
+async fn try_send_batch<D, T>(
+    state: &mut ApplyLoopState,
+    end_batch: Option<EndBatch>,
+    skip_table: Option<TableId>,
+    destination: &D,
+    hook: &T,
+    max_batch_size: usize,
+) -> Result<bool, ApplyLoopError>
+where
+    D: Destination + Clone + Send + 'static,
+    T: ApplyLoopHook,
+    ApplyLoopError: From<<T as ApplyLoopHook>::Error>,
+{
     let now = Instant::now();
     if now - state.last_batch_send_time >= state.max_batch_fill_duration
         || state.events_batch.len() >= max_batch_size
-        || result.end_batch.is_some()
+        || end_batch.is_some()
     {
         if !state.events_batch.is_empty() {
             // TODO: figure out if we can send a slice to the destination instead of a vec
@@ -390,7 +413,7 @@ where
         }
 
         let mut end_loop = false;
-        if let Some(table_id) = result.skip_table {
+        if let Some(table_id) = skip_table {
             end_loop |= !hook.skip_table(table_id).await?;
         }
 
