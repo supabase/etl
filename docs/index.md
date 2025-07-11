@@ -9,7 +9,7 @@ Welcome to the ETL project, a Rust-based collection of tooling designed to build
 
 ## What is ETL
 
-ETL is a collection of Rust crates which can be used to build replication data pipelines on top of [Postgres's logical replication protocol](https://www.postgresql.org/docs/current/protocol-logical-replication.html). It provides a high-level API to work with Postgres logical replication, allowing developers to focus on building their applications without worrying about the low-level details of the replication protocol. The ETL crate abstracts away the complexities of managing replication slots, publications, and subscriptions, enabling you to create robust data pipelines that can continually copy data from Postgres to various destinations like BigQuery, DuckDB, and more.
+ETL is a collection of Rust crates which can be used to build replication data pipelines on top of [Postgres's logical replication protocol](https://www.postgresql.org/docs/current/protocol-logical-replication.html). It provides a high-level API to work with Postgres logical replication, allowing developers to focus on building their applications without worrying about the low-level details of the replication protocol. The ETL crate abstracts away the complexities of managing replication slots, publications, and subscriptions, enabling you to create robust data pipelines that can continually copy data from Postgres to various destinations like BigQuery and other OLAP databases.
 
 ## What is Postgres Logical Replication?
 
@@ -60,7 +60,7 @@ By using Rust, the ETL crate provides a fast, safe, and scalable solution for bu
 
 This documentation is designed to help you effectively use the ETL crate to build Postgres replication applications. It includes the following resources:
 
-- [**Tutorials**](tutorials/index.md): Step-by-step guides to get started with the ETL crate, including setting up a basic data pipeline, configuring Postgres logical replication, and connecting to destinations like BigQuery or DuckDB. Check the [examples folder](https://github.com/supabase/etl/tree/main/etl/examples) for practical code samples.
+- [**Tutorials**](tutorials/index.md): Step-by-step guides to get started with the ETL crate, including setting up a basic data pipeline, configuring Postgres logical replication, and connecting to destinations like BigQuery or other OLAP databases. Check the [examples folder](https://github.com/supabase/etl/tree/main/etl/examples) for practical code samples.
 - [**Guides**](guides/index.md): In-depth explanations of key concepts, such as building custom data pipelines, handling change data capture (CDC), and optimizing performance for specific use cases.
 - [**Reference**](reference/index.md): Detailed documentation of the crate’s API, including modules like `etl::pipeline`, `etl::sources::postgres`, and available destinations (e.g., `StdoutDestination`, `BigQueryDestination`). Each destination is feature-gated, so you can enable only what you need.
 - [**Design**](design/index.md): Overview of the crate’s architecture, including its modular pipeline structure, source-destination flow, and extensibility for custom integrations.

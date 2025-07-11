@@ -24,13 +24,11 @@ A Rust crate to quickly build replication solutions for Postgres. It provides bu
 The `etl` crate supports the following destinations:
 
 - [x] BigQuery
-- [x] DuckDB
-- [x] MotherDuck
+- [ ] DuckDB
+- [ ] MotherDuck
 - [ ] Snowflake (planned)
 - [ ] ClickHouse (planned)
 - [ ] Many more to come...
-
-Note: DuckDB and MotherDuck destinations do not use the batched pipeline, hence they currently perform poorly. A batched pipeline version of these destinations is planned.
 
 ## Installation
 
