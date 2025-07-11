@@ -1,4 +1,4 @@
-use sqlx::{PgPool, Postgres, Transaction};
+use sqlx::{Executor, PgPool, Postgres, Transaction};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -13,22 +13,14 @@ pub struct Replicator {
     pub image_id: i64,
 }
 
-pub async fn create_replicator(
-    pool: &PgPool,
+pub async fn create_replicator<'c, E>(
+    executor: E,
     tenant_id: &str,
     image_id: i64,
-) -> Result<i64, ReplicatorsDbError> {
-    let mut txn = pool.begin().await?;
-    let res = create_replicator_txn(&mut txn, tenant_id, image_id).await;
-    txn.commit().await?;
-    res
-}
-
-pub async fn create_replicator_txn(
-    txn: &mut Transaction<'_, Postgres>,
-    tenant_id: &str,
-    image_id: i64,
-) -> Result<i64, ReplicatorsDbError> {
+) -> Result<i64, ReplicatorsDbError>
+where
+    E: Executor<'c, Database = Postgres>,
+{
     let record = sqlx::query!(
         r#"
         insert into app.replicators (tenant_id, image_id)
@@ -38,17 +30,20 @@ pub async fn create_replicator_txn(
         tenant_id,
         image_id
     )
-    .fetch_one(&mut **txn)
+    .fetch_one(executor)
     .await?;
 
     Ok(record.id)
 }
 
-pub async fn read_replicator_by_pipeline_id(
-    pool: &PgPool,
+pub async fn read_replicator_by_pipeline_id<'c, E>(
+    executor: E,
     tenant_id: &str,
     pipeline_id: i64,
-) -> Result<Option<Replicator>, ReplicatorsDbError> {
+) -> Result<Option<Replicator>, ReplicatorsDbError>
+where
+    E: Executor<'c, Database = Postgres>,
+{
     let record = sqlx::query!(
         r#"
         select r.id, r.tenant_id, r.image_id
@@ -59,7 +54,7 @@ pub async fn read_replicator_by_pipeline_id(
         tenant_id,
         pipeline_id,
     )
-    .fetch_optional(pool)
+    .fetch_optional(executor)
     .await?;
 
     Ok(record.map(|r| Replicator {
@@ -69,10 +64,13 @@ pub async fn read_replicator_by_pipeline_id(
     }))
 }
 
-pub async fn read_replicators(
-    pool: &PgPool,
+pub async fn read_replicators<'c, E>(
+    executor: E,
     tenant_id: &str,
-) -> Result<Vec<Replicator>, ReplicatorsDbError> {
+) -> Result<Vec<Replicator>, ReplicatorsDbError>
+where
+    E: Executor<'c, Database = Postgres>,
+{
     let mut records = sqlx::query!(
         r#"
         select r.id, r.tenant_id, r.image_id
@@ -82,7 +80,7 @@ pub async fn read_replicators(
         "#,
         tenant_id,
     )
-    .fetch_all(pool)
+    .fetch_all(executor)
     .await?;
 
     Ok(records
@@ -93,4 +91,30 @@ pub async fn read_replicators(
             image_id: r.image_id,
         })
         .collect())
+}
+
+pub async fn update_replicator_image<'c, E>(
+    executor: E,
+    tenant_id: &str,
+    replicator_id: i64,
+    image_id: i64,
+) -> Result<Option<i64>, ReplicatorsDbError>
+where
+    E: Executor<'c, Database = Postgres>,
+{
+    let record = sqlx::query!(
+        r#"
+        update app.replicators
+        set image_id = $1
+        where id = $2 and tenant_id = $3
+        returning id
+        "#,
+        image_id,
+        replicator_id,
+        tenant_id
+    )
+    .fetch_optional(executor)
+    .await?;
+
+    Ok(record.map(|r| r.id))
 }

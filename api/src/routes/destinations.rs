@@ -123,8 +123,9 @@ pub async fn create_destination(
     let tenant_id = extract_tenant_id(&req)?;
     let name = destination.name;
     let config = destination.config;
-    let id = db::destinations::create_destination(&pool, tenant_id, &name, config, &encryption_key)
-        .await?;
+    let id =
+        db::destinations::create_destination(&**pool, tenant_id, &name, config, &encryption_key)
+            .await?;
     let response = CreateDestinationResponse { id };
 
     Ok(Json(response))
@@ -153,7 +154,7 @@ pub async fn read_destination(
     let tenant_id = extract_tenant_id(&req)?;
     let destination_id = destination_id.into_inner();
     let response =
-        db::destinations::read_destination(&pool, tenant_id, destination_id, &encryption_key)
+        db::destinations::read_destination(&**pool, tenant_id, destination_id, &encryption_key)
             .await?
             .map(|s| ReadDestinationResponse {
                 id: s.id,
@@ -194,7 +195,7 @@ pub async fn update_destination(
     let name = destination.name;
     let config = destination.config;
     db::destinations::update_destination(
-        &pool,
+        &**pool,
         tenant_id,
         &name,
         destination_id,
@@ -228,7 +229,7 @@ pub async fn delete_destination(
 ) -> Result<impl Responder, DestinationError> {
     let tenant_id = extract_tenant_id(&req)?;
     let destination_id = destination_id.into_inner();
-    db::destinations::delete_destination(&pool, tenant_id, destination_id)
+    db::destinations::delete_destination(&**pool, tenant_id, destination_id)
         .await?
         .ok_or(DestinationError::DestinationNotFound(destination_id))?;
 
@@ -255,7 +256,7 @@ pub async fn read_all_destinations(
     let tenant_id = extract_tenant_id(&req)?;
     let mut destinations = vec![];
     for destination in
-        db::destinations::read_all_destinations(&pool, tenant_id, &encryption_key).await?
+        db::destinations::read_all_destinations(&**pool, tenant_id, &encryption_key).await?
     {
         let destination = ReadDestinationResponse {
             id: destination.id,

@@ -100,7 +100,7 @@ pub async fn create_tenant_and_source(
     } = tenant_and_source;
     root_span.record("project", &tenant_id);
     let (tenant_id, source_id) = db::tenants_sources::create_tenant_and_source(
-        &pool,
+        &**pool,
         &tenant_id,
         &tenant_name,
         &source_name,

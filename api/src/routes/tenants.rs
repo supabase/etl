@@ -121,7 +121,7 @@ pub async fn create_tenant(
     let id = tenant.id;
     root_span.record("project", &id);
     let name = tenant.name;
-    let id = db::tenants::create_tenant(&pool, &id, &name).await?;
+    let id = db::tenants::create_tenant(&**pool, &id, &name).await?;
     let response = CreateTenantResponse { id };
 
     Ok(Json(response))
@@ -151,7 +151,7 @@ pub async fn create_or_update_tenant(
     let tenant_id = tenant_id.into_inner();
     root_span.record("project", &tenant_id);
     let name = tenant.name;
-    let id = db::tenants::create_or_update_tenant(&pool, &tenant_id, &name).await?;
+    let id = db::tenants::create_or_update_tenant(&**pool, &tenant_id, &name).await?;
     let response = CreateOrUpdateTenantResponse { id };
 
     Ok(Json(response))
@@ -177,7 +177,7 @@ pub async fn read_tenant(
 ) -> Result<impl Responder, TenantError> {
     let tenant_id = tenant_id.into_inner();
     root_span.record("project", &tenant_id);
-    let response = db::tenants::read_tenant(&pool, &tenant_id)
+    let response = db::tenants::read_tenant(&**pool, &tenant_id)
         .await?
         .map(|t| ReadTenantResponse {
             id: t.id,
@@ -211,7 +211,7 @@ pub async fn update_tenant(
     let tenant = tenant.into_inner();
     let tenant_id = tenant_id.into_inner();
     root_span.record("project", &tenant_id);
-    db::tenants::update_tenant(&pool, &tenant_id, &tenant.name)
+    db::tenants::update_tenant(&**pool, &tenant_id, &tenant.name)
         .await?
         .ok_or(TenantError::TenantNotFound(tenant_id))?;
 
@@ -238,7 +238,7 @@ pub async fn delete_tenant(
 ) -> Result<impl Responder, TenantError> {
     let tenant_id = tenant_id.into_inner();
     root_span.record("project", &tenant_id);
-    db::tenants::delete_tenant(&pool, &tenant_id).await?;
+    db::tenants::delete_tenant(&**pool, &tenant_id).await?;
     Ok(HttpResponse::Ok().finish())
 }
 
@@ -252,7 +252,7 @@ pub async fn delete_tenant(
 )]
 #[get("/tenants")]
 pub async fn read_all_tenants(pool: Data<PgPool>) -> Result<impl Responder, TenantError> {
-    let tenants: Vec<ReadTenantResponse> = db::tenants::read_all_tenants(&pool)
+    let tenants: Vec<ReadTenantResponse> = db::tenants::read_all_tenants(&**pool)
         .await?
         .drain(..)
         .map(|t| ReadTenantResponse {

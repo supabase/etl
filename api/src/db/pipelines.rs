@@ -1,9 +1,9 @@
 use config::shared::{BatchConfig, RetryConfig};
 use serde::{Deserialize, Serialize};
-use sqlx::{PgPool, Postgres, Transaction};
+use sqlx::{Executor, PgPool, Postgres, Transaction};
 use thiserror::Error;
 
-use crate::db::replicators::{ReplicatorsDbError, create_replicator_txn};
+use crate::db::replicators::{ReplicatorsDbError, create_replicator};
 use crate::db::serde::{
     DbDeserializationError, DbSerializationError, deserialize_from_value, serialize,
 };
@@ -57,29 +57,7 @@ pub async fn create_pipeline(
     let config = serde_json::to_value(config).expect("failed to serialize config");
 
     let mut txn = pool.begin().await?;
-    let res = create_pipeline_txn(
-        &mut txn,
-        tenant_id,
-        source_id,
-        destination_id,
-        image_id,
-        config,
-    )
-    .await;
-    txn.commit().await?;
-
-    res
-}
-
-pub async fn create_pipeline_txn(
-    txn: &mut Transaction<'_, Postgres>,
-    tenant_id: &str,
-    source_id: i64,
-    destination_id: i64,
-    image_id: i64,
-    pipeline_config: serde_json::Value,
-) -> Result<i64, PipelinesDbError> {
-    let replicator_id = create_replicator_txn(txn, tenant_id, image_id).await?;
+    let replicator_id = create_replicator(&mut *txn, tenant_id, image_id).await?;
     let record = sqlx::query!(
         r#"
         insert into app.pipelines (tenant_id, source_id, destination_id, replicator_id, config)
@@ -90,19 +68,23 @@ pub async fn create_pipeline_txn(
         source_id,
         destination_id,
         replicator_id,
-        pipeline_config
+        config
     )
-    .fetch_one(&mut **txn)
+    .fetch_one(&mut *txn)
     .await?;
 
+    txn.commit().await?;
     Ok(record.id)
 }
 
-pub async fn read_pipeline(
-    pool: &PgPool,
+pub async fn read_pipeline<'c, E>(
+    executor: E,
     tenant_id: &str,
     pipeline_id: i64,
-) -> Result<Option<Pipeline>, PipelinesDbError> {
+) -> Result<Option<Pipeline>, PipelinesDbError>
+where
+    E: Executor<'c, Database = Postgres>,
+{
     let record = sqlx::query!(
         r#"
         select p.id,
@@ -121,7 +103,7 @@ pub async fn read_pipeline(
         tenant_id,
         pipeline_id,
     )
-    .fetch_optional(pool)
+    .fetch_optional(executor)
     .await?;
 
     let pipeline = match record {
@@ -147,39 +129,19 @@ pub async fn read_pipeline(
     Ok(pipeline)
 }
 
-pub async fn update_pipeline(
-    pool: &PgPool,
+pub async fn update_pipeline<'c, E>(
+    executor: E,
     tenant_id: &str,
     pipeline_id: i64,
     source_id: i64,
     destination_id: i64,
     config: &PipelineConfig,
-) -> Result<Option<i64>, PipelinesDbError> {
+) -> Result<Option<i64>, PipelinesDbError>
+where
+    E: Executor<'c, Database = Postgres>,
+{
     let pipeline_config = serialize(config)?;
 
-    let mut txn = pool.begin().await?;
-    let res = update_pipeline_txn(
-        &mut txn,
-        tenant_id,
-        pipeline_id,
-        source_id,
-        destination_id,
-        pipeline_config,
-    )
-    .await?;
-    txn.commit().await?;
-
-    Ok(res)
-}
-
-pub async fn update_pipeline_txn(
-    txn: &mut Transaction<'_, Postgres>,
-    tenant_id: &str,
-    pipeline_id: i64,
-    source_id: i64,
-    destination_id: i64,
-    pipeline_config: serde_json::Value,
-) -> Result<Option<i64>, PipelinesDbError> {
     let record = sqlx::query!(
         r#"
         update app.pipelines
@@ -193,17 +155,20 @@ pub async fn update_pipeline_txn(
         tenant_id,
         pipeline_id
     )
-    .fetch_optional(&mut **txn)
+    .fetch_optional(executor)
     .await?;
 
     Ok(record.map(|r| r.id))
 }
 
-pub async fn delete_pipeline(
-    pool: &PgPool,
+pub async fn delete_pipeline<'c, E>(
+    executor: E,
     tenant_id: &str,
     pipeline_id: i64,
-) -> Result<Option<i64>, PipelinesDbError> {
+) -> Result<Option<i64>, PipelinesDbError>
+where
+    E: Executor<'c, Database = Postgres>,
+{
     let record = sqlx::query!(
         r#"
         delete from app.pipelines
@@ -213,16 +178,19 @@ pub async fn delete_pipeline(
         tenant_id,
         pipeline_id
     )
-    .fetch_optional(pool)
+    .fetch_optional(executor)
     .await?;
 
     Ok(record.map(|r| r.id))
 }
 
-pub async fn read_all_pipelines(
-    pool: &PgPool,
+pub async fn read_all_pipelines<'c, E>(
+    executor: E,
     tenant_id: &str,
-) -> Result<Vec<Pipeline>, PipelinesDbError> {
+) -> Result<Vec<Pipeline>, PipelinesDbError>
+where
+    E: Executor<'c, Database = Postgres>,
+{
     let records = sqlx::query!(
         r#"
         select p.id,
@@ -240,7 +208,7 @@ pub async fn read_all_pipelines(
         "#,
         tenant_id,
     )
-    .fetch_all(pool)
+    .fetch_all(executor)
     .await?;
 
     let mut pipelines = Vec::with_capacity(records.len());

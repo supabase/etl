@@ -116,7 +116,7 @@ pub async fn create_publication(
     let tenant_id = extract_tenant_id(&req)?;
     let source_id = source_id.into_inner();
 
-    let config = db::sources::read_source(&pool, tenant_id, source_id, &encryption_key)
+    let config = db::sources::read_source(&**pool, tenant_id, source_id, &encryption_key)
         .await?
         .map(|s| s.config)
         .ok_or(PublicationError::SourceNotFound(source_id))?;
@@ -155,7 +155,7 @@ pub async fn read_publication(
     let tenant_id = extract_tenant_id(&req)?;
     let (source_id, publication_name) = source_id_and_pub_name.into_inner();
 
-    let config = db::sources::read_source(&pool, tenant_id, source_id, &encryption_key)
+    let config = db::sources::read_source(&**pool, tenant_id, source_id, &encryption_key)
         .await?
         .map(|s| s.config)
         .ok_or(PublicationError::SourceNotFound(source_id))?;
@@ -193,7 +193,7 @@ pub async fn update_publication(
     let tenant_id = extract_tenant_id(&req)?;
     let (source_id, publication_name) = source_id_and_pub_name.into_inner();
 
-    let config = db::sources::read_source(&pool, tenant_id, source_id, &encryption_key)
+    let config = db::sources::read_source(&**pool, tenant_id, source_id, &encryption_key)
         .await?
         .map(|s| s.config)
         .ok_or(PublicationError::SourceNotFound(source_id))?;
@@ -232,7 +232,7 @@ pub async fn delete_publication(
     let tenant_id = extract_tenant_id(&req)?;
     let (source_id, publication_name) = source_id_and_pub_name.into_inner();
 
-    let config = db::sources::read_source(&pool, tenant_id, source_id, &encryption_key)
+    let config = db::sources::read_source(&**pool, tenant_id, source_id, &encryption_key)
         .await?
         .map(|s| s.config)
         .ok_or(PublicationError::SourceNotFound(source_id))?;
@@ -264,7 +264,7 @@ pub async fn read_all_publications(
     let tenant_id = extract_tenant_id(&req)?;
     let source_id = source_id.into_inner();
 
-    let config = db::sources::read_source(&pool, tenant_id, source_id, &encryption_key)
+    let config = db::sources::read_source(&**pool, tenant_id, source_id, &encryption_key)
         .await?
         .map(|s| s.config)
         .ok_or(PublicationError::SourceNotFound(source_id))?;

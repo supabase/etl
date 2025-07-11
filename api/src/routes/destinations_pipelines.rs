@@ -178,16 +178,16 @@ pub async fn create_destination_and_pipeline(
     } = destination_and_pipeline;
     let tenant_id = extract_tenant_id(&req)?;
 
-    if !source_exists(&pool, tenant_id, source_id).await? {
+    if !source_exists(&**pool, tenant_id, source_id).await? {
         return Err(DestinationPipelineError::SourceNotFound(source_id));
     }
 
-    let image = db::images::read_default_image(&pool)
+    let image = db::images::read_default_image(&**pool)
         .await?
         .ok_or(DestinationPipelineError::NoDefaultImageFound)?;
     let (destination_id, pipeline_id) =
         db::destinations_pipelines::create_destination_and_pipeline(
-            &pool,
+            &**pool,
             tenant_id,
             source_id,
             &destination_name,
@@ -239,11 +239,11 @@ pub async fn update_destination_and_pipeline(
     let tenant_id = extract_tenant_id(&req)?;
     let (destination_id, pipeline_id) = destination_and_pipeline_ids.into_inner();
 
-    if !source_exists(&pool, tenant_id, source_id).await? {
+    if !source_exists(&**pool, tenant_id, source_id).await? {
         return Err(DestinationPipelineError::SourceNotFound(source_id));
     }
 
-    if !destination_exists(&pool, tenant_id, destination_id).await? {
+    if !destination_exists(&**pool, tenant_id, destination_id).await? {
         return Err(DestinationPipelineError::DestinationNotFound(
             destination_id,
         ));

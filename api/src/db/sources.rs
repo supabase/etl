@@ -2,7 +2,7 @@ use config::SerializableSecretString;
 use config::shared::{PgConnectionConfig, TlsConfig};
 use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
-use sqlx::{PgPool, Postgres, Transaction};
+use sqlx::{Executor, PgPool, Postgres, Transaction};
 use std::fmt::Debug;
 use thiserror::Error;
 
@@ -113,29 +113,19 @@ pub enum SourcesDbError {
     DbDeserialization(#[from] DbDeserializationError),
 }
 
-pub async fn create_source(
-    pool: &PgPool,
+pub async fn create_source<'c, E>(
+    executor: E,
     tenant_id: &str,
     name: &str,
     config: SourceConfig,
     encryption_key: &EncryptionKey,
-) -> Result<i64, SourcesDbError> {
+) -> Result<i64, SourcesDbError>
+where
+    E: Executor<'c, Database = Postgres>,
+{
     let config =
         encrypt_and_serialize::<SourceConfig, EncryptedSourceConfig>(config, encryption_key)?;
 
-    let mut txn = pool.begin().await?;
-    let res = create_source_txn(&mut txn, tenant_id, name, config).await;
-    txn.commit().await?;
-
-    res
-}
-
-pub async fn create_source_txn(
-    txn: &mut Transaction<'_, Postgres>,
-    tenant_id: &str,
-    name: &str,
-    config: serde_json::Value,
-) -> Result<i64, SourcesDbError> {
     let record = sqlx::query!(
         r#"
         insert into app.sources (tenant_id, name, config)
@@ -146,18 +136,21 @@ pub async fn create_source_txn(
         name,
         config
     )
-    .fetch_one(&mut **txn)
+    .fetch_one(executor)
     .await?;
 
     Ok(record.id)
 }
 
-pub async fn read_source(
-    pool: &PgPool,
+pub async fn read_source<'c, E>(
+    executor: E,
     tenant_id: &str,
     source_id: i64,
     encryption_key: &EncryptionKey,
-) -> Result<Option<Source>, SourcesDbError> {
+) -> Result<Option<Source>, SourcesDbError>
+where
+    E: Executor<'c, Database = Postgres>,
+{
     let record = sqlx::query!(
         r#"
         select id, tenant_id, name, config
@@ -167,7 +160,7 @@ pub async fn read_source(
         tenant_id,
         source_id,
     )
-    .fetch_optional(pool)
+    .fetch_optional(executor)
     .await?;
 
     let source = match record {
@@ -190,14 +183,17 @@ pub async fn read_source(
     Ok(source)
 }
 
-pub async fn update_source(
-    pool: &PgPool,
+pub async fn update_source<'c, E>(
+    executor: E,
     tenant_id: &str,
     name: &str,
     source_id: i64,
     config: SourceConfig,
     encryption_key: &EncryptionKey,
-) -> Result<Option<i64>, SourcesDbError> {
+) -> Result<Option<i64>, SourcesDbError>
+where
+    E: Executor<'c, Database = Postgres>,
+{
     let config =
         encrypt_and_serialize::<SourceConfig, EncryptedSourceConfig>(config, encryption_key)?;
 
@@ -213,17 +209,20 @@ pub async fn update_source(
         tenant_id,
         source_id
     )
-    .fetch_optional(pool)
+    .fetch_optional(executor)
     .await?;
 
     Ok(record.map(|r| r.id))
 }
 
-pub async fn delete_source(
-    pool: &PgPool,
+pub async fn delete_source<'c, E>(
+    executor: E,
     tenant_id: &str,
     source_id: i64,
-) -> Result<Option<i64>, SourcesDbError> {
+) -> Result<Option<i64>, SourcesDbError>
+where
+    E: Executor<'c, Database = Postgres>,
+{
     let record = sqlx::query!(
         r#"
         delete from app.sources
@@ -233,17 +232,20 @@ pub async fn delete_source(
         tenant_id,
         source_id
     )
-    .fetch_optional(pool)
+    .fetch_optional(executor)
     .await?;
 
     Ok(record.map(|r| r.id))
 }
 
-pub async fn read_all_sources(
-    pool: &PgPool,
+pub async fn read_all_sources<'c, E>(
+    executor: E,
     tenant_id: &str,
     encryption_key: &EncryptionKey,
-) -> Result<Vec<Source>, SourcesDbError> {
+) -> Result<Vec<Source>, SourcesDbError>
+where
+    E: Executor<'c, Database = Postgres>,
+{
     let records = sqlx::query!(
         r#"
         select id, tenant_id, name, config
@@ -252,7 +254,7 @@ pub async fn read_all_sources(
         "#,
         tenant_id,
     )
-    .fetch_all(pool)
+    .fetch_all(executor)
     .await?;
 
     let mut sources = Vec::with_capacity(records.len());
@@ -273,11 +275,14 @@ pub async fn read_all_sources(
     Ok(sources)
 }
 
-pub async fn source_exists(
-    pool: &PgPool,
+pub async fn source_exists<'c, E>(
+    executor: E,
     tenant_id: &str,
     source_id: i64,
-) -> Result<bool, SourcesDbError> {
+) -> Result<bool, SourcesDbError>
+where
+    E: Executor<'c, Database = Postgres>,
+{
     let record = sqlx::query!(
         r#"
         select exists (select id
@@ -287,7 +292,7 @@ pub async fn source_exists(
         tenant_id,
         source_id
     )
-    .fetch_one(pool)
+    .fetch_one(executor)
     .await?;
 
     Ok(record.exists)

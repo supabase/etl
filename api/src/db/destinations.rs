@@ -2,7 +2,7 @@ use config::SerializableSecretString;
 use config::shared::DestinationConfig;
 use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
-use sqlx::{PgPool, Postgres, Transaction};
+use sqlx::{Executor, Postgres};
 use std::fmt::Debug;
 use thiserror::Error;
 
@@ -102,28 +102,18 @@ pub struct Destination {
     pub config: DestinationConfig,
 }
 
-pub async fn create_destination(
-    pool: &PgPool,
+pub async fn create_destination<'c, E>(
+    executor: E,
     tenant_id: &str,
     name: &str,
     config: DestinationConfig,
     encryption_key: &EncryptionKey,
-) -> Result<i64, DestinationsDbError> {
+) -> Result<i64, DestinationsDbError>
+where
+    E: Executor<'c, Database = Postgres>,
+{
     let config = encrypt_and_serialize(config, encryption_key)?;
 
-    let mut txn = pool.begin().await?;
-    let res = create_destination_txn(&mut txn, tenant_id, name, config).await;
-    txn.commit().await?;
-
-    res
-}
-
-pub async fn create_destination_txn(
-    txn: &mut Transaction<'_, Postgres>,
-    tenant_id: &str,
-    name: &str,
-    config: serde_json::Value,
-) -> Result<i64, DestinationsDbError> {
     let record = sqlx::query!(
         r#"
         insert into app.destinations (tenant_id, name, config)
@@ -134,18 +124,21 @@ pub async fn create_destination_txn(
         name,
         config
     )
-    .fetch_one(&mut **txn)
+    .fetch_one(executor)
     .await?;
 
     Ok(record.id)
 }
 
-pub async fn read_destination(
-    pool: &PgPool,
+pub async fn read_destination<'c, E>(
+    executor: E,
     tenant_id: &str,
     destination_id: i64,
     encryption_key: &EncryptionKey,
-) -> Result<Option<Destination>, DestinationsDbError> {
+) -> Result<Option<Destination>, DestinationsDbError>
+where
+    E: Executor<'c, Database = Postgres>,
+{
     let record = sqlx::query!(
         r#"
         select id, tenant_id, name, config
@@ -155,7 +148,7 @@ pub async fn read_destination(
         tenant_id,
         destination_id,
     )
-    .fetch_optional(pool)
+    .fetch_optional(executor)
     .await?;
 
     let destination = match record {
@@ -180,30 +173,19 @@ pub async fn read_destination(
     Ok(destination)
 }
 
-pub async fn update_destination(
-    pool: &PgPool,
+pub async fn update_destination<'c, E>(
+    executor: E,
     tenant_id: &str,
     name: &str,
     destination_id: i64,
     config: DestinationConfig,
     encryption_key: &EncryptionKey,
-) -> Result<Option<i64>, DestinationsDbError> {
+) -> Result<Option<i64>, DestinationsDbError>
+where
+    E: Executor<'c, Database = Postgres>,
+{
     let config = encrypt_and_serialize(config, encryption_key)?;
 
-    let mut txn = pool.begin().await?;
-    let res = update_destination_txn(&mut txn, tenant_id, name, destination_id, config).await;
-    txn.commit().await?;
-
-    res
-}
-
-pub async fn update_destination_txn(
-    txn: &mut Transaction<'_, Postgres>,
-    tenant_id: &str,
-    name: &str,
-    destination_id: i64,
-    config: serde_json::Value,
-) -> Result<Option<i64>, DestinationsDbError> {
     let record = sqlx::query!(
         r#"
         update app.destinations
@@ -216,17 +198,20 @@ pub async fn update_destination_txn(
         tenant_id,
         destination_id
     )
-    .fetch_optional(&mut **txn)
+    .fetch_optional(executor)
     .await?;
 
     Ok(record.map(|r| r.id))
 }
 
-pub async fn delete_destination(
-    pool: &PgPool,
+pub async fn delete_destination<'c, E>(
+    executor: E,
     tenant_id: &str,
     destination_id: i64,
-) -> Result<Option<i64>, DestinationsDbError> {
+) -> Result<Option<i64>, DestinationsDbError>
+where
+    E: Executor<'c, Database = Postgres>,
+{
     let record = sqlx::query!(
         r#"
         delete from app.destinations
@@ -236,17 +221,20 @@ pub async fn delete_destination(
         tenant_id,
         destination_id
     )
-    .fetch_optional(pool)
+    .fetch_optional(executor)
     .await?;
 
     Ok(record.map(|r| r.id))
 }
 
-pub async fn read_all_destinations(
-    pool: &PgPool,
+pub async fn read_all_destinations<'c, E>(
+    executor: E,
     tenant_id: &str,
     encryption_key: &EncryptionKey,
-) -> Result<Vec<Destination>, DestinationsDbError> {
+) -> Result<Vec<Destination>, DestinationsDbError>
+where
+    E: Executor<'c, Database = Postgres>,
+{
     let records = sqlx::query!(
         r#"
         select id, tenant_id, name, config
@@ -255,7 +243,7 @@ pub async fn read_all_destinations(
         "#,
         tenant_id,
     )
-    .fetch_all(pool)
+    .fetch_all(executor)
     .await?;
 
     let mut destinations = Vec::with_capacity(records.len());
@@ -277,11 +265,14 @@ pub async fn read_all_destinations(
     Ok(destinations)
 }
 
-pub async fn destination_exists(
-    pool: &PgPool,
+pub async fn destination_exists<'c, E>(
+    executor: E,
     tenant_id: &str,
     destination_id: i64,
-) -> Result<bool, DestinationsDbError> {
+) -> Result<bool, DestinationsDbError>
+where
+    E: Executor<'c, Database = Postgres>,
+{
     let record = sqlx::query!(
         r#"
         select exists (select id
@@ -291,7 +282,7 @@ pub async fn destination_exists(
         tenant_id,
         destination_id,
     )
-    .fetch_one(pool)
+    .fetch_one(executor)
     .await?;
 
     Ok(record.exists)
