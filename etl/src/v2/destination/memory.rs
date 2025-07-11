@@ -42,7 +42,7 @@ impl Default for MemoryDestination {
 impl Destination for MemoryDestination {
     async fn write_table_schema(&self, table_schema: TableSchema) -> Result<(), DestinationError> {
         let mut inner = self.inner.write().await;
-        info!("Writing table schema:");
+        info!("writing table schema:");
         info!("{:?}", table_schema);
         inner.table_schemas.push(table_schema);
         Ok(())
@@ -51,7 +51,7 @@ impl Destination for MemoryDestination {
     async fn load_table_schemas(&self) -> Result<Vec<TableSchema>, DestinationError> {
         let inner = self.inner.read().await;
         let schemas = inner.table_schemas.to_vec();
-        info!("Loaded {} table schemas:", schemas.len());
+        info!("loaded {} table schemas:", schemas.len());
         info!("{:?}", schemas);
         Ok(schemas)
     }
@@ -62,7 +62,7 @@ impl Destination for MemoryDestination {
         table_rows: Vec<TableRow>,
     ) -> Result<(), DestinationError> {
         let mut inner = self.inner.write().await;
-        info!("Writing a batch of {} table rows:", table_rows.len());
+        info!("writing a batch of {} table rows:", table_rows.len());
         for table_row in &table_rows {
             info!("  {:?}", table_row);
         }
@@ -72,7 +72,7 @@ impl Destination for MemoryDestination {
 
     async fn write_events(&self, events: Vec<Event>) -> Result<(), DestinationError> {
         let mut inner = self.inner.write().await;
-        info!("Writing a batch of {} events:", events.len());
+        info!("writing a batch of {} events:", events.len());
         for event in &events {
             info!("  {:?}", event);
         }

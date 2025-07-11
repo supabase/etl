@@ -174,7 +174,8 @@ where
             .get_publication_table_ids(&self.config.publication_name)
             .await?;
         info!(
-            "got table ids from publication: {}",
+            "got table ids from publication {}: {}",
+            self.config.publication_name,
             table_ids
                 .iter()
                 .map(|id| id.to_string())

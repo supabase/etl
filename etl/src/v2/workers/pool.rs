@@ -4,7 +4,7 @@ use std::mem;
 use std::ops::Deref;
 use std::sync::Arc;
 use tokio::sync::{Notify, RwLock};
-use tracing::{debug, info, warn};
+use tracing::{debug, warn};
 
 use crate::v2::concurrency::future::ReactiveFutureCallback;
 use crate::v2::destination::base::Destination;
@@ -53,14 +53,14 @@ impl TableSyncWorkerPoolInner {
     {
         let table_id = worker.table_id();
         if self.active.contains_key(&table_id) {
-            warn!("Worker for table {} already exists in the pool", table_id);
+            warn!("worker for table {} already exists in the pool", table_id);
             return Ok(false);
         }
 
         let handle = worker.start().await?;
         self.active.insert(table_id, handle);
-        info!(
-            "Successfully added worker for table {} to the pool",
+        debug!(
+            "successfully added worker for table {} to the pool",
             table_id
         );
 
@@ -69,7 +69,7 @@ impl TableSyncWorkerPoolInner {
 
     pub fn get_active_worker_state(&self, table_id: TableId) -> Option<TableSyncWorkerState> {
         let state = self.active.get(&table_id)?.state().clone();
-        debug!("Retrieved worker state for table {table_id}");
+        debug!("retrieved worker state for table {table_id}");
 
         Some(state)
     }
@@ -86,7 +86,7 @@ impl TableSyncWorkerPoolInner {
         }
 
         if let Some(removed_worker) = removed_worker {
-            info!("Marked table sync worker inactive with reason: {reason:?}",);
+            debug!("table sync worker finished with reason: {reason:?}",);
 
             self.inactive
                 .entry(table_id)
