@@ -157,15 +157,15 @@ where
     // Spawn a task to listen for shutdown signals and trigger shutdown.
     let shutdown_tx = pipeline.shutdown_tx();
     let shutdown_handle = tokio::spawn(async move {
-        use tokio::signal::unix::{signal, SignalKind};
+        use tokio::signal::unix::{SignalKind, signal};
 
         // Listen for SIGTERM, sent by Kubernetes before SIGKILL during pod termination.
         //
         // If the process is killed before shutdown completes, the pipeline may become corrupted,
         // depending on the state store and destination implementations.
-        let mut sigterm = signal(SignalKind::terminate())
-            .expect("failed to register SIGTERM handler");
-        
+        let mut sigterm =
+            signal(SignalKind::terminate()).expect("failed to register SIGTERM handler");
+
         tokio::select! {
             _ = tokio::signal::ctrl_c() => {
                 info!("SIGINT (Ctrl+C) received, shutting down pipeline");
