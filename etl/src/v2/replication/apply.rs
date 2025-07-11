@@ -200,9 +200,6 @@ struct ApplyLoopState {
     /// The LSNs of the status update that we want to send to Postgres.
     next_status_update: StatusUpdate,
 
-    /// Maximum time to wait for a batch to fill
-    max_batch_fill_duration: Duration,
-
     /// Last time when the batch was sent (or since when the apply loop started)
     last_batch_send_time: Instant,
 
@@ -211,16 +208,11 @@ struct ApplyLoopState {
 }
 
 impl ApplyLoopState {
-    fn new(
-        next_status_update: StatusUpdate,
-        max_batch_fill_duration: Duration,
-        events_batch: Vec<Event>,
-    ) -> Self {
+    fn new(next_status_update: StatusUpdate, events_batch: Vec<Event>) -> Self {
         Self {
             last_commit_end_lsn: None,
             remote_final_lsn: None,
             next_status_update,
-            max_batch_fill_duration,
             last_batch_send_time: Instant::now(),
             events_batch,
         }
@@ -290,9 +282,10 @@ where
     // We initialize the shared state that is used throughout the loop to track progress.
     let mut state = ApplyLoopState::new(
         first_status_update,
-        Duration::from_millis(config.batch.max_fill_ms),
         Vec::with_capacity(config.batch.max_size),
     );
+
+    let max_batch_fill_duration = Duration::from_millis(config.batch.max_fill_ms);
 
     loop {
         tokio::select! {
@@ -305,8 +298,17 @@ where
             }
 
             Some(message) = logical_replication_stream.next() => {
-                let end_loop =
-                    handle_replication_message_batch(&mut state, logical_replication_stream.as_mut(), message?, &schema_cache, &destination, &hook, config.batch.max_size).await?;
+                let end_loop = handle_replication_message_batch(
+                    &mut state,
+                    logical_replication_stream.as_mut(),
+                    message?,
+                    &schema_cache,
+                    &destination,
+                    &hook,
+                    config.batch.max_size,
+                    max_batch_fill_duration,
+                )
+                .await?;
 
                 if end_loop {
                     return Ok(ApplyLoopResult::ApplyStopped);
@@ -350,6 +352,7 @@ where
     }
 }
 
+#[expect(clippy::too_many_arguments)]
 async fn handle_replication_message_batch<D, T>(
     state: &mut ApplyLoopState,
     events_stream: Pin<&mut EventsStream>,
@@ -358,6 +361,7 @@ async fn handle_replication_message_batch<D, T>(
     destination: &D,
     hook: &T,
     max_batch_size: usize,
+    max_batch_fill_duration: Duration,
 ) -> Result<bool, ApplyLoopError>
 where
     D: Destination + Clone + Send + 'static,
@@ -381,6 +385,7 @@ where
         destination,
         hook,
         max_batch_size,
+        max_batch_fill_duration,
     )
     .await
 }
@@ -392,6 +397,7 @@ async fn try_send_batch<D, T>(
     destination: &D,
     hook: &T,
     max_batch_size: usize,
+    max_batch_fill_duration: Duration,
 ) -> Result<bool, ApplyLoopError>
 where
     D: Destination + Clone + Send + 'static,
@@ -402,7 +408,7 @@ where
     // `elapsed` could be zero in case current time is earlier than `last_batch_send_time`.
     // We send the batch even in this case to make sure `last_batch_send_time` is reset to
     // a new value and to avoid getting stuck with some events in the batch.
-    let time_to_send_batch = elapsed.is_zero() || elapsed > state.max_batch_fill_duration;
+    let time_to_send_batch = elapsed.is_zero() || elapsed > max_batch_fill_duration;
 
     if time_to_send_batch || state.events_batch.len() >= max_batch_size || end_batch.is_some() {
         if !state.events_batch.is_empty() {
