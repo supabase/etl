@@ -371,6 +371,7 @@ where
         && !matches!(result.end_batch, Some(EndBatch::Exclusive))
     {
         state.events_batch.push(event);
+        state.update_last_commit_end_lsn(result.end_lsn);
     }
 
     let mut batch_written = false;
@@ -391,8 +392,6 @@ where
         batch_written = true;
     }
 
-    state.update_last_commit_end_lsn(result.end_lsn);
-
     if batch_written {
         let mut end_loop = false;
         if let Some(table_id) = result.skip_table {
@@ -401,7 +400,7 @@ where
 
         // At this point, the `last_commit_end_lsn` will contain the LSN of the next byte in the WAL after
         // the last `Commit` message that was processed in this batch or in the previous ones.
-        if let Some(last_commit_end_lsn) = state.last_commit_end_lsn {
+        if let Some(last_commit_end_lsn) = state.last_commit_end_lsn.take() {
             // We also prepare the next status update for Postgres, where we will confirm that we flushed
             // data up to this LSN to allow for WAL pruning on the database side.
             //
