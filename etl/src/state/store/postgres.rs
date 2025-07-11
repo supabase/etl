@@ -12,7 +12,7 @@ use tokio::sync::RwLock;
 use tokio_postgres::types::PgLsn;
 use tracing::{debug, info};
 
-use crate::v2::{
+use crate::{
     pipeline::PipelineId,
     state::{
         store::base::{StateStore, StateStoreError},

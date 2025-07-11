@@ -1,7 +1,7 @@
 use config::shared::{BatchConfig, PgConnectionConfig, PipelineConfig, RetryConfig};
-use etl::v2::destination::base::Destination;
-use etl::v2::pipeline::{Pipeline, PipelineId};
-use etl::v2::state::store::base::StateStore;
+use etl::destination::base::Destination;
+use etl::pipeline::{Pipeline, PipelineId};
+use etl::state::store::base::StateStore;
 
 pub fn create_pipeline<S, D>(
     pg_connection_config: &PgConnectionConfig,

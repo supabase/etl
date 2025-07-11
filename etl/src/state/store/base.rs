@@ -2,7 +2,7 @@ use postgres::schema::TableId;
 use std::{collections::HashMap, future::Future};
 use thiserror::Error;
 
-use crate::v2::{
+use crate::{
     replication::slot::SlotError,
     state::{
         store::postgres::{FromTableStateError, ToTableStateError},

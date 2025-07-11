@@ -3,9 +3,9 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::info;
 
+use crate::conversions::event::Event;
 use crate::conversions::table_row::TableRow;
-use crate::v2::conversions::event::Event;
-use crate::v2::destination::base::{Destination, DestinationError};
+use crate::destination::base::{Destination, DestinationError};
 
 #[derive(Debug)]
 struct Inner {

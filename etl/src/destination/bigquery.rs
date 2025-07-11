@@ -9,12 +9,12 @@ use tokio::sync::RwLock;
 use tokio_postgres::types::Type;
 use tracing::{debug, info, warn};
 
+use crate::clients::bigquery::{BigQueryClient, BigQueryClientError, BigQueryOperationType};
 use crate::conversions::Cell;
+use crate::conversions::event::{Event, TruncateEvent};
 use crate::conversions::table_row::TableRow;
-use crate::v2::clients::bigquery::{BigQueryClient, BigQueryClientError, BigQueryOperationType};
-use crate::v2::conversions::event::{Event, TruncateEvent};
-use crate::v2::destination::base::{Destination, DestinationError};
-use crate::v2::schema::cache::SchemaCache;
+use crate::destination::base::{Destination, DestinationError};
+use crate::schema::cache::SchemaCache;
 
 /// Table name for storing ETL table schema metadata in BigQuery.
 const ETL_TABLE_SCHEMAS_NAME: &str = "etl_table_schemas";

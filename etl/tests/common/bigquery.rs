@@ -1,4 +1,4 @@
-use etl::v2::destination::bigquery::BigQueryDestination;
+use etl::destination::bigquery::BigQueryDestination;
 use gcp_bigquery_client::Client;
 use gcp_bigquery_client::client_builder::ClientBuilder;
 use gcp_bigquery_client::model::dataset::Dataset;

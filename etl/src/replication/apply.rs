@@ -1,17 +1,15 @@
-use crate::v2::concurrency::shutdown::{ShutdownResult, ShutdownRx};
-use crate::v2::concurrency::stream::BatchStream;
-use crate::v2::conversions::event::{
-    Event, EventConversionError, EventType, convert_message_to_event,
-};
-use crate::v2::destination::base::{Destination, DestinationError};
-use crate::v2::pipeline::PipelineId;
-use crate::v2::replication::client::{PgReplicationClient, PgReplicationError};
-use crate::v2::replication::slot::{SlotError, get_slot_name};
-use crate::v2::replication::stream::{EventsStream, EventsStreamError};
-use crate::v2::schema::cache::SchemaCache;
-use crate::v2::workers::apply::ApplyWorkerHookError;
-use crate::v2::workers::base::WorkerType;
-use crate::v2::workers::table_sync::TableSyncWorkerHookError;
+use crate::concurrency::shutdown::{ShutdownResult, ShutdownRx};
+use crate::concurrency::stream::BatchStream;
+use crate::conversions::event::{Event, EventConversionError, EventType, convert_message_to_event};
+use crate::destination::base::{Destination, DestinationError};
+use crate::pipeline::PipelineId;
+use crate::replication::client::{PgReplicationClient, PgReplicationError};
+use crate::replication::slot::{SlotError, get_slot_name};
+use crate::replication::stream::{EventsStream, EventsStreamError};
+use crate::schema::cache::SchemaCache;
+use crate::workers::apply::ApplyWorkerHookError;
+use crate::workers::base::WorkerType;
+use crate::workers::table_sync::TableSyncWorkerHookError;
 
 use config::shared::PipelineConfig;
 use futures::StreamExt;

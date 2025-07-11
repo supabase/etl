@@ -1,9 +1,9 @@
 use postgres::schema::TableId;
 use std::collections::HashMap;
 
-use crate::v2::state::store::base::StateStore;
-use crate::v2::state::table::TableReplicationPhase;
-use crate::v2::workers::apply::ApplyWorkerHookError;
+use crate::state::store::base::StateStore;
+use crate::state::table::TableReplicationPhase;
+use crate::workers::apply::ApplyWorkerHookError;
 
 /// Returns the table replication states that are either done or in active state.
 ///

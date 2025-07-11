@@ -7,19 +7,19 @@ use tokio::task::JoinHandle;
 use tokio_postgres::types::PgLsn;
 use tracing::{Instrument, debug, error, info};
 
-use crate::v2::concurrency::shutdown::ShutdownRx;
-use crate::v2::destination::base::Destination;
-use crate::v2::pipeline::PipelineId;
-use crate::v2::replication::apply::{ApplyLoopError, ApplyLoopHook, start_apply_loop};
-use crate::v2::replication::client::{PgReplicationClient, PgReplicationError};
-use crate::v2::replication::common::get_table_replication_states;
-use crate::v2::replication::slot::{SlotError, get_slot_name};
-use crate::v2::schema::cache::SchemaCache;
-use crate::v2::state::store::base::{StateStore, StateStoreError};
-use crate::v2::state::table::{TableReplicationPhase, TableReplicationPhaseType};
-use crate::v2::workers::base::{Worker, WorkerHandle, WorkerType, WorkerWaitError};
-use crate::v2::workers::pool::TableSyncWorkerPool;
-use crate::v2::workers::table_sync::{
+use crate::concurrency::shutdown::ShutdownRx;
+use crate::destination::base::Destination;
+use crate::pipeline::PipelineId;
+use crate::replication::apply::{ApplyLoopError, ApplyLoopHook, start_apply_loop};
+use crate::replication::client::{PgReplicationClient, PgReplicationError};
+use crate::replication::common::get_table_replication_states;
+use crate::replication::slot::{SlotError, get_slot_name};
+use crate::schema::cache::SchemaCache;
+use crate::state::store::base::{StateStore, StateStoreError};
+use crate::state::table::{TableReplicationPhase, TableReplicationPhaseType};
+use crate::workers::base::{Worker, WorkerHandle, WorkerType, WorkerWaitError};
+use crate::workers::pool::TableSyncWorkerPool;
+use crate::workers::table_sync::{
     TableSyncWorker, TableSyncWorkerError, TableSyncWorkerState, TableSyncWorkerStateError,
 };
 

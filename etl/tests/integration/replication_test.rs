@@ -1,4 +1,4 @@
-use etl::v2::replication::client::{PgReplicationClient, PgReplicationError};
+use etl::replication::client::{PgReplicationClient, PgReplicationError};
 use futures::StreamExt;
 use postgres::schema::ColumnSchema;
 use postgres::tokio::test_utils::{TableModification, id_column_schema};

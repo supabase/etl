@@ -1,4 +1,4 @@
-use crate::v2::concurrency::shutdown::{ShutdownResult, ShutdownRx};
+use crate::concurrency::shutdown::{ShutdownResult, ShutdownRx};
 use config::shared::BatchConfig;
 use core::pin::Pin;
 use core::task::{Context, Poll};

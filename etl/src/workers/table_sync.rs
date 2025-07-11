@@ -8,19 +8,19 @@ use tokio::task::JoinHandle;
 use tokio_postgres::types::PgLsn;
 use tracing::{Instrument, debug, error, info};
 
-use crate::v2::concurrency::future::ReactiveFuture;
-use crate::v2::concurrency::shutdown::{ShutdownResult, ShutdownRx};
-use crate::v2::destination::base::Destination;
-use crate::v2::pipeline::PipelineId;
-use crate::v2::replication::apply::{ApplyLoopError, ApplyLoopHook, start_apply_loop};
-use crate::v2::replication::client::{PgReplicationClient, PgReplicationError};
-use crate::v2::replication::slot::get_slot_name;
-use crate::v2::replication::table_sync::{TableSyncError, TableSyncResult, start_table_sync};
-use crate::v2::schema::cache::SchemaCache;
-use crate::v2::state::store::base::{StateStore, StateStoreError};
-use crate::v2::state::table::{TableReplicationPhase, TableReplicationPhaseType};
-use crate::v2::workers::base::{Worker, WorkerHandle, WorkerType, WorkerWaitError};
-use crate::v2::workers::pool::TableSyncWorkerPool;
+use crate::concurrency::future::ReactiveFuture;
+use crate::concurrency::shutdown::{ShutdownResult, ShutdownRx};
+use crate::destination::base::Destination;
+use crate::pipeline::PipelineId;
+use crate::replication::apply::{ApplyLoopError, ApplyLoopHook, start_apply_loop};
+use crate::replication::client::{PgReplicationClient, PgReplicationError};
+use crate::replication::slot::get_slot_name;
+use crate::replication::table_sync::{TableSyncError, TableSyncResult, start_table_sync};
+use crate::schema::cache::SchemaCache;
+use crate::state::store::base::{StateStore, StateStoreError};
+use crate::state::table::{TableReplicationPhase, TableReplicationPhaseType};
+use crate::workers::base::{Worker, WorkerHandle, WorkerType, WorkerWaitError};
+use crate::workers::pool::TableSyncWorkerPool;
 
 /// Maximum time to wait for a phase change before trying again.
 const PHASE_CHANGE_REFRESH_FREQUENCY: Duration = Duration::from_millis(100);

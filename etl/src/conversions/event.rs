@@ -1,8 +1,8 @@
 use crate::conversions::Cell;
 use crate::conversions::table_row::TableRow;
 use crate::conversions::text::{FromTextError, TextFormatConverter};
-use crate::v2::schema::cache::SchemaCache;
-use crate::v2::state::store::base::StateStoreError;
+use crate::schema::cache::SchemaCache;
+use crate::state::store::base::StateStoreError;
 use core::str;
 use postgres::schema::{ColumnSchema, TableId, TableName, TableSchema};
 use postgres::types::convert_type_oid_to_type;

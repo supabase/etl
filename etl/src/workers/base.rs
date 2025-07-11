@@ -4,8 +4,8 @@ use std::future::Future;
 use thiserror::Error;
 use tokio::task;
 
-use crate::v2::workers::apply::ApplyWorkerError;
-use crate::v2::workers::table_sync::TableSyncWorkerError;
+use crate::workers::apply::ApplyWorkerError;
+use crate::workers::table_sync::TableSyncWorkerError;
 
 /// Represents all possible errors that can occur while waiting for a worker to complete.
 ///

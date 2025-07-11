@@ -1,9 +1,9 @@
 use config::shared::BatchConfig;
-use etl::v2::conversions::event::EventType;
-use etl::v2::destination::base::Destination;
-use etl::v2::encryption::bigquery::install_crypto_provider_once;
-use etl::v2::pipeline::PipelineId;
-use etl::v2::state::table::TableReplicationPhaseType;
+use etl::conversions::event::EventType;
+use etl::destination::base::Destination;
+use etl::encryption::bigquery::install_crypto_provider_once;
+use etl::pipeline::PipelineId;
+use etl::state::table::TableReplicationPhaseType;
 use rand::random;
 use telemetry::init_test_tracing;
 

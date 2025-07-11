@@ -169,7 +169,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use crate::v2::concurrency::future::{ReactiveFuture, ReactiveFutureCallback};
+    use crate::concurrency::future::{ReactiveFuture, ReactiveFutureCallback};
     use futures::FutureExt;
     use std::fmt;
     use std::future::Future;

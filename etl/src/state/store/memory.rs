@@ -3,8 +3,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-use crate::v2::state::store::base::{StateStore, StateStoreError};
-use crate::v2::state::table::TableReplicationPhase;
+use crate::state::store::base::{StateStore, StateStoreError};
+use crate::state::table::TableReplicationPhase;
 
 #[derive(Debug)]
 struct Inner {

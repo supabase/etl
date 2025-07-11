@@ -1,9 +1,9 @@
-use etl::v2::conversions::event::EventType;
-use etl::v2::destination::memory::MemoryDestination;
-use etl::v2::pipeline::{PipelineError, PipelineId};
-use etl::v2::replication::slot::get_slot_name;
-use etl::v2::state::table::TableReplicationPhaseType;
-use etl::v2::workers::base::{WorkerType, WorkerWaitError};
+use etl::conversions::event::EventType;
+use etl::destination::memory::MemoryDestination;
+use etl::pipeline::{PipelineError, PipelineId};
+use etl::replication::slot::get_slot_name;
+use etl::state::table::TableReplicationPhaseType;
+use etl::workers::base::{WorkerType, WorkerWaitError};
 use postgres::schema::ColumnSchema;
 use postgres::tokio::test_utils::TableModification;
 use rand::random;

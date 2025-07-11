@@ -4,13 +4,13 @@ use config::shared::{
     BatchConfig, DestinationConfig, PgConnectionConfig, PipelineConfig, ReplicatorConfig,
     RetryConfig,
 };
-use etl::v2::destination::bigquery::BigQueryDestination;
-use etl::v2::destination::memory::MemoryDestination;
-use etl::v2::encryption::bigquery::install_crypto_provider_once;
-use etl::v2::pipeline::Pipeline;
-use etl::v2::state::store::base::StateStore;
-use etl::v2::state::store::postgres::PostgresStateStore;
-use etl::v2::{destination::base::Destination, pipeline::PipelineId};
+use etl::destination::bigquery::BigQueryDestination;
+use etl::destination::memory::MemoryDestination;
+use etl::encryption::bigquery::install_crypto_provider_once;
+use etl::pipeline::Pipeline;
+use etl::state::store::base::StateStore;
+use etl::state::store::postgres::PostgresStateStore;
+use etl::{destination::base::Destination, pipeline::PipelineId};
 use secrecy::ExposeSecret;
 use std::fmt;
 use tracing::{error, info, instrument, warn};

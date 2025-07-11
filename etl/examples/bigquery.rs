@@ -21,7 +21,7 @@ use std::error::Error;
 
 use clap::{Args, Parser};
 use config::shared::{BatchConfig, PgConnectionConfig, PipelineConfig, RetryConfig, TlsConfig};
-use etl::v2::{
+use etl::{
     destination::bigquery::BigQueryDestination, pipeline::Pipeline,
     state::store::memory::MemoryStateStore,
 };

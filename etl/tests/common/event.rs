@@ -1,4 +1,4 @@
-use etl::v2::conversions::event::{Event, EventType};
+use etl::conversions::event::{Event, EventType};
 use postgres::schema::TableId;
 use std::collections::HashMap;
 

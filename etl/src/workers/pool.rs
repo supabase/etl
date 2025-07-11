@@ -6,11 +6,11 @@ use std::sync::Arc;
 use tokio::sync::{Notify, RwLock};
 use tracing::{debug, info, warn};
 
-use crate::v2::concurrency::future::ReactiveFutureCallback;
-use crate::v2::destination::base::Destination;
-use crate::v2::state::store::base::StateStore;
-use crate::v2::workers::base::{Worker, WorkerHandle, WorkerWaitError, WorkerWaitErrors};
-use crate::v2::workers::table_sync::{
+use crate::concurrency::future::ReactiveFutureCallback;
+use crate::destination::base::Destination;
+use crate::state::store::base::StateStore;
+use crate::workers::base::{Worker, WorkerHandle, WorkerWaitError, WorkerWaitErrors};
+use crate::workers::table_sync::{
     TableSyncWorker, TableSyncWorkerError, TableSyncWorkerHandle, TableSyncWorkerState,
 };
 

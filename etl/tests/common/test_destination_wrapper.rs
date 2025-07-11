@@ -1,7 +1,7 @@
+use etl::conversions::event::{Event, EventType};
 use etl::conversions::table_row::TableRow;
-use etl::v2::conversions::event::{Event, EventType};
-use etl::v2::destination::base::{Destination, DestinationError};
-use etl::v2::schema::cache::SchemaCache;
+use etl::destination::base::{Destination, DestinationError};
+use etl::schema::cache::SchemaCache;
 use postgres::schema::{TableId, TableSchema};
 use std::collections::HashMap;
 use std::fmt;

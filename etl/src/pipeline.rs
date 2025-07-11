@@ -4,15 +4,15 @@ use thiserror::Error;
 use tokio::sync::{Semaphore, watch};
 use tracing::{error, info};
 
-use crate::v2::concurrency::shutdown::{ShutdownTx, create_shutdown_channel};
-use crate::v2::destination::base::{Destination, DestinationError};
-use crate::v2::replication::client::{PgReplicationClient, PgReplicationError};
-use crate::v2::schema::cache::SchemaCache;
-use crate::v2::state::store::base::{StateStore, StateStoreError};
-use crate::v2::state::table::TableReplicationPhase;
-use crate::v2::workers::apply::{ApplyWorker, ApplyWorkerError, ApplyWorkerHandle};
-use crate::v2::workers::base::{Worker, WorkerHandle, WorkerWaitErrors};
-use crate::v2::workers::pool::TableSyncWorkerPool;
+use crate::concurrency::shutdown::{ShutdownTx, create_shutdown_channel};
+use crate::destination::base::{Destination, DestinationError};
+use crate::replication::client::{PgReplicationClient, PgReplicationError};
+use crate::schema::cache::SchemaCache;
+use crate::state::store::base::{StateStore, StateStoreError};
+use crate::state::table::TableReplicationPhase;
+use crate::workers::apply::{ApplyWorker, ApplyWorkerError, ApplyWorkerHandle};
+use crate::workers::base::{Worker, WorkerHandle, WorkerWaitErrors};
+use crate::workers::pool::TableSyncWorkerPool;
 
 #[derive(Debug, Error)]
 pub enum PipelineError {

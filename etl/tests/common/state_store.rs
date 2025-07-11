@@ -1,5 +1,5 @@
-use etl::v2::state::store::base::{StateStore, StateStoreError};
-use etl::v2::state::table::{TableReplicationPhase, TableReplicationPhaseType};
+use etl::state::store::base::{StateStore, StateStoreError};
+use etl::state::table::{TableReplicationPhase, TableReplicationPhaseType};
 use postgres::schema::TableId;
 use std::collections::HashMap;
 use std::fmt;

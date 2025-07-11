@@ -1,6 +1,6 @@
 use etl::conversions::Cell;
+use etl::conversions::event::{Event, InsertEvent};
 use etl::conversions::table_row::TableRow;
-use etl::v2::conversions::event::{Event, InsertEvent};
 use postgres::schema::{ColumnSchema, Oid, TableName, TableSchema};
 use postgres::tokio::test_utils::{PgDatabase, id_column_schema};
 use std::ops::RangeInclusive;
