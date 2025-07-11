@@ -2,7 +2,7 @@ use ::config::Environment;
 use std::sync::Arc;
 use telemetry::init_tracing;
 use thiserror::__private::AsDynError;
-use tracing::info;
+use tracing::{error, info};
 
 use crate::config::load_replicator_config;
 use crate::core::start_replicator;
@@ -32,9 +32,10 @@ fn main() -> anyhow::Result<()> {
 }
 
 async fn async_main() -> anyhow::Result<()> {
-    // We start the replicator.
+    // We start the replicator and catch any errors.
     if let Err(err) = start_replicator().await {
         sentry::capture_error(err.as_dyn_error());
+        error!("an error occurred in the replicator: {err}");
         return Err(err);
     }
 

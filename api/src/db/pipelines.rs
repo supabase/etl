@@ -53,8 +53,6 @@ pub async fn create_pipeline(
     image_id: i64,
     config: PipelineConfig,
 ) -> Result<i64, PipelinesDbError> {
-    // TODO: remove publication name since it's in the config (only when the db column is removed).
-    let publication_name = &config.publication_name;
     let config = serialize(&config)?;
     let config = serde_json::to_value(config).expect("failed to serialize config");
 
@@ -65,7 +63,6 @@ pub async fn create_pipeline(
         source_id,
         destination_id,
         image_id,
-        publication_name,
         config,
     )
     .await;
@@ -80,21 +77,19 @@ pub async fn create_pipeline_txn(
     source_id: i64,
     destination_id: i64,
     image_id: i64,
-    publication_name: &str,
     pipeline_config: serde_json::Value,
 ) -> Result<i64, PipelinesDbError> {
     let replicator_id = create_replicator_txn(txn, tenant_id, image_id).await?;
     let record = sqlx::query!(
         r#"
-        insert into app.pipelines (tenant_id, source_id, destination_id, replicator_id, publication_name, config)
-        values ($1, $2, $3, $4, $5, $6)
+        insert into app.pipelines (tenant_id, source_id, destination_id, replicator_id, config)
+        values ($1, $2, $3, $4, $5)
         returning id
         "#,
         tenant_id,
         source_id,
         destination_id,
         replicator_id,
-        publication_name,
         pipeline_config
     )
     .fetch_one(&mut **txn)
@@ -117,7 +112,6 @@ pub async fn read_pipeline(
             destination_id,
             d.name as destination_name,
             replicator_id,
-            publication_name,
             p.config
         from app.pipelines p
         join app.sources s on p.source_id = s.id
@@ -161,7 +155,6 @@ pub async fn update_pipeline(
     destination_id: i64,
     config: &PipelineConfig,
 ) -> Result<Option<i64>, PipelinesDbError> {
-    let publication_name = &config.publication_name;
     let pipeline_config = serialize(config)?;
 
     let mut txn = pool.begin().await?;
@@ -171,7 +164,6 @@ pub async fn update_pipeline(
         pipeline_id,
         source_id,
         destination_id,
-        publication_name,
         pipeline_config,
     )
     .await?;
@@ -186,19 +178,17 @@ pub async fn update_pipeline_txn(
     pipeline_id: i64,
     source_id: i64,
     destination_id: i64,
-    publication_name: &str,
     pipeline_config: serde_json::Value,
 ) -> Result<Option<i64>, PipelinesDbError> {
     let record = sqlx::query!(
         r#"
         update app.pipelines
-        set source_id = $1, destination_id = $2, publication_name = $3, config = $4
-        where tenant_id = $5 and id = $6
+        set source_id = $1, destination_id = $2, config = $3
+        where tenant_id = $4 and id = $5
         returning id
         "#,
         source_id,
         destination_id,
-        publication_name,
         pipeline_config,
         tenant_id,
         pipeline_id
@@ -242,7 +232,6 @@ pub async fn read_all_pipelines(
             destination_id,
             d.name as destination_name,
             replicator_id,
-            publication_name,
             p.config
         from app.pipelines p
         join app.sources s on p.source_id = s.id

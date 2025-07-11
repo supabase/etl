@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        update app.pipelines\n        set source_id = $1, destination_id = $2, publication_name = $3, config = $4\n        where tenant_id = $5 and id = $6\n        returning id\n        ",
+  "query": "\n        update app.pipelines\n        set source_id = $1, destination_id = $2, config = $3\n        where tenant_id = $4 and id = $5\n        returning id\n        ",
   "describe": {
     "columns": [
       {
@@ -13,7 +13,6 @@
       "Left": [
         "Int8",
         "Int8",
-        "Text",
         "Jsonb",
         "Text",
         "Int8"
@@ -23,5 +22,5 @@
       false
     ]
   },
-  "hash": "389faf1c8ea8aac1487e734040e8bb7a304719a2f1188be4a62c386399a647a7"
+  "hash": "f7d1d406236bd94609cab3ea6392bdb91f2435ce7a60c57c29665450c2f624f3"
 }

@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        select p.id,\n            p.tenant_id,\n            source_id,\n            s.name as source_name,\n            destination_id,\n            d.name as destination_name,\n            replicator_id,\n            publication_name,\n            p.config\n        from app.pipelines p\n        join app.sources s on p.source_id = s.id\n        join app.destinations d on p.destination_id = d.id\n        where p.tenant_id = $1 and p.id = $2\n        ",
+  "query": "\n        select p.id,\n            p.tenant_id,\n            source_id,\n            s.name as source_name,\n            destination_id,\n            d.name as destination_name,\n            replicator_id,\n            p.config\n        from app.pipelines p\n        join app.sources s on p.source_id = s.id\n        join app.destinations d on p.destination_id = d.id\n        where p.tenant_id = $1 and p.id = $2\n        ",
   "describe": {
     "columns": [
       {
@@ -40,11 +40,6 @@
       },
       {
         "ordinal": 7,
-        "name": "publication_name",
-        "type_info": "Text"
-      },
-      {
-        "ordinal": 8,
         "name": "config",
         "type_info": "Jsonb"
       }
@@ -63,9 +58,8 @@
       false,
       false,
       false,
-      false,
       false
     ]
   },
-  "hash": "e0135e45bbf859ec1bbf27654d84b49fbe41f4d41fd4b8cc9d88f8762884f157"
+  "hash": "9225705adb7aaeec671bc0157fe6a5c9e6e1fb3713e53396a3946f7fb6e9c56d"
 }
