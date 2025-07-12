@@ -16,6 +16,7 @@ pub struct Table {
 
 pub async fn get_tables(options: &PgConnectOptions) -> Result<Vec<Table>, TablesDbError> {
     let mut connection = PgConnection::connect_with(options).await?;
+
     let query = r#"
         select
            	n.nspname as schema,
@@ -31,6 +32,7 @@ pub async fn get_tables(options: &PgConnectOptions) -> Result<Vec<Table>, Tables
            	and pg_catalog.pg_table_is_visible(c.oid)
         order by schema, name;
         "#;
+
     let tables = connection
         .fetch_all(query)
         .await?
@@ -40,5 +42,6 @@ pub async fn get_tables(options: &PgConnectOptions) -> Result<Vec<Table>, Tables
             name: r.get("name"),
         })
         .collect();
+
     Ok(tables)
 }

@@ -20,15 +20,17 @@ use crate::routes::ErrorMessage;
 enum TenantSourceError {
     #[error(transparent)]
     TenantSourceDb(#[from] TenantSourceDbError),
+
+    #[error("Database error: {0}")]
+    Database(#[from] sqlx::Error),
 }
 
 impl TenantSourceError {
     fn to_message(&self) -> String {
         match self {
             // Do not expose internal database details in error messages
-            TenantSourceError::TenantSourceDb(TenantSourceDbError::Database(_)) => {
-                "internal server error".to_string()
-            }
+            TenantSourceError::TenantSourceDb(TenantSourceDbError::Database(_))
+            | TenantSourceError::Database(_) => "internal server error".to_string(),
             // Every other message is ok, as they do not divulge sensitive information
             e => e.to_string(),
         }
@@ -38,7 +40,9 @@ impl TenantSourceError {
 impl ResponseError for TenantSourceError {
     fn status_code(&self) -> StatusCode {
         match self {
-            TenantSourceError::TenantSourceDb(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            TenantSourceError::TenantSourceDb(_) | TenantSourceError::Database(_) => {
+                StatusCode::INTERNAL_SERVER_ERROR
+            }
         }
     }
 
@@ -92,22 +96,21 @@ pub async fn create_tenant_and_source(
     root_span: RootSpan,
 ) -> Result<impl Responder, TenantSourceError> {
     let tenant_and_source = tenant_and_source.into_inner();
-    let CreateTenantSourceRequest {
-        tenant_id,
-        tenant_name,
-        source_name,
-        source_config,
-    } = tenant_and_source;
-    root_span.record("project", &tenant_id);
+
+    root_span.record("project", &tenant_and_source.tenant_id);
+
+    let mut txn = pool.begin().await?;
     let (tenant_id, source_id) = db::tenants_sources::create_tenant_and_source(
-        &pool,
-        &tenant_id,
-        &tenant_name,
-        &source_name,
-        source_config,
+        &mut txn,
+        &tenant_and_source.tenant_id,
+        &tenant_and_source.tenant_name,
+        &tenant_and_source.source_name,
+        tenant_and_source.source_config,
         &encryption_key,
     )
     .await?;
+    txn.commit().await?;
+
     let response = CreateTenantSourceResponse {
         tenant_id,
         source_id,

@@ -93,7 +93,7 @@ pub async fn read_table_names(
     let tenant_id = extract_tenant_id(&req)?;
     let source_id = source_id.into_inner();
 
-    let config = db::sources::read_source(&pool, tenant_id, source_id, &encryption_key)
+    let config = db::sources::read_source(&**pool, tenant_id, source_id, &encryption_key)
         .await?
         .map(|s| s.config)
         .ok_or(TableError::SourceNotFound(source_id))?;
