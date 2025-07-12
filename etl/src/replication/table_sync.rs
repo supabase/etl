@@ -83,6 +83,7 @@ where
             "table {} sync not required, already in phase {:?}",
             table_id, phase_type
         );
+
         return Ok(TableSyncResult::SyncNotRequired);
     }
 

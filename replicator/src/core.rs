@@ -13,7 +13,7 @@ use etl::state::store::postgres::PostgresStateStore;
 use etl::{destination::base::Destination, pipeline::PipelineId};
 use secrecy::ExposeSecret;
 use std::fmt;
-use tracing::{error, info, instrument, warn};
+use tracing::{info, instrument, warn};
 
 pub async fn start_replicator() -> anyhow::Result<()> {
     info!("starting replicator service");
@@ -154,18 +154,33 @@ where
     // Start the pipeline.
     pipeline.start().await?;
 
-    // Spawn a task to listen for Ctrl+C and trigger shutdown.
+    // Spawn a task to listen for shutdown signals and trigger shutdown.
     let shutdown_tx = pipeline.shutdown_tx();
     let shutdown_handle = tokio::spawn(async move {
-        if let Err(e) = tokio::signal::ctrl_c().await {
-            error!("failed to listen for Ctrl+C: {:?}", e);
+        use tokio::signal::unix::{SignalKind, signal};
+
+        // Listen for SIGTERM, sent by Kubernetes before SIGKILL during pod termination.
+        //
+        // If the process is killed before shutdown completes, the pipeline may become corrupted,
+        // depending on the state store and destination implementations.
+        let mut sigterm =
+            signal(SignalKind::terminate()).expect("failed to register SIGTERM handler");
+
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {
+                info!("SIGINT (Ctrl+C) received, shutting down pipeline");
+            }
+            _ = sigterm.recv() => {
+                info!("SIGTERM received, shutting down pipeline");
+            }
+        }
+
+        if let Err(e) = shutdown_tx.shutdown() {
+            warn!("failed to send shutdown signal: {:?}", e);
             return;
         }
 
-        info!("ctrl+C received, shutting down pipeline");
-        if let Err(e) = shutdown_tx.shutdown() {
-            warn!("failed to send shutdown signal: {:?}", e);
-        }
+        info!("pipeline shutdown successfully")
     });
 
     // Wait for the pipeline to finish (either normally or via shutdown).

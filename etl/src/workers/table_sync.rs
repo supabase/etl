@@ -291,9 +291,7 @@ where
     async fn start(mut self) -> Result<TableSyncWorkerHandle, Self::Error> {
         info!("starting table sync worker for table {}", self.table_id);
 
-        // TODO: maybe we can optimize the performance by doing this loading within the task and
-        //  implementing a mechanism for table sync state to be updated after the fact.
-        let Some(relation_subscription_state) = self
+        let Some(table_replication_phase) = self
             .state_store
             .get_table_replication_state(self.table_id)
             .await?
@@ -306,7 +304,12 @@ where
             return Err(TableSyncWorkerError::ReplicationStateMissing(self.table_id));
         };
 
-        let state = TableSyncWorkerState::new(self.table_id, relation_subscription_state);
+        info!(
+            "loaded table sync worker state for table {}: {:?}",
+            self.table_id, table_replication_phase
+        );
+
+        let state = TableSyncWorkerState::new(self.table_id, table_replication_phase);
 
         let state_clone = state.clone();
         let table_sync_worker_span =

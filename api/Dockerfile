@@ -1,5 +1,5 @@
 # Build stage with cargo-chef for better layer caching
-FROM lukemathwalker/cargo-chef:latest-rust-1.85.0-slim-bookworm AS chef
+FROM lukemathwalker/cargo-chef:latest-rust-1.88.0-slim-bookworm AS chef
 WORKDIR /app
 
 # Install system dependencies
