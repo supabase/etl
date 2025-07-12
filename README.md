@@ -1,8 +1,5 @@
 # ETL
 
-> **Note:** Version 2 is currently under development under `/v2`, which includes a complete rework of the pipeline
-> architecture for improved performance and scalability.
-
 A Rust crate to quickly build replication solutions for Postgres. It provides building blocks to construct data pipelines which can continually copy data from Postgres to other systems. It builds abstractions on top of Postgres's [logical streaming replication protocol](https://www.postgresql.org/docs/current/protocol-logical-replication.html) and pushes users towards the pit of success without letting them worry about low level details of the protocol.
 
 ## Table of Contents
@@ -36,27 +33,37 @@ To use `etl` in your Rust project, add it via a git dependency in `Cargo.toml`:
 
 ```toml
 [dependencies]
-etl = { git = "https://github.com/supabase/etl", features = ["stdout"] }
+etl = { git = "https://github.com/supabase/etl", features = ["bigquery"] }
 ```
 
 Each destination is behind a feature of the same name, so remember to enable the right feature. The git dependency is needed for now because `etl` is not yet published on crates.io.
 
 ## Quickstart
 
-To quickly try out `etl`, you can run the `stdout` example, which will replicate the data to standard output. First, create a publication in Postgres which includes the tables you want to replicate:
+To quickly try out `etl`, you can run the `bigquery` example, which will replicate the data to BigQuery. First, create a publication in Postgres which includes the tables you want to replicate:
 
 ```sql
 create publication my_publication
 for table table1, table2;
 ```
 
-Then run the `stdout` example:
+Then run the `bigquery` example:
 
 ```bash
-cargo run -p etl --example stdout --features="stdout" -- --db-host localhost --db-port 5432 --db-name postgres --db-username postgres --db-password password cdc my_publication stdout_slot
+cargo run --example bigquery --features bigquery -- \
+        --db-host localhost \
+        --db-port 5432 \
+        --db-name postgres \
+        --db-username postgres \
+        -- db-password password \
+        --bq-sa-key-file /path/to/your/service-account-key.json \
+        --bq-project-id your-gcp-project-id \
+        --bq-dataset-id your_bigquery_dataset_id \
+        --publication my_publication \
+        --publication int_types_pub
 ```
 
-In the above example, `etl` connects to a Postgres database named `postgres` running on `localhost:5432` with a username `postgres` and password `password`. The slot name `stdout_slot` will be created by `etl` automatically.
+In the above example, `etl` connects to a Postgres database named `postgres` running on `localhost:5432` with a username `postgres` and password `password`.
 
 ## Examples
 
