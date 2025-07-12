@@ -12,7 +12,7 @@ use tokio_postgres::types::Type;
 
 use crate::common::database::spawn_database;
 use crate::common::event::{group_events_by_type, group_events_by_type_and_table_id};
-use crate::common::pipeline_v2::create_pipeline;
+use crate::common::pipeline::create_pipeline;
 use crate::common::state_store::{
     FaultConfig, FaultInjectingStateStore, FaultType, TestStateStore,
 };

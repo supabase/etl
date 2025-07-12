@@ -9,7 +9,7 @@ use telemetry::init_test_tracing;
 
 use crate::common::bigquery::setup_bigquery_connection;
 use crate::common::database::spawn_database;
-use crate::common::pipeline_v2::{create_pipeline, create_pipeline_with};
+use crate::common::pipeline::{create_pipeline, create_pipeline_with};
 use crate::common::state_store::TestStateStore;
 use crate::common::test_destination_wrapper::TestDestinationWrapper;
 use crate::common::test_schema::bigquery::{
