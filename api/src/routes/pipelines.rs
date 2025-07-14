@@ -201,7 +201,7 @@ pub struct ReadPipelinesResponse {
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
-pub struct SwapImageRequest {
+pub struct UpdateImageRequest {
     #[schema(example = 1)]
     pub image_id: Option<i64>,
 }
@@ -573,38 +573,38 @@ pub async fn get_pipeline_status(
 
 #[utoipa::path(
     context_path = "/v1",
-    request_body = SwapImageRequest,
+    request_body = UpdateImageRequest,
     params(
         ("pipeline_id" = i64, Path, description = "Id of the pipeline"),
         ("tenant_id" = String, Header, description = "The tenant ID")
     ),
     responses(
-        (status = 200, description = "Image swapped successfully"),
+        (status = 200, description = "Image updated successfully"),
         (status = 400, description = "Pipeline not running or bad request", body = ErrorMessage),
         (status = 404, description = "Pipeline or image not found", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage)
     ),
     tag = "Pipelines"
 )]
-#[post("/pipelines/{pipeline_id}/swap-image")]
-pub async fn swap_pipeline_image(
+#[post("/pipelines/{pipeline_id}/update-image")]
+pub async fn update_pipeline_image(
     req: HttpRequest,
     api_config: Data<ApiConfig>,
     pool: Data<PgPool>,
     encryption_key: Data<EncryptionKey>,
     k8s_client: Option<Data<Arc<HttpK8sClient>>>,
     pipeline_id: Path<i64>,
-    swap_request: Json<SwapImageRequest>,
+    update_request: Json<UpdateImageRequest>,
 ) -> Result<impl Responder, PipelineError> {
     let tenant_id = extract_tenant_id(&req)?;
     let pipeline_id = pipeline_id.into_inner();
-    let swap_request = swap_request.into_inner();
+    let update_request = update_request.into_inner();
 
     let mut txn = pool.begin().await?;
     let (pipeline, replicator, current_image, source, destination) =
         read_all_required_data(&mut txn, tenant_id, pipeline_id, &encryption_key).await?;
 
-    let target_image = match swap_request.image_id {
+    let target_image = match update_request.image_id {
         Some(image_id) => db::images::read_image(txn.deref_mut(), image_id)
             .await?
             .ok_or(PipelineError::ImageNotFoundById(image_id))?,

@@ -1,7 +1,7 @@
 use api::db::pipelines::PipelineConfig;
 use api::routes::pipelines::{
     CreatePipelineRequest, CreatePipelineResponse, ReadPipelineResponse, ReadPipelinesResponse,
-    SwapImageRequest, UpdatePipelineRequest,
+    UpdateImageRequest, UpdatePipelineRequest,
 };
 use config::shared::{BatchConfig, RetryConfig};
 use reqwest::StatusCode;
@@ -619,7 +619,7 @@ async fn updating_pipeline_to_duplicate_source_destination_combination_fails() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn pipeline_image_can_be_swapped_with_specific_image() {
+async fn pipeline_image_can_be_updated_with_specific_image() {
     init_test_tracing();
     // Arrange
     let app = spawn_test_app().await;
@@ -638,11 +638,11 @@ async fn pipeline_image_can_be_swapped_with_specific_image() {
     .await;
 
     // Act
-    let swap_request = SwapImageRequest {
+    let update_request = UpdateImageRequest {
         image_id: Some(1), // Use the default image ID
     };
     let response = app
-        .swap_pipeline_image(tenant_id, pipeline_id, &swap_request)
+        .update_pipeline_image(tenant_id, pipeline_id, &update_request)
         .await;
 
     // Assert
@@ -650,7 +650,7 @@ async fn pipeline_image_can_be_swapped_with_specific_image() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn pipeline_image_can_be_swapped_to_default_image() {
+async fn pipeline_image_can_be_updated_to_default_image() {
     init_test_tracing();
     // Arrange
     let app = spawn_test_app().await;
@@ -668,10 +668,10 @@ async fn pipeline_image_can_be_swapped_to_default_image() {
     )
     .await;
 
-    // Act - swap to default image (no image_id specified)
-    let swap_request = SwapImageRequest { image_id: None };
+    // Act - update to default image (no image_id specified)
+    let update_request = UpdateImageRequest { image_id: None };
     let response = app
-        .swap_pipeline_image(tenant_id, pipeline_id, &swap_request)
+        .update_pipeline_image(tenant_id, pipeline_id, &update_request)
         .await;
 
     // Assert
@@ -679,22 +679,24 @@ async fn pipeline_image_can_be_swapped_to_default_image() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn swap_image_fails_for_non_existing_pipeline() {
+async fn update_image_fails_for_non_existing_pipeline() {
     init_test_tracing();
     // Arrange
     let app = spawn_test_app().await;
     let tenant_id = &create_tenant(&app).await;
 
     // Act
-    let swap_request = SwapImageRequest { image_id: None };
-    let response = app.swap_pipeline_image(tenant_id, 42, &swap_request).await;
+    let update_request = UpdateImageRequest { image_id: None };
+    let response = app
+        .update_pipeline_image(tenant_id, 42, &update_request)
+        .await;
 
     // Assert
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn swap_image_fails_for_non_existing_image() {
+async fn update_image_fails_for_non_existing_image() {
     init_test_tracing();
     // Arrange
     let app = spawn_test_app().await;
@@ -713,11 +715,11 @@ async fn swap_image_fails_for_non_existing_image() {
     .await;
 
     // Act
-    let swap_request = SwapImageRequest {
+    let update_request = UpdateImageRequest {
         image_id: Some(999), // Non-existing image ID
     };
     let response = app
-        .swap_pipeline_image(tenant_id, pipeline_id, &swap_request)
+        .update_pipeline_image(tenant_id, pipeline_id, &update_request)
         .await;
 
     // Assert
@@ -725,7 +727,7 @@ async fn swap_image_fails_for_non_existing_image() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn swap_image_fails_for_pipeline_from_another_tenant() {
+async fn update_image_fails_for_pipeline_from_another_tenant() {
     init_test_tracing();
     // Arrange
     let app = spawn_test_app().await;
@@ -744,10 +746,10 @@ async fn swap_image_fails_for_pipeline_from_another_tenant() {
     )
     .await;
 
-    // Act - Try to swap image using wrong tenant credentials
-    let swap_request = SwapImageRequest { image_id: None };
+    // Act - Try to update image using wrong tenant credentials
+    let update_request = UpdateImageRequest { image_id: None };
     let response = app
-        .swap_pipeline_image("wrong-tenant-id", pipeline_id, &swap_request)
+        .update_pipeline_image("wrong-tenant-id", pipeline_id, &update_request)
         .await;
 
     // Assert
@@ -755,16 +757,18 @@ async fn swap_image_fails_for_pipeline_from_another_tenant() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn swap_image_fails_when_no_default_image_exists() {
+async fn update_image_fails_when_no_default_image_exists() {
     init_test_tracing();
     // Arrange
     let app = spawn_test_app().await;
     // Don't create default image
     let tenant_id = &create_tenant(&app).await;
 
-    // Act - Try to swap to default image when none exists
-    let swap_request = SwapImageRequest { image_id: None };
-    let response = app.swap_pipeline_image(tenant_id, 1, &swap_request).await;
+    // Act - Try to update to default image when none exists
+    let update_request = UpdateImageRequest { image_id: None };
+    let response = app
+        .update_pipeline_image(tenant_id, 1, &update_request)
+        .await;
 
     // Assert
     assert_eq!(response.status(), StatusCode::NOT_FOUND);

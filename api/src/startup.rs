@@ -36,10 +36,10 @@ use crate::{
         },
         pipelines::{
             CreatePipelineRequest, CreatePipelineResponse, ReadPipelineResponse,
-            ReadPipelinesResponse, SwapImageRequest, UpdatePipelineRequest, create_pipeline,
+            ReadPipelinesResponse, UpdateImageRequest, UpdatePipelineRequest, create_pipeline,
             delete_pipeline, get_pipeline_status, read_all_pipelines, read_pipeline,
-            start_pipeline, stop_all_pipelines, stop_pipeline, swap_pipeline_image,
-            update_pipeline,
+            start_pipeline, stop_all_pipelines, stop_pipeline, update_pipeline,
+            update_pipeline_image,
         },
         sources::{
             CreateSourceRequest, CreateSourceResponse, ReadSourceResponse, ReadSourcesResponse,
@@ -159,7 +159,7 @@ pub async fn run(
             crate::routes::pipelines::delete_pipeline,
             crate::routes::pipelines::read_all_pipelines,
             crate::routes::pipelines::get_pipeline_status,
-            crate::routes::pipelines::swap_pipeline_image,
+            crate::routes::pipelines::update_pipeline_image,
             crate::routes::tenants::create_tenant,
             crate::routes::tenants::create_or_update_tenant,
             crate::routes::tenants::read_tenant,
@@ -197,7 +197,7 @@ pub async fn run(
             UpdatePipelineRequest,
             ReadPipelineResponse,
             ReadPipelinesResponse,
-            SwapImageRequest,
+            UpdateImageRequest,
             CreateTenantRequest,
             CreateTenantResponse,
             CreateOrUpdateTenantRequest,
@@ -278,7 +278,7 @@ pub async fn run(
                     .service(stop_pipeline)
                     .service(stop_all_pipelines)
                     .service(get_pipeline_status)
-                    .service(swap_pipeline_image)
+                    .service(update_pipeline_image)
                     //tables
                     .service(read_table_names)
                     //publications
