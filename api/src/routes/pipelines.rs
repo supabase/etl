@@ -8,7 +8,6 @@ use config::shared::{
     DestinationConfig, PgConnectionConfig, PipelineConfig as SharedPipelineConfig,
     ReplicatorConfig, SupabaseConfig, TlsConfig,
 };
-use k8s_openapi::api::core::v1::PodStatus;
 use serde::{Deserialize, Serialize};
 use sqlx::{PgPool, PgTransaction};
 use std::ops::DerefMut;
@@ -29,7 +28,6 @@ use crate::k8s_client::{
 };
 use crate::routes::{ErrorMessage, TenantIdError, extract_tenant_id};
 use secrecy::ExposeSecret;
-use tracing::info;
 
 #[derive(Debug, Error)]
 enum PipelineError {
@@ -584,15 +582,14 @@ pub async fn get_pipeline_status(
     // to return to the user.
     let replicator_error = k8s_client.get_replicator_container_error(&prefix).await?;
 
-    let mut status = PipelineStatus::Unknown;
-    if let Some(replicator_error) = replicator_error {
-        status = PipelineStatus::Failed {
+    let status = if let Some(replicator_error) = replicator_error {
+        PipelineStatus::Failed {
             exit_code: replicator_error.exit_code,
             message: replicator_error.message,
             reason: replicator_error.reason,
         }
     } else {
-        status = match pod_phase {
+        match pod_phase {
             PodPhase::Pending => PipelineStatus::Starting,
             PodPhase::Running => PipelineStatus::Started,
             PodPhase::Succeeded => PipelineStatus::Stopped,
@@ -602,8 +599,8 @@ pub async fn get_pipeline_status(
                 reason: None,
             },
             PodPhase::Unknown => PipelineStatus::Unknown,
-        };
-    }
+        }
+    };
 
     let response = GetPipelineStatusResponse {
         pipeline_id,
