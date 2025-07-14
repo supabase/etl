@@ -366,12 +366,10 @@ where
                 Ok(TableSyncResult::SyncStopped | TableSyncResult::SyncNotRequired) => {
                     return Ok(());
                 }
-                Ok(TableSyncResult::SyncCompleted { start_lsn }) => {
-                    start_lsn
-                }
+                Ok(TableSyncResult::SyncCompleted { start_lsn }) => start_lsn,
                 Err(err) => {
                     error!("table sync failed for table {}: {}", self.table_id, err);
-                    
+
                     return Err(err.into());
                 }
             };
