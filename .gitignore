@@ -30,3 +30,6 @@ site/
 bin/
 lib/
 pyvenv.cfg
+
+# Log files
+*.log
