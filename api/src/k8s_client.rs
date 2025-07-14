@@ -10,7 +10,7 @@ use tracing::*;
 
 use kube::{
     Client,
-    api::{Api, DeleteParams, Patch, PatchParams},
+    api::{Api, DeleteParams, LogParams, Patch, PatchParams},
 };
 
 #[derive(Debug, Error)]
@@ -31,7 +31,7 @@ pub enum PodPhase {
 }
 
 #[derive(Debug, Clone)]
-pub struct PodError {
+pub struct ContainerError {
     pub exit_code: Option<i32>,
     pub message: Option<String>,
     pub reason: Option<String>,
@@ -88,7 +88,17 @@ pub trait K8sClient {
 
     async fn get_pod_phase(&self, prefix: &str) -> Result<PodPhase, K8sError>;
 
-    async fn get_replicator_pod_error(&self, prefix: &str) -> Result<Option<PodError>, K8sError>;
+    async fn get_replicator_container_error(
+        &self,
+        prefix: &str,
+    ) -> Result<Option<ContainerError>, K8sError>;
+
+    async fn get_container_logs(
+        &self,
+        pod_name: &str,
+        container_name: &str,
+        previous: bool,
+    ) -> Result<String, K8sError>;
 
     async fn delete_pod(&self, prefix: &str) -> Result<(), K8sError>;
 }
@@ -477,15 +487,18 @@ impl K8sClient for HttpK8sClient {
         let pod_name = format!("{prefix}-{STATEFUL_SET_NAME_SUFFIX}-0");
         let pod = match self.pods_api.get(&pod_name).await {
             Ok(pod) => pod,
-            Err(e) => return match e {
-                kube::Error::Api(ref er) => {
-                    if er.code == 404 {
-                        return Ok(PodPhase::Succeeded);
+            Err(e) => {
+                return match e {
+                    kube::Error::Api(ref er) => {
+                        if er.code == 404 {
+                            return Ok(PodPhase::Succeeded);
+                        }
+
+                        Err(e.into())
                     }
-                    Err(e.into())
-                }
-                e => Err(e.into()),
-            },
+                    e => Err(e.into()),
+                };
+            }
         };
 
         let phase = pod
@@ -505,96 +518,72 @@ impl K8sClient for HttpK8sClient {
         Ok(phase)
     }
 
-    async fn get_replicator_pod_error(&self, prefix: &str) -> Result<Option<PodError>, K8sError> {
-        info!("getting pod error information");
+    async fn get_replicator_container_error(
+        &self,
+        prefix: &str,
+    ) -> Result<Option<ContainerError>, K8sError> {
+        info!("getting replicator error information");
+
         let pod_name = format!("{prefix}-{STATEFUL_SET_NAME_SUFFIX}-0");
         let pod = match self.pods_api.get(&pod_name).await {
             Ok(pod) => pod,
-            Err(e) => match e {
-                kube::Error::Api(ref er) => {
-                    if er.code == 404 {
-                        return Ok(None);
+            Err(e) => {
+                return match e {
+                    kube::Error::Api(ref er) => {
+                        if er.code == 404 {
+                            return Ok(None);
+                        }
+                        Err(e.into())
                     }
-                    return Err(e.into());
-                }
-                e => return Err(e.into()),
-            },
+                    e => Err(e.into()),
+                };
+            }
         };
 
-        let pod_error = pod
-            .status
-            .and_then(|status| {
-                status.container_statuses.and_then(|container_statuses| {
-                    // Look for the replicator container specifically
-                    let replicator_container_name = format!("{prefix}-{REPLICATOR_CONTAINER_NAME_SUFFIX}");
-                    
-                    container_statuses
-                        .iter()
-                        .find(|cs| cs.name == replicator_container_name)
-                        .and_then(|container_status| {
-                            // Check terminated state first, then waiting state
-                            container_status
-                                .state
-                                .as_ref()
-                                .and_then(|state| {
-                                    // Check terminated state
-                                    if let Some(terminated) = &state.terminated {
-                                        if terminated.exit_code != 0 {
-                                            return Some(PodError {
-                                                exit_code: Some(terminated.exit_code),
-                                                message: terminated.message.clone().and_then(|msg| {
-                                                    sanitize_error_message(msg)
-                                                }),
-                                                reason: terminated.reason.clone(),
-                                            });
-                                        }
-                                    }
-                                    
-                                    // Check waiting state for restart loops
-                                    if let Some(waiting) = &state.waiting {
-                                        if waiting.reason.as_deref() == Some("CrashLoopBackOff") 
-                                            || waiting.reason.as_deref() == Some("ImagePullBackOff") {
-                                            return Some(PodError {
-                                                exit_code: None,
-                                                message: waiting.message.clone().and_then(|msg| {
-                                                    sanitize_error_message(msg)
-                                                }),
-                                                reason: waiting.reason.clone(),
-                                            });
-                                        }
-                                    }
-                                    
-                                    None
-                                })
-                                .or_else(|| {
-                                    // Check last terminated state
-                                    container_status
-                                        .last_state
-                                        .as_ref()
-                                        .and_then(|last_state| {
-                                            if let Some(terminated) = &last_state.terminated {
-                                                if terminated.exit_code != 0 {
-                                                    return Some(PodError {
-                                                        exit_code: Some(terminated.exit_code),
-                                                        message: terminated.message.clone().and_then(|msg| {
-                                                            sanitize_error_message(msg)
-                                                        }),
-                                                        reason: terminated.reason.clone(),
-                                                    });
-                                                }
-                                            }
-                                            None
-                                        })
-                                })
-                        })
-                })
-            });
+        let replicator_container_name = format!("{prefix}-{REPLICATOR_CONTAINER_NAME_SUFFIX}");
 
-        Ok(pod_error)
+        // Find the replicator container status
+        let container_status = pod.status.and_then(|status| {
+            status.container_statuses.and_then(|container_statuses| {
+                container_statuses
+                    .iter()
+                    .find(|cs| cs.name == replicator_container_name)
+                    .cloned()
+            })
+        });
+
+        let Some(container_status) = container_status else {
+            return Ok(None);
+        };
+
+        // Check last terminated state.
+        //
+        // `last_state` is only set when there’s a previous termination, and remains empty if the
+        // container has never failed, so this is what we want, having access to the previous failure
+        if let Some(last_state) = &container_status.last_state {
+            if let Some(terminated) = &last_state.terminated {
+                if terminated.exit_code != 0 {
+                    // Fetch logs from the previous container run
+                    let log_message = self
+                        .get_container_logs(&pod_name, &replicator_container_name, true)
+                        .await
+                        .ok();
+
+                    return Ok(Some(ContainerError {
+                        exit_code: Some(terminated.exit_code),
+                        message: log_message.or_else(|| terminated.message.clone()),
+                        reason: terminated.reason.clone(),
+                    }));
+                }
+            }
+        }
+
+        Ok(None)
     }
 
     async fn delete_pod(&self, prefix: &str) -> Result<(), K8sError> {
         info!("deleting pod");
+
         let pod_name = format!("{prefix}-{STATEFUL_SET_NAME_SUFFIX}-0");
         let dp = DeleteParams::default();
         match self.pods_api.delete(&pod_name, &dp).await {
@@ -609,77 +598,26 @@ impl K8sClient for HttpK8sClient {
             },
         }
         info!("deleted pod");
+
         Ok(())
     }
-}
 
-fn sanitize_error_message(message: String) -> Option<String> {
-    let message = message.trim();
-    
-    // Return None for empty messages
-    if message.is_empty() {
-        return None;
+    async fn get_container_logs(
+        &self,
+        pod_name: &str,
+        container_name: &str,
+        previous: bool,
+    ) -> Result<String, K8sError> {
+        let log_params = LogParams {
+            container: Some(container_name.to_string()),
+            tail_lines: Some(50), // Get last 50 lines
+            timestamps: false,
+            previous, // Get logs from previous container instance or not
+            ..Default::default()
+        };
+
+        let logs = self.pods_api.logs(pod_name, &log_params).await?;
+
+        Ok(logs)
     }
-    
-    // Filter out system internal messages that shouldn't be exposed
-    let filtered_patterns = [
-        "/dev/termination-log",
-        "/proc/",
-        "/sys/",
-        "/var/run/",
-        "/tmp/",
-        "kubernetes.io/",
-        "k8s.io/",
-        "container runtime",
-        "OOMKilled",
-        "signal:",
-        "SIGKILL",
-        "SIGTERM",
-        "exit status",
-    ];
-    
-    // Check if message contains system internal patterns
-    for pattern in &filtered_patterns {
-        if message.to_lowercase().contains(&pattern.to_lowercase()) {
-            return None;
-        }
-    }
-    
-    // Extract application-level errors from common patterns
-    let lines: Vec<&str> = message.lines().collect();
-    
-    // Look for panic messages or error messages that are application-level
-    for line in &lines {
-        let line = line.trim();
-        if line.starts_with("panic:")
-            || line.starts_with("Error:")
-            || line.starts_with("FATAL:")
-            || line.starts_with("ERROR:")
-            || line.contains("error:")
-            || line.contains("failed to")
-            || line.contains("unable to")
-            || line.contains("cannot")
-        {
-            // Only return if it doesn't contain system paths
-            if !filtered_patterns.iter().any(|pattern| {
-                line.to_lowercase().contains(&pattern.to_lowercase())
-            }) {
-                return Some(line.to_string());
-            }
-        }
-    }
-    
-    // If no specific error pattern found, return the first few lines if they seem safe
-    if !lines.is_empty() {
-        let first_line = lines[0].trim();
-        if first_line.len() > 10 
-            && !filtered_patterns.iter().any(|pattern| {
-                first_line.to_lowercase().contains(&pattern.to_lowercase())
-            }) 
-        {
-            return Some(first_line.to_string());
-        }
-    }
-    
-    None
 }

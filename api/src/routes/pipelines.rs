@@ -8,6 +8,7 @@ use config::shared::{
     DestinationConfig, PgConnectionConfig, PipelineConfig as SharedPipelineConfig,
     ReplicatorConfig, SupabaseConfig, TlsConfig,
 };
+use k8s_openapi::api::core::v1::PodStatus;
 use serde::{Deserialize, Serialize};
 use sqlx::{PgPool, PgTransaction};
 use std::ops::DerefMut;
@@ -28,6 +29,7 @@ use crate::k8s_client::{
 };
 use crate::routes::{ErrorMessage, TenantIdError, extract_tenant_id};
 use secrecy::ExposeSecret;
+use tracing::info;
 
 #[derive(Debug, Error)]
 enum PipelineError {
@@ -204,6 +206,29 @@ pub struct ReadPipelinesResponse {
 pub struct UpdatePipelineImageRequest {
     #[schema(example = 1)]
     pub image_id: Option<i64>,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct GetPipelineStatusResponse {
+    #[schema(example = 1)]
+    pub pipeline_id: i64,
+    pub status: PipelineStatus,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+#[serde(tag = "name")]
+pub enum PipelineStatus {
+    Stopped,
+    Starting,
+    Started,
+    Stopping,
+    Unknown,
+    Failed {
+        exit_code: Option<i32>,
+        message: Option<String>,
+        reason: Option<String>,
+    },
 }
 
 #[utoipa::path(
@@ -423,7 +448,7 @@ pub async fn read_all_pipelines(
     ),
     responses(
         (status = 200, description = "Start a pipeline"),
-        (status = 500, description = "Internal server error")
+        (status = 500, description = "Internal server error", body = ErrorMessage)
     )
 )]
 #[post("/pipelines/{pipeline_id}/start")]
@@ -467,7 +492,7 @@ pub async fn start_pipeline(
     ),
     responses(
         (status = 200, description = "Stop a pipeline"),
-        (status = 500, description = "Internal server error")
+        (status = 500, description = "Internal server error", body = ErrorMessage)
     )
 )]
 #[post("/pipelines/{pipeline_id}/stop")]
@@ -499,7 +524,7 @@ pub async fn stop_pipeline(
     ),
     responses(
         (status = 200, description = "Stop all pipelines"),
-        (status = 500, description = "Internal server error")
+        (status = 500, description = "Internal server error", body = ErrorMessage)
     )
 )]
 #[post("/pipelines/stop")]
@@ -520,20 +545,6 @@ pub async fn stop_all_pipelines(
     Ok(HttpResponse::Ok().finish())
 }
 
-#[derive(Serialize, ToSchema)]
-pub enum PipelineStatus {
-    Stopped,
-    Starting,
-    Started,
-    Stopping,
-    Unknown,
-    Failed { 
-        exit_code: Option<i32>, 
-        message: Option<String>, 
-        reason: Option<String> 
-    },
-}
-
 #[utoipa::path(
     context_path = "/v1",
     params(
@@ -541,8 +552,8 @@ pub enum PipelineStatus {
         ("tenant_id" = String, Header, description = "The tenant ID")
     ),
     responses(
-        (status = 200, description = "Get pipeline status"),
-        (status = 500, description = "Internal server error")
+        (status = 200, description = "Get pipeline status", body = GetPipelineStatusResponse),
+        (status = 500, description = "Internal server error", body = ErrorMessage)
     )
 )]
 #[get("/pipelines/{pipeline_id}/status")]
@@ -562,41 +573,44 @@ pub async fn get_pipeline_status(
 
     let prefix = create_k8s_object_prefix(tenant_id, replicator.id);
 
+    // We load the pod phase.
     let pod_phase = k8s_client.get_pod_phase(&prefix).await?;
 
-    let status = match pod_phase {
-        PodPhase::Pending => PipelineStatus::Starting,
-        PodPhase::Running => PipelineStatus::Started,
-        PodPhase::Succeeded => PipelineStatus::Stopped,
-        PodPhase::Failed => {
-            // Get detailed error information for failed pods
-            match k8s_client.get_replicator_pod_error(&prefix).await? {
-                Some(pod_error) => PipelineStatus::Failed {
-                    exit_code: pod_error.exit_code,
-                    message: pod_error.message,
-                    reason: pod_error.reason,
-                },
-                None => PipelineStatus::Failed {
-                    exit_code: None,
-                    message: None,
-                    reason: None,
-                },
-            }
+    // We check the status of the replicator container.
+    //
+    // Note that this is dumping all the logs within the container, meaning that anything on stdout
+    // and stderr will be returned. In case we want to be more careful with what we return we can
+    // embed within the logs some special characters that will be used to determine which error message
+    // to return to the user.
+    let replicator_error = k8s_client.get_replicator_container_error(&prefix).await?;
+
+    let mut status = PipelineStatus::Unknown;
+    if let Some(replicator_error) = replicator_error {
+        status = PipelineStatus::Failed {
+            exit_code: replicator_error.exit_code,
+            message: replicator_error.message,
+            reason: replicator_error.reason,
         }
-        PodPhase::Unknown => {
-            // Check if pod is in error state even if phase is unknown
-            match k8s_client.get_replicator_pod_error(&prefix).await? {
-                Some(pod_error) => PipelineStatus::Failed {
-                    exit_code: pod_error.exit_code,
-                    message: pod_error.message,
-                    reason: pod_error.reason,
-                },
-                None => PipelineStatus::Unknown,
-            }
-        }
+    } else {
+        status = match pod_phase {
+            PodPhase::Pending => PipelineStatus::Starting,
+            PodPhase::Running => PipelineStatus::Started,
+            PodPhase::Succeeded => PipelineStatus::Stopped,
+            PodPhase::Failed => PipelineStatus::Failed {
+                exit_code: None,
+                message: None,
+                reason: None,
+            },
+            PodPhase::Unknown => PipelineStatus::Unknown,
+        };
+    }
+
+    let response = GetPipelineStatusResponse {
+        pipeline_id,
+        status,
     };
 
-    Ok(Json(status))
+    Ok(Json(response))
 }
 
 #[utoipa::path(
