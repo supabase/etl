@@ -136,7 +136,6 @@ where
         .await?;
 
         self.workers = PipelineWorkers::Started { apply_worker, pool };
-        info!("pipeline started successfully");
 
         Ok(())
     }
@@ -154,7 +153,10 @@ where
         &self,
         replication_client: &PgReplicationClient,
     ) -> Result<(), PipelineError> {
-        info!("initializing table states");
+        info!(
+            "initializing table states for tables in publication '{}'",
+            self.config.publication_name
+        );
 
         // We need to make sure that the publication exists.
         if !replication_client
@@ -173,15 +175,7 @@ where
         let table_ids = replication_client
             .get_publication_table_ids(&self.config.publication_name)
             .await?;
-        info!(
-            "got table ids from publication {}: {}",
-            self.config.publication_name,
-            table_ids
-                .iter()
-                .map(|id| id.to_string())
-                .collect::<Vec<String>>()
-                .join(", ")
-        );
+
         self.state_store.load_table_replication_states().await?;
         let states = self.state_store.get_table_replication_states().await?;
         for table_id in table_ids {

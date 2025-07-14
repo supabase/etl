@@ -275,7 +275,7 @@ where
     hook.initialize().await?;
 
     info!(
-        "starting apply loop in worker {:?} from lsn {}",
+        "starting apply loop in worker '{:?}' from lsn {}",
         hook.worker_type(),
         start_lsn
     );
@@ -431,10 +431,12 @@ where
             // we could just call clear() on it.
             let events_batch =
                 std::mem::replace(&mut state.events_batch, Vec::with_capacity(max_batch_size));
-            debug!(
+
+            info!(
                 "sending batch of {} events to destination",
                 events_batch.len()
             );
+
             destination.write_events(events_batch).await?;
             state.last_batch_send_time = Instant::now();
         }

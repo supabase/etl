@@ -78,7 +78,7 @@ where
         TableReplicationPhaseType::SyncDone | TableReplicationPhaseType::Ready
     ) {
         info!(
-            "table {} sync not required, already in phase {:?}",
+            "table {} sync not required, already in phase '{:?}'",
             table_id, phase_type
         );
 
