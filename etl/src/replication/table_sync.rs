@@ -226,7 +226,6 @@ where
             slot.consistent_point
         }
         TableReplicationPhaseType::FinishedCopy => {
-            debug!("resuming from finished copy state for table {}", table_id);
             let slot = replication_client.get_slot(&slot_name).await?;
             info!(
                 "resuming table sync for table {} from lsn {}",
@@ -262,6 +261,8 @@ where
 
         return Ok(TableSyncResult::SyncStopped);
     }
+
+    info!("table sync for table {} completed", table_id);
 
     Ok(TableSyncResult::SyncCompleted { start_lsn })
 }

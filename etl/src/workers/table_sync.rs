@@ -6,7 +6,7 @@ use thiserror::Error;
 use tokio::sync::{AcquireError, Notify, RwLock, RwLockReadGuard, Semaphore};
 use tokio::task::JoinHandle;
 use tokio_postgres::types::PgLsn;
-use tracing::{Instrument, debug, error, info};
+use tracing::{Instrument, debug, error, info, warn};
 
 use crate::concurrency::future::ReactiveFuture;
 use crate::concurrency::shutdown::{ShutdownResult, ShutdownRx};
@@ -349,7 +349,6 @@ where
             let replication_client =
                 PgReplicationClient::connect(self.config.pg_connection.clone()).await?;
 
-            debug!("starting table sync process for table {}", self.table_id);
             let result = start_table_sync(
                 self.pipeline_id,
                 self.config.clone(),
@@ -365,26 +364,18 @@ where
 
             let start_lsn = match result {
                 Ok(TableSyncResult::SyncStopped | TableSyncResult::SyncNotRequired) => {
-                    info!("table sync worker for table {} exited early", self.table_id);
                     return Ok(());
                 }
                 Ok(TableSyncResult::SyncCompleted { start_lsn }) => {
-                    info!(
-                        "table {} sync completed, starting apply loop from lsn {}",
-                        self.table_id, start_lsn
-                    );
                     start_lsn
                 }
                 Err(err) => {
                     error!("table sync failed for table {}: {}", self.table_id, err);
+                    
                     return Err(err.into());
                 }
             };
 
-            info!(
-                "starting apply loop for table sync worker for table {}",
-                self.table_id
-            );
             start_apply_loop(
                 self.pipeline_id,
                 start_lsn,
@@ -420,13 +411,13 @@ where
                     );
                 }
                 Ok(Err(err)) => {
-                    error!(
+                    warn!(
                         "failed to delete the replication slot {slot_name} of the table sync worker {}: {err}",
                         self.table_id
                     )
                 }
                 Err(_) => {
-                    error!(
+                    warn!(
                         "failed to delete the replication slot {slot_name} of the table sync worker {} due to timeout",
                         self.table_id
                     );
