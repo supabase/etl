@@ -147,6 +147,8 @@ where
             )
             .await?;
 
+            info!("apply worker completed successfully");
+
             Ok(())
         }
         .instrument(apply_worker_span);
@@ -238,7 +240,10 @@ where
         if let Err(err) = pool.start_worker(worker).await {
             // TODO: check if we want to build a backoff mechanism for retrying the
             //  spawning of new table sync workers.
-            error!("failed to start table sync worker for table {}: {}", table_id, err);
+            error!(
+                "failed to start table sync worker for table {}: {}",
+                table_id, err
+            );
 
             return Err(err.into());
         }
@@ -277,7 +282,10 @@ where
         {
             let mut inner = table_sync_worker_state.get_inner().write().await;
             if inner.replication_phase().as_type() == TableReplicationPhaseType::SyncWait {
-                info!("table sync worker {} is waiting to catchup, starting catchup at lsn {}", table_id, current_lsn);
+                info!(
+                    "table sync worker {} is waiting to catchup, starting catchup at lsn {}",
+                    table_id, current_lsn
+                );
 
                 inner
                     .set_phase_with(
@@ -291,7 +299,10 @@ where
         }
 
         if catchup_started {
-            info!("catchup was started, waiting for table sync worker {} to complete sync", table_id);
+            info!(
+                "catchup was started, waiting for table sync worker {} to complete sync",
+                table_id
+            );
 
             let result = table_sync_worker_state
                 .wait_for_phase_type(

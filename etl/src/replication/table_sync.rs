@@ -66,6 +66,8 @@ where
     S: StateStore + Clone + Send + 'static,
     D: Destination + Clone + Send + 'static,
 {
+    info!("starting table sync for table {}", table_id);
+
     let inner = table_sync_worker_state.get_inner().read().await;
     let phase_type = inner.replication_phase().as_type();
 
@@ -209,7 +211,10 @@ where
             // since no transactions can be running while replication is started.
             transaction.commit().await?;
 
-            info!("completed table copy for table {} ({} rows copied)", table_id, rows_copied);
+            info!(
+                "completed table copy for table {} ({} rows copied)",
+                table_id, rows_copied
+            );
             // We mark that we finished the copy of the table schema and data.
             {
                 let mut inner = table_sync_worker_state.get_inner().write().await;
@@ -223,7 +228,10 @@ where
         TableReplicationPhaseType::FinishedCopy => {
             debug!("resuming from finished copy state for table {}", table_id);
             let slot = replication_client.get_slot(&slot_name).await?;
-            info!("resuming table sync for table {} from lsn {}", table_id, slot.confirmed_flush_lsn);
+            info!(
+                "resuming table sync for table {} from lsn {}",
+                table_id, slot.confirmed_flush_lsn
+            );
 
             slot.confirmed_flush_lsn
         }

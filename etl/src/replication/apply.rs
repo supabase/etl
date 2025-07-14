@@ -274,7 +274,11 @@ where
     // We initialize the apply loop which is based on the hook implementation.
     hook.initialize().await?;
 
-    info!("starting apply loop in worker {} from lsn {}", hook.worker_type(), start_lsn);
+    info!(
+        "starting apply loop in worker {:?} from lsn {}",
+        hook.worker_type(),
+        start_lsn
+    );
 
     // We compute the slot name for the replication slot that we are going to use for the logical
     // replication. At this point we assume that the slot already exists.
@@ -427,7 +431,10 @@ where
             // we could just call clear() on it.
             let events_batch =
                 std::mem::replace(&mut state.events_batch, Vec::with_capacity(max_batch_size));
-            debug!("sending batch of {} events to destination", events_batch.len());
+            debug!(
+                "sending batch of {} events to destination",
+                events_batch.len()
+            );
             destination.write_events(events_batch).await?;
             state.last_batch_send_time = Instant::now();
         }
@@ -449,7 +456,10 @@ where
             // the `write_lsn` which is used by Postgres to get an acknowledgement of how far we have processed
             // messages but not flushed them.
             // TODO: check if we want to send `apply_lsn` as a different value.
-            debug!("updating lsn for next status update to {}", last_commit_end_lsn);
+            debug!(
+                "updating lsn for next status update to {}",
+                last_commit_end_lsn
+            );
             state
                 .next_status_update
                 .update_flush_lsn(last_commit_end_lsn);
@@ -491,7 +501,10 @@ where
             let end_lsn = PgLsn::from(message.wal_end());
             state.next_status_update.update_write_lsn(end_lsn);
 
-            debug!("handling logical replication data message (start_lsn: {}, end_lsn: {})", start_lsn, end_lsn);
+            debug!(
+                "handling logical replication data message (start_lsn: {}, end_lsn: {})",
+                start_lsn, end_lsn
+            );
 
             handle_logical_replication_message(state, message.into_data(), schema_cache, hook).await
         }
@@ -499,7 +512,10 @@ where
             let end_lsn = PgLsn::from(message.wal_end());
             state.next_status_update.update_write_lsn(end_lsn);
 
-            debug!("handling logical replication status update message (end_lsn: {})", end_lsn);
+            debug!(
+                "handling logical replication status update message (end_lsn: {})",
+                end_lsn
+            );
 
             events_stream
                 .send_status_update(

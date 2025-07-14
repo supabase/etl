@@ -381,7 +381,10 @@ where
                 }
             };
 
-            info!("starting apply loop for table sync worker for table {}", self.table_id);
+            info!(
+                "starting apply loop for table sync worker for table {}",
+                self.table_id
+            );
             start_apply_loop(
                 self.pipeline_id,
                 start_lsn,
@@ -404,7 +407,6 @@ where
                 table_id: self.table_id,
             };
             let slot_name = get_slot_name(self.pipeline_id, worker_type).unwrap();
-            debug!("deleting replication slot '{}' for table sync worker {}", slot_name, self.table_id);
             let result = tokio::time::timeout(
                 MAX_DELETE_SLOT_WAIT,
                 replication_client.delete_slot(&slot_name),
@@ -412,7 +414,10 @@ where
             .await;
             match result {
                 Ok(Ok(())) => {
-                    info!("successfully deleted replication slot '{}' for table {}", slot_name, self.table_id);
+                    info!(
+                        "successfully deleted replication slot '{}' for table {}",
+                        slot_name, self.table_id
+                    );
                 }
                 Ok(Err(err)) => {
                     error!(
@@ -433,7 +438,8 @@ where
             // connections.
             drop(permit);
 
-            info!("table sync worker for table {} completed successfully", self.table_id);
+            info!("table sync worker {} completed successfully", self.table_id);
+
             Ok(())
         };
 
