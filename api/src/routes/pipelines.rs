@@ -9,7 +9,7 @@ use config::shared::{
     ReplicatorConfig, SupabaseConfig, TlsConfig,
 };
 use serde::{Deserialize, Serialize};
-use sqlx::{PgPool, Postgres, Transaction};
+use sqlx::{PgPool, PgTransaction};
 use std::ops::DerefMut;
 use std::sync::Arc;
 use thiserror::Error;
@@ -710,7 +710,7 @@ async fn delete_pipeline_in_k8s(
 }
 
 async fn read_all_required_data(
-    txn: &mut Transaction<'_, Postgres>,
+    txn: &mut PgTransaction<'_>,
     tenant_id: &str,
     pipeline_id: i64,
     encryption_key: &EncryptionKey,

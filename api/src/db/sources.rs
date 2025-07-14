@@ -2,7 +2,7 @@ use config::SerializableSecretString;
 use config::shared::{PgConnectionConfig, TlsConfig};
 use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
-use sqlx::{Executor, Postgres};
+use sqlx::PgExecutor;
 use std::fmt::Debug;
 use thiserror::Error;
 
@@ -121,7 +121,7 @@ pub async fn create_source<'c, E>(
     encryption_key: &EncryptionKey,
 ) -> Result<i64, SourcesDbError>
 where
-    E: Executor<'c, Database = Postgres>,
+    E: PgExecutor<'c>,
 {
     let config =
         encrypt_and_serialize::<SourceConfig, EncryptedSourceConfig>(config, encryption_key)?;
@@ -149,7 +149,7 @@ pub async fn read_source<'c, E>(
     encryption_key: &EncryptionKey,
 ) -> Result<Option<Source>, SourcesDbError>
 where
-    E: Executor<'c, Database = Postgres>,
+    E: PgExecutor<'c>,
 {
     let record = sqlx::query!(
         r#"
@@ -192,7 +192,7 @@ pub async fn update_source<'c, E>(
     encryption_key: &EncryptionKey,
 ) -> Result<Option<i64>, SourcesDbError>
 where
-    E: Executor<'c, Database = Postgres>,
+    E: PgExecutor<'c>,
 {
     let config =
         encrypt_and_serialize::<SourceConfig, EncryptedSourceConfig>(config, encryption_key)?;
@@ -221,7 +221,7 @@ pub async fn delete_source<'c, E>(
     source_id: i64,
 ) -> Result<Option<i64>, SourcesDbError>
 where
-    E: Executor<'c, Database = Postgres>,
+    E: PgExecutor<'c>,
 {
     let record = sqlx::query!(
         r#"
@@ -244,7 +244,7 @@ pub async fn read_all_sources<'c, E>(
     encryption_key: &EncryptionKey,
 ) -> Result<Vec<Source>, SourcesDbError>
 where
-    E: Executor<'c, Database = Postgres>,
+    E: PgExecutor<'c>,
 {
     let records = sqlx::query!(
         r#"
@@ -281,7 +281,7 @@ pub async fn source_exists<'c, E>(
     source_id: i64,
 ) -> Result<bool, SourcesDbError>
 where
-    E: Executor<'c, Database = Postgres>,
+    E: PgExecutor<'c>,
 {
     let record = sqlx::query!(
         r#"

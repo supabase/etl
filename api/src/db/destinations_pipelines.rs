@@ -1,5 +1,5 @@
 use config::shared::DestinationConfig;
-use sqlx::{Postgres, Transaction};
+use sqlx::PgTransaction;
 use std::ops::DerefMut;
 use thiserror::Error;
 
@@ -34,7 +34,7 @@ pub enum DestinationPipelinesDbError {
 
 #[expect(clippy::too_many_arguments)]
 pub async fn create_destination_and_pipeline(
-    txn: &mut Transaction<'_, Postgres>,
+    txn: &mut PgTransaction<'_>,
     tenant_id: &str,
     source_id: i64,
     destination_name: &str,
@@ -67,7 +67,7 @@ pub async fn create_destination_and_pipeline(
 
 #[expect(clippy::too_many_arguments)]
 pub async fn update_destination_and_pipeline(
-    mut txn: Transaction<'_, Postgres>,
+    mut txn: PgTransaction<'_>,
     tenant_id: &str,
     destination_id: i64,
     pipeline_id: i64,

@@ -2,7 +2,7 @@ use config::SerializableSecretString;
 use config::shared::DestinationConfig;
 use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
-use sqlx::{Executor, Postgres};
+use sqlx::PgExecutor;
 use std::fmt::Debug;
 use thiserror::Error;
 
@@ -110,7 +110,7 @@ pub async fn create_destination<'c, E>(
     encryption_key: &EncryptionKey,
 ) -> Result<i64, DestinationsDbError>
 where
-    E: Executor<'c, Database = Postgres>,
+    E: PgExecutor<'c>,
 {
     let config = encrypt_and_serialize(config, encryption_key)?;
 
@@ -137,7 +137,7 @@ pub async fn read_destination<'c, E>(
     encryption_key: &EncryptionKey,
 ) -> Result<Option<Destination>, DestinationsDbError>
 where
-    E: Executor<'c, Database = Postgres>,
+    E: PgExecutor<'c>,
 {
     let record = sqlx::query!(
         r#"
@@ -182,7 +182,7 @@ pub async fn update_destination<'c, E>(
     encryption_key: &EncryptionKey,
 ) -> Result<Option<i64>, DestinationsDbError>
 where
-    E: Executor<'c, Database = Postgres>,
+    E: PgExecutor<'c>,
 {
     let config = encrypt_and_serialize(config, encryption_key)?;
 
@@ -210,7 +210,7 @@ pub async fn delete_destination<'c, E>(
     destination_id: i64,
 ) -> Result<Option<i64>, DestinationsDbError>
 where
-    E: Executor<'c, Database = Postgres>,
+    E: PgExecutor<'c>,
 {
     let record = sqlx::query!(
         r#"
@@ -233,7 +233,7 @@ pub async fn read_all_destinations<'c, E>(
     encryption_key: &EncryptionKey,
 ) -> Result<Vec<Destination>, DestinationsDbError>
 where
-    E: Executor<'c, Database = Postgres>,
+    E: PgExecutor<'c>,
 {
     let records = sqlx::query!(
         r#"
@@ -271,7 +271,7 @@ pub async fn destination_exists<'c, E>(
     destination_id: i64,
 ) -> Result<bool, DestinationsDbError>
 where
-    E: Executor<'c, Database = Postgres>,
+    E: PgExecutor<'c>,
 {
     let record = sqlx::query!(
         r#"

@@ -1,4 +1,4 @@
-use sqlx::{Executor, Postgres};
+use sqlx::PgExecutor;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -19,7 +19,7 @@ pub async fn create_image<'c, E>(
     is_default: bool,
 ) -> Result<i64, ImagesDbError>
 where
-    E: Executor<'c, Database = Postgres>,
+    E: PgExecutor<'c>,
 {
     let record = sqlx::query!(
         r#"
@@ -38,7 +38,7 @@ where
 
 pub async fn read_default_image<'c, E>(executor: E) -> Result<Option<Image>, ImagesDbError>
 where
-    E: Executor<'c, Database = Postgres>,
+    E: PgExecutor<'c>,
 {
     let record = sqlx::query!(
         r#"
@@ -59,7 +59,7 @@ where
 
 pub async fn read_image<'c, E>(executor: E, image_id: i64) -> Result<Option<Image>, ImagesDbError>
 where
-    E: Executor<'c, Database = Postgres>,
+    E: PgExecutor<'c>,
 {
     let record = sqlx::query!(
         r#"
@@ -86,7 +86,7 @@ pub async fn update_image<'c, E>(
     is_default: bool,
 ) -> Result<Option<i64>, ImagesDbError>
 where
-    E: Executor<'c, Database = Postgres>,
+    E: PgExecutor<'c>,
 {
     let record = sqlx::query!(
         r#"
@@ -107,7 +107,7 @@ where
 
 pub async fn delete_image<'c, E>(executor: E, image_id: i64) -> Result<Option<i64>, ImagesDbError>
 where
-    E: Executor<'c, Database = Postgres>,
+    E: PgExecutor<'c>,
 {
     let record = sqlx::query!(
         r#"
@@ -125,7 +125,7 @@ where
 
 pub async fn read_all_images<'c, E>(executor: E) -> Result<Vec<Image>, ImagesDbError>
 where
-    E: Executor<'c, Database = Postgres>,
+    E: PgExecutor<'c>,
 {
     let mut record = sqlx::query!(
         r#"
@@ -151,7 +151,7 @@ pub async fn read_image_by_replicator_id<'c, E>(
     replicator_id: i64,
 ) -> Result<Option<Image>, ImagesDbError>
 where
-    E: Executor<'c, Database = Postgres>,
+    E: PgExecutor<'c>,
 {
     let record = sqlx::query!(
         r#"

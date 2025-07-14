@@ -1,4 +1,4 @@
-use sqlx::{Executor, Postgres};
+use sqlx::PgExecutor;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -18,7 +18,7 @@ pub async fn create_tenant<'c, E>(
     tenant_name: &str,
 ) -> Result<String, TenantsDbError>
 where
-    E: Executor<'c, Database = Postgres>,
+    E: PgExecutor<'c>,
 {
     let record = sqlx::query!(
         r#"
@@ -41,7 +41,7 @@ pub async fn create_or_update_tenant<'c, E>(
     tenant_name: &str,
 ) -> Result<String, TenantsDbError>
 where
-    E: Executor<'c, Database = Postgres>,
+    E: PgExecutor<'c>,
 {
     let record = sqlx::query!(
         r#"
@@ -64,7 +64,7 @@ pub async fn read_tenant<'c, E>(
     tenant_id: &str,
 ) -> Result<Option<Tenant>, TenantsDbError>
 where
-    E: Executor<'c, Database = Postgres>,
+    E: PgExecutor<'c>,
 {
     let record = sqlx::query!(
         r#"
@@ -89,7 +89,7 @@ pub async fn update_tenant<'c, E>(
     tenant_name: &str,
 ) -> Result<Option<String>, TenantsDbError>
 where
-    E: Executor<'c, Database = Postgres>,
+    E: PgExecutor<'c>,
 {
     let record = sqlx::query!(
         r#"
@@ -112,7 +112,7 @@ pub async fn delete_tenant<'c, E>(
     tenant_id: &str,
 ) -> Result<Option<String>, TenantsDbError>
 where
-    E: Executor<'c, Database = Postgres>,
+    E: PgExecutor<'c>,
 {
     let record = sqlx::query!(
         r#"
@@ -130,7 +130,7 @@ where
 
 pub async fn read_all_tenants<'c, E>(executor: E) -> Result<Vec<Tenant>, TenantsDbError>
 where
-    E: Executor<'c, Database = Postgres>,
+    E: PgExecutor<'c>,
 {
     let mut record = sqlx::query!(
         r#"

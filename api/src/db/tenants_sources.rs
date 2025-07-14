@@ -1,4 +1,4 @@
-use sqlx::{Postgres, Transaction};
+use sqlx::PgTransaction;
 use std::ops::DerefMut;
 use thiserror::Error;
 
@@ -23,7 +23,7 @@ pub enum TenantSourceDbError {
 }
 
 pub async fn create_tenant_and_source(
-    txn: &mut Transaction<'_, Postgres>,
+    txn: &mut PgTransaction<'_>,
     tenant_id: &str,
     tenant_name: &str,
     source_name: &str,

@@ -1,4 +1,4 @@
-use sqlx::{Executor, Postgres};
+use sqlx::PgExecutor;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -19,7 +19,7 @@ pub async fn create_replicator<'c, E>(
     image_id: i64,
 ) -> Result<i64, ReplicatorsDbError>
 where
-    E: Executor<'c, Database = Postgres>,
+    E: PgExecutor<'c>,
 {
     let record = sqlx::query!(
         r#"
@@ -42,7 +42,7 @@ pub async fn read_replicator_by_pipeline_id<'c, E>(
     pipeline_id: i64,
 ) -> Result<Option<Replicator>, ReplicatorsDbError>
 where
-    E: Executor<'c, Database = Postgres>,
+    E: PgExecutor<'c>,
 {
     let record = sqlx::query!(
         r#"
@@ -69,7 +69,7 @@ pub async fn read_replicators<'c, E>(
     tenant_id: &str,
 ) -> Result<Vec<Replicator>, ReplicatorsDbError>
 where
-    E: Executor<'c, Database = Postgres>,
+    E: PgExecutor<'c>,
 {
     let mut records = sqlx::query!(
         r#"
@@ -100,7 +100,7 @@ pub async fn update_replicator_image<'c, E>(
     image_id: i64,
 ) -> Result<Option<i64>, ReplicatorsDbError>
 where
-    E: Executor<'c, Database = Postgres>,
+    E: PgExecutor<'c>,
 {
     let record = sqlx::query!(
         r#"

@@ -1,6 +1,6 @@
 use config::shared::{BatchConfig, RetryConfig};
 use serde::{Deserialize, Serialize};
-use sqlx::{Executor, Postgres, Transaction};
+use sqlx::{PgExecutor, PgTransaction};
 use std::ops::DerefMut;
 use thiserror::Error;
 
@@ -47,7 +47,7 @@ pub enum PipelinesDbError {
 }
 
 pub async fn create_pipeline(
-    txn: &mut Transaction<'_, Postgres>,
+    txn: &mut PgTransaction<'_>,
     tenant_id: &str,
     source_id: i64,
     destination_id: i64,
@@ -81,7 +81,7 @@ pub async fn read_pipeline<'c, E>(
     pipeline_id: i64,
 ) -> Result<Option<Pipeline>, PipelinesDbError>
 where
-    E: Executor<'c, Database = Postgres>,
+    E: PgExecutor<'c>,
 {
     let record = sqlx::query!(
         r#"
@@ -136,7 +136,7 @@ pub async fn update_pipeline<'c, E>(
     config: &PipelineConfig,
 ) -> Result<Option<i64>, PipelinesDbError>
 where
-    E: Executor<'c, Database = Postgres>,
+    E: PgExecutor<'c>,
 {
     let pipeline_config = serialize(config)?;
 
@@ -165,7 +165,7 @@ pub async fn delete_pipeline<'c, E>(
     pipeline_id: i64,
 ) -> Result<Option<i64>, PipelinesDbError>
 where
-    E: Executor<'c, Database = Postgres>,
+    E: PgExecutor<'c>,
 {
     let record = sqlx::query!(
         r#"
@@ -187,7 +187,7 @@ pub async fn read_all_pipelines<'c, E>(
     tenant_id: &str,
 ) -> Result<Vec<Pipeline>, PipelinesDbError>
 where
-    E: Executor<'c, Database = Postgres>,
+    E: PgExecutor<'c>,
 {
     let records = sqlx::query!(
         r#"
