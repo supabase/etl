@@ -527,6 +527,11 @@ pub enum PipelineStatus {
     Started,
     Stopping,
     Unknown,
+    Failed { 
+        exit_code: Option<i32>, 
+        message: Option<String>, 
+        reason: Option<String> 
+    },
 }
 
 #[utoipa::path(
@@ -559,13 +564,36 @@ pub async fn get_pipeline_status(
 
     let pod_phase = k8s_client.get_pod_phase(&prefix).await?;
 
-    // TODO: expose failures in a better way.
     let status = match pod_phase {
         PodPhase::Pending => PipelineStatus::Starting,
         PodPhase::Running => PipelineStatus::Started,
         PodPhase::Succeeded => PipelineStatus::Stopped,
-        PodPhase::Failed => PipelineStatus::Stopped,
-        PodPhase::Unknown => PipelineStatus::Unknown,
+        PodPhase::Failed => {
+            // Get detailed error information for failed pods
+            match k8s_client.get_replicator_pod_error(&prefix).await? {
+                Some(pod_error) => PipelineStatus::Failed {
+                    exit_code: pod_error.exit_code,
+                    message: pod_error.message,
+                    reason: pod_error.reason,
+                },
+                None => PipelineStatus::Failed {
+                    exit_code: None,
+                    message: None,
+                    reason: None,
+                },
+            }
+        }
+        PodPhase::Unknown => {
+            // Check if pod is in error state even if phase is unknown
+            match k8s_client.get_replicator_pod_error(&prefix).await? {
+                Some(pod_error) => PipelineStatus::Failed {
+                    exit_code: pod_error.exit_code,
+                    message: pod_error.message,
+                    reason: pod_error.reason,
+                },
+                None => PipelineStatus::Unknown,
+            }
+        }
     };
 
     Ok(Json(status))
