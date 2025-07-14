@@ -17,7 +17,7 @@ use std::sync::Arc;
 use thiserror::Error;
 use tokio::pin;
 use tokio_postgres::types::PgLsn;
-use tracing::{debug, error, info, warn};
+use tracing::{error, info, warn};
 
 #[derive(Debug, Error)]
 pub enum TableSyncError {
