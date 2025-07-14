@@ -1,7 +1,7 @@
 use api::db::pipelines::PipelineConfig;
 use api::routes::pipelines::{
     CreatePipelineRequest, CreatePipelineResponse, ReadPipelineResponse, ReadPipelinesResponse,
-    UpdateImageRequest, UpdatePipelineRequest,
+    UpdatePipelineImageRequest, UpdatePipelineRequest,
 };
 use config::shared::{BatchConfig, RetryConfig};
 use reqwest::StatusCode;
@@ -638,7 +638,7 @@ async fn pipeline_image_can_be_updated_with_specific_image() {
     .await;
 
     // Act
-    let update_request = UpdateImageRequest {
+    let update_request = UpdatePipelineImageRequest {
         image_id: Some(1), // Use the default image ID
     };
     let response = app
@@ -669,7 +669,7 @@ async fn pipeline_image_can_be_updated_to_default_image() {
     .await;
 
     // Act - update to default image (no image_id specified)
-    let update_request = UpdateImageRequest { image_id: None };
+    let update_request = UpdatePipelineImageRequest { image_id: None };
     let response = app
         .update_pipeline_image(tenant_id, pipeline_id, &update_request)
         .await;
@@ -686,7 +686,7 @@ async fn update_image_fails_for_non_existing_pipeline() {
     let tenant_id = &create_tenant(&app).await;
 
     // Act
-    let update_request = UpdateImageRequest { image_id: None };
+    let update_request = UpdatePipelineImageRequest { image_id: None };
     let response = app
         .update_pipeline_image(tenant_id, 42, &update_request)
         .await;
@@ -715,7 +715,7 @@ async fn update_image_fails_for_non_existing_image() {
     .await;
 
     // Act
-    let update_request = UpdateImageRequest {
+    let update_request = UpdatePipelineImageRequest {
         image_id: Some(999), // Non-existing image ID
     };
     let response = app
@@ -747,7 +747,7 @@ async fn update_image_fails_for_pipeline_from_another_tenant() {
     .await;
 
     // Act - Try to update image using wrong tenant credentials
-    let update_request = UpdateImageRequest { image_id: None };
+    let update_request = UpdatePipelineImageRequest { image_id: None };
     let response = app
         .update_pipeline_image("wrong-tenant-id", pipeline_id, &update_request)
         .await;
@@ -765,7 +765,7 @@ async fn update_image_fails_when_no_default_image_exists() {
     let tenant_id = &create_tenant(&app).await;
 
     // Act - Try to update to default image when none exists
-    let update_request = UpdateImageRequest { image_id: None };
+    let update_request = UpdatePipelineImageRequest { image_id: None };
     let response = app
         .update_pipeline_image(tenant_id, 1, &update_request)
         .await;

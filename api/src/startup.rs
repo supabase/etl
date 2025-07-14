@@ -36,9 +36,9 @@ use crate::{
         },
         pipelines::{
             CreatePipelineRequest, CreatePipelineResponse, ReadPipelineResponse,
-            ReadPipelinesResponse, UpdateImageRequest, UpdatePipelineRequest, create_pipeline,
-            delete_pipeline, get_pipeline_status, read_all_pipelines, read_pipeline,
-            start_pipeline, stop_all_pipelines, stop_pipeline, update_pipeline,
+            ReadPipelinesResponse, UpdatePipelineImageRequest, UpdatePipelineRequest,
+            create_pipeline, delete_pipeline, get_pipeline_status, read_all_pipelines,
+            read_pipeline, start_pipeline, stop_all_pipelines, stop_pipeline, update_pipeline,
             update_pipeline_image,
         },
         sources::{
@@ -197,7 +197,7 @@ pub async fn run(
             UpdatePipelineRequest,
             ReadPipelineResponse,
             ReadPipelinesResponse,
-            UpdateImageRequest,
+            UpdatePipelineImageRequest,
             CreateTenantRequest,
             CreateTenantResponse,
             CreateOrUpdateTenantRequest,

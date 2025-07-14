@@ -201,7 +201,7 @@ pub struct ReadPipelinesResponse {
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
-pub struct UpdateImageRequest {
+pub struct UpdatePipelineImageRequest {
     #[schema(example = 1)]
     pub image_id: Option<i64>,
 }
@@ -573,7 +573,7 @@ pub async fn get_pipeline_status(
 
 #[utoipa::path(
     context_path = "/v1",
-    request_body = UpdateImageRequest,
+    request_body = UpdatePipelineImageRequest,
     params(
         ("pipeline_id" = i64, Path, description = "Id of the pipeline"),
         ("tenant_id" = String, Header, description = "The tenant ID")
@@ -594,7 +594,7 @@ pub async fn update_pipeline_image(
     encryption_key: Data<EncryptionKey>,
     k8s_client: Option<Data<Arc<HttpK8sClient>>>,
     pipeline_id: Path<i64>,
-    update_request: Json<UpdateImageRequest>,
+    update_request: Json<UpdatePipelineImageRequest>,
 ) -> Result<impl Responder, PipelineError> {
     let tenant_id = extract_tenant_id(&req)?;
     let pipeline_id = pipeline_id.into_inner();

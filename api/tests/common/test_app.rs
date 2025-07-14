@@ -4,7 +4,9 @@ use api::routes::destinations_pipelines::{
     CreateDestinationPipelineRequest, UpdateDestinationPipelineRequest,
 };
 use api::routes::images::{CreateImageRequest, UpdateImageRequest};
-use api::routes::pipelines::{CreatePipelineRequest, UpdateImageRequest, UpdatePipelineRequest};
+use api::routes::pipelines::{
+    CreatePipelineRequest, UpdatePipelineImageRequest, UpdatePipelineRequest,
+};
 use api::routes::sources::{CreateSourceRequest, UpdateSourceRequest};
 use api::routes::tenants::{CreateOrUpdateTenantRequest, CreateTenantRequest, UpdateTenantRequest};
 use api::routes::tenants_sources::CreateTenantSourceRequest;
@@ -372,7 +374,7 @@ impl TestApp {
         &self,
         tenant_id: &str,
         pipeline_id: i64,
-        update_request: &UpdateImageRequest,
+        update_request: &UpdatePipelineImageRequest,
     ) -> reqwest::Response {
         self.post_authenticated(format!(
             "{}/v1/pipelines/{pipeline_id}/update-image",
