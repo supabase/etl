@@ -17,7 +17,7 @@ use std::sync::Arc;
 use thiserror::Error;
 use tokio::pin;
 use tokio_postgres::types::PgLsn;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 #[derive(Debug, Error)]
 pub enum TableSyncError {
@@ -68,10 +68,6 @@ where
 {
     let inner = table_sync_worker_state.get_inner().read().await;
     let phase_type = inner.replication_phase().as_type();
-    debug!(
-        "starting table sync for table {} in phase {:?}",
-        table_id, phase_type
-    );
 
     // In case the work for this table has been already done, we don't want to continue and we
     // successfully return.
@@ -95,10 +91,11 @@ where
             | TableReplicationPhaseType::DataSync
             | TableReplicationPhaseType::FinishedCopy
     ) {
-        error!(
-            "invalid replication phase {:?} for table {}, cannot perform table sync",
+        warn!(
+            "invalid replication phase '{:?}' for table {}, cannot perform table sync",
             phase_type, table_id
         );
+
         return Err(TableSyncError::InvalidPhase(phase_type));
     }
 
@@ -142,6 +139,7 @@ where
             }
 
             // We are ready to start copying table data, and we update the state accordingly.
+            info!("starting data copy for table {}", table_id);
             {
                 let mut inner = table_sync_worker_state.get_inner().write().await;
                 inner
@@ -165,6 +163,7 @@ where
             //  for correct decoding, thus we rely on our own state store to preserve this information.
             // - Destination -> we write here because some consumers might want to have the schema of incoming
             //  data.
+            info!("fetching table schema for table {}", table_id);
             let table_schema = transaction
                 .get_table_schema(table_id, Some(&config.publication_name))
                 .await?;
@@ -181,12 +180,15 @@ where
                 BatchStream::wrap(table_copy_stream, config.batch.clone(), shutdown_rx.clone());
             pin!(table_copy_stream);
 
+            info!("starting table copy stream for table {}", table_id);
             // We start consuming the table stream. If any error occurs, we will bail the entire copy since
             // we want to be fully consistent.
+            let mut rows_copied = 0;
             while let Some(result) = table_copy_stream.next().await {
                 match result {
                     ShutdownResult::Ok(table_rows) => {
                         let table_rows = table_rows.into_iter().collect::<Result<Vec<_>, _>>()?;
+                        rows_copied += table_rows.len();
                         destination.write_table_rows(table_id, table_rows).await?;
                     }
                     ShutdownResult::Shutdown(_) => {
@@ -194,9 +196,10 @@ where
                         // that the system can automatically recover if a table copy has failed in
                         // the middle of processing.
                         info!(
-                            "Shutting down table sync worker for table {} during table copy",
+                            "shutting down table sync worker for table {} during table copy",
                             table_id
                         );
+
                         return Ok(TableSyncResult::SyncStopped);
                     }
                 }
@@ -206,6 +209,7 @@ where
             // since no transactions can be running while replication is started.
             transaction.commit().await?;
 
+            info!("completed table copy for table {} ({} rows copied)", table_id, rows_copied);
             // We mark that we finished the copy of the table schema and data.
             {
                 let mut inner = table_sync_worker_state.get_inner().write().await;
@@ -217,10 +221,13 @@ where
             slot.consistent_point
         }
         TableReplicationPhaseType::FinishedCopy => {
+            debug!("resuming from finished copy state for table {}", table_id);
             let slot = replication_client.get_slot(&slot_name).await?;
+            info!("resuming table sync for table {} from lsn {}", table_id, slot.confirmed_flush_lsn);
+
             slot.confirmed_flush_lsn
         }
-        _ => unreachable!("Phase type already validated above"),
+        _ => unreachable!("phase type already validated above"),
     };
 
     // We mark this worker as `SyncWait` (in memory only) to signal the apply worker that we are
@@ -241,9 +248,10 @@ where
     // the caller.
     if result.should_shutdown() {
         info!(
-            "Shutting down table sync worker for table {} while waiting for catchup",
+            "shutting down table sync worker for table {} while waiting for catchup",
             table_id
         );
+
         return Ok(TableSyncResult::SyncStopped);
     }
 

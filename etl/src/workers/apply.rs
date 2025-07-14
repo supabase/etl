@@ -174,7 +174,9 @@ async fn get_start_lsn(
     //  because it was never created in the first place. The answer here might be to create
     //  the apply worker slot as the first thing, before starting table sync workers.
     let slot = replication_client.get_or_create_slot(&slot_name).await?;
-    Ok(slot.get_start_lsn())
+    let start_lsn = slot.get_start_lsn();
+
+    Ok(start_lsn)
 }
 
 #[derive(Debug)]
@@ -236,7 +238,7 @@ where
         if let Err(err) = pool.start_worker(worker).await {
             // TODO: check if we want to build a backoff mechanism for retrying the
             //  spawning of new table sync workers.
-            error!("failed to start table sync worker: {}", err);
+            error!("failed to start table sync worker for table {}: {}", table_id, err);
 
             return Err(err.into());
         }
@@ -275,6 +277,8 @@ where
         {
             let mut inner = table_sync_worker_state.get_inner().write().await;
             if inner.replication_phase().as_type() == TableReplicationPhaseType::SyncWait {
+                info!("table sync worker {} is waiting to catchup, starting catchup at lsn {}", table_id, current_lsn);
+
                 inner
                     .set_phase_with(
                         TableReplicationPhase::Catchup { lsn: current_lsn },
@@ -287,6 +291,8 @@ where
         }
 
         if catchup_started {
+            info!("catchup was started, waiting for table sync worker {} to complete sync", table_id);
+
             let result = table_sync_worker_state
                 .wait_for_phase_type(
                     TableReplicationPhaseType::SyncDone,
@@ -294,13 +300,13 @@ where
                 )
                 .await;
 
+            info!("the table sync worker {} has finished syncing", table_id);
+
             // If we are told to shut down while waiting for a phase change, we will signal this to
             // the caller.
             if result.should_shutdown() {
                 return Ok(false);
             }
-
-            info!("sync completed for table {}", table_id);
         }
 
         Ok(true)
@@ -327,7 +333,7 @@ where
             if table_sync_worker_state.is_none() {
                 if let Err(err) = self.start_table_sync_worker(*table_id).await {
                     error!(
-                        "Error starting table sync worker for table {}: {}",
+                        "error starting table sync worker for table {}: {}",
                         table_id, err
                     );
                 }
@@ -345,7 +351,7 @@ where
         let active_table_replication_states =
             get_table_replication_states(&self.state_store, false).await?;
         debug!(
-            "Processing syncing tables for apply worker with lsn {}",
+            "processing syncing tables for apply worker with lsn {}",
             current_lsn
         );
 
@@ -364,9 +370,10 @@ where
                 TableReplicationPhase::SyncDone { lsn } => {
                     if current_lsn >= lsn && update_state {
                         info!(
-                            "Table {} is ready, its events are now processed by the main apply worker",
+                            "table {} is ready, its events will now be processed by the main apply worker",
                             table_id
                         );
+
                         self.state_store
                             .update_table_replication_state(table_id, TableReplicationPhase::Ready)
                             .await?;
@@ -374,7 +381,7 @@ where
                 }
                 _ => {
                     if let Err(err) = self.handle_syncing_table(table_id, current_lsn).await {
-                        error!("error handling syncing table {}: {}", table_id, err);
+                        error!("error handling syncing for table {}: {}", table_id, err);
                     }
                 }
             }

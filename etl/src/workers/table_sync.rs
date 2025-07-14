@@ -201,6 +201,8 @@ impl TableSyncWorkerState {
 
                 // Shutdown signal received, exit loop.
                 _ = shutdown_rx.changed() => {
+                    info!("shutdown signal received, cancelling the wait for phase type {:?}", phase_type);
+
                     return ShutdownResult::Shutdown(());
                 }
 
@@ -325,7 +327,7 @@ where
             // number of cocurrent connections to the source database.
             let permit = tokio::select! {
                 _ = self.shutdown_rx.changed() => {
-                    info!("shutting down table sync worker while waiting for a run permit");
+                    info!("shutting down table sync worker for table {} while waiting for a run permit", self.table_id);
 
                     return Ok(());
                 }
@@ -335,8 +337,8 @@ where
                 }
             };
 
-            debug!(
-                "acquired a running permit for table sync worker for table {}",
+            info!(
+                "acquired running permit for table sync worker for table {}",
                 self.table_id
             );
 
@@ -347,6 +349,7 @@ where
             let replication_client =
                 PgReplicationClient::connect(self.config.pg_connection.clone()).await?;
 
+            debug!("starting table sync process for table {}", self.table_id);
             let result = start_table_sync(
                 self.pipeline_id,
                 self.config.clone(),
@@ -362,6 +365,7 @@ where
 
             let start_lsn = match result {
                 Ok(TableSyncResult::SyncStopped | TableSyncResult::SyncNotRequired) => {
+                    info!("table sync worker for table {} exited early", self.table_id);
                     return Ok(());
                 }
                 Ok(TableSyncResult::SyncCompleted { start_lsn }) => {
@@ -377,6 +381,7 @@ where
                 }
             };
 
+            info!("starting apply loop for table sync worker for table {}", self.table_id);
             start_apply_loop(
                 self.pipeline_id,
                 start_lsn,
@@ -399,12 +404,16 @@ where
                 table_id: self.table_id,
             };
             let slot_name = get_slot_name(self.pipeline_id, worker_type).unwrap();
+            debug!("deleting replication slot '{}' for table sync worker {}", slot_name, self.table_id);
             let result = tokio::time::timeout(
                 MAX_DELETE_SLOT_WAIT,
                 replication_client.delete_slot(&slot_name),
             )
             .await;
             match result {
+                Ok(Ok(())) => {
+                    info!("successfully deleted replication slot '{}' for table {}", slot_name, self.table_id);
+                }
                 Ok(Err(err)) => {
                     error!(
                         "failed to delete the replication slot {slot_name} of the table sync worker {}: {err}",
@@ -417,7 +426,6 @@ where
                         self.table_id
                     );
                 }
-                _ => {}
             }
 
             // This explicit drop is not strictly necessary but is added to make it extra clear
@@ -425,6 +433,7 @@ where
             // connections.
             drop(permit);
 
+            info!("table sync worker for table {} completed successfully", self.table_id);
             Ok(())
         };
 
