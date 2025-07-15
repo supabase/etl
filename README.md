@@ -55,7 +55,7 @@ cargo run --example bigquery --features bigquery -- \
         --db-port 5432 \
         --db-name postgres \
         --db-username postgres \
-        -- db-password password \
+        --db-password password \
         --bq-sa-key-file /path/to/your/service-account-key.json \
         --bq-project-id your-gcp-project-id \
         --bq-dataset-id your_bigquery_dataset_id \
