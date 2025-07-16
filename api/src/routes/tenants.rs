@@ -7,6 +7,7 @@ use actix_web::{
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use thiserror::Error;
+use tracing_actix_web::RootSpan;
 use utoipa::ToSchema;
 
 use crate::db;
@@ -114,8 +115,11 @@ pub struct ReadTenantsResponse {
 pub async fn create_tenant(
     pool: Data<PgPool>,
     tenant: Json<CreateTenantRequest>,
+    root_span: RootSpan,
 ) -> Result<impl Responder, TenantError> {
     let tenant = tenant.into_inner();
+
+    root_span.record("project", &tenant.id);
 
     let id = db::tenants::create_tenant(&**pool, &tenant.id, &tenant.name).await?;
 
@@ -142,9 +146,12 @@ pub async fn create_or_update_tenant(
     pool: Data<PgPool>,
     tenant_id: Path<String>,
     tenant: Json<CreateOrUpdateTenantRequest>,
+    root_span: RootSpan,
 ) -> Result<impl Responder, TenantError> {
     let tenant_id = tenant_id.into_inner();
     let tenant = tenant.into_inner();
+
+    root_span.record("project", &tenant_id);
 
     let id = db::tenants::create_or_update_tenant(&**pool, &tenant_id, &tenant.name).await?;
     let response = CreateOrUpdateTenantResponse { id };
@@ -168,8 +175,11 @@ pub async fn create_or_update_tenant(
 pub async fn read_tenant(
     pool: Data<PgPool>,
     tenant_id: Path<String>,
+    root_span: RootSpan,
 ) -> Result<impl Responder, TenantError> {
     let tenant_id = tenant_id.into_inner();
+
+    root_span.record("project", &tenant_id);
 
     let response = db::tenants::read_tenant(&**pool, &tenant_id)
         .await?
@@ -200,9 +210,12 @@ pub async fn update_tenant(
     pool: Data<PgPool>,
     tenant_id: Path<String>,
     tenant: Json<UpdateTenantRequest>,
+    root_span: RootSpan,
 ) -> Result<impl Responder, TenantError> {
     let tenant = tenant.into_inner();
     let tenant_id = tenant_id.into_inner();
+
+    root_span.record("project", &tenant_id);
 
     db::tenants::update_tenant(&**pool, &tenant_id, &tenant.name)
         .await?
@@ -227,8 +240,11 @@ pub async fn update_tenant(
 pub async fn delete_tenant(
     pool: Data<PgPool>,
     tenant_id: Path<String>,
+    root_span: RootSpan,
 ) -> Result<impl Responder, TenantError> {
     let tenant_id = tenant_id.into_inner();
+
+    root_span.record("project", &tenant_id);
 
     db::tenants::delete_tenant(&**pool, &tenant_id).await?;
 

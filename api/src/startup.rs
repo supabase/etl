@@ -7,6 +7,7 @@ use base64::{Engine, prelude::BASE64_STANDARD};
 use config::shared::{IntoConnectOptions, PgConnectionConfig};
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use tracing::warn;
+use tracing_actix_web::TracingLogger;
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
 
@@ -16,7 +17,6 @@ use crate::{
     db::publications::Publication,
     encryption,
     k8s_client::HttpK8sClient,
-    request_logging::RequestLogging,
     routes::{
         destinations::{
             CreateDestinationRequest, CreateDestinationResponse, ReadDestinationResponse,
@@ -62,6 +62,7 @@ use crate::{
             CreateTenantSourceRequest, CreateTenantSourceResponse, create_tenant_and_source,
         },
     },
+    span_builder::ApiRootSpanBuilder,
 };
 
 pub struct Application {
@@ -232,7 +233,7 @@ pub async fn run(
     let openapi = ApiDoc::openapi();
 
     let server = HttpServer::new(move || {
-        let request_logging = RequestLogging;
+        let tracing_logger = TracingLogger::<ApiRootSpanBuilder>::new();
         let authentication = HttpAuthentication::bearer(auth_validator);
         let app = App::new()
             .wrap(
@@ -241,7 +242,7 @@ pub async fn run(
                     .start_transaction(true)
                     .finish(),
             )
-            .wrap(request_logging)
+            .wrap(tracing_logger)
             .service(health_check)
             .service(
                 SwaggerUi::new("/swagger-ui/{_:.*}").url("/api-docs/openapi.json", openapi.clone()),
