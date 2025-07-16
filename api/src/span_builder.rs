@@ -3,8 +3,8 @@ use actix_web::{
     body::MessageBody,
     dev::{ServiceRequest, ServiceResponse},
 };
-use tracing::{Span, info, warn};
-use tracing_actix_web::RootSpanBuilder;
+use tracing::{Span, info};
+use tracing_actix_web::{DefaultRootSpanBuilder, RootSpanBuilder};
 
 /// The `RootSpanBuilder` implementation for the API service.
 ///
@@ -30,7 +30,8 @@ impl RootSpanBuilder for ApiRootSpanBuilder {
             None => tracing_actix_web::root_span!(request, project = tracing::field::Empty),
         };
 
-        // Log request start within the span
+        // We enter the span temporarily to log the request received. The span will be entered
+        // automatically before the request is handled.
         {
             let _enter = span.enter();
             info!(
@@ -47,40 +48,14 @@ impl RootSpanBuilder for ApiRootSpanBuilder {
     }
 
     fn on_request_end<B: MessageBody>(span: Span, outcome: &Result<ServiceResponse<B>, Error>) {
-        // Log request completion within the span
-        {
-            let _enter = span.enter();
+        // We call the default builder to add more details to the current span.
+        DefaultRootSpanBuilder::on_request_end(span, outcome);
 
-            match outcome {
-                Ok(response) => {
-                    let status_code = response.status().as_u16();
-                    let response_size = response
-                        .headers()
-                        .get("content-length")
-                        .and_then(|h| h.to_str().ok())
-                        .and_then(|s| s.parse::<u64>().ok())
-                        .unwrap_or(0);
-
-                    let response_content_type = response
-                        .headers()
-                        .get("content-type")
-                        .and_then(|h| h.to_str().ok())
-                        .unwrap_or("unknown");
-
-                    info!(
-                        status_code = status_code,
-                        response_size = response_size,
-                        response_content_type = %response_content_type,
-                        "HTTP request completed successfully"
-                    );
-                }
-                Err(error) => {
-                    warn!(
-                        error = %error,
-                        error_type = %std::any::type_name_of_val(error),
-                        "HTTP request completed with error"
-                    );
-                }
+        // In case we have a positive response, we want to log the success. The error will be logged
+        // since we have the `emit_event_on_error` feature enabled.
+        if let Ok(response) = outcome {
+            if response.response().error().is_none() {
+                info!("HTTP request completed successfully");
             }
         }
     }
