@@ -45,7 +45,7 @@ sqlx = { workspace = true, features = [
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 tracing = { workspace = true, default-features = false }
-tracing-actix-web = { workspace = true, features = ["uuid_v7"] }
+tracing-actix-web = { workspace = true }
 utoipa = { workspace = true, features = ["actix_extras"] }
 utoipa-swagger-ui = { workspace = true, features = ["actix-web", "reqwest"] }
 uuid = { version = "1.10.0", features = ["v4"] }
