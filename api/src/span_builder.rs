@@ -51,8 +51,8 @@ impl RootSpanBuilder for ApiRootSpanBuilder {
         // We call the default builder to add more details to the current span.
         DefaultRootSpanBuilder::on_request_end(span, outcome);
 
-        // In case we have a positive response, we want to log the success. The error will be logged
-        // since we have the `emit_event_on_error` feature enabled.
+        // In case we have a positive response, we want to log the success. In case of error, it will
+        // be logged automatically since we have the `emit_event_on_error` feature enabled.
         if let Ok(response) = outcome {
             if response.response().error().is_none() {
                 info!("HTTP request completed successfully");
