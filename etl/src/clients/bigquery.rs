@@ -177,7 +177,7 @@ impl BigQueryClient {
             "".to_string()
         };
 
-        info!("Creating table {full_table_name} in BigQuery");
+        info!("creating table {full_table_name} in BigQuery");
 
         let query = format!("create table {full_table_name} {columns_spec} {max_staleness_option}");
 

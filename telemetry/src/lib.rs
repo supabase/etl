@@ -12,10 +12,7 @@ use tracing_appender::{
     rolling::{self, InitError},
 };
 use tracing_log::{LogTracer, log_tracer::SetLoggerError};
-use tracing_subscriber::{
-    EnvFilter, FmtSubscriber,
-    fmt::self,
-};
+use tracing_subscriber::{EnvFilter, FmtSubscriber, fmt};
 
 #[derive(Debug, Error)]
 pub enum TracingError {
