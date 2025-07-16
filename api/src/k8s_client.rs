@@ -332,7 +332,7 @@ impl K8sClient for HttpK8sClient {
           "kind": "StatefulSet",
           "metadata": {
             "name": stateful_set_name,
-            "namespace": NAMESPACE_NAME,
+            "namespace": NAMESPACE_NAME
           },
           "spec": {
             "replicas": 1,
@@ -348,22 +348,33 @@ impl K8sClient for HttpK8sClient {
                 }
               },
               "spec": {
-                "volumes": [
+                "terminationGracePeriodSeconds": 60,
+                "initContainers": [
                   {
-                    "name": REPLICATOR_CONFIG_FILE_VOLUME_NAME,
-                    "configMap": {
-                      "name": replicator_config_map_name
-                    }
-                  },
-                  {
-                    "name": VECTOR_CONFIG_FILE_VOLUME_NAME,
-                    "configMap": {
-                      "name": VECTOR_CONFIG_MAP_NAME
-                    }
-                  },
-                  {
-                    "name": LOGS_VOLUME_NAME,
-                    "emptyDir": {}
+                    "name": vector_container_name,
+                    "image": VECTOR_IMAGE_NAME,
+                    "restartPolicy": "Always",
+                    "env": [
+                      {
+                        "name": "LOGFLARE_API_KEY",
+                        "valueFrom": {
+                          "secretKeyRef": {
+                            "name": LOGFLARE_SECRET_NAME,
+                            "key": "key"
+                          }
+                        }
+                      }
+                    ],
+                    "volumeMounts": [
+                      {
+                        "name": VECTOR_CONFIG_FILE_VOLUME_NAME,
+                        "mountPath": "/etc/vector"
+                      },
+                      {
+                        "name": LOGS_VOLUME_NAME,
+                        "mountPath": "/var/log"
+                      }
+                    ]
                   }
                 ],
                 "containers": [
@@ -402,42 +413,26 @@ impl K8sClient for HttpK8sClient {
                       {
                         "name": LOGS_VOLUME_NAME,
                         "mountPath": "/app/logs"
-                      },
+                      }
                     ]
+                  }
+                ],
+                "volumes": [
+                  {
+                    "name": REPLICATOR_CONFIG_FILE_VOLUME_NAME,
+                    "configMap": {
+                      "name": replicator_config_map_name
+                    }
                   },
                   {
-                    "name": vector_container_name,
-                    "image": VECTOR_IMAGE_NAME,
-                    "env": [
-                      {
-                        "name": "LOGFLARE_API_KEY",
-                        "valueFrom": {
-                          "secretKeyRef": {
-                            "name": LOGFLARE_SECRET_NAME,
-                            "key": "key"
-                          }
-                        }
-                      }
-                    ],
-                    "resources": {
-                      "limits": {
-                        "memory": "200Mi",
-                      },
-                      "requests": {
-                        "memory": "200Mi",
-                        "cpu": "100m"
-                      }
-                    },
-                    "volumeMounts": [
-                      {
-                        "name": VECTOR_CONFIG_FILE_VOLUME_NAME,
-                        "mountPath": "/etc/vector"
-                      },
-                      {
-                        "name": LOGS_VOLUME_NAME,
-                        "mountPath": "/var/log"
-                      }
-                    ],
+                    "name": VECTOR_CONFIG_FILE_VOLUME_NAME,
+                    "configMap": {
+                      "name": VECTOR_CONFIG_MAP_NAME
+                    }
+                  },
+                  {
+                    "name": LOGS_VOLUME_NAME,
+                    "emptyDir": {}
                   }
                 ]
               }
