@@ -86,6 +86,10 @@ where
         }
     }
 
+    pub fn id(&self) -> PipelineId {
+        self.id
+    }
+
     pub fn shutdown_tx(&self) -> ShutdownTx {
         self.shutdown_tx.clone()
     }

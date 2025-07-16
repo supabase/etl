@@ -37,6 +37,7 @@ where
         info!("postgres connection terminated successfully")
     }
     .instrument(span);
+
     tokio::spawn(task);
 }
 

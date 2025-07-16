@@ -14,7 +14,7 @@ use tracing_appender::{
 use tracing_log::{LogTracer, log_tracer::SetLoggerError};
 use tracing_subscriber::{
     EnvFilter, FmtSubscriber,
-    fmt::{self, format::FmtSpan},
+    fmt::self,
 };
 
 #[derive(Debug, Error)]
@@ -52,13 +52,13 @@ pub fn init_test_tracing() {
             // and we need to log to terminal when `ENABLE_TRACING` env var is set.
             Environment::Dev.set();
             let _log_flusher =
-                init_tracing("test", false).expect("Failed to initialize tracing for tests");
+                init_tracing("test").expect("Failed to initialize tracing for tests");
         }
     });
 }
 
 /// Initializes tracing for the application.
-pub fn init_tracing(app_name: &str, emit_on_span_close: bool) -> Result<LogFlusher, TracingError> {
+pub fn init_tracing(app_name: &str) -> Result<LogFlusher, TracingError> {
     // Initialize the log tracer to capture logs from the `log` crate
     // and send them to the `tracing` subscriber. This captures logs
     // from libraries that use the `log` crate.
@@ -66,27 +66,23 @@ pub fn init_tracing(app_name: &str, emit_on_span_close: bool) -> Result<LogFlush
 
     let is_prod = Environment::load()?.is_prod();
 
-    // Set the default log level to `info` if not specified in the RUST_LOG environment variable.
+    // Set the default log level to `info` if not specified in the `RUST_LOG` environment variable.
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into());
 
     let log_flusher = if is_prod {
-        configure_prod_tracing(filter, app_name, emit_on_span_close)?
+        configure_prod_tracing(filter, app_name)?
     } else {
-        configure_dev_tracing(filter, emit_on_span_close)?
+        configure_dev_tracing(filter)?
     };
 
     set_tracing_panic_hook();
 
     // Return the log flusher to ensure logs are flushed before the application exits
-    // without this the logs in memory may not be flushed to the file
+    // without this the logs in memory may not be flushed to the file.
     Ok(log_flusher)
 }
 
-fn configure_prod_tracing(
-    filter: EnvFilter,
-    app_name: &str,
-    emit_on_span_close: bool,
-) -> Result<LogFlusher, TracingError> {
+fn configure_prod_tracing(filter: EnvFilter, app_name: &str) -> Result<LogFlusher, TracingError> {
     let filename_suffix = "log";
     let log_dir = "logs";
     let file_appender = rolling::Builder::new()
@@ -113,13 +109,9 @@ fn configure_prod_tracing(
         .event_format(format)
         .with_writer(file_appender)
         .json()
+        .with_current_span(true)
+        .with_span_list(true)
         .with_env_filter(filter);
-
-    let subscriber_builder = if emit_on_span_close {
-        subscriber_builder.with_span_events(FmtSpan::CLOSE)
-    } else {
-        subscriber_builder
-    };
 
     let subscriber = subscriber_builder.finish();
 
@@ -128,10 +120,7 @@ fn configure_prod_tracing(
     Ok(LogFlusher::Flusher(guard))
 }
 
-fn configure_dev_tracing(
-    filter: EnvFilter,
-    emit_on_span_close: bool,
-) -> Result<LogFlusher, TracingError> {
+fn configure_dev_tracing(filter: EnvFilter) -> Result<LogFlusher, TracingError> {
     let format = fmt::format()
         // Emit the log level in the log output
         .with_level(true)
@@ -148,12 +137,6 @@ fn configure_dev_tracing(
     let subscriber_builder = FmtSubscriber::builder()
         .event_format(format)
         .with_env_filter(filter);
-
-    let subscriber_builder = if emit_on_span_close {
-        subscriber_builder.with_span_events(FmtSpan::CLOSE)
-    } else {
-        subscriber_builder
-    };
 
     let subscriber = subscriber_builder.finish();
 

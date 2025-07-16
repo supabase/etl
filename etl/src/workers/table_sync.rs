@@ -314,8 +314,12 @@ where
         let state = TableSyncWorkerState::new(self.table_id, table_replication_phase);
 
         let state_clone = state.clone();
-        let table_sync_worker_span =
-            tracing::info_span!("table_sync_worker", table_id = self.table_id);
+        let table_sync_worker_span = tracing::info_span!(
+            "table_sync_worker",
+            pipeline_id = self.pipeline_id,
+            publication_name = self.config.publication_name,
+            table_id = self.table_id,
+        );
         let table_sync_worker = async move {
             debug!(
                 "waiting to acquire a running permit for table sync worker for table {}",

@@ -175,7 +175,6 @@ impl K8sClient for HttpK8sClient {
         self.secrets_api
             .patch(&secret_name, &pp, &Patch::Apply(secret))
             .await?;
-        info!("patched postgres secret");
 
         Ok(())
     }
@@ -207,7 +206,6 @@ impl K8sClient for HttpK8sClient {
         self.secrets_api
             .patch(&secret_name, &pp, &Patch::Apply(secret))
             .await?;
-        info!("patched bq secret");
 
         Ok(())
     }
@@ -227,7 +225,6 @@ impl K8sClient for HttpK8sClient {
                 e => return Err(e.into()),
             },
         }
-        info!("deleted postgres secret");
         Ok(())
     }
 
@@ -246,7 +243,6 @@ impl K8sClient for HttpK8sClient {
                 e => return Err(e.into()),
             },
         }
-        info!("deleted bq secret");
         Ok(())
     }
 
@@ -258,7 +254,6 @@ impl K8sClient for HttpK8sClient {
                 return Err(e.into());
             }
         };
-        info!("got config map");
         Ok(config_map)
     }
 
@@ -290,7 +285,6 @@ impl K8sClient for HttpK8sClient {
         self.config_maps_api
             .patch(&config_map_name, &pp, &Patch::Apply(config_map))
             .await?;
-        info!("patched config map");
         Ok(())
     }
 
@@ -309,7 +303,6 @@ impl K8sClient for HttpK8sClient {
                 e => return Err(e.into()),
             },
         }
-        info!("deleted config map");
         Ok(())
     }
 
@@ -454,8 +447,6 @@ impl K8sClient for HttpK8sClient {
 
         self.delete_pod(prefix).await?;
 
-        info!("patched stateful set");
-
         Ok(())
     }
 
@@ -476,7 +467,6 @@ impl K8sClient for HttpK8sClient {
             },
         }
         self.delete_pod(prefix).await?;
-        info!("deleted stateful set");
 
         Ok(())
     }
@@ -597,7 +587,6 @@ impl K8sClient for HttpK8sClient {
                 e => return Err(e.into()),
             },
         }
-        info!("deleted pod");
 
         Ok(())
     }

@@ -122,7 +122,11 @@ where
     async fn start(self) -> Result<ApplyWorkerHandle, Self::Error> {
         info!("starting apply worker");
 
-        let apply_worker_span = tracing::info_span!("apply_worker");
+        let apply_worker_span = tracing::info_span!(
+            "apply_worker",
+            pipeline_id = self.pipeline_id,
+            publication_name = self.config.publication_name
+        );
         let apply_worker = async move {
             let start_lsn = get_start_lsn(self.pipeline_id, &self.replication_client).await?;
 
@@ -151,7 +155,7 @@ where
 
             Ok(())
         }
-        .instrument(apply_worker_span);
+        .instrument(apply_worker_span.or_current());
 
         let handle = tokio::spawn(apply_worker);
 

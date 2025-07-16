@@ -13,7 +13,7 @@ use etl::state::store::postgres::PostgresStateStore;
 use etl::{destination::base::Destination, pipeline::PipelineId};
 use secrecy::ExposeSecret;
 use std::fmt;
-use tracing::{info, instrument, warn};
+use tracing::{info, warn};
 
 pub async fn start_replicator() -> anyhow::Result<()> {
     info!("starting replicator service");
@@ -145,7 +145,7 @@ async fn init_state_store(
     Ok(PostgresStateStore::new(pipeline_id, pg_connection_config))
 }
 
-#[instrument(skip(pipeline))]
+#[tracing::instrument(skip(pipeline), fields(pipeline_id = pipeline.id()))]
 async fn start_pipeline<S, D>(mut pipeline: Pipeline<S, D>) -> anyhow::Result<()>
 where
     S: StateStore + Clone + Send + Sync + 'static,

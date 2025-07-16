@@ -12,12 +12,8 @@ mod core;
 mod migrations;
 
 fn main() -> anyhow::Result<()> {
-    let app_name = env!("CARGO_BIN_NAME");
-
-    // We pass `emit_on_span_close = false` to avoid emitting logs on span close
-    // for replicator because it is not a web server, and we don't need to emit logs
-    // for every closing span.
-    let _log_flusher = init_tracing(app_name, false)?;
+    // Initialize tracing from the binary name
+    let _log_flusher = init_tracing(env!("CARGO_BIN_NAME"))?;
 
     // Initialize Sentry before the async runtime starts
     let _sentry_guard = init_sentry()?;

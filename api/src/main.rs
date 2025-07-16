@@ -7,14 +7,8 @@ use telemetry::init_tracing;
 use tracing::{error, info};
 
 fn main() -> anyhow::Result<()> {
-    let app_name = env!("CARGO_BIN_NAME");
-
-    // We pass emit_on_span_close = true to emit logs on span close
-    // for the api because it is a web server, and we need to emit logs
-    // for every closing request. This is a bit of a hack, but it works
-    // for now. Ideally the tracing middleware should emit a log on
-    // request end, but it doesn't do that yet.
-    let _log_flusher = init_tracing(app_name, true)?;
+    // Initialize tracing from the binary name
+    let _log_flusher = init_tracing(env!("CARGO_BIN_NAME"))?;
 
     // Initialize Sentry before the async runtime starts
     let _sentry_guard = init_sentry()?;
