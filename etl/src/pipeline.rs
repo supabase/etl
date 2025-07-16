@@ -242,6 +242,8 @@ where
             )));
         }
 
+        info!("pipeline completed successfully");
+
         Ok(())
     }
 

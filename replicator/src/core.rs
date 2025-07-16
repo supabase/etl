@@ -16,7 +16,8 @@ use std::fmt;
 use tracing::{info, instrument, warn};
 
 pub async fn start_replicator() -> anyhow::Result<()> {
-    info!("starting replicator service");
+    info!("starting replicator");
+
     let replicator_config = load_replicator_config()?;
 
     log_config(&replicator_config);
@@ -68,7 +69,8 @@ pub async fn start_replicator() -> anyhow::Result<()> {
         }
     }
 
-    info!("replicator service completed");
+    info!("replicator completed successfully");
+
     Ok(())
 }
 
@@ -179,8 +181,6 @@ where
             warn!("failed to send shutdown signal: {:?}", e);
             return;
         }
-
-        info!("pipeline shutdown successfully")
     });
 
     // Wait for the pipeline to finish (either normally or via shutdown).
