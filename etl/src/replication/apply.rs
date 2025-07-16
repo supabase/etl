@@ -463,7 +463,7 @@ where
                 "updating lsn for next status update to {}",
                 last_commit_end_lsn
             );
-            
+
             state
                 .next_status_update
                 .update_flush_lsn(last_commit_end_lsn);
