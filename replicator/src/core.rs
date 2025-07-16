@@ -179,7 +179,6 @@ where
 
         if let Err(e) = shutdown_tx.shutdown() {
             warn!("failed to send shutdown signal: {:?}", e);
-            return;
         }
     });
 
