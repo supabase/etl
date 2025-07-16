@@ -208,18 +208,20 @@ where
         if let Err(err) = apply_worker_result {
             errors.push(err);
 
+            info!("apply worker completed with an error, shutting down table sync workers");
+
             // TODO: in the future we might build a system based on the `ReactiveFuture` that
             //  automatically sends a shutdown signal to table sync workers on apply worker failure.
             // If there was an error in the apply worker, we want to shut down all table sync
             // workers, since without an apply worker they are lost.
-            if let Err(err) = self.shutdown_tx.shutdown() {
-                info!(
-                    "shut down signal could not be delivered, likely because no workers are running: {:?}",
-                    err
-                );
+            //
+            // If shutdown fails, it means that all receivers of the shutdown signal were not active
+            // and in our case receivers are either apply worker or table sync workers. Since the apply
+            // worker is terminated, we can infer that a failure of sending a message implies that there
+            // are no active table sync workers.
+            if self.shutdown_tx.shutdown().is_err() {
+                info!("there are no table sync workers to shutdown");
             }
-
-            info!("apply worker completed with an error, shutting down table sync workers");
         } else {
             info!("apply worker completed successfully");
         }

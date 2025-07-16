@@ -356,6 +356,7 @@ where
                 // the table sync workers to get stuck if there are no changes in the cdc stream.
                 if !state.handling_transaction() {
                     debug!("processing syncing tables after a period of inactivity of {} seconds", REFRESH_INTERVAL.as_secs());
+
                     let continue_loop = hook.process_syncing_tables(state.next_status_update.flush_lsn, true).await?;
                     if !continue_loop {
                         break Ok(ApplyLoopResult::ApplyStopped);
@@ -462,6 +463,7 @@ where
                 "updating lsn for next status update to {}",
                 last_commit_end_lsn
             );
+            
             state
                 .next_status_update
                 .update_flush_lsn(last_commit_end_lsn);
