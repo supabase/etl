@@ -857,5 +857,5 @@ async fn all_pipelines_can_be_stopped() {
     let response = app.stop_all_pipelines(tenant_id).await;
 
     // Assert
-    assert!(dbg!(response).status().is_success());
+    assert!(response.status().is_success());
 }
