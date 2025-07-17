@@ -417,7 +417,7 @@ impl K8sClient for HttpK8sClient {
                       },
                       {
                         "name": "APP_SENTRY__DSN",
-                        "value": {
+                        "valueFrom": {
                           "secretKeyRef": {
                             "name": SENTRY_DSN_SECRET_NAME,
                             "key": "dsn"
