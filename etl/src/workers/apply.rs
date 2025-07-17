@@ -390,18 +390,16 @@ where
                             .await?;
                     }
                 }
-                _ => {
-                    match self.handle_syncing_table(table_id, current_lsn).await {
-                        Ok(continue_loop) => {
-                            if !continue_loop {
-                                return Ok(false);
-                            }
-                        },
-                        Err(err) => {
-                            error!("error handling syncing for table {}: {}", table_id, err);
+                _ => match self.handle_syncing_table(table_id, current_lsn).await {
+                    Ok(continue_loop) => {
+                        if !continue_loop {
+                            return Ok(false);
                         }
                     }
-                }
+                    Err(err) => {
+                        error!("error handling syncing for table {}: {}", table_id, err);
+                    }
+                },
             }
         }
 

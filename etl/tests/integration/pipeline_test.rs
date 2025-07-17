@@ -1,3 +1,16 @@
+use crate::common::database::spawn_database;
+use crate::common::event::{group_events_by_type, group_events_by_type_and_table_id};
+use crate::common::pipeline::{create_pipeline, create_pipeline_with};
+use crate::common::state_store::{
+    FaultConfig, FaultInjectingStateStore, FaultType, TestStateStore,
+};
+use crate::common::test_destination_wrapper::TestDestinationWrapper;
+use crate::common::test_schema::{
+    TableSelection, build_expected_orders_inserts, build_expected_users_inserts,
+    get_n_integers_sum, get_users_age_sum_from_rows, insert_mock_data, insert_users_data,
+    setup_test_database_schema,
+};
+use config::shared::BatchConfig;
 use etl::conversions::event::EventType;
 use etl::destination::memory::MemoryDestination;
 use etl::pipeline::{PipelineError, PipelineId};
@@ -9,18 +22,6 @@ use postgres::tokio::test_utils::TableModification;
 use rand::random;
 use telemetry::init_test_tracing;
 use tokio_postgres::types::Type;
-use config::shared::BatchConfig;
-use crate::common::database::spawn_database;
-use crate::common::event::{group_events_by_type, group_events_by_type_and_table_id};
-use crate::common::pipeline::{create_pipeline, create_pipeline_with};
-use crate::common::state_store::{
-    FaultConfig, FaultInjectingStateStore, FaultType, TestStateStore,
-};
-use crate::common::test_destination_wrapper::TestDestinationWrapper;
-use crate::common::test_schema::{
-    TableSelection, build_expected_orders_inserts, build_expected_users_inserts,
-    get_n_integers_sum, get_users_age_sum_from_rows, insert_mock_data, insert_users_data, setup_test_database_schema,
-};
 
 // TODO: find a way to inject errors in a way that is predictable.
 #[ignore]
@@ -760,7 +761,7 @@ async fn table_sync_streams_new_data_with_batch() {
     // data.
     let batch_config = BatchConfig {
         max_size: 1000,
-        max_fill_ms: 10000
+        max_fill_ms: 10000,
     };
     let mut pipeline = create_pipeline_with(
         &database.config,
@@ -768,7 +769,7 @@ async fn table_sync_streams_new_data_with_batch() {
         database_schema.publication_name(),
         state_store.clone(),
         destination.clone(),
-        Some(batch_config)
+        Some(batch_config),
     );
 
     // Register notifications for initial table copy completion.
@@ -785,7 +786,12 @@ async fn table_sync_streams_new_data_with_batch() {
 
     // Insert additional data to test streaming.
     let rows_inserted = 5;
-    insert_users_data(&mut database, &database_schema.users_schema().name, 1..=rows_inserted).await;
+    insert_users_data(
+        &mut database,
+        &database_schema.users_schema().name,
+        1..=rows_inserted,
+    )
+    .await;
 
     // Register notifications for ready state.
     let users_state_notify = state_store
