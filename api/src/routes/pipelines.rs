@@ -11,7 +11,6 @@ use config::shared::{
 use serde::{Deserialize, Serialize};
 use sqlx::{PgPool, PgTransaction};
 use std::ops::DerefMut;
-use std::sync::Arc;
 use thiserror::Error;
 use utoipa::ToSchema;
 
@@ -453,11 +452,12 @@ pub async fn start_pipeline(
     api_config: Data<ApiConfig>,
     pool: Data<PgPool>,
     encryption_key: Data<EncryptionKey>,
-    k8s_client: Data<Arc<dyn K8sClient>>,
+    k8s_client: Data<dyn K8sClient>,
     pipeline_id: Path<i64>,
 ) -> Result<impl Responder, PipelineError> {
     let tenant_id = extract_tenant_id(&req)?;
     let pipeline_id = pipeline_id.into_inner();
+    let k8s_client = k8s_client.into_inner();
 
     let mut txn = pool.begin().await?;
     let (pipeline, replicator, image, source, destination) =
@@ -465,7 +465,7 @@ pub async fn start_pipeline(
 
     // We update the pipeline in K8s.
     create_or_update_pipeline_in_k8s(
-        k8s_client.as_ref().as_ref(),
+        k8s_client.as_ref(),
         tenant_id,
         &api_config,
         pipeline,
@@ -495,11 +495,12 @@ pub async fn start_pipeline(
 pub async fn stop_pipeline(
     req: HttpRequest,
     pool: Data<PgPool>,
-    k8s_client: Data<Arc<dyn K8sClient>>,
+    k8s_client: Data<dyn K8sClient>,
     pipeline_id: Path<i64>,
 ) -> Result<impl Responder, PipelineError> {
     let tenant_id = extract_tenant_id(&req)?;
     let pipeline_id = pipeline_id.into_inner();
+    let k8s_client = k8s_client.into_inner();
 
     let mut txn = pool.begin().await?;
     let replicator =
@@ -507,7 +508,7 @@ pub async fn stop_pipeline(
             .await?
             .ok_or(PipelineError::ReplicatorNotFound(pipeline_id))?;
 
-    delete_pipeline_in_k8s(k8s_client.as_ref().as_ref(), tenant_id, replicator).await?;
+    delete_pipeline_in_k8s(k8s_client.as_ref(), tenant_id, replicator).await?;
     txn.commit().await?;
 
     Ok(HttpResponse::Ok().finish())
@@ -527,14 +528,15 @@ pub async fn stop_pipeline(
 pub async fn stop_all_pipelines(
     req: HttpRequest,
     pool: Data<PgPool>,
-    k8s_client: Data<Arc<dyn K8sClient>>,
+    k8s_client: Data<dyn K8sClient>,
 ) -> Result<impl Responder, PipelineError> {
     let tenant_id = extract_tenant_id(&req)?;
+    let k8s_client = k8s_client.into_inner();
 
     let mut txn = pool.begin().await?;
     let replicators = db::replicators::read_replicators(txn.deref_mut(), tenant_id).await?;
     for replicator in replicators {
-        delete_pipeline_in_k8s(k8s_client.as_ref().as_ref(), tenant_id, replicator).await?;
+        delete_pipeline_in_k8s(k8s_client.as_ref(), tenant_id, replicator).await?;
     }
     txn.commit().await?;
 
@@ -556,11 +558,12 @@ pub async fn stop_all_pipelines(
 pub async fn get_pipeline_status(
     req: HttpRequest,
     pool: Data<PgPool>,
-    k8s_client: Data<Arc<dyn K8sClient>>,
+    k8s_client: Data<dyn K8sClient>,
     pipeline_id: Path<i64>,
 ) -> Result<impl Responder, PipelineError> {
     let tenant_id = extract_tenant_id(&req)?;
     let pipeline_id = pipeline_id.into_inner();
+    let k8s_client = k8s_client.into_inner();
 
     let replicator =
         db::replicators::read_replicator_by_pipeline_id(&**pool, tenant_id, pipeline_id)
@@ -570,7 +573,7 @@ pub async fn get_pipeline_status(
     let prefix = create_k8s_object_prefix(tenant_id, replicator.id);
 
     // We load the pod phase.
-    let pod_phase = k8s_client.as_ref().as_ref().get_pod_phase(&prefix).await?;
+    let pod_phase = k8s_client.get_pod_phase(&prefix).await?;
 
     // We check the status of the replicator container.
     //
@@ -578,11 +581,7 @@ pub async fn get_pipeline_status(
     // and stderr will be returned. In case we want to be more careful with what we return we can
     // embed within the logs some special characters that will be used to determine which error message
     // to return to the user.
-    let replicator_error = k8s_client
-        .as_ref()
-        .as_ref()
-        .get_replicator_container_error(&prefix)
-        .await?;
+    let replicator_error = k8s_client.get_replicator_container_error(&prefix).await?;
 
     let status = if let Some(replicator_error) = replicator_error {
         PipelineStatus::Failed {
@@ -633,13 +632,14 @@ pub async fn update_pipeline_image(
     api_config: Data<ApiConfig>,
     pool: Data<PgPool>,
     encryption_key: Data<EncryptionKey>,
-    k8s_client: Option<Data<Arc<dyn K8sClient>>>,
+    k8s_client: Data<dyn K8sClient>,
     pipeline_id: Path<i64>,
     update_request: Json<UpdatePipelineImageRequest>,
 ) -> Result<impl Responder, PipelineError> {
     let tenant_id = extract_tenant_id(&req)?;
     let pipeline_id = pipeline_id.into_inner();
     let update_request = update_request.into_inner();
+    let k8s_client = k8s_client.into_inner();
 
     let mut txn = pool.begin().await?;
     let (pipeline, replicator, current_image, source, destination) =
@@ -675,19 +675,17 @@ pub async fn update_pipeline_image(
     }
 
     // We update the pipeline in K8s if client is available.
-    if let Some(k8s_client) = k8s_client {
-        create_or_update_pipeline_in_k8s(
-            k8s_client.as_ref().as_ref(),
-            tenant_id,
-            &api_config,
-            pipeline,
-            replicator,
-            target_image,
-            source,
-            destination,
-        )
-        .await?;
-    }
+    create_or_update_pipeline_in_k8s(
+        k8s_client.as_ref(),
+        tenant_id,
+        &api_config,
+        pipeline,
+        replicator,
+        target_image,
+        source,
+        destination,
+    )
+    .await?;
     txn.commit().await?;
 
     Ok(HttpResponse::Ok().finish())

@@ -142,7 +142,7 @@ pub async fn run(
     let config = web::Data::new(config);
     let connection_pool = web::Data::new(connection_pool);
     let encryption_key = web::Data::new(encryption_key);
-    let k8s_client = http_k8s_client.map(web::Data::new);
+    let k8s_client: Option<web::Data<dyn K8sClient>> = http_k8s_client.map(Into::into);
 
     #[derive(OpenApi)]
     #[openapi(
