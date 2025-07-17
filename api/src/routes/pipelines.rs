@@ -15,7 +15,6 @@ use std::sync::Arc;
 use thiserror::Error;
 use utoipa::ToSchema;
 
-use crate::config::ApiConfig;
 use crate::db;
 use crate::db::destinations::{Destination, DestinationsDbError, destination_exists};
 use crate::db::images::{Image, ImagesDbError};
