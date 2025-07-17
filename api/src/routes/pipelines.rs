@@ -21,9 +21,9 @@ use crate::db::pipelines::{Pipeline, PipelineConfig, PipelinesDbError};
 use crate::db::replicators::{Replicator, ReplicatorsDbError};
 use crate::db::sources::{Source, SourceConfig, SourcesDbError, source_exists};
 use crate::encryption::EncryptionKey;
+use crate::k8s_client::TRUSTED_ROOT_CERT_KEY_NAME;
 use crate::k8s_client::{K8sClient, K8sError, PodPhase, TRUSTED_ROOT_CERT_CONFIG_MAP_NAME};
 use crate::routes::{ErrorMessage, TenantIdError, extract_tenant_id};
-use crate::{config::ApiConfig, k8s_client::TRUSTED_ROOT_CERT_KEY_NAME};
 use secrecy::ExposeSecret;
 
 #[derive(Debug, Error)]
@@ -451,7 +451,6 @@ pub async fn read_all_pipelines(
 #[post("/pipelines/{pipeline_id}/start")]
 pub async fn start_pipeline(
     req: HttpRequest,
-    api_config: Data<ApiConfig>,
     pool: Data<PgPool>,
     encryption_key: Data<EncryptionKey>,
     k8s_client: Data<dyn K8sClient>,
@@ -469,7 +468,6 @@ pub async fn start_pipeline(
     create_or_update_pipeline_in_k8s(
         k8s_client.as_ref(),
         tenant_id,
-        &api_config,
         pipeline,
         replicator,
         image,
@@ -631,7 +629,6 @@ pub async fn get_pipeline_status(
 #[post("/pipelines/{pipeline_id}/update-image")]
 pub async fn update_pipeline_image(
     req: HttpRequest,
-    api_config: Data<ApiConfig>,
     pool: Data<PgPool>,
     encryption_key: Data<EncryptionKey>,
     k8s_client: Data<dyn K8sClient>,
@@ -680,7 +677,6 @@ pub async fn update_pipeline_image(
     create_or_update_pipeline_in_k8s(
         k8s_client.as_ref(),
         tenant_id,
-        &api_config,
         pipeline,
         replicator,
         target_image,
@@ -703,7 +699,6 @@ struct Secrets {
 async fn create_or_update_pipeline_in_k8s(
     k8s_client: &dyn K8sClient,
     tenant_id: &str,
-    api_config: &ApiConfig,
     pipeline: Pipeline,
     replicator: Replicator,
     image: Image,
@@ -719,7 +714,6 @@ async fn create_or_update_pipeline_in_k8s(
     // We create the replicator configuration.
     let replicator_config = build_replicator_config(
         k8s_client,
-        api_config,
         source.config,
         destination.config,
         pipeline,
@@ -810,7 +804,6 @@ fn build_secrets(source_config: &SourceConfig, destination_config: &DestinationC
 
 async fn build_replicator_config(
     k8s_client: &dyn K8sClient,
-    api_config: &ApiConfig,
     source_config: SourceConfig,
     destination_config: DestinationConfig,
     pipeline: Pipeline,
@@ -859,7 +852,8 @@ async fn build_replicator_config(
     let config = ReplicatorConfig {
         destination: destination_config,
         pipeline: pipeline_config,
-        sentry: api_config.sentry.clone(),
+        // The Sentry config will be injected via env variables for security purposes.
+        sentry: None,
         supabase: Some(supabase_config),
     };
 

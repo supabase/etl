@@ -123,6 +123,7 @@ const VECTOR_IMAGE_NAME: &str = "timberio/vector:0.46.1-distroless-libc";
 const VECTOR_CONFIG_MAP_NAME: &str = "replicator-vector-config";
 const REPLICATOR_CONFIG_FILE_VOLUME_NAME: &str = "replicator-config-file";
 const VECTOR_CONFIG_FILE_VOLUME_NAME: &str = "vector-config-file";
+const SENTRY_DSN_SECRET_NAME: &str = "replicator-sentry-dsn";
 const LOGS_VOLUME_NAME: &str = "logs";
 pub const TRUSTED_ROOT_CERT_CONFIG_MAP_NAME: &str = "trusted-root-certs-config";
 pub const TRUSTED_ROOT_CERT_KEY_NAME: &str = "trusted_root_certs";
@@ -414,6 +415,15 @@ impl K8sClient for HttpK8sClient {
                       {
                         "name": "APP_ENVIRONMENT",
                         "value": "prod"
+                      },
+                      {
+                        "name": "APP_SENTRY__DSN",
+                        "valueFrom": {
+                          "secretKeyRef": {
+                            "name": SENTRY_DSN_SECRET_NAME,
+                            "key": "dsn"
+                          }
+                        }
                       },
                       {
                         "name": PG_PASSWORD_ENV_VAR_NAME,
