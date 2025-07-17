@@ -366,19 +366,13 @@ impl K8sClient for HttpK8sClient {
                     "emptyDir": {}
                   }
                 ],
-                // We want to wait at most 60 seconds before sending `SIGKILL` to the containers.
+                // We want to wait at most 60 seconds before K8S sends a `SIGKILL` to the containers.
                 "terminationGracePeriodSeconds": 60,
                 "initContainers": [
                   {
                     "name": vector_container_name,
                     "image": VECTOR_IMAGE_NAME,
                     "restartPolicy": "Always",
-                    "command": [
-                      "vector",
-                      "--config",
-                      "/etc/vector/vector.yaml",
-                      "--no-graceful-shutdown-limit"
-                    ],
                     "env": [
                       {
                         "name": "LOGFLARE_API_KEY",
