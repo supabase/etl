@@ -32,6 +32,7 @@ async fn async_main() -> anyhow::Result<()> {
     if let Err(err) = start_replicator().await {
         sentry::capture_error(err.as_dyn_error());
         error!("an error occurred in the replicator: {err}");
+
         return Err(err);
     }
 

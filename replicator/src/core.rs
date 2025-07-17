@@ -13,7 +13,7 @@ use etl::state::store::postgres::PostgresStateStore;
 use etl::{destination::base::Destination, pipeline::PipelineId};
 use secrecy::ExposeSecret;
 use std::fmt;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 pub async fn start_replicator() -> anyhow::Result<()> {
     info!("starting replicator service");
@@ -69,6 +69,7 @@ pub async fn start_replicator() -> anyhow::Result<()> {
     }
 
     info!("replicator service completed");
+
     Ok(())
 }
 
@@ -80,7 +81,7 @@ fn log_config(config: &ReplicatorConfig) {
 fn log_destination_config(config: &DestinationConfig) {
     match config {
         DestinationConfig::Memory => {
-            info!("memory config");
+            debug!("using memory destination config");
         }
         DestinationConfig::BigQuery {
             project_id,
@@ -88,16 +89,16 @@ fn log_destination_config(config: &DestinationConfig) {
             service_account_key: _,
             max_staleness_mins,
         } => {
-            info!(
+            debug!(
                 project_id,
-                dataset_id, max_staleness_mins, "bigquery config"
+                dataset_id, max_staleness_mins, "using bigquery destination config"
             )
         }
     }
 }
 
 fn log_pipeline_config(config: &PipelineConfig) {
-    info!(
+    debug!(
         pipeline_id = config.id,
         publication_name = config.publication_name,
         max_table_sync_workers = config.max_table_sync_workers,
@@ -109,7 +110,7 @@ fn log_pipeline_config(config: &PipelineConfig) {
 }
 
 fn log_pg_connection_config(config: &PgConnectionConfig) {
-    info!(
+    debug!(
         host = config.host,
         port = config.port,
         dbname = config.name,
@@ -120,7 +121,7 @@ fn log_pg_connection_config(config: &PgConnectionConfig) {
 }
 
 fn log_batch_config(config: &BatchConfig) {
-    info!(
+    debug!(
         max_size = config.max_size,
         max_fill_ms = config.max_fill_ms,
         "batch config"
@@ -128,7 +129,7 @@ fn log_batch_config(config: &BatchConfig) {
 }
 
 fn log_apply_worker_init_retry(config: &RetryConfig) {
-    info!(
+    debug!(
         max_attempts = config.max_attempts,
         initial_delay_ms = config.initial_delay_ms,
         max_delay_ms = config.max_delay_ms,

@@ -366,6 +366,8 @@ impl K8sClient for HttpK8sClient {
                     "emptyDir": {}
                   }
                 ],
+                // We want to wait at most 60 seconds before sending `SIGKILL` to the containers.
+                "terminationGracePeriodSeconds": 60,
                 "containers": [
                   {
                     "name": replicator_container_name,
@@ -438,6 +440,16 @@ impl K8sClient for HttpK8sClient {
                         "mountPath": "/var/log"
                       }
                     ],
+                    "lifecycle": {
+                      "preStop": {
+                        "exec": {
+                          // We sleep for 5 seconds before sending a `SIGTERM` to Vector to let it
+                          // have some time to flush data. This is a temporary fix until we find a
+                          // way to properly have Vector working as sidecar.
+                          "command": ["sleep", "5"]
+                        }
+                      }
+                    }
                   }
                 ]
               }

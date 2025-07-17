@@ -22,6 +22,7 @@ use std::time::{Duration, Instant};
 use thiserror::Error;
 use tokio::pin;
 use tokio_postgres::types::PgLsn;
+use tracing::field::debug;
 use tracing::{debug, error, info};
 
 /// The amount of milliseconds that pass between one refresh and the other of the system, in case no
@@ -547,6 +548,9 @@ where
     // We perform the conversion of the message to our own event format which is used downstream
     // by the destination.
     let event = convert_message_to_event(schema_cache, &message).await?;
+
+    let event_type = EventType::from(&event);
+    debug!("message converted to event type {}", event_type);
 
     match message {
         LogicalReplicationMessage::Begin(message) => {

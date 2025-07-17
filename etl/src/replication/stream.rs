@@ -1,3 +1,4 @@
+use crate::conversions::table_row::{TableRow, TableRowConversionError, TableRowConverter};
 use futures::{Stream, ready};
 use pin_project_lite::pin_project;
 use postgres::schema::ColumnSchema;
@@ -10,8 +11,7 @@ use std::time::{Duration, Instant, SystemTimeError};
 use thiserror::Error;
 use tokio_postgres::CopyOutStream;
 use tokio_postgres::types::PgLsn;
-
-use crate::conversions::table_row::{TableRow, TableRowConversionError, TableRowConverter};
+use tracing::debug;
 
 /// The amount of milliseconds between two consecutive status updates in case no forced update
 /// is requested.
@@ -156,6 +156,11 @@ impl EventsStream {
         this.stream
             .standby_status_update(write_lsn, flush_lsn, apply_lsn, ts, 0)
             .await?;
+
+        debug!(
+            "status update successfully sent (write_lsn = {}, flush_lsn = {}, apply_lsn = {})",
+            write_lsn, flush_lsn, apply_lsn
+        );
 
         // Update the state after successful send.
         *this.last_update = Some(Instant::now());
