@@ -332,6 +332,7 @@ impl PgReplicationClient {
             }
             Err(PgReplicationError::SlotNotFound(_)) => {
                 info!("creating new replication slot '{}'", slot_name);
+
                 let create_result = self.create_slot_internal(slot_name, false).await?;
 
                 Ok(GetOrCreateSlotResult::CreateSlot(create_result))
@@ -354,6 +355,7 @@ impl PgReplicationClient {
         match self.client.simple_query(&query).await {
             Ok(_) => {
                 info!("successfully deleted replication slot '{}'", slot_name);
+
                 Ok(())
             }
             Err(err) => {

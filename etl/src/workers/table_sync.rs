@@ -405,25 +405,11 @@ where
                 replication_client.delete_slot(&slot_name),
             )
             .await;
-            match result {
-                Ok(Ok(())) => {
-                    info!(
-                        "successfully deleted replication slot '{}' for table {}",
-                        slot_name, self.table_id
-                    );
-                }
-                Ok(Err(err)) => {
-                    warn!(
-                        "failed to delete the replication slot {slot_name} of the table sync worker {}: {err}",
-                        self.table_id
-                    )
-                }
-                Err(_) => {
-                    warn!(
+            if let Err(_) = result {
+                warn!(
                         "failed to delete the replication slot {slot_name} of the table sync worker {} due to timeout",
                         self.table_id
                     );
-                }
             }
 
             // This explicit drop is not strictly necessary but is added to make it extra clear
