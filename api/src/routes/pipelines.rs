@@ -333,7 +333,7 @@ pub async fn read_pipeline(
     ),
     tag = "Pipelines"
 )]
-#[post("/pipelines/{pipeline_id}")]
+#[post("/pipelines/{pipeline_id:\\d+}")]
 pub async fn update_pipeline(
     req: HttpRequest,
     pool: Data<PgPool>,
