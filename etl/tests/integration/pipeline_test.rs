@@ -25,7 +25,7 @@ use crate::common::test_schema::{
 // TODO: find a way to inject errors in a way that is predictable.
 #[ignore]
 #[tokio::test(flavor = "multi_thread")]
-async fn test_pipeline_with_table_sync_worker_panic() {
+async fn pipeline_handles_table_sync_worker_panic() {
     init_test_tracing();
     let database = spawn_database().await;
     let database_schema = setup_test_database_schema(&database, TableSelection::Both).await;
@@ -86,7 +86,7 @@ async fn test_pipeline_with_table_sync_worker_panic() {
 // TODO: find a way to inject errors in a way that is predictable.
 #[ignore]
 #[tokio::test(flavor = "multi_thread")]
-async fn test_pipeline_with_table_sync_worker_error() {
+async fn pipeline_handles_table_sync_worker_error() {
     init_test_tracing();
     let database = spawn_database().await;
     let database_schema = setup_test_database_schema(&database, TableSelection::Both).await;
@@ -146,7 +146,7 @@ async fn test_pipeline_with_table_sync_worker_error() {
 // TODO: find a way to inject errors in a way that is predictable.
 #[ignore]
 #[tokio::test(flavor = "multi_thread")]
-async fn test_table_schema_copy_with_data_sync_retry() {
+async fn table_schema_copy_retries_after_data_sync_failure() {
     init_test_tracing();
     let database = spawn_database().await;
     let database_schema = setup_test_database_schema(&database, TableSelection::Both).await;
@@ -257,7 +257,7 @@ async fn test_table_schema_copy_with_data_sync_retry() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn test_table_schema_copy_with_finished_copy_retry() {
+async fn table_schema_copy_retries_after_finished_copy_failure() {
     init_test_tracing();
     let database = spawn_database().await;
     let database_schema = setup_test_database_schema(&database, TableSelection::Both).await;
@@ -277,8 +277,7 @@ async fn test_table_schema_copy_with_finished_copy_retry() {
 
     // We wait for two table schemas to be received.
     let schemas_notify = destination.wait_for_n_schemas(2).await;
-    // We wait for both table states to be in finished done (sync wait is only memory and not
-    // available on the store).
+    // We wait for both table states to be in sync done.
     let users_state_notify = state_store
         .notify_on_replication_phase(
             database_schema.users_schema().id,
@@ -367,7 +366,41 @@ async fn test_table_schema_copy_with_finished_copy_retry() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn test_table_schema_copy_survives_restarts() {
+async fn table_state_converges_with_no_data() {
+    init_test_tracing();
+    let database = spawn_database().await;
+    let database_schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
+
+    let state_store = TestStateStore::new();
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
+
+    // We start the pipeline from scratch.
+    let pipeline_id: PipelineId = random();
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        database_schema.publication_name(),
+        state_store.clone(),
+        destination.clone(),
+    );
+
+    // We wait for the user table to be in sync done.
+    let users_state_notify = state_store
+        .notify_on_replication_phase(
+            database_schema.users_schema().id,
+            TableReplicationPhaseType::Ready,
+        )
+        .await;
+
+    pipeline.start().await.unwrap();
+
+    users_state_notify.notified().await;
+
+    pipeline.shutdown_and_wait().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn table_schema_copy_survives_pipeline_restarts() {
     init_test_tracing();
     let mut database = spawn_database().await;
     let database_schema = setup_test_database_schema(&database, TableSelection::Both).await;
@@ -387,8 +420,7 @@ async fn test_table_schema_copy_survives_restarts() {
 
     // We wait for two table schemas to be received.
     let schemas_notify = destination.wait_for_n_schemas(2).await;
-    // We wait for both table states to be in finished done (sync wait is only memory and not
-    // available on the store).
+    // We wait for both table states to be in sync done.
     let users_state_notify = state_store
         .notify_on_replication_phase(
             database_schema.users_schema().id,
@@ -481,7 +513,7 @@ async fn test_table_schema_copy_survives_restarts() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn test_table_copy() {
+async fn table_copy_replicates_existing_data() {
     init_test_tracing();
     let mut database = spawn_database().await;
     let database_schema = setup_test_database_schema(&database, TableSelection::Both).await;
@@ -574,7 +606,7 @@ async fn test_table_copy() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn test_table_copy_and_sync() {
+async fn table_copy_and_sync_streams_new_data() {
     init_test_tracing();
     let mut database = spawn_database().await;
     let database_schema = setup_test_database_schema(&database, TableSelection::Both).await;
@@ -748,7 +780,7 @@ async fn test_table_copy_and_sync() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn test_table_copy_and_sync_with_changed_schema_in_table_sync_worker() {
+async fn table_sync_worker_skips_on_schema_change() {
     init_test_tracing();
     let database = spawn_database().await;
     let database_schema = setup_test_database_schema(&database, TableSelection::OrdersOnly).await;
@@ -838,7 +870,7 @@ async fn test_table_copy_and_sync_with_changed_schema_in_table_sync_worker() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn test_table_copy_and_sync_with_changed_schema_in_apply_worker() {
+async fn apply_worker_skips_on_schema_change() {
     init_test_tracing();
     let database = spawn_database().await;
     let database_schema = setup_test_database_schema(&database, TableSelection::OrdersOnly).await;
