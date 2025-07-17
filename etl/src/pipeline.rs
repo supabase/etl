@@ -216,12 +216,10 @@ where
             //  automatically sends a shutdown signal to table sync workers on apply worker failure.
             // If there was an error in the apply worker, we want to shut down all table sync
             // workers, since without an apply worker they are lost.
-            if let Err(err) = self.shutdown_tx.shutdown() {
-                info!(
-                    "shut down signal could not be delivered, likely because no workers are running: {:?}",
-                    err
-                );
-            }
+            //
+            // If we fail to send the shutdown signal, we are not going to capture the error since
+            // it means that no table sync workers are running, which is fine.
+            let _ = self.shutdown_tx.shutdown();
 
             info!("apply worker completed with an error, shutting down table sync workers");
         } else {
