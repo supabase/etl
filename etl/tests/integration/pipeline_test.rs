@@ -9,17 +9,17 @@ use postgres::tokio::test_utils::TableModification;
 use rand::random;
 use telemetry::init_test_tracing;
 use tokio_postgres::types::Type;
-
+use config::shared::BatchConfig;
 use crate::common::database::spawn_database;
 use crate::common::event::{group_events_by_type, group_events_by_type_and_table_id};
-use crate::common::pipeline::create_pipeline;
+use crate::common::pipeline::{create_pipeline, create_pipeline_with};
 use crate::common::state_store::{
     FaultConfig, FaultInjectingStateStore, FaultType, TestStateStore,
 };
 use crate::common::test_destination_wrapper::TestDestinationWrapper;
 use crate::common::test_schema::{
     TableSelection, build_expected_orders_inserts, build_expected_users_inserts,
-    get_n_integers_sum, get_users_age_sum_from_rows, insert_mock_data, setup_test_database_schema,
+    get_n_integers_sum, get_users_age_sum_from_rows, insert_mock_data, insert_users_data, setup_test_database_schema,
 };
 
 // TODO: find a way to inject errors in a way that is predictable.
@@ -363,40 +363,6 @@ async fn table_schema_copy_retries_after_finished_copy_failure() {
     assert_eq!(table_schemas.len(), 2);
     assert_eq!(table_schemas[0], database_schema.orders_schema());
     assert_eq!(table_schemas[1], database_schema.users_schema());
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn table_state_converges_with_no_data() {
-    init_test_tracing();
-    let database = spawn_database().await;
-    let database_schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
-
-    let state_store = TestStateStore::new();
-    let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
-
-    // We start the pipeline from scratch.
-    let pipeline_id: PipelineId = random();
-    let mut pipeline = create_pipeline(
-        &database.config,
-        pipeline_id,
-        database_schema.publication_name(),
-        state_store.clone(),
-        destination.clone(),
-    );
-
-    // We wait for the user table to be in sync done.
-    let users_state_notify = state_store
-        .notify_on_replication_phase(
-            database_schema.users_schema().id,
-            TableReplicationPhaseType::Ready,
-        )
-        .await;
-
-    pipeline.start().await.unwrap();
-
-    users_state_notify.notified().await;
-
-    pipeline.shutdown_and_wait().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -777,6 +743,86 @@ async fn table_copy_and_sync_streams_new_data() {
             .await
             .unwrap()
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn table_sync_streams_new_data_with_batch() {
+    init_test_tracing();
+    let mut database = spawn_database().await;
+    let database_schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
+
+    let state_store = TestStateStore::new();
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
+
+    // Start pipeline from scratch.
+    let pipeline_id: PipelineId = random();
+    // We set a batch of 1000 elements to still check that even with batching we are getting all the
+    // data.
+    let batch_config = BatchConfig {
+        max_size: 1000,
+        max_fill_ms: 10000
+    };
+    let mut pipeline = create_pipeline_with(
+        &database.config,
+        pipeline_id,
+        database_schema.publication_name(),
+        state_store.clone(),
+        destination.clone(),
+        Some(batch_config)
+    );
+
+    // Register notifications for initial table copy completion.
+    let users_state_notify = state_store
+        .notify_on_replication_phase(
+            database_schema.users_schema().id,
+            TableReplicationPhaseType::SyncDone,
+        )
+        .await;
+
+    pipeline.start().await.unwrap();
+
+    users_state_notify.notified().await;
+
+    // Insert additional data to test streaming.
+    let rows_inserted = 5;
+    insert_users_data(&mut database, &database_schema.users_schema().name, 1..=rows_inserted).await;
+
+    // Register notifications for ready state.
+    let users_state_notify = state_store
+        .notify_on_replication_phase(
+            database_schema.users_schema().id,
+            TableReplicationPhaseType::Ready,
+        )
+        .await;
+
+    // We wait for all the inserts to be received.
+    let events_notify = destination
+        .wait_for_events_count(vec![(EventType::Insert, 5)])
+        .await;
+
+    users_state_notify.notified().await;
+    events_notify.notified().await;
+
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    let events = destination.get_events().await;
+    let grouped_events = group_events_by_type_and_table_id(&events);
+    let users_inserts = grouped_events
+        .get(&(EventType::Insert, database_schema.users_schema().id))
+        .unwrap();
+    // Build expected events for verification
+    let expected_users_inserts = build_expected_users_inserts(
+        1,
+        database_schema.users_schema().id,
+        vec![
+            ("user_1", 1),
+            ("user_2", 2),
+            ("user_3", 3),
+            ("user_4", 4),
+            ("user_5", 5),
+        ],
+    );
+    assert_eq!(*users_inserts, expected_users_inserts);
 }
 
 #[tokio::test(flavor = "multi_thread")]
