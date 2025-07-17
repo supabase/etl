@@ -57,29 +57,29 @@ async fn async_main() -> anyhow::Result<()> {
 }
 
 fn init_sentry() -> anyhow::Result<Option<sentry::ClientInitGuard>> {
-    if let Ok(config) = load_config::<ApiConfig>() {
-        if let Some(sentry_config) = &config.sentry {
-            info!("initializing sentry with supplied dsn");
+    if let Ok(config) = load_config::<ApiConfig>()
+        && let Some(sentry_config) = &config.sentry
+    {
+        info!("initializing sentry with supplied dsn");
 
-            let environment = Environment::load()?;
-            let guard = sentry::init(sentry::ClientOptions {
-                dsn: Some(sentry_config.dsn.parse()?),
-                environment: Some(environment.to_string().into()),
-                traces_sample_rate: 1.0,
-                max_request_body_size: sentry::MaxRequestBodySize::Always,
-                integrations: vec![Arc::new(
-                    sentry::integrations::panic::PanicIntegration::new(),
-                )],
-                ..Default::default()
-            });
+        let environment = Environment::load()?;
+        let guard = sentry::init(sentry::ClientOptions {
+            dsn: Some(sentry_config.dsn.parse()?),
+            environment: Some(environment.to_string().into()),
+            traces_sample_rate: 1.0,
+            max_request_body_size: sentry::MaxRequestBodySize::Always,
+            integrations: vec![Arc::new(
+                sentry::integrations::panic::PanicIntegration::new(),
+            )],
+            ..Default::default()
+        });
 
-            // Set service tag to differentiate API from other services
-            sentry::configure_scope(|scope| {
-                scope.set_tag("service", "api");
-            });
+        // Set service tag to differentiate API from other services
+        sentry::configure_scope(|scope| {
+            scope.set_tag("service", "api");
+        });
 
-            return Ok(Some(guard));
-        }
+        return Ok(Some(guard));
     }
 
     info!("sentry not configured for api, skipping initialization");

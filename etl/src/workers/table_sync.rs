@@ -405,7 +405,7 @@ where
                 replication_client.delete_slot(&slot_name),
             )
             .await;
-            if let Err(_) = result {
+            if result.is_err() {
                 warn!(
                     "failed to delete the replication slot {slot_name} of the table sync worker {} due to timeout",
                     self.table_id

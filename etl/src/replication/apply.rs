@@ -22,7 +22,6 @@ use std::time::{Duration, Instant};
 use thiserror::Error;
 use tokio::pin;
 use tokio_postgres::types::PgLsn;
-use tracing::field::debug;
 use tracing::{debug, error, info};
 
 /// The amount of milliseconds that pass between one refresh and the other of the system, in case no

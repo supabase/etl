@@ -45,27 +45,27 @@ async fn async_main() -> anyhow::Result<()> {
 /// Tags all errors and transactions with the "replicator" service identifier.
 /// Configures panic handling to automatically capture panics and send them to Sentry.
 fn init_sentry() -> anyhow::Result<Option<sentry::ClientInitGuard>> {
-    if let Ok(config) = load_replicator_config() {
-        if let Some(sentry_config) = &config.sentry {
-            info!("initializing sentry with supplied dsn");
+    if let Ok(config) = load_replicator_config()
+        && let Some(sentry_config) = &config.sentry
+    {
+        info!("initializing sentry with supplied dsn");
 
-            let environment = Environment::load()?;
-            let guard = sentry::init(sentry::ClientOptions {
-                dsn: Some(sentry_config.dsn.parse()?),
-                environment: Some(environment.to_string().into()),
-                integrations: vec![Arc::new(
-                    sentry::integrations::panic::PanicIntegration::new(),
-                )],
-                ..Default::default()
-            });
+        let environment = Environment::load()?;
+        let guard = sentry::init(sentry::ClientOptions {
+            dsn: Some(sentry_config.dsn.parse()?),
+            environment: Some(environment.to_string().into()),
+            integrations: vec![Arc::new(
+                sentry::integrations::panic::PanicIntegration::new(),
+            )],
+            ..Default::default()
+        });
 
-            // Set service tag to differentiate replicator from other services
-            sentry::configure_scope(|scope| {
-                scope.set_tag("service", "replicator");
-            });
+        // Set service tag to differentiate replicator from other services
+        sentry::configure_scope(|scope| {
+            scope.set_tag("service", "replicator");
+        });
 
-            return Ok(Some(guard));
-        }
+        return Ok(Some(guard));
     }
 
     info!("sentry not configured for replicator, skipping initialization");
