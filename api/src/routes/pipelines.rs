@@ -333,6 +333,8 @@ pub async fn read_pipeline(
     ),
     tag = "Pipelines"
 )]
+// Forcing {pipeline_id} to be all digits by appending :\\d+
+// to avoid this route clashing with /pipelines/stop
 #[post("/pipelines/{pipeline_id:\\d+}")]
 pub async fn update_pipeline(
     req: HttpRequest,
