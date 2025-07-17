@@ -50,7 +50,7 @@ impl From<&str> for PodPhase {
 }
 
 #[async_trait]
-pub trait K8sClient {
+pub trait K8sClient: Send + Sync {
     async fn create_or_update_postgres_secret(
         &self,
         prefix: &str,
