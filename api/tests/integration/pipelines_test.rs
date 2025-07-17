@@ -832,7 +832,6 @@ async fn an_existing_pipeline_can_be_stopped() {
     assert!(response.status().is_success());
 }
 
-#[ignore = "failing currently"]
 #[tokio::test(flavor = "multi_thread")]
 async fn all_pipelines_can_be_stopped() {
     init_test_tracing();
