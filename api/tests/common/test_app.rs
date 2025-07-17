@@ -310,7 +310,7 @@ impl TestApp {
     }
 
     pub async fn stop_all_pipelines(&self, tenant_id: &str) -> reqwest::Response {
-        self.post_authenticated(format!("{}/v1/pipelines/stop", &self.address))
+        self.post_authenticated(format!("{}/v1/pipelines/all/stop", &self.address))
             .header("tenant_id", tenant_id)
             .send()
             .await

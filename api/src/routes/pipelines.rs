@@ -333,7 +333,7 @@ pub async fn read_pipeline(
     ),
     tag = "Pipelines"
 )]
-#[post("/pipelines/{pipeline_id:\\d+}")]
+#[post("/pipelines/{pipeline_id}")]
 pub async fn update_pipeline(
     req: HttpRequest,
     pool: Data<PgPool>,
@@ -491,7 +491,9 @@ pub async fn start_pipeline(
         (status = 500, description = "Internal server error", body = ErrorMessage)
     )
 )]
-#[post("/pipelines/{pipeline_id}/stop")]
+// Forcing {pipeline_id} to be all digits by appending :\\d+
+// to avoid this route clashing with /pipelines/all/stop
+#[post("/pipelines/{pipeline_id:\\d+}/stop")]
 pub async fn stop_pipeline(
     req: HttpRequest,
     pool: Data<PgPool>,
@@ -524,7 +526,7 @@ pub async fn stop_pipeline(
         (status = 500, description = "Internal server error", body = ErrorMessage)
     )
 )]
-#[post("/pipelines/stop")]
+#[post("/pipelines/all/stop")]
 pub async fn stop_all_pipelines(
     req: HttpRequest,
     pool: Data<PgPool>,
