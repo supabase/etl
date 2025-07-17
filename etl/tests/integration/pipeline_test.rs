@@ -1,15 +1,3 @@
-use crate::common::database::spawn_database;
-use crate::common::event::{group_events_by_type, group_events_by_type_and_table_id};
-use crate::common::pipeline::{create_pipeline, create_pipeline_with};
-use crate::common::state_store::{
-    FaultConfig, FaultInjectingStateStore, FaultType, TestStateStore,
-};
-use crate::common::test_destination_wrapper::TestDestinationWrapper;
-use crate::common::test_schema::{
-    TableSelection, build_expected_orders_inserts, build_expected_users_inserts,
-    get_n_integers_sum, get_users_age_sum_from_rows, insert_mock_data, insert_users_data,
-    setup_test_database_schema,
-};
 use config::shared::BatchConfig;
 use etl::conversions::event::EventType;
 use etl::destination::memory::MemoryDestination;
@@ -22,6 +10,19 @@ use postgres::tokio::test_utils::TableModification;
 use rand::random;
 use telemetry::init_test_tracing;
 use tokio_postgres::types::Type;
+
+use crate::common::database::spawn_database;
+use crate::common::event::{group_events_by_type, group_events_by_type_and_table_id};
+use crate::common::pipeline::{create_pipeline, create_pipeline_with};
+use crate::common::state_store::{
+    FaultConfig, FaultInjectingStateStore, FaultType, TestStateStore,
+};
+use crate::common::test_destination_wrapper::TestDestinationWrapper;
+use crate::common::test_schema::{
+    TableSelection, build_expected_orders_inserts, build_expected_users_inserts,
+    get_n_integers_sum, get_users_age_sum_from_rows, insert_mock_data, insert_users_data,
+    setup_test_database_schema,
+};
 
 // TODO: find a way to inject errors in a way that is predictable.
 #[ignore]
