@@ -1,4 +1,9 @@
-use api::k8s_client::{ContainerError, K8sClient, K8sError, PodPhase};
+use std::collections::BTreeMap;
+
+use api::k8s_client::{
+    ContainerError, K8sClient, K8sError, PodPhase, TRUSTED_ROOT_CERT_CONFIG_MAP_NAME,
+    TRUSTED_ROOT_CERT_KEY_NAME,
+};
 use async_trait::async_trait;
 use k8s_openapi::api::core::v1::ConfigMap;
 
@@ -30,8 +35,20 @@ impl K8sClient for MockK8sClient {
         Ok(())
     }
 
-    async fn get_config_map(&self, _config_map_name: &str) -> Result<ConfigMap, K8sError> {
-        Ok(ConfigMap::default())
+    async fn get_config_map(&self, config_map_name: &str) -> Result<ConfigMap, K8sError> {
+        // For tests to pass the TRUSTED_ROOT_CERT_CONFIG_MAP_NAME config map expects
+        // a key named TRUSTED_ROOT_CERT_KEY_NAME to be present
+        if config_map_name == TRUSTED_ROOT_CERT_CONFIG_MAP_NAME {
+            let mut map = BTreeMap::new();
+            map.insert(TRUSTED_ROOT_CERT_KEY_NAME.to_string(), String::new());
+            let cm = ConfigMap {
+                data: Some(map),
+                ..ConfigMap::default()
+            };
+            Ok(cm)
+        } else {
+            Ok(ConfigMap::default())
+        }
     }
 
     async fn create_or_update_config_map(

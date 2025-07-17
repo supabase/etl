@@ -14,7 +14,6 @@ use std::ops::DerefMut;
 use thiserror::Error;
 use utoipa::ToSchema;
 
-use crate::config::ApiConfig;
 use crate::db;
 use crate::db::destinations::{Destination, DestinationsDbError, destination_exists};
 use crate::db::images::{Image, ImagesDbError};
@@ -24,6 +23,7 @@ use crate::db::sources::{Source, SourceConfig, SourcesDbError, source_exists};
 use crate::encryption::EncryptionKey;
 use crate::k8s_client::{K8sClient, K8sError, PodPhase, TRUSTED_ROOT_CERT_CONFIG_MAP_NAME};
 use crate::routes::{ErrorMessage, TenantIdError, extract_tenant_id};
+use crate::{config::ApiConfig, k8s_client::TRUSTED_ROOT_CERT_KEY_NAME};
 use secrecy::ExposeSecret;
 
 #[derive(Debug, Error)]
@@ -820,7 +820,7 @@ async fn build_replicator_config(
         .await?
         .data
         .ok_or(PipelineError::TrustedRootCertsConfigMissing)?
-        .get("trusted_root_certs")
+        .get(TRUSTED_ROOT_CERT_KEY_NAME)
         .ok_or(PipelineError::TrustedRootCertsConfigMissing)?
         .clone();
 

@@ -774,7 +774,6 @@ async fn update_image_fails_when_no_default_image_exists() {
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
-#[ignore = "failing currently"]
 #[tokio::test(flavor = "multi_thread")]
 async fn an_existing_pipeline_can_be_started() {
     init_test_tracing();
@@ -801,7 +800,7 @@ async fn an_existing_pipeline_can_be_started() {
     let response = app.start_pipeline(tenant_id, pipeline_id).await;
 
     // Assert
-    assert!(dbg!(response).status().is_success());
+    assert!(response.status().is_success());
 }
 
 #[tokio::test(flavor = "multi_thread")]
