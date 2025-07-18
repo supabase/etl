@@ -4,7 +4,7 @@ use etl::conversions::table_row::TableRow;
 use postgres::schema::{ColumnSchema, Oid, TableName, TableSchema};
 use postgres::tokio::test_utils::{PgDatabase, id_column_schema};
 use std::ops::RangeInclusive;
-use tokio_postgres::types::{Type, PgLsn};
+use tokio_postgres::types::{PgLsn, Type};
 use tokio_postgres::{Client, GenericClient};
 
 use crate::common::database::test_table_name;

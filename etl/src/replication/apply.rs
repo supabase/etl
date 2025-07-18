@@ -508,7 +508,14 @@ where
                 start_lsn, end_lsn
             );
 
-            handle_logical_replication_message(state, start_lsn, message.into_data(), schema_cache, hook).await
+            handle_logical_replication_message(
+                state,
+                start_lsn,
+                message.into_data(),
+                schema_cache,
+                hook,
+            )
+            .await
         }
         ReplicationMessage::PrimaryKeepAlive(message) => {
             let end_lsn = PgLsn::from(message.wal_end());

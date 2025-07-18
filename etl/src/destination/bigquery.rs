@@ -708,7 +708,7 @@ impl BigQueryDestination {
     /// latest update in Postgres order to be the winner.
     fn generate_sequence_number(lsn: PgLsn) -> String {
         let lsn = u64::from(lsn);
-        format!("{:016x}", lsn)
+        format!("{lsn:016x}")
     }
 }
 

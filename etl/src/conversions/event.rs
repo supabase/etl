@@ -104,7 +104,10 @@ impl RelationEvent {
             .collect::<Result<Vec<ColumnSchema>, _>>()?;
         let table_schema = TableSchema::new(relation_body.rel_id(), table_name, column_schemas);
 
-        Ok(Self { start_lsn, table_schema })
+        Ok(Self {
+            start_lsn,
+            table_schema,
+        })
     }
 
     fn build_column_schema(
@@ -187,7 +190,6 @@ pub enum Event {
 }
 
 impl Event {
-
     /// Returns the LSN of this [`Event`].
     pub fn start_lsn(&self) -> Option<PgLsn> {
         match self {
@@ -198,7 +200,7 @@ impl Event {
             Event::Delete(event) => Some(event.start_lsn),
             Event::Relation(event) => Some(event.start_lsn),
             Event::Truncate(event) => Some(event.start_lsn),
-            Event::Unsupported => None
+            Event::Unsupported => None,
         }
     }
 
@@ -402,15 +404,18 @@ pub async fn convert_message_to_event(
             RelationEvent::from_protocol(start_lsn, relation_body)?,
         )),
         LogicalReplicationMessage::Insert(insert_body) => {
-            let insert_event = convert_insert_to_event(schema_cache, start_lsn, insert_body).await?;
+            let insert_event =
+                convert_insert_to_event(schema_cache, start_lsn, insert_body).await?;
             Ok(Event::Insert(insert_event))
         }
         LogicalReplicationMessage::Update(update_body) => {
-            let update_event = convert_update_to_event(schema_cache, start_lsn, update_body).await?;
+            let update_event =
+                convert_update_to_event(schema_cache, start_lsn, update_body).await?;
             Ok(Event::Update(update_event))
         }
         LogicalReplicationMessage::Delete(delete_body) => {
-            let delete_event = convert_delete_to_event(schema_cache, start_lsn, delete_body).await?;
+            let delete_event =
+                convert_delete_to_event(schema_cache, start_lsn, delete_body).await?;
             Ok(Event::Delete(delete_event))
         }
         LogicalReplicationMessage::Truncate(truncate_body) => Ok(Event::Truncate(
