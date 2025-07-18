@@ -9,6 +9,10 @@ edition = "2024"
 name = "bigquery"
 required-features = ["bigquery"]
 
+[[bench]]
+name = "table_copies"
+harness = false
+
 [dependencies]
 config = { workspace = true }
 postgres = { workspace = true, features = ["tokio"] }
