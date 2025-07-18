@@ -1,5 +1,6 @@
 use std::error::Error;
 
+use clap::Parser;
 use config::shared::{BatchConfig, PgConnectionConfig, PipelineConfig, RetryConfig, TlsConfig};
 use etl::{
     conversions::{event::Event, table_row::TableRow},
@@ -9,16 +10,58 @@ use etl::{
 };
 use postgres::schema::{TableId, TableSchema};
 
-async fn start_pipeline() -> Result<(), Box<dyn Error>> {
+#[derive(Parser, Debug)]
+#[command(author, version, about, long_about = None)]
+struct Args {
+    /// PostgreSQL host
+    #[arg(long, default_value = "localhost")]
+    host: String,
+
+    /// PostgreSQL port
+    #[arg(long, default_value = "5432")]
+    port: u16,
+
+    /// Database name
+    #[arg(long, default_value = "bench")]
+    database: String,
+
+    /// PostgreSQL username
+    #[arg(long, default_value = "postgres")]
+    username: String,
+
+    /// PostgreSQL password (optional)
+    #[arg(long)]
+    password: Option<String>,
+
+    /// Enable TLS
+    #[arg(long, default_value = "false")]
+    tls_enabled: bool,
+
+    /// TLS trusted root certificates
+    #[arg(long, default_value = "")]
+    tls_certs: String,
+
+    /// Publication name
+    #[arg(long, default_value = "bench_pub")]
+    publication_name: String,
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn Error>> {
+    let args = Args::parse();
+    start_pipeline(args).await
+}
+
+async fn start_pipeline(args: Args) -> Result<(), Box<dyn Error>> {
     let pg_connection_config = PgConnectionConfig {
-        host: "localhost".to_string(),
-        port: 5431,
-        name: "bench".to_string(),
-        username: "raminder.singh".to_string(),
-        password: None,
+        host: args.host,
+        port: args.port,
+        name: args.database,
+        username: args.username,
+        password: args.password.map(|p| p.into()),
         tls: TlsConfig {
-            trusted_root_certs: String::new(),
-            enabled: false,
+            trusted_root_certs: args.tls_certs,
+            enabled: args.tls_enabled,
         },
     };
 
@@ -51,8 +94,8 @@ async fn start_pipeline() -> Result<(), Box<dyn Error>> {
             max_delay_ms: 10000,
             backoff_factor: 2.0,
         },
-        publication_name: "bench_pub".to_string(),
-        max_table_sync_workers: 2,
+        publication_name: args.publication_name,
+        max_table_sync_workers: 10,
     };
 
     let mut pipeline = Pipeline::new(1, pipeline_config, state_store, destination);
@@ -65,11 +108,6 @@ async fn start_pipeline() -> Result<(), Box<dyn Error>> {
     pipeline.shutdown_and_wait().await?;
 
     Ok(())
-}
-
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn Error>> {
-    start_pipeline().await
 }
 
 #[derive(Clone)]
