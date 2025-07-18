@@ -44,6 +44,18 @@ struct Args {
     /// Publication name
     #[arg(long, default_value = "bench_pub")]
     publication_name: String,
+
+    /// Maximum batch size
+    #[arg(long, default_value = "100000")]
+    batch_max_size: usize,
+
+    /// Maximum batch fill time in milliseconds
+    #[arg(long, default_value = "10000")]
+    batch_max_fill_ms: u64,
+
+    /// Maximum number of table sync workers
+    #[arg(long, default_value = "8")]
+    max_table_sync_workers: u16,
 }
 
 #[tokio::main]
@@ -85,8 +97,8 @@ async fn start_pipeline(args: Args) -> Result<(), Box<dyn Error>> {
         id: 1,
         pg_connection: pg_connection_config,
         batch: BatchConfig {
-            max_size: 100_000,
-            max_fill_ms: 10_000,
+            max_size: args.batch_max_size,
+            max_fill_ms: args.batch_max_fill_ms,
         },
         apply_worker_init_retry: RetryConfig {
             max_attempts: 3,
@@ -95,7 +107,7 @@ async fn start_pipeline(args: Args) -> Result<(), Box<dyn Error>> {
             backoff_factor: 2.0,
         },
         publication_name: args.publication_name,
-        max_table_sync_workers: 10,
+        max_table_sync_workers: args.max_table_sync_workers,
     };
 
     let mut pipeline = Pipeline::new(1, pipeline_config, state_store, destination);
