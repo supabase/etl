@@ -27,6 +27,9 @@ const ETL_TRACE_ID: &str = "ETL BigQueryClient";
 /// Special column name for Change Data Capture operations in BigQuery.
 const BIGQUERY_CDC_SPECIAL_COLUMN: &str = "_CHANGE_TYPE";
 
+/// Special column name for Change Data Capture sequence ordering in BigQuery.
+const BIGQUERY_CDC_SEQUENCE_COLUMN: &str = "_CHANGE_SEQUENCE_NUMBER";
+
 /// Change Data Capture operation types for BigQuery streaming.
 #[derive(Debug)]
 pub enum BigQueryOperationType {
@@ -411,7 +414,10 @@ impl BigQueryClient {
     /// Maps PostgreSQL data types to BigQuery column types and sets the appropriate
     /// column mode (`NULLABLE`, `REQUIRED`, or `REPEATED`). Automatically adds the
     /// Change Data Capture special column.
-    pub fn column_schemas_to_table_descriptor(column_schemas: &[ColumnSchema]) -> TableDescriptor {
+    pub fn column_schemas_to_table_descriptor(
+        column_schemas: &[ColumnSchema],
+        use_cdc_sequence_column: bool,
+    ) -> TableDescriptor {
         let mut field_descriptors = Vec::with_capacity(column_schemas.len());
         let mut number = 1;
 
@@ -483,6 +489,16 @@ impl BigQueryClient {
             typ: ColumnType::String,
             mode: ColumnMode::Required,
         });
+        number += 1;
+
+        if use_cdc_sequence_column {
+            field_descriptors.push(FieldDescriptor {
+                number,
+                name: BIGQUERY_CDC_SEQUENCE_COLUMN.to_string(),
+                typ: ColumnType::String,
+                mode: ColumnMode::Required,
+            });
+        }
 
         TableDescriptor { field_descriptors }
     }
@@ -648,9 +664,9 @@ mod tests {
             ColumnSchema::new("tags".to_string(), Type::TEXT_ARRAY, -1, false, false),
         ];
 
-        let descriptor = BigQueryClient::column_schemas_to_table_descriptor(&columns);
+        let descriptor = BigQueryClient::column_schemas_to_table_descriptor(&columns, true);
 
-        assert_eq!(descriptor.field_descriptors.len(), 5); // 4 columns + CDC column
+        assert_eq!(descriptor.field_descriptors.len(), 6); // 4 columns + CDC columns
 
         // Check regular columns
         assert_eq!(descriptor.field_descriptors[0].name, "id");
@@ -694,7 +710,7 @@ mod tests {
             ColumnMode::Repeated
         ));
 
-        // Check CDC column
+        // Check CDC columns
         assert_eq!(
             descriptor.field_descriptors[4].name,
             BIGQUERY_CDC_SPECIAL_COLUMN
@@ -705,6 +721,19 @@ mod tests {
         ));
         assert!(matches!(
             descriptor.field_descriptors[4].mode,
+            ColumnMode::Required
+        ));
+
+        assert_eq!(
+            descriptor.field_descriptors[5].name,
+            BIGQUERY_CDC_SEQUENCE_COLUMN
+        );
+        assert!(matches!(
+            descriptor.field_descriptors[5].typ,
+            ColumnType::String
+        ));
+        assert!(matches!(
+            descriptor.field_descriptors[5].mode,
             ColumnMode::Required
         ));
     }
@@ -720,9 +749,9 @@ mod tests {
             ColumnSchema::new("time_col".to_string(), Type::TIME, -1, true, false),
         ];
 
-        let descriptor = BigQueryClient::column_schemas_to_table_descriptor(&columns);
+        let descriptor = BigQueryClient::column_schemas_to_table_descriptor(&columns, true);
 
-        assert_eq!(descriptor.field_descriptors.len(), 7); // 6 columns + CDC column
+        assert_eq!(descriptor.field_descriptors.len(), 8); // 6 columns + CDC columns
 
         // Check that UUID, JSON, DATE, TIME are all mapped to String in storage
         assert!(matches!(
