@@ -15,4 +15,5 @@
 //!
 //! These utilities help maintain consistency across tests and reduce code duplication.
 pub mod database;
+pub mod k8s_client;
 pub mod test_app;

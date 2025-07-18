@@ -16,7 +16,7 @@ use crate::{
     config::ApiConfig,
     db::publications::Publication,
     encryption,
-    k8s_client::HttpK8sClient,
+    k8s_client::{HttpK8sClient, K8sClient},
     routes::{
         destinations::{
             CreateDestinationRequest, CreateDestinationResponse, ReadDestinationResponse,
@@ -86,7 +86,7 @@ impl Application {
         };
 
         let k8s_client = match HttpK8sClient::new().await {
-            Ok(client) => Some(client),
+            Ok(client) => Some(Arc::new(client) as Arc<dyn K8sClient>),
             Err(e) => {
                 warn!(
                     "Failed to create Kubernetes client: {}. Running without Kubernetes support.",
@@ -137,12 +137,12 @@ pub async fn run(
     listener: TcpListener,
     connection_pool: PgPool,
     encryption_key: encryption::EncryptionKey,
-    http_k8s_client: Option<HttpK8sClient>,
+    http_k8s_client: Option<Arc<dyn K8sClient>>,
 ) -> Result<Server, anyhow::Error> {
     let config = web::Data::new(config);
     let connection_pool = web::Data::new(connection_pool);
     let encryption_key = web::Data::new(encryption_key);
-    let k8s_client = http_k8s_client.map(|client| web::Data::new(Arc::new(client)));
+    let k8s_client: Option<web::Data<dyn K8sClient>> = http_k8s_client.map(Into::into);
 
     #[derive(OpenApi)]
     #[openapi(

@@ -10,6 +10,7 @@ use tracing::{Instrument, debug, error, info, warn};
 
 use crate::concurrency::future::ReactiveFuture;
 use crate::concurrency::shutdown::{ShutdownResult, ShutdownRx};
+use crate::concurrency::signal::SignalTx;
 use crate::destination::base::Destination;
 use crate::pipeline::PipelineId;
 use crate::replication::apply::{ApplyLoopError, ApplyLoopHook, start_apply_loop};
@@ -249,6 +250,7 @@ pub struct TableSyncWorker<S, D> {
     state_store: S,
     destination: D,
     shutdown_rx: ShutdownRx,
+    force_syncing_tables_tx: SignalTx,
     run_permit: Arc<Semaphore>,
 }
 
@@ -263,6 +265,7 @@ impl<S, D> TableSyncWorker<S, D> {
         state_store: S,
         destination: D,
         shutdown_rx: ShutdownRx,
+        force_syncing_tables_tx: SignalTx,
         run_permit: Arc<Semaphore>,
     ) -> Self {
         Self {
@@ -274,6 +277,7 @@ impl<S, D> TableSyncWorker<S, D> {
             state_store,
             destination,
             shutdown_rx,
+            force_syncing_tables_tx,
             run_permit,
         }
     }
@@ -363,17 +367,17 @@ where
                 self.state_store.clone(),
                 self.destination.clone(),
                 self.shutdown_rx.clone(),
+                self.force_syncing_tables_tx,
             )
             .await;
 
             let start_lsn = match result {
+                Ok(TableSyncResult::SyncCompleted { start_lsn }) => start_lsn,
                 Ok(TableSyncResult::SyncStopped | TableSyncResult::SyncNotRequired) => {
                     return Ok(());
                 }
-                Ok(TableSyncResult::SyncCompleted { start_lsn }) => start_lsn,
                 Err(err) => {
                     error!("table sync failed for table {}: {}", self.table_id, err);
-
                     return Err(err.into());
                 }
             };
@@ -387,6 +391,7 @@ where
                 self.destination,
                 TableSyncWorkerHook::new(self.table_id, state_clone, self.state_store),
                 self.shutdown_rx,
+                None,
             )
             .await?;
 
@@ -456,46 +461,28 @@ impl<S> TableSyncWorkerHook<S> {
     }
 }
 
-impl<S> ApplyLoopHook for TableSyncWorkerHook<S>
+impl<S> TableSyncWorkerHook<S>
 where
-    S: StateStore + Clone + Send + Sync + 'static,
+    S: StateStore + Clone,
 {
-    type Error = TableSyncWorkerHookError;
-
-    async fn initialize(&self) -> Result<(), Self::Error> {
-        Ok(())
-    }
-
-    /// This function compares `current_lsn` against the table's catch up lsn
-    /// and if it is greater than or equal to the catch up `lsn`:
+    /// Tries to advance the [`TableReplicationPhase`] of this table based on the current lsn.
     ///
-    /// * Marks the table as sync done in state store if `update_state` is true.
-    /// * Returns Ok(false) to indicate to the callers that this table has been marked sync done.
-    ///
-    /// In all other cases it returns Ok(true)
-    async fn process_syncing_tables(
+    /// Returns `Ok(false)` when the worker is done with its work, signaling the caller that the apply
+    /// loop should be stopped.
+    async fn try_advance_phase(
         &self,
         current_lsn: PgLsn,
         update_state: bool,
-    ) -> Result<bool, Self::Error> {
-        info!(
-            "processing syncing tables for table sync worker with lsn {}",
-            current_lsn
-        );
-
+    ) -> Result<bool, TableSyncWorkerHookError> {
         let mut inner = self.table_sync_worker_state.get_inner().write().await;
 
         // If we caught up with the lsn, we mark this table as `SyncDone` and stop the worker.
         if let TableReplicationPhase::Catchup { lsn } = inner.replication_phase() {
-            // TODO: there is currently a correctness bug in which we mark this table as sync done
-            //  before we actually acknowledged writes to dis  (since they are acknowledged after the
-            //  batch is processed). This is fine for apply workers since progress is tracked after
-            //  the batch is written, but for table sync workers this causes the problem where we might
-            //  crash after marking ourselves as `SynCdONE` and we end up not actually sending that data
-            //  and the apply worker still assumes that data is there so it will be lost forever.
-            //  Postgres doesn't have this problem since they process and acknowledge each commit message
-            //  individually.
             if current_lsn >= lsn {
+                // If we are told to update the state, we mark the phase as actually changes. We do
+                // this because we want to update the actual state only when we are sure that the
+                // progress has been persisted to the destination. When `update_state` is `false` this
+                // function is used as a lookahead, to determine whether the worker should be stopped.
                 if update_state {
                     inner
                         .set_phase_with(
@@ -515,6 +502,39 @@ where
         }
 
         Ok(true)
+    }
+}
+
+impl<S> ApplyLoopHook for TableSyncWorkerHook<S>
+where
+    S: StateStore + Clone + Send + Sync + 'static,
+{
+    type Error = TableSyncWorkerHookError;
+
+    async fn before_loop(&self, start_lsn: PgLsn) -> Result<bool, Self::Error> {
+        info!("checking if the table sync worker is already caught up with the apply worker");
+
+        self.try_advance_phase(start_lsn, true).await
+    }
+
+    /// This function compares `current_lsn` against the table's catch up lsn
+    /// and if it is greater than or equal to the `Catchup` `lsn`:
+    ///
+    /// * Marks the table as sync done in state store if `update_state` is true.
+    /// * Returns Ok(false) to indicate to the callers that this table has been marked sync done.
+    ///
+    /// In all other cases it returns Ok(true)
+    async fn process_syncing_tables(
+        &self,
+        current_lsn: PgLsn,
+        update_state: bool,
+    ) -> Result<bool, Self::Error> {
+        info!(
+            "processing syncing tables for table sync worker with lsn {}",
+            current_lsn
+        );
+
+        self.try_advance_phase(current_lsn, update_state).await
     }
 
     async fn skip_table(&self, table_id: TableId) -> Result<bool, Self::Error> {

@@ -773,3 +773,89 @@ async fn update_image_fails_when_no_default_image_exists() {
     // Assert
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_existing_pipeline_can_be_started() {
+    init_test_tracing();
+    // Arrange
+    let app = spawn_test_app().await;
+    create_default_image(&app).await;
+    let tenant_id = &create_tenant(&app).await;
+    let source_id = create_source(&app, tenant_id).await;
+    let destination_id = create_destination(&app, tenant_id).await;
+
+    let pipeline = CreatePipelineRequest {
+        source_id,
+        destination_id,
+        config: new_pipeline_config(),
+    };
+    let response = app.create_pipeline(tenant_id, &pipeline).await;
+    let response: CreatePipelineResponse = response
+        .json()
+        .await
+        .expect("failed to deserialize response");
+    let pipeline_id = response.id;
+
+    // Act
+    let response = app.start_pipeline(tenant_id, pipeline_id).await;
+
+    // Assert
+    assert!(response.status().is_success());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_existing_pipeline_can_be_stopped() {
+    init_test_tracing();
+    // Arrange
+    let app = spawn_test_app().await;
+    create_default_image(&app).await;
+    let tenant_id = &create_tenant(&app).await;
+    let source_id = create_source(&app, tenant_id).await;
+    let destination_id = create_destination(&app, tenant_id).await;
+
+    let pipeline = CreatePipelineRequest {
+        source_id,
+        destination_id,
+        config: new_pipeline_config(),
+    };
+    let response = app.create_pipeline(tenant_id, &pipeline).await;
+    let response: CreatePipelineResponse = response
+        .json()
+        .await
+        .expect("failed to deserialize response");
+    let pipeline_id = response.id;
+
+    // Act
+    let response = app.stop_pipeline(tenant_id, pipeline_id).await;
+
+    // Assert
+    assert!(response.status().is_success());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn all_pipelines_can_be_stopped() {
+    init_test_tracing();
+    // Arrange
+    let app = spawn_test_app().await;
+    create_default_image(&app).await;
+    let tenant_id = &create_tenant(&app).await;
+    let source_id = create_source(&app, tenant_id).await;
+    let destination_id = create_destination(&app, tenant_id).await;
+
+    let pipeline = CreatePipelineRequest {
+        source_id,
+        destination_id,
+        config: new_pipeline_config(),
+    };
+    let response = app.create_pipeline(tenant_id, &pipeline).await;
+    let _response: CreatePipelineResponse = response
+        .json()
+        .await
+        .expect("failed to deserialize response");
+
+    // Act
+    let response = app.stop_all_pipelines(tenant_id).await;
+
+    // Assert
+    assert!(response.status().is_success());
+}

@@ -87,7 +87,15 @@ impl<B, S: Stream<Item = B>> Stream for BatchStream<B, S> {
             // remaining elements, irrespectively of boundaries.
             if this.shutdown_rx.has_changed().unwrap_or(false) {
                 info!("the stream has been forcefully stopped");
+
+                // We mark the stream as stopped, in this way any further call with return
+                // `Poll::Ready(None)`.
                 *this.stream_stopped = true;
+
+                // We mark the current value as unchanged, effectively acknowledging that we have
+                // seen it. This does not affect the correctness, but it makes the implementation
+                // semantically more correct.
+                this.shutdown_rx.mark_unchanged();
 
                 // Even if we have no items, we return this result, since we signal that a shutdown
                 // signal was received and the consumer side of the stream, can decide what to do.

@@ -11,7 +11,6 @@ use config::shared::{
 use serde::{Deserialize, Serialize};
 use sqlx::{PgPool, PgTransaction};
 use std::ops::DerefMut;
-use std::sync::Arc;
 use thiserror::Error;
 use utoipa::ToSchema;
 
@@ -22,9 +21,8 @@ use crate::db::pipelines::{Pipeline, PipelineConfig, PipelinesDbError};
 use crate::db::replicators::{Replicator, ReplicatorsDbError};
 use crate::db::sources::{Source, SourceConfig, SourcesDbError, source_exists};
 use crate::encryption::EncryptionKey;
-use crate::k8s_client::{
-    HttpK8sClient, K8sClient, K8sError, PodPhase, TRUSTED_ROOT_CERT_CONFIG_MAP_NAME,
-};
+use crate::k8s_client::TRUSTED_ROOT_CERT_KEY_NAME;
+use crate::k8s_client::{K8sClient, K8sError, PodPhase, TRUSTED_ROOT_CERT_CONFIG_MAP_NAME};
 use crate::routes::{ErrorMessage, TenantIdError, extract_tenant_id};
 use secrecy::ExposeSecret;
 
@@ -335,7 +333,9 @@ pub async fn read_pipeline(
     ),
     tag = "Pipelines"
 )]
-#[post("/pipelines/{pipeline_id}")]
+// Forcing {pipeline_id} to be all digits by appending :\\d+
+// to avoid this route clashing with /pipelines/stop
+#[post("/pipelines/{pipeline_id:\\d+}")]
 pub async fn update_pipeline(
     req: HttpRequest,
     pool: Data<PgPool>,
@@ -453,11 +453,12 @@ pub async fn start_pipeline(
     req: HttpRequest,
     pool: Data<PgPool>,
     encryption_key: Data<EncryptionKey>,
-    k8s_client: Data<Arc<HttpK8sClient>>,
+    k8s_client: Data<dyn K8sClient>,
     pipeline_id: Path<i64>,
 ) -> Result<impl Responder, PipelineError> {
     let tenant_id = extract_tenant_id(&req)?;
     let pipeline_id = pipeline_id.into_inner();
+    let k8s_client = k8s_client.into_inner();
 
     let mut txn = pool.begin().await?;
     let (pipeline, replicator, image, source, destination) =
@@ -465,7 +466,7 @@ pub async fn start_pipeline(
 
     // We update the pipeline in K8s.
     create_or_update_pipeline_in_k8s(
-        &k8s_client,
+        k8s_client.as_ref(),
         tenant_id,
         pipeline,
         replicator,
@@ -494,11 +495,12 @@ pub async fn start_pipeline(
 pub async fn stop_pipeline(
     req: HttpRequest,
     pool: Data<PgPool>,
-    k8s_client: Data<Arc<HttpK8sClient>>,
+    k8s_client: Data<dyn K8sClient>,
     pipeline_id: Path<i64>,
 ) -> Result<impl Responder, PipelineError> {
     let tenant_id = extract_tenant_id(&req)?;
     let pipeline_id = pipeline_id.into_inner();
+    let k8s_client = k8s_client.into_inner();
 
     let mut txn = pool.begin().await?;
     let replicator =
@@ -526,9 +528,10 @@ pub async fn stop_pipeline(
 pub async fn stop_all_pipelines(
     req: HttpRequest,
     pool: Data<PgPool>,
-    k8s_client: Data<Arc<HttpK8sClient>>,
+    k8s_client: Data<dyn K8sClient>,
 ) -> Result<impl Responder, PipelineError> {
     let tenant_id = extract_tenant_id(&req)?;
+    let k8s_client = k8s_client.into_inner();
 
     let mut txn = pool.begin().await?;
     let replicators = db::replicators::read_replicators(txn.deref_mut(), tenant_id).await?;
@@ -555,11 +558,12 @@ pub async fn stop_all_pipelines(
 pub async fn get_pipeline_status(
     req: HttpRequest,
     pool: Data<PgPool>,
-    k8s_client: Data<Arc<HttpK8sClient>>,
+    k8s_client: Data<dyn K8sClient>,
     pipeline_id: Path<i64>,
 ) -> Result<impl Responder, PipelineError> {
     let tenant_id = extract_tenant_id(&req)?;
     let pipeline_id = pipeline_id.into_inner();
+    let k8s_client = k8s_client.into_inner();
 
     let replicator =
         db::replicators::read_replicator_by_pipeline_id(&**pool, tenant_id, pipeline_id)
@@ -627,13 +631,14 @@ pub async fn update_pipeline_image(
     req: HttpRequest,
     pool: Data<PgPool>,
     encryption_key: Data<EncryptionKey>,
-    k8s_client: Option<Data<Arc<HttpK8sClient>>>,
+    k8s_client: Data<dyn K8sClient>,
     pipeline_id: Path<i64>,
     update_request: Json<UpdatePipelineImageRequest>,
 ) -> Result<impl Responder, PipelineError> {
     let tenant_id = extract_tenant_id(&req)?;
     let pipeline_id = pipeline_id.into_inner();
     let update_request = update_request.into_inner();
+    let k8s_client = k8s_client.into_inner();
 
     let mut txn = pool.begin().await?;
     let (pipeline, replicator, current_image, source, destination) =
@@ -669,18 +674,16 @@ pub async fn update_pipeline_image(
     }
 
     // We update the pipeline in K8s if client is available.
-    if let Some(k8s_client) = k8s_client {
-        create_or_update_pipeline_in_k8s(
-            &k8s_client,
-            tenant_id,
-            pipeline,
-            replicator,
-            target_image,
-            source,
-            destination,
-        )
-        .await?;
-    }
+    create_or_update_pipeline_in_k8s(
+        k8s_client.as_ref(),
+        tenant_id,
+        pipeline,
+        replicator,
+        target_image,
+        source,
+        destination,
+    )
+    .await?;
     txn.commit().await?;
 
     Ok(HttpResponse::Ok().finish())
@@ -694,7 +697,7 @@ struct Secrets {
 
 #[allow(clippy::too_many_arguments)]
 async fn create_or_update_pipeline_in_k8s(
-    k8s_client: &HttpK8sClient,
+    k8s_client: &dyn K8sClient,
     tenant_id: &str,
     pipeline: Pipeline,
     replicator: Replicator,
@@ -728,7 +731,7 @@ async fn create_or_update_pipeline_in_k8s(
 }
 
 async fn delete_pipeline_in_k8s(
-    k8s_client: &HttpK8sClient,
+    k8s_client: &dyn K8sClient,
     tenant_id: &str,
     replicator: Replicator,
 ) -> Result<(), PipelineError> {
@@ -800,7 +803,7 @@ fn build_secrets(source_config: &SourceConfig, destination_config: &DestinationC
 }
 
 async fn build_replicator_config(
-    k8s_client: &HttpK8sClient,
+    k8s_client: &dyn K8sClient,
     source_config: SourceConfig,
     destination_config: DestinationConfig,
     pipeline: Pipeline,
@@ -812,7 +815,7 @@ async fn build_replicator_config(
         .await?
         .data
         .ok_or(PipelineError::TrustedRootCertsConfigMissing)?
-        .get("trusted_root_certs")
+        .get(TRUSTED_ROOT_CERT_KEY_NAME)
         .ok_or(PipelineError::TrustedRootCertsConfigMissing)?
         .clone();
 
@@ -862,7 +865,7 @@ fn create_k8s_object_prefix(tenant_id: &str, replicator_id: i64) -> String {
 }
 
 async fn create_or_update_secrets(
-    k8s_client: &HttpK8sClient,
+    k8s_client: &dyn K8sClient,
     prefix: &str,
     secrets: Secrets,
 ) -> Result<(), PipelineError> {
@@ -880,7 +883,7 @@ async fn create_or_update_secrets(
 }
 
 async fn create_or_update_config(
-    k8s_client: &HttpK8sClient,
+    k8s_client: &dyn K8sClient,
     prefix: &str,
     config: ReplicatorConfig,
 ) -> Result<(), PipelineError> {
@@ -895,7 +898,7 @@ async fn create_or_update_config(
 }
 
 async fn create_or_update_replicator(
-    k8s_client: &HttpK8sClient,
+    k8s_client: &dyn K8sClient,
     prefix: &str,
     replicator_image: String,
 ) -> Result<(), PipelineError> {
@@ -906,20 +909,20 @@ async fn create_or_update_replicator(
     Ok(())
 }
 
-async fn delete_secrets(k8s_client: &HttpK8sClient, prefix: &str) -> Result<(), PipelineError> {
+async fn delete_secrets(k8s_client: &dyn K8sClient, prefix: &str) -> Result<(), PipelineError> {
     k8s_client.delete_postgres_secret(prefix).await?;
     k8s_client.delete_bq_secret(prefix).await?;
 
     Ok(())
 }
 
-async fn delete_config(k8s_client: &HttpK8sClient, prefix: &str) -> Result<(), PipelineError> {
+async fn delete_config(k8s_client: &dyn K8sClient, prefix: &str) -> Result<(), PipelineError> {
     k8s_client.delete_config_map(prefix).await?;
 
     Ok(())
 }
 
-async fn delete_replicator(k8s_client: &HttpK8sClient, prefix: &str) -> Result<(), PipelineError> {
+async fn delete_replicator(k8s_client: &dyn K8sClient, prefix: &str) -> Result<(), PipelineError> {
     k8s_client.delete_stateful_set(prefix).await?;
 
     Ok(())

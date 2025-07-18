@@ -128,6 +128,42 @@ pub async fn setup_test_database_schema<G: GenericClient>(
     }
 }
 
+/// Inserts users data into the database for testing purposes.
+pub async fn insert_users_data<G: GenericClient>(
+    client: &mut PgDatabase<G>,
+    users_table_name: &TableName,
+    range: RangeInclusive<usize>,
+) {
+    for i in range {
+        client
+            .insert_values(
+                users_table_name.clone(),
+                &["name", "age"],
+                &[&format!("user_{i}"), &(i as i32)],
+            )
+            .await
+            .expect("Failed to insert users");
+    }
+}
+
+/// Inserts orders data into the database for testing purposes.
+pub async fn insert_orders_data<G: GenericClient>(
+    client: &mut PgDatabase<G>,
+    orders_table_name: &TableName,
+    range: RangeInclusive<usize>,
+) {
+    for i in range {
+        client
+            .insert_values(
+                orders_table_name.clone(),
+                &["description"],
+                &[&format!("description_{i}")],
+            )
+            .await
+            .expect("Failed to insert orders");
+    }
+}
+
 pub async fn insert_mock_data(
     database: &mut PgDatabase<Client>,
     users_table_name: &TableName,
@@ -138,56 +174,13 @@ pub async fn insert_mock_data(
     if use_transaction {
         let mut transaction = database.begin_transaction().await;
 
-        // Insert users with deterministic data.
-        for i in range.clone() {
-            transaction
-                .insert_values(
-                    users_table_name.clone(),
-                    &["name", "age"],
-                    &[&format!("user_{i}"), &(i as i32)],
-                )
-                .await
-                .expect("Failed to insert users");
-        }
+        insert_users_data(&mut transaction, users_table_name, range.clone()).await;
+        insert_orders_data(&mut transaction, orders_table_name, range).await;
 
-        // Insert orders with deterministic data.
-        for i in range {
-            transaction
-                .insert_values(
-                    orders_table_name.clone(),
-                    &["description"],
-                    &[&format!("description_{i}")],
-                )
-                .await
-                .expect("Failed to insert orders");
-        }
-
-        // Commit the transaction.
         transaction.commit_transaction().await;
     } else {
-        // Insert users with deterministic data.
-        for i in range.clone() {
-            database
-                .insert_values(
-                    users_table_name.clone(),
-                    &["name", "age"],
-                    &[&format!("user_{i}"), &(i as i32)],
-                )
-                .await
-                .expect("Failed to insert users");
-        }
-
-        // Insert orders with deterministic data.
-        for i in range {
-            database
-                .insert_values(
-                    orders_table_name.clone(),
-                    &["description"],
-                    &[&format!("description_{i}")],
-                )
-                .await
-                .expect("Failed to insert orders");
-        }
+        insert_users_data(database, users_table_name, range.clone()).await;
+        insert_orders_data(database, orders_table_name, range).await;
     }
 }
 

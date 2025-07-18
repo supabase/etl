@@ -1,4 +1,6 @@
 use crate::common::database::create_etl_api_database;
+use crate::common::k8s_client::MockK8sClient;
+use api::k8s_client::K8sClient;
 use api::routes::destinations::{CreateDestinationRequest, UpdateDestinationRequest};
 use api::routes::destinations_pipelines::{
     CreateDestinationPipelineRequest, UpdateDestinationPipelineRequest,
@@ -20,6 +22,7 @@ use postgres::sqlx::test_utils::drop_pg_database;
 use reqwest::{IntoUrl, RequestBuilder};
 use std::io;
 use std::net::TcpListener;
+use std::sync::Arc;
 use tokio::runtime::Handle;
 use uuid::Uuid;
 
@@ -290,6 +293,33 @@ impl TestApp {
             .expect("Failed to execute request.")
     }
 
+    pub async fn start_pipeline(&self, tenant_id: &str, pipeline_id: i64) -> reqwest::Response {
+        self.post_authenticated(format!(
+            "{}/v1/pipelines/{pipeline_id}/start",
+            &self.address
+        ))
+        .header("tenant_id", tenant_id)
+        .send()
+        .await
+        .expect("failed to execute request")
+    }
+
+    pub async fn stop_pipeline(&self, tenant_id: &str, pipeline_id: i64) -> reqwest::Response {
+        self.post_authenticated(format!("{}/v1/pipelines/{pipeline_id}/stop", &self.address))
+            .header("tenant_id", tenant_id)
+            .send()
+            .await
+            .expect("failed to execute request")
+    }
+
+    pub async fn stop_all_pipelines(&self, tenant_id: &str) -> reqwest::Response {
+        self.post_authenticated(format!("{}/v1/pipelines/stop", &self.address))
+            .header("tenant_id", tenant_id)
+            .send()
+            .await
+            .expect("failed to execute request")
+    }
+
     pub async fn read_all_pipelines(&self, tenant_id: &str) -> reqwest::Response {
         self.get_authenticated(format!("{}/v1/pipelines", &self.address))
             .header("tenant_id", tenant_id)
@@ -406,13 +436,14 @@ pub async fn spawn_test_app() -> TestApp {
     let key = generate_random_key::<32>().expect("failed to generate random key");
     let encryption_key = encryption::EncryptionKey { id: 0, key };
     let api_key = "XOUbHmWbt9h7nWl15wWwyWQnctmFGNjpawMc3lT5CFs=".to_string();
+    let k8s_client = Some(Arc::new(MockK8sClient) as Arc<dyn K8sClient>);
 
     let server = run(
         config.clone(),
         listener,
         connection_pool,
         encryption_key,
-        None,
+        k8s_client,
     )
     .await
     .expect("failed to bind address");

@@ -8,6 +8,7 @@ use tokio_postgres::types::PgLsn;
 use tracing::{Instrument, debug, error, info};
 
 use crate::concurrency::shutdown::ShutdownRx;
+use crate::concurrency::signal::{SignalTx, create_signal};
 use crate::destination::base::Destination;
 use crate::pipeline::PipelineId;
 use crate::replication::apply::{ApplyLoopError, ApplyLoopHook, start_apply_loop};
@@ -130,6 +131,9 @@ where
         let apply_worker = async move {
             let start_lsn = get_start_lsn(self.pipeline_id, &self.replication_client).await?;
 
+            // We create the signal used to notify the apply worker that it should force syncing tables.
+            let (force_syncing_tables_tx, force_syncing_tables_rx) = create_signal();
+
             start_apply_loop(
                 self.pipeline_id,
                 start_lsn,
@@ -145,9 +149,11 @@ where
                     self.state_store,
                     self.destination,
                     self.shutdown_rx.clone(),
+                    force_syncing_tables_tx,
                     self.table_sync_worker_permits.clone(),
                 ),
                 self.shutdown_rx,
+                Some(force_syncing_tables_rx),
             )
             .await?;
 
@@ -194,6 +200,7 @@ struct ApplyWorkerHook<S, D> {
     state_store: S,
     destination: D,
     shutdown_rx: ShutdownRx,
+    force_syncing_tables_tx: SignalTx,
     table_sync_worker_permits: Arc<Semaphore>,
 }
 
@@ -207,6 +214,7 @@ impl<S, D> ApplyWorkerHook<S, D> {
         state_store: S,
         destination: D,
         shutdown_rx: ShutdownRx,
+        force_syncing_tables_tx: SignalTx,
         table_sync_worker_permits: Arc<Semaphore>,
     ) -> Self {
         Self {
@@ -217,6 +225,7 @@ impl<S, D> ApplyWorkerHook<S, D> {
             state_store,
             destination,
             shutdown_rx,
+            force_syncing_tables_tx,
             table_sync_worker_permits,
         }
     }
@@ -227,8 +236,10 @@ where
     S: StateStore + Clone + Send + Sync + 'static,
     D: Destination + Clone + Send + Sync + 'static,
 {
-    async fn start_table_sync_worker(&self, table_id: TableId) -> Result<(), ApplyWorkerHookError> {
-        let worker = TableSyncWorker::new(
+    async fn build_table_sync_worker(&self, table_id: TableId) -> TableSyncWorker<S, D> {
+        info!("creating a new table sync worker for table {}", table_id);
+
+        TableSyncWorker::new(
             self.pipeline_id,
             self.config.clone(),
             self.pool.clone(),
@@ -237,22 +248,9 @@ where
             self.state_store.clone(),
             self.destination.clone(),
             self.shutdown_rx.clone(),
+            self.force_syncing_tables_tx.clone(),
             self.table_sync_worker_permits.clone(),
-        );
-
-        let mut pool = self.pool.write().await;
-        if let Err(err) = pool.start_worker(worker).await {
-            // TODO: check if we want to build a backoff mechanism for retrying the
-            //  spawning of new table sync workers.
-            error!(
-                "failed to start table sync worker for table {}: {}",
-                table_id, err
-            );
-
-            return Err(err.into());
-        }
-
-        Ok(())
+        )
     }
 
     async fn handle_syncing_table(
@@ -260,14 +258,13 @@ where
         table_id: TableId,
         current_lsn: PgLsn,
     ) -> Result<bool, ApplyWorkerHookError> {
-        let table_sync_worker_state = {
-            let pool = self.pool.read().await;
-            pool.get_active_worker_state(table_id)
-        };
+        let mut pool = self.pool.write().await;
+        let table_sync_worker_state = pool.get_active_worker_state(table_id);
 
+        // If there is no worker state, we start a new worker.
         let Some(table_sync_worker_state) = table_sync_worker_state else {
-            info!("creating a new table sync worker for table {}", table_id);
-            self.start_table_sync_worker(table_id).await?;
+            let table_sync_worker = self.build_table_sync_worker(table_id).await;
+            pool.start_worker(table_sync_worker).await?;
 
             return Ok(true);
         };
@@ -335,27 +332,38 @@ where
 {
     type Error = ApplyWorkerHookError;
 
-    async fn initialize(&self) -> Result<(), Self::Error> {
+    async fn before_loop(&self, _start_lsn: PgLsn) -> Result<bool, Self::Error> {
+        info!("starting table sync workers before the main apply loop");
+
         let active_table_replication_states =
             get_table_replication_states(&self.state_store, false).await?;
 
-        for table_id in active_table_replication_states.keys() {
-            let table_sync_worker_state = {
-                let pool = self.pool.read().await;
-                pool.get_active_worker_state(*table_id)
-            };
+        for (table_id, table_replication_phase) in active_table_replication_states {
+            // A table in `SyncDone` doesn't need to have its worker started, since the main apply
+            // worker will move it into `Ready` state automatically once the condition is met.
+            if let TableReplicationPhaseType::SyncDone = table_replication_phase.as_type() {
+                continue;
+            }
 
-            if table_sync_worker_state.is_none() {
-                if let Err(err) = self.start_table_sync_worker(*table_id).await {
-                    error!(
-                        "error starting table sync worker for table {}: {}",
-                        table_id, err
-                    );
-                }
+            // If there is already an active worker for this table in the pool, we can avoid starting
+            // it.
+            let mut pool = self.pool.write().await;
+            if pool.get_active_worker_state(table_id).is_some() {
+                continue;
+            }
+
+            // If we fail, we just show an error, and hopefully we will succeed when starting it
+            // during syncing tables.
+            let table_sync_worker = self.build_table_sync_worker(table_id).await;
+            if let Err(err) = pool.start_worker(table_sync_worker).await {
+                error!(
+                    "error starting table sync worker for table {} during initialization: {}",
+                    table_id, err
+                );
             }
         }
 
-        Ok(())
+        Ok(true)
     }
 
     async fn process_syncing_tables(
@@ -394,11 +402,16 @@ where
                             .await?;
                     }
                 }
-                _ => {
-                    if let Err(err) = self.handle_syncing_table(table_id, current_lsn).await {
+                _ => match self.handle_syncing_table(table_id, current_lsn).await {
+                    Ok(continue_loop) => {
+                        if !continue_loop {
+                            return Ok(false);
+                        }
+                    }
+                    Err(err) => {
                         error!("error handling syncing for table {}: {}", table_id, err);
                     }
-                }
+                },
             }
         }
 

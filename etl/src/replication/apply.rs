@@ -10,12 +10,13 @@ use crate::workers::apply::ApplyWorkerHookError;
 use crate::workers::base::WorkerType;
 use crate::workers::table_sync::TableSyncWorkerHookError;
 
+use crate::concurrency::signal::SignalRx;
 use config::shared::PipelineConfig;
-use futures::StreamExt;
+use futures::{FutureExt, StreamExt};
 use postgres::schema::TableId;
 use postgres_replication::protocol;
 use postgres_replication::protocol::{LogicalReplicationMessage, ReplicationMessage};
-use std::future::Future;
+use std::future::{Future, pending};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -88,7 +89,10 @@ pub enum ApplyLoopResult {
 pub trait ApplyLoopHook {
     type Error: Into<ApplyLoopError>;
 
-    fn initialize(&self) -> impl Future<Output = Result<(), Self::Error>> + Send;
+    fn before_loop(
+        &self,
+        start_lsn: PgLsn,
+    ) -> impl Future<Output = Result<bool, Self::Error>> + Send;
 
     fn process_syncing_tables(
         &self,
@@ -171,7 +175,7 @@ struct HandleMessageResult {
     end_lsn: Option<PgLsn>,
 
     /// Set when a batch should be ended earlier than the normal batching parameters of
-    /// max size and max fill duration. Currently this will be set in the following
+    /// max size and max fill duration. Currently, this will be set in the following
     /// conditions:
     ///
     /// * Set to [`EndBatch::Inclusive`]` when a commit message indicates that it will
@@ -241,7 +245,7 @@ impl ApplyLoopState {
         }
     }
 
-    /// Returns true if the apply loop is in the middle of processing a trasaction, false otherwise.
+    /// Returns true if the apply loop is in the middle of processing a transaction, false otherwise.
     fn handling_transaction(&self) -> bool {
         self.remote_final_lsn.is_some()
     }
@@ -257,12 +261,27 @@ pub async fn start_apply_loop<D, T>(
     destination: D,
     hook: T,
     mut shutdown_rx: ShutdownRx,
+    mut force_syncing_tables_rx: Option<SignalRx>,
 ) -> Result<ApplyLoopResult, ApplyLoopError>
 where
     D: Destination + Clone + Send + 'static,
     T: ApplyLoopHook,
     ApplyLoopError: From<<T as ApplyLoopHook>::Error>,
 {
+    info!(
+        "starting apply loop in worker '{:?}' from lsn {}",
+        hook.worker_type(),
+        start_lsn
+    );
+
+    // We call the `before_loop` hook and stop the loop immediately in case we are told to stop.
+    let continue_loop = hook.before_loop(start_lsn).await?;
+    if !continue_loop {
+        info!("apply loop stopped before having started");
+
+        return Ok(ApplyLoopResult::ApplyStopped);
+    }
+
     // The first status update is defaulted from the start lsn since at this point we haven't
     // processed anything.
     let first_status_update = StatusUpdate {
@@ -270,15 +289,6 @@ where
         flush_lsn: start_lsn,
         apply_lsn: start_lsn,
     };
-
-    // We initialize the apply loop which is based on the hook implementation.
-    hook.initialize().await?;
-
-    info!(
-        "starting apply loop in worker '{:?}' from lsn {}",
-        hook.worker_type(),
-        start_lsn
-    );
 
     // We compute the slot name for the replication slot that we are going to use for the logical
     // replication. At this point we assume that the slot already exists.
@@ -324,9 +334,29 @@ where
                     max_batch_fill_duration,
                 )
                 .await?;
-
                 if end_loop {
                     return Ok(ApplyLoopResult::ApplyStopped);
+                }
+            }
+
+            // If we are given a signal which tells us when to forcefully perform table syncing, we
+            // will subscribe to it.
+            _ = force_syncing_tables_rx.as_mut().map_or_else(|| pending().boxed(), |rx| rx.changed().boxed()) => {
+                // If we are told to force syncing tables, call the hook's `process_syncing_tables`
+                // method so that we can advance the state of tables.
+                //
+                // Note that for consistency we can perform table syncing only when we are not in
+                // a transaction, meaning that if we get a signal while in the middle of a transaction
+                // it will be received but no syncing will happen. We are fine with that since we assume
+                // that if we are in the middle of a transaction, Postgres will send us the remaining
+                // events of the transaction within a reasonable amount of time and that will drive the
+                // sync at the next transaction boundary.
+                if !state.handling_transaction() {
+                    debug!("forcefully processing syncing tables");
+                    let continue_loop = hook.process_syncing_tables(state.next_status_update.flush_lsn, true).await?;
+                    if !continue_loop {
+                        return Ok(ApplyLoopResult::ApplyStopped);
+                    }
                 }
             }
 
@@ -341,26 +371,6 @@ where
                         false
                     )
                     .await?;
-
-                // If the apply loop is not in the middle of processing a transaction, call the hook's
-                // process_syncing_tables method so that apply worker:
-                //
-                // * Marks any table sync workers in sync wait state as catchup
-                // * Marks any sync done table sync workers as ready
-                //
-                // and the table sync worker:
-                //
-                // * Marks itself as sync done if it completes its catch phase
-                //
-                // This is done here as well in addition to at a commit boundary because we do not want
-                // the table sync workers to get stuck if there are no changes in the cdc stream.
-                if !state.handling_transaction() {
-                    debug!("processing syncing tables after a period of inactivity of {} seconds", REFRESH_INTERVAL.as_secs());
-                    let continue_loop = hook.process_syncing_tables(state.next_status_update.flush_lsn, true).await?;
-                    if !continue_loop {
-                        break Ok(ApplyLoopResult::ApplyStopped);
-                    }
-                }
             }
         }
     }
@@ -473,6 +483,11 @@ where
             // and ack for the batch from the destination. This is important to keep a consistent state.
             // Without this order it could happen that the table's state was updated but sending the batch
             // to the destination failed.
+            //
+            // For this loop, we use the `flush_lsn` as LSN instead of the `last_commit_end_lsn` just
+            // because we want to semantically process syncing tables with the same LSN that we tell
+            // Postgres that we flushed durably to disk. In practice, `flush_lsn` and `last_commit_end_lsn`
+            // will be always equal, since LSNs are guaranteed to be monotonically increasing.
             end_loop |= !hook
                 .process_syncing_tables(state.next_status_update.flush_lsn, true)
                 .await?;
