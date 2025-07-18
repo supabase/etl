@@ -848,7 +848,7 @@ async fn table_processing_converges_to_apply_loop_with_no_events_coming() {
         &database_schema.users_schema().name,
         1..=rows_inserted,
     )
-        .await;
+    .await;
 
     // Start pipeline from scratch.
     let pipeline_id: PipelineId = random();
@@ -878,6 +878,8 @@ async fn table_processing_converges_to_apply_loop_with_no_events_coming() {
     pipeline.start().await.unwrap();
 
     users_state_notify.notified().await;
+
+    pipeline.shutdown_and_wait().await.unwrap();
 
     // Verify initial table copy data.
     let table_rows = destination.get_table_rows().await;
