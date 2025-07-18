@@ -478,6 +478,7 @@ impl BigQueryDestination {
 
                 match event {
                     Event::Insert(mut insert) => {
+                        let sequence_number = Self::generate_sequence_number(insert.start_lsn);
                         insert
                             .table_row
                             .values
@@ -489,6 +490,7 @@ impl BigQueryDestination {
                         table_rows.push(insert.table_row);
                     }
                     Event::Update(mut update) => {
+                        let sequence_number = Self::generate_sequence_number(update.start_lsn);
                         update
                             .table_row
                             .values
@@ -505,6 +507,7 @@ impl BigQueryDestination {
                             continue;
                         };
 
+                        let sequence_number = Self::generate_sequence_number(delete.start_lsn);
                         old_table_row
                             .values
                             .push(BigQueryOperationType::DELETE.into_cell());
@@ -526,7 +529,7 @@ impl BigQueryDestination {
 
                 for (table_id, table_rows) in table_id_to_table_rows {
                     let (table_id, table_descriptor) =
-                        Self::load_table_id_and_descriptor(&inner, &table_id).await?;
+                        Self::load_table_id_and_descriptor(&inner, &table_id, true).await?;
 
                     let dataset_id = inner.dataset_id.clone();
                     inner
@@ -976,23 +979,23 @@ mod tests {
     #[test]
     fn test_generate_sequence_number() {
         assert_eq!(
-            BigQueryDestination::generate_sequence_number(0),
+            BigQueryDestination::generate_sequence_number(PgLsn::from(0)),
             "0000000000000000"
         );
         assert_eq!(
-            BigQueryDestination::generate_sequence_number(1),
+            BigQueryDestination::generate_sequence_number(PgLsn::from(1)),
             "0000000000000001"
         );
         assert_eq!(
-            BigQueryDestination::generate_sequence_number(255),
+            BigQueryDestination::generate_sequence_number(PgLsn::from(255)),
             "00000000000000ff"
         );
         assert_eq!(
-            BigQueryDestination::generate_sequence_number(65535),
+            BigQueryDestination::generate_sequence_number(PgLsn::from(65535)),
             "000000000000ffff"
         );
         assert_eq!(
-            BigQueryDestination::generate_sequence_number(u64::MAX),
+            BigQueryDestination::generate_sequence_number(PgLsn::from(u64::MAX)),
             "ffffffffffffffff"
         );
     }

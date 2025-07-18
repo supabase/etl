@@ -687,7 +687,7 @@ where
     T: ApplyLoopHook,
     ApplyLoopError: From<<T as ApplyLoopHook>::Error>,
 {
-    let EventType::Relation = event.event_type() else {
+    let Event::Relation(event) = event else {
         return Err(ApplyLoopError::InvalidEvent(
             event.into(),
             EventType::Relation,

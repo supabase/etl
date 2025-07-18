@@ -4,7 +4,7 @@ use etl::conversions::table_row::TableRow;
 use postgres::schema::{ColumnSchema, Oid, TableName, TableSchema};
 use postgres::tokio::test_utils::{PgDatabase, id_column_schema};
 use std::ops::RangeInclusive;
-use tokio_postgres::types::Type;
+use tokio_postgres::types::{Type, PgLsn};
 use tokio_postgres::{Client, GenericClient};
 
 use crate::common::database::test_table_name;
@@ -214,6 +214,7 @@ pub fn build_expected_users_inserts(
 
     for (name, age) in expected_rows {
         events.push(Event::Insert(InsertEvent {
+            start_lsn: PgLsn::from(0),
             table_id: users_table_id,
             table_row: TableRow {
                 values: vec![
@@ -239,6 +240,7 @@ pub fn build_expected_orders_inserts(
 
     for name in expected_rows {
         events.push(Event::Insert(InsertEvent {
+            start_lsn: PgLsn::from(0),
             table_id: orders_table_id,
             table_row: TableRow {
                 values: vec![Cell::I64(starting_id), Cell::String(name.to_owned())],
