@@ -367,6 +367,7 @@ where
                 self.state_store.clone(),
                 self.destination.clone(),
                 self.shutdown_rx.clone(),
+                self.force_syncing_tables_tx,
             )
             .await;
 
