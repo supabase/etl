@@ -8,6 +8,7 @@ use tokio_postgres::types::PgLsn;
 use tracing::{Instrument, debug, error, info};
 
 use crate::concurrency::shutdown::ShutdownRx;
+use crate::concurrency::signal::{SignalTx, create_signal};
 use crate::destination::base::Destination;
 use crate::pipeline::PipelineId;
 use crate::replication::apply::{ApplyLoopError, ApplyLoopHook, start_apply_loop};
@@ -130,6 +131,9 @@ where
         let apply_worker = async move {
             let start_lsn = get_start_lsn(self.pipeline_id, &self.replication_client).await?;
 
+            // We create the signal used to notify the apply worker that it should force syncing tables.
+            let (force_syncing_tables_tx, force_syncing_tables_rx) = create_signal();
+
             start_apply_loop(
                 self.pipeline_id,
                 start_lsn,
@@ -145,9 +149,11 @@ where
                     self.state_store,
                     self.destination,
                     self.shutdown_rx.clone(),
+                    force_syncing_tables_tx,
                     self.table_sync_worker_permits.clone(),
                 ),
                 self.shutdown_rx,
+                Some(force_syncing_tables_rx),
             )
             .await?;
 
@@ -194,6 +200,7 @@ struct ApplyWorkerHook<S, D> {
     state_store: S,
     destination: D,
     shutdown_rx: ShutdownRx,
+    force_syncing_tables_tx: SignalTx,
     table_sync_worker_permits: Arc<Semaphore>,
 }
 
@@ -207,6 +214,7 @@ impl<S, D> ApplyWorkerHook<S, D> {
         state_store: S,
         destination: D,
         shutdown_rx: ShutdownRx,
+        force_syncing_tables_tx: SignalTx,
         table_sync_worker_permits: Arc<Semaphore>,
     ) -> Self {
         Self {
@@ -217,6 +225,7 @@ impl<S, D> ApplyWorkerHook<S, D> {
             state_store,
             destination,
             shutdown_rx,
+            force_syncing_tables_tx,
             table_sync_worker_permits,
         }
     }
@@ -239,6 +248,7 @@ where
             self.state_store.clone(),
             self.destination.clone(),
             self.shutdown_rx.clone(),
+            self.force_syncing_tables_tx.clone(),
             self.table_sync_worker_permits.clone(),
         )
     }
@@ -322,7 +332,9 @@ where
 {
     type Error = ApplyWorkerHookError;
 
-    async fn initialize(&self) -> Result<(), Self::Error> {
+    async fn before_loop(&self, _start_lsn: PgLsn) -> Result<bool, Self::Error> {
+        info!("starting table sync workers before the main apply loop");
+
         let active_table_replication_states =
             get_table_replication_states(&self.state_store, false).await?;
 
@@ -351,7 +363,7 @@ where
             }
         }
 
-        Ok(())
+        Ok(true)
     }
 
     async fn process_syncing_tables(

@@ -12,7 +12,7 @@ use telemetry::init_test_tracing;
 use tokio_postgres::types::Type;
 
 use crate::common::database::spawn_database;
-use crate::common::event::{group_events_by_type, group_events_by_type_and_table_id};
+use crate::common::event::group_events_by_type_and_table_id;
 use crate::common::pipeline::{create_pipeline, create_pipeline_with};
 use crate::common::state_store::{
     FaultConfig, FaultInjectingStateStore, FaultType, TestStateStore,
@@ -762,7 +762,7 @@ async fn table_sync_streams_new_data_with_batch() {
     // data.
     let batch_config = BatchConfig {
         max_size: 1000,
-        max_fill_ms: 10000,
+        max_fill_ms: 1000,
     };
     let mut pipeline = create_pipeline_with(
         &database.config,
@@ -833,97 +833,68 @@ async fn table_sync_streams_new_data_with_batch() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn table_sync_worker_skips_on_schema_change() {
+async fn table_processing_converges_to_apply_loop_with_no_events_coming() {
     init_test_tracing();
-    let database = spawn_database().await;
-    let database_schema = setup_test_database_schema(&database, TableSelection::OrdersOnly).await;
-
-    // Insert data in the table.
-    database
-        .insert_values(
-            database_schema.orders_schema().name.clone(),
-            &["description"],
-            &[&"description_1"],
-        )
-        .await
-        .unwrap();
+    let mut database = spawn_database().await;
+    let database_schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
 
     let state_store = TestStateStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
 
+    // Insert some data to test that the table copy is performed.
+    let rows_inserted = 5;
+    insert_users_data(
+        &mut database,
+        &database_schema.users_schema().name,
+        1..=rows_inserted,
+    )
+    .await;
+
     // Start pipeline from scratch.
     let pipeline_id: PipelineId = random();
-    let mut pipeline = create_pipeline(
+    // We set a batch of 1000 elements to still check that even with batching we are getting all the
+    // data.
+    let batch_config = BatchConfig {
+        max_size: 1000,
+        max_fill_ms: 1000,
+    };
+    let mut pipeline = create_pipeline_with(
         &database.config,
         pipeline_id,
         database_schema.publication_name(),
         state_store.clone(),
         destination.clone(),
+        Some(batch_config),
     );
 
     // Register notifications for initial table copy completion.
-    let orders_state_notify = state_store
+    let users_state_notify = state_store
         .notify_on_replication_phase(
-            database_schema.orders_schema().id,
-            TableReplicationPhaseType::FinishedCopy,
+            database_schema.users_schema().id,
+            TableReplicationPhaseType::SyncDone,
         )
         .await;
 
     pipeline.start().await.unwrap();
 
-    orders_state_notify.notified().await;
-
-    // Register notification for the skipped state.
-    let orders_state_notify = state_store
-        .notify_on_replication_phase(
-            database_schema.orders_schema().id,
-            TableReplicationPhaseType::Skipped,
-        )
-        .await;
-
-    // Change the schema of orders by adding a new column.
-    database
-        .alter_table(
-            database_schema.orders_schema().name.clone(),
-            &[TableModification::AddColumn {
-                name: "date",
-                data_type: "integer",
-            }],
-        )
-        .await
-        .unwrap();
-
-    // Insert new data in the table.
-    database
-        .insert_values(
-            database_schema.orders_schema().name.clone(),
-            &["description", "date"],
-            &[&"description_with_date", &(10i32)],
-        )
-        .await
-        .unwrap();
-
-    orders_state_notify.notified().await;
+    users_state_notify.notified().await;
 
     pipeline.shutdown_and_wait().await.unwrap();
 
-    // We assert that the schema is the initial one.
-    let table_schemas = destination.get_table_schemas().await;
-    assert_eq!(table_schemas.len(), 1);
-    assert_eq!(table_schemas[0], database_schema.orders_schema());
+    // Verify initial table copy data.
+    let table_rows = destination.get_table_rows().await;
+    let users_table_rows = table_rows.get(&database_schema.users_schema().id).unwrap();
+    assert_eq!(users_table_rows.len(), rows_inserted);
 
-    let events = destination.get_events().await;
-    let grouped_events = group_events_by_type(&events);
-
-    // We assert that only one `Commit` message was received, since the apply worker doesn't filter
-    // transaction control operations by table id, so those should always go out for each apply +
-    // table sync worker. And since we are skipping a table on the table schema change, we only expect
-    // the first `Commit` to be sent by the apply worker.
-    assert_eq!(grouped_events.get(&EventType::Commit).unwrap().len(), 1);
+    // Verify age sum calculation.
+    let expected_age_sum = get_n_integers_sum(rows_inserted);
+    let age_sum =
+        get_users_age_sum_from_rows(&destination, database_schema.users_schema().id).await;
+    assert_eq!(age_sum, expected_age_sum);
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn apply_worker_skips_on_schema_change() {
+async fn table_processing_with_schema_change_skips_table() {
     init_test_tracing();
     let database = spawn_database().await;
     let database_schema = setup_test_database_schema(&database, TableSelection::OrdersOnly).await;

@@ -1,4 +1,5 @@
 use crate::concurrency::shutdown::{ShutdownResult, ShutdownRx};
+use crate::concurrency::signal::SignalTx;
 use crate::concurrency::stream::BatchStream;
 use crate::destination::base::{Destination, DestinationError};
 use crate::pipeline::PipelineId;
@@ -61,6 +62,7 @@ pub async fn start_table_sync<S, D>(
     state_store: S,
     destination: D,
     shutdown_rx: ShutdownRx,
+    force_syncing_tables_tx: SignalTx,
 ) -> Result<TableSyncResult, TableSyncError>
 where
     S: StateStore + Clone + Send + 'static,
@@ -244,6 +246,10 @@ where
         inner
             .set_phase_with(TableReplicationPhase::SyncWait, state_store)
             .await?;
+
+        // We notify the main apply worker to force syncing tables. In this way, the `Catchup` phase
+        // will be started even if no events are flowing in the main apply loop.
+        let _ = force_syncing_tables_tx.send(());
     }
 
     // We also wait to be signaled to catchup with the main apply worker up to a specific lsn.
