@@ -129,7 +129,6 @@ where
             publication_name = self.config.publication_name
         );
         let apply_worker = async move {
-            // We load the start lsn
             let start_lsn = get_start_lsn(self.pipeline_id, &self.replication_client).await?;
 
             // We create the signal used to notify the apply worker that it should force syncing tables.
