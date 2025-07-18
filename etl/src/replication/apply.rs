@@ -175,7 +175,7 @@ struct HandleMessageResult {
     end_lsn: Option<PgLsn>,
 
     /// Set when a batch should be ended earlier than the normal batching parameters of
-    /// max size and max fill duration. Currently this will be set in the following
+    /// max size and max fill duration. Currently, this will be set in the following
     /// conditions:
     ///
     /// * Set to [`EndBatch::Inclusive`]` when a commit message indicates that it will
@@ -245,7 +245,7 @@ impl ApplyLoopState {
         }
     }
 
-    /// Returns true if the apply loop is in the middle of processing a trasaction, false otherwise.
+    /// Returns true if the apply loop is in the middle of processing a transaction, false otherwise.
     fn handling_transaction(&self) -> bool {
         self.remote_final_lsn.is_some()
     }

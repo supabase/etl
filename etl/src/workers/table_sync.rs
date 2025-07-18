@@ -512,13 +512,13 @@ where
     type Error = TableSyncWorkerHookError;
 
     async fn before_loop(&self, start_lsn: PgLsn) -> Result<bool, Self::Error> {
-        info!("checking ");
+        info!("checking if the table sync worker is already caught up with the apply worker");
 
         self.try_advance_phase(start_lsn, true).await
     }
 
     /// This function compares `current_lsn` against the table's catch up lsn
-    /// and if it is greater than or equal to the catch up `lsn`:
+    /// and if it is greater than or equal to the `Catchup` `lsn`:
     ///
     /// * Marks the table as sync done in state store if `update_state` is true.
     /// * Returns Ok(false) to indicate to the callers that this table has been marked sync done.
