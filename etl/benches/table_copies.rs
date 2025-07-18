@@ -1,4 +1,7 @@
-use std::error::Error;
+use std::{
+    error::Error,
+    sync::{Arc, Mutex},
+};
 
 use clap::{Parser, Subcommand};
 use config::shared::{BatchConfig, PgConnectionConfig, PipelineConfig, RetryConfig, TlsConfig};
@@ -250,7 +253,9 @@ async fn start_pipeline(args: RunArgs) -> Result<(), Box<dyn Error>> {
         },
     };
 
-    let destination = NullDestination;
+    let destination = NullDestination {
+        rows_received: Arc::new(Mutex::new(0)),
+    };
 
     let state_store = NotifyingStateStore::new();
 
@@ -296,7 +301,9 @@ async fn start_pipeline(args: RunArgs) -> Result<(), Box<dyn Error>> {
 }
 
 #[derive(Clone)]
-struct NullDestination;
+struct NullDestination {
+    rows_received: Arc<Mutex<usize>>,
+}
 
 impl Destination for NullDestination {
     async fn write_table_schema(&self, table_schema: TableSchema) -> Result<(), DestinationError> {
@@ -311,8 +318,15 @@ impl Destination for NullDestination {
     async fn write_table_rows(
         &self,
         _table_id: TableId,
-        _table_rows: Vec<TableRow>,
+        table_rows: Vec<TableRow>,
     ) -> Result<(), DestinationError> {
+        // println!("Got {} rows", table_rows.len());
+        let mut rows_received = self.rows_received.lock().unwrap();
+        *rows_received += table_rows.len();
+        if *rows_received % 1000 == 0 {
+            // println!("Got 100,000 rows");
+        }
+        println!("Total rows: {}", *rows_received);
         Ok(())
     }
 
