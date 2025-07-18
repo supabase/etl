@@ -9,6 +9,7 @@ use etl::{
     state::{store::notify::NotifyingStateStore, table::TableReplicationPhaseType},
 };
 use postgres::schema::{TableId, TableSchema};
+use sqlx::postgres::PgPool;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -65,8 +66,36 @@ enum Commands {
         #[arg(long, default_value = "8")]
         max_table_sync_workers: u16,
     },
-    /// Prepare the benchmark environment (placeholder)
-    Prepare,
+    /// Prepare the benchmark environment by cleaning up replication slots
+    Prepare {
+        /// PostgreSQL host
+        #[arg(long, default_value = "localhost")]
+        host: String,
+
+        /// PostgreSQL port
+        #[arg(long, default_value = "5432")]
+        port: u16,
+
+        /// Database name
+        #[arg(long, default_value = "bench")]
+        database: String,
+
+        /// PostgreSQL username
+        #[arg(long, default_value = "postgres")]
+        username: String,
+
+        /// PostgreSQL password (optional)
+        #[arg(long)]
+        password: Option<String>,
+
+        /// Enable TLS
+        #[arg(long, default_value = "false")]
+        tls_enabled: bool,
+
+        /// TLS trusted root certificates
+        #[arg(long, default_value = "")]
+        tls_certs: String,
+    },
 }
 
 #[tokio::main]
@@ -102,9 +131,25 @@ async fn main() -> Result<(), Box<dyn Error>> {
             })
             .await
         }
-        Commands::Prepare => {
-            println!("Prepare command - placeholder for future implementation");
-            Ok(())
+        Commands::Prepare {
+            host,
+            port,
+            database,
+            username,
+            password,
+            tls_enabled,
+            tls_certs,
+        } => {
+            prepare_benchmark(PrepareArgs {
+                host,
+                port,
+                database,
+                username,
+                password,
+                tls_enabled,
+                tls_certs,
+            })
+            .await
         }
     }
 }
@@ -122,6 +167,71 @@ struct RunArgs {
     batch_max_size: usize,
     batch_max_fill_ms: u64,
     max_table_sync_workers: u16,
+}
+
+#[derive(Debug)]
+#[allow(dead_code)]
+struct PrepareArgs {
+    host: String,
+    port: u16,
+    database: String,
+    username: String,
+    password: Option<String>,
+    tls_enabled: bool,
+    tls_certs: String,
+}
+
+async fn prepare_benchmark(args: PrepareArgs) -> Result<(), Box<dyn Error>> {
+    println!("Preparing benchmark environment...");
+
+    // Build connection string
+    let mut connection_string = format!(
+        "postgres://{}@{}:{}/{}",
+        args.username, args.host, args.port, args.database
+    );
+
+    if let Some(password) = &args.password {
+        connection_string = format!(
+            "postgres://{}:{}@{}:{}/{}",
+            args.username, password, args.host, args.port, args.database
+        );
+    }
+
+    // Add SSL mode based on TLS settings
+    if args.tls_enabled {
+        connection_string.push_str("?sslmode=require");
+    } else {
+        connection_string.push_str("?sslmode=disable");
+    }
+
+    println!("Connecting to database at {}:{}", args.host, args.port);
+
+    // Connect to the database
+    let pool = PgPool::connect(&connection_string).await?;
+
+    println!("Cleaning up existing replication slots...");
+
+    // Execute the cleanup SQL
+    let cleanup_sql = r#"
+        do $$
+        declare
+            slot record;
+        begin
+            for slot in (select slot_name from pg_replication_slots where slot_name like 'supabase_etl_%')
+            loop
+                execute 'select pg_drop_replication_slot(' || quote_literal(slot.slot_name) || ')';
+            end loop;
+        end $$;
+    "#;
+
+    sqlx::query(cleanup_sql).execute(&pool).await?;
+
+    println!("Replication slots cleanup completed successfully!");
+
+    // Close the connection
+    pool.close().await;
+
+    Ok(())
 }
 
 async fn start_pipeline(args: RunArgs) -> Result<(), Box<dyn Error>> {
