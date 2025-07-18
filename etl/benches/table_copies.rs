@@ -68,6 +68,10 @@ enum Commands {
         /// Maximum number of table sync workers
         #[arg(long, default_value = "8")]
         max_table_sync_workers: u16,
+
+        /// Table IDs to replicate (comma-separated)
+        #[arg(long, value_delimiter = ',')]
+        table_ids: Vec<u32>,
     },
     /// Prepare the benchmark environment by cleaning up replication slots
     Prepare {
@@ -121,6 +125,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             batch_max_size,
             batch_max_fill_ms,
             max_table_sync_workers,
+            table_ids,
         } => {
             start_pipeline(RunArgs {
                 host,
@@ -134,6 +139,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 batch_max_size,
                 batch_max_fill_ms,
                 max_table_sync_workers,
+                table_ids,
             })
             .await
         }
@@ -173,6 +179,7 @@ struct RunArgs {
     batch_max_size: usize,
     batch_max_fill_ms: u64,
     max_table_sync_workers: u16,
+    table_ids: Vec<u32>,
 }
 
 #[derive(Debug)]
@@ -259,14 +266,10 @@ async fn start_pipeline(args: RunArgs) -> Result<(), Box<dyn Error>> {
 
     let state_store = NotifyingStateStore::new();
 
-    let table_ids = [
-        50504, 50509, 50514, 50522, 50527, 50532, 50538, 50543, 50548,
-    ];
-
     let mut table_copied_notifications = vec![];
-    for table_id in table_ids {
+    for table_id in &args.table_ids {
         let table_copied = state_store
-            .notify_on_table_state(table_id, TableReplicationPhaseType::FinishedCopy)
+            .notify_on_table_state(*table_id, TableReplicationPhaseType::FinishedCopy)
             .await;
         table_copied_notifications.push(table_copied);
     }
