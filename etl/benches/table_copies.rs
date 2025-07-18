@@ -100,7 +100,10 @@ enum Commands {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    let args = Args::parse();
+    // Filter out the --bench argument that cargo might add
+    let args: Vec<String> = std::env::args().filter(|arg| arg != "--bench").collect();
+
+    let args = Args::parse_from(args);
 
     match args.command {
         Commands::Run {
