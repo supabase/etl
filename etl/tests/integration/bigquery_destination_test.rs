@@ -288,6 +288,83 @@ async fn test_table_insert_update_delete() {
     assert!(users_rows.is_none());
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn test_table_subsequent_updates() {
+    init_test_tracing();
+    install_crypto_provider_once();
+
+    let database = spawn_database().await;
+    let database_schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
+
+    let bigquery_database = setup_bigquery_connection().await;
+
+    let state_store = TestStateStore::new();
+    let raw_destination = bigquery_database.build_destination().await;
+    let destination = TestDestinationWrapper::wrap(raw_destination);
+
+    // Start pipeline from scratch.
+    let pipeline_id: PipelineId = random();
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        database_schema.publication_name(),
+        state_store.clone(),
+        destination.clone(),
+    );
+
+    // Register notifications for table copy completion.
+    let users_state_notify = state_store
+        .notify_on_replication_phase(
+            database_schema.users_schema().id,
+            TableReplicationPhaseType::SyncDone,
+        )
+        .await;
+
+    pipeline.start().await.unwrap();
+
+    users_state_notify.notified().await;
+
+    // Wait for the first insert.
+    let event_notify = destination
+        .wait_for_events_count(vec![(EventType::Insert, 1), (EventType::Update, 10)])
+        .await;
+
+    // Insert a row.
+    database
+        .insert_values(
+            database_schema.users_schema().name.clone(),
+            &["name", "age"],
+            &[&"user_1", &1],
+        )
+        .await
+        .unwrap();
+
+    // Update the row several times.
+    for value in 2..=10 {
+        database
+            .update_values(
+                database_schema.users_schema().name.clone(),
+                &["name", "age"],
+                &[&format!("'user_{value}'"), &value.to_string()],
+            )
+            .await
+            .unwrap();
+    }
+
+    event_notify.notified().await;
+
+    // We query BigQuery to check for the final value.
+    let users_rows = bigquery_database
+        .query_table(database_schema.users_schema().name)
+        .await
+        .unwrap();
+    let parsed_users_rows = parse_bigquery_table_rows::<BigQueryUser>(users_rows);
+    assert_eq!(
+        parsed_users_rows,
+        vec![BigQueryUser::new(1, "user_10", 10),]
+    );
+}
+
 // This test is disabled since truncation is currently not supported by BigQuery when doing CDC
 // streaming. The test is kept just for future use.
 #[tokio::test(flavor = "multi_thread")]

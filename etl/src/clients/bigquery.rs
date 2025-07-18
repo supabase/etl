@@ -664,7 +664,7 @@ mod tests {
             ColumnSchema::new("tags".to_string(), Type::TEXT_ARRAY, -1, false, false),
         ];
 
-        let descriptor = BigQueryClient::column_schemas_to_table_descriptor(&columns);
+        let descriptor = BigQueryClient::column_schemas_to_table_descriptor(&columns, true);
 
         assert_eq!(descriptor.field_descriptors.len(), 6); // 4 columns + CDC columns
 
@@ -749,7 +749,7 @@ mod tests {
             ColumnSchema::new("time_col".to_string(), Type::TIME, -1, true, false),
         ];
 
-        let descriptor = BigQueryClient::column_schemas_to_table_descriptor(&columns);
+        let descriptor = BigQueryClient::column_schemas_to_table_descriptor(&columns, true);
 
         assert_eq!(descriptor.field_descriptors.len(), 8); // 6 columns + CDC columns
 
