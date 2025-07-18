@@ -762,7 +762,7 @@ async fn table_sync_streams_new_data_with_batch() {
     // data.
     let batch_config = BatchConfig {
         max_size: 1000,
-        max_fill_ms: 10000,
+        max_fill_ms: 1000,
     };
     let mut pipeline = create_pipeline_with(
         &database.config,
@@ -830,6 +830,65 @@ async fn table_sync_streams_new_data_with_batch() {
         ],
     );
     assert_eq!(*users_inserts, expected_users_inserts);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn table_processing_converges_to_apply_loop_with_no_events_coming() {
+    init_test_tracing();
+    let mut database = spawn_database().await;
+    let database_schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
+
+    let state_store = TestStateStore::new();
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
+
+    // Insert some data to test that the table copy is performed.
+    let rows_inserted = 5;
+    insert_users_data(
+        &mut database,
+        &database_schema.users_schema().name,
+        1..=rows_inserted,
+    )
+        .await;
+
+    // Start pipeline from scratch.
+    let pipeline_id: PipelineId = random();
+    // We set a batch of 1000 elements to still check that even with batching we are getting all the
+    // data.
+    let batch_config = BatchConfig {
+        max_size: 1000,
+        max_fill_ms: 1000,
+    };
+    let mut pipeline = create_pipeline_with(
+        &database.config,
+        pipeline_id,
+        database_schema.publication_name(),
+        state_store.clone(),
+        destination.clone(),
+        Some(batch_config),
+    );
+
+    // Register notifications for initial table copy completion.
+    let users_state_notify = state_store
+        .notify_on_replication_phase(
+            database_schema.users_schema().id,
+            TableReplicationPhaseType::SyncDone,
+        )
+        .await;
+
+    pipeline.start().await.unwrap();
+
+    users_state_notify.notified().await;
+
+    // Verify initial table copy data.
+    let table_rows = destination.get_table_rows().await;
+    let users_table_rows = table_rows.get(&database_schema.users_schema().id).unwrap();
+    assert_eq!(users_table_rows.len(), rows_inserted);
+
+    // Verify age sum calculation.
+    let expected_age_sum = get_n_integers_sum(rows_inserted);
+    let age_sum =
+        get_users_age_sum_from_rows(&destination, database_schema.users_schema().id).await;
+    assert_eq!(age_sum, expected_age_sum);
 }
 
 #[tokio::test(flavor = "multi_thread")]
