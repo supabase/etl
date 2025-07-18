@@ -1,4 +1,5 @@
 use crate::concurrency::shutdown::{ShutdownResult, ShutdownRx};
+use crate::concurrency::signal::SignalTx;
 use crate::concurrency::stream::BatchStream;
 use crate::destination::base::{Destination, DestinationError};
 use crate::pipeline::PipelineId;
@@ -18,7 +19,6 @@ use thiserror::Error;
 use tokio::pin;
 use tokio_postgres::types::PgLsn;
 use tracing::{error, info, warn};
-use crate::concurrency::signal::SignalTx;
 
 #[derive(Debug, Error)]
 pub enum TableSyncError {
@@ -62,7 +62,7 @@ pub async fn start_table_sync<S, D>(
     state_store: S,
     destination: D,
     shutdown_rx: ShutdownRx,
-    force_syncing_tables_tx: SignalTx
+    force_syncing_tables_tx: SignalTx,
 ) -> Result<TableSyncResult, TableSyncError>
 where
     S: StateStore + Clone + Send + 'static,
