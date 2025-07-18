@@ -5,7 +5,6 @@ use tokio_postgres::types::Type;
 use uuid::Uuid;
 
 pub mod bool;
-pub mod cdc_event;
 pub mod event;
 pub mod hex;
 pub mod numeric;

@@ -508,7 +508,7 @@ where
                 start_lsn, end_lsn
             );
 
-            handle_logical_replication_message(state, message.into_data(), schema_cache, hook).await
+            handle_logical_replication_message(state, start_lsn, message.into_data(), schema_cache, hook).await
         }
         ReplicationMessage::PrimaryKeepAlive(message) => {
             let end_lsn = PgLsn::from(message.wal_end());
@@ -536,6 +536,7 @@ where
 
 async fn handle_logical_replication_message<T>(
     state: &mut ApplyLoopState,
+    start_lsn: PgLsn,
     message: LogicalReplicationMessage,
     schema_cache: &SchemaCache,
     hook: &T,
@@ -546,7 +547,11 @@ where
 {
     // We perform the conversion of the message to our own event format which is used downstream
     // by the destination.
-    let event = convert_message_to_event(schema_cache, &message).await?;
+    //
+    // It's important to note that we use the `start_lsn` as LSN for tracking the position of the
+    // event in the WAL. This is the LSN we want to use to define ordering of entries in the WAL, which
+    // could be useful to destinations.
+    let event = convert_message_to_event(schema_cache, start_lsn, &message).await?;
 
     let event_type = EventType::from(&event);
     debug!("message converted to event type {}", event_type);
@@ -584,7 +589,7 @@ async fn handle_begin_message(
     event: Event,
     message: &protocol::BeginBody,
 ) -> Result<HandleMessageResult, ApplyLoopError> {
-    let Event::Begin(event) = event else {
+    let EventType::Begin = event.event_type() else {
         return Err(ApplyLoopError::InvalidEvent(event.into(), EventType::Begin));
     };
 
@@ -594,7 +599,7 @@ async fn handle_begin_message(
     state.remote_final_lsn = Some(final_lsn);
 
     Ok(HandleMessageResult {
-        event: Some(Event::Begin(event)),
+        event: Some(event),
         end_lsn: None,
         end_batch: None,
         skip_table: None,
@@ -611,7 +616,7 @@ where
     T: ApplyLoopHook,
     ApplyLoopError: From<<T as ApplyLoopHook>::Error>,
 {
-    let Event::Commit(event) = event else {
+    let EventType::Commit = event.event_type() else {
         return Err(ApplyLoopError::InvalidEvent(
             event.into(),
             EventType::Commit,
@@ -648,7 +653,7 @@ where
     let continue_loop = hook.process_syncing_tables(end_lsn, false).await?;
 
     let mut result = HandleMessageResult {
-        event: Some(Event::Commit(event)),
+        event: Some(event),
         // We mark this as the last commit end LSN since we want to be able to track from the outside
         // what was the biggest transaction boundary LSN which was successfully applied.
         //
@@ -682,7 +687,7 @@ where
     T: ApplyLoopHook,
     ApplyLoopError: From<<T as ApplyLoopHook>::Error>,
 {
-    let Event::Relation(event) = event else {
+    let EventType::Relation = event.event_type() else {
         return Err(ApplyLoopError::InvalidEvent(
             event.into(),
             EventType::Relation,
