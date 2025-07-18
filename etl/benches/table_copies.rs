@@ -1,6 +1,6 @@
 use std::error::Error;
 
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use config::shared::{BatchConfig, PgConnectionConfig, PipelineConfig, RetryConfig, TlsConfig};
 use etl::{
     conversions::{event::Event, table_row::TableRow},
@@ -13,58 +13,118 @@ use postgres::schema::{TableId, TableSchema};
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
-    /// PostgreSQL host
-    #[arg(long, default_value = "localhost")]
-    host: String,
+    #[command(subcommand)]
+    command: Commands,
+}
 
-    /// PostgreSQL port
-    #[arg(long, default_value = "5432")]
-    port: u16,
+#[derive(Subcommand, Debug)]
+enum Commands {
+    /// Run the table copies benchmark
+    Run {
+        /// PostgreSQL host
+        #[arg(long, default_value = "localhost")]
+        host: String,
 
-    /// Database name
-    #[arg(long, default_value = "bench")]
-    database: String,
+        /// PostgreSQL port
+        #[arg(long, default_value = "5432")]
+        port: u16,
 
-    /// PostgreSQL username
-    #[arg(long, default_value = "postgres")]
-    username: String,
+        /// Database name
+        #[arg(long, default_value = "bench")]
+        database: String,
 
-    /// PostgreSQL password (optional)
-    #[arg(long)]
-    password: Option<String>,
+        /// PostgreSQL username
+        #[arg(long, default_value = "postgres")]
+        username: String,
 
-    /// Enable TLS
-    #[arg(long, default_value = "false")]
-    tls_enabled: bool,
+        /// PostgreSQL password (optional)
+        #[arg(long)]
+        password: Option<String>,
 
-    /// TLS trusted root certificates
-    #[arg(long, default_value = "")]
-    tls_certs: String,
+        /// Enable TLS
+        #[arg(long, default_value = "false")]
+        tls_enabled: bool,
 
-    /// Publication name
-    #[arg(long, default_value = "bench_pub")]
-    publication_name: String,
+        /// TLS trusted root certificates
+        #[arg(long, default_value = "")]
+        tls_certs: String,
 
-    /// Maximum batch size
-    #[arg(long, default_value = "100000")]
-    batch_max_size: usize,
+        /// Publication name
+        #[arg(long, default_value = "bench_pub")]
+        publication_name: String,
 
-    /// Maximum batch fill time in milliseconds
-    #[arg(long, default_value = "10000")]
-    batch_max_fill_ms: u64,
+        /// Maximum batch size
+        #[arg(long, default_value = "100000")]
+        batch_max_size: usize,
 
-    /// Maximum number of table sync workers
-    #[arg(long, default_value = "8")]
-    max_table_sync_workers: u16,
+        /// Maximum batch fill time in milliseconds
+        #[arg(long, default_value = "10000")]
+        batch_max_fill_ms: u64,
+
+        /// Maximum number of table sync workers
+        #[arg(long, default_value = "8")]
+        max_table_sync_workers: u16,
+    },
+    /// Prepare the benchmark environment (placeholder)
+    Prepare,
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     let args = Args::parse();
-    start_pipeline(args).await
+
+    match args.command {
+        Commands::Run {
+            host,
+            port,
+            database,
+            username,
+            password,
+            tls_enabled,
+            tls_certs,
+            publication_name,
+            batch_max_size,
+            batch_max_fill_ms,
+            max_table_sync_workers,
+        } => {
+            start_pipeline(RunArgs {
+                host,
+                port,
+                database,
+                username,
+                password,
+                tls_enabled,
+                tls_certs,
+                publication_name,
+                batch_max_size,
+                batch_max_fill_ms,
+                max_table_sync_workers,
+            })
+            .await
+        }
+        Commands::Prepare => {
+            println!("Prepare command - placeholder for future implementation");
+            Ok(())
+        }
+    }
 }
 
-async fn start_pipeline(args: Args) -> Result<(), Box<dyn Error>> {
+#[derive(Debug)]
+struct RunArgs {
+    host: String,
+    port: u16,
+    database: String,
+    username: String,
+    password: Option<String>,
+    tls_enabled: bool,
+    tls_certs: String,
+    publication_name: String,
+    batch_max_size: usize,
+    batch_max_fill_ms: u64,
+    max_table_sync_workers: u16,
+}
+
+async fn start_pipeline(args: RunArgs) -> Result<(), Box<dyn Error>> {
     let pg_connection_config = PgConnectionConfig {
         host: args.host,
         port: args.port,
