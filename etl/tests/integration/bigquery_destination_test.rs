@@ -3,6 +3,7 @@ use etl::conversions::event::EventType;
 use etl::destination::base::Destination;
 use etl::encryption::bigquery::install_crypto_provider_once;
 use etl::pipeline::PipelineId;
+use etl::state::store::notify::NotifyingStateStore;
 use etl::state::table::TableReplicationPhaseType;
 use rand::random;
 use telemetry::init_test_tracing;
@@ -10,7 +11,6 @@ use telemetry::init_test_tracing;
 use crate::common::bigquery::setup_bigquery_connection;
 use crate::common::database::spawn_database;
 use crate::common::pipeline::{create_pipeline, create_pipeline_with};
-use crate::common::state_store::TestStateStore;
 use crate::common::test_destination_wrapper::TestDestinationWrapper;
 use crate::common::test_schema::bigquery::{
     BigQueryOrder, BigQueryUser, parse_bigquery_table_rows,
@@ -37,7 +37,7 @@ async fn test_table_copy_and_streaming_with_restart() {
     )
     .await;
 
-    let state_store = TestStateStore::new();
+    let state_store = NotifyingStateStore::new();
     let raw_destination = bigquery_database.build_destination().await;
     let destination = TestDestinationWrapper::wrap(raw_destination);
 
@@ -53,13 +53,13 @@ async fn test_table_copy_and_streaming_with_restart() {
 
     // Register notifications for table copy completion.
     let users_state_notify = state_store
-        .notify_on_replication_phase(
+        .notify_on_table_state(
             database_schema.users_schema().id,
             TableReplicationPhaseType::SyncDone,
         )
         .await;
     let orders_state_notify = state_store
-        .notify_on_replication_phase(
+        .notify_on_table_state(
             database_schema.orders_schema().id,
             TableReplicationPhaseType::SyncDone,
         )
@@ -182,7 +182,7 @@ async fn test_table_insert_update_delete() {
 
     let bigquery_database = setup_bigquery_connection().await;
 
-    let state_store = TestStateStore::new();
+    let state_store = NotifyingStateStore::new();
     let raw_destination = bigquery_database.build_destination().await;
     let destination = TestDestinationWrapper::wrap(raw_destination);
 
@@ -198,7 +198,7 @@ async fn test_table_insert_update_delete() {
 
     // Register notifications for table copy completion.
     let users_state_notify = state_store
-        .notify_on_replication_phase(
+        .notify_on_table_state(
             database_schema.users_schema().id,
             TableReplicationPhaseType::SyncDone,
         )
@@ -301,7 +301,7 @@ async fn test_table_truncate_with_batching() {
 
     let bigquery_database = setup_bigquery_connection().await;
 
-    let state_store = TestStateStore::new();
+    let state_store = NotifyingStateStore::new();
     let raw_destination = bigquery_database.build_destination().await;
     let destination = TestDestinationWrapper::wrap(raw_destination);
 
@@ -323,13 +323,13 @@ async fn test_table_truncate_with_batching() {
 
     // Register notifications for table copy completion.
     let users_state_notify = state_store
-        .notify_on_replication_phase(
+        .notify_on_table_state(
             database_schema.users_schema().id,
             TableReplicationPhaseType::SyncDone,
         )
         .await;
     let orders_state_notify = state_store
-        .notify_on_replication_phase(
+        .notify_on_table_state(
             database_schema.orders_schema().id,
             TableReplicationPhaseType::SyncDone,
         )

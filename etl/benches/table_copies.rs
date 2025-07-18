@@ -1,17 +1,13 @@
-use std::{
-    error::Error,
-    sync::{Arc, Mutex},
-};
+use std::error::Error;
 
 use config::shared::{BatchConfig, PgConnectionConfig, PipelineConfig, RetryConfig, TlsConfig};
 use etl::{
     conversions::{event::Event, table_row::TableRow},
     destination::base::{Destination, DestinationError},
     pipeline::Pipeline,
-    state::store::memory::MemoryStateStore,
+    state::{store::notify::NotifyingStateStore, table::TableReplicationPhaseType},
 };
 use postgres::schema::{TableId, TableSchema};
-use tokio::sync::Notify;
 
 async fn start_pipeline() -> Result<(), Box<dyn Error>> {
     let pg_connection_config = PgConnectionConfig {
@@ -26,14 +22,21 @@ async fn start_pipeline() -> Result<(), Box<dyn Error>> {
         },
     };
 
-    let done = Arc::new(Notify::new());
-    let destination = RowCountingDestination {
-        stop_after_rows: 49_947_997,
-        done: done.clone(),
-        inner: Arc::new(Mutex::new(Inner { received_rows: 0 })),
-    };
+    let destination = NullDestination;
 
-    let state_store = MemoryStateStore::new();
+    let state_store = NotifyingStateStore::new();
+
+    let table_ids = [
+        50504, 50509, 50514, 50522, 50527, 50532, 50538, 50543, 50548,
+    ];
+
+    let mut table_copied_notifications = vec![];
+    for table_id in table_ids {
+        let table_copied = state_store
+            .notify_on_table_state(table_id, TableReplicationPhaseType::FinishedCopy)
+            .await;
+        table_copied_notifications.push(table_copied);
+    }
 
     let pipeline_config = PipelineConfig {
         id: 1,
@@ -55,7 +58,10 @@ async fn start_pipeline() -> Result<(), Box<dyn Error>> {
     let mut pipeline = Pipeline::new(1, pipeline_config, state_store, destination);
     pipeline.start().await?;
 
-    done.notified().await;
+    for notification in table_copied_notifications {
+        notification.notified().await;
+    }
+
     pipeline.shutdown_and_wait().await?;
 
     Ok(())
@@ -66,18 +72,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
     start_pipeline().await
 }
 
-struct Inner {
-    received_rows: usize,
-}
-
 #[derive(Clone)]
-struct RowCountingDestination {
-    stop_after_rows: usize,
-    inner: Arc<Mutex<Inner>>,
-    done: Arc<Notify>,
-}
+struct NullDestination;
 
-impl Destination for RowCountingDestination {
+impl Destination for NullDestination {
     async fn write_table_schema(&self, table_schema: TableSchema) -> Result<(), DestinationError> {
         println!("Got table {} schema", table_schema.name);
         Ok(())
@@ -92,11 +90,6 @@ impl Destination for RowCountingDestination {
         _table_id: TableId,
         _table_rows: Vec<TableRow>,
     ) -> Result<(), DestinationError> {
-        let mut inner = self.inner.lock().unwrap();
-        inner.received_rows += 1;
-        if inner.received_rows >= self.stop_after_rows {
-            self.done.notify_one();
-        }
         Ok(())
     }
 
