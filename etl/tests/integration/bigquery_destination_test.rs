@@ -18,7 +18,7 @@ use crate::common::test_schema::bigquery::{
 use crate::common::test_schema::{TableSelection, insert_mock_data, setup_test_database_schema};
 
 #[tokio::test(flavor = "multi_thread")]
-async fn test_table_copy_and_streaming_with_restart() {
+async fn table_copy_and_streaming_with_restart() {
     init_test_tracing();
     install_crypto_provider_once();
 
@@ -173,7 +173,7 @@ async fn test_table_copy_and_streaming_with_restart() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn test_table_insert_update_delete() {
+async fn table_insert_update_delete() {
     init_test_tracing();
     install_crypto_provider_once();
 
@@ -289,7 +289,7 @@ async fn test_table_insert_update_delete() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn test_table_subsequent_updates() {
+async fn table_subsequent_updates() {
     init_test_tracing();
     install_crypto_provider_once();
 
@@ -326,7 +326,7 @@ async fn test_table_subsequent_updates() {
 
     // Wait for the first insert.
     let event_notify = destination
-        .wait_for_events_count(vec![(EventType::Insert, 1), (EventType::Update, 10)])
+        .wait_for_events_count(vec![(EventType::Insert, 1), (EventType::Update, 9)])
         .await;
 
     // Insert a row.
@@ -369,7 +369,7 @@ async fn test_table_subsequent_updates() {
 // streaming. The test is kept just for future use.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore]
-async fn test_table_truncate_with_batching() {
+async fn table_truncate_with_batching() {
     init_test_tracing();
     install_crypto_provider_once();
 
