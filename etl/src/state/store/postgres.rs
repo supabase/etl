@@ -4,13 +4,13 @@ use config::shared::{IntoConnectOptions, PgConnectionConfig};
 use postgres::schema::TableId;
 use sqlx::{
     PgPool,
-    postgres::{PgConnectOptions, PgPoolOptions, types::Oid as SqlxTableId},
-    prelude::{FromRow, Type},
+    postgres::{PgConnectOptions, PgPoolOptions},
 };
 use thiserror::Error;
 use tokio::sync::Mutex;
 use tokio_postgres::types::PgLsn;
 use tracing::{debug, info};
+use postgres::replication::{TableState, ReplicationStateRow, update_replication_state_with_pool};
 
 use crate::{
     pipeline::PipelineId,
@@ -21,17 +21,6 @@ use crate::{
 };
 
 const NUM_POOL_CONNECTIONS: u32 = 1;
-
-#[derive(Debug, Clone, Copy, Type, PartialEq)]
-#[sqlx(type_name = "etl.table_state", rename_all = "snake_case")]
-pub enum TableState {
-    Init,
-    DataSync,
-    FinishedCopy,
-    SyncDone,
-    Ready,
-    Skipped,
-}
 
 #[derive(Debug, Error)]
 pub enum ToTableStateError {
@@ -65,13 +54,6 @@ pub enum FromTableStateError {
     MissingSyncDoneLsn,
 }
 
-#[derive(Debug, FromRow)]
-pub struct ReplicationStateRow {
-    pub pipeline_id: i64,
-    pub table_id: SqlxTableId,
-    pub state: TableState,
-    pub sync_done_lsn: Option<String>,
-}
 
 #[derive(Debug)]
 struct Inner {
@@ -115,18 +97,7 @@ impl PostgresStateStore {
         pool: &PgPool,
         pipeline_id: PipelineId,
     ) -> sqlx::Result<Vec<ReplicationStateRow>> {
-        let states = sqlx::query_as::<_, ReplicationStateRow>(
-            r#"
-            select pipeline_id, table_id, state, sync_done_lsn
-            from etl.replication_state
-            where pipeline_id = $1
-            "#,
-        )
-        .bind(pipeline_id as i64)
-        .fetch_all(pool)
-        .await?;
-
-        Ok(states)
+        postgres::replication::get_replication_state_rows(pool, pipeline_id as i64).await
     }
 
     async fn update_replication_state(
@@ -136,27 +107,8 @@ impl PostgresStateStore {
         state: TableState,
         sync_done_lsn: Option<String>,
     ) -> sqlx::Result<()> {
-        // We connect to source database each time we update because we assume that
-        // these updates will be infrequent. It has some overhead to establish a
-        // connection but it's better than holding a connection open for long periods
-        // when there's little activity on it.
         let pool = self.connect_to_source().await?;
-        sqlx::query(
-            r#"
-            insert into etl.replication_state (pipeline_id, table_id, state, sync_done_lsn)
-            values ($1, $2, $3, $4)
-            on conflict (pipeline_id, table_id)
-            do update set state = $3, sync_done_lsn = $4
-        "#,
-        )
-        .bind(pipeline_id as i64)
-        .bind(SqlxTableId(table_id))
-        .bind(state)
-        .bind(sync_done_lsn)
-        .execute(&pool)
-        .await?;
-
-        Ok(())
+        update_replication_state_with_pool(&pool, pipeline_id, table_id, state, sync_done_lsn).await
     }
 
     async fn replication_phase_from_state(

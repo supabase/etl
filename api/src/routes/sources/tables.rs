@@ -3,7 +3,7 @@ use actix_web::{
     http::{StatusCode, header::ContentType},
     web::{Data, Json, Path},
 };
-use config::shared::IntoConnectOptions;
+use postgres::replication::connect_to_source_database;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use thiserror::Error;
@@ -29,6 +29,9 @@ enum TableError {
 
     #[error(transparent)]
     TablesDb(#[from] TablesDbError),
+
+    #[error("Database connection error: {0}")]
+    Database(#[from] sqlx::Error),
 }
 
 impl TableError {
@@ -54,7 +57,7 @@ pub struct ReadTablesResponse {
 impl ResponseError for TableError {
     fn status_code(&self) -> StatusCode {
         match self {
-            TableError::SourcesDb(_) | TableError::TablesDb(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            TableError::SourcesDb(_) | TableError::TablesDb(_) | TableError::Database(_) => StatusCode::INTERNAL_SERVER_ERROR,
             TableError::SourceNotFound(_) => StatusCode::NOT_FOUND,
             TableError::TenantId(_) => StatusCode::BAD_REQUEST,
         }
@@ -98,8 +101,9 @@ pub async fn read_table_names(
         .map(|s| s.config)
         .ok_or(TableError::SourceNotFound(source_id))?;
 
-    let options = config.into_connection_config().with_db();
-    let tables = db::tables::get_tables(&options).await?;
+    let source_pool = connect_to_source_database(&config.into_connection_config()).await
+        .map_err(TableError::Database)?;
+    let tables = db::tables::get_tables_with_pool(&source_pool).await?;
     let response = ReadTablesResponse { tables };
 
     Ok(Json(response))
