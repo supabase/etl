@@ -103,7 +103,7 @@ pub async fn read_table_names(
 
     let source_pool = connect_to_source_database(&config.into_connection_config()).await
         .map_err(TableError::Database)?;
-    let tables = db::tables::get_tables_with_pool(&source_pool).await?;
+    let tables = db::tables::get_tables(&source_pool).await?;
     let response = ReadTablesResponse { tables };
 
     Ok(Json(response))

@@ -4,7 +4,7 @@ use actix_web::{
     post,
     web::{Data, Json, Path},
 };
-use config::shared::IntoConnectOptions;
+use postgres::replication::connect_to_source_database;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use thiserror::Error;
@@ -33,6 +33,9 @@ enum PublicationError {
 
     #[error(transparent)]
     PublicationsDb(#[from] PublicationsDbError),
+
+    #[error("Database connection error: {0}")]
+    Database(#[from] sqlx::Error),
 }
 
 impl PublicationError {
@@ -52,7 +55,7 @@ impl PublicationError {
 impl ResponseError for PublicationError {
     fn status_code(&self) -> StatusCode {
         match self {
-            PublicationError::SourcesDb(_) | PublicationError::PublicationsDb(_) => {
+            PublicationError::SourcesDb(_) | PublicationError::PublicationsDb(_) | PublicationError::Database(_) => {
                 StatusCode::INTERNAL_SERVER_ERROR
             }
             PublicationError::SourceNotFound(_) | PublicationError::PublicationNotFound(_) => {
@@ -121,13 +124,14 @@ pub async fn create_publication(
         .map(|s| s.config)
         .ok_or(PublicationError::SourceNotFound(source_id))?;
 
-    let options = config.into_connection_config().with_db();
+    let source_pool = connect_to_source_database(&config.into_connection_config()).await
+        .map_err(PublicationError::Database)?;
     let publication = publication.0;
     let publication = Publication {
         name: publication.name,
         tables: publication.tables,
     };
-    db::publications::create_publication(&publication, &options).await?;
+    db::publications::create_publication(&publication, &source_pool).await?;
 
     Ok(HttpResponse::Ok().finish())
 }
@@ -160,8 +164,9 @@ pub async fn read_publication(
         .map(|s| s.config)
         .ok_or(PublicationError::SourceNotFound(source_id))?;
 
-    let options = config.into_connection_config().with_db();
-    let publications = db::publications::read_publication(&publication_name, &options)
+    let source_pool = connect_to_source_database(&config.into_connection_config()).await
+        .map_err(PublicationError::Database)?;
+    let publications = db::publications::read_publication(&publication_name, &source_pool)
         .await?
         .ok_or(PublicationError::PublicationNotFound(publication_name))?;
 
@@ -198,13 +203,14 @@ pub async fn update_publication(
         .map(|s| s.config)
         .ok_or(PublicationError::SourceNotFound(source_id))?;
 
-    let options = config.into_connection_config().with_db();
+    let source_pool = connect_to_source_database(&config.into_connection_config()).await
+        .map_err(PublicationError::Database)?;
     let publication = publication.0;
     let publication = Publication {
         name: publication_name,
         tables: publication.tables,
     };
-    db::publications::update_publication(&publication, &options).await?;
+    db::publications::update_publication(&publication, &source_pool).await?;
 
     Ok(HttpResponse::Ok().finish())
 }
@@ -237,8 +243,9 @@ pub async fn delete_publication(
         .map(|s| s.config)
         .ok_or(PublicationError::SourceNotFound(source_id))?;
 
-    let options = config.into_connection_config().with_db();
-    db::publications::drop_publication(&publication_name, &options).await?;
+    let source_pool = connect_to_source_database(&config.into_connection_config()).await
+        .map_err(PublicationError::Database)?;
+    db::publications::drop_publication(&publication_name, &source_pool).await?;
 
     Ok(HttpResponse::Ok().finish())
 }
@@ -269,8 +276,9 @@ pub async fn read_all_publications(
         .map(|s| s.config)
         .ok_or(PublicationError::SourceNotFound(source_id))?;
 
-    let options = config.into_connection_config().with_db();
-    let publications = db::publications::read_all_publications(&options).await?;
+    let source_pool = connect_to_source_database(&config.into_connection_config()).await
+        .map_err(PublicationError::Database)?;
+    let publications = db::publications::read_all_publications(&source_pool).await?;
     let response = ReadPublicationsResponse { publications };
 
     Ok(Json(response))
