@@ -35,8 +35,8 @@ use crate::{
             update_image,
         },
         pipelines::{
-            CreatePipelineRequest, CreatePipelineResponse, GetPipelineStatusResponse,
-            GetPipelineReplicationStatusResponse, ReadPipelineResponse, ReadPipelinesResponse,
+            CreatePipelineRequest, CreatePipelineResponse, GetPipelineReplicationStatusResponse,
+            GetPipelineStatusResponse, ReadPipelineResponse, ReadPipelinesResponse,
             SimpleTableReplicationState, TableReplicationStatus, UpdatePipelineImageRequest,
             UpdatePipelineRequest, create_pipeline, delete_pipeline,
             get_pipeline_replication_status, get_pipeline_status, read_all_pipelines,

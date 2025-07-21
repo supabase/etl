@@ -1,5 +1,5 @@
 use config::shared::{IntoConnectOptions, PgConnectionConfig};
-use sqlx::{PgPool, postgres::PgPoolOptions, Row};
+use sqlx::{PgPool, Row, postgres::PgPoolOptions};
 use thiserror::Error;
 
 use crate::schema::{TableId, TableName};
@@ -30,7 +30,6 @@ pub async fn connect_to_source_database(
 
     Ok(pool)
 }
-
 
 /// Loads the table name from a table OID by querying the source database.
 ///

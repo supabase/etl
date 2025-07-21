@@ -26,7 +26,10 @@ use crate::k8s_client::{K8sClient, K8sError, PodPhase, TRUSTED_ROOT_CERT_CONFIG_
 use crate::routes::{
     ErrorMessage, TenantIdError, connect_to_source_database_with_defaults, extract_tenant_id,
 };
-use postgres::replication::{TableReplicationState, get_table_replication_state_rows, get_table_name_from_oid, TableLookupError};
+use postgres::replication::{
+    TableLookupError, TableReplicationState, get_table_name_from_oid,
+    get_table_replication_state_rows,
+};
 use secrecy::ExposeSecret;
 
 #[derive(Debug, Error)]
