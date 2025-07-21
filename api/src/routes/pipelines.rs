@@ -26,7 +26,7 @@ use crate::k8s_client::{K8sClient, K8sError, PodPhase, TRUSTED_ROOT_CERT_CONFIG_
 use crate::routes::{
     ErrorMessage, TenantIdError, connect_to_source_database_with_defaults, extract_tenant_id,
 };
-use postgres::replication::{TableReplicationState, get_table_replication_state_rows};
+use postgres::replication::{TableReplicationState, get_table_replication_state_rows, get_table_name_from_oid, TableLookupError};
 use secrecy::ExposeSecret;
 
 #[derive(Debug, Error)]
@@ -82,6 +82,9 @@ enum PipelineError {
     #[error("The specified image with id {0} was not found")]
     ImageNotFoundById(i64),
 
+    #[error("There was an error while loolking up table information in the source database: {0}")]
+    TableLookup(#[from] TableLookupError),
+
     #[error("Database error: {0}")]
     Database(#[from] sqlx::Error),
 }
@@ -127,7 +130,8 @@ impl ResponseError for PipelineError {
             | PipelineError::ImagesDb(_)
             | PipelineError::K8s(_)
             | PipelineError::TrustedRootCertsConfigMissing
-            | PipelineError::Database(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            | PipelineError::Database(_)
+            | PipelineError::TableLookup(_) => StatusCode::INTERNAL_SERVER_ERROR,
             PipelineError::PipelineNotFound(_) | PipelineError::ImageNotFoundById(_) => {
                 StatusCode::NOT_FOUND
             }
@@ -246,17 +250,15 @@ pub struct TableReplicationStatus {
     #[schema(example = 1234567890)]
     pub table_id: u32,
     #[schema(example = "public.users")]
-    pub table_name: Option<String>,
-    pub status: SimpleTableReplicationState,
-    #[schema(example = 0)]
-    pub lag: u64,
+    pub table_name: String,
+    pub state: SimpleTableReplicationState,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
-pub struct GetReplicationStatusResponse {
+pub struct GetPipelineReplicationStatusResponse {
     #[schema(example = 1)]
     pub pipeline_id: i64,
-    pub tables: Vec<TableReplicationStatus>,
+    pub table_statuses: Vec<TableReplicationStatus>,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
@@ -709,20 +711,21 @@ pub async fn get_pipeline_replication_status(
     // Fetch replication state for all tables in this pipeline
     let state_rows = get_table_replication_state_rows(&source_pool, pipeline_id).await?;
 
-    // Convert database states to UI-friendly format
-    let tables: Vec<TableReplicationStatus> = state_rows
-        .into_iter()
-        .map(|row| TableReplicationStatus {
-            table_id: row.table_id.0,
-            table_name: None, // We could enhance this to include actual table names by joining with table metadata
-            status: row.state.into(),
-            lag: 0, // For now, lag is always 0 as specified in requirements
-        })
-        .collect();
+    // Convert database states to UI-friendly format and fetch table names
+    let mut tables: Vec<TableReplicationStatus> = Vec::new();
+    for row in state_rows {
+        let table_name = get_table_name_from_oid(&source_pool, row.table_id.0).await?;
 
-    let response = GetReplicationStatusResponse {
+        tables.push(TableReplicationStatus {
+            table_id: row.table_id.0,
+            table_name: table_name.to_string(),
+            state: row.state.into(),
+        });
+    }
+
+    let response = GetPipelineReplicationStatusResponse {
         pipeline_id,
-        tables,
+        table_statuses: tables,
     };
 
     Ok(Json(response))

@@ -49,7 +49,7 @@ impl Drop for TestApp {
 }
 
 impl TestApp {
-    fn get_authenticated<U: IntoUrl>(&self, url: U) -> RequestBuilder {
+    pub fn get_authenticated<U: IntoUrl>(&self, url: U) -> RequestBuilder {
         self.api_client.get(url).bearer_auth(self.api_key.clone())
     }
 
@@ -65,6 +65,10 @@ impl TestApp {
         self.api_client
             .delete(url)
             .bearer_auth(self.api_key.clone())
+    }
+
+    pub fn database_config(&self) -> &config::shared::PgConnectionConfig {
+        &self.config.database
     }
 
     pub async fn create_tenant(&self, tenant: &CreateTenantRequest) -> reqwest::Response {

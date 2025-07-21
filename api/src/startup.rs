@@ -36,7 +36,7 @@ use crate::{
         },
         pipelines::{
             CreatePipelineRequest, CreatePipelineResponse, GetPipelineStatusResponse,
-            GetReplicationStatusResponse, ReadPipelineResponse, ReadPipelinesResponse,
+            GetPipelineReplicationStatusResponse, ReadPipelineResponse, ReadPipelinesResponse,
             SimpleTableReplicationState, TableReplicationStatus, UpdatePipelineImageRequest,
             UpdatePipelineRequest, create_pipeline, delete_pipeline,
             get_pipeline_replication_status, get_pipeline_status, read_all_pipelines,
@@ -202,7 +202,7 @@ pub async fn run(
             ReadPipelinesResponse,
             UpdatePipelineImageRequest,
             GetPipelineStatusResponse,
-            GetReplicationStatusResponse,
+            GetPipelineReplicationStatusResponse,
             TableReplicationStatus,
             SimpleTableReplicationState,
             CreateTenantRequest,

@@ -1,12 +1,19 @@
 use api::db::pipelines::PipelineConfig;
 use api::routes::pipelines::{
-    CreatePipelineRequest, CreatePipelineResponse, ReadPipelineResponse, ReadPipelinesResponse,
+    CreatePipelineRequest, CreatePipelineResponse, GetPipelineReplicationStatusResponse,
+    ReadPipelineResponse, ReadPipelinesResponse,
     UpdatePipelineImageRequest, UpdatePipelineRequest,
 };
 use config::shared::{BatchConfig, RetryConfig};
 use reqwest::StatusCode;
+use secrecy::ExposeSecret;
+use sqlx::postgres::types::Oid;
+use api::db::sources::SourceConfig;
+use api::routes::sources::{CreateSourceRequest, CreateSourceResponse};
+use config::SerializableSecretString;
 use telemetry::init_test_tracing;
-
+use uuid::Uuid;
+use postgres::sqlx::test_utils::{create_pg_database, drop_pg_database};
 use crate::{
     common::test_app::{TestApp, spawn_test_app},
     integration::destination_test::create_destination,
@@ -858,4 +865,163 @@ async fn all_pipelines_can_be_stopped() {
 
     // Assert
     assert!(response.status().is_success());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn pipeline_replication_status_returns_table_states_and_names() {
+    init_test_tracing();
+    // Arrange
+    let app = spawn_test_app().await;
+    create_default_image(&app).await;
+    let tenant_id = &create_tenant(&app).await;
+
+    // Create a separate database for the source using create_pg_database
+    let mut source_db_config = app.database_config().clone();
+    source_db_config.name = format!("fake_source_db_{}", Uuid::new_v4().to_string());
+    let source_pool = create_pg_database(&source_db_config).await;
+    let source_config = SourceConfig {
+        host: source_db_config.host.clone(),
+        port: source_db_config.port,
+        name: source_db_config.name.clone(),
+        username: source_db_config.username.clone(),
+        password: source_db_config.password.as_ref().map(|p| 
+            SerializableSecretString::from(p.expose_secret().clone())
+        ),
+    };
+    
+    let source = CreateSourceRequest {
+        name: "Test Source".to_string(),
+        config: source_config,
+    };
+
+    let response = app.create_source(tenant_id, &source).await;
+    let response: CreateSourceResponse = response
+        .json()
+        .await
+        .expect("failed to deserialize response");
+    let source_id = response.id;
+    
+    let destination_id = create_destination(&app, tenant_id).await;
+
+    // Create pipeline
+    let pipeline = CreatePipelineRequest {
+        source_id,
+        destination_id,
+        config: new_pipeline_config(),
+    };
+    let response = app.create_pipeline(tenant_id, &pipeline).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    
+    let response: CreatePipelineResponse = response
+        .json()
+        .await
+        .expect("failed to deserialize response");
+    let pipeline_id = response.id;
+
+    // Create etl schema and replication_state table
+    sqlx::query("CREATE SCHEMA IF NOT EXISTS etl")
+        .execute(&source_pool)
+        .await
+        .expect("Failed to create etl schema");
+
+    sqlx::query(r#"
+        CREATE TABLE IF NOT EXISTS etl.replication_state (
+            pipeline_id BIGINT NOT NULL,
+            table_id OID NOT NULL,
+            state TEXT NOT NULL,
+            sync_done_lsn TEXT,
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            PRIMARY KEY (pipeline_id, table_id)
+        )
+    "#)
+    .execute(&source_pool)
+    .await
+    .expect("Failed to create replication_state table");
+
+    // Create some test tables to get real OIDs
+    sqlx::query("CREATE TABLE IF NOT EXISTS test_table_users (id SERIAL PRIMARY KEY, name TEXT)")
+        .execute(&source_pool)
+        .await
+        .expect("Failed to create test_table_users");
+        
+    sqlx::query("CREATE TABLE IF NOT EXISTS test_table_orders (id SERIAL PRIMARY KEY, user_id INT)")
+        .execute(&source_pool)
+        .await
+        .expect("Failed to create test_table_orders");
+
+    // Get the OIDs of the test tables
+    let users_table_oid = sqlx::query_scalar::<_, Oid>(
+        "SELECT c.oid FROM pg_class c JOIN pg_namespace n ON c.relnamespace = n.oid WHERE c.relname = $1 AND n.nspname = $2"
+    )
+    .bind("test_table_users")
+    .bind("public")
+    .fetch_one(&source_pool)
+    .await
+    .expect("Failed to get users table OID").0 as i64;
+
+    let orders_table_oid = sqlx::query_scalar::<_, Oid>(
+        "SELECT c.oid FROM pg_class c JOIN pg_namespace n ON c.relnamespace = n.oid WHERE c.relname = $1 AND n.nspname = $2"
+    )
+    .bind("test_table_orders")
+    .bind("public")
+    .fetch_one(&source_pool)
+    .await
+    .expect("Failed to get orders table OID").0 as i64;
+
+    // Insert test data into etl.replication_state table
+    sqlx::query(r#"
+        INSERT INTO etl.replication_state (pipeline_id, table_id, state, sync_done_lsn)
+        VALUES 
+            ($1, $2, 'data_sync', NULL),
+            ($1, $3, 'ready', '0/12345678')
+    "#)
+    .bind(pipeline_id)
+    .bind(users_table_oid)
+    .bind(orders_table_oid)
+    .execute(&source_pool)
+    .await
+    .expect("Failed to insert test replication state data");
+
+    // Test the endpoint with actual replication state data
+    let response = app.get_authenticated(format!("{}/v1/pipelines/{}/replication-status", app.address, pipeline_id))
+        .header("tenant_id", tenant_id)
+        .send()
+        .await
+        .expect("failed to execute request");
+    let response: GetPipelineReplicationStatusResponse = response
+        .json()
+        .await
+        .expect("failed to deserialize response");
+
+    assert_eq!(response.pipeline_id, pipeline_id);
+    // Should have 2 table statuses (users and orders tables)
+    assert_eq!(response.table_statuses.len(), 2);
+
+    // Find the tables and verify their data
+    let users_table_status = response.table_statuses.iter()
+        .find(|s| s.table_id == users_table_oid as u32)
+        .expect("Users table not found in response");
+    let orders_table_status = response.table_statuses.iter()
+        .find(|s| s.table_id == orders_table_oid as u32)
+        .expect("Orders table not found in response");
+
+    // Verify table names are populated correctly
+    assert_eq!(users_table_status.table_name, "etl.test_table_users");
+    assert_eq!(orders_table_status.table_name, "etl.test_table_orders");
+
+    // Verify states are correctly mapped
+    use api::routes::pipelines::SimpleTableReplicationState;
+    match &users_table_status.state {
+        SimpleTableReplicationState::CopyingTable => {}, // Expected for data_sync state
+        other => panic!("Expected CopyingTable state for users table, got {:?}", other),
+    }
+
+    match &orders_table_status.state {
+        SimpleTableReplicationState::FollowingWal { lag: _ } => {}, // Expected for ready state
+        other => panic!("Expected FollowingWal state for orders table, got {:?}", other),
+    }
+
+    // We destroy the database
+    drop_pg_database(&source_db_config).await;
 }
