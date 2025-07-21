@@ -17,6 +17,7 @@ use api::{
     encryption::{self, generate_random_key},
     startup::run,
 };
+use config::shared::PgConnectionConfig;
 use config::{Environment, load_config};
 use postgres::sqlx::test_utils::drop_pg_database;
 use reqwest::{IntoUrl, RequestBuilder};
@@ -25,7 +26,6 @@ use std::net::TcpListener;
 use std::sync::Arc;
 use tokio::runtime::Handle;
 use uuid::Uuid;
-use config::shared::PgConnectionConfig;
 
 pub struct TestApp {
     pub address: String,
