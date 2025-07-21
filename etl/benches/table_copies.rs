@@ -1,6 +1,38 @@
+/*
+Table Copies Benchmark
+
+This benchmark allows testing ETL pipeline performance with different destinations.
+
+Usage Examples:
+
+1. Run with null destination (fastest, data is discarded):
+   cargo bench --bench table_copies -- run \
+     --host localhost --port 5432 --database bench \
+     --username postgres --password mypass \
+     --publication-name bench_pub \
+     --table-ids 1,2,3 \
+     --destination null
+
+2. Run with BigQuery destination (requires BigQuery feature):
+   cargo bench --bench table_copies --features bigquery -- run \
+     --host localhost --port 5432 --database bench \
+     --username postgres --password mypass \
+     --publication-name bench_pub \
+     --table-ids 1,2,3 \
+     --destination big-query \
+     --bq-project-id my-gcp-project \
+     --bq-dataset-id my_dataset \
+     --bq-sa-key-file /path/to/service-account-key.json
+
+3. Prepare benchmark environment (clean up replication slots):
+   cargo bench --bench table_copies -- prepare \
+     --host localhost --port 5432 --database bench \
+     --username postgres --password mypass
+*/
+
 use std::error::Error;
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use config::shared::{BatchConfig, PgConnectionConfig, PipelineConfig, RetryConfig, TlsConfig};
 use etl::{
     conversions::{event::Event, table_row::TableRow},
@@ -11,11 +43,23 @@ use etl::{
 use postgres::schema::{TableId, TableSchema};
 use sqlx::postgres::PgPool;
 
+#[cfg(feature = "bigquery")]
+use etl::destination::bigquery::BigQueryDestination;
+
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
     #[command(subcommand)]
     command: Commands,
+}
+
+#[derive(ValueEnum, Debug, Clone)]
+enum DestinationType {
+    /// Use a null destination that discards all data (fastest)
+    Null,
+    /// Use BigQuery as the destination
+    #[cfg(feature = "bigquery")]
+    BigQuery,
 }
 
 #[derive(Subcommand, Debug)]
@@ -69,6 +113,30 @@ enum Commands {
         /// Table IDs to replicate (comma-separated)
         #[arg(long, value_delimiter = ',')]
         table_ids: Vec<u32>,
+
+        /// Destination type to use
+        #[arg(long, value_enum, default_value = "null")]
+        destination: DestinationType,
+
+        /// BigQuery project ID (required when using BigQuery destination)
+        #[cfg(feature = "bigquery")]
+        #[arg(long)]
+        bq_project_id: Option<String>,
+
+        /// BigQuery dataset ID (required when using BigQuery destination)
+        #[cfg(feature = "bigquery")]
+        #[arg(long)]
+        bq_dataset_id: Option<String>,
+
+        /// BigQuery service account key file path (required when using BigQuery destination)
+        #[cfg(feature = "bigquery")]
+        #[arg(long)]
+        bq_sa_key_file: Option<String>,
+
+        /// BigQuery maximum staleness in minutes (optional)
+        #[cfg(feature = "bigquery")]
+        #[arg(long)]
+        bq_max_staleness_mins: Option<u16>,
     },
     /// Prepare the benchmark environment by cleaning up replication slots
     Prepare {
@@ -123,6 +191,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
             batch_max_fill_ms,
             max_table_sync_workers,
             table_ids,
+            destination,
+            #[cfg(feature = "bigquery")]
+            bq_project_id,
+            #[cfg(feature = "bigquery")]
+            bq_dataset_id,
+            #[cfg(feature = "bigquery")]
+            bq_sa_key_file,
+            #[cfg(feature = "bigquery")]
+            bq_max_staleness_mins,
         } => {
             start_pipeline(RunArgs {
                 host,
@@ -137,6 +214,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 batch_max_fill_ms,
                 max_table_sync_workers,
                 table_ids,
+                destination,
+                #[cfg(feature = "bigquery")]
+                bq_project_id,
+                #[cfg(feature = "bigquery")]
+                bq_dataset_id,
+                #[cfg(feature = "bigquery")]
+                bq_sa_key_file,
+                #[cfg(feature = "bigquery")]
+                bq_max_staleness_mins,
             })
             .await
         }
@@ -177,6 +263,15 @@ struct RunArgs {
     batch_max_fill_ms: u64,
     max_table_sync_workers: u16,
     table_ids: Vec<u32>,
+    destination: DestinationType,
+    #[cfg(feature = "bigquery")]
+    bq_project_id: Option<String>,
+    #[cfg(feature = "bigquery")]
+    bq_dataset_id: Option<String>,
+    #[cfg(feature = "bigquery")]
+    bq_sa_key_file: Option<String>,
+    #[cfg(feature = "bigquery")]
+    bq_max_staleness_mins: Option<u16>,
 }
 
 #[derive(Debug)]
@@ -257,7 +352,32 @@ async fn start_pipeline(args: RunArgs) -> Result<(), Box<dyn Error>> {
         },
     };
 
-    let destination = NullDestination;
+    // Create the appropriate destination based on the argument
+    let destination = match args.destination {
+        DestinationType::Null => BenchDestination::Null(NullDestination),
+        #[cfg(feature = "bigquery")]
+        DestinationType::BigQuery => {
+            let project_id = args
+                .bq_project_id
+                .ok_or("BigQuery project ID is required when using BigQuery destination")?;
+            let dataset_id = args
+                .bq_dataset_id
+                .ok_or("BigQuery dataset ID is required when using BigQuery destination")?;
+            let sa_key_file = args.bq_sa_key_file.ok_or(
+                "BigQuery service account key file is required when using BigQuery destination",
+            )?;
+
+            let bigquery_dest = BigQueryDestination::new_with_key_path(
+                project_id,
+                dataset_id,
+                &sa_key_file,
+                args.bq_max_staleness_mins,
+            )
+            .await?;
+
+            BenchDestination::BigQuery(bigquery_dest)
+        }
+    };
 
     let state_store = NotifyingStateStore::new();
 
@@ -301,7 +421,70 @@ async fn start_pipeline(args: RunArgs) -> Result<(), Box<dyn Error>> {
 #[derive(Clone)]
 struct NullDestination;
 
+#[derive(Clone)]
+enum BenchDestination {
+    Null(NullDestination),
+    #[cfg(feature = "bigquery")]
+    BigQuery(BigQueryDestination),
+}
+
+impl Destination for BenchDestination {
+    async fn inject(
+        &self,
+        schema_cache: etl::schema::cache::SchemaCache,
+    ) -> Result<(), DestinationError> {
+        match self {
+            BenchDestination::Null(dest) => dest.inject(schema_cache).await,
+            #[cfg(feature = "bigquery")]
+            BenchDestination::BigQuery(dest) => dest.inject(schema_cache).await,
+        }
+    }
+
+    async fn write_table_schema(&self, table_schema: TableSchema) -> Result<(), DestinationError> {
+        match self {
+            BenchDestination::Null(dest) => dest.write_table_schema(table_schema).await,
+            #[cfg(feature = "bigquery")]
+            BenchDestination::BigQuery(dest) => dest.write_table_schema(table_schema).await,
+        }
+    }
+
+    async fn load_table_schemas(&self) -> Result<Vec<TableSchema>, DestinationError> {
+        match self {
+            BenchDestination::Null(dest) => dest.load_table_schemas().await,
+            #[cfg(feature = "bigquery")]
+            BenchDestination::BigQuery(dest) => dest.load_table_schemas().await,
+        }
+    }
+
+    async fn write_table_rows(
+        &self,
+        table_id: TableId,
+        table_rows: Vec<TableRow>,
+    ) -> Result<(), DestinationError> {
+        match self {
+            BenchDestination::Null(dest) => dest.write_table_rows(table_id, table_rows).await,
+            #[cfg(feature = "bigquery")]
+            BenchDestination::BigQuery(dest) => dest.write_table_rows(table_id, table_rows).await,
+        }
+    }
+
+    async fn write_events(&self, events: Vec<Event>) -> Result<(), DestinationError> {
+        match self {
+            BenchDestination::Null(dest) => dest.write_events(events).await,
+            #[cfg(feature = "bigquery")]
+            BenchDestination::BigQuery(dest) => dest.write_events(events).await,
+        }
+    }
+}
+
 impl Destination for NullDestination {
+    async fn inject(
+        &self,
+        _schema_cache: etl::schema::cache::SchemaCache,
+    ) -> Result<(), DestinationError> {
+        Ok(())
+    }
+
     async fn write_table_schema(&self, _table_schema: TableSchema) -> Result<(), DestinationError> {
         Ok(())
     }

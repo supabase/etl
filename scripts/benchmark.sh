@@ -1,6 +1,43 @@
 #!/usr/bin/env bash
 set -eo pipefail
 
+# Table Copies Benchmark Script
+#
+# This script runs the table copies benchmark using hyperfine with configurable destinations.
+#
+# Supported destinations:
+# - null: Discards all data (fastest, default)
+# - big-query: Streams data to Google BigQuery
+#
+# Environment Variables:
+#   Database Configuration:
+#     POSTGRES_USER, POSTGRES_PASSWORD, POSTGRES_DB, POSTGRES_PORT, POSTGRES_HOST
+#   
+#   Benchmark Configuration:
+#     HYPERFINE_RUNS, PUBLICATION_NAME, BATCH_MAX_SIZE, BATCH_MAX_FILL_MS, MAX_TABLE_SYNC_WORKERS
+#     DESTINATION (null or big-query)
+#     DRY_RUN (true/false) - Show commands without executing them
+#   
+#   BigQuery Configuration (required when DESTINATION=big-query):
+#     BQ_PROJECT_ID - Google Cloud project ID
+#     BQ_DATASET_ID - BigQuery dataset ID
+#     BQ_SA_KEY_FILE - Path to service account key JSON file
+#     BQ_MAX_STALENESS_MINS - Optional staleness setting
+#
+# Examples:
+#   # Run with null destination (default)
+#   ./scripts/benchmark.sh
+#
+#   # Dry run to see commands that would be executed
+#   DRY_RUN=true ./scripts/benchmark.sh
+#
+#   # Run with BigQuery destination
+#   DESTINATION=big-query \
+#   BQ_PROJECT_ID=my-project \
+#   BQ_DATASET_ID=my_dataset \
+#   BQ_SA_KEY_FILE=/path/to/sa-key.json \
+#   ./scripts/benchmark.sh
+
 # Check if hyperfine is installed
 if ! [ -x "$(command -v hyperfine)" ]; then
   echo >&2 "❌ Error: hyperfine is not installed."
@@ -30,6 +67,16 @@ BATCH_MAX_SIZE="${BATCH_MAX_SIZE:=1000000}"
 BATCH_MAX_FILL_MS="${BATCH_MAX_FILL_MS:=10000}"
 MAX_TABLE_SYNC_WORKERS="${MAX_TABLE_SYNC_WORKERS:=8}"
 
+# Destination configuration
+DESTINATION="${DESTINATION:=null}"  # null or big-query
+BQ_PROJECT_ID="${BQ_PROJECT_ID:=}"
+BQ_DATASET_ID="${BQ_DATASET_ID:=}"
+BQ_SA_KEY_FILE="${BQ_SA_KEY_FILE:=}"
+BQ_MAX_STALENESS_MINS="${BQ_MAX_STALENESS_MINS:=}"
+
+# Optional dry-run mode
+DRY_RUN="${DRY_RUN:=false}"
+
 echo "🏁 Running table copies benchmark with hyperfine..."
 echo "📊 Configuration:"
 echo "   Database: ${DB_NAME}@${DB_HOST}:${DB_PORT}"
@@ -39,6 +86,15 @@ echo "   Publication: ${PUBLICATION_NAME}"
 echo "   Batch size: ${BATCH_MAX_SIZE}"
 echo "   Batch fill time: ${BATCH_MAX_FILL_MS}ms"
 echo "   Workers: ${MAX_TABLE_SYNC_WORKERS}"
+echo "   Destination: ${DESTINATION}"
+if [[ "${DESTINATION}" == "big-query" ]]; then
+  echo "   BigQuery Project: ${BQ_PROJECT_ID}"
+  echo "   BigQuery Dataset: ${BQ_DATASET_ID}"
+  echo "   BigQuery SA Key: ${BQ_SA_KEY_FILE}"
+  if [[ -n "${BQ_MAX_STALENESS_MINS}" ]]; then
+    echo "   BigQuery Max Staleness: ${BQ_MAX_STALENESS_MINS} mins"
+  fi
+fi
 
 # Get table IDs from the database for TPC-C tables
 echo "🔍 Querying table IDs from database..."
@@ -57,21 +113,75 @@ fi
 
 echo "✅ Found table IDs: ${TPCC_TABLE_IDS}"
 
+# Validate BigQuery configuration if using BigQuery destination
+if [[ "${DESTINATION}" == "big-query" ]]; then
+  if [[ -z "${BQ_PROJECT_ID}" ]]; then
+    echo "❌ Error: BQ_PROJECT_ID environment variable is required when using BigQuery destination."
+    exit 1
+  fi
+  if [[ -z "${BQ_DATASET_ID}" ]]; then
+    echo "❌ Error: BQ_DATASET_ID environment variable is required when using BigQuery destination."
+    exit 1
+  fi
+  if [[ -z "${BQ_SA_KEY_FILE}" ]]; then
+    echo "❌ Error: BQ_SA_KEY_FILE environment variable is required when using BigQuery destination."
+    exit 1
+  fi
+  if [[ ! -f "${BQ_SA_KEY_FILE}" ]]; then
+    echo "❌ Error: BigQuery service account key file does not exist: ${BQ_SA_KEY_FILE}"
+    exit 1
+  fi
+fi
+
+# Determine if we need BigQuery features
+FEATURES_FLAG=""
+if [[ "${DESTINATION}" == "big-query" ]]; then
+  FEATURES_FLAG="--features bigquery"
+fi
+
+# Validate destination option
+if [[ "${DESTINATION}" != "null" && "${DESTINATION}" != "big-query" ]]; then
+  echo "❌ Error: Invalid destination '${DESTINATION}'. Supported values: null, big-query"
+  exit 1
+fi
+
 # Build the prepare command
-PREPARE_CMD="cargo bench --bench table_copies -- prepare --host ${DB_HOST} --port ${DB_PORT} --database ${DB_NAME} --username ${DB_USER}"
+PREPARE_CMD="cargo bench --bench table_copies ${FEATURES_FLAG} -- prepare --host ${DB_HOST} --port ${DB_PORT} --database ${DB_NAME} --username ${DB_USER}"
 if [[ -n "${DB_PASSWORD}" && "${DB_PASSWORD}" != "" ]]; then
   PREPARE_CMD="${PREPARE_CMD} --password ${DB_PASSWORD}"
 fi
 
 # Build the run command
-RUN_CMD="cargo bench --bench table_copies -- run --host ${DB_HOST} --port ${DB_PORT} --database ${DB_NAME} --username ${DB_USER}"
+RUN_CMD="cargo bench --bench table_copies ${FEATURES_FLAG} -- run --host ${DB_HOST} --port ${DB_PORT} --database ${DB_NAME} --username ${DB_USER}"
 if [[ -n "${DB_PASSWORD}" && "${DB_PASSWORD}" != "" ]]; then
   RUN_CMD="${RUN_CMD} --password ${DB_PASSWORD}"
 fi
 RUN_CMD="${RUN_CMD} --publication-name ${PUBLICATION_NAME} --batch-max-size ${BATCH_MAX_SIZE} --batch-max-fill-ms ${BATCH_MAX_FILL_MS} --max-table-sync-workers ${MAX_TABLE_SYNC_WORKERS} --table-ids ${TPCC_TABLE_IDS}"
 
+# Add destination-specific options
+RUN_CMD="${RUN_CMD} --destination ${DESTINATION}"
+if [[ "${DESTINATION}" == "big-query" ]]; then
+  RUN_CMD="${RUN_CMD} --bq-project-id ${BQ_PROJECT_ID}"
+  RUN_CMD="${RUN_CMD} --bq-dataset-id ${BQ_DATASET_ID}"
+  RUN_CMD="${RUN_CMD} --bq-sa-key-file ${BQ_SA_KEY_FILE}"
+  if [[ -n "${BQ_MAX_STALENESS_MINS}" ]]; then
+    RUN_CMD="${RUN_CMD} --bq-max-staleness-mins ${BQ_MAX_STALENESS_MINS}"
+  fi
+fi
+
 echo ""
 echo "🚀 Starting benchmark..."
+
+# Show commands in dry-run mode
+if [[ "${DRY_RUN}" == "true" ]]; then
+  echo ""
+  echo "📝 Commands that would be executed:"
+  echo "   Prepare: ${PREPARE_CMD}"
+  echo "   Run:     ${RUN_CMD}"
+  echo ""
+  echo "ℹ️  This was a dry run. Set DRY_RUN=false to actually run the benchmark."
+  exit 0
+fi
 
 # Run hyperfine
 hyperfine \
