@@ -3,7 +3,7 @@ use postgres::schema::TableId;
 use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
-use tokio::sync::{AcquireError, Notify, RwLock, RwLockReadGuard, Semaphore};
+use tokio::sync::{AcquireError, Mutex, MutexGuard, Notify, Semaphore};
 use tokio::task::JoinHandle;
 use tokio_postgres::types::PgLsn;
 use tracing::{Instrument, debug, error, info, warn};
@@ -126,7 +126,7 @@ impl TableSyncWorkerStateInner {
 //  by table sync workers.
 #[derive(Debug, Clone)]
 pub struct TableSyncWorkerState {
-    inner: Arc<RwLock<TableSyncWorkerStateInner>>,
+    inner: Arc<Mutex<TableSyncWorkerStateInner>>,
 }
 
 impl TableSyncWorkerState {
@@ -138,22 +138,22 @@ impl TableSyncWorkerState {
         };
 
         Self {
-            inner: Arc::new(RwLock::new(inner)),
+            inner: Arc::new(Mutex::new(inner)),
         }
     }
 
-    pub fn get_inner(&self) -> &RwLock<TableSyncWorkerStateInner> {
+    pub fn get_inner(&self) -> &Mutex<TableSyncWorkerStateInner> {
         &self.inner
     }
 
     async fn wait(
         &self,
         phase_type: TableReplicationPhaseType,
-    ) -> Option<RwLockReadGuard<'_, TableSyncWorkerStateInner>> {
+    ) -> Option<MutexGuard<'_, TableSyncWorkerStateInner>> {
         // We grab hold of the phase change notify in case we don't immediately have the state
         // that we want.
         let phase_change = {
-            let inner = self.inner.read().await;
+            let inner = self.inner.lock().await;
             if inner.table_replication_phase.as_type() == phase_type {
                 info!(
                     "phase type '{:?}' was already set, no need to wait",
@@ -170,7 +170,7 @@ impl TableSyncWorkerState {
         let _ = tokio::time::timeout(PHASE_CHANGE_REFRESH_FREQUENCY, phase_change.notified()).await;
 
         // We read the state and return the lock to the state.
-        let inner = self.inner.read().await;
+        let inner = self.inner.lock().await;
         if inner.table_replication_phase.as_type() == phase_type {
             info!(
                 "phase type '{:?}' was reached for table {:?}",
@@ -186,9 +186,9 @@ impl TableSyncWorkerState {
         &self,
         phase_type: TableReplicationPhaseType,
         mut shutdown_rx: ShutdownRx,
-    ) -> ShutdownResult<RwLockReadGuard<'_, TableSyncWorkerStateInner>, ()> {
+    ) -> ShutdownResult<MutexGuard<'_, TableSyncWorkerStateInner>, ()> {
         let table_id = {
-            let inner = self.inner.read().await;
+            let inner = self.inner.lock().await;
             inner.table_id
         };
         info!(
@@ -429,7 +429,7 @@ where
 
         // We spawn the table sync worker with a safe future, so that we can have controlled teardown
         // on completion or error.
-        let fut = ReactiveFuture::new(table_sync_worker, self.table_id, self.pool.workers())
+        let fut = ReactiveFuture::new(table_sync_worker, self.table_id, self.pool.get_inner())
             .instrument(table_sync_worker_span);
         let handle = tokio::spawn(fut);
 
@@ -474,7 +474,7 @@ where
         current_lsn: PgLsn,
         update_state: bool,
     ) -> Result<bool, TableSyncWorkerHookError> {
-        let mut inner = self.table_sync_worker_state.get_inner().write().await;
+        let mut inner = self.table_sync_worker_state.get_inner().lock().await;
 
         // If we caught up with the lsn, we mark this table as `SyncDone` and stop the worker.
         if let TableReplicationPhase::Catchup { lsn } = inner.replication_phase() {
@@ -542,7 +542,7 @@ where
             return Ok(true);
         }
 
-        let mut inner = self.table_sync_worker_state.get_inner().write().await;
+        let mut inner = self.table_sync_worker_state.get_inner().lock().await;
         inner
             .set_phase_with(TableReplicationPhase::Skipped, self.state_store.clone())
             .await?;
@@ -555,7 +555,7 @@ where
         table_id: TableId,
         _remote_final_lsn: PgLsn,
     ) -> Result<bool, Self::Error> {
-        let inner = self.table_sync_worker_state.get_inner().write().await;
+        let inner = self.table_sync_worker_state.get_inner().lock().await;
         let is_skipped = matches!(
             inner.table_replication_phase.as_type(),
             TableReplicationPhaseType::Skipped
