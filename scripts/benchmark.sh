@@ -101,7 +101,7 @@ echo "🔍 Querying table IDs from database..."
 TPCC_TABLE_IDS=$(PGPASSWORD="${DB_PASSWORD}" psql -h "${DB_HOST}" -U "${DB_USER}" -p "${DB_PORT}" -d "${DB_NAME}" -tAc "
   select string_agg(oid::text, ',')
   from pg_class
-  where relname in ('warehouse', 'district', 'customer', 'history', 'new_order', 'orders', 'order_line', 'stock', 'item')
+  where relname in ('warehouse', 'district', 'customer', 'new_order', 'orders', 'stock', 'item')
     and relkind = 'r';
 " 2>/dev/null || echo "")
 

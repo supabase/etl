@@ -57,7 +57,7 @@ TPCC_EXISTS=$(PGPASSWORD="${DB_PASSWORD}" psql -h "${DB_HOST}" -U "${DB_USER}" -
   select count(*) 
   from pg_catalog.pg_tables 
   where schemaname = 'public' 
-    and tablename in ('warehouse', 'district', 'customer', 'history', 'new_order', 'orders', 'order_line', 'stock', 'item');
+    and tablename in ('warehouse', 'district', 'customer', 'new_order', 'orders', 'stock', 'item');
 " 2>/dev/null || echo "0")
 
 if [[ "${TPCC_EXISTS}" -eq 9 ]]; then
@@ -94,10 +94,8 @@ PGPASSWORD="${DB_PASSWORD}" psql -h "${DB_HOST}" -U "${DB_USER}" -p "${DB_PORT}"
     warehouse,
     district,
     customer,
-    history,
     new_order,
     orders,
-    order_line,
     stock,
     item;
 "
