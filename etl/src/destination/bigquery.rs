@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::ops::Deref;
 use std::sync::{Arc, LazyLock};
 use thiserror::Error;
-use tokio::sync::RwLock;
+use tokio::sync::Mutex;
 use tokio_postgres::types::{PgLsn, Type};
 use tracing::{debug, info, warn};
 
@@ -94,7 +94,7 @@ pub enum BigQueryDestinationError {
     SerializationError(#[from] serde_json::Error),
 }
 
-/// Internal state for [`BigQueryDestination`] wrapped in `Arc<RwLock<>>`.
+/// Internal state for [`BigQueryDestination`] wrapped in `Arc<Mutex<>>`.
 ///
 /// Contains the BigQuery client, dataset configuration, and injected schema cache.
 #[derive(Debug)]
@@ -145,7 +145,7 @@ impl Inner {
 /// - `etl_table_columns`: Stores column-level schema details
 #[derive(Debug, Clone)]
 pub struct BigQueryDestination {
-    inner: Arc<RwLock<Inner>>,
+    inner: Arc<Mutex<Inner>>,
 }
 
 impl BigQueryDestination {
@@ -168,7 +168,7 @@ impl BigQueryDestination {
         };
 
         Ok(Self {
-            inner: Arc::new(RwLock::new(inner)),
+            inner: Arc::new(Mutex::new(inner)),
         })
     }
 
@@ -191,7 +191,7 @@ impl BigQueryDestination {
         };
 
         Ok(Self {
-            inner: Arc::new(RwLock::new(inner)),
+            inner: Arc::new(Mutex::new(inner)),
         })
     }
 
@@ -218,7 +218,7 @@ impl BigQueryDestination {
         };
 
         Ok(Self {
-            inner: Arc::new(RwLock::new(inner)),
+            inner: Arc::new(Mutex::new(inner)),
         })
     }
 
@@ -234,7 +234,7 @@ impl BigQueryDestination {
             .schema_cache
             .as_ref()
             .ok_or(BigQueryDestinationError::MissingSchemaCache)?
-            .read_inner()
+            .lock_inner()
             .await;
         let table_schema = schema_cache
             .get_table_schema_ref(table_id)
@@ -256,7 +256,7 @@ impl BigQueryDestination {
         &self,
         table_schema: TableSchema,
     ) -> Result<(), BigQueryDestinationError> {
-        let mut inner = self.inner.write().await;
+        let mut inner = self.inner.lock().await;
 
         let dataset_id = inner.dataset_id.clone();
 
@@ -320,7 +320,7 @@ impl BigQueryDestination {
     ///
     /// Reconstructs [`TableSchema`] objects by joining data from schema and column metadata tables.
     async fn load_table_schemas(&self) -> Result<Vec<TableSchema>, BigQueryDestinationError> {
-        let inner = self.inner.read().await;
+        let inner = self.inner.lock().await;
 
         // First check if schema tables exist
         let tables_exist = inner
@@ -436,7 +436,7 @@ impl BigQueryDestination {
         table_id: TableId,
         mut table_rows: Vec<TableRow>,
     ) -> Result<(), BigQueryDestinationError> {
-        let mut inner = self.inner.write().await;
+        let mut inner = self.inner.lock().await;
 
         // We do not use the sequence column for table rows, since we assume that table rows are always
         // unique by primary key, thus there is no need to order them.
@@ -525,7 +525,7 @@ impl BigQueryDestination {
 
             // Process accumulated streaming operations
             if !table_id_to_table_rows.is_empty() {
-                let mut inner = self.inner.write().await;
+                let mut inner = self.inner.lock().await;
 
                 for (table_id, table_rows) in table_id_to_table_rows {
                     let (table_id, table_descriptor) =
@@ -569,7 +569,7 @@ impl BigQueryDestination {
         &self,
         truncate_events: Vec<TruncateEvent>,
     ) -> Result<(), BigQueryDestinationError> {
-        let inner = self.inner.read().await;
+        let inner = self.inner.lock().await;
 
         for truncate_event in truncate_events {
             for table_id in truncate_event.rel_ids {
@@ -578,7 +578,7 @@ impl BigQueryDestination {
                     .schema_cache
                     .as_ref()
                     .ok_or(BigQueryDestinationError::MissingSchemaCache)?
-                    .read_inner()
+                    .lock_inner()
                     .await;
 
                 if let Some(table_schema) = schema_cache.get_table_schema_ref(&table_id) {
@@ -714,7 +714,7 @@ impl BigQueryDestination {
 
 impl Destination for BigQueryDestination {
     async fn inject(&self, schema_cache: SchemaCache) -> Result<(), DestinationError> {
-        let mut inner = self.inner.write().await;
+        let mut inner = self.inner.lock().await;
         inner.schema_cache = Some(schema_cache);
 
         Ok(())
