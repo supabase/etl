@@ -250,8 +250,6 @@ impl From<TableReplicationState> for SimpleTableReplicationState {
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct TableReplicationStatus {
-    #[schema(example = 1234567890)]
-    pub table_id: u32,
     #[schema(example = "public.users")]
     pub table_name: String,
     pub state: SimpleTableReplicationState,
@@ -718,9 +716,7 @@ pub async fn get_pipeline_replication_status(
     let mut tables: Vec<TableReplicationStatus> = Vec::new();
     for row in state_rows {
         let table_name = get_table_name_from_oid(&source_pool, row.table_id.0).await?;
-
         tables.push(TableReplicationStatus {
-            table_id: row.table_id.0,
             table_name: table_name.to_string(),
             state: row.state.into(),
         });

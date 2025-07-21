@@ -420,6 +420,21 @@ impl TestApp {
         .await
         .expect("Failed to execute request.")
     }
+
+    pub async fn get_pipeline_replication_status(
+        &self,
+        tenant_id: &str,
+        pipeline_id: i64,
+    ) -> reqwest::Response {
+        self.get_authenticated(format!(
+            "{}/v1/pipelines/{}/replication-status",
+            &self.address, pipeline_id
+        ))
+        .header("tenant_id", tenant_id)
+        .send()
+        .await
+        .expect("failed to execute request")
+    }
 }
 
 pub async fn spawn_test_app() -> TestApp {

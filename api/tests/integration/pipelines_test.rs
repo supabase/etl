@@ -1,11 +1,3 @@
-use crate::{
-    common::test_app::{TestApp, spawn_test_app},
-    integration::destination_test::create_destination,
-    integration::images_test::create_default_image,
-    integration::sources_test::create_source,
-    integration::tenants_test::create_tenant,
-    integration::tenants_test::create_tenant_with_id_and_name,
-};
 use api::db::pipelines::PipelineConfig;
 use api::db::sources::SourceConfig;
 use api::routes::pipelines::{
@@ -21,6 +13,15 @@ use secrecy::ExposeSecret;
 use sqlx::postgres::types::Oid;
 use telemetry::init_test_tracing;
 use uuid::Uuid;
+
+use crate::{
+    common::test_app::{TestApp, spawn_test_app},
+    integration::destination_test::create_destination,
+    integration::images_test::create_default_image,
+    integration::sources_test::create_source,
+    integration::tenants_test::create_tenant,
+    integration::tenants_test::create_tenant_with_id_and_name,
+};
 
 pub fn new_pipeline_config() -> PipelineConfig {
     PipelineConfig {
@@ -958,11 +959,13 @@ async fn pipeline_replication_status_returns_table_states_and_names() {
     .expect("Failed to create replication_state table");
 
     // Create some test tables to get real OIDs
+    let users_table_name = "public.test_table_users";
     sqlx::query("CREATE TABLE IF NOT EXISTS test_table_users (id SERIAL PRIMARY KEY, name TEXT)")
         .execute(&source_pool)
         .await
         .expect("Failed to create test_table_users");
 
+    let orders_table_name = "public.test_table_orders";
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS test_table_orders (id SERIAL PRIMARY KEY, user_id INT)",
     )
@@ -1007,14 +1010,8 @@ async fn pipeline_replication_status_returns_table_states_and_names() {
 
     // Test the endpoint with actual replication state data
     let response = app
-        .get_authenticated(format!(
-            "{}/v1/pipelines/{}/replication-status",
-            app.address, pipeline_id
-        ))
-        .header("tenant_id", tenant_id)
-        .send()
-        .await
-        .expect("failed to execute request");
+        .get_pipeline_replication_status(tenant_id, pipeline_id)
+        .await;
     let response: GetPipelineReplicationStatusResponse = response
         .json()
         .await
@@ -1028,32 +1025,24 @@ async fn pipeline_replication_status_returns_table_states_and_names() {
     let users_table_status = response
         .table_statuses
         .iter()
-        .find(|s| s.table_id == users_table_oid as u32)
+        .find(|s| s.table_name == users_table_name)
         .expect("Users table not found in response");
     let orders_table_status = response
         .table_statuses
         .iter()
-        .find(|s| s.table_id == orders_table_oid as u32)
+        .find(|s| s.table_name == orders_table_name)
         .expect("Orders table not found in response");
-
-    // Verify table names are populated correctly
-    assert_eq!(users_table_status.table_name, "public.test_table_users");
-    assert_eq!(orders_table_status.table_name, "public.test_table_orders");
 
     // Verify states are correctly mapped
     use api::routes::pipelines::SimpleTableReplicationState;
     match &users_table_status.state {
         SimpleTableReplicationState::CopyingTable => {} // Expected for data_sync state
-        other => panic!(
-            "Expected CopyingTable state for users table, got {other:?}"
-        ),
+        other => panic!("Expected CopyingTable state for users table, got {other:?}"),
     }
 
     match &orders_table_status.state {
         SimpleTableReplicationState::FollowingWal { lag: _ } => {} // Expected for ready state
-        other => panic!(
-            "Expected FollowingWal state for orders table, got {other:?}"
-        ),
+        other => panic!("Expected FollowingWal state for orders table, got {other:?}"),
     }
 
     // We destroy the database
