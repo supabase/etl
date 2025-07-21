@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use std::mem;
 use std::ops::Deref;
 use std::sync::Arc;
-use tokio::sync::{Mutex, Notify, RwLock};
+use tokio::sync::{Mutex, Notify};
 use tracing::{debug, warn};
 
 use crate::concurrency::future::ReactiveFutureCallback;
@@ -149,18 +149,18 @@ impl ReactiveFutureCallback<TableId> for TableSyncWorkerPoolInner {
 
 #[derive(Debug, Clone)]
 pub struct TableSyncWorkerPool {
-    workers: Arc<Mutex<TableSyncWorkerPoolInner>>,
+    inner: Arc<Mutex<TableSyncWorkerPoolInner>>,
 }
 
 impl TableSyncWorkerPool {
     pub fn new() -> Self {
         Self {
-            workers: Arc::new(Mutex::new(TableSyncWorkerPoolInner::new())),
+            inner: Arc::new(Mutex::new(TableSyncWorkerPoolInner::new())),
         }
     }
 
-    pub fn workers(&self) -> Arc<Mutex<TableSyncWorkerPoolInner>> {
-        self.workers.clone()
+    pub fn get_inner(&self) -> Arc<Mutex<TableSyncWorkerPoolInner>> {
+        self.inner.clone()
     }
 
     pub async fn wait_all(&self) -> Result<(), WorkerWaitErrors> {
@@ -169,7 +169,7 @@ impl TableSyncWorkerPool {
             // workers, we get back a `Notify` which we will use to try again once new workers reported
             // their finished status.
             let notify = {
-                let mut workers = self.workers.lock().await;
+                let mut workers = self.inner.lock().await;
                 let Some(notify) = workers.wait_all().await? else {
                     return Ok(());
                 };
@@ -192,6 +192,6 @@ impl Deref for TableSyncWorkerPool {
     type Target = Mutex<TableSyncWorkerPoolInner>;
 
     fn deref(&self) -> &Self::Target {
-        &self.workers
+        &self.inner
     }
 }

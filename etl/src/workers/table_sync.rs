@@ -3,7 +3,7 @@ use postgres::schema::TableId;
 use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
-use tokio::sync::{AcquireError, Mutex, MutexGuard, Notify, RwLock, RwLockReadGuard, Semaphore};
+use tokio::sync::{AcquireError, Mutex, MutexGuard, Notify, Semaphore};
 use tokio::task::JoinHandle;
 use tokio_postgres::types::PgLsn;
 use tracing::{Instrument, debug, error, info, warn};
@@ -429,7 +429,7 @@ where
 
         // We spawn the table sync worker with a safe future, so that we can have controlled teardown
         // on completion or error.
-        let fut = ReactiveFuture::new(table_sync_worker, self.table_id, self.pool.workers())
+        let fut = ReactiveFuture::new(table_sync_worker, self.table_id, self.pool.get_inner())
             .instrument(table_sync_worker_span);
         let handle = tokio::spawn(fut);
 
@@ -474,7 +474,7 @@ where
         current_lsn: PgLsn,
         update_state: bool,
     ) -> Result<bool, TableSyncWorkerHookError> {
-        let mut inner = self.table_sync_worker_state.get_inner().write().await;
+        let mut inner = self.table_sync_worker_state.get_inner().lock().await;
 
         // If we caught up with the lsn, we mark this table as `SyncDone` and stop the worker.
         if let TableReplicationPhase::Catchup { lsn } = inner.replication_phase() {
@@ -542,7 +542,7 @@ where
             return Ok(true);
         }
 
-        let mut inner = self.table_sync_worker_state.get_inner().write().await;
+        let mut inner = self.table_sync_worker_state.get_inner().lock().await;
         inner
             .set_phase_with(TableReplicationPhase::Skipped, self.state_store.clone())
             .await?;
@@ -555,7 +555,7 @@ where
         table_id: TableId,
         _remote_final_lsn: PgLsn,
     ) -> Result<bool, Self::Error> {
-        let inner = self.table_sync_worker_state.get_inner().write().await;
+        let inner = self.table_sync_worker_state.get_inner().lock().await;
         let is_skipped = matches!(
             inner.table_replication_phase.as_type(),
             TableReplicationPhaseType::Skipped

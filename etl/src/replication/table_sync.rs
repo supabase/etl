@@ -70,43 +70,45 @@ where
 {
     info!("starting table sync for table {}", table_id);
 
-    let inner = table_sync_worker_state.get_inner().read().await;
-    let phase_type = inner.replication_phase().as_type();
-
-    // In case the work for this table has been already done, we don't want to continue and we
-    // successfully return.
-    if matches!(
-        phase_type,
-        TableReplicationPhaseType::SyncDone | TableReplicationPhaseType::Ready
-    ) {
-        info!(
-            "table {} sync not required, already in phase '{:?}'",
-            table_id, phase_type
-        );
-
-        return Ok(TableSyncResult::SyncNotRequired);
-    }
-
-    // In case the phase is different from the standard phases in which a table sync worker can perform
-    // table syncing, we want to return an error.
-    if !matches!(
-        phase_type,
-        TableReplicationPhaseType::Init
-            | TableReplicationPhaseType::DataSync
-            | TableReplicationPhaseType::FinishedCopy
-    ) {
-        warn!(
-            "invalid replication phase '{:?}' for table {}, cannot perform table sync",
-            phase_type, table_id
-        );
-
-        return Err(TableSyncError::InvalidPhase(phase_type));
-    }
-
-    // We are safe to unlock the state here, since we know that the state will be changed by the
+    // We are safe to keep the lock only for this section, since we know that the state will be changed by the
     // apply worker only if `SyncWait` is set, which is not the case if we arrive here, so we are
     // good to reduce the length of the critical section.
-    drop(inner);
+    let phase_type = {
+        let inner = table_sync_worker_state.get_inner().lock().await;
+        let phase_type = inner.replication_phase().as_type();
+
+        // In case the work for this table has been already done, we don't want to continue and we
+        // successfully return.
+        if matches!(
+            phase_type,
+            TableReplicationPhaseType::SyncDone | TableReplicationPhaseType::Ready
+        ) {
+            info!(
+                "table {} sync not required, already in phase '{:?}'",
+                table_id, phase_type
+            );
+
+            return Ok(TableSyncResult::SyncNotRequired);
+        }
+
+        // In case the phase is different from the standard phases in which a table sync worker can perform
+        // table syncing, we want to return an error.
+        if !matches!(
+            phase_type,
+            TableReplicationPhaseType::Init
+                | TableReplicationPhaseType::DataSync
+                | TableReplicationPhaseType::FinishedCopy
+        ) {
+            warn!(
+                "invalid replication phase '{:?}' for table {}, cannot perform table sync",
+                phase_type, table_id
+            );
+
+            return Err(TableSyncError::InvalidPhase(phase_type));
+        }
+
+        phase_type
+    };
 
     let slot_name = get_slot_name(pipeline_id, WorkerType::TableSync { table_id })?;
 
@@ -145,7 +147,7 @@ where
             // We are ready to start copying table data, and we update the state accordingly.
             info!("starting data copy for table {}", table_id);
             {
-                let mut inner = table_sync_worker_state.get_inner().write().await;
+                let mut inner = table_sync_worker_state.get_inner().lock().await;
                 inner
                     .set_phase_with(TableReplicationPhase::DataSync, state_store.clone())
                     .await?;
@@ -219,7 +221,7 @@ where
             );
             // We mark that we finished the copy of the table schema and data.
             {
-                let mut inner = table_sync_worker_state.get_inner().write().await;
+                let mut inner = table_sync_worker_state.get_inner().lock().await;
                 inner
                     .set_phase_with(TableReplicationPhase::FinishedCopy, state_store.clone())
                     .await?;
@@ -242,7 +244,7 @@ where
     // We mark this worker as `SyncWait` (in memory only) to signal the apply worker that we are
     // ready to start catchup.
     {
-        let mut inner = table_sync_worker_state.get_inner().write().await;
+        let mut inner = table_sync_worker_state.get_inner().lock().await;
         inner
             .set_phase_with(TableReplicationPhase::SyncWait, state_store)
             .await?;
