@@ -258,7 +258,7 @@ where
         table_id: TableId,
         current_lsn: PgLsn,
     ) -> Result<bool, ApplyWorkerHookError> {
-        let mut pool = self.pool.write().await;
+        let mut pool = self.pool.lock().await;
         let table_sync_worker_state = pool.get_active_worker_state(table_id);
 
         // If there is no worker state, we start a new worker.
@@ -281,7 +281,7 @@ where
     ) -> Result<bool, ApplyWorkerHookError> {
         let mut catchup_started = false;
         {
-            let mut inner = table_sync_worker_state.get_inner().write().await;
+            let mut inner = table_sync_worker_state.get_inner().lock().await;
             if inner.replication_phase().as_type() == TableReplicationPhaseType::SyncWait {
                 info!(
                     "table sync worker {} is waiting to catchup, starting catchup at lsn {}",
@@ -347,7 +347,7 @@ where
 
             // If there is already an active worker for this table in the pool, we can avoid starting
             // it.
-            let mut pool = self.pool.write().await;
+            let mut pool = self.pool.lock().await;
             if pool.get_active_worker_state(table_id).is_some() {
                 continue;
             }
@@ -420,13 +420,13 @@ where
 
     async fn skip_table(&self, table_id: TableId) -> Result<bool, Self::Error> {
         let table_sync_worker_state = {
-            let pool = self.pool.read().await;
+            let pool = self.pool.lock().await;
             pool.get_active_worker_state(table_id)
         };
 
         // In case we have the state in memory, we will also update that.
         if let Some(table_sync_worker_state) = table_sync_worker_state {
-            let mut inner = table_sync_worker_state.get_inner().write().await;
+            let mut inner = table_sync_worker_state.get_inner().lock().await;
             inner.set_phase(TableReplicationPhase::Skipped);
         }
 
@@ -444,13 +444,13 @@ where
         table_id: TableId,
         remote_final_lsn: PgLsn,
     ) -> Result<bool, Self::Error> {
-        let pool = self.pool.read().await;
+        let pool = self.pool.lock().await;
 
         // We try to load the state first from memory, if we don't find it, we try to load from the
         // state store.
         let replication_phase = match pool.get_active_worker_state(table_id) {
             Some(state) => {
-                let inner = state.get_inner().read().await;
+                let inner = state.get_inner().lock().await;
                 inner.replication_phase()
             }
             None => {

@@ -8,7 +8,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::{fmt, panic};
-use tokio::sync::{Mutex};
+use tokio::sync::Mutex;
 
 /// A callback interface for receiving notifications about future completion.
 ///
