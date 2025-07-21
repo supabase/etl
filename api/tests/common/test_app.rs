@@ -25,6 +25,7 @@ use std::net::TcpListener;
 use std::sync::Arc;
 use tokio::runtime::Handle;
 use uuid::Uuid;
+use config::shared::PgConnectionConfig;
 
 pub struct TestApp {
     pub address: String,
@@ -49,7 +50,7 @@ impl Drop for TestApp {
 }
 
 impl TestApp {
-    pub fn get_authenticated<U: IntoUrl>(&self, url: U) -> RequestBuilder {
+    fn get_authenticated<U: IntoUrl>(&self, url: U) -> RequestBuilder {
         self.api_client.get(url).bearer_auth(self.api_key.clone())
     }
 
@@ -67,7 +68,7 @@ impl TestApp {
             .bearer_auth(self.api_key.clone())
     }
 
-    pub fn database_config(&self) -> &config::shared::PgConnectionConfig {
+    pub fn database_config(&self) -> &PgConnectionConfig {
         &self.config.database
     }
 
