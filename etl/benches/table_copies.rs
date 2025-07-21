@@ -357,6 +357,9 @@ async fn start_pipeline(args: RunArgs) -> Result<(), Box<dyn Error>> {
         DestinationType::Null => BenchDestination::Null(NullDestination),
         #[cfg(feature = "bigquery")]
         DestinationType::BigQuery => {
+            rustls::crypto::aws_lc_rs::default_provider()
+                .install_default()
+                .expect("failed to install default crypto provider");
             let project_id = args
                 .bq_project_id
                 .ok_or("BigQuery project ID is required when using BigQuery destination")?;
