@@ -13,7 +13,7 @@ use crate::workers::base::WorkerType;
 use crate::workers::table_sync::{TableSyncWorkerState, TableSyncWorkerStateError};
 use config::shared::PipelineConfig;
 use futures::StreamExt;
-use postgres::schema::TableId;
+use postgres::schema::{TableId, TableName};
 use std::sync::Arc;
 use thiserror::Error;
 use tokio::pin;
@@ -42,6 +42,9 @@ pub enum TableSyncError {
 
     #[error("An error happened in the table copy stream")]
     TableCopyStream(#[from] TableCopyStreamError),
+
+    #[error("table {0} has no primary key")]
+    MissingPrimaryKey(TableName),
 }
 
 #[derive(Debug)]
@@ -173,6 +176,14 @@ where
             let table_schema = transaction
                 .get_table_schema(table_id, Some(&config.publication_name))
                 .await?;
+
+            if !table_schema.has_primary_keys() {
+                state_store
+                    .update_table_replication_state(table_id, TableReplicationPhase::Skipped)
+                    .await?;
+                return Err(TableSyncError::MissingPrimaryKey(table_schema.name));
+            }
+
             schema_cache.add_table_schema(table_schema.clone()).await;
             destination.write_table_schema(table_schema.clone()).await?;
 
