@@ -178,7 +178,7 @@ mod tests {
     use std::pin::Pin;
     use std::sync::Arc;
     use std::task::{Context, Poll};
-    use tokio::sync::{Mutex, RwLock};
+    use tokio::sync::Mutex;
 
     #[derive(Debug)]
     struct SimpleError(String);

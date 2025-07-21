@@ -8,7 +8,7 @@ use sqlx::{
     prelude::{FromRow, Type},
 };
 use thiserror::Error;
-use tokio::sync::RwLock;
+use tokio::sync::Mutex;
 use tokio_postgres::types::PgLsn;
 use tracing::{debug, info};
 
@@ -84,7 +84,7 @@ struct Inner {
 pub struct PostgresStateStore {
     pipeline_id: PipelineId,
     source_config: PgConnectionConfig,
-    inner: Arc<RwLock<Inner>>,
+    inner: Arc<Mutex<Inner>>,
 }
 
 impl PostgresStateStore {
@@ -95,7 +95,7 @@ impl PostgresStateStore {
         PostgresStateStore {
             pipeline_id,
             source_config,
-            inner: Arc::new(RwLock::new(inner)),
+            inner: Arc::new(Mutex::new(inner)),
         }
     }
 
@@ -188,14 +188,14 @@ impl StateStore for PostgresStateStore {
         &self,
         table_id: TableId,
     ) -> Result<Option<TableReplicationPhase>, StateStoreError> {
-        let inner = self.inner.read().await;
+        let inner = self.inner.lock().await;
         Ok(inner.table_states.get(&table_id).cloned())
     }
 
     async fn get_table_replication_states(
         &self,
     ) -> Result<HashMap<TableId, TableReplicationPhase>, StateStoreError> {
-        let inner = self.inner.read().await;
+        let inner = self.inner.lock().await;
         Ok(inner.table_states.clone())
     }
 
@@ -212,7 +212,7 @@ impl StateStore for PostgresStateStore {
                 .await?;
             table_states.insert(row.table_id.0, phase);
         }
-        let mut inner = self.inner.write().await;
+        let mut inner = self.inner.lock().await;
         inner.table_states = table_states.clone();
 
         info!(
@@ -231,7 +231,7 @@ impl StateStore for PostgresStateStore {
         let (table_state, sync_done_lsn) = state.try_into()?;
         self.update_replication_state(self.pipeline_id, table_id, table_state, sync_done_lsn)
             .await?;
-        let mut inner = self.inner.write().await;
+        let mut inner = self.inner.lock().await;
         inner.table_states.insert(table_id, state);
         Ok(())
     }
