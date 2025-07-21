@@ -293,8 +293,9 @@ async fn table_subsequent_updates() {
     init_test_tracing();
     install_crypto_provider_once();
 
-    let database = spawn_database().await;
-    let database_schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
+    let mut database_1 = spawn_database().await;
+    let mut database_2 = database_1.duplicate().await;
+    let database_schema = setup_test_database_schema(&database_1, TableSelection::UsersOnly).await;
 
     let bigquery_database = setup_bigquery_connection().await;
 
@@ -305,7 +306,7 @@ async fn table_subsequent_updates() {
     // Start pipeline from scratch.
     let pipeline_id: PipelineId = random();
     let mut pipeline = create_pipeline(
-        &database.config,
+        &database_1.config,
         pipeline_id,
         database_schema.publication_name(),
         state_store.clone(),
@@ -326,11 +327,11 @@ async fn table_subsequent_updates() {
 
     // Wait for the first insert.
     let event_notify = destination
-        .wait_for_events_count(vec![(EventType::Insert, 1), (EventType::Update, 9)])
+        .wait_for_events_count(vec![(EventType::Insert, 1), (EventType::Update, 2)])
         .await;
 
     // Insert a row.
-    database
+    database_1
         .insert_values(
             database_schema.users_schema().name.clone(),
             &["name", "age"],
@@ -339,19 +340,34 @@ async fn table_subsequent_updates() {
         .await
         .unwrap();
 
-    // Update the row several times.
-    for value in 2..=10 {
-        database
-            .update_values(
-                database_schema.users_schema().name.clone(),
-                &["name", "age"],
-                &[&format!("'user_{value}'"), &value.to_string()],
-            )
-            .await
-            .unwrap();
-    }
+    // Create two transactions A and B. A starts first and finishes last, B starts last and finishes
+    // first. The goal is to make sure that the insertion order of interleaved transactions follows
+    // Postgres logical replication transaction ordering.
+    let transaction_a = database_1.begin_transaction().await;
+    transaction_a
+        .update_values(
+            database_schema.users_schema().name.clone(),
+            &["name", "age"],
+            &["'user_3'", "3"],
+        )
+        .await
+        .unwrap();
+    transaction_a.commit_transaction().await;
+
+    let transaction_b = database_2.begin_transaction().await;
+    transaction_b
+        .update_values(
+            database_schema.users_schema().name.clone(),
+            &["name", "age"],
+            &["'user_2'", "2"],
+        )
+        .await
+        .unwrap();
+    transaction_b.commit_transaction().await;
 
     event_notify.notified().await;
+
+    pipeline.shutdown_and_wait().await.unwrap();
 
     // We query BigQuery to check for the final value.
     let users_rows = bigquery_database
@@ -361,7 +377,7 @@ async fn table_subsequent_updates() {
     let parsed_users_rows = parse_bigquery_table_rows::<BigQueryUser>(users_rows);
     assert_eq!(
         parsed_users_rows,
-        vec![BigQueryUser::new(1, "user_10", 10),]
+        vec![BigQueryUser::new(1, "user_2", 2),]
     );
 }
 
@@ -453,6 +469,8 @@ async fn table_truncate_with_batching() {
     .await;
 
     event_notify.notified().await;
+
+    pipeline.shutdown_and_wait().await.unwrap();
 
     // We query BigQuery directly to get the data which has been inserted by tests expecting that
     // only the rows after truncation are there.
