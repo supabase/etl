@@ -205,6 +205,47 @@ pub fn get_n_integers_sum(n: usize) -> i32 {
     ((n * (n + 1)) / 2) as i32
 }
 
+pub fn assert_events_equal(left: &[Event], right: &[Event]) {
+    assert_eq!(left.len(), right.len());
+
+    for (left, right) in left.iter().zip(right.iter()) {
+        assert!(events_equal_excluding_start_lsn(left, right));
+    }
+}
+
+pub fn events_equal_excluding_start_lsn(left: &Event, right: &Event) -> bool {
+    match (left, right) {
+        (Event::Begin(left), Event::Begin(right)) => {
+            left.final_lsn == right.final_lsn
+                && left.timestamp == right.timestamp
+                && left.xid == right.xid
+        }
+        (Event::Commit(left), Event::Commit(right)) => {
+            left.flags == right.flags
+                && left.commit_lsn == right.commit_lsn
+                && left.end_lsn == right.end_lsn
+                && left.timestamp == right.timestamp
+        }
+        (Event::Insert(left), Event::Insert(right)) => {
+            left.table_id == right.table_id && left.table_row == right.table_row
+        }
+        (Event::Update(left), Event::Update(right)) => {
+            left.table_id == right.table_id
+                && left.table_row == right.table_row
+                && left.old_table_row == right.old_table_row
+        }
+        (Event::Delete(left), Event::Delete(right)) => {
+            left.table_id == right.table_id && left.old_table_row == right.old_table_row
+        }
+        (Event::Relation(left), Event::Relation(right)) => left.table_schema == right.table_schema,
+        (Event::Truncate(left), Event::Truncate(right)) => {
+            left.options == right.options && left.rel_ids == right.rel_ids
+        }
+        (Event::Unsupported, Event::Unsupported) => true,
+        _ => false, // Different event types
+    }
+}
+
 pub fn build_expected_users_inserts(
     mut starting_id: i64,
     users_table_id: Oid,
