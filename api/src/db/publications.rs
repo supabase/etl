@@ -122,7 +122,10 @@ pub async fn read_publication(
         let schema: Option<String> = row.get("schemaname?");
         let table_name: Option<String> = row.get("tablename?");
         if let (Some(schema), Some(table_name)) = (schema, table_name) {
-            tables.push(Table { schema, name: table_name });
+            tables.push(Table {
+                schema,
+                name: table_name,
+            });
         }
     }
 
@@ -130,9 +133,7 @@ pub async fn read_publication(
     Ok(publication)
 }
 
-pub async fn read_all_publications(
-    pool: &PgPool,
-) -> Result<Vec<Publication>, PublicationsDbError> {
+pub async fn read_all_publications(pool: &PgPool) -> Result<Vec<Publication>, PublicationsDbError> {
     let query = r#"
         select p.pubname,
             pt.schemaname as "schemaname?",
@@ -156,7 +157,10 @@ pub async fn read_all_publications(
         let tables = pub_name_to_tables.entry(pub_name).or_default();
 
         if let (Some(schema), Some(table_name)) = (schema, table_name) {
-            tables.push(Table { schema, name: table_name });
+            tables.push(Table {
+                schema,
+                name: table_name,
+            });
         }
     }
 

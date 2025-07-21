@@ -1,16 +1,18 @@
 use std::{collections::HashMap, sync::Arc};
 
-use config::shared::{IntoConnectOptions, PgConnectionConfig};
+use config::shared::{PgConnectionConfig};
+use postgres::replication::{
+    TableReplicationState, TableReplicationStateRow, connect_to_source_database,
+    update_replication_state,
+};
 use postgres::schema::TableId;
 use sqlx::{
-    PgPool,
-    postgres::{PgConnectOptions, PgPoolOptions},
+    PgPool
 };
 use thiserror::Error;
 use tokio::sync::Mutex;
 use tokio_postgres::types::PgLsn;
 use tracing::{debug, info};
-use postgres::replication::{TableState, ReplicationStateRow, update_replication_state_with_pool};
 
 use crate::{
     pipeline::PipelineId,
@@ -28,19 +30,19 @@ pub enum ToTableStateError {
     InMemoryPhase,
 }
 
-impl TryFrom<TableReplicationPhase> for (TableState, Option<String>) {
+impl TryFrom<TableReplicationPhase> for (TableReplicationState, Option<String>) {
     type Error = ToTableStateError;
 
     fn try_from(value: TableReplicationPhase) -> Result<Self, Self::Error> {
         Ok(match value {
-            TableReplicationPhase::Init => (TableState::Init, None),
-            TableReplicationPhase::DataSync => (TableState::DataSync, None),
-            TableReplicationPhase::FinishedCopy => (TableState::FinishedCopy, None),
+            TableReplicationPhase::Init => (TableReplicationState::Init, None),
+            TableReplicationPhase::DataSync => (TableReplicationState::DataSync, None),
+            TableReplicationPhase::FinishedCopy => (TableReplicationState::FinishedCopy, None),
             TableReplicationPhase::SyncDone { lsn } => {
-                (TableState::SyncDone, Some(lsn.to_string()))
+                (TableReplicationState::SyncDone, Some(lsn.to_string()))
             }
-            TableReplicationPhase::Ready => (TableState::Ready, None),
-            TableReplicationPhase::Skipped => (TableState::Skipped, None),
+            TableReplicationPhase::Ready => (TableReplicationState::Ready, None),
+            TableReplicationPhase::Skipped => (TableReplicationState::Skipped, None),
             TableReplicationPhase::SyncWait | TableReplicationPhase::Catchup { .. } => {
                 return Err(ToTableStateError::InMemoryPhase);
             }
@@ -53,7 +55,6 @@ pub enum FromTableStateError {
     #[error("Lsn can't be missing from the state store if state is SyncDone")]
     MissingSyncDoneLsn,
 }
-
 
 #[derive(Debug)]
 struct Inner {
@@ -82,13 +83,13 @@ impl PostgresStateStore {
     }
 
     async fn connect_to_source(&self) -> Result<PgPool, sqlx::Error> {
-        let options: PgConnectOptions = self.source_config.with_db();
+        let pool = connect_to_source_database(
+            &self.source_config,
+            NUM_POOL_CONNECTIONS,
+            NUM_POOL_CONNECTIONS,
+        )
+        .await?;
 
-        let pool = PgPoolOptions::new()
-            .max_connections(NUM_POOL_CONNECTIONS)
-            .min_connections(NUM_POOL_CONNECTIONS)
-            .connect_with(options)
-            .await?;
         Ok(pool)
     }
 
@@ -96,31 +97,35 @@ impl PostgresStateStore {
         &self,
         pool: &PgPool,
         pipeline_id: PipelineId,
-    ) -> sqlx::Result<Vec<ReplicationStateRow>> {
-        postgres::replication::get_replication_state_rows(pool, pipeline_id as i64).await
+    ) -> sqlx::Result<Vec<TableReplicationStateRow>> {
+        postgres::replication::get_table_replication_state_rows(pool, pipeline_id as i64).await
     }
 
     async fn update_replication_state(
         &self,
         pipeline_id: PipelineId,
         table_id: TableId,
-        state: TableState,
+        state: TableReplicationState,
         sync_done_lsn: Option<String>,
     ) -> sqlx::Result<()> {
+        // We connect to source database each time we update because we assume that
+        // these updates will be infrequent. It has some overhead to establish a
+        // connection, but it's better than holding a connection open for long periods
+        // when there's little activity on it.
         let pool = self.connect_to_source().await?;
-        update_replication_state_with_pool(&pool, pipeline_id, table_id, state, sync_done_lsn).await
+        update_replication_state(&pool, pipeline_id, table_id, state, sync_done_lsn).await
     }
 
     async fn replication_phase_from_state(
         &self,
-        state: &TableState,
+        state: &TableReplicationState,
         sync_done_lsn: Option<String>,
     ) -> Result<TableReplicationPhase, StateStoreError> {
         Ok(match state {
-            TableState::Init => TableReplicationPhase::Init,
-            TableState::DataSync => TableReplicationPhase::DataSync,
-            TableState::FinishedCopy => TableReplicationPhase::FinishedCopy,
-            TableState::SyncDone => match sync_done_lsn {
+            TableReplicationState::Init => TableReplicationPhase::Init,
+            TableReplicationState::DataSync => TableReplicationPhase::DataSync,
+            TableReplicationState::FinishedCopy => TableReplicationPhase::FinishedCopy,
+            TableReplicationState::SyncDone => match sync_done_lsn {
                 Some(lsn_str) => {
                     let lsn = lsn_str
                         .parse::<PgLsn>()
@@ -129,8 +134,8 @@ impl PostgresStateStore {
                 }
                 None => return Err(FromTableStateError::MissingSyncDoneLsn)?,
             },
-            TableState::Ready => TableReplicationPhase::Ready,
-            TableState::Skipped => TableReplicationPhase::Skipped,
+            TableReplicationState::Ready => TableReplicationPhase::Ready,
+            TableReplicationState::Skipped => TableReplicationPhase::Skipped,
         })
     }
 }

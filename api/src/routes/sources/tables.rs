@@ -3,13 +3,13 @@ use actix_web::{
     http::{StatusCode, header::ContentType},
     web::{Data, Json, Path},
 };
-use postgres::replication::connect_to_source_database;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use thiserror::Error;
 use utoipa::ToSchema;
 
 use crate::db::tables::TablesDbError;
+use crate::routes::connect_to_source_database_with_defaults;
 use crate::{
     db::{self, sources::SourcesDbError, tables::Table},
     encryption::EncryptionKey,
@@ -57,7 +57,9 @@ pub struct ReadTablesResponse {
 impl ResponseError for TableError {
     fn status_code(&self) -> StatusCode {
         match self {
-            TableError::SourcesDb(_) | TableError::TablesDb(_) | TableError::Database(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            TableError::SourcesDb(_) | TableError::TablesDb(_) | TableError::Database(_) => {
+                StatusCode::INTERNAL_SERVER_ERROR
+            }
             TableError::SourceNotFound(_) => StatusCode::NOT_FOUND,
             TableError::TenantId(_) => StatusCode::BAD_REQUEST,
         }
@@ -101,7 +103,8 @@ pub async fn read_table_names(
         .map(|s| s.config)
         .ok_or(TableError::SourceNotFound(source_id))?;
 
-    let source_pool = connect_to_source_database(&config.into_connection_config()).await
+    let source_pool = connect_to_source_database_with_defaults(&config.into_connection_config())
+        .await
         .map_err(TableError::Database)?;
     let tables = db::tables::get_tables(&source_pool).await?;
     let response = ReadTablesResponse { tables };

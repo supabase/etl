@@ -23,9 +23,11 @@ use crate::db::sources::{Source, SourceConfig, SourcesDbError, source_exists};
 use crate::encryption::EncryptionKey;
 use crate::k8s_client::TRUSTED_ROOT_CERT_KEY_NAME;
 use crate::k8s_client::{K8sClient, K8sError, PodPhase, TRUSTED_ROOT_CERT_CONFIG_MAP_NAME};
-use crate::routes::{ErrorMessage, TenantIdError, extract_tenant_id};
+use crate::routes::{
+    ErrorMessage, TenantIdError, connect_to_source_database_with_defaults, extract_tenant_id,
+};
+use postgres::replication::{TableReplicationState, get_table_replication_state_rows};
 use secrecy::ExposeSecret;
-use postgres::replication::{TableState, get_replication_state_rows, connect_to_source_database};
 
 #[derive(Debug, Error)]
 enum PipelineError {
@@ -215,7 +217,7 @@ pub struct GetPipelineStatusResponse {
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 #[serde(tag = "name")]
-pub enum TableReplicationUiState {
+pub enum SimpleTableReplicationState {
     Queued,
     CopyingTable,
     CopiedTable,
@@ -223,16 +225,17 @@ pub enum TableReplicationUiState {
     Error { message: String },
 }
 
-impl From<TableState> for TableReplicationUiState {
-    fn from(state: TableState) -> Self {
+impl From<TableReplicationState> for SimpleTableReplicationState {
+    fn from(state: TableReplicationState) -> Self {
         match state {
-            TableState::Init => TableReplicationUiState::Queued,
-            TableState::DataSync => TableReplicationUiState::CopyingTable,
-            TableState::FinishedCopy => TableReplicationUiState::CopiedTable,
-            TableState::SyncDone => TableReplicationUiState::FollowingWal { lag: 0 },
-            TableState::Ready => TableReplicationUiState::FollowingWal { lag: 0 },
-            TableState::Skipped => TableReplicationUiState::Error { 
-                message: "Table was skipped during replication".to_string() 
+            TableReplicationState::Init => SimpleTableReplicationState::Queued,
+            TableReplicationState::DataSync => SimpleTableReplicationState::CopyingTable,
+            TableReplicationState::FinishedCopy => SimpleTableReplicationState::CopiedTable,
+            // TODO: add lag metric when available.
+            TableReplicationState::SyncDone => SimpleTableReplicationState::FollowingWal { lag: 0 },
+            TableReplicationState::Ready => SimpleTableReplicationState::FollowingWal { lag: 0 },
+            TableReplicationState::Skipped => SimpleTableReplicationState::Error {
+                message: "Table was skipped during replication".to_string(),
             },
         }
     }
@@ -244,7 +247,7 @@ pub struct TableReplicationStatus {
     pub table_id: u32,
     #[schema(example = "public.users")]
     pub table_name: Option<String>,
-    pub ui_state: TableReplicationUiState,
+    pub status: SimpleTableReplicationState,
     #[schema(example = 0)]
     pub lag: u64,
 }
@@ -692,20 +695,21 @@ pub async fn get_pipeline_replication_status(
         txn.deref_mut(),
         tenant_id,
         pipeline.source_id,
-        &encryption_key
+        &encryption_key,
     )
-        .await?
-        .ok_or(PipelineError::SourceNotFound(pipeline.source_id))?;
+    .await?
+    .ok_or(PipelineError::SourceNotFound(pipeline.source_id))?;
 
     txn.commit().await?;
 
     // Connect to the source database to read replication state
-    let source_pool = connect_to_source_database(&source.config.into_connection_config())
-        .await
-        .map_err(PipelineError::Database)?;
+    let source_pool =
+        connect_to_source_database_with_defaults(&source.config.into_connection_config())
+            .await
+            .map_err(PipelineError::Database)?;
 
     // Fetch replication state for all tables in this pipeline
-    let state_rows = get_replication_state_rows(&source_pool, pipeline_id)
+    let state_rows = get_table_replication_state_rows(&source_pool, pipeline_id)
         .await
         .map_err(PipelineError::Database)?;
 
@@ -715,7 +719,7 @@ pub async fn get_pipeline_replication_status(
         .map(|row| TableReplicationStatus {
             table_id: row.table_id.0,
             table_name: None, // We could enhance this to include actual table names by joining with table metadata
-            ui_state: row.state.into(),
+            status: row.state.into(),
             lag: 0, // For now, lag is always 0 as specified in requirements
         })
         .collect();
@@ -727,7 +731,6 @@ pub async fn get_pipeline_replication_status(
 
     Ok(Json(response))
 }
-
 
 #[utoipa::path(
     context_path = "/v1",

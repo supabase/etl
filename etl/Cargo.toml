@@ -11,7 +11,7 @@ required-features = ["bigquery"]
 
 [dependencies]
 config = { workspace = true }
-postgres = { workspace = true, features = ["tokio", "sqlx"] }
+postgres = { workspace = true, features = ["tokio", "replication"] }
 
 async-trait = { workspace = true }
 bigdecimal = { workspace = true, features = ["std"] }

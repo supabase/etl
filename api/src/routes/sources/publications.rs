@@ -4,13 +4,13 @@ use actix_web::{
     post,
     web::{Data, Json, Path},
 };
-use postgres::replication::connect_to_source_database;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use thiserror::Error;
 use utoipa::ToSchema;
 
 use crate::db::publications::PublicationsDbError;
+use crate::routes::connect_to_source_database_with_defaults;
 use crate::{
     db::{self, publications::Publication, sources::SourcesDbError, tables::Table},
     encryption::EncryptionKey,
@@ -55,9 +55,9 @@ impl PublicationError {
 impl ResponseError for PublicationError {
     fn status_code(&self) -> StatusCode {
         match self {
-            PublicationError::SourcesDb(_) | PublicationError::PublicationsDb(_) | PublicationError::Database(_) => {
-                StatusCode::INTERNAL_SERVER_ERROR
-            }
+            PublicationError::SourcesDb(_)
+            | PublicationError::PublicationsDb(_)
+            | PublicationError::Database(_) => StatusCode::INTERNAL_SERVER_ERROR,
             PublicationError::SourceNotFound(_) | PublicationError::PublicationNotFound(_) => {
                 StatusCode::NOT_FOUND
             }
@@ -124,7 +124,8 @@ pub async fn create_publication(
         .map(|s| s.config)
         .ok_or(PublicationError::SourceNotFound(source_id))?;
 
-    let source_pool = connect_to_source_database(&config.into_connection_config()).await
+    let source_pool = connect_to_source_database_with_defaults(&config.into_connection_config())
+        .await
         .map_err(PublicationError::Database)?;
     let publication = publication.0;
     let publication = Publication {
@@ -164,7 +165,8 @@ pub async fn read_publication(
         .map(|s| s.config)
         .ok_or(PublicationError::SourceNotFound(source_id))?;
 
-    let source_pool = connect_to_source_database(&config.into_connection_config()).await
+    let source_pool = connect_to_source_database_with_defaults(&config.into_connection_config())
+        .await
         .map_err(PublicationError::Database)?;
     let publications = db::publications::read_publication(&publication_name, &source_pool)
         .await?
@@ -203,7 +205,8 @@ pub async fn update_publication(
         .map(|s| s.config)
         .ok_or(PublicationError::SourceNotFound(source_id))?;
 
-    let source_pool = connect_to_source_database(&config.into_connection_config()).await
+    let source_pool = connect_to_source_database_with_defaults(&config.into_connection_config())
+        .await
         .map_err(PublicationError::Database)?;
     let publication = publication.0;
     let publication = Publication {
@@ -243,7 +246,8 @@ pub async fn delete_publication(
         .map(|s| s.config)
         .ok_or(PublicationError::SourceNotFound(source_id))?;
 
-    let source_pool = connect_to_source_database(&config.into_connection_config()).await
+    let source_pool = connect_to_source_database_with_defaults(&config.into_connection_config())
+        .await
         .map_err(PublicationError::Database)?;
     db::publications::drop_publication(&publication_name, &source_pool).await?;
 
@@ -276,7 +280,8 @@ pub async fn read_all_publications(
         .map(|s| s.config)
         .ok_or(PublicationError::SourceNotFound(source_id))?;
 
-    let source_pool = connect_to_source_database(&config.into_connection_config()).await
+    let source_pool = connect_to_source_database_with_defaults(&config.into_connection_config())
+        .await
         .map_err(PublicationError::Database)?;
     let publications = db::publications::read_all_publications(&source_pool).await?;
     let response = ReadPublicationsResponse { publications };
