@@ -704,14 +704,10 @@ pub async fn get_pipeline_replication_status(
 
     // Connect to the source database to read replication state
     let source_pool =
-        connect_to_source_database_with_defaults(&source.config.into_connection_config())
-            .await
-            .map_err(PipelineError::Database)?;
+        connect_to_source_database_with_defaults(&source.config.into_connection_config()).await?;
 
     // Fetch replication state for all tables in this pipeline
-    let state_rows = get_table_replication_state_rows(&source_pool, pipeline_id)
-        .await
-        .map_err(PipelineError::Database)?;
+    let state_rows = get_table_replication_state_rows(&source_pool, pipeline_id).await?;
 
     // Convert database states to UI-friendly format
     let tables: Vec<TableReplicationStatus> = state_rows

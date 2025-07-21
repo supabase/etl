@@ -1,14 +1,12 @@
 use std::{collections::HashMap, sync::Arc};
 
-use config::shared::{PgConnectionConfig};
+use config::shared::PgConnectionConfig;
 use postgres::replication::{
     TableReplicationState, TableReplicationStateRow, connect_to_source_database,
     update_replication_state,
 };
 use postgres::schema::TableId;
-use sqlx::{
-    PgPool
-};
+use sqlx::PgPool;
 use thiserror::Error;
 use tokio::sync::Mutex;
 use tokio_postgres::types::PgLsn;

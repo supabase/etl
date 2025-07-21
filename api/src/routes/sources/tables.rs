@@ -103,9 +103,8 @@ pub async fn read_table_names(
         .map(|s| s.config)
         .ok_or(TableError::SourceNotFound(source_id))?;
 
-    let source_pool = connect_to_source_database_with_defaults(&config.into_connection_config())
-        .await
-        .map_err(TableError::Database)?;
+    let source_pool =
+        connect_to_source_database_with_defaults(&config.into_connection_config()).await?;
     let tables = db::tables::get_tables(&source_pool).await?;
     let response = ReadTablesResponse { tables };
 
