@@ -23,7 +23,13 @@ use crate::db::sources::{Source, SourceConfig, SourcesDbError, source_exists};
 use crate::encryption::EncryptionKey;
 use crate::k8s_client::TRUSTED_ROOT_CERT_KEY_NAME;
 use crate::k8s_client::{K8sClient, K8sError, PodPhase, TRUSTED_ROOT_CERT_CONFIG_MAP_NAME};
-use crate::routes::{ErrorMessage, TenantIdError, extract_tenant_id};
+use crate::routes::{
+    ErrorMessage, TenantIdError, connect_to_source_database_with_defaults, extract_tenant_id,
+};
+use postgres::replication::{
+    TableLookupError, TableReplicationState, get_table_name_from_oid,
+    get_table_replication_state_rows,
+};
 use secrecy::ExposeSecret;
 
 #[derive(Debug, Error)]
@@ -79,6 +85,9 @@ enum PipelineError {
     #[error("The specified image with id {0} was not found")]
     ImageNotFoundById(i64),
 
+    #[error("There was an error while loolking up table information in the source database: {0}")]
+    TableLookup(#[from] TableLookupError),
+
     #[error("Database error: {0}")]
     Database(#[from] sqlx::Error),
 }
@@ -124,7 +133,8 @@ impl ResponseError for PipelineError {
             | PipelineError::ImagesDb(_)
             | PipelineError::K8s(_)
             | PipelineError::TrustedRootCertsConfigMissing
-            | PipelineError::Database(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            | PipelineError::Database(_)
+            | PipelineError::TableLookup(_) => StatusCode::INTERNAL_SERVER_ERROR,
             PipelineError::PipelineNotFound(_) | PipelineError::ImageNotFoundById(_) => {
                 StatusCode::NOT_FOUND
             }
@@ -208,6 +218,48 @@ pub struct GetPipelineStatusResponse {
     #[schema(example = 1)]
     pub pipeline_id: i64,
     pub status: PipelineStatus,
+}
+
+/// UI-friendly representation of table replication state
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+#[serde(tag = "name")]
+pub enum SimpleTableReplicationState {
+    Queued,
+    CopyingTable,
+    CopiedTable,
+    FollowingWal { lag: u64 },
+    Error { message: String },
+}
+
+impl From<TableReplicationState> for SimpleTableReplicationState {
+    fn from(state: TableReplicationState) -> Self {
+        match state {
+            TableReplicationState::Init => SimpleTableReplicationState::Queued,
+            TableReplicationState::DataSync => SimpleTableReplicationState::CopyingTable,
+            TableReplicationState::FinishedCopy => SimpleTableReplicationState::CopiedTable,
+            // TODO: add lag metric when available.
+            TableReplicationState::SyncDone => SimpleTableReplicationState::FollowingWal { lag: 0 },
+            TableReplicationState::Ready => SimpleTableReplicationState::FollowingWal { lag: 0 },
+            TableReplicationState::Skipped => SimpleTableReplicationState::Error {
+                message: "Table was skipped during replication".to_string(),
+            },
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct TableReplicationStatus {
+    #[schema(example = "public.users")]
+    pub table_name: String,
+    pub state: SimpleTableReplicationState,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct GetPipelineReplicationStatusResponse {
+    #[schema(example = 1)]
+    pub pipeline_id: i64,
+    pub table_statuses: Vec<TableReplicationStatus>,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
@@ -606,6 +658,73 @@ pub async fn get_pipeline_status(
     let response = GetPipelineStatusResponse {
         pipeline_id,
         status,
+    };
+
+    Ok(Json(response))
+}
+
+#[utoipa::path(
+    context_path = "/v1",
+    params(
+        ("pipeline_id" = i64, Path, description = "Id of the pipeline"),
+        ("tenant_id" = String, Header, description = "The tenant ID")
+    ),
+    responses(
+        (status = 200, description = "Get replication status for all tables in the pipeline", body = GetReplicationStatusResponse),
+        (status = 404, description = "Pipeline not found", body = ErrorMessage),
+        (status = 500, description = "Internal server error", body = ErrorMessage)
+    ),
+    tag = "Pipelines"
+)]
+#[get("/pipelines/{pipeline_id}/replication-status")]
+pub async fn get_pipeline_replication_status(
+    req: HttpRequest,
+    pool: Data<PgPool>,
+    encryption_key: Data<EncryptionKey>,
+    pipeline_id: Path<i64>,
+) -> Result<impl Responder, PipelineError> {
+    let tenant_id = extract_tenant_id(&req)?;
+    let pipeline_id = pipeline_id.into_inner();
+
+    let mut txn = pool.begin().await?;
+
+    // Read the pipeline to ensure it exists and get the source configuration
+    let pipeline = db::pipelines::read_pipeline(txn.deref_mut(), tenant_id, pipeline_id)
+        .await?
+        .ok_or(PipelineError::PipelineNotFound(pipeline_id))?;
+
+    // Get the source configuration
+    let source = db::sources::read_source(
+        txn.deref_mut(),
+        tenant_id,
+        pipeline.source_id,
+        &encryption_key,
+    )
+    .await?
+    .ok_or(PipelineError::SourceNotFound(pipeline.source_id))?;
+
+    txn.commit().await?;
+
+    // Connect to the source database to read replication state
+    let source_pool =
+        connect_to_source_database_with_defaults(&source.config.into_connection_config()).await?;
+
+    // Fetch replication state for all tables in this pipeline
+    let state_rows = get_table_replication_state_rows(&source_pool, pipeline_id).await?;
+
+    // Convert database states to UI-friendly format and fetch table names
+    let mut tables: Vec<TableReplicationStatus> = Vec::new();
+    for row in state_rows {
+        let table_name = get_table_name_from_oid(&source_pool, row.table_id.0).await?;
+        tables.push(TableReplicationStatus {
+            table_name: table_name.to_string(),
+            state: row.state.into(),
+        });
+    }
+
+    let response = GetPipelineReplicationStatusResponse {
+        pipeline_id,
+        table_statuses: tables,
     };
 
     Ok(Json(response))

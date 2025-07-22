@@ -1,6 +1,6 @@
 use pg_escape::{quote_identifier, quote_literal};
 use serde::Serialize;
-use sqlx::{Connection, Executor, PgConnection, Row, postgres::PgConnectOptions};
+use sqlx::{Executor, PgPool, Row};
 use std::collections::HashMap;
 use thiserror::Error;
 use utoipa::ToSchema;
@@ -21,7 +21,7 @@ pub struct Publication {
 
 pub async fn create_publication(
     publication: &Publication,
-    options: &PgConnectOptions,
+    pool: &PgPool,
 ) -> Result<(), PublicationsDbError> {
     let mut query = String::new();
     let quoted_publication_name = quote_identifier(&publication.name);
@@ -41,15 +41,13 @@ pub async fn create_publication(
         }
     }
 
-    let mut connection = PgConnection::connect_with(options).await?;
-    connection.execute(query.as_str()).await?;
-
+    pool.execute(query.as_str()).await?;
     Ok(())
 }
 
 pub async fn update_publication(
     publication: &Publication,
-    options: &PgConnectOptions,
+    pool: &PgPool,
 ) -> Result<(), PublicationsDbError> {
     let mut query = String::new();
     let quoted_publication_name = quote_identifier(&publication.name);
@@ -69,30 +67,26 @@ pub async fn update_publication(
         }
     }
 
-    let mut connection = PgConnection::connect_with(options).await?;
-    connection.execute(query.as_str()).await?;
-
+    pool.execute(query.as_str()).await?;
     Ok(())
 }
 
 pub async fn drop_publication(
     publication_name: &str,
-    options: &PgConnectOptions,
+    pool: &PgPool,
 ) -> Result<(), PublicationsDbError> {
     let mut query = String::new();
     query.push_str("drop publication if exists ");
     let quoted_publication_name = quote_identifier(publication_name);
     query.push_str(&quoted_publication_name);
 
-    let mut connection = PgConnection::connect_with(options).await?;
-    connection.execute(query.as_str()).await?;
-
+    pool.execute(query.as_str()).await?;
     Ok(())
 }
 
 pub async fn read_publication(
     publication_name: &str,
-    options: &PgConnectOptions,
+    pool: &PgPool,
 ) -> Result<Option<Publication>, PublicationsDbError> {
     let mut query = String::new();
     query.push_str(
@@ -115,12 +109,10 @@ pub async fn read_publication(
     let quoted_publication_name = quote_literal(publication_name);
     query.push_str(&quoted_publication_name);
 
-    let mut connection = PgConnection::connect_with(options).await?;
-
     let mut tables = vec![];
     let mut name: Option<String> = None;
 
-    for row in connection.fetch_all(query.as_str()).await? {
+    for row in pool.fetch_all(query.as_str()).await? {
         let pub_name: String = row.get("pubname");
         if let Some(ref name) = name {
             assert_eq!(name.as_str(), pub_name);
@@ -128,20 +120,20 @@ pub async fn read_publication(
             name = Some(pub_name);
         }
         let schema: Option<String> = row.get("schemaname?");
-        let name: Option<String> = row.get("tablename?");
-        if let (Some(schema), Some(name)) = (schema, name) {
-            tables.push(Table { schema, name });
+        let table_name: Option<String> = row.get("tablename?");
+        if let (Some(schema), Some(table_name)) = (schema, table_name) {
+            tables.push(Table {
+                schema,
+                name: table_name,
+            });
         }
     }
 
     let publication = name.map(|name| Publication { name, tables });
-
     Ok(publication)
 }
 
-pub async fn read_all_publications(
-    options: &PgConnectOptions,
-) -> Result<Vec<Publication>, PublicationsDbError> {
+pub async fn read_all_publications(pool: &PgPool) -> Result<Vec<Publication>, PublicationsDbError> {
     let query = r#"
         select p.pubname,
             pt.schemaname as "schemaname?",
@@ -156,18 +148,19 @@ pub async fn read_all_publications(
            	and p.pubtruncate = true;
 	   "#;
 
-    let mut connection = PgConnection::connect_with(options).await?;
-
     let mut pub_name_to_tables: HashMap<String, Vec<Table>> = HashMap::new();
 
-    for row in connection.fetch_all(query).await? {
+    for row in pool.fetch_all(query).await? {
         let pub_name: String = row.get("pubname");
         let schema: Option<String> = row.get("schemaname?");
-        let name: Option<String> = row.get("tablename?");
+        let table_name: Option<String> = row.get("tablename?");
         let tables = pub_name_to_tables.entry(pub_name).or_default();
 
-        if let (Some(schema), Some(name)) = (schema, name) {
-            tables.push(Table { schema, name });
+        if let (Some(schema), Some(table_name)) = (schema, table_name) {
+            tables.push(Table {
+                schema,
+                name: table_name,
+            });
         }
     }
 

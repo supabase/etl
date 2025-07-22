@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use sqlx::{Connection, Executor, PgConnection, Row, postgres::PgConnectOptions};
+use sqlx::{Executor, PgPool, Row};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -14,9 +14,7 @@ pub struct Table {
     pub name: String,
 }
 
-pub async fn get_tables(options: &PgConnectOptions) -> Result<Vec<Table>, TablesDbError> {
-    let mut connection = PgConnection::connect_with(options).await?;
-
+pub async fn get_tables(pool: &PgPool) -> Result<Vec<Table>, TablesDbError> {
     let query = r#"
         select
            	n.nspname as schema,
@@ -33,7 +31,7 @@ pub async fn get_tables(options: &PgConnectOptions) -> Result<Vec<Table>, Tables
         order by schema, name;
         "#;
 
-    let tables = connection
+    let tables = pool
         .fetch_all(query)
         .await?
         .iter()
