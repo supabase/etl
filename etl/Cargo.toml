@@ -16,11 +16,12 @@ harness = false
 [[test]]
 name = "integration"
 path = "tests/integration/mod.rs"
+required-features = ["test-utils"]
 
 [[test]]
 name = "failpoints"
 path = "tests/failpoints/mod.rs"
-required-features = ["fail/failpoints"]
+required-features = ["fail/failpoints", "test-utils"]
 
 [dependencies]
 config = { workspace = true }
@@ -84,4 +85,6 @@ wiremock = { workspace = true }
 bigquery = ["dep:gcp-bigquery-client", "dep:prost", "postgres/bigquery"]
 # When enabled converts unknown types to bytes
 unknown_types_to_bytes = []
+# Feature for test support utilities
+test-utils = []
 default = ["unknown_types_to_bytes"]

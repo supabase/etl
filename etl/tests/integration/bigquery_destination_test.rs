@@ -8,14 +8,14 @@ use etl::state::table::TableReplicationPhaseType;
 use rand::random;
 use telemetry::init_test_tracing;
 
-use crate::common::bigquery::setup_bigquery_connection;
-use crate::common::database::spawn_database;
-use crate::common::pipeline::{create_pipeline, create_pipeline_with};
-use crate::common::test_destination_wrapper::TestDestinationWrapper;
-use crate::common::test_schema::bigquery::{
+use etl::test_utils::bigquery::setup_bigquery_connection;
+use etl::test_utils::database::spawn_database;
+use etl::test_utils::pipeline::{create_pipeline, create_pipeline_with};
+use etl::test_utils::test_destination_wrapper::TestDestinationWrapper;
+use etl::test_utils::test_schema::bigquery::{
     BigQueryOrder, BigQueryUser, parse_bigquery_table_rows,
 };
-use crate::common::test_schema::{TableSelection, insert_mock_data, setup_test_database_schema};
+use etl::test_utils::test_schema::{TableSelection, insert_mock_data, setup_test_database_schema};
 
 #[tokio::test(flavor = "multi_thread")]
 async fn table_copy_and_streaming_with_restart() {

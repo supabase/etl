@@ -10,11 +10,11 @@ use postgres::tokio::test_utils::TableModification;
 use rand::random;
 use telemetry::init_test_tracing;
 
-use crate::common::database::spawn_database;
-use crate::common::event::group_events_by_type_and_table_id;
-use crate::common::pipeline::{create_pipeline, create_pipeline_with};
-use crate::common::test_destination_wrapper::TestDestinationWrapper;
-use crate::common::test_schema::{
+use etl::test_utils::database::spawn_database;
+use etl::test_utils::event::group_events_by_type_and_table_id;
+use etl::test_utils::pipeline::{create_pipeline, create_pipeline_with};
+use etl::test_utils::test_destination_wrapper::TestDestinationWrapper;
+use etl::test_utils::test_schema::{
     TableSelection, assert_events_equal, build_expected_orders_inserts,
     build_expected_users_inserts, get_n_integers_sum, get_users_age_sum_from_rows,
     insert_mock_data, insert_users_data, setup_test_database_schema,
@@ -652,7 +652,7 @@ async fn table_processing_with_schema_change_skips_table() {
         .insert_values(
             database_schema.orders_schema().name.clone(),
             &["description", "date"],
-            &[&"description_with_date", &(10i32)],
+            &[&"description_with_date", &"10"],
         )
         .await
         .unwrap();

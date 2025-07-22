@@ -1,8 +1,9 @@
 use config::shared::{BatchConfig, PgConnectionConfig, PipelineConfig, RetryConfig};
-use etl::destination::base::Destination;
-use etl::pipeline::{Pipeline, PipelineId};
-use etl::state::store::base::StateStore;
 use uuid::Uuid;
+
+use crate::destination::base::Destination;
+use crate::pipeline::{Pipeline, PipelineId};
+use crate::state::store::base::StateStore;
 
 /// Generates a test-specific replication slot name with a random component.
 ///

@@ -9,13 +9,13 @@ use rand::random;
 use telemetry::init_test_tracing;
 use tokio_postgres::types::Type;
 
-use crate::common::pipeline::{create_pipeline};
-use crate::common::state_store::{FaultConfig, FaultInjectingStateStore, FaultType};
-use crate::common::test_destination_wrapper::TestDestinationWrapper;
-use crate::common::test_schema::{
+use etl::test_utils::pipeline::{create_pipeline};
+use etl::test_utils::state_store::{FaultConfig, FaultInjectingStateStore, FaultType};
+use etl::test_utils::test_destination_wrapper::TestDestinationWrapper;
+use etl::test_utils::test_schema::{
     TableSelection, setup_test_database_schema,
 };
-use crate::common::database::spawn_database;
+use etl::test_utils::database::spawn_database;
 
 // TODO: find a way to inject errors in a way that is predictable.
 #[ignore]

@@ -1,8 +1,9 @@
-use etl::state::store::base::{StateStore, StateStoreError};
-use etl::state::table::TableReplicationPhase;
 use postgres::schema::TableId;
 use std::collections::HashMap;
 use std::sync::Arc;
+
+use crate::state::store::base::{StateStore, StateStoreError};
+use crate::state::table::TableReplicationPhase;
 
 #[derive(Debug, Clone)]
 pub enum FaultType {

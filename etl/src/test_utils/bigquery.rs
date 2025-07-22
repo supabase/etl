@@ -1,4 +1,3 @@
-use etl::destination::bigquery::BigQueryDestination;
 use gcp_bigquery_client::Client;
 use gcp_bigquery_client::client_builder::ClientBuilder;
 use gcp_bigquery_client::model::dataset::Dataset;
@@ -12,6 +11,8 @@ use tokio::runtime::Handle;
 use uuid::Uuid;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate, Times};
+
+use crate::destination::bigquery::BigQueryDestination;
 
 /// Environment variable name for the BigQuery project id.
 const BIGQUERY_PROJECT_ID_ENV_NAME: &str = "TESTS_BIGQUERY_PROJECT_ID";
