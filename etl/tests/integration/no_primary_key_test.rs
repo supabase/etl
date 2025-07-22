@@ -29,6 +29,7 @@ async fn tables_without_primary_key_are_skipped_test() {
         .await
         .expect("Failed to create publication");
 
+    // Insert a row to later check that this doesn't appear in destination's table rows
     database
         .insert_values(table_name.clone(), &["name"], &[&"abc"])
         .await
@@ -37,7 +38,6 @@ async fn tables_without_primary_key_are_skipped_test() {
     let state_store = NotifyingStateStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
 
-    // Start pipeline from scratch.
     let pipeline_id: PipelineId = random();
     let mut pipeline = create_pipeline(
         &database.config,
@@ -53,7 +53,7 @@ async fn tables_without_primary_key_are_skipped_test() {
 
     pipeline.start().await.unwrap();
 
-    // insert a row to later check that it is not processed by the apply worker
+    // Insert a row to later check that it is not processed by the apply worker
     database
         .insert_values(table_name.clone(), &["name"], &[&"abc1"])
         .await
@@ -69,6 +69,9 @@ async fn tables_without_primary_key_are_skipped_test() {
 
     pipeline.shutdown_and_wait().await.unwrap();
 
+    let rows = destination.get_table_rows().await;
+    assert_eq!(rows.len(), 0);
+
     let events = destination.get_events().await;
-    assert_eq!(dbg!(events).len(), 0);
+    assert_eq!(events.len(), 0);
 }
