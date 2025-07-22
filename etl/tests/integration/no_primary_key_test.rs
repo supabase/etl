@@ -76,7 +76,7 @@ async fn tables_without_primary_key_are_skipped_test() {
     let result = pipeline.shutdown_and_wait().await;
 
     assert!(matches!(
-        result,
+        dbg!(result),
         Err(PipelineError::OneOrMoreWorkersFailed(WorkerWaitErrors(ref errors)))
         if errors.len() == 1 && matches!(
             &errors[0],
