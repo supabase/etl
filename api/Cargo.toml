@@ -12,7 +12,7 @@ name = "api"
 
 [dependencies]
 config = { workspace = true }
-postgres = { workspace = true, features = ["sqlx"] }
+postgres = { workspace = true, features = ["replication"] }
 telemetry = { workspace = true }
 
 actix-web = { workspace = true, features = ["macros", "http2"] }

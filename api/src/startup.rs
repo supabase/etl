@@ -35,11 +35,13 @@ use crate::{
             update_image,
         },
         pipelines::{
-            CreatePipelineRequest, CreatePipelineResponse, GetPipelineStatusResponse,
-            ReadPipelineResponse, ReadPipelinesResponse, UpdatePipelineImageRequest,
-            UpdatePipelineRequest, create_pipeline, delete_pipeline, get_pipeline_status,
-            read_all_pipelines, read_pipeline, start_pipeline, stop_all_pipelines, stop_pipeline,
-            update_pipeline, update_pipeline_image,
+            CreatePipelineRequest, CreatePipelineResponse, GetPipelineReplicationStatusResponse,
+            GetPipelineStatusResponse, ReadPipelineResponse, ReadPipelinesResponse,
+            SimpleTableReplicationState, TableReplicationStatus, UpdatePipelineImageRequest,
+            UpdatePipelineRequest, create_pipeline, delete_pipeline,
+            get_pipeline_replication_status, get_pipeline_status, read_all_pipelines,
+            read_pipeline, start_pipeline, stop_all_pipelines, stop_pipeline, update_pipeline,
+            update_pipeline_image,
         },
         sources::{
             CreateSourceRequest, CreateSourceResponse, ReadSourceResponse, ReadSourcesResponse,
@@ -159,6 +161,7 @@ pub async fn run(
             crate::routes::pipelines::delete_pipeline,
             crate::routes::pipelines::read_all_pipelines,
             crate::routes::pipelines::get_pipeline_status,
+            crate::routes::pipelines::get_pipeline_replication_status,
             crate::routes::pipelines::update_pipeline_image,
             crate::routes::tenants::create_tenant,
             crate::routes::tenants::create_or_update_tenant,
@@ -199,6 +202,9 @@ pub async fn run(
             ReadPipelinesResponse,
             UpdatePipelineImageRequest,
             GetPipelineStatusResponse,
+            GetPipelineReplicationStatusResponse,
+            TableReplicationStatus,
+            SimpleTableReplicationState,
             CreateTenantRequest,
             CreateTenantResponse,
             CreateOrUpdateTenantRequest,
@@ -279,6 +285,7 @@ pub async fn run(
                     .service(stop_pipeline)
                     .service(stop_all_pipelines)
                     .service(get_pipeline_status)
+                    .service(get_pipeline_replication_status)
                     .service(update_pipeline_image)
                     //tables
                     .service(read_table_names)

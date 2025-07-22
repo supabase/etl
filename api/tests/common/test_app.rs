@@ -17,6 +17,7 @@ use api::{
     encryption::{self, generate_random_key},
     startup::run,
 };
+use config::shared::PgConnectionConfig;
 use config::{Environment, load_config};
 use postgres::sqlx::test_utils::drop_pg_database;
 use reqwest::{IntoUrl, RequestBuilder};
@@ -65,6 +66,10 @@ impl TestApp {
         self.api_client
             .delete(url)
             .bearer_auth(self.api_key.clone())
+    }
+
+    pub fn database_config(&self) -> &PgConnectionConfig {
+        &self.config.database
     }
 
     pub async fn create_tenant(&self, tenant: &CreateTenantRequest) -> reqwest::Response {
@@ -415,6 +420,21 @@ impl TestApp {
         .send()
         .await
         .expect("Failed to execute request.")
+    }
+
+    pub async fn get_pipeline_replication_status(
+        &self,
+        tenant_id: &str,
+        pipeline_id: i64,
+    ) -> reqwest::Response {
+        self.get_authenticated(format!(
+            "{}/v1/pipelines/{}/replication-status",
+            &self.address, pipeline_id
+        ))
+        .header("tenant_id", tenant_id)
+        .send()
+        .await
+        .expect("failed to execute request")
     }
 }
 
