@@ -30,7 +30,7 @@ async fn tables_without_primary_key_are_skipped_test() {
         .expect("Failed to create publication");
 
     database
-        .insert_values(table_name, &["name"], &[&"abc"])
+        .insert_values(table_name.clone(), &["name"], &[&"abc"])
         .await
         .unwrap();
 
@@ -53,5 +53,22 @@ async fn tables_without_primary_key_are_skipped_test() {
 
     pipeline.start().await.unwrap();
 
+    // insert a row to later check that it is not processed by the apply worker
+    database
+        .insert_values(table_name.clone(), &["name"], &[&"abc1"])
+        .await
+        .unwrap();
+
     notification.notified().await;
+
+    // insert another row
+    database
+        .insert_values(table_name, &["name"], &[&"abc2"])
+        .await
+        .unwrap();
+
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    let events = destination.get_events().await;
+    assert_eq!(dbg!(events).len(), 0);
 }
