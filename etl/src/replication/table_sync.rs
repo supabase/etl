@@ -1,7 +1,18 @@
+use config::shared::PipelineConfig;
+use fail::fail_point;
+use futures::StreamExt;
+use postgres::schema::TableId;
+use std::sync::Arc;
+use thiserror::Error;
+use tokio::pin;
+use tokio_postgres::types::PgLsn;
+use tracing::{error, info, warn};
+
 use crate::concurrency::shutdown::{ShutdownResult, ShutdownRx};
 use crate::concurrency::signal::SignalTx;
 use crate::concurrency::stream::BatchStream;
 use crate::destination::base::{Destination, DestinationError};
+use crate::failpoints::START_TABLE_SYNC_AFTER_DATA_SYNC;
 use crate::pipeline::PipelineId;
 use crate::replication::client::{PgReplicationClient, PgReplicationError};
 use crate::replication::slot::{SlotError, get_slot_name};
@@ -11,14 +22,6 @@ use crate::state::store::base::{StateStore, StateStoreError};
 use crate::state::table::{TableReplicationPhase, TableReplicationPhaseType};
 use crate::workers::base::WorkerType;
 use crate::workers::table_sync::{TableSyncWorkerState, TableSyncWorkerStateError};
-use config::shared::PipelineConfig;
-use futures::StreamExt;
-use postgres::schema::TableId;
-use std::sync::Arc;
-use thiserror::Error;
-use tokio::pin;
-use tokio_postgres::types::PgLsn;
-use tracing::{error, info, warn};
 
 #[derive(Debug, Error)]
 pub enum TableSyncError {
@@ -152,6 +155,9 @@ where
                     .set_phase_with(TableReplicationPhase::DataSync, state_store.clone())
                     .await?;
             }
+
+            // Fail point to test when the table sync fails.
+            fail_point!(START_TABLE_SYNC_AFTER_DATA_SYNC);
 
             // We create the slot with a transaction, since we need to have a consistent snapshot of the database
             // before copying the schema and tables.
