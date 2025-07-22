@@ -132,7 +132,7 @@ jobs:
         run: |
           cargo llvm-cov test \
             --workspace --no-fail-fast \
-            --features etl/test-utils \
+            --all-features \
             --lcov --output-path lcov.info
 
       - name: Upload coverage to Coveralls
