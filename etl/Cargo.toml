@@ -13,6 +13,16 @@ required-features = ["bigquery"]
 name = "table_copies"
 harness = false
 
+[[test]]
+name = "integration"
+path = "tests/integration/mod.rs"
+required-features = ["test-utils"]
+
+[[test]]
+name = "failpoints"
+path = "tests/failpoints/mod.rs"
+required-features = ["fail/failpoints", "test-utils"]
+
 [dependencies]
 config = { workspace = true }
 postgres = { workspace = true, features = ["tokio", "replication"] }
@@ -22,6 +32,7 @@ bigdecimal = { workspace = true, features = ["std"] }
 bytes = { workspace = true }
 byteorder = { workspace = true }
 chrono = { workspace = true, features = ["serde"] }
+fail = { workspace = true, features = ["failpoints"] }
 futures = { workspace = true }
 gcp-bigquery-client = { workspace = true, optional = true, features = [
     "rust-tls",
@@ -58,6 +69,7 @@ tracing-subscriber = { workspace = true, default-features = true, features = [
     "env-filter",
 ] }
 uuid = { workspace = true, features = ["v4"] }
+wiremock = { workspace = true, optional = true }
 
 [dev-dependencies]
 postgres = { workspace = true, features = ["test-utils", "tokio"] }
@@ -67,11 +79,10 @@ clap = { workspace = true, default-features = true, features = [
     "std",
     "derive",
 ] }
-wiremock = { workspace = true }
 
 
 [features]
 bigquery = ["dep:gcp-bigquery-client", "dep:prost", "postgres/bigquery"]
-# When enabled converts unknown types to bytes
-unknown_types_to_bytes = []
-default = ["unknown_types_to_bytes"]
+unknown-types-to-bytes = []
+test-utils = ["dep:wiremock"]
+default = ["unknown-types-to-bytes"]

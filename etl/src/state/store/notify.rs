@@ -160,7 +160,7 @@ impl fmt::Debug for NotifyingStateStore {
         let inner = tokio::task::block_in_place(move || {
             Handle::current().block_on(async move { self.inner.read().await })
         });
-        f.debug_struct("TestStateStore")
+        f.debug_struct("NotifyingStateStore")
             .field("table_replication_states", &inner.table_replication_states)
             .finish()
     }

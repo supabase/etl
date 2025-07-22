@@ -103,7 +103,10 @@ impl TableSyncWorkerStateInner {
 
         // If we should store this phase change, we want to do it via the supplied state store.
         if phase.as_type().should_store() {
-            info!("storing phase change '{:?}' for table", phase);
+            info!(
+                "storing phase change '{:?}' for table {}",
+                phase, self.table_id
+            );
 
             state_store
                 .update_table_replication_state(self.table_id, phase)
@@ -156,7 +159,7 @@ impl TableSyncWorkerState {
             let inner = self.inner.lock().await;
             if inner.table_replication_phase.as_type() == phase_type {
                 info!(
-                    "phase type '{:?}' was already set, no need to wait",
+                    "table replication phase '{:?}' was already set, no need to wait",
                     phase_type
                 );
                 return Some(inner);
@@ -173,7 +176,7 @@ impl TableSyncWorkerState {
         let inner = self.inner.lock().await;
         if inner.table_replication_phase.as_type() == phase_type {
             info!(
-                "phase type '{:?}' was reached for table {:?}",
+                "table replication phase '{:?}' was reached for table {:?}",
                 phase_type, inner.table_id
             );
             return Some(inner);
@@ -192,7 +195,7 @@ impl TableSyncWorkerState {
             inner.table_id
         };
         info!(
-            "waiting for phase type '{:?}' for table {:?}",
+            "waiting for table replication phase '{:?}' for table {:?}",
             phase_type, table_id
         );
 
@@ -492,7 +495,7 @@ where
                         .await?;
 
                     info!(
-                        "table sync worker for table {} has caught up with the apply worker, shutting down",
+                        "table sync worker for table {} is in sync with the apply worker, the worker will terminate",
                         self.table_id
                     );
                 }

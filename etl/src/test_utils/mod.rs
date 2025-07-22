@@ -9,7 +9,6 @@ pub mod bigquery;
 pub mod database;
 pub mod event;
 pub mod pipeline;
-pub mod state_store;
 pub mod table;
 pub mod test_destination_wrapper;
 pub mod test_schema;

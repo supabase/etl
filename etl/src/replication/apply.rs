@@ -277,7 +277,10 @@ where
     // We call the `before_loop` hook and stop the loop immediately in case we are told to stop.
     let continue_loop = hook.before_loop(start_lsn).await?;
     if !continue_loop {
-        info!("apply loop stopped before having started");
+        info!(
+            "no need to run apply loop for worker '{:?}', the loop will terminate",
+            hook.worker_type()
+        );
 
         return Ok(ApplyLoopResult::ApplyStopped);
     }

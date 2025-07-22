@@ -9,9 +9,9 @@ use tokio::pin;
 use tokio_postgres::CopyOutStream;
 use tokio_postgres::types::{ToSql, Type};
 
-use crate::common::database::{spawn_database, test_table_name};
-use crate::common::pipeline::test_slot_name;
-use crate::common::table::assert_table_schema;
+use etl::test_utils::database::{spawn_database, test_table_name};
+use etl::test_utils::pipeline::test_slot_name;
+use etl::test_utils::table::assert_table_schema;
 
 async fn count_stream_rows(stream: CopyOutStream) -> u64 {
     pin!(stream);

@@ -99,9 +99,9 @@ impl TextFormatConverter {
             Type::JSON_ARRAY | Type::JSONB_ARRAY => Cell::Array(ArrayCell::Json(Vec::default())),
             Type::OID => Cell::U32(u32::default()),
             Type::OID_ARRAY => Cell::Array(ArrayCell::U32(Vec::default())),
-            #[cfg(feature = "unknown_types_to_bytes")]
+            #[cfg(feature = "unknown-types-to-bytes")]
             _ => Cell::String(String::default()),
-            #[cfg(not(feature = "unknown_types_to_bytes"))]
+            #[cfg(not(feature = "unknown-types-to-bytes"))]
             _ => Err(CdcEventConversionError::UnsupportedType(
                 typ.name().to_string(),
             )),
@@ -257,9 +257,9 @@ impl TextFormatConverter {
             Type::OID_ARRAY => {
                 TextFormatConverter::parse_array(str, |str| Ok(Some(str.parse()?)), ArrayCell::U32)
             }
-            #[cfg(feature = "unknown_types_to_bytes")]
+            #[cfg(feature = "unknown-types-to-bytes")]
             _ => Ok(Cell::String(str.to_string())),
-            #[cfg(not(feature = "unknown_types_to_bytes"))]
+            #[cfg(not(feature = "unknown-types-to-bytes"))]
             _ => Err(CdcEventConversionError::UnsupportedType(
                 typ.name().to_string(),
             )),
