@@ -278,43 +278,6 @@ impl From<Event> for EventType {
     }
 }
 
-impl Event {
-    /// Gets the start LSN from any event that has it.
-    pub fn get_start_lsn(&self) -> Option<PgLsn> {
-        match self {
-            Event::Begin(begin) => Some(begin.start_lsn),
-            Event::Commit(commit) => Some(commit.start_lsn),
-            Event::Insert(insert) => Some(insert.start_lsn),
-            Event::Update(update) => Some(update.start_lsn),
-            Event::Delete(delete) => Some(delete.start_lsn),
-            Event::Relation(relation) => Some(relation.start_lsn),
-            Event::Truncate(truncate) => Some(truncate.start_lsn),
-            _ => None,
-        }
-    }
-
-    /// Gets the commit LSN from DML events if available.
-    pub fn get_commit_lsn(&self) -> Option<PgLsn> {
-        match self {
-            Event::Insert(insert) => Some(insert.commit_lsn),
-            Event::Update(update) => Some(update.commit_lsn),
-            Event::Delete(delete) => Some(delete.commit_lsn),
-            Event::Commit(commit) => Some(commit.commit_lsn),
-            _ => None,
-        }
-    }
-
-    /// Sets the commit LSN for DML events (Insert, Update, Delete).
-    pub fn set_commit_lsn(&mut self, commit_lsn: PgLsn) {
-        match self {
-            Event::Insert(insert) => insert.commit_lsn = commit_lsn,
-            Event::Update(update) => update.commit_lsn = commit_lsn,
-            Event::Delete(delete) => delete.commit_lsn = commit_lsn,
-            _ => {} // Other events don't need commit LSN
-        }
-    }
-}
-
 async fn get_table_schema(
     schema_cache: &SchemaCache,
     table_id: TableId,
