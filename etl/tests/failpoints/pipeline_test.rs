@@ -9,7 +9,6 @@ use rand::random;
 use telemetry::init_test_tracing;
 
 use etl::test_utils::database::spawn_database;
-use etl::test_utils::failpoints::CustomFailScenario;
 use etl::test_utils::pipeline::create_pipeline;
 use etl::test_utils::test_destination_wrapper::TestDestinationWrapper;
 use etl::test_utils::test_schema::{TableSelection, setup_test_database_schema};
@@ -21,7 +20,8 @@ TBD
 
 #[tokio::test(flavor = "multi_thread")]
 async fn pipeline_handles_table_sync_worker_panic_during_data_sync() {
-    let scenario = CustomFailScenario::setup(&[(START_TABLE_SYNC_AFTER_DATA_SYNC, "panic")]);
+    let _scenario = FailScenario::setup();
+    fail::cfg(START_TABLE_SYNC_AFTER_DATA_SYNC, "panic").unwrap();
 
     init_test_tracing();
 
@@ -73,15 +73,13 @@ async fn pipeline_handles_table_sync_worker_panic_during_data_sync() {
         }
         other => panic!("Expected TableSyncWorkersFailed error, but got: {other:?}"),
     }
-
-    scenario.teardown();
 }
 
 // TODO: inject the failure via fail-rs.
 #[ignore]
 #[tokio::test(flavor = "multi_thread")]
 async fn pipeline_handles_table_sync_worker_error() {
-    let scenario = FailScenario::setup();
+    let _scenario = FailScenario::setup();
 
     init_test_tracing();
 
@@ -133,15 +131,13 @@ async fn pipeline_handles_table_sync_worker_error() {
         }
         other => panic!("Expected TableSyncWorkersFailed error, but got: {other:?}"),
     }
-
-    scenario.teardown();
 }
 
 // TODO: inject the failure via fail-rs.
 #[ignore]
 #[tokio::test(flavor = "multi_thread")]
 async fn table_schema_copy_retries_after_data_sync_failure() {
-    let scenario = FailScenario::setup();
+    let _scenario = FailScenario::setup();
 
     init_test_tracing();
 
@@ -243,6 +239,4 @@ async fn table_schema_copy_retries_after_data_sync_failure() {
     assert_eq!(table_schemas.len(), 2);
     assert_eq!(table_schemas[0], database_schema.orders_schema());
     assert_eq!(table_schemas[1], database_schema.users_schema());
-
-    scenario.teardown();
 }
