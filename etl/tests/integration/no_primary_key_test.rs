@@ -2,15 +2,14 @@ use etl::{
     destination::memory::MemoryDestination,
     pipeline::PipelineId,
     state::{store::notify::NotifyingStateStore, table::TableReplicationPhaseType},
+    test_utils::{
+        database::{spawn_database, test_table_name},
+        pipeline::create_pipeline,
+        test_destination_wrapper::TestDestinationWrapper,
+    },
 };
 use rand::random;
 use telemetry::init_test_tracing;
-
-use crate::common::{
-    database::{spawn_database, test_table_name},
-    pipeline::create_pipeline,
-    test_destination_wrapper::TestDestinationWrapper,
-};
 
 #[tokio::test(flavor = "multi_thread")]
 async fn tables_without_primary_key_are_skipped_test() {
@@ -69,7 +68,7 @@ async fn tables_without_primary_key_are_skipped_test() {
 
     let _ = pipeline.shutdown_and_wait().await;
 
-    // testing for a specific result here makes the test flaky, so for now commenting it out to make the test pass
+    // TODO: testing for a specific result here makes the test flaky, so for now commenting it out to make the test pass
     // but this needs to be investigated why the `Pipeline::shutdown_and_wait()` sometimes doesn't return the below
     // error
     // assert!(matches!(
