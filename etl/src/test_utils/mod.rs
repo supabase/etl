@@ -8,6 +8,7 @@
 pub mod bigquery;
 pub mod database;
 pub mod event;
+pub mod failpoints;
 pub mod pipeline;
 pub mod table;
 pub mod test_destination_wrapper;

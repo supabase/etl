@@ -9,6 +9,7 @@ use rand::random;
 use telemetry::init_test_tracing;
 
 use etl::test_utils::database::spawn_database;
+use etl::test_utils::failpoints::CustomFailScenario;
 use etl::test_utils::pipeline::create_pipeline;
 use etl::test_utils::test_destination_wrapper::TestDestinationWrapper;
 use etl::test_utils::test_schema::{TableSelection, setup_test_database_schema};
@@ -20,10 +21,10 @@ TBD
 
 #[tokio::test(flavor = "multi_thread")]
 async fn pipeline_handles_table_sync_worker_panic_during_data_sync() {
-    let scenario = FailScenario::setup();
-    fail::cfg(START_TABLE_SYNC_AFTER_DATA_SYNC, "panic").unwrap();
+    let scenario = CustomFailScenario::setup(&[(START_TABLE_SYNC_AFTER_DATA_SYNC, "panic")]);
 
     init_test_tracing();
+
     let database = spawn_database().await;
     let database_schema = setup_test_database_schema(&database, TableSelection::Both).await;
 
@@ -81,7 +82,9 @@ async fn pipeline_handles_table_sync_worker_panic_during_data_sync() {
 #[tokio::test(flavor = "multi_thread")]
 async fn pipeline_handles_table_sync_worker_error() {
     let scenario = FailScenario::setup();
+
     init_test_tracing();
+
     let database = spawn_database().await;
     let database_schema = setup_test_database_schema(&database, TableSelection::Both).await;
 
@@ -139,7 +142,9 @@ async fn pipeline_handles_table_sync_worker_error() {
 #[tokio::test(flavor = "multi_thread")]
 async fn table_schema_copy_retries_after_data_sync_failure() {
     let scenario = FailScenario::setup();
+
     init_test_tracing();
+
     let database = spawn_database().await;
     let database_schema = setup_test_database_schema(&database, TableSelection::Both).await;
 
