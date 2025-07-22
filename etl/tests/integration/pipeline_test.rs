@@ -652,7 +652,7 @@ async fn table_processing_with_schema_change_skips_table() {
         .insert_values(
             database_schema.orders_schema().name.clone(),
             &["description", "date"],
-            &[&"description_with_date", &"10"],
+            &[&"description_with_date", &10],
         )
         .await
         .unwrap();
