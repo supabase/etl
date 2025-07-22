@@ -129,6 +129,7 @@ impl RelationEvent {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct InsertEvent {
+    pub commit_lsn: u64,
     pub start_lsn: PgLsn,
     pub table_id: TableId,
     pub table_row: TableRow,
@@ -136,6 +137,7 @@ pub struct InsertEvent {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct UpdateEvent {
+    pub commit_lsn: u64,
     pub start_lsn: PgLsn,
     pub table_id: TableId,
     pub table_row: TableRow,
@@ -147,6 +149,7 @@ pub struct UpdateEvent {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct DeleteEvent {
+    pub commit_lsn: u64,
     pub start_lsn: PgLsn,
     pub table_id: TableId,
     /// Represents the old table row that was deleted.
@@ -258,6 +261,43 @@ impl From<Event> for EventType {
     }
 }
 
+impl Event {
+    /// Sets the commit LSN for DML events (Insert, Update, Delete).
+    pub fn set_commit_lsn(&mut self, commit_lsn: u64) {
+        match self {
+            Event::Insert(insert) => insert.commit_lsn = Some(commit_lsn),
+            Event::Update(update) => update.commit_lsn = Some(commit_lsn),
+            Event::Delete(delete) => delete.commit_lsn = Some(commit_lsn),
+            _ => {} // Other events don't need commit LSN
+        }
+    }
+
+    /// Gets the commit LSN from DML events if available.
+    pub fn get_commit_lsn(&self) -> Option<u64> {
+        match self {
+            Event::Insert(insert) => Some(insert.commit_lsn),
+            Event::Update(update) => Some(update.commit_lsn),
+            Event::Delete(delete) => Some(delete.commit_lsn),
+            Event::Commit(commit) => Some(commit.commit_lsn),
+            _ => None,
+        }
+    }
+
+    /// Gets the start LSN from any event that has it.
+    pub fn get_start_lsn(&self) -> Option<PgLsn> {
+        match self {
+            Event::Begin(begin) => Some(begin.start_lsn),
+            Event::Commit(commit) => Some(commit.start_lsn),
+            Event::Insert(insert) => Some(insert.start_lsn),
+            Event::Update(update) => Some(update.start_lsn),
+            Event::Delete(delete) => Some(delete.start_lsn),
+            Event::Relation(relation) => Some(relation.start_lsn),
+            Event::Truncate(truncate) => Some(truncate.start_lsn),
+            _ => None,
+        }
+    }
+}
+
 async fn get_table_schema(
     schema_cache: &SchemaCache,
     table_id: TableId,
@@ -323,6 +363,7 @@ async fn convert_insert_to_event(
         start_lsn,
         table_id,
         table_row,
+        commit_lsn: None,
     })
 }
 
@@ -357,6 +398,7 @@ async fn convert_update_to_event(
         table_id,
         table_row,
         old_table_row,
+        commit_lsn: None,
     })
 }
 
@@ -385,6 +427,7 @@ async fn convert_delete_to_event(
         start_lsn,
         table_id,
         old_table_row,
+        commit_lsn: None,
     })
 }
 
