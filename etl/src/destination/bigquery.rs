@@ -478,7 +478,7 @@ impl BigQueryDestination {
 
                 match event {
                     Event::Insert(mut insert) => {
-                        let sequence_number = Self::generate_sequence_number(insert.start_lsn);
+                        let sequence_number = Self::generate_sequence_number(insert.start_lsn, insert.commit_lsn);
                         insert
                             .table_row
                             .values
@@ -490,7 +490,7 @@ impl BigQueryDestination {
                         table_rows.push(insert.table_row);
                     }
                     Event::Update(mut update) => {
-                        let sequence_number = Self::generate_sequence_number(update.start_lsn);
+                        let sequence_number = Self::generate_sequence_number(update.start_lsn, update.commit_lsn);
                         update
                             .table_row
                             .values
@@ -507,7 +507,7 @@ impl BigQueryDestination {
                             continue;
                         };
 
-                        let sequence_number = Self::generate_sequence_number(delete.start_lsn);
+                        let sequence_number = Self::generate_sequence_number(delete.start_lsn, delete.commit_lsn);
                         old_table_row
                             .values
                             .push(BigQueryOperationType::DELETE.into_cell());
@@ -697,7 +697,7 @@ impl BigQueryDestination {
         }
     }
 
-    /// Generates a sequence number from the LSN of an event.
+    /// Generates a sequence number from the LSNs of an event.
     ///
     /// Creates a hex-encoded sequence number that ensures events are processed in the correct order
     /// even when they have the same system time. The format is compatible with BigQuery's
@@ -705,10 +705,16 @@ impl BigQueryDestination {
     ///
     /// The rationale for using the LSN is that BigQuery will preserve the highest sequence number
     /// in case of equal primary key, which is what we want since in case of updates, we want the
-    /// latest update in Postgres order to be the winner.
-    fn generate_sequence_number(lsn: PgLsn) -> String {
-        let lsn = u64::from(lsn);
-        format!("{lsn:016x}")
+    /// latest update in Postgres order to be the winner. We have first the `commit_lsn` in the key
+    /// so that BigQuery can first order operations based on the LSN at which the transaction committed
+    /// and if two operations belong to the same transaction (meaning they have the same LSN), the
+    /// `start_lsn` will be used. We first order by `commit_lsn` to preserve the order in which operations
+    /// are received by the pipeline since transactions are ordered by commit time and not interleaved.
+    fn generate_sequence_number(start_lsn: PgLsn, commit_lsn: PgLsn) -> String {
+        let start_lsn = u64::from(start_lsn);
+        let commit_lsn = u64::from(commit_lsn);
+
+        format!("{commit_lsn:016x}/{start_lsn:016x}")
     }
 }
 
@@ -979,24 +985,24 @@ mod tests {
     #[test]
     fn test_generate_sequence_number() {
         assert_eq!(
-            BigQueryDestination::generate_sequence_number(PgLsn::from(0)),
-            "0000000000000000"
+            BigQueryDestination::generate_sequence_number(PgLsn::from(0), PgLsn::from(0)),
+            "0000000000000000/0000000000000000"
         );
         assert_eq!(
-            BigQueryDestination::generate_sequence_number(PgLsn::from(1)),
-            "0000000000000001"
+            BigQueryDestination::generate_sequence_number(PgLsn::from(1), PgLsn::from(0)),
+            "0000000000000001/0000000000000000"
         );
         assert_eq!(
-            BigQueryDestination::generate_sequence_number(PgLsn::from(255)),
-            "00000000000000ff"
+            BigQueryDestination::generate_sequence_number(PgLsn::from(255), PgLsn::from(0)),
+            "00000000000000ff/0000000000000000"
         );
         assert_eq!(
-            BigQueryDestination::generate_sequence_number(PgLsn::from(65535)),
-            "000000000000ffff"
+            BigQueryDestination::generate_sequence_number(PgLsn::from(65535), PgLsn::from(0)),
+            "000000000000ffff/0000000000000000"
         );
         assert_eq!(
-            BigQueryDestination::generate_sequence_number(PgLsn::from(u64::MAX)),
-            "ffffffffffffffff"
+            BigQueryDestination::generate_sequence_number(PgLsn::from(u64::MAX), PgLsn::from(0)),
+            "ffffffffffffffff/0000000000000000"
         );
     }
 }

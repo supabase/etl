@@ -570,10 +570,13 @@ where
     // We perform the conversion of the message to our own event format which is used downstream
     // by the destination.
     //
-    // It's important to note that we use the `start_lsn` as LSN for tracking the position of the
-    // event in the WAL. This is the LSN we want to use to define ordering of entries in the WAL, which
-    // could be useful to destinations.
-    let event = convert_message_to_event(schema_cache, start_lsn, &message).await?;
+    // It's important to note that we use the `start_lsn` and `commit_lsn` as LSNs for tracking the
+    // position of the event in the WAL. The `start_lsn` defines total order within the WAL but with
+    // `commit_lsn` we can also encode information about the transaction order since we might have
+    // an entry with `start_lsn` greater than another but because logical replication sends transactions
+    // in the order of commit, the actual insert could happen before.
+    let commit_lsn = get_commit_lsn(state, &message)?;
+    let event = convert_message_to_event(schema_cache, start_lsn, commit_lsn, &message).await?;
 
     let event_type = EventType::from(&event);
     debug!("message converted to event type {}", event_type);
@@ -603,6 +606,20 @@ where
         LogicalReplicationMessage::Origin(_) => Ok(HandleMessageResult::default()),
         LogicalReplicationMessage::Type(_) => Ok(HandleMessageResult::default()),
         _ => Ok(HandleMessageResult::default()),
+    }
+}
+
+#[allow(clippy::result_large_err)]
+fn get_commit_lsn(state: &ApplyLoopState, message: &LogicalReplicationMessage) -> Result<PgLsn, ApplyLoopError>  {
+    // If we are in a `Begin` message, the `commit_lsn` is the `final_lsn` of the payload, in all the
+    // other cases we read the `remote_final_lsn` which should be always set in case we are within or
+    // at the end of a transaction (meaning that the event type is different from `Begin`).
+    if let LogicalReplicationMessage::Begin(message) = message {
+        Ok(PgLsn::from(message.final_lsn()))
+    } else {
+        state.remote_final_lsn.ok_or_else(|| {
+            ApplyLoopError::InvalidTransaction("get_commit_lsn".to_owned(), )
+        })
     }
 }
 

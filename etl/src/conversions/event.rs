@@ -45,16 +45,16 @@ pub enum EventConversionError {
 #[derive(Debug, Clone, PartialEq)]
 pub struct BeginEvent {
     pub start_lsn: PgLsn,
-    pub final_lsn: u64,
+    pub commit_lsn: PgLsn,
     pub timestamp: i64,
     pub xid: u32,
 }
 
 impl BeginEvent {
-    pub fn from_protocol(start_lsn: PgLsn, begin_body: &protocol::BeginBody) -> Self {
+    pub fn from_protocol(start_lsn: PgLsn, commit_lsn: PgLsn, begin_body: &protocol::BeginBody) -> Self {
         Self {
             start_lsn,
-            final_lsn: begin_body.final_lsn(),
+            commit_lsn,
             timestamp: begin_body.timestamp(),
             xid: begin_body.xid(),
         }
@@ -64,18 +64,18 @@ impl BeginEvent {
 #[derive(Debug, Clone, PartialEq)]
 pub struct CommitEvent {
     pub start_lsn: PgLsn,
+    pub commit_lsn: PgLsn,
     pub flags: i8,
-    pub commit_lsn: u64,
     pub end_lsn: u64,
     pub timestamp: i64,
 }
 
 impl CommitEvent {
-    pub fn from_protocol(start_lsn: PgLsn, commit_body: &protocol::CommitBody) -> Self {
+    pub fn from_protocol(start_lsn: PgLsn, commit_lsn: PgLsn, commit_body: &protocol::CommitBody) -> Self {
         Self {
             start_lsn,
+            commit_lsn,
             flags: commit_body.flags(),
-            commit_lsn: commit_body.commit_lsn(),
             end_lsn: commit_body.end_lsn(),
             timestamp: commit_body.timestamp(),
         }
@@ -85,12 +85,14 @@ impl CommitEvent {
 #[derive(Debug, Clone, PartialEq)]
 pub struct RelationEvent {
     pub start_lsn: PgLsn,
+    pub commit_lsn: PgLsn,
     pub table_schema: TableSchema,
 }
 
 impl RelationEvent {
     pub fn from_protocol(
         start_lsn: PgLsn,
+        commit_lsn: PgLsn,
         relation_body: &protocol::RelationBody,
     ) -> Result<Self, EventConversionError> {
         let table_name = TableName::new(
@@ -106,6 +108,7 @@ impl RelationEvent {
 
         Ok(Self {
             start_lsn,
+            commit_lsn,
             table_schema,
         })
     }
@@ -129,16 +132,16 @@ impl RelationEvent {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct InsertEvent {
-    pub commit_lsn: u64,
     pub start_lsn: PgLsn,
+    pub commit_lsn: PgLsn,
     pub table_id: TableId,
     pub table_row: TableRow,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct UpdateEvent {
-    pub commit_lsn: u64,
     pub start_lsn: PgLsn,
+    pub commit_lsn: PgLsn,
     pub table_id: TableId,
     pub table_row: TableRow,
     /// Represents the old table row that was deleted.
@@ -149,8 +152,8 @@ pub struct UpdateEvent {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct DeleteEvent {
-    pub commit_lsn: u64,
     pub start_lsn: PgLsn,
+    pub commit_lsn: PgLsn,
     pub table_id: TableId,
     /// Represents the old table row that was deleted.
     ///
@@ -161,14 +164,16 @@ pub struct DeleteEvent {
 #[derive(Debug, Clone, PartialEq)]
 pub struct TruncateEvent {
     pub start_lsn: PgLsn,
+    pub commit_lsn: PgLsn,
     pub options: i8,
     pub rel_ids: Vec<u32>,
 }
 
 impl TruncateEvent {
-    pub fn from_protocol(start_lsn: PgLsn, truncate_body: &protocol::TruncateBody) -> Self {
+    pub fn from_protocol(start_lsn: PgLsn, commit_lsn: PgLsn, truncate_body: &protocol::TruncateBody) -> Self {
         Self {
             start_lsn,
+            commit_lsn,
             options: truncate_body.options(),
             rel_ids: truncate_body.rel_ids().to_vec(),
         }
@@ -262,27 +267,6 @@ impl From<Event> for EventType {
 }
 
 impl Event {
-    /// Sets the commit LSN for DML events (Insert, Update, Delete).
-    pub fn set_commit_lsn(&mut self, commit_lsn: u64) {
-        match self {
-            Event::Insert(insert) => insert.commit_lsn = Some(commit_lsn),
-            Event::Update(update) => update.commit_lsn = Some(commit_lsn),
-            Event::Delete(delete) => delete.commit_lsn = Some(commit_lsn),
-            _ => {} // Other events don't need commit LSN
-        }
-    }
-
-    /// Gets the commit LSN from DML events if available.
-    pub fn get_commit_lsn(&self) -> Option<u64> {
-        match self {
-            Event::Insert(insert) => Some(insert.commit_lsn),
-            Event::Update(update) => Some(update.commit_lsn),
-            Event::Delete(delete) => Some(delete.commit_lsn),
-            Event::Commit(commit) => Some(commit.commit_lsn),
-            _ => None,
-        }
-    }
-
     /// Gets the start LSN from any event that has it.
     pub fn get_start_lsn(&self) -> Option<PgLsn> {
         match self {
@@ -296,6 +280,28 @@ impl Event {
             _ => None,
         }
     }
+
+    /// Gets the commit LSN from DML events if available.
+    pub fn get_commit_lsn(&self) -> Option<PgLsn> {
+        match self {
+            Event::Insert(insert) => Some(insert.commit_lsn),
+            Event::Update(update) => Some(update.commit_lsn),
+            Event::Delete(delete) => Some(delete.commit_lsn),
+            Event::Commit(commit) => Some(commit.commit_lsn),
+            _ => None,
+        }
+    }
+
+    /// Sets the commit LSN for DML events (Insert, Update, Delete).
+    pub fn set_commit_lsn(&mut self, commit_lsn: PgLsn) {
+        match self {
+            Event::Insert(insert) => insert.commit_lsn = commit_lsn,
+            Event::Update(update) => update.commit_lsn = commit_lsn,
+            Event::Delete(delete) => delete.commit_lsn = commit_lsn,
+            _ => {} // Other events don't need commit LSN
+        }
+    }
+
 }
 
 async fn get_table_schema(
@@ -349,6 +355,7 @@ fn convert_tuple_to_row(
 async fn convert_insert_to_event(
     schema_cache: &SchemaCache,
     start_lsn: PgLsn,
+    commit_lsn: PgLsn,
     insert_body: &protocol::InsertBody,
 ) -> Result<InsertEvent, EventConversionError> {
     let table_id = insert_body.rel_id();
@@ -361,15 +368,16 @@ async fn convert_insert_to_event(
 
     Ok(InsertEvent {
         start_lsn,
+        commit_lsn,
         table_id,
         table_row,
-        commit_lsn: None,
     })
 }
 
 async fn convert_update_to_event(
     schema_cache: &SchemaCache,
     start_lsn: PgLsn,
+    commit_lsn: PgLsn,
     update_body: &protocol::UpdateBody,
 ) -> Result<UpdateEvent, EventConversionError> {
     let table_id = update_body.rel_id();
@@ -395,16 +403,17 @@ async fn convert_update_to_event(
 
     Ok(UpdateEvent {
         start_lsn,
+        commit_lsn,
         table_id,
         table_row,
         old_table_row,
-        commit_lsn: None,
     })
 }
 
 async fn convert_delete_to_event(
     schema_cache: &SchemaCache,
     start_lsn: PgLsn,
+    commit_lsn: PgLsn,
     delete_body: &protocol::DeleteBody,
 ) -> Result<DeleteEvent, EventConversionError> {
     let table_id = delete_body.rel_id();
@@ -425,44 +434,45 @@ async fn convert_delete_to_event(
 
     Ok(DeleteEvent {
         start_lsn,
+        commit_lsn,
         table_id,
         old_table_row,
-        commit_lsn: None,
     })
 }
 
 pub async fn convert_message_to_event(
     schema_cache: &SchemaCache,
     start_lsn: PgLsn,
+    commit_lsn: PgLsn,
     message: &LogicalReplicationMessage,
 ) -> Result<Event, EventConversionError> {
     match message {
         LogicalReplicationMessage::Begin(begin_body) => Ok(Event::Begin(
-            BeginEvent::from_protocol(start_lsn, begin_body),
+            BeginEvent::from_protocol(start_lsn, commit_lsn, begin_body),
         )),
         LogicalReplicationMessage::Commit(commit_body) => Ok(Event::Commit(
-            CommitEvent::from_protocol(start_lsn, commit_body),
+            CommitEvent::from_protocol(start_lsn, commit_lsn, commit_body),
         )),
         LogicalReplicationMessage::Relation(relation_body) => Ok(Event::Relation(
-            RelationEvent::from_protocol(start_lsn, relation_body)?,
+            RelationEvent::from_protocol(start_lsn, commit_lsn, relation_body)?,
         )),
         LogicalReplicationMessage::Insert(insert_body) => {
             let insert_event =
-                convert_insert_to_event(schema_cache, start_lsn, insert_body).await?;
+                convert_insert_to_event(schema_cache, start_lsn, commit_lsn, insert_body).await?;
             Ok(Event::Insert(insert_event))
         }
         LogicalReplicationMessage::Update(update_body) => {
             let update_event =
-                convert_update_to_event(schema_cache, start_lsn, update_body).await?;
+                convert_update_to_event(schema_cache, start_lsn, commit_lsn, update_body).await?;
             Ok(Event::Update(update_event))
         }
         LogicalReplicationMessage::Delete(delete_body) => {
             let delete_event =
-                convert_delete_to_event(schema_cache, start_lsn, delete_body).await?;
+                convert_delete_to_event(schema_cache, start_lsn, commit_lsn, delete_body).await?;
             Ok(Event::Delete(delete_event))
         }
         LogicalReplicationMessage::Truncate(truncate_body) => Ok(Event::Truncate(
-            TruncateEvent::from_protocol(start_lsn, truncate_body),
+            TruncateEvent::from_protocol(start_lsn, commit_lsn, truncate_body),
         )),
         LogicalReplicationMessage::Origin(_) | LogicalReplicationMessage::Type(_) => {
             Ok(Event::Unsupported)

@@ -209,14 +209,14 @@ pub fn assert_events_equal(left: &[Event], right: &[Event]) {
     assert_eq!(left.len(), right.len());
 
     for (left, right) in left.iter().zip(right.iter()) {
-        assert!(events_equal_excluding_start_lsn(left, right));
+        assert!(events_equal_excluding_fields(left, right));
     }
 }
 
-pub fn events_equal_excluding_start_lsn(left: &Event, right: &Event) -> bool {
+pub fn events_equal_excluding_fields(left: &Event, right: &Event) -> bool {
     match (left, right) {
         (Event::Begin(left), Event::Begin(right)) => {
-            left.final_lsn == right.final_lsn
+            left.commit_lsn == right.commit_lsn
                 && left.timestamp == right.timestamp
                 && left.xid == right.xid
         }
@@ -256,6 +256,7 @@ pub fn build_expected_users_inserts(
     for (name, age) in expected_rows {
         events.push(Event::Insert(InsertEvent {
             start_lsn: PgLsn::from(0),
+            commit_lsn: PgLsn::from(0),
             table_id: users_table_id,
             table_row: TableRow {
                 values: vec![
@@ -282,6 +283,7 @@ pub fn build_expected_orders_inserts(
     for name in expected_rows {
         events.push(Event::Insert(InsertEvent {
             start_lsn: PgLsn::from(0),
+            commit_lsn: PgLsn::from(0),
             table_id: orders_table_id,
             table_row: TableRow {
                 values: vec![Cell::I64(starting_id), Cell::String(name.to_owned())],
