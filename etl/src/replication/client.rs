@@ -17,7 +17,6 @@ use tokio_postgres::{
 };
 use tokio_postgres_rustls::MakeRustlsConnect;
 use tracing::{Instrument, error, info, warn};
-use crate::workers::base::WorkerType;
 
 /// Spawns a background task to monitor a PostgreSQL connection until it terminates.
 ///
