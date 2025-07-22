@@ -340,9 +340,8 @@ async fn table_subsequent_updates() {
         .await
         .unwrap();
 
-    // Create two transactions A and B. A starts first and finishes last, B starts last and finishes
-    // first. The goal is to make sure that the insertion order of interleaved transactions follows
-    // Postgres logical replication transaction ordering.
+    // Create two transactions A and B on separate connections to make sure that the updates are
+    // ordered correctly.
     let transaction_a = database_1.begin_transaction().await;
     transaction_a
         .update_values(
@@ -353,7 +352,6 @@ async fn table_subsequent_updates() {
         .await
         .unwrap();
     transaction_a.commit_transaction().await;
-
     let transaction_b = database_2.begin_transaction().await;
     transaction_b
         .update_values(
