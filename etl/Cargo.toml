@@ -69,6 +69,7 @@ tracing-subscriber = { workspace = true, default-features = true, features = [
     "env-filter",
 ] }
 uuid = { workspace = true, features = ["v4"] }
+wiremock = { workspace = true, optional = true }
 
 [dev-dependencies]
 postgres = { workspace = true, features = ["test-utils", "tokio"] }
@@ -78,13 +79,10 @@ clap = { workspace = true, default-features = true, features = [
     "std",
     "derive",
 ] }
-wiremock = { workspace = true }
 
 
 [features]
 bigquery = ["dep:gcp-bigquery-client", "dep:prost", "postgres/bigquery"]
-# When enabled converts unknown types to bytes
-unknown_types_to_bytes = []
-# Feature for test support utilities
-test-utils = []
-default = ["unknown_types_to_bytes"]
+unknown-types-to-bytes = []
+test-utils = ["dep:wiremock"]
+default = ["unknown-types-to-bytes"]

@@ -5,7 +5,7 @@ use etl::pipeline::PipelineId;
 use etl::replication::slot::get_slot_name;
 use etl::state::store::notify::NotifyingStateStore;
 use etl::state::table::TableReplicationPhaseType;
-use etl::workers::base::{WorkerType};
+use etl::workers::base::WorkerType;
 use postgres::tokio::test_utils::TableModification;
 use rand::random;
 use telemetry::init_test_tracing;
