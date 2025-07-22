@@ -293,7 +293,7 @@ fn convert_tuple_to_row(
         let cell = match tuple_data {
             // In case of a null value, we store the type information since that will be used to
             // correctly compute default values when needed.
-            protocol::TupleData::Null => Cell::Null(column_schema.typ.clone()),
+            protocol::TupleData::Null => Cell::Null,
             protocol::TupleData::UnchangedToast => {
                 TextFormatConverter::default_value(&column_schema.typ)
             }
