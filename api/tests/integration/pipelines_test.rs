@@ -1,6 +1,10 @@
 use api::db::pipelines::PipelineConfig;
 use api::db::sources::SourceConfig;
-use api::routes::pipelines::{CreatePipelineRequest, CreatePipelineResponse, GetPipelineReplicationStatusResponse, ReadPipelineResponse, ReadPipelinesResponse, SimpleTableReplicationState, UpdatePipelineImageRequest, UpdatePipelineRequest};
+use api::routes::pipelines::{
+    CreatePipelineRequest, CreatePipelineResponse, GetPipelineReplicationStatusResponse,
+    ReadPipelineResponse, ReadPipelinesResponse, SimpleTableReplicationState,
+    UpdatePipelineImageRequest, UpdatePipelineRequest,
+};
 use api::routes::sources::{CreateSourceRequest, CreateSourceResponse};
 use config::SerializableSecretString;
 use config::shared::{BatchConfig, RetryConfig};
