@@ -56,6 +56,7 @@ pub async fn setup_test_database_schema<G: GenericClient>(
         let users_table_id = database
             .create_table(
                 users_table_name.clone(),
+                true,
                 &[("name", "text not null"), ("age", "integer not null")],
             )
             .await
@@ -91,6 +92,7 @@ pub async fn setup_test_database_schema<G: GenericClient>(
         let orders_table_id = database
             .create_table(
                 orders_table_name.clone(),
+                true,
                 &[("description", "text not null")],
             )
             .await

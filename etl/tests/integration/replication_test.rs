@@ -174,7 +174,7 @@ async fn test_table_schema_copy_is_consistent() {
     };
 
     let table_1_id = database
-        .create_table(test_table_name("table_1"), &[("age", "integer")])
+        .create_table(test_table_name("table_1"), true, &[("age", "integer")])
         .await
         .unwrap();
 
@@ -226,7 +226,7 @@ async fn test_table_schema_copy_across_multiple_connections() {
     };
 
     let table_1_id = database
-        .create_table(test_table_name("table_1"), &[("age", "integer")])
+        .create_table(test_table_name("table_1"), true, &[("age", "integer")])
         .await
         .unwrap();
 
@@ -251,7 +251,7 @@ async fn test_table_schema_copy_across_multiple_connections() {
 
     // We create a new table in the database and update the schema of the old one.
     let table_2_id = database
-        .create_table(test_table_name("table_2"), &[("year", "integer")])
+        .create_table(test_table_name("table_2"), true, &[("year", "integer")])
         .await
         .unwrap();
     database
@@ -306,7 +306,7 @@ async fn test_table_copy_stream_is_consistent() {
 
     // We create a table and insert one row.
     let table_1_id = database
-        .create_table(test_table_name("table_1"), &[("age", "integer")])
+        .create_table(test_table_name("table_1"), true, &[("age", "integer")])
         .await
         .unwrap();
 
@@ -370,11 +370,11 @@ async fn test_publication_creation_and_check() {
 
     // We create two tables and a publication on those tables.
     let table_1_id = database
-        .create_table(test_table_name("table_1"), &[("age", "integer")])
+        .create_table(test_table_name("table_1"), true, &[("age", "integer")])
         .await
         .unwrap();
     let table_2_id = database
-        .create_table(test_table_name("table_2"), &[("age", "integer")])
+        .create_table(test_table_name("table_2"), true, &[("age", "integer")])
         .await
         .unwrap();
     database
@@ -425,7 +425,7 @@ async fn test_start_logical_replication() {
 
     // We create a table with a publication and 10 entries.
     database
-        .create_table(test_table_name("table_1"), &[("age", "integer")])
+        .create_table(test_table_name("table_1"), true, &[("age", "integer")])
         .await
         .unwrap();
     database

@@ -47,6 +47,7 @@ impl<G: GenericClient> PgDatabase<G> {
     pub async fn create_table(
         &self,
         table_name: TableName,
+        add_pk_col: bool,
         columns: &[(&str, &str)], // (column_name, column_type)
     ) -> Result<TableId, tokio_postgres::Error> {
         let columns_str = columns
@@ -55,10 +56,15 @@ impl<G: GenericClient> PgDatabase<G> {
             .collect::<Vec<_>>()
             .join(", ");
 
+        let pk_col = if add_pk_col {
+            "id bigserial primary key, "
+        } else {
+            ""
+        };
+
         let create_table_query = format!(
-            "create table {} (id bigserial primary key, {})",
+            "create table {} ({pk_col}{columns_str})",
             table_name.as_quoted_identifier(),
-            columns_str
         );
         self.client
             .as_ref()
