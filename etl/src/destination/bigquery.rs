@@ -6,7 +6,7 @@ use std::ops::Deref;
 use std::sync::{Arc, LazyLock};
 use thiserror::Error;
 use tokio::sync::Mutex;
-use tokio_postgres::types::Type;
+use tokio_postgres::types::{PgLsn, Type};
 use tracing::{debug, info, warn};
 
 use crate::clients::bigquery::{BigQueryClient, BigQueryClientError, BigQueryOperationType};
@@ -228,6 +228,7 @@ impl BigQueryDestination {
     async fn load_table_id_and_descriptor<I: Deref<Target = Inner>>(
         inner: &I,
         table_id: &TableId,
+        use_cdc_sequence_column: bool,
     ) -> Result<(String, TableDescriptor), BigQueryDestinationError> {
         let schema_cache = inner
             .schema_cache
@@ -240,8 +241,10 @@ impl BigQueryDestination {
             .ok_or(BigQueryDestinationError::MissingTableSchema(*table_id))?;
 
         let table_id = table_schema.name.as_bigquery_table_id();
-        let table_descriptor =
-            BigQueryClient::column_schemas_to_table_descriptor(&table_schema.column_schemas);
+        let table_descriptor = BigQueryClient::column_schemas_to_table_descriptor(
+            &table_schema.column_schemas,
+            use_cdc_sequence_column,
+        );
 
         Ok((table_id, table_descriptor))
     }
@@ -277,7 +280,7 @@ impl BigQueryDestination {
             .values
             .push(BigQueryOperationType::UPSERT.into_cell());
         let table_schema_descriptor =
-            BigQueryClient::column_schemas_to_table_descriptor(&ETL_TABLE_SCHEMAS_COLUMNS);
+            BigQueryClient::column_schemas_to_table_descriptor(&ETL_TABLE_SCHEMAS_COLUMNS, false);
         inner
             .client
             .stream_rows(
@@ -296,7 +299,7 @@ impl BigQueryDestination {
                 .push(BigQueryOperationType::UPSERT.into_cell());
         }
         let column_descriptors =
-            BigQueryClient::column_schemas_to_table_descriptor(&ETL_TABLE_COLUMNS_COLUMNS);
+            BigQueryClient::column_schemas_to_table_descriptor(&ETL_TABLE_COLUMNS_COLUMNS, false);
         if !column_rows.is_empty() {
             inner
                 .client
@@ -427,7 +430,7 @@ impl BigQueryDestination {
 
     /// Writes data rows to a BigQuery table, adding CDC mode metadata.
     ///
-    /// Each row gets a CDC mode column appended before streaming to BigQuery.
+    /// Each row gets a CDC mode column and sequence number appended before streaming to BigQuery.
     async fn write_table_rows(
         &self,
         table_id: TableId,
@@ -435,8 +438,10 @@ impl BigQueryDestination {
     ) -> Result<(), BigQueryDestinationError> {
         let mut inner = self.inner.lock().await;
 
+        // We do not use the sequence column for table rows, since we assume that table rows are always
+        // unique by primary key, thus there is no need to order them.
         let (table_id, table_descriptor) =
-            Self::load_table_id_and_descriptor(&inner, &table_id).await?;
+            Self::load_table_id_and_descriptor(&inner, &table_id, false).await?;
 
         let dataset_id = inner.dataset_id.clone();
         for table_row in table_rows.iter_mut() {
@@ -455,6 +460,7 @@ impl BigQueryDestination {
     /// Processes and writes a batch of CDC events to BigQuery.
     ///
     /// Groups events by type, handles inserts/updates/deletes via streaming, and processes truncates separately.
+    /// Adds sequence numbers to ensure proper ordering of events with the same system time.
     async fn write_events(&self, events: Vec<Event>) -> Result<(), BigQueryDestinationError> {
         let mut event_iter = events.into_iter().peekable();
 
@@ -469,21 +475,30 @@ impl BigQueryDestination {
                 }
 
                 let event = event_iter.next().unwrap();
+
                 match event {
                     Event::Insert(mut insert) => {
+                        let sequence_number =
+                            Self::generate_sequence_number(insert.start_lsn, insert.commit_lsn);
                         insert
                             .table_row
                             .values
                             .push(BigQueryOperationType::UPSERT.into_cell());
+                        insert.table_row.values.push(Cell::String(sequence_number));
+
                         let table_rows: &mut Vec<TableRow> =
                             table_id_to_table_rows.entry(insert.table_id).or_default();
                         table_rows.push(insert.table_row);
                     }
                     Event::Update(mut update) => {
+                        let sequence_number =
+                            Self::generate_sequence_number(update.start_lsn, update.commit_lsn);
                         update
                             .table_row
                             .values
                             .push(BigQueryOperationType::UPSERT.into_cell());
+                        update.table_row.values.push(Cell::String(sequence_number));
+
                         let table_rows: &mut Vec<TableRow> =
                             table_id_to_table_rows.entry(update.table_id).or_default();
                         table_rows.push(update.table_row);
@@ -494,9 +509,13 @@ impl BigQueryDestination {
                             continue;
                         };
 
+                        let sequence_number =
+                            Self::generate_sequence_number(delete.start_lsn, delete.commit_lsn);
                         old_table_row
                             .values
                             .push(BigQueryOperationType::DELETE.into_cell());
+                        old_table_row.values.push(Cell::String(sequence_number));
+
                         let table_rows: &mut Vec<TableRow> =
                             table_id_to_table_rows.entry(delete.table_id).or_default();
                         table_rows.push(old_table_row);
@@ -513,7 +532,7 @@ impl BigQueryDestination {
 
                 for (table_id, table_rows) in table_id_to_table_rows {
                     let (table_id, table_descriptor) =
-                        Self::load_table_id_and_descriptor(&inner, &table_id).await?;
+                        Self::load_table_id_and_descriptor(&inner, &table_id, true).await?;
 
                     let dataset_id = inner.dataset_id.clone();
                     inner
@@ -679,6 +698,26 @@ impl BigQueryDestination {
                 Ok(Type::TEXT)
             }
         }
+    }
+
+    /// Generates a sequence number from the LSNs of an event.
+    ///
+    /// Creates a hex-encoded sequence number that ensures events are processed in the correct order
+    /// even when they have the same system time. The format is compatible with BigQuery's
+    /// `_CHANGE_SEQUENCE_NUMBER` column requirements.
+    ///
+    /// The rationale for using the LSN is that BigQuery will preserve the highest sequence number
+    /// in case of equal primary key, which is what we want since in case of updates, we want the
+    /// latest update in Postgres order to be the winner. We have first the `commit_lsn` in the key
+    /// so that BigQuery can first order operations based on the LSN at which the transaction committed
+    /// and if two operations belong to the same transaction (meaning they have the same LSN), the
+    /// `start_lsn` will be used. We first order by `commit_lsn` to preserve the order in which operations
+    /// are received by the pipeline since transactions are ordered by commit time and not interleaved.
+    fn generate_sequence_number(start_lsn: PgLsn, commit_lsn: PgLsn) -> String {
+        let start_lsn = u64::from(start_lsn);
+        let commit_lsn = u64::from(commit_lsn);
+
+        format!("{commit_lsn:016x}/{start_lsn:016x}")
     }
 }
 
@@ -944,5 +983,29 @@ mod tests {
         assert_eq!(column_rows[2].values[6], Cell::U32(2));
         assert_eq!(column_rows[3].values[6], Cell::U32(3));
         assert_eq!(column_rows[4].values[6], Cell::U32(4));
+    }
+
+    #[test]
+    fn test_generate_sequence_number() {
+        assert_eq!(
+            BigQueryDestination::generate_sequence_number(PgLsn::from(0), PgLsn::from(0)),
+            "0000000000000000/0000000000000000"
+        );
+        assert_eq!(
+            BigQueryDestination::generate_sequence_number(PgLsn::from(1), PgLsn::from(0)),
+            "0000000000000001/0000000000000000"
+        );
+        assert_eq!(
+            BigQueryDestination::generate_sequence_number(PgLsn::from(255), PgLsn::from(0)),
+            "00000000000000ff/0000000000000000"
+        );
+        assert_eq!(
+            BigQueryDestination::generate_sequence_number(PgLsn::from(65535), PgLsn::from(0)),
+            "000000000000ffff/0000000000000000"
+        );
+        assert_eq!(
+            BigQueryDestination::generate_sequence_number(PgLsn::from(u64::MAX), PgLsn::from(0)),
+            "ffffffffffffffff/0000000000000000"
+        );
     }
 }

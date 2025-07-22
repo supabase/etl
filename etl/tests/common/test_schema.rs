@@ -4,7 +4,7 @@ use etl::conversions::table_row::TableRow;
 use postgres::schema::{ColumnSchema, Oid, TableName, TableSchema};
 use postgres::tokio::test_utils::{PgDatabase, id_column_schema};
 use std::ops::RangeInclusive;
-use tokio_postgres::types::Type;
+use tokio_postgres::types::{PgLsn, Type};
 use tokio_postgres::{Client, GenericClient};
 
 use crate::common::database::test_table_name;
@@ -207,6 +207,47 @@ pub fn get_n_integers_sum(n: usize) -> i32 {
     ((n * (n + 1)) / 2) as i32
 }
 
+pub fn assert_events_equal(left: &[Event], right: &[Event]) {
+    assert_eq!(left.len(), right.len());
+
+    for (left, right) in left.iter().zip(right.iter()) {
+        assert!(events_equal_excluding_fields(left, right));
+    }
+}
+
+pub fn events_equal_excluding_fields(left: &Event, right: &Event) -> bool {
+    match (left, right) {
+        (Event::Begin(left), Event::Begin(right)) => {
+            left.commit_lsn == right.commit_lsn
+                && left.timestamp == right.timestamp
+                && left.xid == right.xid
+        }
+        (Event::Commit(left), Event::Commit(right)) => {
+            left.flags == right.flags
+                && left.commit_lsn == right.commit_lsn
+                && left.end_lsn == right.end_lsn
+                && left.timestamp == right.timestamp
+        }
+        (Event::Insert(left), Event::Insert(right)) => {
+            left.table_id == right.table_id && left.table_row == right.table_row
+        }
+        (Event::Update(left), Event::Update(right)) => {
+            left.table_id == right.table_id
+                && left.table_row == right.table_row
+                && left.old_table_row == right.old_table_row
+        }
+        (Event::Delete(left), Event::Delete(right)) => {
+            left.table_id == right.table_id && left.old_table_row == right.old_table_row
+        }
+        (Event::Relation(left), Event::Relation(right)) => left.table_schema == right.table_schema,
+        (Event::Truncate(left), Event::Truncate(right)) => {
+            left.options == right.options && left.rel_ids == right.rel_ids
+        }
+        (Event::Unsupported, Event::Unsupported) => true,
+        _ => false, // Different event types
+    }
+}
+
 pub fn build_expected_users_inserts(
     mut starting_id: i64,
     users_table_id: Oid,
@@ -216,6 +257,8 @@ pub fn build_expected_users_inserts(
 
     for (name, age) in expected_rows {
         events.push(Event::Insert(InsertEvent {
+            start_lsn: PgLsn::from(0),
+            commit_lsn: PgLsn::from(0),
             table_id: users_table_id,
             table_row: TableRow {
                 values: vec![
@@ -241,6 +284,8 @@ pub fn build_expected_orders_inserts(
 
     for name in expected_rows {
         events.push(Event::Insert(InsertEvent {
+            start_lsn: PgLsn::from(0),
+            commit_lsn: PgLsn::from(0),
             table_id: orders_table_id,
             table_row: TableRow {
                 values: vec![Cell::I64(starting_id), Cell::String(name.to_owned())],

@@ -18,7 +18,7 @@ use crate::common::test_schema::bigquery::{
 use crate::common::test_schema::{TableSelection, insert_mock_data, setup_test_database_schema};
 
 #[tokio::test(flavor = "multi_thread")]
-async fn test_table_copy_and_streaming_with_restart() {
+async fn table_copy_and_streaming_with_restart() {
     init_test_tracing();
     install_crypto_provider_once();
 
@@ -173,7 +173,7 @@ async fn test_table_copy_and_streaming_with_restart() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn test_table_insert_update_delete() {
+async fn table_insert_update_delete() {
     init_test_tracing();
     install_crypto_provider_once();
 
@@ -288,11 +288,99 @@ async fn test_table_insert_update_delete() {
     assert!(users_rows.is_none());
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn table_subsequent_updates() {
+    init_test_tracing();
+    install_crypto_provider_once();
+
+    let mut database_1 = spawn_database().await;
+    let mut database_2 = database_1.duplicate().await;
+    let database_schema = setup_test_database_schema(&database_1, TableSelection::UsersOnly).await;
+
+    let bigquery_database = setup_bigquery_connection().await;
+
+    let state_store = NotifyingStateStore::new();
+    let raw_destination = bigquery_database.build_destination().await;
+    let destination = TestDestinationWrapper::wrap(raw_destination);
+
+    // Start pipeline from scratch.
+    let pipeline_id: PipelineId = random();
+    let mut pipeline = create_pipeline(
+        &database_1.config,
+        pipeline_id,
+        database_schema.publication_name(),
+        state_store.clone(),
+        destination.clone(),
+    );
+
+    // Register notifications for table copy completion.
+    let users_state_notify = state_store
+        .notify_on_table_state(
+            database_schema.users_schema().id,
+            TableReplicationPhaseType::SyncDone,
+        )
+        .await;
+
+    pipeline.start().await.unwrap();
+
+    users_state_notify.notified().await;
+
+    // Wait for the first insert.
+    let event_notify = destination
+        .wait_for_events_count(vec![(EventType::Insert, 1), (EventType::Update, 2)])
+        .await;
+
+    // Insert a row.
+    database_1
+        .insert_values(
+            database_schema.users_schema().name.clone(),
+            &["name", "age"],
+            &[&"user_1", &1],
+        )
+        .await
+        .unwrap();
+
+    // Create two transactions A and B on separate connections to make sure that the updates are
+    // ordered correctly.
+    let transaction_a = database_1.begin_transaction().await;
+    transaction_a
+        .update_values(
+            database_schema.users_schema().name.clone(),
+            &["name", "age"],
+            &["'user_3'", "3"],
+        )
+        .await
+        .unwrap();
+    transaction_a.commit_transaction().await;
+    let transaction_b = database_2.begin_transaction().await;
+    transaction_b
+        .update_values(
+            database_schema.users_schema().name.clone(),
+            &["name", "age"],
+            &["'user_2'", "2"],
+        )
+        .await
+        .unwrap();
+    transaction_b.commit_transaction().await;
+
+    event_notify.notified().await;
+
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    // We query BigQuery to check for the final value.
+    let users_rows = bigquery_database
+        .query_table(database_schema.users_schema().name)
+        .await
+        .unwrap();
+    let parsed_users_rows = parse_bigquery_table_rows::<BigQueryUser>(users_rows);
+    assert_eq!(parsed_users_rows, vec![BigQueryUser::new(1, "user_2", 2),]);
+}
+
 // This test is disabled since truncation is currently not supported by BigQuery when doing CDC
 // streaming. The test is kept just for future use.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore]
-async fn test_table_truncate_with_batching() {
+async fn table_truncate_with_batching() {
     init_test_tracing();
     install_crypto_provider_once();
 
@@ -376,6 +464,8 @@ async fn test_table_truncate_with_batching() {
     .await;
 
     event_notify.notified().await;
+
+    pipeline.shutdown_and_wait().await.unwrap();
 
     // We query BigQuery directly to get the data which has been inserted by tests expecting that
     // only the rows after truncation are there.

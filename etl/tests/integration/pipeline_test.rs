@@ -18,9 +18,9 @@ use crate::common::pipeline::{create_pipeline, create_pipeline_with};
 use crate::common::state_store::{FaultConfig, FaultInjectingStateStore, FaultType};
 use crate::common::test_destination_wrapper::TestDestinationWrapper;
 use crate::common::test_schema::{
-    TableSelection, build_expected_orders_inserts, build_expected_users_inserts,
-    get_n_integers_sum, get_users_age_sum_from_rows, insert_mock_data, insert_users_data,
-    setup_test_database_schema,
+    TableSelection, assert_events_equal, build_expected_orders_inserts,
+    build_expected_users_inserts, get_n_integers_sum, get_users_age_sum_from_rows,
+    insert_mock_data, insert_users_data, setup_test_database_schema,
 };
 
 // TODO: find a way to inject errors in a way that is predictable.
@@ -714,8 +714,8 @@ async fn table_copy_and_sync_streams_new_data() {
             "description_14",
         ],
     );
-    assert_eq!(*users_inserts, expected_users_inserts);
-    assert_eq!(*orders_inserts, expected_orders_inserts);
+    assert_events_equal(users_inserts, &expected_users_inserts);
+    assert_events_equal(orders_inserts, &expected_orders_inserts);
 
     // Check that the replication slots for the two tables have been removed.
     let users_replication_slot = get_slot_name(
@@ -828,7 +828,7 @@ async fn table_sync_streams_new_data_with_batch() {
             ("user_5", 5),
         ],
     );
-    assert_eq!(*users_inserts, expected_users_inserts);
+    assert_events_equal(users_inserts, &expected_users_inserts);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1024,5 +1024,5 @@ async fn table_processing_with_schema_change_skips_table() {
         database_schema.orders_schema().id,
         vec!["description_2", "description_3"],
     );
-    assert_eq!(*orders_inserts, expected_orders_inserts);
+    assert_events_equal(orders_inserts, &expected_orders_inserts);
 }

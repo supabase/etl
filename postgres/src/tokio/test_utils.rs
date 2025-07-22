@@ -291,6 +291,19 @@ impl PgDatabase<Client> {
         }
     }
 
+    pub async fn duplicate(&self) -> Self {
+        let config = self.config.clone();
+        // This connects to the database assuming it already exists since this is meant to be
+        // a duplicate connection.
+        let client = connect_to_pg_database(&config).await;
+
+        Self {
+            config,
+            client: Some(client),
+            destroy_on_drop: true,
+        }
+    }
+
     /// Begins a new transaction.
     ///
     /// Returns a `Transaction` object that can be used to execute queries within the transaction.
@@ -307,7 +320,7 @@ impl PgDatabase<Client> {
 }
 
 impl PgDatabase<Transaction<'_>> {
-    pub async fn commit_transaction(&mut self) {
+    pub async fn commit_transaction(mut self) {
         if let Some(client) = self.client.take() {
             client.commit().await.unwrap();
         }
@@ -367,6 +380,11 @@ pub async fn create_pg_database(config: &PgConnectionConfig) -> Client {
         .await
         .expect("Failed to create database");
 
+    // Connects to the actual Postgres database
+    connect_to_pg_database(config).await
+}
+
+pub async fn connect_to_pg_database(config: &PgConnectionConfig) -> Client {
     // Create a new client connected to the created database
     let (client, connection) = {
         let config: tokio_postgres::Config = config.with_db();

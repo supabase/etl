@@ -523,7 +523,14 @@ where
                 start_lsn, end_lsn
             );
 
-            handle_logical_replication_message(state, message.into_data(), schema_cache, hook).await
+            handle_logical_replication_message(
+                state,
+                start_lsn,
+                message.into_data(),
+                schema_cache,
+                hook,
+            )
+            .await
         }
         ReplicationMessage::PrimaryKeepAlive(message) => {
             let end_lsn = PgLsn::from(message.wal_end());
@@ -551,6 +558,7 @@ where
 
 async fn handle_logical_replication_message<T>(
     state: &mut ApplyLoopState,
+    start_lsn: PgLsn,
     message: LogicalReplicationMessage,
     schema_cache: &SchemaCache,
     hook: &T,
@@ -561,7 +569,14 @@ where
 {
     // We perform the conversion of the message to our own event format which is used downstream
     // by the destination.
-    let event = convert_message_to_event(schema_cache, &message).await?;
+    //
+    // It's important to note that we use the `start_lsn` and `commit_lsn` as LSNs for tracking the
+    // position of the event in the WAL. The `start_lsn` defines total order within the WAL but with
+    // `commit_lsn` we can also encode information about the transaction order since we might have
+    // an entry with `start_lsn` greater than another but because logical replication sends transactions
+    // in the order of commit, the actual insert could happen before.
+    let commit_lsn = get_commit_lsn(state, &message)?;
+    let event = convert_message_to_event(schema_cache, start_lsn, commit_lsn, &message).await?;
 
     let event_type = EventType::from(&event);
     debug!("message converted to event type {}", event_type);
@@ -594,12 +609,29 @@ where
     }
 }
 
+#[allow(clippy::result_large_err)]
+fn get_commit_lsn(
+    state: &ApplyLoopState,
+    message: &LogicalReplicationMessage,
+) -> Result<PgLsn, ApplyLoopError> {
+    // If we are in a `Begin` message, the `commit_lsn` is the `final_lsn` of the payload, in all the
+    // other cases we read the `remote_final_lsn` which should be always set in case we are within or
+    // at the end of a transaction (meaning that the event type is different from `Begin`).
+    if let LogicalReplicationMessage::Begin(message) = message {
+        Ok(PgLsn::from(message.final_lsn()))
+    } else {
+        state
+            .remote_final_lsn
+            .ok_or_else(|| ApplyLoopError::InvalidTransaction("get_commit_lsn".to_owned()))
+    }
+}
+
 async fn handle_begin_message(
     state: &mut ApplyLoopState,
     event: Event,
     message: &protocol::BeginBody,
 ) -> Result<HandleMessageResult, ApplyLoopError> {
-    let Event::Begin(event) = event else {
+    let EventType::Begin = event.event_type() else {
         return Err(ApplyLoopError::InvalidEvent(event.into(), EventType::Begin));
     };
 
@@ -609,7 +641,7 @@ async fn handle_begin_message(
     state.remote_final_lsn = Some(final_lsn);
 
     Ok(HandleMessageResult {
-        event: Some(Event::Begin(event)),
+        event: Some(event),
         end_lsn: None,
         end_batch: None,
         skip_table: None,
@@ -626,7 +658,7 @@ where
     T: ApplyLoopHook,
     ApplyLoopError: From<<T as ApplyLoopHook>::Error>,
 {
-    let Event::Commit(event) = event else {
+    let EventType::Commit = event.event_type() else {
         return Err(ApplyLoopError::InvalidEvent(
             event.into(),
             EventType::Commit,
@@ -663,7 +695,7 @@ where
     let continue_loop = hook.process_syncing_tables(end_lsn, false).await?;
 
     let mut result = HandleMessageResult {
-        event: Some(Event::Commit(event)),
+        event: Some(event),
         // We mark this as the last commit end LSN since we want to be able to track from the outside
         // what was the biggest transaction boundary LSN which was successfully applied.
         //
