@@ -993,19 +993,19 @@ mod tests {
         );
         assert_eq!(
             BigQueryDestination::generate_sequence_number(PgLsn::from(1), PgLsn::from(0)),
-            "0000000000000001/0000000000000000"
+            "0000000000000000/0000000000000001"
         );
         assert_eq!(
             BigQueryDestination::generate_sequence_number(PgLsn::from(255), PgLsn::from(0)),
-            "00000000000000ff/0000000000000000"
+            "0000000000000000/00000000000000ff"
         );
         assert_eq!(
             BigQueryDestination::generate_sequence_number(PgLsn::from(65535), PgLsn::from(0)),
-            "000000000000ffff/0000000000000000"
+            "0000000000000000/000000000000ffff"
         );
         assert_eq!(
             BigQueryDestination::generate_sequence_number(PgLsn::from(u64::MAX), PgLsn::from(0)),
-            "ffffffffffffffff/0000000000000000"
+            "0000000000000000/ffffffffffffffff"
         );
     }
 }
