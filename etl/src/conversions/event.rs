@@ -51,7 +51,11 @@ pub struct BeginEvent {
 }
 
 impl BeginEvent {
-    pub fn from_protocol(start_lsn: PgLsn, commit_lsn: PgLsn, begin_body: &protocol::BeginBody) -> Self {
+    pub fn from_protocol(
+        start_lsn: PgLsn,
+        commit_lsn: PgLsn,
+        begin_body: &protocol::BeginBody,
+    ) -> Self {
         Self {
             start_lsn,
             commit_lsn,
@@ -71,7 +75,11 @@ pub struct CommitEvent {
 }
 
 impl CommitEvent {
-    pub fn from_protocol(start_lsn: PgLsn, commit_lsn: PgLsn, commit_body: &protocol::CommitBody) -> Self {
+    pub fn from_protocol(
+        start_lsn: PgLsn,
+        commit_lsn: PgLsn,
+        commit_body: &protocol::CommitBody,
+    ) -> Self {
         Self {
             start_lsn,
             commit_lsn,
@@ -170,7 +178,11 @@ pub struct TruncateEvent {
 }
 
 impl TruncateEvent {
-    pub fn from_protocol(start_lsn: PgLsn, commit_lsn: PgLsn, truncate_body: &protocol::TruncateBody) -> Self {
+    pub fn from_protocol(
+        start_lsn: PgLsn,
+        commit_lsn: PgLsn,
+        truncate_body: &protocol::TruncateBody,
+    ) -> Self {
         Self {
             start_lsn,
             commit_lsn,
@@ -301,7 +313,6 @@ impl Event {
             _ => {} // Other events don't need commit LSN
         }
     }
-
 }
 
 async fn get_table_schema(

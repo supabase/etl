@@ -373,10 +373,7 @@ async fn table_subsequent_updates() {
         .await
         .unwrap();
     let parsed_users_rows = parse_bigquery_table_rows::<BigQueryUser>(users_rows);
-    assert_eq!(
-        parsed_users_rows,
-        vec![BigQueryUser::new(1, "user_2", 2),]
-    );
+    assert_eq!(parsed_users_rows, vec![BigQueryUser::new(1, "user_2", 2),]);
 }
 
 // This test is disabled since truncation is currently not supported by BigQuery when doing CDC

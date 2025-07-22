@@ -478,7 +478,8 @@ impl BigQueryDestination {
 
                 match event {
                     Event::Insert(mut insert) => {
-                        let sequence_number = Self::generate_sequence_number(insert.start_lsn, insert.commit_lsn);
+                        let sequence_number =
+                            Self::generate_sequence_number(insert.start_lsn, insert.commit_lsn);
                         insert
                             .table_row
                             .values
@@ -490,7 +491,8 @@ impl BigQueryDestination {
                         table_rows.push(insert.table_row);
                     }
                     Event::Update(mut update) => {
-                        let sequence_number = Self::generate_sequence_number(update.start_lsn, update.commit_lsn);
+                        let sequence_number =
+                            Self::generate_sequence_number(update.start_lsn, update.commit_lsn);
                         update
                             .table_row
                             .values
@@ -507,7 +509,8 @@ impl BigQueryDestination {
                             continue;
                         };
 
-                        let sequence_number = Self::generate_sequence_number(delete.start_lsn, delete.commit_lsn);
+                        let sequence_number =
+                            Self::generate_sequence_number(delete.start_lsn, delete.commit_lsn);
                         old_table_row
                             .values
                             .push(BigQueryOperationType::DELETE.into_cell());

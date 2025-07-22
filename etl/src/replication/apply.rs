@@ -610,16 +610,19 @@ where
 }
 
 #[allow(clippy::result_large_err)]
-fn get_commit_lsn(state: &ApplyLoopState, message: &LogicalReplicationMessage) -> Result<PgLsn, ApplyLoopError>  {
+fn get_commit_lsn(
+    state: &ApplyLoopState,
+    message: &LogicalReplicationMessage,
+) -> Result<PgLsn, ApplyLoopError> {
     // If we are in a `Begin` message, the `commit_lsn` is the `final_lsn` of the payload, in all the
     // other cases we read the `remote_final_lsn` which should be always set in case we are within or
     // at the end of a transaction (meaning that the event type is different from `Begin`).
     if let LogicalReplicationMessage::Begin(message) = message {
         Ok(PgLsn::from(message.final_lsn()))
     } else {
-        state.remote_final_lsn.ok_or_else(|| {
-            ApplyLoopError::InvalidTransaction("get_commit_lsn".to_owned(), )
-        })
+        state
+            .remote_final_lsn
+            .ok_or_else(|| ApplyLoopError::InvalidTransaction("get_commit_lsn".to_owned()))
     }
 }
 
