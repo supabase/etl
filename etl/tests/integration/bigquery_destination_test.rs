@@ -299,7 +299,7 @@ async fn table_subsequent_updates() {
 
     let bigquery_database = setup_bigquery_connection().await;
 
-    let state_store = TestStateStore::new();
+    let state_store = NotifyingStateStore::new();
     let raw_destination = bigquery_database.build_destination().await;
     let destination = TestDestinationWrapper::wrap(raw_destination);
 
@@ -315,7 +315,7 @@ async fn table_subsequent_updates() {
 
     // Register notifications for table copy completion.
     let users_state_notify = state_store
-        .notify_on_replication_phase(
+        .notify_on_table_state(
             database_schema.users_schema().id,
             TableReplicationPhaseType::SyncDone,
         )
