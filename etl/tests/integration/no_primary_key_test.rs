@@ -1,8 +1,14 @@
 use etl::{
     destination::memory::MemoryDestination,
-    pipeline::PipelineId,
+    pipeline::{PipelineError, PipelineId},
+    replication::table_sync::TableSyncError,
     state::{store::notify::NotifyingStateStore, table::TableReplicationPhaseType},
+    workers::{
+        base::{WorkerWaitError, WorkerWaitErrors},
+        table_sync::TableSyncWorkerError,
+    },
 };
+use postgres::schema::TableName;
 use rand::random;
 use telemetry::init_test_tracing;
 
@@ -67,7 +73,19 @@ async fn tables_without_primary_key_are_skipped_test() {
         .await
         .unwrap();
 
-    pipeline.shutdown_and_wait().await.unwrap();
+    let result = pipeline.shutdown_and_wait().await;
+
+    assert!(matches!(
+        result,
+        Err(PipelineError::OneOrMoreWorkersFailed(WorkerWaitErrors(ref errors)))
+        if errors.len() == 1 && matches!(
+            &errors[0],
+            WorkerWaitError::TableSyncWorkerFailed(TableSyncWorkerError::TableSync(TableSyncError::MissingPrimaryKey(TableName {
+                schema,
+                name,
+            }))) if schema == "test" && name == "no_primary_key"
+        )
+    ));
 
     let rows = destination.get_table_rows().await;
     assert_eq!(rows.len(), 0);
