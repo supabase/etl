@@ -210,20 +210,6 @@ pub enum Event {
 }
 
 impl Event {
-    /// Returns the LSN of this [`Event`].
-    pub fn start_lsn(&self) -> Option<PgLsn> {
-        match self {
-            Event::Begin(event) => Some(event.start_lsn),
-            Event::Commit(event) => Some(event.start_lsn),
-            Event::Insert(event) => Some(event.start_lsn),
-            Event::Update(event) => Some(event.start_lsn),
-            Event::Delete(event) => Some(event.start_lsn),
-            Event::Relation(event) => Some(event.start_lsn),
-            Event::Truncate(event) => Some(event.start_lsn),
-            Event::Unsupported => None,
-        }
-    }
-
     /// Returns the [`EventType`] that corresponds to this event.
     pub fn event_type(&self) -> EventType {
         self.into()
