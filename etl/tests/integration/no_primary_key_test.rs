@@ -12,7 +12,7 @@ use rand::random;
 use telemetry::init_test_tracing;
 
 #[tokio::test(flavor = "multi_thread")]
-async fn tables_without_primary_key_are_skipped_test() {
+async fn tables_without_primary_key_are_skipped() {
     init_test_tracing();
     let database = spawn_database().await;
 
