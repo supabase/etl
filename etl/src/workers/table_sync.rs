@@ -103,7 +103,10 @@ impl TableSyncWorkerStateInner {
 
         // If we should store this phase change, we want to do it via the supplied state store.
         if phase.as_type().should_store() {
-            info!("storing phase change '{:?}' for table {}", phase, self.table_id);
+            info!(
+                "storing phase change '{:?}' for table {}",
+                phase, self.table_id
+            );
 
             state_store
                 .update_table_replication_state(self.table_id, phase)
