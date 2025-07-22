@@ -492,7 +492,7 @@ where
                         .await?;
 
                     info!(
-                        "table sync worker for table {} is in sync with the apply worker, shutting down",
+                        "table sync worker for table {} is in sync with the apply worker, the worker will terminate",
                         self.table_id
                     );
                 }
