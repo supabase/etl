@@ -1,3 +1,4 @@
+use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use config::shared::BatchConfig;
 use etl::conversions::event::EventType;
 use etl::conversions::numeric::PgNumeric;
@@ -508,15 +509,15 @@ async fn table_nullable_columns() {
                 ("f4", "float4"),
                 ("f8", "float8"),
                 ("n", "numeric"),
-                // ("by", "bytea"),
-                // ("d", "date"),
-                // ("t", "time"),
-                // ("ts", "timestamp"),
-                // ("tstz", "timestamptz"),
-                // ("uuid", "uuid"),
-                // ("j", "json"),
-                // ("jb", "jsonb"),
-                // ("o", "oid"),
+                ("by", "bytea"),
+                ("d", "date"),
+                ("ti", "time"),
+                ("ts", "timestamp"),
+                ("tstz", "timestamptz"),
+                ("u", "uuid"),
+                ("j", "json"),
+                ("jb", "jsonb"),
+                ("o", "oid"),
             ],
         )
         .await
@@ -556,7 +557,9 @@ async fn table_nullable_columns() {
     database
         .insert_values(
             table_name.clone(),
-            &["b", "t", "i2", "i4", "i8", "f4", "f8", "n"],
+            &[
+                "b", "t", "i2", "i4", "i8", "f4", "f8", "n", "by", "d", "ti", "ts", "tstz", "u", "j", "jb", "o"
+            ],
             &[
                 &Option::<bool>::None,
                 &Option::<String>::None,
@@ -566,6 +569,15 @@ async fn table_nullable_columns() {
                 &Option::<f32>::None,
                 &Option::<f64>::None,
                 &Option::<PgNumeric>::None,
+                &Option::<Vec<u8>>::None,
+                &Option::<NaiveDate>::None,
+                &Option::<NaiveTime>::None,
+                &Option::<NaiveDateTime>::None,
+                &Option::<DateTime<Utc>>::None,
+                &Option::<uuid::Uuid>::None,
+                &Option::<serde_json::Value>::None,
+                &Option::<serde_json::Value>::None,
+                &Option::<u32>::None,
             ],
         )
         .await
