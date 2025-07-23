@@ -2,6 +2,7 @@ use thiserror::Error;
 
 use crate::pipeline::PipelineId;
 use crate::workers::base::WorkerType;
+use postgres::schema::TableId;
 
 /// Maximum length for a PostgreSQL replication slot name in bytes.
 const MAX_SLOT_NAME_LENGTH: usize = 63;
@@ -55,7 +56,13 @@ mod tests {
     #[test]
     fn test_table_sync_slot_name() {
         let pipeline_id = 1;
-        let result = get_slot_name(pipeline_id, WorkerType::TableSync { table_id: 123 }).unwrap();
+        let result = get_slot_name(
+            pipeline_id,
+            WorkerType::TableSync {
+                table_id: TableId::from(123),
+            },
+        )
+        .unwrap();
         assert!(result.starts_with(TABLE_SYNC_PREFIX));
         assert!(result.len() <= MAX_SLOT_NAME_LENGTH);
     }

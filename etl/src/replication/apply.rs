@@ -746,7 +746,7 @@ where
     };
 
     if !hook
-        .should_apply_changes(message.rel_id(), remote_final_lsn)
+        .should_apply_changes(TableId::new(message.rel_id()), remote_final_lsn)
         .await?
     {
         return Ok(HandleMessageResult::default());
@@ -756,8 +756,12 @@ where
     // dealt with differently based on the worker type.
     // TODO: explore how to deal with applying relation messages to the schema (creating it if missing).
     let schema_cache = schema_cache.lock_inner().await;
-    let Some(existing_table_schema) = schema_cache.get_table_schema_ref(&message.rel_id()) else {
-        return Err(ApplyLoopError::MissingTableSchema(message.rel_id()));
+    let Some(existing_table_schema) =
+        schema_cache.get_table_schema_ref(&TableId::new(message.rel_id()))
+    else {
+        return Err(ApplyLoopError::MissingTableSchema(TableId::new(
+            message.rel_id(),
+        )));
     };
 
     // We compare the table schema from the relation message with the existing schema (if any).
@@ -766,7 +770,7 @@ where
     if !existing_table_schema.partial_eq(&event.table_schema) {
         return Ok(HandleMessageResult {
             end_batch: Some(EndBatch::Exclusive),
-            skip_table: Some(message.rel_id()),
+            skip_table: Some(TableId::new(message.rel_id())),
             ..Default::default()
         });
     }
@@ -803,7 +807,7 @@ where
     };
 
     if !hook
-        .should_apply_changes(message.rel_id(), remote_final_lsn)
+        .should_apply_changes(TableId::new(message.rel_id()), remote_final_lsn)
         .await?
     {
         return Ok(HandleMessageResult::default());
@@ -841,7 +845,7 @@ where
     };
 
     if !hook
-        .should_apply_changes(message.rel_id(), remote_final_lsn)
+        .should_apply_changes(TableId::new(message.rel_id()), remote_final_lsn)
         .await?
     {
         return Ok(HandleMessageResult::default());
@@ -879,7 +883,7 @@ where
     };
 
     if !hook
-        .should_apply_changes(message.rel_id(), remote_final_lsn)
+        .should_apply_changes(TableId::new(message.rel_id()), remote_final_lsn)
         .await?
     {
         return Ok(HandleMessageResult::default());
@@ -919,7 +923,7 @@ where
     let mut rel_ids = Vec::with_capacity(message.rel_ids().len());
     for &table_id in message.rel_ids().iter() {
         if hook
-            .should_apply_changes(table_id, remote_final_lsn)
+            .should_apply_changes(TableId::new(table_id), remote_final_lsn)
             .await?
         {
             rel_ids.push(table_id)

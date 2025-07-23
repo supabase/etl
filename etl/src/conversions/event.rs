@@ -112,7 +112,11 @@ impl RelationEvent {
             .iter()
             .map(Self::build_column_schema)
             .collect::<Result<Vec<ColumnSchema>, _>>()?;
-        let table_schema = TableSchema::new(relation_body.rel_id(), table_name, column_schemas);
+        let table_schema = TableSchema::new(
+            TableId::new(relation_body.rel_id()),
+            table_name,
+            column_schemas,
+        );
 
         Ok(Self {
             start_lsn,
@@ -319,7 +323,7 @@ async fn convert_insert_to_event(
     insert_body: &protocol::InsertBody,
 ) -> Result<InsertEvent, EventConversionError> {
     let table_id = insert_body.rel_id();
-    let table_schema = get_table_schema(schema_cache, table_id).await?;
+    let table_schema = get_table_schema(schema_cache, TableId::new(table_id)).await?;
 
     let table_row = convert_tuple_to_row(
         &table_schema.column_schemas,
@@ -329,7 +333,7 @@ async fn convert_insert_to_event(
     Ok(InsertEvent {
         start_lsn,
         commit_lsn,
-        table_id,
+        table_id: TableId::new(table_id),
         table_row,
     })
 }
@@ -341,7 +345,7 @@ async fn convert_update_to_event(
     update_body: &protocol::UpdateBody,
 ) -> Result<UpdateEvent, EventConversionError> {
     let table_id = update_body.rel_id();
-    let table_schema = get_table_schema(schema_cache, table_id).await?;
+    let table_schema = get_table_schema(schema_cache, TableId::new(table_id)).await?;
 
     let table_row = convert_tuple_to_row(
         &table_schema.column_schemas,
@@ -364,7 +368,7 @@ async fn convert_update_to_event(
     Ok(UpdateEvent {
         start_lsn,
         commit_lsn,
-        table_id,
+        table_id: TableId::new(table_id),
         table_row,
         old_table_row,
     })
@@ -377,7 +381,7 @@ async fn convert_delete_to_event(
     delete_body: &protocol::DeleteBody,
 ) -> Result<DeleteEvent, EventConversionError> {
     let table_id = delete_body.rel_id();
-    let table_schema = get_table_schema(schema_cache, table_id).await?;
+    let table_schema = get_table_schema(schema_cache, TableId::new(table_id)).await?;
 
     // We try to extract the old tuple by either taking the entire old tuple or the key of the old
     // tuple.
@@ -395,7 +399,7 @@ async fn convert_delete_to_event(
     Ok(DeleteEvent {
         start_lsn,
         commit_lsn,
-        table_id,
+        table_id: TableId::new(table_id),
         old_table_row,
     })
 }

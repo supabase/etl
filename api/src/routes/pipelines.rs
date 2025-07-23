@@ -8,6 +8,7 @@ use config::shared::{
     DestinationConfig, PgConnectionConfig, PipelineConfig as SharedPipelineConfig,
     ReplicatorConfig, SupabaseConfig, TlsConfig,
 };
+use postgres::schema::TableId;
 use serde::{Deserialize, Serialize};
 use sqlx::{PgPool, PgTransaction};
 use std::ops::DerefMut;
@@ -718,7 +719,8 @@ pub async fn get_pipeline_replication_status(
     let mut tables: Vec<TableReplicationStatus> = Vec::new();
     for row in state_rows {
         let table_id = row.table_id.0;
-        let table_name = get_table_name_from_oid(&source_pool, table_id).await?;
+        let table_name =
+            get_table_name_from_oid(&source_pool, TableId::new(row.table_id.0)).await?;
         tables.push(TableReplicationStatus {
             table_id,
             table_name: table_name.to_string(),

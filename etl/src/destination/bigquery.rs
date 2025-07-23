@@ -394,7 +394,7 @@ impl BigQueryDestination {
 
         let mut result = Vec::new();
         for (table_id, (table_name, column_schemas)) in table_schemas {
-            let table_schema = TableSchema::new(table_id, table_name, column_schemas);
+            let table_schema = TableSchema::new(TableId::new(table_id), table_name, column_schemas);
             result.push(table_schema);
         }
 
@@ -557,7 +557,9 @@ impl BigQueryDestination {
                     .lock_inner()
                     .await;
 
-                if let Some(table_schema) = schema_cache.get_table_schema_ref(&table_id) {
+                if let Some(table_schema) =
+                    schema_cache.get_table_schema_ref(&TableId::new(table_id))
+                {
                     inner
                         .client
                         .truncate_table(
@@ -582,7 +584,7 @@ impl BigQueryDestination {
     /// Extracts table ID, schema name, and table name for storage in `etl_table_schemas`.
     fn table_schema_to_table_row(table_schema: &TableSchema) -> TableRow {
         let columns = vec![
-            Cell::U32(table_schema.id),
+            Cell::U32(table_schema.id.into()),
             Cell::String(table_schema.name.schema.clone()),
             Cell::String(table_schema.name.name.clone()),
         ];
@@ -598,7 +600,7 @@ impl BigQueryDestination {
 
         for (column_order, column_schema) in table_schema.column_schemas.iter().enumerate() {
             let columns = vec![
-                Cell::U32(table_schema.id),
+                Cell::U32(table_schema.id.into()),
                 Cell::String(column_schema.name.clone()),
                 Cell::String(Self::postgres_type_to_string(&column_schema.typ)),
                 Cell::I32(column_schema.modifier),
@@ -924,7 +926,7 @@ mod tests {
             ColumnSchema::new("data".to_string(), Type::JSONB, -1, true, false),
             ColumnSchema::new("active".to_string(), Type::BOOL, -1, false, false),
         ];
-        let table_schema = TableSchema::new(456, table_name, columns);
+        let table_schema = TableSchema::new(TableId::from(456), table_name, columns);
 
         let schema_row = BigQueryDestination::table_schema_to_table_row(&table_schema);
         assert_eq!(schema_row.values[0], Cell::U32(456));

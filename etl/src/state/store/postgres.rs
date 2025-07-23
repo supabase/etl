@@ -3,7 +3,7 @@ use std::{collections::HashMap, sync::Arc};
 use config::shared::PgConnectionConfig;
 use postgres::replication::{
     TableReplicationState, TableReplicationStateRow, connect_to_source_database,
-    update_replication_state,
+    get_table_replication_state_rows, update_replication_state,
 };
 use postgres::schema::TableId;
 use sqlx::PgPool;
@@ -96,7 +96,7 @@ impl PostgresStateStore {
         pool: &PgPool,
         pipeline_id: PipelineId,
     ) -> sqlx::Result<Vec<TableReplicationStateRow>> {
-        postgres::replication::get_table_replication_state_rows(pool, pipeline_id as i64).await
+        get_table_replication_state_rows(pool, pipeline_id as i64).await
     }
 
     async fn update_replication_state(
@@ -165,7 +165,7 @@ impl StateStore for PostgresStateStore {
             let phase = self
                 .replication_phase_from_state(&row.state, row.sync_done_lsn)
                 .await?;
-            table_states.insert(row.table_id.0, phase);
+            table_states.insert(TableId::new(row.table_id.0), phase);
         }
         let mut inner = self.inner.lock().await;
         inner.table_states = table_states.clone();
@@ -188,6 +188,7 @@ impl StateStore for PostgresStateStore {
             .await?;
         let mut inner = self.inner.lock().await;
         inner.table_states.insert(table_id, state);
+
         Ok(())
     }
 }

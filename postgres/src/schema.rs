@@ -1,8 +1,9 @@
 use std::cmp::Ordering;
 use std::fmt;
+use std::str::FromStr;
 
 use pg_escape::quote_identifier;
-use tokio_postgres::types::Type;
+use tokio_postgres::types::{FromSql, ToSql, Type};
 
 /// An object identifier in PostgreSQL.
 pub type Oid = u32;
@@ -107,10 +108,87 @@ impl ColumnSchema {
     }
 }
 
-/// A type alias for PostgreSQL table OIDs.
+/// A type-safe wrapper for PostgreSQL table OIDs.
 ///
 /// Table OIDs are unique identifiers assigned to tables in PostgreSQL.
-pub type TableId = Oid;
+///
+/// This newtype provides type safety by preventing accidental use of raw [`Oid`] values
+/// where a table identifier is expected.
+#[derive(Debug, Clone, Copy, Eq, PartialEq, PartialOrd, Ord, Hash)]
+pub struct TableId(pub Oid);
+
+impl TableId {
+    /// Creates a new [`TableId`] from an [`Oid`].
+    pub fn new(oid: Oid) -> Self {
+        Self(oid)
+    }
+
+    /// Returns the underlying [`Oid`] value.
+    pub fn into_inner(self) -> Oid {
+        self.0
+    }
+}
+
+impl From<Oid> for TableId {
+    fn from(oid: Oid) -> Self {
+        Self(oid)
+    }
+}
+
+impl From<TableId> for Oid {
+    fn from(table_id: TableId) -> Self {
+        table_id.0
+    }
+}
+
+impl fmt::Display for TableId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl FromStr for TableId {
+    type Err = <Oid as FromStr>::Err;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        s.parse::<Oid>().map(TableId::new)
+    }
+}
+
+impl<'a> FromSql<'a> for TableId {
+    fn from_sql(
+        ty: &Type,
+        raw: &'a [u8],
+    ) -> Result<Self, Box<dyn std::error::Error + Sync + Send>> {
+        Ok(TableId::new(Oid::from_sql(ty, raw)?))
+    }
+
+    fn accepts(ty: &Type) -> bool {
+        <Oid as FromSql>::accepts(ty)
+    }
+}
+
+impl ToSql for TableId {
+    fn to_sql(
+        &self,
+        ty: &Type,
+        w: &mut bytes::BytesMut,
+    ) -> Result<tokio_postgres::types::IsNull, Box<dyn std::error::Error + Sync + Send>>
+    where
+        Self: Sized,
+    {
+        self.0.to_sql(ty, w)
+    }
+
+    fn accepts(ty: &Type) -> bool
+    where
+        Self: Sized,
+    {
+        <Oid as ToSql>::accepts(ty)
+    }
+
+    tokio_postgres::types::to_sql_checked!();
+}
 
 /// Represents the complete schema of a PostgreSQL table.
 ///

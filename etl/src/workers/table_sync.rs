@@ -325,7 +325,7 @@ where
             "table_sync_worker",
             pipeline_id = self.pipeline_id,
             publication_name = self.config.publication_name,
-            table_id = self.table_id,
+            table_id = %self.table_id,
         );
         let table_sync_worker = async move {
             debug!(

@@ -1,4 +1,4 @@
-use postgres::schema::{ColumnSchema, Oid, TableName, TableSchema};
+use postgres::schema::{ColumnSchema, Oid, TableId, TableName, TableSchema};
 use postgres::tokio::test_utils::{PgDatabase, id_column_schema};
 use std::ops::RangeInclusive;
 use tokio_postgres::types::{PgLsn, Type};
@@ -193,7 +193,7 @@ pub async fn get_users_age_sum_from_rows<D>(
     let mut actual_sum = 0;
 
     let tables_rows = destination.get_table_rows().await;
-    let table_rows = tables_rows.get(&table_id).unwrap();
+    let table_rows = tables_rows.get(&TableId::from(table_id)).unwrap();
     for table_row in table_rows {
         if let Cell::I32(age) = &table_row.values[2] {
             actual_sum += age;
@@ -259,7 +259,7 @@ pub fn build_expected_users_inserts(
         events.push(Event::Insert(InsertEvent {
             start_lsn: PgLsn::from(0),
             commit_lsn: PgLsn::from(0),
-            table_id: users_table_id,
+            table_id: TableId::from(users_table_id),
             table_row: TableRow {
                 values: vec![
                     Cell::I64(starting_id),
@@ -286,7 +286,7 @@ pub fn build_expected_orders_inserts(
         events.push(Event::Insert(InsertEvent {
             start_lsn: PgLsn::from(0),
             commit_lsn: PgLsn::from(0),
-            table_id: orders_table_id,
+            table_id: TableId::from(orders_table_id),
             table_row: TableRow {
                 values: vec![Cell::I64(starting_id), Cell::String(name.to_owned())],
             },
