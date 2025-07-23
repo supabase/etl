@@ -387,7 +387,10 @@ async fn start_pipeline(args: RunArgs) -> Result<(), Box<dyn Error>> {
     let mut table_copied_notifications = vec![];
     for table_id in &args.table_ids {
         let table_copied = state_store
-            .notify_on_table_state(TableId::new(*table_id), TableReplicationPhaseType::FinishedCopy)
+            .notify_on_table_state(
+                TableId::new(*table_id),
+                TableReplicationPhaseType::FinishedCopy,
+            )
             .await;
         table_copied_notifications.push(table_copied);
     }
