@@ -188,12 +188,12 @@ pub async fn insert_mock_data(
 
 pub async fn get_users_age_sum_from_rows<D>(
     destination: &TestDestinationWrapper<D>,
-    table_id: Oid,
+    table_id: TableId,
 ) -> i32 {
     let mut actual_sum = 0;
 
     let tables_rows = destination.get_table_rows().await;
-    let table_rows = tables_rows.get(&TableId::from(table_id)).unwrap();
+    let table_rows = tables_rows.get(&table_id).unwrap();
     for table_row in table_rows {
         if let Cell::I32(age) = &table_row.values[2] {
             actual_sum += age;
@@ -250,7 +250,7 @@ pub fn events_equal_excluding_fields(left: &Event, right: &Event) -> bool {
 
 pub fn build_expected_users_inserts(
     mut starting_id: i64,
-    users_table_id: Oid,
+    users_table_id: TableId,
     expected_rows: Vec<(&str, i32)>,
 ) -> Vec<Event> {
     let mut events = Vec::new();
@@ -259,7 +259,7 @@ pub fn build_expected_users_inserts(
         events.push(Event::Insert(InsertEvent {
             start_lsn: PgLsn::from(0),
             commit_lsn: PgLsn::from(0),
-            table_id: TableId::from(users_table_id),
+            table_id: users_table_id,
             table_row: TableRow {
                 values: vec![
                     Cell::I64(starting_id),
@@ -277,7 +277,7 @@ pub fn build_expected_users_inserts(
 
 pub fn build_expected_orders_inserts(
     mut starting_id: i64,
-    orders_table_id: Oid,
+    orders_table_id: TableId,
     expected_rows: Vec<&str>,
 ) -> Vec<Event> {
     let mut events = Vec::new();
@@ -286,7 +286,7 @@ pub fn build_expected_orders_inserts(
         events.push(Event::Insert(InsertEvent {
             start_lsn: PgLsn::from(0),
             commit_lsn: PgLsn::from(0),
-            table_id: TableId::from(orders_table_id),
+            table_id: orders_table_id,
             table_row: TableRow {
                 values: vec![Cell::I64(starting_id), Cell::String(name.to_owned())],
             },
