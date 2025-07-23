@@ -1,5 +1,4 @@
 use futures::StreamExt;
-use gcp_bigquery_client::client_builder::ClientBuilder;
 use gcp_bigquery_client::google::cloud::bigquery::storage::v1::RowError;
 use gcp_bigquery_client::storage::{ColumnMode, StorageApi};
 use gcp_bigquery_client::yup_oauth2::parse_service_account_key;
@@ -112,27 +111,6 @@ impl BigQueryClient {
     ) -> Result<BigQueryClient, BigQueryClientError> {
         let sa_key = parse_service_account_key(sa_key).map_err(BQError::from)?;
         let client = Client::from_service_account_key(sa_key, false).await?;
-
-        Ok(BigQueryClient { project_id, client })
-    }
-
-    /// Creates a new [`BigQueryClient`] from a service-account JSON key and allows overriding
-    /// the BigQuery endpoint URL—primarily useful for testing against emulators or mock servers.
-    ///
-    /// This override is intended only for integration tests and local development against
-    /// non-Google BigQuery implementations or emulators.
-    pub async fn new_with_custom_urls(
-        project_id: String,
-        auth_base_url: String,
-        v2_base_url: String,
-        sa_key: &str,
-    ) -> Result<BigQueryClient, BigQueryClientError> {
-        let sa_key = parse_service_account_key(sa_key).map_err(BQError::from)?;
-        let client = ClientBuilder::new()
-            .with_auth_base_url(auth_base_url)
-            .with_v2_base_url(v2_base_url)
-            .build_from_service_account_key(sa_key, false)
-            .await?;
 
         Ok(BigQueryClient { project_id, client })
     }

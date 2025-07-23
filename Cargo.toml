@@ -3,12 +3,12 @@ resolver = "2"
 members = ["api", "config", "etl", "postgres", "replicator", "telemetry"]
 
 [workspace.dependencies]
-api = { path = "api" }
-config = { path = "config" }
-etl = { path = "etl" }
-postgres = { path = "postgres" }
-replicator = { path = "replicator" }
-telemetry = { path = "telemetry" }
+api = { path = "api", default-features = false }
+config = { path = "config", default-features = false }
+etl = { path = "etl", default-features = false }
+postgres = { path = "postgres", default-features = false }
+replicator = { path = "replicator", default-features = false }
+telemetry = { path = "telemetry", default-features = false }
 
 actix-web = { version = "4", default-features = false }
 actix-web-httpauth = { version = "0.8.2", default-features = false }
@@ -57,7 +57,6 @@ tracing-subscriber = { version = "0.3", default-features = false }
 utoipa = { version = "4.2.3", default-features = false }
 utoipa-swagger-ui = { version = "7.1.0", default-features = false }
 uuid = { version = "1.10.0", default-features = false }
-wiremock = { version = "0.6.4", default-features = false }
 
 # [patch."https://github.com/imor/gcp-bigquery-client"]
 # gcp-bigquery-client = { path = "../gcp-bigquery-client" }

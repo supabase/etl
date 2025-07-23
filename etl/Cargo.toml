@@ -69,7 +69,6 @@ tracing-subscriber = { workspace = true, default-features = true, features = [
     "env-filter",
 ] }
 uuid = { workspace = true, features = ["v4"] }
-wiremock = { workspace = true, optional = true }
 
 [dev-dependencies]
 postgres = { workspace = true, features = ["test-utils", "tokio"] }
@@ -84,5 +83,5 @@ clap = { workspace = true, default-features = true, features = [
 [features]
 bigquery = ["dep:gcp-bigquery-client", "dep:prost", "postgres/bigquery"]
 unknown-types-to-bytes = []
-test-utils = ["dep:wiremock"]
-default = ["unknown-types-to-bytes"]
+test-utils = []
+default = ["unknown-types-to-bytes", "test-utils"]
