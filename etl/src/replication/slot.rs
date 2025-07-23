@@ -42,8 +42,8 @@ pub fn get_slot_name(
 
 #[cfg(test)]
 mod tests {
-    use postgres::schema::TableId;
     use super::*;
+    use postgres::schema::TableId;
 
     #[test]
     fn test_apply_worker_slot_name() {
