@@ -1,4 +1,4 @@
-use postgres::schema::{ColumnSchema, Oid, TableId, TableName, TableSchema};
+use postgres::schema::{ColumnSchema, TableId, TableName, TableSchema};
 use postgres::tokio::test_utils::{PgDatabase, id_column_schema};
 use std::ops::RangeInclusive;
 use tokio_postgres::types::{PgLsn, Type};
