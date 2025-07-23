@@ -6,6 +6,34 @@ use tokio_postgres::{Config as TokioPgConnectOptions, config::SslMode as TokioPg
 use crate::SerializableSecretString;
 use crate::shared::ValidationError;
 
+/// Static PostgreSQL connection options that ensure sane defaults.
+///
+/// These options are applied to all PostgreSQL connections to ensure consistent
+/// behavior across different PostgreSQL installations.
+pub struct DefaultPgConnectionOptions;
+
+impl DefaultPgConnectionOptions {
+    /// Returns the options as a string suitable for tokio-postgres options parameter.
+    ///
+    /// Returns a space-separated list of `-c key=value` pairs.
+    pub fn to_options_string() -> String {
+        "-c datestyle=ISO -c intervalstyle=postgres -c extra_float_digits=3 -c client_encoding=UTF8"
+            .to_string()
+    }
+
+    /// Returns the options as key-value pairs suitable for sqlx.
+    ///
+    /// Returns a vector of (key, value) tuples.
+    pub fn to_key_value_pairs() -> Vec<(String, String)> {
+        vec![
+            ("datestyle".to_string(), "ISO".to_string()),
+            ("intervalstyle".to_string(), "postgres".to_string()),
+            ("extra_float_digits".to_string(), "3".to_string()),
+            ("client_encoding".to_string(), "UTF8".to_string()),
+        ]
+    }
+}
+
 /// Configuration for connecting to a Postgres database.
 ///
 /// This struct holds all necessary connection parameters and settings.
@@ -80,18 +108,19 @@ impl IntoConnectOptions<SqlxConnectOptions> for PgConnectionConfig {
         } else {
             SqlxSslMode::Prefer
         };
-        let options = SqlxConnectOptions::new_without_pgpass()
+        let mut options = SqlxConnectOptions::new_without_pgpass()
             .host(&self.host)
             .username(&self.username)
             .port(self.port)
             .ssl_mode(ssl_mode)
-            .ssl_root_cert_from_pem(self.tls.trusted_root_certs.clone().into_bytes());
+            .ssl_root_cert_from_pem(self.tls.trusted_root_certs.clone().into_bytes())
+            .options(DefaultPgConnectionOptions::to_key_value_pairs());
 
         if let Some(password) = &self.password {
-            options.password(password.expose_secret())
-        } else {
-            options
+            options = options.password(password.expose_secret());
         }
+
+        options
     }
 
     fn with_db(&self) -> SqlxConnectOptions {
@@ -112,6 +141,7 @@ impl IntoConnectOptions<TokioPgConnectOptions> for PgConnectionConfig {
             .host(self.host.clone())
             .port(self.port)
             .user(self.username.clone())
+            .options(DefaultPgConnectionOptions::to_options_string())
             //
             // We set only ssl_mode from the tls config here and not trusted_root_certs
             // because we are using rustls for tls connections and rust_postgres
@@ -134,5 +164,31 @@ impl IntoConnectOptions<TokioPgConnectOptions> for PgConnectionConfig {
         let mut options: TokioPgConnectOptions = self.without_db();
         options.dbname(self.name.clone());
         options
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_options_string_format() {
+        let options_string = DefaultPgConnectionOptions::to_options_string();
+
+        assert_eq!(
+            options_string,
+            "-c datestyle=ISO -c intervalstyle=postgres -c extra_float_digits=3 -c client_encoding=UTF8"
+        );
+    }
+
+    #[test]
+    fn test_key_value_pairs() {
+        let pairs = DefaultPgConnectionOptions::to_key_value_pairs();
+
+        assert_eq!(pairs.len(), 4);
+        assert!(pairs.contains(&("datestyle".to_string(), "ISO".to_string())));
+        assert!(pairs.contains(&("intervalstyle".to_string(), "postgres".to_string())));
+        assert!(pairs.contains(&("extra_float_digits".to_string(), "3".to_string())));
+        assert!(pairs.contains(&("client_encoding".to_string(), "UTF8".to_string())));
     }
 }
