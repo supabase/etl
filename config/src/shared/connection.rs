@@ -12,21 +12,21 @@ use crate::shared::ValidationError;
 /// session-specific settings that affect how the server processes queries and data.
 #[derive(Debug, Clone)]
 pub struct PgConnectionOptions {
-    /// Sets the display format for date values. Common values: "ISO", "Postgres", "SQL", "German".
+    /// Sets the display format for date values.
     pub datestyle: String,
-    /// Sets the display format for interval values. Common values: "postgres", "sql_standard", "iso_8601".
+    /// Sets the display format for interval values.
     pub intervalstyle: String,
-    /// Controls the number of digits displayed for floating-point values. Range: -15 to 3.
+    /// Controls the number of digits displayed for floating-point values.
     pub extra_float_digits: i32,
-    /// Sets the client-side character set encoding. Common values: "UTF8", "LATIN1", "WIN1252".
+    /// Sets the client-side character set encoding.
     pub client_encoding: String,
-    /// Sets the time zone for displaying and interpreting time stamps. Use "UTC" or local timezone names.
+    /// Sets the time zone for displaying and interpreting time stamps.
     pub timezone: String,
-    /// Aborts any statement that takes more than the specified number of milliseconds. 0 disables timeout.
+    /// Aborts any statement that takes more than the specified number of milliseconds.
     pub statement_timeout: u32,
-    /// Aborts any statement that waits longer than the specified milliseconds to acquire a lock. 0 disables timeout.
+    /// Aborts any statement that waits longer than the specified milliseconds to acquire a lock.
     pub lock_timeout: u32,
-    /// Terminates any session that has been idle within a transaction for longer than the specified milliseconds. 0 disables timeout.
+    /// Terminates any session that has been idle within a transaction for longer than the specified milliseconds.
     pub idle_in_transaction_session_timeout: u32,
     /// Sets the application name to be reported in statistics views and logs for connection identification.
     pub application_name: String,
