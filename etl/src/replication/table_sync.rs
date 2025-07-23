@@ -1,4 +1,6 @@
 use config::shared::PipelineConfig;
+#[cfg(feature = "failpoints")]
+use fail::fail_point;
 use futures::StreamExt;
 use postgres::schema::{TableId, TableName};
 use std::sync::Arc;
@@ -6,8 +8,6 @@ use thiserror::Error;
 use tokio::pin;
 use tokio_postgres::types::PgLsn;
 use tracing::{error, info, warn};
-#[cfg(feature = "failpoints")]
-use fail::fail_point;
 
 use crate::concurrency::shutdown::{ShutdownResult, ShutdownRx};
 use crate::concurrency::signal::SignalTx;
