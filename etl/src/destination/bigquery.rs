@@ -195,33 +195,6 @@ impl BigQueryDestination {
         })
     }
 
-    /// Creates a new [`BigQueryDestination`] with custom BigQuery API endpoints.
-    ///
-    /// Allows overriding the default BigQuery service URLs for testing or private deployments.
-    /// The `auth_base_url` is used for authentication, while `v2_base_url` handles data operations.
-    pub async fn new_with_urls(
-        project_id: String,
-        dataset_id: String,
-        auth_base_url: String,
-        v2_base_url: String,
-        sa_key: &str,
-        max_staleness_mins: Option<u16>,
-    ) -> Result<Self, BigQueryDestinationError> {
-        let client =
-            BigQueryClient::new_with_custom_urls(project_id, auth_base_url, v2_base_url, sa_key)
-                .await?;
-        let inner = Inner {
-            client,
-            dataset_id,
-            max_staleness_mins,
-            schema_cache: None,
-        };
-
-        Ok(Self {
-            inner: Arc::new(Mutex::new(inner)),
-        })
-    }
-
     /// Loads BigQuery table ID and descriptor that are used for streaming operations.
     ///
     /// Returns the BigQuery-formatted table name and its column descriptor for streaming operations.

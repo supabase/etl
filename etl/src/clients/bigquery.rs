@@ -116,26 +116,6 @@ impl BigQueryClient {
         Ok(BigQueryClient { project_id, client })
     }
 
-    /// Creates a new [`BigQueryClient`] from a service-account JSON key and allows overriding
-    /// the BigQuery endpoint URL—primarily useful for testing against mock servers.
-    ///
-    /// This override is intended only for integration tests and local development.
-    pub async fn new_with_custom_urls(
-        project_id: String,
-        auth_base_url: String,
-        v2_base_url: String,
-        sa_key: &str,
-    ) -> Result<BigQueryClient, BigQueryClientError> {
-        let sa_key = parse_service_account_key(sa_key).map_err(BQError::from)?;
-        let client = ClientBuilder::new()
-            .with_auth_base_url(auth_base_url)
-            .with_v2_base_url(v2_base_url)
-            .build_from_service_account_key(sa_key, false)
-            .await?;
-
-        Ok(BigQueryClient { project_id, client })
-    }
-
     /// Returns the full BigQuery table name in the form `project_id.dataset_id.table_id`.
     pub fn full_table_name(&self, dataset_id: &str, table_id: &str) -> String {
         format!("`{}.{}.{}`", self.project_id, dataset_id, table_id)
