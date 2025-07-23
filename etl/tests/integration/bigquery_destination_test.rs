@@ -245,7 +245,7 @@ async fn table_insert_update_delete() {
         .update_values(
             database_schema.users_schema().name.clone(),
             &["name", "age"],
-            &["'user_10'", "10"],
+            &[&"user_10", &10],
         )
         .await
         .unwrap();
@@ -349,7 +349,7 @@ async fn table_subsequent_updates() {
         .update_values(
             database_schema.users_schema().name.clone(),
             &["name", "age"],
-            &["'user_3'", "3"],
+            &[&"user_3", &3],
         )
         .await
         .unwrap();
@@ -359,7 +359,7 @@ async fn table_subsequent_updates() {
         .update_values(
             database_schema.users_schema().name.clone(),
             &["name", "age"],
-            &["'user_2'", "2"],
+            &[&"user_2", &2],
         )
         .await
         .unwrap();
