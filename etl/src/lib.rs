@@ -3,6 +3,7 @@ pub mod concurrency;
 pub mod conversions;
 pub mod destination;
 pub mod encryption;
+#[cfg(feature = "failpoints")]
 pub mod failpoints;
 pub mod pipeline;
 pub mod replication;

@@ -2,6 +2,7 @@
 name = "etl"
 version = "0.1.0"
 edition = "2024"
+autotests = false
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -21,7 +22,7 @@ required-features = ["test-utils"]
 [[test]]
 name = "failpoints"
 path = "tests/failpoints/mod.rs"
-required-features = ["fail/failpoints", "test-utils"]
+required-features = ["failpoints", "test-utils"]
 
 [dependencies]
 config = { workspace = true }
@@ -32,7 +33,7 @@ bigdecimal = { workspace = true, features = ["std"] }
 bytes = { workspace = true }
 byteorder = { workspace = true }
 chrono = { workspace = true, features = ["serde"] }
-fail = { workspace = true, features = ["failpoints"] }
+fail = { workspace = true }
 futures = { workspace = true }
 gcp-bigquery-client = { workspace = true, optional = true, features = [
     "rust-tls",
@@ -84,4 +85,5 @@ clap = { workspace = true, default-features = true, features = [
 bigquery = ["dep:gcp-bigquery-client", "dep:prost", "postgres/bigquery"]
 unknown-types-to-bytes = []
 test-utils = []
-default = ["unknown-types-to-bytes", "test-utils"]
+failpoints = ["fail/failpoints"]
+default = ["unknown-types-to-bytes"]

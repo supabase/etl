@@ -1,4 +1,5 @@
 use config::shared::PipelineConfig;
+#[cfg(feature = "failpoints")]
 use fail::fail_point;
 use futures::StreamExt;
 use postgres::schema::{TableId, TableName};
@@ -12,6 +13,7 @@ use crate::concurrency::shutdown::{ShutdownResult, ShutdownRx};
 use crate::concurrency::signal::SignalTx;
 use crate::concurrency::stream::BatchStream;
 use crate::destination::base::{Destination, DestinationError};
+#[cfg(feature = "failpoints")]
 use crate::failpoints::START_TABLE_SYNC_AFTER_DATA_SYNC;
 use crate::pipeline::PipelineId;
 use crate::replication::client::{PgReplicationClient, PgReplicationError};
@@ -160,6 +162,7 @@ where
             }
 
             // Fail point to test when the table sync fails.
+            #[cfg(feature = "failpoints")]
             fail_point!(START_TABLE_SYNC_AFTER_DATA_SYNC);
 
             // We create the slot with a transaction, since we need to have a consistent snapshot of the database
