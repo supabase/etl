@@ -2,7 +2,6 @@ use thiserror::Error;
 
 use crate::pipeline::PipelineId;
 use crate::workers::base::WorkerType;
-use postgres::schema::TableId;
 
 /// Maximum length for a PostgreSQL replication slot name in bytes.
 const MAX_SLOT_NAME_LENGTH: usize = 63;
@@ -43,6 +42,7 @@ pub fn get_slot_name(
 
 #[cfg(test)]
 mod tests {
+    use postgres::schema::TableId;
     use super::*;
 
     #[test]
