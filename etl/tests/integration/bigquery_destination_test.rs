@@ -550,6 +550,7 @@ async fn table_nullable_columns() {
 
     table_sync_done_notification.notified().await;
 
+    // insert
     let event_notify = destination
         .wait_for_events_count(vec![(EventType::Insert, 1)])
         .await;
@@ -586,7 +587,27 @@ async fn table_nullable_columns() {
 
     event_notify.notified().await;
 
-    let table_rows = bigquery_database.query_table(table_name).await.unwrap();
+    let table_rows = bigquery_database
+        .query_table(table_name.clone())
+        .await
+        .unwrap();
     let parsed_table_rows = parse_bigquery_table_rows::<NullableColsScalar>(table_rows);
     assert_eq!(parsed_table_rows, vec![NullableColsScalar::all_nulls(1),]);
+
+    // delete
+    let event_notify = destination
+        .wait_for_events_count(vec![(EventType::Delete, 1)])
+        .await;
+
+    database
+        .delete_values(table_name.clone(), &["id"], &["'1'"], "")
+        .await
+        .unwrap();
+
+    event_notify.notified().await;
+
+    let table_rows = bigquery_database.query_table(table_name.clone()).await;
+    assert!(table_rows.is_none());
+
+    pipeline.shutdown_and_wait().await.unwrap();
 }
