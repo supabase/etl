@@ -6,34 +6,48 @@ use tokio_postgres::{Config as TokioPgConnectOptions, config::SslMode as TokioPg
 use crate::SerializableSecretString;
 use crate::shared::ValidationError;
 
-/// PostgreSQL connection options that ensure sane defaults for ETL/replication systems.
+/// PostgreSQL connection options for customizing server behavior.
 ///
-/// These options are applied to all PostgreSQL connections to ensure consistent
-/// behavior across different PostgreSQL installations and optimize for ETL workloads.
+/// These options are passed to PostgreSQL during connection establishment to configure
+/// session-specific settings that affect how the server processes queries and data.
 #[derive(Debug, Clone)]
 pub struct PgConnectionOptions {
-    /// Consistent ISO date format for reliable parsing
+    /// Sets the display format for date values. Common values: "ISO", "Postgres", "SQL", "German".
     pub datestyle: String,
-    /// Standard PostgreSQL interval format
+    /// Sets the display format for interval values. Common values: "postgres", "sql_standard", "iso_8601".
     pub intervalstyle: String,
-    /// Additional precision for floating point numbers
+    /// Controls the number of digits displayed for floating-point values. Range: -15 to 3.
     pub extra_float_digits: i32,
-    /// Proper character encoding support
+    /// Sets the client-side character set encoding. Common values: "UTF8", "LATIN1", "WIN1252".
     pub client_encoding: String,
-    /// Consistent timezone handling for cross-system ETL
+    /// Sets the time zone for displaying and interpreting time stamps. Use "UTC" or local timezone names.
     pub timezone: String,
-    /// 2-hour timeout for large table COPY operations (in milliseconds)
+    /// Aborts any statement that takes more than the specified number of milliseconds. 0 disables timeout.
     pub statement_timeout: u32,
-    /// 30-second timeout to prevent indefinite lock waits (in milliseconds)
+    /// Aborts any statement that waits longer than the specified milliseconds to acquire a lock. 0 disables timeout.
     pub lock_timeout: u32,
-    /// 5-minute cleanup of abandoned transactions (in milliseconds)
+    /// Terminates any session that has been idle within a transaction for longer than the specified milliseconds. 0 disables timeout.
     pub idle_in_transaction_session_timeout: u32,
-    /// Easy identification in monitoring and logs
+    /// Sets the application name to be reported in statistics views and logs for connection identification.
     pub application_name: String,
 }
 
 impl Default for PgConnectionOptions {
-    /// Default configuration values optimized for ETL/replication workloads
+    /// Returns default configuration values optimized for ETL/replication workloads.
+    ///
+    /// These defaults ensure consistent behavior across different PostgreSQL installations
+    /// and are specifically tuned for ETL systems that perform logical replication and
+    /// large data operations:
+    ///
+    /// - `datestyle = "ISO"`: Provides consistent date formatting for reliable parsing
+    /// - `intervalstyle = "postgres"`: Uses standard PostgreSQL interval format
+    /// - `extra_float_digits = 3`: Ensures sufficient precision for numeric replication
+    /// - `client_encoding = "UTF8"`: Supports international character sets
+    /// - `timezone = "UTC"`: Eliminates timezone ambiguity in distributed ETL systems
+    /// - `statement_timeout = 7200000` (2 hours): Allows large COPY operations while preventing runaway queries
+    /// - `lock_timeout = 30000` (30 seconds): Prevents indefinite blocking on table locks during replication
+    /// - `idle_in_transaction_session_timeout = 300000` (5 minutes): Cleans up abandoned transactions that could block VACUUM
+    /// - `application_name = "etl"`: Enables easy identification in monitoring and pg_stat_activity
     fn default() -> Self {
         Self {
             datestyle: "ISO".to_string(),
