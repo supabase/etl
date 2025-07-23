@@ -1,5 +1,4 @@
 use futures::StreamExt;
-use gcp_bigquery_client::client_builder::ClientBuilder;
 use gcp_bigquery_client::google::cloud::bigquery::storage::v1::RowError;
 use gcp_bigquery_client::storage::{ColumnMode, StorageApi};
 use gcp_bigquery_client::yup_oauth2::parse_service_account_key;
