@@ -2,7 +2,8 @@ use api::db::pipelines::PipelineConfig;
 use api::db::sources::SourceConfig;
 use api::routes::pipelines::{
     CreatePipelineRequest, CreatePipelineResponse, GetPipelineReplicationStatusResponse,
-    ReadPipelineResponse, ReadPipelinesResponse, UpdatePipelineImageRequest, UpdatePipelineRequest,
+    ReadPipelineResponse, ReadPipelinesResponse, SimpleTableReplicationState,
+    UpdatePipelineImageRequest, UpdatePipelineRequest,
 };
 use api::routes::sources::{CreateSourceRequest, CreateSourceResponse};
 use config::SerializableSecretString;
@@ -1034,12 +1035,12 @@ async fn pipeline_replication_status_returns_table_states_and_names() {
         .expect("Orders table not found in response");
 
     // Verify states are correctly mapped
-    use api::routes::pipelines::SimpleTableReplicationState;
+    assert_eq!(users_table_status.table_id, users_table_oid as u32);
     match &users_table_status.state {
         SimpleTableReplicationState::CopyingTable => {} // Expected for data_sync state
         other => panic!("Expected CopyingTable state for users table, got {other:?}"),
     }
-
+    assert_eq!(orders_table_status.table_id, orders_table_oid as u32);
     match &orders_table_status.state {
         SimpleTableReplicationState::FollowingWal { lag: _ } => {} // Expected for ready state
         other => panic!("Expected FollowingWal state for orders table, got {other:?}"),
