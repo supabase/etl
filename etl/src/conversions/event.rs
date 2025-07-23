@@ -277,6 +277,7 @@ async fn get_table_schema(
 fn convert_tuple_to_row(
     column_schemas: &[ColumnSchema],
     tuple_data: &[protocol::TupleData],
+    use_default_for_missing_cols: bool,
 ) -> Result<TableRow, EventConversionError> {
     let mut values = Vec::with_capacity(column_schemas.len());
 
@@ -291,9 +292,20 @@ fn convert_tuple_to_row(
         };
 
         let cell = match tuple_data {
-            // In case of a null value, we store the type information since that will be used to
-            // correctly compute default values when needed.
-            protocol::TupleData::Null => Cell::Null,
+            protocol::TupleData::Null => {
+                if column_schema.nullable {
+                    Cell::Null
+                } else if use_default_for_missing_cols {
+                    TextFormatConverter::default_value(&column_schema.typ)
+                } else {
+                    // This is protocol level error, so we panic instead of carrying on
+                    // with incorrect data to avoid corruption downstream.
+                    panic!(
+                        "A required column {} was missing from the tuple",
+                        column_schema.name
+                    );
+                }
+            }
             protocol::TupleData::UnchangedToast => {
                 TextFormatConverter::default_value(&column_schema.typ)
             }
@@ -324,6 +336,7 @@ async fn convert_insert_to_event(
     let table_row = convert_tuple_to_row(
         &table_schema.column_schemas,
         insert_body.tuple().tuple_data(),
+        false,
     )?;
 
     Ok(InsertEvent {
@@ -346,6 +359,7 @@ async fn convert_update_to_event(
     let table_row = convert_tuple_to_row(
         &table_schema.column_schemas,
         update_body.new_tuple().tuple_data(),
+        false,
     )?;
 
     // We try to extract the old tuple by either taking the entire old tuple or the key of the old
@@ -356,6 +370,7 @@ async fn convert_update_to_event(
         Some(identity) => Some(convert_tuple_to_row(
             &table_schema.column_schemas,
             identity.tuple_data(),
+            true,
         )?),
         None => None,
     }
@@ -387,6 +402,7 @@ async fn convert_delete_to_event(
         Some(identity) => Some(convert_tuple_to_row(
             &table_schema.column_schemas,
             identity.tuple_data(),
+            true,
         )?),
         None => None,
     }
