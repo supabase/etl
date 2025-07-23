@@ -74,22 +74,6 @@ jobs:
             sleep 1
           done
 
-      - name: Start BigQuery emulator
-        run: |
-          docker run -d --name bigquery-emulator \
-            -p 9050:9050 -p 9060:9060 \
-            ghcr.io/goccy/bigquery-emulator:latest \
-            --project=local-project \
-            --dataset=local-dataset \
-            --port=9050 \
-            --grpc-port=9060
-
-      - name: Wait for BigQuery emulator to be ready
-        run: |
-          until curl -s "http://localhost:9050/" > /dev/null; do
-            echo "Waiting for BigQuery emulator..."
-            sleep 1
-          done
 
       - name: Update WAL Settings
         # This step is necessary to enable logical replication for the tests

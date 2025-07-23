@@ -117,10 +117,9 @@ impl BigQueryClient {
     }
 
     /// Creates a new [`BigQueryClient`] from a service-account JSON key and allows overriding
-    /// the BigQuery endpoint URL—primarily useful for testing against emulators or mock servers.
+    /// the BigQuery endpoint URL—primarily useful for testing against mock servers.
     ///
-    /// This override is intended only for integration tests and local development against
-    /// non-Google BigQuery implementations or emulators.
+    /// This override is intended only for integration tests and local development.
     pub async fn new_with_custom_urls(
         project_id: String,
         auth_base_url: String,

@@ -57,7 +57,6 @@ tracing-subscriber = { version = "0.3", default-features = false }
 utoipa = { version = "4.2.3", default-features = false }
 utoipa-swagger-ui = { version = "7.1.0", default-features = false }
 uuid = { version = "1.10.0", default-features = false }
-wiremock = { version = "0.6.4", default-features = false }
 
 # [patch."https://github.com/imor/gcp-bigquery-client"]
 # gcp-bigquery-client = { path = "../gcp-bigquery-client" }
