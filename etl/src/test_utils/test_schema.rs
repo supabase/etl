@@ -300,17 +300,22 @@ pub fn build_expected_orders_inserts(
 
 #[cfg(feature = "bigquery")]
 pub mod bigquery {
+    use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
     use gcp_bigquery_client::model::table_cell::TableCell;
     use gcp_bigquery_client::model::table_row::TableRow;
     use std::fmt;
     use std::str::FromStr;
 
-    pub fn parse_table_cell<O>(table_cell: TableCell) -> O
+    use crate::conversions::numeric::PgNumeric;
+
+    pub fn parse_table_cell<O>(table_cell: TableCell) -> Option<O>
     where
         O: FromStr,
         <O as FromStr>::Err: fmt::Debug,
     {
-        table_cell.value.unwrap().as_str().unwrap().parse().unwrap()
+        table_cell
+            .value
+            .map(|value| value.as_str().unwrap().parse().unwrap())
     }
 
     #[derive(Debug, Eq, PartialEq, Ord, PartialOrd)]
@@ -335,9 +340,9 @@ pub mod bigquery {
             let columns = value.columns.unwrap();
 
             BigQueryUser {
-                id: parse_table_cell(columns[0].clone()),
-                name: parse_table_cell(columns[1].clone()),
-                age: parse_table_cell(columns[2].clone()),
+                id: parse_table_cell(columns[0].clone()).unwrap(),
+                name: parse_table_cell(columns[1].clone()).unwrap(),
+                age: parse_table_cell(columns[2].clone()).unwrap(),
             }
         }
     }
@@ -362,9 +367,151 @@ pub mod bigquery {
             let columns = value.columns.unwrap();
 
             BigQueryOrder {
-                id: parse_table_cell(columns[0].clone()),
-                description: parse_table_cell(columns[1].clone()),
+                id: parse_table_cell(columns[0].clone()).unwrap(),
+                description: parse_table_cell(columns[1].clone()).unwrap(),
             }
+        }
+    }
+
+    #[derive(Debug)]
+    pub struct NullableColsScalar {
+        id: i32,
+        b: Option<bool>,
+        t: Option<String>,
+        i2: Option<i16>,
+        i4: Option<i32>,
+        i8: Option<i64>,
+        f4: Option<f32>,
+        f8: Option<f64>,
+        n: Option<PgNumeric>,
+        by: Option<Vec<u8>>,
+        d: Option<NaiveDate>,
+        ti: Option<NaiveTime>,
+        ts: Option<NaiveDateTime>,
+        tstz: Option<DateTime<Utc>>,
+        u: Option<uuid::Uuid>,
+        j: Option<serde_json::Value>,
+        jb: Option<serde_json::Value>,
+        o: Option<u32>,
+    }
+
+    impl NullableColsScalar {
+        pub fn all_nulls(id: i32) -> Self {
+            Self {
+                id,
+                b: None,
+                t: None,
+                i2: None,
+                i4: None,
+                i8: None,
+                f4: None,
+                f8: None,
+                n: None,
+                by: None,
+                d: None,
+                ti: None,
+                ts: None,
+                tstz: None,
+                u: None,
+                j: None,
+                jb: None,
+                o: None,
+            }
+        }
+    }
+
+    impl From<TableRow> for NullableColsScalar {
+        fn from(value: TableRow) -> Self {
+            let columns = value.columns.unwrap();
+
+            // Helper function to parse JSON values
+            fn parse_json_value(table_cell: TableCell) -> Option<serde_json::Value> {
+                table_cell
+                    .value
+                    .and_then(|v| v.as_str().and_then(|s| serde_json::from_str(s).ok()))
+            }
+
+            // Helper function to parse byte arrays (simplified - just convert string to bytes)
+            fn parse_bytes(table_cell: TableCell) -> Option<Vec<u8>> {
+                table_cell
+                    .value
+                    .and_then(|v| v.as_str().map(|s| s.as_bytes().to_vec()))
+            }
+
+            NullableColsScalar {
+                id: parse_table_cell(columns[0].clone()).unwrap(),
+                b: parse_table_cell(columns[1].clone()),
+                t: parse_table_cell(columns[2].clone()),
+                i2: parse_table_cell(columns[3].clone()),
+                i4: parse_table_cell(columns[4].clone()),
+                i8: parse_table_cell(columns[5].clone()),
+                f4: parse_table_cell(columns[6].clone()),
+                f8: parse_table_cell(columns[7].clone()),
+                n: parse_table_cell(columns[8].clone()),
+                by: parse_bytes(columns[9].clone()),
+                d: parse_table_cell(columns[10].clone()),
+                ti: parse_table_cell(columns[11].clone()),
+                ts: parse_table_cell(columns[12].clone()),
+                tstz: parse_table_cell(columns[13].clone()),
+                u: parse_table_cell(columns[14].clone()),
+                j: parse_json_value(columns[15].clone()),
+                jb: parse_json_value(columns[16].clone()),
+                o: parse_table_cell(columns[17].clone()),
+            }
+        }
+    }
+
+    impl PartialEq for NullableColsScalar {
+        fn eq(&self, other: &Self) -> bool {
+            // Helper function for float comparison with epsilon
+            fn float_eq(a: Option<f32>, b: Option<f32>) -> bool {
+                match (a, b) {
+                    (Some(x), Some(y)) => (x - y).abs() < f32::EPSILON,
+                    (None, None) => true,
+                    _ => false,
+                }
+            }
+
+            fn double_eq(a: Option<f64>, b: Option<f64>) -> bool {
+                match (a, b) {
+                    (Some(x), Some(y)) => (x - y).abs() < f64::EPSILON,
+                    (None, None) => true,
+                    _ => false,
+                }
+            }
+
+            self.id == other.id
+                && self.b == other.b
+                && self.t == other.t
+                && self.i2 == other.i2
+                && self.i4 == other.i4
+                && self.i8 == other.i8
+                && float_eq(self.f4, other.f4)
+                && double_eq(self.f8, other.f8)
+                && self.n == other.n
+                && self.by == other.by
+                && self.d == other.d
+                && self.ti == other.ti
+                && self.ts == other.ts
+                && self.tstz == other.tstz
+                && self.u == other.u
+                && self.j == other.j
+                && self.jb == other.jb
+                && self.o == other.o
+        }
+    }
+
+    impl Eq for NullableColsScalar {}
+
+    impl PartialOrd for NullableColsScalar {
+        fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+            Some(self.cmp(other))
+        }
+    }
+
+    impl Ord for NullableColsScalar {
+        fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+            self.id.cmp(&other.id)
         }
     }
 

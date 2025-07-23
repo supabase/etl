@@ -15,7 +15,7 @@ use etl::test_utils::database::{spawn_database, test_table_name};
 use etl::test_utils::pipeline::{create_pipeline, create_pipeline_with};
 use etl::test_utils::test_destination_wrapper::TestDestinationWrapper;
 use etl::test_utils::test_schema::bigquery::{
-    BigQueryOrder, BigQueryUser, parse_bigquery_table_rows,
+    BigQueryOrder, BigQueryUser, NullableColsScalar, parse_bigquery_table_rows,
 };
 use etl::test_utils::test_schema::{TableSelection, insert_mock_data, setup_test_database_schema};
 
@@ -558,7 +558,8 @@ async fn table_nullable_columns() {
         .insert_values(
             table_name.clone(),
             &[
-                "b", "t", "i2", "i4", "i8", "f4", "f8", "n", "by", "d", "ti", "ts", "tstz", "u", "j", "jb", "o"
+                "b", "t", "i2", "i4", "i8", "f4", "f8", "n", "by", "d", "ti", "ts", "tstz", "u",
+                "j", "jb", "o",
             ],
             &[
                 &Option::<bool>::None,
@@ -584,4 +585,8 @@ async fn table_nullable_columns() {
         .unwrap();
 
     event_notify.notified().await;
+
+    let table_rows = bigquery_database.query_table(table_name).await.unwrap();
+    let parsed_table_rows = parse_bigquery_table_rows::<NullableColsScalar>(table_rows);
+    assert_eq!(parsed_table_rows, vec![NullableColsScalar::all_nulls(1),]);
 }
