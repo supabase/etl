@@ -300,6 +300,8 @@ pub fn build_expected_orders_inserts(
 
 #[cfg(feature = "bigquery")]
 pub mod bigquery {
+    use base64::Engine;
+    use base64::prelude::BASE64_STANDARD;
     use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
     use gcp_bigquery_client::model::table_cell::TableCell;
     use gcp_bigquery_client::model::table_row::TableRow;
@@ -418,6 +420,49 @@ pub mod bigquery {
                 o: None,
             }
         }
+
+        #[allow(clippy::too_many_arguments)]
+        pub fn with_non_null_values(
+            id: i32,
+            b: bool,
+            t: String,
+            i2: i16,
+            i4: i32,
+            i8: i64,
+            f4: f32,
+            f8: f64,
+            n: PgNumeric,
+            by: Vec<u8>,
+            d: NaiveDate,
+            ti: NaiveTime,
+            ts: NaiveDateTime,
+            tstz: DateTime<Utc>,
+            u: uuid::Uuid,
+            j: serde_json::Value,
+            jb: serde_json::Value,
+            o: u32,
+        ) -> Self {
+            Self {
+                id,
+                b: Some(b),
+                t: Some(t),
+                i2: Some(i2),
+                i4: Some(i4),
+                i8: Some(i8),
+                f4: Some(f4),
+                f8: Some(f8),
+                n: Some(n),
+                by: Some(by),
+                d: Some(d),
+                ti: Some(ti),
+                ts: Some(ts),
+                tstz: Some(tstz),
+                u: Some(u),
+                j: Some(j),
+                jb: Some(jb),
+                o: Some(o),
+            }
+        }
     }
 
     impl From<TableRow> for NullableColsScalar {
@@ -431,11 +476,11 @@ pub mod bigquery {
                     .and_then(|v| v.as_str().and_then(|s| serde_json::from_str(s).ok()))
             }
 
-            // Helper function to parse byte arrays (simplified - just convert string to bytes)
+            // Helper function to parse byte arrays (decode from base64)
             fn parse_bytes(table_cell: TableCell) -> Option<Vec<u8>> {
                 table_cell
                     .value
-                    .and_then(|v| v.as_str().map(|s| s.as_bytes().to_vec()))
+                    .and_then(|v| v.as_str().and_then(|s| BASE64_STANDARD.decode(s).ok()))
             }
 
             NullableColsScalar {
