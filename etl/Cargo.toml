@@ -84,4 +84,4 @@ clap = { workspace = true, default-features = true, features = [
 bigquery = ["dep:gcp-bigquery-client", "dep:prost", "postgres/bigquery"]
 unknown-types-to-bytes = []
 test-utils = []
-default = ["unknown-types-to-bytes"]
+default = ["unknown-types-to-bytes", "test-utils"]

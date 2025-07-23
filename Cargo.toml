@@ -3,12 +3,12 @@ resolver = "2"
 members = ["api", "config", "etl", "postgres", "replicator", "telemetry"]
 
 [workspace.dependencies]
-api = { path = "api" }
-config = { path = "config" }
-etl = { path = "etl" }
-postgres = { path = "postgres" }
-replicator = { path = "replicator" }
-telemetry = { path = "telemetry" }
+api = { path = "api", default-features = false }
+config = { path = "config", default-features = false }
+etl = { path = "etl", default-features = false }
+postgres = { path = "postgres", default-features = false }
+replicator = { path = "replicator", default-features = false }
+telemetry = { path = "telemetry", default-features = false }
 
 actix-web = { version = "4", default-features = false }
 actix-web-httpauth = { version = "0.8.2", default-features = false }
