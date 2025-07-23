@@ -59,7 +59,7 @@ mod tests {
         let result = get_slot_name(
             pipeline_id,
             WorkerType::TableSync {
-                table_id: TableId::from(123),
+                table_id: TableId::new(123),
             },
         )
         .unwrap();

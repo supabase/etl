@@ -926,7 +926,7 @@ mod tests {
             ColumnSchema::new("data".to_string(), Type::JSONB, -1, true, false),
             ColumnSchema::new("active".to_string(), Type::BOOL, -1, false, false),
         ];
-        let table_schema = TableSchema::new(TableId::from(456), table_name, columns);
+        let table_schema = TableSchema::new(TableId::new(456), table_name, columns);
 
         let schema_row = BigQueryDestination::table_schema_to_table_row(&table_schema);
         assert_eq!(schema_row.values[0], Cell::U32(456));
