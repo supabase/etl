@@ -507,7 +507,7 @@ async fn table_nullable_columns() {
                 ("i8", "int8"),
                 ("f4", "float4"),
                 ("f8", "float8"),
-                // ("n", "numeric"),
+                ("n", "numeric"),
                 // ("by", "bytea"),
                 // ("d", "date"),
                 // ("t", "time"),
@@ -556,7 +556,7 @@ async fn table_nullable_columns() {
     database
         .insert_values(
             table_name.clone(),
-            &["b", "t", "i2", "i4", "i8", "f4", "f8"],
+            &["b", "t", "i2", "i4", "i8", "f4", "f8", "n"],
             &[
                 &Option::<bool>::None,
                 &Option::<String>::None,
@@ -565,6 +565,7 @@ async fn table_nullable_columns() {
                 &Option::<i64>::None,
                 &Option::<f32>::None,
                 &Option::<f64>::None,
+                &Option::<PgNumeric>::None,
             ],
         )
         .await
