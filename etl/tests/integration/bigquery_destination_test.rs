@@ -1,5 +1,6 @@
 use config::shared::BatchConfig;
 use etl::conversions::event::EventType;
+use etl::conversions::numeric::PgNumeric;
 use etl::destination::base::Destination;
 use etl::encryption::bigquery::install_crypto_provider_once;
 use etl::pipeline::PipelineId;
@@ -9,7 +10,7 @@ use rand::random;
 use telemetry::init_test_tracing;
 
 use etl::test_utils::bigquery::setup_bigquery_connection;
-use etl::test_utils::database::spawn_database;
+use etl::test_utils::database::{spawn_database, test_table_name};
 use etl::test_utils::pipeline::{create_pipeline, create_pipeline_with};
 use etl::test_utils::test_destination_wrapper::TestDestinationWrapper;
 use etl::test_utils::test_schema::bigquery::{
@@ -484,4 +485,90 @@ async fn table_truncate_with_batching() {
         parsed_orders_rows,
         vec![BigQueryOrder::new(2, "description_2"),]
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn table_nullable_columns() {
+    init_test_tracing();
+    install_crypto_provider_once();
+
+    let database = spawn_database().await;
+    let bigquery_database = setup_bigquery_connection().await;
+    let table_name = test_table_name("nullable_cols_scalar");
+    let table_id = database
+        .create_table(
+            table_name.clone(),
+            true,
+            &[
+                ("b", "bool"),
+                ("t", "text"),
+                ("i2", "int2"),
+                ("i4", "int4"),
+                ("i8", "int8"),
+                ("f4", "float4"),
+                ("f8", "float8"),
+                // ("n", "numeric"),
+                // ("by", "bytea"),
+                // ("d", "date"),
+                // ("t", "time"),
+                // ("ts", "timestamp"),
+                // ("tstz", "timestamptz"),
+                // ("uuid", "uuid"),
+                // ("j", "json"),
+                // ("jb", "jsonb"),
+                // ("o", "oid"),
+            ],
+        )
+        .await
+        .unwrap();
+
+    let state_store = NotifyingStateStore::new();
+    let raw_destination = bigquery_database.build_destination().await;
+    let destination = TestDestinationWrapper::wrap(raw_destination);
+
+    let publication_name = "test_pub".to_string();
+    database
+        .create_publication(&publication_name, &[table_name.clone()])
+        .await
+        .expect("Failed to create publication");
+
+    let pipeline_id: PipelineId = random();
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        publication_name,
+        state_store.clone(),
+        destination.clone(),
+    );
+
+    let table_sync_done_notification = state_store
+        .notify_on_table_state(table_id, TableReplicationPhaseType::SyncDone)
+        .await;
+
+    pipeline.start().await.unwrap();
+
+    table_sync_done_notification.notified().await;
+
+    let event_notify = destination
+        .wait_for_events_count(vec![(EventType::Insert, 1)])
+        .await;
+
+    database
+        .insert_values(
+            table_name.clone(),
+            &["b", "t", "i2", "i4", "i8", "f4", "f8"],
+            &[
+                &Option::<bool>::None,
+                &Option::<String>::None,
+                &Option::<i16>::None,
+                &Option::<i32>::None,
+                &Option::<i64>::None,
+                &Option::<f32>::None,
+                &Option::<f64>::None,
+            ],
+        )
+        .await
+        .unwrap();
+
+    event_notify.notified().await;
 }
