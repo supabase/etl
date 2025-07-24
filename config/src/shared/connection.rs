@@ -52,7 +52,7 @@ impl Default for PgConnectionOptions {
             extra_float_digits: 3,
             client_encoding: "UTF8".to_string(),
             timezone: "UTC".to_string(),
-            lock_timeout: 30_000,         // 30 seconds in milliseconds
+            lock_timeout: 30_000, // 30 seconds in milliseconds
             idle_in_transaction_session_timeout: 300_000, // 5 minutes in milliseconds
             application_name: "etl".to_string(),
         }
