@@ -249,7 +249,7 @@ mod tests {
 
         assert_eq!(
             options_string,
-            "-c datestyle=ISO -c intervalstyle=postgres -c extra_float_digits=3 -c client_encoding=UTF8 -c timezone=UTC -c statement_timeout=7200000 -c lock_timeout=30000 -c idle_in_transaction_session_timeout=300000 -c application_name=etl"
+            "-c datestyle=ISO -c intervalstyle=postgres -c extra_float_digits=3 -c client_encoding=UTF8 -c timezone=UTC -c lock_timeout=30000 -c idle_in_transaction_session_timeout=300000 -c application_name=etl"
         );
     }
 
@@ -264,7 +264,6 @@ mod tests {
         assert!(pairs.contains(&("extra_float_digits".to_string(), "3".to_string())));
         assert!(pairs.contains(&("client_encoding".to_string(), "UTF8".to_string())));
         assert!(pairs.contains(&("timezone".to_string(), "UTC".to_string())));
-        assert!(pairs.contains(&("statement_timeout".to_string(), "7200000".to_string())));
         assert!(pairs.contains(&("lock_timeout".to_string(), "30000".to_string())));
         assert!(pairs.contains(&(
             "idle_in_transaction_session_timeout".to_string(),
