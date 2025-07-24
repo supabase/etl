@@ -258,7 +258,7 @@ mod tests {
         let options = PgConnectionOptions::default();
         let pairs = options.to_key_value_pairs();
 
-        assert_eq!(pairs.len(), 9);
+        assert_eq!(pairs.len(), 8);
         assert!(pairs.contains(&("datestyle".to_string(), "ISO".to_string())));
         assert!(pairs.contains(&("intervalstyle".to_string(), "postgres".to_string())));
         assert!(pairs.contains(&("extra_float_digits".to_string(), "3".to_string())));
