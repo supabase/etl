@@ -22,8 +22,6 @@ pub struct PgConnectionOptions {
     pub client_encoding: String,
     /// Sets the time zone for displaying and interpreting time stamps.
     pub timezone: String,
-    /// Aborts any statement that takes more than the specified number of milliseconds.
-    pub statement_timeout: u32,
     /// Aborts any statement that waits longer than the specified milliseconds to acquire a lock.
     pub lock_timeout: u32,
     /// Terminates any session that has been idle within a transaction for longer than the specified milliseconds.
@@ -44,7 +42,6 @@ impl Default for PgConnectionOptions {
     /// - `extra_float_digits = 3`: Ensures sufficient precision for numeric replication
     /// - `client_encoding = "UTF8"`: Supports international character sets
     /// - `timezone = "UTC"`: Eliminates timezone ambiguity in distributed ETL systems
-    /// - `statement_timeout = 7200000` (2 hours): Allows large COPY operations while preventing runaway queries
     /// - `lock_timeout = 30000` (30 seconds): Prevents indefinite blocking on table locks during replication
     /// - `idle_in_transaction_session_timeout = 300000` (5 minutes): Cleans up abandoned transactions that could block VACUUM
     /// - `application_name = "etl"`: Enables easy identification in monitoring and pg_stat_activity
@@ -55,7 +52,6 @@ impl Default for PgConnectionOptions {
             extra_float_digits: 3,
             client_encoding: "UTF8".to_string(),
             timezone: "UTC".to_string(),
-            statement_timeout: 7_200_000, // 2 hours in milliseconds
             lock_timeout: 30_000,         // 30 seconds in milliseconds
             idle_in_transaction_session_timeout: 300_000, // 5 minutes in milliseconds
             application_name: "etl".to_string(),
@@ -69,13 +65,12 @@ impl PgConnectionOptions {
     /// Returns a space-separated list of `-c key=value` pairs.
     pub fn to_options_string(&self) -> String {
         format!(
-            "-c datestyle={} -c intervalstyle={} -c extra_float_digits={} -c client_encoding={} -c timezone={} -c statement_timeout={} -c lock_timeout={} -c idle_in_transaction_session_timeout={} -c application_name={}",
+            "-c datestyle={} -c intervalstyle={} -c extra_float_digits={} -c client_encoding={} -c timezone={} -c lock_timeout={} -c idle_in_transaction_session_timeout={} -c application_name={}",
             self.datestyle,
             self.intervalstyle,
             self.extra_float_digits,
             self.client_encoding,
             self.timezone,
-            self.statement_timeout,
             self.lock_timeout,
             self.idle_in_transaction_session_timeout,
             self.application_name
@@ -95,10 +90,6 @@ impl PgConnectionOptions {
             ),
             ("client_encoding".to_string(), self.client_encoding.clone()),
             ("timezone".to_string(), self.timezone.clone()),
-            (
-                "statement_timeout".to_string(),
-                self.statement_timeout.to_string(),
-            ),
             ("lock_timeout".to_string(), self.lock_timeout.to_string()),
             (
                 "idle_in_transaction_session_timeout".to_string(),
