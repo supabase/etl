@@ -1,5 +1,5 @@
-use crate::error::ETLError;
 use crate::bail;
+use crate::error::ETLError;
 use crate::error::{ETLResult, ErrorKind};
 
 pub fn from_bytea_hex(s: &str) -> ETLResult<Vec<u8>> {

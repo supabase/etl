@@ -9,10 +9,10 @@ use tokio_postgres::types::PgLsn;
 use crate::conversions::Cell;
 use crate::conversions::table_row::TableRow;
 use crate::conversions::text::TextFormatConverter;
+use crate::error::ETLError;
 use crate::error::{ETLResult, ErrorKind};
 use crate::schema::cache::SchemaCache;
 use crate::{bail, etl_error};
-use crate::error::ETLError;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct BeginEvent {
