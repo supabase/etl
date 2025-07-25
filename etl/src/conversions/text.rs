@@ -1,11 +1,14 @@
-use super::{ArrayCell, Cell, numeric::PgNumeric};
-use crate::bail;
-use crate::conversions::{bool::parse_bool, hex};
-use crate::error::ETLResult;
+use crate::error::ETLError;
 use chrono::{DateTime, FixedOffset, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use core::str;
 use tokio_postgres::types::Type;
 use uuid::Uuid;
+
+use crate::bail;
+use crate::conversions::{bool::parse_bool, hex};
+use crate::error::{ETLResult, ErrorKind};
+
+use super::{ArrayCell, Cell, numeric::PgNumeric};
 
 pub struct TextFormatConverter;
 
