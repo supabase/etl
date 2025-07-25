@@ -14,8 +14,6 @@ use crate::concurrency::signal::SignalTx;
 use crate::concurrency::stream::BatchStream;
 use crate::destination::base::Destination;
 use crate::error::{ETLError, ETLResult, ErrorKind};
-#[cfg(feature = "failpoints")]
-use crate::failpoints::START_TABLE_SYNC_AFTER_DATA_SYNC;
 use crate::pipeline::PipelineId;
 use crate::replication::client::PgReplicationClient;
 use crate::replication::slot::get_slot_name;
@@ -25,6 +23,11 @@ use crate::state::store::base::StateStore;
 use crate::state::table::{TableReplicationPhase, TableReplicationPhaseType};
 use crate::workers::base::WorkerType;
 use crate::workers::table_sync::TableSyncWorkerState;
+#[cfg(feature = "failpoints")]
+use crate::{
+    failpoints::START_TABLE_SYNC_AFTER_DATA_SYNC_ERROR,
+    failpoints::START_TABLE_SYNC_AFTER_DATA_SYNC_PANIC,
+};
 
 #[derive(Debug)]
 pub enum TableSyncResult {
@@ -144,7 +147,14 @@ where
 
             // Fail point to test when the table sync fails.
             #[cfg(feature = "failpoints")]
-            fail_point!(START_TABLE_SYNC_AFTER_DATA_SYNC);
+            fail_point!(START_TABLE_SYNC_AFTER_DATA_SYNC_PANIC);
+            #[cfg(feature = "failpoints")]
+            fail_point!(START_TABLE_SYNC_AFTER_DATA_SYNC_ERROR, |_| {
+                bail!(
+                    ErrorKind::Unknown,
+                    "An unknown error has occurred before copying the table"
+                );
+            });
 
             // We create the slot with a transaction, since we need to have a consistent snapshot of the database
             // before copying the schema and tables.

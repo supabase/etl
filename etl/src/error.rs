@@ -22,8 +22,6 @@ pub enum ErrorRepr {
 pub enum ErrorKind {
     /// Database connection failed
     ConnectionFailed,
-    /// Authentication failed
-    AuthenticationFailed,
     /// Query execution failed
     QueryFailed,
     /// Source schema mismatch or validation error
@@ -36,18 +34,12 @@ pub enum ErrorKind {
     ConversionError,
     /// Configuration error
     ConfigError,
-    /// Pipeline execution error
-    PipelineError,
-    /// Resource constraint error (memory, disk, etc.)
-    ResourceError,
     /// Network or I/O error
     NetworkError,
     /// Serialization/deserialization error
     SerializationError,
     /// Encryption/decryption error
     EncryptionError,
-    /// Timeout error
-    TimeoutError,
     /// Invalid state error
     InvalidState,
     /// Invalid data
@@ -60,8 +52,6 @@ pub enum ErrorKind {
     TableSyncWorkerError,
     /// Destination-specific error
     DestinationError,
-    /// Source-specific error
-    SourceError,
     /// Replication slot not found
     ReplicationSlotNotFound,
     /// Replication slot already exists
@@ -72,8 +62,6 @@ pub enum ErrorKind {
     ReplicationSlotInvalid,
     /// Table synchronization failed
     TableSyncFailed,
-    /// Table not found
-    TableNotFound,
     /// Logical replication stream error
     LogicalReplicationFailed,
     /// Unknown error
@@ -95,7 +83,7 @@ impl ETLError {
             | ErrorRepr::WithDescriptionAndDetail(kind, _, _) => kind,
             ErrorRepr::Many(ref errors) => errors
                 .first()
-                .map(|e| e.kind())
+                .map(|err| err.kind())
                 .unwrap_or(ErrorKind::Unknown),
         }
     }
@@ -105,7 +93,11 @@ impl ETLError {
         match self.repr {
             ErrorRepr::WithDescription(kind, _)
             | ErrorRepr::WithDescriptionAndDetail(kind, _, _) => vec![kind],
-            ErrorRepr::Many(ref errors) => errors.iter().map(|e| e.kind()).collect::<Vec<_>>(),
+            ErrorRepr::Many(ref errors) => errors
+                .iter()
+                .map(|err| err.kinds())
+                .flatten()
+                .collect::<Vec<_>>(),
         }
     }
 

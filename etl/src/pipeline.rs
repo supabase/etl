@@ -177,7 +177,6 @@ where
     pub async fn wait(self) -> ETLResult<()> {
         let PipelineWorkers::Started { apply_worker, pool } = self.workers else {
             info!("pipeline was not started, nothing to wait for");
-
             return Ok(());
         };
 
@@ -213,7 +212,6 @@ where
         let table_sync_workers_result = pool.wait_all().await;
         if let Err(err) = table_sync_workers_result {
             errors.push(err);
-
             info!("one or more table sync workers failed with an error");
         } else {
             info!("all table sync workers completed successfully");
