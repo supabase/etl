@@ -435,8 +435,8 @@ pub mod bigquery {
             by: Vec<u8>,
             d: NaiveDate,
             ti: NaiveTime,
-            // ts: NaiveDateTime,
-            // tstz: DateTime<Utc>,
+            ts: NaiveDateTime,
+            tstz: DateTime<Utc>,
             u: uuid::Uuid,
             j: serde_json::Value,
             jb: serde_json::Value,
@@ -455,8 +455,8 @@ pub mod bigquery {
                 by: Some(by),
                 d: Some(d),
                 ti: Some(ti),
-                ts: None,   //ts: Some(ts),
-                tstz: None, // tstz: Some(tstz),
+                ts: Some(ts),
+                tstz: Some(tstz),
                 u: Some(u),
                 j: Some(j),
                 jb: Some(jb),
@@ -483,6 +483,29 @@ pub mod bigquery {
                     .and_then(|v| v.as_str().and_then(|s| BASE64_STANDARD.decode(s).ok()))
             }
 
+            // Helper function to parse Unix timestamp from TableCell to DateTime<Utc>
+            fn parse_unix_timestamp_from_cell(table_cell: TableCell) -> Option<DateTime<Utc>> {
+                table_cell
+                    .value
+                    .and_then(|v| v.as_str().map(|s| s.to_string()))
+                    .and_then(|s| s.parse::<f64>().ok())
+                    .and_then(|timestamp| {
+                        let secs = timestamp.trunc() as i64;
+                        let nanos = ((timestamp.fract()) * 1_000_000_000.0).round() as u32;
+                        DateTime::from_timestamp(secs, nanos)
+                    })
+            }
+
+            // Helper function to parse Unix timestamp to NaiveDateTime
+            fn parse_unix_timestamp_naive(table_cell: TableCell) -> Option<NaiveDateTime> {
+                parse_unix_timestamp_from_cell(table_cell).map(|dt| dt.naive_utc())
+            }
+
+            // Helper function to parse Unix timestamp to DateTime<Utc>
+            fn parse_unix_timestamp_utc(table_cell: TableCell) -> Option<DateTime<Utc>> {
+                parse_unix_timestamp_from_cell(table_cell)
+            }
+
             NullableColsScalar {
                 id: parse_table_cell(columns[0].clone()).unwrap(),
                 b: parse_table_cell(columns[1].clone()),
@@ -496,8 +519,8 @@ pub mod bigquery {
                 by: parse_bytes(columns[9].clone()),
                 d: parse_table_cell(columns[10].clone()),
                 ti: parse_table_cell(columns[11].clone()),
-                ts: parse_table_cell(columns[12].clone()),
-                tstz: parse_table_cell(columns[13].clone()),
+                ts: parse_unix_timestamp_naive(columns[12].clone()),
+                tstz: parse_unix_timestamp_utc(columns[13].clone()),
                 u: parse_table_cell(columns[14].clone()),
                 j: parse_json_value(columns[15].clone()),
                 jb: parse_json_value(columns[16].clone()),
