@@ -1,14 +1,13 @@
 use crate::concurrency::shutdown::ShutdownRx;
-use crate::conversions::event::{Event, EventConversionError, EventType, convert_message_to_event};
-use crate::destination::base::{Destination, DestinationError};
+use crate::conversions::event::{Event, EventType, convert_message_to_event};
+use crate::destination::base::Destination;
+use crate::error::{ETLError, ErrorKind, ErrorRepr};
 use crate::pipeline::PipelineId;
-use crate::replication::client::{PgReplicationClient, PgReplicationError};
-use crate::replication::slot::{SlotError, get_slot_name};
-use crate::replication::stream::{EventsStream, EventsStreamError};
+use crate::replication::client::PgReplicationClient;
+use crate::replication::slot::get_slot_name;
+use crate::replication::stream::EventsStream;
 use crate::schema::cache::SchemaCache;
-use crate::workers::apply::ApplyWorkerHookError;
 use crate::workers::base::WorkerType;
-use crate::workers::table_sync::TableSyncWorkerHookError;
 
 use crate::concurrency::signal::SignalRx;
 use config::shared::PipelineConfig;
@@ -20,66 +19,14 @@ use std::future::{Future, pending};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use thiserror::Error;
 use tokio::pin;
 use tokio_postgres::types::PgLsn;
-use tracing::{debug, error, info};
+use tracing::{debug, info};
 
 /// The amount of milliseconds that pass between one refresh and the other of the system, in case no
 /// events or shutdown signal are received.
 const REFRESH_INTERVAL: Duration = Duration::from_millis(1000);
 
-// TODO: figure out how to break the cycle and remove `Box`.
-#[derive(Debug, Error)]
-pub enum ApplyLoopError {
-    #[error("Apply worker hook operation failed: {0}")]
-    ApplyWorkerHook(Box<ApplyWorkerHookError>),
-
-    #[error("Table sync worker hook operation failed: {0}")]
-    TableSyncWorkerHook(Box<TableSyncWorkerHookError>),
-
-    #[error("A Postgres replication error occurred in the apply loop: {0}")]
-    PgReplication(#[from] PgReplicationError),
-
-    #[error("An error occurred while streaming logical replication changes in the apply loop: {0}")]
-    LogicalReplicationStreamFailed(#[from] EventsStreamError),
-
-    #[error("Could not generate slot name in the apply loop: {0}")]
-    Slot(#[from] SlotError),
-
-    #[error("An error occurred while building an event from a message in the apply loop: {0}")]
-    EventConversion(#[from] EventConversionError),
-
-    #[error("An error occurred when interacting with the destination in the apply loop: {0}")]
-    Destination(#[from] DestinationError),
-
-    #[error("A transaction should have started for the action ({0}) to be performed")]
-    InvalidTransaction(String),
-
-    #[error("Incorrect commit LSN {0} in COMMIT message (expected {1})")]
-    InvalidCommitLsn(PgLsn, PgLsn),
-
-    #[error("An invalid event {0} was received (expected {1})")]
-    InvalidEvent(EventType, EventType),
-
-    #[error("The table schema for table {0} was not found in the cache")]
-    MissingTableSchema(TableId),
-
-    #[error("The received table schema doesn't match the table schema loaded during table sync")]
-    MismatchedTableSchema,
-}
-
-impl From<ApplyWorkerHookError> for ApplyLoopError {
-    fn from(err: ApplyWorkerHookError) -> Self {
-        ApplyLoopError::ApplyWorkerHook(Box::new(err))
-    }
-}
-
-impl From<TableSyncWorkerHookError> for ApplyLoopError {
-    fn from(err: TableSyncWorkerHookError) -> Self {
-        ApplyLoopError::TableSyncWorkerHook(Box::new(err))
-    }
-}
 
 #[derive(Debug, Copy, Clone)]
 pub enum ApplyLoopResult {
@@ -87,7 +34,7 @@ pub enum ApplyLoopResult {
 }
 
 pub trait ApplyLoopHook {
-    type Error: Into<ApplyLoopError>;
+    type Error: Into<ETLError>;
 
     fn before_loop(
         &self,
@@ -262,11 +209,11 @@ pub async fn start_apply_loop<D, T>(
     hook: T,
     mut shutdown_rx: ShutdownRx,
     mut force_syncing_tables_rx: Option<SignalRx>,
-) -> Result<ApplyLoopResult, ApplyLoopError>
+) -> Result<ApplyLoopResult, ETLError>
 where
     D: Destination + Clone + Send + 'static,
     T: ApplyLoopHook,
-    ApplyLoopError: From<<T as ApplyLoopHook>::Error>,
+    ETLError: From<<T as ApplyLoopHook>::Error>,
 {
     info!(
         "starting apply loop in worker '{:?}' from lsn {}",
@@ -389,11 +336,11 @@ async fn handle_replication_message_batch<D, T>(
     hook: &T,
     max_batch_size: usize,
     max_batch_fill_duration: Duration,
-) -> Result<bool, ApplyLoopError>
+) -> Result<bool, ETLError>
 where
     D: Destination + Clone + Send + 'static,
     T: ApplyLoopHook,
-    ApplyLoopError: From<<T as ApplyLoopHook>::Error>,
+    ETLError: From<<T as ApplyLoopHook>::Error>,
 {
     let result =
         handle_replication_message(state, events_stream, message, schema_cache, hook).await?;
@@ -425,11 +372,11 @@ async fn try_send_batch<D, T>(
     hook: &T,
     max_batch_size: usize,
     max_batch_fill_duration: Duration,
-) -> Result<bool, ApplyLoopError>
+) -> Result<bool, ETLError>
 where
     D: Destination + Clone + Send + 'static,
     T: ApplyLoopHook,
-    ApplyLoopError: From<<T as ApplyLoopHook>::Error>,
+    ETLError: From<<T as ApplyLoopHook>::Error>,
 {
     let elapsed = state.last_batch_send_time.elapsed();
     // `elapsed` could be zero in case current time is earlier than `last_batch_send_time`.
@@ -508,10 +455,10 @@ async fn handle_replication_message<T>(
     message: ReplicationMessage<LogicalReplicationMessage>,
     schema_cache: &SchemaCache,
     hook: &T,
-) -> Result<HandleMessageResult, ApplyLoopError>
+) -> Result<HandleMessageResult, ETLError>
 where
     T: ApplyLoopHook,
-    ApplyLoopError: From<<T as ApplyLoopHook>::Error>,
+    ETLError: From<<T as ApplyLoopHook>::Error>,
 {
     match message {
         ReplicationMessage::XLogData(message) => {
@@ -565,10 +512,10 @@ async fn handle_logical_replication_message<T>(
     message: LogicalReplicationMessage,
     schema_cache: &SchemaCache,
     hook: &T,
-) -> Result<HandleMessageResult, ApplyLoopError>
+) -> Result<HandleMessageResult, ETLError>
 where
     T: ApplyLoopHook,
-    ApplyLoopError: From<<T as ApplyLoopHook>::Error>,
+    ETLError: From<<T as ApplyLoopHook>::Error>,
 {
     // We perform the conversion of the message to our own event format which is used downstream
     // by the destination.
@@ -616,7 +563,7 @@ where
 fn get_commit_lsn(
     state: &ApplyLoopState,
     message: &LogicalReplicationMessage,
-) -> Result<PgLsn, ApplyLoopError> {
+) -> Result<PgLsn, ETLError> {
     // If we are in a `Begin` message, the `commit_lsn` is the `final_lsn` of the payload, in all the
     // other cases we read the `remote_final_lsn` which should be always set in case we are within or
     // at the end of a transaction (meaning that the event type is different from `Begin`).
@@ -625,7 +572,7 @@ fn get_commit_lsn(
     } else {
         state
             .remote_final_lsn
-            .ok_or_else(|| ApplyLoopError::InvalidTransaction("get_commit_lsn".to_owned()))
+            .ok_or_else(|| ETLError { repr: ErrorRepr::WithDescriptionAndDetail(ErrorKind::InvalidState, "Invalid transaction", "A transaction should have started for get_commit_lsn to be performed".to_string()) })
     }
 }
 
@@ -633,9 +580,9 @@ async fn handle_begin_message(
     state: &mut ApplyLoopState,
     event: Event,
     message: &protocol::BeginBody,
-) -> Result<HandleMessageResult, ApplyLoopError> {
+) -> Result<HandleMessageResult, ETLError> {
     let EventType::Begin = event.event_type() else {
-        return Err(ApplyLoopError::InvalidEvent(event.into(), EventType::Begin));
+        return Err(ETLError { repr: ErrorRepr::WithDescriptionAndDetail(ErrorKind::ValidationError, "Invalid event", format!("An invalid event {:?} was received (expected {:?})", event, EventType::Begin)) });
     };
 
     // We track the final lsn of this transaction, which should be equal to the `commit_lsn` of the
@@ -656,25 +603,20 @@ async fn handle_commit_message<T>(
     event: Event,
     message: &protocol::CommitBody,
     hook: &T,
-) -> Result<HandleMessageResult, ApplyLoopError>
+) -> Result<HandleMessageResult, ETLError>
 where
     T: ApplyLoopHook,
-    ApplyLoopError: From<<T as ApplyLoopHook>::Error>,
+    ETLError: From<<T as ApplyLoopHook>::Error>,
 {
     let EventType::Commit = event.event_type() else {
-        return Err(ApplyLoopError::InvalidEvent(
-            event.into(),
-            EventType::Commit,
-        ));
+        return Err(ETLError { repr: ErrorRepr::WithDescriptionAndDetail(ErrorKind::ValidationError, "Invalid event", format!("An invalid event {:?} was received (expected {:?})", event, EventType::Commit)) });
     };
 
     // We take the LSN that belongs to the current transaction, however, if there is no
     // LSN, it means that a `Begin` message was not received before this `Commit` which means
     // we are in an inconsistent state.
     let Some(remote_final_lsn) = state.remote_final_lsn.take() else {
-        return Err(ApplyLoopError::InvalidTransaction(
-            "handle_commit_message".to_owned(),
-        ));
+        return Err(ETLError { repr: ErrorRepr::WithDescriptionAndDetail(ErrorKind::InvalidState, "Invalid transaction", "A transaction should have started for handle_commit_message to be performed".to_string()) });
     };
 
     // If the commit lsn of the message is different from the remote final lsn, it means that the
@@ -682,10 +624,7 @@ where
     // we want to bail assuming we are in an inconsistent state.
     let commit_lsn = PgLsn::from(message.commit_lsn());
     if commit_lsn != remote_final_lsn {
-        return Err(ApplyLoopError::InvalidCommitLsn(
-            commit_lsn,
-            remote_final_lsn,
-        ));
+        return Err(ETLError { repr: ErrorRepr::WithDescriptionAndDetail(ErrorKind::ValidationError, "Invalid commit LSN", format!("Incorrect commit LSN {} in COMMIT message (expected {})", commit_lsn, remote_final_lsn)) });
     }
 
     let end_lsn = PgLsn::from(message.end_lsn());
@@ -727,22 +666,17 @@ async fn handle_relation_message<T>(
     message: &protocol::RelationBody,
     schema_cache: &SchemaCache,
     hook: &T,
-) -> Result<HandleMessageResult, ApplyLoopError>
+) -> Result<HandleMessageResult, ETLError>
 where
     T: ApplyLoopHook,
-    ApplyLoopError: From<<T as ApplyLoopHook>::Error>,
+    ETLError: From<<T as ApplyLoopHook>::Error>,
 {
     let Event::Relation(event) = event else {
-        return Err(ApplyLoopError::InvalidEvent(
-            event.into(),
-            EventType::Relation,
-        ));
+        return Err(ETLError { repr: ErrorRepr::WithDescriptionAndDetail(ErrorKind::ValidationError, "Invalid event", format!("An invalid event {:?} was received (expected {:?})", event, EventType::Relation)) });
     };
 
     let Some(remote_final_lsn) = state.remote_final_lsn else {
-        return Err(ApplyLoopError::InvalidTransaction(
-            "handle_relation_message".to_owned(),
-        ));
+        return Err(ETLError { repr: ErrorRepr::WithDescriptionAndDetail(ErrorKind::InvalidState, "Invalid transaction", "A transaction should have started for handle_relation_message to be performed".to_string()) });
     };
 
     if !hook
@@ -757,7 +691,7 @@ where
     // TODO: explore how to deal with applying relation messages to the schema (creating it if missing).
     let schema_cache = schema_cache.lock_inner().await;
     let Some(existing_table_schema) = schema_cache.get_table_schema_ref(&message.rel_id()) else {
-        return Err(ApplyLoopError::MissingTableSchema(message.rel_id()));
+        return Err(ETLError { repr: ErrorRepr::WithDescriptionAndDetail(ErrorKind::SchemaError, "Missing table schema", format!("The table schema for table {} was not found in the cache", message.rel_id())) });
     };
 
     // We compare the table schema from the relation message with the existing schema (if any).
@@ -784,22 +718,17 @@ async fn handle_insert_message<T>(
     event: Event,
     message: &protocol::InsertBody,
     hook: &T,
-) -> Result<HandleMessageResult, ApplyLoopError>
+) -> Result<HandleMessageResult, ETLError>
 where
     T: ApplyLoopHook,
-    ApplyLoopError: From<<T as ApplyLoopHook>::Error>,
+    ETLError: From<<T as ApplyLoopHook>::Error>,
 {
     let Event::Insert(event) = event else {
-        return Err(ApplyLoopError::InvalidEvent(
-            event.into(),
-            EventType::Insert,
-        ));
+        return Err(ETLError { repr: ErrorRepr::WithDescriptionAndDetail(ErrorKind::ValidationError, "Invalid event", format!("An invalid event {:?} was received (expected {:?})", event, EventType::Insert)) });
     };
 
     let Some(remote_final_lsn) = state.remote_final_lsn else {
-        return Err(ApplyLoopError::InvalidTransaction(
-            "handle_insert_message".to_owned(),
-        ));
+        return Err(ETLError { repr: ErrorRepr::WithDescriptionAndDetail(ErrorKind::InvalidState, "Invalid transaction", "A transaction should have started for handle_insert_message to be performed".to_string()) });
     };
 
     if !hook
@@ -822,22 +751,17 @@ async fn handle_update_message<T>(
     event: Event,
     message: &protocol::UpdateBody,
     hook: &T,
-) -> Result<HandleMessageResult, ApplyLoopError>
+) -> Result<HandleMessageResult, ETLError>
 where
     T: ApplyLoopHook,
-    ApplyLoopError: From<<T as ApplyLoopHook>::Error>,
+    ETLError: From<<T as ApplyLoopHook>::Error>,
 {
     let Event::Update(event) = event else {
-        return Err(ApplyLoopError::InvalidEvent(
-            event.into(),
-            EventType::Update,
-        ));
+        return Err(ETLError { repr: ErrorRepr::WithDescriptionAndDetail(ErrorKind::ValidationError, "Invalid event", format!("An invalid event {:?} was received (expected {:?})", event, EventType::Update)) });
     };
 
     let Some(remote_final_lsn) = state.remote_final_lsn else {
-        return Err(ApplyLoopError::InvalidTransaction(
-            "handle_update_message".to_owned(),
-        ));
+        return Err(ETLError { repr: ErrorRepr::WithDescriptionAndDetail(ErrorKind::InvalidState, "Invalid transaction", "A transaction should have started for handle_update_message to be performed".to_string()) });
     };
 
     if !hook
@@ -860,22 +784,17 @@ async fn handle_delete_message<T>(
     event: Event,
     message: &protocol::DeleteBody,
     hook: &T,
-) -> Result<HandleMessageResult, ApplyLoopError>
+) -> Result<HandleMessageResult, ETLError>
 where
     T: ApplyLoopHook,
-    ApplyLoopError: From<<T as ApplyLoopHook>::Error>,
+    ETLError: From<<T as ApplyLoopHook>::Error>,
 {
     let Event::Delete(event) = event else {
-        return Err(ApplyLoopError::InvalidEvent(
-            event.into(),
-            EventType::Delete,
-        ));
+        return Err(ETLError { repr: ErrorRepr::WithDescriptionAndDetail(ErrorKind::ValidationError, "Invalid event", format!("An invalid event {:?} was received (expected {:?})", event, EventType::Delete)) });
     };
 
     let Some(remote_final_lsn) = state.remote_final_lsn else {
-        return Err(ApplyLoopError::InvalidTransaction(
-            "handle_delete_message".to_owned(),
-        ));
+        return Err(ETLError { repr: ErrorRepr::WithDescriptionAndDetail(ErrorKind::InvalidState, "Invalid transaction", "A transaction should have started for handle_delete_message to be performed".to_string()) });
     };
 
     if !hook
@@ -898,22 +817,17 @@ async fn handle_truncate_message<T>(
     event: Event,
     message: &protocol::TruncateBody,
     hook: &T,
-) -> Result<HandleMessageResult, ApplyLoopError>
+) -> Result<HandleMessageResult, ETLError>
 where
     T: ApplyLoopHook,
-    ApplyLoopError: From<<T as ApplyLoopHook>::Error>,
+    ETLError: From<<T as ApplyLoopHook>::Error>,
 {
     let Event::Truncate(mut event) = event else {
-        return Err(ApplyLoopError::InvalidEvent(
-            event.into(),
-            EventType::Truncate,
-        ));
+        return Err(ETLError { repr: ErrorRepr::WithDescriptionAndDetail(ErrorKind::ValidationError, "Invalid event", format!("An invalid event {:?} was received (expected {:?})", event, EventType::Truncate)) });
     };
 
     let Some(remote_final_lsn) = state.remote_final_lsn else {
-        return Err(ApplyLoopError::InvalidTransaction(
-            "handle_truncate_message".to_owned(),
-        ));
+        return Err(ETLError { repr: ErrorRepr::WithDescriptionAndDetail(ErrorKind::InvalidState, "Invalid transaction", "A transaction should have started for handle_truncate_message to be performed".to_string()) });
     };
 
     let mut rel_ids = Vec::with_capacity(message.rel_ids().len());

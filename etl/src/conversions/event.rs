@@ -2,7 +2,6 @@ use crate::conversions::Cell;
 use crate::conversions::table_row::TableRow;
 use crate::conversions::text::{FromTextError, TextFormatConverter};
 use crate::schema::cache::SchemaCache;
-use crate::state::store::base::StateStoreError;
 use core::str;
 use postgres::schema::{ColumnSchema, TableId, TableName, TableSchema};
 use postgres::types::convert_type_oid_to_type;
@@ -39,7 +38,7 @@ pub enum EventConversionError {
     Io(#[from] io::Error),
 
     #[error("An error occurred in the state store: {0}")]
-    StateStore(#[from] StateStoreError),
+    StateStore(#[from] crate::error::ETLError),
 }
 
 #[derive(Debug, Clone, PartialEq)]

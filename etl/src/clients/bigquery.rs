@@ -10,7 +10,7 @@ use gcp_bigquery_client::{
 };
 use postgres::schema::ColumnSchema;
 use std::fmt;
-use thiserror::Error;
+use crate::error::{ETLError, ETLResult, ErrorKind};
 use tokio_postgres::types::Type;
 use tracing::info;
 
@@ -53,7 +53,7 @@ impl fmt::Display for BigQueryOperationType {
 }
 
 /// Collection of row errors returned from BigQuery streaming operations.
-#[derive(Debug, Error)]
+#[derive(Debug)]
 pub struct RowErrors(pub Vec<RowError>);
 
 impl fmt::Display for RowErrors {
@@ -66,16 +66,6 @@ impl fmt::Display for RowErrors {
 
         Ok(())
     }
-}
-
-/// Errors that can occur when interacting with BigQuery.
-#[derive(Debug, Error)]
-pub enum BigQueryClientError {
-    #[error("An error occurred with BigQuery: {0}")]
-    BigQuery(#[from] BQError),
-
-    #[error("One or multiple errors: {0}")]
-    AppendRowErrors(#[from] RowErrors),
 }
 
 /// A client for interacting with Google BigQuery.
@@ -95,7 +85,7 @@ impl BigQueryClient {
     pub async fn new_with_key_path(
         project_id: String,
         sa_key_path: &str,
-    ) -> Result<BigQueryClient, BigQueryClientError> {
+    ) -> ETLResult<BigQueryClient> {
         let client = Client::from_service_account_key_file(sa_key_path).await?;
 
         Ok(BigQueryClient { project_id, client })
@@ -108,7 +98,7 @@ impl BigQueryClient {
     pub async fn new_with_key(
         project_id: String,
         sa_key: &str,
-    ) -> Result<BigQueryClient, BigQueryClientError> {
+    ) -> ETLResult<BigQueryClient> {
         let sa_key = parse_service_account_key(sa_key).map_err(BQError::from)?;
         let client = Client::from_service_account_key(sa_key, false).await?;
 
@@ -130,7 +120,7 @@ impl BigQueryClient {
         table_id: &str,
         column_schemas: &[ColumnSchema],
         max_staleness_mins: Option<u16>,
-    ) -> Result<bool, BigQueryClientError> {
+    ) -> ETLResult<bool> {
         if self.table_exists(dataset_id, table_id).await? {
             return Ok(false);
         }
@@ -148,7 +138,7 @@ impl BigQueryClient {
         table_id: &str,
         column_schemas: &[ColumnSchema],
         max_staleness_mins: Option<u16>,
-    ) -> Result<(), BigQueryClientError> {
+    ) -> ETLResult<()> {
         let full_table_name = self.full_table_name(dataset_id, table_id);
 
         let columns_spec = Self::create_columns_spec(column_schemas);
@@ -172,7 +162,7 @@ impl BigQueryClient {
         &self,
         dataset_id: &str,
         table_id: &str,
-    ) -> Result<(), BigQueryClientError> {
+    ) -> ETLResult<()> {
         let full_table_name = self.full_table_name(dataset_id, table_id);
 
         info!("Truncating table {full_table_name} in BigQuery");
@@ -193,7 +183,7 @@ impl BigQueryClient {
         &self,
         dataset_id: &str,
         table_id: &str,
-    ) -> Result<bool, BigQueryClientError> {
+    ) -> ETLResult<bool> {
         let table = self
             .client
             .table()
@@ -216,7 +206,7 @@ impl BigQueryClient {
         table_id: String,
         table_descriptor: &TableDescriptor,
         table_rows: Vec<TableRow>,
-    ) -> Result<(), BigQueryClientError> {
+    ) -> ETLResult<()> {
         // We create a slice on table rows, which will be updated while the streaming progresses.
         //
         // Using a slice allows us to deallocate the vector only at the end of streaming, which leads
@@ -242,7 +232,7 @@ impl BigQueryClient {
             if let Some(append_rows_response) = append_rows_stream.next().await {
                 let append_rows_response = append_rows_response.map_err(BQError::from)?;
                 if !append_rows_response.row_errors.is_empty() {
-                    return Err(BigQueryClientError::AppendRowErrors(RowErrors(
+                    return Err(ETLError::from(RowErrors(
                         append_rows_response.row_errors,
                     )));
                 }
@@ -258,7 +248,7 @@ impl BigQueryClient {
     }
 
     /// Executes an SQL query and returns the result set.
-    pub async fn query(&self, request: QueryRequest) -> Result<ResultSet, BigQueryClientError> {
+    pub async fn query(&self, request: QueryRequest) -> ETLResult<ResultSet> {
         let query_response = self.client.job().query(&self.project_id, request).await?;
 
         Ok(ResultSet::new_from_query_response(query_response))

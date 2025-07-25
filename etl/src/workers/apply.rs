@@ -1,7 +1,7 @@
 use config::shared::PipelineConfig;
 use postgres::schema::TableId;
 use std::sync::Arc;
-use thiserror::Error;
+use crate::error::{ETLError, ETLResult, ErrorKind};
 use tokio::sync::Semaphore;
 use tokio::task::JoinHandle;
 use tokio_postgres::types::PgLsn;
@@ -11,52 +11,23 @@ use crate::concurrency::shutdown::ShutdownRx;
 use crate::concurrency::signal::{SignalTx, create_signal};
 use crate::destination::base::Destination;
 use crate::pipeline::PipelineId;
-use crate::replication::apply::{ApplyLoopError, ApplyLoopHook, start_apply_loop};
-use crate::replication::client::{PgReplicationClient, PgReplicationError};
+use crate::replication::apply::{ApplyLoopHook, start_apply_loop};
+use crate::replication::client::PgReplicationClient;
 use crate::replication::common::get_table_replication_states;
 use crate::replication::slot::{SlotError, get_slot_name};
 use crate::schema::cache::SchemaCache;
-use crate::state::store::base::{StateStore, StateStoreError};
+use crate::state::store::base::StateStore;
 use crate::state::table::{TableReplicationPhase, TableReplicationPhaseType};
 use crate::workers::base::{Worker, WorkerHandle, WorkerType, WorkerWaitError};
 use crate::workers::pool::TableSyncWorkerPool;
 use crate::workers::table_sync::{
-    TableSyncWorker, TableSyncWorkerError, TableSyncWorkerState, TableSyncWorkerStateError,
+    TableSyncWorker, TableSyncWorkerState,
 };
 
-#[derive(Debug, Error)]
-pub enum ApplyWorkerError {
-    #[error("An error occurred while interacting with the state store: {0}")]
-    StateStore(#[from] StateStoreError),
-
-    #[error("An error occurred in the apply loop: {0}")]
-    ApplyLoop(#[from] ApplyLoopError),
-
-    #[error("A Postgres replication error occurred in the apply loop: {0}")]
-    PgReplication(#[from] PgReplicationError),
-
-    #[error("Could not generate slot name in the apply loop: {0}")]
-    Slot(#[from] SlotError),
-}
-
-#[derive(Debug, Error)]
-pub enum ApplyWorkerHookError {
-    #[error("An error occurred while interacting with the state store: {0}")]
-    StateStore(#[from] StateStoreError),
-
-    #[error("An error occurred while interacting with the table sync worker state: {0}")]
-    TableSyncWorkerState(#[from] TableSyncWorkerStateError),
-
-    #[error("An error occurred while trying to start the table sync worker: {0}")]
-    TableSyncWorkerStartedFailed(#[from] TableSyncWorkerError),
-
-    #[error("A Postgres replication error occurred in the apply worker: {0}")]
-    PgReplication(#[from] PgReplicationError),
-}
 
 #[derive(Debug)]
 pub struct ApplyWorkerHandle {
-    handle: Option<JoinHandle<Result<(), ApplyWorkerError>>>,
+    handle: Option<JoinHandle<ETLResult<()>>>,
 }
 
 impl WorkerHandle<()> for ApplyWorkerHandle {
@@ -118,9 +89,9 @@ where
     S: StateStore + Clone + Send + Sync + 'static,
     D: Destination + Clone + Send + Sync + 'static,
 {
-    type Error = ApplyWorkerError;
+    type Error = ETLError;
 
-    async fn start(self) -> Result<ApplyWorkerHandle, Self::Error> {
+    async fn start(self) -> Result<ApplyWorkerHandle, ETLError> {
         info!("starting apply worker");
 
         let apply_worker_span = tracing::info_span!(
@@ -174,7 +145,7 @@ where
 async fn get_start_lsn(
     pipeline_id: PipelineId,
     replication_client: &PgReplicationClient,
-) -> Result<PgLsn, ApplyWorkerError> {
+) -> Result<PgLsn, ETLError> {
     let slot_name = get_slot_name(pipeline_id, WorkerType::Apply)?;
     // TODO: validate that we only create the slot when we first start replication which
     //  means when all tables are in the Init state. In any other case we should raise an
@@ -257,7 +228,7 @@ where
         &self,
         table_id: TableId,
         current_lsn: PgLsn,
-    ) -> Result<bool, ApplyWorkerHookError> {
+    ) -> Result<bool, ETLError> {
         let mut pool = self.pool.lock().await;
         let table_sync_worker_state = pool.get_active_worker_state(table_id);
 
@@ -278,7 +249,7 @@ where
         table_id: TableId,
         table_sync_worker_state: TableSyncWorkerState,
         current_lsn: PgLsn,
-    ) -> Result<bool, ApplyWorkerHookError> {
+    ) -> Result<bool, ETLError> {
         let mut catchup_started = false;
         {
             let mut inner = table_sync_worker_state.get_inner().lock().await;
@@ -330,7 +301,7 @@ where
     S: StateStore + Clone + Send + Sync + 'static,
     D: Destination + Clone + Send + Sync + 'static,
 {
-    type Error = ApplyWorkerHookError;
+    type Error = ETLError;
 
     async fn before_loop(&self, _start_lsn: PgLsn) -> Result<bool, Self::Error> {
         info!("starting table sync workers before the main apply loop");

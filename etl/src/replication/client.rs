@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::io::BufReader;
 use std::sync::Arc;
-use thiserror::Error;
+use crate::error::{ETLError, ETLResult, ErrorKind};
 use tokio_postgres::error::SqlState;
 use tokio_postgres::tls::MakeTlsConnect;
 use tokio_postgres::{
@@ -41,57 +41,6 @@ where
     tokio::spawn(task);
 }
 
-/// Errors that can occur when using the PostgreSQL replication client.
-#[derive(Debug, Error)]
-pub enum PgReplicationError {
-    /// Errors from the underlying PostgreSQL client
-    #[error("PostgreSQL client operation failed: {0}")]
-    Client(#[from] tokio_postgres::Error),
-
-    /// Errors related to TLS/SSL configuration
-    #[error("TLS configuration failed: {0}")]
-    Tls(#[from] rustls::Error),
-
-    /// Errors related to replication slot operations
-    #[error("Failed to create replication slot")]
-    SlotCreationFailed,
-
-    #[error("Replication slot '{0}' not found in database")]
-    SlotNotFound(String),
-
-    #[error("Replication slot '{0}' already exists in database")]
-    SlotAlreadyExists(String),
-
-    #[error("Invalid replication slot response: missing required fields in server response")]
-    SlotResponseInvalid,
-
-    /// Errors related to database schema and objects
-    #[error("Table '{0}' not found in database")]
-    TableNotFound(TableName),
-
-    #[error("Column '{0}' not found in table '{1}'")]
-    ColumnNotFound(String, String),
-
-    #[error("Failed to parse value from column '{0}' in table '{1}': {2}")]
-    ColumnParsingFailed(String, String, String),
-
-    #[error("Publication '{0}' not found in database")]
-    PublicationNotFound(String),
-
-    /// Errors related to data type handling
-    #[error(
-        "Unsupported column type '{0}' (OID: {1}) in table '{2}': type is not supported for replication"
-    )]
-    UnsupportedColumnType(String, u32, String),
-
-    #[error(
-        "Unsupported replica identity '{0}' in table: only 'default' or 'full' replica identities are supported"
-    )]
-    UnsupportedReplicaIdentity(String),
-
-    #[error("Io error: {0}")]
-    Io(#[from] std::io::Error),
-}
 
 #[derive(Debug, Clone)]
 pub struct CreateSlotResult {
@@ -201,7 +150,7 @@ pub struct PgReplicationClient {
 }
 
 /// Update the type alias to use the new error type
-pub type PgReplicationResult<T> = Result<T, PgReplicationError>;
+pub type PgReplicationResult<T> = ETLResult<T>;
 
 impl PgReplicationClient {
     /// Establishes a connection to PostgreSQL. The connection uses TLS if configured in the
@@ -308,7 +257,7 @@ impl PgReplicationClient {
             }
         }
 
-        Err(PgReplicationError::SlotNotFound(slot_name.to_string()))
+        Err(ETLError::from((ErrorKind::ReplicationError, "Replication slot not found", format!("Replication slot '{}' not found in database", slot_name))))
     }
 
     /// Gets an existing replication slot or creates a new one if it doesn't exist.
@@ -330,7 +279,7 @@ impl PgReplicationClient {
 
                 Ok(GetOrCreateSlotResult::GetSlot(slot))
             }
-            Err(PgReplicationError::SlotNotFound(_)) => {
+            Err(err) if err.kind() == ErrorKind::ReplicationError && err.detail().map_or(false, |d| d.contains("not found")) => {
                 info!("creating new replication slot '{}'", slot_name);
 
                 let create_result = self.create_slot_internal(slot_name, false).await?;
@@ -365,7 +314,7 @@ impl PgReplicationClient {
                             "attempted to delete non-existent replication slot '{}'",
                             slot_name
                         );
-                        return Err(PgReplicationError::SlotNotFound(slot_name.to_string()));
+                        return Err(ETLError::from((ErrorKind::ReplicationError, "Replication slot not found", format!("Replication slot '{}' not found in database", slot_name))));
                     }
                 }
 
@@ -540,7 +489,7 @@ impl PgReplicationClient {
             Err(err) => {
                 if let Some(code) = err.code() {
                     if *code == SqlState::DUPLICATE_OBJECT {
-                        return Err(PgReplicationError::SlotAlreadyExists(slot_name.to_string()));
+                        return Err(ETLError::from((ErrorKind::ReplicationError, "Replication slot already exists", format!("Replication slot '{}' already exists in database", slot_name))));
                     }
                 }
 
@@ -548,7 +497,7 @@ impl PgReplicationClient {
             }
         }
 
-        Err(PgReplicationError::SlotCreationFailed)
+        Err(ETLError::from((ErrorKind::ReplicationError, "Failed to create replication slot")))
     }
 
     /// Retrieves schema information for multiple tables.
@@ -625,10 +574,7 @@ impl PgReplicationClient {
             }
         }
 
-        Err(PgReplicationError::TableNotFound(TableName {
-            schema: String::new(),
-            name: format!("oid: {table_id}"),
-        }))
+        Err(ETLError::from((ErrorKind::SchemaError, "Table not found", format!("Table not found in database (oid: {})", table_id))))
     }
 
     /// Retrieves schema information for all columns in a table.
@@ -753,17 +699,10 @@ impl PgReplicationClient {
     {
         let value = row
             .try_get(column_name)?
-            .ok_or(PgReplicationError::ColumnNotFound(
-                column_name.to_string(),
-                table_name.to_string(),
-            ))?;
+            .ok_or(ETLError::from((ErrorKind::SchemaError, "Column not found", format!("Column '{}' not found in table '{}'", column_name, table_name))))?;
 
         value.parse().map_err(|e: T::Err| {
-            PgReplicationError::ColumnParsingFailed(
-                column_name.to_string(),
-                table_name.to_string(),
-                format!("{e:?}"),
-            )
+            ETLError::from((ErrorKind::ConversionError, "Column parsing failed", format!("Failed to parse value from column '{}' in table '{}': {:?}", column_name, table_name, e)))
         })
     }
 }

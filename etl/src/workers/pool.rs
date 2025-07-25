@@ -11,7 +11,7 @@ use crate::destination::base::Destination;
 use crate::state::store::base::StateStore;
 use crate::workers::base::{Worker, WorkerHandle, WorkerWaitError, WorkerWaitErrors};
 use crate::workers::table_sync::{
-    TableSyncWorker, TableSyncWorkerError, TableSyncWorkerHandle, TableSyncWorkerState,
+    TableSyncWorker, TableSyncWorkerHandle, TableSyncWorkerState,
 };
 
 #[derive(Debug)]
@@ -46,7 +46,7 @@ impl TableSyncWorkerPoolInner {
     pub async fn start_worker<S, D>(
         &mut self,
         worker: TableSyncWorker<S, D>,
-    ) -> Result<bool, TableSyncWorkerError>
+    ) -> crate::error::ETLResult<bool>
     where
         S: StateStore + Clone + Send + Sync + 'static,
         D: Destination + Clone + Send + Sync + 'static,

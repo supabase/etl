@@ -1,44 +1,19 @@
 use config::shared::PipelineConfig;
 use std::sync::Arc;
-use thiserror::Error;
-use tokio::sync::{Semaphore, watch};
+use tokio::sync::Semaphore;
 use tracing::{error, info};
 
 use crate::concurrency::shutdown::{ShutdownTx, create_shutdown_channel};
-use crate::destination::base::{Destination, DestinationError};
-use crate::replication::client::{PgReplicationClient, PgReplicationError};
+use crate::destination::base::Destination;
+use crate::error::{ETLError, ETLResult, ErrorKind};
+use crate::replication::client::PgReplicationClient;
 use crate::schema::cache::SchemaCache;
-use crate::state::store::base::{StateStore, StateStoreError};
+use crate::state::store::base::StateStore;
 use crate::state::table::TableReplicationPhase;
-use crate::workers::apply::{ApplyWorker, ApplyWorkerError, ApplyWorkerHandle};
-use crate::workers::base::{Worker, WorkerHandle, WorkerWaitErrors};
+use crate::workers::apply::{ApplyWorker, ApplyWorkerHandle};
+use crate::workers::base::{Worker, WorkerHandle};
 use crate::workers::pool::TableSyncWorkerPool;
 
-#[derive(Debug, Error)]
-pub enum PipelineError {
-    #[error("One or more workers failed: {0}")]
-    OneOrMoreWorkersFailed(WorkerWaitErrors),
-
-    #[error("PostgreSQL replication operation failed: {0}")]
-    PgReplicationClient(#[from] PgReplicationError),
-
-    #[error("Apply worker failed to start in the pipeline: {0}")]
-    ApplyWorkerFailedOnStart(#[from] ApplyWorkerError),
-
-    #[error("An error happened in the state store: {0}")]
-    StateStore(#[from] StateStoreError),
-
-    #[error("An error occurred in the destination: {0}")]
-    Destination(#[from] DestinationError),
-
-    #[error(
-        "An error occurred while shutting down the pipeline, likely because no workers are running: {0}"
-    )]
-    ShutdownFailed(#[from] watch::error::SendError<()>),
-
-    #[error("The publication '{0}' does not exist in the database")]
-    MissingPublication(String),
-}
 
 #[derive(Debug)]
 enum PipelineWorkers {
@@ -94,7 +69,7 @@ where
         self.shutdown_tx.clone()
     }
 
-    pub async fn start(&mut self) -> Result<(), PipelineError> {
+    pub async fn start(&mut self) -> ETLResult<()> {
         info!(
             "starting pipeline for publication '{}' with id {}",
             self.config.publication_name, self.id
@@ -144,7 +119,7 @@ where
         Ok(())
     }
 
-    async fn prepare_schema_cache(&self, schema_cache: &SchemaCache) -> Result<(), PipelineError> {
+    async fn prepare_schema_cache(&self, schema_cache: &SchemaCache) -> ETLResult<()> {
         // We initialize the schema cache, which is local to a pipeline, and we try to load existing
         // schemas that were previously stored at the destination (if any).
         let table_schemas = self.destination.load_table_schemas().await?;
@@ -156,7 +131,7 @@ where
     async fn initialize_table_states(
         &self,
         replication_client: &PgReplicationClient,
-    ) -> Result<(), PipelineError> {
+    ) -> ETLResult<()> {
         info!(
             "initializing table states for tables in publication '{}'",
             self.config.publication_name
@@ -171,9 +146,11 @@ where
                 "publication '{}' does not exist in the database",
                 self.config.publication_name
             );
-            return Err(PipelineError::MissingPublication(
-                self.config.publication_name.clone(),
-            ));
+            return Err(ETLError::from((
+                ErrorKind::ConfigError,
+                "Missing publication",
+                format!("The publication '{}' does not exist in the database", self.config.publication_name)
+            )));
         }
 
         let table_ids = replication_client
@@ -193,7 +170,7 @@ where
         Ok(())
     }
 
-    pub async fn wait(self) -> Result<(), PipelineError> {
+    pub async fn wait(self) -> ETLResult<()> {
         let PipelineWorkers::Started { apply_worker, pool } = self.workers else {
             info!("pipeline was not started, nothing to wait for");
 
@@ -239,8 +216,10 @@ where
         }
 
         if !errors.is_empty() {
-            return Err(PipelineError::OneOrMoreWorkersFailed(WorkerWaitErrors(
-                errors,
+            return Err(ETLError::from((
+                ErrorKind::WorkerError,
+                "One or more workers failed",
+                format!("Workers failed with {} errors", errors.len())
             )));
         }
 
@@ -248,7 +227,7 @@ where
     }
 
     #[allow(clippy::result_large_err)]
-    pub fn shutdown(&self) -> Result<(), PipelineError> {
+    pub fn shutdown(&self) -> ETLResult<()> {
         info!("trying to shut down the pipeline");
         self.shutdown_tx.shutdown()?;
         info!("shut down signal successfully sent to all workers");
@@ -256,7 +235,7 @@ where
         Ok(())
     }
 
-    pub async fn shutdown_and_wait(self) -> Result<(), PipelineError> {
+    pub async fn shutdown_and_wait(self) -> ETLResult<()> {
         self.shutdown()?;
         self.wait().await
     }

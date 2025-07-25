@@ -3,7 +3,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
-use crate::state::store::base::{StateStore, StateStoreError};
+use crate::state::store::base::StateStore;
+use crate::error::ETLResult;
 use crate::state::table::TableReplicationPhase;
 
 #[derive(Debug)]
@@ -38,7 +39,7 @@ impl StateStore for MemoryStateStore {
     async fn get_table_replication_state(
         &self,
         table_id: TableId,
-    ) -> Result<Option<TableReplicationPhase>, StateStoreError> {
+    ) -> ETLResult<Option<TableReplicationPhase>> {
         let inner = self.inner.lock().await;
 
         Ok(inner.table_replication_states.get(&table_id).cloned())
@@ -46,13 +47,13 @@ impl StateStore for MemoryStateStore {
 
     async fn get_table_replication_states(
         &self,
-    ) -> Result<HashMap<TableId, TableReplicationPhase>, StateStoreError> {
+    ) -> ETLResult<HashMap<TableId, TableReplicationPhase>> {
         let inner = self.inner.lock().await;
 
         Ok(inner.table_replication_states.clone())
     }
 
-    async fn load_table_replication_states(&self) -> Result<usize, StateStoreError> {
+    async fn load_table_replication_states(&self) -> ETLResult<usize> {
         let inner = self.inner.lock().await;
 
         Ok(inner.table_replication_states.len())
@@ -62,7 +63,7 @@ impl StateStore for MemoryStateStore {
         &self,
         table_id: TableId,
         state: TableReplicationPhase,
-    ) -> Result<(), StateStoreError> {
+    ) -> ETLResult<()> {
         let mut inner = self.inner.lock().await;
         inner.table_replication_states.insert(table_id, state);
 

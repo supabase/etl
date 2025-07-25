@@ -4,8 +4,7 @@ use std::future::Future;
 use thiserror::Error;
 use tokio::task;
 
-use crate::workers::apply::ApplyWorkerError;
-use crate::workers::table_sync::TableSyncWorkerError;
+use crate::error::ETLError;
 
 /// Represents all possible errors that can occur while waiting for a worker to complete.
 ///
@@ -27,17 +26,11 @@ pub enum WorkerWaitError {
     #[error("Worker task failed internally and the error was silently handled: {0}")]
     WorkerSilentlyFailed(String),
 
-    /// The apply worker encountered an error that was propagated via the handle's return value.
+    /// A worker encountered an error that was propagated via the handle's return value.
     ///
-    /// This variant wraps the specific error returned by the apply worker.
-    #[error("Apply worker terminated with an error: {0}")]
-    ApplyWorkerFailed(#[from] ApplyWorkerError),
-
-    /// The table sync worker encountered an error that was propagated via the handle's return value.
-    ///
-    /// This variant wraps the specific error returned by the table sync worker.
-    #[error("Table sync worker terminated with an error: {0}")]
-    TableSyncWorkerFailed(#[from] TableSyncWorkerError),
+    /// This variant wraps the specific error returned by the worker.
+    #[error("Worker terminated with an error: {0}")]
+    WorkerFailed(#[from] ETLError),
 }
 
 #[derive(Debug)]

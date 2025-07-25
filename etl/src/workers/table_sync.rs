@@ -2,7 +2,7 @@ use config::shared::PipelineConfig;
 use postgres::schema::TableId;
 use std::sync::Arc;
 use std::time::Duration;
-use thiserror::Error;
+use crate::error::{ETLError, ETLResult, ErrorKind};
 use tokio::sync::{AcquireError, Mutex, MutexGuard, Notify, Semaphore};
 use tokio::task::JoinHandle;
 use tokio_postgres::types::PgLsn;
@@ -13,12 +13,12 @@ use crate::concurrency::shutdown::{ShutdownResult, ShutdownRx};
 use crate::concurrency::signal::SignalTx;
 use crate::destination::base::Destination;
 use crate::pipeline::PipelineId;
-use crate::replication::apply::{ApplyLoopError, ApplyLoopHook, start_apply_loop};
-use crate::replication::client::{PgReplicationClient, PgReplicationError};
+use crate::replication::apply::{ApplyLoopHook, start_apply_loop};
+use crate::replication::client::PgReplicationClient;
 use crate::replication::slot::get_slot_name;
-use crate::replication::table_sync::{TableSyncError, TableSyncResult, start_table_sync};
+use crate::replication::table_sync::{TableSyncResult, start_table_sync};
 use crate::schema::cache::SchemaCache;
-use crate::state::store::base::{StateStore, StateStoreError};
+use crate::state::store::base::StateStore;
 use crate::state::table::{TableReplicationPhase, TableReplicationPhaseType};
 use crate::workers::base::{Worker, WorkerHandle, WorkerType, WorkerWaitError};
 use crate::workers::pool::TableSyncWorkerPool;
@@ -34,41 +34,6 @@ const PHASE_CHANGE_REFRESH_FREQUENCY: Duration = Duration::from_millis(100);
 /// of new tables.
 const MAX_DELETE_SLOT_WAIT: Duration = Duration::from_secs(30);
 
-#[derive(Debug, Error)]
-pub enum TableSyncWorkerError {
-    #[error("An error occurred while syncing a table: {0}")]
-    TableSync(#[from] TableSyncError),
-
-    #[error("The replication state is missing for table {0}")]
-    ReplicationStateMissing(TableId),
-
-    #[error("An error occurred while interacting with the state store: {0}")]
-    StateStore(#[from] StateStoreError),
-
-    #[error("An error occurred in the apply loop: {0}")]
-    ApplyLoop(#[from] ApplyLoopError),
-
-    #[error("Failed to acquire a permit to run a table sync worker")]
-    PermitAcquire(#[from] AcquireError),
-
-    #[error("A Postgres replication error occurred in the table sync worker: {0}")]
-    PgReplication(#[from] PgReplicationError),
-}
-
-#[derive(Debug, Error)]
-pub enum TableSyncWorkerHookError {
-    #[error("An error occurred while updating the table sync worker state: {0}")]
-    TableSyncWorkerState(#[from] TableSyncWorkerStateError),
-
-    #[error("A Postgres replication error occurred in the table sync worker: {0}")]
-    PgReplication(#[from] PgReplicationError),
-}
-
-#[derive(Debug, Error)]
-pub enum TableSyncWorkerStateError {
-    #[error("An error occurred while interacting with the state store: {0}")]
-    StateStore(#[from] StateStoreError),
-}
 
 #[derive(Debug)]
 pub struct TableSyncWorkerStateInner {
@@ -98,7 +63,7 @@ impl TableSyncWorkerStateInner {
         &mut self,
         phase: TableReplicationPhase,
         state_store: S,
-    ) -> Result<(), TableSyncWorkerStateError> {
+    ) -> ETLResult<()> {
         self.set_phase(phase);
 
         // If we should store this phase change, we want to do it via the supplied state store.
@@ -224,7 +189,7 @@ impl TableSyncWorkerState {
 #[derive(Debug)]
 pub struct TableSyncWorkerHandle {
     state: TableSyncWorkerState,
-    handle: Option<JoinHandle<Result<(), TableSyncWorkerError>>>,
+    handle: Option<JoinHandle<ETLResult<()>>>,
 }
 
 impl WorkerHandle<TableSyncWorkerState> for TableSyncWorkerHandle {
@@ -295,9 +260,9 @@ where
     S: StateStore + Clone + Send + Sync + 'static,
     D: Destination + Clone + Send + Sync + 'static,
 {
-    type Error = TableSyncWorkerError;
+    type Error = ETLError;
 
-    async fn start(mut self) -> Result<TableSyncWorkerHandle, Self::Error> {
+    async fn start(mut self) -> Result<TableSyncWorkerHandle, ETLError> {
         info!("starting table sync worker for table {}", self.table_id);
 
         let Some(table_replication_phase) = self
@@ -310,7 +275,7 @@ where
                 self.table_id
             );
 
-            return Err(TableSyncWorkerError::ReplicationStateMissing(self.table_id));
+            return Err(ETLError::from((ErrorKind::InvalidState, "Replication state missing", format!("The replication state is missing for table {}", self.table_id))));
         };
 
         info!(
@@ -476,7 +441,7 @@ where
         &self,
         current_lsn: PgLsn,
         update_state: bool,
-    ) -> Result<bool, TableSyncWorkerHookError> {
+    ) -> Result<bool, ETLError> {
         let mut inner = self.table_sync_worker_state.get_inner().lock().await;
 
         // If we caught up with the lsn, we mark this table as `SyncDone` and stop the worker.
@@ -512,7 +477,7 @@ impl<S> ApplyLoopHook for TableSyncWorkerHook<S>
 where
     S: StateStore + Clone + Send + Sync + 'static,
 {
-    type Error = TableSyncWorkerHookError;
+    type Error = ETLError;
 
     async fn before_loop(&self, start_lsn: PgLsn) -> Result<bool, Self::Error> {
         info!("checking if the table sync worker is already caught up with the apply worker");
