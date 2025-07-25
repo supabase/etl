@@ -183,12 +183,12 @@ impl<G: GenericClient> PgDatabase<G> {
         &self,
         table_name: TableName,
         columns: &[&str],
-        expressions: &[&str],
+        values: &[&(dyn tokio_postgres::types::ToSql + Sync)],
     ) -> Result<u64, tokio_postgres::Error> {
         let set_clauses: Vec<String> = columns
             .iter()
-            .zip(expressions.iter())
-            .map(|(col, val)| format!("{col} = {val}"))
+            .enumerate()
+            .map(|(i, col)| format!("{col} = ${}", i + 1))
             .collect();
         let set_clause = set_clauses.join(", ");
 
@@ -201,7 +201,7 @@ impl<G: GenericClient> PgDatabase<G> {
         self.client
             .as_ref()
             .unwrap()
-            .execute(&update_query, &[])
+            .execute(&update_query, values)
             .await
     }
 

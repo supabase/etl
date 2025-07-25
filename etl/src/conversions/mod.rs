@@ -1,7 +1,6 @@
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use numeric::PgNumeric;
 use std::fmt::Debug;
-use tokio_postgres::types::Type;
 use uuid::Uuid;
 
 pub mod bool;
@@ -13,7 +12,7 @@ pub mod text;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Cell {
-    Null(Type),
+    Null,
     Bool(bool),
     String(String),
     I16(i16),
@@ -36,12 +35,8 @@ pub enum Cell {
 impl Cell {
     #[cfg(feature = "bigquery")]
     pub fn encode_prost(&self, tag: u32, buf: &mut impl bytes::BufMut) {
-        use crate::conversions::text::TextFormatConverter;
-
         match self {
-            Cell::Null(typ) => {
-                TextFormatConverter::default_value(typ).encode_prost(tag, buf);
-            }
+            Cell::Null => {}
             Cell::Bool(b) => {
                 prost::encoding::bool::encode(tag, b, buf);
             }
@@ -106,10 +101,8 @@ impl Cell {
 
     #[cfg(feature = "bigquery")]
     pub fn encoded_len_prost(&self, tag: u32) -> usize {
-        use crate::conversions::text::TextFormatConverter;
-
         match self {
-            Cell::Null(typ) => TextFormatConverter::default_value(typ).encoded_len_prost(tag),
+            Cell::Null => 0,
             Cell::Bool(b) => prost::encoding::bool::encoded_len(tag, b),
             Cell::String(s) => prost::encoding::string::encoded_len(tag, s),
             Cell::I16(i) => {
@@ -156,7 +149,7 @@ impl Cell {
 
     pub fn clear(&mut self) {
         match self {
-            Cell::Null(_) => {}
+            Cell::Null => {}
             Cell::Bool(b) => *b = false,
             Cell::String(s) => s.clear(),
             Cell::I16(i) => *i = 0,

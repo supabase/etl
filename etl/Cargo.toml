@@ -29,6 +29,7 @@ config = { workspace = true }
 postgres = { workspace = true, features = ["tokio", "replication"] }
 
 async-trait = { workspace = true }
+base64 = { workspace = true }
 bigdecimal = { workspace = true, features = ["std"] }
 bytes = { workspace = true }
 byteorder = { workspace = true }
