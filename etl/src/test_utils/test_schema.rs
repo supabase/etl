@@ -583,6 +583,264 @@ pub mod bigquery {
         }
     }
 
+    #[derive(Debug)]
+    pub struct NullableColsArray {
+        id: i32,
+        b_arr: Option<Vec<bool>>,
+        t_arr: Option<Vec<String>>,
+        i2_arr: Option<Vec<i16>>,
+        i4_arr: Option<Vec<i32>>,
+        i8_arr: Option<Vec<i64>>,
+        f4_arr: Option<Vec<f32>>,
+        f8_arr: Option<Vec<f64>>,
+        // n_arr: Option<Vec<PgNumeric>>, // Numeric arrays are complex, skip for now
+        by_arr: Option<Vec<Vec<u8>>>,
+        d_arr: Option<Vec<NaiveDate>>,
+        ti_arr: Option<Vec<NaiveTime>>,
+        ts_arr: Option<Vec<NaiveDateTime>>,
+        tstz_arr: Option<Vec<DateTime<Utc>>>,
+        u_arr: Option<Vec<uuid::Uuid>>,
+        j_arr: Option<Vec<serde_json::Value>>,
+        jb_arr: Option<Vec<serde_json::Value>>,
+        o_arr: Option<Vec<u32>>,
+    }
+
+    impl NullableColsArray {
+        pub fn all_empty(id: i32) -> Self {
+            Self {
+                id,
+                b_arr: Some(vec![]),
+                t_arr: Some(vec![]),
+                i2_arr: Some(vec![]),
+                i4_arr: Some(vec![]),
+                i8_arr: Some(vec![]),
+                f4_arr: Some(vec![]),
+                f8_arr: Some(vec![]),
+                by_arr: Some(vec![]),
+                d_arr: Some(vec![]),
+                ti_arr: Some(vec![]),
+                ts_arr: Some(vec![]),
+                tstz_arr: Some(vec![]),
+                u_arr: Some(vec![]),
+                j_arr: Some(vec![]),
+                jb_arr: Some(vec![]),
+                o_arr: Some(vec![]),
+            }
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        pub fn with_non_null_values(
+            id: i32,
+            b_arr: Vec<bool>,
+            t_arr: Vec<String>,
+            i2_arr: Vec<i16>,
+            i4_arr: Vec<i32>,
+            i8_arr: Vec<i64>,
+            f4_arr: Vec<f32>,
+            f8_arr: Vec<f64>,
+            by_arr: Vec<Vec<u8>>,
+            d_arr: Vec<NaiveDate>,
+            ti_arr: Vec<NaiveTime>,
+            ts_arr: Vec<NaiveDateTime>,
+            tstz_arr: Vec<DateTime<Utc>>,
+            u_arr: Vec<uuid::Uuid>,
+            j_arr: Vec<serde_json::Value>,
+            jb_arr: Vec<serde_json::Value>,
+            o_arr: Vec<u32>,
+        ) -> Self {
+            Self {
+                id,
+                b_arr: Some(b_arr),
+                t_arr: Some(t_arr),
+                i2_arr: Some(i2_arr),
+                i4_arr: Some(i4_arr),
+                i8_arr: Some(i8_arr),
+                f4_arr: Some(f4_arr),
+                f8_arr: Some(f8_arr),
+                by_arr: Some(by_arr),
+                d_arr: Some(d_arr),
+                ti_arr: Some(ti_arr),
+                ts_arr: Some(ts_arr),
+                tstz_arr: Some(tstz_arr),
+                u_arr: Some(u_arr),
+                j_arr: Some(j_arr),
+                jb_arr: Some(jb_arr),
+                o_arr: Some(o_arr),
+            }
+        }
+    }
+
+    impl From<TableRow> for NullableColsArray {
+        fn from(value: TableRow) -> Self {
+            let columns = value.columns.unwrap();
+
+            // Helper function to parse array values from BigQuery
+            fn parse_array_cell<T>(table_cell: TableCell) -> Option<Vec<T>>
+            where
+                T: FromStr,
+                <T as FromStr>::Err: fmt::Debug,
+            {
+                table_cell.value.and_then(|v| {
+                    v.as_array().map(|arr| {
+                        arr.iter()
+                            .filter_map(|item| {
+                                item.as_object()
+                                    .and_then(|obj| obj.get("v"))
+                                    .and_then(|val| val.as_str())
+                                    .and_then(|s| s.parse::<T>().ok())
+                            })
+                            .collect()
+                    })
+                })
+            }
+
+            // Helper function to parse array of JSON values
+            fn parse_json_array(table_cell: TableCell) -> Option<Vec<serde_json::Value>> {
+                table_cell.value.and_then(|v| {
+                    v.as_array().map(|arr| {
+                        arr.iter()
+                            .filter_map(|item| {
+                                item.as_object()
+                                    .and_then(|obj| obj.get("v"))
+                                    .and_then(|val| val.as_str())
+                                    .and_then(|s| serde_json::from_str(s).ok())
+                            })
+                            .collect()
+                    })
+                })
+            }
+
+            // Helper function to parse array of timestamps
+            fn parse_timestamp_array(table_cell: TableCell) -> Option<Vec<DateTime<Utc>>> {
+                table_cell.value.and_then(|v| {
+                    v.as_array().map(|arr| {
+                        arr.iter()
+                            .filter_map(|item| {
+                                item.as_object()
+                                    .and_then(|obj| obj.get("v"))
+                                    .and_then(|val| val.as_str())
+                                    .and_then(|s| s.parse::<f64>().ok())
+                                    .and_then(|timestamp| {
+                                        let secs = timestamp.trunc() as i64;
+                                        let nanos =
+                                            ((timestamp.fract()) * 1_000_000_000.0).round() as u32;
+                                        DateTime::from_timestamp(secs, nanos)
+                                    })
+                            })
+                            .collect()
+                    })
+                })
+            }
+
+            // Helper function to parse array of naive datetimes
+            fn parse_naive_datetime_array(table_cell: TableCell) -> Option<Vec<NaiveDateTime>> {
+                parse_timestamp_array(table_cell)
+                    .map(|timestamps| timestamps.into_iter().map(|dt| dt.naive_utc()).collect())
+            }
+
+            // Helper function to parse array of byte arrays (decode from base64)
+            fn parse_bytes_array(table_cell: TableCell) -> Option<Vec<Vec<u8>>> {
+                table_cell.value.and_then(|v| {
+                    v.as_array().map(|arr| {
+                        arr.iter()
+                            .filter_map(|item| {
+                                item.as_object()
+                                    .and_then(|obj| obj.get("v"))
+                                    .and_then(|val| val.as_str())
+                                    .and_then(|s| BASE64_STANDARD.decode(s).ok())
+                            })
+                            .collect()
+                    })
+                })
+            }
+
+            NullableColsArray {
+                id: parse_table_cell(columns[0].clone()).unwrap(),
+                b_arr: parse_array_cell(columns[1].clone()),
+                t_arr: parse_array_cell(columns[2].clone()),
+                i2_arr: parse_array_cell(columns[3].clone()),
+                i4_arr: parse_array_cell(columns[4].clone()),
+                i8_arr: parse_array_cell(columns[5].clone()),
+                f4_arr: parse_array_cell(columns[6].clone()),
+                f8_arr: parse_array_cell(columns[7].clone()),
+                by_arr: parse_bytes_array(columns[8].clone()),
+                d_arr: parse_array_cell(columns[9].clone()),
+                ti_arr: parse_array_cell(columns[10].clone()),
+                ts_arr: parse_naive_datetime_array(columns[11].clone()),
+                tstz_arr: parse_timestamp_array(columns[12].clone()),
+                u_arr: parse_array_cell(columns[13].clone()),
+                j_arr: parse_json_array(columns[14].clone()),
+                jb_arr: parse_json_array(columns[15].clone()),
+                o_arr: parse_array_cell(columns[16].clone()),
+            }
+        }
+    }
+
+    impl PartialEq for NullableColsArray {
+        fn eq(&self, other: &Self) -> bool {
+            // Helper function for float array comparison with epsilon
+            fn float_array_eq(a: &Option<Vec<f32>>, b: &Option<Vec<f32>>) -> bool {
+                match (a, b) {
+                    (Some(a_vec), Some(b_vec)) => {
+                        a_vec.len() == b_vec.len()
+                            && a_vec
+                                .iter()
+                                .zip(b_vec.iter())
+                                .all(|(x, y)| (x - y).abs() < f32::EPSILON)
+                    }
+                    (None, None) => true,
+                    _ => false,
+                }
+            }
+
+            fn double_array_eq(a: &Option<Vec<f64>>, b: &Option<Vec<f64>>) -> bool {
+                match (a, b) {
+                    (Some(a_vec), Some(b_vec)) => {
+                        a_vec.len() == b_vec.len()
+                            && a_vec
+                                .iter()
+                                .zip(b_vec.iter())
+                                .all(|(x, y)| (x - y).abs() < f64::EPSILON)
+                    }
+                    (None, None) => true,
+                    _ => false,
+                }
+            }
+
+            self.id == other.id
+                && self.b_arr == other.b_arr
+                && self.t_arr == other.t_arr
+                && self.i2_arr == other.i2_arr
+                && self.i4_arr == other.i4_arr
+                && self.i8_arr == other.i8_arr
+                && float_array_eq(&self.f4_arr, &other.f4_arr)
+                && double_array_eq(&self.f8_arr, &other.f8_arr)
+                && self.by_arr == other.by_arr
+                && self.d_arr == other.d_arr
+                && self.ti_arr == other.ti_arr
+                && self.ts_arr == other.ts_arr
+                && self.tstz_arr == other.tstz_arr
+                && self.u_arr == other.u_arr
+                && self.j_arr == other.j_arr
+                && self.jb_arr == other.jb_arr
+                && self.o_arr == other.o_arr
+        }
+    }
+
+    impl Eq for NullableColsArray {}
+
+    impl PartialOrd for NullableColsArray {
+        fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+            Some(self.cmp(other))
+        }
+    }
+
+    impl Ord for NullableColsArray {
+        fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+            self.id.cmp(&other.id)
+        }
+    }
+
     pub fn parse_bigquery_table_rows<T>(table_rows: Vec<TableRow>) -> Vec<T>
     where
         T: Ord,
