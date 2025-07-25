@@ -841,6 +841,181 @@ pub mod bigquery {
         }
     }
 
+    #[derive(Debug)]
+    pub struct NonNullableColsScalar {
+        id: i32,
+        b: bool,
+        t: String,
+        i2: i16,
+        i4: i32,
+        i8: i64,
+        f4: f32,
+        f8: f64,
+        // n: PgNumeric,
+        by: Vec<u8>,
+        d: NaiveDate,
+        ti: NaiveTime,
+        ts: NaiveDateTime,
+        tstz: DateTime<Utc>,
+        u: uuid::Uuid,
+        j: serde_json::Value,
+        jb: serde_json::Value,
+        o: u32,
+    }
+
+    impl NonNullableColsScalar {
+        #[allow(clippy::too_many_arguments)]
+        pub fn new(
+            id: i32,
+            b: bool,
+            t: String,
+            i2: i16,
+            i4: i32,
+            i8: i64,
+            f4: f32,
+            f8: f64,
+            // n: PgNumeric,
+            by: Vec<u8>,
+            d: NaiveDate,
+            ti: NaiveTime,
+            ts: NaiveDateTime,
+            tstz: DateTime<Utc>,
+            u: uuid::Uuid,
+            j: serde_json::Value,
+            jb: serde_json::Value,
+            o: u32,
+        ) -> Self {
+            Self {
+                id,
+                b,
+                t,
+                i2,
+                i4,
+                i8,
+                f4,
+                f8,
+                // n,
+                by,
+                d,
+                ti,
+                ts,
+                tstz,
+                u,
+                j,
+                jb,
+                o,
+            }
+        }
+    }
+
+    impl From<TableRow> for NonNullableColsScalar {
+        fn from(value: TableRow) -> Self {
+            let columns = value.columns.unwrap();
+
+            // Helper function to parse JSON values
+            fn parse_json_value(table_cell: TableCell) -> serde_json::Value {
+                table_cell
+                    .value
+                    .and_then(|v| v.as_str().and_then(|s| serde_json::from_str(s).ok()))
+                    .unwrap()
+            }
+
+            // Helper function to parse byte arrays (decode from base64)
+            fn parse_bytes(table_cell: TableCell) -> Vec<u8> {
+                table_cell
+                    .value
+                    .and_then(|v| v.as_str().and_then(|s| BASE64_STANDARD.decode(s).ok()))
+                    .unwrap()
+            }
+
+            // Helper function to parse Unix timestamp from TableCell to DateTime<Utc>
+            fn parse_unix_timestamp_from_cell(table_cell: TableCell) -> DateTime<Utc> {
+                table_cell
+                    .value
+                    .and_then(|v| v.as_str().map(|s| s.to_string()))
+                    .and_then(|s| s.parse::<f64>().ok())
+                    .and_then(|timestamp| {
+                        let secs = timestamp.trunc() as i64;
+                        let nanos = ((timestamp.fract()) * 1_000_000_000.0).round() as u32;
+                        DateTime::from_timestamp(secs, nanos)
+                    })
+                    .unwrap()
+            }
+
+            // Helper function to parse Unix timestamp to NaiveDateTime
+            fn parse_unix_timestamp_naive(table_cell: TableCell) -> NaiveDateTime {
+                parse_unix_timestamp_from_cell(table_cell).naive_utc()
+            }
+
+            NonNullableColsScalar {
+                id: parse_table_cell(columns[0].clone()).unwrap(),
+                b: parse_table_cell(columns[1].clone()).unwrap(),
+                t: parse_table_cell(columns[2].clone()).unwrap(),
+                i2: parse_table_cell(columns[3].clone()).unwrap(),
+                i4: parse_table_cell(columns[4].clone()).unwrap(),
+                i8: parse_table_cell(columns[5].clone()).unwrap(),
+                f4: parse_table_cell(columns[6].clone()).unwrap(),
+                f8: parse_table_cell(columns[7].clone()).unwrap(),
+                // n: parse_table_cell(columns[8].clone()).unwrap(),
+                by: parse_bytes(columns[8].clone()),
+                d: parse_table_cell(columns[9].clone()).unwrap(),
+                ti: parse_table_cell(columns[10].clone()).unwrap(),
+                ts: parse_unix_timestamp_naive(columns[11].clone()),
+                tstz: parse_unix_timestamp_from_cell(columns[12].clone()),
+                u: parse_table_cell(columns[13].clone()).unwrap(),
+                j: parse_json_value(columns[14].clone()),
+                jb: parse_json_value(columns[15].clone()),
+                o: parse_table_cell(columns[16].clone()).unwrap(),
+            }
+        }
+    }
+
+    impl PartialEq for NonNullableColsScalar {
+        fn eq(&self, other: &Self) -> bool {
+            // Helper function for float comparison with epsilon
+            fn float_eq(a: f32, b: f32) -> bool {
+                (a - b).abs() < f32::EPSILON
+            }
+
+            fn double_eq(a: f64, b: f64) -> bool {
+                (a - b).abs() < f64::EPSILON
+            }
+
+            self.id == other.id
+                && self.b == other.b
+                && self.t == other.t
+                && self.i2 == other.i2
+                && self.i4 == other.i4
+                && self.i8 == other.i8
+                && float_eq(self.f4, other.f4)
+                && double_eq(self.f8, other.f8)
+                // && self.n == other.n
+                && self.by == other.by
+                && self.d == other.d
+                && self.ti == other.ti
+                && self.ts == other.ts
+                && self.tstz == other.tstz
+                && self.u == other.u
+                && self.j == other.j
+                && self.jb == other.jb
+                && self.o == other.o
+        }
+    }
+
+    impl Eq for NonNullableColsScalar {}
+
+    impl PartialOrd for NonNullableColsScalar {
+        fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+            Some(self.cmp(other))
+        }
+    }
+
+    impl Ord for NonNullableColsScalar {
+        fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+            self.id.cmp(&other.id)
+        }
+    }
+
     pub fn parse_bigquery_table_rows<T>(table_rows: Vec<TableRow>) -> Vec<T>
     where
         T: Ord,

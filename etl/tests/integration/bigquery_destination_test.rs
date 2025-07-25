@@ -15,7 +15,8 @@ use etl::test_utils::database::{spawn_database, test_table_name};
 use etl::test_utils::pipeline::{create_pipeline, create_pipeline_with};
 use etl::test_utils::test_destination_wrapper::TestDestinationWrapper;
 use etl::test_utils::test_schema::bigquery::{
-    BigQueryOrder, BigQueryUser, NullableColsArray, NullableColsScalar, parse_bigquery_table_rows,
+    BigQueryOrder, BigQueryUser, NonNullableColsScalar, NullableColsArray, NullableColsScalar,
+    parse_bigquery_table_rows,
 };
 use etl::test_utils::test_schema::{TableSelection, insert_mock_data, setup_test_database_schema};
 
@@ -903,6 +904,256 @@ async fn table_nullable_array_columns() {
     );
 
     assert_eq!(parsed_table_rows, vec![expected_row]);
+
+    // delete
+    let event_notify = destination
+        .wait_for_events_count(vec![(EventType::Delete, 1)])
+        .await;
+
+    database
+        .delete_values(table_name.clone(), &["id"], &["'1'"], "")
+        .await
+        .unwrap();
+
+    event_notify.notified().await;
+
+    let table_rows = bigquery_database.query_table(table_name.clone()).await;
+    assert!(table_rows.is_none());
+
+    pipeline.shutdown_and_wait().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn table_non_nullable_scalar_columns() {
+    init_test_tracing();
+    install_crypto_provider_once();
+
+    let database = spawn_database().await;
+    let bigquery_database = setup_bigquery_connection().await;
+    let table_name = test_table_name("non_nullable_cols_scalar");
+    let table_id = database
+        .create_table(
+            table_name.clone(),
+            true,
+            &[
+                ("b", "bool NOT NULL"),
+                ("t", "text NOT NULL"),
+                ("i2", "int2 NOT NULL"),
+                ("i4", "int4 NOT NULL"),
+                ("i8", "int8 NOT NULL"),
+                ("f4", "float4 NOT NULL"),
+                ("f8", "float8 NOT NULL"),
+                // ("n", "numeric NOT NULL"),
+                ("by", "bytea NOT NULL"),
+                ("d", "date NOT NULL"),
+                ("ti", "time NOT NULL"),
+                ("ts", "timestamp NOT NULL"),
+                ("tstz", "timestamptz NOT NULL"),
+                ("u", "uuid NOT NULL"),
+                ("j", "json NOT NULL"),
+                ("jb", "jsonb NOT NULL"),
+                ("o", "oid NOT NULL"),
+            ],
+        )
+        .await
+        .unwrap();
+
+    let state_store = NotifyingStateStore::new();
+    let raw_destination = bigquery_database.build_destination().await;
+    let destination = TestDestinationWrapper::wrap(raw_destination);
+
+    let publication_name = "test_pub_non_null".to_string();
+    database
+        .create_publication(&publication_name, &[table_name.clone()])
+        .await
+        .expect("Failed to create publication");
+
+    let pipeline_id: PipelineId = random();
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        publication_name,
+        state_store.clone(),
+        destination.clone(),
+    );
+
+    let table_sync_done_notification = state_store
+        .notify_on_table_state(table_id, TableReplicationPhaseType::SyncDone)
+        .await;
+
+    pipeline.start().await.unwrap();
+
+    table_sync_done_notification.notified().await;
+
+    // insert with non-null values
+    let event_notify = destination
+        .wait_for_events_count(vec![(EventType::Insert, 1)])
+        .await;
+
+    // Define test values - all non-null
+    let test_bool = true;
+    let test_text = "test_text".to_string();
+    let test_i2 = 42i16;
+    let test_i4 = 1000i32;
+    let test_i8 = 123456789i64;
+    let test_f4 = 3.15f32; // Avoid clippy warning for PI approximation
+    let test_f8 = 2.717f64; // Avoid clippy warning for E approximation
+    // let test_numeric = PgNumeric::Value(bigdecimal::BigDecimal::from_str("99.99").unwrap());
+    let test_bytes = b"test_bytes".to_vec();
+    let test_date = NaiveDate::from_ymd_opt(2023, 7, 15).unwrap();
+    let test_time = NaiveTime::from_hms_opt(14, 30, 0).unwrap();
+    let test_timestamp = NaiveDateTime::new(test_date, test_time);
+    let test_timestamptz = DateTime::<Utc>::from_naive_utc_and_offset(test_timestamp, Utc);
+    let test_uuid = uuid::Uuid::new_v4();
+    let test_json = serde_json::json!({"key": "value"});
+    let test_jsonb = serde_json::json!({"jsonb": "data"});
+    let test_oid = 12345u32;
+
+    database
+        .insert_values(
+            table_name.clone(),
+            &[
+                "b", "t", "i2", "i4", "i8", "f4", "f8", "by", "d", "ti", "ts", "tstz", "u", "j",
+                "jb", "o",
+            ],
+            &[
+                &test_bool,
+                &test_text,
+                &test_i2,
+                &test_i4,
+                &test_i8,
+                &test_f4,
+                &test_f8,
+                // &test_numeric,
+                &test_bytes,
+                &test_date,
+                &test_time,
+                &test_timestamp,
+                &test_timestamptz,
+                &test_uuid,
+                &test_json,
+                &test_jsonb,
+                &test_oid,
+            ],
+        )
+        .await
+        .unwrap();
+
+    event_notify.notified().await;
+
+    let table_rows = bigquery_database
+        .query_table(table_name.clone())
+        .await
+        .unwrap();
+    let parsed_table_rows = parse_bigquery_table_rows::<NonNullableColsScalar>(table_rows);
+
+    let expected_row = NonNullableColsScalar::new(
+        1,
+        test_bool,
+        test_text.clone(),
+        test_i2,
+        test_i4,
+        test_i8,
+        test_f4,
+        test_f8,
+        // test_numeric.clone(),
+        test_bytes.clone(),
+        test_date,
+        test_time,
+        test_timestamp,
+        test_timestamptz,
+        test_uuid,
+        test_json.clone(),
+        test_jsonb.clone(),
+        test_oid,
+    );
+
+    assert_eq!(parsed_table_rows, vec![expected_row]);
+
+    // update with different non-null values
+    let event_notify = destination
+        .wait_for_events_count(vec![(EventType::Update, 1)])
+        .await;
+
+    // Define updated test values
+    let updated_bool = false;
+    let updated_text = "updated_text".to_string();
+    let updated_i2 = 84i16;
+    let updated_i4 = 2000i32;
+    let updated_i8 = 987654321i64;
+    let updated_f4 = 1.41f32;
+    let updated_f8 = 3.14160f64; // Avoid clippy warning for PI approximation
+    // let updated_numeric = PgNumeric::Value(bigdecimal::BigDecimal::from_str("42.42").unwrap());
+    let updated_bytes = b"updated_bytes".to_vec();
+    let updated_date = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
+    let updated_time = NaiveTime::from_hms_opt(9, 15, 30).unwrap();
+    let updated_timestamp = NaiveDateTime::new(updated_date, updated_time);
+    let updated_timestamptz = DateTime::<Utc>::from_naive_utc_and_offset(updated_timestamp, Utc);
+    let updated_uuid = uuid::Uuid::new_v4();
+    let updated_json = serde_json::json!({"updated": "json"});
+    let updated_jsonb = serde_json::json!({"updated": "jsonb"});
+    let updated_oid = 54321u32;
+
+    database
+        .update_values(
+            table_name.clone(),
+            &[
+                "b", "t", "i2", "i4", "i8", "f4", "f8", "by", "d", "ti", "ts", "tstz", "u", "j",
+                "jb", "o",
+            ],
+            &[
+                &updated_bool,
+                &updated_text,
+                &updated_i2,
+                &updated_i4,
+                &updated_i8,
+                &updated_f4,
+                &updated_f8,
+                // &updated_numeric,
+                &updated_bytes,
+                &updated_date,
+                &updated_time,
+                &updated_timestamp,
+                &updated_timestamptz,
+                &updated_uuid,
+                &updated_json,
+                &updated_jsonb,
+                &updated_oid,
+            ],
+        )
+        .await
+        .unwrap();
+
+    event_notify.notified().await;
+
+    let table_rows = bigquery_database
+        .query_table(table_name.clone())
+        .await
+        .unwrap();
+    let parsed_table_rows = parse_bigquery_table_rows::<NonNullableColsScalar>(table_rows);
+
+    let expected_updated_row = NonNullableColsScalar::new(
+        1,
+        updated_bool,
+        updated_text,
+        updated_i2,
+        updated_i4,
+        updated_i8,
+        updated_f4,
+        updated_f8,
+        // updated_numeric,
+        updated_bytes,
+        updated_date,
+        updated_time,
+        updated_timestamp,
+        updated_timestamptz,
+        updated_uuid,
+        updated_json,
+        updated_jsonb,
+        updated_oid,
+    );
+
+    assert_eq!(parsed_table_rows, vec![expected_updated_row]);
 
     // delete
     let event_notify = destination
