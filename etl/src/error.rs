@@ -6,13 +6,14 @@ pub type ETLResult<T> = Result<T, ETLError>;
 
 /// Main error type for ETL operations, inspired by Redis error handling
 pub struct ETLError {
-    pub repr: ErrorRepr,
+    repr: ErrorRepr,
 }
 
 #[derive(Debug)]
 pub enum ErrorRepr {
     WithDescription(ErrorKind, &'static str),
     WithDescriptionAndDetail(ErrorKind, &'static str, String),
+    Many(Vec<ETLError>),
 }
 
 /// Comprehensive error kinds for ETL operations
@@ -53,15 +54,38 @@ pub enum ErrorKind {
     DestinationError,
     /// Source-specific error
     SourceError,
-    /// Replication error
-    ReplicationError,
+    /// Replication slot not found
+    ReplicationSlotNotFound,
+    /// Replication slot already exists
+    ReplicationSlotAlreadyExists,
+    /// Replication slot name is invalid or too long
+    ReplicationSlotInvalid,
+    /// Table synchronization failed
+    TableSyncFailed,
+    /// Logical replication stream error
+    LogicalReplicationFailed,
 }
 
 impl ETLError {
+    /// Creates a new ETLError that contains multiple errors
+    pub fn many(errors: Vec<ETLError>) -> ETLError {
+        ETLError {
+            repr: ErrorRepr::Many(errors),
+        }
+    }
+
     /// Returns the kind of the error
     pub fn kind(&self) -> ErrorKind {
         match self.repr {
-            ErrorRepr::WithDescription(kind, _) | ErrorRepr::WithDescriptionAndDetail(kind, _, _) => kind,
+            ErrorRepr::WithDescription(kind, _)
+            | ErrorRepr::WithDescriptionAndDetail(kind, _, _) => kind,
+            ErrorRepr::Many(ref errors) => {
+                // For multiple errors, return the kind of the first error, or WorkerError if empty
+                errors
+                    .first()
+                    .map(|e| e.kind())
+                    .unwrap_or(ErrorKind::WorkerError)
+            }
         }
     }
 
@@ -69,6 +93,10 @@ impl ETLError {
     pub fn detail(&self) -> Option<&str> {
         match self.repr {
             ErrorRepr::WithDescriptionAndDetail(_, _, ref detail) => Some(detail.as_str()),
+            ErrorRepr::Many(ref errors) => {
+                // For multiple errors, return the detail of the first error that has one
+                errors.iter().find_map(|e| e.detail())
+            }
             _ => None,
         }
     }
@@ -93,7 +121,11 @@ impl ETLError {
             ErrorKind::WorkerError => "worker error",
             ErrorKind::DestinationError => "destination error",
             ErrorKind::SourceError => "source error",
-            ErrorKind::ReplicationError => "replication error",
+            ErrorKind::ReplicationSlotNotFound => "replication slot not found",
+            ErrorKind::ReplicationSlotAlreadyExists => "replication slot already exists",
+            ErrorKind::ReplicationSlotInvalid => "replication slot invalid",
+            ErrorKind::TableSyncFailed => "table sync failed",
+            ErrorKind::LogicalReplicationFailed => "logical replication failed",
         }
     }
 
@@ -105,7 +137,6 @@ impl ETLError {
         )
     }
 
-
     /// Returns true if this is a data-related error
     pub fn is_data_error(&self) -> bool {
         matches!(
@@ -113,16 +144,112 @@ impl ETLError {
             ErrorKind::SchemaError | ErrorKind::ConversionError | ErrorKind::ValidationError
         )
     }
+
+    /// Returns true if this is a replication-related error
+    pub fn is_replication_error(&self) -> bool {
+        matches!(
+            self.kind(),
+            ErrorKind::ReplicationSlotNotFound
+                | ErrorKind::ReplicationSlotAlreadyExists
+                | ErrorKind::ReplicationSlotInvalid
+                | ErrorKind::TableSyncFailed
+                | ErrorKind::LogicalReplicationFailed
+        )
+    }
+
+    /// Returns true if this is a replication slot error
+    pub fn is_replication_slot_error(&self) -> bool {
+        matches!(
+            self.kind(),
+            ErrorKind::ReplicationSlotNotFound
+                | ErrorKind::ReplicationSlotAlreadyExists
+                | ErrorKind::ReplicationSlotInvalid
+        )
+    }
+
+    /// Returns true if this error contains multiple errors
+    pub fn is_many(&self) -> bool {
+        matches!(self.repr, ErrorRepr::Many(_))
+    }
+
+    /// Returns the number of errors contained in this error
+    pub fn error_count(&self) -> usize {
+        match self.repr {
+            ErrorRepr::Many(ref errors) => errors.len(),
+            _ => 1,
+        }
+    }
+
+    /// Returns an iterator over all errors (including nested ones)
+    pub fn iter_errors(&self) -> impl Iterator<Item = &ETLError> {
+        ErrorIterator::new(self)
+    }
+
+    /// Flattens multiple errors into a single vector
+    pub fn flatten_errors(&self) -> Vec<&ETLError> {
+        let mut errors = Vec::new();
+        self.collect_errors(&mut errors);
+        errors
+    }
+
+    fn collect_errors<'a>(&'a self, errors: &mut Vec<&'a ETLError>) {
+        match self.repr {
+            ErrorRepr::Many(ref nested_errors) => {
+                for error in nested_errors {
+                    error.collect_errors(errors);
+                }
+            }
+            _ => errors.push(self),
+        }
+    }
+}
+
+/// Iterator over all errors in an ETLError tree
+pub struct ErrorIterator<'a> {
+    stack: Vec<&'a ETLError>,
+}
+
+impl<'a> ErrorIterator<'a> {
+    fn new(error: &'a ETLError) -> Self {
+        let mut stack = Vec::new();
+        stack.push(error);
+        ErrorIterator { stack }
+    }
+}
+
+impl<'a> Iterator for ErrorIterator<'a> {
+    type Item = &'a ETLError;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        while let Some(error) = self.stack.pop() {
+            match &error.repr {
+                ErrorRepr::Many(ref errors) => {
+                    // Add all errors to the stack in reverse order so they're processed in order
+                    for error in errors.iter().rev() {
+                        self.stack.push(error);
+                    }
+                }
+                _ => return Some(error),
+            }
+        }
+        None
+    }
 }
 
 impl PartialEq for ETLError {
     fn eq(&self, other: &ETLError) -> bool {
         match (&self.repr, &other.repr) {
-            (ErrorRepr::WithDescription(kind_a, _), ErrorRepr::WithDescription(kind_b, _)) => kind_a == kind_b,
+            (ErrorRepr::WithDescription(kind_a, _), ErrorRepr::WithDescription(kind_b, _)) => {
+                kind_a == kind_b
+            }
             (
                 ErrorRepr::WithDescriptionAndDetail(kind_a, _, _),
                 ErrorRepr::WithDescriptionAndDetail(kind_b, _, _),
             ) => kind_a == kind_b,
+            (ErrorRepr::Many(errors_a), ErrorRepr::Many(errors_b)) => {
+                errors_a.len() == errors_b.len()
+                    && errors_a.iter().zip(errors_b.iter()).all(|(a, b)| a == b)
+            }
             _ => false,
         }
     }
@@ -143,6 +270,20 @@ impl fmt::Display for ETLError {
                 f.write_str(": ")?;
                 detail.fmt(f)
             }
+            ErrorRepr::Many(ref errors) => {
+                if errors.is_empty() {
+                    write!(f, "Multiple errors occurred (empty)")?;
+                } else if errors.len() == 1 {
+                    // If there's only one error, just display it directly
+                    errors[0].fmt(f)?;
+                } else {
+                    write!(f, "Multiple errors occurred ({} total):", errors.len())?;
+                    for (i, error) in errors.iter().enumerate() {
+                        write!(f, "\n  {}: {}", i + 1, error)?;
+                    }
+                }
+                Ok(())
+            }
         }
     }
 }
@@ -156,7 +297,16 @@ impl fmt::Debug for ETLError {
 impl error::Error for ETLError {
     fn description(&self) -> &str {
         match self.repr {
-            ErrorRepr::WithDescription(_, desc) | ErrorRepr::WithDescriptionAndDetail(_, desc, _) => desc,
+            ErrorRepr::WithDescription(_, desc)
+            | ErrorRepr::WithDescriptionAndDetail(_, desc, _) => desc,
+            ErrorRepr::Many(ref errors) => {
+                if errors.is_empty() {
+                    "Multiple errors occurred (empty)"
+                } else {
+                    // Return the description of the first error
+                    errors[0].description()
+                }
+            }
         }
     }
 }
@@ -244,7 +394,7 @@ impl From<std::num::ParseFloatError> for ETLError {
         ETLError {
             repr: ErrorRepr::WithDescriptionAndDetail(
                 ErrorKind::ConversionError,
-                "Float parsing failed",  
+                "Float parsing failed",
                 err.to_string(),
             ),
         }
@@ -259,7 +409,7 @@ impl From<tokio_postgres::Error> for ETLError {
         } else {
             ErrorKind::ConnectionFailed
         };
-        
+
         ETLError {
             repr: ErrorRepr::WithDescriptionAndDetail(
                 kind,
@@ -308,6 +458,18 @@ impl From<tokio::sync::AcquireError> for ETLError {
     }
 }
 
+impl From<tokio::task::JoinError> for ETLError {
+    fn from(err: tokio::task::JoinError) -> ETLError {
+        ETLError {
+            repr: ErrorRepr::WithDescriptionAndDetail(
+                ErrorKind::WorkerError,
+                "Failed to join tokio task",
+                err.to_string(),
+            ),
+        }
+    }
+}
+
 // SQLx error conversion
 impl From<sqlx::Error> for ETLError {
     fn from(err: sqlx::Error) -> ETLError {
@@ -317,7 +479,7 @@ impl From<sqlx::Error> for ETLError {
             sqlx::Error::PoolClosed | sqlx::Error::PoolTimedOut => ErrorKind::ConnectionFailed,
             _ => ErrorKind::QueryFailed,
         };
-        
+
         ETLError {
             repr: ErrorRepr::WithDescriptionAndDetail(
                 kind,
@@ -337,7 +499,7 @@ impl From<gcp_bigquery_client::error::BQError> for ETLError {
             gcp_bigquery_client::error::BQError::ResponseError { .. } => ErrorKind::QueryFailed,
             _ => ErrorKind::DestinationError,
         };
-        
+
         ETLError {
             repr: ErrorRepr::WithDescriptionAndDetail(
                 kind,
@@ -378,7 +540,7 @@ impl From<crate::replication::stream::TableCopyStreamError> for ETLError {
     fn from(err: crate::replication::stream::TableCopyStreamError) -> ETLError {
         ETLError {
             repr: ErrorRepr::WithDescriptionAndDetail(
-                ErrorKind::ReplicationError,
+                ErrorKind::TableSyncFailed,
                 "Table copy stream operation failed",
                 err.to_string(),
             ),
@@ -390,7 +552,7 @@ impl From<crate::replication::stream::EventsStreamError> for ETLError {
     fn from(err: crate::replication::stream::EventsStreamError) -> ETLError {
         ETLError {
             repr: ErrorRepr::WithDescriptionAndDetail(
-                ErrorKind::ReplicationError,
+                ErrorKind::LogicalReplicationFailed,
                 "Events stream operation failed",
                 err.to_string(),
             ),
@@ -414,7 +576,7 @@ impl From<crate::replication::slot::SlotError> for ETLError {
     fn from(err: crate::replication::slot::SlotError) -> ETLError {
         ETLError {
             repr: ErrorRepr::WithDescriptionAndDetail(
-                ErrorKind::ReplicationError,
+                ErrorKind::ReplicationSlotInvalid,
                 "Replication slot operation failed",
                 err.to_string(),
             ),
@@ -422,7 +584,67 @@ impl From<crate::replication::slot::SlotError> for ETLError {
     }
 }
 
-// Helpful macros for error creation (following Redis pattern)
+// Missing From implementations for conversion error types
+impl From<crate::conversions::hex::ByteaHexParseError> for ETLError {
+    fn from(err: crate::conversions::hex::ByteaHexParseError) -> ETLError {
+        ETLError {
+            repr: ErrorRepr::WithDescriptionAndDetail(
+                ErrorKind::ConversionError,
+                "Hex parsing failed",
+                err.to_string(),
+            ),
+        }
+    }
+}
+
+impl From<crate::conversions::table_row::TableRowConversionError> for ETLError {
+    fn from(err: crate::conversions::table_row::TableRowConversionError) -> ETLError {
+        ETLError {
+            repr: ErrorRepr::WithDescriptionAndDetail(
+                ErrorKind::ConversionError,
+                "Table row conversion failed",
+                err.to_string(),
+            ),
+        }
+    }
+}
+
+impl From<crate::conversions::text::FromTextError> for ETLError {
+    fn from(err: crate::conversions::text::FromTextError) -> ETLError {
+        ETLError {
+            repr: ErrorRepr::WithDescriptionAndDetail(
+                ErrorKind::ConversionError,
+                "Text conversion failed",
+                err.to_string(),
+            ),
+        }
+    }
+}
+
+impl From<crate::conversions::text::ArrayParseError> for ETLError {
+    fn from(err: crate::conversions::text::ArrayParseError) -> ETLError {
+        ETLError {
+            repr: ErrorRepr::WithDescriptionAndDetail(
+                ErrorKind::ConversionError,
+                "Array parsing failed",
+                err.to_string(),
+            ),
+        }
+    }
+}
+
+impl From<crate::conversions::bool::ParseBoolError> for ETLError {
+    fn from(err: crate::conversions::bool::ParseBoolError) -> ETLError {
+        ETLError {
+            repr: ErrorRepr::WithDescriptionAndDetail(
+                ErrorKind::ConversionError,
+                "Boolean parsing failed",
+                err.to_string(),
+            ),
+        }
+    }
+}
+
 #[macro_export]
 macro_rules! etl_error {
     ($kind:expr, $desc:expr) => {
@@ -433,7 +655,7 @@ macro_rules! etl_error {
     };
 }
 
-#[macro_export] 
+#[macro_export]
 macro_rules! bail {
     ($kind:expr, $desc:expr) => {
         return Err(etl_error!($kind, $desc))
@@ -492,11 +714,24 @@ mod tests {
     fn test_error_categories() {
         let connection_err = ETLError::from((ErrorKind::ConnectionFailed, "Connection failed"));
         let data_err = ETLError::from((ErrorKind::SchemaError, "Schema mismatch"));
-        
+        let replication_err =
+            ETLError::from((ErrorKind::ReplicationSlotNotFound, "Slot not found"));
+        let slot_err = ETLError::from((ErrorKind::ReplicationSlotAlreadyExists, "Slot exists"));
+
         assert!(connection_err.is_connection_error());
         assert!(!connection_err.is_data_error());
-        
+        assert!(!connection_err.is_replication_error());
+
         assert!(!data_err.is_connection_error());
         assert!(data_err.is_data_error());
+        assert!(!data_err.is_replication_error());
+
+        assert!(replication_err.is_replication_error());
+        assert!(replication_err.is_replication_slot_error());
+        assert!(!replication_err.is_connection_error());
+
+        assert!(slot_err.is_replication_error());
+        assert!(slot_err.is_replication_slot_error());
+        assert!(!slot_err.is_data_error());
     }
 }

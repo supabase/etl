@@ -13,7 +13,7 @@ use crate::state::table::TableReplicationPhase;
 use crate::workers::apply::{ApplyWorker, ApplyWorkerHandle};
 use crate::workers::base::{Worker, WorkerHandle};
 use crate::workers::pool::TableSyncWorkerPool;
-
+use crate::{bail, etl_error};
 
 #[derive(Debug)]
 enum PipelineWorkers {
@@ -146,11 +146,15 @@ where
                 "publication '{}' does not exist in the database",
                 self.config.publication_name
             );
-            return Err(ETLError::from((
+
+            bail!(
                 ErrorKind::ConfigError,
                 "Missing publication",
-                format!("The publication '{}' does not exist in the database", self.config.publication_name)
-            )));
+                format!(
+                    "The publication '{}' does not exist in the database",
+                    self.config.publication_name
+                )
+            );
         }
 
         let table_ids = replication_client
@@ -208,7 +212,7 @@ where
         // We wait for all table sync workers to finish.
         let table_sync_workers_result = pool.wait_all().await;
         if let Err(err) = table_sync_workers_result {
-            errors.extend(err.0);
+            errors.push(err);
 
             info!("one or more table sync workers failed with an error");
         } else {
@@ -216,11 +220,7 @@ where
         }
 
         if !errors.is_empty() {
-            return Err(ETLError::from((
-                ErrorKind::WorkerError,
-                "One or more workers failed",
-                format!("Workers failed with {} errors", errors.len())
-            )));
+            return Err(errors.into());
         }
 
         Ok(())

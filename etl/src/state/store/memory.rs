@@ -3,8 +3,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
-use crate::state::store::base::StateStore;
 use crate::error::ETLResult;
+use crate::state::store::base::StateStore;
 use crate::state::table::TableReplicationPhase;
 
 #[derive(Debug)]

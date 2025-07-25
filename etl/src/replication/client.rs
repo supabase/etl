@@ -1,3 +1,5 @@
+use crate::error::{ETLError, ETLResult, ErrorKind};
+use crate::{bail, etl_error};
 use config::shared::{IntoConnectOptions, PgConnectionConfig};
 use pg_escape::{quote_identifier, quote_literal};
 use postgres::schema::{ColumnSchema, TableId, TableName, TableSchema};
@@ -8,7 +10,6 @@ use std::collections::HashMap;
 use std::fmt;
 use std::io::BufReader;
 use std::sync::Arc;
-use crate::error::{ETLError, ETLResult, ErrorKind};
 use tokio_postgres::error::SqlState;
 use tokio_postgres::tls::MakeTlsConnect;
 use tokio_postgres::{
@@ -40,7 +41,6 @@ where
 
     tokio::spawn(task);
 }
-
 
 #[derive(Debug, Clone)]
 pub struct CreateSlotResult {
@@ -257,7 +257,11 @@ impl PgReplicationClient {
             }
         }
 
-        Err(ETLError::from((ErrorKind::ReplicationError, "Replication slot not found", format!("Replication slot '{}' not found in database", slot_name))))
+        Err(etl_error!(
+            ErrorKind::ReplicationSlotNotFound,
+            "Replication slot not found",
+            format!("Replication slot '{}' not found in database", slot_name)
+        ))
     }
 
     /// Gets an existing replication slot or creates a new one if it doesn't exist.
@@ -279,7 +283,7 @@ impl PgReplicationClient {
 
                 Ok(GetOrCreateSlotResult::GetSlot(slot))
             }
-            Err(err) if err.kind() == ErrorKind::ReplicationError && err.detail().map_or(false, |d| d.contains("not found")) => {
+            Err(err) if err.kind() == ErrorKind::ReplicationSlotNotFound => {
                 info!("creating new replication slot '{}'", slot_name);
 
                 let create_result = self.create_slot_internal(slot_name, false).await?;
@@ -314,7 +318,11 @@ impl PgReplicationClient {
                             "attempted to delete non-existent replication slot '{}'",
                             slot_name
                         );
-                        return Err(ETLError::from((ErrorKind::ReplicationError, "Replication slot not found", format!("Replication slot '{}' not found in database", slot_name))));
+                        bail!(
+                            ErrorKind::ReplicationSlotNotFound,
+                            "Replication slot not found",
+                            format!("Replication slot '{}' not found in database", slot_name)
+                        );
                     }
                 }
 
@@ -489,7 +497,14 @@ impl PgReplicationClient {
             Err(err) => {
                 if let Some(code) = err.code() {
                     if *code == SqlState::DUPLICATE_OBJECT {
-                        return Err(ETLError::from((ErrorKind::ReplicationError, "Replication slot already exists", format!("Replication slot '{}' already exists in database", slot_name))));
+                        bail!(
+                            ErrorKind::ReplicationSlotAlreadyExists,
+                            "Replication slot already exists",
+                            format!(
+                                "Replication slot '{}' already exists in database",
+                                slot_name
+                            )
+                        );
                     }
                 }
 
@@ -497,7 +512,10 @@ impl PgReplicationClient {
             }
         }
 
-        Err(ETLError::from((ErrorKind::ReplicationError, "Failed to create replication slot")))
+        Err(etl_error!(
+            ErrorKind::ReplicationSlotAlreadyExists,
+            "Failed to create replication slot"
+        ))
     }
 
     /// Retrieves schema information for multiple tables.
@@ -574,7 +592,11 @@ impl PgReplicationClient {
             }
         }
 
-        Err(ETLError::from((ErrorKind::SchemaError, "Table not found", format!("Table not found in database (oid: {})", table_id))))
+        Err(etl_error!(
+            ErrorKind::SchemaError,
+            "Table not found",
+            format!("Table not found in database (oid: {})", table_id)
+        ))
     }
 
     /// Retrieves schema information for all columns in a table.
@@ -697,12 +719,24 @@ impl PgReplicationClient {
     where
         T::Err: fmt::Debug,
     {
-        let value = row
-            .try_get(column_name)?
-            .ok_or(ETLError::from((ErrorKind::SchemaError, "Column not found", format!("Column '{}' not found in table '{}'", column_name, table_name))))?;
+        let value = row.try_get(column_name)?.ok_or(etl_error!(
+            ErrorKind::SchemaError,
+            "Column not found",
+            format!(
+                "Column '{}' not found in table '{}'",
+                column_name, table_name
+            )
+        ))?;
 
         value.parse().map_err(|e: T::Err| {
-            ETLError::from((ErrorKind::ConversionError, "Column parsing failed", format!("Failed to parse value from column '{}' in table '{}': {:?}", column_name, table_name, e)))
+            etl_error!(
+                ErrorKind::ConversionError,
+                "Column parsing failed",
+                format!(
+                    "Failed to parse value from column '{}' in table '{}': {:?}",
+                    column_name, table_name, e
+                )
+            )
         })
     }
 }

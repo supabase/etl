@@ -1,7 +1,7 @@
+use crate::error::{ETLError, ETLResult};
 use config::shared::PipelineConfig;
 use postgres::schema::TableId;
 use std::sync::Arc;
-use crate::error::{ETLError, ETLResult, ErrorKind};
 use tokio::sync::Semaphore;
 use tokio::task::JoinHandle;
 use tokio_postgres::types::PgLsn;
@@ -18,12 +18,9 @@ use crate::replication::slot::{SlotError, get_slot_name};
 use crate::schema::cache::SchemaCache;
 use crate::state::store::base::StateStore;
 use crate::state::table::{TableReplicationPhase, TableReplicationPhaseType};
-use crate::workers::base::{Worker, WorkerHandle, WorkerType, WorkerWaitError};
+use crate::workers::base::{Worker, WorkerHandle, WorkerType};
 use crate::workers::pool::TableSyncWorkerPool;
-use crate::workers::table_sync::{
-    TableSyncWorker, TableSyncWorkerState,
-};
-
+use crate::workers::table_sync::{TableSyncWorker, TableSyncWorkerState};
 
 #[derive(Debug)]
 pub struct ApplyWorkerHandle {
@@ -33,7 +30,7 @@ pub struct ApplyWorkerHandle {
 impl WorkerHandle<()> for ApplyWorkerHandle {
     fn state(&self) {}
 
-    async fn wait(mut self) -> Result<(), WorkerWaitError> {
+    async fn wait(mut self) -> ETLResult<()> {
         let Some(handle) = self.handle.take() else {
             return Ok(());
         };
@@ -91,7 +88,7 @@ where
 {
     type Error = ETLError;
 
-    async fn start(self) -> Result<ApplyWorkerHandle, ETLError> {
+    async fn start(self) -> ETLResult<ApplyWorkerHandle> {
         info!("starting apply worker");
 
         let apply_worker_span = tracing::info_span!(
@@ -145,7 +142,7 @@ where
 async fn get_start_lsn(
     pipeline_id: PipelineId,
     replication_client: &PgReplicationClient,
-) -> Result<PgLsn, ETLError> {
+) -> ETLResult<PgLsn> {
     let slot_name = get_slot_name(pipeline_id, WorkerType::Apply)?;
     // TODO: validate that we only create the slot when we first start replication which
     //  means when all tables are in the Init state. In any other case we should raise an
@@ -224,11 +221,7 @@ where
         )
     }
 
-    async fn handle_syncing_table(
-        &self,
-        table_id: TableId,
-        current_lsn: PgLsn,
-    ) -> Result<bool, ETLError> {
+    async fn handle_syncing_table(&self, table_id: TableId, current_lsn: PgLsn) -> ETLResult<bool> {
         let mut pool = self.pool.lock().await;
         let table_sync_worker_state = pool.get_active_worker_state(table_id);
 
@@ -249,7 +242,7 @@ where
         table_id: TableId,
         table_sync_worker_state: TableSyncWorkerState,
         current_lsn: PgLsn,
-    ) -> Result<bool, ETLError> {
+    ) -> ETLResult<bool> {
         let mut catchup_started = false;
         {
             let mut inner = table_sync_worker_state.get_inner().lock().await;

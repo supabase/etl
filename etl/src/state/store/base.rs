@@ -1,14 +1,8 @@
+use crate::error::{ETLError, ETLResult, ErrorKind};
 use postgres::schema::TableId;
 use std::{collections::HashMap, future::Future};
-use crate::error::{ETLError, ETLResult, ErrorKind};
 
-use crate::{
-    replication::slot::SlotError,
-    state::{
-        table::TableReplicationPhase,
-    },
-};
-
+use crate::{replication::slot::SlotError, state::table::TableReplicationPhase};
 
 /// This trait represents a state store for the replication state of all tables.
 /// It assumes that the implementers keep a cache of the state to avoid having
@@ -33,9 +27,7 @@ pub trait StateStore {
     /// and then use only the `get_X` methods to access the state. Updating the state
     /// by calling the `update_table_replication_state` updates in both the cache and
     /// the persistent store, so no need to ever load the state again.
-    fn load_table_replication_states(
-        &self,
-    ) -> impl Future<Output = ETLResult<usize>> + Send;
+    fn load_table_replication_states(&self) -> impl Future<Output = ETLResult<usize>> + Send;
 
     /// Updates the table replicate state for a table with `table_id` in both the cache as well as
     /// the persistent store.

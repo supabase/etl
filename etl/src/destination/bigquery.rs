@@ -72,7 +72,6 @@ static ETL_TABLE_COLUMNS_COLUMNS: LazyLock<Vec<ColumnSchema>> = LazyLock::new(||
     ]
 });
 
-
 /// Internal state for [`BigQueryDestination`] wrapped in `Arc<Mutex<>>`.
 ///
 /// Contains the BigQuery client, dataset configuration, and injected schema cache.
@@ -185,12 +184,21 @@ impl BigQueryDestination {
         let schema_cache = inner
             .schema_cache
             .as_ref()
-            .ok_or_else(|| ETLError::from((ErrorKind::ConfigError, "The schema cache was not set on the destination")))?
+            .ok_or_else(|| {
+                ETLError::from((
+                    ErrorKind::ConfigError,
+                    "The schema cache was not set on the destination",
+                ))
+            })?
             .lock_inner()
             .await;
-        let table_schema = schema_cache
-            .get_table_schema_ref(table_id)
-            .ok_or_else(|| ETLError::from((ErrorKind::SchemaError, "Table schema not found in schema cache", format!("table_id: {}", table_id))))?;
+        let table_schema = schema_cache.get_table_schema_ref(table_id).ok_or_else(|| {
+            ETLError::from((
+                ErrorKind::SchemaError,
+                "Table schema not found in schema cache",
+                format!("table_id: {}", table_id),
+            ))
+        })?;
 
         let table_id = table_schema.name.as_bigquery_table_id();
         let table_descriptor = BigQueryClient::column_schemas_to_table_descriptor(
@@ -204,10 +212,7 @@ impl BigQueryDestination {
     /// Writes a table schema to BigQuery, creating the data table and storing metadata.
     ///
     /// This method creates the actual data table and inserts schema information into the ETL metadata tables.
-    async fn write_table_schema(
-        &self,
-        table_schema: TableSchema,
-    ) -> ETLResult<()> {
+    async fn write_table_schema(&self, table_schema: TableSchema) -> ETLResult<()> {
         let mut inner = self.inner.lock().await;
 
         let dataset_id = inner.dataset_id.clone();
@@ -520,10 +525,7 @@ impl BigQueryDestination {
     ///
     /// Maps PostgreSQL table OIDs to BigQuery table names and issues truncate commands.
     #[allow(dead_code)]
-    async fn process_truncate_events(
-        &self,
-        truncate_events: Vec<TruncateEvent>,
-    ) -> ETLResult<()> {
+    async fn process_truncate_events(&self, truncate_events: Vec<TruncateEvent>) -> ETLResult<()> {
         let inner = self.inner.lock().await;
 
         for truncate_event in truncate_events {
@@ -532,7 +534,12 @@ impl BigQueryDestination {
                 let schema_cache = inner
                     .schema_cache
                     .as_ref()
-                    .ok_or_else(|| ETLError::from((ErrorKind::ConfigError, "The schema cache was not set on the destination")))?
+                    .ok_or_else(|| {
+                        ETLError::from((
+                            ErrorKind::ConfigError,
+                            "The schema cache was not set on the destination",
+                        ))
+                    })?
                     .lock_inner()
                     .await;
 

@@ -1,7 +1,7 @@
 use crate::concurrency::shutdown::ShutdownRx;
 use crate::conversions::event::{Event, EventType, convert_message_to_event};
 use crate::destination::base::Destination;
-use crate::error::{ETLError, ErrorKind, ErrorRepr};
+use crate::error::{ETLError, ETLResult, ErrorKind, ErrorRepr};
 use crate::pipeline::PipelineId;
 use crate::replication::client::PgReplicationClient;
 use crate::replication::slot::get_slot_name;
@@ -26,7 +26,6 @@ use tracing::{debug, info};
 /// The amount of milliseconds that pass between one refresh and the other of the system, in case no
 /// events or shutdown signal are received.
 const REFRESH_INTERVAL: Duration = Duration::from_millis(1000);
-
 
 #[derive(Debug, Copy, Clone)]
 pub enum ApplyLoopResult {
@@ -209,7 +208,7 @@ pub async fn start_apply_loop<D, T>(
     hook: T,
     mut shutdown_rx: ShutdownRx,
     mut force_syncing_tables_rx: Option<SignalRx>,
-) -> Result<ApplyLoopResult, ETLError>
+) -> ETLResult<ApplyLoopResult>
 where
     D: Destination + Clone + Send + 'static,
     T: ApplyLoopHook,
@@ -336,7 +335,7 @@ async fn handle_replication_message_batch<D, T>(
     hook: &T,
     max_batch_size: usize,
     max_batch_fill_duration: Duration,
-) -> Result<bool, ETLError>
+) -> ETLResult<bool>
 where
     D: Destination + Clone + Send + 'static,
     T: ApplyLoopHook,
@@ -372,7 +371,7 @@ async fn try_send_batch<D, T>(
     hook: &T,
     max_batch_size: usize,
     max_batch_fill_duration: Duration,
-) -> Result<bool, ETLError>
+) -> ETLResult<bool>
 where
     D: Destination + Clone + Send + 'static,
     T: ApplyLoopHook,
@@ -455,7 +454,7 @@ async fn handle_replication_message<T>(
     message: ReplicationMessage<LogicalReplicationMessage>,
     schema_cache: &SchemaCache,
     hook: &T,
-) -> Result<HandleMessageResult, ETLError>
+) -> ETLResult<HandleMessageResult>
 where
     T: ApplyLoopHook,
     ETLError: From<<T as ApplyLoopHook>::Error>,
@@ -512,7 +511,7 @@ async fn handle_logical_replication_message<T>(
     message: LogicalReplicationMessage,
     schema_cache: &SchemaCache,
     hook: &T,
-) -> Result<HandleMessageResult, ETLError>
+) -> ETLResult<HandleMessageResult>
 where
     T: ApplyLoopHook,
     ETLError: From<<T as ApplyLoopHook>::Error>,
@@ -560,19 +559,20 @@ where
 }
 
 #[allow(clippy::result_large_err)]
-fn get_commit_lsn(
-    state: &ApplyLoopState,
-    message: &LogicalReplicationMessage,
-) -> Result<PgLsn, ETLError> {
+fn get_commit_lsn(state: &ApplyLoopState, message: &LogicalReplicationMessage) -> ETLResult<PgLsn> {
     // If we are in a `Begin` message, the `commit_lsn` is the `final_lsn` of the payload, in all the
     // other cases we read the `remote_final_lsn` which should be always set in case we are within or
     // at the end of a transaction (meaning that the event type is different from `Begin`).
     if let LogicalReplicationMessage::Begin(message) = message {
         Ok(PgLsn::from(message.final_lsn()))
     } else {
-        state
-            .remote_final_lsn
-            .ok_or_else(|| ETLError { repr: ErrorRepr::WithDescriptionAndDetail(ErrorKind::InvalidState, "Invalid transaction", "A transaction should have started for get_commit_lsn to be performed".to_string()) })
+        state.remote_final_lsn.ok_or_else(|| ETLError {
+            repr: ErrorRepr::WithDescriptionAndDetail(
+                ErrorKind::InvalidState,
+                "Invalid transaction",
+                "A transaction should have started for get_commit_lsn to be performed".to_string(),
+            ),
+        })
     }
 }
 
@@ -580,9 +580,19 @@ async fn handle_begin_message(
     state: &mut ApplyLoopState,
     event: Event,
     message: &protocol::BeginBody,
-) -> Result<HandleMessageResult, ETLError> {
+) -> ETLResult<HandleMessageResult> {
     let EventType::Begin = event.event_type() else {
-        return Err(ETLError { repr: ErrorRepr::WithDescriptionAndDetail(ErrorKind::ValidationError, "Invalid event", format!("An invalid event {:?} was received (expected {:?})", event, EventType::Begin)) });
+        return Err(ETLError {
+            repr: ErrorRepr::WithDescriptionAndDetail(
+                ErrorKind::ValidationError,
+                "Invalid event",
+                format!(
+                    "An invalid event {:?} was received (expected {:?})",
+                    event,
+                    EventType::Begin
+                ),
+            ),
+        });
     };
 
     // We track the final lsn of this transaction, which should be equal to the `commit_lsn` of the
@@ -603,20 +613,37 @@ async fn handle_commit_message<T>(
     event: Event,
     message: &protocol::CommitBody,
     hook: &T,
-) -> Result<HandleMessageResult, ETLError>
+) -> ETLResult<HandleMessageResult>
 where
     T: ApplyLoopHook,
     ETLError: From<<T as ApplyLoopHook>::Error>,
 {
     let EventType::Commit = event.event_type() else {
-        return Err(ETLError { repr: ErrorRepr::WithDescriptionAndDetail(ErrorKind::ValidationError, "Invalid event", format!("An invalid event {:?} was received (expected {:?})", event, EventType::Commit)) });
+        return Err(ETLError {
+            repr: ErrorRepr::WithDescriptionAndDetail(
+                ErrorKind::ValidationError,
+                "Invalid event",
+                format!(
+                    "An invalid event {:?} was received (expected {:?})",
+                    event,
+                    EventType::Commit
+                ),
+            ),
+        });
     };
 
     // We take the LSN that belongs to the current transaction, however, if there is no
     // LSN, it means that a `Begin` message was not received before this `Commit` which means
     // we are in an inconsistent state.
     let Some(remote_final_lsn) = state.remote_final_lsn.take() else {
-        return Err(ETLError { repr: ErrorRepr::WithDescriptionAndDetail(ErrorKind::InvalidState, "Invalid transaction", "A transaction should have started for handle_commit_message to be performed".to_string()) });
+        return Err(ETLError {
+            repr: ErrorRepr::WithDescriptionAndDetail(
+                ErrorKind::InvalidState,
+                "Invalid transaction",
+                "A transaction should have started for handle_commit_message to be performed"
+                    .to_string(),
+            ),
+        });
     };
 
     // If the commit lsn of the message is different from the remote final lsn, it means that the
@@ -624,7 +651,16 @@ where
     // we want to bail assuming we are in an inconsistent state.
     let commit_lsn = PgLsn::from(message.commit_lsn());
     if commit_lsn != remote_final_lsn {
-        return Err(ETLError { repr: ErrorRepr::WithDescriptionAndDetail(ErrorKind::ValidationError, "Invalid commit LSN", format!("Incorrect commit LSN {} in COMMIT message (expected {})", commit_lsn, remote_final_lsn)) });
+        return Err(ETLError {
+            repr: ErrorRepr::WithDescriptionAndDetail(
+                ErrorKind::ValidationError,
+                "Invalid commit LSN",
+                format!(
+                    "Incorrect commit LSN {} in COMMIT message (expected {})",
+                    commit_lsn, remote_final_lsn
+                ),
+            ),
+        });
     }
 
     let end_lsn = PgLsn::from(message.end_lsn());
@@ -666,17 +702,34 @@ async fn handle_relation_message<T>(
     message: &protocol::RelationBody,
     schema_cache: &SchemaCache,
     hook: &T,
-) -> Result<HandleMessageResult, ETLError>
+) -> ETLResult<HandleMessageResult>
 where
     T: ApplyLoopHook,
     ETLError: From<<T as ApplyLoopHook>::Error>,
 {
     let Event::Relation(event) = event else {
-        return Err(ETLError { repr: ErrorRepr::WithDescriptionAndDetail(ErrorKind::ValidationError, "Invalid event", format!("An invalid event {:?} was received (expected {:?})", event, EventType::Relation)) });
+        return Err(ETLError {
+            repr: ErrorRepr::WithDescriptionAndDetail(
+                ErrorKind::ValidationError,
+                "Invalid event",
+                format!(
+                    "An invalid event {:?} was received (expected {:?})",
+                    event,
+                    EventType::Relation
+                ),
+            ),
+        });
     };
 
     let Some(remote_final_lsn) = state.remote_final_lsn else {
-        return Err(ETLError { repr: ErrorRepr::WithDescriptionAndDetail(ErrorKind::InvalidState, "Invalid transaction", "A transaction should have started for handle_relation_message to be performed".to_string()) });
+        return Err(ETLError {
+            repr: ErrorRepr::WithDescriptionAndDetail(
+                ErrorKind::InvalidState,
+                "Invalid transaction",
+                "A transaction should have started for handle_relation_message to be performed"
+                    .to_string(),
+            ),
+        });
     };
 
     if !hook
@@ -691,7 +744,16 @@ where
     // TODO: explore how to deal with applying relation messages to the schema (creating it if missing).
     let schema_cache = schema_cache.lock_inner().await;
     let Some(existing_table_schema) = schema_cache.get_table_schema_ref(&message.rel_id()) else {
-        return Err(ETLError { repr: ErrorRepr::WithDescriptionAndDetail(ErrorKind::SchemaError, "Missing table schema", format!("The table schema for table {} was not found in the cache", message.rel_id())) });
+        return Err(ETLError {
+            repr: ErrorRepr::WithDescriptionAndDetail(
+                ErrorKind::SchemaError,
+                "Missing table schema",
+                format!(
+                    "The table schema for table {} was not found in the cache",
+                    message.rel_id()
+                ),
+            ),
+        });
     };
 
     // We compare the table schema from the relation message with the existing schema (if any).
@@ -718,17 +780,34 @@ async fn handle_insert_message<T>(
     event: Event,
     message: &protocol::InsertBody,
     hook: &T,
-) -> Result<HandleMessageResult, ETLError>
+) -> ETLResult<HandleMessageResult>
 where
     T: ApplyLoopHook,
     ETLError: From<<T as ApplyLoopHook>::Error>,
 {
     let Event::Insert(event) = event else {
-        return Err(ETLError { repr: ErrorRepr::WithDescriptionAndDetail(ErrorKind::ValidationError, "Invalid event", format!("An invalid event {:?} was received (expected {:?})", event, EventType::Insert)) });
+        return Err(ETLError {
+            repr: ErrorRepr::WithDescriptionAndDetail(
+                ErrorKind::ValidationError,
+                "Invalid event",
+                format!(
+                    "An invalid event {:?} was received (expected {:?})",
+                    event,
+                    EventType::Insert
+                ),
+            ),
+        });
     };
 
     let Some(remote_final_lsn) = state.remote_final_lsn else {
-        return Err(ETLError { repr: ErrorRepr::WithDescriptionAndDetail(ErrorKind::InvalidState, "Invalid transaction", "A transaction should have started for handle_insert_message to be performed".to_string()) });
+        return Err(ETLError {
+            repr: ErrorRepr::WithDescriptionAndDetail(
+                ErrorKind::InvalidState,
+                "Invalid transaction",
+                "A transaction should have started for handle_insert_message to be performed"
+                    .to_string(),
+            ),
+        });
     };
 
     if !hook
@@ -751,17 +830,34 @@ async fn handle_update_message<T>(
     event: Event,
     message: &protocol::UpdateBody,
     hook: &T,
-) -> Result<HandleMessageResult, ETLError>
+) -> ETLResult<HandleMessageResult>
 where
     T: ApplyLoopHook,
     ETLError: From<<T as ApplyLoopHook>::Error>,
 {
     let Event::Update(event) = event else {
-        return Err(ETLError { repr: ErrorRepr::WithDescriptionAndDetail(ErrorKind::ValidationError, "Invalid event", format!("An invalid event {:?} was received (expected {:?})", event, EventType::Update)) });
+        return Err(ETLError {
+            repr: ErrorRepr::WithDescriptionAndDetail(
+                ErrorKind::ValidationError,
+                "Invalid event",
+                format!(
+                    "An invalid event {:?} was received (expected {:?})",
+                    event,
+                    EventType::Update
+                ),
+            ),
+        });
     };
 
     let Some(remote_final_lsn) = state.remote_final_lsn else {
-        return Err(ETLError { repr: ErrorRepr::WithDescriptionAndDetail(ErrorKind::InvalidState, "Invalid transaction", "A transaction should have started for handle_update_message to be performed".to_string()) });
+        return Err(ETLError {
+            repr: ErrorRepr::WithDescriptionAndDetail(
+                ErrorKind::InvalidState,
+                "Invalid transaction",
+                "A transaction should have started for handle_update_message to be performed"
+                    .to_string(),
+            ),
+        });
     };
 
     if !hook
@@ -784,17 +880,34 @@ async fn handle_delete_message<T>(
     event: Event,
     message: &protocol::DeleteBody,
     hook: &T,
-) -> Result<HandleMessageResult, ETLError>
+) -> ETLResult<HandleMessageResult>
 where
     T: ApplyLoopHook,
     ETLError: From<<T as ApplyLoopHook>::Error>,
 {
     let Event::Delete(event) = event else {
-        return Err(ETLError { repr: ErrorRepr::WithDescriptionAndDetail(ErrorKind::ValidationError, "Invalid event", format!("An invalid event {:?} was received (expected {:?})", event, EventType::Delete)) });
+        return Err(ETLError {
+            repr: ErrorRepr::WithDescriptionAndDetail(
+                ErrorKind::ValidationError,
+                "Invalid event",
+                format!(
+                    "An invalid event {:?} was received (expected {:?})",
+                    event,
+                    EventType::Delete
+                ),
+            ),
+        });
     };
 
     let Some(remote_final_lsn) = state.remote_final_lsn else {
-        return Err(ETLError { repr: ErrorRepr::WithDescriptionAndDetail(ErrorKind::InvalidState, "Invalid transaction", "A transaction should have started for handle_delete_message to be performed".to_string()) });
+        return Err(ETLError {
+            repr: ErrorRepr::WithDescriptionAndDetail(
+                ErrorKind::InvalidState,
+                "Invalid transaction",
+                "A transaction should have started for handle_delete_message to be performed"
+                    .to_string(),
+            ),
+        });
     };
 
     if !hook
@@ -817,17 +930,34 @@ async fn handle_truncate_message<T>(
     event: Event,
     message: &protocol::TruncateBody,
     hook: &T,
-) -> Result<HandleMessageResult, ETLError>
+) -> ETLResult<HandleMessageResult>
 where
     T: ApplyLoopHook,
     ETLError: From<<T as ApplyLoopHook>::Error>,
 {
     let Event::Truncate(mut event) = event else {
-        return Err(ETLError { repr: ErrorRepr::WithDescriptionAndDetail(ErrorKind::ValidationError, "Invalid event", format!("An invalid event {:?} was received (expected {:?})", event, EventType::Truncate)) });
+        return Err(ETLError {
+            repr: ErrorRepr::WithDescriptionAndDetail(
+                ErrorKind::ValidationError,
+                "Invalid event",
+                format!(
+                    "An invalid event {:?} was received (expected {:?})",
+                    event,
+                    EventType::Truncate
+                ),
+            ),
+        });
     };
 
     let Some(remote_final_lsn) = state.remote_final_lsn else {
-        return Err(ETLError { repr: ErrorRepr::WithDescriptionAndDetail(ErrorKind::InvalidState, "Invalid transaction", "A transaction should have started for handle_truncate_message to be performed".to_string()) });
+        return Err(ETLError {
+            repr: ErrorRepr::WithDescriptionAndDetail(
+                ErrorKind::InvalidState,
+                "Invalid transaction",
+                "A transaction should have started for handle_truncate_message to be performed"
+                    .to_string(),
+            ),
+        });
     };
 
     let mut rel_ids = Vec::with_capacity(message.rel_ids().len());

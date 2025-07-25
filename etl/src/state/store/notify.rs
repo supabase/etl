@@ -6,11 +6,11 @@ use tokio::{
     sync::{Notify, RwLock},
 };
 
+use crate::error::ETLResult;
 use crate::state::{
     store::base::StateStore,
     table::{TableReplicationPhase, TableReplicationPhaseType},
 };
-use crate::error::ETLResult;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum StateStoreMethod {

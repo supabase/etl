@@ -1,3 +1,4 @@
+use crate::error::{ETLError, ETLResult, ErrorKind};
 use futures::StreamExt;
 use gcp_bigquery_client::google::cloud::bigquery::storage::v1::RowError;
 use gcp_bigquery_client::storage::{ColumnMode, StorageApi};
@@ -10,7 +11,6 @@ use gcp_bigquery_client::{
 };
 use postgres::schema::ColumnSchema;
 use std::fmt;
-use crate::error::{ETLError, ETLResult, ErrorKind};
 use tokio_postgres::types::Type;
 use tracing::info;
 
@@ -95,10 +95,7 @@ impl BigQueryClient {
     ///
     /// Parses the provided service account key string to authenticate with the
     /// BigQuery API.
-    pub async fn new_with_key(
-        project_id: String,
-        sa_key: &str,
-    ) -> ETLResult<BigQueryClient> {
+    pub async fn new_with_key(project_id: String, sa_key: &str) -> ETLResult<BigQueryClient> {
         let sa_key = parse_service_account_key(sa_key).map_err(BQError::from)?;
         let client = Client::from_service_account_key(sa_key, false).await?;
 
@@ -158,11 +155,7 @@ impl BigQueryClient {
     }
 
     /// Truncates a table in a BigQuery dataset.
-    pub async fn truncate_table(
-        &self,
-        dataset_id: &str,
-        table_id: &str,
-    ) -> ETLResult<()> {
+    pub async fn truncate_table(&self, dataset_id: &str, table_id: &str) -> ETLResult<()> {
         let full_table_name = self.full_table_name(dataset_id, table_id);
 
         info!("Truncating table {full_table_name} in BigQuery");
@@ -179,11 +172,7 @@ impl BigQueryClient {
     /// # Panics
     ///
     /// Panics if the query result does not contain the expected `table_exists` column.
-    pub async fn table_exists(
-        &self,
-        dataset_id: &str,
-        table_id: &str,
-    ) -> ETLResult<bool> {
+    pub async fn table_exists(&self, dataset_id: &str, table_id: &str) -> ETLResult<bool> {
         let table = self
             .client
             .table()
@@ -232,9 +221,7 @@ impl BigQueryClient {
             if let Some(append_rows_response) = append_rows_stream.next().await {
                 let append_rows_response = append_rows_response.map_err(BQError::from)?;
                 if !append_rows_response.row_errors.is_empty() {
-                    return Err(ETLError::from(RowErrors(
-                        append_rows_response.row_errors,
-                    )));
+                    return Err(ETLError::from(RowErrors(append_rows_response.row_errors)));
                 }
             }
 

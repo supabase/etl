@@ -25,7 +25,7 @@ use crate::state::store::base::StateStore;
 use crate::state::table::{TableReplicationPhase, TableReplicationPhaseType};
 use crate::workers::base::WorkerType;
 use crate::workers::table_sync::TableSyncWorkerState;
-
+use crate::{bail, etl_error};
 
 #[derive(Debug)]
 pub enum TableSyncResult {
@@ -46,7 +46,7 @@ pub async fn start_table_sync<S, D>(
     destination: D,
     shutdown_rx: ShutdownRx,
     force_syncing_tables_tx: SignalTx,
-) -> Result<TableSyncResult, ETLError>
+) -> ETLResult<TableSyncResult>
 where
     S: StateStore + Clone + Send + 'static,
     D: Destination + Clone + Send + 'static,
@@ -87,7 +87,14 @@ where
                 phase_type, table_id
             );
 
-            return Err(ETLError::from((ErrorKind::InvalidState, "Invalid replication phase", format!("Invalid replication phase '{}': expected Init, DataSync, or FinishedCopy", phase_type))));
+            bail!(
+                ErrorKind::InvalidState,
+                "Invalid replication phase",
+                format!(
+                    "Invalid replication phase '{}': expected Init, DataSync, or FinishedCopy",
+                    phase_type
+                )
+            );
         }
 
         phase_type
@@ -121,7 +128,7 @@ where
                 // before starting a table copy.
                 if let Err(err) = replication_client.delete_slot(&slot_name).await {
                     // If the slot is not found, we are safe to continue, for any other error, we bail.
-                    if err.kind() != ErrorKind::ReplicationError || !err.detail().map_or(false, |d| d.contains("not found")) {
+                    if err.kind() != ErrorKind::ReplicationSlotNotFound {
                         return Err(err.into());
                     }
                 }
@@ -165,7 +172,11 @@ where
                 state_store
                     .update_table_replication_state(table_id, TableReplicationPhase::Skipped)
                     .await?;
-                return Err(ETLError::from((ErrorKind::SchemaError, "Missing primary key", format!("table {} has no primary key", table_schema.name))));
+                bail!(
+                    ErrorKind::SchemaError,
+                    "Missing primary key",
+                    format!("table {} has no primary key", table_schema.name)
+                );
             }
 
             schema_cache.add_table_schema(table_schema.clone()).await;

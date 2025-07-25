@@ -1,5 +1,7 @@
 use std::{collections::HashMap, sync::Arc};
 
+use crate::error::{ETLError, ETLResult, ErrorKind};
+use crate::{bail, etl_error};
 use config::shared::PgConnectionConfig;
 use postgres::replication::{
     TableReplicationState, TableReplicationStateRow, connect_to_source_database,
@@ -7,17 +9,13 @@ use postgres::replication::{
 };
 use postgres::schema::TableId;
 use sqlx::PgPool;
-use crate::error::{ETLError, ETLResult, ErrorKind};
 use tokio::sync::Mutex;
 use tokio_postgres::types::PgLsn;
 use tracing::{debug, info};
 
 use crate::{
     pipeline::PipelineId,
-    state::{
-        store::base::StateStore,
-        table::TableReplicationPhase,
-    },
+    state::{store::base::StateStore, table::TableReplicationPhase},
 };
 
 const NUM_POOL_CONNECTIONS: u32 = 1;
@@ -36,12 +34,15 @@ impl TryFrom<TableReplicationPhase> for (TableReplicationState, Option<String>) 
             TableReplicationPhase::Ready => (TableReplicationState::Ready, None),
             TableReplicationPhase::Skipped => (TableReplicationState::Skipped, None),
             TableReplicationPhase::SyncWait | TableReplicationPhase::Catchup { .. } => {
-                return Err(ETLError::from((ErrorKind::InvalidState, "In-memory phase error", "In-memory table replication phase can't be saved in the state store".to_string())));
+                bail!(
+                    ErrorKind::InvalidState,
+                    "In-memory phase error",
+                    "In-memory table replication phase can't be saved in the state store"
+                );
             }
         })
     }
 }
-
 
 #[derive(Debug)]
 struct Inner {
@@ -114,12 +115,23 @@ impl PostgresStateStore {
             TableReplicationState::FinishedCopy => TableReplicationPhase::FinishedCopy,
             TableReplicationState::SyncDone => match sync_done_lsn {
                 Some(lsn_str) => {
-                    let lsn = lsn_str
-                        .parse::<PgLsn>()
-                        .map_err(|_| ETLError::from((ErrorKind::ValidationError, "Invalid LSN", format!("Invalid confirmed flush lsn value in state store: {}", lsn_str))))?;
+                    let lsn = lsn_str.parse::<PgLsn>().map_err(|_| {
+                        etl_error!(
+                            ErrorKind::ValidationError,
+                            "Invalid LSN",
+                            format!(
+                                "Invalid confirmed flush lsn value in state store: {}",
+                                lsn_str
+                            )
+                        )
+                    })?;
                     TableReplicationPhase::SyncDone { lsn }
                 }
-                None => return Err(ETLError::from((ErrorKind::ValidationError, "Missing LSN", "Lsn can't be missing from the state store if state is SyncDone".to_string()))),
+                None => bail!(
+                    ErrorKind::ValidationError,
+                    "Missing LSN",
+                    "Lsn can't be missing from the state store if state is SyncDone"
+                ),
             },
             TableReplicationState::Ready => TableReplicationPhase::Ready,
             TableReplicationState::Skipped => TableReplicationPhase::Skipped,

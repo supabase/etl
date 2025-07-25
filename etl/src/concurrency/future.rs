@@ -59,7 +59,7 @@ where
     ///
     /// The callback will be notified of either success or failure, and will receive the provided
     /// identifier to track which future completed.
-    pub fn new(future: Fut, id: I, callback_source: Arc<Mutex<C>>) -> Self {
+    pub fn wrap(future: Fut, id: I, callback_source: Arc<Mutex<C>>) -> Self {
         Self {
             future: AssertUnwindSafe(future).catch_unwind(),
             callback_fut: None,
@@ -271,7 +271,7 @@ mod tests {
         let callback = Arc::new(Mutex::new(MockCallback::default()));
         let table_id = 1;
 
-        let future = ReactiveFuture::new(ImmediateFuture, table_id, callback.clone());
+        let future = ReactiveFuture::wrap(ImmediateFuture, table_id, callback.clone());
         future.await.unwrap();
 
         let guard = callback.lock().await;
@@ -285,7 +285,7 @@ mod tests {
         let table_id = 1;
 
         // Test string panic
-        let future = AssertUnwindSafe(ReactiveFuture::new(
+        let future = AssertUnwindSafe(ReactiveFuture::wrap(
             PanicFuture { panic_any: false },
             table_id,
             callback.clone(),
@@ -312,7 +312,7 @@ mod tests {
         drop(guard);
 
         // Test any panic
-        let future = AssertUnwindSafe(ReactiveFuture::new(
+        let future = AssertUnwindSafe(ReactiveFuture::wrap(
             PanicFuture { panic_any: true },
             table_id,
             callback.clone(),
@@ -335,7 +335,7 @@ mod tests {
         let table_id = 1;
 
         let pending_future = PendingFuture::new();
-        let future = ReactiveFuture::new(pending_future, table_id, callback.clone());
+        let future = ReactiveFuture::wrap(pending_future, table_id, callback.clone());
 
         // First poll should return pending
         let mut pinned_future = Box::pin(future);
@@ -364,7 +364,7 @@ mod tests {
         let callback = Arc::new(Mutex::new(MockCallback::default()));
         let table_id = 1;
 
-        let future = ReactiveFuture::new(ErrorFuture, table_id, callback.clone());
+        let future = ReactiveFuture::wrap(ErrorFuture, table_id, callback.clone());
         let result = future.await;
 
         // Verify the error was propagated
