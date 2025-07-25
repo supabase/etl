@@ -1,4 +1,4 @@
-use crate::error::{ETLError, ETLResult};
+use crate::error::{ETLError, ETLResult, ErrorKind};
 use config::shared::PipelineConfig;
 use postgres::schema::TableId;
 use std::sync::Arc;
@@ -10,6 +10,7 @@ use tracing::{Instrument, debug, error, info};
 use crate::concurrency::shutdown::ShutdownRx;
 use crate::concurrency::signal::{SignalTx, create_signal};
 use crate::destination::base::Destination;
+use crate::etl_error;
 use crate::pipeline::PipelineId;
 use crate::replication::apply::{ApplyLoopHook, start_apply_loop};
 use crate::replication::client::PgReplicationClient;
@@ -35,7 +36,13 @@ impl WorkerHandle<()> for ApplyWorkerHandle {
             return Ok(());
         };
 
-        handle.await??;
+        handle.await.map_err(|err| {
+            etl_error!(
+                ErrorKind::ApplyWorkerError,
+                "A panic occurred in the apply worker",
+                err
+            )
+        })??;
 
         Ok(())
     }

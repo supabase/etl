@@ -716,7 +716,9 @@ where
     // dealt with differently based on the worker type.
     // TODO: explore how to deal with applying relation messages to the schema (creating it if missing).
     let schema_cache = schema_cache.lock_inner().await;
-    let Some(existing_table_schema) = schema_cache.get_table_schema_ref(&message.rel_id()) else {
+    let Some(existing_table_schema) =
+        schema_cache.get_table_schema_ref(&TableId::new(message.rel_id()))
+    else {
         bail!(
             ErrorKind::MissingTableSchema,
             "Table not found in the schema cache",

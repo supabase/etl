@@ -1,4 +1,4 @@
-use etl::error::{ETLError, ErrorKind};
+use etl::error::ErrorKind;
 use etl::replication::client::PgReplicationClient;
 use futures::StreamExt;
 use postgres::schema::ColumnSchema;

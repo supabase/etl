@@ -54,8 +54,10 @@ pub enum ErrorKind {
     InvalidData,
     /// Data validation error
     ValidationError,
-    /// Worker/concurrency error
-    WorkerError,
+    /// Apply worker error
+    ApplyWorkerError,
+    /// Table sync worker error
+    TableSyncWorkerError,
     /// Destination-specific error
     DestinationError,
     /// Source-specific error
@@ -74,6 +76,8 @@ pub enum ErrorKind {
     TableNotFound,
     /// Logical replication stream error
     LogicalReplicationFailed,
+    /// Unknown error
+    Unknown,
 }
 
 impl ETLError {
@@ -89,13 +93,19 @@ impl ETLError {
         match self.repr {
             ErrorRepr::WithDescription(kind, _)
             | ErrorRepr::WithDescriptionAndDetail(kind, _, _) => kind,
-            ErrorRepr::Many(ref errors) => {
-                // For multiple errors, return the kind of the first error, or WorkerError if empty
-                errors
-                    .first()
-                    .map(|e| e.kind())
-                    .unwrap_or(ErrorKind::WorkerError)
-            }
+            ErrorRepr::Many(ref errors) => errors
+                .first()
+                .map(|e| e.kind())
+                .unwrap_or(ErrorKind::Unknown),
+        }
+    }
+
+    /// Returns the kinds of the error
+    pub fn kinds(&self) -> Vec<ErrorKind> {
+        match self.repr {
+            ErrorRepr::WithDescription(kind, _)
+            | ErrorRepr::WithDescriptionAndDetail(kind, _, _) => vec![kind],
+            ErrorRepr::Many(ref errors) => errors.iter().map(|e| e.kind()).collect::<Vec<_>>(),
         }
     }
 
@@ -135,16 +145,20 @@ impl fmt::Display for ETLError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
         match self.repr {
             ErrorRepr::WithDescription(kind, desc) => {
-                desc.fmt(f)?;
-                f.write_str(" - ")?;
-                fmt::Debug::fmt(&kind, f)
-            }
-            ErrorRepr::WithDescriptionAndDetail(kind, desc, ref detail) => {
-                desc.fmt(f)?;
-                f.write_str(" - ")?;
                 fmt::Debug::fmt(&kind, f)?;
                 f.write_str(": ")?;
-                detail.fmt(f)
+                desc.fmt(f)?;
+
+                Ok(())
+            }
+            ErrorRepr::WithDescriptionAndDetail(kind, desc, ref detail) => {
+                fmt::Debug::fmt(&kind, f)?;
+                f.write_str(": ")?;
+                desc.fmt(f)?;
+                f.write_str(" -> ")?;
+                detail.fmt(f)?;
+
+                Ok(())
             }
             ErrorRepr::Many(ref errors) => {
                 if errors.is_empty() {
@@ -347,44 +361,6 @@ impl From<bigdecimal::ParseBigDecimalError> for ETLError {
             repr: ErrorRepr::WithDescriptionAndDetail(
                 ErrorKind::ConversionError,
                 "BigDecimal parsing failed",
-                err.to_string(),
-            ),
-        }
-    }
-}
-
-// Tokio watch error conversion
-impl From<tokio::sync::watch::error::SendError<()>> for ETLError {
-    fn from(err: tokio::sync::watch::error::SendError<()>) -> ETLError {
-        ETLError {
-            repr: ErrorRepr::WithDescriptionAndDetail(
-                ErrorKind::WorkerError,
-                "Worker shutdown failed",
-                err.to_string(),
-            ),
-        }
-    }
-}
-
-// Tokio sync error conversions
-impl From<tokio::sync::AcquireError> for ETLError {
-    fn from(err: tokio::sync::AcquireError) -> ETLError {
-        ETLError {
-            repr: ErrorRepr::WithDescriptionAndDetail(
-                ErrorKind::ResourceError,
-                "Failed to acquire permit",
-                err.to_string(),
-            ),
-        }
-    }
-}
-
-impl From<tokio::task::JoinError> for ETLError {
-    fn from(err: tokio::task::JoinError) -> ETLError {
-        ETLError {
-            repr: ErrorRepr::WithDescriptionAndDetail(
-                ErrorKind::WorkerError,
-                "Failed to join tokio task",
                 err.to_string(),
             ),
         }

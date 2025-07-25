@@ -123,8 +123,8 @@ impl TableSyncWorkerPoolInner {
                 // re-propagate the error after marking a table sync worker as finished.
                 if let TableSyncWorkerInactiveReason::Errored(err) = finish {
                     errors.push(etl_error!(
-                        ErrorKind::WorkerError,
-                        "Table sync worker failed",
+                        ErrorKind::TableSyncWorkerError,
+                        "A caught error occurred in a table sync worker",
                         err
                     ));
                 }

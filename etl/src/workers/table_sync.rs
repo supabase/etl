@@ -7,7 +7,6 @@ use tokio::task::JoinHandle;
 use tokio_postgres::types::PgLsn;
 use tracing::{Instrument, debug, error, info, warn};
 
-use crate::bail;
 use crate::concurrency::future::ReactiveFuture;
 use crate::concurrency::shutdown::{ShutdownResult, ShutdownRx};
 use crate::concurrency::signal::SignalTx;
@@ -23,6 +22,7 @@ use crate::state::store::base::StateStore;
 use crate::state::table::{TableReplicationPhase, TableReplicationPhaseType};
 use crate::workers::base::{Worker, WorkerHandle, WorkerType};
 use crate::workers::pool::TableSyncWorkerPool;
+use crate::{bail, etl_error};
 
 /// Maximum time to wait for a phase change before trying again.
 const PHASE_CHANGE_REFRESH_FREQUENCY: Duration = Duration::from_millis(100);
@@ -202,7 +202,13 @@ impl WorkerHandle<TableSyncWorkerState> for TableSyncWorkerHandle {
             return Ok(());
         };
 
-        handle.await??;
+        handle.await.map_err(|err| {
+            etl_error!(
+                ErrorKind::TableSyncWorkerError,
+                "A panic occurred in the table sync worker",
+                err
+            )
+        })??;
 
         Ok(())
     }

@@ -227,16 +227,19 @@ where
     }
 
     #[allow(clippy::result_large_err)]
-    pub fn shutdown(&self) -> ETLResult<()> {
+    pub fn shutdown(&self) {
         info!("trying to shut down the pipeline");
-        self.shutdown_tx.shutdown()?;
-        info!("shut down signal successfully sent to all workers");
 
-        Ok(())
+        if let Err(err) = self.shutdown_tx.shutdown() {
+            error!("failed to send shutdown signal to the pipeline: {}", err);
+            return;
+        }
+
+        info!("shut down signal successfully sent to all workers");
     }
 
     pub async fn shutdown_and_wait(self) -> ETLResult<()> {
-        self.shutdown()?;
+        self.shutdown();
         self.wait().await
     }
 }
