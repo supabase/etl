@@ -13,7 +13,7 @@ use crate::clients::bigquery::{BigQueryClient, BigQueryOperationType};
 use crate::conversions::Cell;
 use crate::conversions::event::{Event, TruncateEvent};
 use crate::conversions::table_row::TableRow;
-use crate::destination::base::{Destination, DestinationError};
+use crate::destination::base::Destination;
 use crate::error::{ETLError, ETLResult, ErrorKind};
 use crate::schema::cache::SchemaCache;
 
@@ -270,6 +270,7 @@ impl BigQueryDestination {
         }
 
         debug!("wrote table schema for table '{}'", table_schema.name);
+
         Ok(())
     }
 
@@ -681,20 +682,20 @@ impl BigQueryDestination {
 }
 
 impl Destination for BigQueryDestination {
-    async fn inject(&self, schema_cache: SchemaCache) -> Result<(), DestinationError> {
+    async fn inject(&self, schema_cache: SchemaCache) -> ETLResult<()> {
         let mut inner = self.inner.lock().await;
         inner.schema_cache = Some(schema_cache);
 
         Ok(())
     }
 
-    async fn write_table_schema(&self, table_schema: TableSchema) -> Result<(), DestinationError> {
+    async fn write_table_schema(&self, table_schema: TableSchema) -> ETLResult<()> {
         self.write_table_schema(table_schema).await?;
 
         Ok(())
     }
 
-    async fn load_table_schemas(&self) -> Result<Vec<TableSchema>, DestinationError> {
+    async fn load_table_schemas(&self) -> ETLResult<Vec<TableSchema>> {
         let table_schemas = self.load_table_schemas().await?;
 
         Ok(table_schemas)
@@ -704,13 +705,13 @@ impl Destination for BigQueryDestination {
         &self,
         table_id: TableId,
         table_rows: Vec<TableRow>,
-    ) -> Result<(), DestinationError> {
+    ) -> ETLResult<()> {
         self.write_table_rows(table_id, table_rows).await?;
 
         Ok(())
     }
 
-    async fn write_events(&self, events: Vec<Event>) -> Result<(), DestinationError> {
+    async fn write_events(&self, events: Vec<Event>) -> ETLResult<()> {
         self.write_events(events).await?;
 
         Ok(())

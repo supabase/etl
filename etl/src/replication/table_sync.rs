@@ -12,7 +12,7 @@ use tracing::{error, info, warn};
 use crate::concurrency::shutdown::{ShutdownResult, ShutdownRx};
 use crate::concurrency::signal::SignalTx;
 use crate::concurrency::stream::BatchStream;
-use crate::destination::base::{Destination, DestinationError};
+use crate::destination::base::Destination;
 use crate::error::{ETLError, ETLResult, ErrorKind};
 #[cfg(feature = "failpoints")]
 use crate::failpoints::START_TABLE_SYNC_AFTER_DATA_SYNC;

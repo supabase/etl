@@ -1,45 +1,16 @@
-use crate::conversions::Cell;
-use crate::conversions::table_row::TableRow;
-use crate::conversions::text::{FromTextError, TextFormatConverter};
-use crate::schema::cache::SchemaCache;
 use core::str;
 use postgres::schema::{ColumnSchema, TableId, TableName, TableSchema};
 use postgres::types::convert_type_oid_to_type;
 use postgres_replication::protocol;
 use postgres_replication::protocol::LogicalReplicationMessage;
-use std::{fmt, io, str::Utf8Error};
-use thiserror::Error;
+use std::fmt;
 use tokio_postgres::types::PgLsn;
 
-#[derive(Debug, Error)]
-pub enum EventConversionError {
-    #[error("An unknown replication message type was encountered")]
-    UnknownReplicationMessage,
-
-    #[error("Binary format is not supported for data conversion")]
-    BinaryFormatNotSupported,
-
-    #[error("The tuple data was not found for column {0} at index {0}")]
-    TupleDataNotFound(String, usize),
-
-    #[error("Missing tuple data in delete body")]
-    MissingTupleInDeleteBody,
-
-    #[error("Table schema not found for table id {0}")]
-    MissingSchema(TableId),
-
-    #[error("Error converting from bytes: {0}")]
-    FromBytes(#[from] FromTextError),
-
-    #[error("Invalid string value encountered: {0}")]
-    InvalidStr(#[from] Utf8Error),
-
-    #[error("IO error encountered: {0}")]
-    Io(#[from] io::Error),
-
-    #[error("An error occurred in the state store: {0}")]
-    StateStore(#[from] crate::error::ETLError),
-}
+use crate::conversions::Cell;
+use crate::conversions::table_row::TableRow;
+use crate::conversions::text::TextFormatConverter;
+use crate::error::ETLResult;
+use crate::schema::cache::SchemaCache;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct BeginEvent {
@@ -101,7 +72,7 @@ impl RelationEvent {
         start_lsn: PgLsn,
         commit_lsn: PgLsn,
         relation_body: &protocol::RelationBody,
-    ) -> Result<Self, EventConversionError> {
+    ) -> ETLResult<Self> {
         let table_name = TableName::new(
             relation_body.namespace()?.to_string(),
             relation_body.name()?.to_string(),
@@ -120,9 +91,7 @@ impl RelationEvent {
         })
     }
 
-    fn build_column_schema(
-        column: &protocol::Column,
-    ) -> Result<ColumnSchema, EventConversionError> {
+    fn build_column_schema(column: &protocol::Column) -> ETLResult<ColumnSchema> {
         Ok(ColumnSchema::new(
             column.name()?.to_string(),
             convert_type_oid_to_type(column.type_id() as u32),
@@ -263,10 +232,7 @@ impl From<Event> for EventType {
     }
 }
 
-async fn get_table_schema(
-    schema_cache: &SchemaCache,
-    table_id: TableId,
-) -> Result<TableSchema, EventConversionError> {
+async fn get_table_schema(schema_cache: &SchemaCache, table_id: TableId) -> ETLResult<TableSchema> {
     schema_cache
         .get_table_schema(&table_id)
         .await
@@ -276,7 +242,7 @@ async fn get_table_schema(
 fn convert_tuple_to_row(
     column_schemas: &[ColumnSchema],
     tuple_data: &[protocol::TupleData],
-) -> Result<TableRow, EventConversionError> {
+) -> ETLResult<TableRow> {
     let mut values = Vec::with_capacity(column_schemas.len());
 
     for (i, column_schema) in column_schemas.iter().enumerate() {
@@ -316,7 +282,7 @@ async fn convert_insert_to_event(
     start_lsn: PgLsn,
     commit_lsn: PgLsn,
     insert_body: &protocol::InsertBody,
-) -> Result<InsertEvent, EventConversionError> {
+) -> ETLResult<InsertEvent> {
     let table_id = insert_body.rel_id();
     let table_schema = get_table_schema(schema_cache, table_id).await?;
 
@@ -338,7 +304,7 @@ async fn convert_update_to_event(
     start_lsn: PgLsn,
     commit_lsn: PgLsn,
     update_body: &protocol::UpdateBody,
-) -> Result<UpdateEvent, EventConversionError> {
+) -> ETLResult<UpdateEvent> {
     let table_id = update_body.rel_id();
     let table_schema = get_table_schema(schema_cache, table_id).await?;
 
@@ -374,7 +340,7 @@ async fn convert_delete_to_event(
     start_lsn: PgLsn,
     commit_lsn: PgLsn,
     delete_body: &protocol::DeleteBody,
-) -> Result<DeleteEvent, EventConversionError> {
+) -> ETLResult<DeleteEvent> {
     let table_id = delete_body.rel_id();
     let table_schema = get_table_schema(schema_cache, table_id).await?;
 
@@ -404,7 +370,7 @@ pub async fn convert_message_to_event(
     start_lsn: PgLsn,
     commit_lsn: PgLsn,
     message: &LogicalReplicationMessage,
-) -> Result<Event, EventConversionError> {
+) -> ETLResult<Event> {
     match message {
         LogicalReplicationMessage::Begin(begin_body) => Ok(Event::Begin(
             BeginEvent::from_protocol(start_lsn, commit_lsn, begin_body),

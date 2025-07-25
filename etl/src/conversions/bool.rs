@@ -1,17 +1,19 @@
+use std::io::ErrorKind;
 use thiserror::Error;
 
-#[derive(Debug, Error)]
-pub enum ParseBoolError {
-    #[error("invalid input value: {0}")]
-    InvalidInput(String),
-}
+use crate::bail;
+use crate::error::ETLResult;
 
-pub fn parse_bool(s: &str) -> Result<bool, ParseBoolError> {
+pub fn parse_bool(s: &str) -> ETLResult<bool> {
     if s == "t" {
         Ok(true)
     } else if s == "f" {
         Ok(false)
     } else {
-        Err(ParseBoolError::InvalidInput(s.to_string()))
+        bail!(
+            ErrorKind::InvalidData,
+            "Invalid boolean value",
+            format!("Boolean value must be 't' or 'f' (received: {s})")
+        );
     }
 }

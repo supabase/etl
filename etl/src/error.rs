@@ -50,6 +50,8 @@ pub enum ErrorKind {
     TimeoutError,
     /// Invalid state error
     InvalidState,
+    /// Invalid data
+    InvalidData,
     /// Data validation error
     ValidationError,
     /// Worker/concurrency error
@@ -104,108 +106,6 @@ impl ETLError {
                 errors.iter().find_map(|e| e.detail())
             }
             _ => None,
-        }
-    }
-
-    /// Returns the name of the error category for display purposes
-    pub fn category(&self) -> &str {
-        match self.kind() {
-            ErrorKind::ConnectionFailed => "connection failed",
-            ErrorKind::AuthenticationFailed => "authentication failed",
-            ErrorKind::QueryFailed => "query failed",
-            ErrorKind::SchemaError => "schema error",
-            ErrorKind::ConversionError => "conversion error",
-            ErrorKind::ConfigError => "config error",
-            ErrorKind::PipelineError => "pipeline error",
-            ErrorKind::ResourceError => "resource error",
-            ErrorKind::NetworkError => "network error",
-            ErrorKind::SerializationError => "serialization error",
-            ErrorKind::EncryptionError => "encryption error",
-            ErrorKind::TimeoutError => "timeout error",
-            ErrorKind::InvalidState => "invalid state",
-            ErrorKind::ValidationError => "validation error",
-            ErrorKind::WorkerError => "worker error",
-            ErrorKind::DestinationError => "destination error",
-            ErrorKind::SourceError => "source error",
-            ErrorKind::ReplicationSlotNotFound => "replication slot not found",
-            ErrorKind::ReplicationSlotAlreadyExists => "replication slot already exists",
-            ErrorKind::ReplicationSlotInvalid => "replication slot invalid",
-            ErrorKind::TableSyncFailed => "table sync failed",
-            ErrorKind::LogicalReplicationFailed => "logical replication failed",
-        }
-    }
-
-    /// Returns true if this is a connection-related error
-    pub fn is_connection_error(&self) -> bool {
-        matches!(
-            self.kind(),
-            ErrorKind::ConnectionFailed | ErrorKind::NetworkError | ErrorKind::TimeoutError
-        )
-    }
-
-    /// Returns true if this is a data-related error
-    pub fn is_data_error(&self) -> bool {
-        matches!(
-            self.kind(),
-            ErrorKind::SchemaError | ErrorKind::ConversionError | ErrorKind::ValidationError
-        )
-    }
-
-    /// Returns true if this is a replication-related error
-    pub fn is_replication_error(&self) -> bool {
-        matches!(
-            self.kind(),
-            ErrorKind::ReplicationSlotNotFound
-                | ErrorKind::ReplicationSlotAlreadyExists
-                | ErrorKind::ReplicationSlotInvalid
-                | ErrorKind::TableSyncFailed
-                | ErrorKind::LogicalReplicationFailed
-        )
-    }
-
-    /// Returns true if this is a replication slot error
-    pub fn is_replication_slot_error(&self) -> bool {
-        matches!(
-            self.kind(),
-            ErrorKind::ReplicationSlotNotFound
-                | ErrorKind::ReplicationSlotAlreadyExists
-                | ErrorKind::ReplicationSlotInvalid
-        )
-    }
-
-    /// Returns true if this error contains multiple errors
-    pub fn is_many(&self) -> bool {
-        matches!(self.repr, ErrorRepr::Many(_))
-    }
-
-    /// Returns the number of errors contained in this error
-    pub fn error_count(&self) -> usize {
-        match self.repr {
-            ErrorRepr::Many(ref errors) => errors.len(),
-            _ => 1,
-        }
-    }
-
-    /// Returns an iterator over all errors (including nested ones)
-    pub fn iter_errors(&self) -> impl Iterator<Item = &ETLError> {
-        ErrorIterator::new(self)
-    }
-
-    /// Flattens multiple errors into a single vector
-    pub fn flatten_errors(&self) -> Vec<&ETLError> {
-        let mut errors = Vec::new();
-        self.collect_errors(&mut errors);
-        errors
-    }
-
-    fn collect_errors<'a>(&'a self, errors: &mut Vec<&'a ETLError>) {
-        match self.repr {
-            ErrorRepr::Many(ref nested_errors) => {
-                for error in nested_errors {
-                    error.collect_errors(errors);
-                }
-            }
-            _ => errors.push(self),
         }
     }
 }
@@ -438,6 +338,18 @@ impl From<rustls::Error> for ETLError {
     }
 }
 
+impl From<uuid::Error> for ETLError {
+    fn from(err: uuid::Error) -> ETLError {
+        ETLError {
+            repr: ErrorRepr::WithDescriptionAndDetail(
+                ErrorKind::InvalidData,
+                "UUID parsing failed",
+                err.to_string(),
+            ),
+        }
+    }
+}
+
 // Tokio watch error conversion
 impl From<tokio::sync::watch::error::SendError<()>> for ETLError {
     fn from(err: tokio::sync::watch::error::SendError<()>) -> ETLError {
@@ -529,19 +441,6 @@ impl From<crate::clients::bigquery::RowErrors> for ETLError {
     }
 }
 
-// Additional error type conversions for destination and stream errors
-impl From<crate::destination::base::DestinationError> for ETLError {
-    fn from(err: crate::destination::base::DestinationError) -> ETLError {
-        ETLError {
-            repr: ErrorRepr::WithDescriptionAndDetail(
-                ErrorKind::DestinationError,
-                "Destination operation failed",
-                err.to_string(),
-            ),
-        }
-    }
-}
-
 impl From<crate::replication::stream::TableCopyStreamError> for ETLError {
     fn from(err: crate::replication::stream::TableCopyStreamError) -> ETLError {
         ETLError {
@@ -560,91 +459,6 @@ impl From<crate::replication::stream::EventsStreamError> for ETLError {
             repr: ErrorRepr::WithDescriptionAndDetail(
                 ErrorKind::LogicalReplicationFailed,
                 "Events stream operation failed",
-                err.to_string(),
-            ),
-        }
-    }
-}
-
-impl From<crate::conversions::event::EventConversionError> for ETLError {
-    fn from(err: crate::conversions::event::EventConversionError) -> ETLError {
-        ETLError {
-            repr: ErrorRepr::WithDescriptionAndDetail(
-                ErrorKind::ConversionError,
-                "Event conversion failed",
-                err.to_string(),
-            ),
-        }
-    }
-}
-
-impl From<crate::replication::slot::SlotError> for ETLError {
-    fn from(err: crate::replication::slot::SlotError) -> ETLError {
-        ETLError {
-            repr: ErrorRepr::WithDescriptionAndDetail(
-                ErrorKind::ReplicationSlotInvalid,
-                "Replication slot operation failed",
-                err.to_string(),
-            ),
-        }
-    }
-}
-
-// Missing From implementations for conversion error types
-impl From<crate::conversions::hex::ByteaHexParseError> for ETLError {
-    fn from(err: crate::conversions::hex::ByteaHexParseError) -> ETLError {
-        ETLError {
-            repr: ErrorRepr::WithDescriptionAndDetail(
-                ErrorKind::ConversionError,
-                "Hex parsing failed",
-                err.to_string(),
-            ),
-        }
-    }
-}
-
-impl From<crate::conversions::table_row::TableRowConversionError> for ETLError {
-    fn from(err: crate::conversions::table_row::TableRowConversionError) -> ETLError {
-        ETLError {
-            repr: ErrorRepr::WithDescriptionAndDetail(
-                ErrorKind::ConversionError,
-                "Table row conversion failed",
-                err.to_string(),
-            ),
-        }
-    }
-}
-
-impl From<crate::conversions::text::FromTextError> for ETLError {
-    fn from(err: crate::conversions::text::FromTextError) -> ETLError {
-        ETLError {
-            repr: ErrorRepr::WithDescriptionAndDetail(
-                ErrorKind::ConversionError,
-                "Text conversion failed",
-                err.to_string(),
-            ),
-        }
-    }
-}
-
-impl From<crate::conversions::text::ArrayParseError> for ETLError {
-    fn from(err: crate::conversions::text::ArrayParseError) -> ETLError {
-        ETLError {
-            repr: ErrorRepr::WithDescriptionAndDetail(
-                ErrorKind::ConversionError,
-                "Array parsing failed",
-                err.to_string(),
-            ),
-        }
-    }
-}
-
-impl From<crate::conversions::bool::ParseBoolError> for ETLError {
-    fn from(err: crate::conversions::bool::ParseBoolError) -> ETLError {
-        ETLError {
-            repr: ErrorRepr::WithDescriptionAndDetail(
-                ErrorKind::ConversionError,
-                "Boolean parsing failed",
                 err.to_string(),
             ),
         }
