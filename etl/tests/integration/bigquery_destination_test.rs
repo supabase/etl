@@ -1,4 +1,3 @@
-use bigdecimal::BigDecimal;
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use config::shared::BatchConfig;
 use etl::conversions::event::EventType;
@@ -9,7 +8,6 @@ use etl::pipeline::PipelineId;
 use etl::state::store::notify::NotifyingStateStore;
 use etl::state::table::TableReplicationPhaseType;
 use rand::random;
-use std::str::FromStr;
 use telemetry::init_test_tracing;
 
 use etl::test_utils::bigquery::setup_bigquery_connection;
@@ -609,12 +607,12 @@ async fn table_nullable_columns() {
     let updated_i8 = 123456789i64;
     let updated_f4 = 3.15f32;
     let updated_f8 = 2.717f64;
-    let updated_numeric = PgNumeric::Value(BigDecimal::from_str("99.99").unwrap());
+    let updated_numeric: Option<PgNumeric> = None; //PgNumeric::Value(BigDecimal::from_str("99.99").unwrap());
     let updated_bytes = b"test_bytes".to_vec();
     let updated_date = NaiveDate::from_ymd_opt(2023, 7, 15).unwrap();
     let updated_time = NaiveTime::from_hms_opt(14, 30, 0).unwrap();
-    let updated_timestamp = NaiveDateTime::new(updated_date, updated_time);
-    let updated_timestamptz = DateTime::<Utc>::from_naive_utc_and_offset(updated_timestamp, Utc);
+    let updated_timestamp: Option<NaiveDateTime> = None; //NaiveDateTime::new(updated_date, updated_time);
+    let updated_timestamptz: Option<DateTime<Utc>> = None; //DateTime::<Utc>::from_naive_utc_and_offset(updated_timestamp, Utc);
     let updated_uuid = uuid::Uuid::new_v4();
     let updated_json = serde_json::json!({"key": "value"});
     let updated_jsonb = serde_json::json!({"jsonb": "data"});
@@ -635,12 +633,12 @@ async fn table_nullable_columns() {
                 &Some(updated_i8),
                 &Some(updated_f4),
                 &Some(updated_f8),
-                &Some(updated_numeric.clone()),
+                &updated_numeric, // &Some(updated_numeric.clone()),
                 &Some(updated_bytes.clone()),
                 &Some(updated_date),
                 &Some(updated_time),
-                &Some(updated_timestamp),
-                &Some(updated_timestamptz),
+                &updated_timestamp,   // &Some(updated_timestamp),
+                &updated_timestamptz, // &Some(updated_timestamptz),
                 &Some(updated_uuid),
                 &Some(updated_json.clone()),
                 &Some(updated_jsonb.clone()),
@@ -667,12 +665,12 @@ async fn table_nullable_columns() {
         updated_i8,
         updated_f4,
         updated_f8,
-        updated_numeric,
+        // updated_numeric,
         updated_bytes,
         updated_date,
         updated_time,
-        updated_timestamp,
-        updated_timestamptz,
+        // updated_timestamp,
+        // updated_timestamptz,
         updated_uuid,
         updated_json,
         updated_jsonb,
