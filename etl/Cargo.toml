@@ -28,7 +28,6 @@ required-features = ["failpoints", "test-utils"]
 config = { workspace = true }
 postgres = { workspace = true, features = ["tokio", "replication"] }
 
-async-trait = { workspace = true }
 bigdecimal = { workspace = true, features = ["std"] }
 bytes = { workspace = true }
 byteorder = { workspace = true }
@@ -41,17 +40,14 @@ gcp-bigquery-client = { workspace = true, optional = true, features = [
 ] }
 pg_escape = { workspace = true }
 pin-project-lite = { workspace = true }
-postgres-protocol = { workspace = true }
 postgres-replication = { workspace = true }
 prost = { workspace = true, optional = true }
 rustls = { workspace = true, features = ["aws-lc-rs", "logging"] }
 rustls-pemfile = { workspace = true, features = ["std"] }
 rand = { workspace = true, features = ["std"] }
 secrecy = { workspace = true }
-serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true, features = ["std"] }
 sqlx = { workspace = true, features = ["runtime-tokio-rustls", "postgres"] }
-thiserror = { workspace = true }
 tokio = { workspace = true, features = [
     "rt-multi-thread",
     "macros",
