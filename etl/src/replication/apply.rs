@@ -719,7 +719,7 @@ where
     let Some(existing_table_schema) = schema_cache.get_table_schema_ref(&message.rel_id()) else {
         bail!(
             ErrorKind::MissingTableSchema,
-            "Missing table schema",
+            "Table not found in the schema cache",
             format!(
                 "The table schema for table {} was not found in the cache",
                 message.rel_id()

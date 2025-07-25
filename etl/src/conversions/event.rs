@@ -240,8 +240,12 @@ async fn get_table_schema(schema_cache: &SchemaCache, table_id: TableId) -> ETLR
         .await
         .ok_or_else(|| {
             etl_error!(
-                ErrorKind::TableSyncFailed,
-                "Table not found in schema cache"
+                ErrorKind::MissingTableSchema,
+                "Table not found in the schema cache",
+                format!(
+                    "The table schema for table {} was not found in the cache",
+                    table_id
+                )
             )
         })
 }
