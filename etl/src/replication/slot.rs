@@ -35,6 +35,7 @@ pub fn get_slot_name(pipeline_id: PipelineId, worker_type: WorkerType) -> ETLRes
 #[cfg(test)]
 mod tests {
     use super::*;
+    use postgres::schema::TableId;
 
     #[test]
     fn test_apply_worker_slot_name() {
@@ -47,7 +48,13 @@ mod tests {
     #[test]
     fn test_table_sync_slot_name() {
         let pipeline_id = 1;
-        let result = get_slot_name(pipeline_id, WorkerType::TableSync { table_id: 123 }).unwrap();
+        let result = get_slot_name(
+            pipeline_id,
+            WorkerType::TableSync {
+                table_id: TableId::new(123),
+            },
+        )
+        .unwrap();
         assert!(result.starts_with(TABLE_SYNC_PREFIX));
         assert!(result.len() <= MAX_SLOT_NAME_LENGTH);
     }

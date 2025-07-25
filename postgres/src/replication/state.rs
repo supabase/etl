@@ -60,7 +60,7 @@ pub async fn update_replication_state(
         "#,
     )
     .bind(pipeline_id as i64)
-    .bind(SqlxTableId(table_id))
+    .bind(SqlxTableId(table_id.into_inner()))
     .bind(state)
     .bind(sync_done_lsn)
     .execute(pool)

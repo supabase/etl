@@ -706,7 +706,7 @@ where
     };
 
     if !hook
-        .should_apply_changes(message.rel_id(), remote_final_lsn)
+        .should_apply_changes(TableId::new(message.rel_id()), remote_final_lsn)
         .await?
     {
         return Ok(HandleMessageResult::default());
@@ -733,7 +733,7 @@ where
     if !existing_table_schema.partial_eq(&event.table_schema) {
         return Ok(HandleMessageResult {
             end_batch: Some(EndBatch::Exclusive),
-            skip_table: Some(message.rel_id()),
+            skip_table: Some(TableId::new(message.rel_id())),
             ..Default::default()
         });
     }
@@ -776,7 +776,7 @@ where
     };
 
     if !hook
-        .should_apply_changes(message.rel_id(), remote_final_lsn)
+        .should_apply_changes(TableId::new(message.rel_id()), remote_final_lsn)
         .await?
     {
         return Ok(HandleMessageResult::default());
@@ -820,7 +820,7 @@ where
     };
 
     if !hook
-        .should_apply_changes(message.rel_id(), remote_final_lsn)
+        .should_apply_changes(TableId::new(message.rel_id()), remote_final_lsn)
         .await?
     {
         return Ok(HandleMessageResult::default());
@@ -864,7 +864,7 @@ where
     };
 
     if !hook
-        .should_apply_changes(message.rel_id(), remote_final_lsn)
+        .should_apply_changes(TableId::new(message.rel_id()), remote_final_lsn)
         .await?
     {
         return Ok(HandleMessageResult::default());
@@ -910,7 +910,7 @@ where
     let mut rel_ids = Vec::with_capacity(message.rel_ids().len());
     for &table_id in message.rel_ids().iter() {
         if hook
-            .should_apply_changes(table_id, remote_final_lsn)
+            .should_apply_changes(TableId::new(table_id), remote_final_lsn)
             .await?
         {
             rel_ids.push(table_id)
