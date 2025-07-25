@@ -1,8 +1,6 @@
-use std::num::ParseIntError;
-
+use crate::error::ETLError;
 use crate::bail;
-use crate::error::ETLResult;
-use thiserror::Error;
+use crate::error::{ETLResult, ErrorKind};
 
 pub fn from_bytea_hex(s: &str) -> ETLResult<Vec<u8>> {
     if s.len() < 2 || &s[..2] != "\\x" {

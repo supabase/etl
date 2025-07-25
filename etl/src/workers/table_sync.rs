@@ -481,9 +481,7 @@ impl<S> ApplyLoopHook for TableSyncWorkerHook<S>
 where
     S: StateStore + Clone + Send + Sync + 'static,
 {
-    type Error = ETLError;
-
-    async fn before_loop(&self, start_lsn: PgLsn) -> Result<bool, Self::Error> {
+    async fn before_loop(&self, start_lsn: PgLsn) -> ETLResult<bool> {
         info!("checking if the table sync worker is already caught up with the apply worker");
 
         self.try_advance_phase(start_lsn, true).await
@@ -500,7 +498,7 @@ where
         &self,
         current_lsn: PgLsn,
         update_state: bool,
-    ) -> Result<bool, Self::Error> {
+    ) -> ETLResult<bool> {
         info!(
             "processing syncing tables for table sync worker with lsn {}",
             current_lsn
@@ -509,7 +507,7 @@ where
         self.try_advance_phase(current_lsn, update_state).await
     }
 
-    async fn skip_table(&self, table_id: TableId) -> Result<bool, Self::Error> {
+    async fn skip_table(&self, table_id: TableId) -> ETLResult<bool> {
         if self.table_id != table_id {
             return Ok(true);
         }
@@ -526,7 +524,7 @@ where
         &self,
         table_id: TableId,
         _remote_final_lsn: PgLsn,
-    ) -> Result<bool, Self::Error> {
+    ) -> ETLResult<bool> {
         let inner = self.table_sync_worker_state.get_inner().lock().await;
         let is_skipped = matches!(
             inner.table_replication_phase.as_type(),

@@ -34,29 +34,21 @@ pub enum ApplyLoopResult {
 }
 
 pub trait ApplyLoopHook {
-    type Error: Into<ETLError>;
-
-    fn before_loop(
-        &self,
-        start_lsn: PgLsn,
-    ) -> impl Future<Output = Result<bool, Self::Error>> + Send;
+    fn before_loop(&self, start_lsn: PgLsn) -> impl Future<Output = ETLResult<bool>> + Send;
 
     fn process_syncing_tables(
         &self,
         current_lsn: PgLsn,
         update_state: bool,
-    ) -> impl Future<Output = Result<bool, Self::Error>> + Send;
+    ) -> impl Future<Output = ETLResult<bool>> + Send;
 
-    fn skip_table(
-        &self,
-        table_id: TableId,
-    ) -> impl Future<Output = Result<bool, Self::Error>> + Send;
+    fn skip_table(&self, table_id: TableId) -> impl Future<Output = ETLResult<bool>> + Send;
 
     fn should_apply_changes(
         &self,
         table_id: TableId,
         remote_final_lsn: PgLsn,
-    ) -> impl Future<Output = Result<bool, Self::Error>> + Send;
+    ) -> impl Future<Output = ETLResult<bool>> + Send;
 
     fn worker_type(&self) -> WorkerType;
 }
@@ -213,7 +205,6 @@ pub async fn start_apply_loop<D, T>(
 where
     D: Destination + Clone + Send + 'static,
     T: ApplyLoopHook,
-    ETLError: From<<T as ApplyLoopHook>::Error>,
 {
     info!(
         "starting apply loop in worker '{:?}' from lsn {}",
@@ -341,7 +332,6 @@ async fn handle_replication_message_batch<D, T>(
 where
     D: Destination + Clone + Send + 'static,
     T: ApplyLoopHook,
-    ETLError: From<<T as ApplyLoopHook>::Error>,
 {
     let result =
         handle_replication_message(state, events_stream, message, schema_cache, hook).await?;
@@ -377,7 +367,6 @@ async fn try_send_batch<D, T>(
 where
     D: Destination + Clone + Send + 'static,
     T: ApplyLoopHook,
-    ETLError: From<<T as ApplyLoopHook>::Error>,
 {
     let elapsed = state.last_batch_send_time.elapsed();
     // `elapsed` could be zero in case current time is earlier than `last_batch_send_time`.
@@ -459,7 +448,6 @@ async fn handle_replication_message<T>(
 ) -> ETLResult<HandleMessageResult>
 where
     T: ApplyLoopHook,
-    ETLError: From<<T as ApplyLoopHook>::Error>,
 {
     match message {
         ReplicationMessage::XLogData(message) => {
@@ -516,7 +504,6 @@ async fn handle_logical_replication_message<T>(
 ) -> ETLResult<HandleMessageResult>
 where
     T: ApplyLoopHook,
-    ETLError: From<<T as ApplyLoopHook>::Error>,
 {
     // We perform the conversion of the message to our own event format which is used downstream
     // by the destination.
@@ -616,7 +603,6 @@ async fn handle_commit_message<T>(
 ) -> ETLResult<HandleMessageResult>
 where
     T: ApplyLoopHook,
-    ETLError: From<<T as ApplyLoopHook>::Error>,
 {
     let EventType::Commit = event.event_type() else {
         bail!(
@@ -698,7 +684,6 @@ async fn handle_relation_message<T>(
 ) -> ETLResult<HandleMessageResult>
 where
     T: ApplyLoopHook,
-    ETLError: From<<T as ApplyLoopHook>::Error>,
 {
     let Event::Relation(event) = event else {
         bail!(
@@ -769,7 +754,6 @@ async fn handle_insert_message<T>(
 ) -> ETLResult<HandleMessageResult>
 where
     T: ApplyLoopHook,
-    ETLError: From<<T as ApplyLoopHook>::Error>,
 {
     let Event::Insert(event) = event else {
         bail!(
@@ -814,7 +798,6 @@ async fn handle_update_message<T>(
 ) -> ETLResult<HandleMessageResult>
 where
     T: ApplyLoopHook,
-    ETLError: From<<T as ApplyLoopHook>::Error>,
 {
     let Event::Update(event) = event else {
         bail!(
@@ -859,7 +842,6 @@ async fn handle_delete_message<T>(
 ) -> ETLResult<HandleMessageResult>
 where
     T: ApplyLoopHook,
-    ETLError: From<<T as ApplyLoopHook>::Error>,
 {
     let Event::Delete(event) = event else {
         bail!(
@@ -904,7 +886,6 @@ async fn handle_truncate_message<T>(
 ) -> ETLResult<HandleMessageResult>
 where
     T: ApplyLoopHook,
-    ETLError: From<<T as ApplyLoopHook>::Error>,
 {
     let Event::Truncate(mut event) = event else {
         bail!(

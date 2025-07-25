@@ -70,6 +70,8 @@ pub enum ErrorKind {
     ReplicationSlotInvalid,
     /// Table synchronization failed
     TableSyncFailed,
+    /// Table not found
+    TableNotFound,
     /// Logical replication stream error
     LogicalReplicationFailed,
 }
@@ -203,7 +205,6 @@ impl From<(ErrorKind, &'static str, String)> for ETLError {
 }
 
 impl From<Vec<ETLError>> for ETLError {
-
     fn from(errors: Vec<ETLError>) -> ETLError {
         ETLError {
             repr: ErrorRepr::Many(errors),
@@ -417,31 +418,6 @@ impl From<crate::clients::bigquery::RowErrors> for ETLError {
         }
     }
 }
-
-impl From<crate::replication::stream::TableCopyStreamError> for ETLError {
-    fn from(err: crate::replication::stream::TableCopyStreamError) -> ETLError {
-        ETLError {
-            repr: ErrorRepr::WithDescriptionAndDetail(
-                ErrorKind::TableSyncFailed,
-                "Table copy stream operation failed",
-                err.to_string(),
-            ),
-        }
-    }
-}
-
-impl From<crate::replication::stream::EventsStreamError> for ETLError {
-    fn from(err: crate::replication::stream::EventsStreamError) -> ETLError {
-        ETLError {
-            repr: ErrorRepr::WithDescriptionAndDetail(
-                ErrorKind::LogicalReplicationFailed,
-                "Events stream operation failed",
-                err.to_string(),
-            ),
-        }
-    }
-}
-
 
 // #[cfg(test)]
 // mod tests {

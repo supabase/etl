@@ -14,7 +14,7 @@ use crate::pipeline::PipelineId;
 use crate::replication::apply::{ApplyLoopHook, start_apply_loop};
 use crate::replication::client::PgReplicationClient;
 use crate::replication::common::get_table_replication_states;
-use crate::replication::slot::{SlotError, get_slot_name};
+use crate::replication::slot::get_slot_name;
 use crate::schema::cache::SchemaCache;
 use crate::state::store::base::StateStore;
 use crate::state::table::{TableReplicationPhase, TableReplicationPhaseType};
@@ -294,9 +294,7 @@ where
     S: StateStore + Clone + Send + Sync + 'static,
     D: Destination + Clone + Send + Sync + 'static,
 {
-    type Error = ETLError;
-
-    async fn before_loop(&self, _start_lsn: PgLsn) -> Result<bool, Self::Error> {
+    async fn before_loop(&self, _start_lsn: PgLsn) -> ETLResult<bool> {
         info!("starting table sync workers before the main apply loop");
 
         let active_table_replication_states =
@@ -334,7 +332,7 @@ where
         &self,
         current_lsn: PgLsn,
         update_state: bool,
-    ) -> Result<bool, Self::Error> {
+    ) -> ETLResult<bool> {
         let active_table_replication_states =
             get_table_replication_states(&self.state_store, false).await?;
         debug!(
@@ -382,7 +380,7 @@ where
         Ok(true)
     }
 
-    async fn skip_table(&self, table_id: TableId) -> Result<bool, Self::Error> {
+    async fn skip_table(&self, table_id: TableId) -> ETLResult<bool> {
         let table_sync_worker_state = {
             let pool = self.pool.lock().await;
             pool.get_active_worker_state(table_id)
@@ -407,7 +405,7 @@ where
         &self,
         table_id: TableId,
         remote_final_lsn: PgLsn,
-    ) -> Result<bool, Self::Error> {
+    ) -> ETLResult<bool> {
         let pool = self.pool.lock().await;
 
         // We try to load the state first from memory, if we don't find it, we try to load from the

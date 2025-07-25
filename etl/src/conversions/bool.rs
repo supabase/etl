@@ -1,7 +1,5 @@
-use std::io::ErrorKind;
-use thiserror::Error;
-
 use crate::bail;
+use crate::error::{ETLError, ErrorKind};
 use crate::error::ETLResult;
 
 pub fn parse_bool(s: &str) -> ETLResult<bool> {

@@ -2,12 +2,11 @@ use config::shared::PipelineConfig;
 #[cfg(feature = "failpoints")]
 use fail::fail_point;
 use futures::StreamExt;
-use postgres::schema::{TableId, TableName};
+use postgres::schema::TableId;
 use std::sync::Arc;
-use thiserror::Error;
 use tokio::pin;
 use tokio_postgres::types::PgLsn;
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 
 use crate::concurrency::shutdown::{ShutdownResult, ShutdownRx};
 use crate::concurrency::signal::SignalTx;
@@ -19,7 +18,7 @@ use crate::failpoints::START_TABLE_SYNC_AFTER_DATA_SYNC;
 use crate::pipeline::PipelineId;
 use crate::replication::client::PgReplicationClient;
 use crate::replication::slot::get_slot_name;
-use crate::replication::stream::{TableCopyStream, TableCopyStreamError};
+use crate::replication::stream::TableCopyStream;
 use crate::schema::cache::SchemaCache;
 use crate::state::store::base::StateStore;
 use crate::state::table::{TableReplicationPhase, TableReplicationPhaseType};

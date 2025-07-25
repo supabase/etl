@@ -1,7 +1,8 @@
+use crate::error::ETLError;
 use super::Cell;
 use crate::bail;
 use crate::conversions::text::TextFormatConverter;
-use crate::error::ETLResult;
+use crate::error::{ETLResult, ErrorKind};
 use core::str;
 use postgres::schema::ColumnSchema;
 use std::str::Utf8Error;

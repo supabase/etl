@@ -9,8 +9,10 @@ use tokio_postgres::types::PgLsn;
 use crate::conversions::Cell;
 use crate::conversions::table_row::TableRow;
 use crate::conversions::text::TextFormatConverter;
-use crate::error::ETLResult;
+use crate::error::{ETLResult, ErrorKind};
 use crate::schema::cache::SchemaCache;
+use crate::{bail, etl_error};
+use crate::error::ETLError;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct BeginEvent {
@@ -236,7 +238,12 @@ async fn get_table_schema(schema_cache: &SchemaCache, table_id: TableId) -> ETLR
     schema_cache
         .get_table_schema(&table_id)
         .await
-        .ok_or(EventConversionError::MissingSchema(table_id))
+        .ok_or_else(|| {
+            etl_error!(
+                ErrorKind::TableSyncFailed,
+                "Table not found in schema cache"
+            )
+        })
 }
 
 fn convert_tuple_to_row(
@@ -249,10 +256,10 @@ fn convert_tuple_to_row(
         // We are expecting that for each column, there is corresponding tuple data, even for null
         // values.
         let Some(tuple_data) = &tuple_data.get(i) else {
-            return Err(EventConversionError::TupleDataNotFound(
-                column_schema.name.clone(),
-                i,
-            ));
+            bail!(
+                ErrorKind::ConnectionFailed,
+                "Tuple data does not contain data at the specified index"
+            );
         };
 
         let cell = match tuple_data {
@@ -263,7 +270,10 @@ fn convert_tuple_to_row(
                 TextFormatConverter::default_value(&column_schema.typ)
             }
             protocol::TupleData::Binary(_) => {
-                return Err(EventConversionError::BinaryFormatNotSupported);
+                bail!(
+                    ErrorKind::ConversionError,
+                    "Binary format is not supported in tuple data"
+                );
             }
             protocol::TupleData::Text(bytes) => {
                 let str = str::from_utf8(&bytes[..])?;
@@ -402,6 +412,10 @@ pub async fn convert_message_to_event(
         LogicalReplicationMessage::Origin(_) | LogicalReplicationMessage::Type(_) => {
             Ok(Event::Unsupported)
         }
-        _ => Err(EventConversionError::UnknownReplicationMessage),
+        _ => bail!(
+            ErrorKind::ConversionError,
+            "Replication message not supported",
+            format!("The replication message {:?} is not supported", message)
+        ),
     }
 }

@@ -1,7 +1,6 @@
-use thiserror::Error;
-
 use crate::bail;
-use crate::error::ETLResult;
+use crate::error::ETLError;
+use crate::error::{ETLResult, ErrorKind};
 use crate::pipeline::PipelineId;
 use crate::workers::base::WorkerType;
 
