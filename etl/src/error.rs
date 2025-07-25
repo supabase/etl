@@ -171,7 +171,6 @@ impl fmt::Debug for ETLError {
 }
 
 impl error::Error for ETLError {
-
     #[allow(deprecated)]
     fn description(&self) -> &str {
         match self.repr {
@@ -331,27 +330,25 @@ impl From<uuid::Error> for ETLError {
 }
 
 impl From<chrono::ParseError> for ETLError {
-
     fn from(err: chrono::ParseError) -> ETLError {
         ETLError {
             repr: ErrorRepr::WithDescriptionAndDetail(
                 ErrorKind::ConversionError,
                 "Chrono parse failed",
                 err.to_string(),
-            )
+            ),
         }
     }
 }
 
 impl From<bigdecimal::ParseBigDecimalError> for ETLError {
-
     fn from(err: bigdecimal::ParseBigDecimalError) -> ETLError {
         ETLError {
             repr: ErrorRepr::WithDescriptionAndDetail(
                 ErrorKind::ConversionError,
                 "BigDecimal parsing failed",
                 err.to_string(),
-            )
+            ),
         }
     }
 }

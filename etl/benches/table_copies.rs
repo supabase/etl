@@ -36,7 +36,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use config::shared::{BatchConfig, PgConnectionConfig, PipelineConfig, RetryConfig, TlsConfig};
 use etl::{
     conversions::{event::Event, table_row::TableRow},
-    destination::base::{Destination},
+    destination::base::Destination,
     pipeline::Pipeline,
     state::{store::notify::NotifyingStateStore, table::TableReplicationPhaseType},
 };
@@ -433,10 +433,7 @@ enum BenchDestination {
 }
 
 impl Destination for BenchDestination {
-    async fn inject(
-        &self,
-        schema_cache: etl::schema::cache::SchemaCache,
-    ) -> ETLResult<()> {
+    async fn inject(&self, schema_cache: etl::schema::cache::SchemaCache) -> ETLResult<()> {
         match self {
             BenchDestination::Null(dest) => dest.inject(schema_cache).await,
             #[cfg(feature = "bigquery")]
@@ -482,10 +479,7 @@ impl Destination for BenchDestination {
 }
 
 impl Destination for NullDestination {
-    async fn inject(
-        &self,
-        _schema_cache: etl::schema::cache::SchemaCache,
-    ) -> ETLResult<()> {
+    async fn inject(&self, _schema_cache: etl::schema::cache::SchemaCache) -> ETLResult<()> {
         Ok(())
     }
 

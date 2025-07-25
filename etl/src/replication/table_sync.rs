@@ -8,6 +8,7 @@ use tokio::pin;
 use tokio_postgres::types::PgLsn;
 use tracing::{info, warn};
 
+use crate::bail;
 use crate::concurrency::shutdown::{ShutdownResult, ShutdownRx};
 use crate::concurrency::signal::SignalTx;
 use crate::concurrency::stream::BatchStream;
@@ -24,7 +25,6 @@ use crate::state::store::base::StateStore;
 use crate::state::table::{TableReplicationPhase, TableReplicationPhaseType};
 use crate::workers::base::WorkerType;
 use crate::workers::table_sync::TableSyncWorkerState;
-use crate::bail;
 
 #[derive(Debug)]
 pub enum TableSyncResult {

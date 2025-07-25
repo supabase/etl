@@ -3,6 +3,7 @@ use std::sync::Arc;
 use tokio::sync::Semaphore;
 use tracing::{error, info};
 
+use crate::bail;
 use crate::concurrency::shutdown::{ShutdownTx, create_shutdown_channel};
 use crate::destination::base::Destination;
 use crate::error::{ETLError, ETLResult, ErrorKind};
@@ -13,7 +14,6 @@ use crate::state::table::TableReplicationPhase;
 use crate::workers::apply::{ApplyWorker, ApplyWorkerHandle};
 use crate::workers::base::{Worker, WorkerHandle};
 use crate::workers::pool::TableSyncWorkerPool;
-use crate::bail;
 
 #[derive(Debug)]
 enum PipelineWorkers {
