@@ -64,7 +64,9 @@ async fn pipeline_handles_table_sync_worker_panic_during_data_sync() {
 
     // We stop and inspect errors.
     let err = pipeline.shutdown_and_wait().await.err().unwrap();
-    println!("pipeline shutdown err {:?}", err);
+    assert_eq!(err.kinds().len(), 2);
+    assert_eq!(err.kinds()[0], ErrorKind::TableSyncWorkerPanic);
+    assert_eq!(err.kinds()[1], ErrorKind::TableSyncWorkerPanic);
 }
 
 #[tokio::test(flavor = "multi_thread")]

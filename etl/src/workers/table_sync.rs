@@ -204,7 +204,7 @@ impl WorkerHandle<TableSyncWorkerState> for TableSyncWorkerHandle {
 
         handle.await.map_err(|err| {
             etl_error!(
-                ErrorKind::TableSyncWorkerError,
+                ErrorKind::TableSyncWorkerPanic,
                 "A panic occurred in the table sync worker",
                 err
             )
