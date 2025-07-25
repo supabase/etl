@@ -1,6 +1,5 @@
-use crate::error::{ETLError, ETLResult};
+use crate::error::ETLResult;
 use futures::StreamExt;
-use gcp_bigquery_client::google::cloud::bigquery::storage::v1::RowError;
 use gcp_bigquery_client::storage::{ColumnMode, StorageApi};
 use gcp_bigquery_client::yup_oauth2::parse_service_account_key;
 use gcp_bigquery_client::{
@@ -49,22 +48,6 @@ impl fmt::Display for BigQueryOperationType {
             BigQueryOperationType::UPSERT => write!(f, "UPSERT"),
             BigQueryOperationType::DELETE => write!(f, "DELETE"),
         }
-    }
-}
-
-/// Collection of row errors returned from BigQuery streaming operations.
-#[derive(Debug)]
-pub struct RowErrors(pub Vec<RowError>);
-
-impl fmt::Display for RowErrors {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if !self.0.is_empty() {
-            for row_error in self.0.iter() {
-                writeln!(f, "{row_error:?}")?;
-            }
-        }
-
-        Ok(())
     }
 }
 
@@ -221,7 +204,7 @@ impl BigQueryClient {
             if let Some(append_rows_response) = append_rows_stream.next().await {
                 let append_rows_response = append_rows_response.map_err(BQError::from)?;
                 if !append_rows_response.row_errors.is_empty() {
-                    return Err(ETLError::from(RowErrors(append_rows_response.row_errors)));
+                    return Err(append_rows_response.row_errors.into());
                 }
             }
 

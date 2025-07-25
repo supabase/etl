@@ -265,7 +265,7 @@ fn convert_tuple_to_row(
         // values.
         let Some(tuple_data) = &tuple_data.get(i) else {
             bail!(
-                ErrorKind::ConnectionFailed,
+                ErrorKind::ConversionError,
                 "Tuple data does not contain data at the specified index"
             );
         };
