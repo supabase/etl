@@ -499,7 +499,7 @@ impl From<crate::clients::bigquery::RowErrors> for ETLError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{etl_error, bail};
+    use crate::{bail, etl_error};
 
     #[test]
     fn test_simple_error_creation() {
@@ -529,24 +529,31 @@ mod tests {
             ETLError::from((ErrorKind::NetworkError, "Connection timeout")),
         ];
         let multi_err = ETLError::many(errors);
-        
+
         assert_eq!(multi_err.kind(), ErrorKind::ValidationError);
-        assert_eq!(multi_err.kinds(), vec![
-            ErrorKind::ValidationError,
-            ErrorKind::ConversionError, 
-            ErrorKind::NetworkError
-        ]);
+        assert_eq!(
+            multi_err.kinds(),
+            vec![
+                ErrorKind::ValidationError,
+                ErrorKind::ConversionError,
+                ErrorKind::NetworkError
+            ]
+        );
         assert_eq!(multi_err.detail(), None);
     }
 
     #[test]
     fn test_multiple_errors_with_detail() {
         let errors = vec![
-            ETLError::from((ErrorKind::ValidationError, "Invalid schema", "Missing required field".to_string())),
+            ETLError::from((
+                ErrorKind::ValidationError,
+                "Invalid schema",
+                "Missing required field".to_string(),
+            )),
             ETLError::from((ErrorKind::ConversionError, "Type mismatch")),
         ];
         let multi_err = ETLError::many(errors);
-        
+
         assert_eq!(multi_err.detail(), Some("Missing required field"));
     }
 
@@ -606,7 +613,7 @@ mod tests {
         let err1 = ETLError::from((ErrorKind::ConnectionFailed, "Connection failed"));
         let err2 = ETLError::from((ErrorKind::ConnectionFailed, "Connection failed"));
         let err3 = ETLError::from((ErrorKind::QueryFailed, "Query failed"));
-        
+
         assert_eq!(err1, err2);
         assert_ne!(err1, err3);
     }
@@ -666,7 +673,11 @@ mod tests {
         }
 
         fn test_function_with_detail() -> ETLResult<i32> {
-            bail!(ErrorKind::ConversionError, "Test error", "Additional detail");
+            bail!(
+                ErrorKind::ConversionError,
+                "Test error",
+                "Additional detail"
+            );
         }
 
         let result = test_function();
@@ -688,13 +699,13 @@ mod tests {
             ETLError::from((ErrorKind::ValidationError, "Inner error 2")),
         ];
         let inner_multi = ETLError::many(inner_errors);
-        
+
         let outer_errors = vec![
             inner_multi,
             ETLError::from((ErrorKind::NetworkError, "Outer error")),
         ];
         let outer_multi = ETLError::many(outer_errors);
-        
+
         let kinds = outer_multi.kinds();
         assert_eq!(kinds.len(), 3);
         assert!(kinds.contains(&ErrorKind::ConversionError));
