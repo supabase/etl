@@ -5,9 +5,6 @@ use crate::error::ETLError;
 use crate::error::{ETLResult, ErrorKind};
 use core::str;
 use postgres::schema::ColumnSchema;
-use std::str::Utf8Error;
-use thiserror::Error;
-use tokio_postgres::types::Type;
 use tracing::error;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -148,7 +145,7 @@ impl TableRowConverter {
                                 "error parsing column `{}` of type `{}` from text `{val_str}`",
                                 column_schema.name, column_schema.typ
                             );
-                            return Err(e.into());
+                            return Err(e);
                         }
                     }
                 };

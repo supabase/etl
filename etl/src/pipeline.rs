@@ -13,7 +13,7 @@ use crate::state::table::TableReplicationPhase;
 use crate::workers::apply::{ApplyWorker, ApplyWorkerHandle};
 use crate::workers::base::{Worker, WorkerHandle};
 use crate::workers::pool::TableSyncWorkerPool;
-use crate::{bail, etl_error};
+use crate::bail;
 
 #[derive(Debug)]
 enum PipelineWorkers {

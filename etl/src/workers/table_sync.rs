@@ -2,7 +2,7 @@ use config::shared::PipelineConfig;
 use postgres::schema::TableId;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{AcquireError, Mutex, MutexGuard, Notify, Semaphore};
+use tokio::sync::{Mutex, MutexGuard, Notify, Semaphore};
 use tokio::task::JoinHandle;
 use tokio_postgres::types::PgLsn;
 use tracing::{Instrument, debug, error, info, warn};
@@ -353,7 +353,7 @@ where
                 }
                 Err(err) => {
                     error!("table sync failed for table {}: {}", self.table_id, err);
-                    return Err(err.into());
+                    return Err(err);
                 }
             };
 

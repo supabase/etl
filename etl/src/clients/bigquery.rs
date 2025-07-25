@@ -1,4 +1,4 @@
-use crate::error::{ETLError, ETLResult, ErrorKind};
+use crate::error::{ETLError, ETLResult};
 use futures::StreamExt;
 use gcp_bigquery_client::google::cloud::bigquery::storage::v1::RowError;
 use gcp_bigquery_client::storage::{ColumnMode, StorageApi};

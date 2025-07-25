@@ -24,7 +24,7 @@ use crate::state::store::base::StateStore;
 use crate::state::table::{TableReplicationPhase, TableReplicationPhaseType};
 use crate::workers::base::WorkerType;
 use crate::workers::table_sync::TableSyncWorkerState;
-use crate::{bail, etl_error};
+use crate::bail;
 
 #[derive(Debug)]
 pub enum TableSyncResult {
@@ -128,7 +128,7 @@ where
                 if let Err(err) = replication_client.delete_slot(&slot_name).await {
                     // If the slot is not found, we are safe to continue, for any other error, we bail.
                     if err.kind() != ErrorKind::ReplicationSlotNotFound {
-                        return Err(err.into());
+                        return Err(err);
                     }
                 }
             }

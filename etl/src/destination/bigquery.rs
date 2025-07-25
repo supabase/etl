@@ -4,7 +4,6 @@ use postgres::schema::{ColumnSchema, TableId, TableName, TableSchema};
 use std::collections::HashMap;
 use std::ops::Deref;
 use std::sync::{Arc, LazyLock};
-use thiserror::Error;
 use tokio::sync::Mutex;
 use tokio_postgres::types::{PgLsn, Type};
 use tracing::{debug, info, warn};
@@ -196,7 +195,7 @@ impl BigQueryDestination {
             ETLError::from((
                 ErrorKind::DestinationSchemaError,
                 "Table schema not found in schema cache",
-                format!("table_id: {}", table_id),
+                format!("table_id: {table_id}"),
             ))
         })?;
 
