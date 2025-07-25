@@ -26,8 +26,12 @@ pub enum ErrorKind {
     AuthenticationFailed,
     /// Query execution failed
     QueryFailed,
-    /// Schema mismatch or validation error
-    SchemaError,
+    /// Source schema mismatch or validation error
+    SourceSchemaError,
+    /// Destination schema mismatch or validation error
+    DestinationSchemaError,
+    /// Missing table schema
+    MissingTableSchema,
     /// Data type conversion error
     ConversionError,
     /// Configuration error
@@ -58,6 +62,8 @@ pub enum ErrorKind {
     ReplicationSlotNotFound,
     /// Replication slot already exists
     ReplicationSlotAlreadyExists,
+    /// Replication slot could not be created
+    ReplicationSlotNotCreated,
     /// Replication slot name is invalid or too long
     ReplicationSlotInvalid,
     /// Table synchronization failed

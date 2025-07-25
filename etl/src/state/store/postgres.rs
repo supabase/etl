@@ -1,7 +1,5 @@
 use std::{collections::HashMap, sync::Arc};
 
-use crate::error::{ETLError, ETLResult, ErrorKind};
-use crate::{bail, etl_error};
 use config::shared::PgConnectionConfig;
 use postgres::replication::{
     TableReplicationState, TableReplicationStateRow, connect_to_source_database,
@@ -13,10 +11,11 @@ use tokio::sync::Mutex;
 use tokio_postgres::types::PgLsn;
 use tracing::{debug, info};
 
-use crate::{
-    pipeline::PipelineId,
-    state::{store::base::StateStore, table::TableReplicationPhase},
-};
+use crate::error::{ETLError, ETLResult, ErrorKind};
+use crate::pipeline::PipelineId;
+use crate::state::store::base::StateStore;
+use crate::state::table::TableReplicationPhase;
+use crate::{bail, etl_error};
 
 const NUM_POOL_CONNECTIONS: u32 = 1;
 
@@ -59,11 +58,12 @@ pub struct PostgresStateStore {
 }
 
 impl PostgresStateStore {
-    pub fn new(pipeline_id: PipelineId, source_config: PgConnectionConfig) -> PostgresStateStore {
+    pub fn new(pipeline_id: PipelineId, source_config: PgConnectionConfig) -> Self {
         let inner = Inner {
             table_states: HashMap::new(),
         };
-        PostgresStateStore {
+
+        Self {
             pipeline_id,
             source_config,
             inner: Arc::new(Mutex::new(inner)),
@@ -130,7 +130,7 @@ impl PostgresStateStore {
                 None => bail!(
                     ErrorKind::ValidationError,
                     "Missing LSN",
-                    "Lsn can't be missing from the state store if state is SyncDone"
+                    "Lsn can't be missing from the state store if state is 'SyncDone'"
                 ),
             },
             TableReplicationState::Ready => TableReplicationPhase::Ready,
@@ -157,6 +157,7 @@ impl StateStore for PostgresStateStore {
 
     async fn load_table_replication_states(&self) -> ETLResult<usize> {
         debug!("loading table replication states from postgres state store");
+
         let pool = self.connect_to_source().await?;
         let replication_state_rows = self
             .get_all_replication_state_rows(&pool, self.pipeline_id)
@@ -187,8 +188,10 @@ impl StateStore for PostgresStateStore {
         let (table_state, sync_done_lsn) = state.try_into()?;
         self.update_replication_state(self.pipeline_id, table_id, table_state, sync_done_lsn)
             .await?;
+
         let mut inner = self.inner.lock().await;
         inner.table_states.insert(table_id, state);
+
         Ok(())
     }
 }

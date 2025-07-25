@@ -23,7 +23,7 @@ pub trait StateStore {
     ) -> impl Future<Output = ETLResult<HashMap<TableId, TableReplicationPhase>>> + Send;
 
     /// Loads the table replication states from the persistent state into the cache.
-    /// This should called once at program start to load the state into the cache
+    /// This should be called once at program start to load the state into the cache
     /// and then use only the `get_X` methods to access the state. Updating the state
     /// by calling the `update_table_replication_state` updates in both the cache and
     /// the persistent store, so no need to ever load the state again.

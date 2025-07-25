@@ -18,7 +18,7 @@ use crate::error::{ETLError, ETLResult, ErrorKind};
 use crate::failpoints::START_TABLE_SYNC_AFTER_DATA_SYNC;
 use crate::pipeline::PipelineId;
 use crate::replication::client::PgReplicationClient;
-use crate::replication::slot::{SlotError, get_slot_name};
+use crate::replication::slot::get_slot_name;
 use crate::replication::stream::{TableCopyStream, TableCopyStreamError};
 use crate::schema::cache::SchemaCache;
 use crate::state::store::base::StateStore;
@@ -172,8 +172,9 @@ where
                 state_store
                     .update_table_replication_state(table_id, TableReplicationPhase::Skipped)
                     .await?;
+
                 bail!(
-                    ErrorKind::SchemaError,
+                    ErrorKind::SourceSchemaError,
                     "Missing primary key",
                     format!("table {} has no primary key", table_schema.name)
                 );

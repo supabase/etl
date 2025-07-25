@@ -1,5 +1,3 @@
-use crate::error::{ETLError, ETLResult, ErrorKind};
-use crate::{bail, etl_error};
 use config::shared::PipelineConfig;
 use postgres::schema::TableId;
 use std::sync::Arc;
@@ -9,10 +7,12 @@ use tokio::task::JoinHandle;
 use tokio_postgres::types::PgLsn;
 use tracing::{Instrument, debug, error, info, warn};
 
+use crate::bail;
 use crate::concurrency::future::ReactiveFuture;
 use crate::concurrency::shutdown::{ShutdownResult, ShutdownRx};
 use crate::concurrency::signal::SignalTx;
 use crate::destination::base::Destination;
+use crate::error::{ETLError, ETLResult, ErrorKind};
 use crate::pipeline::PipelineId;
 use crate::replication::apply::{ApplyLoopHook, start_apply_loop};
 use crate::replication::client::PgReplicationClient;

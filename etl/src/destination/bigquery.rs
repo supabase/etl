@@ -194,7 +194,7 @@ impl BigQueryDestination {
             .await;
         let table_schema = schema_cache.get_table_schema_ref(table_id).ok_or_else(|| {
             ETLError::from((
-                ErrorKind::SchemaError,
+                ErrorKind::DestinationSchemaError,
                 "Table schema not found in schema cache",
                 format!("table_id: {}", table_id),
             ))

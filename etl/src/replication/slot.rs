@@ -1,5 +1,7 @@
 use thiserror::Error;
 
+use crate::bail;
+use crate::error::ETLResult;
 use crate::pipeline::PipelineId;
 use crate::workers::base::WorkerType;
 
@@ -10,20 +12,8 @@ const MAX_SLOT_NAME_LENGTH: usize = 63;
 const APPLY_WORKER_PREFIX: &str = "supabase_etl_apply";
 const TABLE_SYNC_PREFIX: &str = "supabase_etl_table_sync";
 
-/// Error types that can occur when working with replication slots
-#[derive(Debug, Error)]
-pub enum SlotError {
-    #[error(
-        "Replication slot name exceeds maximum length of {MAX_SLOT_NAME_LENGTH} characters: name must be shorter"
-    )]
-    NameTooLong,
-}
-
 /// Generates a replication slot name.
-pub fn get_slot_name(
-    pipeline_id: PipelineId,
-    worker_type: WorkerType,
-) -> Result<String, SlotError> {
+pub fn get_slot_name(pipeline_id: PipelineId, worker_type: WorkerType) -> ETLResult<String> {
     let slot_name = match worker_type {
         WorkerType::Apply => {
             format!("{APPLY_WORKER_PREFIX}_{pipeline_id}")
@@ -34,7 +24,10 @@ pub fn get_slot_name(
     };
 
     if slot_name.len() > MAX_SLOT_NAME_LENGTH {
-        return Err(SlotError::NameTooLong);
+        bail!(
+            ErrorKind::ValidationError,
+            "Invalid slot name length: {slot_name}"
+        );
     }
 
     Ok(slot_name)
