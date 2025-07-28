@@ -26,9 +26,9 @@ pub trait ReactiveFutureCallback<I, E> {
 enum ReactiveFutureState {
     /// The inner future is currently being polled.
     PollInnerFuture,
-    /// The inner future has completed, and we have to notify the callback.
+    /// The inner future has completed and the callback needs to be invoked.
     InvokeCallback,
-    /// The future has finished all processing.
+    /// All processing is complete and the future is ready to return its final result.
     Finished,
 }
 
@@ -56,10 +56,9 @@ impl<Fut, I, C, E> ReactiveFuture<Fut, I, C, E>
 where
     Fut: Future<Output = Result<(), E>>,
 {
-    /// Creates a new reactive future that will notify the callback when it completes.
+    /// Creates a new [`ReactiveFuture`] that wraps the given future with callback notifications.
     ///
-    /// The callback will be notified of either success or failure, and will receive the provided
-    /// identifier to track which future completed.
+    /// The callback receives the provided identifier and is notified on completion, error, or panic.
     pub fn wrap(future: Fut, id: I, callback_source: C) -> Self {
         Self {
             future: AssertUnwindSafe(future).catch_unwind(),
@@ -82,11 +81,10 @@ where
 {
     type Output = Result<(), E>;
 
-    /// Polls the future, handling both successful completion and errors.
+    /// Polls the reactive future through its state machine.
     ///
-    /// This implementation ensures that the callback is notified appropriately when the future
-    /// completes, whether successfully or with an error. It also handles panics by converting
-    /// them into error notifications.
+    /// Handles completion, errors, and panics by notifying the callback before returning the result.
+    /// Panics are caught and converted to string messages for the callback, then resumed.
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let mut this = self.project();
 
