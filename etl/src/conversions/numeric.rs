@@ -1,4 +1,3 @@
-// adapted from the bigdecimal crate
 use byteorder::{BigEndian, ReadBytesExt};
 use std::{
     fmt::Display,
