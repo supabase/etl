@@ -13,18 +13,11 @@ use crate::workers::base::{Worker, WorkerHandle};
 use crate::workers::table_sync::{TableSyncWorker, TableSyncWorkerHandle, TableSyncWorkerState};
 
 #[derive(Debug)]
-pub enum TableSyncWorkerInactiveReason {
-    Completed,
-    Errored(String),
-    Panicked(String),
-}
-
-#[derive(Debug)]
 pub struct TableSyncWorkerPoolInner {
     /// The table sync workers that are currently active.
     active: HashMap<TableId, TableSyncWorkerHandle>,
-    /// The table sync workers that are inactive, meaning that either they completed or errored.
-    inactive: HashMap<TableId, Vec<TableSyncWorkerHandle>>,
+    /// The table sync workers that are finished, meaning that either they completed or errored.
+    finished: HashMap<TableId, Vec<TableSyncWorkerHandle>>,
     /// A [`Notify`] instance which notifies subscribers when there is a change in the pool (e.g.
     /// a new worker changes from active to inactive).
     pool_update: Option<Arc<Notify>>,
@@ -34,7 +27,7 @@ impl TableSyncWorkerPoolInner {
     fn new() -> Self {
         Self {
             active: HashMap::new(),
-            inactive: HashMap::new(),
+            finished: HashMap::new(),
             pool_update: None,
         }
     }
@@ -61,11 +54,7 @@ impl TableSyncWorkerPoolInner {
         Ok(true)
     }
 
-    pub fn mark_worker_finished(
-        &mut self,
-        table_id: TableId,
-        reason: TableSyncWorkerInactiveReason,
-    ) {
+    pub fn mark_worker_finished(&mut self, table_id: TableId) {
         let removed_worker = self.active.remove(&table_id);
 
         if let Some(waiting) = self.pool_update.take() {
@@ -73,9 +62,7 @@ impl TableSyncWorkerPoolInner {
         }
 
         if let Some(removed_worker) = removed_worker {
-            debug!("table sync worker finished with reason: {reason:?}",);
-
-            self.inactive
+            self.finished
                 .entry(table_id)
                 .or_default()
                 .push(removed_worker);
@@ -105,13 +92,12 @@ impl TableSyncWorkerPoolInner {
         }
 
         let mut errors = Vec::new();
-        for (_, workers) in mem::take(&mut self.inactive) {
+        for (_, workers) in mem::take(&mut self.finished) {
             for worker in workers {
-                // If there is an error while waiting for the task, we can assume that there was un
-                // uncaught panic or a propagated error.
+                // The `wait` method will return either an error due to a caught panic or the error
+                // returned by the worker.
                 if let Err(err) = worker.wait().await {
                     errors.push(err);
-                    continue;
                 }
             }
         }

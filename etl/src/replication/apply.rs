@@ -21,7 +21,7 @@ use crate::replication::client::PgReplicationClient;
 use crate::replication::slot::get_slot_name;
 use crate::replication::stream::EventsStream;
 use crate::schema::cache::SchemaCache;
-use crate::state::table::{RetryPolicy, TableReplicationError, TableReplicationPhase};
+use crate::state::table::{RetryPolicy, TableReplicationError};
 use crate::workers::base::WorkerType;
 use crate::{bail, etl_error};
 
@@ -739,10 +739,7 @@ where
     if !existing_table_schema.partial_eq(&event.table_schema) {
         let table_error = TableReplicationError::with_solution(
             table_id,
-            format!(
-                "The schema for table {} has changed during streaming",
-                table_id
-            ),
+            format!("The schema for table {table_id} has changed during streaming"),
             "ETL doesn't support schema changes at this point in time, rollback the schema",
             RetryPolicy::UserIntervention,
         );

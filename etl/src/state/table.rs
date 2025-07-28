@@ -1,9 +1,15 @@
 use postgres::schema::TableId;
 use std::fmt;
 use tokio_postgres::types::PgLsn;
+
 use crate::error::EtlError;
 
+/// Represents an error that occurred during table replication.
+///
+/// Contains diagnostic information including the table that failed, the reason for failure,
+/// an optional solution suggestion, and the retry policy to apply.
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct TableReplicationError {
     table_id: TableId,
     reason: String,
@@ -12,6 +18,7 @@ pub struct TableReplicationError {
 }
 
 impl TableReplicationError {
+    /// Creates a new [`TableReplicationError`] with a suggested solution.
     pub fn with_solution(
         table_id: TableId,
         reason: impl ToString,
@@ -26,6 +33,7 @@ impl TableReplicationError {
         }
     }
 
+    /// Creates a new [`TableReplicationError`] without a suggested solution.
     pub fn without_solution(
         table_id: TableId,
         reason: impl ToString,
@@ -39,28 +47,35 @@ impl TableReplicationError {
         }
     }
 
+    /// Returns the [`TableId`] of the table that failed replication.
     pub fn table_id(&self) -> TableId {
         self.table_id
     }
 }
 
+/// Converts an [`EtlError`] into a [`TableReplicationError`].
+///
+/// Currently uses placeholder values for the table ID and provides a generic solution.
 impl From<EtlError> for TableReplicationError {
-
     fn from(value: EtlError) -> Self {
         // TODO: implement actual conversion.
         Self::with_solution(
             TableId::new(10),
             format!("An error occurred: {value}"),
             "This error requires requires manual intervention",
-            RetryPolicy::None
+            RetryPolicy::None,
         )
     }
 }
 
+/// Defines the retry strategy for a failed table replication.
 #[derive(Debug)]
 pub enum RetryPolicy {
+    /// No retry should be attempted.
     None,
+    /// Retry requires user intervention before proceeding.
     UserIntervention,
+    /// Retry with exponential backoff strategy.
     Backoff,
 }
 

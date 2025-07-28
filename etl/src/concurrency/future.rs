@@ -6,18 +6,20 @@ use std::future::Future;
 use std::panic::AssertUnwindSafe;
 use std::pin::Pin;
 use std::task::{Context, Poll};
-use std::{fmt, panic};
+use std::{error, panic};
 
 /// A callback interface for receiving notifications about future completion.
 ///
 /// The generic parameter `I` represents the identifier type used to track futures.
-pub trait ReactiveFutureCallback<I> {
+pub trait ReactiveFutureCallback<I, E> {
     /// Called when a future completes successfully.
     fn on_complete(&mut self, id: I) -> impl Future<Output = ()> + Send;
 
     /// Called when a future encounters an error.
-    fn on_error(&mut self, id: I, error: String, is_panic: bool)
-    -> impl Future<Output = ()> + Send;
+    fn on_error(&mut self, id: I, error: E) -> impl Future<Output = ()> + Send;
+
+    /// Called when a future encounters a panic.
+    fn on_panic(&mut self, id: I, panic: String) -> impl Future<Output = ()> + Send;
 }
 
 /// Represents the internal state of a [`ReactiveFuture`].
@@ -25,7 +27,7 @@ enum ReactiveFutureState {
     /// The inner future is currently being polled.
     PollInnerFuture,
     /// The inner future has completed, and we have to notify the callback.
-    InvokeCallback(Option<String>),
+    InvokeCallback,
     /// The future has finished all processing.
     Finished,
 }
@@ -75,8 +77,8 @@ impl<Fut, I, C, E> Future for ReactiveFuture<Fut, I, C, E>
 where
     Fut: Future<Output = Result<(), E>>,
     I: Clone + Send + 'static,
-    C: ReactiveFutureCallback<I> + Clone + Send + 'static,
-    E: fmt::Display,
+    C: ReactiveFutureCallback<I, E> + Clone + Send + 'static,
+    E: error::Error + Send + Clone + 'static,
 {
     type Output = Result<(), E>;
 
@@ -93,44 +95,48 @@ where
                 ReactiveFutureState::PollInnerFuture => match this.future.as_mut().poll(cx) {
                     Poll::Ready(Ok(inner_result)) => match inner_result {
                         Ok(_) => {
-                            *this.state = ReactiveFutureState::InvokeCallback(None);
+                            *this.state = ReactiveFutureState::InvokeCallback;
                         }
                         Err(err) => {
-                            let casted_err = format!("{err}");
-
                             *this.original_error = Some(err);
-                            *this.state = ReactiveFutureState::InvokeCallback(Some(casted_err));
+                            *this.state = ReactiveFutureState::InvokeCallback;
                         }
                     },
                     Poll::Ready(Err(err)) => {
-                        // We want to handle the most common panic types.
-                        let casted_err = if let Some(s) = err.downcast_ref::<&str>() {
-                            s.to_string()
-                        } else if let Some(s) = err.downcast_ref::<String>() {
-                            s.clone()
-                        } else {
-                            "Unknown panic error".to_string()
-                        };
-
-                        *this.original_panic = Some(Box::new(err));
-                        *this.state = ReactiveFutureState::InvokeCallback(Some(casted_err));
+                        *this.original_panic = Some(err);
+                        *this.state = ReactiveFutureState::InvokeCallback;
                     }
                     Poll::Pending => {
                         return Poll::Pending;
                     }
                 },
-                ReactiveFutureState::InvokeCallback(error) => {
+                ReactiveFutureState::InvokeCallback => {
                     if this.callback_fut.is_none() {
                         let id = this.id.clone();
                         let mut callback_source = this.callback_source.clone();
-                        let error = error.clone();
-                        let is_panic = this.original_panic.is_some();
+
+                        // We clone the original error.
+                        let original_error = this.original_error.clone();
+
+                        // We convert the original panic to a concrete type.
+                        let original_panic = this.original_panic.as_ref().map(|panic| {
+                            if let Some(&s) = panic.downcast_ref::<&str>() {
+                                s.to_owned()
+                            } else if let Some(s) = panic.downcast_ref::<String>() {
+                                s.clone()
+                            } else {
+                                "unknown panic error".to_owned()
+                            }
+                        });
 
                         let callback_fut = async move {
-                            match error {
-                                Some(err) => callback_source.on_error(id, err, is_panic).await,
-                                None => callback_source.on_complete(id).await,
-                            };
+                            if let Some(error) = original_error {
+                                callback_source.on_error(id, error).await;
+                            } else if let Some(panic) = original_panic {
+                                callback_source.on_panic(id, panic).await;
+                            } else {
+                                callback_source.on_complete(id).await;
+                            }
                         }
                         .boxed();
 
@@ -170,16 +176,16 @@ where
 mod tests {
     use crate::concurrency::future::{ReactiveFuture, ReactiveFutureCallback};
     use futures::FutureExt;
-    use std::fmt;
     use std::future::Future;
     use std::panic;
     use std::panic::AssertUnwindSafe;
     use std::pin::Pin;
     use std::sync::Arc;
     use std::task::{Context, Poll};
+    use std::{error, fmt};
     use tokio::sync::Mutex;
 
-    #[derive(Debug)]
+    #[derive(Debug, Clone, PartialEq, Eq)]
     struct SimpleError(String);
 
     impl fmt::Display for SimpleError {
@@ -187,6 +193,8 @@ mod tests {
             write!(f, "{}", self.0)
         }
     }
+
+    impl error::Error for SimpleError {}
 
     struct ImmediateFuture;
 
@@ -250,9 +258,8 @@ mod tests {
     #[derive(Debug, Default)]
     struct Inner {
         complete_called: bool,
-        error_called: bool,
-        error_message: Option<String>,
-        had_panic: bool,
+        error: Option<SimpleError>,
+        panic: Option<String>,
     }
 
     #[derive(Debug, Clone)]
@@ -268,17 +275,20 @@ mod tests {
         }
     }
 
-    impl ReactiveFutureCallback<i32> for MockCallback {
+    impl ReactiveFutureCallback<i32, SimpleError> for MockCallback {
         async fn on_complete(&mut self, _id: i32) {
             let mut inner = self.inner.lock().await;
             inner.complete_called = true;
         }
 
-        async fn on_error(&mut self, _id: i32, error: String, is_panic: bool) {
+        async fn on_error(&mut self, _id: i32, error: SimpleError) {
             let mut inner = self.inner.lock().await;
-            inner.error_called = true;
-            inner.had_panic = is_panic;
-            inner.error_message = Some(error);
+            inner.error = Some(error);
+        }
+
+        async fn on_panic(&mut self, _id: i32, panic: String) {
+            let mut inner = self.inner.lock().await;
+            inner.panic = Some(panic);
         }
     }
 
@@ -292,7 +302,8 @@ mod tests {
 
         let guard = callback.inner.lock().await;
         assert!(guard.complete_called);
-        assert!(!guard.error_called);
+        assert!(guard.error.is_none());
+        assert!(guard.panic.is_none());
     }
 
     #[tokio::test]
@@ -313,20 +324,16 @@ mod tests {
         {
             let guard = callback.inner.lock().await;
             assert!(!guard.complete_called);
-            assert!(guard.error_called);
-            assert!(guard.had_panic);
-            assert_eq!(
-                guard.error_message,
-                Some("The future had an error".to_string())
-            );
+            assert_eq!(guard.panic, Some("The future had an error".to_string()));
         }
 
         // Reset callback state
-        let mut guard = callback.inner.lock().await;
-        guard.complete_called = false;
-        guard.error_called = false;
-        guard.error_message = None;
-        drop(guard);
+        {
+            let mut guard = callback.inner.lock().await;
+            guard.complete_called = false;
+            guard.error = None;
+            guard.panic = None;
+        }
 
         // Test any panic
         let future = AssertUnwindSafe(ReactiveFuture::wrap(
@@ -341,10 +348,25 @@ mod tests {
         {
             let guard = callback.inner.lock().await;
             assert!(!guard.complete_called);
-            assert!(guard.error_called);
-            assert!(guard.had_panic);
-            assert_eq!(guard.error_message, Some("Unknown panic error".to_string()));
+            assert_eq!(guard.panic, Some("unknown panic error".to_string()));
         }
+    }
+
+    #[tokio::test]
+    async fn test_error_handling() {
+        let callback = MockCallback::new();
+        let table_id = 1;
+
+        let future = ReactiveFuture::wrap(ErrorFuture, table_id, callback.clone());
+        let result = future.await;
+
+        // Verify the error was propagated
+        assert!(result.is_err());
+
+        // Verify the callback was notified of the error
+        let guard = callback.inner.lock().await;
+        assert!(!guard.complete_called);
+        assert_eq!(guard.error, Some(SimpleError("Test error".to_owned())));
     }
 
     #[tokio::test]
@@ -374,24 +396,7 @@ mod tests {
         // Verify the callback was notified of success
         let guard = callback.inner.lock().await;
         assert!(guard.complete_called);
-        assert!(!guard.error_called);
-    }
-
-    #[tokio::test]
-    async fn test_error_handling() {
-        let callback = MockCallback::new();
-        let table_id = 1;
-
-        let future = ReactiveFuture::wrap(ErrorFuture, table_id, callback.clone());
-        let result = future.await;
-
-        // Verify the error was propagated
-        assert!(result.is_err());
-
-        // Verify the callback was notified of the error
-        let guard = callback.inner.lock().await;
-        assert!(!guard.complete_called);
-        assert!(guard.error_called);
-        assert_eq!(guard.error_message, Some("Test error".to_string()));
+        assert!(guard.error.is_none());
+        assert!(guard.panic.is_none());
     }
 }

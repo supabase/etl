@@ -12,7 +12,7 @@ pub type EtlResult<T> = Result<T, EtlError>;
 /// [`EtlError`] provides a comprehensive error system that can represent single errors,
 /// errors with additional detail, or multiple aggregated errors. The design allows for
 /// rich error information while maintaining ergonomic usage patterns.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct EtlError {
     repr: ErrorRepr,
 }
@@ -21,7 +21,7 @@ pub struct EtlError {
 ///
 /// This enum supports different error patterns while maintaining a unified interface.
 /// Users should not interact with this type directly but use [`EtlError`] methods instead.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum ErrorRepr {
     /// Error with kind and static description
     WithDescription(ErrorKind, &'static str),
