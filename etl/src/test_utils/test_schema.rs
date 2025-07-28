@@ -593,7 +593,7 @@ pub mod bigquery {
         i8_arr: Option<Vec<i64>>,
         f4_arr: Option<Vec<f32>>,
         f8_arr: Option<Vec<f64>>,
-        // n_arr: Option<Vec<PgNumeric>>, // Numeric arrays are complex, skip for now
+        n_arr: Option<Vec<PgNumeric>>,
         by_arr: Option<Vec<Vec<u8>>>,
         d_arr: Option<Vec<NaiveDate>>,
         ti_arr: Option<Vec<NaiveTime>>,
@@ -616,6 +616,7 @@ pub mod bigquery {
                 i8_arr: Some(vec![]),
                 f4_arr: Some(vec![]),
                 f8_arr: Some(vec![]),
+                n_arr: Some(vec![]),
                 by_arr: Some(vec![]),
                 d_arr: Some(vec![]),
                 ti_arr: Some(vec![]),
@@ -638,6 +639,7 @@ pub mod bigquery {
             i8_arr: Vec<i64>,
             f4_arr: Vec<f32>,
             f8_arr: Vec<f64>,
+            n_arr: Vec<PgNumeric>,
             by_arr: Vec<Vec<u8>>,
             d_arr: Vec<NaiveDate>,
             ti_arr: Vec<NaiveTime>,
@@ -657,6 +659,7 @@ pub mod bigquery {
                 i8_arr: Some(i8_arr),
                 f4_arr: Some(f4_arr),
                 f8_arr: Some(f8_arr),
+                n_arr: Some(n_arr),
                 by_arr: Some(by_arr),
                 d_arr: Some(d_arr),
                 ti_arr: Some(ti_arr),
@@ -763,15 +766,16 @@ pub mod bigquery {
                 i8_arr: parse_array_cell(columns[5].clone()),
                 f4_arr: parse_array_cell(columns[6].clone()),
                 f8_arr: parse_array_cell(columns[7].clone()),
-                by_arr: parse_bytes_array(columns[8].clone()),
-                d_arr: parse_array_cell(columns[9].clone()),
-                ti_arr: parse_array_cell(columns[10].clone()),
-                ts_arr: parse_naive_datetime_array(columns[11].clone()),
-                tstz_arr: parse_timestamp_array(columns[12].clone()),
-                u_arr: parse_array_cell(columns[13].clone()),
-                j_arr: parse_json_array(columns[14].clone()),
-                jb_arr: parse_json_array(columns[15].clone()),
-                o_arr: parse_array_cell(columns[16].clone()),
+                n_arr: parse_array_cell(columns[8].clone()),
+                by_arr: parse_bytes_array(columns[9].clone()),
+                d_arr: parse_array_cell(columns[10].clone()),
+                ti_arr: parse_array_cell(columns[11].clone()),
+                ts_arr: parse_naive_datetime_array(columns[12].clone()),
+                tstz_arr: parse_timestamp_array(columns[13].clone()),
+                u_arr: parse_array_cell(columns[14].clone()),
+                j_arr: parse_json_array(columns[15].clone()),
+                jb_arr: parse_json_array(columns[16].clone()),
+                o_arr: parse_array_cell(columns[17].clone()),
             }
         }
     }
@@ -815,6 +819,7 @@ pub mod bigquery {
                 && self.i8_arr == other.i8_arr
                 && float_array_eq(&self.f4_arr, &other.f4_arr)
                 && double_array_eq(&self.f8_arr, &other.f8_arr)
+                && self.n_arr == other.n_arr
                 && self.by_arr == other.by_arr
                 && self.d_arr == other.d_arr
                 && self.ti_arr == other.ti_arr
@@ -851,7 +856,7 @@ pub mod bigquery {
         i8: i64,
         f4: f32,
         f8: f64,
-        // n: PgNumeric,
+        n: PgNumeric,
         by: Vec<u8>,
         d: NaiveDate,
         ti: NaiveTime,
@@ -874,7 +879,7 @@ pub mod bigquery {
             i8: i64,
             f4: f32,
             f8: f64,
-            // n: PgNumeric,
+            n: PgNumeric,
             by: Vec<u8>,
             d: NaiveDate,
             ti: NaiveTime,
@@ -894,7 +899,7 @@ pub mod bigquery {
                 i8,
                 f4,
                 f8,
-                // n,
+                n,
                 by,
                 d,
                 ti,
@@ -956,16 +961,16 @@ pub mod bigquery {
                 i8: parse_table_cell(columns[5].clone()).unwrap(),
                 f4: parse_table_cell(columns[6].clone()).unwrap(),
                 f8: parse_table_cell(columns[7].clone()).unwrap(),
-                // n: parse_table_cell(columns[8].clone()).unwrap(),
-                by: parse_bytes(columns[8].clone()),
-                d: parse_table_cell(columns[9].clone()).unwrap(),
-                ti: parse_table_cell(columns[10].clone()).unwrap(),
-                ts: parse_unix_timestamp_naive(columns[11].clone()),
-                tstz: parse_unix_timestamp_from_cell(columns[12].clone()),
-                u: parse_table_cell(columns[13].clone()).unwrap(),
-                j: parse_json_value(columns[14].clone()),
-                jb: parse_json_value(columns[15].clone()),
-                o: parse_table_cell(columns[16].clone()).unwrap(),
+                n: parse_table_cell(columns[8].clone()).unwrap(),
+                by: parse_bytes(columns[9].clone()),
+                d: parse_table_cell(columns[10].clone()).unwrap(),
+                ti: parse_table_cell(columns[11].clone()).unwrap(),
+                ts: parse_unix_timestamp_naive(columns[12].clone()),
+                tstz: parse_unix_timestamp_from_cell(columns[13].clone()),
+                u: parse_table_cell(columns[14].clone()).unwrap(),
+                j: parse_json_value(columns[15].clone()),
+                jb: parse_json_value(columns[16].clone()),
+                o: parse_table_cell(columns[17].clone()).unwrap(),
             }
         }
     }
@@ -989,7 +994,7 @@ pub mod bigquery {
                 && self.i8 == other.i8
                 && float_eq(self.f4, other.f4)
                 && double_eq(self.f8, other.f8)
-                // && self.n == other.n
+                && self.n == other.n
                 && self.by == other.by
                 && self.d == other.d
                 && self.ti == other.ti
