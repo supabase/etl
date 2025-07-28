@@ -235,8 +235,6 @@ impl fmt::Display for EtlError {
 
 impl error::Error for EtlError {}
 
-// Ergonomic constructors following Redis pattern
-
 /// Creates an [`EtlError`] from an error kind and static description.
 impl From<(ErrorKind, &'static str)> for EtlError {
     fn from((kind, desc): (ErrorKind, &'static str)) -> EtlError {
@@ -509,8 +507,6 @@ impl From<bigdecimal::ParseBigDecimalError> for EtlError {
     }
 }
 
-// SQLx error conversion
-
 /// Converts [`sqlx::Error`] to [`EtlError`] with appropriate error kind.
 ///
 /// Maps database errors to [`ErrorKind::QueryFailed`], I/O errors to [`ErrorKind::IoError`],
@@ -533,8 +529,6 @@ impl From<sqlx::Error> for EtlError {
         }
     }
 }
-
-// BigQuery error conversions (feature-gated)
 
 /// Converts [`gcp_bigquery_client::error::BQError`] to [`EtlError`] with appropriate error kind.
 ///

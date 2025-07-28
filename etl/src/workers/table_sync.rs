@@ -1,5 +1,6 @@
 use config::shared::PipelineConfig;
 use postgres::schema::TableId;
+use std::ops::Deref;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{Mutex, MutexGuard, Notify, Semaphore};
@@ -21,7 +22,8 @@ use crate::schema::cache::SchemaCache;
 use crate::state::store::base::StateStore;
 use crate::state::table::{TableReplicationPhase, TableReplicationPhaseType};
 use crate::workers::base::{Worker, WorkerHandle, WorkerType};
-use crate::workers::pool::TableSyncWorkerPool;
+use crate::workers::lifecycle::WorkerLifecycleObserver;
+use crate::workers::pool::{TableSyncWorkerPool, TableSyncWorkerPoolInner};
 use crate::{bail, etl_error};
 
 /// Maximum time to wait for a phase change before trying again.
@@ -108,16 +110,16 @@ impl TableSyncWorkerState {
         }
     }
 
-    pub async fn set_and_store<S>(
-        pool: &TableSyncWorkerPool,
+    pub async fn set_and_store<P, S>(
+        pool: &P,
         state_store: &S,
         table_id: TableId,
         table_replication_phase: TableReplicationPhase,
     ) -> EtlResult<()>
     where
+        P: Deref<Target = TableSyncWorkerPoolInner>,
         S: StateStore,
     {
-        let pool = pool.lock().await;
         let table_sync_worker_state = pool.get_active_worker_state(table_id);
 
         // In case we have the state in memory, we will atomically update the memory and state store
@@ -324,7 +326,9 @@ where
 
         let state = TableSyncWorkerState::new(self.table_id, table_replication_phase);
 
+        let state_store_clone = self.state_store.clone();
         let state_clone = state.clone();
+
         let table_sync_worker_span = tracing::info_span!(
             "table_sync_worker",
             pipeline_id = self.pipeline_id,
@@ -371,7 +375,7 @@ where
                 self.table_id,
                 state_clone.clone(),
                 self.schema_cache.clone(),
-                self.state_store.clone(),
+                state_store_clone.clone(),
                 self.destination.clone(),
                 self.shutdown_rx.clone(),
                 self.force_syncing_tables_tx,
@@ -396,7 +400,7 @@ where
                 replication_client.clone(),
                 self.schema_cache,
                 self.destination,
-                TableSyncWorkerHook::new(self.table_id, state_clone, self.state_store),
+                TableSyncWorkerHook::new(self.table_id, state_clone, state_store_clone),
                 self.shutdown_rx,
                 None,
             )
@@ -434,10 +438,12 @@ where
             Ok(())
         };
 
-        // We spawn the table sync worker with a safe future, so that we can have controlled teardown
-        // on completion or error.
-        // TODO: we want to implement a custom callback source which can skip tables and react to panics.
-        let fut = ReactiveFuture::wrap(table_sync_worker, self.table_id, self.pool)
+        // We wrap the table sync worker future with a reactive future which is hooked into a lifecycle
+        // observer in order to react to state changes of the future. In this way, if an error happens in
+        // a table sync worker, we can take action immediately instead of waiting on the join handles of
+        // the future. This is important for notifying the state store about the new table sync state.
+        let observer = WorkerLifecycleObserver::new(self.pool.clone(), self.state_store.clone());
+        let fut = ReactiveFuture::wrap(table_sync_worker, self.table_id, observer)
             .instrument(table_sync_worker_span);
         let handle = tokio::spawn(fut);
 

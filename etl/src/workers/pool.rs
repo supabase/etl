@@ -6,7 +6,6 @@ use std::sync::Arc;
 use tokio::sync::{Mutex, Notify};
 use tracing::{debug, warn};
 
-use crate::concurrency::future::ReactiveFutureCallback;
 use crate::destination::base::Destination;
 use crate::error::EtlResult;
 use crate::state::store::base::StateStore;
@@ -137,10 +136,6 @@ impl TableSyncWorkerPool {
         }
     }
 
-    pub fn get_inner(&self) -> Arc<Mutex<TableSyncWorkerPoolInner>> {
-        self.inner.clone()
-    }
-
     pub async fn wait_all(&self) -> EtlResult<()> {
         loop {
             // We try first to wait for all workers to be finished, in case there are still active
@@ -157,22 +152,6 @@ impl TableSyncWorkerPool {
 
             notify.notified().await;
         }
-    }
-}
-
-impl ReactiveFutureCallback<TableId> for TableSyncWorkerPool {
-    async fn on_complete(&mut self, id: TableId) {
-        let mut inner = self.inner.lock().await;
-        inner.mark_worker_finished(id, TableSyncWorkerInactiveReason::Completed);
-    }
-
-    async fn on_error(&mut self, id: TableId, error: String, is_panic: bool) {
-        let mut inner = self.inner.lock().await;
-        let reason = match is_panic {
-            true => TableSyncWorkerInactiveReason::Panicked(error),
-            false => TableSyncWorkerInactiveReason::Errored(error),
-        };
-        inner.mark_worker_finished(id, reason);
     }
 }
 

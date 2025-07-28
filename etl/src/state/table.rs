@@ -42,6 +42,7 @@ pub enum TableReplicationPhase {
     /// Set by either the table-sync worker or the apply worker when a table is no
     /// longer being synced because of an error. Tables in this state can only
     /// start syncing again after a manual intervention from the user.
+    // TODO: turn this into a generic `Error` state with more information.
     Skipped,
 }
 
@@ -51,8 +52,6 @@ impl TableReplicationPhase {
     }
 }
 
-// TODO: we may not need as many phases as we have now.
-// Evaluate this once the code is more mature.
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum TableReplicationPhaseType {
     Init,

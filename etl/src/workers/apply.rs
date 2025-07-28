@@ -388,8 +388,9 @@ where
     }
 
     async fn skip_table(&self, table_id: TableId) -> EtlResult<bool> {
+        let pool = self.pool.lock().await;
         TableSyncWorkerState::set_and_store(
-            &self.pool,
+            &pool,
             &self.state_store,
             table_id,
             TableReplicationPhase::Skipped,
