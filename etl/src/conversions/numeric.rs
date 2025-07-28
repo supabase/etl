@@ -44,10 +44,9 @@ impl From<Sign> for u16 {
 }
 
 /// A Postgres Numeric value. Closely matches the wire format.
-#[derive(Debug, Ord, PartialOrd, Eq, PartialEq, Clone, Default)]
+#[derive(Debug, Ord, PartialOrd, Eq, PartialEq, Clone)]
 pub enum PgNumeric {
     /// Not a number
-    #[default]
     NaN,
 
     /// Positive infinity
@@ -71,6 +70,17 @@ pub enum PgNumeric {
         /// Actual digits, stored in base 100,00
         digits: Vec<i16>,
     },
+}
+
+impl Default for PgNumeric {
+    fn default() -> Self {
+        PgNumeric::Value {
+            sign: Sign::Positive,
+            weight: 0,
+            scale: 0,
+            digits: vec![],
+        }
+    }
 }
 
 impl FromStr for PgNumeric {

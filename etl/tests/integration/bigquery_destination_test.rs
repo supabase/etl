@@ -935,7 +935,6 @@ async fn table_nullable_array_columns() {
     pipeline.shutdown_and_wait().await.unwrap();
 }
 
-#[ignore = "temporarily ignored"]
 #[tokio::test(flavor = "multi_thread")]
 async fn table_non_nullable_scalar_columns() {
     init_test_tracing();
