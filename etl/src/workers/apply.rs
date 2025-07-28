@@ -260,9 +260,9 @@ where
                 );
 
                 inner
-                    .set_phase_with(
+                    .set_and_store(
                         TableReplicationPhase::Catchup { lsn: current_lsn },
-                        self.state_store.clone(),
+                        &self.state_store,
                     )
                     .await?;
 
@@ -388,22 +388,13 @@ where
     }
 
     async fn skip_table(&self, table_id: TableId) -> EtlResult<bool> {
-        let table_sync_worker_state = {
-            let pool = self.pool.lock().await;
-            pool.get_active_worker_state(table_id)
-        };
-
-        // In case we have the state in memory, we will also update that.
-        if let Some(table_sync_worker_state) = table_sync_worker_state {
-            let mut inner = table_sync_worker_state.get_inner().lock().await;
-            inner.set_phase(TableReplicationPhase::Skipped);
-        }
-
-        // We store the new skipped state in the state store, since we want to still skip a table in
-        // case of pipeline restarts.
-        self.state_store
-            .update_table_replication_state(table_id, TableReplicationPhase::Skipped)
-            .await?;
+        TableSyncWorkerState::set_and_store(
+            &self.pool,
+            &self.state_store,
+            table_id,
+            TableReplicationPhase::Skipped,
+        )
+        .await?;
 
         Ok(true)
     }

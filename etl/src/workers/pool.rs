@@ -28,7 +28,9 @@ pub struct TableSyncWorkerPoolInner {
     active: HashMap<TableId, TableSyncWorkerHandle>,
     /// The table sync workers that are inactive, meaning that either they completed or errored.
     inactive: HashMap<TableId, Vec<TableSyncWorkerHandle>>,
-    waiting: Option<Arc<Notify>>,
+    /// A [`Notify`] instance which notifies subscribers when there is a change in the pool (e.g.
+    /// a new worker changes from active to inactive).
+    pool_update: Option<Arc<Notify>>,
 }
 
 impl TableSyncWorkerPoolInner {
@@ -36,7 +38,7 @@ impl TableSyncWorkerPoolInner {
         Self {
             active: HashMap::new(),
             inactive: HashMap::new(),
-            waiting: None,
+            pool_update: None,
         }
     }
 
@@ -53,6 +55,7 @@ impl TableSyncWorkerPoolInner {
 
         let handle = worker.start().await?;
         self.active.insert(table_id, handle);
+
         debug!(
             "successfully added worker for table {} to the pool",
             table_id
@@ -61,21 +64,14 @@ impl TableSyncWorkerPoolInner {
         Ok(true)
     }
 
-    pub fn get_active_worker_state(&self, table_id: TableId) -> Option<TableSyncWorkerState> {
-        let state = self.active.get(&table_id)?.state().clone();
-        debug!("retrieved worker state for table {table_id}");
-
-        Some(state)
-    }
-
-    pub fn set_worker_finished(
+    pub fn mark_worker_finished(
         &mut self,
         table_id: TableId,
         reason: TableSyncWorkerInactiveReason,
     ) {
         let removed_worker = self.active.remove(&table_id);
 
-        if let Some(waiting) = self.waiting.take() {
+        if let Some(waiting) = self.pool_update.take() {
             waiting.notify_one();
         }
 
@@ -89,6 +85,14 @@ impl TableSyncWorkerPoolInner {
         }
     }
 
+    pub fn get_active_worker_state(&self, table_id: TableId) -> Option<TableSyncWorkerState> {
+        let state = self.active.get(&table_id)?.state().clone();
+
+        debug!("retrieved active worker state for table {table_id}");
+
+        Some(state)
+    }
+
     pub async fn wait_all(&mut self) -> EtlResult<Option<Arc<Notify>>> {
         // If there are active workers, we return the notify, signaling that not all of them are
         // ready.
@@ -98,7 +102,7 @@ impl TableSyncWorkerPoolInner {
         // mark itself as finished.
         if !self.active.is_empty() {
             let notify = Arc::new(Notify::new());
-            self.waiting = Some(notify.clone());
+            self.pool_update = Some(notify.clone());
 
             return Ok(Some(notify));
         }
@@ -124,16 +128,16 @@ impl TableSyncWorkerPoolInner {
 }
 
 impl ReactiveFutureCallback<TableId> for TableSyncWorkerPoolInner {
-    fn on_complete(&mut self, id: TableId) {
-        self.set_worker_finished(id, TableSyncWorkerInactiveReason::Completed);
+    async fn on_complete(&mut self, id: TableId) {
+        self.mark_worker_finished(id, TableSyncWorkerInactiveReason::Completed);
     }
 
-    fn on_error(&mut self, id: TableId, error: String, is_panic: bool) {
+    async fn on_error(&mut self, id: TableId, error: String, is_panic: bool) {
         let reason = match is_panic {
             true => TableSyncWorkerInactiveReason::Panicked(error),
             false => TableSyncWorkerInactiveReason::Errored(error),
         };
-        self.set_worker_finished(id, reason);
+        self.mark_worker_finished(id, reason);
     }
 }
 

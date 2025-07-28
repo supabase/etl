@@ -141,7 +141,7 @@ where
             {
                 let mut inner = table_sync_worker_state.get_inner().lock().await;
                 inner
-                    .set_phase_with(TableReplicationPhase::DataSync, state_store.clone())
+                    .set_and_store(TableReplicationPhase::DataSync, &state_store)
                     .await?;
             }
 
@@ -239,7 +239,7 @@ where
             {
                 let mut inner = table_sync_worker_state.get_inner().lock().await;
                 inner
-                    .set_phase_with(TableReplicationPhase::FinishedCopy, state_store.clone())
+                    .set_and_store(TableReplicationPhase::FinishedCopy, &state_store)
                     .await?;
             }
 
@@ -262,7 +262,7 @@ where
     {
         let mut inner = table_sync_worker_state.get_inner().lock().await;
         inner
-            .set_phase_with(TableReplicationPhase::SyncWait, state_store)
+            .set_and_store(TableReplicationPhase::SyncWait, &state_store)
             .await?;
 
         // We notify the main apply worker to force syncing tables. In this way, the `Catchup` phase

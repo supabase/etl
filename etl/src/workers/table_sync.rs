@@ -43,7 +43,7 @@ pub struct TableSyncWorkerStateInner {
 }
 
 impl TableSyncWorkerStateInner {
-    pub fn set_phase(&mut self, phase: TableReplicationPhase) {
+    pub fn set(&mut self, phase: TableReplicationPhase) {
         info!(
             "table phase changing from '{:?}' to '{:?}'",
             self.table_replication_phase, phase
@@ -57,14 +57,12 @@ impl TableSyncWorkerStateInner {
         self.phase_change.notify_waiters();
     }
 
-    // TODO: investigate whether we want to just keep the syncwait and catchup special states in
-    //  the table sync worker state for the sake of simplicity.
-    pub async fn set_phase_with<S: StateStore>(
+    pub async fn set_and_store<S: StateStore>(
         &mut self,
         phase: TableReplicationPhase,
-        state_store: S,
+        state_store: &S,
     ) -> EtlResult<()> {
-        self.set_phase(phase);
+        self.set(phase);
 
         // If we should store this phase change, we want to do it via the supplied state store.
         if phase.as_type().should_store() {
@@ -110,8 +108,71 @@ impl TableSyncWorkerState {
         }
     }
 
+    pub async fn set_and_store<S>(
+        pool: &TableSyncWorkerPool,
+        state_store: &S,
+        table_id: TableId,
+        table_replication_phase: TableReplicationPhase,
+    ) -> EtlResult<()>
+    where
+        S: StateStore,
+    {
+        let pool = pool.lock().await;
+        let table_sync_worker_state = pool.get_active_worker_state(table_id);
+
+        // In case we have the state in memory, we will atomically update the memory and state store
+        // states. Otherwise, we just update the state store.
+        if let Some(table_sync_worker_state) = table_sync_worker_state {
+            let mut inner = table_sync_worker_state.get_inner().lock().await;
+            inner
+                .set_and_store(table_replication_phase, state_store)
+                .await?;
+        } else {
+            state_store
+                .update_table_replication_state(table_id, table_replication_phase)
+                .await?;
+        }
+
+        Ok(())
+    }
+
     pub fn get_inner(&self) -> &Mutex<TableSyncWorkerStateInner> {
         &self.inner
+    }
+
+    pub async fn wait_for_phase_type(
+        &self,
+        phase_type: TableReplicationPhaseType,
+        mut shutdown_rx: ShutdownRx,
+    ) -> ShutdownResult<MutexGuard<'_, TableSyncWorkerStateInner>, ()> {
+        let table_id = {
+            let inner = self.inner.lock().await;
+            inner.table_id
+        };
+        info!(
+            "waiting for table replication phase '{:?}' for table {:?}",
+            phase_type, table_id
+        );
+
+        loop {
+            tokio::select! {
+                biased;
+
+                // Shutdown signal received, exit loop.
+                _ = shutdown_rx.changed() => {
+                    info!("shutdown signal received, cancelling the wait for phase type {:?}", phase_type);
+
+                    return ShutdownResult::Shutdown(());
+                }
+
+                // Try to wait for the phase type.
+                acquired = self.wait(phase_type) => {
+                    if let Some(acquired) = acquired {
+                        return ShutdownResult::Ok(acquired);
+                    }
+                }
+            }
+        }
     }
 
     async fn wait(
@@ -148,41 +209,6 @@ impl TableSyncWorkerState {
         }
 
         None
-    }
-
-    pub async fn wait_for_phase_type(
-        &self,
-        phase_type: TableReplicationPhaseType,
-        mut shutdown_rx: ShutdownRx,
-    ) -> ShutdownResult<MutexGuard<'_, TableSyncWorkerStateInner>, ()> {
-        let table_id = {
-            let inner = self.inner.lock().await;
-            inner.table_id
-        };
-        info!(
-            "waiting for table replication phase '{:?}' for table {:?}",
-            phase_type, table_id
-        );
-
-        loop {
-            tokio::select! {
-                biased;
-
-                // Shutdown signal received, exit loop.
-                _ = shutdown_rx.changed() => {
-                    info!("shutdown signal received, cancelling the wait for phase type {:?}", phase_type);
-
-                    return ShutdownResult::Shutdown(());
-                }
-
-                // Try to wait for the phase type.
-                acquired = self.wait(phase_type) => {
-                    if let Some(acquired) = acquired {
-                        return ShutdownResult::Ok(acquired);
-                    }
-                }
-            }
-        }
     }
 }
 
@@ -463,9 +489,9 @@ where
                 // function is used as a lookahead, to determine whether the worker should be stopped.
                 if update_state {
                     inner
-                        .set_phase_with(
+                        .set_and_store(
                             TableReplicationPhase::SyncDone { lsn: current_lsn },
-                            self.state_store.clone(),
+                            &self.state_store,
                         )
                         .await?;
 
@@ -520,7 +546,7 @@ where
 
         let mut inner = self.table_sync_worker_state.get_inner().lock().await;
         inner
-            .set_phase_with(TableReplicationPhase::Skipped, self.state_store.clone())
+            .set_and_store(TableReplicationPhase::Skipped, &self.state_store)
             .await?;
 
         Ok(false)
