@@ -15,7 +15,7 @@ use crate::concurrency::shutdown::ShutdownRx;
 use crate::concurrency::signal::SignalRx;
 use crate::conversions::event::{Event, EventType, convert_message_to_event};
 use crate::destination::base::Destination;
-use crate::error::{ETLError, ETLResult, ErrorKind};
+use crate::error::{EtlError, EtlResult, ErrorKind};
 use crate::pipeline::PipelineId;
 use crate::replication::client::PgReplicationClient;
 use crate::replication::slot::get_slot_name;
@@ -34,21 +34,21 @@ pub enum ApplyLoopResult {
 }
 
 pub trait ApplyLoopHook {
-    fn before_loop(&self, start_lsn: PgLsn) -> impl Future<Output = ETLResult<bool>> + Send;
+    fn before_loop(&self, start_lsn: PgLsn) -> impl Future<Output = EtlResult<bool>> + Send;
 
     fn process_syncing_tables(
         &self,
         current_lsn: PgLsn,
         update_state: bool,
-    ) -> impl Future<Output = ETLResult<bool>> + Send;
+    ) -> impl Future<Output = EtlResult<bool>> + Send;
 
-    fn skip_table(&self, table_id: TableId) -> impl Future<Output = ETLResult<bool>> + Send;
+    fn skip_table(&self, table_id: TableId) -> impl Future<Output = EtlResult<bool>> + Send;
 
     fn should_apply_changes(
         &self,
         table_id: TableId,
         remote_final_lsn: PgLsn,
-    ) -> impl Future<Output = ETLResult<bool>> + Send;
+    ) -> impl Future<Output = EtlResult<bool>> + Send;
 
     fn worker_type(&self) -> WorkerType;
 }
@@ -201,7 +201,7 @@ pub async fn start_apply_loop<D, T>(
     hook: T,
     mut shutdown_rx: ShutdownRx,
     mut force_syncing_tables_rx: Option<SignalRx>,
-) -> ETLResult<ApplyLoopResult>
+) -> EtlResult<ApplyLoopResult>
 where
     D: Destination + Clone + Send + 'static,
     T: ApplyLoopHook,
@@ -328,7 +328,7 @@ async fn handle_replication_message_batch<D, T>(
     hook: &T,
     max_batch_size: usize,
     max_batch_fill_duration: Duration,
-) -> ETLResult<bool>
+) -> EtlResult<bool>
 where
     D: Destination + Clone + Send + 'static,
     T: ApplyLoopHook,
@@ -363,7 +363,7 @@ async fn try_send_batch<D, T>(
     hook: &T,
     max_batch_size: usize,
     max_batch_fill_duration: Duration,
-) -> ETLResult<bool>
+) -> EtlResult<bool>
 where
     D: Destination + Clone + Send + 'static,
     T: ApplyLoopHook,
@@ -445,7 +445,7 @@ async fn handle_replication_message<T>(
     message: ReplicationMessage<LogicalReplicationMessage>,
     schema_cache: &SchemaCache,
     hook: &T,
-) -> ETLResult<HandleMessageResult>
+) -> EtlResult<HandleMessageResult>
 where
     T: ApplyLoopHook,
 {
@@ -501,7 +501,7 @@ async fn handle_logical_replication_message<T>(
     message: LogicalReplicationMessage,
     schema_cache: &SchemaCache,
     hook: &T,
-) -> ETLResult<HandleMessageResult>
+) -> EtlResult<HandleMessageResult>
 where
     T: ApplyLoopHook,
 {
@@ -548,7 +548,7 @@ where
 }
 
 #[allow(clippy::result_large_err)]
-fn get_commit_lsn(state: &ApplyLoopState, message: &LogicalReplicationMessage) -> ETLResult<PgLsn> {
+fn get_commit_lsn(state: &ApplyLoopState, message: &LogicalReplicationMessage) -> EtlResult<PgLsn> {
     // If we are in a `Begin` message, the `commit_lsn` is the `final_lsn` of the payload, in all the
     // other cases we read the `remote_final_lsn` which should be always set in case we are within or
     // at the end of a transaction (meaning that the event type is different from `Begin`).
@@ -569,14 +569,13 @@ async fn handle_begin_message(
     state: &mut ApplyLoopState,
     event: Event,
     message: &protocol::BeginBody,
-) -> ETLResult<HandleMessageResult> {
+) -> EtlResult<HandleMessageResult> {
     let EventType::Begin = event.event_type() else {
         bail!(
             ErrorKind::ValidationError,
             "Invalid event",
             format!(
-                "An invalid event {:?} was received (expected {:?})",
-                event,
+                "An invalid event {event:?} was received (expected {:?})",
                 EventType::Begin
             )
         );
@@ -600,7 +599,7 @@ async fn handle_commit_message<T>(
     event: Event,
     message: &protocol::CommitBody,
     hook: &T,
-) -> ETLResult<HandleMessageResult>
+) -> EtlResult<HandleMessageResult>
 where
     T: ApplyLoopHook,
 {
@@ -609,8 +608,7 @@ where
             ErrorKind::ValidationError,
             "Invalid event",
             format!(
-                "An invalid event {:?} was received (expected {:?})",
-                event,
+                "An invalid event {event:?} was received (expected {:?})",
                 EventType::Commit
             )
         );
@@ -681,7 +679,7 @@ async fn handle_relation_message<T>(
     message: &protocol::RelationBody,
     schema_cache: &SchemaCache,
     hook: &T,
-) -> ETLResult<HandleMessageResult>
+) -> EtlResult<HandleMessageResult>
 where
     T: ApplyLoopHook,
 {
@@ -690,8 +688,7 @@ where
             ErrorKind::ValidationError,
             "Invalid event",
             format!(
-                "An invalid event {:?} was received (expected {:?})",
-                event,
+                "An invalid event {event:?} was received (expected {:?})",
                 EventType::Relation
             )
         );
@@ -753,7 +750,7 @@ async fn handle_insert_message<T>(
     event: Event,
     message: &protocol::InsertBody,
     hook: &T,
-) -> ETLResult<HandleMessageResult>
+) -> EtlResult<HandleMessageResult>
 where
     T: ApplyLoopHook,
 {
@@ -762,8 +759,7 @@ where
             ErrorKind::ValidationError,
             "Invalid event",
             format!(
-                "An invalid event {:?} was received (expected {:?})",
-                event,
+                "An invalid event {event:?} was received (expected {:?})",
                 EventType::Insert
             )
         );
@@ -797,7 +793,7 @@ async fn handle_update_message<T>(
     event: Event,
     message: &protocol::UpdateBody,
     hook: &T,
-) -> ETLResult<HandleMessageResult>
+) -> EtlResult<HandleMessageResult>
 where
     T: ApplyLoopHook,
 {
@@ -806,8 +802,7 @@ where
             ErrorKind::ValidationError,
             "Invalid event",
             format!(
-                "An invalid event {:?} was received (expected {:?})",
-                event,
+                "An invalid event {event:?} was received (expected {:?})",
                 EventType::Update
             )
         );
@@ -841,7 +836,7 @@ async fn handle_delete_message<T>(
     event: Event,
     message: &protocol::DeleteBody,
     hook: &T,
-) -> ETLResult<HandleMessageResult>
+) -> EtlResult<HandleMessageResult>
 where
     T: ApplyLoopHook,
 {
@@ -850,8 +845,7 @@ where
             ErrorKind::ValidationError,
             "Invalid event",
             format!(
-                "An invalid event {:?} was received (expected {:?})",
-                event,
+                "An invalid event {event:?} was received (expected {:?})",
                 EventType::Delete
             )
         );
@@ -885,7 +879,7 @@ async fn handle_truncate_message<T>(
     event: Event,
     message: &protocol::TruncateBody,
     hook: &T,
-) -> ETLResult<HandleMessageResult>
+) -> EtlResult<HandleMessageResult>
 where
     T: ApplyLoopHook,
 {
@@ -894,8 +888,7 @@ where
             ErrorKind::ValidationError,
             "Invalid event",
             format!(
-                "An invalid event {:?} was received (expected {:?})",
-                event,
+                "An invalid event {event:?} was received (expected {:?})",
                 EventType::Truncate
             )
         );

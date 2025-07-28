@@ -1,25 +1,26 @@
 use std::error;
 use std::fmt;
 
-/// Convenient result type for ETL operations using [`ETLError`] as the error type.
+/// Convenient result type for ETL operations using [`EtlError`] as the error type.
 ///
 /// This type alias reduces boilerplate when working with fallible ETL operations.
 /// Most ETL functions return this type.
-pub type ETLResult<T> = Result<T, ETLError>;
+pub type EtlResult<T> = Result<T, EtlError>;
 
 /// Main error type for ETL operations.
 ///
-/// [`ETLError`] provides a comprehensive error system that can represent single errors,
+/// [`EtlError`] provides a comprehensive error system that can represent single errors,
 /// errors with additional detail, or multiple aggregated errors. The design allows for
 /// rich error information while maintaining ergonomic usage patterns.
-pub struct ETLError {
+#[derive(Debug)]
+pub struct EtlError {
     repr: ErrorRepr,
 }
 
 /// Internal representation of error data.
 ///
 /// This enum supports different error patterns while maintaining a unified interface.
-/// Users should not interact with this type directly but use [`ETLError`] methods instead.
+/// Users should not interact with this type directly but use [`EtlError`] methods instead.
 #[derive(Debug)]
 pub enum ErrorRepr {
     /// Error with kind and static description
@@ -27,7 +28,7 @@ pub enum ErrorRepr {
     /// Error with kind, static description, and dynamic detail
     WithDescriptionAndDetail(ErrorKind, &'static str, String),
     /// Multiple aggregated errors
-    Many(Vec<ETLError>),
+    Many(Vec<EtlError>),
 }
 
 /// Specific categories of errors that can occur during ETL operations.
@@ -121,13 +122,13 @@ pub enum ErrorKind {
     Unknown,
 }
 
-impl ETLError {
-    /// Creates an [`ETLError`] containing multiple aggregated errors.
+impl EtlError {
+    /// Creates an [`EtlError`] containing multiple aggregated errors.
     ///
     /// This is useful when multiple operations fail and you want to report all failures
     /// rather than just the first one.
-    pub fn many(errors: Vec<ETLError>) -> ETLError {
-        ETLError {
+    pub fn many(errors: Vec<EtlError>) -> EtlError {
+        EtlError {
             repr: ErrorRepr::Many(errors),
         }
     }
@@ -178,8 +179,8 @@ impl ETLError {
     }
 }
 
-impl PartialEq for ETLError {
-    fn eq(&self, other: &ETLError) -> bool {
+impl PartialEq for EtlError {
+    fn eq(&self, other: &EtlError) -> bool {
         match (&self.repr, &other.repr) {
             (ErrorRepr::WithDescription(kind_a, _), ErrorRepr::WithDescription(kind_b, _)) => {
                 kind_a == kind_b
@@ -197,7 +198,7 @@ impl PartialEq for ETLError {
     }
 }
 
-impl fmt::Display for ETLError {
+impl fmt::Display for EtlError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
         match self.repr {
             ErrorRepr::WithDescription(kind, desc) => {
@@ -234,57 +235,35 @@ impl fmt::Display for ETLError {
     }
 }
 
-impl fmt::Debug for ETLError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
-        fmt::Display::fmt(self, f)
-    }
-}
-
-impl error::Error for ETLError {
-    #[allow(deprecated)]
-    fn description(&self) -> &str {
-        match self.repr {
-            ErrorRepr::WithDescription(_, desc)
-            | ErrorRepr::WithDescriptionAndDetail(_, desc, _) => desc,
-            ErrorRepr::Many(ref errors) => {
-                if errors.is_empty() {
-                    "Multiple errors occurred (empty)"
-                } else {
-                    // Return the description of the first error
-                    errors[0].description()
-                }
-            }
-        }
-    }
-}
+impl error::Error for EtlError { }
 
 // Ergonomic constructors following Redis pattern
 
-/// Creates an [`ETLError`] from an error kind and static description.
-impl From<(ErrorKind, &'static str)> for ETLError {
-    fn from((kind, desc): (ErrorKind, &'static str)) -> ETLError {
-        ETLError {
+/// Creates an [`EtlError`] from an error kind and static description.
+impl From<(ErrorKind, &'static str)> for EtlError {
+    fn from((kind, desc): (ErrorKind, &'static str)) -> EtlError {
+        EtlError {
             repr: ErrorRepr::WithDescription(kind, desc),
         }
     }
 }
 
-/// Creates an [`ETLError`] from an error kind, static description, and dynamic detail.
-impl From<(ErrorKind, &'static str, String)> for ETLError {
-    fn from((kind, desc, detail): (ErrorKind, &'static str, String)) -> ETLError {
-        ETLError {
+/// Creates an [`EtlError`] from an error kind, static description, and dynamic detail.
+impl From<(ErrorKind, &'static str, String)> for EtlError {
+    fn from((kind, desc, detail): (ErrorKind, &'static str, String)) -> EtlError {
+        EtlError {
             repr: ErrorRepr::WithDescriptionAndDetail(kind, desc, detail),
         }
     }
 }
 
-/// Creates an [`ETLError`] from a vector of errors for aggregation.
-impl<E> From<Vec<E>> for ETLError
+/// Creates an [`EtlError`] from a vector of errors for aggregation.
+impl<E> From<Vec<E>> for EtlError
 where
-    E: Into<ETLError>,
+    E: Into<EtlError>,
 {
-    fn from(errors: Vec<E>) -> ETLError {
-        ETLError {
+    fn from(errors: Vec<E>) -> EtlError {
+        EtlError {
             repr: ErrorRepr::Many(errors.into_iter().map(Into::into).collect()),
         }
     }
@@ -292,10 +271,10 @@ where
 
 // Common standard library error conversions
 
-/// Converts [`std::io::Error`] to [`ETLError`] with [`ErrorKind::IoError`].
-impl From<std::io::Error> for ETLError {
-    fn from(err: std::io::Error) -> ETLError {
-        ETLError {
+/// Converts [`std::io::Error`] to [`EtlError`] with [`ErrorKind::IoError`].
+impl From<std::io::Error> for EtlError {
+    fn from(err: std::io::Error) -> EtlError {
+        EtlError {
             repr: ErrorRepr::WithDescriptionAndDetail(
                 ErrorKind::IoError,
                 "I/O error occurred",
@@ -305,12 +284,12 @@ impl From<std::io::Error> for ETLError {
     }
 }
 
-/// Converts [`serde_json::Error`] to [`ETLError`] with appropriate error kind.
+/// Converts [`serde_json::Error`] to [`EtlError`] with appropriate error kind.
 ///
 /// Maps to [`ErrorKind::SerializationError`] for serialization failures and
 /// [`ErrorKind::DeserializationError`] for deserialization failures based on error classification.
-impl From<serde_json::Error> for ETLError {
-    fn from(err: serde_json::Error) -> ETLError {
+impl From<serde_json::Error> for EtlError {
+    fn from(err: serde_json::Error) -> EtlError {
         let (kind, description) = match err.classify() {
             serde_json::error::Category::Io => (ErrorKind::IoError, "JSON I/O operation failed"),
             serde_json::error::Category::Syntax | serde_json::error::Category::Data => (
@@ -323,16 +302,16 @@ impl From<serde_json::Error> for ETLError {
             ),
         };
 
-        ETLError {
+        EtlError {
             repr: ErrorRepr::WithDescriptionAndDetail(kind, description, err.to_string()),
         }
     }
 }
 
-/// Converts [`std::str::Utf8Error`] to [`ETLError`] with [`ErrorKind::ConversionError`].
-impl From<std::str::Utf8Error> for ETLError {
-    fn from(err: std::str::Utf8Error) -> ETLError {
-        ETLError {
+/// Converts [`std::str::Utf8Error`] to [`EtlError`] with [`ErrorKind::ConversionError`].
+impl From<std::str::Utf8Error> for EtlError {
+    fn from(err: std::str::Utf8Error) -> EtlError {
+        EtlError {
             repr: ErrorRepr::WithDescriptionAndDetail(
                 ErrorKind::ConversionError,
                 "UTF-8 conversion failed",
@@ -342,10 +321,10 @@ impl From<std::str::Utf8Error> for ETLError {
     }
 }
 
-/// Converts [`std::string::FromUtf8Error`] to [`ETLError`] with [`ErrorKind::ConversionError`].
-impl From<std::string::FromUtf8Error> for ETLError {
-    fn from(err: std::string::FromUtf8Error) -> ETLError {
-        ETLError {
+/// Converts [`std::string::FromUtf8Error`] to [`EtlError`] with [`ErrorKind::ConversionError`].
+impl From<std::string::FromUtf8Error> for EtlError {
+    fn from(err: std::string::FromUtf8Error) -> EtlError {
+        EtlError {
             repr: ErrorRepr::WithDescriptionAndDetail(
                 ErrorKind::ConversionError,
                 "UTF-8 string conversion failed",
@@ -355,10 +334,10 @@ impl From<std::string::FromUtf8Error> for ETLError {
     }
 }
 
-/// Converts [`std::num::ParseIntError`] to [`ETLError`] with [`ErrorKind::ConversionError`].
-impl From<std::num::ParseIntError> for ETLError {
-    fn from(err: std::num::ParseIntError) -> ETLError {
-        ETLError {
+/// Converts [`std::num::ParseIntError`] to [`EtlError`] with [`ErrorKind::ConversionError`].
+impl From<std::num::ParseIntError> for EtlError {
+    fn from(err: std::num::ParseIntError) -> EtlError {
+        EtlError {
             repr: ErrorRepr::WithDescriptionAndDetail(
                 ErrorKind::ConversionError,
                 "Integer parsing failed",
@@ -368,10 +347,10 @@ impl From<std::num::ParseIntError> for ETLError {
     }
 }
 
-/// Converts [`std::num::ParseFloatError`] to [`ETLError`] with [`ErrorKind::ConversionError`].
-impl From<std::num::ParseFloatError> for ETLError {
-    fn from(err: std::num::ParseFloatError) -> ETLError {
-        ETLError {
+/// Converts [`std::num::ParseFloatError`] to [`EtlError`] with [`ErrorKind::ConversionError`].
+impl From<std::num::ParseFloatError> for EtlError {
+    fn from(err: std::num::ParseFloatError) -> EtlError {
+        EtlError {
             repr: ErrorRepr::WithDescriptionAndDetail(
                 ErrorKind::ConversionError,
                 "Float parsing failed",
@@ -383,12 +362,12 @@ impl From<std::num::ParseFloatError> for ETLError {
 
 // PostgreSQL-specific error conversions
 
-/// Converts [`tokio_postgres::Error`] to [`ETLError`] with appropriate error kind.
+/// Converts [`tokio_postgres::Error`] to [`EtlError`] with appropriate error kind.
 ///
 /// Maps errors based on PostgreSQL SQLSTATE codes to provide granular error classification
 /// for better error handling in ETL operations.
-impl From<tokio_postgres::Error> for ETLError {
-    fn from(err: tokio_postgres::Error) -> ETLError {
+impl From<tokio_postgres::Error> for EtlError {
+    fn from(err: tokio_postgres::Error) -> EtlError {
         let (kind, description) = match err.code() {
             Some(sqlstate) => {
                 use tokio_postgres::error::SqlState;
@@ -474,16 +453,16 @@ impl From<tokio_postgres::Error> for ETLError {
             None => (ErrorKind::ConnectionFailed, "PostgreSQL connection failed"),
         };
 
-        ETLError {
+        EtlError {
             repr: ErrorRepr::WithDescriptionAndDetail(kind, description, err.to_string()),
         }
     }
 }
 
-/// Converts [`rustls::Error`] to [`ETLError`] with [`ErrorKind::EncryptionError`].
-impl From<rustls::Error> for ETLError {
-    fn from(err: rustls::Error) -> ETLError {
-        ETLError {
+/// Converts [`rustls::Error`] to [`EtlError`] with [`ErrorKind::EncryptionError`].
+impl From<rustls::Error> for EtlError {
+    fn from(err: rustls::Error) -> EtlError {
+        EtlError {
             repr: ErrorRepr::WithDescriptionAndDetail(
                 ErrorKind::EncryptionError,
                 "TLS configuration failed",
@@ -493,10 +472,10 @@ impl From<rustls::Error> for ETLError {
     }
 }
 
-/// Converts [`uuid::Error`] to [`ETLError`] with [`ErrorKind::InvalidData`].
-impl From<uuid::Error> for ETLError {
-    fn from(err: uuid::Error) -> ETLError {
-        ETLError {
+/// Converts [`uuid::Error`] to [`EtlError`] with [`ErrorKind::InvalidData`].
+impl From<uuid::Error> for EtlError {
+    fn from(err: uuid::Error) -> EtlError {
+        EtlError {
             repr: ErrorRepr::WithDescriptionAndDetail(
                 ErrorKind::InvalidData,
                 "UUID parsing failed",
@@ -506,10 +485,10 @@ impl From<uuid::Error> for ETLError {
     }
 }
 
-/// Converts [`chrono::ParseError`] to [`ETLError`] with [`ErrorKind::ConversionError`].
-impl From<chrono::ParseError> for ETLError {
-    fn from(err: chrono::ParseError) -> ETLError {
-        ETLError {
+/// Converts [`chrono::ParseError`] to [`EtlError`] with [`ErrorKind::ConversionError`].
+impl From<chrono::ParseError> for EtlError {
+    fn from(err: chrono::ParseError) -> EtlError {
+        EtlError {
             repr: ErrorRepr::WithDescriptionAndDetail(
                 ErrorKind::ConversionError,
                 "Chrono parse failed",
@@ -519,10 +498,10 @@ impl From<chrono::ParseError> for ETLError {
     }
 }
 
-/// Converts [`bigdecimal::ParseBigDecimalError`] to [`ETLError`] with [`ErrorKind::ConversionError`].
-impl From<bigdecimal::ParseBigDecimalError> for ETLError {
-    fn from(err: bigdecimal::ParseBigDecimalError) -> ETLError {
-        ETLError {
+/// Converts [`bigdecimal::ParseBigDecimalError`] to [`EtlError`] with [`ErrorKind::ConversionError`].
+impl From<bigdecimal::ParseBigDecimalError> for EtlError {
+    fn from(err: bigdecimal::ParseBigDecimalError) -> EtlError {
+        EtlError {
             repr: ErrorRepr::WithDescriptionAndDetail(
                 ErrorKind::ConversionError,
                 "BigDecimal parsing failed",
@@ -534,12 +513,12 @@ impl From<bigdecimal::ParseBigDecimalError> for ETLError {
 
 // SQLx error conversion
 
-/// Converts [`sqlx::Error`] to [`ETLError`] with appropriate error kind.
+/// Converts [`sqlx::Error`] to [`EtlError`] with appropriate error kind.
 ///
 /// Maps database errors to [`ErrorKind::QueryFailed`], I/O errors to [`ErrorKind::IoError`],
 /// and connection pool errors to [`ErrorKind::ConnectionFailed`].
-impl From<sqlx::Error> for ETLError {
-    fn from(err: sqlx::Error) -> ETLError {
+impl From<sqlx::Error> for EtlError {
+    fn from(err: sqlx::Error) -> EtlError {
         let kind = match &err {
             sqlx::Error::Database(_) => ErrorKind::QueryFailed,
             sqlx::Error::Io(_) => ErrorKind::IoError,
@@ -547,7 +526,7 @@ impl From<sqlx::Error> for ETLError {
             _ => ErrorKind::QueryFailed,
         };
 
-        ETLError {
+        EtlError {
             repr: ErrorRepr::WithDescriptionAndDetail(
                 kind,
                 "Database operation failed",
@@ -559,12 +538,12 @@ impl From<sqlx::Error> for ETLError {
 
 // BigQuery error conversions (feature-gated)
 
-/// Converts [`gcp_bigquery_client::error::BQError`] to [`ETLError`] with appropriate error kind.
+/// Converts [`gcp_bigquery_client::error::BQError`] to [`EtlError`] with appropriate error kind.
 ///
 /// Maps errors based on their specific type for better error classification and handling.
 #[cfg(feature = "bigquery")]
-impl From<gcp_bigquery_client::error::BQError> for ETLError {
-    fn from(err: gcp_bigquery_client::error::BQError) -> ETLError {
+impl From<gcp_bigquery_client::error::BQError> for EtlError {
+    fn from(err: gcp_bigquery_client::error::BQError) -> EtlError {
         use gcp_bigquery_client::error::BQError;
 
         let (kind, description) = match &err {
@@ -637,17 +616,17 @@ impl From<gcp_bigquery_client::error::BQError> for ETLError {
             }
         };
 
-        ETLError {
+        EtlError {
             repr: ErrorRepr::WithDescriptionAndDetail(kind, description, err.to_string()),
         }
     }
 }
 
-/// Converts BigQuery row errors to [`ETLError`] with [`ErrorKind::DestinationError`].
+/// Converts BigQuery row errors to [`EtlError`] with [`ErrorKind::DestinationError`].
 #[cfg(feature = "bigquery")]
-impl From<gcp_bigquery_client::google::cloud::bigquery::storage::v1::RowError> for ETLError {
-    fn from(err: gcp_bigquery_client::google::cloud::bigquery::storage::v1::RowError) -> ETLError {
-        ETLError {
+impl From<gcp_bigquery_client::google::cloud::bigquery::storage::v1::RowError> for EtlError {
+    fn from(err: gcp_bigquery_client::google::cloud::bigquery::storage::v1::RowError) -> EtlError {
+        EtlError {
             repr: ErrorRepr::WithDescriptionAndDetail(
                 ErrorKind::DestinationError,
                 "BigQuery row error",
@@ -664,7 +643,7 @@ mod tests {
 
     #[test]
     fn test_simple_error_creation() {
-        let err = ETLError::from((ErrorKind::ConnectionFailed, "Database connection failed"));
+        let err = EtlError::from((ErrorKind::ConnectionFailed, "Database connection failed"));
         assert_eq!(err.kind(), ErrorKind::ConnectionFailed);
         assert_eq!(err.detail(), None);
         assert_eq!(err.kinds(), vec![ErrorKind::ConnectionFailed]);
@@ -672,7 +651,7 @@ mod tests {
 
     #[test]
     fn test_error_with_detail() {
-        let err = ETLError::from((
+        let err = EtlError::from((
             ErrorKind::QueryFailed,
             "SQL query execution failed",
             "Table 'users' doesn't exist".to_string(),
@@ -685,11 +664,11 @@ mod tests {
     #[test]
     fn test_multiple_errors() {
         let errors = vec![
-            ETLError::from((ErrorKind::ValidationError, "Invalid schema")),
-            ETLError::from((ErrorKind::ConversionError, "Type mismatch")),
-            ETLError::from((ErrorKind::IoError, "Connection timeout")),
+            EtlError::from((ErrorKind::ValidationError, "Invalid schema")),
+            EtlError::from((ErrorKind::ConversionError, "Type mismatch")),
+            EtlError::from((ErrorKind::IoError, "Connection timeout")),
         ];
-        let multi_err = ETLError::many(errors);
+        let multi_err = EtlError::many(errors);
 
         assert_eq!(multi_err.kind(), ErrorKind::ValidationError);
         assert_eq!(
@@ -706,14 +685,14 @@ mod tests {
     #[test]
     fn test_multiple_errors_with_detail() {
         let errors = vec![
-            ETLError::from((
+            EtlError::from((
                 ErrorKind::ValidationError,
                 "Invalid schema",
                 "Missing required field".to_string(),
             )),
-            ETLError::from((ErrorKind::ConversionError, "Type mismatch")),
+            EtlError::from((ErrorKind::ConversionError, "Type mismatch")),
         ];
-        let multi_err = ETLError::many(errors);
+        let multi_err = EtlError::many(errors);
 
         assert_eq!(multi_err.detail(), Some("Missing required field"));
     }
@@ -721,16 +700,16 @@ mod tests {
     #[test]
     fn test_from_vector() {
         let errors = vec![
-            ETLError::from((ErrorKind::ValidationError, "Error 1")),
-            ETLError::from((ErrorKind::ConversionError, "Error 2")),
+            EtlError::from((ErrorKind::ValidationError, "Error 1")),
+            EtlError::from((ErrorKind::ConversionError, "Error 2")),
         ];
-        let multi_err = ETLError::from(errors);
+        let multi_err = EtlError::from(errors);
         assert_eq!(multi_err.kinds().len(), 2);
     }
 
     #[test]
     fn test_empty_multiple_errors() {
-        let multi_err = ETLError::many(vec![]);
+        let multi_err = EtlError::many(vec![]);
         assert_eq!(multi_err.kind(), ErrorKind::Unknown);
         assert_eq!(multi_err.kinds(), vec![]);
         assert_eq!(multi_err.detail(), None);
@@ -738,9 +717,9 @@ mod tests {
 
     #[test]
     fn test_error_equality() {
-        let err1 = ETLError::from((ErrorKind::ConnectionFailed, "Connection failed"));
-        let err2 = ETLError::from((ErrorKind::ConnectionFailed, "Connection failed"));
-        let err3 = ETLError::from((ErrorKind::QueryFailed, "Query failed"));
+        let err1 = EtlError::from((ErrorKind::ConnectionFailed, "Connection failed"));
+        let err2 = EtlError::from((ErrorKind::ConnectionFailed, "Connection failed"));
+        let err3 = EtlError::from((ErrorKind::QueryFailed, "Query failed"));
 
         assert_eq!(err1, err2);
         assert_ne!(err1, err3);
@@ -748,7 +727,7 @@ mod tests {
 
     #[test]
     fn test_error_display() {
-        let err = ETLError::from((ErrorKind::ConnectionFailed, "Database connection failed"));
+        let err = EtlError::from((ErrorKind::ConnectionFailed, "Database connection failed"));
         let display_str = format!("{err}");
         assert!(display_str.contains("ConnectionFailed"));
         assert!(display_str.contains("Database connection failed"));
@@ -756,7 +735,7 @@ mod tests {
 
     #[test]
     fn test_error_display_with_detail() {
-        let err = ETLError::from((
+        let err = EtlError::from((
             ErrorKind::QueryFailed,
             "SQL query failed",
             "Invalid table name".to_string(),
@@ -770,10 +749,10 @@ mod tests {
     #[test]
     fn test_multiple_errors_display() {
         let errors = vec![
-            ETLError::from((ErrorKind::ValidationError, "Invalid schema")),
-            ETLError::from((ErrorKind::ConversionError, "Type mismatch")),
+            EtlError::from((ErrorKind::ValidationError, "Invalid schema")),
+            EtlError::from((ErrorKind::ConversionError, "Type mismatch")),
         ];
-        let multi_err = ETLError::many(errors);
+        let multi_err = EtlError::many(errors);
         let display_str = format!("{multi_err}");
         assert!(display_str.contains("Multiple errors"));
         assert!(display_str.contains("2 total"));
@@ -796,11 +775,11 @@ mod tests {
 
     #[test]
     fn test_bail_macro() {
-        fn test_function() -> ETLResult<i32> {
+        fn test_function() -> EtlResult<i32> {
             bail!(ErrorKind::ValidationError, "Test error");
         }
 
-        fn test_function_with_detail() -> ETLResult<i32> {
+        fn test_function_with_detail() -> EtlResult<i32> {
             bail!(
                 ErrorKind::ConversionError,
                 "Test error",
@@ -823,16 +802,16 @@ mod tests {
     #[test]
     fn test_nested_multiple_errors() {
         let inner_errors = vec![
-            ETLError::from((ErrorKind::ConversionError, "Inner error 1")),
-            ETLError::from((ErrorKind::ValidationError, "Inner error 2")),
+            EtlError::from((ErrorKind::ConversionError, "Inner error 1")),
+            EtlError::from((ErrorKind::ValidationError, "Inner error 2")),
         ];
-        let inner_multi = ETLError::many(inner_errors);
+        let inner_multi = EtlError::many(inner_errors);
 
         let outer_errors = vec![
             inner_multi,
-            ETLError::from((ErrorKind::IoError, "Outer error")),
+            EtlError::from((ErrorKind::IoError, "Outer error")),
         ];
-        let outer_multi = ETLError::many(outer_errors);
+        let outer_multi = EtlError::many(outer_errors);
 
         let kinds = outer_multi.kinds();
         assert_eq!(kinds.len(), 3);
@@ -848,12 +827,12 @@ mod tests {
 
         // Test authentication error
         let auth_err = BQError::NoToken;
-        let etl_err = ETLError::from(auth_err);
+        let etl_err = EtlError::from(auth_err);
         assert_eq!(etl_err.kind(), ErrorKind::AuthenticationError);
 
         // Test invalid data error
         let invalid_col_err = BQError::InvalidColumnIndex { col_index: 5 };
-        let etl_err = ETLError::from(invalid_col_err);
+        let etl_err = EtlError::from(invalid_col_err);
         assert_eq!(etl_err.kind(), ErrorKind::InvalidData);
 
         // Test conversion error
@@ -862,7 +841,7 @@ mod tests {
             col_type: "STRING".to_string(),
             type_requested: "INTEGER".to_string(),
         };
-        let etl_err = ETLError::from(type_err);
+        let etl_err = EtlError::from(type_err);
         assert_eq!(etl_err.kind(), ErrorKind::ConversionError);
     }
 
@@ -872,7 +851,7 @@ mod tests {
         // by verifying that we can convert standard IO errors to ETL errors
         let io_err =
             std::io::Error::new(std::io::ErrorKind::ConnectionRefused, "Connection refused");
-        let etl_err = ETLError::from(io_err);
+        let etl_err = EtlError::from(io_err);
         assert_eq!(etl_err.kind(), ErrorKind::IoError);
         assert!(etl_err.detail().unwrap().contains("Connection refused"));
 
@@ -885,13 +864,13 @@ mod tests {
     fn test_json_error_classification() {
         // Test syntax error during deserialization
         let json_err = serde_json::from_str::<serde_json::Value>("invalid json").unwrap_err();
-        let etl_err = ETLError::from(json_err);
+        let etl_err = EtlError::from(json_err);
         assert_eq!(etl_err.kind(), ErrorKind::DeserializationError);
         assert!(etl_err.detail().unwrap().contains("expected"));
 
         // Test data error during deserialization
         let json_err = serde_json::from_str::<bool>("\"not_a_bool\"").unwrap_err();
-        let etl_err = ETLError::from(json_err);
+        let etl_err = EtlError::from(json_err);
         assert_eq!(etl_err.kind(), ErrorKind::DeserializationError);
         assert!(etl_err.detail().is_some());
     }

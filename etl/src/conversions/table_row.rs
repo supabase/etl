@@ -1,8 +1,8 @@
 use super::Cell;
 use crate::bail;
 use crate::conversions::text::TextFormatConverter;
-use crate::error::ETLError;
-use crate::error::{ETLResult, ErrorKind};
+use crate::error::EtlError;
+use crate::error::{EtlResult, ErrorKind};
 use core::str;
 use postgres::schema::ColumnSchema;
 use tracing::error;
@@ -66,7 +66,7 @@ pub struct TableRowConverter;
 
 impl TableRowConverter {
     // parses text produced by this code in Postgres: https://github.com/postgres/postgres/blob/263a3f5f7f508167dbeafc2aefd5835b41d77481/src/backend/commands/copyto.c#L988-L1134
-    pub fn try_from(row: &[u8], column_schemas: &[ColumnSchema]) -> ETLResult<TableRow> {
+    pub fn try_from(row: &[u8], column_schemas: &[ColumnSchema]) -> EtlResult<TableRow> {
         let mut values = Vec::with_capacity(column_schemas.len());
 
         let row_str = str::from_utf8(row)?;

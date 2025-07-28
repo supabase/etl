@@ -1,6 +1,6 @@
 use crate::bail;
-use crate::error::ETLError;
-use crate::error::{ETLResult, ErrorKind};
+use crate::error::EtlError;
+use crate::error::{EtlResult, ErrorKind};
 use crate::pipeline::PipelineId;
 use crate::workers::base::WorkerType;
 
@@ -12,7 +12,7 @@ const APPLY_WORKER_PREFIX: &str = "supabase_etl_apply";
 const TABLE_SYNC_PREFIX: &str = "supabase_etl_table_sync";
 
 /// Generates a replication slot name.
-pub fn get_slot_name(pipeline_id: PipelineId, worker_type: WorkerType) -> ETLResult<String> {
+pub fn get_slot_name(pipeline_id: PipelineId, worker_type: WorkerType) -> EtlResult<String> {
     let slot_name = match worker_type {
         WorkerType::Apply => {
             format!("{APPLY_WORKER_PREFIX}_{pipeline_id}")

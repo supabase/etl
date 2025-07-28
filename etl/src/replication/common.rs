@@ -1,7 +1,7 @@
 use postgres::schema::TableId;
 use std::collections::HashMap;
 
-use crate::error::ETLResult;
+use crate::error::EtlResult;
 use crate::state::store::base::StateStore;
 use crate::state::table::TableReplicationPhase;
 
@@ -12,7 +12,7 @@ use crate::state::table::TableReplicationPhase;
 pub async fn get_table_replication_states<S>(
     state_store: &S,
     done: bool,
-) -> ETLResult<HashMap<TableId, TableReplicationPhase>>
+) -> EtlResult<HashMap<TableId, TableReplicationPhase>>
 where
     S: StateStore + Clone + Send + Sync + 'static,
 {

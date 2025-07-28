@@ -1,8 +1,8 @@
 use crate::bail;
-use crate::error::ETLResult;
-use crate::error::{ETLError, ErrorKind};
+use crate::error::EtlResult;
+use crate::error::{EtlError, ErrorKind};
 
-pub fn parse_bool(s: &str) -> ETLResult<bool> {
+pub fn parse_bool(s: &str) -> EtlResult<bool> {
     if s == "t" {
         Ok(true)
     } else if s == "f" {

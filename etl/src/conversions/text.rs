@@ -1,4 +1,4 @@
-use crate::error::ETLError;
+use crate::error::EtlError;
 use chrono::{DateTime, FixedOffset, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use core::str;
 use tokio_postgres::types::Type;
@@ -6,7 +6,7 @@ use uuid::Uuid;
 
 use crate::bail;
 use crate::conversions::{bool::parse_bool, hex};
-use crate::error::{ETLResult, ErrorKind};
+use crate::error::{EtlResult, ErrorKind};
 
 use super::{ArrayCell, Cell, numeric::PgNumeric};
 
@@ -65,7 +65,7 @@ impl TextFormatConverter {
         }
     }
 
-    pub fn try_from_str(typ: &Type, str: &str) -> ETLResult<Cell> {
+    pub fn try_from_str(typ: &Type, str: &str) -> EtlResult<Cell> {
         match *typ {
             Type::BOOL => Ok(Cell::Bool(parse_bool(str)?)),
             Type::BOOL_ARRAY => TextFormatConverter::parse_array(
@@ -223,9 +223,9 @@ impl TextFormatConverter {
         }
     }
 
-    fn parse_array<P, M, T>(str: &str, mut parse: P, m: M) -> ETLResult<Cell>
+    fn parse_array<P, M, T>(str: &str, mut parse: P, m: M) -> EtlResult<Cell>
     where
-        P: FnMut(&str) -> ETLResult<Option<T>>,
+        P: FnMut(&str) -> EtlResult<Option<T>>,
         M: FnOnce(Vec<Option<T>>) -> ArrayCell,
     {
         if str.len() < 2 {

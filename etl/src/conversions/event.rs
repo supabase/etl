@@ -9,8 +9,8 @@ use tokio_postgres::types::PgLsn;
 use crate::conversions::Cell;
 use crate::conversions::table_row::TableRow;
 use crate::conversions::text::TextFormatConverter;
-use crate::error::ETLError;
-use crate::error::{ETLResult, ErrorKind};
+use crate::error::EtlError;
+use crate::error::{EtlResult, ErrorKind};
 use crate::schema::cache::SchemaCache;
 use crate::{bail, etl_error};
 
@@ -74,7 +74,7 @@ impl RelationEvent {
         start_lsn: PgLsn,
         commit_lsn: PgLsn,
         relation_body: &protocol::RelationBody,
-    ) -> ETLResult<Self> {
+    ) -> EtlResult<Self> {
         let table_name = TableName::new(
             relation_body.namespace()?.to_string(),
             relation_body.name()?.to_string(),
@@ -97,7 +97,7 @@ impl RelationEvent {
         })
     }
 
-    fn build_column_schema(column: &protocol::Column) -> ETLResult<ColumnSchema> {
+    fn build_column_schema(column: &protocol::Column) -> EtlResult<ColumnSchema> {
         Ok(ColumnSchema::new(
             column.name()?.to_string(),
             convert_type_oid_to_type(column.type_id() as u32),
@@ -238,7 +238,7 @@ impl From<Event> for EventType {
     }
 }
 
-async fn get_table_schema(schema_cache: &SchemaCache, table_id: TableId) -> ETLResult<TableSchema> {
+async fn get_table_schema(schema_cache: &SchemaCache, table_id: TableId) -> EtlResult<TableSchema> {
     schema_cache
         .get_table_schema(&table_id)
         .await
@@ -247,8 +247,7 @@ async fn get_table_schema(schema_cache: &SchemaCache, table_id: TableId) -> ETLR
                 ErrorKind::MissingTableSchema,
                 "Table not found in the schema cache",
                 format!(
-                    "The table schema for table {} was not found in the cache",
-                    table_id
+                    "The table schema for table {table_id} was not found in the cache"
                 )
             )
         })
@@ -257,7 +256,7 @@ async fn get_table_schema(schema_cache: &SchemaCache, table_id: TableId) -> ETLR
 fn convert_tuple_to_row(
     column_schemas: &[ColumnSchema],
     tuple_data: &[protocol::TupleData],
-) -> ETLResult<TableRow> {
+) -> EtlResult<TableRow> {
     let mut values = Vec::with_capacity(column_schemas.len());
 
     for (i, column_schema) in column_schemas.iter().enumerate() {
@@ -300,7 +299,7 @@ async fn convert_insert_to_event(
     start_lsn: PgLsn,
     commit_lsn: PgLsn,
     insert_body: &protocol::InsertBody,
-) -> ETLResult<InsertEvent> {
+) -> EtlResult<InsertEvent> {
     let table_id = insert_body.rel_id();
     let table_schema = get_table_schema(schema_cache, TableId::new(table_id)).await?;
 
@@ -322,7 +321,7 @@ async fn convert_update_to_event(
     start_lsn: PgLsn,
     commit_lsn: PgLsn,
     update_body: &protocol::UpdateBody,
-) -> ETLResult<UpdateEvent> {
+) -> EtlResult<UpdateEvent> {
     let table_id = update_body.rel_id();
     let table_schema = get_table_schema(schema_cache, TableId::new(table_id)).await?;
 
@@ -358,7 +357,7 @@ async fn convert_delete_to_event(
     start_lsn: PgLsn,
     commit_lsn: PgLsn,
     delete_body: &protocol::DeleteBody,
-) -> ETLResult<DeleteEvent> {
+) -> EtlResult<DeleteEvent> {
     let table_id = delete_body.rel_id();
     let table_schema = get_table_schema(schema_cache, TableId::new(table_id)).await?;
 
@@ -388,7 +387,7 @@ pub async fn convert_message_to_event(
     start_lsn: PgLsn,
     commit_lsn: PgLsn,
     message: &LogicalReplicationMessage,
-) -> ETLResult<Event> {
+) -> EtlResult<Event> {
     match message {
         LogicalReplicationMessage::Begin(begin_body) => Ok(Event::Begin(
             BeginEvent::from_protocol(start_lsn, commit_lsn, begin_body),

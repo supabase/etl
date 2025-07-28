@@ -6,7 +6,7 @@ use tracing::{error, info};
 use crate::bail;
 use crate::concurrency::shutdown::{ShutdownTx, create_shutdown_channel};
 use crate::destination::base::Destination;
-use crate::error::{ETLError, ETLResult, ErrorKind};
+use crate::error::{EtlError, EtlResult, ErrorKind};
 use crate::replication::client::PgReplicationClient;
 use crate::schema::cache::SchemaCache;
 use crate::state::store::base::StateStore;
@@ -69,7 +69,7 @@ where
         self.shutdown_tx.clone()
     }
 
-    pub async fn start(&mut self) -> ETLResult<()> {
+    pub async fn start(&mut self) -> EtlResult<()> {
         info!(
             "starting pipeline for publication '{}' with id {}",
             self.config.publication_name, self.id
@@ -119,7 +119,7 @@ where
         Ok(())
     }
 
-    async fn prepare_schema_cache(&self, schema_cache: &SchemaCache) -> ETLResult<()> {
+    async fn prepare_schema_cache(&self, schema_cache: &SchemaCache) -> EtlResult<()> {
         // We initialize the schema cache, which is local to a pipeline, and we try to load existing
         // schemas that were previously stored at the destination (if any).
         let table_schemas = self.destination.load_table_schemas().await?;
@@ -131,7 +131,7 @@ where
     async fn initialize_table_states(
         &self,
         replication_client: &PgReplicationClient,
-    ) -> ETLResult<()> {
+    ) -> EtlResult<()> {
         info!(
             "initializing table states for tables in publication '{}'",
             self.config.publication_name
@@ -174,7 +174,7 @@ where
         Ok(())
     }
 
-    pub async fn wait(self) -> ETLResult<()> {
+    pub async fn wait(self) -> EtlResult<()> {
         let PipelineWorkers::Started { apply_worker, pool } = self.workers else {
             info!("pipeline was not started, nothing to wait for");
             return Ok(());
@@ -236,7 +236,7 @@ where
         info!("shut down signal successfully sent to all workers");
     }
 
-    pub async fn shutdown_and_wait(self) -> ETLResult<()> {
+    pub async fn shutdown_and_wait(self) -> EtlResult<()> {
         self.shutdown();
         self.wait().await
     }

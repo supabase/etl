@@ -1,10 +1,10 @@
 #[macro_export]
 macro_rules! etl_error {
     ($kind:expr, $desc:expr) => {
-        ETLError::from(($kind, $desc))
+        EtlError::from(($kind, $desc))
     };
     ($kind:expr, $desc:expr, $detail:expr) => {
-        ETLError::from(($kind, $desc, $detail.to_string()))
+        EtlError::from(($kind, $desc, $detail.to_string()))
     };
 }
 

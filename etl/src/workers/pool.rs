@@ -8,8 +8,8 @@ use tracing::{debug, warn};
 
 use crate::concurrency::future::ReactiveFutureCallback;
 use crate::destination::base::Destination;
-use crate::error::ETLError;
-use crate::error::{ETLResult, ErrorKind};
+use crate::error::EtlError;
+use crate::error::{EtlResult, ErrorKind};
 use crate::etl_error;
 use crate::state::store::base::StateStore;
 use crate::workers::base::{Worker, WorkerHandle};
@@ -44,7 +44,7 @@ impl TableSyncWorkerPoolInner {
         }
     }
 
-    pub async fn start_worker<S, D>(&mut self, worker: TableSyncWorker<S, D>) -> ETLResult<bool>
+    pub async fn start_worker<S, D>(&mut self, worker: TableSyncWorker<S, D>) -> EtlResult<bool>
     where
         S: StateStore + Clone + Send + Sync + 'static,
         D: Destination + Clone + Send + Sync + 'static,
@@ -93,7 +93,7 @@ impl TableSyncWorkerPoolInner {
         }
     }
 
-    pub async fn wait_all(&mut self) -> ETLResult<Option<Arc<Notify>>> {
+    pub async fn wait_all(&mut self) -> EtlResult<Option<Arc<Notify>>> {
         // If there are active workers, we return the notify, signaling that not all of them are
         // ready.
         //
@@ -165,7 +165,7 @@ impl TableSyncWorkerPool {
         self.inner.clone()
     }
 
-    pub async fn wait_all(&self) -> ETLResult<()> {
+    pub async fn wait_all(&self) -> EtlResult<()> {
         loop {
             // We try first to wait for all workers to be finished, in case there are still active
             // workers, we get back a `Notify` which we will use to try again once new workers reported

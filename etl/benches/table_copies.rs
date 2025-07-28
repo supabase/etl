@@ -45,7 +45,7 @@ use sqlx::postgres::PgPool;
 
 #[cfg(feature = "bigquery")]
 use etl::destination::bigquery::BigQueryDestination;
-use etl::error::ETLResult;
+use etl::error::EtlResult;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -436,7 +436,7 @@ enum BenchDestination {
 }
 
 impl Destination for BenchDestination {
-    async fn inject(&self, schema_cache: etl::schema::cache::SchemaCache) -> ETLResult<()> {
+    async fn inject(&self, schema_cache: etl::schema::cache::SchemaCache) -> EtlResult<()> {
         match self {
             BenchDestination::Null(dest) => dest.inject(schema_cache).await,
             #[cfg(feature = "bigquery")]
@@ -444,7 +444,7 @@ impl Destination for BenchDestination {
         }
     }
 
-    async fn write_table_schema(&self, table_schema: TableSchema) -> ETLResult<()> {
+    async fn write_table_schema(&self, table_schema: TableSchema) -> EtlResult<()> {
         match self {
             BenchDestination::Null(dest) => dest.write_table_schema(table_schema).await,
             #[cfg(feature = "bigquery")]
@@ -452,7 +452,7 @@ impl Destination for BenchDestination {
         }
     }
 
-    async fn load_table_schemas(&self) -> ETLResult<Vec<TableSchema>> {
+    async fn load_table_schemas(&self) -> EtlResult<Vec<TableSchema>> {
         match self {
             BenchDestination::Null(dest) => dest.load_table_schemas().await,
             #[cfg(feature = "bigquery")]
@@ -464,7 +464,7 @@ impl Destination for BenchDestination {
         &self,
         table_id: TableId,
         table_rows: Vec<TableRow>,
-    ) -> ETLResult<()> {
+    ) -> EtlResult<()> {
         match self {
             BenchDestination::Null(dest) => dest.write_table_rows(table_id, table_rows).await,
             #[cfg(feature = "bigquery")]
@@ -472,7 +472,7 @@ impl Destination for BenchDestination {
         }
     }
 
-    async fn write_events(&self, events: Vec<Event>) -> ETLResult<()> {
+    async fn write_events(&self, events: Vec<Event>) -> EtlResult<()> {
         match self {
             BenchDestination::Null(dest) => dest.write_events(events).await,
             #[cfg(feature = "bigquery")]
@@ -482,15 +482,15 @@ impl Destination for BenchDestination {
 }
 
 impl Destination for NullDestination {
-    async fn inject(&self, _schema_cache: etl::schema::cache::SchemaCache) -> ETLResult<()> {
+    async fn inject(&self, _schema_cache: etl::schema::cache::SchemaCache) -> EtlResult<()> {
         Ok(())
     }
 
-    async fn write_table_schema(&self, _table_schema: TableSchema) -> ETLResult<()> {
+    async fn write_table_schema(&self, _table_schema: TableSchema) -> EtlResult<()> {
         Ok(())
     }
 
-    async fn load_table_schemas(&self) -> ETLResult<Vec<TableSchema>> {
+    async fn load_table_schemas(&self) -> EtlResult<Vec<TableSchema>> {
         Ok(vec![])
     }
 
@@ -498,11 +498,11 @@ impl Destination for NullDestination {
         &self,
         _table_id: TableId,
         _table_rows: Vec<TableRow>,
-    ) -> ETLResult<()> {
+    ) -> EtlResult<()> {
         Ok(())
     }
 
-    async fn write_events(&self, _events: Vec<Event>) -> ETLResult<()> {
+    async fn write_events(&self, _events: Vec<Event>) -> EtlResult<()> {
         Ok(())
     }
 }

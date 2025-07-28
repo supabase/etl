@@ -11,7 +11,7 @@ use crate::concurrency::future::ReactiveFuture;
 use crate::concurrency::shutdown::{ShutdownResult, ShutdownRx};
 use crate::concurrency::signal::SignalTx;
 use crate::destination::base::Destination;
-use crate::error::{ETLError, ETLResult, ErrorKind};
+use crate::error::{EtlError, EtlResult, ErrorKind};
 use crate::pipeline::PipelineId;
 use crate::replication::apply::{ApplyLoopHook, start_apply_loop};
 use crate::replication::client::PgReplicationClient;
@@ -63,7 +63,7 @@ impl TableSyncWorkerStateInner {
         &mut self,
         phase: TableReplicationPhase,
         state_store: S,
-    ) -> ETLResult<()> {
+    ) -> EtlResult<()> {
         self.set_phase(phase);
 
         // If we should store this phase change, we want to do it via the supplied state store.
@@ -189,7 +189,7 @@ impl TableSyncWorkerState {
 #[derive(Debug)]
 pub struct TableSyncWorkerHandle {
     state: TableSyncWorkerState,
-    handle: Option<JoinHandle<ETLResult<()>>>,
+    handle: Option<JoinHandle<EtlResult<()>>>,
 }
 
 impl WorkerHandle<TableSyncWorkerState> for TableSyncWorkerHandle {
@@ -197,7 +197,7 @@ impl WorkerHandle<TableSyncWorkerState> for TableSyncWorkerHandle {
         self.state.clone()
     }
 
-    async fn wait(mut self) -> ETLResult<()> {
+    async fn wait(mut self) -> EtlResult<()> {
         let Some(handle) = self.handle.take() else {
             return Ok(());
         };
@@ -266,9 +266,9 @@ where
     S: StateStore + Clone + Send + Sync + 'static,
     D: Destination + Clone + Send + Sync + 'static,
 {
-    type Error = ETLError;
+    type Error = EtlError;
 
-    async fn start(mut self) -> ETLResult<TableSyncWorkerHandle> {
+    async fn start(mut self) -> EtlResult<TableSyncWorkerHandle> {
         info!("starting table sync worker for table {}", self.table_id);
 
         let Some(table_replication_phase) = self
@@ -451,7 +451,7 @@ where
     ///
     /// Returns `Ok(false)` when the worker is done with its work, signaling the caller that the apply
     /// loop should be stopped.
-    async fn try_advance_phase(&self, current_lsn: PgLsn, update_state: bool) -> ETLResult<bool> {
+    async fn try_advance_phase(&self, current_lsn: PgLsn, update_state: bool) -> EtlResult<bool> {
         let mut inner = self.table_sync_worker_state.get_inner().lock().await;
 
         // If we caught up with the lsn, we mark this table as `SyncDone` and stop the worker.
@@ -487,7 +487,7 @@ impl<S> ApplyLoopHook for TableSyncWorkerHook<S>
 where
     S: StateStore + Clone + Send + Sync + 'static,
 {
-    async fn before_loop(&self, start_lsn: PgLsn) -> ETLResult<bool> {
+    async fn before_loop(&self, start_lsn: PgLsn) -> EtlResult<bool> {
         info!("checking if the table sync worker is already caught up with the apply worker");
 
         self.try_advance_phase(start_lsn, true).await
@@ -504,7 +504,7 @@ where
         &self,
         current_lsn: PgLsn,
         update_state: bool,
-    ) -> ETLResult<bool> {
+    ) -> EtlResult<bool> {
         info!(
             "processing syncing tables for table sync worker with lsn {}",
             current_lsn
@@ -513,7 +513,7 @@ where
         self.try_advance_phase(current_lsn, update_state).await
     }
 
-    async fn skip_table(&self, table_id: TableId) -> ETLResult<bool> {
+    async fn skip_table(&self, table_id: TableId) -> EtlResult<bool> {
         if self.table_id != table_id {
             return Ok(true);
         }
@@ -530,7 +530,7 @@ where
         &self,
         table_id: TableId,
         _remote_final_lsn: PgLsn,
-    ) -> ETLResult<bool> {
+    ) -> EtlResult<bool> {
         let inner = self.table_sync_worker_state.get_inner().lock().await;
         let is_skipped = matches!(
             inner.table_replication_phase.as_type(),

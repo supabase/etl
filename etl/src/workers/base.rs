@@ -1,7 +1,7 @@
 use postgres::schema::TableId;
 use std::future::Future;
 
-use crate::error::ETLResult;
+use crate::error::EtlResult;
 
 /// The type of worker that is currently running.
 ///
@@ -45,5 +45,5 @@ pub trait WorkerHandle<S> {
     ///
     /// The future resolves to a [`Result`] indicating whether the worker completed successfully
     /// or encountered an error.
-    fn wait(self) -> impl Future<Output = ETLResult<()>> + Send;
+    fn wait(self) -> impl Future<Output = EtlResult<()>> + Send;
 }

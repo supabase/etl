@@ -13,7 +13,7 @@ use crate::concurrency::shutdown::{ShutdownResult, ShutdownRx};
 use crate::concurrency::signal::SignalTx;
 use crate::concurrency::stream::BatchStream;
 use crate::destination::base::Destination;
-use crate::error::{ETLError, ETLResult, ErrorKind};
+use crate::error::{EtlError, EtlResult, ErrorKind};
 use crate::pipeline::PipelineId;
 use crate::replication::client::PgReplicationClient;
 use crate::replication::slot::get_slot_name;
@@ -48,7 +48,7 @@ pub async fn start_table_sync<S, D>(
     destination: D,
     shutdown_rx: ShutdownRx,
     force_syncing_tables_tx: SignalTx,
-) -> ETLResult<TableSyncResult>
+) -> EtlResult<TableSyncResult>
 where
     S: StateStore + Clone + Send + 'static,
     D: Destination + Clone + Send + 'static,

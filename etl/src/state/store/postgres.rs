@@ -11,7 +11,7 @@ use tokio::sync::Mutex;
 use tokio_postgres::types::PgLsn;
 use tracing::{debug, info};
 
-use crate::error::{ETLError, ETLResult, ErrorKind};
+use crate::error::{EtlError, EtlResult, ErrorKind};
 use crate::pipeline::PipelineId;
 use crate::state::store::base::StateStore;
 use crate::state::table::TableReplicationPhase;
@@ -20,7 +20,7 @@ use crate::{bail, etl_error};
 const NUM_POOL_CONNECTIONS: u32 = 1;
 
 impl TryFrom<TableReplicationPhase> for (TableReplicationState, Option<String>) {
-    type Error = ETLError;
+    type Error = EtlError;
 
     fn try_from(value: TableReplicationPhase) -> Result<Self, Self::Error> {
         Ok(match value {
@@ -108,7 +108,7 @@ impl PostgresStateStore {
         &self,
         state: &TableReplicationState,
         sync_done_lsn: Option<String>,
-    ) -> ETLResult<TableReplicationPhase> {
+    ) -> EtlResult<TableReplicationPhase> {
         Ok(match state {
             TableReplicationState::Init => TableReplicationPhase::Init,
             TableReplicationState::DataSync => TableReplicationPhase::DataSync,
@@ -143,19 +143,19 @@ impl StateStore for PostgresStateStore {
     async fn get_table_replication_state(
         &self,
         table_id: TableId,
-    ) -> ETLResult<Option<TableReplicationPhase>> {
+    ) -> EtlResult<Option<TableReplicationPhase>> {
         let inner = self.inner.lock().await;
         Ok(inner.table_states.get(&table_id).cloned())
     }
 
     async fn get_table_replication_states(
         &self,
-    ) -> ETLResult<HashMap<TableId, TableReplicationPhase>> {
+    ) -> EtlResult<HashMap<TableId, TableReplicationPhase>> {
         let inner = self.inner.lock().await;
         Ok(inner.table_states.clone())
     }
 
-    async fn load_table_replication_states(&self) -> ETLResult<usize> {
+    async fn load_table_replication_states(&self) -> EtlResult<usize> {
         debug!("loading table replication states from postgres state store");
 
         let pool = self.connect_to_source().await?;
@@ -184,7 +184,7 @@ impl StateStore for PostgresStateStore {
         &self,
         table_id: TableId,
         state: TableReplicationPhase,
-    ) -> ETLResult<()> {
+    ) -> EtlResult<()> {
         let (table_state, sync_done_lsn) = state.try_into()?;
         self.update_replication_state(self.pipeline_id, table_id, table_state, sync_done_lsn)
             .await?;

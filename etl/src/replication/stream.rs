@@ -12,8 +12,8 @@ use tokio_postgres::types::PgLsn;
 use tracing::debug;
 
 use crate::conversions::table_row::{TableRow, TableRowConverter};
-use crate::error::ETLError;
-use crate::error::{ETLResult, ErrorKind};
+use crate::error::EtlError;
+use crate::error::{EtlResult, ErrorKind};
 use crate::etl_error;
 
 /// The amount of milliseconds between two consecutive status updates in case no forced update
@@ -47,7 +47,7 @@ impl<'a> TableCopyStream<'a> {
 }
 
 impl<'a> Stream for TableCopyStream<'a> {
-    type Item = ETLResult<TableRow>;
+    type Item = EtlResult<TableRow>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.project();
@@ -99,7 +99,7 @@ impl EventsStream {
         flush_lsn: PgLsn,
         apply_lsn: PgLsn,
         force: bool,
-    ) -> ETLResult<()> {
+    ) -> EtlResult<()> {
         let this = self.project();
 
         // If we are not forced to send an update, we can willingly do so based on a set of conditions.
@@ -160,7 +160,7 @@ impl EventsStream {
 }
 
 impl Stream for EventsStream {
-    type Item = ETLResult<ReplicationMessage<LogicalReplicationMessage>>;
+    type Item = EtlResult<ReplicationMessage<LogicalReplicationMessage>>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.project();

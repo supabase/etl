@@ -6,7 +6,7 @@ use tokio::{
     sync::{Notify, RwLock},
 };
 
-use crate::error::ETLResult;
+use crate::error::EtlResult;
 use crate::state::{
     store::base::StateStore,
     table::{TableReplicationPhase, TableReplicationPhaseType},
@@ -106,7 +106,7 @@ impl StateStore for NotifyingStateStore {
     async fn get_table_replication_state(
         &self,
         table_id: TableId,
-    ) -> ETLResult<Option<TableReplicationPhase>> {
+    ) -> EtlResult<Option<TableReplicationPhase>> {
         let inner = self.inner.read().await;
         let result = Ok(inner.table_replication_states.get(&table_id).cloned());
 
@@ -119,7 +119,7 @@ impl StateStore for NotifyingStateStore {
 
     async fn get_table_replication_states(
         &self,
-    ) -> ETLResult<HashMap<TableId, TableReplicationPhase>> {
+    ) -> EtlResult<HashMap<TableId, TableReplicationPhase>> {
         let inner = self.inner.read().await;
         let result = Ok(inner.table_replication_states.clone());
 
@@ -130,7 +130,7 @@ impl StateStore for NotifyingStateStore {
         result
     }
 
-    async fn load_table_replication_states(&self) -> ETLResult<usize> {
+    async fn load_table_replication_states(&self) -> EtlResult<usize> {
         let inner = self.inner.read().await;
         let result = Ok(inner.table_replication_states.clone());
 
@@ -145,7 +145,7 @@ impl StateStore for NotifyingStateStore {
         &self,
         table_id: TableId,
         state: TableReplicationPhase,
-    ) -> ETLResult<()> {
+    ) -> EtlResult<()> {
         let mut inner = self.inner.write().await;
         inner.table_replication_states.insert(table_id, state);
         inner.check_conditions().await;

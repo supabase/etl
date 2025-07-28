@@ -13,7 +13,7 @@ use crate::conversions::Cell;
 use crate::conversions::event::{Event, TruncateEvent};
 use crate::conversions::table_row::TableRow;
 use crate::destination::base::Destination;
-use crate::error::{ETLError, ETLResult, ErrorKind};
+use crate::error::{EtlError, EtlResult, ErrorKind};
 use crate::schema::cache::SchemaCache;
 
 /// Table name for storing ETL table schema metadata in BigQuery.
@@ -86,7 +86,7 @@ impl Inner {
     /// Ensures the ETL metadata tables exist in BigQuery.
     ///
     /// Creates `etl_table_schemas` and `etl_table_columns` tables if they don't exist.
-    async fn ensure_schema_tables_exist(&self) -> ETLResult<()> {
+    async fn ensure_schema_tables_exist(&self) -> EtlResult<()> {
         // Create etl_table_schemas table - use ColumnSchema for compatibility
         self.client
             .create_table_if_missing(
@@ -135,7 +135,7 @@ impl BigQueryDestination {
         dataset_id: String,
         sa_key: &str,
         max_staleness_mins: Option<u16>,
-    ) -> ETLResult<Self> {
+    ) -> EtlResult<Self> {
         let client = BigQueryClient::new_with_key_path(project_id, sa_key).await?;
         let inner = Inner {
             client,
@@ -158,7 +158,7 @@ impl BigQueryDestination {
         dataset_id: String,
         sa_key: &str,
         max_staleness_mins: Option<u16>,
-    ) -> ETLResult<Self> {
+    ) -> EtlResult<Self> {
         let client = BigQueryClient::new_with_key(project_id, sa_key).await?;
         let inner = Inner {
             client,
@@ -179,12 +179,12 @@ impl BigQueryDestination {
         inner: &I,
         table_id: &TableId,
         use_cdc_sequence_column: bool,
-    ) -> ETLResult<(String, TableDescriptor)> {
+    ) -> EtlResult<(String, TableDescriptor)> {
         let schema_cache = inner
             .schema_cache
             .as_ref()
             .ok_or_else(|| {
-                ETLError::from((
+                EtlError::from((
                     ErrorKind::ConfigError,
                     "The schema cache was not set on the destination",
                 ))
@@ -192,7 +192,7 @@ impl BigQueryDestination {
             .lock_inner()
             .await;
         let table_schema = schema_cache.get_table_schema_ref(table_id).ok_or_else(|| {
-            ETLError::from((
+            EtlError::from((
                 ErrorKind::DestinationSchemaError,
                 "Table schema not found in schema cache",
                 format!("table_id: {table_id}"),
@@ -211,7 +211,7 @@ impl BigQueryDestination {
     /// Writes a table schema to BigQuery, creating the data table and storing metadata.
     ///
     /// This method creates the actual data table and inserts schema information into the ETL metadata tables.
-    async fn write_table_schema(&self, table_schema: TableSchema) -> ETLResult<()> {
+    async fn write_table_schema(&self, table_schema: TableSchema) -> EtlResult<()> {
         let mut inner = self.inner.lock().await;
 
         let dataset_id = inner.dataset_id.clone();
@@ -276,7 +276,7 @@ impl BigQueryDestination {
     /// Loads all table schemas from BigQuery ETL metadata tables.
     ///
     /// Reconstructs [`TableSchema`] objects by joining data from schema and column metadata tables.
-    async fn load_table_schemas(&self) -> ETLResult<Vec<TableSchema>> {
+    async fn load_table_schemas(&self) -> EtlResult<Vec<TableSchema>> {
         let inner = self.inner.lock().await;
 
         // First check if schema tables exist
@@ -392,7 +392,7 @@ impl BigQueryDestination {
         &self,
         table_id: TableId,
         mut table_rows: Vec<TableRow>,
-    ) -> ETLResult<()> {
+    ) -> EtlResult<()> {
         let mut inner = self.inner.lock().await;
 
         // We do not use the sequence column for table rows, since we assume that table rows are always
@@ -418,7 +418,7 @@ impl BigQueryDestination {
     ///
     /// Groups events by type, handles inserts/updates/deletes via streaming, and processes truncates separately.
     /// Adds sequence numbers to ensure proper ordering of events with the same system time.
-    async fn write_events(&self, events: Vec<Event>) -> ETLResult<()> {
+    async fn write_events(&self, events: Vec<Event>) -> EtlResult<()> {
         let mut event_iter = events.into_iter().peekable();
 
         while event_iter.peek().is_some() {
@@ -525,7 +525,7 @@ impl BigQueryDestination {
     ///
     /// Maps PostgreSQL table OIDs to BigQuery table names and issues truncate commands.
     #[allow(dead_code)]
-    async fn process_truncate_events(&self, truncate_events: Vec<TruncateEvent>) -> ETLResult<()> {
+    async fn process_truncate_events(&self, truncate_events: Vec<TruncateEvent>) -> EtlResult<()> {
         let inner = self.inner.lock().await;
 
         for truncate_event in truncate_events {
@@ -535,7 +535,7 @@ impl BigQueryDestination {
                     .schema_cache
                     .as_ref()
                     .ok_or_else(|| {
-                        ETLError::from((
+                        EtlError::from((
                             ErrorKind::ConfigError,
                             "The schema cache was not set on the destination",
                         ))
@@ -634,7 +634,7 @@ impl BigQueryDestination {
     ///
     /// Used when reconstructing schemas from BigQuery metadata tables. Falls back to `TEXT` for unknown types.
     #[allow(clippy::result_large_err)]
-    fn string_to_postgres_type(type_str: &str) -> ETLResult<Type> {
+    fn string_to_postgres_type(type_str: &str) -> EtlResult<Type> {
         match type_str {
             "BOOL" => Ok(Type::BOOL),
             "CHAR" => Ok(Type::CHAR),
@@ -683,20 +683,20 @@ impl BigQueryDestination {
 }
 
 impl Destination for BigQueryDestination {
-    async fn inject(&self, schema_cache: SchemaCache) -> ETLResult<()> {
+    async fn inject(&self, schema_cache: SchemaCache) -> EtlResult<()> {
         let mut inner = self.inner.lock().await;
         inner.schema_cache = Some(schema_cache);
 
         Ok(())
     }
 
-    async fn write_table_schema(&self, table_schema: TableSchema) -> ETLResult<()> {
+    async fn write_table_schema(&self, table_schema: TableSchema) -> EtlResult<()> {
         self.write_table_schema(table_schema).await?;
 
         Ok(())
     }
 
-    async fn load_table_schemas(&self) -> ETLResult<Vec<TableSchema>> {
+    async fn load_table_schemas(&self) -> EtlResult<Vec<TableSchema>> {
         let table_schemas = self.load_table_schemas().await?;
 
         Ok(table_schemas)
@@ -706,13 +706,13 @@ impl Destination for BigQueryDestination {
         &self,
         table_id: TableId,
         table_rows: Vec<TableRow>,
-    ) -> ETLResult<()> {
+    ) -> EtlResult<()> {
         self.write_table_rows(table_id, table_rows).await?;
 
         Ok(())
     }
 
-    async fn write_events(&self, events: Vec<Event>) -> ETLResult<()> {
+    async fn write_events(&self, events: Vec<Event>) -> EtlResult<()> {
         self.write_events(events).await?;
 
         Ok(())
