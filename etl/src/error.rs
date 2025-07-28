@@ -105,8 +105,6 @@ pub enum ErrorKind {
     ApplyWorkerPanic,
     /// Table sync worker error
     TableSyncWorkerPanic,
-    /// Table sync worker error
-    TableSyncWorkerCaughtError,
     /// Destination-specific error
     ///
     /// Used for BigQuery gRPC status errors, row errors,

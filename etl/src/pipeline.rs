@@ -177,6 +177,7 @@ where
     pub async fn wait(self) -> EtlResult<()> {
         let PipelineWorkers::Started { apply_worker, pool } = self.workers else {
             info!("pipeline was not started, nothing to wait for");
+
             return Ok(());
         };
 
@@ -202,8 +203,6 @@ where
             let _ = self.shutdown_tx.shutdown();
 
             info!("apply worker completed with an error, shutting down table sync workers");
-        } else {
-            info!("apply worker completed successfully");
         }
 
         info!("waiting for table sync workers to complete");
@@ -211,10 +210,12 @@ where
         // We wait for all table sync workers to finish.
         let table_sync_workers_result = pool.wait_all().await;
         if let Err(err) = table_sync_workers_result {
+            // We naively use the `kinds` as number of errors.
+            let errors_number = err.kinds().len();
+
             errors.push(err);
-            info!("one or more table sync workers failed with an error");
-        } else {
-            info!("all table sync workers completed successfully");
+
+            info!("{} table sync workers failed with an error", errors_number);
         }
 
         if !errors.is_empty() {

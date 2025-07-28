@@ -19,19 +19,15 @@ use crate::workers::table_sync::{TableSyncWorker, TableSyncWorkerHandle, TableSy
 pub enum TableSyncWorkerInactiveReason {
     Completed,
     Errored(String),
+    Panicked(String),
 }
 
 #[derive(Debug)]
 pub struct TableSyncWorkerPoolInner {
     /// The table sync workers that are currently active.
     active: HashMap<TableId, TableSyncWorkerHandle>,
-    /// The table sync workers that are inactive, meaning that they are completed or errored.
-    ///
-    /// Having the state of finished workers gives us the power to reschedule failed table sync
-    /// workers very cheaply since the state can be fed into a new table worker future as if it was
-    /// read initially from the state store.
-    // TODO: make it a bounded history to guard memory usage.
-    inactive: HashMap<TableId, Vec<(TableSyncWorkerInactiveReason, TableSyncWorkerHandle)>>,
+    /// The table sync workers that are inactive, meaning that either they completed or errored.
+    inactive: HashMap<TableId, Vec<TableSyncWorkerHandle>>,
     waiting: Option<Arc<Notify>>,
 }
 
@@ -89,7 +85,7 @@ impl TableSyncWorkerPoolInner {
             self.inactive
                 .entry(table_id)
                 .or_default()
-                .push((reason, removed_worker));
+                .push(removed_worker);
         }
     }
 
@@ -109,24 +105,12 @@ impl TableSyncWorkerPoolInner {
 
         let mut errors = Vec::new();
         for (_, workers) in mem::take(&mut self.inactive) {
-            for (finish, worker) in workers {
+            for worker in workers {
                 // If there is an error while waiting for the task, we can assume that there was un
                 // uncaught panic or a propagated error.
                 if let Err(err) = worker.wait().await {
                     errors.push(err);
                     continue;
-                }
-
-                // If we arrive here, it means that the worker task did fail but silently, since
-                // the error we see here was reported by the `ReactiveFuture` and swallowed.
-                // This should not happen since right now the `ReactiveFuture` is configured to
-                // re-propagate the error after marking a table sync worker as finished.
-                if let TableSyncWorkerInactiveReason::Errored(err) = finish {
-                    errors.push(etl_error!(
-                        ErrorKind::TableSyncWorkerCaughtError,
-                        "An error occurred in a table sync worker but was not propagated",
-                        err
-                    ));
                 }
             }
         }
@@ -144,8 +128,12 @@ impl ReactiveFutureCallback<TableId> for TableSyncWorkerPoolInner {
         self.set_worker_finished(id, TableSyncWorkerInactiveReason::Completed);
     }
 
-    fn on_error(&mut self, id: TableId, error: String) {
-        self.set_worker_finished(id, TableSyncWorkerInactiveReason::Errored(error));
+    fn on_error(&mut self, id: TableId, error: String, is_panic: bool) {
+        let reason = match is_panic {
+            true => TableSyncWorkerInactiveReason::Panicked(error),
+            false => TableSyncWorkerInactiveReason::Errored(error),
+        };
+        self.set_worker_finished(id, reason);
     }
 }
 

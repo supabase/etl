@@ -15,10 +15,11 @@ use tokio::sync::Mutex;
 /// The generic parameter `I` represents the identifier type used to track futures.
 pub trait ReactiveFutureCallback<I> {
     /// Called when a future completes successfully.
-    fn on_complete(&mut self, id: I);
+    fn on_complete(&mut self, id: I) -> impl Future<Output = ()> + Send;
 
     /// Called when a future encounters an error.
-    fn on_error(&mut self, id: I, error: String);
+    fn on_error(&mut self, id: I, error: String, is_panic: bool)
+    -> impl Future<Output = ()> + Send;
 }
 
 /// Represents the internal state of a [`ReactiveFuture`].
@@ -125,12 +126,13 @@ where
                         let id = this.id.clone();
                         let callback_source = this.callback_source.clone();
                         let error = error.clone();
+                        let is_panic = this.original_panic.is_some();
 
                         let callback_fut = async move {
                             let mut guard = callback_source.lock().await;
                             match error {
-                                Some(err) => guard.on_error(id, err),
-                                None => guard.on_complete(id),
+                                Some(err) => guard.on_error(id, err, is_panic).await,
+                                None => guard.on_complete(id).await,
                             };
                         }
                         .boxed();
@@ -253,15 +255,17 @@ mod tests {
         complete_called: bool,
         error_called: bool,
         error_message: Option<String>,
+        had_panic: bool,
     }
 
     impl ReactiveFutureCallback<i32> for MockCallback {
-        fn on_complete(&mut self, _id: i32) {
+        async fn on_complete(&mut self, _id: i32) {
             self.complete_called = true;
         }
 
-        fn on_error(&mut self, _id: i32, error: String) {
+        async fn on_error(&mut self, _id: i32, error: String, is_panic: bool) {
             self.error_called = true;
+            self.had_panic = is_panic;
             self.error_message = Some(error);
         }
     }
@@ -298,6 +302,7 @@ mod tests {
             let guard = callback.lock().await;
             assert!(!guard.complete_called);
             assert!(guard.error_called);
+            assert!(guard.had_panic);
             assert_eq!(
                 guard.error_message,
                 Some("The future had an error".to_string())
@@ -325,6 +330,7 @@ mod tests {
             let guard = callback.lock().await;
             assert!(!guard.complete_called);
             assert!(guard.error_called);
+            assert!(guard.had_panic);
             assert_eq!(guard.error_message, Some("Unknown panic error".to_string()));
         }
     }
