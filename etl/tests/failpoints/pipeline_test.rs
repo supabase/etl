@@ -4,8 +4,9 @@ use etl::failpoints::{
     START_TABLE_SYNC_AFTER_DATA_SYNC_ERROR, START_TABLE_SYNC_AFTER_DATA_SYNC_PANIC,
 };
 use etl::pipeline::PipelineId;
+use etl::state::store::base::StateStore;
 use etl::state::store::notify::NotifyingStateStore;
-use etl::state::table::TableReplicationPhaseType;
+use etl::state::table::{TableReplicationPhase, TableReplicationPhaseType};
 use fail::FailScenario;
 use rand::random;
 use telemetry::init_test_tracing;
@@ -64,6 +65,21 @@ async fn pipeline_handles_table_sync_worker_panic_during_data_sync() {
     assert_eq!(err.kinds().len(), 2);
     assert_eq!(err.kinds()[0], ErrorKind::TableSyncWorkerPanic);
     assert_eq!(err.kinds()[1], ErrorKind::TableSyncWorkerPanic);
+
+    // We make sure that the error has been tracked in the state store.
+    state_store.load_table_replication_states().await.unwrap();
+    let users_phase = state_store
+        .get_table_replication_state(database_schema.users_schema().id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(users_phase, TableReplicationPhase::Skipped));
+    let orders_phase = state_store
+        .get_table_replication_state(database_schema.orders_schema().id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(orders_phase, TableReplicationPhase::Skipped));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -113,6 +129,21 @@ async fn pipeline_handles_table_sync_worker_error_during_data_sync() {
     assert_eq!(err.kinds().len(), 2);
     assert_eq!(err.kinds()[0], ErrorKind::Unknown);
     assert_eq!(err.kinds()[1], ErrorKind::Unknown);
+
+    // We make sure that the error has been tracked in the state store.
+    state_store.load_table_replication_states().await.unwrap();
+    let users_phase = state_store
+        .get_table_replication_state(database_schema.users_schema().id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(users_phase, TableReplicationPhase::Skipped));
+    let orders_phase = state_store
+        .get_table_replication_state(database_schema.orders_schema().id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(orders_phase, TableReplicationPhase::Skipped));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -171,8 +202,40 @@ async fn table_copy_is_consistent_after_data_sync_threw_an_error() {
     let err = pipeline.shutdown_and_wait().await.err().unwrap();
     assert_eq!(err.kinds().len(), 2);
 
+    // We make sure that the error has been tracked in the state store.
+    state_store.load_table_replication_states().await.unwrap();
+    let users_phase = state_store
+        .get_table_replication_state(database_schema.users_schema().id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(users_phase, TableReplicationPhase::Skipped));
+    let orders_phase = state_store
+        .get_table_replication_state(database_schema.orders_schema().id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(orders_phase, TableReplicationPhase::Skipped));
+
     // We disable the failpoint.
     fail::remove(START_TABLE_SYNC_AFTER_DATA_SYNC_ERROR);
+
+    // We simulate the act of unskipping a table.
+    // TODO: implement manual retry mechanism to unskip state.
+    state_store
+        .update_table_replication_state(
+            database_schema.users_schema().id,
+            TableReplicationPhase::Init,
+        )
+        .await
+        .unwrap();
+    state_store
+        .update_table_replication_state(
+            database_schema.orders_schema().id,
+            TableReplicationPhase::Init,
+        )
+        .await
+        .unwrap();
 
     // Restart pipeline with normal state store to verify recovery.
     let mut pipeline = create_pipeline(

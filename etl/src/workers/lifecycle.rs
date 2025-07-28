@@ -39,6 +39,7 @@ where
             true => TableSyncWorkerInactiveReason::Panicked(error),
             false => TableSyncWorkerInactiveReason::Errored(error),
         };
+        pool.mark_worker_finished(id, reason);
 
         // We update the worker state with the new phase and store it in the state store.
         //
@@ -55,7 +56,5 @@ where
         {
             error!("an error occurred while marking table {id} as failed: {err}");
         };
-
-        pool.mark_worker_finished(id, reason);
     }
 }
