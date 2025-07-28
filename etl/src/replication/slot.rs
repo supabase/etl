@@ -1,6 +1,6 @@
 use crate::bail;
 use crate::error::EtlError;
-use crate::error::{EtlResult, ErrorKind};
+use crate::error::{ErrorKind, EtlResult};
 use crate::pipeline::PipelineId;
 use crate::workers::base::WorkerType;
 

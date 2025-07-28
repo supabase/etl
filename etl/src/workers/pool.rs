@@ -9,7 +9,7 @@ use tracing::{debug, warn};
 use crate::concurrency::future::ReactiveFutureCallback;
 use crate::destination::base::Destination;
 use crate::error::EtlError;
-use crate::error::{EtlResult, ErrorKind};
+use crate::error::{ErrorKind, EtlResult};
 use crate::etl_error;
 use crate::state::store::base::StateStore;
 use crate::workers::base::{Worker, WorkerHandle};

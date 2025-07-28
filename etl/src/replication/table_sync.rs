@@ -13,7 +13,7 @@ use crate::concurrency::shutdown::{ShutdownResult, ShutdownRx};
 use crate::concurrency::signal::SignalTx;
 use crate::concurrency::stream::BatchStream;
 use crate::destination::base::Destination;
-use crate::error::{EtlError, EtlResult, ErrorKind};
+use crate::error::{ErrorKind, EtlError, EtlResult};
 use crate::pipeline::PipelineId;
 use crate::replication::client::PgReplicationClient;
 use crate::replication::slot::get_slot_name;

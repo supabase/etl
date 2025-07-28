@@ -1,4 +1,4 @@
-use crate::error::{EtlError, EtlResult, ErrorKind};
+use crate::error::{ErrorKind, EtlError, EtlResult};
 use config::shared::PipelineConfig;
 use postgres::schema::TableId;
 use std::sync::Arc;

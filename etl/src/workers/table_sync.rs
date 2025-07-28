@@ -11,7 +11,7 @@ use crate::concurrency::future::ReactiveFuture;
 use crate::concurrency::shutdown::{ShutdownResult, ShutdownRx};
 use crate::concurrency::signal::SignalTx;
 use crate::destination::base::Destination;
-use crate::error::{EtlError, EtlResult, ErrorKind};
+use crate::error::{ErrorKind, EtlError, EtlResult};
 use crate::pipeline::PipelineId;
 use crate::replication::apply::{ApplyLoopHook, start_apply_loop};
 use crate::replication::client::PgReplicationClient;

@@ -1,6 +1,6 @@
 use crate::bail;
 use crate::error::EtlResult;
-use crate::error::{EtlError, ErrorKind};
+use crate::error::{ErrorKind, EtlError};
 
 pub fn parse_bool(s: &str) -> EtlResult<bool> {
     if s == "t" {

@@ -6,7 +6,7 @@ use uuid::Uuid;
 
 use crate::bail;
 use crate::conversions::{bool::parse_bool, hex};
-use crate::error::{EtlResult, ErrorKind};
+use crate::error::{ErrorKind, EtlResult};
 
 use super::{ArrayCell, Cell, numeric::PgNumeric};
 

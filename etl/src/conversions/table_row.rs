@@ -2,7 +2,7 @@ use super::Cell;
 use crate::bail;
 use crate::conversions::text::TextFormatConverter;
 use crate::error::EtlError;
-use crate::error::{EtlResult, ErrorKind};
+use crate::error::{ErrorKind, EtlResult};
 use core::str;
 use postgres::schema::ColumnSchema;
 use tracing::error;

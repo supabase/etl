@@ -11,7 +11,7 @@ use tokio::sync::Mutex;
 use tokio_postgres::types::PgLsn;
 use tracing::{debug, info};
 
-use crate::error::{EtlError, EtlResult, ErrorKind};
+use crate::error::{ErrorKind, EtlError, EtlResult};
 use crate::pipeline::PipelineId;
 use crate::state::store::base::StateStore;
 use crate::state::table::TableReplicationPhase;

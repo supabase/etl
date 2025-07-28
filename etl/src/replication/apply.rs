@@ -15,7 +15,7 @@ use crate::concurrency::shutdown::ShutdownRx;
 use crate::concurrency::signal::SignalRx;
 use crate::conversions::event::{Event, EventType, convert_message_to_event};
 use crate::destination::base::Destination;
-use crate::error::{EtlError, EtlResult, ErrorKind};
+use crate::error::{ErrorKind, EtlError, EtlResult};
 use crate::pipeline::PipelineId;
 use crate::replication::client::PgReplicationClient;
 use crate::replication::slot::get_slot_name;

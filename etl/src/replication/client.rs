@@ -1,4 +1,4 @@
-use crate::error::{EtlError, EtlResult, ErrorKind};
+use crate::error::{ErrorKind, EtlError, EtlResult};
 use crate::{bail, etl_error};
 use config::shared::{IntoConnectOptions, PgConnectionConfig};
 use pg_escape::{quote_identifier, quote_literal};

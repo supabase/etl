@@ -1,6 +1,6 @@
 use crate::bail;
 use crate::error::EtlError;
-use crate::error::{EtlResult, ErrorKind};
+use crate::error::{ErrorKind, EtlResult};
 
 pub fn from_bytea_hex(s: &str) -> EtlResult<Vec<u8>> {
     if s.len() < 2 || &s[..2] != "\\x" {

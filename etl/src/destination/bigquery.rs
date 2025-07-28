@@ -13,7 +13,7 @@ use crate::conversions::Cell;
 use crate::conversions::event::{Event, TruncateEvent};
 use crate::conversions::table_row::TableRow;
 use crate::destination::base::Destination;
-use crate::error::{EtlError, EtlResult, ErrorKind};
+use crate::error::{ErrorKind, EtlError, EtlResult};
 use crate::schema::cache::SchemaCache;
 
 /// Table name for storing ETL table schema metadata in BigQuery.

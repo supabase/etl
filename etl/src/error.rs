@@ -235,7 +235,7 @@ impl fmt::Display for EtlError {
     }
 }
 
-impl error::Error for EtlError { }
+impl error::Error for EtlError {}
 
 // Ergonomic constructors following Redis pattern
 

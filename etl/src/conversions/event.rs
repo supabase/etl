@@ -10,7 +10,7 @@ use crate::conversions::Cell;
 use crate::conversions::table_row::TableRow;
 use crate::conversions::text::TextFormatConverter;
 use crate::error::EtlError;
-use crate::error::{EtlResult, ErrorKind};
+use crate::error::{ErrorKind, EtlResult};
 use crate::schema::cache::SchemaCache;
 use crate::{bail, etl_error};
 
@@ -246,9 +246,7 @@ async fn get_table_schema(schema_cache: &SchemaCache, table_id: TableId) -> EtlR
             etl_error!(
                 ErrorKind::MissingTableSchema,
                 "Table not found in the schema cache",
-                format!(
-                    "The table schema for table {table_id} was not found in the cache"
-                )
+                format!("The table schema for table {table_id} was not found in the cache")
             )
         })
 }

@@ -13,7 +13,7 @@ use tracing::debug;
 
 use crate::conversions::table_row::{TableRow, TableRowConverter};
 use crate::error::EtlError;
-use crate::error::{EtlResult, ErrorKind};
+use crate::error::{ErrorKind, EtlResult};
 use crate::etl_error;
 
 /// The amount of milliseconds between two consecutive status updates in case no forced update
