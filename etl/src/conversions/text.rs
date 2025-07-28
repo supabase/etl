@@ -1,59 +1,16 @@
-use core::str;
-use std::num::{ParseFloatError, ParseIntError};
-
-use bigdecimal::ParseBigDecimalError;
+use crate::error::EtlError;
 use chrono::{DateTime, FixedOffset, NaiveDate, NaiveDateTime, NaiveTime, Utc};
-use thiserror::Error;
+use core::str;
 use tokio_postgres::types::Type;
 use uuid::Uuid;
 
+use crate::bail;
 use crate::conversions::{bool::parse_bool, hex};
+use crate::error::{ErrorKind, EtlResult};
 
-use super::{ArrayCell, Cell, bool::ParseBoolError, hex::ByteaHexParseError, numeric::PgNumeric};
-
-#[derive(Debug, Error)]
-pub enum FromTextError {
-    #[error("invalid bool value")]
-    InvalidBool(#[from] ParseBoolError),
-
-    #[error("invalid int value")]
-    InvalidInt(#[from] ParseIntError),
-
-    #[error("invalid float value")]
-    InvalidFloat(#[from] ParseFloatError),
-
-    #[error("invalid numeric: {0}")]
-    InvalidNumeric(#[from] ParseBigDecimalError),
-
-    #[error("invalid bytea: {0}")]
-    InvalidBytea(#[from] ByteaHexParseError),
-
-    #[error("invalid uuid: {0}")]
-    InvalidUuid(#[from] uuid::Error),
-
-    #[error("invalid json: {0}")]
-    InvalidJson(#[from] serde_json::Error),
-
-    #[error("invalid timestamp: {0} ")]
-    InvalidTimestamp(#[from] chrono::ParseError),
-
-    #[error("invalid array: {0}")]
-    InvalidArray(#[from] ArrayParseError),
-
-    #[error("row get error: {0:?}")]
-    RowGetError(#[from] Box<dyn std::error::Error + Sync + Send>),
-}
+use super::{ArrayCell, Cell, numeric::PgNumeric};
 
 pub struct TextFormatConverter;
-
-#[derive(Debug, Error)]
-pub enum ArrayParseError {
-    #[error("input too short")]
-    InputTooShort,
-
-    #[error("missing braces")]
-    MissingBraces,
-}
 
 impl TextFormatConverter {
     pub fn default_value(typ: &Type) -> Cell {
@@ -110,7 +67,7 @@ impl TextFormatConverter {
         }
     }
 
-    pub fn try_from_str(typ: &Type, str: &str) -> Result<Cell, FromTextError> {
+    pub fn try_from_str(typ: &Type, str: &str) -> EtlResult<Cell> {
         match *typ {
             Type::BOOL => Ok(Cell::Bool(parse_bool(str)?)),
             Type::BOOL_ARRAY => TextFormatConverter::parse_array(
@@ -268,17 +225,20 @@ impl TextFormatConverter {
         }
     }
 
-    fn parse_array<P, M, T>(str: &str, mut parse: P, m: M) -> Result<Cell, FromTextError>
+    fn parse_array<P, M, T>(str: &str, mut parse: P, m: M) -> EtlResult<Cell>
     where
-        P: FnMut(&str) -> Result<Option<T>, FromTextError>,
+        P: FnMut(&str) -> EtlResult<Option<T>>,
         M: FnOnce(Vec<Option<T>>) -> ArrayCell,
     {
         if str.len() < 2 {
-            return Err(ArrayParseError::InputTooShort.into());
+            bail!(ErrorKind::ConversionError, "The array input is too short");
         }
 
         if !str.starts_with('{') || !str.ends_with('}') {
-            return Err(ArrayParseError::MissingBraces.into());
+            bail!(
+                ErrorKind::ConversionError,
+                "The array input is missing braces"
+            );
         }
 
         let mut res = vec![];

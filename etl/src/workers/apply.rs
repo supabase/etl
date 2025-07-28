@@ -1,7 +1,7 @@
+use crate::error::{ErrorKind, EtlError, EtlResult};
 use config::shared::PipelineConfig;
 use postgres::schema::TableId;
 use std::sync::Arc;
-use thiserror::Error;
 use tokio::sync::Semaphore;
 use tokio::task::JoinHandle;
 use tokio_postgres::types::PgLsn;
@@ -10,64 +10,39 @@ use tracing::{Instrument, debug, error, info};
 use crate::concurrency::shutdown::ShutdownRx;
 use crate::concurrency::signal::{SignalTx, create_signal};
 use crate::destination::base::Destination;
+use crate::etl_error;
 use crate::pipeline::PipelineId;
-use crate::replication::apply::{ApplyLoopError, ApplyLoopHook, start_apply_loop};
-use crate::replication::client::{PgReplicationClient, PgReplicationError};
+use crate::replication::apply::{ApplyLoopHook, start_apply_loop};
+use crate::replication::client::PgReplicationClient;
 use crate::replication::common::get_table_replication_states;
-use crate::replication::slot::{SlotError, get_slot_name};
+use crate::replication::slot::get_slot_name;
 use crate::schema::cache::SchemaCache;
-use crate::state::store::base::{StateStore, StateStoreError};
+use crate::state::store::base::StateStore;
 use crate::state::table::{TableReplicationPhase, TableReplicationPhaseType};
-use crate::workers::base::{Worker, WorkerHandle, WorkerType, WorkerWaitError};
+use crate::workers::base::{Worker, WorkerHandle, WorkerType};
 use crate::workers::pool::TableSyncWorkerPool;
-use crate::workers::table_sync::{
-    TableSyncWorker, TableSyncWorkerError, TableSyncWorkerState, TableSyncWorkerStateError,
-};
-
-#[derive(Debug, Error)]
-pub enum ApplyWorkerError {
-    #[error("An error occurred while interacting with the state store: {0}")]
-    StateStore(#[from] StateStoreError),
-
-    #[error("An error occurred in the apply loop: {0}")]
-    ApplyLoop(#[from] ApplyLoopError),
-
-    #[error("A Postgres replication error occurred in the apply loop: {0}")]
-    PgReplication(#[from] PgReplicationError),
-
-    #[error("Could not generate slot name in the apply loop: {0}")]
-    Slot(#[from] SlotError),
-}
-
-#[derive(Debug, Error)]
-pub enum ApplyWorkerHookError {
-    #[error("An error occurred while interacting with the state store: {0}")]
-    StateStore(#[from] StateStoreError),
-
-    #[error("An error occurred while interacting with the table sync worker state: {0}")]
-    TableSyncWorkerState(#[from] TableSyncWorkerStateError),
-
-    #[error("An error occurred while trying to start the table sync worker: {0}")]
-    TableSyncWorkerStartedFailed(#[from] TableSyncWorkerError),
-
-    #[error("A Postgres replication error occurred in the apply worker: {0}")]
-    PgReplication(#[from] PgReplicationError),
-}
+use crate::workers::table_sync::{TableSyncWorker, TableSyncWorkerState};
 
 #[derive(Debug)]
 pub struct ApplyWorkerHandle {
-    handle: Option<JoinHandle<Result<(), ApplyWorkerError>>>,
+    handle: Option<JoinHandle<EtlResult<()>>>,
 }
 
 impl WorkerHandle<()> for ApplyWorkerHandle {
     fn state(&self) {}
 
-    async fn wait(mut self) -> Result<(), WorkerWaitError> {
+    async fn wait(mut self) -> EtlResult<()> {
         let Some(handle) = self.handle.take() else {
             return Ok(());
         };
 
-        handle.await??;
+        handle.await.map_err(|err| {
+            etl_error!(
+                ErrorKind::ApplyWorkerPanic,
+                "A panic occurred in the apply worker",
+                err
+            )
+        })??;
 
         Ok(())
     }
@@ -118,9 +93,9 @@ where
     S: StateStore + Clone + Send + Sync + 'static,
     D: Destination + Clone + Send + Sync + 'static,
 {
-    type Error = ApplyWorkerError;
+    type Error = EtlError;
 
-    async fn start(self) -> Result<ApplyWorkerHandle, Self::Error> {
+    async fn start(self) -> EtlResult<ApplyWorkerHandle> {
         info!("starting apply worker");
 
         let apply_worker_span = tracing::info_span!(
@@ -174,7 +149,7 @@ where
 async fn get_start_lsn(
     pipeline_id: PipelineId,
     replication_client: &PgReplicationClient,
-) -> Result<PgLsn, ApplyWorkerError> {
+) -> EtlResult<PgLsn> {
     let slot_name = get_slot_name(pipeline_id, WorkerType::Apply)?;
     // TODO: validate that we only create the slot when we first start replication which
     //  means when all tables are in the Init state. In any other case we should raise an
@@ -253,11 +228,7 @@ where
         )
     }
 
-    async fn handle_syncing_table(
-        &self,
-        table_id: TableId,
-        current_lsn: PgLsn,
-    ) -> Result<bool, ApplyWorkerHookError> {
+    async fn handle_syncing_table(&self, table_id: TableId, current_lsn: PgLsn) -> EtlResult<bool> {
         let mut pool = self.pool.lock().await;
         let table_sync_worker_state = pool.get_active_worker_state(table_id);
 
@@ -278,7 +249,7 @@ where
         table_id: TableId,
         table_sync_worker_state: TableSyncWorkerState,
         current_lsn: PgLsn,
-    ) -> Result<bool, ApplyWorkerHookError> {
+    ) -> EtlResult<bool> {
         let mut catchup_started = false;
         {
             let mut inner = table_sync_worker_state.get_inner().lock().await;
@@ -330,9 +301,7 @@ where
     S: StateStore + Clone + Send + Sync + 'static,
     D: Destination + Clone + Send + Sync + 'static,
 {
-    type Error = ApplyWorkerHookError;
-
-    async fn before_loop(&self, _start_lsn: PgLsn) -> Result<bool, Self::Error> {
+    async fn before_loop(&self, _start_lsn: PgLsn) -> EtlResult<bool> {
         info!("starting table sync workers before the main apply loop");
 
         let active_table_replication_states =
@@ -370,7 +339,7 @@ where
         &self,
         current_lsn: PgLsn,
         update_state: bool,
-    ) -> Result<bool, Self::Error> {
+    ) -> EtlResult<bool> {
         let active_table_replication_states =
             get_table_replication_states(&self.state_store, false).await?;
         debug!(
@@ -418,7 +387,7 @@ where
         Ok(true)
     }
 
-    async fn skip_table(&self, table_id: TableId) -> Result<bool, Self::Error> {
+    async fn skip_table(&self, table_id: TableId) -> EtlResult<bool> {
         let table_sync_worker_state = {
             let pool = self.pool.lock().await;
             pool.get_active_worker_state(table_id)
@@ -443,7 +412,7 @@ where
         &self,
         table_id: TableId,
         remote_final_lsn: PgLsn,
-    ) -> Result<bool, Self::Error> {
+    ) -> EtlResult<bool> {
         let pool = self.pool.lock().await;
 
         // We try to load the state first from memory, if we don't find it, we try to load from the

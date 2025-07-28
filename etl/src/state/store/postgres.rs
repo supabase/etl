@@ -3,33 +3,24 @@ use std::{collections::HashMap, sync::Arc};
 use config::shared::PgConnectionConfig;
 use postgres::replication::{
     TableReplicationState, TableReplicationStateRow, connect_to_source_database,
-    update_replication_state,
+    get_table_replication_state_rows, update_replication_state,
 };
 use postgres::schema::TableId;
 use sqlx::PgPool;
-use thiserror::Error;
 use tokio::sync::Mutex;
 use tokio_postgres::types::PgLsn;
 use tracing::{debug, info};
 
-use crate::{
-    pipeline::PipelineId,
-    state::{
-        store::base::{StateStore, StateStoreError},
-        table::TableReplicationPhase,
-    },
-};
+use crate::error::{ErrorKind, EtlError, EtlResult};
+use crate::pipeline::PipelineId;
+use crate::state::store::base::StateStore;
+use crate::state::table::TableReplicationPhase;
+use crate::{bail, etl_error};
 
 const NUM_POOL_CONNECTIONS: u32 = 1;
 
-#[derive(Debug, Error)]
-pub enum ToTableStateError {
-    #[error("In-memory table replication phase can't be saved in the state store")]
-    InMemoryPhase,
-}
-
 impl TryFrom<TableReplicationPhase> for (TableReplicationState, Option<String>) {
-    type Error = ToTableStateError;
+    type Error = EtlError;
 
     fn try_from(value: TableReplicationPhase) -> Result<Self, Self::Error> {
         Ok(match value {
@@ -42,16 +33,14 @@ impl TryFrom<TableReplicationPhase> for (TableReplicationState, Option<String>) 
             TableReplicationPhase::Ready => (TableReplicationState::Ready, None),
             TableReplicationPhase::Skipped => (TableReplicationState::Skipped, None),
             TableReplicationPhase::SyncWait | TableReplicationPhase::Catchup { .. } => {
-                return Err(ToTableStateError::InMemoryPhase);
+                bail!(
+                    ErrorKind::InvalidState,
+                    "In-memory phase error",
+                    "In-memory table replication phase can't be saved in the state store"
+                );
             }
         })
     }
-}
-
-#[derive(Debug, Error)]
-pub enum FromTableStateError {
-    #[error("Lsn can't be missing from the state store if state is SyncDone")]
-    MissingSyncDoneLsn,
 }
 
 #[derive(Debug)]
@@ -69,11 +58,12 @@ pub struct PostgresStateStore {
 }
 
 impl PostgresStateStore {
-    pub fn new(pipeline_id: PipelineId, source_config: PgConnectionConfig) -> PostgresStateStore {
+    pub fn new(pipeline_id: PipelineId, source_config: PgConnectionConfig) -> Self {
         let inner = Inner {
             table_states: HashMap::new(),
         };
-        PostgresStateStore {
+
+        Self {
             pipeline_id,
             source_config,
             inner: Arc::new(Mutex::new(inner)),
@@ -96,7 +86,7 @@ impl PostgresStateStore {
         pool: &PgPool,
         pipeline_id: PipelineId,
     ) -> sqlx::Result<Vec<TableReplicationStateRow>> {
-        postgres::replication::get_table_replication_state_rows(pool, pipeline_id as i64).await
+        get_table_replication_state_rows(pool, pipeline_id as i64).await
     }
 
     async fn update_replication_state(
@@ -118,19 +108,30 @@ impl PostgresStateStore {
         &self,
         state: &TableReplicationState,
         sync_done_lsn: Option<String>,
-    ) -> Result<TableReplicationPhase, StateStoreError> {
+    ) -> EtlResult<TableReplicationPhase> {
         Ok(match state {
             TableReplicationState::Init => TableReplicationPhase::Init,
             TableReplicationState::DataSync => TableReplicationPhase::DataSync,
             TableReplicationState::FinishedCopy => TableReplicationPhase::FinishedCopy,
             TableReplicationState::SyncDone => match sync_done_lsn {
                 Some(lsn_str) => {
-                    let lsn = lsn_str
-                        .parse::<PgLsn>()
-                        .map_err(|_| StateStoreError::InvalidConfirmedFlushLsn(lsn_str))?;
+                    let lsn = lsn_str.parse::<PgLsn>().map_err(|_| {
+                        etl_error!(
+                            ErrorKind::ValidationError,
+                            "Invalid LSN",
+                            format!(
+                                "Invalid confirmed flush lsn value in state store: {}",
+                                lsn_str
+                            )
+                        )
+                    })?;
                     TableReplicationPhase::SyncDone { lsn }
                 }
-                None => return Err(FromTableStateError::MissingSyncDoneLsn)?,
+                None => bail!(
+                    ErrorKind::ValidationError,
+                    "Missing LSN",
+                    "Lsn can't be missing from the state store if state is 'SyncDone'"
+                ),
             },
             TableReplicationState::Ready => TableReplicationPhase::Ready,
             TableReplicationState::Skipped => TableReplicationPhase::Skipped,
@@ -142,20 +143,21 @@ impl StateStore for PostgresStateStore {
     async fn get_table_replication_state(
         &self,
         table_id: TableId,
-    ) -> Result<Option<TableReplicationPhase>, StateStoreError> {
+    ) -> EtlResult<Option<TableReplicationPhase>> {
         let inner = self.inner.lock().await;
         Ok(inner.table_states.get(&table_id).cloned())
     }
 
     async fn get_table_replication_states(
         &self,
-    ) -> Result<HashMap<TableId, TableReplicationPhase>, StateStoreError> {
+    ) -> EtlResult<HashMap<TableId, TableReplicationPhase>> {
         let inner = self.inner.lock().await;
         Ok(inner.table_states.clone())
     }
 
-    async fn load_table_replication_states(&self) -> Result<usize, StateStoreError> {
+    async fn load_table_replication_states(&self) -> EtlResult<usize> {
         debug!("loading table replication states from postgres state store");
+
         let pool = self.connect_to_source().await?;
         let replication_state_rows = self
             .get_all_replication_state_rows(&pool, self.pipeline_id)
@@ -165,7 +167,7 @@ impl StateStore for PostgresStateStore {
             let phase = self
                 .replication_phase_from_state(&row.state, row.sync_done_lsn)
                 .await?;
-            table_states.insert(row.table_id.0, phase);
+            table_states.insert(TableId::new(row.table_id.0), phase);
         }
         let mut inner = self.inner.lock().await;
         inner.table_states = table_states.clone();
@@ -182,12 +184,14 @@ impl StateStore for PostgresStateStore {
         &self,
         table_id: TableId,
         state: TableReplicationPhase,
-    ) -> Result<(), StateStoreError> {
+    ) -> EtlResult<()> {
         let (table_state, sync_done_lsn) = state.try_into()?;
         self.update_replication_state(self.pipeline_id, table_id, table_state, sync_done_lsn)
             .await?;
+
         let mut inner = self.inner.lock().await;
         inner.table_states.insert(table_id, state);
+
         Ok(())
     }
 }

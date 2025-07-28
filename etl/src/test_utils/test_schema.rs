@@ -1,4 +1,4 @@
-use postgres::schema::{ColumnSchema, Oid, TableName, TableSchema};
+use postgres::schema::{ColumnSchema, TableId, TableName, TableSchema};
 use postgres::tokio::test_utils::{PgDatabase, id_column_schema};
 use std::ops::RangeInclusive;
 use tokio_postgres::types::{PgLsn, Type};
@@ -188,7 +188,7 @@ pub async fn insert_mock_data(
 
 pub async fn get_users_age_sum_from_rows<D>(
     destination: &TestDestinationWrapper<D>,
-    table_id: Oid,
+    table_id: TableId,
 ) -> i32 {
     let mut actual_sum = 0;
 
@@ -250,7 +250,7 @@ pub fn events_equal_excluding_fields(left: &Event, right: &Event) -> bool {
 
 pub fn build_expected_users_inserts(
     mut starting_id: i64,
-    users_table_id: Oid,
+    users_table_id: TableId,
     expected_rows: Vec<(&str, i32)>,
 ) -> Vec<Event> {
     let mut events = Vec::new();
@@ -277,7 +277,7 @@ pub fn build_expected_users_inserts(
 
 pub fn build_expected_orders_inserts(
     mut starting_id: i64,
-    orders_table_id: Oid,
+    orders_table_id: TableId,
     expected_rows: Vec<&str>,
 ) -> Vec<Event> {
     let mut events = Vec::new();

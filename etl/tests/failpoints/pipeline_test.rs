@@ -1,9 +1,11 @@
 use etl::destination::memory::MemoryDestination;
-use etl::failpoints::START_TABLE_SYNC_AFTER_DATA_SYNC;
-use etl::pipeline::{PipelineError, PipelineId};
+use etl::error::ErrorKind;
+use etl::failpoints::{
+    START_TABLE_SYNC_AFTER_DATA_SYNC_ERROR, START_TABLE_SYNC_AFTER_DATA_SYNC_PANIC,
+};
+use etl::pipeline::PipelineId;
 use etl::state::store::notify::NotifyingStateStore;
 use etl::state::table::TableReplicationPhaseType;
-use etl::workers::base::WorkerWaitError;
 use fail::FailScenario;
 use rand::random;
 use telemetry::init_test_tracing;
@@ -11,17 +13,14 @@ use telemetry::init_test_tracing;
 use etl::test_utils::database::spawn_database;
 use etl::test_utils::pipeline::create_pipeline;
 use etl::test_utils::test_destination_wrapper::TestDestinationWrapper;
-use etl::test_utils::test_schema::{TableSelection, setup_test_database_schema};
+use etl::test_utils::test_schema::{TableSelection, insert_mock_data, setup_test_database_schema};
 
-/*
-Tests that we want to add:
-TBD
- */
+// TODO: add more tests with fault injection.
 
 #[tokio::test(flavor = "multi_thread")]
 async fn pipeline_handles_table_sync_worker_panic_during_data_sync() {
     let _scenario = FailScenario::setup();
-    fail::cfg(START_TABLE_SYNC_AFTER_DATA_SYNC, "panic").unwrap();
+    fail::cfg(START_TABLE_SYNC_AFTER_DATA_SYNC_PANIC, "panic").unwrap();
 
     init_test_tracing();
 
@@ -61,25 +60,16 @@ async fn pipeline_handles_table_sync_worker_panic_during_data_sync() {
     orders_state_notify.notified().await;
 
     // We stop and inspect errors.
-    match pipeline.shutdown_and_wait().await.err().unwrap() {
-        PipelineError::OneOrMoreWorkersFailed(err) => {
-            assert!(matches!(
-                err.0.as_slice(),
-                [
-                    WorkerWaitError::WorkerPanicked(_),
-                    WorkerWaitError::WorkerPanicked(_)
-                ]
-            ));
-        }
-        other => panic!("Expected TableSyncWorkersFailed error, but got: {other:?}"),
-    }
+    let err = pipeline.shutdown_and_wait().await.err().unwrap();
+    assert_eq!(err.kinds().len(), 2);
+    assert_eq!(err.kinds()[0], ErrorKind::TableSyncWorkerPanic);
+    assert_eq!(err.kinds()[1], ErrorKind::TableSyncWorkerPanic);
 }
 
-// TODO: inject the failure via fail-rs.
-#[ignore]
 #[tokio::test(flavor = "multi_thread")]
-async fn pipeline_handles_table_sync_worker_error() {
+async fn pipeline_handles_table_sync_worker_error_during_data_sync() {
     let _scenario = FailScenario::setup();
+    fail::cfg(START_TABLE_SYNC_AFTER_DATA_SYNC_ERROR, "return").unwrap();
 
     init_test_tracing();
 
@@ -99,7 +89,7 @@ async fn pipeline_handles_table_sync_worker_error() {
         destination.clone(),
     );
 
-    // Register notifications for when table sync is started.
+    // We register the interest in waiting for both table syncs to have started.
     let users_state_notify = state_store
         .notify_on_table_state(
             database_schema.users_schema().id,
@@ -119,30 +109,32 @@ async fn pipeline_handles_table_sync_worker_error() {
     orders_state_notify.notified().await;
 
     // We stop and inspect errors.
-    match pipeline.shutdown_and_wait().await.err().unwrap() {
-        PipelineError::OneOrMoreWorkersFailed(err) => {
-            assert!(matches!(
-                err.0.as_slice(),
-                [
-                    WorkerWaitError::WorkerPanicked(_),
-                    WorkerWaitError::WorkerPanicked(_)
-                ]
-            ));
-        }
-        other => panic!("Expected TableSyncWorkersFailed error, but got: {other:?}"),
-    }
+    let err = pipeline.shutdown_and_wait().await.err().unwrap();
+    assert_eq!(err.kinds().len(), 2);
+    assert_eq!(err.kinds()[0], ErrorKind::Unknown);
+    assert_eq!(err.kinds()[1], ErrorKind::Unknown);
 }
 
-// TODO: inject the failure via fail-rs.
-#[ignore]
 #[tokio::test(flavor = "multi_thread")]
-async fn table_schema_copy_retries_after_data_sync_failure() {
+async fn table_copy_is_consistent_after_data_sync_threw_an_error() {
     let _scenario = FailScenario::setup();
+    fail::cfg(START_TABLE_SYNC_AFTER_DATA_SYNC_ERROR, "return").unwrap();
 
     init_test_tracing();
 
-    let database = spawn_database().await;
+    let mut database = spawn_database().await;
     let database_schema = setup_test_database_schema(&database, TableSelection::Both).await;
+
+    // Insert initial test data.
+    let rows_inserted = 10;
+    insert_mock_data(
+        &mut database,
+        &database_schema.users_schema().name,
+        &database_schema.orders_schema().name,
+        1..=rows_inserted,
+        false,
+    )
+    .await;
 
     let state_store = NotifyingStateStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
@@ -176,11 +168,11 @@ async fn table_schema_copy_retries_after_data_sync_failure() {
     users_state_notify.notified().await;
     orders_state_notify.notified().await;
 
-    // This result could be an error or not based on if we manage to shut down before the error is
-    // thrown. This is a shortcoming of this fault injection implementation, we have plans to fix
-    // this in future PRs.
-    // TODO: assert error once better failure injection is implemented.
-    let _ = pipeline.shutdown_and_wait().await;
+    let err = pipeline.shutdown_and_wait().await.err().unwrap();
+    assert_eq!(err.kinds().len(), 2);
+
+    // We disable the failpoint.
+    fail::remove(START_TABLE_SYNC_AFTER_DATA_SYNC_ERROR);
 
     // Restart pipeline with normal state store to verify recovery.
     let mut pipeline = create_pipeline(
@@ -198,13 +190,13 @@ async fn table_schema_copy_retries_after_data_sync_failure() {
     let users_state_notify = state_store
         .notify_on_table_state(
             database_schema.users_schema().id,
-            TableReplicationPhaseType::FinishedCopy,
+            TableReplicationPhaseType::SyncDone,
         )
         .await;
     let orders_state_notify = state_store
         .notify_on_table_state(
             database_schema.orders_schema().id,
-            TableReplicationPhaseType::FinishedCopy,
+            TableReplicationPhaseType::SyncDone,
         )
         .await;
 
@@ -216,23 +208,12 @@ async fn table_schema_copy_retries_after_data_sync_failure() {
 
     pipeline.shutdown_and_wait().await.unwrap();
 
-    // Verify table replication states.
-    let table_replication_states = state_store.get_table_replication_states().await;
-    assert_eq!(table_replication_states.len(), 2);
-    assert_eq!(
-        table_replication_states
-            .get(&database_schema.users_schema().id)
-            .unwrap()
-            .as_type(),
-        TableReplicationPhaseType::FinishedCopy
-    );
-    assert_eq!(
-        table_replication_states
-            .get(&database_schema.orders_schema().id)
-            .unwrap()
-            .as_type(),
-        TableReplicationPhaseType::FinishedCopy
-    );
+    // Verify copied data.
+    let table_rows = destination.get_table_rows().await;
+    let users_table_rows = table_rows.get(&database_schema.users_schema().id).unwrap();
+    let orders_table_rows = table_rows.get(&database_schema.orders_schema().id).unwrap();
+    assert_eq!(users_table_rows.len(), rows_inserted);
+    assert_eq!(orders_table_rows.len(), rows_inserted);
 
     // Verify table schemas were correctly stored.
     let table_schemas = destination.get_table_schemas().await;

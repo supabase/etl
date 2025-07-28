@@ -7,7 +7,8 @@ use tokio::sync::{Notify, RwLock};
 
 use crate::conversions::event::{Event, EventType};
 use crate::conversions::table_row::TableRow;
-use crate::destination::base::{Destination, DestinationError};
+use crate::destination::base::Destination;
+use crate::error::EtlResult;
 use crate::schema::cache::SchemaCache;
 use crate::test_utils::event::check_events_count;
 
@@ -156,7 +157,7 @@ impl<D> TestDestinationWrapper<D> {
 }
 
 impl<D: Destination + Send + Sync + Clone> Destination for TestDestinationWrapper<D> {
-    async fn inject(&self, schema_cache: SchemaCache) -> Result<(), DestinationError> {
+    async fn inject(&self, schema_cache: SchemaCache) -> EtlResult<()> {
         let destination = {
             let inner = self.inner.read().await;
             inner.wrapped_destination.clone()
@@ -165,7 +166,7 @@ impl<D: Destination + Send + Sync + Clone> Destination for TestDestinationWrappe
         destination.inject(schema_cache).await
     }
 
-    async fn write_table_schema(&self, table_schema: TableSchema) -> Result<(), DestinationError> {
+    async fn write_table_schema(&self, table_schema: TableSchema) -> EtlResult<()> {
         let destination = {
             let inner = self.inner.read().await;
             inner.wrapped_destination.clone()
@@ -185,7 +186,7 @@ impl<D: Destination + Send + Sync + Clone> Destination for TestDestinationWrappe
         result
     }
 
-    async fn load_table_schemas(&self) -> Result<Vec<TableSchema>, DestinationError> {
+    async fn load_table_schemas(&self) -> EtlResult<Vec<TableSchema>> {
         let destination = {
             let inner = self.inner.read().await;
             inner.wrapped_destination.clone()
@@ -198,7 +199,7 @@ impl<D: Destination + Send + Sync + Clone> Destination for TestDestinationWrappe
         &self,
         table_id: TableId,
         table_rows: Vec<TableRow>,
-    ) -> Result<(), DestinationError> {
+    ) -> EtlResult<()> {
         let destination = {
             let inner = self.inner.read().await;
             inner.wrapped_destination.clone()
@@ -224,7 +225,7 @@ impl<D: Destination + Send + Sync + Clone> Destination for TestDestinationWrappe
         result
     }
 
-    async fn write_events(&self, events: Vec<Event>) -> Result<(), DestinationError> {
+    async fn write_events(&self, events: Vec<Event>) -> EtlResult<()> {
         let destination = {
             let inner = self.inner.read().await;
             inner.wrapped_destination.clone()

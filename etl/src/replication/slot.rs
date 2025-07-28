@@ -1,5 +1,6 @@
-use thiserror::Error;
-
+use crate::bail;
+use crate::error::EtlError;
+use crate::error::{ErrorKind, EtlResult};
 use crate::pipeline::PipelineId;
 use crate::workers::base::WorkerType;
 
@@ -10,20 +11,8 @@ const MAX_SLOT_NAME_LENGTH: usize = 63;
 const APPLY_WORKER_PREFIX: &str = "supabase_etl_apply";
 const TABLE_SYNC_PREFIX: &str = "supabase_etl_table_sync";
 
-/// Error types that can occur when working with replication slots
-#[derive(Debug, Error)]
-pub enum SlotError {
-    #[error(
-        "Replication slot name exceeds maximum length of {MAX_SLOT_NAME_LENGTH} characters: name must be shorter"
-    )]
-    NameTooLong,
-}
-
 /// Generates a replication slot name.
-pub fn get_slot_name(
-    pipeline_id: PipelineId,
-    worker_type: WorkerType,
-) -> Result<String, SlotError> {
+pub fn get_slot_name(pipeline_id: PipelineId, worker_type: WorkerType) -> EtlResult<String> {
     let slot_name = match worker_type {
         WorkerType::Apply => {
             format!("{APPLY_WORKER_PREFIX}_{pipeline_id}")
@@ -34,7 +23,10 @@ pub fn get_slot_name(
     };
 
     if slot_name.len() > MAX_SLOT_NAME_LENGTH {
-        return Err(SlotError::NameTooLong);
+        bail!(
+            ErrorKind::ValidationError,
+            "Invalid slot name length: {slot_name}"
+        );
     }
 
     Ok(slot_name)
@@ -43,6 +35,7 @@ pub fn get_slot_name(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use postgres::schema::TableId;
 
     #[test]
     fn test_apply_worker_slot_name() {
@@ -55,7 +48,13 @@ mod tests {
     #[test]
     fn test_table_sync_slot_name() {
         let pipeline_id = 1;
-        let result = get_slot_name(pipeline_id, WorkerType::TableSync { table_id: 123 }).unwrap();
+        let result = get_slot_name(
+            pipeline_id,
+            WorkerType::TableSync {
+                table_id: TableId::new(123),
+            },
+        )
+        .unwrap();
         assert!(result.starts_with(TABLE_SYNC_PREFIX));
         assert!(result.len() <= MAX_SLOT_NAME_LENGTH);
     }

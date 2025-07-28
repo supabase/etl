@@ -47,7 +47,7 @@ pub async fn get_table_name_from_oid(
     ";
 
     let row = sqlx::query(query)
-        .bind(table_id as i64)
+        .bind(table_id.into_inner() as i64)
         .fetch_optional(pool)
         .await?;
 

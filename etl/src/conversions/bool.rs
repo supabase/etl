@@ -1,17 +1,17 @@
-use thiserror::Error;
+use crate::bail;
+use crate::error::EtlResult;
+use crate::error::{ErrorKind, EtlError};
 
-#[derive(Debug, Error)]
-pub enum ParseBoolError {
-    #[error("invalid input value: {0}")]
-    InvalidInput(String),
-}
-
-pub fn parse_bool(s: &str) -> Result<bool, ParseBoolError> {
+pub fn parse_bool(s: &str) -> EtlResult<bool> {
     if s == "t" {
         Ok(true)
     } else if s == "f" {
         Ok(false)
     } else {
-        Err(ParseBoolError::InvalidInput(s.to_string()))
+        bail!(
+            ErrorKind::InvalidData,
+            "Invalid boolean value",
+            format!("Boolean value must be 't' or 'f' (received: {s})")
+        );
     }
 }

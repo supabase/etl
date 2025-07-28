@@ -1,13 +1,11 @@
+use super::Cell;
+use crate::bail;
+use crate::conversions::text::TextFormatConverter;
+use crate::error::EtlError;
+use crate::error::{ErrorKind, EtlResult};
 use core::str;
 use postgres::schema::ColumnSchema;
-use std::str::Utf8Error;
-use thiserror::Error;
-use tokio_postgres::types::Type;
 use tracing::error;
-
-use crate::conversions::text::TextFormatConverter;
-
-use super::{Cell, text::FromTextError};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct TableRow {
@@ -64,32 +62,11 @@ impl prost::Message for TableRow {
     }
 }
 
-#[derive(Debug, Error)]
-pub enum TableRowConversionError {
-    #[error("unsupported type {0}")]
-    UnsupportedType(Type),
-
-    #[error("invalid string: {0}")]
-    InvalidString(#[from] Utf8Error),
-
-    #[error("mismatch in num of columns in schema and row")]
-    NumColsMismatch,
-
-    #[error("unterminated row")]
-    UnterminatedRow,
-
-    #[error("invalid value: {0}")]
-    InvalidValue(#[from] FromTextError),
-}
-
 pub struct TableRowConverter;
 
 impl TableRowConverter {
     // parses text produced by this code in Postgres: https://github.com/postgres/postgres/blob/263a3f5f7f508167dbeafc2aefd5835b41d77481/src/backend/commands/copyto.c#L988-L1134
-    pub fn try_from(
-        row: &[u8],
-        column_schemas: &[ColumnSchema],
-    ) -> Result<TableRow, TableRowConversionError> {
+    pub fn try_from(row: &[u8], column_schemas: &[ColumnSchema]) -> EtlResult<TableRow> {
         let mut values = Vec::with_capacity(column_schemas.len());
 
         let row_str = str::from_utf8(row)?;
@@ -139,9 +116,10 @@ impl TableRowConverter {
                     },
                     None => {
                         if !row_terminated {
-                            return Err(TableRowConversionError::UnterminatedRow);
+                            bail!(ErrorKind::ConversionError, "The row is not terminated");
                         }
                         done = true;
+
                         break;
                     }
                 }
@@ -149,7 +127,10 @@ impl TableRowConverter {
 
             if !done {
                 let Some(column_schema) = column_schemas_iter.next() else {
-                    return Err(TableRowConversionError::NumColsMismatch);
+                    bail!(
+                        ErrorKind::ConversionError,
+                        "The number of columns in the schema and row is mismatched"
+                    );
                 };
 
                 let value = if val_str == "\\N" {
@@ -164,7 +145,7 @@ impl TableRowConverter {
                                 "error parsing column `{}` of type `{}` from text `{val_str}`",
                                 column_schema.name, column_schema.typ
                             );
-                            return Err(e.into());
+                            return Err(e);
                         }
                     }
                 };

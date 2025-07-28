@@ -5,7 +5,8 @@ use tracing::info;
 
 use crate::conversions::event::Event;
 use crate::conversions::table_row::TableRow;
-use crate::destination::base::{Destination, DestinationError};
+use crate::destination::base::Destination;
+use crate::error::EtlResult;
 
 #[derive(Debug)]
 struct Inner {
@@ -40,7 +41,7 @@ impl Default for MemoryDestination {
 }
 
 impl Destination for MemoryDestination {
-    async fn write_table_schema(&self, table_schema: TableSchema) -> Result<(), DestinationError> {
+    async fn write_table_schema(&self, table_schema: TableSchema) -> EtlResult<()> {
         let mut inner = self.inner.lock().await;
         info!("writing table schema:");
         info!("{:?}", table_schema);
@@ -49,7 +50,7 @@ impl Destination for MemoryDestination {
         Ok(())
     }
 
-    async fn load_table_schemas(&self) -> Result<Vec<TableSchema>, DestinationError> {
+    async fn load_table_schemas(&self) -> EtlResult<Vec<TableSchema>> {
         let inner = self.inner.lock().await;
         let schemas = inner.table_schemas.to_vec();
         info!("loaded {} table schemas:", schemas.len());
@@ -62,7 +63,7 @@ impl Destination for MemoryDestination {
         &self,
         table_id: TableId,
         table_rows: Vec<TableRow>,
-    ) -> Result<(), DestinationError> {
+    ) -> EtlResult<()> {
         let mut inner = self.inner.lock().await;
         info!("writing a batch of {} table rows:", table_rows.len());
         for table_row in &table_rows {
@@ -73,7 +74,7 @@ impl Destination for MemoryDestination {
         Ok(())
     }
 
-    async fn write_events(&self, events: Vec<Event>) -> Result<(), DestinationError> {
+    async fn write_events(&self, events: Vec<Event>) -> EtlResult<()> {
         let mut inner = self.inner.lock().await;
         info!("writing a batch of {} events:", events.len());
         for event in &events {

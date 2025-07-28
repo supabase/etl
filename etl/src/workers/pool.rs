@@ -8,11 +8,12 @@ use tracing::{debug, warn};
 
 use crate::concurrency::future::ReactiveFutureCallback;
 use crate::destination::base::Destination;
+use crate::error::EtlError;
+use crate::error::{ErrorKind, EtlResult};
+use crate::etl_error;
 use crate::state::store::base::StateStore;
-use crate::workers::base::{Worker, WorkerHandle, WorkerWaitError, WorkerWaitErrors};
-use crate::workers::table_sync::{
-    TableSyncWorker, TableSyncWorkerError, TableSyncWorkerHandle, TableSyncWorkerState,
-};
+use crate::workers::base::{Worker, WorkerHandle};
+use crate::workers::table_sync::{TableSyncWorker, TableSyncWorkerHandle, TableSyncWorkerState};
 
 #[derive(Debug)]
 pub enum TableSyncWorkerInactiveReason {
@@ -43,10 +44,7 @@ impl TableSyncWorkerPoolInner {
         }
     }
 
-    pub async fn start_worker<S, D>(
-        &mut self,
-        worker: TableSyncWorker<S, D>,
-    ) -> Result<bool, TableSyncWorkerError>
+    pub async fn start_worker<S, D>(&mut self, worker: TableSyncWorker<S, D>) -> EtlResult<bool>
     where
         S: StateStore + Clone + Send + Sync + 'static,
         D: Destination + Clone + Send + Sync + 'static,
@@ -95,7 +93,7 @@ impl TableSyncWorkerPoolInner {
         }
     }
 
-    pub async fn wait_all(&mut self) -> Result<Option<Arc<Notify>>, WorkerWaitErrors> {
+    pub async fn wait_all(&mut self) -> EtlResult<Option<Arc<Notify>>> {
         // If there are active workers, we return the notify, signaling that not all of them are
         // ready.
         //
@@ -124,16 +122,20 @@ impl TableSyncWorkerPoolInner {
                 // This should not happen since right now the `ReactiveFuture` is configured to
                 // re-propagate the error after marking a table sync worker as finished.
                 if let TableSyncWorkerInactiveReason::Errored(err) = finish {
-                    errors.push(WorkerWaitError::WorkerSilentlyFailed(err));
+                    errors.push(etl_error!(
+                        ErrorKind::TableSyncWorkerCaughtError,
+                        "An error occurred in a table sync worker but was not propagated",
+                        err
+                    ));
                 }
             }
         }
 
-        if errors.is_empty() {
-            Ok(None)
-        } else {
-            Err(WorkerWaitErrors(errors))
+        if !errors.is_empty() {
+            return Err(errors.into());
         }
+
+        Ok(None)
     }
 }
 
@@ -163,7 +165,7 @@ impl TableSyncWorkerPool {
         self.inner.clone()
     }
 
-    pub async fn wait_all(&self) -> Result<(), WorkerWaitErrors> {
+    pub async fn wait_all(&self) -> EtlResult<()> {
         loop {
             // We try first to wait for all workers to be finished, in case there are still active
             // workers, we get back a `Notify` which we will use to try again once new workers reported

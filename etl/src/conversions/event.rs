@@ -1,46 +1,18 @@
-use crate::conversions::Cell;
-use crate::conversions::table_row::TableRow;
-use crate::conversions::text::{FromTextError, TextFormatConverter};
-use crate::schema::cache::SchemaCache;
-use crate::state::store::base::StateStoreError;
 use core::str;
 use postgres::schema::{ColumnSchema, TableId, TableName, TableSchema};
 use postgres::types::convert_type_oid_to_type;
 use postgres_replication::protocol;
 use postgres_replication::protocol::LogicalReplicationMessage;
-use std::{fmt, io, str::Utf8Error};
-use thiserror::Error;
+use std::fmt;
 use tokio_postgres::types::PgLsn;
 
-#[derive(Debug, Error)]
-pub enum EventConversionError {
-    #[error("An unknown replication message type was encountered")]
-    UnknownReplicationMessage,
-
-    #[error("Binary format is not supported for data conversion")]
-    BinaryFormatNotSupported,
-
-    #[error("The tuple data was not found for column {0} at index {0}")]
-    TupleDataNotFound(String, usize),
-
-    #[error("Missing tuple data in delete body")]
-    MissingTupleInDeleteBody,
-
-    #[error("Table schema not found for table id {0}")]
-    MissingSchema(TableId),
-
-    #[error("Error converting from bytes: {0}")]
-    FromBytes(#[from] FromTextError),
-
-    #[error("Invalid string value encountered: {0}")]
-    InvalidStr(#[from] Utf8Error),
-
-    #[error("IO error encountered: {0}")]
-    Io(#[from] io::Error),
-
-    #[error("An error occurred in the state store: {0}")]
-    StateStore(#[from] StateStoreError),
-}
+use crate::conversions::Cell;
+use crate::conversions::table_row::TableRow;
+use crate::conversions::text::TextFormatConverter;
+use crate::error::EtlError;
+use crate::error::{ErrorKind, EtlResult};
+use crate::schema::cache::SchemaCache;
+use crate::{bail, etl_error};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct BeginEvent {
@@ -102,7 +74,7 @@ impl RelationEvent {
         start_lsn: PgLsn,
         commit_lsn: PgLsn,
         relation_body: &protocol::RelationBody,
-    ) -> Result<Self, EventConversionError> {
+    ) -> EtlResult<Self> {
         let table_name = TableName::new(
             relation_body.namespace()?.to_string(),
             relation_body.name()?.to_string(),
@@ -112,7 +84,11 @@ impl RelationEvent {
             .iter()
             .map(Self::build_column_schema)
             .collect::<Result<Vec<ColumnSchema>, _>>()?;
-        let table_schema = TableSchema::new(relation_body.rel_id(), table_name, column_schemas);
+        let table_schema = TableSchema::new(
+            TableId::new(relation_body.rel_id()),
+            table_name,
+            column_schemas,
+        );
 
         Ok(Self {
             start_lsn,
@@ -121,9 +97,7 @@ impl RelationEvent {
         })
     }
 
-    fn build_column_schema(
-        column: &protocol::Column,
-    ) -> Result<ColumnSchema, EventConversionError> {
+    fn build_column_schema(column: &protocol::Column) -> EtlResult<ColumnSchema> {
         Ok(ColumnSchema::new(
             column.name()?.to_string(),
             convert_type_oid_to_type(column.type_id() as u32),
@@ -264,31 +238,34 @@ impl From<Event> for EventType {
     }
 }
 
-async fn get_table_schema(
-    schema_cache: &SchemaCache,
-    table_id: TableId,
-) -> Result<TableSchema, EventConversionError> {
+async fn get_table_schema(schema_cache: &SchemaCache, table_id: TableId) -> EtlResult<TableSchema> {
     schema_cache
         .get_table_schema(&table_id)
         .await
-        .ok_or(EventConversionError::MissingSchema(table_id))
+        .ok_or_else(|| {
+            etl_error!(
+                ErrorKind::MissingTableSchema,
+                "Table not found in the schema cache",
+                format!("The table schema for table {table_id} was not found in the cache")
+            )
+        })
 }
 
 fn convert_tuple_to_row(
     column_schemas: &[ColumnSchema],
     tuple_data: &[protocol::TupleData],
     use_default_for_missing_cols: bool,
-) -> Result<TableRow, EventConversionError> {
+) -> EtlResult<TableRow> {
     let mut values = Vec::with_capacity(column_schemas.len());
 
     for (i, column_schema) in column_schemas.iter().enumerate() {
         // We are expecting that for each column, there is corresponding tuple data, even for null
         // values.
         let Some(tuple_data) = &tuple_data.get(i) else {
-            return Err(EventConversionError::TupleDataNotFound(
-                column_schema.name.clone(),
-                i,
-            ));
+            bail!(
+                ErrorKind::ConversionError,
+                "Tuple data does not contain data at the specified index"
+            );
         };
 
         let cell = match tuple_data {
@@ -310,7 +287,10 @@ fn convert_tuple_to_row(
                 TextFormatConverter::default_value(&column_schema.typ)
             }
             protocol::TupleData::Binary(_) => {
-                return Err(EventConversionError::BinaryFormatNotSupported);
+                bail!(
+                    ErrorKind::ConversionError,
+                    "Binary format is not supported in tuple data"
+                );
             }
             protocol::TupleData::Text(bytes) => {
                 let str = str::from_utf8(&bytes[..])?;
@@ -329,9 +309,9 @@ async fn convert_insert_to_event(
     start_lsn: PgLsn,
     commit_lsn: PgLsn,
     insert_body: &protocol::InsertBody,
-) -> Result<InsertEvent, EventConversionError> {
+) -> EtlResult<InsertEvent> {
     let table_id = insert_body.rel_id();
-    let table_schema = get_table_schema(schema_cache, table_id).await?;
+    let table_schema = get_table_schema(schema_cache, TableId::new(table_id)).await?;
 
     let table_row = convert_tuple_to_row(
         &table_schema.column_schemas,
@@ -342,7 +322,7 @@ async fn convert_insert_to_event(
     Ok(InsertEvent {
         start_lsn,
         commit_lsn,
-        table_id,
+        table_id: TableId::new(table_id),
         table_row,
     })
 }
@@ -352,9 +332,9 @@ async fn convert_update_to_event(
     start_lsn: PgLsn,
     commit_lsn: PgLsn,
     update_body: &protocol::UpdateBody,
-) -> Result<UpdateEvent, EventConversionError> {
+) -> EtlResult<UpdateEvent> {
     let table_id = update_body.rel_id();
-    let table_schema = get_table_schema(schema_cache, table_id).await?;
+    let table_schema = get_table_schema(schema_cache, TableId::new(table_id)).await?;
 
     let table_row = convert_tuple_to_row(
         &table_schema.column_schemas,
@@ -379,7 +359,7 @@ async fn convert_update_to_event(
     Ok(UpdateEvent {
         start_lsn,
         commit_lsn,
-        table_id,
+        table_id: TableId::new(table_id),
         table_row,
         old_table_row,
     })
@@ -390,9 +370,9 @@ async fn convert_delete_to_event(
     start_lsn: PgLsn,
     commit_lsn: PgLsn,
     delete_body: &protocol::DeleteBody,
-) -> Result<DeleteEvent, EventConversionError> {
+) -> EtlResult<DeleteEvent> {
     let table_id = delete_body.rel_id();
-    let table_schema = get_table_schema(schema_cache, table_id).await?;
+    let table_schema = get_table_schema(schema_cache, TableId::new(table_id)).await?;
 
     // We try to extract the old tuple by either taking the entire old tuple or the key of the old
     // tuple.
@@ -411,7 +391,7 @@ async fn convert_delete_to_event(
     Ok(DeleteEvent {
         start_lsn,
         commit_lsn,
-        table_id,
+        table_id: TableId::new(table_id),
         old_table_row,
     })
 }
@@ -421,7 +401,7 @@ pub async fn convert_message_to_event(
     start_lsn: PgLsn,
     commit_lsn: PgLsn,
     message: &LogicalReplicationMessage,
-) -> Result<Event, EventConversionError> {
+) -> EtlResult<Event> {
     match message {
         LogicalReplicationMessage::Begin(begin_body) => Ok(Event::Begin(
             BeginEvent::from_protocol(start_lsn, commit_lsn, begin_body),
@@ -453,6 +433,10 @@ pub async fn convert_message_to_event(
         LogicalReplicationMessage::Origin(_) | LogicalReplicationMessage::Type(_) => {
             Ok(Event::Unsupported)
         }
-        _ => Err(EventConversionError::UnknownReplicationMessage),
+        _ => bail!(
+            ErrorKind::ConversionError,
+            "Replication message not supported",
+            format!("The replication message {:?} is not supported", message)
+        ),
     }
 }

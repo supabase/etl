@@ -1,5 +1,5 @@
+use crate::error::EtlResult;
 use futures::StreamExt;
-use gcp_bigquery_client::google::cloud::bigquery::storage::v1::RowError;
 use gcp_bigquery_client::storage::{ColumnMode, StorageApi};
 use gcp_bigquery_client::yup_oauth2::parse_service_account_key;
 use gcp_bigquery_client::{
@@ -10,7 +10,6 @@ use gcp_bigquery_client::{
 };
 use postgres::schema::ColumnSchema;
 use std::fmt;
-use thiserror::Error;
 use tokio_postgres::types::Type;
 use tracing::info;
 
@@ -52,32 +51,6 @@ impl fmt::Display for BigQueryOperationType {
     }
 }
 
-/// Collection of row errors returned from BigQuery streaming operations.
-#[derive(Debug, Error)]
-pub struct RowErrors(pub Vec<RowError>);
-
-impl fmt::Display for RowErrors {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if !self.0.is_empty() {
-            for row_error in self.0.iter() {
-                writeln!(f, "{row_error:?}")?;
-            }
-        }
-
-        Ok(())
-    }
-}
-
-/// Errors that can occur when interacting with BigQuery.
-#[derive(Debug, Error)]
-pub enum BigQueryClientError {
-    #[error("An error occurred with BigQuery: {0}")]
-    BigQuery(#[from] BQError),
-
-    #[error("One or multiple errors: {0}")]
-    AppendRowErrors(#[from] RowErrors),
-}
-
 /// A client for interacting with Google BigQuery.
 ///
 /// This client provides methods for managing tables, inserting data,
@@ -95,7 +68,7 @@ impl BigQueryClient {
     pub async fn new_with_key_path(
         project_id: String,
         sa_key_path: &str,
-    ) -> Result<BigQueryClient, BigQueryClientError> {
+    ) -> EtlResult<BigQueryClient> {
         let client = Client::from_service_account_key_file(sa_key_path).await?;
 
         Ok(BigQueryClient { project_id, client })
@@ -105,10 +78,7 @@ impl BigQueryClient {
     ///
     /// Parses the provided service account key string to authenticate with the
     /// BigQuery API.
-    pub async fn new_with_key(
-        project_id: String,
-        sa_key: &str,
-    ) -> Result<BigQueryClient, BigQueryClientError> {
+    pub async fn new_with_key(project_id: String, sa_key: &str) -> EtlResult<BigQueryClient> {
         let sa_key = parse_service_account_key(sa_key).map_err(BQError::from)?;
         let client = Client::from_service_account_key(sa_key, false).await?;
 
@@ -130,7 +100,7 @@ impl BigQueryClient {
         table_id: &str,
         column_schemas: &[ColumnSchema],
         max_staleness_mins: Option<u16>,
-    ) -> Result<bool, BigQueryClientError> {
+    ) -> EtlResult<bool> {
         if self.table_exists(dataset_id, table_id).await? {
             return Ok(false);
         }
@@ -148,7 +118,7 @@ impl BigQueryClient {
         table_id: &str,
         column_schemas: &[ColumnSchema],
         max_staleness_mins: Option<u16>,
-    ) -> Result<(), BigQueryClientError> {
+    ) -> EtlResult<()> {
         let full_table_name = self.full_table_name(dataset_id, table_id);
 
         let columns_spec = Self::create_columns_spec(column_schemas);
@@ -168,11 +138,7 @@ impl BigQueryClient {
     }
 
     /// Truncates a table in a BigQuery dataset.
-    pub async fn truncate_table(
-        &self,
-        dataset_id: &str,
-        table_id: &str,
-    ) -> Result<(), BigQueryClientError> {
+    pub async fn truncate_table(&self, dataset_id: &str, table_id: &str) -> EtlResult<()> {
         let full_table_name = self.full_table_name(dataset_id, table_id);
 
         info!("Truncating table {full_table_name} in BigQuery");
@@ -189,11 +155,7 @@ impl BigQueryClient {
     /// # Panics
     ///
     /// Panics if the query result does not contain the expected `table_exists` column.
-    pub async fn table_exists(
-        &self,
-        dataset_id: &str,
-        table_id: &str,
-    ) -> Result<bool, BigQueryClientError> {
+    pub async fn table_exists(&self, dataset_id: &str, table_id: &str) -> EtlResult<bool> {
         let table = self
             .client
             .table()
@@ -216,7 +178,7 @@ impl BigQueryClient {
         table_id: String,
         table_descriptor: &TableDescriptor,
         table_rows: Vec<TableRow>,
-    ) -> Result<(), BigQueryClientError> {
+    ) -> EtlResult<()> {
         // We create a slice on table rows, which will be updated while the streaming progresses.
         //
         // Using a slice allows us to deallocate the vector only at the end of streaming, which leads
@@ -242,9 +204,7 @@ impl BigQueryClient {
             if let Some(append_rows_response) = append_rows_stream.next().await {
                 let append_rows_response = append_rows_response.map_err(BQError::from)?;
                 if !append_rows_response.row_errors.is_empty() {
-                    return Err(BigQueryClientError::AppendRowErrors(RowErrors(
-                        append_rows_response.row_errors,
-                    )));
+                    return Err(append_rows_response.row_errors.into());
                 }
             }
 
@@ -258,7 +218,7 @@ impl BigQueryClient {
     }
 
     /// Executes an SQL query and returns the result set.
-    pub async fn query(&self, request: QueryRequest) -> Result<ResultSet, BigQueryClientError> {
+    pub async fn query(&self, request: QueryRequest) -> EtlResult<ResultSet> {
         let query_response = self.client.job().query(&self.project_id, request).await?;
 
         Ok(ResultSet::new_from_query_response(query_response))

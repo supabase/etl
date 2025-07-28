@@ -2,55 +2,32 @@ use config::shared::PipelineConfig;
 #[cfg(feature = "failpoints")]
 use fail::fail_point;
 use futures::StreamExt;
-use postgres::schema::{TableId, TableName};
+use postgres::schema::TableId;
 use std::sync::Arc;
-use thiserror::Error;
 use tokio::pin;
 use tokio_postgres::types::PgLsn;
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 
+use crate::bail;
 use crate::concurrency::shutdown::{ShutdownResult, ShutdownRx};
 use crate::concurrency::signal::SignalTx;
 use crate::concurrency::stream::BatchStream;
-use crate::destination::base::{Destination, DestinationError};
-#[cfg(feature = "failpoints")]
-use crate::failpoints::START_TABLE_SYNC_AFTER_DATA_SYNC;
+use crate::destination::base::Destination;
+use crate::error::{ErrorKind, EtlError, EtlResult};
 use crate::pipeline::PipelineId;
-use crate::replication::client::{PgReplicationClient, PgReplicationError};
-use crate::replication::slot::{SlotError, get_slot_name};
-use crate::replication::stream::{TableCopyStream, TableCopyStreamError};
+use crate::replication::client::PgReplicationClient;
+use crate::replication::slot::get_slot_name;
+use crate::replication::stream::TableCopyStream;
 use crate::schema::cache::SchemaCache;
-use crate::state::store::base::{StateStore, StateStoreError};
+use crate::state::store::base::StateStore;
 use crate::state::table::{TableReplicationPhase, TableReplicationPhaseType};
 use crate::workers::base::WorkerType;
-use crate::workers::table_sync::{TableSyncWorkerState, TableSyncWorkerStateError};
-
-#[derive(Debug, Error)]
-pub enum TableSyncError {
-    #[error("Invalid replication phase '{0}': expected Init, DataSync, or FinishedCopy")]
-    InvalidPhase(TableReplicationPhaseType),
-
-    #[error("Invalid replication slot name: {0}")]
-    InvalidSlotName(#[from] SlotError),
-
-    #[error("PostgreSQL replication operation failed: {0}")]
-    PgReplication(#[from] PgReplicationError),
-
-    #[error("An error occurred while interacting with the table sync worker state: {0}")]
-    TableSyncWorkerState(#[from] TableSyncWorkerStateError),
-
-    #[error("An error occurred while writing to the destination: {0}")]
-    Destination(#[from] DestinationError),
-
-    #[error("An error happened in the state store: {0}")]
-    StateStore(#[from] StateStoreError),
-
-    #[error("An error happened in the table copy stream")]
-    TableCopyStream(#[from] TableCopyStreamError),
-
-    #[error("table {0} has no primary key")]
-    MissingPrimaryKey(TableName),
-}
+use crate::workers::table_sync::TableSyncWorkerState;
+#[cfg(feature = "failpoints")]
+use crate::{
+    failpoints::START_TABLE_SYNC_AFTER_DATA_SYNC_ERROR,
+    failpoints::START_TABLE_SYNC_AFTER_DATA_SYNC_PANIC,
+};
 
 #[derive(Debug)]
 pub enum TableSyncResult {
@@ -71,7 +48,7 @@ pub async fn start_table_sync<S, D>(
     destination: D,
     shutdown_rx: ShutdownRx,
     force_syncing_tables_tx: SignalTx,
-) -> Result<TableSyncResult, TableSyncError>
+) -> EtlResult<TableSyncResult>
 where
     S: StateStore + Clone + Send + 'static,
     D: Destination + Clone + Send + 'static,
@@ -112,7 +89,14 @@ where
                 phase_type, table_id
             );
 
-            return Err(TableSyncError::InvalidPhase(phase_type));
+            bail!(
+                ErrorKind::InvalidState,
+                "Invalid replication phase",
+                format!(
+                    "Invalid replication phase '{}': expected Init, DataSync, or FinishedCopy",
+                    phase_type
+                )
+            );
         }
 
         phase_type
@@ -146,8 +130,8 @@ where
                 // before starting a table copy.
                 if let Err(err) = replication_client.delete_slot(&slot_name).await {
                     // If the slot is not found, we are safe to continue, for any other error, we bail.
-                    if !matches!(err, PgReplicationError::SlotNotFound(_)) {
-                        return Err(err.into());
+                    if err.kind() != ErrorKind::ReplicationSlotNotFound {
+                        return Err(err);
                     }
                 }
             }
@@ -163,7 +147,14 @@ where
 
             // Fail point to test when the table sync fails.
             #[cfg(feature = "failpoints")]
-            fail_point!(START_TABLE_SYNC_AFTER_DATA_SYNC);
+            fail_point!(START_TABLE_SYNC_AFTER_DATA_SYNC_PANIC);
+            #[cfg(feature = "failpoints")]
+            fail_point!(START_TABLE_SYNC_AFTER_DATA_SYNC_ERROR, |_| {
+                bail!(
+                    ErrorKind::Unknown,
+                    "An unknown error has occurred before copying the table"
+                );
+            });
 
             // We create the slot with a transaction, since we need to have a consistent snapshot of the database
             // before copying the schema and tables.
@@ -190,7 +181,12 @@ where
                 state_store
                     .update_table_replication_state(table_id, TableReplicationPhase::Skipped)
                     .await?;
-                return Err(TableSyncError::MissingPrimaryKey(table_schema.name));
+
+                bail!(
+                    ErrorKind::SourceSchemaError,
+                    "Missing primary key",
+                    format!("table {} has no primary key", table_schema.name)
+                );
             }
 
             schema_cache.add_table_schema(table_schema.clone()).await;

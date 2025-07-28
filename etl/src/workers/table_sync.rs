@@ -2,8 +2,7 @@ use config::shared::PipelineConfig;
 use postgres::schema::TableId;
 use std::sync::Arc;
 use std::time::Duration;
-use thiserror::Error;
-use tokio::sync::{AcquireError, Mutex, MutexGuard, Notify, Semaphore};
+use tokio::sync::{Mutex, MutexGuard, Notify, Semaphore};
 use tokio::task::JoinHandle;
 use tokio_postgres::types::PgLsn;
 use tracing::{Instrument, debug, error, info, warn};
@@ -12,16 +11,18 @@ use crate::concurrency::future::ReactiveFuture;
 use crate::concurrency::shutdown::{ShutdownResult, ShutdownRx};
 use crate::concurrency::signal::SignalTx;
 use crate::destination::base::Destination;
+use crate::error::{ErrorKind, EtlError, EtlResult};
 use crate::pipeline::PipelineId;
-use crate::replication::apply::{ApplyLoopError, ApplyLoopHook, start_apply_loop};
-use crate::replication::client::{PgReplicationClient, PgReplicationError};
+use crate::replication::apply::{ApplyLoopHook, start_apply_loop};
+use crate::replication::client::PgReplicationClient;
 use crate::replication::slot::get_slot_name;
-use crate::replication::table_sync::{TableSyncError, TableSyncResult, start_table_sync};
+use crate::replication::table_sync::{TableSyncResult, start_table_sync};
 use crate::schema::cache::SchemaCache;
-use crate::state::store::base::{StateStore, StateStoreError};
+use crate::state::store::base::StateStore;
 use crate::state::table::{TableReplicationPhase, TableReplicationPhaseType};
-use crate::workers::base::{Worker, WorkerHandle, WorkerType, WorkerWaitError};
+use crate::workers::base::{Worker, WorkerHandle, WorkerType};
 use crate::workers::pool::TableSyncWorkerPool;
+use crate::{bail, etl_error};
 
 /// Maximum time to wait for a phase change before trying again.
 const PHASE_CHANGE_REFRESH_FREQUENCY: Duration = Duration::from_millis(100);
@@ -33,42 +34,6 @@ const PHASE_CHANGE_REFRESH_FREQUENCY: Duration = Duration::from_millis(100);
 /// as this could result in a connection being held indefinitely, potentially stalling the processing
 /// of new tables.
 const MAX_DELETE_SLOT_WAIT: Duration = Duration::from_secs(30);
-
-#[derive(Debug, Error)]
-pub enum TableSyncWorkerError {
-    #[error("An error occurred while syncing a table: {0}")]
-    TableSync(#[from] TableSyncError),
-
-    #[error("The replication state is missing for table {0}")]
-    ReplicationStateMissing(TableId),
-
-    #[error("An error occurred while interacting with the state store: {0}")]
-    StateStore(#[from] StateStoreError),
-
-    #[error("An error occurred in the apply loop: {0}")]
-    ApplyLoop(#[from] ApplyLoopError),
-
-    #[error("Failed to acquire a permit to run a table sync worker")]
-    PermitAcquire(#[from] AcquireError),
-
-    #[error("A Postgres replication error occurred in the table sync worker: {0}")]
-    PgReplication(#[from] PgReplicationError),
-}
-
-#[derive(Debug, Error)]
-pub enum TableSyncWorkerHookError {
-    #[error("An error occurred while updating the table sync worker state: {0}")]
-    TableSyncWorkerState(#[from] TableSyncWorkerStateError),
-
-    #[error("A Postgres replication error occurred in the table sync worker: {0}")]
-    PgReplication(#[from] PgReplicationError),
-}
-
-#[derive(Debug, Error)]
-pub enum TableSyncWorkerStateError {
-    #[error("An error occurred while interacting with the state store: {0}")]
-    StateStore(#[from] StateStoreError),
-}
 
 #[derive(Debug)]
 pub struct TableSyncWorkerStateInner {
@@ -98,7 +63,7 @@ impl TableSyncWorkerStateInner {
         &mut self,
         phase: TableReplicationPhase,
         state_store: S,
-    ) -> Result<(), TableSyncWorkerStateError> {
+    ) -> EtlResult<()> {
         self.set_phase(phase);
 
         // If we should store this phase change, we want to do it via the supplied state store.
@@ -224,7 +189,7 @@ impl TableSyncWorkerState {
 #[derive(Debug)]
 pub struct TableSyncWorkerHandle {
     state: TableSyncWorkerState,
-    handle: Option<JoinHandle<Result<(), TableSyncWorkerError>>>,
+    handle: Option<JoinHandle<EtlResult<()>>>,
 }
 
 impl WorkerHandle<TableSyncWorkerState> for TableSyncWorkerHandle {
@@ -232,12 +197,18 @@ impl WorkerHandle<TableSyncWorkerState> for TableSyncWorkerHandle {
         self.state.clone()
     }
 
-    async fn wait(mut self) -> Result<(), WorkerWaitError> {
+    async fn wait(mut self) -> EtlResult<()> {
         let Some(handle) = self.handle.take() else {
             return Ok(());
         };
 
-        handle.await??;
+        handle.await.map_err(|err| {
+            etl_error!(
+                ErrorKind::TableSyncWorkerPanic,
+                "A panic occurred in the table sync worker",
+                err
+            )
+        })??;
 
         Ok(())
     }
@@ -295,9 +266,9 @@ where
     S: StateStore + Clone + Send + Sync + 'static,
     D: Destination + Clone + Send + Sync + 'static,
 {
-    type Error = TableSyncWorkerError;
+    type Error = EtlError;
 
-    async fn start(mut self) -> Result<TableSyncWorkerHandle, Self::Error> {
+    async fn start(mut self) -> EtlResult<TableSyncWorkerHandle> {
         info!("starting table sync worker for table {}", self.table_id);
 
         let Some(table_replication_phase) = self
@@ -310,7 +281,14 @@ where
                 self.table_id
             );
 
-            return Err(TableSyncWorkerError::ReplicationStateMissing(self.table_id));
+            bail!(
+                ErrorKind::InvalidState,
+                "Replication state missing",
+                format!(
+                    "The replication state is missing for table {}",
+                    self.table_id
+                )
+            );
         };
 
         info!(
@@ -325,7 +303,7 @@ where
             "table_sync_worker",
             pipeline_id = self.pipeline_id,
             publication_name = self.config.publication_name,
-            table_id = self.table_id,
+            table_id = %self.table_id,
         );
         let table_sync_worker = async move {
             debug!(
@@ -381,7 +359,7 @@ where
                 }
                 Err(err) => {
                     error!("table sync failed for table {}: {}", self.table_id, err);
-                    return Err(err.into());
+                    return Err(err);
                 }
             };
 
@@ -432,7 +410,8 @@ where
 
         // We spawn the table sync worker with a safe future, so that we can have controlled teardown
         // on completion or error.
-        let fut = ReactiveFuture::new(table_sync_worker, self.table_id, self.pool.get_inner())
+        // TODO: we want to implement a custom callback source which can skip tables and react to panics.
+        let fut = ReactiveFuture::wrap(table_sync_worker, self.table_id, self.pool.get_inner())
             .instrument(table_sync_worker_span);
         let handle = tokio::spawn(fut);
 
@@ -472,11 +451,7 @@ where
     ///
     /// Returns `Ok(false)` when the worker is done with its work, signaling the caller that the apply
     /// loop should be stopped.
-    async fn try_advance_phase(
-        &self,
-        current_lsn: PgLsn,
-        update_state: bool,
-    ) -> Result<bool, TableSyncWorkerHookError> {
+    async fn try_advance_phase(&self, current_lsn: PgLsn, update_state: bool) -> EtlResult<bool> {
         let mut inner = self.table_sync_worker_state.get_inner().lock().await;
 
         // If we caught up with the lsn, we mark this table as `SyncDone` and stop the worker.
@@ -512,9 +487,7 @@ impl<S> ApplyLoopHook for TableSyncWorkerHook<S>
 where
     S: StateStore + Clone + Send + Sync + 'static,
 {
-    type Error = TableSyncWorkerHookError;
-
-    async fn before_loop(&self, start_lsn: PgLsn) -> Result<bool, Self::Error> {
+    async fn before_loop(&self, start_lsn: PgLsn) -> EtlResult<bool> {
         info!("checking if the table sync worker is already caught up with the apply worker");
 
         self.try_advance_phase(start_lsn, true).await
@@ -531,7 +504,7 @@ where
         &self,
         current_lsn: PgLsn,
         update_state: bool,
-    ) -> Result<bool, Self::Error> {
+    ) -> EtlResult<bool> {
         info!(
             "processing syncing tables for table sync worker with lsn {}",
             current_lsn
@@ -540,7 +513,7 @@ where
         self.try_advance_phase(current_lsn, update_state).await
     }
 
-    async fn skip_table(&self, table_id: TableId) -> Result<bool, Self::Error> {
+    async fn skip_table(&self, table_id: TableId) -> EtlResult<bool> {
         if self.table_id != table_id {
             return Ok(true);
         }
@@ -557,7 +530,7 @@ where
         &self,
         table_id: TableId,
         _remote_final_lsn: PgLsn,
-    ) -> Result<bool, Self::Error> {
+    ) -> EtlResult<bool> {
         let inner = self.table_sync_worker_state.get_inner().lock().await;
         let is_skipped = matches!(
             inner.table_replication_phase.as_type(),

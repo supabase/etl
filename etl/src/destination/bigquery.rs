@@ -4,16 +4,16 @@ use postgres::schema::{ColumnSchema, TableId, TableName, TableSchema};
 use std::collections::HashMap;
 use std::ops::Deref;
 use std::sync::{Arc, LazyLock};
-use thiserror::Error;
 use tokio::sync::Mutex;
 use tokio_postgres::types::{PgLsn, Type};
 use tracing::{debug, info, warn};
 
-use crate::clients::bigquery::{BigQueryClient, BigQueryClientError, BigQueryOperationType};
+use crate::clients::bigquery::{BigQueryClient, BigQueryOperationType};
 use crate::conversions::Cell;
 use crate::conversions::event::{Event, TruncateEvent};
 use crate::conversions::table_row::TableRow;
-use crate::destination::base::{Destination, DestinationError};
+use crate::destination::base::Destination;
+use crate::error::{ErrorKind, EtlError, EtlResult};
 use crate::schema::cache::SchemaCache;
 
 /// Table name for storing ETL table schema metadata in BigQuery.
@@ -71,29 +71,6 @@ static ETL_TABLE_COLUMNS_COLUMNS: LazyLock<Vec<ColumnSchema>> = LazyLock::new(||
     ]
 });
 
-/// Errors that can occur when using [`BigQueryDestination`].
-///
-/// This error type covers BigQuery client failures, schema cache issues,
-/// missing table schemas, and serialization problems.
-#[derive(Debug, Error)]
-pub enum BigQueryDestinationError {
-    /// Wraps errors from the underlying [`BigQueryClient`].
-    #[error("An error occurred with the BigQuery client: {0}")]
-    BigQueryClient(#[from] BigQueryClientError),
-
-    /// The requested table schema was not found in the schema cache.
-    #[error("The table schema for table id {0} was not found in the schema cache")]
-    MissingTableSchema(TableId),
-
-    /// No schema cache has been injected into this destination instance.
-    #[error("The schema cache was not set on the destination")]
-    MissingSchemaCache,
-
-    /// JSON serialization failed while processing table schema data.
-    #[error("Failed to serialize table schema: {0}")]
-    SerializationError(#[from] serde_json::Error),
-}
-
 /// Internal state for [`BigQueryDestination`] wrapped in `Arc<Mutex<>>`.
 ///
 /// Contains the BigQuery client, dataset configuration, and injected schema cache.
@@ -109,7 +86,7 @@ impl Inner {
     /// Ensures the ETL metadata tables exist in BigQuery.
     ///
     /// Creates `etl_table_schemas` and `etl_table_columns` tables if they don't exist.
-    async fn ensure_schema_tables_exist(&self) -> Result<(), BigQueryDestinationError> {
+    async fn ensure_schema_tables_exist(&self) -> EtlResult<()> {
         // Create etl_table_schemas table - use ColumnSchema for compatibility
         self.client
             .create_table_if_missing(
@@ -158,7 +135,7 @@ impl BigQueryDestination {
         dataset_id: String,
         sa_key: &str,
         max_staleness_mins: Option<u16>,
-    ) -> Result<Self, BigQueryDestinationError> {
+    ) -> EtlResult<Self> {
         let client = BigQueryClient::new_with_key_path(project_id, sa_key).await?;
         let inner = Inner {
             client,
@@ -181,7 +158,7 @@ impl BigQueryDestination {
         dataset_id: String,
         sa_key: &str,
         max_staleness_mins: Option<u16>,
-    ) -> Result<Self, BigQueryDestinationError> {
+    ) -> EtlResult<Self> {
         let client = BigQueryClient::new_with_key(project_id, sa_key).await?;
         let inner = Inner {
             client,
@@ -202,16 +179,25 @@ impl BigQueryDestination {
         inner: &I,
         table_id: &TableId,
         use_cdc_sequence_column: bool,
-    ) -> Result<(String, TableDescriptor), BigQueryDestinationError> {
+    ) -> EtlResult<(String, TableDescriptor)> {
         let schema_cache = inner
             .schema_cache
             .as_ref()
-            .ok_or(BigQueryDestinationError::MissingSchemaCache)?
+            .ok_or_else(|| {
+                EtlError::from((
+                    ErrorKind::ConfigError,
+                    "The schema cache was not set on the destination",
+                ))
+            })?
             .lock_inner()
             .await;
-        let table_schema = schema_cache
-            .get_table_schema_ref(table_id)
-            .ok_or(BigQueryDestinationError::MissingTableSchema(*table_id))?;
+        let table_schema = schema_cache.get_table_schema_ref(table_id).ok_or_else(|| {
+            EtlError::from((
+                ErrorKind::DestinationSchemaError,
+                "Table schema not found in schema cache",
+                format!("table_id: {table_id}"),
+            ))
+        })?;
 
         let table_id = table_schema.name.as_bigquery_table_id();
         let table_descriptor = BigQueryClient::column_schemas_to_table_descriptor(
@@ -225,10 +211,7 @@ impl BigQueryDestination {
     /// Writes a table schema to BigQuery, creating the data table and storing metadata.
     ///
     /// This method creates the actual data table and inserts schema information into the ETL metadata tables.
-    async fn write_table_schema(
-        &self,
-        table_schema: TableSchema,
-    ) -> Result<(), BigQueryDestinationError> {
+    async fn write_table_schema(&self, table_schema: TableSchema) -> EtlResult<()> {
         let mut inner = self.inner.lock().await;
 
         let dataset_id = inner.dataset_id.clone();
@@ -286,13 +269,14 @@ impl BigQueryDestination {
         }
 
         debug!("wrote table schema for table '{}'", table_schema.name);
+
         Ok(())
     }
 
     /// Loads all table schemas from BigQuery ETL metadata tables.
     ///
     /// Reconstructs [`TableSchema`] objects by joining data from schema and column metadata tables.
-    async fn load_table_schemas(&self) -> Result<Vec<TableSchema>, BigQueryDestinationError> {
+    async fn load_table_schemas(&self) -> EtlResult<Vec<TableSchema>> {
         let inner = self.inner.lock().await;
 
         // First check if schema tables exist
@@ -394,7 +378,7 @@ impl BigQueryDestination {
 
         let mut result = Vec::new();
         for (table_id, (table_name, column_schemas)) in table_schemas {
-            let table_schema = TableSchema::new(table_id, table_name, column_schemas);
+            let table_schema = TableSchema::new(TableId::new(table_id), table_name, column_schemas);
             result.push(table_schema);
         }
 
@@ -408,7 +392,7 @@ impl BigQueryDestination {
         &self,
         table_id: TableId,
         mut table_rows: Vec<TableRow>,
-    ) -> Result<(), BigQueryDestinationError> {
+    ) -> EtlResult<()> {
         let mut inner = self.inner.lock().await;
 
         // We do not use the sequence column for table rows, since we assume that table rows are always
@@ -434,7 +418,7 @@ impl BigQueryDestination {
     ///
     /// Groups events by type, handles inserts/updates/deletes via streaming, and processes truncates separately.
     /// Adds sequence numbers to ensure proper ordering of events with the same system time.
-    async fn write_events(&self, events: Vec<Event>) -> Result<(), BigQueryDestinationError> {
+    async fn write_events(&self, events: Vec<Event>) -> EtlResult<()> {
         let mut event_iter = events.into_iter().peekable();
 
         while event_iter.peek().is_some() {
@@ -541,10 +525,7 @@ impl BigQueryDestination {
     ///
     /// Maps PostgreSQL table OIDs to BigQuery table names and issues truncate commands.
     #[allow(dead_code)]
-    async fn process_truncate_events(
-        &self,
-        truncate_events: Vec<TruncateEvent>,
-    ) -> Result<(), BigQueryDestinationError> {
+    async fn process_truncate_events(&self, truncate_events: Vec<TruncateEvent>) -> EtlResult<()> {
         let inner = self.inner.lock().await;
 
         for truncate_event in truncate_events {
@@ -553,11 +534,18 @@ impl BigQueryDestination {
                 let schema_cache = inner
                     .schema_cache
                     .as_ref()
-                    .ok_or(BigQueryDestinationError::MissingSchemaCache)?
+                    .ok_or_else(|| {
+                        EtlError::from((
+                            ErrorKind::ConfigError,
+                            "The schema cache was not set on the destination",
+                        ))
+                    })?
                     .lock_inner()
                     .await;
 
-                if let Some(table_schema) = schema_cache.get_table_schema_ref(&table_id) {
+                if let Some(table_schema) =
+                    schema_cache.get_table_schema_ref(&TableId::new(table_id))
+                {
                     inner
                         .client
                         .truncate_table(
@@ -582,7 +570,7 @@ impl BigQueryDestination {
     /// Extracts table ID, schema name, and table name for storage in `etl_table_schemas`.
     fn table_schema_to_table_row(table_schema: &TableSchema) -> TableRow {
         let columns = vec![
-            Cell::U32(table_schema.id),
+            Cell::U32(table_schema.id.into()),
             Cell::String(table_schema.name.schema.clone()),
             Cell::String(table_schema.name.name.clone()),
         ];
@@ -598,7 +586,7 @@ impl BigQueryDestination {
 
         for (column_order, column_schema) in table_schema.column_schemas.iter().enumerate() {
             let columns = vec![
-                Cell::U32(table_schema.id),
+                Cell::U32(table_schema.id.into()),
                 Cell::String(column_schema.name.clone()),
                 Cell::String(Self::postgres_type_to_string(&column_schema.typ)),
                 Cell::I32(column_schema.modifier),
@@ -646,7 +634,7 @@ impl BigQueryDestination {
     ///
     /// Used when reconstructing schemas from BigQuery metadata tables. Falls back to `TEXT` for unknown types.
     #[allow(clippy::result_large_err)]
-    fn string_to_postgres_type(type_str: &str) -> Result<Type, BigQueryDestinationError> {
+    fn string_to_postgres_type(type_str: &str) -> EtlResult<Type> {
         match type_str {
             "BOOL" => Ok(Type::BOOL),
             "CHAR" => Ok(Type::CHAR),
@@ -695,20 +683,20 @@ impl BigQueryDestination {
 }
 
 impl Destination for BigQueryDestination {
-    async fn inject(&self, schema_cache: SchemaCache) -> Result<(), DestinationError> {
+    async fn inject(&self, schema_cache: SchemaCache) -> EtlResult<()> {
         let mut inner = self.inner.lock().await;
         inner.schema_cache = Some(schema_cache);
 
         Ok(())
     }
 
-    async fn write_table_schema(&self, table_schema: TableSchema) -> Result<(), DestinationError> {
+    async fn write_table_schema(&self, table_schema: TableSchema) -> EtlResult<()> {
         self.write_table_schema(table_schema).await?;
 
         Ok(())
     }
 
-    async fn load_table_schemas(&self) -> Result<Vec<TableSchema>, DestinationError> {
+    async fn load_table_schemas(&self) -> EtlResult<Vec<TableSchema>> {
         let table_schemas = self.load_table_schemas().await?;
 
         Ok(table_schemas)
@@ -718,13 +706,13 @@ impl Destination for BigQueryDestination {
         &self,
         table_id: TableId,
         table_rows: Vec<TableRow>,
-    ) -> Result<(), DestinationError> {
+    ) -> EtlResult<()> {
         self.write_table_rows(table_id, table_rows).await?;
 
         Ok(())
     }
 
-    async fn write_events(&self, events: Vec<Event>) -> Result<(), DestinationError> {
+    async fn write_events(&self, events: Vec<Event>) -> EtlResult<()> {
         self.write_events(events).await?;
 
         Ok(())
@@ -924,7 +912,7 @@ mod tests {
             ColumnSchema::new("data".to_string(), Type::JSONB, -1, true, false),
             ColumnSchema::new("active".to_string(), Type::BOOL, -1, false, false),
         ];
-        let table_schema = TableSchema::new(456, table_name, columns);
+        let table_schema = TableSchema::new(TableId::new(456), table_name, columns);
 
         let schema_row = BigQueryDestination::table_schema_to_table_row(&table_schema);
         assert_eq!(schema_row.values[0], Cell::U32(456));

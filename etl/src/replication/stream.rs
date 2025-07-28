@@ -1,4 +1,3 @@
-use crate::conversions::table_row::{TableRow, TableRowConversionError, TableRowConverter};
 use futures::{Stream, ready};
 use pin_project_lite::pin_project;
 use postgres::schema::ColumnSchema;
@@ -7,27 +6,19 @@ use postgres_replication::LogicalReplicationStream;
 use postgres_replication::protocol::{LogicalReplicationMessage, ReplicationMessage};
 use std::pin::Pin;
 use std::task::{Context, Poll};
-use std::time::{Duration, Instant, SystemTimeError};
-use thiserror::Error;
+use std::time::{Duration, Instant};
 use tokio_postgres::CopyOutStream;
 use tokio_postgres::types::PgLsn;
 use tracing::debug;
 
+use crate::conversions::table_row::{TableRow, TableRowConverter};
+use crate::error::EtlError;
+use crate::error::{ErrorKind, EtlResult};
+use crate::etl_error;
+
 /// The amount of milliseconds between two consecutive status updates in case no forced update
 /// is requested.
 const STATUS_UPDATE_INTERVAL: Duration = Duration::from_millis(100);
-
-/// Errors that can occur while streaming table copy data.
-#[derive(Debug, Error)]
-pub enum TableCopyStreamError {
-    /// An error occurred when copying table data from the stream.
-    #[error("An error occurred when copying table data from the stream: {0}")]
-    TableCopyFailed(#[from] tokio_postgres::Error),
-
-    /// An error occurred while converting a table row during table copy.
-    #[error("An error occurred while converting a table row during table copy: {0}")]
-    Conversion(#[from] TableRowConversionError),
-}
 
 pin_project! {
     /// A stream that yields rows from a PostgreSQL COPY operation.
@@ -56,7 +47,7 @@ impl<'a> TableCopyStream<'a> {
 }
 
 impl<'a> Stream for TableCopyStream<'a> {
-    type Item = Result<TableRow, TableCopyStreamError>;
+    type Item = EtlResult<TableRow>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.project();
@@ -64,24 +55,12 @@ impl<'a> Stream for TableCopyStream<'a> {
             // TODO: allow pluggable table row conversion based on if the data is in text or binary format.
             Some(Ok(row)) => match TableRowConverter::try_from(&row, this.column_schemas) {
                 Ok(row) => Poll::Ready(Some(Ok(row))),
-                Err(err) => Poll::Ready(Some(Err(err.into()))),
+                Err(err) => Poll::Ready(Some(Err(err))),
             },
             Some(Err(err)) => Poll::Ready(Some(Err(err.into()))),
             None => Poll::Ready(None),
         }
     }
-}
-
-/// Errors that can occur while streaming logical replication events.
-#[derive(Debug, Error)]
-pub enum EventsStreamError {
-    /// An error occurred when copying table data from the stream.
-    #[error("An error occurred when copying table data from the stream: {0}")]
-    TableCopyFailed(#[from] tokio_postgres::Error),
-
-    /// An error occurred while calculating the elapsed time since PostgreSQL epoch.
-    #[error("An error occurred while determining the elapsed time: {0}")]
-    EpochCalculationFailed(#[from] SystemTimeError),
 }
 
 pin_project! {
@@ -120,7 +99,7 @@ impl EventsStream {
         flush_lsn: PgLsn,
         apply_lsn: PgLsn,
         force: bool,
-    ) -> Result<(), EventsStreamError> {
+    ) -> EtlResult<()> {
         let this = self.project();
 
         // If we are not forced to send an update, we can willingly do so based on a set of conditions.
@@ -151,7 +130,16 @@ impl EventsStream {
 
         // The client's system clock at the time of transmission, as microseconds since midnight
         // on 2000-01-01.
-        let ts = POSTGRES_EPOCH.elapsed()?.as_micros() as i64;
+        let ts = POSTGRES_EPOCH
+            .elapsed()
+            .map_err(|e| {
+                etl_error!(
+                    ErrorKind::InvalidState,
+                    "Invalid Postgres epoch",
+                    e.to_string()
+                )
+            })?
+            .as_micros() as i64;
 
         this.stream
             .standby_status_update(write_lsn, flush_lsn, apply_lsn, ts, 0)
@@ -172,7 +160,7 @@ impl EventsStream {
 }
 
 impl Stream for EventsStream {
-    type Item = Result<ReplicationMessage<LogicalReplicationMessage>, EventsStreamError>;
+    type Item = EtlResult<ReplicationMessage<LogicalReplicationMessage>>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.project();

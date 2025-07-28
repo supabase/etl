@@ -36,7 +36,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use config::shared::{BatchConfig, PgConnectionConfig, PipelineConfig, RetryConfig, TlsConfig};
 use etl::{
     conversions::{event::Event, table_row::TableRow},
-    destination::base::{Destination, DestinationError},
+    destination::base::Destination,
     pipeline::Pipeline,
     state::{store::notify::NotifyingStateStore, table::TableReplicationPhaseType},
 };
@@ -45,6 +45,7 @@ use sqlx::postgres::PgPool;
 
 #[cfg(feature = "bigquery")]
 use etl::destination::bigquery::BigQueryDestination;
+use etl::error::EtlResult;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -387,7 +388,10 @@ async fn start_pipeline(args: RunArgs) -> Result<(), Box<dyn Error>> {
     let mut table_copied_notifications = vec![];
     for table_id in &args.table_ids {
         let table_copied = state_store
-            .notify_on_table_state(*table_id, TableReplicationPhaseType::FinishedCopy)
+            .notify_on_table_state(
+                TableId::new(*table_id),
+                TableReplicationPhaseType::FinishedCopy,
+            )
             .await;
         table_copied_notifications.push(table_copied);
     }
@@ -432,10 +436,7 @@ enum BenchDestination {
 }
 
 impl Destination for BenchDestination {
-    async fn inject(
-        &self,
-        schema_cache: etl::schema::cache::SchemaCache,
-    ) -> Result<(), DestinationError> {
+    async fn inject(&self, schema_cache: etl::schema::cache::SchemaCache) -> EtlResult<()> {
         match self {
             BenchDestination::Null(dest) => dest.inject(schema_cache).await,
             #[cfg(feature = "bigquery")]
@@ -443,7 +444,7 @@ impl Destination for BenchDestination {
         }
     }
 
-    async fn write_table_schema(&self, table_schema: TableSchema) -> Result<(), DestinationError> {
+    async fn write_table_schema(&self, table_schema: TableSchema) -> EtlResult<()> {
         match self {
             BenchDestination::Null(dest) => dest.write_table_schema(table_schema).await,
             #[cfg(feature = "bigquery")]
@@ -451,7 +452,7 @@ impl Destination for BenchDestination {
         }
     }
 
-    async fn load_table_schemas(&self) -> Result<Vec<TableSchema>, DestinationError> {
+    async fn load_table_schemas(&self) -> EtlResult<Vec<TableSchema>> {
         match self {
             BenchDestination::Null(dest) => dest.load_table_schemas().await,
             #[cfg(feature = "bigquery")]
@@ -463,7 +464,7 @@ impl Destination for BenchDestination {
         &self,
         table_id: TableId,
         table_rows: Vec<TableRow>,
-    ) -> Result<(), DestinationError> {
+    ) -> EtlResult<()> {
         match self {
             BenchDestination::Null(dest) => dest.write_table_rows(table_id, table_rows).await,
             #[cfg(feature = "bigquery")]
@@ -471,7 +472,7 @@ impl Destination for BenchDestination {
         }
     }
 
-    async fn write_events(&self, events: Vec<Event>) -> Result<(), DestinationError> {
+    async fn write_events(&self, events: Vec<Event>) -> EtlResult<()> {
         match self {
             BenchDestination::Null(dest) => dest.write_events(events).await,
             #[cfg(feature = "bigquery")]
@@ -481,18 +482,15 @@ impl Destination for BenchDestination {
 }
 
 impl Destination for NullDestination {
-    async fn inject(
-        &self,
-        _schema_cache: etl::schema::cache::SchemaCache,
-    ) -> Result<(), DestinationError> {
+    async fn inject(&self, _schema_cache: etl::schema::cache::SchemaCache) -> EtlResult<()> {
         Ok(())
     }
 
-    async fn write_table_schema(&self, _table_schema: TableSchema) -> Result<(), DestinationError> {
+    async fn write_table_schema(&self, _table_schema: TableSchema) -> EtlResult<()> {
         Ok(())
     }
 
-    async fn load_table_schemas(&self) -> Result<Vec<TableSchema>, DestinationError> {
+    async fn load_table_schemas(&self) -> EtlResult<Vec<TableSchema>> {
         Ok(vec![])
     }
 
@@ -500,11 +498,11 @@ impl Destination for NullDestination {
         &self,
         _table_id: TableId,
         _table_rows: Vec<TableRow>,
-    ) -> Result<(), DestinationError> {
+    ) -> EtlResult<()> {
         Ok(())
     }
 
-    async fn write_events(&self, _events: Vec<Event>) -> Result<(), DestinationError> {
+    async fn write_events(&self, _events: Vec<Event>) -> EtlResult<()> {
         Ok(())
     }
 }

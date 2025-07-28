@@ -1,29 +1,25 @@
-use std::num::ParseIntError;
+use crate::bail;
+use crate::error::EtlError;
+use crate::error::{ErrorKind, EtlResult};
 
-use thiserror::Error;
-
-#[derive(Debug, Error)]
-pub enum ByteaHexParseError {
-    #[error("missing prefix '\\x'")]
-    InvalidPrefix,
-
-    #[error("invalid byte")]
-    OddNumerOfDigits,
-
-    #[error("parse int result: {0}")]
-    ParseInt(#[from] ParseIntError),
-}
-
-pub fn from_bytea_hex(s: &str) -> Result<Vec<u8>, ByteaHexParseError> {
+pub fn from_bytea_hex(s: &str) -> EtlResult<Vec<u8>> {
     if s.len() < 2 || &s[..2] != "\\x" {
-        return Err(ByteaHexParseError::InvalidPrefix);
+        bail!(
+            ErrorKind::ConversionError,
+            "Could not convert from bytea hex string to byte array",
+            "The prefix '\\x' is missing"
+        );
     }
 
     let mut result = Vec::with_capacity((s.len() - 2) / 2);
     let s = &s[2..];
 
     if s.len() % 2 != 0 {
-        return Err(ByteaHexParseError::OddNumerOfDigits);
+        bail!(
+            ErrorKind::ConversionError,
+            "Could not convert from bytea hex string to byte array",
+            "The number of digits is odd"
+        );
     }
 
     for i in (0..s.len()).step_by(2) {
