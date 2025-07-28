@@ -1,5 +1,68 @@
+use postgres::schema::TableId;
 use std::fmt;
 use tokio_postgres::types::PgLsn;
+use crate::error::EtlError;
+
+#[derive(Debug)]
+pub struct TableReplicationError {
+    table_id: TableId,
+    reason: String,
+    solution: Option<String>,
+    retry_policy: RetryPolicy,
+}
+
+impl TableReplicationError {
+    pub fn with_solution(
+        table_id: TableId,
+        reason: impl ToString,
+        solution: impl ToString,
+        retry_policy: RetryPolicy,
+    ) -> Self {
+        Self {
+            table_id,
+            reason: reason.to_string(),
+            solution: Some(solution.to_string()),
+            retry_policy,
+        }
+    }
+
+    pub fn without_solution(
+        table_id: TableId,
+        reason: impl ToString,
+        retry_policy: RetryPolicy,
+    ) -> Self {
+        Self {
+            table_id,
+            reason: reason.to_string(),
+            solution: None,
+            retry_policy,
+        }
+    }
+
+    pub fn table_id(&self) -> TableId {
+        self.table_id
+    }
+}
+
+impl From<EtlError> for TableReplicationError {
+
+    fn from(value: EtlError) -> Self {
+        // TODO: implement actual conversion.
+        Self::with_solution(
+            TableId::new(10),
+            format!("An error occurred: {value}"),
+            "This error requires requires manual intervention",
+            RetryPolicy::None
+        )
+    }
+}
+
+#[derive(Debug)]
+pub enum RetryPolicy {
+    None,
+    UserIntervention,
+    Backoff,
+}
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum TableReplicationPhase {
@@ -49,6 +112,14 @@ pub enum TableReplicationPhase {
 impl TableReplicationPhase {
     pub fn as_type(&self) -> TableReplicationPhaseType {
         self.into()
+    }
+}
+
+impl From<TableReplicationError> for TableReplicationPhase {
+    fn from(_value: TableReplicationError) -> Self {
+        // TODO: implement actual conversion with proper values once `Skipped` is converted to `Errored`
+        //  and the fields are added.
+        Self::Skipped
     }
 }
 

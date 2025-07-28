@@ -20,7 +20,9 @@ use crate::replication::slot::get_slot_name;
 use crate::replication::table_sync::{TableSyncResult, start_table_sync};
 use crate::schema::cache::SchemaCache;
 use crate::state::store::base::StateStore;
-use crate::state::table::{TableReplicationPhase, TableReplicationPhaseType};
+use crate::state::table::{
+    TableReplicationError, TableReplicationPhase, TableReplicationPhaseType,
+};
 use crate::workers::base::{Worker, WorkerHandle, WorkerType};
 use crate::workers::lifecycle::WorkerLifecycleObserver;
 use crate::workers::pool::{TableSyncWorkerPool, TableSyncWorkerPoolInner};
@@ -545,16 +547,25 @@ where
         self.try_advance_phase(current_lsn, update_state).await
     }
 
-    async fn skip_table(&self, table_id: TableId) -> EtlResult<bool> {
-        if self.table_id != table_id {
+    async fn mark_table_errored(
+        &self,
+        table_replication_error: TableReplicationError,
+    ) -> EtlResult<bool> {
+        if self.table_id != table_replication_error.table_id() {
+            // If the table is not the same as the one handled by this table sync worker, marking
+            // the table will be a noop, and we want to continue the loop.
             return Ok(true);
         }
 
+        // Since we already have access to the table sync worker state, we can avoid going through
+        // the pool, and we just modify the state here and also update the state store.
         let mut inner = self.table_sync_worker_state.get_inner().lock().await;
         inner
-            .set_and_store(TableReplicationPhase::Skipped, &self.state_store)
+            .set_and_store(table_replication_error.into(), &self.state_store)
             .await?;
 
+        // If we mark a table as errored in a table sync worker, the worker will stop here, thus we
+        // signal the loop to stop.
         Ok(false)
     }
 

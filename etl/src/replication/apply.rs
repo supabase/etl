@@ -21,6 +21,7 @@ use crate::replication::client::PgReplicationClient;
 use crate::replication::slot::get_slot_name;
 use crate::replication::stream::EventsStream;
 use crate::schema::cache::SchemaCache;
+use crate::state::table::{RetryPolicy, TableReplicationError, TableReplicationPhase};
 use crate::workers::base::WorkerType;
 use crate::{bail, etl_error};
 
@@ -42,7 +43,10 @@ pub trait ApplyLoopHook {
         update_state: bool,
     ) -> impl Future<Output = EtlResult<bool>> + Send;
 
-    fn skip_table(&self, table_id: TableId) -> impl Future<Output = EtlResult<bool>> + Send;
+    fn mark_table_errored(
+        &self,
+        table_replication_error: TableReplicationError,
+    ) -> impl Future<Output = EtlResult<bool>> + Send;
 
     fn should_apply_changes(
         &self,
@@ -130,8 +134,9 @@ struct HandleMessageResult {
     ///
     end_batch: Option<EndBatch>,
 
-    /// Set when a replication message indicates a change in schema, otherwise None
-    skip_table: Option<TableId>,
+    /// Set when the table has encountered an error, and it should consequently be marked as errored
+    /// in the state store.
+    table_replication_error: Option<TableReplicationError>,
 }
 
 #[derive(Debug, Clone)]
@@ -346,7 +351,7 @@ where
     try_send_batch(
         state,
         result.end_batch,
-        result.skip_table,
+        result.table_replication_error,
         destination,
         hook,
         max_batch_size,
@@ -358,7 +363,7 @@ where
 async fn try_send_batch<D, T>(
     state: &mut ApplyLoopState,
     end_batch: Option<EndBatch>,
-    skip_table: Option<TableId>,
+    table_replication_error: Option<TableReplicationError>,
     destination: &D,
     hook: &T,
     max_batch_size: usize,
@@ -392,9 +397,11 @@ where
         }
 
         let mut end_loop = false;
-        if let Some(table_id) = skip_table {
-            info!("skipping table {} due to schema change", table_id);
-            end_loop |= !hook.skip_table(table_id).await?;
+        // We handle the action related to a table error. This is done after the batch is written
+        // to the destination to make sure that the data is durable before assuming things about a
+        // table.
+        if let Some(table_replication_error) = table_replication_error {
+            end_loop |= !hook.mark_table_errored(table_replication_error).await?;
         }
 
         // At this point, the `last_commit_end_lsn` will contain the LSN of the next byte in the WAL after
@@ -590,7 +597,7 @@ async fn handle_begin_message(
         event: Some(event),
         end_lsn: None,
         end_batch: None,
-        skip_table: None,
+        table_replication_error: None,
     })
 }
 
@@ -702,8 +709,10 @@ where
         );
     };
 
+    let table_id = TableId::new(message.rel_id());
+
     if !hook
-        .should_apply_changes(TableId::new(message.rel_id()), remote_final_lsn)
+        .should_apply_changes(table_id, remote_final_lsn)
         .await?
     {
         return Ok(HandleMessageResult::default());
@@ -713,9 +722,7 @@ where
     // dealt with differently based on the worker type.
     // TODO: explore how to deal with applying relation messages to the schema (creating it if missing).
     let schema_cache = schema_cache.lock_inner().await;
-    let Some(existing_table_schema) =
-        schema_cache.get_table_schema_ref(&TableId::new(message.rel_id()))
-    else {
+    let Some(existing_table_schema) = schema_cache.get_table_schema_ref(&table_id) else {
         bail!(
             ErrorKind::MissingTableSchema,
             "Table not found in the schema cache",
@@ -730,9 +737,19 @@ where
     // The purpose of this comparison is that we want to throw an error and stop the processing
     // of any table that incurs in a schema change after the initial table sync is performed.
     if !existing_table_schema.partial_eq(&event.table_schema) {
+        let table_error = TableReplicationError::with_solution(
+            table_id,
+            format!(
+                "The schema for table {} has changed during streaming",
+                table_id
+            ),
+            "ETL doesn't support schema changes at this point in time, rollback the schema",
+            RetryPolicy::UserIntervention,
+        );
+
         return Ok(HandleMessageResult {
             end_batch: Some(EndBatch::Exclusive),
-            skip_table: Some(TableId::new(message.rel_id())),
+            table_replication_error: Some(table_error),
             ..Default::default()
         });
     }
@@ -741,7 +758,7 @@ where
         event: Some(Event::Relation(event)),
         end_lsn: None,
         end_batch: None,
-        skip_table: None,
+        table_replication_error: None,
     })
 }
 
@@ -784,7 +801,7 @@ where
         event: Some(Event::Insert(event)),
         end_lsn: None,
         end_batch: None,
-        skip_table: None,
+        table_replication_error: None,
     })
 }
 
@@ -827,7 +844,7 @@ where
         event: Some(Event::Update(event)),
         end_lsn: None,
         end_batch: None,
-        skip_table: None,
+        table_replication_error: None,
     })
 }
 
@@ -870,7 +887,7 @@ where
         event: Some(Event::Delete(event)),
         end_lsn: None,
         end_batch: None,
-        skip_table: None,
+        table_replication_error: None,
     })
 }
 
@@ -917,6 +934,6 @@ where
         event: Some(Event::Truncate(event)),
         end_lsn: None,
         end_batch: None,
-        skip_table: None,
+        table_replication_error: None,
     })
 }

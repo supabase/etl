@@ -18,7 +18,9 @@ use crate::replication::common::get_table_replication_states;
 use crate::replication::slot::get_slot_name;
 use crate::schema::cache::SchemaCache;
 use crate::state::store::base::StateStore;
-use crate::state::table::{TableReplicationPhase, TableReplicationPhaseType};
+use crate::state::table::{
+    TableReplicationError, TableReplicationPhase, TableReplicationPhaseType,
+};
 use crate::workers::base::{Worker, WorkerHandle, WorkerType};
 use crate::workers::pool::TableSyncWorkerPool;
 use crate::workers::table_sync::{TableSyncWorker, TableSyncWorkerState};
@@ -286,7 +288,7 @@ where
             info!("the table sync worker {} has finished syncing", table_id);
 
             // If we are told to shut down while waiting for a phase change, we will signal this to
-            // the caller.
+            // the caller which will result in the apply loop being cancelled.
             if result.should_shutdown() {
                 return Ok(false);
             }
@@ -387,16 +389,22 @@ where
         Ok(true)
     }
 
-    async fn skip_table(&self, table_id: TableId) -> EtlResult<bool> {
+    async fn mark_table_errored(
+        &self,
+        table_replication_error: TableReplicationError,
+    ) -> EtlResult<bool> {
         let pool = self.pool.lock().await;
+        let table_id = table_replication_error.table_id();
         TableSyncWorkerState::set_and_store(
             &pool,
             &self.state_store,
             table_id,
-            TableReplicationPhase::Skipped,
+            table_replication_error.into(),
         )
         .await?;
 
+        // We want to always continue the loop, since we have to deal with the events of other
+        // tables.
         Ok(true)
     }
 
