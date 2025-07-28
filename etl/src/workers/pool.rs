@@ -8,9 +8,7 @@ use tracing::{debug, warn};
 
 use crate::concurrency::future::ReactiveFutureCallback;
 use crate::destination::base::Destination;
-use crate::error::EtlError;
-use crate::error::{ErrorKind, EtlResult};
-use crate::etl_error;
+use crate::error::EtlResult;
 use crate::state::store::base::StateStore;
 use crate::workers::base::{Worker, WorkerHandle};
 use crate::workers::table_sync::{TableSyncWorker, TableSyncWorkerHandle, TableSyncWorkerState};
@@ -127,20 +125,6 @@ impl TableSyncWorkerPoolInner {
     }
 }
 
-impl ReactiveFutureCallback<TableId> for TableSyncWorkerPoolInner {
-    async fn on_complete(&mut self, id: TableId) {
-        self.mark_worker_finished(id, TableSyncWorkerInactiveReason::Completed);
-    }
-
-    async fn on_error(&mut self, id: TableId, error: String, is_panic: bool) {
-        let reason = match is_panic {
-            true => TableSyncWorkerInactiveReason::Panicked(error),
-            false => TableSyncWorkerInactiveReason::Errored(error),
-        };
-        self.mark_worker_finished(id, reason);
-    }
-}
-
 #[derive(Debug, Clone)]
 pub struct TableSyncWorkerPool {
     inner: Arc<Mutex<TableSyncWorkerPoolInner>>,
@@ -173,6 +157,22 @@ impl TableSyncWorkerPool {
 
             notify.notified().await;
         }
+    }
+}
+
+impl ReactiveFutureCallback<TableId> for TableSyncWorkerPool {
+    async fn on_complete(&mut self, id: TableId) {
+        let mut inner = self.inner.lock().await;
+        inner.mark_worker_finished(id, TableSyncWorkerInactiveReason::Completed);
+    }
+
+    async fn on_error(&mut self, id: TableId, error: String, is_panic: bool) {
+        let mut inner = self.inner.lock().await;
+        let reason = match is_panic {
+            true => TableSyncWorkerInactiveReason::Panicked(error),
+            false => TableSyncWorkerInactiveReason::Errored(error),
+        };
+        inner.mark_worker_finished(id, reason);
     }
 }
 

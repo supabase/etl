@@ -437,7 +437,7 @@ where
         // We spawn the table sync worker with a safe future, so that we can have controlled teardown
         // on completion or error.
         // TODO: we want to implement a custom callback source which can skip tables and react to panics.
-        let fut = ReactiveFuture::wrap(table_sync_worker, self.table_id, self.pool.get_inner())
+        let fut = ReactiveFuture::wrap(table_sync_worker, self.table_id, self.pool)
             .instrument(table_sync_worker_span);
         let handle = tokio::spawn(fut);
 

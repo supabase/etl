@@ -5,10 +5,8 @@ use std::any::Any;
 use std::future::Future;
 use std::panic::AssertUnwindSafe;
 use std::pin::Pin;
-use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::{fmt, panic};
-use tokio::sync::Mutex;
 
 /// A callback interface for receiving notifications about future completion.
 ///
@@ -46,7 +44,7 @@ pin_project! {
         callback_fut: Option<BoxFuture<'static, ()>>,
         state: ReactiveFutureState,
         id: I,
-        callback_source: Arc<Mutex<C>>,
+        callback_source: C,
         original_error: Option<E>,
         original_panic: Option<Box<dyn Any + Send>>
     }
@@ -60,7 +58,7 @@ where
     ///
     /// The callback will be notified of either success or failure, and will receive the provided
     /// identifier to track which future completed.
-    pub fn wrap(future: Fut, id: I, callback_source: Arc<Mutex<C>>) -> Self {
+    pub fn wrap(future: Fut, id: I, callback_source: C) -> Self {
         Self {
             future: AssertUnwindSafe(future).catch_unwind(),
             callback_fut: None,
@@ -77,7 +75,7 @@ impl<Fut, I, C, E> Future for ReactiveFuture<Fut, I, C, E>
 where
     Fut: Future<Output = Result<(), E>>,
     I: Clone + Send + 'static,
-    C: ReactiveFutureCallback<I> + Send + Sync + 'static,
+    C: ReactiveFutureCallback<I> + Clone + Send + 'static,
     E: fmt::Display,
 {
     type Output = Result<(), E>;
@@ -124,15 +122,14 @@ where
                 ReactiveFutureState::InvokeCallback(error) => {
                     if this.callback_fut.is_none() {
                         let id = this.id.clone();
-                        let callback_source = this.callback_source.clone();
+                        let mut callback_source = this.callback_source.clone();
                         let error = error.clone();
                         let is_panic = this.original_panic.is_some();
 
                         let callback_fut = async move {
-                            let mut guard = callback_source.lock().await;
                             match error {
-                                Some(err) => guard.on_error(id, err, is_panic).await,
-                                None => guard.on_complete(id).await,
+                                Some(err) => callback_source.on_error(id, err, is_panic).await,
+                                None => callback_source.on_complete(id).await,
                             };
                         }
                         .boxed();
@@ -250,42 +247,57 @@ mod tests {
         }
     }
 
-    #[derive(Default)]
-    struct MockCallback {
+    #[derive(Debug, Default)]
+    struct Inner {
         complete_called: bool,
         error_called: bool,
         error_message: Option<String>,
         had_panic: bool,
     }
 
+    #[derive(Debug, Clone)]
+    struct MockCallback {
+        inner: Arc<Mutex<Inner>>,
+    }
+
+    impl MockCallback {
+        fn new() -> Self {
+            Self {
+                inner: Arc::new(Mutex::new(Inner::default())),
+            }
+        }
+    }
+
     impl ReactiveFutureCallback<i32> for MockCallback {
         async fn on_complete(&mut self, _id: i32) {
-            self.complete_called = true;
+            let mut inner = self.inner.lock().await;
+            inner.complete_called = true;
         }
 
         async fn on_error(&mut self, _id: i32, error: String, is_panic: bool) {
-            self.error_called = true;
-            self.had_panic = is_panic;
-            self.error_message = Some(error);
+            let mut inner = self.inner.lock().await;
+            inner.error_called = true;
+            inner.had_panic = is_panic;
+            inner.error_message = Some(error);
         }
     }
 
     #[tokio::test]
     async fn test_successful_completion() {
-        let callback = Arc::new(Mutex::new(MockCallback::default()));
+        let callback = MockCallback::new();
         let table_id = 1;
 
         let future = ReactiveFuture::wrap(ImmediateFuture, table_id, callback.clone());
         future.await.unwrap();
 
-        let guard = callback.lock().await;
+        let guard = callback.inner.lock().await;
         assert!(guard.complete_called);
         assert!(!guard.error_called);
     }
 
     #[tokio::test]
     async fn test_panic_handling() {
-        let callback = Arc::new(Mutex::new(MockCallback::default()));
+        let callback = MockCallback::new();
         let table_id = 1;
 
         // Test string panic
@@ -299,7 +311,7 @@ mod tests {
         assert!(result.is_err());
 
         {
-            let guard = callback.lock().await;
+            let guard = callback.inner.lock().await;
             assert!(!guard.complete_called);
             assert!(guard.error_called);
             assert!(guard.had_panic);
@@ -310,7 +322,7 @@ mod tests {
         }
 
         // Reset callback state
-        let mut guard = callback.lock().await;
+        let mut guard = callback.inner.lock().await;
         guard.complete_called = false;
         guard.error_called = false;
         guard.error_message = None;
@@ -327,7 +339,7 @@ mod tests {
         assert!(result.is_err());
 
         {
-            let guard = callback.lock().await;
+            let guard = callback.inner.lock().await;
             assert!(!guard.complete_called);
             assert!(guard.error_called);
             assert!(guard.had_panic);
@@ -337,7 +349,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_pending_state() {
-        let callback = Arc::new(Mutex::new(MockCallback::default()));
+        let callback = MockCallback::new();
         let table_id = 1;
 
         let pending_future = PendingFuture::new();
@@ -360,14 +372,14 @@ mod tests {
         ));
 
         // Verify the callback was notified of success
-        let guard = callback.lock().await;
+        let guard = callback.inner.lock().await;
         assert!(guard.complete_called);
         assert!(!guard.error_called);
     }
 
     #[tokio::test]
     async fn test_error_handling() {
-        let callback = Arc::new(Mutex::new(MockCallback::default()));
+        let callback = MockCallback::new();
         let table_id = 1;
 
         let future = ReactiveFuture::wrap(ErrorFuture, table_id, callback.clone());
@@ -377,7 +389,7 @@ mod tests {
         assert!(result.is_err());
 
         // Verify the callback was notified of the error
-        let guard = callback.lock().await;
+        let guard = callback.inner.lock().await;
         assert!(!guard.complete_called);
         assert!(guard.error_called);
         assert_eq!(guard.error_message, Some("Test error".to_string()));
