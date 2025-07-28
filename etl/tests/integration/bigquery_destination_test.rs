@@ -1,3 +1,5 @@
+use std::str::FromStr;
+
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use config::shared::BatchConfig;
 use etl::conversions::event::EventType;
@@ -608,7 +610,7 @@ async fn table_nullable_scalar_columns() {
     let updated_i8 = 123456789i64;
     let updated_f4 = 3.15f32;
     let updated_f8 = 2.717f64;
-    let updated_numeric: Option<PgNumeric> = None; //PgNumeric::Value(BigDecimal::from_str("99.99").unwrap());
+    let updated_numeric = PgNumeric::from_str("99.99").unwrap();
     let updated_bytes = b"test_bytes".to_vec();
     let updated_date = NaiveDate::from_ymd_opt(2023, 7, 15).unwrap();
     let updated_time = NaiveTime::from_hms_opt(14, 30, 0).unwrap();
@@ -634,7 +636,7 @@ async fn table_nullable_scalar_columns() {
                 &Some(updated_i8),
                 &Some(updated_f4),
                 &Some(updated_f8),
-                &updated_numeric, // &Some(updated_numeric.clone()),
+                &Some(updated_numeric.clone()),
                 &Some(updated_bytes.clone()),
                 &Some(updated_date),
                 &Some(updated_time),
@@ -666,7 +668,7 @@ async fn table_nullable_scalar_columns() {
         updated_i8,
         updated_f4,
         updated_f8,
-        // updated_numeric,
+        updated_numeric,
         updated_bytes,
         updated_date,
         updated_time,

@@ -1,6 +1,8 @@
 use std::error;
 use std::fmt;
 
+use crate::conversions::numeric::ParseNumericError;
+
 /// Convenient result type for ETL operations using [`EtlError`] as the error type.
 ///
 /// This type alias reduces boilerplate when working with fallible ETL operations.
@@ -498,13 +500,13 @@ impl From<chrono::ParseError> for EtlError {
     }
 }
 
-/// Converts [`bigdecimal::ParseBigDecimalError`] to [`EtlError`] with [`ErrorKind::ConversionError`].
-impl From<bigdecimal::ParseBigDecimalError> for EtlError {
-    fn from(err: bigdecimal::ParseBigDecimalError) -> EtlError {
+/// Converts [`ParseNumericError`] to [`EtlError`] with [`ErrorKind::ConversionError`].
+impl From<ParseNumericError> for EtlError {
+    fn from(err: ParseNumericError) -> EtlError {
         EtlError {
             repr: ErrorRepr::WithDescriptionAndDetail(
                 ErrorKind::ConversionError,
-                "BigDecimal parsing failed",
+                "Numeric parsing failed",
                 err.to_string(),
             ),
         }
