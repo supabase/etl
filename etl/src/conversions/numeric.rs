@@ -71,14 +71,16 @@ pub enum PgNumeric {
     },
 }
 
+const ZERO: PgNumeric = PgNumeric::Value {
+    sign: Sign::Positive,
+    weight: 0,
+    scale: 0,
+    digits: vec![],
+};
+
 impl Default for PgNumeric {
     fn default() -> Self {
-        PgNumeric::Value {
-            sign: Sign::Positive,
-            weight: 0,
-            scale: 0,
-            digits: vec![],
-        }
+        ZERO
     }
 }
 
@@ -92,7 +94,7 @@ impl FromStr for PgNumeric {
         skip_whitespace(&mut chars);
 
         if chars.peek().is_none() {
-            return Err(ParseNumericError::InvalidSyntax("empty string".to_string()));
+            return Err(ParseNumericError::InvalidSyntax);
         }
 
         // Handle sign
@@ -110,11 +112,11 @@ impl FromStr for PgNumeric {
 
         // Check for special values (NaN, infinity)
         if !matches!(chars.peek(), Some('0'..='9') | Some('.')) {
-            return parse_special_value(&mut chars, &sign, input);
+            return parse_special_value(&mut chars, &sign);
         }
 
         // Parse regular numeric value
-        parse_numeric_value(&mut chars, sign, input)
+        parse_numeric_value(&mut chars, sign)
     }
 }
 
@@ -210,21 +212,11 @@ impl ToSql for PgNumeric {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ParseNumericError {
-    InvalidSyntax(String),
-    ValueOutOfRange(String),
+    InvalidSyntax,
+    ValueOutOfRange,
 }
 
-impl std::fmt::Display for ParseNumericError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            ParseNumericError::InvalidSyntax(msg) => write!(f, "Invalid syntax: {msg}"),
-            ParseNumericError::ValueOutOfRange(msg) => write!(f, "Value out of range: {msg}"),
-        }
-    }
-}
-
-impl std::error::Error for ParseNumericError {}
-
+/// Skips whitespace from a peekable iterator over characters
 fn skip_whitespace(chars: &mut Peekable<Chars>) {
     while let Some(&ch) = chars.peek() {
         if ch.is_whitespace() {
@@ -235,10 +227,21 @@ fn skip_whitespace(chars: &mut Peekable<Chars>) {
     }
 }
 
+impl std::fmt::Display for ParseNumericError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ParseNumericError::InvalidSyntax => write!(f, "Invalid syntax"),
+            ParseNumericError::ValueOutOfRange => write!(f, "Value out of range"),
+        }
+    }
+}
+
+impl std::error::Error for ParseNumericError {}
+
+/// Parses
 fn parse_special_value(
     chars: &mut Peekable<Chars>,
     sign: &Sign,
-    input: &str,
 ) -> Result<PgNumeric, ParseNumericError> {
     let remaining: String = chars.collect();
     let remaining_lower = remaining.to_lowercase();
@@ -246,9 +249,7 @@ fn parse_special_value(
     if remaining_lower == "nan" {
         // NaN must not have a sign
         if matches!(sign, Sign::Negative) {
-            return Err(ParseNumericError::InvalidSyntax(format!(
-                "invalid input syntax for type numeric: \"{input}\"",
-            )));
+            return Err(ParseNumericError::InvalidSyntax);
         }
         Ok(PgNumeric::NaN)
     } else if remaining_lower == "infinity" || remaining_lower == "inf" {
@@ -257,16 +258,13 @@ fn parse_special_value(
             Sign::Negative => Ok(PgNumeric::NegativeInfinity),
         }
     } else {
-        Err(ParseNumericError::InvalidSyntax(format!(
-            "invalid input syntax for type numeric: \"{input}\"",
-        )))
+        Err(ParseNumericError::InvalidSyntax)
     }
 }
 
 fn parse_numeric_value(
     chars: &mut Peekable<Chars>,
     sign: Sign,
-    input: &str,
 ) -> Result<PgNumeric, ParseNumericError> {
     let mut decimal_digits = Vec::new();
     let mut have_decimal_point = false;
@@ -281,9 +279,7 @@ fn parse_numeric_value(
 
     // Must have at least one digit
     if !matches!(chars.peek(), Some('0'..='9')) {
-        return Err(ParseNumericError::InvalidSyntax(format!(
-            "invalid input syntax for type numeric: \"{input}\"",
-        )));
+        return Err(ParseNumericError::InvalidSyntax);
     }
 
     // Parse digits and decimal point
@@ -300,26 +296,20 @@ fn parse_numeric_value(
             }
             '.' => {
                 if have_decimal_point {
-                    return Err(ParseNumericError::InvalidSyntax(format!(
-                        "invalid input syntax for type numeric: \"{input}\"",
-                    )));
+                    return Err(ParseNumericError::InvalidSyntax);
                 }
                 have_decimal_point = true;
                 chars.next();
                 // Decimal point must not be followed by underscore
                 if chars.peek() == Some(&'_') {
-                    return Err(ParseNumericError::InvalidSyntax(format!(
-                        "invalid input syntax for type numeric: \"{input}\"",
-                    )));
+                    return Err(ParseNumericError::InvalidSyntax);
                 }
             }
             '_' => {
                 chars.next();
                 // Underscore must be followed by more digits
                 if !matches!(chars.peek(), Some('0'..='9')) {
-                    return Err(ParseNumericError::InvalidSyntax(format!(
-                        "invalid input syntax for type numeric: \"{input}\"",
-                    )));
+                    return Err(ParseNumericError::InvalidSyntax);
                 }
             }
             _ => break,
@@ -346,9 +336,7 @@ fn parse_numeric_value(
 
         // Parse exponent digits
         if !matches!(chars.peek(), Some('0'..='9')) {
-            return Err(ParseNumericError::InvalidSyntax(format!(
-                "invalid input syntax for type numeric: \"{input}\"",
-            )));
+            return Err(ParseNumericError::InvalidSyntax);
         }
 
         while let Some(&ch) = chars.peek() {
@@ -357,17 +345,13 @@ fn parse_numeric_value(
                     chars.next();
                     exponent = exponent * 10 + (ch as u8 - b'0') as i64;
                     if exponent > i32::MAX as i64 / 2 {
-                        return Err(ParseNumericError::ValueOutOfRange(
-                            "value overflows numeric format".to_string(),
-                        ));
+                        return Err(ParseNumericError::ValueOutOfRange);
                     }
                 }
                 '_' => {
                     chars.next();
                     if !matches!(chars.peek(), Some('0'..='9')) {
-                        return Err(ParseNumericError::InvalidSyntax(format!(
-                            "invalid input syntax for type numeric: \"{input}\"",
-                        )));
+                        return Err(ParseNumericError::InvalidSyntax);
                     }
                 }
                 _ => break,
@@ -389,9 +373,7 @@ fn parse_numeric_value(
     // Check for trailing whitespace/junk
     skip_whitespace(chars);
     if chars.peek().is_some() {
-        return Err(ParseNumericError::InvalidSyntax(format!(
-            "invalid input syntax for type numeric: \"{input}\"",
-        )));
+        return Err(ParseNumericError::InvalidSyntax);
     }
 
     // Convert to base-10000 representation
@@ -515,15 +497,11 @@ fn format_numeric_value(
         write!(f, "-")?;
     }
 
-    // Calculate the number of decimal digits before the decimal point
-    // let digits_before_decimal = (weight as i32 + 1) * 4;
-
     if weight < 0 {
         // Number is less than 1, start with "0."
         write!(f, "0")?;
     } else {
         // Output digits before the decimal point
-        // let mut digit_pos = 0;
         for d in 0..=weight {
             let base_10000_digit = if (d as usize) < digits.len() {
                 digits[d as usize]
@@ -546,7 +524,6 @@ fn format_numeric_value(
                 // For subsequent digits, always output all 4 digits
                 write!(f, "{decimal_digits}")?;
             }
-            // digit_pos += 4;
         }
     }
 
@@ -588,7 +565,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_parse_simple_integer() {
+    fn parse_simple_integer() {
         let result = PgNumeric::from_str("123").unwrap();
         if let PgNumeric::Value {
             sign,
@@ -601,32 +578,48 @@ mod tests {
             assert_eq!(scale, 0);
             assert_eq!(digits, vec![123]);
         } else {
-            panic!("Expected Value variant");
+            panic!("Invalid PgNumeric value");
         }
     }
 
     #[test]
-    fn test_parse_negative() {
+    fn parse_negative() {
         let result = PgNumeric::from_str("-456").unwrap();
-        if let PgNumeric::Value { sign, .. } = result {
+        if let PgNumeric::Value {
+            sign,
+            weight: _,
+            scale,
+            digits,
+        } = result
+        {
             assert_eq!(sign, Sign::Negative);
+            assert_eq!(scale, 0);
+            assert_eq!(digits, vec![456]);
         } else {
-            panic!("Expected Value variant");
+            panic!("Invalid PgNumeric value");
         }
     }
 
     #[test]
-    fn test_parse_decimal() {
+    fn parse_decimal() {
         let result = PgNumeric::from_str("123.45").unwrap();
-        if let PgNumeric::Value { scale, .. } = result {
+        if let PgNumeric::Value {
+            sign,
+            weight: _,
+            scale,
+            digits,
+        } = result
+        {
+            assert_eq!(sign, Sign::Positive);
             assert_eq!(scale, 2);
+            assert_eq!(digits, vec![123, 4500]);
         } else {
-            panic!("Expected Value variant");
+            panic!("Invalid PgNumeric value");
         }
     }
 
     #[test]
-    fn test_parse_special_values() {
+    fn parse_special_values() {
         assert_eq!(PgNumeric::from_str("NaN").unwrap(), PgNumeric::NaN);
         assert_eq!(
             PgNumeric::from_str("Infinity").unwrap(),
@@ -647,14 +640,26 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_scientific_notation() {
+    fn parse_scientific_notation() {
         let result = PgNumeric::from_str("1.23e2").unwrap();
-        // Should represent 123
-        assert!(matches!(result, PgNumeric::Value { .. }));
+        if let PgNumeric::Value {
+            sign,
+            weight,
+            scale,
+            digits,
+        } = result
+        {
+            assert_eq!(sign, Sign::Positive);
+            assert_eq!(weight, 0);
+            assert_eq!(scale, 0);
+            assert_eq!(digits, vec![123]);
+        } else {
+            panic!("Expected Value variant");
+        }
     }
 
     #[test]
-    fn test_parse_errors() {
+    fn parse_errors() {
         assert!(PgNumeric::from_str("").is_err());
         assert!(PgNumeric::from_str("abc").is_err());
         assert!(PgNumeric::from_str("1.2.3").is_err());
@@ -662,14 +667,14 @@ mod tests {
     }
 
     #[test]
-    fn test_display_special_values() {
+    fn display_special_values() {
         assert_eq!(format!("{}", PgNumeric::NaN), "NaN");
         assert_eq!(format!("{}", PgNumeric::PositiveInfinity), "Infinity");
         assert_eq!(format!("{}", PgNumeric::NegativeInfinity), "-Infinity");
     }
 
     #[test]
-    fn test_display_simple_integers() {
+    fn display_simple_integers() {
         let num = PgNumeric::Value {
             sign: Sign::Positive,
             weight: 0,
@@ -688,18 +693,18 @@ mod tests {
     }
 
     #[test]
-    fn test_display_decimals() {
+    fn display_decimals() {
         let num = PgNumeric::Value {
             sign: Sign::Positive,
             weight: 0,
             scale: 2,
-            digits: vec![1234, 5000], // Represents 123.45
+            digits: vec![1234, 5000],
         };
         assert_eq!(format!("{num}"), "1234.50");
     }
 
     #[test]
-    fn test_display_zero() {
+    fn display_zero() {
         let num = PgNumeric::Value {
             sign: Sign::Positive,
             weight: 0,
@@ -710,29 +715,29 @@ mod tests {
     }
 
     #[test]
-    fn test_display_large_numbers() {
+    fn display_large_numbers() {
         let num = PgNumeric::Value {
             sign: Sign::Positive,
             weight: 1,
             scale: 0,
-            digits: vec![1234, 5678], // Represents 12345678
+            digits: vec![1234, 5678],
         };
         assert_eq!(format!("{num}"), "12345678");
     }
 
     #[test]
-    fn test_display_small_decimals() {
+    fn display_small_decimals() {
         let num = PgNumeric::Value {
             sign: Sign::Positive,
             weight: -1,
             scale: 4,
-            digits: vec![1234], // Represents 0.1234
+            digits: vec![1234],
         };
         assert_eq!(format!("{num}"), "0.1234");
     }
 
     #[test]
-    fn test_leading_zero_suppression() {
+    fn leading_zero_suppression() {
         let num = PgNumeric::Value {
             sign: Sign::Positive,
             weight: 0,
@@ -743,7 +748,7 @@ mod tests {
     }
 
     #[test]
-    fn test_trailing_decimal_zeros() {
+    fn trailing_decimal_zeros() {
         let num = PgNumeric::Value {
             sign: Sign::Positive,
             weight: 0,
