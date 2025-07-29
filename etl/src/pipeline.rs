@@ -1,8 +1,3 @@
-use config::shared::PipelineConfig;
-use std::sync::Arc;
-use tokio::sync::Semaphore;
-use tracing::{error, info};
-
 use crate::bail;
 use crate::concurrency::shutdown::{ShutdownTx, create_shutdown_channel};
 use crate::concurrency::signal::create_signal;
@@ -16,6 +11,11 @@ use crate::state::table::TableReplicationPhase;
 use crate::workers::apply::{ApplyWorker, ApplyWorkerHandle};
 use crate::workers::base::{Worker, WorkerHandle};
 use crate::workers::pool::TableSyncWorkerPool;
+use config::shared::PipelineConfig;
+use postgres::schema::TableId;
+use std::sync::Arc;
+use tokio::sync::Semaphore;
+use tracing::{error, info};
 
 #[derive(Debug)]
 enum PipelineState<S> {
@@ -129,62 +129,30 @@ where
         .start()
         .await?;
 
-        self.state = PipelineState::Started { retries_orchestrator, apply_worker, pool };
+        self.state = PipelineState::Started {
+            retries_orchestrator,
+            apply_worker,
+            pool,
+        };
 
         Ok(())
     }
 
-    async fn prepare_schema_cache(&self, schema_cache: &SchemaCache) -> EtlResult<()> {
-        // We initialize the schema cache, which is local to a pipeline, and we try to load existing
-        // schemas that were previously stored at the destination (if any).
-        let table_schemas = self.destination.load_table_schemas().await?;
-        schema_cache.add_table_schemas(table_schemas).await;
+    pub async fn retry_table(&self, table_id: TableId) -> EtlResult<()> {
+        let PipelineState::Started {
+            retries_orchestrator,
+            apply_worker: _,
+            pool: _,
+        } = &self.state
+        else {
+            info!("pipeline was not started, nothing to retry");
 
-        Ok(())
-    }
+            return Ok(());
+        };
 
-    async fn initialize_table_states(
-        &self,
-        replication_client: &PgReplicationClient,
-    ) -> EtlResult<()> {
-        info!(
-            "initializing table states for tables in publication '{}'",
-            self.config.publication_name
-        );
-
-        // We need to make sure that the publication exists.
-        if !replication_client
-            .publication_exists(&self.config.publication_name)
-            .await?
-        {
-            error!(
-                "publication '{}' does not exist in the database",
-                self.config.publication_name
-            );
-
-            bail!(
-                ErrorKind::ConfigError,
-                "Missing publication",
-                format!(
-                    "The publication '{}' does not exist in the database",
-                    self.config.publication_name
-                )
-            );
-        }
-
-        let table_ids = replication_client
-            .get_publication_table_ids(&self.config.publication_name)
-            .await?;
-
-        self.state_store.load_table_replication_states().await?;
-        let states = self.state_store.get_table_replication_states().await?;
-        for table_id in table_ids {
-            if !states.contains_key(&table_id) {
-                self.state_store
-                    .update_table_replication_state(table_id, TableReplicationPhase::Init)
-                    .await?;
-            }
-        }
+        // We try to retry manually the table. If the table didn't fail, or it has a different retry
+        // mode, this operation will be a noop.
+        retries_orchestrator.retry(table_id).await;
 
         Ok(())
     }
@@ -245,7 +213,6 @@ where
         Ok(())
     }
 
-    #[allow(clippy::result_large_err)]
     pub fn shutdown(&self) {
         info!("trying to shut down the pipeline");
 
@@ -260,5 +227,60 @@ where
     pub async fn shutdown_and_wait(self) -> EtlResult<()> {
         self.shutdown();
         self.wait().await
+    }
+
+    async fn prepare_schema_cache(&self, schema_cache: &SchemaCache) -> EtlResult<()> {
+        // We initialize the schema cache, which is local to a pipeline, and we try to load existing
+        // schemas that were previously stored at the destination (if any).
+        let table_schemas = self.destination.load_table_schemas().await?;
+        schema_cache.add_table_schemas(table_schemas).await;
+
+        Ok(())
+    }
+
+    async fn initialize_table_states(
+        &self,
+        replication_client: &PgReplicationClient,
+    ) -> EtlResult<()> {
+        info!(
+            "initializing table states for tables in publication '{}'",
+            self.config.publication_name
+        );
+
+        // We need to make sure that the publication exists.
+        if !replication_client
+            .publication_exists(&self.config.publication_name)
+            .await?
+        {
+            error!(
+                "publication '{}' does not exist in the database",
+                self.config.publication_name
+            );
+
+            bail!(
+                ErrorKind::ConfigError,
+                "Missing publication",
+                format!(
+                    "The publication '{}' does not exist in the database",
+                    self.config.publication_name
+                )
+            );
+        }
+
+        let table_ids = replication_client
+            .get_publication_table_ids(&self.config.publication_name)
+            .await?;
+
+        self.state_store.load_table_replication_states().await?;
+        let states = self.state_store.get_table_replication_states().await?;
+        for table_id in table_ids {
+            if !states.contains_key(&table_id) {
+                self.state_store
+                    .update_table_replication_state(table_id, TableReplicationPhase::Init)
+                    .await?;
+            }
+        }
+
+        Ok(())
     }
 }

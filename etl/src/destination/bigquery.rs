@@ -634,7 +634,6 @@ impl BigQueryDestination {
     /// Converts a string representation back to a PostgreSQL [`Type`].
     ///
     /// Used when reconstructing schemas from BigQuery metadata tables. Falls back to `TEXT` for unknown types.
-    #[allow(clippy::result_large_err)]
     fn string_to_postgres_type(type_str: &str) -> EtlResult<Type> {
         match type_str {
             "BOOL" => Ok(Type::BOOL),
