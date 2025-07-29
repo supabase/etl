@@ -20,7 +20,7 @@ Usage:
 use std::error::Error;
 
 use clap::{Args, Parser};
-use config::shared::{BatchConfig, PgConnectionConfig, PipelineConfig, RetryConfig, TlsConfig};
+use config::shared::{BatchConfig, PgConnectionConfig, PipelineConfig, TlsConfig};
 use etl::{
     destination::bigquery::BigQueryDestination, pipeline::Pipeline,
     state::store::memory::MemoryStateStore,

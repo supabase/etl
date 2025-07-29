@@ -143,10 +143,10 @@ struct HandleMessageResult {
     /// Other errors that make the apply loop fail, will be propagated to the caller and handled differently
     /// based on the worker that runs the loop:
     /// - Apply worker -> the error will make the apply loop crash, which will be propagated to the
-    ///     worker and up if the worker is awaited.
+    ///   worker and up if the worker is awaited.
     /// - Table sync worker -> the error will make the apply loop crash, which will be propagated
-    ///     to the worker, however the error will be caught and persisted via the observer mechanism
-    ///     in place for the table sync workers.
+    ///   to the worker, however the error will be caught and persisted via the observer mechanism
+    ///   in place for the table sync workers.
     table_replication_error: Option<TableReplicationError>,
 }
 

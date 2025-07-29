@@ -2,7 +2,6 @@ use crate::config::load_replicator_config;
 use crate::migrations::migrate_state_store;
 use config::shared::{
     BatchConfig, DestinationConfig, PgConnectionConfig, PipelineConfig, ReplicatorConfig,
-    RetryConfig,
 };
 use etl::destination::bigquery::BigQueryDestination;
 use etl::destination::memory::MemoryDestination;

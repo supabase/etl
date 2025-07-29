@@ -33,7 +33,7 @@ Usage Examples:
 use std::error::Error;
 
 use clap::{Parser, Subcommand, ValueEnum};
-use config::shared::{BatchConfig, PgConnectionConfig, PipelineConfig, RetryConfig, TlsConfig};
+use config::shared::{BatchConfig, PgConnectionConfig, PipelineConfig, TlsConfig};
 use etl::{
     conversions::{event::Event, table_row::TableRow},
     destination::base::Destination,

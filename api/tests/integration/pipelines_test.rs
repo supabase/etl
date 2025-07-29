@@ -7,7 +7,7 @@ use api::routes::pipelines::{
 };
 use api::routes::sources::{CreateSourceRequest, CreateSourceResponse};
 use config::SerializableSecretString;
-use config::shared::{BatchConfig, RetryConfig};
+use config::shared::BatchConfig;
 use postgres::sqlx::test_utils::{create_pg_database, drop_pg_database};
 use reqwest::StatusCode;
 use secrecy::ExposeSecret;
