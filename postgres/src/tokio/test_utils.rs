@@ -1,7 +1,7 @@
 use crate::schema::{ColumnSchema, TableId, TableName};
 use config::shared::{IntoConnectOptions, PgConnectionConfig};
 use tokio::runtime::Handle;
-use tokio_postgres::types::Type;
+use tokio_postgres::types::{ToSql, Type};
 use tokio_postgres::{Client, GenericClient, NoTls, Transaction};
 use tracing::info;
 
