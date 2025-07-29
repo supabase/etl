@@ -3,18 +3,32 @@ Table Copies Benchmark
 
 This benchmark allows testing ETL pipeline performance with different destinations.
 
+Logging:
+- Use --log-target terminal for terminal output (default, colorized, pretty)
+- Use --log-target file for file output (logs written to 'logs/' directory)
+- Set RUST_LOG environment variable to control log levels (default: info)
+- Example: RUST_LOG=debug cargo bench --bench table_copies -- --log-target terminal run
+
 Usage Examples:
 
-1. Run with null destination (fastest, data is discarded):
-   cargo bench --bench table_copies -- run \
+1. Run with null destination and terminal logging (fastest, data is discarded):
+   cargo bench --bench table_copies -- --log-target terminal run \
      --host localhost --port 5432 --database bench \
      --username postgres --password mypass \
      --publication-name bench_pub \
      --table-ids 1,2,3 \
      --destination null
 
-2. Run with BigQuery destination (requires BigQuery feature):
-   cargo bench --bench table_copies --features bigquery -- run \
+2. Run with file logging for production-like testing:
+   cargo bench --bench table_copies -- --log-target file run \
+     --host localhost --port 5432 --database bench \
+     --username postgres --password mypass \
+     --publication-name bench_pub \
+     --table-ids 1,2,3 \
+     --destination null
+
+3. Run with BigQuery destination (requires BigQuery feature):
+   cargo bench --bench table_copies --features bigquery -- --log-target terminal run \
      --host localhost --port 5432 --database bench \
      --username postgres --password mypass \
      --publication-name bench_pub \
@@ -24,8 +38,8 @@ Usage Examples:
      --bq-dataset-id my_dataset \
      --bq-sa-key-file /path/to/service-account-key.json
 
-3. Prepare benchmark environment (clean up replication slots):
-   cargo bench --bench table_copies -- prepare \
+4. Prepare benchmark environment (clean up replication slots):
+   cargo bench --bench table_copies -- --log-target terminal prepare \
      --host localhost --port 5432 --database bench \
      --username postgres --password mypass
 */
@@ -33,7 +47,10 @@ Usage Examples:
 use std::error::Error;
 
 use clap::{Parser, Subcommand, ValueEnum};
-use config::shared::{BatchConfig, PgConnectionConfig, PipelineConfig, RetryConfig, TlsConfig};
+use config::{
+    Environment,
+    shared::{BatchConfig, PgConnectionConfig, PipelineConfig, RetryConfig, TlsConfig},
+};
 use etl::{
     conversions::{event::Event, table_row::TableRow},
     destination::base::Destination,
@@ -42,6 +59,8 @@ use etl::{
 };
 use postgres::schema::{TableId, TableSchema};
 use sqlx::postgres::PgPool;
+use telemetry::init_tracing;
+use tracing::info;
 
 #[cfg(feature = "bigquery")]
 use etl::destination::bigquery::BigQueryDestination;
@@ -50,8 +69,34 @@ use etl::error::EtlResult;
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
+    /// Where to send log output
+    #[arg(
+        long = "log-target",
+        value_enum,
+        default_value = "terminal",
+        global = true
+    )]
+    log_target: LogTarget,
+
     #[command(subcommand)]
     command: Commands,
+}
+
+#[derive(ValueEnum, Debug, Clone)]
+enum LogTarget {
+    /// Send logs to terminal with colors and pretty formatting
+    Terminal,
+    /// Send logs to files in 'logs/' directory
+    File,
+}
+
+impl From<LogTarget> for Environment {
+    fn from(log_target: LogTarget) -> Self {
+        match log_target {
+            LogTarget::Terminal => Environment::Dev,
+            LogTarget::File => Environment::Prod,
+        }
+    }
 }
 
 #[derive(ValueEnum, Debug, Clone)]
@@ -178,6 +223,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let args = Args::parse_from(args);
 
+    // Set the environment based on the log target argument
+    let environment: Environment = args.log_target.into();
+    environment.set();
+
+    // Initialize tracing with the selected environment
+    let _log_flusher = init_tracing("table_copies")?;
+
     match args.command {
         Commands::Run {
             host,
@@ -288,7 +340,7 @@ struct PrepareArgs {
 }
 
 async fn prepare_benchmark(args: PrepareArgs) -> Result<(), Box<dyn Error>> {
-    println!("Preparing benchmark environment...");
+    info!("Preparing benchmark environment...");
 
     // Build connection string
     let mut connection_string = format!(
@@ -310,12 +362,12 @@ async fn prepare_benchmark(args: PrepareArgs) -> Result<(), Box<dyn Error>> {
         connection_string.push_str("?sslmode=disable");
     }
 
-    println!("Connecting to database at {}:{}", args.host, args.port);
+    info!("Connecting to database at {}:{}", args.host, args.port);
 
     // Connect to the database
     let pool = PgPool::connect(&connection_string).await?;
 
-    println!("Cleaning up existing replication slots...");
+    info!("Cleaning up existing replication slots...");
 
     // Execute the cleanup SQL
     let cleanup_sql = r#"
@@ -332,7 +384,7 @@ async fn prepare_benchmark(args: PrepareArgs) -> Result<(), Box<dyn Error>> {
 
     sqlx::query(cleanup_sql).execute(&pool).await?;
 
-    println!("Replication slots cleanup completed successfully!");
+    info!("Replication slots cleanup completed successfully!");
 
     // Close the connection
     pool.close().await;
@@ -341,6 +393,14 @@ async fn prepare_benchmark(args: PrepareArgs) -> Result<(), Box<dyn Error>> {
 }
 
 async fn start_pipeline(args: RunArgs) -> Result<(), Box<dyn Error>> {
+    info!("Starting ETL pipeline benchmark");
+    info!(
+        "Database: {}@{}:{}/{}",
+        args.username, args.host, args.port, args.database
+    );
+    info!("Table IDs: {:?}", args.table_ids);
+    info!("Destination: {:?}", args.destination);
+
     let pg_connection_config = PgConnectionConfig {
         host: args.host,
         port: args.port,
@@ -414,13 +474,21 @@ async fn start_pipeline(args: RunArgs) -> Result<(), Box<dyn Error>> {
     };
 
     let mut pipeline = Pipeline::new(1, pipeline_config, state_store, destination);
+    info!("Starting pipeline...");
     pipeline.start().await?;
 
+    info!(
+        "Waiting for all {} tables to complete copy phase...",
+        args.table_ids.len()
+    );
     for notification in table_copied_notifications {
         notification.notified().await;
     }
+    info!("All tables completed copy phase");
 
+    info!("Shutting down pipeline...");
     pipeline.shutdown_and_wait().await?;
+    info!("ETL pipeline benchmark completed successfully");
 
     Ok(())
 }
