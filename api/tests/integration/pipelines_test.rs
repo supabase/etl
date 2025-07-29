@@ -31,12 +31,7 @@ pub fn new_pipeline_config() -> PipelineConfig {
             max_size: 1000,
             max_fill_ms: 5,
         }),
-        apply_worker_init_retry: Some(RetryConfig {
-            max_attempts: 5,
-            initial_delay_ms: 1000,
-            max_delay_ms: 2000,
-            backoff_factor: 0.5,
-        }),
+        table_error_retry_delay_ms: Some(10000),
         max_table_sync_workers: Some(2),
     }
 }
@@ -48,12 +43,7 @@ pub fn updated_pipeline_config() -> PipelineConfig {
             max_size: 2000,
             max_fill_ms: 10,
         }),
-        apply_worker_init_retry: Some(RetryConfig {
-            max_attempts: 10,
-            initial_delay_ms: 2000,
-            max_delay_ms: 4000,
-            backoff_factor: 1.0,
-        }),
+        table_error_retry_delay_ms: Some(20000),
         max_table_sync_workers: Some(4),
     }
 }

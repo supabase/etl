@@ -8,14 +8,13 @@ use etl::pipeline::PipelineId;
 use etl::state::store::base::StateStore;
 use etl::state::store::notify::NotifyingStateStore;
 use etl::state::table::{TableReplicationPhase, TableReplicationPhaseType};
-use fail::FailScenario;
-use rand::random;
-use telemetry::init_test_tracing;
-
 use etl::test_utils::database::spawn_database;
 use etl::test_utils::pipeline::create_pipeline;
 use etl::test_utils::test_destination_wrapper::TestDestinationWrapper;
 use etl::test_utils::test_schema::{TableSelection, insert_users_data, setup_test_database_schema};
+use fail::FailScenario;
+use rand::random;
+use telemetry::init_test_tracing;
 
 // TODO: add more tests with fault injection.
 

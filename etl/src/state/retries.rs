@@ -306,21 +306,301 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state::store::notify::NotifyingStateStore;
+    use crate::state::table::{TableReplicationPhase, TableReplicationPhaseType};
+    use chrono::{Duration as ChronoDuration, Utc};
     use postgres::schema::TableId;
+    use std::time::Duration;
     use tokio::sync::watch;
+    use tokio::time::sleep;
+
+    async fn create_test_orchestrator() -> (
+        RetriesOrchestrator<NotifyingStateStore>,
+        NotifyingStateStore,
+    ) {
+        let pool = TableSyncWorkerPool::new();
+        let state_store = NotifyingStateStore::new();
+        let (tx, _rx) = watch::channel(());
+
+        let orchestrator = RetriesOrchestrator::new(pool, state_store.clone(), tx);
+
+        (orchestrator, state_store)
+    }
 
     #[tokio::test]
-    async fn test_retries_orchestrator_basic() {
-        let _pool = TableSyncWorkerPool::new();
-        let _state_store = (); // Use unit type for simple test
-        let (_tx, _rx) = watch::channel(());
-
-        // This test just verifies basic compilation and instantiation
+    async fn test_schedule_timed_retry() {
+        let (orchestrator, state_store) = create_test_orchestrator().await;
         let table_id = TableId::new(1);
 
-        // Basic instantiation test - we can't easily test the full functionality
-        // without implementing a proper StateStore mock, but this verifies
-        // the basic structure compiles correctly
-        assert!(table_id.0 > 0);
+        // Add some initial state for the table
+        state_store
+            .update_table_replication_state(table_id, TableReplicationPhase::Init)
+            .await
+            .unwrap();
+
+        let retry_time = Utc::now() + ChronoDuration::milliseconds(100);
+        orchestrator
+            .schedule_timed_retry(table_id, retry_time)
+            .await;
+
+        // Verify the retry is scheduled
+        let delay_queue = orchestrator.delay_queue.lock().await;
+        let enqueued_keys = orchestrator.enqueued_table_keys.lock().await;
+
+        assert!(enqueued_keys.contains_key(&table_id));
+        assert_eq!(delay_queue.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_schedule_timed_retry_debouncing() {
+        let (orchestrator, state_store) = create_test_orchestrator().await;
+        let table_id = TableId::new(1);
+
+        // Add some initial state for the table
+        state_store
+            .update_table_replication_state(table_id, TableReplicationPhase::Init)
+            .await
+            .unwrap();
+
+        // Schedule first retry
+        let retry_time1 = Utc::now() + ChronoDuration::milliseconds(200);
+        orchestrator
+            .schedule_timed_retry(table_id, retry_time1)
+            .await;
+
+        // Schedule second retry for same table (should replace first)
+        let retry_time2 = Utc::now() + ChronoDuration::milliseconds(300);
+        orchestrator
+            .schedule_timed_retry(table_id, retry_time2)
+            .await;
+
+        // Verify only one retry is scheduled
+        let delay_queue = orchestrator.delay_queue.lock().await;
+        let enqueued_keys = orchestrator.enqueued_table_keys.lock().await;
+
+        assert_eq!(enqueued_keys.len(), 1);
+        assert_eq!(delay_queue.len(), 1);
+        assert!(enqueued_keys.contains_key(&table_id));
+    }
+
+    #[tokio::test]
+    async fn test_schedule_manual_retry() {
+        let (orchestrator, _) = create_test_orchestrator().await;
+        let table_id = TableId::new(1);
+
+        orchestrator.schedule_manual_retry(table_id).await;
+
+        let manual_retries = orchestrator.manual_retries.lock().await;
+        assert!(manual_retries.contains(&table_id));
+    }
+
+    #[tokio::test]
+    async fn test_manual_retry_execution() {
+        let (orchestrator, state_store) = create_test_orchestrator().await;
+        let table_id = TableId::new(1);
+
+        // Add initial state and history for rollback
+        state_store
+            .update_table_replication_state(table_id, TableReplicationPhase::Init)
+            .await
+            .unwrap();
+        state_store
+            .update_table_replication_state(table_id, TableReplicationPhase::DataSync)
+            .await
+            .unwrap();
+
+        // Schedule manual retry
+        orchestrator.schedule_manual_retry(table_id).await;
+
+        // Execute the retry
+        let result = orchestrator.retry(table_id).await;
+        assert!(result);
+
+        // Verify the table is no longer in manual retries
+        let manual_retries = orchestrator.manual_retries.lock().await;
+        assert!(!manual_retries.contains(&table_id));
+
+        // Verify state was rolled back
+        let current_state = state_store
+            .get_table_replication_state(table_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(current_state.as_type(), TableReplicationPhaseType::Init);
+    }
+
+    #[tokio::test]
+    async fn test_retry_nonexistent_manual_retry() {
+        let (orchestrator, _) = create_test_orchestrator().await;
+        let table_id = TableId::new(1);
+
+        // Try to retry a table that wasn't scheduled for manual retry
+        let result = orchestrator.retry(table_id).await;
+        assert!(!result);
+    }
+
+    #[tokio::test]
+    async fn test_timed_retry_execution() {
+        let (orchestrator, state_store) = create_test_orchestrator().await;
+        let table_id = TableId::new(1);
+
+        // Add initial state and history for rollback
+        state_store
+            .update_table_replication_state(table_id, TableReplicationPhase::Init)
+            .await
+            .unwrap();
+        state_store
+            .update_table_replication_state(table_id, TableReplicationPhase::DataSync)
+            .await
+            .unwrap();
+
+        // Schedule a retry with very short delay
+        let retry_time = Utc::now() + ChronoDuration::milliseconds(50);
+        orchestrator
+            .schedule_timed_retry(table_id, retry_time)
+            .await;
+
+        // Wait for the retry to be processed
+        sleep(Duration::from_millis(200)).await;
+
+        // Verify the state was rolled back
+        let current_state = state_store
+            .get_table_replication_state(table_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(current_state.as_type(), TableReplicationPhaseType::Init);
+
+        // Verify the retry is no longer in the queue
+        let enqueued_keys = orchestrator.enqueued_table_keys.lock().await;
+        assert!(!enqueued_keys.contains_key(&table_id));
+    }
+
+    #[tokio::test]
+    async fn test_timed_retry_with_past_time() {
+        let (orchestrator, state_store) = create_test_orchestrator().await;
+        let table_id = TableId::new(1);
+
+        // Add initial state and history for rollback
+        state_store
+            .update_table_replication_state(table_id, TableReplicationPhase::Init)
+            .await
+            .unwrap();
+        state_store
+            .update_table_replication_state(table_id, TableReplicationPhase::DataSync)
+            .await
+            .unwrap();
+
+        // Schedule a retry with past time (should execute immediately)
+        let retry_time = Utc::now() - ChronoDuration::minutes(1);
+        orchestrator
+            .schedule_timed_retry(table_id, retry_time)
+            .await;
+
+        // Wait a short time for processing
+        sleep(Duration::from_millis(100)).await;
+
+        // Verify the state was rolled back
+        let current_state = state_store
+            .get_table_replication_state(table_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(current_state.as_type(), TableReplicationPhaseType::Init);
+    }
+
+    #[tokio::test]
+    async fn test_multiple_tables_retries() {
+        let (orchestrator, state_store) = create_test_orchestrator().await;
+        let table_id1 = TableId::new(1);
+        let table_id2 = TableId::new(2);
+        let table_id3 = TableId::new(3);
+
+        // Setup states for all tables
+        for table_id in [table_id1, table_id2, table_id3] {
+            state_store
+                .update_table_replication_state(table_id, TableReplicationPhase::Init)
+                .await
+                .unwrap();
+            state_store
+                .update_table_replication_state(table_id, TableReplicationPhase::DataSync)
+                .await
+                .unwrap();
+        }
+
+        // Schedule different types of retries
+        orchestrator.schedule_manual_retry(table_id1).await;
+        orchestrator
+            .schedule_timed_retry(table_id2, Utc::now() + ChronoDuration::milliseconds(50))
+            .await;
+        orchestrator
+            .schedule_timed_retry(table_id3, Utc::now() + ChronoDuration::milliseconds(100))
+            .await;
+
+        // Verify manual retry
+        let manual_retries = orchestrator.manual_retries.lock().await;
+        assert!(manual_retries.contains(&table_id1));
+
+        // Verify timed retries
+        let enqueued_keys = orchestrator.enqueued_table_keys.lock().await;
+        assert!(enqueued_keys.contains_key(&table_id2));
+        assert!(enqueued_keys.contains_key(&table_id3));
+    }
+
+    #[tokio::test]
+    async fn test_retry_with_no_history() {
+        let (orchestrator, state_store) = create_test_orchestrator().await;
+        let table_id = TableId::new(1);
+
+        // Only add current state, no history
+        state_store
+            .update_table_replication_state(table_id, TableReplicationPhase::Init)
+            .await
+            .unwrap();
+
+        // Schedule manual retry
+        orchestrator.schedule_manual_retry(table_id).await;
+
+        // Execute the retry - should handle the case where rollback fails
+        let result = orchestrator.retry(table_id).await;
+        assert!(result); // The retry executes, but rollback may fail internally
+
+        // Verify the table is removed from manual retries even if rollback fails
+        let manual_retries = orchestrator.manual_retries.lock().await;
+        assert!(!manual_retries.contains(&table_id));
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_manual_retries() {
+        let (orchestrator, state_store) = create_test_orchestrator().await;
+        let table_id = TableId::new(1);
+
+        // Setup state with history
+        state_store
+            .update_table_replication_state(table_id, TableReplicationPhase::Init)
+            .await
+            .unwrap();
+        state_store
+            .update_table_replication_state(table_id, TableReplicationPhase::DataSync)
+            .await
+            .unwrap();
+
+        // Schedule manual retry
+        orchestrator.schedule_manual_retry(table_id).await;
+
+        // Try concurrent retries
+        let orchestrator_clone = orchestrator.clone();
+        let (result1, result2) = tokio::join!(
+            orchestrator.retry(table_id),
+            orchestrator_clone.retry(table_id)
+        );
+
+        // Only one should succeed
+        assert!(result1 != result2);
+        assert!(result1 || result2);
+
+        // Verify no manual retry remains
+        let manual_retries = orchestrator.manual_retries.lock().await;
+        assert!(!manual_retries.contains(&table_id));
     }
 }

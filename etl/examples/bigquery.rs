@@ -158,18 +158,13 @@ async fn main_impl() -> Result<(), Box<dyn Error>> {
     // Create pipeline configuration with all necessary settings
     let pipeline_config = PipelineConfig {
         id: 1, // Using a simple ID for the example
+        publication_name: args.publication,
         pg_connection: pg_connection_config,
         batch: BatchConfig {
             max_size: args.bq_args.max_batch_size,
             max_fill_ms: args.bq_args.max_batch_fill_duration_ms,
         },
-        apply_worker_init_retry: RetryConfig {
-            max_attempts: 3,
-            initial_delay_ms: 1000,
-            max_delay_ms: 10000,
-            backoff_factor: 2.0,
-        },
-        publication_name: args.publication,
+        table_error_retry_delay_ms: 10000,
         max_table_sync_workers: args.bq_args.max_table_sync_workers,
     };
 
