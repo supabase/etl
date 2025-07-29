@@ -101,12 +101,12 @@ fn log_pipeline_config(config: &PipelineConfig) {
     debug!(
         pipeline_id = config.id,
         publication_name = config.publication_name,
+        table_error_retry_delay_ms = config.table_error_retry_delay_ms,
         max_table_sync_workers = config.max_table_sync_workers,
         "pipeline config"
     );
     log_pg_connection_config(&config.pg_connection);
     log_batch_config(&config.batch);
-    log_apply_worker_init_retry(&config.apply_worker_init_retry);
 }
 
 fn log_pg_connection_config(config: &PgConnectionConfig) {
@@ -126,16 +126,6 @@ fn log_batch_config(config: &BatchConfig) {
         max_fill_ms = config.max_fill_ms,
         "batch config"
     );
-}
-
-fn log_apply_worker_init_retry(config: &RetryConfig) {
-    debug!(
-        max_attempts = config.max_attempts,
-        initial_delay_ms = config.initial_delay_ms,
-        max_delay_ms = config.max_delay_ms,
-        backoff_factor = config.backoff_factor,
-        "apply worker init retry config"
-    )
 }
 
 async fn init_state_store(

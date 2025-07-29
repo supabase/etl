@@ -1,4 +1,4 @@
-use config::shared::{BatchConfig, PgConnectionConfig, PipelineConfig, RetryConfig};
+use config::shared::{BatchConfig, PgConnectionConfig, PipelineConfig};
 use uuid::Uuid;
 
 use crate::destination::base::Destination;
@@ -27,18 +27,13 @@ where
 {
     let config = PipelineConfig {
         id: pipeline_id,
+        publication_name,
         pg_connection: pg_connection_config.clone(),
         batch: BatchConfig {
             max_size: 1,
             max_fill_ms: 1000,
         },
-        apply_worker_init_retry: RetryConfig {
-            max_attempts: 2,
-            initial_delay_ms: 1000,
-            max_delay_ms: 5000,
-            backoff_factor: 2.0,
-        },
-        publication_name,
+        table_error_retry_delay_ms: 1000,
         max_table_sync_workers: 1,
     };
 
@@ -64,15 +59,10 @@ where
 
     let config = PipelineConfig {
         id: pipeline_id,
+        publication_name,
         pg_connection: pg_connection_config.clone(),
         batch,
-        apply_worker_init_retry: RetryConfig {
-            max_attempts: 2,
-            initial_delay_ms: 1000,
-            max_delay_ms: 5000,
-            backoff_factor: 2.0,
-        },
-        publication_name,
+        table_error_retry_delay_ms: 1000,
         max_table_sync_workers: 1,
     };
 

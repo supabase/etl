@@ -1,5 +1,7 @@
+use config::shared::PipelineConfig;
 use postgres::schema::TableId;
 use std::ops::Deref;
+use std::sync::Arc;
 use tracing::error;
 
 use crate::concurrency::future::ReactiveFutureCallback;
@@ -12,6 +14,7 @@ use crate::workers::table_sync::TableSyncWorkerState;
 
 #[derive(Debug, Clone)]
 pub struct WorkerLifecycleObserver<S> {
+    config: Arc<PipelineConfig>,
     pool: TableSyncWorkerPool,
     retries_orchestrator: RetriesOrchestrator<S>,
     state_store: S,
@@ -22,11 +25,13 @@ where
     S: StateStore + Clone + Send + 'static,
 {
     pub fn new(
+        config: Arc<PipelineConfig>,
         pool: TableSyncWorkerPool,
         retries_orchestrator: RetriesOrchestrator<S>,
         state_store: S,
     ) -> Self {
         Self {
+            config,
             pool,
             retries_orchestrator,
             state_store,
@@ -79,7 +84,7 @@ where
         pool.mark_worker_finished(id);
 
         // We mark the table as errored properly persisting the error state.
-        let table_error = TableReplicationError::from_etl_error(id, error);
+        let table_error = TableReplicationError::from_etl_error(&self.config, id, error);
         self.mark_table_errored(&pool, id, table_error).await;
     }
 

@@ -1,4 +1,5 @@
 use chrono::{DateTime, Duration, Utc};
+use config::shared::PipelineConfig;
 use postgres::schema::TableId;
 use std::fmt;
 use tokio_postgres::types::PgLsn;
@@ -6,18 +7,6 @@ use tokio_postgres::types::PgLsn;
 use crate::error::{ErrorKind, EtlError};
 use crate::state::retries::RetriesOrchestrator;
 use crate::state::store::base::StateStore;
-
-/// Standard retry intervals for different types of transient errors.
-mod retry_intervals {
-
-    use chrono::Duration;
-
-    /// Standard retry interval for connection and destination service issues.
-    pub const CONNECTION_ERROR: Duration = Duration::minutes(1);
-
-    /// Longer retry interval for authentication issues that may need token refresh.
-    pub const AUTHENTICATION_ERROR: Duration = Duration::minutes(2);
-}
 
 /// Represents a processed error that occurred during table replication.
 ///
@@ -84,32 +73,28 @@ impl TableReplicationError {
     pub fn table_id(&self) -> TableId {
         self.table_id
     }
-}
 
-/// Converts an [`EtlError`] into a [`TableReplicationError`].
-///
-/// Currently, uses placeholder values for the table ID and provides a generic solution.
-impl TableReplicationError {
     /// Converts an [`EtlError`] to a [`TableReplicationError`] for a specific table.
     ///
     /// Determines appropriate retry policies based on the error kind.
     ///
     /// Note that this conversion is constantly improving since during testing and operation of ETL
     /// we might notice edge cases that could be manually handled.
-    pub fn from_etl_error(table_id: TableId, error: EtlError) -> Self {
+    pub fn from_etl_error(config: &PipelineConfig, table_id: TableId, error: EtlError) -> Self {
+        let retry_duration = Duration::milliseconds(config.table_error_retry_delay_ms as i64);
         match error.kind() {
             // Transient errors with retry
             ErrorKind::ConnectionFailed => Self::with_solution(
                 table_id,
                 error,
                 "Check network connectivity and database availability",
-                RetryPolicy::retry_in(retry_intervals::CONNECTION_ERROR),
+                RetryPolicy::retry_in(retry_duration),
             ),
             ErrorKind::AuthenticationError => Self::with_solution(
                 table_id,
                 error,
                 "Check credentials and token validity",
-                RetryPolicy::retry_in(retry_intervals::AUTHENTICATION_ERROR),
+                RetryPolicy::retry_in(retry_duration),
             ),
 
             // Errors that could disappear after user intervention

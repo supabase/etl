@@ -26,6 +26,7 @@ use crate::workers::table_sync::TableSyncWorkerState;
 #[cfg(feature = "failpoints")]
 use crate::{
     failpoints::START_TABLE_SYNC_AFTER_DATA_SYNC_ERROR,
+    failpoints::START_TABLE_SYNC_AFTER_DATA_SYNC_ERROR_RETRYABLE,
     failpoints::START_TABLE_SYNC_AFTER_DATA_SYNC_PANIC,
 };
 
@@ -147,14 +148,26 @@ where
 
             // Fail point to test when the table sync fails.
             #[cfg(feature = "failpoints")]
-            fail_point!(START_TABLE_SYNC_AFTER_DATA_SYNC_PANIC);
-            #[cfg(feature = "failpoints")]
-            fail_point!(START_TABLE_SYNC_AFTER_DATA_SYNC_ERROR, |_| {
-                bail!(
-                    ErrorKind::Unknown,
-                    "An unknown error has occurred before copying the table"
-                );
-            });
+            {
+                // Simple panic.
+                fail_point!(START_TABLE_SYNC_AFTER_DATA_SYNC_PANIC);
+
+                // Unknown error.
+                fail_point!(START_TABLE_SYNC_AFTER_DATA_SYNC_ERROR, |_| {
+                    bail!(
+                        ErrorKind::Unknown,
+                        "An unknown error has occurred before copying the table"
+                    );
+                });
+
+                // Error with timed retry.
+                fail_point!(START_TABLE_SYNC_AFTER_DATA_SYNC_ERROR_RETRYABLE, |_| {
+                    bail!(
+                        ErrorKind::ConnectionFailed,
+                        "An error occurred while connecting to Postgres"
+                    );
+                });
+            }
 
             // We create the slot with a transaction, since we need to have a consistent snapshot of the database
             // before copying the schema and tables.

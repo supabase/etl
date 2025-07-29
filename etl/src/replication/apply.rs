@@ -136,6 +136,17 @@ struct HandleMessageResult {
 
     /// Set when the table has encountered an error, and it should consequently be marked as errored
     /// in the state store.
+    ///
+    /// This error is a "caught" error, meaning that it doesn't crash the apply loop, but it makes it
+    /// continue or gracefully stop based on the worker type that runs the loop.
+    ///
+    /// Other errors that make the apply loop fail, will be propagated to the caller and handled differently
+    /// based on the worker that runs the loop:
+    /// - Apply worker -> the error will make the apply loop crash, which will be propagated to the
+    ///     worker and up if the worker is awaited.
+    /// - Table sync worker -> the error will make the apply loop crash, which will be propagated
+    ///     to the worker, however the error will be caught and persisted via the observer mechanism
+    ///     in place for the table sync workers.
     table_replication_error: Option<TableReplicationError>,
 }
 

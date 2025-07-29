@@ -336,6 +336,7 @@ where
 
         let state = TableSyncWorkerState::new(self.table_id, table_replication_phase);
 
+        let config_clone = self.config.clone();
         let retries_orchestrator_clone = self.retries_orchestrator.clone();
         let state_store_clone = self.state_store.clone();
         let state_clone = state.clone();
@@ -377,11 +378,11 @@ where
             // Note that this connection must be tied to the lifetime of this worker, otherwise
             // there will be problems when cleaning up the replication slot.
             let replication_client =
-                PgReplicationClient::connect(self.config.pg_connection.clone()).await?;
+                PgReplicationClient::connect(config_clone.pg_connection.clone()).await?;
 
             let result = start_table_sync(
                 self.pipeline_id,
-                self.config.clone(),
+                config_clone.clone(),
                 replication_client.clone(),
                 self.table_id,
                 state_clone.clone(),
@@ -407,7 +408,7 @@ where
             start_apply_loop(
                 self.pipeline_id,
                 start_lsn,
-                self.config.clone(),
+                config_clone,
                 replication_client.clone(),
                 self.schema_cache,
                 self.destination,
@@ -458,8 +459,12 @@ where
         // observer in order to react to state changes of the future. In this way, if an error happens in
         // a table sync worker, we can take action immediately instead of waiting on the join handles of
         // the future. This is important for notifying the state store about the new table sync state.
-        let observer =
-            WorkerLifecycleObserver::new(self.pool, self.retries_orchestrator, self.state_store);
+        let observer = WorkerLifecycleObserver::new(
+            self.config,
+            self.pool,
+            self.retries_orchestrator,
+            self.state_store,
+        );
         let fut = ReactiveFuture::wrap(table_sync_worker, self.table_id, observer)
             .instrument(table_sync_worker_span);
         let handle = tokio::spawn(fut);

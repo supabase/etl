@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::shared::{PgConnectionConfig, ValidationError, batch::BatchConfig, retry::RetryConfig};
+use crate::shared::{PgConnectionConfig, ValidationError, batch::BatchConfig};
 
 /// Configuration for a pipeline's batching and worker retry behavior.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -23,9 +23,8 @@ pub struct PipelineConfig {
     #[serde(default)]
     pub batch: BatchConfig,
 
-    /// Retry configuration for initializing apply workers.
-    #[serde(default)]
-    pub apply_worker_init_retry: RetryConfig,
+    /// Number of ms between one retry and another when a table error occurs.
+    pub table_error_retry_delay_ms: u64,
 
     /// Maximum number of table sync workers that can run at a time
     pub max_table_sync_workers: u16,
