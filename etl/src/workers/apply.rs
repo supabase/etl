@@ -17,6 +17,7 @@ use crate::replication::client::PgReplicationClient;
 use crate::replication::common::get_table_replication_states;
 use crate::replication::slot::get_slot_name;
 use crate::schema::cache::SchemaCache;
+use crate::state::retries::RetriesOrchestrator;
 use crate::state::store::base::StateStore;
 use crate::state::table::{
     TableReplicationError, TableReplicationPhase, TableReplicationPhaseType,
@@ -111,6 +112,13 @@ where
             // We create the signal used to notify the apply worker that it should force syncing tables.
             let (force_syncing_tables_tx, force_syncing_tables_rx) = create_signal();
 
+            // We set up the retries orchestrator which will be used to handle retries of tables.
+            let retries_orchestrator = RetriesOrchestrator::new(
+                self.pool.clone(),
+                self.state_store.clone(),
+                force_syncing_tables_tx.clone(),
+            );
+
             start_apply_loop(
                 self.pipeline_id,
                 start_lsn,
@@ -123,6 +131,7 @@ where
                     self.config,
                     self.pool,
                     self.schema_cache,
+                    retries_orchestrator,
                     self.state_store,
                     self.destination,
                     self.shutdown_rx.clone(),
@@ -174,6 +183,7 @@ struct ApplyWorkerHook<S, D> {
     config: Arc<PipelineConfig>,
     pool: TableSyncWorkerPool,
     schema_cache: SchemaCache,
+    retries_orchestrator: RetriesOrchestrator<S>,
     state_store: S,
     destination: D,
     shutdown_rx: ShutdownRx,
@@ -188,6 +198,7 @@ impl<S, D> ApplyWorkerHook<S, D> {
         config: Arc<PipelineConfig>,
         pool: TableSyncWorkerPool,
         schema_cache: SchemaCache,
+        retries_orchestrator: RetriesOrchestrator<S>,
         state_store: S,
         destination: D,
         shutdown_rx: ShutdownRx,
@@ -199,6 +210,7 @@ impl<S, D> ApplyWorkerHook<S, D> {
             config,
             pool,
             schema_cache,
+            retries_orchestrator,
             state_store,
             destination,
             shutdown_rx,
@@ -222,6 +234,7 @@ where
             self.pool.clone(),
             table_id,
             self.schema_cache.clone(),
+            self.retries_orchestrator.clone(),
             self.state_store.clone(),
             self.destination.clone(),
             self.shutdown_rx.clone(),
@@ -394,8 +407,12 @@ where
         table_replication_error: TableReplicationError,
     ) -> EtlResult<bool> {
         let pool = self.pool.lock().await;
+
+        // We process the table replication error before storing it into the state.
         let table_id = table_replication_error.table_id();
-        let table_replication_error = table_replication_error.process().await;
+        let table_replication_error = table_replication_error
+            .process(&self.retries_orchestrator)
+            .await;
         TableSyncWorkerState::set_and_store(
             &pool,
             &self.state_store,

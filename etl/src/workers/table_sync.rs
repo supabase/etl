@@ -19,6 +19,7 @@ use crate::replication::client::PgReplicationClient;
 use crate::replication::slot::get_slot_name;
 use crate::replication::table_sync::{TableSyncResult, start_table_sync};
 use crate::schema::cache::SchemaCache;
+use crate::state::retries::RetriesOrchestrator;
 use crate::state::store::base::StateStore;
 use crate::state::table::{
     TableReplicationError, TableReplicationPhase, TableReplicationPhaseType,
@@ -255,6 +256,7 @@ pub struct TableSyncWorker<S, D> {
     pool: TableSyncWorkerPool,
     table_id: TableId,
     schema_cache: SchemaCache,
+    retries_orchestrator: RetriesOrchestrator<S>,
     state_store: S,
     destination: D,
     shutdown_rx: ShutdownRx,
@@ -270,6 +272,7 @@ impl<S, D> TableSyncWorker<S, D> {
         pool: TableSyncWorkerPool,
         table_id: TableId,
         schema_cache: SchemaCache,
+        retries_orchestrator: RetriesOrchestrator<S>,
         state_store: S,
         destination: D,
         shutdown_rx: ShutdownRx,
@@ -282,6 +285,7 @@ impl<S, D> TableSyncWorker<S, D> {
             pool,
             table_id,
             schema_cache,
+            retries_orchestrator,
             state_store,
             destination,
             shutdown_rx,
@@ -332,6 +336,7 @@ where
 
         let state = TableSyncWorkerState::new(self.table_id, table_replication_phase);
 
+        let retries_orchestrator_clone = self.retries_orchestrator.clone();
         let state_store_clone = self.state_store.clone();
         let state_clone = state.clone();
 
@@ -406,7 +411,12 @@ where
                 replication_client.clone(),
                 self.schema_cache,
                 self.destination,
-                TableSyncWorkerHook::new(self.table_id, state_clone, state_store_clone),
+                TableSyncWorkerHook::new(
+                    self.table_id,
+                    state_clone,
+                    retries_orchestrator_clone,
+                    state_store_clone,
+                ),
                 self.shutdown_rx,
                 None,
             )
@@ -448,7 +458,8 @@ where
         // observer in order to react to state changes of the future. In this way, if an error happens in
         // a table sync worker, we can take action immediately instead of waiting on the join handles of
         // the future. This is important for notifying the state store about the new table sync state.
-        let observer = WorkerLifecycleObserver::new(self.pool.clone(), self.state_store.clone());
+        let observer =
+            WorkerLifecycleObserver::new(self.pool, self.retries_orchestrator, self.state_store);
         let fut = ReactiveFuture::wrap(table_sync_worker, self.table_id, observer)
             .instrument(table_sync_worker_span);
         let handle = tokio::spawn(fut);
@@ -464,6 +475,7 @@ where
 struct TableSyncWorkerHook<S> {
     table_id: TableId,
     table_sync_worker_state: TableSyncWorkerState,
+    retries_orchestrator: RetriesOrchestrator<S>,
     state_store: S,
 }
 
@@ -471,11 +483,13 @@ impl<S> TableSyncWorkerHook<S> {
     fn new(
         table_id: TableId,
         table_sync_worker_state: TableSyncWorkerState,
+        retries_orchestrator: RetriesOrchestrator<S>,
         state_store: S,
     ) -> Self {
         Self {
             table_id,
             table_sync_worker_state,
+            retries_orchestrator,
             state_store,
         }
     }
@@ -564,6 +578,9 @@ where
         // Since we already have access to the table sync worker state, we can avoid going through
         // the pool, and we just modify the state here and also update the state store.
         let mut inner = self.table_sync_worker_state.lock().await;
+        let table_replication_error = table_replication_error
+            .process(&self.retries_orchestrator)
+            .await;
         inner
             .set_and_store(table_replication_error.into(), &self.state_store)
             .await?;

@@ -1,11 +1,11 @@
-use crate::concurrency::signal::SignalTx;
-use crate::error::{ErrorKind, EtlError, EtlResult};
-use crate::state::store::base::StateStore;
-use crate::workers::pool::TableSyncWorkerPool;
 use chrono::{DateTime, Duration, Utc};
 use postgres::schema::TableId;
 use std::fmt;
 use tokio_postgres::types::PgLsn;
+
+use crate::error::{ErrorKind, EtlError};
+use crate::state::retries::RetriesOrchestrator;
+use crate::state::store::base::StateStore;
 
 /// Standard retry intervals for different types of transient errors.
 mod retry_intervals {
@@ -145,40 +145,36 @@ impl TableReplicationError {
 
     /// Processes a table replication error, which involves the scheduling of tasks in case of
     /// a [`RetryPolicy::Retry`].
-    pub fn process<S>(
+    pub async fn process<S>(
         self,
-        pool: TableSyncWorkerPool,
-        state_store: S,
-        force_syncing_tables_tx: SignalTx,
-    ) -> EtlResult<ProcessedTableReplicationError>
+        retries_orchestrator: &RetriesOrchestrator<S>,
+    ) -> ProcessedTableReplicationError
     where
-        S: StateStore + Send + 'static,
+        S: StateStore + Clone + Send + 'static,
     {
-        self.handle_retry_policy(pool, state_store, force_syncing_tables_tx);
+        match self.retry_policy {
+            RetryPolicy::None => {
+                // If there is a `None` retry policy, the state can't be rolled back unless there is
+                // manual intervention.
+            }
+            RetryPolicy::UserIntervention => {
+                retries_orchestrator
+                    .schedule_manual_retry(self.table_id)
+                    .await;
+            }
+            RetryPolicy::Retry { next_retry } => {
+                retries_orchestrator
+                    .schedule_timed_retry(self.table_id, next_retry)
+                    .await;
+            }
+        }
 
-        Ok(ProcessedTableReplicationError {
+        ProcessedTableReplicationError {
             table_id: self.table_id,
             reason: self.reason,
             solution: self.solution,
             retry_policy: self.retry_policy,
-        })
-    }
-
-    /// Handles the retry policy for this [`TableReplicationError`].
-    ///
-    /// Note: This method is deprecated. Retry handling should now be done through the
-    /// [`RetriesOrchestrator`] for better coordination and deduplication.
-    fn handle_retry_policy<S>(
-        &self,
-        _pool: TableSyncWorkerPool,
-        _state_store: S,
-        _force_syncing_tables_tx: SignalTx,
-    ) where
-        S: StateStore + Send + 'static,
-    {
-        // TODO: Replace with RetriesOrchestrator usage
-        // This method is kept for backward compatibility but should be removed
-        // once all callers are updated to use RetriesOrchestrator
+        }
     }
 }
 

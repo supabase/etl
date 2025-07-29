@@ -36,8 +36,8 @@ pub struct RetriesOrchestrator<S> {
     state_store: S,
     /// Signal sender for forcing table synchronization
     force_syncing_tables_tx: SignalTx,
-    /// Notification mechanism for waking up the background task
-    notify: Arc<Notify>,
+    /// Notification mechanism for waking up the task that handles timed retries
+    notify_new_timed_retry: Arc<Notify>,
 }
 
 /// Information about a table retry operation
@@ -49,7 +49,7 @@ struct TableRetryInfo {
 
 impl<S> RetriesOrchestrator<S>
 where
-    S: StateStore + Send + 'static + Clone,
+    S: StateStore + Clone + Send + 'static,
 {
     /// Creates a new [`RetriesOrchestrator`] instance.
     pub fn new(
@@ -60,16 +60,17 @@ where
         let delay_queue = Arc::new(Mutex::new(DelayQueue::new()));
         let enqueued_table_keys = Arc::new(Mutex::new(HashMap::new()));
         let manual_retries = Arc::new(Mutex::new(HashSet::new()));
-        let notify = Arc::new(Notify::new());
+        let notify_new_timed_retry = Arc::new(Notify::new());
 
         // TODO: do we want to store the handle?
-        let _ = Self::start_background_task(
+        // Start the background task to handle timed retries.
+        Self::start_background_task(
             pool.clone(),
             state_store.clone(),
             force_syncing_tables_tx.clone(),
             delay_queue.clone(),
             enqueued_table_keys.clone(),
-            notify.clone()
+            notify_new_timed_retry.clone(),
         );
 
         Self {
@@ -79,7 +80,7 @@ where
             pool,
             state_store,
             force_syncing_tables_tx,
-            notify,
+            notify_new_timed_retry,
         }
     }
 
@@ -87,23 +88,24 @@ where
     ///
     /// If the table already has a pending retry, the old one is removed and replaced
     /// with the new retry time to ensure only the most recent retry is active.
-    pub async fn schedule_timed_retry(&self, table_id: TableId, retry_time: DateTime<Utc>) {
+    pub async fn schedule_timed_retry(&self, table_id: TableId, next_retry: DateTime<Utc>) {
         let mut delay_queue = self.delay_queue.lock().await;
         let mut enqueued_keys = self.enqueued_table_keys.lock().await;
 
-        // Remove existing retry for this table if present
+        // Remove existing retry for this table if present. This is done to implement a debouncing
+        // behavior for multiple retries on the same table.
         if let Some(old_key) = enqueued_keys.remove(&table_id) {
             delay_queue.remove(&old_key);
             debug!(
-                "removed existing retry for table {} from delay queue",
+                "removed existing retry for table {} from delay queue in favor of a new one",
                 table_id
             );
         }
 
         // Calculate delay from now
         let now = Utc::now();
-        let delay = if retry_time > now {
-            chrono::Duration::to_std(&(retry_time - now)).unwrap_or(Duration::ZERO)
+        let delay = if next_retry > now {
+            chrono::Duration::to_std(&(next_retry - now)).unwrap_or(Duration::ZERO)
         } else {
             Duration::ZERO
         };
@@ -111,18 +113,18 @@ where
         // Schedule new retry
         let retry_info = TableRetryInfo {
             table_id,
-            retry_time,
+            retry_time: next_retry,
         };
         let key = delay_queue.insert_at(retry_info, Instant::now() + delay);
         enqueued_keys.insert(table_id, key);
 
         info!(
             "scheduled timed retry for table {} at {}",
-            table_id, retry_time
+            table_id, next_retry
         );
 
         // Notify the background task that new work is available
-        self.notify.notify_one();
+        self.notify_new_timed_retry.notify_one();
     }
 
     /// Adds a table to the manual retry queue.
@@ -135,6 +137,7 @@ where
         info!("scheduled manual retry for table {}", table_id);
     }
 
+    // TODO: hook this method to allow the process to receive a signal to retry the specific table.
     /// Attempts to retry a table that requires manual intervention.
     ///
     /// Returns `true` if the retry was found and executed, `false` if no manual
@@ -192,7 +195,7 @@ where
         force_syncing_tables_tx: SignalTx,
         delay_queue: Arc<Mutex<DelayQueue<TableRetryInfo>>>,
         enqueued_table_keys: Arc<Mutex<HashMap<TableId, delay_queue::Key>>>,
-        notify: Arc<Notify>,
+        notify_new_timed_retry: Arc<Notify>,
     ) {
         info!("starting retries orchestrator background task");
 
@@ -217,8 +220,7 @@ where
                         }
                     }
                     // Also listen for notifications that new items were added
-                    _ = notify.notified() => {
-                        // Check if there are any immediately expired items
+                    _ = notify_new_timed_retry.notified() => {
                         None
                     }
                 }
