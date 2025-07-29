@@ -183,7 +183,7 @@ impl<G: GenericClient> PgDatabase<G> {
         &self,
         table_name: TableName,
         columns: &[&str],
-        values: &[&(dyn tokio_postgres::types::ToSql + Sync)],
+        values: &[&(dyn ToSql + Sync)],
     ) -> Result<u64, tokio_postgres::Error> {
         let set_clauses: Vec<String> = columns
             .iter()
