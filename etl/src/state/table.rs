@@ -1,14 +1,11 @@
-use crate::concurrency::scheduler::schedule_at;
 use crate::concurrency::signal::SignalTx;
 use crate::error::{ErrorKind, EtlError, EtlResult};
 use crate::state::store::base::StateStore;
 use crate::workers::pool::TableSyncWorkerPool;
-use crate::workers::table_sync::TableSyncWorkerState;
 use chrono::{DateTime, Duration, Utc};
 use postgres::schema::TableId;
 use std::fmt;
 use tokio_postgres::types::PgLsn;
-use tracing::{error, info};
 
 /// Standard retry intervals for different types of transient errors.
 mod retry_intervals {
@@ -152,11 +149,12 @@ impl TableReplicationError {
         self,
         pool: TableSyncWorkerPool,
         state_store: S,
+        force_syncing_tables_tx: SignalTx,
     ) -> EtlResult<ProcessedTableReplicationError>
     where
         S: StateStore + Send + 'static,
     {
-        self.handle_retry_policy(pool, state_store);
+        self.handle_retry_policy(pool, state_store, force_syncing_tables_tx);
 
         Ok(ProcessedTableReplicationError {
             table_id: self.table_id,
@@ -167,73 +165,20 @@ impl TableReplicationError {
     }
 
     /// Handles the retry policy for this [`TableReplicationError`].
-    fn handle_retry_policy<S>(&self, pool: TableSyncWorkerPool, state_store: S)
-    where
+    ///
+    /// Note: This method is deprecated. Retry handling should now be done through the
+    /// [`RetriesOrchestrator`] for better coordination and deduplication.
+    fn handle_retry_policy<S>(
+        &self,
+        _pool: TableSyncWorkerPool,
+        _state_store: S,
+        _force_syncing_tables_tx: SignalTx,
+    ) where
         S: StateStore + Send + 'static,
     {
-        if let RetryPolicy::Retry { next_retry } = self.retry_policy {
-            let table_id = self.table_id;
-            let _ = schedule_at(next_retry, "schedule_retry_for_error", move || {
-                rollback_table_replication_state(pool, state_store, table_id)
-            });
-        }
-    }
-}
-
-/// Future that rolls back the table replication state and notifies the main apply worker to try
-/// and process syncing tables again.
-async fn rollback_table_replication_state<S>(
-    pool: TableSyncWorkerPool,
-    state_store: S,
-    force_syncing_tables_tx: SignalTx,
-    table_id: TableId,
-) where
-    S: StateStore + Send + 'static,
-{
-    // We lock the pool to prevent any table sync workers to be scheduled while we are
-    // rolling back.
-    let pool = pool.lock().await;
-
-    // We try to see if there is an in-memory state, if so, we lock it for the whole duration of the
-    // rollback. This way, we prevent the case where the in-memory and state store states are out of
-    // sync due to race conditions.
-    //
-    // If we fail to rollback, we will just log an error, since in that case we can't do much, and
-    // we want to avoid changing the error in the table since if we fail to rollback we might have
-    // a problem in the source database, and we don't want to aggravate it by issuing another write.
-    match pool.get_active_worker_state(table_id) {
-        Some(table_sync_worker_state) => {
-            let mut inner = table_sync_worker_state.lock().await;
-
-            let rolled_back_state =
-                match state_store.rollback_table_replication_state(table_id).await {
-                    Ok(rolled_back_state) => rolled_back_state,
-                    Err(err) => {
-                        error!("error while rolling back table replication state: {}", err);
-                        return;
-                    }
-                };
-
-            // In case we have an in-memory state, we want to update it. Technically there should not be an
-            // active worker for that table when a table is errored since the worker is shutdown on failure,
-            // but just to be extra sure we also update the in-memory state.
-            inner.set(rolled_back_state);
-        }
-        None => {
-            match state_store.rollback_table_replication_state(table_id).await {
-                Ok(rolled_back_state) => rolled_back_state,
-                Err(err) => {
-                    error!("error while rolling back table replication state: {}", err);
-                    return;
-                }
-            };
-        }
-    }
-
-    // We send the signal to the apply worker to force the syncing of tables, which will result in
-    // new table sync workers being spawned.
-    if force_syncing_tables_tx.send(()).is_err() {
-        error!("error while forcing syncing tables after table replication state rollback");
+        // TODO: Replace with RetriesOrchestrator usage
+        // This method is kept for backward compatibility but should be removed
+        // once all callers are updated to use RetriesOrchestrator
     }
 }
 

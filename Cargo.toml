@@ -48,6 +48,7 @@ sqlx = { version = "0.8.6", default-features = false }
 thiserror = "1.0"
 tokio = { version = "1.38", default-features = false }
 tokio-postgres = { git = "https://github.com/imor/rust-postgres", default-features = false, rev = "20265ef38e32a06f76b6f9b678e2077fc2211f6b" }
+tokio-util = { version = "0.7", default-features = false }
 tokio-postgres-rustls = { git = "https://github.com/imor/tokio-postgres-rustls", default-features = false }
 tracing = { version = "0.1", default-features = false }
 tracing-actix-web = { version = "0.7", default-features = false }
