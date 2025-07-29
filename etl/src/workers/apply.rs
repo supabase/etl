@@ -109,16 +109,6 @@ where
         let apply_worker = async move {
             let start_lsn = get_start_lsn(self.pipeline_id, &self.replication_client).await?;
 
-            // We create the signal used to notify the apply worker that it should force syncing tables.
-            let (force_syncing_tables_tx, force_syncing_tables_rx) = create_signal();
-
-            // We set up the retries orchestrator which will be used to handle retries of tables.
-            let retries_orchestrator = RetriesOrchestrator::new(
-                self.pool.clone(),
-                self.state_store.clone(),
-                force_syncing_tables_tx.clone(),
-            );
-
             start_apply_loop(
                 self.pipeline_id,
                 start_lsn,

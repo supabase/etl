@@ -5,10 +5,12 @@ use tracing::{error, info};
 
 use crate::bail;
 use crate::concurrency::shutdown::{ShutdownTx, create_shutdown_channel};
+use crate::concurrency::signal::create_signal;
 use crate::destination::base::Destination;
 use crate::error::{ErrorKind, EtlError, EtlResult};
 use crate::replication::client::PgReplicationClient;
 use crate::schema::cache::SchemaCache;
+use crate::state::retries::RetriesOrchestrator;
 use crate::state::store::base::StateStore;
 use crate::state::table::TableReplicationPhase;
 use crate::workers::apply::{ApplyWorker, ApplyWorkerHandle};
@@ -16,11 +18,12 @@ use crate::workers::base::{Worker, WorkerHandle};
 use crate::workers::pool::TableSyncWorkerPool;
 
 #[derive(Debug)]
-enum PipelineWorkers {
+enum PipelineState<S> {
     NotStarted,
     Started {
         // TODO: investigate whether we could benefit from a central launcher that deals at a high-level
         //  with workers management, which should not be done in the pipeline.
+        retries_orchestrator: RetriesOrchestrator<S>,
         apply_worker: ApplyWorkerHandle,
         pool: TableSyncWorkerPool,
     },
@@ -34,7 +37,7 @@ pub struct Pipeline<S, D> {
     config: Arc<PipelineConfig>,
     state_store: S,
     destination: D,
-    workers: PipelineWorkers,
+    state: PipelineState<S>,
     shutdown_tx: ShutdownTx,
 }
 
@@ -56,7 +59,7 @@ where
             config: Arc::new(config),
             state_store,
             destination,
-            workers: PipelineWorkers::NotStarted,
+            state: PipelineState::NotStarted,
             shutdown_tx,
         }
     }
@@ -96,6 +99,18 @@ where
         // We create the table sync workers pool to manage all table sync workers in a central place.
         let pool = TableSyncWorkerPool::new();
 
+        // We create the signal used to notify the apply worker that it should force syncing tables.
+        let (force_syncing_tables_tx, force_syncing_tables_rx) = create_signal();
+
+        // We set up the retries orchestrator which will be used to handle retries of tables.
+        let retries_orchestrator = RetriesOrchestrator::new(
+            pool.clone(),
+            self.state_store.clone(),
+            force_syncing_tables_tx.clone(),
+        );
+
+        // We create the permits semaphore which is used to control how many table sync workers can
+        // be running at the same time.
         let table_sync_worker_permits =
             Arc::new(Semaphore::new(self.config.max_table_sync_workers as usize));
 
@@ -114,7 +129,7 @@ where
         .start()
         .await?;
 
-        self.workers = PipelineWorkers::Started { apply_worker, pool };
+        self.state = PipelineState::Started { retries_orchestrator, apply_worker, pool };
 
         Ok(())
     }
@@ -175,7 +190,12 @@ where
     }
 
     pub async fn wait(self) -> EtlResult<()> {
-        let PipelineWorkers::Started { apply_worker, pool } = self.workers else {
+        let PipelineState::Started {
+            retries_orchestrator: _,
+            apply_worker,
+            pool,
+        } = self.state
+        else {
             info!("pipeline was not started, nothing to wait for");
 
             return Ok(());

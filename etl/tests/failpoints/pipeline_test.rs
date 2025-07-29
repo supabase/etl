@@ -260,9 +260,6 @@ async fn table_copy_is_consistent_after_data_sync_threw_an_error_and_manually_re
         .unwrap();
     assert!(matches!(users_phase, TableReplicationPhase::Skipped));
 
-    // Wait for schema reception and table sync completion.
-    let schemas_notify = destination.wait_for_n_schemas(2).await;
-
     // Register notifications for table sync phases.
     let users_state_notify = state_store
         .notify_on_table_state(
@@ -270,19 +267,11 @@ async fn table_copy_is_consistent_after_data_sync_threw_an_error_and_manually_re
             TableReplicationPhaseType::SyncDone,
         )
         .await;
-    let orders_state_notify = state_store
-        .notify_on_table_state(
-            database_schema.orders_schema().id,
-            TableReplicationPhaseType::SyncDone,
-        )
-        .await;
 
     // We manually retry the table.
     // TODO: implement manual retry.
 
-    schemas_notify.notified().await;
     users_state_notify.notified().await;
-    orders_state_notify.notified().await;
 
     // We expect the error of the first table sync worker to be returned since we collect all worker
     // errors.

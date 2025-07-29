@@ -564,7 +564,7 @@ mod tests {
             assert!(enqueued_keys.contains_key(&table_id2));
             assert!(enqueued_keys.contains_key(&table_id3));
         }
-        
+
         // Try to retry a table that wasn't scheduled for manual retry
         let result = orchestrator.retry(table_id1).await;
         assert!(result);
