@@ -36,4 +36,10 @@ pub trait StateStore {
         table_id: TableId,
         state: TableReplicationPhase,
     ) -> impl Future<Output = EtlResult<()>> + Send;
+
+    /// Rolls back to the previous replication state.
+    fn rollback_table_replication_state(
+        &self,
+        table_id: TableId,
+    ) -> impl Future<Output = EtlResult<TableReplicationPhase>> + Send;
 }

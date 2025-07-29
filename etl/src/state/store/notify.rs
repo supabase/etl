@@ -1,3 +1,4 @@
+use crate::error::EtlError;
 use std::{collections::HashMap, fmt, sync::Arc};
 
 use postgres::schema::TableId;
@@ -6,7 +7,8 @@ use tokio::{
     sync::{Notify, RwLock},
 };
 
-use crate::error::EtlResult;
+use crate::error::{ErrorKind, EtlResult};
+use crate::etl_error;
 use crate::state::{
     store::base::StateStore,
     table::{TableReplicationPhase, TableReplicationPhaseType},
@@ -18,10 +20,12 @@ pub enum StateStoreMethod {
     GetTableReplicationStates,
     LoadTableReplicationStates,
     StoreTableReplicationState,
+    RollbackTableReplicationState,
 }
 
 struct Inner {
     table_replication_states: HashMap<TableId, TableReplicationPhase>,
+    table_state_history: HashMap<TableId, Vec<TableReplicationPhase>>,
     table_state_conditions: Vec<(TableId, TableReplicationPhaseType, Arc<Notify>)>,
     method_call_notifiers: HashMap<StateStoreMethod, Vec<Arc<Notify>>>,
 }
@@ -62,6 +66,7 @@ impl NotifyingStateStore {
     pub fn new() -> Self {
         let inner = Inner {
             table_replication_states: HashMap::new(),
+            table_state_history: HashMap::new(),
             table_state_conditions: Vec::new(),
             method_call_notifiers: HashMap::new(),
         };
@@ -147,12 +152,53 @@ impl StateStore for NotifyingStateStore {
         state: TableReplicationPhase,
     ) -> EtlResult<()> {
         let mut inner = self.inner.write().await;
+
+        // Store the current state in history before updating
+        if let Some(current_state) = inner.table_replication_states.get(&table_id).copied() {
+            inner
+                .table_state_history
+                .entry(table_id)
+                .or_insert_with(Vec::new)
+                .push(current_state);
+        }
+
         inner.table_replication_states.insert(table_id, state);
         inner.check_conditions().await;
         inner
             .dispatch_method_notification(StateStoreMethod::StoreTableReplicationState)
             .await;
         Ok(())
+    }
+
+    async fn rollback_table_replication_state(
+        &self,
+        table_id: TableId,
+    ) -> EtlResult<TableReplicationPhase> {
+        let mut inner = self.inner.write().await;
+
+        // Get the previous state from history
+        let previous_state = inner
+            .table_state_history
+            .get_mut(&table_id)
+            .and_then(|history| history.pop())
+            .ok_or_else(|| {
+                etl_error!(
+                    ErrorKind::StateRollbackError,
+                    "There is no state in memory to rollback to"
+                )
+            })?;
+
+        // Update the current state to the previous state
+        inner
+            .table_replication_states
+            .insert(table_id, previous_state);
+        inner.check_conditions().await;
+
+        inner
+            .dispatch_method_notification(StateStoreMethod::RollbackTableReplicationState)
+            .await;
+
+        Ok(previous_state)
     }
 }
 

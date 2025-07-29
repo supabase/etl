@@ -127,7 +127,7 @@ impl TableSyncWorkerState {
         // In case we have the state in memory, we will atomically update the memory and state store
         // states. Otherwise, we just update the state store.
         if let Some(table_sync_worker_state) = table_sync_worker_state {
-            let mut inner = table_sync_worker_state.get_inner().lock().await;
+            let mut inner = table_sync_worker_state.lock().await;
             inner
                 .set_and_store(table_replication_phase, state_store)
                 .await?;
@@ -138,10 +138,6 @@ impl TableSyncWorkerState {
         }
 
         Ok(())
-    }
-
-    pub fn get_inner(&self) -> &Mutex<TableSyncWorkerStateInner> {
-        &self.inner
     }
 
     pub async fn wait_for_phase_type(
@@ -213,6 +209,14 @@ impl TableSyncWorkerState {
         }
 
         None
+    }
+}
+
+impl Deref for TableSyncWorkerState {
+    type Target = Mutex<TableSyncWorkerStateInner>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
     }
 }
 
@@ -486,7 +490,7 @@ where
     /// Returns `Ok(false)` when the worker is done with its work, signaling the caller that the apply
     /// loop should be stopped.
     async fn try_advance_phase(&self, current_lsn: PgLsn, update_state: bool) -> EtlResult<bool> {
-        let mut inner = self.table_sync_worker_state.get_inner().lock().await;
+        let mut inner = self.table_sync_worker_state.lock().await;
 
         // If we caught up with the lsn, we mark this table as `SyncDone` and stop the worker.
         if let TableReplicationPhase::Catchup { lsn } = inner.replication_phase() {
@@ -559,7 +563,7 @@ where
 
         // Since we already have access to the table sync worker state, we can avoid going through
         // the pool, and we just modify the state here and also update the state store.
-        let mut inner = self.table_sync_worker_state.get_inner().lock().await;
+        let mut inner = self.table_sync_worker_state.lock().await;
         inner
             .set_and_store(table_replication_error.into(), &self.state_store)
             .await?;
@@ -574,7 +578,7 @@ where
         table_id: TableId,
         _remote_final_lsn: PgLsn,
     ) -> EtlResult<bool> {
-        let inner = self.table_sync_worker_state.get_inner().lock().await;
+        let inner = self.table_sync_worker_state.lock().await;
         let is_skipped = matches!(
             inner.table_replication_phase.as_type(),
             TableReplicationPhaseType::Skipped

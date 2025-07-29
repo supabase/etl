@@ -254,7 +254,7 @@ where
     ) -> EtlResult<bool> {
         let mut catchup_started = false;
         {
-            let mut inner = table_sync_worker_state.get_inner().lock().await;
+            let mut inner = table_sync_worker_state.lock().await;
             if inner.replication_phase().as_type() == TableReplicationPhaseType::SyncWait {
                 info!(
                     "table sync worker {} is waiting to catchup, starting catchup at lsn {}",
@@ -395,6 +395,7 @@ where
     ) -> EtlResult<bool> {
         let pool = self.pool.lock().await;
         let table_id = table_replication_error.table_id();
+        let table_replication_error = table_replication_error.process().await;
         TableSyncWorkerState::set_and_store(
             &pool,
             &self.state_store,
@@ -419,7 +420,7 @@ where
         // state store.
         let replication_phase = match pool.get_active_worker_state(table_id) {
             Some(state) => {
-                let inner = state.get_inner().lock().await;
+                let inner = state.lock().await;
                 inner.replication_phase()
             }
             None => {

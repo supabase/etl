@@ -1,9 +1,14 @@
+use crate::concurrency::scheduler::schedule_at;
+use crate::concurrency::signal::SignalTx;
+use crate::error::{ErrorKind, EtlError, EtlResult};
+use crate::state::store::base::StateStore;
+use crate::workers::pool::TableSyncWorkerPool;
+use crate::workers::table_sync::TableSyncWorkerState;
 use chrono::{DateTime, Duration, Utc};
 use postgres::schema::TableId;
 use std::fmt;
 use tokio_postgres::types::PgLsn;
-
-use crate::error::{ErrorKind, EtlError};
+use tracing::{error, info};
 
 /// Standard retry intervals for different types of transient errors.
 mod retry_intervals {
@@ -15,6 +20,24 @@ mod retry_intervals {
 
     /// Longer retry interval for authentication issues that may need token refresh.
     pub const AUTHENTICATION_ERROR: Duration = Duration::minutes(2);
+}
+
+/// Represents a processed error that occurred during table replication.
+///
+/// The role of this struct is to enforce statically the difference between an error what was just
+/// created and an error that was created and then processed. This is useful in the state store since
+/// in the state store we want to accept only phases derived from errors that were processed.
+///
+/// For example, if we have an error that should be retried in 5 minutes, we don't want to supply the
+/// error to the state store if we didn't first process it and kickstart the task to attempt again to
+/// process the table.
+#[derive(Debug)]
+#[allow(dead_code)]
+pub struct ProcessedTableReplicationError {
+    table_id: TableId,
+    reason: String,
+    solution: Option<String>,
+    retry_policy: RetryPolicy,
 }
 
 /// Represents an error that occurred during table replication.
@@ -122,6 +145,96 @@ impl TableReplicationError {
             _ => Self::without_solution(table_id, error, RetryPolicy::None),
         }
     }
+
+    /// Processes a table replication error, which involves the scheduling of tasks in case of
+    /// a [`RetryPolicy::Retry`].
+    pub fn process<S>(
+        self,
+        pool: TableSyncWorkerPool,
+        state_store: S,
+    ) -> EtlResult<ProcessedTableReplicationError>
+    where
+        S: StateStore + Send + 'static,
+    {
+        self.handle_retry_policy(pool, state_store);
+
+        Ok(ProcessedTableReplicationError {
+            table_id: self.table_id,
+            reason: self.reason,
+            solution: self.solution,
+            retry_policy: self.retry_policy,
+        })
+    }
+
+    /// Handles the retry policy for this [`TableReplicationError`].
+    fn handle_retry_policy<S>(&self, pool: TableSyncWorkerPool, state_store: S)
+    where
+        S: StateStore + Send + 'static,
+    {
+        if let RetryPolicy::Retry { next_retry } = self.retry_policy {
+            let table_id = self.table_id;
+            let _ = schedule_at(next_retry, "schedule_retry_for_error", move || {
+                rollback_table_replication_state(pool, state_store, table_id)
+            });
+        }
+    }
+}
+
+/// Future that rolls back the table replication state and notifies the main apply worker to try
+/// and process syncing tables again.
+async fn rollback_table_replication_state<S>(
+    pool: TableSyncWorkerPool,
+    state_store: S,
+    force_syncing_tables_tx: SignalTx,
+    table_id: TableId,
+) where
+    S: StateStore + Send + 'static,
+{
+    // We lock the pool to prevent any table sync workers to be scheduled while we are
+    // rolling back.
+    let pool = pool.lock().await;
+
+    // We try to see if there is an in-memory state, if so, we lock it for the whole duration of the
+    // rollback. This way, we prevent the case where the in-memory and state store states are out of
+    // sync due to race conditions.
+    //
+    // If we fail to rollback, we will just log an error, since in that case we can't do much, and
+    // we want to avoid changing the error in the table since if we fail to rollback we might have
+    // a problem in the source database, and we don't want to aggravate it by issuing another write.
+    match pool.get_active_worker_state(table_id) {
+        Some(table_sync_worker_state) => {
+            let mut inner = table_sync_worker_state.lock().await;
+
+            let rolled_back_state =
+                match state_store.rollback_table_replication_state(table_id).await {
+                    Ok(rolled_back_state) => rolled_back_state,
+                    Err(err) => {
+                        error!("error while rolling back table replication state: {}", err);
+                        return;
+                    }
+                };
+
+            // In case we have an in-memory state, we want to update it. Technically there should not be an
+            // active worker for that table when a table is errored since the worker is shutdown on failure,
+            // but just to be extra sure we also update the in-memory state.
+            inner.set(rolled_back_state);
+        }
+        None => {
+            match state_store.rollback_table_replication_state(table_id).await {
+                Ok(rolled_back_state) => rolled_back_state,
+                Err(err) => {
+                    error!("error while rolling back table replication state: {}", err);
+                    return;
+                }
+            };
+        }
+    }
+
+    // We send the signal to the apply worker to force the syncing of tables, which will result in
+    // new table sync workers being spawned.
+    if force_syncing_tables_tx.send(()).is_err() {
+        error!("error while forcing syncing tables after table replication state rollback");
+    }
 }
 
 /// Defines the retry strategy for a failed table replication.
@@ -136,9 +249,10 @@ pub enum RetryPolicy {
 }
 
 impl RetryPolicy {
-
     pub fn retry_in(duration: Duration) -> Self {
-        Self::Retry { next_retry: Utc::now() + duration }
+        Self::Retry {
+            next_retry: Utc::now() + duration,
+        }
     }
 }
 
@@ -193,8 +307,8 @@ impl TableReplicationPhase {
     }
 }
 
-impl From<TableReplicationError> for TableReplicationPhase {
-    fn from(_value: TableReplicationError) -> Self {
+impl From<ProcessedTableReplicationError> for TableReplicationPhase {
+    fn from(_value: ProcessedTableReplicationError) -> Self {
         // TODO: implement actual conversion with proper values once `Skipped` is converted to `Errored`
         //  and the fields are added.
         Self::Skipped

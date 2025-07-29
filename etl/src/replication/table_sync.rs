@@ -6,7 +6,7 @@ use postgres::schema::TableId;
 use std::sync::Arc;
 use tokio::pin;
 use tokio_postgres::types::PgLsn;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 use crate::bail;
 use crate::concurrency::shutdown::{ShutdownResult, ShutdownRx};
@@ -59,7 +59,7 @@ where
     // apply worker only if `SyncWait` is set, which is not the case if we arrive here, so we are
     // good to reduce the length of the critical section.
     let phase_type = {
-        let inner = table_sync_worker_state.get_inner().lock().await;
+        let inner = table_sync_worker_state.lock().await;
         let phase_type = inner.replication_phase().as_type();
 
         // In case the work for this table has been already done, we don't want to continue and we
@@ -139,7 +139,7 @@ where
             // We are ready to start copying table data, and we update the state accordingly.
             info!("starting data copy for table {}", table_id);
             {
-                let mut inner = table_sync_worker_state.get_inner().lock().await;
+                let mut inner = table_sync_worker_state.lock().await;
                 inner
                     .set_and_store(TableReplicationPhase::DataSync, &state_store)
                     .await?;
@@ -237,7 +237,7 @@ where
             );
             // We mark that we finished the copy of the table schema and data.
             {
-                let mut inner = table_sync_worker_state.get_inner().lock().await;
+                let mut inner = table_sync_worker_state.lock().await;
                 inner
                     .set_and_store(TableReplicationPhase::FinishedCopy, &state_store)
                     .await?;
@@ -260,14 +260,19 @@ where
     // We mark this worker as `SyncWait` (in memory only) to signal the apply worker that we are
     // ready to start catchup.
     {
-        let mut inner = table_sync_worker_state.get_inner().lock().await;
+        let mut inner = table_sync_worker_state.lock().await;
         inner
             .set_and_store(TableReplicationPhase::SyncWait, &state_store)
             .await?;
 
         // We notify the main apply worker to force syncing tables. In this way, the `Catchup` phase
         // will be started even if no events are flowing in the main apply loop.
-        let _ = force_syncing_tables_tx.send(());
+        if force_syncing_tables_tx.send(()).is_err() {
+            error!(
+                "error while forcing syncing tables during '{:?}' phase of the table sync worker",
+                TableReplicationPhaseType::SyncWait
+            );
+        }
     }
 
     // We also wait to be signaled to catchup with the main apply worker up to a specific lsn.

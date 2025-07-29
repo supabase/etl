@@ -61,18 +61,23 @@ where
     async fn on_error(&mut self, id: TableId, error: EtlError) {
         let mut pool = self.pool.lock().await;
 
+        // We first mark the worker as finished in the pool, in this way we know that a failed worker
+        // can never have an active worker state.
         pool.mark_worker_finished(id);
+
+        // We mark the table as errored properly persisting the error state.
         let table_error = TableReplicationError::from_etl_error(id, error);
-        // TODO: if the retry policy is retry with time, schedule a callback to the main apply loop.
         self.mark_table_errored(&pool, id, table_error).await;
     }
 
     async fn on_panic(&mut self, id: TableId, panic: String) {
         let mut pool = self.pool.lock().await;
 
-        // TODO: in this case we might also want to perform a shutdown of the entire process since
-        //  we consider it corrupted.
+        // We first mark the worker as finished in the pool, in this way we know that a failed worker
+        // can never have an active worker state.
         pool.mark_worker_finished(id);
+
+        // We mark the table as errored properly persisting the error state.
         let error = TableReplicationError::without_solution(
             id,
             format!("The table sync worker has experienced a panic: {panic}"),

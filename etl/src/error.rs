@@ -68,6 +68,8 @@ pub enum ErrorKind {
     ValidationError,
     /// Apply worker error
     ApplyWorkerPanic,
+    /// State rollback error,
+    StateRollbackError,
     /// Table sync worker error
     TableSyncWorkerPanic,
     /// Destination-specific error

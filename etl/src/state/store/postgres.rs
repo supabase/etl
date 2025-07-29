@@ -194,4 +194,15 @@ impl StateStore for PostgresStateStore {
 
         Ok(())
     }
+
+    async fn rollback_table_replication_state(
+        &self,
+        _table_id: TableId,
+    ) -> EtlResult<TableReplicationPhase> {
+        // TODO: implement rollback for Postgres.
+        Err(etl_error!(
+            ErrorKind::StateRollbackError,
+            "There is no state in Postgres to rollback to"
+        ))
+    }
 }
