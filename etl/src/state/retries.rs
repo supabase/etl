@@ -5,6 +5,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{Mutex, Notify};
+use tokio::task::JoinHandle;
 use tokio::time::Instant;
 use tokio_util::time::{DelayQueue, delay_queue};
 use tracing::{debug, error, info};
@@ -21,6 +22,7 @@ use crate::workers::pool::TableSyncWorkerPool;
 ///
 /// The orchestrator uses a [`DelayQueue`] for managing timed retries and ensures
 /// that only the most recent retry attempt is kept for each table ID.
+#[derive(Debug, Clone)]
 pub struct RetriesOrchestrator<S> {
     /// Queue for timed retries with automatic expiration
     delay_queue: Arc<Mutex<DelayQueue<TableRetryInfo>>>,
@@ -55,14 +57,29 @@ where
         state_store: S,
         force_syncing_tables_tx: SignalTx,
     ) -> Self {
+        let delay_queue = Arc::new(Mutex::new(DelayQueue::new()));
+        let enqueued_table_keys = Arc::new(Mutex::new(HashMap::new()));
+        let manual_retries = Arc::new(Mutex::new(HashSet::new()));
+        let notify = Arc::new(Notify::new());
+
+        // TODO: do we want to store the handle?
+        let _ = Self::start_background_task(
+            pool.clone(),
+            state_store.clone(),
+            force_syncing_tables_tx.clone(),
+            delay_queue.clone(),
+            enqueued_table_keys.clone(),
+            notify.clone()
+        );
+
         Self {
-            delay_queue: Arc::new(Mutex::new(DelayQueue::new())),
-            enqueued_table_keys: Arc::new(Mutex::new(HashMap::new())),
-            manual_retries: Arc::new(Mutex::new(HashSet::new())),
+            delay_queue,
+            enqueued_table_keys,
+            manual_retries,
             pool,
             state_store,
             force_syncing_tables_tx,
-            notify: Arc::new(Notify::new()),
+            notify,
         }
     }
 
@@ -147,10 +164,29 @@ where
     }
 
     /// Starts the background task that processes timed retries.
+    fn start_background_task(
+        pool: TableSyncWorkerPool,
+        state_store: S,
+        force_syncing_tables_tx: SignalTx,
+        delay_queue: Arc<Mutex<DelayQueue<TableRetryInfo>>>,
+        enqueued_table_keys: Arc<Mutex<HashMap<TableId, delay_queue::Key>>>,
+        notify: Arc<Notify>,
+    ) -> JoinHandle<()> {
+        tokio::spawn(Self::background_task(
+            pool,
+            state_store,
+            force_syncing_tables_tx,
+            delay_queue,
+            enqueued_table_keys,
+            notify,
+        ))
+    }
+
+    /// The background task that processes timed retries.
     ///
     /// This task waits for expired items from the delay queue and executes them automatically.
     /// It waits for notifications when new items are added to minimize CPU usage.
-    async fn run_background_task(
+    async fn background_task(
         pool: TableSyncWorkerPool,
         state_store: S,
         force_syncing_tables_tx: SignalTx,
