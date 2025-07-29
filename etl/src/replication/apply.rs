@@ -722,16 +722,15 @@ where
     // dealt with differently based on the worker type.
     // TODO: explore how to deal with applying relation messages to the schema (creating it if missing).
     let schema_cache = schema_cache.lock_inner().await;
-    let Some(existing_table_schema) = schema_cache.get_table_schema_ref(&table_id) else {
-        bail!(
-            ErrorKind::MissingTableSchema,
-            "Table not found in the schema cache",
-            format!(
-                "The table schema for table {} was not found in the cache",
-                message.rel_id()
+    let existing_table_schema = schema_cache
+        .get_table_schema_ref(&table_id)
+        .ok_or_else(|| {
+            etl_error!(
+                ErrorKind::MissingTableSchema,
+                "Table not found in the schema cache",
+                format!("The table schema for table {table_id} was not found in the cache")
             )
-        );
-    };
+        })?;
 
     // We compare the table schema from the relation message with the existing schema (if any).
     // The purpose of this comparison is that we want to throw an error and stop the processing

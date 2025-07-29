@@ -62,7 +62,9 @@ where
         let mut pool = self.pool.lock().await;
 
         pool.mark_worker_finished(id);
-        self.mark_table_errored(&pool, id, error.into()).await;
+        let table_error = TableReplicationError::from_etl_error(id, error);
+        // TODO: if the retry policy is retry with time, schedule a callback to the main apply loop.
+        self.mark_table_errored(&pool, id, table_error).await;
     }
 
     async fn on_panic(&mut self, id: TableId, panic: String) {

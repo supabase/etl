@@ -1,8 +1,21 @@
+use chrono::{DateTime, Duration, Utc};
 use postgres::schema::TableId;
 use std::fmt;
 use tokio_postgres::types::PgLsn;
 
-use crate::error::EtlError;
+use crate::error::{ErrorKind, EtlError};
+
+/// Standard retry intervals for different types of transient errors.
+mod retry_intervals {
+
+    use chrono::Duration;
+
+    /// Standard retry interval for connection and destination service issues.
+    pub const CONNECTION_ERROR: Duration = Duration::minutes(1);
+
+    /// Longer retry interval for authentication issues that may need token refresh.
+    pub const AUTHENTICATION_ERROR: Duration = Duration::minutes(2);
+}
 
 /// Represents an error that occurred during table replication.
 ///
@@ -55,16 +68,59 @@ impl TableReplicationError {
 
 /// Converts an [`EtlError`] into a [`TableReplicationError`].
 ///
-/// Currently uses placeholder values for the table ID and provides a generic solution.
-impl From<EtlError> for TableReplicationError {
-    fn from(value: EtlError) -> Self {
-        // TODO: implement actual conversion.
-        Self::with_solution(
-            TableId::new(10),
-            format!("An error occurred: {value}"),
-            "This error requires requires manual intervention",
-            RetryPolicy::None,
-        )
+/// Currently, uses placeholder values for the table ID and provides a generic solution.
+impl TableReplicationError {
+    /// Converts an [`EtlError`] to a [`TableReplicationError`] for a specific table.
+    ///
+    /// Determines appropriate retry policies based on the error kind.
+    ///
+    /// Note that this conversion is constantly improving since during testing and operation of ETL
+    /// we might notice edge cases that could be manually handled.
+    pub fn from_etl_error(table_id: TableId, error: EtlError) -> Self {
+        match error.kind() {
+            // Transient errors with retry
+            ErrorKind::ConnectionFailed => Self::with_solution(
+                table_id,
+                error,
+                "Check network connectivity and database availability",
+                RetryPolicy::retry_in(retry_intervals::CONNECTION_ERROR),
+            ),
+            ErrorKind::AuthenticationError => Self::with_solution(
+                table_id,
+                error,
+                "Check credentials and token validity",
+                RetryPolicy::retry_in(retry_intervals::AUTHENTICATION_ERROR),
+            ),
+
+            // Errors that could disappear after user intervention
+            ErrorKind::SourceSchemaError => Self::with_solution(
+                table_id,
+                error,
+                "Fix the schema of the Postgres database",
+                RetryPolicy::UserIntervention,
+            ),
+            ErrorKind::ConfigError => Self::with_solution(
+                table_id,
+                error,
+                "Fix application or service configuration",
+                RetryPolicy::UserIntervention,
+            ),
+            ErrorKind::ReplicationSlotAlreadyExists => Self::with_solution(
+                table_id,
+                error,
+                "Remove the existing slot from the Postgres database",
+                RetryPolicy::UserIntervention,
+            ),
+            ErrorKind::ReplicationSlotNotCreated => Self::with_solution(
+                table_id,
+                error,
+                "Check if the Postgres database allows the creation of new replication slots",
+                RetryPolicy::UserIntervention,
+            ),
+
+            // By default, all errors are not retriable
+            _ => Self::without_solution(table_id, error, RetryPolicy::None),
+        }
     }
 }
 
@@ -75,8 +131,15 @@ pub enum RetryPolicy {
     None,
     /// Retry requires user intervention before proceeding.
     UserIntervention,
-    /// Retry with exponential backoff strategy.
-    Backoff,
+    /// Retry after the specified timestamp.
+    Retry { next_retry: DateTime<Utc> },
+}
+
+impl RetryPolicy {
+
+    pub fn retry_in(duration: Duration) -> Self {
+        Self::Retry { next_retry: Utc::now() + duration }
+    }
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]

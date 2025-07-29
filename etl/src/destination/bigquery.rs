@@ -14,6 +14,7 @@ use crate::conversions::event::{Event, TruncateEvent};
 use crate::conversions::table_row::TableRow;
 use crate::destination::base::Destination;
 use crate::error::{ErrorKind, EtlError, EtlResult};
+use crate::etl_error;
 use crate::schema::cache::SchemaCache;
 
 /// Table name for storing ETL table schema metadata in BigQuery.
@@ -184,19 +185,19 @@ impl BigQueryDestination {
             .schema_cache
             .as_ref()
             .ok_or_else(|| {
-                EtlError::from((
-                    ErrorKind::ConfigError,
-                    "The schema cache was not set on the destination",
-                ))
+                etl_error!(
+                    ErrorKind::InvalidState,
+                    "The schema cache was not set on the destination"
+                )
             })?
             .lock_inner()
             .await;
         let table_schema = schema_cache.get_table_schema_ref(table_id).ok_or_else(|| {
-            EtlError::from((
-                ErrorKind::DestinationSchemaError,
-                "Table schema not found in schema cache",
-                format!("table_id: {table_id}"),
-            ))
+            etl_error!(
+                ErrorKind::MissingTableSchema,
+                "Table not found in the schema cache",
+                format!("The table schema for table {table_id} was not found in the cache")
+            )
         })?;
 
         let table_id = table_schema.name.as_bigquery_table_id();
@@ -535,10 +536,10 @@ impl BigQueryDestination {
                     .schema_cache
                     .as_ref()
                     .ok_or_else(|| {
-                        EtlError::from((
-                            ErrorKind::ConfigError,
-                            "The schema cache was not set on the destination",
-                        ))
+                        etl_error!(
+                            ErrorKind::InvalidState,
+                            "The schema cache was not set on the destination"
+                        )
                     })?
                     .lock_inner()
                     .await;

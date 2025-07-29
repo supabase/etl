@@ -39,76 +39,38 @@ pub enum ErrorRepr {
 #[non_exhaustive]
 pub enum ErrorKind {
     /// Database connection failed or resource limitations
-    ///
-    /// Used for PostgreSQL connection errors (08xxx), resource errors (53xxx),
-    /// and general connectivity issues.
     ConnectionFailed,
     /// Query execution failed
-    ///
-    /// Used for PostgreSQL syntax errors (42xxx), BigQuery response errors,
-    /// and general SQL execution failures.
     QueryFailed,
     /// Source schema mismatch or validation error
     SourceSchemaError,
-    /// Destination schema mismatch or validation error
-    ///
-    /// Used for PostgreSQL schema object not found errors (42xxx)
-    /// and destination schema mismatches.
-    DestinationSchemaError,
     /// Missing table schema
     MissingTableSchema,
     /// Data type conversion error
-    ///
-    /// Used for PostgreSQL data conversion errors (22xxx), BigQuery column type mismatches,
-    /// UTF-8 conversion failures, and numeric parsing errors.
     ConversionError,
     /// Configuration error
-    ///
-    /// Used for BigQuery invalid metadata values and general configuration issues.
     ConfigError,
     /// Network or I/O error
-    ///
-    /// Used for PostgreSQL system errors (58xxx), BigQuery transport/request errors,
-    /// JSON I/O errors, and general I/O failures.
     IoError,
     /// Serialization error
-    ///
-    /// Used for BigQuery JSON serialization errors and data encoding failures.
     SerializationError,
     /// Deserialization error
-    ///
-    /// Used for JSON syntax/data/EOF errors and data decoding failures.
     DeserializationError,
     /// Encryption/decryption error
     EncryptionError,
     /// Authentication failed
-    ///
-    /// Used for PostgreSQL authentication errors (28xxx),
-    /// BigQuery authentication errors, and credential failures.
     AuthenticationError,
     /// Invalid state error
-    ///
-    /// Used for PostgreSQL transaction errors (40xxx, 25xxx),
-    /// BigQuery result set positioning errors, and state inconsistencies.
     InvalidState,
     /// Invalid data
-    ///
-    /// Used for BigQuery invalid column index/name errors,
-    /// UUID parsing failures, and malformed data.
     InvalidData,
     /// Data validation error
-    ///
-    /// Used for PostgreSQL constraint violations (23xxx)
-    /// and data integrity validation failures.
     ValidationError,
     /// Apply worker error
     ApplyWorkerPanic,
     /// Table sync worker error
     TableSyncWorkerPanic,
     /// Destination-specific error
-    ///
-    /// Used for BigQuery gRPC status errors, row errors,
-    /// and destination-specific failures.
     DestinationError,
     /// Replication slot not found
     ReplicationSlotNotFound,
@@ -409,7 +371,7 @@ impl From<tokio_postgres::Error> for EtlError {
                     | SqlState::UNDEFINED_COLUMN
                     | SqlState::UNDEFINED_FUNCTION
                     | SqlState::UNDEFINED_SCHEMA => (
-                        ErrorKind::DestinationSchemaError,
+                        ErrorKind::SourceSchemaError,
                         "PostgreSQL schema object not found",
                     ),
 
@@ -600,9 +562,10 @@ impl From<gcp_bigquery_client::error::BQError> for EtlError {
             ),
 
             // gRPC errors
-            BQError::TonicInvalidMetadataValueError(_) => {
-                (ErrorKind::ConfigError, "BigQuery invalid metadata value")
-            }
+            BQError::TonicInvalidMetadataValueError(_) => (
+                ErrorKind::DestinationError,
+                "BigQuery invalid metadata value",
+            ),
             BQError::TonicStatusError(_) => {
                 (ErrorKind::DestinationError, "BigQuery gRPC status error")
             }
