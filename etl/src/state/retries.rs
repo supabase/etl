@@ -305,31 +305,34 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::state::store::notify::NotifyingStateStore;
-    use crate::state::table::{TableReplicationPhase, TableReplicationPhaseType};
     use chrono::{Duration as ChronoDuration, Utc};
     use postgres::schema::TableId;
     use std::time::Duration;
     use tokio::sync::watch;
     use tokio::time::sleep;
 
+    use crate::state::store::notify::NotifyingStateStore;
+    use crate::state::table::{TableReplicationPhase, TableReplicationPhaseType};
+
+    use super::*;
+
     async fn create_test_orchestrator() -> (
         RetriesOrchestrator<NotifyingStateStore>,
         NotifyingStateStore,
+        watch::Receiver<()>,
     ) {
         let pool = TableSyncWorkerPool::new();
         let state_store = NotifyingStateStore::new();
-        let (tx, _rx) = watch::channel(());
+        let (tx, rx) = watch::channel(());
 
         let orchestrator = RetriesOrchestrator::new(pool, state_store.clone(), tx);
 
-        (orchestrator, state_store)
+        (orchestrator, state_store, rx)
     }
 
     #[tokio::test]
     async fn test_schedule_timed_retry() {
-        let (orchestrator, state_store) = create_test_orchestrator().await;
+        let (orchestrator, state_store, _rx) = create_test_orchestrator().await;
         let table_id = TableId::new(1);
 
         // Add some initial state for the table
@@ -353,7 +356,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_schedule_timed_retry_debouncing() {
-        let (orchestrator, state_store) = create_test_orchestrator().await;
+        let (orchestrator, state_store, _rx) = create_test_orchestrator().await;
         let table_id = TableId::new(1);
 
         // Add some initial state for the table
@@ -385,7 +388,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_schedule_manual_retry() {
-        let (orchestrator, _) = create_test_orchestrator().await;
+        let (orchestrator, _, _rx) = create_test_orchestrator().await;
         let table_id = TableId::new(1);
 
         orchestrator.schedule_manual_retry(table_id).await;
@@ -396,7 +399,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_manual_retry_execution() {
-        let (orchestrator, state_store) = create_test_orchestrator().await;
+        let (orchestrator, state_store, rx) = create_test_orchestrator().await;
         let table_id = TableId::new(1);
 
         // Add initial state and history for rollback
@@ -427,21 +430,27 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(current_state.as_type(), TableReplicationPhaseType::Init);
+
+        // Verify that the force syncing signal was sent
+        assert!(rx.has_changed().unwrap());
     }
 
     #[tokio::test]
     async fn test_retry_nonexistent_manual_retry() {
-        let (orchestrator, _) = create_test_orchestrator().await;
+        let (orchestrator, _, rx) = create_test_orchestrator().await;
         let table_id = TableId::new(1);
 
         // Try to retry a table that wasn't scheduled for manual retry
         let result = orchestrator.retry(table_id).await;
         assert!(!result);
+
+        // Verify that the force syncing signal was not sent
+        assert!(!rx.has_changed().unwrap());
     }
 
     #[tokio::test]
     async fn test_timed_retry_execution() {
-        let (orchestrator, state_store) = create_test_orchestrator().await;
+        let (orchestrator, state_store, rx) = create_test_orchestrator().await;
         let table_id = TableId::new(1);
 
         // Add initial state and history for rollback
@@ -474,11 +483,14 @@ mod tests {
         // Verify the retry is no longer in the queue
         let enqueued_keys = orchestrator.enqueued_table_keys.lock().await;
         assert!(!enqueued_keys.contains_key(&table_id));
+
+        // Verify that the force syncing signal was sent
+        assert!(rx.has_changed().unwrap());
     }
 
     #[tokio::test]
     async fn test_timed_retry_with_past_time() {
-        let (orchestrator, state_store) = create_test_orchestrator().await;
+        let (orchestrator, state_store, rx) = create_test_orchestrator().await;
         let table_id = TableId::new(1);
 
         // Add initial state and history for rollback
@@ -507,11 +519,14 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(current_state.as_type(), TableReplicationPhaseType::Init);
+
+        // Verify that the force syncing signal was sent
+        assert!(rx.has_changed().unwrap());
     }
 
     #[tokio::test]
     async fn test_multiple_tables_retries() {
-        let (orchestrator, state_store) = create_test_orchestrator().await;
+        let (orchestrator, state_store, rx) = create_test_orchestrator().await;
         let table_id1 = TableId::new(1);
         let table_id2 = TableId::new(2);
         let table_id3 = TableId::new(3);
@@ -538,18 +553,32 @@ mod tests {
             .await;
 
         // Verify manual retry
-        let manual_retries = orchestrator.manual_retries.lock().await;
-        assert!(manual_retries.contains(&table_id1));
+        {
+            let manual_retries = orchestrator.manual_retries.lock().await;
+            assert!(manual_retries.contains(&table_id1));
+        }
 
         // Verify timed retries
-        let enqueued_keys = orchestrator.enqueued_table_keys.lock().await;
-        assert!(enqueued_keys.contains_key(&table_id2));
-        assert!(enqueued_keys.contains_key(&table_id3));
+        {
+            let enqueued_keys = orchestrator.enqueued_table_keys.lock().await;
+            assert!(enqueued_keys.contains_key(&table_id2));
+            assert!(enqueued_keys.contains_key(&table_id3));
+        }
+        
+        // Try to retry a table that wasn't scheduled for manual retry
+        let result = orchestrator.retry(table_id1).await;
+        assert!(result);
+
+        // Wait a short time for processing of timed retries
+        sleep(Duration::from_millis(200)).await;
+
+        // Verify that the force syncing signal was sent
+        assert!(rx.has_changed().unwrap());
     }
 
     #[tokio::test]
     async fn test_retry_with_no_history() {
-        let (orchestrator, state_store) = create_test_orchestrator().await;
+        let (orchestrator, state_store, rx) = create_test_orchestrator().await;
         let table_id = TableId::new(1);
 
         // Only add current state, no history
@@ -576,11 +605,14 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(current_state.as_type(), TableReplicationPhaseType::Init);
+
+        // When rollback fails, the signal should NOT be sent
+        assert!(!rx.has_changed().unwrap());
     }
 
     #[tokio::test]
     async fn test_concurrent_manual_retries() {
-        let (orchestrator, state_store) = create_test_orchestrator().await;
+        let (orchestrator, state_store, rx) = create_test_orchestrator().await;
         let table_id = TableId::new(1);
 
         // Setup state with history
@@ -610,5 +642,8 @@ mod tests {
         // Verify no manual retry remains
         let manual_retries = orchestrator.manual_retries.lock().await;
         assert!(!manual_retries.contains(&table_id));
+
+        // Verify that the force syncing signal was sent
+        assert!(rx.has_changed().unwrap());
     }
 }
