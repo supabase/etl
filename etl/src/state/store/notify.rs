@@ -137,13 +137,13 @@ impl StateStore for NotifyingStateStore {
 
     async fn load_table_replication_states(&self) -> EtlResult<usize> {
         let inner = self.inner.read().await;
-        let result = Ok(inner.table_replication_states.clone());
+        let table_replication_states_len = inner.table_replication_states.len();
 
         inner
             .dispatch_method_notification(StateStoreMethod::LoadTableReplicationStates)
             .await;
 
-        result.map(|states| states.len())
+        Ok(table_replication_states_len)
     }
 
     async fn update_table_replication_state(

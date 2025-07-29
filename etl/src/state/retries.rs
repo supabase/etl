@@ -568,6 +568,14 @@ mod tests {
         // Verify the table is removed from manual retries even if rollback fails
         let manual_retries = orchestrator.manual_retries.lock().await;
         assert!(!manual_retries.contains(&table_id));
+
+        // Verify the state was not rolled back
+        let current_state = state_store
+            .get_table_replication_state(table_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(current_state.as_type(), TableReplicationPhaseType::Init);
     }
 
     #[tokio::test]
@@ -596,7 +604,7 @@ mod tests {
         );
 
         // Only one should succeed
-        assert!(result1 != result2);
+        assert_ne!(result1, result2);
         assert!(result1 || result2);
 
         // Verify no manual retry remains
