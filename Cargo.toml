@@ -1,14 +1,15 @@
 [workspace]
 resolver = "2"
-members = ["api", "config", "etl", "postgres", "replicator", "telemetry"]
+members = ["etl-api", "etl-config", "etl-destinations", "etl", "etl-postgres", "etl-replicator", "etl-telemetry"]
 
 [workspace.dependencies]
-api = { path = "api", default-features = false }
-config = { path = "config", default-features = false }
+etl-api = { path = "etl-api", default-features = false }
+etl-config = { path = "etl-config", default-features = false }
+etl-destinations = { path = "etl-destinations", default-features = false }
 etl = { path = "etl", default-features = false }
-postgres = { path = "postgres", default-features = false }
-replicator = { path = "replicator", default-features = false }
-telemetry = { path = "telemetry", default-features = false }
+etl-postgres = { path = "etl-postgres", default-features = false }
+etl-replicator = { path = "etl-replicator", default-features = false }
+etl-telemetry = { path = "etl-telemetry", default-features = false }
 
 actix-web = { version = "4", default-features = false }
 actix-web-httpauth = { version = "0.8.2", default-features = false }
@@ -37,14 +38,13 @@ rand = { version = "0.8.5", default-features = false }
 reqwest = { version = "0.12", default-features = false }
 rustls = { version = "0.23.12", default-features = false }
 rustls-pemfile = { version = "2.2.0", default-features = false }
-rustyline = { version = "14.0.0", default-features = false }
 rust-cli-config = { package = "config", version = "0.14", default-features = false }
 secrecy = { version = "0.8.0", default-features = false }
-sentry = { version = "0.41.0" }
+sentry = { version = "0.42.0" }
 serde = { version = "1.0", default-features = false }
 serde_json = { version = "1.0", default-features = false }
 sqlx = { version = "0.8.6", default-features = false }
-thiserror = "1.0"
+thiserror = { version = "2.0.12" }
 tokio = { version = "1.38", default-features = false }
 tokio-postgres = { git = "https://github.com/imor/rust-postgres", default-features = false, rev = "20265ef38e32a06f76b6f9b678e2077fc2211f6b" }
 tokio-postgres-rustls = { git = "https://github.com/imor/tokio-postgres-rustls", default-features = false }
