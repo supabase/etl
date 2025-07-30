@@ -9,9 +9,11 @@ use crate::db::serde::{
     DbDeserializationError, DbSerializationError, deserialize_from_value, serialize,
 };
 
-/// Pipeline configuration used during replication.
-/// This struct's fields should be kept in sync with
-/// [`OptionalPipelineConfig`]
+/// Pipeline configuration used during replication. This struct's fields
+/// should be kept in sync with [`OptionalPipelineConfig`]. A separate
+/// struct was created because `publication_name` is not optional and
+/// when updating config we do not want the user to pass publication
+/// name.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PipelineConfig {
     pub publication_name: String,
