@@ -10,8 +10,11 @@ use crate::db::serde::{
 };
 
 /// Pipeline configuration used during replication. This struct's fields
-/// should be kept in sync with [`OptionalPipelineConfig`]. A separate
-/// struct was created because `publication_name` is not optional and
+/// should be kept in sync with [`OptionalPipelineConfig`]. If a new optional
+/// field is added, it should also be included in the [`OptionalPipelineConfig::merge`]
+/// implementation.
+///
+/// A separate struct was created because `publication_name` is not optional and
 /// when updating config we do not want the user to pass publication
 /// name.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -53,14 +56,6 @@ impl PipelineConfig {
 
         if let Some(max_table_sync_workers) = other.max_table_sync_workers {
             self.max_table_sync_workers = Some(max_table_sync_workers);
-        }
-    }
-
-    pub fn into_optional_pipeline_config(self) -> OptionalPipelineConfig {
-        OptionalPipelineConfig {
-            batch: self.batch,
-            apply_worker_init_retry: self.apply_worker_init_retry,
-            max_table_sync_workers: self.max_table_sync_workers,
         }
     }
 }
@@ -278,7 +273,7 @@ pub async fn update_pipeline_config(
     txn: &mut PgTransaction<'_>,
     tenant_id: &str,
     pipeline_id: i64,
-    config: OptionalPipelineConfig,
+    request_config: OptionalPipelineConfig,
 ) -> Result<Option<PipelineConfig>, PipelinesDbError> {
     // We use `select ... for update` to lock the pipeline row being updated
     // to avoid concurrent requests clobbering data from each other
@@ -299,7 +294,7 @@ pub async fn update_pipeline_config(
     match record {
         Some(record) => {
             let mut config_in_db = deserialize_from_value::<PipelineConfig>(record.config)?;
-            config_in_db.merge(config);
+            config_in_db.merge(request_config);
             let updated_config = serialize(config_in_db)?;
 
             let record = sqlx::query!(

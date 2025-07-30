@@ -869,7 +869,7 @@ async fn pipeline_config_can_be_updated() {
         config: partially_updated_optional_pipeline_config(ConfigUpdateType::ApplyWorkerInitRetry(
             RetryConfig {
                 max_attempts: 10,
-                initial_delay_ms: 1000,
+                initial_delay_ms: 2000,
                 max_delay_ms: 5000,
                 backoff_factor: 3.0,
             },
