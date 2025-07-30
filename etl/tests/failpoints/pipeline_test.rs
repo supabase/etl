@@ -2,9 +2,8 @@ use etl::destination::memory::MemoryDestination;
 use etl::error::ErrorKind;
 use etl::failpoints::START_TABLE_SYNC__AFTER_DATA_SYNC;
 use etl::pipeline::PipelineId;
-use etl::state::store::base::StateStore;
 use etl::state::store::notify::NotifyingStateStore;
-use etl::state::table::{TableReplicationPhase, TableReplicationPhaseType};
+use etl::state::table::TableReplicationPhaseType;
 use etl::test_utils::database::spawn_database;
 use etl::test_utils::pipeline::create_pipeline;
 use etl::test_utils::test_destination_wrapper::TestDestinationWrapper;
@@ -18,14 +17,23 @@ use tokio::time::sleep;
 // TODO: add more tests with fault injection.
 
 #[tokio::test(flavor = "multi_thread")]
-async fn pipeline_handles_table_sync_worker_panic_during_data_sync() {
+async fn table_copy_fails_after_data_sync_threw_a_panic() {
     let _scenario = FailScenario::setup();
-    fail::cfg(START_TABLE_SYNC__AFTER_DATA_SYNC, "panic").unwrap();
+    fail::cfg(START_TABLE_SYNC__AFTER_DATA_SYNC, "1*panic").unwrap();
 
     init_test_tracing();
 
-    let database = spawn_database().await;
-    let database_schema = setup_test_database_schema(&database, TableSelection::Both).await;
+    let mut database = spawn_database().await;
+    let database_schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
+
+    // Insert initial test data.
+    let rows_inserted = 10;
+    insert_users_data(
+        &mut database,
+        &database_schema.users_schema().name,
+        1..=rows_inserted,
+    )
+    .await;
 
     let state_store = NotifyingStateStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
@@ -40,113 +48,34 @@ async fn pipeline_handles_table_sync_worker_panic_during_data_sync() {
         destination.clone(),
     );
 
-    // We register the interest in waiting for both table syncs to have started.
+    // Register notifications for table sync phases.
     let users_state_notify = state_store
         .notify_on_table_state(
             database_schema.users_schema().id,
-            TableReplicationPhaseType::DataSync,
-        )
-        .await;
-    let orders_state_notify = state_store
-        .notify_on_table_state(
-            database_schema.orders_schema().id,
-            TableReplicationPhaseType::DataSync,
+            TableReplicationPhaseType::Skipped,
         )
         .await;
 
     pipeline.start().await.unwrap();
 
     users_state_notify.notified().await;
-    orders_state_notify.notified().await;
 
-    // We stop and inspect errors.
+    // We expect to have a panic error.
     let err = pipeline.shutdown_and_wait().await.err().unwrap();
-    assert_eq!(err.kinds().len(), 2);
+    assert_eq!(err.kinds().len(), 1);
     assert_eq!(err.kinds()[0], ErrorKind::TableSyncWorkerPanic);
-    assert_eq!(err.kinds()[1], ErrorKind::TableSyncWorkerPanic);
 
-    // We make sure that the error has been tracked in the state store.
-    state_store.load_table_replication_states().await.unwrap();
-    let users_phase = state_store
-        .get_table_replication_state(database_schema.users_schema().id)
-        .await
-        .unwrap()
-        .unwrap();
-    assert!(matches!(users_phase, TableReplicationPhase::Skipped));
-    let orders_phase = state_store
-        .get_table_replication_state(database_schema.orders_schema().id)
-        .await
-        .unwrap()
-        .unwrap();
-    assert!(matches!(orders_phase, TableReplicationPhase::Skipped));
+    // Verify no data is there.
+    let table_rows = destination.get_table_rows().await;
+    assert!(table_rows.is_empty());
+
+    // Verify table schemas were correctly stored.
+    let table_schemas = destination.get_table_schemas().await;
+    assert!(table_schemas.is_empty());
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn pipeline_handles_table_sync_worker_error_during_data_sync() {
-    let _scenario = FailScenario::setup();
-    fail::cfg(START_TABLE_SYNC__AFTER_DATA_SYNC, "return").unwrap();
-
-    init_test_tracing();
-
-    let database = spawn_database().await;
-    let database_schema = setup_test_database_schema(&database, TableSelection::Both).await;
-
-    let state_store = NotifyingStateStore::new();
-    let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
-
-    // We start the pipeline from scratch.
-    let pipeline_id: PipelineId = random();
-    let mut pipeline = create_pipeline(
-        &database.config,
-        pipeline_id,
-        database_schema.publication_name(),
-        state_store.clone(),
-        destination.clone(),
-    );
-
-    // We register the interest in waiting for both table syncs to have started.
-    let users_state_notify = state_store
-        .notify_on_table_state(
-            database_schema.users_schema().id,
-            TableReplicationPhaseType::DataSync,
-        )
-        .await;
-    let orders_state_notify = state_store
-        .notify_on_table_state(
-            database_schema.orders_schema().id,
-            TableReplicationPhaseType::DataSync,
-        )
-        .await;
-
-    pipeline.start().await.unwrap();
-
-    users_state_notify.notified().await;
-    orders_state_notify.notified().await;
-
-    // We stop and inspect errors.
-    let err = pipeline.shutdown_and_wait().await.err().unwrap();
-    assert_eq!(err.kinds().len(), 2);
-    assert_eq!(err.kinds()[0], ErrorKind::WithNoRetry);
-    assert_eq!(err.kinds()[1], ErrorKind::WithNoRetry);
-
-    // We make sure that the error has been tracked in the state store.
-    state_store.load_table_replication_states().await.unwrap();
-    let users_phase = state_store
-        .get_table_replication_state(database_schema.users_schema().id)
-        .await
-        .unwrap()
-        .unwrap();
-    assert!(matches!(users_phase, TableReplicationPhase::Skipped));
-    let orders_phase = state_store
-        .get_table_replication_state(database_schema.orders_schema().id)
-        .await
-        .unwrap()
-        .unwrap();
-    assert!(matches!(orders_phase, TableReplicationPhase::Skipped));
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn table_copy_is_consistent_after_data_sync_threw_an_error_no_manual_retry() {
+async fn table_copy_fails_after_data_sync_threw_an_error_with_no_retry() {
     let _scenario = FailScenario::setup();
     fail::cfg(START_TABLE_SYNC__AFTER_DATA_SYNC, "1*return(no_retry)").unwrap();
 
@@ -189,8 +118,7 @@ async fn table_copy_is_consistent_after_data_sync_threw_an_error_no_manual_retry
 
     users_state_notify.notified().await;
 
-    // We expect the error of the first table sync worker to be returned since we collect all worker
-    // errors.
+    // We expect to have a no retry error which is generated by the failpoint.
     let err = pipeline.shutdown_and_wait().await.err().unwrap();
     assert_eq!(err.kinds().len(), 1);
     assert_eq!(err.kinds()[0], ErrorKind::WithNoRetry);
