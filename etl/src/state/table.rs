@@ -123,7 +123,7 @@ impl TableReplicationError {
                 RetryPolicy::ManualRetry,
             ),
 
-            // Special handling for test specific error kinds.
+            // Special handling for error kinds used during failure injection.
             #[cfg(feature = "failpoints")]
             ErrorKind::WithNoRetry => {
                 Self::with_solution(table_id, error, "Cannot retry", RetryPolicy::NoRetry)
@@ -185,7 +185,7 @@ impl TableReplicationError {
 pub enum RetryPolicy {
     /// No retry should be attempted, the system has to be fixed by hand.
     NoRetry,
-    /// Retry requires user intervention before proceeding.
+    /// Retry after it was manually triggered.
     ManualRetry,
     /// Retry after the specified timestamp.
     TimedRetry { next_retry: DateTime<Utc> },

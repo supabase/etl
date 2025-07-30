@@ -12,11 +12,20 @@ use crate::state::table::{RetryPolicy, TableReplicationError};
 use crate::workers::pool::{TableSyncWorkerPool, TableSyncWorkerPoolInner};
 use crate::workers::table_sync::TableSyncWorkerState;
 
+/// Observes and manages the lifecycle of table sync workers.
+///
+/// Handles completion, errors, and panics from table sync workers by updating
+/// worker pool state and persisting error information through the state store.
+/// Integrates with the retries orchestrator to determine appropriate retry policies.
 #[derive(Debug, Clone)]
 pub struct WorkerLifecycleObserver<S> {
+    /// Pipeline configuration used for error processing.
     config: Arc<PipelineConfig>,
+    /// Pool of table synchronization workers being observed.
     pool: TableSyncWorkerPool,
+    /// Orchestrator for handling retry logic and policies.
     retries_orchestrator: RetriesOrchestrator<S>,
+    /// State store for persisting worker and table states.
     state_store: S,
 }
 
@@ -24,6 +33,10 @@ impl<S> WorkerLifecycleObserver<S>
 where
     S: StateStore + Clone + Send + 'static,
 {
+    /// Creates a new worker lifecycle observer.
+    ///
+    /// Initializes the observer with the necessary components to monitor and
+    /// manage table sync worker lifecycles, including error handling and state persistence.
     pub fn new(
         config: Arc<PipelineConfig>,
         pool: TableSyncWorkerPool,
@@ -38,6 +51,11 @@ where
         }
     }
 
+    /// Marks a table as errored and persists the error state.
+    ///
+    /// Processes the error through the retries orchestrator to determine retry policy,
+    /// then updates and stores the worker state. Logs any failures that occur during
+    /// state persistence to avoid propagating errors to the reactive future system.
     async fn mark_table_errored<P>(
         &self,
         pool: &P,

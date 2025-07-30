@@ -1,4 +1,3 @@
-use crate::error::EtlError;
 use std::{collections::HashMap, fmt, sync::Arc};
 
 use postgres::schema::TableId;
@@ -7,7 +6,7 @@ use tokio::{
     sync::{Notify, RwLock},
 };
 
-use crate::error::{ErrorKind, EtlResult};
+use crate::error::{ErrorKind, EtlError, EtlResult};
 use crate::etl_error;
 use crate::state::{
     store::base::StateStore,

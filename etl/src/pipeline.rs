@@ -1,3 +1,9 @@
+use config::shared::PipelineConfig;
+use postgres::schema::TableId;
+use std::sync::Arc;
+use tokio::sync::Semaphore;
+use tracing::{error, info};
+
 use crate::bail;
 use crate::concurrency::shutdown::{ShutdownTx, create_shutdown_channel};
 use crate::concurrency::signal::create_signal;
@@ -11,11 +17,6 @@ use crate::state::table::TableReplicationPhase;
 use crate::workers::apply::{ApplyWorker, ApplyWorkerHandle};
 use crate::workers::base::{Worker, WorkerHandle};
 use crate::workers::pool::TableSyncWorkerPool;
-use config::shared::PipelineConfig;
-use postgres::schema::TableId;
-use std::sync::Arc;
-use tokio::sync::Semaphore;
-use tracing::{error, info};
 
 #[derive(Debug)]
 enum PipelineState<S> {

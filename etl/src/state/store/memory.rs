@@ -1,10 +1,9 @@
-use crate::error::EtlError;
 use postgres::schema::TableId;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
-use crate::error::{ErrorKind, EtlResult};
+use crate::error::{ErrorKind, EtlError, EtlResult};
 use crate::etl_error;
 use crate::state::store::base::StateStore;
 use crate::state::table::TableReplicationPhase;

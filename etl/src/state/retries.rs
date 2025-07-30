@@ -40,10 +40,14 @@ pub struct RetriesOrchestrator<S> {
     notify_new_timed_retry: Arc<Notify>,
 }
 
-/// Information about a table retry operation
+/// Information about a table retry operation.
+///
+/// Contains the table identifier and the scheduled retry time for use in the delay queue.
 #[derive(Debug, Clone)]
 struct TableRetryInfo {
+    /// The table ID that needs to be retried.
     table_id: TableId,
+    /// The UTC timestamp when the retry should be executed.
     retry_time: DateTime<Utc>,
 }
 
@@ -52,6 +56,9 @@ where
     S: StateStore + Clone + Send + 'static,
 {
     /// Creates a new [`RetriesOrchestrator`] instance.
+    ///
+    /// Initializes all internal data structures and starts the background task
+    /// for processing timed retries automatically.
     pub fn new(
         pool: TableSyncWorkerPool,
         state_store: S,
@@ -137,7 +144,6 @@ where
         info!("scheduled manual retry for table {}", table_id);
     }
 
-    // TODO: hook this method to allow the process to receive a signal to retry the specific table.
     /// Attempts to retry a table that requires manual intervention.
     ///
     /// Returns `true` if the retry was found and executed, `false` if no manual
@@ -167,6 +173,9 @@ where
     }
 
     /// Starts the background task that processes timed retries.
+    ///
+    /// Spawns a tokio task that monitors the delay queue for expired retries
+    /// and executes them automatically. Returns a handle to the spawned task.
     fn start_background_task(
         pool: TableSyncWorkerPool,
         state_store: S,
@@ -245,8 +254,9 @@ where
 
     /// Executes a retry operation for the specified table.
     ///
-    /// Rolls back the table replication state and notifies the main apply worker to try
-    /// and process syncing tables again.
+    /// Rolls back the table replication state to the previous phase and signals
+    /// the apply worker to attempt table synchronization again. Handles both
+    /// in-memory and persistent state consistency during the rollback process.
     async fn execute_retry(
         pool: TableSyncWorkerPool,
         state_store: S,
