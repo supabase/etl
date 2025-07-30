@@ -1,6 +1,7 @@
 ---
-source: api/src/db/destinations.rs
-expression: deserialized.unwrap()
+source: api/tests/integration/destination_test.rs
+assertion_line: 261
+expression: destination.config
 ---
 BigQuery {
     project_id: "project-id",
@@ -8,7 +9,5 @@ BigQuery {
     service_account_key: SerializableSecretString(
         "[REDACTED]",
     ),
-    max_staleness_mins: Some(
-        42,
-    ),
+    max_staleness_mins: None,
 }

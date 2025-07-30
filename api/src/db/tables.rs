@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use sqlx::{Executor, PgPool, Row};
 use thiserror::Error;
+use utoipa::ToSchema;
 
 #[derive(Debug, Error)]
 pub enum TablesDbError {
@@ -8,7 +9,7 @@ pub enum TablesDbError {
     Database(#[from] sqlx::Error),
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct Table {
     pub schema: String,
     pub name: String,
