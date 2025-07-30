@@ -61,7 +61,7 @@ tokio-postgres = { workspace = true, features = [
     "with-serde_json-1",
 ] }
 tokio-postgres-rustls = { workspace = true }
-tokio-util = { workspace = true, features = ["time"] }
+tokio-util = { workspace = true }
 tracing = { workspace = true, default-features = true }
 tracing-subscriber = { workspace = true, default-features = true, features = [
     "env-filter",
