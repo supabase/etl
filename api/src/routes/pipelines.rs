@@ -282,7 +282,6 @@ pub enum PipelineStatus {
 }
 
 #[utoipa::path(
-    context_path = "/v1",
     request_body = CreatePipelineRequest,
     params(
         ("tenant_id" = String, Header, description = "The tenant ID")
@@ -333,7 +332,6 @@ pub async fn create_pipeline(
 }
 
 #[utoipa::path(
-    context_path = "/v1",
     params(
         ("pipeline_id" = i64, Path, description = "Id of the pipeline"),
         ("tenant_id" = String, Header, description = "The tenant ID")
@@ -375,7 +373,6 @@ pub async fn read_pipeline(
 }
 
 #[utoipa::path(
-    context_path = "/v1",
     request_body = UpdatePipelineRequest,
     params(
         ("pipeline_id" = i64, Path, description = "Id of the pipeline"),
@@ -426,7 +423,6 @@ pub async fn update_pipeline(
 }
 
 #[utoipa::path(
-    context_path = "/v1",
     params(
         ("pipeline_id" = i64, Path, description = "Id of the pipeline"),
         ("tenant_id" = String, Header, description = "The tenant ID")
@@ -455,7 +451,6 @@ pub async fn delete_pipeline(
 }
 
 #[utoipa::path(
-    context_path = "/v1",
     params(
         ("tenant_id" = String, Header, description = "The tenant ID")
     ),
@@ -493,7 +488,6 @@ pub async fn read_all_pipelines(
 }
 
 #[utoipa::path(
-    context_path = "/v1",
     params(
         ("pipeline_id" = i64, Path, description = "Id of the pipeline"),
         ("tenant_id" = String, Header, description = "The tenant ID")
@@ -537,7 +531,6 @@ pub async fn start_pipeline(
 }
 
 #[utoipa::path(
-    context_path = "/v1",
     params(
         ("pipeline_id" = i64, Path, description = "Id of the pipeline"),
         ("tenant_id" = String, Header, description = "The tenant ID")
@@ -572,7 +565,6 @@ pub async fn stop_pipeline(
 }
 
 #[utoipa::path(
-    context_path = "/v1",
     params(
         ("tenant_id" = String, Header, description = "The tenant ID")
     ),
@@ -602,7 +594,6 @@ pub async fn stop_all_pipelines(
 }
 
 #[utoipa::path(
-    context_path = "/v1",
     params(
         ("pipeline_id" = i64, Path, description = "Id of the pipeline"),
         ("tenant_id" = String, Header, description = "The tenant ID")
@@ -671,7 +662,6 @@ pub async fn get_pipeline_status(
 }
 
 #[utoipa::path(
-    context_path = "/v1",
     params(
         ("pipeline_id" = i64, Path, description = "Id of the pipeline"),
         ("tenant_id" = String, Header, description = "The tenant ID")
@@ -741,7 +731,6 @@ pub async fn get_pipeline_replication_status(
 }
 
 #[utoipa::path(
-    context_path = "/v1",
     request_body = UpdatePipelineImageRequest,
     params(
         ("pipeline_id" = i64, Path, description = "Id of the pipeline"),

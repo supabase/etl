@@ -150,44 +150,6 @@ pub async fn run(
     #[openapi(
         paths(
             crate::routes::health_check::health_check,
-            crate::routes::images::create_image,
-            crate::routes::images::read_image,
-            crate::routes::images::update_image,
-            crate::routes::images::delete_image,
-            crate::routes::images::read_all_images,
-            crate::routes::pipelines::create_pipeline,
-            crate::routes::pipelines::read_pipeline,
-            crate::routes::pipelines::update_pipeline,
-            crate::routes::pipelines::delete_pipeline,
-            crate::routes::pipelines::read_all_pipelines,
-            crate::routes::pipelines::get_pipeline_status,
-            crate::routes::pipelines::get_pipeline_replication_status,
-            crate::routes::pipelines::update_pipeline_image,
-            crate::routes::tenants::create_tenant,
-            crate::routes::tenants::create_or_update_tenant,
-            crate::routes::tenants::read_tenant,
-            crate::routes::tenants::update_tenant,
-            crate::routes::tenants::delete_tenant,
-            crate::routes::tenants::read_all_tenants,
-            crate::routes::sources::create_source,
-            crate::routes::sources::read_source,
-            crate::routes::sources::update_source,
-            crate::routes::sources::delete_source,
-            crate::routes::sources::read_all_sources,
-            crate::routes::sources::publications::create_publication,
-            crate::routes::sources::publications::read_publication,
-            crate::routes::sources::publications::update_publication,
-            crate::routes::sources::publications::delete_publication,
-            crate::routes::sources::publications::read_all_publications,
-            crate::routes::sources::tables::read_table_names,
-            crate::routes::destinations::create_destination,
-            crate::routes::destinations::read_destination,
-            crate::routes::destinations::update_destination,
-            crate::routes::destinations::delete_destination,
-            crate::routes::destinations::read_all_destinations,
-            crate::routes::tenants_sources::create_tenant_and_source,
-            crate::routes::destinations_pipelines::create_destination_and_pipeline,
-            crate::routes::destinations_pipelines::update_destination_and_pipeline,
         ),
         components(schemas(
             CreateImageRequest,
@@ -230,12 +192,56 @@ pub async fn run(
             CreateDestinationPipelineRequest,
             CreateDestinationPipelineResponse,
             UpdateDestinationPipelineRequest,
-        ))
+        )),
+        nest(
+            (path = "/v1", api = ApiV1)
+        )
     )]
     struct ApiDoc;
 
-    //TODO: replace all the context_path = v1 in route modules with the nest attribute
-    //when it is available in utoipa 5.0.0: https://github.com/juhaku/utoipa/pull/930
+    #[derive(OpenApi)]
+    #[openapi(paths(
+        crate::routes::images::create_image,
+        crate::routes::images::read_image,
+        crate::routes::images::update_image,
+        crate::routes::images::delete_image,
+        crate::routes::images::read_all_images,
+        crate::routes::pipelines::create_pipeline,
+        crate::routes::pipelines::read_pipeline,
+        crate::routes::pipelines::update_pipeline,
+        crate::routes::pipelines::delete_pipeline,
+        crate::routes::pipelines::read_all_pipelines,
+        crate::routes::pipelines::get_pipeline_status,
+        crate::routes::pipelines::get_pipeline_replication_status,
+        crate::routes::pipelines::update_pipeline_image,
+        crate::routes::tenants::create_tenant,
+        crate::routes::tenants::create_or_update_tenant,
+        crate::routes::tenants::read_tenant,
+        crate::routes::tenants::update_tenant,
+        crate::routes::tenants::delete_tenant,
+        crate::routes::tenants::read_all_tenants,
+        crate::routes::sources::create_source,
+        crate::routes::sources::read_source,
+        crate::routes::sources::update_source,
+        crate::routes::sources::delete_source,
+        crate::routes::sources::read_all_sources,
+        crate::routes::sources::publications::create_publication,
+        crate::routes::sources::publications::read_publication,
+        crate::routes::sources::publications::update_publication,
+        crate::routes::sources::publications::delete_publication,
+        crate::routes::sources::publications::read_all_publications,
+        crate::routes::sources::tables::read_table_names,
+        crate::routes::destinations::create_destination,
+        crate::routes::destinations::read_destination,
+        crate::routes::destinations::update_destination,
+        crate::routes::destinations::delete_destination,
+        crate::routes::destinations::read_all_destinations,
+        crate::routes::tenants_sources::create_tenant_and_source,
+        crate::routes::destinations_pipelines::create_destination_and_pipeline,
+        crate::routes::destinations_pipelines::update_destination_and_pipeline,
+    ))]
+    struct ApiV1;
+
     let openapi = ApiDoc::openapi();
 
     let server = HttpServer::new(move || {

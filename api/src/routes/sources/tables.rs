@@ -78,7 +78,6 @@ impl ResponseError for TableError {
 }
 
 #[utoipa::path(
-    context_path = "/v1",
     tag = "Tables",
     params(
         ("source_id" = i64, Path, description = "Id of the source"),

@@ -100,7 +100,6 @@ pub struct ReadDestinationsResponse {
 }
 
 #[utoipa::path(
-    context_path = "/v1",
     request_body = CreateDestinationRequest,
     responses(
         (status = 200, description = "Create new destination", body = CreateDestinationResponse),
@@ -137,7 +136,6 @@ pub async fn create_destination(
 }
 
 #[utoipa::path(
-    context_path = "/v1",
     params(
         ("destination_id" = i64, Path, description = "Id of the destination to retrieve"),
         ("tenant_id" = String, Header, description = "The tenant ID")
@@ -174,7 +172,6 @@ pub async fn read_destination(
 }
 
 #[utoipa::path(
-    context_path = "/v1",
     request_body = UpdateDestinationRequest,
     params(
         ("destination_id" = i64, Path, description = "Id of the destination to update"),
@@ -214,7 +211,6 @@ pub async fn update_destination(
 }
 
 #[utoipa::path(
-    context_path = "/v1",
     params(
         ("destination_id" = i64, Path, description = "Id of the destination to delete"),
         ("tenant_id" = String, Header, description = "The tenant ID")
@@ -243,7 +239,6 @@ pub async fn delete_destination(
 }
 
 #[utoipa::path(
-    context_path = "/v1",
     responses(
         (status = 200, description = "A list of all the destinations for a tenant", body = ReadDestinationsResponse),
         (status = 500, description = "Internal server error", body = ErrorMessage)
