@@ -14,6 +14,11 @@ pub struct TextFormatConverter;
 
 impl TextFormatConverter {
     pub fn default_value(typ: &Type) -> Cell {
+        const DEFAULT_DATE: NaiveDate = NaiveDate::from_ymd_opt(1, 1, 1).unwrap();
+        const DEFAULT_TIMESTAMP: NaiveDateTime = NaiveDateTime::new(DEFAULT_DATE, NaiveTime::MIN);
+        const DEFAULT_TIMESTAMPTZ: DateTime<Utc> =
+            DateTime::<Utc>::from_naive_utc_and_offset(DEFAULT_TIMESTAMP, Utc);
+
         match *typ {
             Type::BOOL => Cell::Bool(bool::default()),
             Type::BOOL_ARRAY => Cell::Array(ArrayCell::Bool(Vec::default())),
@@ -39,16 +44,13 @@ impl TextFormatConverter {
             Type::NUMERIC_ARRAY => Cell::Array(ArrayCell::Numeric(Vec::default())),
             Type::BYTEA => Cell::Bytes(Vec::default()),
             Type::BYTEA_ARRAY => Cell::Array(ArrayCell::Bytes(Vec::default())),
-            Type::DATE => Cell::Date(NaiveDate::MIN),
+            Type::DATE => Cell::Date(DEFAULT_DATE),
             Type::DATE_ARRAY => Cell::Array(ArrayCell::Date(Vec::default())),
             Type::TIME => Cell::Time(NaiveTime::MIN),
             Type::TIME_ARRAY => Cell::Array(ArrayCell::Time(Vec::default())),
-            Type::TIMESTAMP => Cell::TimeStamp(NaiveDateTime::MIN),
+            Type::TIMESTAMP => Cell::TimeStamp(DEFAULT_TIMESTAMP),
             Type::TIMESTAMP_ARRAY => Cell::Array(ArrayCell::TimeStamp(Vec::default())),
-            Type::TIMESTAMPTZ => {
-                let val = DateTime::<Utc>::from_naive_utc_and_offset(NaiveDateTime::MIN, Utc);
-                Cell::TimeStampTz(val)
-            }
+            Type::TIMESTAMPTZ => Cell::TimeStampTz(DEFAULT_TIMESTAMPTZ),
             Type::TIMESTAMPTZ_ARRAY => Cell::Array(ArrayCell::TimeStampTz(Vec::default())),
             Type::UUID => Cell::Uuid(Uuid::default()),
             Type::UUID_ARRAY => Cell::Array(ArrayCell::Uuid(Vec::default())),

@@ -16,6 +16,7 @@ set -eo pipefail
 #   Benchmark Configuration:
 #     HYPERFINE_RUNS, PUBLICATION_NAME, BATCH_MAX_SIZE, BATCH_MAX_FILL_MS, MAX_TABLE_SYNC_WORKERS
 #     DESTINATION (null or big-query)
+#     LOG_TARGET (terminal or file) - Where to send logs (default: terminal)
 #     DRY_RUN (true/false) - Show commands without executing them
 #   
 #   BigQuery Configuration (required when DESTINATION=big-query):
@@ -25,8 +26,11 @@ set -eo pipefail
 #     BQ_MAX_STALENESS_MINS - Optional staleness setting
 #
 # Examples:
-#   # Run with null destination (default)
+#   # Run with null destination and terminal logs (default)
 #   ./scripts/benchmark.sh
+#
+#   # Run with file logging
+#   LOG_TARGET=file ./scripts/benchmark.sh
 #
 #   # Dry run to see commands that would be executed
 #   DRY_RUN=true ./scripts/benchmark.sh
@@ -67,6 +71,9 @@ BATCH_MAX_SIZE="${BATCH_MAX_SIZE:=1000000}"
 BATCH_MAX_FILL_MS="${BATCH_MAX_FILL_MS:=10000}"
 MAX_TABLE_SYNC_WORKERS="${MAX_TABLE_SYNC_WORKERS:=8}"
 
+# Logging configuration
+LOG_TARGET="${LOG_TARGET:=terminal}"  # terminal or file
+
 # Destination configuration
 DESTINATION="${DESTINATION:=null}"  # null or big-query
 BQ_PROJECT_ID="${BQ_PROJECT_ID:=}"
@@ -86,6 +93,7 @@ echo "   Publication: ${PUBLICATION_NAME}"
 echo "   Batch size: ${BATCH_MAX_SIZE}"
 echo "   Batch fill time: ${BATCH_MAX_FILL_MS}ms"
 echo "   Workers: ${MAX_TABLE_SYNC_WORKERS}"
+echo "   Log target: ${LOG_TARGET}"
 echo "   Destination: ${DESTINATION}"
 if [[ "${DESTINATION}" == "big-query" ]]; then
   echo "   BigQuery Project: ${BQ_PROJECT_ID}"
@@ -101,7 +109,7 @@ echo "🔍 Querying table IDs from database..."
 TPCC_TABLE_IDS=$(PGPASSWORD="${DB_PASSWORD}" psql -h "${DB_HOST}" -U "${DB_USER}" -p "${DB_PORT}" -d "${DB_NAME}" -tAc "
   select string_agg(oid::text, ',')
   from pg_class
-  where relname in ('warehouse', 'district', 'customer', 'new_order', 'orders', 'stock', 'item')
+  where relname in ('customer', 'district', 'item', 'new_order', 'order_line', 'orders', 'stock', 'warehouse')
     and relkind = 'r';
 " 2>/dev/null || echo "")
 
@@ -145,14 +153,20 @@ if [[ "${DESTINATION}" != "null" && "${DESTINATION}" != "big-query" ]]; then
   exit 1
 fi
 
+# Validate log target option
+if [[ "${LOG_TARGET}" != "terminal" && "${LOG_TARGET}" != "file" ]]; then
+  echo "❌ Error: Invalid log target '${LOG_TARGET}'. Supported values: terminal, file"
+  exit 1
+fi
+
 # Build the prepare command
-PREPARE_CMD="cargo bench --bench table_copies ${FEATURES_FLAG} -- prepare --host ${DB_HOST} --port ${DB_PORT} --database ${DB_NAME} --username ${DB_USER}"
+PREPARE_CMD="cargo bench --bench table_copies ${FEATURES_FLAG} -- --log-target ${LOG_TARGET} prepare --host ${DB_HOST} --port ${DB_PORT} --database ${DB_NAME} --username ${DB_USER}"
 if [[ -n "${DB_PASSWORD}" && "${DB_PASSWORD}" != "" ]]; then
   PREPARE_CMD="${PREPARE_CMD} --password ${DB_PASSWORD}"
 fi
 
 # Build the run command
-RUN_CMD="cargo bench --bench table_copies ${FEATURES_FLAG} -- run --host ${DB_HOST} --port ${DB_PORT} --database ${DB_NAME} --username ${DB_USER}"
+RUN_CMD="cargo bench --bench table_copies ${FEATURES_FLAG} -- --log-target ${LOG_TARGET} run --host ${DB_HOST} --port ${DB_PORT} --database ${DB_NAME} --username ${DB_USER}"
 if [[ -n "${DB_PASSWORD}" && "${DB_PASSWORD}" != "" ]]; then
   RUN_CMD="${RUN_CMD} --password ${DB_PASSWORD}"
 fi

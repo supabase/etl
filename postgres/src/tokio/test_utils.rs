@@ -1,7 +1,7 @@
 use crate::schema::{ColumnSchema, TableId, TableName};
 use config::shared::{IntoConnectOptions, PgConnectionConfig};
 use tokio::runtime::Handle;
-use tokio_postgres::types::Type;
+use tokio_postgres::types::{ToSql, Type};
 use tokio_postgres::{Client, GenericClient, NoTls, Transaction};
 use tracing::info;
 
@@ -183,12 +183,12 @@ impl<G: GenericClient> PgDatabase<G> {
         &self,
         table_name: TableName,
         columns: &[&str],
-        expressions: &[&str],
+        values: &[&(dyn ToSql + Sync)],
     ) -> Result<u64, tokio_postgres::Error> {
         let set_clauses: Vec<String> = columns
             .iter()
-            .zip(expressions.iter())
-            .map(|(col, val)| format!("{col} = {val}"))
+            .enumerate()
+            .map(|(i, col)| format!("{col} = ${}", i + 1))
             .collect();
         let set_clause = set_clauses.join(", ");
 
@@ -201,7 +201,7 @@ impl<G: GenericClient> PgDatabase<G> {
         self.client
             .as_ref()
             .unwrap()
-            .execute(&update_query, &[])
+            .execute(&update_query, values)
             .await
     }
 

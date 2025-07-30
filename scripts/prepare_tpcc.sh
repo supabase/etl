@@ -57,7 +57,7 @@ TPCC_EXISTS=$(PGPASSWORD="${DB_PASSWORD}" psql -h "${DB_HOST}" -U "${DB_USER}" -
   select count(*) 
   from pg_catalog.pg_tables 
   where schemaname = 'public' 
-    and tablename in ('warehouse', 'district', 'customer', 'new_order', 'orders', 'stock', 'item');
+    and tablename in ('customer', 'district', 'item', 'new_order', 'order_line', 'orders', 'stock', 'warehouse');
 " 2>/dev/null || echo "0")
 
 if [[ "${TPCC_EXISTS}" -eq 9 ]]; then
@@ -91,13 +91,14 @@ PGPASSWORD="${DB_PASSWORD}" psql -h "${DB_HOST}" -U "${DB_USER}" -p "${DB_PORT}"
   
   -- Create publication with all TPC-C tables
   create publication bench_pub for table 
-    warehouse,
-    district,
     customer,
+    district,
+    item,
     new_order,
+    order_line,
     orders,
     stock,
-    item;
+    warehouse;
 "
 
 echo "✅ Publication 'bench_pub' created successfully!"

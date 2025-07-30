@@ -28,7 +28,7 @@ required-features = ["failpoints", "test-utils"]
 config = { workspace = true }
 postgres = { workspace = true, features = ["tokio", "replication"] }
 
-bigdecimal = { workspace = true, features = ["std"] }
+base64 = { workspace = true }
 bytes = { workspace = true }
 byteorder = { workspace = true }
 chrono = { workspace = true, features = ["serde"] }
