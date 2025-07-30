@@ -1,5 +1,5 @@
 [package]
-name = "api"
+name = "etl-api"
 version = "0.1.0"
 edition = "2024"
 
@@ -8,12 +8,12 @@ path = "src/lib.rs"
 
 [[bin]]
 path = "src/main.rs"
-name = "api"
+name = "etl-api"
 
 [dependencies]
-config = { workspace = true }
-postgres = { workspace = true, features = ["replication"] }
-telemetry = { workspace = true }
+etl-config = { workspace = true }
+etl-postgres = { workspace = true, features = ["replication"] }
+etl-telemetry = { workspace = true }
 
 actix-web = { workspace = true, features = ["macros", "http2"] }
 actix-web-httpauth = { workspace = true }
@@ -52,6 +52,6 @@ uuid = { version = "1.10.0", features = ["v4"] }
 sentry = { workspace = true, features = ["actix"] }
 
 [dev-dependencies]
-postgres = { workspace = true, features = ["test-utils", "sqlx"] }
+etl-postgres = { workspace = true, features = ["test-utils", "sqlx"] }
 
 insta = { workspace = true, features = ["json", "redactions"] }

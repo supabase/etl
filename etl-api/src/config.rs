@@ -1,5 +1,5 @@
 use base64::{Engine, prelude::BASE64_STANDARD};
-use config::shared::{PgConnectionConfig, SentryConfig};
+use etl_config::shared::{PgConnectionConfig, SentryConfig};
 use serde::de::{MapAccess, Visitor};
 use serde::{Deserialize, Deserializer, de};
 use std::fmt;

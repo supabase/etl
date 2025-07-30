@@ -1,10 +1,10 @@
 [package]
-name = "config"
+name = "etl-config"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-rust-cli-config = { workspace = true, features = ["yaml"] }
+config = { workspace = true, features = ["yaml"] }
 secrecy = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 sqlx = { workspace = true, features = ["postgres"] }

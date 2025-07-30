@@ -1,4 +1,4 @@
-use config::shared::DestinationConfig;
+use etl_config::shared::DestinationConfig;
 use sqlx::PgTransaction;
 use std::ops::DerefMut;
 use thiserror::Error;

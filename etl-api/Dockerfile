@@ -16,8 +16,8 @@ RUN cargo chef cook --release --recipe-path recipe.json
 # Build application
 COPY . .
 ENV SQLX_OFFLINE=true
-RUN cargo build --release -p api && \
-    strip target/release/api
+RUN cargo build --release -p etl-api && \
+    strip target/release/etl-api
 
 # Runtime stage with distroless for security
 FROM gcr.io/distroless/cc-debian12:nonroot
@@ -27,8 +27,8 @@ WORKDIR /app
 USER nonroot:nonroot
 
 # Copy binary and configuration
-COPY --from=builder /app/target/release/api ./api
-COPY --chown=nonroot:nonroot api/configuration ./configuration
+COPY --from=builder /app/target/release/etl-api ./etl-api
+COPY --chown=nonroot:nonroot etl-api/configuration ./configuration
 
 # Use exec form for proper signal handling
-ENTRYPOINT ["./api"]
+ENTRYPOINT ["./etl-api"]

@@ -6,9 +6,9 @@ use etl::failpoints::{
 use etl::pipeline::PipelineId;
 use etl::state::store::notify::NotifyingStateStore;
 use etl::state::table::TableReplicationPhaseType;
+use etl_telemetry::init_test_tracing;
 use fail::FailScenario;
 use rand::random;
-use telemetry::init_test_tracing;
 
 use etl::test_utils::database::spawn_database;
 use etl::test_utils::pipeline::create_pipeline;

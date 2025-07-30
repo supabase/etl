@@ -36,7 +36,7 @@ const ENV_SEPARATOR: &str = "__";
 /// `APP_ENVIRONMENT` cannot be parsed into an [`Environment`].
 ///
 /// Returns an error if configuration loading or deserialization fails.
-pub fn load_config<T>() -> Result<T, rust_cli_config::ConfigError>
+pub fn load_config<T>() -> Result<T, config::ConfigError>
 where
     T: DeserializeOwned,
 {
@@ -48,18 +48,18 @@ where
     let environment = Environment::load().expect("Failed to parse APP_ENVIRONMENT.");
 
     let environment_filename = format!("{environment}.yaml");
-    let settings = rust_cli_config::Config::builder()
-        .add_source(rust_cli_config::File::from(
+    let settings = config::Config::builder()
+        .add_source(config::File::from(
             configuration_directory.join(BASE_CONFIG_FILE),
         ))
-        .add_source(rust_cli_config::File::from(
+        .add_source(config::File::from(
             configuration_directory.join(environment_filename),
         ))
         // Add in settings from environment variables (with a prefix of APP and '__' as separator)
         // E.g. `APP_DESTINATION__BIG_QUERY__PROJECT_ID=my-project-id` sets
         // `Settings { destination: BigQuery { project_id } }` to `my-project-id`.
         .add_source(
-            rust_cli_config::Environment::with_prefix(ENV_PREFIX)
+            config::Environment::with_prefix(ENV_PREFIX)
                 .prefix_separator(ENV_PREFIX_SEPARATOR)
                 .separator(ENV_SEPARATOR),
         )

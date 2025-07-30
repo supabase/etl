@@ -1,4 +1,5 @@
 use crate::error::EtlResult;
+use etl_postgres::schema::ColumnSchema;
 use futures::StreamExt;
 use gcp_bigquery_client::storage::{ColumnMode, StorageApi};
 use gcp_bigquery_client::yup_oauth2::parse_service_account_key;
@@ -8,7 +9,6 @@ use gcp_bigquery_client::{
     model::{query_request::QueryRequest, query_response::ResultSet},
     storage::{ColumnType, FieldDescriptor, StreamName, TableDescriptor},
 };
-use postgres::schema::ColumnSchema;
 use std::fmt;
 use tokio_postgres::types::Type;
 use tracing::info;
@@ -452,7 +452,7 @@ impl fmt::Debug for BigQueryClient {
 
 #[cfg(test)]
 mod tests {
-    use postgres::schema::ColumnSchema;
+    use etl_postgres::schema::ColumnSchema;
     use tokio_postgres::types::Type;
 
     use super::*;

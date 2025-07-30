@@ -1,4 +1,4 @@
-use config::shared::{BatchConfig, RetryConfig};
+use etl_config::shared::{BatchConfig, RetryConfig};
 use serde::{Deserialize, Serialize};
 use sqlx::{PgExecutor, PgTransaction};
 use std::ops::DerefMut;

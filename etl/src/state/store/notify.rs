@@ -1,6 +1,6 @@
 use std::{collections::HashMap, fmt, sync::Arc};
 
-use postgres::schema::TableId;
+use etl_postgres::schema::TableId;
 use tokio::{
     runtime::Handle,
     sync::{Notify, RwLock},

@@ -1,10 +1,10 @@
 [package]
-name = "postgres"
+name = "etl-postgres"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-config = { workspace = true }
+etl-config = { workspace = true }
 
 bytes = { workspace = true }
 pg_escape = { workspace = true }

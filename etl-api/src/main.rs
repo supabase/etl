@@ -1,9 +1,9 @@
 use anyhow::anyhow;
-use api::{config::ApiConfig, startup::Application};
-use config::{Environment, load_config, shared::PgConnectionConfig};
+use etl_api::{config::ApiConfig, startup::Application};
+use etl_config::{Environment, load_config, shared::PgConnectionConfig};
+use etl_telemetry::init_tracing;
 use std::env;
 use std::sync::Arc;
-use telemetry::init_tracing;
 use tracing::{error, info};
 
 fn main() -> anyhow::Result<()> {

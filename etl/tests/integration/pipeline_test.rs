@@ -1,4 +1,3 @@
-use config::shared::BatchConfig;
 use etl::conversions::event::EventType;
 use etl::destination::memory::MemoryDestination;
 use etl::pipeline::PipelineId;
@@ -6,9 +5,10 @@ use etl::replication::slot::get_slot_name;
 use etl::state::store::notify::NotifyingStateStore;
 use etl::state::table::TableReplicationPhaseType;
 use etl::workers::base::WorkerType;
-use postgres::tokio::test_utils::TableModification;
+use etl_config::shared::BatchConfig;
+use etl_postgres::tokio::test_utils::TableModification;
+use etl_telemetry::init_test_tracing;
 use rand::random;
-use telemetry::init_test_tracing;
 
 use etl::test_utils::database::spawn_database;
 use etl::test_utils::event::group_events_by_type_and_table_id;

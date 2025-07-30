@@ -1,4 +1,4 @@
-use config::shared::{IntoConnectOptions, PgConnectionConfig};
+use etl_config::shared::{IntoConnectOptions, PgConnectionConfig};
 use sqlx::{PgPool, Row, postgres::PgPoolOptions};
 use thiserror::Error;
 

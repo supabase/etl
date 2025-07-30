@@ -38,7 +38,7 @@ rand = { version = "0.8.5", default-features = false }
 reqwest = { version = "0.12", default-features = false }
 rustls = { version = "0.23.12", default-features = false }
 rustls-pemfile = { version = "2.2.0", default-features = false }
-rust-cli-config = { package = "config", version = "0.14", default-features = false }
+config = { version = "0.14", default-features = false }
 secrecy = { version = "0.8.0", default-features = false }
 sentry = { version = "0.42.0" }
 serde = { version = "1.0", default-features = false }

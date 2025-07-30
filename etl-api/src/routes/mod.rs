@@ -1,6 +1,6 @@
 use actix_web::HttpRequest;
-use config::shared::PgConnectionConfig;
-use postgres::replication::connect_to_source_database;
+use etl_config::shared::PgConnectionConfig;
+use etl_postgres::replication::connect_to_source_database;
 use serde::Serialize;
 use sqlx::PgPool;
 use thiserror::Error;

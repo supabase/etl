@@ -1,10 +1,10 @@
 [package]
-name = "telemetry"
+name = "etl-telemetry"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-config = { workspace = true }
+etl-config = { workspace = true }
 
 thiserror = { workspace = true }
 tracing = { workspace = true, default-features = true }

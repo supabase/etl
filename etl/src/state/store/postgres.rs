@@ -1,11 +1,11 @@
 use std::{collections::HashMap, sync::Arc};
 
-use config::shared::PgConnectionConfig;
-use postgres::replication::{
+use etl_config::shared::PgConnectionConfig;
+use etl_postgres::replication::{
     TableReplicationState, TableReplicationStateRow, connect_to_source_database,
     get_table_replication_state_rows, update_replication_state,
 };
-use postgres::schema::TableId;
+use etl_postgres::schema::TableId;
 use sqlx::PgPool;
 use tokio::sync::Mutex;
 use tokio_postgres::types::PgLsn;

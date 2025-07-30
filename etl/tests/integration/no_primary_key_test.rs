@@ -8,8 +8,8 @@ use etl::{
         test_destination_wrapper::TestDestinationWrapper,
     },
 };
+use etl_telemetry::init_test_tracing;
 use rand::random;
-use telemetry::init_test_tracing;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn tables_without_primary_key_are_skipped() {

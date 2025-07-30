@@ -1,6 +1,6 @@
-use config::shared::{PgConnectionConfig, TlsConfig};
-use postgres::schema::TableName;
-use postgres::tokio::test_utils::PgDatabase;
+use etl_config::shared::{PgConnectionConfig, TlsConfig};
+use etl_postgres::schema::TableName;
+use etl_postgres::tokio::test_utils::PgDatabase;
 use secrecy::Secret;
 use tokio_postgres::Client;
 use uuid::Uuid;

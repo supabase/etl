@@ -1,7 +1,7 @@
 use crate::concurrency::shutdown::{ShutdownResult, ShutdownRx};
-use config::shared::BatchConfig;
 use core::pin::Pin;
 use core::task::{Context, Poll};
+use etl_config::shared::BatchConfig;
 use futures::{Future, Stream, ready};
 use pin_project_lite::pin_project;
 use std::time::Duration;

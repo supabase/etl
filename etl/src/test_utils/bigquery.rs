@@ -1,9 +1,9 @@
+use etl_postgres::schema::TableName;
 use gcp_bigquery_client::Client;
 use gcp_bigquery_client::client_builder::ClientBuilder;
 use gcp_bigquery_client::model::dataset::Dataset;
 use gcp_bigquery_client::model::query_request::QueryRequest;
 use gcp_bigquery_client::model::table_row::TableRow;
-use postgres::schema::TableName;
 use tokio::runtime::Handle;
 use uuid::Uuid;
 

@@ -1,9 +1,5 @@
 use crate::config::load_replicator_config;
 use crate::migrations::migrate_state_store;
-use config::shared::{
-    BatchConfig, DestinationConfig, PgConnectionConfig, PipelineConfig, ReplicatorConfig,
-    RetryConfig,
-};
 use etl::destination::bigquery::BigQueryDestination;
 use etl::destination::memory::MemoryDestination;
 use etl::encryption::bigquery::install_crypto_provider_once;
@@ -11,6 +7,10 @@ use etl::pipeline::Pipeline;
 use etl::state::store::base::StateStore;
 use etl::state::store::postgres::PostgresStateStore;
 use etl::{destination::base::Destination, pipeline::PipelineId};
+use etl_config::shared::{
+    BatchConfig, DestinationConfig, PgConnectionConfig, PipelineConfig, ReplicatorConfig,
+    RetryConfig,
+};
 use secrecy::ExposeSecret;
 use std::fmt;
 use tracing::{debug, info, warn};

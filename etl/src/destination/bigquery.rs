@@ -1,6 +1,6 @@
+use etl_postgres::schema::{ColumnSchema, TableId, TableName, TableSchema};
 use gcp_bigquery_client::model::query_request::QueryRequest;
 use gcp_bigquery_client::storage::TableDescriptor;
-use postgres::schema::{ColumnSchema, TableId, TableName, TableSchema};
 use std::collections::HashMap;
 use std::ops::Deref;
 use std::sync::{Arc, LazyLock};
@@ -721,7 +721,7 @@ impl Destination for BigQueryDestination {
 
 #[cfg(test)]
 mod tests {
-    use postgres::schema::{ColumnSchema, TableName, TableSchema};
+    use etl_postgres::schema::{ColumnSchema, TableName, TableSchema};
     use tokio_postgres::types::Type;
 
     use crate::conversions::Cell;

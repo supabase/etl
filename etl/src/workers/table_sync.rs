@@ -1,5 +1,5 @@
-use config::shared::PipelineConfig;
-use postgres::schema::TableId;
+use etl_config::shared::PipelineConfig;
+use etl_postgres::schema::TableId;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{Mutex, MutexGuard, Notify, Semaphore};

@@ -4,11 +4,16 @@ use actix_web::{
     post,
     web::{Data, Json, Path},
 };
-use config::shared::{
+use etl_config::shared::{
     DestinationConfig, PgConnectionConfig, PipelineConfig as SharedPipelineConfig,
     ReplicatorConfig, SupabaseConfig, TlsConfig,
 };
-use postgres::schema::TableId;
+use etl_postgres::replication::{
+    TableLookupError, TableReplicationState, get_table_name_from_oid,
+    get_table_replication_state_rows,
+};
+use etl_postgres::schema::TableId;
+use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 use sqlx::{PgPool, PgTransaction};
 use std::ops::DerefMut;
@@ -27,11 +32,6 @@ use crate::k8s_client::{K8sClient, K8sError, PodPhase, TRUSTED_ROOT_CERT_CONFIG_
 use crate::routes::{
     ErrorMessage, TenantIdError, connect_to_source_database_with_defaults, extract_tenant_id,
 };
-use postgres::replication::{
-    TableLookupError, TableReplicationState, get_table_name_from_oid,
-    get_table_replication_state_rows,
-};
-use secrecy::ExposeSecret;
 
 #[derive(Debug, Error)]
 enum PipelineError {

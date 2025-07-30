@@ -1,9 +1,9 @@
-use api::routes::tenants::{
+use etl_api::routes::tenants::{
     CreateOrUpdateTenantRequest, CreateTenantRequest, CreateTenantResponse, ReadTenantResponse,
     ReadTenantsResponse, UpdateTenantRequest,
 };
+use etl_telemetry::init_test_tracing;
 use reqwest::StatusCode;
-use telemetry::init_test_tracing;
 
 use crate::common::test_app::{TestApp, spawn_test_app};
 

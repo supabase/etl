@@ -68,8 +68,8 @@ tracing-subscriber = { workspace = true, default-features = true, features = [
 uuid = { workspace = true, features = ["v4"] }
 
 [dev-dependencies]
-postgres = { workspace = true, features = ["test-utils", "tokio"] }
-telemetry = { workspace = true }
+etl-postgres = { workspace = true, features = ["test-utils", "tokio"] }
+etl-telemetry = { workspace = true }
 
 clap = { workspace = true, default-features = true, features = [
     "std",
@@ -78,7 +78,7 @@ clap = { workspace = true, default-features = true, features = [
 
 
 [features]
-bigquery = ["dep:gcp-bigquery-client", "dep:prost", "postgres/bigquery"]
+bigquery = ["dep:gcp-bigquery-client", "dep:prost", "etl-postgres/bigquery"]
 unknown-types-to-bytes = []
 test-utils = []
 failpoints = ["fail/failpoints"]

@@ -1,5 +1,5 @@
-use config::shared::PgConnectionConfig;
-use postgres::sqlx::test_utils::create_pg_database;
+use etl_config::shared::PgConnectionConfig;
+use etl_postgres::sqlx::test_utils::create_pg_database;
 use sqlx::PgPool;
 
 /// Creates and configures a new PostgreSQL database for the API.

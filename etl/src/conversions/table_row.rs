@@ -4,7 +4,7 @@ use crate::conversions::text::TextFormatConverter;
 use crate::error::EtlError;
 use crate::error::{ErrorKind, EtlResult};
 use core::str;
-use postgres::schema::ColumnSchema;
+use etl_postgres::schema::ColumnSchema;
 use tracing::error;
 
 #[derive(Debug, Clone, PartialEq)]

@@ -1,5 +1,5 @@
-use config::SerializableSecretString;
-use config::shared::DestinationConfig;
+use etl_config::SerializableSecretString;
+use etl_config::shared::DestinationConfig;
 use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 use sqlx::PgExecutor;
@@ -291,8 +291,8 @@ where
 #[cfg(test)]
 mod tests {
     use aws_lc_rs::aead::RandomizedNonceKey;
-    use config::SerializableSecretString;
-    use config::shared::DestinationConfig;
+    use etl_config::SerializableSecretString;
+    use etl_config::shared::DestinationConfig;
 
     use crate::db::destinations::EncryptedDestinationConfig;
     use crate::db::serde::{decrypt_and_deserialize_from_value, encrypt_and_serialize};

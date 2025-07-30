@@ -20,11 +20,11 @@ Usage:
 use std::error::Error;
 
 use clap::{Args, Parser};
-use config::shared::{BatchConfig, PgConnectionConfig, PipelineConfig, RetryConfig, TlsConfig};
 use etl::{
     destination::bigquery::BigQueryDestination, pipeline::Pipeline,
     state::store::memory::MemoryStateStore,
 };
+use etl_config::shared::{BatchConfig, PgConnectionConfig, PipelineConfig, RetryConfig, TlsConfig};
 use tokio::signal;
 use tracing::{error, info};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};

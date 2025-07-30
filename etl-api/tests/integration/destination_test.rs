@@ -1,11 +1,11 @@
-use api::routes::destinations::{
+use etl_api::routes::destinations::{
     CreateDestinationRequest, CreateDestinationResponse, ReadDestinationResponse,
     ReadDestinationsResponse, UpdateDestinationRequest,
 };
-use config::SerializableSecretString;
-use config::shared::DestinationConfig;
+use etl_config::SerializableSecretString;
+use etl_config::shared::DestinationConfig;
+use etl_telemetry::init_test_tracing;
 use reqwest::StatusCode;
-use telemetry::init_test_tracing;
 
 use crate::{
     common::test_app::{TestApp, spawn_test_app},

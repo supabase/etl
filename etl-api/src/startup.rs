@@ -4,7 +4,7 @@ use actix_web::{App, HttpServer, dev::Server, web};
 use actix_web_httpauth::middleware::HttpAuthentication;
 use aws_lc_rs::aead::{AES_256_GCM, RandomizedNonceKey};
 use base64::{Engine, prelude::BASE64_STANDARD};
-use config::shared::{IntoConnectOptions, PgConnectionConfig};
+use etl_config::shared::{IntoConnectOptions, PgConnectionConfig};
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use tracing::warn;
 use tracing_actix_web::TracingLogger;

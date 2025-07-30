@@ -1,11 +1,11 @@
-use api::routes::destinations::ReadDestinationResponse;
-use api::routes::destinations_pipelines::{
+use etl_api::routes::destinations::ReadDestinationResponse;
+use etl_api::routes::destinations_pipelines::{
     CreateDestinationPipelineRequest, CreateDestinationPipelineResponse,
     UpdateDestinationPipelineRequest,
 };
-use api::routes::pipelines::{CreatePipelineRequest, ReadPipelineResponse};
+use etl_api::routes::pipelines::{CreatePipelineRequest, ReadPipelineResponse};
+use etl_telemetry::init_test_tracing;
 use reqwest::StatusCode;
-use telemetry::init_test_tracing;
 
 use crate::{
     common::test_app::spawn_test_app,

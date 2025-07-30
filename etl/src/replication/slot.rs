@@ -35,7 +35,7 @@ pub fn get_slot_name(pipeline_id: PipelineId, worker_type: WorkerType) -> EtlRes
 #[cfg(test)]
 mod tests {
     use super::*;
-    use postgres::schema::TableId;
+    use etl_postgres::schema::TableId;
 
     #[test]
     fn test_apply_worker_slot_name() {

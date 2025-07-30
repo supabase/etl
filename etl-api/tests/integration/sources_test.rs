@@ -1,11 +1,11 @@
-use api::db::sources::SourceConfig;
-use api::routes::sources::{
+use etl_api::db::sources::SourceConfig;
+use etl_api::routes::sources::{
     CreateSourceRequest, CreateSourceResponse, ReadSourceResponse, ReadSourcesResponse,
     UpdateSourceRequest,
 };
-use config::SerializableSecretString;
+use etl_config::SerializableSecretString;
+use etl_telemetry::init_test_tracing;
 use reqwest::StatusCode;
-use telemetry::init_test_tracing;
 
 use crate::{
     common::test_app::{TestApp, spawn_test_app},

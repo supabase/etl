@@ -1,11 +1,11 @@
 use etl::error::ErrorKind;
 use etl::replication::client::PgReplicationClient;
+use etl_postgres::schema::ColumnSchema;
+use etl_postgres::tokio::test_utils::{TableModification, id_column_schema};
+use etl_telemetry::init_test_tracing;
 use futures::StreamExt;
-use postgres::schema::ColumnSchema;
-use postgres::tokio::test_utils::{TableModification, id_column_schema};
 use postgres_replication::LogicalReplicationStream;
 use postgres_replication::protocol::{LogicalReplicationMessage, ReplicationMessage};
-use telemetry::init_test_tracing;
 use tokio::pin;
 use tokio_postgres::CopyOutStream;
 use tokio_postgres::types::{ToSql, Type};

@@ -1,4 +1,4 @@
-use postgres::schema::{TableId, TableSchema};
+use etl_postgres::schema::{TableId, TableSchema};
 use std::future::Future;
 
 use crate::conversions::event::Event;

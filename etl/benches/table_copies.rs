@@ -47,19 +47,19 @@ Usage Examples:
 use std::error::Error;
 
 use clap::{Parser, Subcommand, ValueEnum};
-use config::{
-    Environment,
-    shared::{BatchConfig, PgConnectionConfig, PipelineConfig, RetryConfig, TlsConfig},
-};
 use etl::{
     conversions::{event::Event, table_row::TableRow},
     destination::base::Destination,
     pipeline::Pipeline,
     state::{store::notify::NotifyingStateStore, table::TableReplicationPhaseType},
 };
-use postgres::schema::{TableId, TableSchema};
+use etl_config::{
+    Environment,
+    shared::{BatchConfig, PgConnectionConfig, PipelineConfig, RetryConfig, TlsConfig},
+};
+use etl_postgres::schema::{TableId, TableSchema};
+use etl_telemetry::init_tracing;
 use sqlx::postgres::PgPool;
-use telemetry::init_tracing;
 use tracing::info;
 
 #[cfg(feature = "bigquery")]

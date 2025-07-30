@@ -4,7 +4,7 @@ use actix_web::{
     post,
     web::{Data, Json, Path},
 };
-use config::shared::DestinationConfig;
+use etl_config::shared::DestinationConfig;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use thiserror::Error;

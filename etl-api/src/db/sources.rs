@@ -1,5 +1,5 @@
-use config::SerializableSecretString;
-use config::shared::{PgConnectionConfig, TlsConfig};
+use etl_config::SerializableSecretString;
+use etl_config::shared::{PgConnectionConfig, TlsConfig};
 use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 use sqlx::PgExecutor;
@@ -300,12 +300,13 @@ where
 
 #[cfg(test)]
 mod tests {
+    use aws_lc_rs::aead::RandomizedNonceKey;
+    use etl_config::SerializableSecretString;
+    use serde_json;
+
     use crate::db::serde::{decrypt_and_deserialize_from_value, encrypt_and_serialize};
     use crate::db::sources::{EncryptedSourceConfig, SourceConfig};
     use crate::encryption::EncryptionKey;
-    use aws_lc_rs::aead::RandomizedNonceKey;
-    use config::SerializableSecretString;
-    use serde_json;
 
     #[test]
     pub fn source_config_json_deserialization() {

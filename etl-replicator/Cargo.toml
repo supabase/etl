@@ -1,13 +1,13 @@
 [package]
-name = "replicator"
+name = "etl-replicator"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-config = { workspace = true }
+etl-config = { workspace = true }
 etl = { workspace = true, features = ["unknown-types-to-bytes", "bigquery"] }
-postgres = { workspace = true, features = ["tokio"] }
-telemetry = { workspace = true }
+etl-postgres = { workspace = true, features = ["tokio"] }
+etl-telemetry = { workspace = true }
 
 anyhow = { workspace = true, features = ["std"] }
 thiserror = { workspace = true }

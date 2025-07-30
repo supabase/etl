@@ -1,4 +1,4 @@
-use config::Environment;
+use etl_config::Environment;
 use std::io::Error;
 use std::{
     backtrace::{Backtrace, BacktraceStatus},

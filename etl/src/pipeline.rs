@@ -1,4 +1,4 @@
-use config::shared::PipelineConfig;
+use etl_config::shared::PipelineConfig;
 use std::sync::Arc;
 use tokio::sync::Semaphore;
 use tracing::{error, info};

@@ -1,18 +1,18 @@
-use api::db::pipelines::PipelineConfig;
-use api::db::sources::SourceConfig;
-use api::routes::pipelines::{
+use etl_api::db::pipelines::PipelineConfig;
+use etl_api::db::sources::SourceConfig;
+use etl_api::routes::pipelines::{
     CreatePipelineRequest, CreatePipelineResponse, GetPipelineReplicationStatusResponse,
     ReadPipelineResponse, ReadPipelinesResponse, SimpleTableReplicationState,
     UpdatePipelineImageRequest, UpdatePipelineRequest,
 };
-use api::routes::sources::{CreateSourceRequest, CreateSourceResponse};
-use config::SerializableSecretString;
-use config::shared::{BatchConfig, RetryConfig};
-use postgres::sqlx::test_utils::{create_pg_database, drop_pg_database};
+use etl_api::routes::sources::{CreateSourceRequest, CreateSourceResponse};
+use etl_config::SerializableSecretString;
+use etl_config::shared::{BatchConfig, RetryConfig};
+use etl_postgres::sqlx::test_utils::{create_pg_database, drop_pg_database};
+use etl_telemetry::init_test_tracing;
 use reqwest::StatusCode;
 use secrecy::ExposeSecret;
 use sqlx::postgres::types::Oid;
-use telemetry::init_test_tracing;
 use uuid::Uuid;
 
 use crate::{

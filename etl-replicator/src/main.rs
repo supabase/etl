@@ -1,6 +1,6 @@
-use ::config::Environment;
+use etl_config::Environment;
+use etl_telemetry::init_tracing;
 use std::sync::Arc;
-use telemetry::init_tracing;
 use thiserror::__private::AsDynError;
 use tracing::{error, info};
 

@@ -1,7 +1,6 @@
 use std::str::FromStr;
 
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
-use config::shared::BatchConfig;
 use etl::conversions::event::EventType;
 use etl::conversions::numeric::PgNumeric;
 use etl::destination::base::Destination;
@@ -9,8 +8,9 @@ use etl::encryption::bigquery::install_crypto_provider_once;
 use etl::pipeline::PipelineId;
 use etl::state::store::notify::NotifyingStateStore;
 use etl::state::table::TableReplicationPhaseType;
+use etl_config::shared::BatchConfig;
+use etl_telemetry::init_test_tracing;
 use rand::random;
-use telemetry::init_test_tracing;
 
 use etl::test_utils::bigquery::setup_bigquery_connection;
 use etl::test_utils::database::{spawn_database, test_table_name};

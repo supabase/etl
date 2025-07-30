@@ -1,25 +1,27 @@
 use crate::common::database::create_etl_api_database;
 use crate::common::k8s_client::MockK8sClient;
-use api::k8s_client::K8sClient;
-use api::routes::destinations::{CreateDestinationRequest, UpdateDestinationRequest};
-use api::routes::destinations_pipelines::{
+use etl_api::k8s_client::K8sClient;
+use etl_api::routes::destinations::{CreateDestinationRequest, UpdateDestinationRequest};
+use etl_api::routes::destinations_pipelines::{
     CreateDestinationPipelineRequest, UpdateDestinationPipelineRequest,
 };
-use api::routes::images::{CreateImageRequest, UpdateImageRequest};
-use api::routes::pipelines::{
+use etl_api::routes::images::{CreateImageRequest, UpdateImageRequest};
+use etl_api::routes::pipelines::{
     CreatePipelineRequest, UpdatePipelineImageRequest, UpdatePipelineRequest,
 };
-use api::routes::sources::{CreateSourceRequest, UpdateSourceRequest};
-use api::routes::tenants::{CreateOrUpdateTenantRequest, CreateTenantRequest, UpdateTenantRequest};
-use api::routes::tenants_sources::CreateTenantSourceRequest;
-use api::{
+use etl_api::routes::sources::{CreateSourceRequest, UpdateSourceRequest};
+use etl_api::routes::tenants::{
+    CreateOrUpdateTenantRequest, CreateTenantRequest, UpdateTenantRequest,
+};
+use etl_api::routes::tenants_sources::CreateTenantSourceRequest;
+use etl_api::{
     config::ApiConfig,
     encryption::{self, generate_random_key},
     startup::run,
 };
-use config::shared::PgConnectionConfig;
-use config::{Environment, load_config};
-use postgres::sqlx::test_utils::drop_pg_database;
+use etl_config::shared::PgConnectionConfig;
+use etl_config::{Environment, load_config};
+use etl_postgres::sqlx::test_utils::drop_pg_database;
 use reqwest::{IntoUrl, RequestBuilder};
 use std::io;
 use std::net::TcpListener;
