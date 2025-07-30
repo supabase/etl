@@ -146,9 +146,86 @@ async fn pipeline_handles_table_sync_worker_error_during_data_sync() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn table_copy_is_consistent_after_data_sync_threw_an_error_and_retries() {
+async fn table_copy_is_consistent_after_data_sync_threw_an_error_with_manual_retry() {
     let _scenario = FailScenario::setup();
     fail::cfg(START_TABLE_SYNC__AFTER_DATA_SYNC, "1*return(manual_retry)").unwrap();
+
+    init_test_tracing();
+
+    let mut database = spawn_database().await;
+    let database_schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
+
+    // Insert initial test data.
+    let rows_inserted = 10;
+    insert_users_data(
+        &mut database,
+        &database_schema.users_schema().name,
+        1..=rows_inserted,
+    )
+        .await;
+
+    let state_store = NotifyingStateStore::new();
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
+
+    // We start the pipeline from scratch.
+    let pipeline_id: PipelineId = random();
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        database_schema.publication_name(),
+        state_store.clone(),
+        destination.clone(),
+    );
+
+    // Register notifications for table sync phases.
+    let users_state_notify = state_store
+        .notify_on_table_state(
+            database_schema.users_schema().id,
+            TableReplicationPhaseType::DataSync,
+        )
+        .await;
+
+    pipeline.start().await.unwrap();
+
+    users_state_notify.notified().await;
+
+    // Register notifications for table sync phases.
+    let users_state_notify = state_store
+        .notify_on_table_state(
+            database_schema.users_schema().id,
+            TableReplicationPhaseType::SyncDone,
+        )
+        .await;
+
+    // We manually retry the table.
+    pipeline
+        .retry_table(database_schema.users_schema().id)
+        .await
+        .unwrap();
+
+    users_state_notify.notified().await;
+
+    // We expect the error of the first table sync worker to be returned since we collect all worker
+    // errors.
+    let err = pipeline.shutdown_and_wait().await.err().unwrap();
+    assert_eq!(err.kinds().len(), 1);
+    assert_eq!(err.kinds()[0], ErrorKind::WithTimedRetry);
+
+    // Verify copied data.
+    let table_rows = destination.get_table_rows().await;
+    let users_table_rows = table_rows.get(&database_schema.users_schema().id).unwrap();
+    assert_eq!(users_table_rows.len(), rows_inserted);
+
+    // Verify table schemas were correctly stored.
+    let table_schemas = destination.get_table_schemas().await;
+    assert_eq!(table_schemas.len(), 1);
+    assert_eq!(table_schemas[0], database_schema.users_schema());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn table_copy_is_consistent_after_data_sync_threw_an_error_with_timed_retry() {
+    let _scenario = FailScenario::setup();
+    fail::cfg(START_TABLE_SYNC__AFTER_DATA_SYNC, "1*return(timed_retry)").unwrap();
 
     init_test_tracing();
 
@@ -193,7 +270,7 @@ async fn table_copy_is_consistent_after_data_sync_threw_an_error_and_retries() {
     // errors.
     let err = pipeline.shutdown_and_wait().await.err().unwrap();
     assert_eq!(err.kinds().len(), 1);
-    assert_eq!(err.kinds()[0], ErrorKind::ConnectionFailed);
+    assert_eq!(err.kinds()[0], ErrorKind::WithTimedRetry);
 
     // Verify copied data.
     let table_rows = destination.get_table_rows().await;
@@ -204,92 +281,4 @@ async fn table_copy_is_consistent_after_data_sync_threw_an_error_and_retries() {
     let table_schemas = destination.get_table_schemas().await;
     assert_eq!(table_schemas.len(), 1);
     assert_eq!(table_schemas[0], database_schema.users_schema());
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn table_copy_is_consistent_after_data_sync_threw_an_error_and_manually_retries() {
-    let _scenario = FailScenario::setup();
-    fail::cfg(START_TABLE_SYNC__AFTER_DATA_SYNC, "1*return(timed_retry)").unwrap();
-
-    init_test_tracing();
-
-    let mut database = spawn_database().await;
-    let database_schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
-
-    // Insert initial test data.
-    let rows_inserted = 10;
-    insert_users_data(
-        &mut database,
-        &database_schema.users_schema().name,
-        1..=rows_inserted,
-    )
-    .await;
-
-    let state_store = NotifyingStateStore::new();
-    let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
-
-    // We start the pipeline from scratch.
-    let pipeline_id: PipelineId = random();
-    let mut pipeline = create_pipeline(
-        &database.config,
-        pipeline_id,
-        database_schema.publication_name(),
-        state_store.clone(),
-        destination.clone(),
-    );
-
-    // Register notifications for table sync phases.
-    let users_state_notify = state_store
-        .notify_on_table_state(
-            database_schema.users_schema().id,
-            TableReplicationPhaseType::DataSync,
-        )
-        .await;
-
-    pipeline.start().await.unwrap();
-
-    users_state_notify.notified().await;
-
-    // We make sure that the error has been tracked in the state store.
-    state_store.load_table_replication_states().await.unwrap();
-    let users_phase = state_store
-        .get_table_replication_state(database_schema.users_schema().id)
-        .await
-        .unwrap()
-        .unwrap();
-    assert!(matches!(users_phase, TableReplicationPhase::Skipped));
-
-    // Register notifications for table sync phases.
-    let users_state_notify = state_store
-        .notify_on_table_state(
-            database_schema.users_schema().id,
-            TableReplicationPhaseType::SyncDone,
-        )
-        .await;
-
-    // We manually retry the table.
-    pipeline
-        .retry_table(database_schema.users_schema().id)
-        .await
-        .unwrap();
-
-    users_state_notify.notified().await;
-
-    // We expect the error of the first table sync worker to be returned since we collect all worker
-    // errors.
-    let err = pipeline.shutdown_and_wait().await.err().unwrap();
-    assert_eq!(err.kinds().len(), 1);
-
-    // Verify copied data.
-    let table_rows = destination.get_table_rows().await;
-    let users_table_rows = table_rows.get(&database_schema.users_schema().id).unwrap();
-    let orders_table_rows = table_rows.get(&database_schema.orders_schema().id).unwrap();
-    assert_eq!(users_table_rows.len(), rows_inserted);
-    assert_eq!(orders_table_rows.len(), rows_inserted);
-
-    // Verify table schemas were correctly stored.
-    let table_schemas = destination.get_table_schemas().await;
-    assert_eq!(table_schemas.len(), 2);
-    assert_eq!(table_schemas[0], database_schema.orders_schema());
-    assert_eq!(table_schemas[1], database_schema.users_schema());
 }
