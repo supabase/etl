@@ -146,6 +146,65 @@ async fn pipeline_handles_table_sync_worker_error_during_data_sync() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn table_copy_is_consistent_after_data_sync_threw_an_error_no_manual_retry() {
+    let _scenario = FailScenario::setup();
+    fail::cfg(START_TABLE_SYNC__AFTER_DATA_SYNC, "1*return(no_retry)").unwrap();
+
+    init_test_tracing();
+
+    let mut database = spawn_database().await;
+    let database_schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
+
+    // Insert initial test data.
+    let rows_inserted = 10;
+    insert_users_data(
+        &mut database,
+        &database_schema.users_schema().name,
+        1..=rows_inserted,
+    )
+    .await;
+
+    let state_store = NotifyingStateStore::new();
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
+
+    // We start the pipeline from scratch.
+    let pipeline_id: PipelineId = random();
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        database_schema.publication_name(),
+        state_store.clone(),
+        destination.clone(),
+    );
+
+    // Register notifications for table sync phases.
+    let users_state_notify = state_store
+        .notify_on_table_state(
+            database_schema.users_schema().id,
+            TableReplicationPhaseType::Skipped,
+        )
+        .await;
+
+    pipeline.start().await.unwrap();
+
+    users_state_notify.notified().await;
+
+    // We expect the error of the first table sync worker to be returned since we collect all worker
+    // errors.
+    let err = pipeline.shutdown_and_wait().await.err().unwrap();
+    assert_eq!(err.kinds().len(), 1);
+    assert_eq!(err.kinds()[0], ErrorKind::WithNoRetry);
+
+    // Verify no data is there.
+    let table_rows = destination.get_table_rows().await;
+    assert!(table_rows.is_empty());
+
+    // Verify table schemas were correctly stored.
+    let table_schemas = destination.get_table_schemas().await;
+    assert!(table_schemas.is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn table_copy_is_consistent_after_data_sync_threw_an_error_with_manual_retry() {
     let _scenario = FailScenario::setup();
     fail::cfg(START_TABLE_SYNC__AFTER_DATA_SYNC, "1*return(manual_retry)").unwrap();
