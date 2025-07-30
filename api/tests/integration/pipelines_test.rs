@@ -59,6 +59,34 @@ pub fn updated_pipeline_config() -> PipelineConfig {
     }
 }
 
+pub enum ConfigUpdateType {
+    Batch(BatchConfig),
+    ApplyWorkerInitRetry(RetryConfig),
+    MaxTableSyncWorkers(u16),
+}
+
+pub fn partially_updated_optional_pipeline_config(
+    update: ConfigUpdateType,
+) -> OptionalPipelineConfig {
+    match update {
+        ConfigUpdateType::Batch(batch_config) => OptionalPipelineConfig {
+            batch: Some(batch_config),
+            apply_worker_init_retry: None,
+            max_table_sync_workers: None,
+        },
+        ConfigUpdateType::ApplyWorkerInitRetry(retry_config) => OptionalPipelineConfig {
+            batch: None,
+            apply_worker_init_retry: Some(retry_config),
+            max_table_sync_workers: None,
+        },
+        ConfigUpdateType::MaxTableSyncWorkers(n) => OptionalPipelineConfig {
+            batch: None,
+            apply_worker_init_retry: None,
+            max_table_sync_workers: Some(n),
+        },
+    }
+}
+
 pub fn updated_optional_pipeline_config() -> OptionalPipelineConfig {
     OptionalPipelineConfig {
         batch: Some(BatchConfig {
@@ -819,7 +847,10 @@ async fn pipeline_config_can_be_updated() {
 
     // Act
     let update_request = UpdatePipelineConfigRequest {
-        config: updated_optional_pipeline_config(),
+        config: partially_updated_optional_pipeline_config(ConfigUpdateType::Batch(BatchConfig {
+            max_size: 10_000,
+            max_fill_ms: 100,
+        })),
     };
     let response = app
         .update_pipeline_config(tenant_id, pipeline_id, &update_request)
@@ -831,7 +862,48 @@ async fn pipeline_config_can_be_updated() {
         .json()
         .await
         .expect("failed to deserialize response");
-    insta::assert_debug_snapshot!(response.config)
+    insta::assert_debug_snapshot!(response.config);
+
+    // Act
+    let update_request = UpdatePipelineConfigRequest {
+        config: partially_updated_optional_pipeline_config(ConfigUpdateType::ApplyWorkerInitRetry(
+            RetryConfig {
+                max_attempts: 10,
+                initial_delay_ms: 1000,
+                max_delay_ms: 5000,
+                backoff_factor: 3.0,
+            },
+        )),
+    };
+    let response = app
+        .update_pipeline_config(tenant_id, pipeline_id, &update_request)
+        .await;
+
+    // Assert
+    assert!(response.status().is_success());
+    let response: UpdatePipelineConfigResponse = response
+        .json()
+        .await
+        .expect("failed to deserialize response");
+    insta::assert_debug_snapshot!(response.config);
+
+    // Act
+    let update_request = UpdatePipelineConfigRequest {
+        config: partially_updated_optional_pipeline_config(ConfigUpdateType::MaxTableSyncWorkers(
+            8,
+        )),
+    };
+    let response = app
+        .update_pipeline_config(tenant_id, pipeline_id, &update_request)
+        .await;
+
+    // Assert
+    assert!(response.status().is_success());
+    let response: UpdatePipelineConfigResponse = response
+        .json()
+        .await
+        .expect("failed to deserialize response");
+    insta::assert_debug_snapshot!(response.config);
 }
 
 #[tokio::test(flavor = "multi_thread")]
