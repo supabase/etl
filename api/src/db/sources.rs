@@ -19,10 +19,15 @@ use crate::encryption::{
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub struct SourceConfig {
+    #[schema(example = "localhost")]
     pub host: String,
+    #[schema(example = 5432)]
     pub port: u16,
+    #[schema(example = "mydb")]
     pub name: String,
+    #[schema(example = "postgres")]
     pub username: String,
+    #[schema(example = "secret123")]
     pub password: Option<SerializableSecretString>,
 }
 

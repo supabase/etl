@@ -6,7 +6,7 @@ use utoipa::ToSchema;
 
 /// Wrapper around [`Secret<String>`] that implements [`Serialize`] and [`Deserialize`].
 #[derive(Clone, Debug)]
-#[cfg_attr(feature = "utoipa", derive(ToSchema), schema(value_type = String))]
+#[cfg_attr(feature = "utoipa", derive(ToSchema), schema(value_type = String, example = "secret123"))]
 pub struct SerializableSecretString(SecretString);
 
 impl Deref for SerializableSecretString {

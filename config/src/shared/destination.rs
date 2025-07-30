@@ -21,16 +21,23 @@ pub enum DestinationConfig {
     /// optional staleness settings.
     BigQuery {
         /// Google Cloud project identifier.
+        #[cfg_attr(feature = "utoipa", schema(example = "my-gcp-project"))]
         project_id: String,
         /// BigQuery dataset identifier.
+        #[cfg_attr(feature = "utoipa", schema(example = "my_dataset"))]
         dataset_id: String,
         /// Service account key for authenticating with BigQuery.
+        #[cfg_attr(
+            feature = "utoipa",
+            schema(example = "{\"type\": \"service_account\", \"project_id\": \"my-project\"}")
+        )]
         service_account_key: SerializableSecretString,
         /// Maximum staleness in minutes for BigQuery CDC reads.
         ///
         /// If not set, the default staleness behavior is used. See
         /// <https://cloud.google.com/bigquery/docs/change-data-capture#create-max-staleness>.
         #[serde(skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "utoipa", schema(example = 15))]
         max_staleness_mins: Option<u16>,
     },
 }

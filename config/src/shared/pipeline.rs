@@ -13,9 +13,11 @@ pub struct PipelineConfig {
     ///
     /// A pipeline id determines isolation between pipelines, in terms of replication slots and state
     /// store.
+    #[cfg_attr(feature = "utoipa", schema(example = 123))]
     pub id: u64,
 
     /// Name of the Postgres publication to use for logical replication.
+    #[cfg_attr(feature = "utoipa", schema(example = "my_publication"))]
     pub publication_name: String,
 
     /// The connection configuration for the Postgres instance to which the pipeline connects for
@@ -31,6 +33,7 @@ pub struct PipelineConfig {
     pub apply_worker_init_retry: RetryConfig,
 
     /// Maximum number of table sync workers that can run at a time
+    #[cfg_attr(feature = "utoipa", schema(example = 4))]
     pub max_table_sync_workers: u16,
 }
 

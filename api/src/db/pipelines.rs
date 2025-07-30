@@ -12,12 +12,14 @@ use crate::db::serde::{
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct PipelineConfig {
+    #[schema(example = "my_publication")]
     pub publication_name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub batch: Option<BatchConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub apply_worker_init_retry: Option<RetryConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(example = 4)]
     pub max_table_sync_workers: Option<u16>,
 }
 
