@@ -1,5 +1,5 @@
 ---
-source: api/src/db/sources.rs
+source: etl-api/src/db/sources.rs
 expression: config
 ---
 {

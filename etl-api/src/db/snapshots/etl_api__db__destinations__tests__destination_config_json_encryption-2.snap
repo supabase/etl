@@ -1,5 +1,5 @@
 ---
-source: api/src/db/destinations.rs
+source: etl-api/src/db/destinations.rs
 expression: deserialized_config
 ---
 BigQuery {
