@@ -164,7 +164,7 @@ pub struct UpdateDestinationPipelineRequest {
         (status = 400, description = "Bad request", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage)
     ),
-    tag = "Destinations & Pipelines"
+    tag = "Destinations and Pipelines"
 )]
 #[post("/destinations-pipelines")]
 pub async fn create_destination_and_pipeline(
@@ -228,7 +228,7 @@ pub async fn create_destination_and_pipeline(
         (status = 400, description = "Bad request", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage)
     ),
-    tag = "Destinations & Pipelines"
+    tag = "Destinations and Pipelines"
 )]
 #[post("/destinations-pipelines/{destination_id}/{pipeline_id}")]
 pub async fn update_destination_and_pipeline(

@@ -11,7 +11,7 @@ path = "src/main.rs"
 name = "api"
 
 [dependencies]
-config = { workspace = true }
+config = { workspace = true, features = ["utoipa"] }
 postgres = { workspace = true, features = ["replication"] }
 telemetry = { workspace = true }
 

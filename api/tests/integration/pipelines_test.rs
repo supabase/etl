@@ -888,7 +888,7 @@ async fn pipeline_replication_status_returns_table_states_and_names() {
         password: source_db_config
             .password
             .as_ref()
-            .map(|p| SerializableSecretString::from(p.expose_secret().clone())),
+            .map(|p| SerializableSecretString::from(p.expose_secret().to_string())),
     };
 
     let source = CreateSourceRequest {

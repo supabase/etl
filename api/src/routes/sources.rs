@@ -62,7 +62,7 @@ impl ResponseError for SourceError {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub struct StrippedSourceConfig {
     pub host: String,

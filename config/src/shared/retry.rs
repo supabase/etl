@@ -1,7 +1,10 @@
 use serde::{Deserialize, Serialize};
+#[cfg(feature = "utoipa")]
+use utoipa::ToSchema;
 
 /// Retry policy configuration for operations such as worker initialization.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(ToSchema))]
 pub struct RetryConfig {
     /// Maximum number of retry attempts before giving up.
     pub max_attempts: u32,

@@ -501,7 +501,8 @@ pub async fn read_all_pipelines(
     responses(
         (status = 200, description = "Start a pipeline"),
         (status = 500, description = "Internal server error", body = ErrorMessage)
-    )
+    ),
+    tag = "Pipelines"
 )]
 #[post("/pipelines/{pipeline_id}/start")]
 pub async fn start_pipeline(
@@ -544,7 +545,8 @@ pub async fn start_pipeline(
     responses(
         (status = 200, description = "Stop a pipeline"),
         (status = 500, description = "Internal server error", body = ErrorMessage)
-    )
+    ),
+    tag = "Pipelines"
 )]
 #[post("/pipelines/{pipeline_id}/stop")]
 pub async fn stop_pipeline(
@@ -577,7 +579,8 @@ pub async fn stop_pipeline(
     responses(
         (status = 200, description = "Stop all pipelines"),
         (status = 500, description = "Internal server error", body = ErrorMessage)
-    )
+    ),
+    tag = "Pipelines"
 )]
 #[post("/pipelines/stop")]
 pub async fn stop_all_pipelines(
@@ -607,7 +610,8 @@ pub async fn stop_all_pipelines(
     responses(
         (status = 200, description = "Get pipeline status", body = GetPipelineStatusResponse),
         (status = 500, description = "Internal server error", body = ErrorMessage)
-    )
+    ),
+    tag = "Pipelines"
 )]
 #[get("/pipelines/{pipeline_id}/status")]
 pub async fn get_pipeline_status(
@@ -673,7 +677,7 @@ pub async fn get_pipeline_status(
         ("tenant_id" = String, Header, description = "The tenant ID")
     ),
     responses(
-        (status = 200, description = "Get replication status for all tables in the pipeline", body = GetReplicationStatusResponse),
+        (status = 200, description = "Get replication status for all tables in the pipeline", body = GetPipelineReplicationStatusResponse),
         (status = 404, description = "Pipeline not found", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage)
     ),

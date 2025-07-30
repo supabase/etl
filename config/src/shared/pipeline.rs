@@ -1,9 +1,12 @@
 use serde::{Deserialize, Serialize};
+#[cfg(feature = "utoipa")]
+use utoipa::ToSchema;
 
 use crate::shared::{PgConnectionConfig, ValidationError, batch::BatchConfig, retry::RetryConfig};
 
 /// Configuration for a pipeline's batching and worker retry behavior.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(ToSchema))]
 #[serde(rename_all = "snake_case")]
 pub struct PipelineConfig {
     /// The unique identifier for this pipeline.

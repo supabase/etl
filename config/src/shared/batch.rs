@@ -1,7 +1,10 @@
 use serde::{Deserialize, Serialize};
+#[cfg(feature = "utoipa")]
+use utoipa::ToSchema;
 
 /// Batch processing configuration for pipelines.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(ToSchema))]
 #[serde(rename_all = "snake_case")]
 pub struct BatchConfig {
     /// Maximum number of items in a batch for table copy and event streaming.

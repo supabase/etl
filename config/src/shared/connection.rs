@@ -2,6 +2,8 @@ use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 use sqlx::postgres::{PgConnectOptions as SqlxConnectOptions, PgSslMode as SqlxSslMode};
 use tokio_postgres::{Config as TokioPgConnectOptions, config::SslMode as TokioPgSslMode};
+#[cfg(feature = "utoipa")]
+use utoipa::ToSchema;
 
 use crate::SerializableSecretString;
 use crate::shared::ValidationError;
@@ -116,6 +118,7 @@ impl PgConnectionOptions {
 ///
 /// This struct holds all necessary connection parameters and settings.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(ToSchema))]
 #[serde(rename_all = "snake_case")]
 pub struct PgConnectionConfig {
     /// Hostname or IP address of the Postgres server.
@@ -134,6 +137,7 @@ pub struct PgConnectionConfig {
 
 /// TLS settings for secure Postgres connections.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(ToSchema))]
 #[serde(rename_all = "snake_case")]
 pub struct TlsConfig {
     /// PEM-encoded trusted root certificates. Sensitive and redacted in debug output.

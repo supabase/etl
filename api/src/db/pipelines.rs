@@ -3,13 +3,14 @@ use serde::{Deserialize, Serialize};
 use sqlx::{PgExecutor, PgTransaction};
 use std::ops::DerefMut;
 use thiserror::Error;
+use utoipa::ToSchema;
 
 use crate::db::replicators::{ReplicatorsDbError, create_replicator};
 use crate::db::serde::{
     DbDeserializationError, DbSerializationError, deserialize_from_value, serialize,
 };
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct PipelineConfig {
     pub publication_name: String,
     #[serde(skip_serializing_if = "Option::is_none")]

@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::PgExecutor;
 use std::fmt::Debug;
 use thiserror::Error;
+use utoipa::ToSchema;
 
 use crate::db::serde::{
     DbDeserializationError, DbSerializationError, decrypt_and_deserialize_from_value,
@@ -15,7 +16,7 @@ use crate::encryption::{
     decrypt_text, encrypt_text,
 };
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub struct SourceConfig {
     pub host: String,

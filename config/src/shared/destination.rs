@@ -1,4 +1,6 @@
 use serde::{Deserialize, Serialize};
+#[cfg(feature = "utoipa")]
+use utoipa::ToSchema;
 
 use crate::SerializableSecretString;
 
@@ -7,6 +9,7 @@ use crate::SerializableSecretString;
 /// This enum is used to specify the destination type and its configuration
 /// for the replicator. Variants correspond to different supported destinations.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(ToSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum DestinationConfig {
     /// In-memory destination for ephemeral or test data.
