@@ -1,12 +1,11 @@
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use std::fmt;
 use std::ops::Deref;
 #[cfg(feature = "utoipa")]
 use utoipa::ToSchema;
 
 /// Wrapper around [`Secret<String>`] that implements [`Serialize`] and [`Deserialize`].
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 #[cfg_attr(feature = "utoipa", derive(ToSchema), schema(value_type = String))]
 pub struct SerializableSecretString(SecretString);
 
@@ -52,13 +51,5 @@ impl<'de> Deserialize<'de> for SerializableSecretString {
     {
         let string = String::deserialize(deserializer)?;
         Ok(Self(string.into()))
-    }
-}
-
-impl fmt::Debug for SerializableSecretString {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_tuple("SerializableSecretString")
-            .field(&"[REDACTED]")
-            .finish()
     }
 }

@@ -9,7 +9,7 @@ SourceConfig {
     username: "postgres",
     password: Some(
         SerializableSecretString(
-            "[REDACTED]",
+            SecretBox<str>([REDACTED]),
         ),
     ),
 }

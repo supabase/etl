@@ -6,7 +6,7 @@ BigQuery {
     project_id: "project-id",
     dataset_id: "dataset-id",
     service_account_key: SerializableSecretString(
-        "[REDACTED]",
+        SecretBox<str>([REDACTED]),
     ),
     max_staleness_mins: None,
 }
