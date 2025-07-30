@@ -1,8 +1,6 @@
 use etl::destination::memory::MemoryDestination;
 use etl::error::ErrorKind;
-use etl::failpoints::{
-    START_TABLE_SYNC__AFTER_DATA_SYNC,
-};
+use etl::failpoints::START_TABLE_SYNC__AFTER_DATA_SYNC;
 use etl::pipeline::PipelineId;
 use etl::state::store::base::StateStore;
 use etl::state::store::notify::NotifyingStateStore;
@@ -13,7 +11,9 @@ use etl::test_utils::test_destination_wrapper::TestDestinationWrapper;
 use etl::test_utils::test_schema::{TableSelection, insert_users_data, setup_test_database_schema};
 use fail::FailScenario;
 use rand::random;
+use std::time::Duration;
 use telemetry::init_test_tracing;
+use tokio::time::sleep;
 
 // TODO: add more tests with fault injection.
 
@@ -162,7 +162,7 @@ async fn table_copy_is_consistent_after_data_sync_threw_an_error_with_manual_ret
         &database_schema.users_schema().name,
         1..=rows_inserted,
     )
-        .await;
+    .await;
 
     let state_store = NotifyingStateStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
@@ -189,6 +189,9 @@ async fn table_copy_is_consistent_after_data_sync_threw_an_error_with_manual_ret
 
     users_state_notify.notified().await;
 
+    // We want to wait for a second, simulating the user waiting.
+    sleep(Duration::from_secs(1)).await;
+
     // Register notifications for table sync phases.
     let users_state_notify = state_store
         .notify_on_table_state(
@@ -209,7 +212,7 @@ async fn table_copy_is_consistent_after_data_sync_threw_an_error_with_manual_ret
     // errors.
     let err = pipeline.shutdown_and_wait().await.err().unwrap();
     assert_eq!(err.kinds().len(), 1);
-    assert_eq!(err.kinds()[0], ErrorKind::WithTimedRetry);
+    assert_eq!(err.kinds()[0], ErrorKind::WithManualRetry);
 
     // Verify copied data.
     let table_rows = destination.get_table_rows().await;

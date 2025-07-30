@@ -1,7 +1,7 @@
 use fail::fail_point;
 
 use crate::bail;
-use crate::error::{ErrorKind, EtlResult, EtlError};
+use crate::error::{ErrorKind, EtlError, EtlResult};
 
 pub const START_TABLE_SYNC__AFTER_DATA_SYNC: &str = "start_table_sync.after_data_sync";
 

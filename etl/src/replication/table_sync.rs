@@ -12,6 +12,8 @@ use crate::concurrency::signal::SignalTx;
 use crate::concurrency::stream::BatchStream;
 use crate::destination::base::Destination;
 use crate::error::{ErrorKind, EtlError, EtlResult};
+#[cfg(feature = "failpoints")]
+use crate::failpoints::START_TABLE_SYNC__AFTER_DATA_SYNC;
 use crate::failpoints::etl_fail_point;
 use crate::pipeline::PipelineId;
 use crate::replication::client::PgReplicationClient;
@@ -22,8 +24,6 @@ use crate::state::store::base::StateStore;
 use crate::state::table::{TableReplicationPhase, TableReplicationPhaseType};
 use crate::workers::base::WorkerType;
 use crate::workers::table_sync::TableSyncWorkerState;
-#[cfg(feature = "failpoints")]
-use crate::failpoints::START_TABLE_SYNC__AFTER_DATA_SYNC;
 
 #[derive(Debug)]
 pub enum TableSyncResult {
