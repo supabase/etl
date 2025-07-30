@@ -7,7 +7,8 @@ use api::routes::destinations_pipelines::{
 };
 use api::routes::images::{CreateImageRequest, UpdateImageRequest};
 use api::routes::pipelines::{
-    CreatePipelineRequest, UpdatePipelineImageRequest, UpdatePipelineRequest,
+    CreatePipelineRequest, UpdatePipelineConfigRequest, UpdatePipelineImageRequest,
+    UpdatePipelineRequest,
 };
 use api::routes::sources::{CreateSourceRequest, UpdateSourceRequest};
 use api::routes::tenants::{CreateOrUpdateTenantRequest, CreateTenantRequest, UpdateTenantRequest};
@@ -413,6 +414,23 @@ impl TestApp {
     ) -> reqwest::Response {
         self.post_authenticated(format!(
             "{}/v1/pipelines/{pipeline_id}/update-image",
+            &self.address
+        ))
+        .header("tenant_id", tenant_id)
+        .json(update_request)
+        .send()
+        .await
+        .expect("Failed to execute request.")
+    }
+
+    pub async fn update_pipeline_config(
+        &self,
+        tenant_id: &str,
+        pipeline_id: i64,
+        update_request: &UpdatePipelineConfigRequest,
+    ) -> reqwest::Response {
+        self.post_authenticated(format!(
+            "{}/v1/pipelines/{pipeline_id}/update-config",
             &self.address
         ))
         .header("tenant_id", tenant_id)

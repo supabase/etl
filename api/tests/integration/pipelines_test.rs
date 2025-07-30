@@ -1,9 +1,10 @@
-use api::db::pipelines::PipelineConfig;
+use api::db::pipelines::{OptionalPipelineConfig, PipelineConfig};
 use api::db::sources::SourceConfig;
 use api::routes::pipelines::{
     CreatePipelineRequest, CreatePipelineResponse, GetPipelineReplicationStatusResponse,
     ReadPipelineResponse, ReadPipelinesResponse, SimpleTableReplicationState,
-    UpdatePipelineImageRequest, UpdatePipelineRequest,
+    UpdatePipelineConfigRequest, UpdatePipelineConfigResponse, UpdatePipelineImageRequest,
+    UpdatePipelineRequest,
 };
 use api::routes::sources::{CreateSourceRequest, CreateSourceResponse};
 use config::SerializableSecretString;
@@ -55,6 +56,22 @@ pub fn updated_pipeline_config() -> PipelineConfig {
             backoff_factor: 1.0,
         }),
         max_table_sync_workers: Some(4),
+    }
+}
+
+pub fn updated_optional_pipeline_config() -> OptionalPipelineConfig {
+    OptionalPipelineConfig {
+        batch: Some(BatchConfig {
+            max_size: 1_000_000,
+            max_fill_ms: 100,
+        }),
+        apply_worker_init_retry: Some(RetryConfig {
+            max_attempts: 3,
+            initial_delay_ms: 1000,
+            max_delay_ms: 5000,
+            backoff_factor: 2.0,
+        }),
+        max_table_sync_workers: Some(8),
     }
 }
 
@@ -776,6 +793,91 @@ async fn update_image_fails_when_no_default_image_exists() {
     let update_request = UpdatePipelineImageRequest { image_id: None };
     let response = app
         .update_pipeline_image(tenant_id, 1, &update_request)
+        .await;
+
+    // Assert
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn pipeline_config_can_be_updated() {
+    init_test_tracing();
+    // Arrange
+    let app = spawn_test_app().await;
+    let tenant_id = &create_tenant(&app).await;
+    let source_id = create_source(&app, tenant_id).await;
+    let destination_id = create_destination(&app, tenant_id).await;
+
+    let pipeline_id = create_pipeline_with_config(
+        &app,
+        tenant_id,
+        source_id,
+        destination_id,
+        new_pipeline_config(),
+    )
+    .await;
+
+    // Act
+    let update_request = UpdatePipelineConfigRequest {
+        config: updated_optional_pipeline_config(),
+    };
+    let response = app
+        .update_pipeline_config(tenant_id, pipeline_id, &update_request)
+        .await;
+
+    // Assert
+    assert!(response.status().is_success());
+    let response: UpdatePipelineConfigResponse = response
+        .json()
+        .await
+        .expect("failed to deserialize response");
+    insta::assert_debug_snapshot!(response.config)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn update_config_fails_for_non_existing_pipeline() {
+    init_test_tracing();
+    // Arrange
+    let app = spawn_test_app().await;
+    let tenant_id = &create_tenant(&app).await;
+
+    // Act
+    let update_request = UpdatePipelineConfigRequest {
+        config: updated_optional_pipeline_config(),
+    };
+    let response = app
+        .update_pipeline_config(tenant_id, 42, &update_request)
+        .await;
+
+    // Assert
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn update_config_fails_for_pipeline_from_another_tenant() {
+    init_test_tracing();
+    // Arrange
+    let app = spawn_test_app().await;
+    let tenant1_id = &create_tenant(&app).await;
+
+    let source1_id = create_source(&app, tenant1_id).await;
+    let destination1_id = create_destination(&app, tenant1_id).await;
+
+    let pipeline_id = create_pipeline_with_config(
+        &app,
+        tenant1_id,
+        source1_id,
+        destination1_id,
+        new_pipeline_config(),
+    )
+    .await;
+
+    // Act - Try to update config using
+    let update_request = UpdatePipelineConfigRequest {
+        config: updated_optional_pipeline_config(),
+    };
+    let response = app
+        .update_pipeline_config("wrong-tenant-id", pipeline_id, &update_request)
         .await;
 
     // Assert
