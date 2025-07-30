@@ -121,9 +121,11 @@ where
             replication_client,
             pool.clone(),
             schema_cache,
+            retries_orchestrator.clone(),
             self.state_store.clone(),
             self.destination.clone(),
             self.shutdown_tx.subscribe(),
+            (force_syncing_tables_tx, force_syncing_tables_rx),
             table_sync_worker_permits,
         )
         .start()

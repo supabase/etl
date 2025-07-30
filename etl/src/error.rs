@@ -82,6 +82,14 @@ pub enum ErrorKind {
     ReplicationSlotNotCreated,
     /// Unknown error
     Unknown,
+
+    // Special error kinds used for tests that trigger specific retry behaviors via fault injection.
+    #[cfg(feature = "failpoints")]
+    WithNoRetry,
+    #[cfg(feature = "failpoints")]
+    WithManualRetry,
+    #[cfg(feature = "failpoints")]
+    WithTimedRetry,
 }
 
 impl EtlError {

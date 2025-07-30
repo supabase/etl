@@ -750,7 +750,7 @@ where
             table_id,
             format!("The schema for table {table_id} has changed during streaming"),
             "ETL doesn't support schema changes at this point in time, rollback the schema",
-            RetryPolicy::UserIntervention,
+            RetryPolicy::ManualRetry,
         );
 
         return Ok(HandleMessageResult {

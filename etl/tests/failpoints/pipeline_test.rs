@@ -1,8 +1,7 @@
 use etl::destination::memory::MemoryDestination;
 use etl::error::ErrorKind;
 use etl::failpoints::{
-    START_TABLE_SYNC_AFTER_DATA_SYNC_ERROR, START_TABLE_SYNC_AFTER_DATA_SYNC_ERROR_RETRYABLE,
-    START_TABLE_SYNC_AFTER_DATA_SYNC_PANIC,
+    START_TABLE_SYNC__AFTER_DATA_SYNC,
 };
 use etl::pipeline::PipelineId;
 use etl::state::store::base::StateStore;
@@ -21,7 +20,7 @@ use telemetry::init_test_tracing;
 #[tokio::test(flavor = "multi_thread")]
 async fn pipeline_handles_table_sync_worker_panic_during_data_sync() {
     let _scenario = FailScenario::setup();
-    fail::cfg(START_TABLE_SYNC_AFTER_DATA_SYNC_PANIC, "panic").unwrap();
+    fail::cfg(START_TABLE_SYNC__AFTER_DATA_SYNC, "panic").unwrap();
 
     init_test_tracing();
 
@@ -85,7 +84,7 @@ async fn pipeline_handles_table_sync_worker_panic_during_data_sync() {
 #[tokio::test(flavor = "multi_thread")]
 async fn pipeline_handles_table_sync_worker_error_during_data_sync() {
     let _scenario = FailScenario::setup();
-    fail::cfg(START_TABLE_SYNC_AFTER_DATA_SYNC_ERROR, "return").unwrap();
+    fail::cfg(START_TABLE_SYNC__AFTER_DATA_SYNC, "return").unwrap();
 
     init_test_tracing();
 
@@ -127,8 +126,8 @@ async fn pipeline_handles_table_sync_worker_error_during_data_sync() {
     // We stop and inspect errors.
     let err = pipeline.shutdown_and_wait().await.err().unwrap();
     assert_eq!(err.kinds().len(), 2);
-    assert_eq!(err.kinds()[0], ErrorKind::Unknown);
-    assert_eq!(err.kinds()[1], ErrorKind::Unknown);
+    assert_eq!(err.kinds()[0], ErrorKind::WithNoRetry);
+    assert_eq!(err.kinds()[1], ErrorKind::WithNoRetry);
 
     // We make sure that the error has been tracked in the state store.
     state_store.load_table_replication_states().await.unwrap();
@@ -149,7 +148,7 @@ async fn pipeline_handles_table_sync_worker_error_during_data_sync() {
 #[tokio::test(flavor = "multi_thread")]
 async fn table_copy_is_consistent_after_data_sync_threw_an_error_and_retries() {
     let _scenario = FailScenario::setup();
-    fail::cfg(START_TABLE_SYNC_AFTER_DATA_SYNC_ERROR_RETRYABLE, "1*return").unwrap();
+    fail::cfg(START_TABLE_SYNC__AFTER_DATA_SYNC, "1*return(manual_retry)").unwrap();
 
     init_test_tracing();
 
@@ -210,7 +209,7 @@ async fn table_copy_is_consistent_after_data_sync_threw_an_error_and_retries() {
 #[tokio::test(flavor = "multi_thread")]
 async fn table_copy_is_consistent_after_data_sync_threw_an_error_and_manually_retries() {
     let _scenario = FailScenario::setup();
-    fail::cfg(START_TABLE_SYNC_AFTER_DATA_SYNC_ERROR, "1*return").unwrap();
+    fail::cfg(START_TABLE_SYNC__AFTER_DATA_SYNC, "1*return(timed_retry)").unwrap();
 
     init_test_tracing();
 
@@ -269,7 +268,10 @@ async fn table_copy_is_consistent_after_data_sync_threw_an_error_and_manually_re
         .await;
 
     // We manually retry the table.
-    // TODO: implement manual retry.
+    pipeline
+        .retry_table(database_schema.users_schema().id)
+        .await
+        .unwrap();
 
     users_state_notify.notified().await;
 

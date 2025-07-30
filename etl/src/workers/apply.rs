@@ -8,7 +8,7 @@ use tokio_postgres::types::PgLsn;
 use tracing::{Instrument, debug, error, info};
 
 use crate::concurrency::shutdown::ShutdownRx;
-use crate::concurrency::signal::{SignalTx, create_signal};
+use crate::concurrency::signal::{SignalRx, SignalTx};
 use crate::destination::base::Destination;
 use crate::etl_error;
 use crate::pipeline::PipelineId;
@@ -58,9 +58,11 @@ pub struct ApplyWorker<S, D> {
     replication_client: PgReplicationClient,
     pool: TableSyncWorkerPool,
     schema_cache: SchemaCache,
+    retries_orchestrator: RetriesOrchestrator<S>,
     state_store: S,
     destination: D,
     shutdown_rx: ShutdownRx,
+    force_syncing_tables_signals: (SignalTx, SignalRx),
     table_sync_worker_permits: Arc<Semaphore>,
 }
 
@@ -72,9 +74,11 @@ impl<S, D> ApplyWorker<S, D> {
         replication_client: PgReplicationClient,
         pool: TableSyncWorkerPool,
         schema_cache: SchemaCache,
+        retries_orchestrator: RetriesOrchestrator<S>,
         state_store: S,
         destination: D,
         shutdown_rx: ShutdownRx,
+        force_syncing_tables_signals: (SignalTx, SignalRx),
         table_sync_worker_permits: Arc<Semaphore>,
     ) -> Self {
         Self {
@@ -83,9 +87,11 @@ impl<S, D> ApplyWorker<S, D> {
             replication_client,
             pool,
             schema_cache,
+            retries_orchestrator,
             state_store,
             destination,
             shutdown_rx,
+            force_syncing_tables_signals,
             table_sync_worker_permits,
         }
     }
@@ -109,6 +115,9 @@ where
         let apply_worker = async move {
             let start_lsn = get_start_lsn(self.pipeline_id, &self.replication_client).await?;
 
+            let (force_syncing_tables_tx, force_syncing_tables_rx) =
+                self.force_syncing_tables_signals;
+
             start_apply_loop(
                 self.pipeline_id,
                 start_lsn,
@@ -121,7 +130,7 @@ where
                     self.config,
                     self.pool,
                     self.schema_cache,
-                    retries_orchestrator,
+                    self.retries_orchestrator,
                     self.state_store,
                     self.destination,
                     self.shutdown_rx.clone(),

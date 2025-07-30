@@ -1,6 +1,4 @@
 use config::shared::PipelineConfig;
-#[cfg(feature = "failpoints")]
-use fail::fail_point;
 use futures::StreamExt;
 use postgres::schema::TableId;
 use std::sync::Arc;
@@ -14,6 +12,7 @@ use crate::concurrency::signal::SignalTx;
 use crate::concurrency::stream::BatchStream;
 use crate::destination::base::Destination;
 use crate::error::{ErrorKind, EtlError, EtlResult};
+use crate::failpoints::etl_fail_point;
 use crate::pipeline::PipelineId;
 use crate::replication::client::PgReplicationClient;
 use crate::replication::slot::get_slot_name;
@@ -24,11 +23,7 @@ use crate::state::table::{TableReplicationPhase, TableReplicationPhaseType};
 use crate::workers::base::WorkerType;
 use crate::workers::table_sync::TableSyncWorkerState;
 #[cfg(feature = "failpoints")]
-use crate::{
-    failpoints::START_TABLE_SYNC_AFTER_DATA_SYNC_ERROR,
-    failpoints::START_TABLE_SYNC_AFTER_DATA_SYNC_ERROR_RETRYABLE,
-    failpoints::START_TABLE_SYNC_AFTER_DATA_SYNC_PANIC,
-};
+use crate::failpoints::START_TABLE_SYNC__AFTER_DATA_SYNC;
 
 #[derive(Debug)]
 pub enum TableSyncResult {
@@ -146,28 +141,9 @@ where
                     .await?;
             }
 
-            // Fail point to test when the table sync fails.
+            // Fail point to test when the table sync fails before copying data.
             #[cfg(feature = "failpoints")]
-            {
-                // Simple panic.
-                fail_point!(START_TABLE_SYNC_AFTER_DATA_SYNC_PANIC);
-
-                // Unknown error.
-                fail_point!(START_TABLE_SYNC_AFTER_DATA_SYNC_ERROR, |_| {
-                    bail!(
-                        ErrorKind::Unknown,
-                        "An unknown error has occurred before copying the table"
-                    );
-                });
-
-                // Error with timed retry.
-                fail_point!(START_TABLE_SYNC_AFTER_DATA_SYNC_ERROR_RETRYABLE, |_| {
-                    bail!(
-                        ErrorKind::ConnectionFailed,
-                        "An error occurred while connecting to Postgres"
-                    );
-                });
-            }
+            etl_fail_point(START_TABLE_SYNC__AFTER_DATA_SYNC)?;
 
             // We create the slot with a transaction, since we need to have a consistent snapshot of the database
             // before copying the schema and tables.

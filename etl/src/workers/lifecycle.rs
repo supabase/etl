@@ -99,7 +99,7 @@ where
         let error = TableReplicationError::without_solution(
             id,
             format!("The table sync worker has experienced a panic: {panic}"),
-            RetryPolicy::None,
+            RetryPolicy::NoRetry,
         );
         self.mark_table_errored(&pool, id, error).await;
     }

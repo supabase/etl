@@ -102,34 +102,51 @@ impl TableReplicationError {
                 table_id,
                 error,
                 "Fix the schema of the Postgres database",
-                RetryPolicy::UserIntervention,
+                RetryPolicy::ManualRetry,
             ),
             ErrorKind::ConfigError => Self::with_solution(
                 table_id,
                 error,
                 "Fix application or service configuration",
-                RetryPolicy::UserIntervention,
+                RetryPolicy::ManualRetry,
             ),
             ErrorKind::ReplicationSlotAlreadyExists => Self::with_solution(
                 table_id,
                 error,
                 "Remove the existing slot from the Postgres database",
-                RetryPolicy::UserIntervention,
+                RetryPolicy::ManualRetry,
             ),
             ErrorKind::ReplicationSlotNotCreated => Self::with_solution(
                 table_id,
                 error,
                 "Check if the Postgres database allows the creation of new replication slots",
-                RetryPolicy::UserIntervention,
+                RetryPolicy::ManualRetry,
+            ),
+
+            // Special handling for test specific error kinds.
+            #[cfg(feature = "failpoints")]
+            ErrorKind::WithNoRetry => {
+                Self::with_solution(table_id, error, "Cannot retry", RetryPolicy::NoRetry)
+            }
+            #[cfg(feature = "failpoints")]
+            ErrorKind::WithManualRetry => {
+                Self::with_solution(table_id, error, "Retry manually", RetryPolicy::ManualRetry)
+            }
+            #[cfg(feature = "failpoints")]
+            ErrorKind::WithTimedRetry => Self::with_solution(
+                table_id,
+                error,
+                "Will retry",
+                RetryPolicy::retry_in(retry_duration),
             ),
 
             // By default, all errors are not retriable
-            _ => Self::without_solution(table_id, error, RetryPolicy::None),
+            _ => Self::without_solution(table_id, error, RetryPolicy::NoRetry),
         }
     }
 
     /// Processes a table replication error, which involves the scheduling of tasks in case of
-    /// a [`RetryPolicy::Retry`].
+    /// a [`RetryPolicy::TimedRetry`].
     pub async fn process<S>(
         self,
         retries_orchestrator: &RetriesOrchestrator<S>,
@@ -138,16 +155,16 @@ impl TableReplicationError {
         S: StateStore + Clone + Send + 'static,
     {
         match self.retry_policy {
-            RetryPolicy::None => {
+            RetryPolicy::NoRetry => {
                 // If there is a `None` retry policy, the state can't be rolled back unless there is
                 // manual intervention.
             }
-            RetryPolicy::UserIntervention => {
+            RetryPolicy::ManualRetry => {
                 retries_orchestrator
                     .schedule_manual_retry(self.table_id)
                     .await;
             }
-            RetryPolicy::Retry { next_retry } => {
+            RetryPolicy::TimedRetry { next_retry } => {
                 retries_orchestrator
                     .schedule_timed_retry(self.table_id, next_retry)
                     .await;
@@ -166,17 +183,17 @@ impl TableReplicationError {
 /// Defines the retry strategy for a failed table replication.
 #[derive(Debug)]
 pub enum RetryPolicy {
-    /// No retry should be attempted.
-    None,
+    /// No retry should be attempted, the system has to be fixed by hand.
+    NoRetry,
     /// Retry requires user intervention before proceeding.
-    UserIntervention,
+    ManualRetry,
     /// Retry after the specified timestamp.
-    Retry { next_retry: DateTime<Utc> },
+    TimedRetry { next_retry: DateTime<Utc> },
 }
 
 impl RetryPolicy {
     pub fn retry_in(duration: Duration) -> Self {
-        Self::Retry {
+        Self::TimedRetry {
             next_retry: Utc::now() + duration,
         }
     }
