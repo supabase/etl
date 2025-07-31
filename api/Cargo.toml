@@ -48,7 +48,7 @@ tracing = { workspace = true, default-features = false }
 tracing-actix-web = { workspace = true, features = ["emit_event_on_error"] }
 utoipa = { workspace = true, features = ["actix_extras"] }
 utoipa-swagger-ui = { workspace = true, features = ["actix-web", "reqwest"] }
-uuid = { version = "1.10.0", features = ["v4"] }
+uuid = { workspace = true, features = ["v4"] }
 sentry = { workspace = true, features = ["actix"] }
 
 [dev-dependencies]
