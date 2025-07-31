@@ -237,7 +237,7 @@ impl BigQueryDestination {
         let mut table_schema_row = Self::table_schema_to_table_row(&table_schema);
         table_schema_row
             .values
-            .push(BigQueryOperationType::UPSERT.into_cell());
+            .push(BigQueryOperationType::Upsert.into_cell());
         let table_schema_descriptor =
             BigQueryClient::column_schemas_to_table_descriptor(&ETL_TABLE_SCHEMAS_COLUMNS, false);
         inner
@@ -255,7 +255,7 @@ impl BigQueryDestination {
         for column_row in column_rows.iter_mut() {
             column_row
                 .values
-                .push(BigQueryOperationType::UPSERT.into_cell());
+                .push(BigQueryOperationType::Upsert.into_cell());
         }
         let column_descriptors =
             BigQueryClient::column_schemas_to_table_descriptor(&ETL_TABLE_COLUMNS_COLUMNS, false);
@@ -407,7 +407,7 @@ impl BigQueryDestination {
         for table_row in table_rows.iter_mut() {
             table_row
                 .values
-                .push(BigQueryOperationType::UPSERT.into_cell());
+                .push(BigQueryOperationType::Upsert.into_cell());
         }
         inner
             .client
@@ -443,7 +443,7 @@ impl BigQueryDestination {
                         insert
                             .table_row
                             .values
-                            .push(BigQueryOperationType::UPSERT.into_cell());
+                            .push(BigQueryOperationType::Upsert.into_cell());
                         insert.table_row.values.push(Cell::String(sequence_number));
 
                         let table_rows: &mut Vec<TableRow> =
@@ -456,7 +456,7 @@ impl BigQueryDestination {
                         update
                             .table_row
                             .values
-                            .push(BigQueryOperationType::UPSERT.into_cell());
+                            .push(BigQueryOperationType::Upsert.into_cell());
                         update.table_row.values.push(Cell::String(sequence_number));
 
                         let table_rows: &mut Vec<TableRow> =
@@ -473,7 +473,7 @@ impl BigQueryDestination {
                             Self::generate_sequence_number(delete.start_lsn, delete.commit_lsn);
                         old_table_row
                             .values
-                            .push(BigQueryOperationType::DELETE.into_cell());
+                            .push(BigQueryOperationType::Delete.into_cell());
                         old_table_row.values.push(Cell::String(sequence_number));
 
                         let table_rows: &mut Vec<TableRow> =

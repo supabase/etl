@@ -31,8 +31,8 @@ const BIGQUERY_CDC_SEQUENCE_COLUMN: &str = "_CHANGE_SEQUENCE_NUMBER";
 /// Change Data Capture operation types for BigQuery streaming.
 #[derive(Debug)]
 pub enum BigQueryOperationType {
-    UPSERT,
-    DELETE,
+    Upsert,
+    Delete,
 }
 
 impl BigQueryOperationType {
@@ -45,8 +45,8 @@ impl BigQueryOperationType {
 impl fmt::Display for BigQueryOperationType {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            BigQueryOperationType::UPSERT => write!(f, "UPSERT"),
-            BigQueryOperationType::DELETE => write!(f, "DELETE"),
+            BigQueryOperationType::Upsert => write!(f, "UPSERT"),
+            BigQueryOperationType::Delete => write!(f, "DELETE"),
         }
     }
 }
@@ -189,7 +189,7 @@ impl BigQueryClient {
         // We have to map table rows into the new type due to the limitations of how Rust works.
         let table_rows = table_rows
             .into_iter()
-            .map(|row| BigQueryTableRow(row))
+            .map(BigQueryTableRow)
             .collect::<Vec<_>>();
 
         // We create a slice on table rows, which will be updated while the streaming progresses.
@@ -224,7 +224,7 @@ impl BigQueryClient {
                     let row_errors = append_rows_response
                         .row_errors
                         .into_iter()
-                        .map(|err| row_error_to_etl_error(err))
+                        .map(row_error_to_etl_error)
                         .collect::<Vec<_>>();
 
                     return Err(row_errors.into());
