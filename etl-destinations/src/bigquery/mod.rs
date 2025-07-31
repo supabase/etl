@@ -1,5 +1,6 @@
 mod client;
 mod core;
+mod encoding;
 mod encryption;
 
 pub use core::BigQueryDestination;

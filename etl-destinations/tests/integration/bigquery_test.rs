@@ -1,18 +1,21 @@
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use etl::config::BatchConfig;
 use etl::destination::Destination;
+use etl::internals::{NotifyingStateStore, TableReplicationPhaseType};
 use etl::test_utils::database::{spawn_database, test_table_name};
 use etl::test_utils::pipeline::{create_pipeline, create_pipeline_with};
 use etl::test_utils::test_destination_wrapper::TestDestinationWrapper;
 use etl::test_utils::test_schema::{TableSelection, insert_mock_data, setup_test_database_schema};
-use etl::test_utils::{NotifyingStateStore, TableReplicationPhaseType};
 use etl::types::{EventType, PgNumeric, PipelineId};
 use etl_destinations::bigquery::install_crypto_provider_for_bigquery;
 use rand::random;
 use std::str::FromStr;
 use telemetry::init_test_tracing;
 
-use crate::common::bigquery::{BigQueryOrder, BigQueryUser, parse_bigquery_table_rows, setup_bigquery_connection, NullableColsScalar, NullableColsArray, NonNullableColsScalar};
+use crate::common::bigquery::{
+    BigQueryOrder, BigQueryUser, NonNullableColsScalar, NullableColsArray, NullableColsScalar,
+    parse_bigquery_table_rows, setup_bigquery_connection,
+};
 
 #[tokio::test(flavor = "multi_thread")]
 async fn table_copy_and_streaming_with_restart() {

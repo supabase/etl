@@ -18,50 +18,6 @@ impl TableRow {
     }
 }
 
-#[cfg(feature = "bigquery")]
-impl prost::Message for TableRow {
-    fn encode_raw(&self, buf: &mut impl bytes::BufMut)
-    where
-        Self: Sized,
-    {
-        let mut tag = 1;
-        for cell in &self.values {
-            cell.encode_prost(tag, buf);
-            tag += 1;
-        }
-    }
-
-    fn merge_field(
-        &mut self,
-        _tag: u32,
-        _wire_type: prost::encoding::WireType,
-        _buf: &mut impl bytes::Buf,
-        _ctx: prost::encoding::DecodeContext,
-    ) -> Result<(), prost::DecodeError>
-    where
-        Self: Sized,
-    {
-        unimplemented!("merge_field not implemented yet");
-    }
-
-    fn encoded_len(&self) -> usize {
-        let mut len = 0;
-        let mut tag = 1;
-        for cell in &self.values {
-            len += cell.encoded_len_prost(tag);
-            tag += 1;
-        }
-
-        len
-    }
-
-    fn clear(&mut self) {
-        for cell in &mut self.values {
-            cell.clear();
-        }
-    }
-}
-
 pub struct TableRowConverter;
 
 impl TableRowConverter {

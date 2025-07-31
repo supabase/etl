@@ -9,8 +9,3 @@ pub mod pipeline;
 pub mod table;
 pub mod test_destination_wrapper;
 pub mod test_schema;
-
-// We export some types that are only useful when requiring the test utils since these types can be
-// used in tests. They are not exported by default because they leak internals of the library.
-pub use crate::state::store::notify::NotifyingStateStore;
-pub use crate::state::table::{TableReplicationPhase, TableReplicationPhaseType};

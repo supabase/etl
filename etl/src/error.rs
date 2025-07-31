@@ -538,106 +538,6 @@ impl From<sqlx::Error> for EtlError {
     }
 }
 
-// BigQuery error conversions (feature-gated)
-
-/// Converts [`gcp_bigquery_client::error::BQError`] to [`EtlError`] with appropriate error kind.
-///
-/// Maps errors based on their specific type for better error classification and handling.
-#[cfg(feature = "bigquery")]
-impl From<gcp_bigquery_client::error::BQError> for EtlError {
-    fn from(err: gcp_bigquery_client::error::BQError) -> EtlError {
-        use gcp_bigquery_client::error::BQError;
-
-        let (kind, description) = match &err {
-            // Authentication related errors
-            BQError::InvalidServiceAccountKey(_) => (
-                ErrorKind::AuthenticationError,
-                "Invalid BigQuery service account key",
-            ),
-            BQError::InvalidServiceAccountAuthenticator(_) => (
-                ErrorKind::AuthenticationError,
-                "Invalid BigQuery service account authenticator",
-            ),
-            BQError::InvalidInstalledFlowAuthenticator(_) => (
-                ErrorKind::AuthenticationError,
-                "Invalid BigQuery installed flow authenticator",
-            ),
-            BQError::InvalidApplicationDefaultCredentialsAuthenticator(_) => (
-                ErrorKind::AuthenticationError,
-                "Invalid BigQuery application default credentials",
-            ),
-            BQError::InvalidAuthorizedUserAuthenticator(_) => (
-                ErrorKind::AuthenticationError,
-                "Invalid BigQuery authorized user authenticator",
-            ),
-            BQError::AuthError(_) => (
-                ErrorKind::AuthenticationError,
-                "BigQuery authentication error",
-            ),
-            BQError::YupAuthError(_) => (
-                ErrorKind::AuthenticationError,
-                "BigQuery OAuth authentication error",
-            ),
-            BQError::NoToken => (
-                ErrorKind::AuthenticationError,
-                "BigQuery authentication token missing",
-            ),
-
-            // Network and transport errors
-            BQError::RequestError(_) => (ErrorKind::IoError, "BigQuery request failed"),
-            BQError::TonicTransportError(_) => (ErrorKind::IoError, "BigQuery transport error"),
-
-            // Query and data errors
-            BQError::ResponseError { .. } => (ErrorKind::QueryFailed, "BigQuery response error"),
-            BQError::NoDataAvailable => (
-                ErrorKind::InvalidState,
-                "BigQuery result set positioning error",
-            ),
-            BQError::InvalidColumnIndex { .. } => {
-                (ErrorKind::InvalidData, "BigQuery invalid column index")
-            }
-            BQError::InvalidColumnName { .. } => {
-                (ErrorKind::InvalidData, "BigQuery invalid column name")
-            }
-            BQError::InvalidColumnType { .. } => {
-                (ErrorKind::ConversionError, "BigQuery column type mismatch")
-            }
-
-            // Serialization errors
-            BQError::SerializationError(_) => (
-                ErrorKind::SerializationError,
-                "BigQuery JSON serialization error",
-            ),
-
-            // gRPC errors
-            BQError::TonicInvalidMetadataValueError(_) => {
-                (ErrorKind::ConfigError, "BigQuery invalid metadata value")
-            }
-            BQError::TonicStatusError(_) => {
-                (ErrorKind::DestinationError, "BigQuery gRPC status error")
-            }
-        };
-
-        EtlError {
-            repr: ErrorRepr::WithDescriptionAndDetail(kind, description, err.to_string()),
-        }
-    }
-}
-
-/// Converts BigQuery row errors to [`EtlError`] with [`ErrorKind::DestinationError`].
-#[cfg(feature = "bigquery")]
-impl From<gcp_bigquery_client::google::cloud::bigquery::storage::v1::RowError> for EtlError {
-    fn from(err: gcp_bigquery_client::google::cloud::bigquery::storage::v1::RowError) -> EtlError {
-        EtlError {
-            repr: ErrorRepr::WithDescriptionAndDetail(
-                ErrorKind::DestinationError,
-                "BigQuery row error",
-                format!("{err:?}"),
-            ),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -820,31 +720,6 @@ mod tests {
         assert!(kinds.contains(&ErrorKind::ConversionError));
         assert!(kinds.contains(&ErrorKind::ValidationError));
         assert!(kinds.contains(&ErrorKind::IoError));
-    }
-
-    #[test]
-    #[cfg(feature = "bigquery")]
-    fn test_bigquery_error_mapping() {
-        use gcp_bigquery_client::error::BQError;
-
-        // Test authentication error
-        let auth_err = BQError::NoToken;
-        let etl_err = EtlError::from(auth_err);
-        assert_eq!(etl_err.kind(), ErrorKind::AuthenticationError);
-
-        // Test invalid data error
-        let invalid_col_err = BQError::InvalidColumnIndex { col_index: 5 };
-        let etl_err = EtlError::from(invalid_col_err);
-        assert_eq!(etl_err.kind(), ErrorKind::InvalidData);
-
-        // Test conversion error
-        let type_err = BQError::InvalidColumnType {
-            col_index: 0,
-            col_type: "STRING".to_string(),
-            type_requested: "INTEGER".to_string(),
-        };
-        let etl_err = EtlError::from(type_err);
-        assert_eq!(etl_err.kind(), ErrorKind::ConversionError);
     }
 
     #[test]

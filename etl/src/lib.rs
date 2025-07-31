@@ -14,3 +14,10 @@ mod state;
 pub mod test_utils;
 pub mod types;
 mod workers;
+
+// We export some internals when the feature is enabled since this might be useful for tests.
+#[cfg(feature = "internals")]
+pub mod internals {
+    pub use crate::state::store::notify::NotifyingStateStore;
+    pub use crate::state::table::{TableReplicationPhase, TableReplicationPhaseType};
+}

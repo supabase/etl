@@ -674,9 +674,6 @@ impl Destination for BigQueryDestination {
 
 #[cfg(test)]
 mod tests {
-    use postgres::schema::{ColumnSchema, TableName, TableSchema};
-    use tokio_postgres::types::Type;
-
     use super::*;
 
     #[test]

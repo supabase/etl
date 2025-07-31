@@ -4,10 +4,6 @@ version = "0.1.0"
 edition = "2024"
 autotests = false
 
-[[bench]]
-name = "table_copies"
-harness = false
-
 [[test]]
 name = "integration"
 path = "tests/integration/mod.rs"
@@ -27,10 +23,6 @@ byteorder = { workspace = true }
 chrono = { workspace = true }
 fail = { workspace = true }
 futures = { workspace = true }
-gcp-bigquery-client = { workspace = true, optional = true, features = [
-    "rust-tls",
-    "aws-lc-rs",
-] }
 pg_escape = { workspace = true }
 pin-project-lite = { workspace = true }
 postgres-replication = { workspace = true }
@@ -40,12 +32,7 @@ rustls-pemfile = { workspace = true, features = ["std"] }
 rand = { workspace = true, features = ["std"] }
 serde_json = { workspace = true, features = ["std"] }
 sqlx = { workspace = true, features = ["runtime-tokio-rustls", "postgres"] }
-tokio = { workspace = true, features = [
-    "rt-multi-thread",
-    "macros",
-    "sync",
-    "signal",
-] }
+tokio = { workspace = true, features = ["rt-multi-thread"] }
 tokio-postgres = { workspace = true, features = [
     "runtime",
     "with-chrono-0_4",
@@ -60,14 +47,10 @@ uuid = { workspace = true, features = ["v4"] }
 postgres = { workspace = true, features = ["test-utils", "tokio"] }
 telemetry = { workspace = true }
 
-clap = { workspace = true, default-features = true, features = [
-    "std",
-    "derive",
-] }
-
 
 [features]
 unknown-types-to-bytes = []
 test-utils = []
 failpoints = ["fail/failpoints"]
+internals = []
 default = ["unknown-types-to-bytes"]

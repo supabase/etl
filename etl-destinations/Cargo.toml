@@ -17,9 +17,10 @@ tokio = { workspace = true, optional = true }
 tracing = { workspace = true, default-features = true }
 
 [dev-dependencies]
+etl = { workspace = true, features = ["test-utils", "internals"] }
+
 base64 = { workspace = true }
 chrono = { workspace = true }
-etl = { workspace = true, features = ["test-utils"] }
 serde_json = { workspace = true }
 uuid = { workspace = true, features = ["v4"] }
 rand = { workspace = true }
