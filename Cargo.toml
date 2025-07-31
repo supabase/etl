@@ -10,52 +10,46 @@ postgres = { path = "postgres", default-features = false }
 replicator = { path = "replicator", default-features = false }
 telemetry = { path = "telemetry", default-features = false }
 
-actix-web = { version = "4", default-features = false }
+actix-web = { version = "4.11.0", default-features = false }
 actix-web-httpauth = { version = "0.8.2", default-features = false }
-anyhow = { version = "1.0", default-features = false }
-async-trait = { version = "0.1" }
-aws-lc-rs = { version = "1.8.1", default-features = false }
+anyhow = { version = "1.0.98", default-features = false }
+async-trait = { version = "0.1.88" }
+aws-lc-rs = { version = "1.13.3", default-features = false }
 base64 = { version = "0.22.1", default-features = false }
-bytes = { version = "1.0" }
+bytes = { version = "1.10.1" }
 byteorder = { version = "1.5.0", default-features = false }
-chrono = { version = "0.4", default-features = false }
-clap = { version = "4.5", default-features = false }
-constant_time_eq = { version = "0.3.1" }
+chrono = { version = "0.4.41", default-features = false }
+clap = { version = "4.5.42", default-features = false }
+constant_time_eq = { version = "0.4.2" }
 fail = { version = "0.5.1", default-features = false }
 futures = { version = "0.3.31", default-features = false }
-gcp-bigquery-client = { version = "0.25.0", default-features = false }
-# gcp-bigquery-client = { git = "https://github.com/imor/gcp-bigquery-client", default-features = false, rev = "d9fe29a33f9e4dc12c4adf061035ee1628da5e39" }
+gcp-bigquery-client = { version = "0.26.0", default-features = false }
 insta = { version = "1.43.1", default-features = false }
-k8s-openapi = { version = "0.23.0", default-features = false }
-kube = { version = "0.96.0", default-features = false }
+k8s-openapi = { version = "0.25.0", default-features = false }
+kube = { version = "1.1.0", default-features = false }
 pg_escape = { version = "0.1.1", default-features = false }
-pin-project-lite = { version = "0.2", default-features = false }
-postgres-protocol = { git = "https://github.com/imor/rust-postgres", rev = "20265ef38e32a06f76b6f9b678e2077fc2211f6b" }
+pin-project-lite = { version = "0.2.16", default-features = false }
 postgres-replication = { git = "https://github.com/imor/rust-postgres", default-features = false, rev = "20265ef38e32a06f76b6f9b678e2077fc2211f6b" }
-prost = { version = "0.13.1", default-features = false }
-rand = { version = "0.8.5", default-features = false }
-reqwest = { version = "0.12", default-features = false }
-rustls = { version = "0.23.12", default-features = false }
+prost = { version = "0.13.5", default-features = false }
+rand = { version = "0.9.2", default-features = false }
+reqwest = { version = "0.12.22", default-features = false }
+rustls = { version = "0.23.31", default-features = false }
 rustls-pemfile = { version = "2.2.0", default-features = false }
-rustyline = { version = "14.0.0", default-features = false }
 rust-cli-config = { package = "config", version = "0.14", default-features = false }
-secrecy = { version = "0.8.0", default-features = false }
-sentry = { version = "0.41.0" }
-serde = { version = "1.0", default-features = false }
-serde_json = { version = "1.0", default-features = false }
+secrecy = { version = "0.10.3", default-features = false }
+sentry = { version = "0.42.0" }
+serde = { version = "1.0.219", default-features = false }
+serde_json = { version = "1.0.141", default-features = false }
 sqlx = { version = "0.8.6", default-features = false }
-thiserror = "1.0"
-tokio = { version = "1.38", default-features = false }
+thiserror = "2.0.12"
+tokio = { version = "1.47.0", default-features = false }
 tokio-postgres = { git = "https://github.com/imor/rust-postgres", default-features = false, rev = "20265ef38e32a06f76b6f9b678e2077fc2211f6b" }
 tokio-postgres-rustls = { git = "https://github.com/imor/tokio-postgres-rustls", default-features = false }
-tracing = { version = "0.1", default-features = false }
-tracing-actix-web = { version = "0.7", default-features = false }
+tracing = { version = "0.1.41", default-features = false }
+tracing-actix-web = { version = "0.7.19", default-features = false }
 tracing-appender = { version = "0.2.3", default-features = false }
 tracing-log = { version = "0.2.0", default-features = false }
-tracing-subscriber = { version = "0.3", default-features = false }
-utoipa = { version = "4.2.3", default-features = false }
-utoipa-swagger-ui = { version = "7.1.0", default-features = false }
-uuid = { version = "1.10.0", default-features = false }
-
-# [patch."https://github.com/imor/gcp-bigquery-client"]
-# gcp-bigquery-client = { path = "../gcp-bigquery-client" }
+tracing-subscriber = { version = "0.3.19", default-features = false }
+utoipa = { version = "5.4.0", default-features = false }
+utoipa-swagger-ui = { version = "9.0.2", default-features = false }
+uuid = { version = "1.17.0", default-features = false }

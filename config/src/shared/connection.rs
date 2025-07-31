@@ -2,6 +2,8 @@ use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 use sqlx::postgres::{PgConnectOptions as SqlxConnectOptions, PgSslMode as SqlxSslMode};
 use tokio_postgres::{Config as TokioPgConnectOptions, config::SslMode as TokioPgSslMode};
+#[cfg(feature = "utoipa")]
+use utoipa::ToSchema;
 
 use crate::SerializableSecretString;
 use crate::shared::ValidationError;
@@ -116,17 +118,23 @@ impl PgConnectionOptions {
 ///
 /// This struct holds all necessary connection parameters and settings.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(ToSchema))]
 #[serde(rename_all = "snake_case")]
 pub struct PgConnectionConfig {
     /// Hostname or IP address of the Postgres server.
+    #[cfg_attr(feature = "utoipa", schema(example = "localhost"))]
     pub host: String,
     /// Port number on which the Postgres server is listening.
+    #[cfg_attr(feature = "utoipa", schema(example = 5432))]
     pub port: u16,
     /// Name of the Postgres database to connect to.
+    #[cfg_attr(feature = "utoipa", schema(example = "mydb"))]
     pub name: String,
     /// Username for authenticating with the Postgres server.
+    #[cfg_attr(feature = "utoipa", schema(example = "postgres"))]
     pub username: String,
     /// Password for the specified user. This field is sensitive and redacted in debug output.
+    #[cfg_attr(feature = "utoipa", schema(example = "secret123"))]
     pub password: Option<SerializableSecretString>,
     /// TLS configuration for secure connections.
     pub tls: TlsConfig,
@@ -134,11 +142,19 @@ pub struct PgConnectionConfig {
 
 /// TLS settings for secure Postgres connections.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(ToSchema))]
 #[serde(rename_all = "snake_case")]
 pub struct TlsConfig {
     /// PEM-encoded trusted root certificates. Sensitive and redacted in debug output.
+    #[cfg_attr(
+        feature = "utoipa",
+        schema(
+            example = "-----BEGIN CERTIFICATE-----\nMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgK..."
+        )
+    )]
     pub trusted_root_certs: String,
     /// Whether TLS is enabled for the connection.
+    #[cfg_attr(feature = "utoipa", schema(example = true))]
     pub enabled: bool,
 }
 

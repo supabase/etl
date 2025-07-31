@@ -6,7 +6,6 @@ edition = "2024"
 [dependencies]
 config = { workspace = true }
 etl = { workspace = true, features = ["unknown-types-to-bytes", "bigquery"] }
-postgres = { workspace = true, features = ["tokio"] }
 telemetry = { workspace = true }
 
 anyhow = { workspace = true, features = ["std"] }

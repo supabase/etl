@@ -62,12 +62,16 @@ impl ResponseError for SourceError {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub struct StrippedSourceConfig {
+    #[schema(example = "localhost")]
     pub host: String,
+    #[schema(example = 5432)]
     pub port: u16,
+    #[schema(example = "mydb")]
     pub name: String,
+    #[schema(example = "postgres")]
     pub username: String,
 }
 

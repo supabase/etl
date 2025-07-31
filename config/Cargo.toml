@@ -10,3 +10,7 @@ serde = { workspace = true, features = ["derive"] }
 sqlx = { workspace = true, features = ["postgres"] }
 thiserror = { workspace = true }
 tokio-postgres = { workspace = true  }
+utoipa = { workspace = true, optional = true }
+
+[features]
+utoipa = ["dep:utoipa"]

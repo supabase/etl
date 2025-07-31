@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::{PgExecutor, PgTransaction};
 use std::ops::DerefMut;
 use thiserror::Error;
+use utoipa::ToSchema;
 
 use crate::db::replicators::{ReplicatorsDbError, create_replicator};
 use crate::db::serde::{
@@ -17,14 +18,16 @@ use crate::db::serde::{
 /// A separate struct was created because `publication_name` is not optional and
 /// when updating config we do not want the user to pass publication
 /// name.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct PipelineConfig {
+    #[schema(example = "my_publication")]
     pub publication_name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub batch: Option<BatchConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub apply_worker_init_retry: Option<RetryConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(example = 4)]
     pub max_table_sync_workers: Option<u16>,
 }
 

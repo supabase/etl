@@ -1,14 +1,16 @@
-use secrecy::{ExposeSecret, Secret};
+use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use std::fmt;
 use std::ops::Deref;
+#[cfg(feature = "utoipa")]
+use utoipa::ToSchema;
 
 /// Wrapper around [`Secret<String>`] that implements [`Serialize`] and [`Deserialize`].
-#[derive(Clone)]
-pub struct SerializableSecretString(Secret<String>);
+#[derive(Clone, Debug)]
+#[cfg_attr(feature = "utoipa", derive(ToSchema), schema(value_type = String, example = "secret123"))]
+pub struct SerializableSecretString(SecretString);
 
 impl Deref for SerializableSecretString {
-    type Target = Secret<String>;
+    type Target = SecretString;
 
     fn deref(&self) -> &Self::Target {
         &self.0
@@ -17,17 +19,17 @@ impl Deref for SerializableSecretString {
 
 impl From<String> for SerializableSecretString {
     fn from(value: String) -> Self {
-        Self(Secret::new(value))
+        Self(value.into())
     }
 }
 
-impl From<Secret<String>> for SerializableSecretString {
-    fn from(value: Secret<String>) -> Self {
+impl From<SecretString> for SerializableSecretString {
+    fn from(value: SecretString) -> Self {
         Self(value)
     }
 }
 
-impl From<SerializableSecretString> for Secret<String> {
+impl From<SerializableSecretString> for SecretString {
     fn from(value: SerializableSecretString) -> Self {
         value.0
     }
@@ -48,14 +50,6 @@ impl<'de> Deserialize<'de> for SerializableSecretString {
         D: Deserializer<'de>,
     {
         let string = String::deserialize(deserializer)?;
-        let secret = Secret::new(string);
-
-        Ok(Self(secret))
-    }
-}
-
-impl fmt::Debug for SerializableSecretString {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.fmt(f)
+        Ok(Self(string.into()))
     }
 }
