@@ -10,7 +10,7 @@ harness = false
 [dev-dependencies]
 config = { workspace = true }
 etl = { workspace = true }
-etl-destinations = { workspace = true }
+etl-destinations = { workspace = true, features = ["bigquery"] }
 postgres = { workspace = true, features = ["sqlx"] }
 telemetry = { workspace = true }
 
