@@ -224,7 +224,6 @@ where
         Ok(())
     }
 
-    #[allow(clippy::result_large_err)]
     pub fn shutdown(&self) {
         info!("trying to shut down the pipeline");
 

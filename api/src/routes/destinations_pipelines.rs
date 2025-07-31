@@ -153,7 +153,6 @@ pub struct UpdateDestinationPipelineRequest {
 }
 
 #[utoipa::path(
-    context_path = "/v1",
     request_body = CreateDestinationPipelineRequest,
     params(
         ("tenant_id" = String, Header, description = "The tenant ID")
@@ -215,7 +214,6 @@ pub async fn create_destination_and_pipeline(
 }
 
 #[utoipa::path(
-    context_path = "/v1",
     request_body = UpdateDestinationPipelineRequest,
     params(
         ("destination_id" = i64, Path, description = "ID of the destination to update"),

@@ -62,7 +62,7 @@ pub struct ApplyWorker<S, D> {
 }
 
 impl<S, D> ApplyWorker<S, D> {
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     pub fn new(
         pipeline_id: PipelineId,
         config: Arc<PipelineConfig>,
@@ -180,7 +180,7 @@ struct ApplyWorkerHook<S, D> {
 }
 
 impl<S, D> ApplyWorkerHook<S, D> {
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     fn new(
         pipeline_id: PipelineId,
         config: Arc<PipelineConfig>,

@@ -125,7 +125,6 @@ pub struct ReadSourcesResponse {
 }
 
 #[utoipa::path(
-    context_path = "/v1",
     request_body = CreateSourceRequest,
     params(
         ("tenant_id" = String, Header, description = "The tenant ID")
@@ -162,7 +161,6 @@ pub async fn create_source(
 }
 
 #[utoipa::path(
-    context_path = "/v1",
     params(
         ("source_id" = i64, Path, description = "Id of the source"),
         ("tenant_id" = String, Header, description = "The tenant ID")
@@ -198,7 +196,6 @@ pub async fn read_source(
 }
 
 #[utoipa::path(
-    context_path = "/v1",
     request_body = UpdateSourceRequest,
     params(
         ("source_id" = i64, Path, description = "Id of the source"),
@@ -238,7 +235,6 @@ pub async fn update_source(
 }
 
 #[utoipa::path(
-    context_path = "/v1",
     params(
         ("source_id" = i64, Path, description = "Id of the source"),
         ("tenant_id" = String, Header, description = "The tenant ID")
@@ -267,7 +263,6 @@ pub async fn delete_source(
 }
 
 #[utoipa::path(
-    context_path = "/v1",
     params(
         ("tenant_id" = String, Header, description = "The tenant ID")
     ),
