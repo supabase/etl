@@ -9,7 +9,7 @@ use crate::destination::Destination;
 use crate::error::{ErrorKind, EtlError, EtlResult};
 use crate::replication::client::PgReplicationClient;
 use crate::schema::SchemaCache;
-use crate::state::store::base::StateStore;
+use crate::state::store::StateStore;
 use crate::state::table::TableReplicationPhase;
 use crate::types::PipelineId;
 use crate::workers::apply::{ApplyWorker, ApplyWorkerHandle};

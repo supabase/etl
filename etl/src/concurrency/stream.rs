@@ -48,13 +48,6 @@ impl<B, S: Stream<Item = B>> BatchStream<B, S> {
             stream_stopped: false,
         }
     }
-
-    /// Returns a mutable reference to the underlying stream.
-    ///
-    /// This allows for direct manipulation of the inner stream if needed.
-    pub fn get_inner_mut(&mut self) -> &mut S {
-        &mut self.stream
-    }
 }
 
 impl<B, S: Stream<Item = B>> Stream for BatchStream<B, S> {

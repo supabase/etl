@@ -144,6 +144,7 @@ impl BigQueryClient {
     }
 
     /// Truncates a table in a BigQuery dataset.
+    #[allow(dead_code)]
     pub async fn truncate_table(&self, dataset_id: &str, table_id: &str) -> EtlResult<()> {
         let full_table_name = self.full_table_name(dataset_id, table_id);
 

@@ -1,6 +1,8 @@
 use config::shared::BatchConfig;
 use etl::destination::memory::MemoryDestination;
-use etl::internals::{NotifyingStateStore, TableReplicationPhaseType, WorkerType, get_slot_name};
+use etl::replication::slot::get_slot_name;
+use etl::state::store::notify::NotifyingStateStore;
+use etl::state::table::TableReplicationPhaseType;
 use postgres::tokio::test_utils::TableModification;
 use rand::random;
 use telemetry::init_test_tracing;
@@ -15,6 +17,7 @@ use etl::test_utils::test_schema::{
     insert_mock_data, insert_users_data, setup_test_database_schema,
 };
 use etl::types::{EventType, PipelineId};
+use etl::workers::base::WorkerType;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn table_schema_copy_survives_pipeline_restarts() {

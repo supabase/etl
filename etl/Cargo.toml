@@ -52,5 +52,4 @@ rand = { workspace = true, features = ["thread_rng"] }
 unknown-types-to-bytes = []
 test-utils = ["postgres/test-utils"]
 failpoints = ["fail/failpoints"]
-internals = []
 default = ["unknown-types-to-bytes"]

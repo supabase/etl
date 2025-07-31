@@ -2,7 +2,7 @@ use postgres::schema::TableId;
 use std::collections::HashMap;
 
 use crate::error::EtlResult;
-use crate::state::store::base::StateStore;
+use crate::state::store::StateStore;
 use crate::state::table::TableReplicationPhase;
 
 /// Returns the table replication states that are either done or in active state.

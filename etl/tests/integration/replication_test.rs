@@ -1,5 +1,5 @@
 use etl::error::ErrorKind;
-use etl::internals::PgReplicationClient;
+use etl::replication::client::PgReplicationClient;
 use etl::test_utils::database::{spawn_database, test_table_name};
 use etl::test_utils::pipeline::test_slot_name;
 use etl::test_utils::table::assert_table_schema;

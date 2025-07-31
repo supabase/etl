@@ -4,7 +4,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 
 use crate::error::EtlResult;
-use crate::state::store::base::StateStore;
+use crate::state::store::StateStore;
 use crate::state::table::TableReplicationPhase;
 
 #[derive(Debug)]

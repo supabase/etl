@@ -17,7 +17,7 @@ use crate::replication::client::PgReplicationClient;
 use crate::replication::slot::get_slot_name;
 use crate::replication::table_sync::{TableSyncResult, start_table_sync};
 use crate::schema::SchemaCache;
-use crate::state::store::base::StateStore;
+use crate::state::store::StateStore;
 use crate::state::table::{TableReplicationPhase, TableReplicationPhaseType};
 use crate::types::PipelineId;
 use crate::workers::base::{Worker, WorkerHandle, WorkerType};
@@ -79,10 +79,6 @@ impl TableSyncWorkerStateInner {
         }
 
         Ok(())
-    }
-
-    pub fn table_id(&self) -> TableId {
-        self.table_id
     }
 
     pub fn replication_phase(&self) -> TableReplicationPhase {

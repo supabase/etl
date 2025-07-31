@@ -3,7 +3,8 @@ use etl::error::ErrorKind;
 use etl::failpoints::{
     START_TABLE_SYNC_AFTER_DATA_SYNC_ERROR, START_TABLE_SYNC_AFTER_DATA_SYNC_PANIC,
 };
-use etl::internals::{NotifyingStateStore, TableReplicationPhaseType};
+use etl::state::store::notify::NotifyingStateStore;
+use etl::state::table::TableReplicationPhaseType;
 use etl::test_utils::database::spawn_database;
 use etl::test_utils::pipeline::create_pipeline;
 use etl::test_utils::test_destination_wrapper::TestDestinationWrapper;

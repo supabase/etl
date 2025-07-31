@@ -16,7 +16,7 @@ use crate::replication::client::PgReplicationClient;
 use crate::replication::common::get_table_replication_states;
 use crate::replication::slot::get_slot_name;
 use crate::schema::SchemaCache;
-use crate::state::store::base::StateStore;
+use crate::state::store::StateStore;
 use crate::state::table::{TableReplicationPhase, TableReplicationPhaseType};
 use crate::types::PipelineId;
 use crate::workers::base::{Worker, WorkerHandle, WorkerType};

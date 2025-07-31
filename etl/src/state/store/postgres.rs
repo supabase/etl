@@ -12,7 +12,7 @@ use tokio_postgres::types::PgLsn;
 use tracing::{debug, info};
 
 use crate::error::{ErrorKind, EtlError, EtlResult};
-use crate::state::store::base::StateStore;
+use crate::state::store::StateStore;
 use crate::state::table::TableReplicationPhase;
 use crate::types::PipelineId;
 use crate::{bail, etl_error};

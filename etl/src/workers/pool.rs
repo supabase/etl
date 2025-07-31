@@ -11,7 +11,7 @@ use crate::destination::Destination;
 use crate::error::EtlError;
 use crate::error::{ErrorKind, EtlResult};
 use crate::etl_error;
-use crate::state::store::base::StateStore;
+use crate::state::store::StateStore;
 use crate::workers::base::{Worker, WorkerHandle};
 use crate::workers::table_sync::{TableSyncWorker, TableSyncWorkerHandle, TableSyncWorkerState};
 
