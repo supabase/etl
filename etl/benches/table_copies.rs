@@ -209,10 +209,6 @@ enum Commands {
         /// Enable TLS
         #[arg(long, default_value = "false")]
         tls_enabled: bool,
-
-        /// TLS trusted root certificates
-        #[arg(long, default_value = "")]
-        tls_certs: String,
     },
 }
 
@@ -286,7 +282,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
             username,
             password,
             tls_enabled,
-            tls_certs,
         } => {
             prepare_benchmark(PrepareArgs {
                 host,
@@ -295,7 +290,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 username,
                 password,
                 tls_enabled,
-                tls_certs,
             })
             .await
         }
@@ -328,7 +322,6 @@ struct RunArgs {
 }
 
 #[derive(Debug)]
-#[allow(dead_code)]
 struct PrepareArgs {
     host: String,
     port: u16,
@@ -336,7 +329,6 @@ struct PrepareArgs {
     username: String,
     password: Option<String>,
     tls_enabled: bool,
-    tls_certs: String,
 }
 
 async fn prepare_benchmark(args: PrepareArgs) -> Result<(), Box<dyn Error>> {

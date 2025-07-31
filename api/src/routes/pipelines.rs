@@ -824,7 +824,6 @@ struct Secrets {
     big_query_service_account_key: Option<String>,
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn create_or_update_pipeline_in_k8s(
     k8s_client: &dyn K8sClient,
     tenant_id: &str,

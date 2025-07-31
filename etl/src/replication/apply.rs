@@ -190,7 +190,7 @@ impl ApplyLoopState {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 pub async fn start_apply_loop<D, T>(
     pipeline_id: PipelineId,
     start_lsn: PgLsn,
@@ -547,7 +547,6 @@ where
     }
 }
 
-#[allow(clippy::result_large_err)]
 fn get_commit_lsn(state: &ApplyLoopState, message: &LogicalReplicationMessage) -> EtlResult<PgLsn> {
     // If we are in a `Begin` message, the `commit_lsn` is the `final_lsn` of the payload, in all the
     // other cases we read the `remote_final_lsn` which should be always set in case we are within or

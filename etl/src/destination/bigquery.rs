@@ -10,7 +10,7 @@ use tracing::{debug, info, warn};
 
 use crate::clients::bigquery::{BigQueryClient, BigQueryOperationType};
 use crate::conversions::Cell;
-use crate::conversions::event::{Event, TruncateEvent};
+use crate::conversions::event::Event;
 use crate::conversions::table_row::TableRow;
 use crate::destination::base::Destination;
 use crate::error::{ErrorKind, EtlError, EtlResult};
@@ -521,50 +521,6 @@ impl BigQueryDestination {
         Ok(())
     }
 
-    /// Processes truncate events by executing `TRUNCATE TABLE` statements in BigQuery.
-    ///
-    /// Maps PostgreSQL table OIDs to BigQuery table names and issues truncate commands.
-    #[allow(dead_code)]
-    async fn process_truncate_events(&self, truncate_events: Vec<TruncateEvent>) -> EtlResult<()> {
-        let inner = self.inner.lock().await;
-
-        for truncate_event in truncate_events {
-            for table_id in truncate_event.rel_ids {
-                // Get table information from schema cache
-                let schema_cache = inner
-                    .schema_cache
-                    .as_ref()
-                    .ok_or_else(|| {
-                        EtlError::from((
-                            ErrorKind::ConfigError,
-                            "The schema cache was not set on the destination",
-                        ))
-                    })?
-                    .lock_inner()
-                    .await;
-
-                if let Some(table_schema) =
-                    schema_cache.get_table_schema_ref(&TableId::new(table_id))
-                {
-                    inner
-                        .client
-                        .truncate_table(
-                            &inner.dataset_id,
-                            &table_schema.name.as_bigquery_table_id(),
-                        )
-                        .await?;
-                } else {
-                    info!(
-                        "table schema not found for table_id: {}, skipping truncate",
-                        table_id
-                    );
-                }
-            }
-        }
-
-        Ok(())
-    }
-
     /// Converts a [`TableSchema`] to a [`TableRow`] for insertion into the ETL metadata table.
     ///
     /// Extracts table ID, schema name, and table name for storage in `etl_table_schemas`.
@@ -633,7 +589,6 @@ impl BigQueryDestination {
     /// Converts a string representation back to a PostgreSQL [`Type`].
     ///
     /// Used when reconstructing schemas from BigQuery metadata tables. Falls back to `TEXT` for unknown types.
-    #[allow(clippy::result_large_err)]
     fn string_to_postgres_type(type_str: &str) -> EtlResult<Type> {
         match type_str {
             "BOOL" => Ok(Type::BOOL),

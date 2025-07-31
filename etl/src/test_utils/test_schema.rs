@@ -13,7 +13,6 @@ use crate::test_utils::test_destination_wrapper::TestDestinationWrapper;
 #[derive(Debug, Clone, Copy)]
 pub enum TableSelection {
     Both,
-    #[allow(dead_code)]
     UsersOnly,
     OrdersOnly,
 }
@@ -421,7 +420,7 @@ pub mod bigquery {
             }
         }
 
-        #[allow(clippy::too_many_arguments)]
+        #[expect(clippy::too_many_arguments)]
         pub fn with_non_null_values(
             id: i32,
             b: bool,
@@ -629,7 +628,7 @@ pub mod bigquery {
             }
         }
 
-        #[allow(clippy::too_many_arguments)]
+        #[expect(clippy::too_many_arguments)]
         pub fn with_non_null_values(
             id: i32,
             b_arr: Vec<bool>,
@@ -869,7 +868,7 @@ pub mod bigquery {
     }
 
     impl NonNullableColsScalar {
-        #[allow(clippy::too_many_arguments)]
+        #[expect(clippy::too_many_arguments)]
         pub fn new(
             id: i32,
             b: bool,
