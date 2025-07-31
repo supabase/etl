@@ -1,7 +1,7 @@
 mod concurrency;
+pub mod config;
 mod conversions;
 pub mod destination;
-mod encryption;
 pub mod error;
 #[cfg(feature = "failpoints")]
 pub mod failpoints;

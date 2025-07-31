@@ -11,6 +11,7 @@ use crate::replication::client::PgReplicationClient;
 use crate::schema::SchemaCache;
 use crate::state::store::base::StateStore;
 use crate::state::table::TableReplicationPhase;
+use crate::types::PipelineId;
 use crate::workers::apply::{ApplyWorker, ApplyWorkerHandle};
 use crate::workers::base::{Worker, WorkerHandle};
 use crate::workers::pool::TableSyncWorkerPool;
@@ -25,8 +26,6 @@ enum PipelineWorkers {
         pool: TableSyncWorkerPool,
     },
 }
-
-pub type PipelineId = u64;
 
 #[derive(Debug)]
 pub struct Pipeline<S, D> {

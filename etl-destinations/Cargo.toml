@@ -12,8 +12,18 @@ gcp-bigquery-client = { workspace = true, optional = true, features = [
     "aws-lc-rs",
 ] }
 prost = { workspace = true, optional = true }
+rustls = { workspace = true, features = ["aws-lc-rs", "logging"] }
 tokio = { workspace = true, optional = true }
 tracing = { workspace = true, default-features = true }
+
+[dev-dependencies]
+base64 = { workspace = true }
+chrono = { workspace = true }
+etl = { workspace = true, features = ["test-utils"] }
+serde_json = { workspace = true }
+uuid = { workspace = true, features = ["v4"] }
+rand = { workspace = true }
+telemetry = { workspace = true }
 
 [features]
 bigquery = [

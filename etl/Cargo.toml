@@ -4,12 +4,6 @@ version = "0.1.0"
 edition = "2024"
 autotests = false
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
-
-[[example]]
-name = "bigquery"
-required-features = ["bigquery"]
-
 [[bench]]
 name = "table_copies"
 harness = false
@@ -28,10 +22,9 @@ required-features = ["failpoints", "test-utils"]
 config = { workspace = true }
 postgres = { workspace = true, features = ["tokio", "replication"] }
 
-base64 = { workspace = true }
 bytes = { workspace = true }
 byteorder = { workspace = true }
-chrono = { workspace = true, features = ["serde"] }
+chrono = { workspace = true }
 fail = { workspace = true }
 futures = { workspace = true }
 gcp-bigquery-client = { workspace = true, optional = true, features = [
@@ -61,9 +54,6 @@ tokio-postgres = { workspace = true, features = [
 ] }
 tokio-postgres-rustls = { workspace = true }
 tracing = { workspace = true, default-features = true }
-tracing-subscriber = { workspace = true, default-features = true, features = [
-    "env-filter",
-] }
 uuid = { workspace = true, features = ["v4"] }
 
 [dev-dependencies]
@@ -77,7 +67,6 @@ clap = { workspace = true, default-features = true, features = [
 
 
 [features]
-bigquery = ["dep:gcp-bigquery-client", "dep:prost", "postgres/bigquery"]
 unknown-types-to-bytes = []
 test-utils = []
 failpoints = ["fail/failpoints"]
