@@ -13,7 +13,6 @@ gcp-bigquery-client = { workspace = true, optional = true, features = [
 ] }
 prost = { workspace = true, optional = true }
 rustls = { workspace = true, features = ["aws-lc-rs", "logging"] }
-tokio = { workspace = true, optional = true }
 tracing = { workspace = true, default-features = true }
 
 [dev-dependencies]
@@ -22,8 +21,7 @@ etl = { workspace = true, features = ["test-utils", "internals"] }
 base64 = { workspace = true }
 chrono = { workspace = true }
 serde_json = { workspace = true }
-uuid = { workspace = true, features = ["v4"] }
-rand = { workspace = true }
+rand = { workspace = true, features = ["thread_rng"] }
 telemetry = { workspace = true }
 
 [features]
@@ -31,8 +29,4 @@ bigquery = [
     "dep:futures",
     "dep:gcp-bigquery-client",
     "dep:prost"
-]
-memory = [
-    "dep:tokio",
-    "tokio/sync"
 ]

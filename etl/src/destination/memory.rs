@@ -1,9 +1,10 @@
-use etl::destination::Destination;
-use etl::error::EtlResult;
-use etl::types::{Event, TableId, TableRow, TableSchema};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::info;
+
+use crate::destination::Destination;
+use crate::error::EtlResult;
+use crate::types::{Event, TableId, TableRow, TableSchema};
 
 #[derive(Debug)]
 struct Inner {

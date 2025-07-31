@@ -16,11 +16,11 @@ use crate::concurrency::signal::SignalRx;
 use crate::conversions::event::{Event, EventType, convert_message_to_event};
 use crate::destination::Destination;
 use crate::error::{ErrorKind, EtlError, EtlResult};
-use crate::pipeline::PipelineId;
 use crate::replication::client::PgReplicationClient;
 use crate::replication::slot::get_slot_name;
 use crate::replication::stream::EventsStream;
 use crate::schema::SchemaCache;
+use crate::types::PipelineId;
 use crate::workers::base::WorkerType;
 use crate::{bail, etl_error};
 

@@ -13,57 +13,66 @@ use super::{ArrayCell, Cell, numeric::PgNumeric};
 pub struct TextFormatConverter;
 
 impl TextFormatConverter {
-    pub fn default_value(typ: &Type) -> Cell {
+    pub fn default_value(typ: &Type) -> EtlResult<Cell> {
         const DEFAULT_DATE: NaiveDate = NaiveDate::from_ymd_opt(1, 1, 1).unwrap();
         const DEFAULT_TIMESTAMP: NaiveDateTime = NaiveDateTime::new(DEFAULT_DATE, NaiveTime::MIN);
         const DEFAULT_TIMESTAMPTZ: DateTime<Utc> =
             DateTime::<Utc>::from_naive_utc_and_offset(DEFAULT_TIMESTAMP, Utc);
 
         match *typ {
-            Type::BOOL => Cell::Bool(bool::default()),
-            Type::BOOL_ARRAY => Cell::Array(ArrayCell::Bool(Vec::default())),
+            Type::BOOL => Ok(Cell::Bool(bool::default())),
+            Type::BOOL_ARRAY => Ok(Cell::Array(ArrayCell::Bool(Vec::default()))),
             Type::CHAR | Type::BPCHAR | Type::VARCHAR | Type::NAME | Type::TEXT => {
-                Cell::String(String::default())
+                Ok(Cell::String(String::default()))
             }
             Type::CHAR_ARRAY
             | Type::BPCHAR_ARRAY
             | Type::VARCHAR_ARRAY
             | Type::NAME_ARRAY
-            | Type::TEXT_ARRAY => Cell::Array(ArrayCell::String(Vec::default())),
-            Type::INT2 => Cell::I16(i16::default()),
-            Type::INT2_ARRAY => Cell::Array(ArrayCell::I16(Vec::default())),
-            Type::INT4 => Cell::I32(i32::default()),
-            Type::INT4_ARRAY => Cell::Array(ArrayCell::I32(Vec::default())),
-            Type::INT8 => Cell::I64(i64::default()),
-            Type::INT8_ARRAY => Cell::Array(ArrayCell::I64(Vec::default())),
-            Type::FLOAT4 => Cell::F32(f32::default()),
-            Type::FLOAT4_ARRAY => Cell::Array(ArrayCell::F32(Vec::default())),
-            Type::FLOAT8 => Cell::F64(f64::default()),
-            Type::FLOAT8_ARRAY => Cell::Array(ArrayCell::F64(Vec::default())),
-            Type::NUMERIC => Cell::Numeric(PgNumeric::default()),
-            Type::NUMERIC_ARRAY => Cell::Array(ArrayCell::Numeric(Vec::default())),
-            Type::BYTEA => Cell::Bytes(Vec::default()),
-            Type::BYTEA_ARRAY => Cell::Array(ArrayCell::Bytes(Vec::default())),
-            Type::DATE => Cell::Date(DEFAULT_DATE),
-            Type::DATE_ARRAY => Cell::Array(ArrayCell::Date(Vec::default())),
-            Type::TIME => Cell::Time(NaiveTime::MIN),
-            Type::TIME_ARRAY => Cell::Array(ArrayCell::Time(Vec::default())),
-            Type::TIMESTAMP => Cell::TimeStamp(DEFAULT_TIMESTAMP),
-            Type::TIMESTAMP_ARRAY => Cell::Array(ArrayCell::TimeStamp(Vec::default())),
-            Type::TIMESTAMPTZ => Cell::TimeStampTz(DEFAULT_TIMESTAMPTZ),
-            Type::TIMESTAMPTZ_ARRAY => Cell::Array(ArrayCell::TimeStampTz(Vec::default())),
-            Type::UUID => Cell::Uuid(Uuid::default()),
-            Type::UUID_ARRAY => Cell::Array(ArrayCell::Uuid(Vec::default())),
-            Type::JSON | Type::JSONB => Cell::Json(serde_json::Value::default()),
-            Type::JSON_ARRAY | Type::JSONB_ARRAY => Cell::Array(ArrayCell::Json(Vec::default())),
-            Type::OID => Cell::U32(u32::default()),
-            Type::OID_ARRAY => Cell::Array(ArrayCell::U32(Vec::default())),
+            | Type::TEXT_ARRAY => Ok(Cell::Array(ArrayCell::String(Vec::default()))),
+            Type::INT2 => Ok(Cell::I16(i16::default())),
+            Type::INT2_ARRAY => Ok(Cell::Array(ArrayCell::I16(Vec::default()))),
+            Type::INT4 => Ok(Cell::I32(i32::default())),
+            Type::INT4_ARRAY => Ok(Cell::Array(ArrayCell::I32(Vec::default()))),
+            Type::INT8 => Ok(Cell::I64(i64::default())),
+            Type::INT8_ARRAY => Ok(Cell::Array(ArrayCell::I64(Vec::default()))),
+            Type::FLOAT4 => Ok(Cell::F32(f32::default())),
+            Type::FLOAT4_ARRAY => Ok(Cell::Array(ArrayCell::F32(Vec::default()))),
+            Type::FLOAT8 => Ok(Cell::F64(f64::default())),
+            Type::FLOAT8_ARRAY => Ok(Cell::Array(ArrayCell::F64(Vec::default()))),
+            Type::NUMERIC => Ok(Cell::Numeric(PgNumeric::default())),
+            Type::NUMERIC_ARRAY => Ok(Cell::Array(ArrayCell::Numeric(Vec::default()))),
+            Type::BYTEA => Ok(Cell::Bytes(Vec::default())),
+            Type::BYTEA_ARRAY => Ok(Cell::Array(ArrayCell::Bytes(Vec::default()))),
+            Type::DATE => Ok(Cell::Date(DEFAULT_DATE)),
+            Type::DATE_ARRAY => Ok(Cell::Array(ArrayCell::Date(Vec::default()))),
+            Type::TIME => Ok(Cell::Time(NaiveTime::MIN)),
+            Type::TIME_ARRAY => Ok(Cell::Array(ArrayCell::Time(Vec::default()))),
+            Type::TIMESTAMP => Ok(Cell::TimeStamp(DEFAULT_TIMESTAMP)),
+            Type::TIMESTAMP_ARRAY => Ok(Cell::Array(ArrayCell::TimeStamp(Vec::default()))),
+            Type::TIMESTAMPTZ => Ok(Cell::TimeStampTz(DEFAULT_TIMESTAMPTZ)),
+            Type::TIMESTAMPTZ_ARRAY => Ok(Cell::Array(ArrayCell::TimeStampTz(Vec::default()))),
+            Type::UUID => Ok(Cell::Uuid(Uuid::default())),
+            Type::UUID_ARRAY => Ok(Cell::Array(ArrayCell::Uuid(Vec::default()))),
+            Type::JSON | Type::JSONB => Ok(Cell::Json(serde_json::Value::default())),
+            Type::JSON_ARRAY | Type::JSONB_ARRAY => {
+                Ok(Cell::Array(ArrayCell::Json(Vec::default())))
+            }
+            Type::OID => Ok(Cell::U32(u32::default())),
+            Type::OID_ARRAY => Ok(Cell::Array(ArrayCell::U32(Vec::default()))),
             #[cfg(feature = "unknown-types-to-bytes")]
-            _ => Cell::String(String::default()),
+            _ => Ok(Cell::String(String::default())),
             #[cfg(not(feature = "unknown-types-to-bytes"))]
-            _ => Err(CdcEventConversionError::UnsupportedType(
-                typ.name().to_string(),
-            )),
+            _ => {
+                bail!(
+                    ErrorKind::ConversionError,
+                    "Unsupported type",
+                    format!(
+                        "The type {} is not supported, enable 'unknown-types-to-bytes' if you want to treat it as 'string'",
+                        typ.name()
+                    )
+                )
+            }
         }
     }
 
@@ -219,9 +228,16 @@ impl TextFormatConverter {
             #[cfg(feature = "unknown-types-to-bytes")]
             _ => Ok(Cell::String(str.to_string())),
             #[cfg(not(feature = "unknown-types-to-bytes"))]
-            _ => Err(CdcEventConversionError::UnsupportedType(
-                typ.name().to_string(),
-            )),
+            _ => {
+                bail!(
+                    ErrorKind::ConversionError,
+                    "Unsupported type",
+                    format!(
+                        "The type {} is not supported, enable 'unknown-types-to-bytes' if you want to treat it as 'string'",
+                        typ.name()
+                    )
+                )
+            }
         }
     }
 

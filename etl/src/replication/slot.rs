@@ -1,7 +1,7 @@
 use crate::bail;
 use crate::error::EtlError;
 use crate::error::{ErrorKind, EtlResult};
-use crate::pipeline::PipelineId;
+use crate::types::PipelineId;
 use crate::workers::base::WorkerType;
 
 /// Maximum length for a PostgreSQL replication slot name in bytes.

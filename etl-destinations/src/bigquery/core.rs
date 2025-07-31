@@ -170,6 +170,11 @@ impl BigQueryDestination {
         })
     }
 
+    /// Returns the BigQuery table id as [`String`] for a supplied [`TableName`].
+    pub fn table_name_to_bigquery_table_id(table_name: &TableName) -> String {
+        format!("{}_{}", table_name.schema, table_name.name)
+    }
+
     /// Loads BigQuery table ID and descriptor that are used for streaming operations.
     ///
     /// Returns the BigQuery-formatted table name and its column descriptor for streaming operations.
@@ -197,7 +202,7 @@ impl BigQueryDestination {
             ))
         })?;
 
-        let table_id = table_schema.name.as_bigquery_table_id();
+        let table_id = Self::table_name_to_bigquery_table_id(&table_schema.name);
         let table_descriptor = BigQueryClient::column_schemas_to_table_descriptor(
             &table_schema.column_schemas,
             use_cdc_sequence_column,
@@ -219,7 +224,7 @@ impl BigQueryDestination {
             .client
             .create_table_if_missing(
                 &dataset_id,
-                &table_schema.name.as_bigquery_table_id(),
+                &Self::table_name_to_bigquery_table_id(&table_schema.name),
                 &table_schema.column_schemas,
                 inner.max_staleness_mins,
             )

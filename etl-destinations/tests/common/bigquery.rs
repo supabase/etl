@@ -97,7 +97,7 @@ impl BigQueryDatabase {
 
         let project_id = self.project_id();
         let dataset_id = self.dataset_id();
-        let table_id = table_name.as_bigquery_table_id();
+        let table_id = BigQueryDestination::table_name_to_bigquery_table_id(&table_name);
 
         let full_table_path = format!("`{project_id}.{dataset_id}.{table_id}`");
 

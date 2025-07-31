@@ -2,7 +2,7 @@ use etl::types::{ArrayCell, Cell, TableRow};
 use prost::bytes;
 
 #[derive(Debug)]
-pub struct BigQueryTableRow(TableRow);
+pub struct BigQueryTableRow(pub TableRow);
 
 impl prost::Message for BigQueryTableRow {
     fn encode_raw(&self, buf: &mut impl bytes::BufMut)

@@ -26,10 +26,8 @@ futures = { workspace = true }
 pg_escape = { workspace = true }
 pin-project-lite = { workspace = true }
 postgres-replication = { workspace = true }
-prost = { workspace = true, optional = true }
 rustls = { workspace = true, features = ["aws-lc-rs", "logging"] }
 rustls-pemfile = { workspace = true, features = ["std"] }
-rand = { workspace = true, features = ["std"] }
 serde_json = { workspace = true, features = ["std"] }
 sqlx = { workspace = true, features = ["runtime-tokio-rustls", "postgres"] }
 tokio = { workspace = true, features = ["rt-multi-thread"] }
@@ -47,10 +45,12 @@ uuid = { workspace = true, features = ["v4"] }
 postgres = { workspace = true, features = ["test-utils", "tokio"] }
 telemetry = { workspace = true }
 
+rand = { workspace = true, features = ["thread_rng"] }
+
 
 [features]
 unknown-types-to-bytes = []
-test-utils = []
+test-utils = ["postgres/test-utils"]
 failpoints = ["fail/failpoints"]
 internals = []
 default = ["unknown-types-to-bytes"]

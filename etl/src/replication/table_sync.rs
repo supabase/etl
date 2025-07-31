@@ -14,13 +14,13 @@ use crate::concurrency::signal::SignalTx;
 use crate::concurrency::stream::BatchStream;
 use crate::destination::Destination;
 use crate::error::{ErrorKind, EtlError, EtlResult};
-use crate::pipeline::PipelineId;
 use crate::replication::client::PgReplicationClient;
 use crate::replication::slot::get_slot_name;
 use crate::replication::stream::TableCopyStream;
 use crate::schema::SchemaCache;
 use crate::state::store::base::StateStore;
 use crate::state::table::{TableReplicationPhase, TableReplicationPhaseType};
+use crate::types::PipelineId;
 use crate::workers::base::WorkerType;
 use crate::workers::table_sync::TableSyncWorkerState;
 #[cfg(feature = "failpoints")]

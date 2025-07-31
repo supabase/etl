@@ -3,7 +3,6 @@ use etl::etl_error;
 use etl::types::{Cell, ColumnSchema, TableRow, Type};
 use futures::StreamExt;
 use gcp_bigquery_client::google::cloud::bigquery::storage::v1::RowError;
-use gcp_bigquery_client::model::row;
 use gcp_bigquery_client::storage::{ColumnMode, StorageApi};
 use gcp_bigquery_client::yup_oauth2::parse_service_account_key;
 use gcp_bigquery_client::{
@@ -14,6 +13,8 @@ use gcp_bigquery_client::{
 };
 use std::fmt;
 use tracing::info;
+
+use crate::bigquery::encoding::BigQueryTableRow;
 
 /// Maximum byte size for streaming data to BigQuery.
 const MAX_SIZE_BYTES: usize = 9 * 1024 * 1024;
@@ -184,6 +185,12 @@ impl BigQueryClient {
         table_descriptor: &TableDescriptor,
         table_rows: Vec<TableRow>,
     ) -> EtlResult<()> {
+        // We have to map table rows into the new type due to the limitations of how Rust works.
+        let table_rows = table_rows
+            .into_iter()
+            .map(|row| BigQueryTableRow(row))
+            .collect::<Vec<_>>();
+
         // We create a slice on table rows, which will be updated while the streaming progresses.
         //
         // Using a slice allows us to deallocate the vector only at the end of streaming, which leads
@@ -205,12 +212,21 @@ impl BigQueryClient {
                 .storage_mut()
                 .append_rows(&default_stream, rows, ETL_TRACE_ID.to_owned())
                 .await
-                .map(bq_error_to_etl_error)?;
+                .map_err(bq_error_to_etl_error)?;
 
             if let Some(append_rows_response) = append_rows_stream.next().await {
-                let append_rows_response = append_rows_response.map_err(BQError::from)?;
+                let append_rows_response = append_rows_response
+                    .map_err(BQError::from)
+                    .map_err(bq_error_to_etl_error)?;
                 if !append_rows_response.row_errors.is_empty() {
-                    return Err(append_rows_response.row_errors.into());
+                    // We convert the error into an `ETLError`.
+                    let row_errors = append_rows_response
+                        .row_errors
+                        .into_iter()
+                        .map(|err| row_error_to_etl_error(err))
+                        .collect::<Vec<_>>();
+
+                    return Err(row_errors.into());
                 }
             }
 

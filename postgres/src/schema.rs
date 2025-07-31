@@ -37,14 +37,6 @@ impl TableName {
     }
 }
 
-#[cfg(feature = "bigquery")]
-impl TableName {
-    /// Returns the BigQuery table id as `String` for this [`TableName`].
-    pub fn as_bigquery_table_id(&self) -> String {
-        format!("{}_{}", self.schema, self.name)
-    }
-}
-
 impl fmt::Display for TableName {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_fmt(format_args!("{0}.{1}", self.schema, self.name))
