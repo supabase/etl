@@ -34,7 +34,7 @@ pub struct PipelineConfig {
 /// Has the same fields as [`PipelineConfig`] except from
 /// the required fields. These two structs should be kept
 /// in sync.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct OptionalPipelineConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub batch: Option<BatchConfig>,
