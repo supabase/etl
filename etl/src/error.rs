@@ -24,7 +24,7 @@ pub struct EtlError {
 /// This enum supports different error patterns while maintaining a unified interface.
 /// Users should not interact with this type directly but use [`EtlError`] methods instead.
 #[derive(Debug)]
-pub enum ErrorRepr {
+enum ErrorRepr {
     /// Error with kind and static description
     WithDescription(ErrorKind, &'static str),
     /// Error with kind, static description, and dynamic detail

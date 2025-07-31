@@ -1,4 +1,5 @@
-use crate::error::EtlResult;
+use etl::error::EtlResult;
+use etl::types::{Cell, TableRow};
 use futures::StreamExt;
 use gcp_bigquery_client::storage::{ColumnMode, StorageApi};
 use gcp_bigquery_client::yup_oauth2::parse_service_account_key;
@@ -12,9 +13,6 @@ use postgres::schema::ColumnSchema;
 use std::fmt;
 use tokio_postgres::types::Type;
 use tracing::info;
-
-use crate::conversions::Cell;
-use crate::conversions::table_row::TableRow;
 
 /// Maximum byte size for streaming data to BigQuery.
 const MAX_SIZE_BYTES: usize = 9 * 1024 * 1024;

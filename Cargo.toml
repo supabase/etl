@@ -1,10 +1,11 @@
 [workspace]
 resolver = "2"
-members = ["api", "config", "etl", "postgres", "replicator", "telemetry"]
+members = ["api", "config", "etl-destinations", "etl", "postgres", "replicator", "telemetry"]
 
 [workspace.dependencies]
 api = { path = "api", default-features = false }
 config = { path = "config", default-features = false }
+etl-destinations = { path = "etl-destinations", default-features = false }
 etl = { path = "etl", default-features = false }
 postgres = { path = "postgres", default-features = false }
 replicator = { path = "replicator", default-features = false }

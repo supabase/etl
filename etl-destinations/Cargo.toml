@@ -1,0 +1,27 @@
+[package]
+name = "etl-destinations"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+etl = { workspace = true }
+
+futures = { workspace = true, optional = true }
+gcp-bigquery-client = { workspace = true, optional = true, features = [
+    "rust-tls",
+    "aws-lc-rs",
+] }
+prost = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }
+tracing = { workspace = true, default-features = true }
+
+[features]
+bigquery = [
+    "dep:futures",
+    "dep:gcp-bigquery-client",
+    "dep:prost"
+]
+memory = [
+    "dep:tokio",
+    "tokio/sync"
+]

@@ -1,20 +1,18 @@
+use etl::destination::Destination;
+use etl::error::{ErrorKind, EtlError, EtlResult};
+use etl::schema::SchemaCache;
+use etl::types::{
+    Cell, ColumnSchema, Event, PgLsn, TableId, TableName, TableRow, TableSchema, Type,
+};
 use gcp_bigquery_client::model::query_request::QueryRequest;
 use gcp_bigquery_client::storage::TableDescriptor;
-use postgres::schema::{ColumnSchema, TableId, TableName, TableSchema};
 use std::collections::HashMap;
 use std::ops::Deref;
 use std::sync::{Arc, LazyLock};
 use tokio::sync::Mutex;
-use tokio_postgres::types::{PgLsn, Type};
 use tracing::{debug, info, warn};
 
-use crate::clients::bigquery::{BigQueryClient, BigQueryOperationType};
-use crate::conversions::Cell;
-use crate::conversions::event::Event;
-use crate::conversions::table_row::TableRow;
-use crate::destination::base::Destination;
-use crate::error::{ErrorKind, EtlError, EtlResult};
-use crate::schema::cache::SchemaCache;
+use crate::bigquery::client::{BigQueryClient, BigQueryOperationType};
 
 /// Table name for storing ETL table schema metadata in BigQuery.
 const ETL_TABLE_SCHEMAS_NAME: &str = "etl_table_schemas";
@@ -678,8 +676,6 @@ impl Destination for BigQueryDestination {
 mod tests {
     use postgres::schema::{ColumnSchema, TableName, TableSchema};
     use tokio_postgres::types::Type;
-
-    use crate::conversions::Cell;
 
     use super::*;
 

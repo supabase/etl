@@ -9,14 +9,14 @@ use tracing::{Instrument, debug, error, info};
 
 use crate::concurrency::shutdown::ShutdownRx;
 use crate::concurrency::signal::{SignalTx, create_signal};
-use crate::destination::base::Destination;
+use crate::destination::Destination;
 use crate::etl_error;
 use crate::pipeline::PipelineId;
 use crate::replication::apply::{ApplyLoopHook, start_apply_loop};
 use crate::replication::client::PgReplicationClient;
 use crate::replication::common::get_table_replication_states;
 use crate::replication::slot::get_slot_name;
-use crate::schema::cache::SchemaCache;
+use crate::schema::SchemaCache;
 use crate::state::store::base::StateStore;
 use crate::state::table::{TableReplicationPhase, TableReplicationPhaseType};
 use crate::workers::base::{Worker, WorkerHandle, WorkerType};

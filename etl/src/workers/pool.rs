@@ -7,7 +7,7 @@ use tokio::sync::{Mutex, Notify};
 use tracing::{debug, warn};
 
 use crate::concurrency::future::ReactiveFutureCallback;
-use crate::destination::base::Destination;
+use crate::destination::Destination;
 use crate::error::EtlError;
 use crate::error::{ErrorKind, EtlResult};
 use crate::etl_error;

@@ -1,12 +1,9 @@
-use postgres::schema::{TableId, TableSchema};
+use etl::destination::Destination;
+use etl::error::EtlResult;
+use etl::types::{Event, TableId, TableRow, TableSchema};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::info;
-
-use crate::conversions::event::Event;
-use crate::conversions::table_row::TableRow;
-use crate::destination::base::Destination;
-use crate::error::EtlResult;
 
 #[derive(Debug)]
 struct Inner {

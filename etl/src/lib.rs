@@ -1,16 +1,16 @@
-pub mod clients;
-pub mod concurrency;
-pub mod conversions;
+mod concurrency;
+mod conversions;
 pub mod destination;
-pub mod encryption;
+mod encryption;
 pub mod error;
 #[cfg(feature = "failpoints")]
 pub mod failpoints;
-mod macros;
+pub mod macros;
 pub mod pipeline;
-pub mod replication;
+mod replication;
 pub mod schema;
-pub mod state;
+mod state;
 #[cfg(any(test, feature = "test-utils"))]
 pub mod test_utils;
-pub mod workers;
+pub mod types;
+mod workers;

@@ -5,10 +5,10 @@ use tracing::{error, info};
 
 use crate::bail;
 use crate::concurrency::shutdown::{ShutdownTx, create_shutdown_channel};
-use crate::destination::base::Destination;
+use crate::destination::Destination;
 use crate::error::{ErrorKind, EtlError, EtlResult};
 use crate::replication::client::PgReplicationClient;
-use crate::schema::cache::SchemaCache;
+use crate::schema::SchemaCache;
 use crate::state::store::base::StateStore;
 use crate::state::table::TableReplicationPhase;
 use crate::workers::apply::{ApplyWorker, ApplyWorkerHandle};

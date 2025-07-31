@@ -1,7 +1,7 @@
 use config::shared::{BatchConfig, PgConnectionConfig, PipelineConfig, RetryConfig};
 use uuid::Uuid;
 
-use crate::destination::base::Destination;
+use crate::destination::Destination;
 use crate::pipeline::{Pipeline, PipelineId};
 use crate::state::store::base::StateStore;
 

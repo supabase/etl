@@ -7,9 +7,9 @@ use tokio::sync::{Notify, RwLock};
 
 use crate::conversions::event::{Event, EventType};
 use crate::conversions::table_row::TableRow;
-use crate::destination::base::Destination;
+use crate::destination::Destination;
 use crate::error::EtlResult;
-use crate::schema::cache::SchemaCache;
+use crate::schema::SchemaCache;
 use crate::test_utils::event::check_events_count;
 
 type EventCondition = Box<dyn Fn(&[Event]) -> bool + Send + Sync>;

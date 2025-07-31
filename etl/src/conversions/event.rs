@@ -11,7 +11,7 @@ use crate::conversions::table_row::TableRow;
 use crate::conversions::text::TextFormatConverter;
 use crate::error::EtlError;
 use crate::error::{ErrorKind, EtlResult};
-use crate::schema::cache::SchemaCache;
+use crate::schema::SchemaCache;
 use crate::{bail, etl_error};
 
 #[derive(Debug, Clone, PartialEq)]
