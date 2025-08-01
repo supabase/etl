@@ -19,10 +19,6 @@ config = { workspace = true }
 postgres = { workspace = true, features = ["tokio", "replication"] }
 
 const-oid = { workspace = true, default-features = false }
-ring = { workspace = true, default-features = false }
-tokio-rustls = { workspace = true, default-features = false }
-x509-cert = { workspace = true, default-features = false }
-
 bytes = { workspace = true }
 byteorder = { workspace = true }
 chrono = { workspace = true }
@@ -31,6 +27,7 @@ futures = { workspace = true }
 pg_escape = { workspace = true }
 pin-project-lite = { workspace = true }
 postgres-replication = { workspace = true }
+ring = { workspace = true, default-features = false }
 rustls = { workspace = true, features = ["aws-lc-rs", "logging"] }
 rustls-pemfile = { workspace = true, features = ["std"] }
 serde_json = { workspace = true, features = ["std"] }
@@ -42,8 +39,10 @@ tokio-postgres = { workspace = true, features = [
     "with-uuid-1",
     "with-serde_json-1",
 ] }
+tokio-rustls = { workspace = true, default-features = false }
 tracing = { workspace = true, default-features = true }
 uuid = { workspace = true, features = ["v4"] }
+x509-cert = { workspace = true, default-features = false }
 
 [dev-dependencies]
 postgres = { workspace = true, features = ["test-utils", "tokio"] }
