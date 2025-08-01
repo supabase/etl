@@ -46,7 +46,7 @@ Usage Examples:
 
 use clap::{Parser, Subcommand, ValueEnum};
 use config::Environment;
-use config::shared::{BatchConfig, PgConnectionConfig, PipelineConfig, RetryConfig, TlsConfig};
+use config::shared::{BatchConfig, PgConnectionConfig, PipelineConfig, TlsConfig};
 use etl::destination::Destination;
 use etl::error::EtlResult;
 use etl::pipeline::Pipeline;
@@ -443,18 +443,13 @@ async fn start_pipeline(args: RunArgs) -> Result<(), Box<dyn Error>> {
 
     let pipeline_config = PipelineConfig {
         id: 1,
+        publication_name: args.publication_name,
         pg_connection: pg_connection_config,
         batch: BatchConfig {
             max_size: args.batch_max_size,
             max_fill_ms: args.batch_max_fill_ms,
         },
-        apply_worker_init_retry: RetryConfig {
-            max_attempts: 3,
-            initial_delay_ms: 1000,
-            max_delay_ms: 10000,
-            backoff_factor: 2.0,
-        },
-        publication_name: args.publication_name,
+        table_error_retry_delay_ms: 10000,
         max_table_sync_workers: args.max_table_sync_workers,
     };
 

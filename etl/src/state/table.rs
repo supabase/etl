@@ -1,5 +1,154 @@
+use chrono::{DateTime, Duration, Utc};
+use config::shared::PipelineConfig;
+use postgres::schema::TableId;
 use std::fmt;
 use tokio_postgres::types::PgLsn;
+
+use crate::error::{ErrorKind, EtlError};
+
+/// Represents an error that occurred during table replication.
+///
+/// Contains diagnostic information including the table that failed, the reason for failure,
+/// an optional solution suggestion, and the retry policy to apply.
+#[derive(Debug)]
+#[allow(dead_code)]
+pub struct TableReplicationError {
+    table_id: TableId,
+    reason: String,
+    solution: Option<String>,
+    retry_policy: RetryPolicy,
+}
+
+impl TableReplicationError {
+    /// Creates a new [`TableReplicationError`] with a suggested solution.
+    pub fn with_solution(
+        table_id: TableId,
+        reason: impl ToString,
+        solution: impl ToString,
+        retry_policy: RetryPolicy,
+    ) -> Self {
+        Self {
+            table_id,
+            reason: reason.to_string(),
+            solution: Some(solution.to_string()),
+            retry_policy,
+        }
+    }
+
+    /// Creates a new [`TableReplicationError`] without a suggested solution.
+    pub fn without_solution(
+        table_id: TableId,
+        reason: impl ToString,
+        retry_policy: RetryPolicy,
+    ) -> Self {
+        Self {
+            table_id,
+            reason: reason.to_string(),
+            solution: None,
+            retry_policy,
+        }
+    }
+
+    /// Returns the [`TableId`] of the table that failed replication.
+    pub fn table_id(&self) -> TableId {
+        self.table_id
+    }
+
+    /// Returns the retry policy for this error.
+    pub fn retry_policy(&self) -> &RetryPolicy {
+        &self.retry_policy
+    }
+
+    /// Converts an [`EtlError`] to a [`TableReplicationError`] for a specific table.
+    ///
+    /// Determines appropriate retry policies based on the error kind.
+    ///
+    /// Note that this conversion is constantly improving since during testing and operation of ETL
+    /// we might notice edge cases that could be manually handled.
+    pub fn from_etl_error(config: &PipelineConfig, table_id: TableId, error: &EtlError) -> Self {
+        let retry_duration = Duration::milliseconds(config.table_error_retry_delay_ms as i64);
+        match error.kind() {
+            // Transient errors with retry
+            ErrorKind::ConnectionFailed => Self::with_solution(
+                table_id,
+                error,
+                "Check network connectivity and database availability",
+                RetryPolicy::retry_in(retry_duration),
+            ),
+            ErrorKind::AuthenticationError => Self::with_solution(
+                table_id,
+                error,
+                "Check credentials and token validity",
+                RetryPolicy::retry_in(retry_duration),
+            ),
+
+            // Errors that could disappear after user intervention
+            ErrorKind::SourceSchemaError => Self::with_solution(
+                table_id,
+                error,
+                "Fix the schema of the Postgres database",
+                RetryPolicy::ManualRetry,
+            ),
+            ErrorKind::ConfigError => Self::with_solution(
+                table_id,
+                error,
+                "Fix application or service configuration",
+                RetryPolicy::ManualRetry,
+            ),
+            ErrorKind::ReplicationSlotAlreadyExists => Self::with_solution(
+                table_id,
+                error,
+                "Remove the existing slot from the Postgres database",
+                RetryPolicy::ManualRetry,
+            ),
+            ErrorKind::ReplicationSlotNotCreated => Self::with_solution(
+                table_id,
+                error,
+                "Check if the Postgres database allows the creation of new replication slots",
+                RetryPolicy::ManualRetry,
+            ),
+
+            // Special handling for error kinds used during failure injection.
+            #[cfg(feature = "failpoints")]
+            ErrorKind::WithNoRetry => {
+                Self::with_solution(table_id, error, "Cannot retry", RetryPolicy::NoRetry)
+            }
+            #[cfg(feature = "failpoints")]
+            ErrorKind::WithManualRetry => {
+                Self::with_solution(table_id, error, "Retry manually", RetryPolicy::ManualRetry)
+            }
+            #[cfg(feature = "failpoints")]
+            ErrorKind::WithTimedRetry => Self::with_solution(
+                table_id,
+                error,
+                "Will retry",
+                RetryPolicy::retry_in(retry_duration),
+            ),
+
+            // By default, all errors are not retriable
+            _ => Self::without_solution(table_id, error, RetryPolicy::NoRetry),
+        }
+    }
+}
+
+/// Defines the retry strategy for a failed table replication.
+#[derive(Debug)]
+pub enum RetryPolicy {
+    /// No retry should be attempted, the system has to be fixed by hand.
+    NoRetry,
+    /// Retry after it was manually triggered.
+    ManualRetry,
+    /// Retry after the specified timestamp.
+    TimedRetry { next_retry: DateTime<Utc> },
+}
+
+impl RetryPolicy {
+    pub fn retry_in(duration: Duration) -> Self {
+        Self::TimedRetry {
+            next_retry: Utc::now() + duration,
+        }
+    }
+}
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum TableReplicationPhase {
@@ -42,6 +191,7 @@ pub enum TableReplicationPhase {
     /// Set by either the table-sync worker or the apply worker when a table is no
     /// longer being synced because of an error. Tables in this state can only
     /// start syncing again after a manual intervention from the user.
+    // TODO: turn this into a generic `Error` state with more information.
     Skipped,
 }
 
@@ -51,8 +201,14 @@ impl TableReplicationPhase {
     }
 }
 
-// TODO: we may not need as many phases as we have now.
-// Evaluate this once the code is more mature.
+impl From<TableReplicationError> for TableReplicationPhase {
+    fn from(_value: TableReplicationError) -> Self {
+        // TODO: implement actual conversion with proper values once `Skipped` is converted to `Errored`
+        //  and the fields are added.
+        Self::Skipped
+    }
+}
+
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum TableReplicationPhaseType {
     Init,

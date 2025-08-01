@@ -32,7 +32,7 @@ The pipeline will automatically:
 */
 
 use clap::{Args, Parser};
-use etl::config::{BatchConfig, PgConnectionConfig, PipelineConfig, RetryConfig, TlsConfig};
+use etl::config::{BatchConfig, PgConnectionConfig, PipelineConfig, TlsConfig};
 use etl::pipeline::Pipeline;
 use etl::state::store::memory::MemoryStateStore;
 use etl_destinations::bigquery::{BigQueryDestination, install_crypto_provider_for_bigquery};
@@ -172,20 +172,14 @@ async fn main_impl() -> Result<(), Box<dyn Error>> {
 
     // Create pipeline configuration with batching and retry settings
     let pipeline_config = PipelineConfig {
-        id: 1, // Pipeline identifier (useful when running multiple pipelines)
+        id: 1, // Using a simple ID for the example
+        publication_name: args.publication,
         pg_connection: pg_connection_config,
         batch: BatchConfig {
             max_size: args.bq_args.max_batch_size,
             max_fill_ms: args.bq_args.max_batch_fill_duration_ms,
         },
-        // Retry configuration for handling transient failures
-        apply_worker_init_retry: RetryConfig {
-            max_attempts: 3,
-            initial_delay_ms: 1000,
-            max_delay_ms: 10000,
-            backoff_factor: 2.0, // Exponential backoff
-        },
-        publication_name: args.publication,
+        table_error_retry_delay_ms: 10000,
         max_table_sync_workers: args.bq_args.max_table_sync_workers,
     };
 

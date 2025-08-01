@@ -8,7 +8,7 @@ use api::routes::pipelines::{
 };
 use api::routes::sources::{CreateSourceRequest, CreateSourceResponse};
 use config::SerializableSecretString;
-use config::shared::{BatchConfig, RetryConfig};
+use config::shared::BatchConfig;
 use postgres::sqlx::test_utils::{create_pg_database, drop_pg_database};
 use reqwest::StatusCode;
 use secrecy::ExposeSecret;
@@ -32,12 +32,7 @@ pub fn new_pipeline_config() -> PipelineConfig {
             max_size: 1000,
             max_fill_ms: 5,
         }),
-        apply_worker_init_retry: Some(RetryConfig {
-            max_attempts: 5,
-            initial_delay_ms: 1000,
-            max_delay_ms: 2000,
-            backoff_factor: 0.5,
-        }),
+        table_error_retry_delay_ms: Some(10000),
         max_table_sync_workers: Some(2),
     }
 }
@@ -49,19 +44,14 @@ pub fn updated_pipeline_config() -> PipelineConfig {
             max_size: 2000,
             max_fill_ms: 10,
         }),
-        apply_worker_init_retry: Some(RetryConfig {
-            max_attempts: 10,
-            initial_delay_ms: 2000,
-            max_delay_ms: 4000,
-            backoff_factor: 1.0,
-        }),
+        table_error_retry_delay_ms: Some(20000),
         max_table_sync_workers: Some(4),
     }
 }
 
 pub enum ConfigUpdateType {
     Batch(BatchConfig),
-    ApplyWorkerInitRetry(RetryConfig),
+    TableErrorRetryDelayMs(u64),
     MaxTableSyncWorkers(u16),
 }
 
@@ -71,17 +61,19 @@ pub fn partially_updated_optional_pipeline_config(
     match update {
         ConfigUpdateType::Batch(batch_config) => OptionalPipelineConfig {
             batch: Some(batch_config),
-            apply_worker_init_retry: None,
+            table_error_retry_delay_ms: None,
             max_table_sync_workers: None,
         },
-        ConfigUpdateType::ApplyWorkerInitRetry(retry_config) => OptionalPipelineConfig {
-            batch: None,
-            apply_worker_init_retry: Some(retry_config),
-            max_table_sync_workers: None,
-        },
+        ConfigUpdateType::TableErrorRetryDelayMs(table_error_retry_delay_ms) => {
+            OptionalPipelineConfig {
+                batch: None,
+                table_error_retry_delay_ms: Some(table_error_retry_delay_ms),
+                max_table_sync_workers: None,
+            }
+        }
         ConfigUpdateType::MaxTableSyncWorkers(n) => OptionalPipelineConfig {
             batch: None,
-            apply_worker_init_retry: None,
+            table_error_retry_delay_ms: None,
             max_table_sync_workers: Some(n),
         },
     }
@@ -93,12 +85,7 @@ pub fn updated_optional_pipeline_config() -> OptionalPipelineConfig {
             max_size: 1_000_000,
             max_fill_ms: 100,
         }),
-        apply_worker_init_retry: Some(RetryConfig {
-            max_attempts: 3,
-            initial_delay_ms: 1000,
-            max_delay_ms: 5000,
-            backoff_factor: 2.0,
-        }),
+        table_error_retry_delay_ms: Some(10000),
         max_table_sync_workers: Some(8),
     }
 }
@@ -866,14 +853,9 @@ async fn pipeline_config_can_be_updated() {
 
     // Act
     let update_request = UpdatePipelineConfigRequest {
-        config: partially_updated_optional_pipeline_config(ConfigUpdateType::ApplyWorkerInitRetry(
-            RetryConfig {
-                max_attempts: 10,
-                initial_delay_ms: 2000,
-                max_delay_ms: 5000,
-                backoff_factor: 3.0,
-            },
-        )),
+        config: partially_updated_optional_pipeline_config(
+            ConfigUpdateType::TableErrorRetryDelayMs(20000),
+        ),
     };
     let response = app
         .update_pipeline_config(tenant_id, pipeline_id, &update_request)

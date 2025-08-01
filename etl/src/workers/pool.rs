@@ -6,41 +6,29 @@ use std::sync::Arc;
 use tokio::sync::{Mutex, Notify};
 use tracing::{debug, warn};
 
-use crate::concurrency::future::ReactiveFutureCallback;
 use crate::destination::Destination;
-use crate::error::EtlError;
-use crate::error::{ErrorKind, EtlResult};
-use crate::etl_error;
+use crate::error::EtlResult;
 use crate::state::store::StateStore;
 use crate::workers::base::{Worker, WorkerHandle};
 use crate::workers::table_sync::{TableSyncWorker, TableSyncWorkerHandle, TableSyncWorkerState};
 
 #[derive(Debug)]
-pub enum TableSyncWorkerInactiveReason {
-    Completed,
-    Errored(String),
-}
-
-#[derive(Debug)]
 pub struct TableSyncWorkerPoolInner {
     /// The table sync workers that are currently active.
     active: HashMap<TableId, TableSyncWorkerHandle>,
-    /// The table sync workers that are inactive, meaning that they are completed or errored.
-    ///
-    /// Having the state of finished workers gives us the power to reschedule failed table sync
-    /// workers very cheaply since the state can be fed into a new table worker future as if it was
-    /// read initially from the state store.
-    // TODO: make it a bounded history to guard memory usage.
-    inactive: HashMap<TableId, Vec<(TableSyncWorkerInactiveReason, TableSyncWorkerHandle)>>,
-    waiting: Option<Arc<Notify>>,
+    /// The table sync workers that are finished, meaning that either they completed or errored.
+    finished: HashMap<TableId, Vec<TableSyncWorkerHandle>>,
+    /// A [`Notify`] instance which notifies subscribers when there is a change in the pool (e.g.
+    /// a new worker changes from active to inactive).
+    pool_update: Option<Arc<Notify>>,
 }
 
 impl TableSyncWorkerPoolInner {
     fn new() -> Self {
         Self {
             active: HashMap::new(),
-            inactive: HashMap::new(),
-            waiting: None,
+            finished: HashMap::new(),
+            pool_update: None,
         }
     }
 
@@ -57,6 +45,7 @@ impl TableSyncWorkerPoolInner {
 
         let handle = worker.start().await?;
         self.active.insert(table_id, handle);
+
         debug!(
             "successfully added worker for table {} to the pool",
             table_id
@@ -65,32 +54,27 @@ impl TableSyncWorkerPoolInner {
         Ok(true)
     }
 
-    pub fn get_active_worker_state(&self, table_id: TableId) -> Option<TableSyncWorkerState> {
-        let state = self.active.get(&table_id)?.state().clone();
-        debug!("retrieved worker state for table {table_id}");
-
-        Some(state)
-    }
-
-    pub fn set_worker_finished(
-        &mut self,
-        table_id: TableId,
-        reason: TableSyncWorkerInactiveReason,
-    ) {
+    pub fn mark_worker_finished(&mut self, table_id: TableId) {
         let removed_worker = self.active.remove(&table_id);
 
-        if let Some(waiting) = self.waiting.take() {
+        if let Some(waiting) = self.pool_update.take() {
             waiting.notify_one();
         }
 
         if let Some(removed_worker) = removed_worker {
-            debug!("table sync worker finished with reason: {reason:?}",);
-
-            self.inactive
+            self.finished
                 .entry(table_id)
                 .or_default()
-                .push((reason, removed_worker));
+                .push(removed_worker);
         }
+    }
+
+    pub fn get_active_worker_state(&self, table_id: TableId) -> Option<TableSyncWorkerState> {
+        let state = self.active.get(&table_id)?.state().clone();
+
+        debug!("retrieved active worker state for table {table_id}");
+
+        Some(state)
     }
 
     pub async fn wait_all(&mut self) -> EtlResult<Option<Arc<Notify>>> {
@@ -102,31 +86,18 @@ impl TableSyncWorkerPoolInner {
         // mark itself as finished.
         if !self.active.is_empty() {
             let notify = Arc::new(Notify::new());
-            self.waiting = Some(notify.clone());
+            self.pool_update = Some(notify.clone());
 
             return Ok(Some(notify));
         }
 
         let mut errors = Vec::new();
-        for (_, workers) in mem::take(&mut self.inactive) {
-            for (finish, worker) in workers {
-                // If there is an error while waiting for the task, we can assume that there was un
-                // uncaught panic or a propagated error.
+        for (_, workers) in mem::take(&mut self.finished) {
+            for worker in workers {
+                // The `wait` method will return either an error due to a caught panic or the error
+                // returned by the worker.
                 if let Err(err) = worker.wait().await {
                     errors.push(err);
-                    continue;
-                }
-
-                // If we arrive here, it means that the worker task did fail but silently, since
-                // the error we see here was reported by the `ReactiveFuture` and swallowed.
-                // This should not happen since right now the `ReactiveFuture` is configured to
-                // re-propagate the error after marking a table sync worker as finished.
-                if let TableSyncWorkerInactiveReason::Errored(err) = finish {
-                    errors.push(etl_error!(
-                        ErrorKind::TableSyncWorkerCaughtError,
-                        "An error occurred in a table sync worker but was not propagated",
-                        err
-                    ));
                 }
             }
         }
@@ -136,16 +107,6 @@ impl TableSyncWorkerPoolInner {
         }
 
         Ok(None)
-    }
-}
-
-impl ReactiveFutureCallback<TableId> for TableSyncWorkerPoolInner {
-    fn on_complete(&mut self, id: TableId) {
-        self.set_worker_finished(id, TableSyncWorkerInactiveReason::Completed);
-    }
-
-    fn on_error(&mut self, id: TableId, error: String) {
-        self.set_worker_finished(id, TableSyncWorkerInactiveReason::Errored(error));
     }
 }
 
@@ -159,10 +120,6 @@ impl TableSyncWorkerPool {
         Self {
             inner: Arc::new(Mutex::new(TableSyncWorkerPoolInner::new())),
         }
-    }
-
-    pub fn get_inner(&self) -> Arc<Mutex<TableSyncWorkerPoolInner>> {
-        self.inner.clone()
     }
 
     pub async fn wait_all(&self) -> EtlResult<()> {

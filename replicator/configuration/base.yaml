@@ -4,11 +4,7 @@ pipeline:
   batch:
     max_size: 10000
     max_fill_ms: 1000
-  apply_worker_init_retry:
-    max_attempts: 3
-    initial_delay_ms: 250
-    max_delay_ms: 5000
-    backoff_factor: 2.0
-  max_table_sync_workers: 2
+  max_table_sync_workers: 10
+  table_error_retry_delay_ms: 1000
 supabase:
   project_ref: "abcdefghijklmnopqrst"

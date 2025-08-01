@@ -1015,7 +1015,8 @@ async fn build_replicator_config(
         // is that we want to persist a config in storage with some unset values, allowing us to interpret
         // them differently after deserialization without needing to run database migrations.
         batch: pipeline.config.batch.unwrap_or_default(),
-        apply_worker_init_retry: pipeline.config.apply_worker_init_retry.unwrap_or_default(),
+        // Hardcoding 10s for now
+        table_error_retry_delay_ms: pipeline.config.table_error_retry_delay_ms.unwrap_or(10000),
         // Hardcoding a value of 4 for now for maximum number of parallel table sync workers
         max_table_sync_workers: pipeline.config.max_table_sync_workers.unwrap_or(4),
     };

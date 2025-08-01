@@ -1,8 +1,11 @@
+use crate::bigquery::client::{BigQueryClient, BigQueryOperationType};
 use etl::destination::Destination;
 use etl::error::{ErrorKind, EtlError, EtlResult};
+use etl::etl_error;
 use etl::schema::SchemaCache;
 use etl::types::{
-    Cell, ColumnSchema, Event, PgLsn, TableId, TableName, TableRow, TableSchema, Type,
+    Cell, ColumnSchema, Event, PgLsn, TableId, TableName, TableRow, TableSchema, TruncateEvent,
+    Type,
 };
 use gcp_bigquery_client::model::query_request::QueryRequest;
 use gcp_bigquery_client::storage::TableDescriptor;
@@ -11,8 +14,6 @@ use std::ops::Deref;
 use std::sync::{Arc, LazyLock};
 use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
-
-use crate::bigquery::client::{BigQueryClient, BigQueryOperationType};
 
 /// Table name for storing ETL table schema metadata in BigQuery.
 const ETL_TABLE_SCHEMAS_NAME: &str = "etl_table_schemas";
@@ -187,19 +188,19 @@ impl BigQueryDestination {
             .schema_cache
             .as_ref()
             .ok_or_else(|| {
-                EtlError::from((
-                    ErrorKind::ConfigError,
-                    "The schema cache was not set on the destination",
-                ))
+                etl_error!(
+                    ErrorKind::InvalidState,
+                    "The schema cache was not set on the destination"
+                )
             })?
             .lock_inner()
             .await;
         let table_schema = schema_cache.get_table_schema_ref(table_id).ok_or_else(|| {
-            EtlError::from((
-                ErrorKind::DestinationSchemaError,
-                "Table schema not found in schema cache",
-                format!("table_id: {table_id}"),
-            ))
+            etl_error!(
+                ErrorKind::MissingTableSchema,
+                "Table not found in the schema cache",
+                format!("The table schema for table {table_id} was not found in the cache")
+            )
         })?;
 
         let table_id = Self::table_name_to_bigquery_table_id(&table_schema.name);
@@ -518,6 +519,50 @@ impl BigQueryDestination {
                     "'TRUNCATE' events are not supported, skipping apply of {} 'TRUNCATE' events",
                     truncate_events.len()
                 );
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Processes truncate events by executing `TRUNCATE TABLE` statements in BigQuery.
+    ///
+    /// Maps PostgreSQL table OIDs to BigQuery table names and issues truncate commands.
+    #[allow(dead_code)]
+    async fn process_truncate_events(&self, truncate_events: Vec<TruncateEvent>) -> EtlResult<()> {
+        let inner = self.inner.lock().await;
+
+        for truncate_event in truncate_events {
+            for table_id in truncate_event.rel_ids {
+                // Get table information from schema cache
+                let schema_cache = inner
+                    .schema_cache
+                    .as_ref()
+                    .ok_or_else(|| {
+                        etl_error!(
+                            ErrorKind::InvalidState,
+                            "The schema cache was not set on the destination"
+                        )
+                    })?
+                    .lock_inner()
+                    .await;
+
+                if let Some(table_schema) =
+                    schema_cache.get_table_schema_ref(&TableId::new(table_id))
+                {
+                    inner
+                        .client
+                        .truncate_table(
+                            &inner.dataset_id,
+                            &Self::table_name_to_bigquery_table_id(&table_schema.name),
+                        )
+                        .await?;
+                } else {
+                    info!(
+                        "table schema not found for table_id: {}, skipping truncate",
+                        table_id
+                    );
+                }
             }
         }
 

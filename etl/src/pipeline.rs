@@ -17,7 +17,7 @@ use crate::workers::base::{Worker, WorkerHandle};
 use crate::workers::pool::TableSyncWorkerPool;
 
 #[derive(Debug)]
-enum PipelineWorkers {
+enum PipelineState {
     NotStarted,
     Started {
         // TODO: investigate whether we could benefit from a central launcher that deals at a high-level
@@ -33,7 +33,7 @@ pub struct Pipeline<S, D> {
     config: Arc<PipelineConfig>,
     state_store: S,
     destination: D,
-    workers: PipelineWorkers,
+    state: PipelineState,
     shutdown_tx: ShutdownTx,
 }
 
@@ -55,7 +55,7 @@ where
             config: Arc::new(config),
             state_store,
             destination,
-            workers: PipelineWorkers::NotStarted,
+            state: PipelineState::NotStarted,
             shutdown_tx,
         }
     }
@@ -95,10 +95,13 @@ where
         // We create the table sync workers pool to manage all table sync workers in a central place.
         let pool = TableSyncWorkerPool::new();
 
+        // We create the permits semaphore which is used to control how many table sync workers can
+        // be running at the same time.
         let table_sync_worker_permits =
             Arc::new(Semaphore::new(self.config.max_table_sync_workers as usize));
 
-        // We create and start the apply worker.
+        // We create and start the apply worker (temporarily leaving out retries_orchestrator)
+        // TODO: Remove retries_orchestrator from ApplyWorker constructor
         let apply_worker = ApplyWorker::new(
             self.id,
             self.config.clone(),
@@ -113,9 +116,76 @@ where
         .start()
         .await?;
 
-        self.workers = PipelineWorkers::Started { apply_worker, pool };
+        self.state = PipelineState::Started { apply_worker, pool };
 
         Ok(())
+    }
+
+    pub async fn wait(self) -> EtlResult<()> {
+        let PipelineState::Started { apply_worker, pool } = self.state else {
+            info!("pipeline was not started, nothing to wait for");
+
+            return Ok(());
+        };
+
+        info!("waiting for apply worker to complete");
+
+        let mut errors = vec![];
+
+        // We first wait for the apply worker to finish, since that must be done before waiting for
+        // the table sync workers to finish, otherwise if we wait for sync workers first, we might
+        // be having the apply worker that spawns new sync workers after we waited for the current
+        // ones to finish.
+        let apply_worker_result = apply_worker.wait().await;
+        if let Err(err) = apply_worker_result {
+            errors.push(err);
+
+            // TODO: in the future we might build a system based on the `ReactiveFuture` that
+            //  automatically sends a shutdown signal to table sync workers on apply worker failure.
+            // If there was an error in the apply worker, we want to shut down all table sync
+            // workers, since without an apply worker they are lost.
+            //
+            // If we fail to send the shutdown signal, we are not going to capture the error since
+            // it means that no table sync workers are running, which is fine.
+            let _ = self.shutdown_tx.shutdown();
+
+            info!("apply worker completed with an error, shutting down table sync workers");
+        }
+
+        info!("waiting for table sync workers to complete");
+
+        // We wait for all table sync workers to finish.
+        let table_sync_workers_result = pool.wait_all().await;
+        if let Err(err) = table_sync_workers_result {
+            // We naively use the `kinds` as number of errors.
+            let errors_number = err.kinds().len();
+
+            errors.push(err);
+
+            info!("{} table sync workers failed with an error", errors_number);
+        }
+
+        if !errors.is_empty() {
+            return Err(errors.into());
+        }
+
+        Ok(())
+    }
+
+    pub fn shutdown(&self) {
+        info!("trying to shut down the pipeline");
+
+        if let Err(err) = self.shutdown_tx.shutdown() {
+            error!("failed to send shutdown signal to the pipeline: {}", err);
+            return;
+        }
+
+        info!("shut down signal successfully sent to all workers");
+    }
+
+    pub async fn shutdown_and_wait(self) -> EtlResult<()> {
+        self.shutdown();
+        self.wait().await
     }
 
     async fn prepare_schema_cache(&self, schema_cache: &SchemaCache) -> EtlResult<()> {
@@ -171,71 +241,5 @@ where
         }
 
         Ok(())
-    }
-
-    pub async fn wait(self) -> EtlResult<()> {
-        let PipelineWorkers::Started { apply_worker, pool } = self.workers else {
-            info!("pipeline was not started, nothing to wait for");
-            return Ok(());
-        };
-
-        info!("waiting for apply worker to complete");
-
-        let mut errors = vec![];
-
-        // We first wait for the apply worker to finish, since that must be done before waiting for
-        // the table sync workers to finish, otherwise if we wait for sync workers first, we might
-        // be having the apply worker that spawns new sync workers after we waited for the current
-        // ones to finish.
-        let apply_worker_result = apply_worker.wait().await;
-        if let Err(err) = apply_worker_result {
-            errors.push(err);
-
-            // TODO: in the future we might build a system based on the `ReactiveFuture` that
-            //  automatically sends a shutdown signal to table sync workers on apply worker failure.
-            // If there was an error in the apply worker, we want to shut down all table sync
-            // workers, since without an apply worker they are lost.
-            //
-            // If we fail to send the shutdown signal, we are not going to capture the error since
-            // it means that no table sync workers are running, which is fine.
-            let _ = self.shutdown_tx.shutdown();
-
-            info!("apply worker completed with an error, shutting down table sync workers");
-        } else {
-            info!("apply worker completed successfully");
-        }
-
-        info!("waiting for table sync workers to complete");
-
-        // We wait for all table sync workers to finish.
-        let table_sync_workers_result = pool.wait_all().await;
-        if let Err(err) = table_sync_workers_result {
-            errors.push(err);
-            info!("one or more table sync workers failed with an error");
-        } else {
-            info!("all table sync workers completed successfully");
-        }
-
-        if !errors.is_empty() {
-            return Err(errors.into());
-        }
-
-        Ok(())
-    }
-
-    pub fn shutdown(&self) {
-        info!("trying to shut down the pipeline");
-
-        if let Err(err) = self.shutdown_tx.shutdown() {
-            error!("failed to send shutdown signal to the pipeline: {}", err);
-            return;
-        }
-
-        info!("shut down signal successfully sent to all workers");
-    }
-
-    pub async fn shutdown_and_wait(self) -> EtlResult<()> {
-        self.shutdown();
-        self.wait().await
     }
 }

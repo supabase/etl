@@ -1,4 +1,4 @@
-use config::shared::{BatchConfig, RetryConfig};
+use config::shared::BatchConfig;
 use serde::{Deserialize, Serialize};
 use sqlx::{PgExecutor, PgTransaction};
 use std::ops::DerefMut;
@@ -25,7 +25,7 @@ pub struct PipelineConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub batch: Option<BatchConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub apply_worker_init_retry: Option<RetryConfig>,
+    pub table_error_retry_delay_ms: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(example = 4)]
     pub max_table_sync_workers: Option<u16>,
@@ -39,7 +39,7 @@ pub struct OptionalPipelineConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub batch: Option<BatchConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub apply_worker_init_retry: Option<RetryConfig>,
+    pub table_error_retry_delay_ms: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_table_sync_workers: Option<u16>,
 }
@@ -53,8 +53,8 @@ impl PipelineConfig {
             self.batch = Some(batch);
         }
 
-        if let Some(apply_worker_init_retry) = other.apply_worker_init_retry {
-            self.apply_worker_init_retry = Some(apply_worker_init_retry);
+        if let Some(table_error_retry_delay_ms) = other.table_error_retry_delay_ms {
+            self.table_error_retry_delay_ms = Some(table_error_retry_delay_ms);
         }
 
         if let Some(max_table_sync_workers) = other.max_table_sync_workers {

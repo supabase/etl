@@ -14,7 +14,7 @@ pub type EtlResult<T> = Result<T, EtlError>;
 /// [`EtlError`] provides a comprehensive error system that can represent single errors,
 /// errors with additional detail, or multiple aggregated errors. The design allows for
 /// rich error information while maintaining ergonomic usage patterns.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct EtlError {
     repr: ErrorRepr,
 }
@@ -23,7 +23,7 @@ pub struct EtlError {
 ///
 /// This enum supports different error patterns while maintaining a unified interface.
 /// Users should not interact with this type directly but use [`EtlError`] methods instead.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 enum ErrorRepr {
     /// Error with kind and static description
     WithDescription(ErrorKind, &'static str),
@@ -41,78 +41,40 @@ enum ErrorRepr {
 #[non_exhaustive]
 pub enum ErrorKind {
     /// Database connection failed or resource limitations
-    ///
-    /// Used for PostgreSQL connection errors (08xxx), resource errors (53xxx),
-    /// and general connectivity issues.
     ConnectionFailed,
     /// Query execution failed
-    ///
-    /// Used for PostgreSQL syntax errors (42xxx), BigQuery response errors,
-    /// and general SQL execution failures.
     QueryFailed,
     /// Source schema mismatch or validation error
     SourceSchemaError,
-    /// Destination schema mismatch or validation error
-    ///
-    /// Used for PostgreSQL schema object not found errors (42xxx)
-    /// and destination schema mismatches.
-    DestinationSchemaError,
     /// Missing table schema
     MissingTableSchema,
     /// Data type conversion error
-    ///
-    /// Used for PostgreSQL data conversion errors (22xxx), BigQuery column type mismatches,
-    /// UTF-8 conversion failures, and numeric parsing errors.
     ConversionError,
     /// Configuration error
-    ///
-    /// Used for BigQuery invalid metadata values and general configuration issues.
     ConfigError,
     /// Network or I/O error
-    ///
-    /// Used for PostgreSQL system errors (58xxx), BigQuery transport/request errors,
-    /// JSON I/O errors, and general I/O failures.
     IoError,
     /// Serialization error
-    ///
-    /// Used for BigQuery JSON serialization errors and data encoding failures.
     SerializationError,
     /// Deserialization error
-    ///
-    /// Used for JSON syntax/data/EOF errors and data decoding failures.
     DeserializationError,
     /// Encryption/decryption error
     EncryptionError,
     /// Authentication failed
-    ///
-    /// Used for PostgreSQL authentication errors (28xxx),
-    /// BigQuery authentication errors, and credential failures.
     AuthenticationError,
     /// Invalid state error
-    ///
-    /// Used for PostgreSQL transaction errors (40xxx, 25xxx),
-    /// BigQuery result set positioning errors, and state inconsistencies.
     InvalidState,
     /// Invalid data
-    ///
-    /// Used for BigQuery invalid column index/name errors,
-    /// UUID parsing failures, and malformed data.
     InvalidData,
     /// Data validation error
-    ///
-    /// Used for PostgreSQL constraint violations (23xxx)
-    /// and data integrity validation failures.
     ValidationError,
     /// Apply worker error
     ApplyWorkerPanic,
+    /// State rollback error,
+    StateRollbackError,
     /// Table sync worker error
     TableSyncWorkerPanic,
-    /// Table sync worker error
-    TableSyncWorkerCaughtError,
     /// Destination-specific error
-    ///
-    /// Used for BigQuery gRPC status errors, row errors,
-    /// and destination-specific failures.
     DestinationError,
     /// Replication slot not found
     ReplicationSlotNotFound,
@@ -122,6 +84,14 @@ pub enum ErrorKind {
     ReplicationSlotNotCreated,
     /// Unknown error
     Unknown,
+
+    // Special error kinds used for tests that trigger specific retry behaviors via fault injection.
+    #[cfg(feature = "failpoints")]
+    WithNoRetry,
+    #[cfg(feature = "failpoints")]
+    WithManualRetry,
+    #[cfg(feature = "failpoints")]
+    WithTimedRetry,
 }
 
 impl EtlError {
@@ -238,8 +208,6 @@ impl fmt::Display for EtlError {
 }
 
 impl error::Error for EtlError {}
-
-// Ergonomic constructors following Redis pattern
 
 /// Creates an [`EtlError`] from an error kind and static description.
 impl From<(ErrorKind, &'static str)> for EtlError {
@@ -415,7 +383,7 @@ impl From<tokio_postgres::Error> for EtlError {
                     | SqlState::UNDEFINED_COLUMN
                     | SqlState::UNDEFINED_FUNCTION
                     | SqlState::UNDEFINED_SCHEMA => (
-                        ErrorKind::DestinationSchemaError,
+                        ErrorKind::SourceSchemaError,
                         "PostgreSQL schema object not found",
                     ),
 
@@ -512,8 +480,6 @@ impl From<ParseNumericError> for EtlError {
         }
     }
 }
-
-// SQLx error conversion
 
 /// Converts [`sqlx::Error`] to [`EtlError`] with appropriate error kind.
 ///

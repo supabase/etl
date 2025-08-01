@@ -3,13 +3,15 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
-use crate::error::EtlResult;
+use crate::error::{ErrorKind, EtlError, EtlResult};
+use crate::etl_error;
 use crate::state::store::StateStore;
 use crate::state::table::TableReplicationPhase;
 
 #[derive(Debug)]
 struct Inner {
     table_replication_states: HashMap<TableId, TableReplicationPhase>,
+    table_state_history: HashMap<TableId, Vec<TableReplicationPhase>>,
 }
 
 #[derive(Debug, Clone)]
@@ -21,6 +23,7 @@ impl MemoryStateStore {
     pub fn new() -> Self {
         let inner = Inner {
             table_replication_states: HashMap::new(),
+            table_state_history: HashMap::new(),
         };
 
         Self {
@@ -65,8 +68,44 @@ impl StateStore for MemoryStateStore {
         state: TableReplicationPhase,
     ) -> EtlResult<()> {
         let mut inner = self.inner.lock().await;
+
+        // Store the current state in history before updating
+        if let Some(current_state) = inner.table_replication_states.get(&table_id).copied() {
+            inner
+                .table_state_history
+                .entry(table_id)
+                .or_insert_with(Vec::new)
+                .push(current_state);
+        }
+
         inner.table_replication_states.insert(table_id, state);
 
         Ok(())
+    }
+
+    async fn rollback_table_replication_state(
+        &self,
+        table_id: TableId,
+    ) -> EtlResult<TableReplicationPhase> {
+        let mut inner = self.inner.lock().await;
+
+        // Get the previous state from history
+        let previous_state = inner
+            .table_state_history
+            .get_mut(&table_id)
+            .and_then(|history| history.pop())
+            .ok_or_else(|| {
+                etl_error!(
+                    ErrorKind::StateRollbackError,
+                    "There is no state in memory to rollback to"
+                )
+            })?;
+
+        // Update the current state to the previous state
+        inner
+            .table_replication_states
+            .insert(table_id, previous_state);
+
+        Ok(previous_state)
     }
 }
