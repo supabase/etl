@@ -4,6 +4,7 @@ pipeline:
   batch:
     max_size: 10000
     max_fill_ms: 1000
+  max_table_sync_workers: 10
   table_error_retry_delay_ms: 1000
 supabase:
   project_ref: "abcdefghijklmnopqrst"
