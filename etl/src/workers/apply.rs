@@ -234,7 +234,6 @@ where
             self.pool.clone(),
             table_id,
             self.schema_cache.clone(),
-            self.retries_orchestrator.clone(),
             self.state_store.clone(),
             self.destination.clone(),
             self.shutdown_rx.clone(),
@@ -408,11 +407,8 @@ where
     ) -> EtlResult<bool> {
         let pool = self.pool.lock().await;
 
-        // We process the table replication error before storing it into the state.
+        // Convert the table replication error directly to a phase.
         let table_id = table_replication_error.table_id();
-        let table_replication_error = table_replication_error
-            .process(&self.retries_orchestrator)
-            .await;
         TableSyncWorkerState::set_and_store(
             &pool,
             &self.state_store,

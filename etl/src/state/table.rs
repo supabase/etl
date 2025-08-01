@@ -5,26 +5,7 @@ use std::fmt;
 use tokio_postgres::types::PgLsn;
 
 use crate::error::{ErrorKind, EtlError};
-use crate::state::retries::RetriesOrchestrator;
-use crate::state::store::StateStore;
 
-/// Represents a processed error that occurred during table replication.
-///
-/// The role of this struct is to enforce statically the difference between an error what was just
-/// created and an error that was created and then processed. This is useful in the state store since
-/// in the state store we want to accept only phases derived from errors that were processed.
-///
-/// For example, if we have an error that should be retried in 5 minutes, we don't want to supply the
-/// error to the state store if we didn't first process it and kickstart the task to attempt again to
-/// process the table.
-#[derive(Debug)]
-#[allow(dead_code)]
-pub struct ProcessedTableReplicationError {
-    table_id: TableId,
-    reason: String,
-    solution: Option<String>,
-    retry_policy: RetryPolicy,
-}
 
 /// Represents an error that occurred during table replication.
 ///
@@ -72,6 +53,11 @@ impl TableReplicationError {
     /// Returns the [`TableId`] of the table that failed replication.
     pub fn table_id(&self) -> TableId {
         self.table_id
+    }
+
+    /// Returns the retry policy for this error.
+    pub fn retry_policy(&self) -> &RetryPolicy {
+        &self.retry_policy
     }
 
     /// Converts an [`EtlError`] to a [`TableReplicationError`] for a specific table.
@@ -145,39 +131,6 @@ impl TableReplicationError {
         }
     }
 
-    /// Processes a table replication error, which involves the scheduling of tasks in case of
-    /// a [`RetryPolicy::TimedRetry`].
-    pub async fn process<S>(
-        self,
-        retries_orchestrator: &RetriesOrchestrator<S>,
-    ) -> ProcessedTableReplicationError
-    where
-        S: StateStore + Clone + Send + 'static,
-    {
-        match self.retry_policy {
-            RetryPolicy::NoRetry => {
-                // If there is a `None` retry policy, the state can't be rolled back unless there is
-                // manual intervention.
-            }
-            RetryPolicy::ManualRetry => {
-                retries_orchestrator
-                    .schedule_manual_retry(self.table_id)
-                    .await;
-            }
-            RetryPolicy::TimedRetry { next_retry } => {
-                retries_orchestrator
-                    .schedule_timed_retry(self.table_id, next_retry)
-                    .await;
-            }
-        }
-
-        ProcessedTableReplicationError {
-            table_id: self.table_id,
-            reason: self.reason,
-            solution: self.solution,
-            retry_policy: self.retry_policy,
-        }
-    }
 }
 
 /// Defines the retry strategy for a failed table replication.
@@ -250,13 +203,15 @@ impl TableReplicationPhase {
     }
 }
 
-impl From<ProcessedTableReplicationError> for TableReplicationPhase {
-    fn from(_value: ProcessedTableReplicationError) -> Self {
+impl From<TableReplicationError> for TableReplicationPhase {
+    fn from(_value: TableReplicationError) -> Self {
         // TODO: implement actual conversion with proper values once `Skipped` is converted to `Errored`
         //  and the fields are added.
         Self::Skipped
     }
 }
+
+
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum TableReplicationPhaseType {

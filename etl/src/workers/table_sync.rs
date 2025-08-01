@@ -3,12 +3,12 @@ use postgres::schema::TableId;
 use std::ops::Deref;
 use std::sync::Arc;
 use std::time::Duration;
+use chrono::Utc;
 use tokio::sync::{Mutex, MutexGuard, Notify, Semaphore};
 use tokio::task::JoinHandle;
 use tokio_postgres::types::PgLsn;
 use tracing::{Instrument, debug, error, info, warn};
 
-use crate::concurrency::future::ReactiveFuture;
 use crate::concurrency::shutdown::{ShutdownResult, ShutdownRx};
 use crate::concurrency::signal::SignalTx;
 use crate::destination::Destination;
@@ -18,14 +18,12 @@ use crate::replication::client::PgReplicationClient;
 use crate::replication::slot::get_slot_name;
 use crate::replication::table_sync::{TableSyncResult, start_table_sync};
 use crate::schema::SchemaCache;
-use crate::state::retries::RetriesOrchestrator;
 use crate::state::store::StateStore;
 use crate::state::table::{
-    TableReplicationError, TableReplicationPhase, TableReplicationPhaseType,
+    TableReplicationError, TableReplicationPhase, TableReplicationPhaseType, RetryPolicy,
 };
 use crate::types::PipelineId;
 use crate::workers::base::{Worker, WorkerHandle, WorkerType};
-use crate::workers::lifecycle::WorkerLifecycleObserver;
 use crate::workers::pool::{TableSyncWorkerPool, TableSyncWorkerPoolInner};
 use crate::{bail, etl_error};
 
@@ -252,7 +250,6 @@ pub struct TableSyncWorker<S, D> {
     pool: TableSyncWorkerPool,
     table_id: TableId,
     schema_cache: SchemaCache,
-    retries_orchestrator: RetriesOrchestrator<S>,
     state_store: S,
     destination: D,
     shutdown_rx: ShutdownRx,
@@ -268,7 +265,6 @@ impl<S, D> TableSyncWorker<S, D> {
         pool: TableSyncWorkerPool,
         table_id: TableId,
         schema_cache: SchemaCache,
-        retries_orchestrator: RetriesOrchestrator<S>,
         state_store: S,
         destination: D,
         shutdown_rx: ShutdownRx,
@@ -281,8 +277,7 @@ impl<S, D> TableSyncWorker<S, D> {
             pool,
             table_id,
             schema_cache,
-            retries_orchestrator,
-            state_store,
+                state_store,
             destination,
             shutdown_rx,
             force_syncing_tables_tx,
@@ -300,11 +295,95 @@ where
     S: StateStore + Clone + Send + Sync + 'static,
     D: Destination + Clone + Send + Sync + 'static,
 {
+    async fn guarded_run_table_sync_worker(
+        self,
+        state: TableSyncWorkerState,
+    ) -> EtlResult<()> {
+        let table_id = self.table_id;
+        let pool = self.pool.clone();
+        let state_store = self.state_store.clone();
+        let config = self.config.clone();
+        
+        // Clone all the fields we need for retries
+        let pipeline_id = self.pipeline_id;
+        let schema_cache = self.schema_cache.clone();
+        let destination = self.destination.clone();
+        let shutdown_rx = self.shutdown_rx.clone();
+        let force_syncing_tables_tx = self.force_syncing_tables_tx.clone();
+        let run_permit = self.run_permit.clone();
+        
+        loop {
+            // Recreate the worker for each attempt
+            let worker = TableSyncWorker {
+                pipeline_id,
+                config: config.clone(),
+                pool: pool.clone(),
+                table_id,
+                schema_cache: schema_cache.clone(),
+                state_store: state_store.clone(),
+                destination: destination.clone(),
+                shutdown_rx: shutdown_rx.clone(),
+                force_syncing_tables_tx: force_syncing_tables_tx.clone(),
+                run_permit: run_permit.clone(),
+            };
+            
+            let result = worker.run_table_sync_worker(state.clone()).await;
+
+            match result {
+                Ok(()) => {
+                    // Worker completed successfully, mark as finished
+                    let mut pool = pool.lock().await;
+                    pool.mark_worker_finished(table_id);
+
+                    return Ok(());
+                }
+                Err(error) => {
+                    error!("table sync worker failed for table {}: {}", table_id, error);
+                    
+                    // Convert error to table replication error to determine retry policy
+                    let table_error = TableReplicationError::from_etl_error(&config, table_id, error);
+                    
+                    match table_error.retry_policy() {
+                        RetryPolicy::TimedRetry { next_retry } => {
+                            // Calculate how long to sleep
+                            let now = Utc::now();
+                            if now < *next_retry {
+                                let sleep_duration = (*next_retry - now).to_std().unwrap_or(Duration::from_secs(0));
+                                info!("retrying table sync worker for table {} in {:?}", table_id, sleep_duration);
+                                tokio::time::sleep(sleep_duration).await;
+                                // Continue the loop to retry
+                                continue;
+                            } else {
+                                // Retry time has already passed, retry immediately
+                                info!("retrying table sync worker for table {} immediately", table_id);
+                                continue;
+                            }
+                        }
+                        RetryPolicy::NoRetry | RetryPolicy::ManualRetry => {
+                            // Exit the worker and mark as finished
+                            let mut pool = pool.lock().await;
+                            pool.mark_worker_finished(table_id);
+
+                            let table_replication_phase = table_error.into();
+                            if let Err(err) = TableSyncWorkerState::set_and_store(
+                                &pool,
+                                &state_store,
+                                table_id,
+                                table_replication_phase,
+                            ).await {
+                                error!("failed to store error state for table {}: {}", table_id, err);
+                            }
+
+                            return Ok(());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     async fn run_table_sync_worker(
         mut self,
-        config: Arc<PipelineConfig>,
-        retries_orchestrator: RetriesOrchestrator<S>,
-        state_store: S,
         state: TableSyncWorkerState,
     ) -> EtlResult<()> {
         debug!(
@@ -318,7 +397,6 @@ where
         let permit = tokio::select! {
             _ = self.shutdown_rx.changed() => {
                 info!("shutting down table sync worker for table {} while waiting for a run permit", self.table_id);
-
                 return Ok(());
             }
 
@@ -337,16 +415,16 @@ where
         // Note that this connection must be tied to the lifetime of this worker, otherwise
         // there will be problems when cleaning up the replication slot.
         let replication_client =
-            PgReplicationClient::connect(config.pg_connection.clone()).await?;
+            PgReplicationClient::connect(self.config.pg_connection.clone()).await?;
 
         let result = start_table_sync(
             self.pipeline_id,
-            config.clone(),
+            self.config.clone(),
             replication_client.clone(),
             self.table_id,
             state.clone(),
             self.schema_cache.clone(),
-            state_store.clone(),
+            self.state_store.clone(),
             self.destination.clone(),
             self.shutdown_rx.clone(),
             self.force_syncing_tables_tx,
@@ -367,15 +445,14 @@ where
         start_apply_loop(
             self.pipeline_id,
             start_lsn,
-            config,
+            self.config,
             replication_client.clone(),
             self.schema_cache,
             self.destination,
             TableSyncWorkerHook::new(
                 self.table_id,
                 state,
-                retries_orchestrator,
-                state_store,
+                self.state_store,
             ),
             self.shutdown_rx,
             None,
@@ -452,43 +529,15 @@ where
 
         let state = TableSyncWorkerState::new(self.table_id, table_replication_phase);
 
-        let config_clone = self.config.clone();
-        let retries_orchestrator_clone = self.retries_orchestrator.clone();
-        let state_store_clone = self.state_store.clone();
-        let state_clone = state.clone();
-
-        // Clone fields needed for the observer before moving self
-        let config_for_observer = self.config.clone();
-        let pool_for_observer = self.pool.clone();
-        let retries_orchestrator_for_observer = self.retries_orchestrator.clone();
-        let state_store_for_observer = self.state_store.clone();
-        let table_id_for_observer = self.table_id;
-
         let table_sync_worker_span = tracing::info_span!(
             "table_sync_worker",
             pipeline_id = self.pipeline_id,
             publication_name = self.config.publication_name,
             table_id = %self.table_id,
         );
-        let table_sync_worker = self.run_table_sync_worker(
-            config_clone,
-            retries_orchestrator_clone,
-            state_store_clone,
-            state_clone,
-        );
+        let table_sync_worker = self.guarded_run_table_sync_worker(state.clone());
 
-        // We wrap the table sync worker future with a reactive future which is hooked into a lifecycle
-        // observer in order to react to state changes of the future. In this way, if an error happens in
-        // a table sync worker, we can take action immediately instead of waiting on the join handles of
-        // the future. This is important for notifying the state store about the new table sync state.
-        let observer = WorkerLifecycleObserver::new(
-            config_for_observer,
-            pool_for_observer,
-            retries_orchestrator_for_observer,
-            state_store_for_observer,
-        );
-        let fut = ReactiveFuture::wrap(table_sync_worker, table_id_for_observer, observer)
-            .instrument(table_sync_worker_span);
+        let fut = table_sync_worker.instrument(table_sync_worker_span);
         let handle = tokio::spawn(fut);
 
         Ok(TableSyncWorkerHandle {
@@ -502,7 +551,6 @@ where
 struct TableSyncWorkerHook<S> {
     table_id: TableId,
     table_sync_worker_state: TableSyncWorkerState,
-    retries_orchestrator: RetriesOrchestrator<S>,
     state_store: S,
 }
 
@@ -510,14 +558,12 @@ impl<S> TableSyncWorkerHook<S> {
     fn new(
         table_id: TableId,
         table_sync_worker_state: TableSyncWorkerState,
-        retries_orchestrator: RetriesOrchestrator<S>,
         state_store: S,
     ) -> Self {
         Self {
             table_id,
             table_sync_worker_state,
-            retries_orchestrator,
-            state_store,
+                state_store,
         }
     }
 }
@@ -605,9 +651,6 @@ where
         // Since we already have access to the table sync worker state, we can avoid going through
         // the pool, and we just modify the state here and also update the state store.
         let mut inner = self.table_sync_worker_state.lock().await;
-        let table_replication_error = table_replication_error
-            .process(&self.retries_orchestrator)
-            .await;
         inner
             .set_and_store(table_replication_error.into(), &self.state_store)
             .await?;
