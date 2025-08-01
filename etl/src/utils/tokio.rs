@@ -1,3 +1,7 @@
+// This code is copied from the tokio-postgres-rustls library (https://github.com/jbg/tokio-postgres-rustls),
+// available under the MIT License, which provides Rustls-based TLS support for secure asynchronous
+// PostgreSQL connections using the tokio-postgres client.
+
 use const_oid::db::{
     rfc5912::{
         ECDSA_WITH_SHA_256, ECDSA_WITH_SHA_384, ID_SHA_1, ID_SHA_256, ID_SHA_384, ID_SHA_512,
