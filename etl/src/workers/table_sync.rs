@@ -396,21 +396,6 @@ where
                     let mut pool = pool.lock().await;
                     pool.mark_worker_finished(table_id);
 
-                    // Update the state store
-                    if let Err(err) = TableSyncWorkerState::set_and_store(
-                        &pool,
-                        &state_store,
-                        table_id,
-                        TableReplicationPhase::Skipped,
-                    )
-                    .await
-                    {
-                        error!(
-                            "failed to store error state for table {} during panic: {}",
-                            table_id, err
-                        );
-                    }
-
                     // Resume panic
                     resume_unwind(err);
                 }
