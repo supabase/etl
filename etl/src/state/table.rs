@@ -6,7 +6,6 @@ use tokio_postgres::types::PgLsn;
 
 use crate::error::{ErrorKind, EtlError};
 
-
 /// Represents an error that occurred during table replication.
 ///
 /// Contains diagnostic information including the table that failed, the reason for failure,
@@ -66,7 +65,7 @@ impl TableReplicationError {
     ///
     /// Note that this conversion is constantly improving since during testing and operation of ETL
     /// we might notice edge cases that could be manually handled.
-    pub fn from_etl_error(config: &PipelineConfig, table_id: TableId, error: EtlError) -> Self {
+    pub fn from_etl_error(config: &PipelineConfig, table_id: TableId, error: &EtlError) -> Self {
         let retry_duration = Duration::milliseconds(config.table_error_retry_delay_ms as i64);
         match error.kind() {
             // Transient errors with retry
@@ -130,7 +129,6 @@ impl TableReplicationError {
             _ => Self::without_solution(table_id, error, RetryPolicy::NoRetry),
         }
     }
-
 }
 
 /// Defines the retry strategy for a failed table replication.
@@ -210,8 +208,6 @@ impl From<TableReplicationError> for TableReplicationPhase {
         Self::Skipped
     }
 }
-
-
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum TableReplicationPhaseType {

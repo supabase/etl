@@ -10,10 +10,7 @@ use etl::test_utils::test_schema::{TableSelection, insert_users_data, setup_test
 use etl::types::PipelineId;
 use fail::FailScenario;
 use rand::random;
-use std::time::Duration;
 use telemetry::init_test_tracing;
-use tokio::time::sleep;
-// TODO: add more tests with fault injection.
 
 #[tokio::test(flavor = "multi_thread")]
 async fn table_copy_fails_after_data_sync_threw_a_panic() {
@@ -132,86 +129,6 @@ async fn table_copy_fails_after_data_sync_threw_an_error_with_no_retry() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn table_copy_is_consistent_after_data_sync_threw_an_error_with_manual_retry() {
-    let _scenario = FailScenario::setup();
-    fail::cfg(START_TABLE_SYNC__AFTER_DATA_SYNC, "1*return(manual_retry)").unwrap();
-
-    init_test_tracing();
-
-    let mut database = spawn_database().await;
-    let database_schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
-
-    // Insert initial test data.
-    let rows_inserted = 10;
-    insert_users_data(
-        &mut database,
-        &database_schema.users_schema().name,
-        1..=rows_inserted,
-    )
-    .await;
-
-    let state_store = NotifyingStateStore::new();
-    let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
-
-    // We start the pipeline from scratch.
-    let pipeline_id: PipelineId = random();
-    let mut pipeline = create_pipeline(
-        &database.config,
-        pipeline_id,
-        database_schema.publication_name(),
-        state_store.clone(),
-        destination.clone(),
-    );
-
-    // Register notifications for table sync phases.
-    let users_state_notify = state_store
-        .notify_on_table_state(
-            database_schema.users_schema().id,
-            TableReplicationPhaseType::DataSync,
-        )
-        .await;
-
-    pipeline.start().await.unwrap();
-
-    users_state_notify.notified().await;
-
-    // We want to wait for a second, simulating the user waiting.
-    sleep(Duration::from_secs(1)).await;
-
-    // Register notifications for table sync phases.
-    let users_state_notify = state_store
-        .notify_on_table_state(
-            database_schema.users_schema().id,
-            TableReplicationPhaseType::SyncDone,
-        )
-        .await;
-
-    // We manually retry the table.
-    pipeline
-        .retry_table(database_schema.users_schema().id)
-        .await
-        .unwrap();
-
-    users_state_notify.notified().await;
-
-    // We expect the error of the first table sync worker to be returned since we collect all worker
-    // errors.
-    let err = pipeline.shutdown_and_wait().await.err().unwrap();
-    assert_eq!(err.kinds().len(), 1);
-    assert_eq!(err.kinds()[0], ErrorKind::WithManualRetry);
-
-    // Verify copied data.
-    let table_rows = destination.get_table_rows().await;
-    let users_table_rows = table_rows.get(&database_schema.users_schema().id).unwrap();
-    assert_eq!(users_table_rows.len(), rows_inserted);
-
-    // Verify table schemas were correctly stored.
-    let table_schemas = destination.get_table_schemas().await;
-    assert_eq!(table_schemas.len(), 1);
-    assert_eq!(table_schemas[0], database_schema.users_schema());
-}
-
-#[tokio::test(flavor = "multi_thread")]
 async fn table_copy_is_consistent_after_data_sync_threw_an_error_with_timed_retry() {
     let _scenario = FailScenario::setup();
     fail::cfg(START_TABLE_SYNC__AFTER_DATA_SYNC, "1*return(timed_retry)").unwrap();
@@ -255,11 +172,8 @@ async fn table_copy_is_consistent_after_data_sync_threw_an_error_with_timed_retr
 
     users_state_notify.notified().await;
 
-    // We expect the error of the first table sync worker to be returned since we collect all worker
-    // errors.
-    let err = pipeline.shutdown_and_wait().await.err().unwrap();
-    assert_eq!(err.kinds().len(), 1);
-    assert_eq!(err.kinds()[0], ErrorKind::WithTimedRetry);
+    // We expect no errors, since the same table sync worker task is retried.
+    pipeline.shutdown_and_wait().await.unwrap();
 
     // Verify copied data.
     let table_rows = destination.get_table_rows().await;

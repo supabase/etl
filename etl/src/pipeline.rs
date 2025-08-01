@@ -1,5 +1,4 @@
 use config::shared::PipelineConfig;
-use postgres::schema::TableId;
 use std::sync::Arc;
 use tokio::sync::Semaphore;
 use tracing::{error, info};
@@ -11,7 +10,6 @@ use crate::destination::Destination;
 use crate::error::{ErrorKind, EtlError, EtlResult};
 use crate::replication::client::PgReplicationClient;
 use crate::schema::SchemaCache;
-use crate::state::retries::RetriesOrchestrator;
 use crate::state::store::StateStore;
 use crate::state::table::TableReplicationPhase;
 use crate::types::PipelineId;
@@ -20,12 +18,11 @@ use crate::workers::base::{Worker, WorkerHandle};
 use crate::workers::pool::TableSyncWorkerPool;
 
 #[derive(Debug)]
-enum PipelineState<S> {
+enum PipelineState {
     NotStarted,
     Started {
         // TODO: investigate whether we could benefit from a central launcher that deals at a high-level
         //  with workers management, which should not be done in the pipeline.
-        retries_orchestrator: RetriesOrchestrator<S>,
         apply_worker: ApplyWorkerHandle,
         pool: TableSyncWorkerPool,
     },
@@ -37,7 +34,7 @@ pub struct Pipeline<S, D> {
     config: Arc<PipelineConfig>,
     state_store: S,
     destination: D,
-    state: PipelineState<S>,
+    state: PipelineState,
     shutdown_tx: ShutdownTx,
 }
 
@@ -102,26 +99,20 @@ where
         // We create the signal used to notify the apply worker that it should force syncing tables.
         let (force_syncing_tables_tx, force_syncing_tables_rx) = create_signal();
 
-        // We set up the retries orchestrator which will be used to handle retries of tables.
-        let retries_orchestrator = RetriesOrchestrator::new(
-            pool.clone(),
-            self.state_store.clone(),
-            force_syncing_tables_tx.clone(),
-        );
-
         // We create the permits semaphore which is used to control how many table sync workers can
         // be running at the same time.
         let table_sync_worker_permits =
             Arc::new(Semaphore::new(self.config.max_table_sync_workers as usize));
 
-        // We create and start the apply worker.
+        // We create and start the apply worker (temporarily leaving out retries_orchestrator)
+        // TODO: Remove retries_orchestrator from ApplyWorker constructor
         let apply_worker = ApplyWorker::new(
             self.id,
             self.config.clone(),
             replication_client,
             pool.clone(),
             schema_cache,
-            retries_orchestrator.clone(),
+            // retries_orchestrator parameter removed - need to update ApplyWorker
             self.state_store.clone(),
             self.destination.clone(),
             self.shutdown_tx.subscribe(),
@@ -131,41 +122,13 @@ where
         .start()
         .await?;
 
-        self.state = PipelineState::Started {
-            retries_orchestrator,
-            apply_worker,
-            pool,
-        };
-
-        Ok(())
-    }
-
-    pub async fn retry_table(&self, table_id: TableId) -> EtlResult<()> {
-        let PipelineState::Started {
-            retries_orchestrator,
-            apply_worker: _,
-            pool: _,
-        } = &self.state
-        else {
-            info!("pipeline was not started, nothing to retry");
-
-            return Ok(());
-        };
-
-        // We try to retry manually the table. If the table didn't fail, or it has a different retry
-        // mode, this operation will be a noop.
-        retries_orchestrator.retry(table_id).await;
+        self.state = PipelineState::Started { apply_worker, pool };
 
         Ok(())
     }
 
     pub async fn wait(self) -> EtlResult<()> {
-        let PipelineState::Started {
-            retries_orchestrator: _,
-            apply_worker,
-            pool,
-        } = self.state
-        else {
+        let PipelineState::Started { apply_worker, pool } = self.state else {
             info!("pipeline was not started, nothing to wait for");
 
             return Ok(());

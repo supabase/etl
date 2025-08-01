@@ -1,9 +1,9 @@
+use chrono::Utc;
 use config::shared::PipelineConfig;
 use postgres::schema::TableId;
 use std::ops::Deref;
 use std::sync::Arc;
 use std::time::Duration;
-use chrono::Utc;
 use tokio::sync::{Mutex, MutexGuard, Notify, Semaphore};
 use tokio::task::JoinHandle;
 use tokio_postgres::types::PgLsn;
@@ -20,7 +20,7 @@ use crate::replication::table_sync::{TableSyncResult, start_table_sync};
 use crate::schema::SchemaCache;
 use crate::state::store::StateStore;
 use crate::state::table::{
-    TableReplicationError, TableReplicationPhase, TableReplicationPhaseType, RetryPolicy,
+    RetryPolicy, TableReplicationError, TableReplicationPhase, TableReplicationPhaseType,
 };
 use crate::types::PipelineId;
 use crate::workers::base::{Worker, WorkerHandle, WorkerType};
@@ -277,7 +277,7 @@ impl<S, D> TableSyncWorker<S, D> {
             pool,
             table_id,
             schema_cache,
-                state_store,
+            state_store,
             destination,
             shutdown_rx,
             force_syncing_tables_tx,
@@ -295,15 +295,12 @@ where
     S: StateStore + Clone + Send + Sync + 'static,
     D: Destination + Clone + Send + Sync + 'static,
 {
-    async fn guarded_run_table_sync_worker(
-        self,
-        state: TableSyncWorkerState,
-    ) -> EtlResult<()> {
+    async fn guarded_run_table_sync_worker(self, state: TableSyncWorkerState) -> EtlResult<()> {
         let table_id = self.table_id;
         let pool = self.pool.clone();
         let state_store = self.state_store.clone();
         let config = self.config.clone();
-        
+
         // Clone all the fields we need for retries
         let pipeline_id = self.pipeline_id;
         let schema_cache = self.schema_cache.clone();
@@ -311,7 +308,7 @@ where
         let shutdown_rx = self.shutdown_rx.clone();
         let force_syncing_tables_tx = self.force_syncing_tables_tx.clone();
         let run_permit = self.run_permit.clone();
-        
+
         loop {
             // Recreate the worker for each attempt
             let worker = TableSyncWorker {
@@ -326,7 +323,7 @@ where
                 force_syncing_tables_tx: force_syncing_tables_tx.clone(),
                 run_permit: run_permit.clone(),
             };
-            
+
             let result = worker.run_table_sync_worker(state.clone()).await;
 
             match result {
@@ -337,25 +334,34 @@ where
 
                     return Ok(());
                 }
-                Err(error) => {
-                    error!("table sync worker failed for table {}: {}", table_id, error);
-                    
+                Err(err) => {
+                    error!("table sync worker failed for table {}: {}", table_id, err);
+
                     // Convert error to table replication error to determine retry policy
-                    let table_error = TableReplicationError::from_etl_error(&config, table_id, error);
-                    
+                    let table_error =
+                        TableReplicationError::from_etl_error(&config, table_id, &err);
+
                     match table_error.retry_policy() {
                         RetryPolicy::TimedRetry { next_retry } => {
                             // Calculate how long to sleep
                             let now = Utc::now();
                             if now < *next_retry {
-                                let sleep_duration = (*next_retry - now).to_std().unwrap_or(Duration::from_secs(0));
-                                info!("retrying table sync worker for table {} in {:?}", table_id, sleep_duration);
+                                let sleep_duration = (*next_retry - now)
+                                    .to_std()
+                                    .unwrap_or(Duration::from_secs(0));
+                                info!(
+                                    "retrying table sync worker for table {} in {:?}",
+                                    table_id, sleep_duration
+                                );
                                 tokio::time::sleep(sleep_duration).await;
                                 // Continue the loop to retry
                                 continue;
                             } else {
                                 // Retry time has already passed, retry immediately
-                                info!("retrying table sync worker for table {} immediately", table_id);
+                                info!(
+                                    "retrying table sync worker for table {} immediately",
+                                    table_id
+                                );
                                 continue;
                             }
                         }
@@ -370,11 +376,16 @@ where
                                 &state_store,
                                 table_id,
                                 table_replication_phase,
-                            ).await {
-                                error!("failed to store error state for table {}: {}", table_id, err);
+                            )
+                            .await
+                            {
+                                error!(
+                                    "failed to store error state for table {}: {}",
+                                    table_id, err
+                                );
                             }
 
-                            return Ok(());
+                            return Err(err);
                         }
                     }
                 }
@@ -382,10 +393,7 @@ where
         }
     }
 
-    async fn run_table_sync_worker(
-        mut self,
-        state: TableSyncWorkerState,
-    ) -> EtlResult<()> {
+    async fn run_table_sync_worker(mut self, state: TableSyncWorkerState) -> EtlResult<()> {
         debug!(
             "waiting to acquire a running permit for table sync worker for table {}",
             self.table_id
@@ -449,11 +457,7 @@ where
             replication_client.clone(),
             self.schema_cache,
             self.destination,
-            TableSyncWorkerHook::new(
-                self.table_id,
-                state,
-                self.state_store,
-            ),
+            TableSyncWorkerHook::new(self.table_id, state, self.state_store),
             self.shutdown_rx,
             None,
         )
@@ -563,7 +567,7 @@ impl<S> TableSyncWorkerHook<S> {
         Self {
             table_id,
             table_sync_worker_state,
-                state_store,
+            state_store,
         }
     }
 }

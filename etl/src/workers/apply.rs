@@ -17,7 +17,6 @@ use crate::replication::client::PgReplicationClient;
 use crate::replication::common::get_table_replication_states;
 use crate::replication::slot::get_slot_name;
 use crate::schema::SchemaCache;
-use crate::state::retries::RetriesOrchestrator;
 use crate::state::store::StateStore;
 use crate::state::table::{
     TableReplicationError, TableReplicationPhase, TableReplicationPhaseType,
@@ -59,7 +58,6 @@ pub struct ApplyWorker<S, D> {
     replication_client: PgReplicationClient,
     pool: TableSyncWorkerPool,
     schema_cache: SchemaCache,
-    retries_orchestrator: RetriesOrchestrator<S>,
     state_store: S,
     destination: D,
     shutdown_rx: ShutdownRx,
@@ -75,7 +73,6 @@ impl<S, D> ApplyWorker<S, D> {
         replication_client: PgReplicationClient,
         pool: TableSyncWorkerPool,
         schema_cache: SchemaCache,
-        retries_orchestrator: RetriesOrchestrator<S>,
         state_store: S,
         destination: D,
         shutdown_rx: ShutdownRx,
@@ -88,7 +85,6 @@ impl<S, D> ApplyWorker<S, D> {
             replication_client,
             pool,
             schema_cache,
-            retries_orchestrator,
             state_store,
             destination,
             shutdown_rx,
@@ -131,7 +127,6 @@ where
                     self.config,
                     self.pool,
                     self.schema_cache,
-                    self.retries_orchestrator,
                     self.state_store,
                     self.destination,
                     self.shutdown_rx.clone(),
@@ -183,7 +178,6 @@ struct ApplyWorkerHook<S, D> {
     config: Arc<PipelineConfig>,
     pool: TableSyncWorkerPool,
     schema_cache: SchemaCache,
-    retries_orchestrator: RetriesOrchestrator<S>,
     state_store: S,
     destination: D,
     shutdown_rx: ShutdownRx,
@@ -198,7 +192,6 @@ impl<S, D> ApplyWorkerHook<S, D> {
         config: Arc<PipelineConfig>,
         pool: TableSyncWorkerPool,
         schema_cache: SchemaCache,
-        retries_orchestrator: RetriesOrchestrator<S>,
         state_store: S,
         destination: D,
         shutdown_rx: ShutdownRx,
@@ -210,7 +203,6 @@ impl<S, D> ApplyWorkerHook<S, D> {
             config,
             pool,
             schema_cache,
-            retries_orchestrator,
             state_store,
             destination,
             shutdown_rx,
