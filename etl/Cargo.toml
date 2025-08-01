@@ -4,24 +4,20 @@ version = "0.1.0"
 edition = "2024"
 autotests = false
 
-[[test]]
-name = "integration"
-path = "tests/integration/mod.rs"
-required-features = ["test-utils"]
-
-[[test]]
-name = "failpoints"
-path = "tests/failpoints/mod.rs"
-required-features = ["failpoints", "test-utils"]
+[features]
+unknown-types-to-bytes = []
+test-utils = ["postgres/test-utils"]
+failpoints = ["fail/failpoints"]
+default = ["unknown-types-to-bytes"]
 
 [dependencies]
 config = { workspace = true }
 postgres = { workspace = true, features = ["tokio", "replication"] }
 
-const-oid = { workspace = true, default-features = false }
-bytes = { workspace = true }
 byteorder = { workspace = true }
+bytes = { workspace = true }
 chrono = { workspace = true }
+const-oid = { workspace = true, default-features = false }
 fail = { workspace = true }
 futures = { workspace = true }
 pg_escape = { workspace = true }
@@ -50,9 +46,12 @@ telemetry = { workspace = true }
 
 rand = { workspace = true, features = ["thread_rng"] }
 
+[[test]]
+name = "integration"
+path = "tests/integration/mod.rs"
+required-features = ["test-utils"]
 
-[features]
-unknown-types-to-bytes = []
-test-utils = ["postgres/test-utils"]
-failpoints = ["fail/failpoints"]
-default = ["unknown-types-to-bytes"]
+[[test]]
+name = "failpoints"
+path = "tests/failpoints/mod.rs"
+required-features = ["failpoints", "test-utils"]

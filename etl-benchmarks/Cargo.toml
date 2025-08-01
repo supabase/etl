@@ -3,10 +3,6 @@ name = "etl-benchmarks"
 version = "0.1.0"
 edition = "2024"
 
-[[bench]]
-name = "table_copies"
-harness = false
-
 [dev-dependencies]
 config = { workspace = true }
 etl = { workspace = true }
@@ -26,3 +22,7 @@ tokio = { workspace = true, features = [
     "signal",
 ] }
 tracing = { workspace = true, default-features = true }
+
+[[bench]]
+name = "table_copies"
+harness = false

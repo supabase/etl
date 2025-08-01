@@ -33,6 +33,7 @@ pg_escape = { workspace = true }
 rand = { workspace = true, features = ["std"] }
 reqwest = { workspace = true, features = ["json"] }
 secrecy = { workspace = true }
+sentry = { workspace = true, features = ["actix"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true, features = ["std"] }
 sqlx = { workspace = true, features = [
@@ -49,7 +50,6 @@ tracing-actix-web = { workspace = true, features = ["emit_event_on_error"] }
 utoipa = { workspace = true, features = ["actix_extras"] }
 utoipa-swagger-ui = { workspace = true, features = ["actix-web", "reqwest"] }
 uuid = { workspace = true, features = ["v4"] }
-sentry = { workspace = true, features = ["actix"] }
 
 [dev-dependencies]
 postgres = { workspace = true, features = ["test-utils", "sqlx"] }

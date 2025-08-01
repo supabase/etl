@@ -3,6 +3,16 @@ name = "etl-destinations"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+bigquery = [
+    "dep:futures",
+    "dep:gcp-bigquery-client",
+    "dep:prost",
+    "dep:rustls",
+    "dep:tracing",
+    "dep:tokio",
+]
+
 [dependencies]
 etl = { workspace = true }
 
@@ -13,25 +23,15 @@ gcp-bigquery-client = { workspace = true, optional = true, features = [
 ] }
 prost = { workspace = true, optional = true }
 rustls = { workspace = true, optional = true, features = ["aws-lc-rs", "logging"] }
-tracing = { workspace = true, optional = true, default-features = true }
 tokio = { workspace = true, optional = true, features = ["sync"] }
+tracing = { workspace = true, optional = true, default-features = true }
 
 [dev-dependencies]
 etl = { workspace = true, features = ["test-utils"] }
 
 base64 = { workspace = true }
 chrono = { workspace = true }
-uuid = { workspace = true, features = ["v4"] }
-serde_json = { workspace = true }
 rand = { workspace = true, features = ["thread_rng"] }
+serde_json = { workspace = true }
 telemetry = { workspace = true }
-
-[features]
-bigquery = [
-    "dep:futures",
-    "dep:gcp-bigquery-client",
-    "dep:prost",
-    "dep:rustls",
-    "dep:tracing",
-    "dep:tokio"
-]
+uuid = { workspace = true, features = ["v4"] }
