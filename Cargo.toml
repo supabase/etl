@@ -12,6 +12,15 @@ members = [
     "telemetry",
 ]
 
+[profile.release]
+panic = 'abort'
+
+[profile.dev]
+panic = 'abort'
+
+[profile.test]
+panic = 'abort'
+
 [workspace.dependencies]
 api = { path = "api", default-features = false }
 config = { path = "config", default-features = false }
