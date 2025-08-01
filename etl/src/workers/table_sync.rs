@@ -1,7 +1,9 @@
 use chrono::Utc;
 use config::shared::PipelineConfig;
+use futures::FutureExt;
 use postgres::schema::TableId;
 use std::ops::Deref;
+use std::panic::{AssertUnwindSafe, resume_unwind};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{Mutex, MutexGuard, Notify, Semaphore};
@@ -324,17 +326,18 @@ where
                 run_permit: run_permit.clone(),
             };
 
-            let result = worker.run_table_sync_worker(state.clone()).await;
+            let table_sync_worker = AssertUnwindSafe(worker.run_table_sync_worker(state.clone()));
+            let result = table_sync_worker.catch_unwind().await;
 
             match result {
-                Ok(()) => {
+                Ok(Ok(())) => {
                     // Worker completed successfully, mark as finished
                     let mut pool = pool.lock().await;
                     pool.mark_worker_finished(table_id);
 
                     return Ok(());
                 }
-                Err(err) => {
+                Ok(Err(err)) => {
                     error!("table sync worker failed for table {}: {}", table_id, err);
 
                     // Convert error to table replication error to determine retry policy
@@ -380,7 +383,7 @@ where
                             .await
                             {
                                 error!(
-                                    "failed to store error state for table {}: {}",
+                                    "failed to store error state for table {} during error: {}",
                                     table_id, err
                                 );
                             }
@@ -388,6 +391,28 @@ where
                             return Err(err);
                         }
                     }
+                }
+                Err(err) => {
+                    // Exit the worker and mark as finished
+                    let mut pool = pool.lock().await;
+                    pool.mark_worker_finished(table_id);
+
+                    if let Err(err) = TableSyncWorkerState::set_and_store(
+                        &pool,
+                        &state_store,
+                        table_id,
+                        TableReplicationPhase::Skipped,
+                    )
+                    .await
+                    {
+                        error!(
+                            "failed to store error state for table {} during panic: {}",
+                            table_id, err
+                        );
+                    }
+
+                    // Resume panic
+                    resume_unwind(err);
                 }
             }
         }
