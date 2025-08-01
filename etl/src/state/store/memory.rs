@@ -70,7 +70,7 @@ impl StateStore for MemoryStateStore {
         let mut inner = self.inner.lock().await;
 
         // Store the current state in history before updating
-        if let Some(current_state) = inner.table_replication_states.get(&table_id).copied() {
+        if let Some(current_state) = inner.table_replication_states.get(&table_id).cloned() {
             inner
                 .table_state_history
                 .entry(table_id)
@@ -104,7 +104,7 @@ impl StateStore for MemoryStateStore {
         // Update the current state to the previous state
         inner
             .table_replication_states
-            .insert(table_id, previous_state);
+            .insert(table_id, previous_state.clone());
 
         Ok(previous_state)
     }

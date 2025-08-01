@@ -1,6 +1,7 @@
 use chrono::{DateTime, Duration, Utc};
 use config::shared::PipelineConfig;
 use postgres::schema::TableId;
+use serde::{Deserialize, Serialize};
 use std::fmt;
 use tokio_postgres::types::PgLsn;
 
@@ -132,13 +133,17 @@ impl TableReplicationError {
 }
 
 /// Defines the retry strategy for a failed table replication.
-#[derive(Debug)]
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum RetryPolicy {
     /// No retry should be attempted, the system has to be fixed by hand.
+    #[serde(rename = "none")]
     NoRetry,
     /// Retry after it was manually triggered.
+    #[serde(rename = "user_intervention")]
     ManualRetry,
     /// Retry after the specified timestamp.
+    #[serde(rename = "backoff")]
     TimedRetry { next_retry: DateTime<Utc> },
 }
 
@@ -150,7 +155,8 @@ impl RetryPolicy {
     }
 }
 
-#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum TableReplicationPhase {
     /// Set by the pipeline when it first starts and encounters a table for the first time
     Init,
@@ -172,6 +178,7 @@ pub enum TableReplicationPhase {
     /// This phase is stored in memory only and not persisted to the state store
     Catchup {
         /// The lsn to catch up to. This is the location where the apply worker is paused
+        #[serde(with = "lsn_serde")]
         lsn: PgLsn,
     },
 
@@ -179,6 +186,7 @@ pub enum TableReplicationPhase {
     /// worker has caught up with the apply worker's lsn position
     SyncDone {
         /// The lsn up to which the table-sync worker has caught up
+        #[serde(with = "lsn_serde")]
         lsn: PgLsn,
     },
 
@@ -188,11 +196,16 @@ pub enum TableReplicationPhase {
     /// be applied by the apply worker only
     Ready,
 
-    /// Set by either the table-sync worker or the apply worker when a table is no
-    /// longer being synced because of an error. Tables in this state can only
-    /// start syncing again after a manual intervention from the user.
-    // TODO: turn this into a generic `Error` state with more information.
-    Skipped,
+    /// Set by either the table-sync worker or the apply worker when a table encounters
+    /// an error during replication. Contains diagnostic information and retry policy.
+    Errored {
+        /// Human-readable description of what went wrong
+        reason: String,
+        /// Optional suggestion for how to fix the issue
+        solution: Option<String>,
+        /// Retry policy specifying how/when to retry
+        retry_policy: RetryPolicy,
+    },
 }
 
 impl TableReplicationPhase {
@@ -202,10 +215,12 @@ impl TableReplicationPhase {
 }
 
 impl From<TableReplicationError> for TableReplicationPhase {
-    fn from(_value: TableReplicationError) -> Self {
-        // TODO: implement actual conversion with proper values once `Skipped` is converted to `Errored`
-        //  and the fields are added.
-        Self::Skipped
+    fn from(value: TableReplicationError) -> Self {
+        Self::Errored {
+            reason: value.reason,
+            solution: value.solution,
+            retry_policy: value.retry_policy,
+        }
     }
 }
 
@@ -218,7 +233,7 @@ pub enum TableReplicationPhaseType {
     Catchup,
     SyncDone,
     Ready,
-    Skipped,
+    Errored,
 }
 
 impl TableReplicationPhaseType {
@@ -232,7 +247,7 @@ impl TableReplicationPhaseType {
             Self::Catchup => false,
             Self::SyncDone => true,
             Self::Ready => true,
-            Self::Skipped => true,
+            Self::Errored => true,
         }
     }
 
@@ -249,7 +264,7 @@ impl TableReplicationPhaseType {
             Self::Catchup => false,
             Self::SyncDone => false,
             Self::Ready => true,
-            Self::Skipped => true,
+            Self::Errored => true,
         }
     }
 }
@@ -264,7 +279,7 @@ impl<'a> From<&'a TableReplicationPhase> for TableReplicationPhaseType {
             TableReplicationPhase::Catchup { .. } => Self::Catchup,
             TableReplicationPhase::SyncDone { .. } => Self::SyncDone,
             TableReplicationPhase::Ready => Self::Ready,
-            TableReplicationPhase::Skipped => Self::Skipped,
+            TableReplicationPhase::Errored { .. } => Self::Errored,
         }
     }
 }
@@ -279,7 +294,147 @@ impl fmt::Display for TableReplicationPhaseType {
             Self::Catchup => write!(f, "catchup"),
             Self::SyncDone => write!(f, "sync_done"),
             Self::Ready => write!(f, "ready"),
-            Self::Skipped => write!(f, "skipped"),
+            Self::Errored => write!(f, "errored"),
         }
+    }
+}
+
+mod lsn_serde {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use tokio_postgres::types::PgLsn;
+
+    pub fn serialize<S>(lsn: &PgLsn, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        lsn.to_string().serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<PgLsn, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        s.parse().map_err(|e| serde::de::Error::custom(format!("{:?}", e)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Utc;
+    use tokio_postgres::types::PgLsn;
+
+    #[test]
+    fn test_retry_policy_serialization() {
+        // Test NoRetry
+        let no_retry = RetryPolicy::NoRetry;
+        let json = serde_json::to_value(&no_retry).unwrap();
+        assert_eq!(json, serde_json::json!({"type": "none"}));
+        
+        let deserialized: RetryPolicy = serde_json::from_value(json).unwrap();
+        assert!(matches!(deserialized, RetryPolicy::NoRetry));
+
+        // Test ManualRetry
+        let manual_retry = RetryPolicy::ManualRetry;
+        let json = serde_json::to_value(&manual_retry).unwrap();
+        assert_eq!(json, serde_json::json!({"type": "user_intervention"}));
+        
+        let deserialized: RetryPolicy = serde_json::from_value(json).unwrap();
+        assert!(matches!(deserialized, RetryPolicy::ManualRetry));
+
+        // Test TimedRetry
+        let timestamp = Utc::now();
+        let timed_retry = RetryPolicy::TimedRetry { next_retry: timestamp };
+        let json = serde_json::to_value(&timed_retry).unwrap();
+        assert_eq!(json, serde_json::json!({
+            "type": "backoff",
+            "next_retry": timestamp
+        }));
+        
+        let deserialized: RetryPolicy = serde_json::from_value(json).unwrap();
+        if let RetryPolicy::TimedRetry { next_retry } = deserialized {
+            assert_eq!(next_retry, timestamp);
+        } else {
+            panic!("Expected TimedRetry variant");
+        }
+    }
+
+    #[test]
+    fn test_table_replication_phase_serialization() {
+        // Test Init
+        let init = TableReplicationPhase::Init;
+        let json = serde_json::to_value(&init).unwrap();
+        assert_eq!(json, serde_json::json!({"type": "init"}));
+        
+        let deserialized: TableReplicationPhase = serde_json::from_value(json).unwrap();
+        assert_eq!(deserialized, TableReplicationPhase::Init);
+
+        // Test SyncDone
+        let lsn = "0/1000000".parse::<PgLsn>().unwrap();
+        let sync_done = TableReplicationPhase::SyncDone { lsn };
+        let json = serde_json::to_value(&sync_done).unwrap();
+        assert_eq!(json, serde_json::json!({
+            "type": "sync_done",
+            "lsn": "0/1000000"
+        }));
+        
+        let deserialized: TableReplicationPhase = serde_json::from_value(json).unwrap();
+        if let TableReplicationPhase::SyncDone { lsn: deserialized_lsn } = deserialized {
+            assert_eq!(deserialized_lsn, lsn);
+        } else {
+            panic!("Expected SyncDone variant");
+        }
+
+        // Test Errored
+        let errored = TableReplicationPhase::Errored {
+            reason: "Test error".to_string(),
+            solution: Some("Test solution".to_string()),
+            retry_policy: RetryPolicy::NoRetry,
+        };
+        let json = serde_json::to_value(&errored).unwrap();
+        assert_eq!(json, serde_json::json!({
+            "type": "errored",
+            "reason": "Test error",
+            "solution": "Test solution",
+            "retry_policy": {"type": "none"}
+        }));
+        
+        let deserialized: TableReplicationPhase = serde_json::from_value(json).unwrap();
+        if let TableReplicationPhase::Errored { reason, solution, retry_policy } = deserialized {
+            assert_eq!(reason, "Test error");
+            assert_eq!(solution, Some("Test solution".to_string()));
+            assert!(matches!(retry_policy, RetryPolicy::NoRetry));
+        } else {
+            panic!("Expected Errored variant");
+        }
+    }
+
+    #[test]
+    fn test_flattened_jsonb_structure() {
+        // Test that serialization produces flattened structure (no nested `data`)
+        let errored = TableReplicationPhase::Errored {
+            reason: "Replication slot limit reached".to_string(),
+            solution: Some("Drop unused replication slots".to_string()),
+            retry_policy: RetryPolicy::ManualRetry,
+        };
+        
+        let json = serde_json::to_value(&errored).unwrap();
+        let obj = json.as_object().unwrap();
+        
+        // Ensure top-level fields are present (flattened)
+        assert!(obj.contains_key("type"));
+        assert!(obj.contains_key("reason"));
+        assert!(obj.contains_key("solution"));
+        assert!(obj.contains_key("retry_policy"));
+        
+        // Ensure no nested "data" object
+        assert!(!obj.contains_key("data"));
+        
+        // Verify values
+        assert_eq!(obj["type"], "errored");
+        assert_eq!(obj["reason"], "Replication slot limit reached");
+        assert_eq!(obj["solution"], "Drop unused replication slots");
+        assert_eq!(obj["retry_policy"]["type"], "user_intervention");
     }
 }

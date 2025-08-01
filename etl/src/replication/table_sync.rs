@@ -8,6 +8,7 @@ use tracing::{error, info, warn};
 
 use crate::bail;
 use crate::concurrency::shutdown::{ShutdownResult, ShutdownRx};
+use crate::state::table::RetryPolicy;
 use crate::concurrency::signal::SignalTx;
 use crate::concurrency::stream::BatchStream;
 use crate::destination::Destination;
@@ -167,7 +168,11 @@ where
 
             if !table_schema.has_primary_keys() {
                 state_store
-                    .update_table_replication_state(table_id, TableReplicationPhase::Skipped)
+                    .update_table_replication_state(table_id, TableReplicationPhase::Errored {
+                        reason: "Table sync failed".to_string(),
+                        solution: Some("Check logs for detailed error information".to_string()),
+                        retry_policy: RetryPolicy::NoRetry,
+                    })
                     .await?;
 
                 bail!(

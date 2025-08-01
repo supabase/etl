@@ -67,7 +67,7 @@ impl TableSyncWorkerStateInner {
         phase: TableReplicationPhase,
         state_store: &S,
     ) -> EtlResult<()> {
-        self.set(phase);
+        self.set(phase.clone());
 
         // If we should store this phase change, we want to do it via the supplied state store.
         if phase.as_type().should_store() {
@@ -85,7 +85,7 @@ impl TableSyncWorkerStateInner {
     }
 
     pub fn replication_phase(&self) -> TableReplicationPhase {
-        self.table_replication_phase
+        self.table_replication_phase.clone()
     }
 }
 
@@ -680,12 +680,12 @@ where
         _remote_final_lsn: PgLsn,
     ) -> EtlResult<bool> {
         let inner = self.table_sync_worker_state.lock().await;
-        let is_skipped = matches!(
+        let is_errored = matches!(
             inner.table_replication_phase.as_type(),
-            TableReplicationPhaseType::Skipped
+            TableReplicationPhaseType::Errored
         );
 
-        let should_apply_changes = !is_skipped && self.table_id == table_id;
+        let should_apply_changes = !is_errored && self.table_id == table_id;
 
         Ok(should_apply_changes)
     }

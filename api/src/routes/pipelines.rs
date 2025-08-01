@@ -253,8 +253,8 @@ impl From<TableReplicationState> for SimpleTableReplicationState {
             // TODO: add lag metric when available.
             TableReplicationState::SyncDone => SimpleTableReplicationState::FollowingWal { lag: 0 },
             TableReplicationState::Ready => SimpleTableReplicationState::FollowingWal { lag: 0 },
-            TableReplicationState::Skipped => SimpleTableReplicationState::Error {
-                message: "Table was skipped during replication".to_string(),
+            TableReplicationState::Errored => SimpleTableReplicationState::Error {
+                message: "Table encountered an error during replication".to_string(),
             },
         }
     }

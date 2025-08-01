@@ -153,7 +153,7 @@ impl StateStore for NotifyingStateStore {
         let mut inner = self.inner.write().await;
 
         // Store the current state in history before updating
-        if let Some(current_state) = inner.table_replication_states.get(&table_id).copied() {
+        if let Some(current_state) = inner.table_replication_states.get(&table_id).cloned() {
             inner
                 .table_state_history
                 .entry(table_id)
@@ -190,7 +190,7 @@ impl StateStore for NotifyingStateStore {
         // Update the current state to the previous state
         inner
             .table_replication_states
-            .insert(table_id, previous_state);
+            .insert(table_id, previous_state.clone());
         inner.check_conditions().await;
 
         inner
