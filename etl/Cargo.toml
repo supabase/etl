@@ -4,16 +4,6 @@ version = "0.1.0"
 edition = "2024"
 autotests = false
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
-
-[[example]]
-name = "bigquery"
-required-features = ["bigquery"]
-
-[[bench]]
-name = "table_copies"
-harness = false
-
 [[test]]
 name = "integration"
 path = "tests/integration/mod.rs"
@@ -28,32 +18,19 @@ required-features = ["failpoints", "test-utils"]
 config = { workspace = true }
 postgres = { workspace = true, features = ["tokio", "replication"] }
 
-base64 = { workspace = true }
 bytes = { workspace = true }
 byteorder = { workspace = true }
-chrono = { workspace = true, features = ["serde"] }
+chrono = { workspace = true }
 fail = { workspace = true }
 futures = { workspace = true }
-gcp-bigquery-client = { workspace = true, optional = true, features = [
-    "rust-tls",
-    "aws-lc-rs",
-] }
 pg_escape = { workspace = true }
 pin-project-lite = { workspace = true }
 postgres-replication = { workspace = true }
-prost = { workspace = true, optional = true }
 rustls = { workspace = true, features = ["aws-lc-rs", "logging"] }
 rustls-pemfile = { workspace = true, features = ["std"] }
-rand = { workspace = true, features = ["std"] }
-secrecy = { workspace = true }
 serde_json = { workspace = true, features = ["std"] }
 sqlx = { workspace = true, features = ["runtime-tokio-rustls", "postgres"] }
-tokio = { workspace = true, features = [
-    "rt-multi-thread",
-    "macros",
-    "sync",
-    "signal",
-] }
+tokio = { workspace = true, features = ["rt-multi-thread"] }
 tokio-postgres = { workspace = true, features = [
     "runtime",
     "with-chrono-0_4",
@@ -61,26 +38,19 @@ tokio-postgres = { workspace = true, features = [
     "with-serde_json-1",
 ] }
 tokio-postgres-rustls = { workspace = true }
-tokio-util = { workspace = true }
+tokio-util = { workspace = true, features = ["time"] }
 tracing = { workspace = true, default-features = true }
-tracing-subscriber = { workspace = true, default-features = true, features = [
-    "env-filter",
-] }
 uuid = { workspace = true, features = ["v4"] }
 
 [dev-dependencies]
 postgres = { workspace = true, features = ["test-utils", "tokio"] }
 telemetry = { workspace = true }
 
-clap = { workspace = true, default-features = true, features = [
-    "std",
-    "derive",
-] }
+rand = { workspace = true, features = ["thread_rng"] }
 
 
 [features]
-bigquery = ["dep:gcp-bigquery-client", "dep:prost", "postgres/bigquery"]
 unknown-types-to-bytes = []
-test-utils = []
+test-utils = ["postgres/test-utils"]
 failpoints = ["fail/failpoints"]
 default = ["unknown-types-to-bytes"]

@@ -10,18 +10,18 @@ use crate::bail;
 use crate::concurrency::shutdown::{ShutdownResult, ShutdownRx};
 use crate::concurrency::signal::SignalTx;
 use crate::concurrency::stream::BatchStream;
-use crate::destination::base::Destination;
+use crate::destination::Destination;
 use crate::error::{ErrorKind, EtlError, EtlResult};
 #[cfg(feature = "failpoints")]
 use crate::failpoints::START_TABLE_SYNC__AFTER_DATA_SYNC;
 use crate::failpoints::etl_fail_point;
-use crate::pipeline::PipelineId;
 use crate::replication::client::PgReplicationClient;
 use crate::replication::slot::get_slot_name;
 use crate::replication::stream::TableCopyStream;
-use crate::schema::cache::SchemaCache;
-use crate::state::store::base::StateStore;
+use crate::schema::SchemaCache;
+use crate::state::store::StateStore;
 use crate::state::table::{TableReplicationPhase, TableReplicationPhaseType};
+use crate::types::PipelineId;
 use crate::workers::base::WorkerType;
 use crate::workers::table_sync::TableSyncWorkerState;
 
@@ -32,7 +32,7 @@ pub enum TableSyncResult {
     SyncCompleted { start_lsn: PgLsn },
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 pub async fn start_table_sync<S, D>(
     pipeline_id: PipelineId,
     config: Arc<PipelineConfig>,

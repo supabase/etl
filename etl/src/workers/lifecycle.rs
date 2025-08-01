@@ -7,7 +7,7 @@ use tracing::error;
 use crate::concurrency::future::ReactiveFutureCallback;
 use crate::error::EtlError;
 use crate::state::retries::RetriesOrchestrator;
-use crate::state::store::base::StateStore;
+use crate::state::store::StateStore;
 use crate::state::table::{RetryPolicy, TableReplicationError};
 use crate::workers::pool::{TableSyncWorkerPool, TableSyncWorkerPoolInner};
 use crate::workers::table_sync::TableSyncWorkerState;

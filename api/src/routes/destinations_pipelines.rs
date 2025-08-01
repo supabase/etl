@@ -153,7 +153,6 @@ pub struct UpdateDestinationPipelineRequest {
 }
 
 #[utoipa::path(
-    context_path = "/v1",
     request_body = CreateDestinationPipelineRequest,
     params(
         ("tenant_id" = String, Header, description = "The tenant ID")
@@ -164,7 +163,7 @@ pub struct UpdateDestinationPipelineRequest {
         (status = 400, description = "Bad request", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage)
     ),
-    tag = "Destinations & Pipelines"
+    tag = "Destinations and Pipelines"
 )]
 #[post("/destinations-pipelines")]
 pub async fn create_destination_and_pipeline(
@@ -215,7 +214,6 @@ pub async fn create_destination_and_pipeline(
 }
 
 #[utoipa::path(
-    context_path = "/v1",
     request_body = UpdateDestinationPipelineRequest,
     params(
         ("destination_id" = i64, Path, description = "ID of the destination to update"),
@@ -228,7 +226,7 @@ pub async fn create_destination_and_pipeline(
         (status = 400, description = "Bad request", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage)
     ),
-    tag = "Destinations & Pipelines"
+    tag = "Destinations and Pipelines"
 )]
 #[post("/destinations-pipelines/{destination_id}/{pipeline_id}")]
 pub async fn update_destination_and_pipeline(

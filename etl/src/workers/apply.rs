@@ -8,20 +8,21 @@ use tokio_postgres::types::PgLsn;
 use tracing::{Instrument, debug, error, info};
 
 use crate::concurrency::shutdown::ShutdownRx;
-use crate::concurrency::signal::{SignalRx, SignalTx};
-use crate::destination::base::Destination;
+use crate::concurrency::signal::SignalRx;
+use crate::concurrency::signal::SignalTx;
+use crate::destination::Destination;
 use crate::etl_error;
-use crate::pipeline::PipelineId;
 use crate::replication::apply::{ApplyLoopHook, start_apply_loop};
 use crate::replication::client::PgReplicationClient;
 use crate::replication::common::get_table_replication_states;
 use crate::replication::slot::get_slot_name;
-use crate::schema::cache::SchemaCache;
+use crate::schema::SchemaCache;
 use crate::state::retries::RetriesOrchestrator;
-use crate::state::store::base::StateStore;
+use crate::state::store::StateStore;
 use crate::state::table::{
     TableReplicationError, TableReplicationPhase, TableReplicationPhaseType,
 };
+use crate::types::PipelineId;
 use crate::workers::base::{Worker, WorkerHandle, WorkerType};
 use crate::workers::pool::TableSyncWorkerPool;
 use crate::workers::table_sync::{TableSyncWorker, TableSyncWorkerState};
@@ -67,7 +68,7 @@ pub struct ApplyWorker<S, D> {
 }
 
 impl<S, D> ApplyWorker<S, D> {
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     pub fn new(
         pipeline_id: PipelineId,
         config: Arc<PipelineConfig>,
@@ -191,7 +192,7 @@ struct ApplyWorkerHook<S, D> {
 }
 
 impl<S, D> ApplyWorkerHook<S, D> {
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     fn new(
         pipeline_id: PipelineId,
         config: Arc<PipelineConfig>,

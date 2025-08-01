@@ -11,19 +11,19 @@ use tracing::{Instrument, debug, error, info, warn};
 use crate::concurrency::future::ReactiveFuture;
 use crate::concurrency::shutdown::{ShutdownResult, ShutdownRx};
 use crate::concurrency::signal::SignalTx;
-use crate::destination::base::Destination;
+use crate::destination::Destination;
 use crate::error::{ErrorKind, EtlError, EtlResult};
-use crate::pipeline::PipelineId;
 use crate::replication::apply::{ApplyLoopHook, start_apply_loop};
 use crate::replication::client::PgReplicationClient;
 use crate::replication::slot::get_slot_name;
 use crate::replication::table_sync::{TableSyncResult, start_table_sync};
-use crate::schema::cache::SchemaCache;
+use crate::schema::SchemaCache;
 use crate::state::retries::RetriesOrchestrator;
-use crate::state::store::base::StateStore;
+use crate::state::store::StateStore;
 use crate::state::table::{
     TableReplicationError, TableReplicationPhase, TableReplicationPhaseType,
 };
+use crate::types::PipelineId;
 use crate::workers::base::{Worker, WorkerHandle, WorkerType};
 use crate::workers::lifecycle::WorkerLifecycleObserver;
 use crate::workers::pool::{TableSyncWorkerPool, TableSyncWorkerPoolInner};
@@ -82,10 +82,6 @@ impl TableSyncWorkerStateInner {
         }
 
         Ok(())
-    }
-
-    pub fn table_id(&self) -> TableId {
-        self.table_id
     }
 
     pub fn replication_phase(&self) -> TableReplicationPhase {

@@ -14,14 +14,14 @@ use tracing::{debug, info};
 use crate::concurrency::shutdown::ShutdownRx;
 use crate::concurrency::signal::SignalRx;
 use crate::conversions::event::{Event, EventType, convert_message_to_event};
-use crate::destination::base::Destination;
+use crate::destination::Destination;
 use crate::error::{ErrorKind, EtlError, EtlResult};
-use crate::pipeline::PipelineId;
 use crate::replication::client::PgReplicationClient;
 use crate::replication::slot::get_slot_name;
 use crate::replication::stream::EventsStream;
-use crate::schema::cache::SchemaCache;
+use crate::schema::SchemaCache;
 use crate::state::table::{RetryPolicy, TableReplicationError};
+use crate::types::PipelineId;
 use crate::workers::base::WorkerType;
 use crate::{bail, etl_error};
 
@@ -206,7 +206,7 @@ impl ApplyLoopState {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 pub async fn start_apply_loop<D, T>(
     pipeline_id: PipelineId,
     start_lsn: PgLsn,

@@ -4,7 +4,7 @@ use std::future::Future;
 use crate::conversions::event::Event;
 use crate::conversions::table_row::TableRow;
 use crate::error::EtlResult;
-use crate::schema::cache::SchemaCache;
+use crate::schema::SchemaCache;
 
 pub trait Destination {
     fn inject(&self, _schema_cache: SchemaCache) -> impl Future<Output = EtlResult<()>> + Send {

@@ -8,6 +8,8 @@ SourceConfig {
     name: "postgres",
     username: "postgres",
     password: Some(
-        Secret([REDACTED alloc::string::String]),
+        SerializableSecretString(
+            SecretBox<str>([REDACTED]),
+        ),
     ),
 }

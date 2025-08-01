@@ -11,7 +11,7 @@ use tokio_util::time::{DelayQueue, delay_queue};
 use tracing::{debug, error, info};
 
 use crate::concurrency::signal::SignalTx;
-use crate::state::store::base::StateStore;
+use crate::state::store::StateStore;
 use crate::workers::pool::TableSyncWorkerPool;
 
 /// Orchestrates retry mechanisms for failed table synchronization operations.

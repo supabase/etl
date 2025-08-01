@@ -6,7 +6,7 @@ use tokio_postgres::types::PgLsn;
 
 use crate::error::{ErrorKind, EtlError};
 use crate::state::retries::RetriesOrchestrator;
-use crate::state::store::base::StateStore;
+use crate::state::store::StateStore;
 
 /// Represents a processed error that occurred during table replication.
 ///

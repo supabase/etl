@@ -91,7 +91,6 @@ pub struct ReadImagesResponse {
 }
 
 #[utoipa::path(
-    context_path = "/v1",
     request_body = CreateImageRequest,
     responses(
         (status = 200, description = "Create new image", body = CreateImageResponse),
@@ -115,7 +114,6 @@ pub async fn create_image(
 }
 
 #[utoipa::path(
-    context_path = "/v1",
     params(
         ("image_id" = i64, Path, description = "Id of the image"),
     ),
@@ -146,7 +144,6 @@ pub async fn read_image(
 }
 
 #[utoipa::path(
-    context_path = "/v1",
     request_body = UpdateImageRequest,
     params(
         ("image_id" = i64, Path, description = "Id of the image"),
@@ -175,7 +172,6 @@ pub async fn update_image(
 }
 
 #[utoipa::path(
-    context_path = "/v1",
     params(
         ("image_id" = i64, Path, description = "Id of the image"),
     ),
@@ -201,7 +197,6 @@ pub async fn delete_image(
 }
 
 #[utoipa::path(
-    context_path = "/v1",
     responses(
         (status = 200, description = "Return all images", body = ReadImagesResponse),
         (status = 500, description = "Internal server error", body = ErrorMessage),

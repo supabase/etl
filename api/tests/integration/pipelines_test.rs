@@ -1,9 +1,10 @@
-use api::db::pipelines::PipelineConfig;
+use api::db::pipelines::{OptionalPipelineConfig, PipelineConfig};
 use api::db::sources::SourceConfig;
 use api::routes::pipelines::{
     CreatePipelineRequest, CreatePipelineResponse, GetPipelineReplicationStatusResponse,
     ReadPipelineResponse, ReadPipelinesResponse, SimpleTableReplicationState,
-    UpdatePipelineImageRequest, UpdatePipelineRequest,
+    UpdatePipelineConfigRequest, UpdatePipelineConfigResponse, UpdatePipelineImageRequest,
+    UpdatePipelineRequest,
 };
 use api::routes::sources::{CreateSourceRequest, CreateSourceResponse};
 use config::SerializableSecretString;
@@ -45,6 +46,47 @@ pub fn updated_pipeline_config() -> PipelineConfig {
         }),
         table_error_retry_delay_ms: Some(20000),
         max_table_sync_workers: Some(4),
+    }
+}
+
+pub enum ConfigUpdateType {
+    Batch(BatchConfig),
+    TableErrorRetryDelayMs(u64),
+    MaxTableSyncWorkers(u16),
+}
+
+pub fn partially_updated_optional_pipeline_config(
+    update: ConfigUpdateType,
+) -> OptionalPipelineConfig {
+    match update {
+        ConfigUpdateType::Batch(batch_config) => OptionalPipelineConfig {
+            batch: Some(batch_config),
+            table_error_retry_delay_ms: None,
+            max_table_sync_workers: None,
+        },
+        ConfigUpdateType::TableErrorRetryDelayMs(table_error_retry_delay_ms) => {
+            OptionalPipelineConfig {
+                batch: None,
+                table_error_retry_delay_ms: Some(table_error_retry_delay_ms),
+                max_table_sync_workers: None,
+            }
+        }
+        ConfigUpdateType::MaxTableSyncWorkers(n) => OptionalPipelineConfig {
+            batch: None,
+            table_error_retry_delay_ms: None,
+            max_table_sync_workers: Some(n),
+        },
+    }
+}
+
+pub fn updated_optional_pipeline_config() -> OptionalPipelineConfig {
+    OptionalPipelineConfig {
+        batch: Some(BatchConfig {
+            max_size: 1_000_000,
+            max_fill_ms: 100,
+        }),
+        table_error_retry_delay_ms: Some(10000),
+        max_table_sync_workers: Some(8),
     }
 }
 
@@ -773,6 +815,130 @@ async fn update_image_fails_when_no_default_image_exists() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn pipeline_config_can_be_updated() {
+    init_test_tracing();
+    // Arrange
+    let app = spawn_test_app().await;
+    let tenant_id = &create_tenant(&app).await;
+    let source_id = create_source(&app, tenant_id).await;
+    let destination_id = create_destination(&app, tenant_id).await;
+
+    let pipeline_id = create_pipeline_with_config(
+        &app,
+        tenant_id,
+        source_id,
+        destination_id,
+        new_pipeline_config(),
+    )
+    .await;
+
+    // Act
+    let update_request = UpdatePipelineConfigRequest {
+        config: partially_updated_optional_pipeline_config(ConfigUpdateType::Batch(BatchConfig {
+            max_size: 10_000,
+            max_fill_ms: 100,
+        })),
+    };
+    let response = app
+        .update_pipeline_config(tenant_id, pipeline_id, &update_request)
+        .await;
+
+    // Assert
+    assert!(response.status().is_success());
+    let response: UpdatePipelineConfigResponse = response
+        .json()
+        .await
+        .expect("failed to deserialize response");
+    insta::assert_debug_snapshot!(response.config);
+
+    // Act
+    let update_request = UpdatePipelineConfigRequest {
+        config: partially_updated_optional_pipeline_config(
+            ConfigUpdateType::TableErrorRetryDelayMs(20000),
+        ),
+    };
+    let response = app
+        .update_pipeline_config(tenant_id, pipeline_id, &update_request)
+        .await;
+
+    // Assert
+    assert!(response.status().is_success());
+    let response: UpdatePipelineConfigResponse = response
+        .json()
+        .await
+        .expect("failed to deserialize response");
+    insta::assert_debug_snapshot!(response.config);
+
+    // Act
+    let update_request = UpdatePipelineConfigRequest {
+        config: partially_updated_optional_pipeline_config(ConfigUpdateType::MaxTableSyncWorkers(
+            8,
+        )),
+    };
+    let response = app
+        .update_pipeline_config(tenant_id, pipeline_id, &update_request)
+        .await;
+
+    // Assert
+    assert!(response.status().is_success());
+    let response: UpdatePipelineConfigResponse = response
+        .json()
+        .await
+        .expect("failed to deserialize response");
+    insta::assert_debug_snapshot!(response.config);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn update_config_fails_for_non_existing_pipeline() {
+    init_test_tracing();
+    // Arrange
+    let app = spawn_test_app().await;
+    let tenant_id = &create_tenant(&app).await;
+
+    // Act
+    let update_request = UpdatePipelineConfigRequest {
+        config: updated_optional_pipeline_config(),
+    };
+    let response = app
+        .update_pipeline_config(tenant_id, 42, &update_request)
+        .await;
+
+    // Assert
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn update_config_fails_for_pipeline_from_another_tenant() {
+    init_test_tracing();
+    // Arrange
+    let app = spawn_test_app().await;
+    let tenant1_id = &create_tenant(&app).await;
+
+    let source1_id = create_source(&app, tenant1_id).await;
+    let destination1_id = create_destination(&app, tenant1_id).await;
+
+    let pipeline_id = create_pipeline_with_config(
+        &app,
+        tenant1_id,
+        source1_id,
+        destination1_id,
+        new_pipeline_config(),
+    )
+    .await;
+
+    // Act - Try to update config using
+    let update_request = UpdatePipelineConfigRequest {
+        config: updated_optional_pipeline_config(),
+    };
+    let response = app
+        .update_pipeline_config("wrong-tenant-id", pipeline_id, &update_request)
+        .await;
+
+    // Assert
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn an_existing_pipeline_can_be_started() {
     init_test_tracing();
     // Arrange
@@ -878,7 +1044,7 @@ async fn pipeline_replication_status_returns_table_states_and_names() {
         password: source_db_config
             .password
             .as_ref()
-            .map(|p| SerializableSecretString::from(p.expose_secret().clone())),
+            .map(|p| SerializableSecretString::from(p.expose_secret().to_string())),
     };
 
     let source = CreateSourceRequest {

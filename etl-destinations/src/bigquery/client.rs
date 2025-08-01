@@ -1,5 +1,8 @@
-use crate::error::EtlResult;
+use etl::error::{ErrorKind, EtlError, EtlResult};
+use etl::etl_error;
+use etl::types::{Cell, ColumnSchema, TableRow, Type};
 use futures::StreamExt;
+use gcp_bigquery_client::google::cloud::bigquery::storage::v1::RowError;
 use gcp_bigquery_client::storage::{ColumnMode, StorageApi};
 use gcp_bigquery_client::yup_oauth2::parse_service_account_key;
 use gcp_bigquery_client::{
@@ -8,13 +11,10 @@ use gcp_bigquery_client::{
     model::{query_request::QueryRequest, query_response::ResultSet},
     storage::{ColumnType, FieldDescriptor, StreamName, TableDescriptor},
 };
-use postgres::schema::ColumnSchema;
 use std::fmt;
-use tokio_postgres::types::Type;
 use tracing::info;
 
-use crate::conversions::Cell;
-use crate::conversions::table_row::TableRow;
+use crate::bigquery::encoding::BigQueryTableRow;
 
 /// Maximum byte size for streaming data to BigQuery.
 const MAX_SIZE_BYTES: usize = 9 * 1024 * 1024;
@@ -31,8 +31,8 @@ const BIGQUERY_CDC_SEQUENCE_COLUMN: &str = "_CHANGE_SEQUENCE_NUMBER";
 /// Change Data Capture operation types for BigQuery streaming.
 #[derive(Debug)]
 pub enum BigQueryOperationType {
-    UPSERT,
-    DELETE,
+    Upsert,
+    Delete,
 }
 
 impl BigQueryOperationType {
@@ -45,8 +45,8 @@ impl BigQueryOperationType {
 impl fmt::Display for BigQueryOperationType {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            BigQueryOperationType::UPSERT => write!(f, "UPSERT"),
-            BigQueryOperationType::DELETE => write!(f, "DELETE"),
+            BigQueryOperationType::Upsert => write!(f, "UPSERT"),
+            BigQueryOperationType::Delete => write!(f, "DELETE"),
         }
     }
 }
@@ -69,7 +69,9 @@ impl BigQueryClient {
         project_id: String,
         sa_key_path: &str,
     ) -> EtlResult<BigQueryClient> {
-        let client = Client::from_service_account_key_file(sa_key_path).await?;
+        let client = Client::from_service_account_key_file(sa_key_path)
+            .await
+            .map_err(bq_error_to_etl_error)?;
 
         Ok(BigQueryClient { project_id, client })
     }
@@ -79,8 +81,12 @@ impl BigQueryClient {
     /// Parses the provided service account key string to authenticate with the
     /// BigQuery API.
     pub async fn new_with_key(project_id: String, sa_key: &str) -> EtlResult<BigQueryClient> {
-        let sa_key = parse_service_account_key(sa_key).map_err(BQError::from)?;
-        let client = Client::from_service_account_key(sa_key, false).await?;
+        let sa_key = parse_service_account_key(sa_key)
+            .map_err(BQError::from)
+            .map_err(bq_error_to_etl_error)?;
+        let client = Client::from_service_account_key(sa_key, false)
+            .await
+            .map_err(bq_error_to_etl_error)?;
 
         Ok(BigQueryClient { project_id, client })
     }
@@ -138,6 +144,7 @@ impl BigQueryClient {
     }
 
     /// Truncates a table in a BigQuery dataset.
+    #[allow(dead_code)]
     pub async fn truncate_table(&self, dataset_id: &str, table_id: &str) -> EtlResult<()> {
         let full_table_name = self.full_table_name(dataset_id, table_id);
 
@@ -179,6 +186,12 @@ impl BigQueryClient {
         table_descriptor: &TableDescriptor,
         table_rows: Vec<TableRow>,
     ) -> EtlResult<()> {
+        // We have to map table rows into the new type due to the limitations of how Rust works.
+        let table_rows = table_rows
+            .into_iter()
+            .map(BigQueryTableRow)
+            .collect::<Vec<_>>();
+
         // We create a slice on table rows, which will be updated while the streaming progresses.
         //
         // Using a slice allows us to deallocate the vector only at the end of streaming, which leads
@@ -199,12 +212,22 @@ impl BigQueryClient {
                 .client
                 .storage_mut()
                 .append_rows(&default_stream, rows, ETL_TRACE_ID.to_owned())
-                .await?;
+                .await
+                .map_err(bq_error_to_etl_error)?;
 
             if let Some(append_rows_response) = append_rows_stream.next().await {
-                let append_rows_response = append_rows_response.map_err(BQError::from)?;
+                let append_rows_response = append_rows_response
+                    .map_err(BQError::from)
+                    .map_err(bq_error_to_etl_error)?;
                 if !append_rows_response.row_errors.is_empty() {
-                    return Err(append_rows_response.row_errors.into());
+                    // We convert the error into an `ETLError`.
+                    let row_errors = append_rows_response
+                        .row_errors
+                        .into_iter()
+                        .map(row_error_to_etl_error)
+                        .collect::<Vec<_>>();
+
+                    return Err(row_errors.into());
                 }
             }
 
@@ -219,7 +242,12 @@ impl BigQueryClient {
 
     /// Executes an SQL query and returns the result set.
     pub async fn query(&self, request: QueryRequest) -> EtlResult<ResultSet> {
-        let query_response = self.client.job().query(&self.project_id, request).await?;
+        let query_response = self
+            .client
+            .job()
+            .query(&self.project_id, request)
+            .await
+            .map_err(bq_error_to_etl_error)?;
 
         Ok(ResultSet::new_from_query_response(query_response))
     }
@@ -450,11 +478,94 @@ impl fmt::Debug for BigQueryClient {
     }
 }
 
+/// Converts [`BQError`] to [`EtlError`] with appropriate error kind.
+///
+/// Maps errors based on their specific type for better error classification and handling.
+fn bq_error_to_etl_error(err: BQError) -> EtlError {
+    use BQError;
+
+    let (kind, description) = match &err {
+        // Authentication related errors
+        BQError::InvalidServiceAccountKey(_) => (
+            ErrorKind::AuthenticationError,
+            "Invalid BigQuery service account key",
+        ),
+        BQError::InvalidServiceAccountAuthenticator(_) => (
+            ErrorKind::AuthenticationError,
+            "Invalid BigQuery service account authenticator",
+        ),
+        BQError::InvalidInstalledFlowAuthenticator(_) => (
+            ErrorKind::AuthenticationError,
+            "Invalid BigQuery installed flow authenticator",
+        ),
+        BQError::InvalidApplicationDefaultCredentialsAuthenticator(_) => (
+            ErrorKind::AuthenticationError,
+            "Invalid BigQuery application default credentials",
+        ),
+        BQError::InvalidAuthorizedUserAuthenticator(_) => (
+            ErrorKind::AuthenticationError,
+            "Invalid BigQuery authorized user authenticator",
+        ),
+        BQError::AuthError(_) => (
+            ErrorKind::AuthenticationError,
+            "BigQuery authentication error",
+        ),
+        BQError::YupAuthError(_) => (
+            ErrorKind::AuthenticationError,
+            "BigQuery OAuth authentication error",
+        ),
+        BQError::NoToken => (
+            ErrorKind::AuthenticationError,
+            "BigQuery authentication token missing",
+        ),
+
+        // Network and transport errors
+        BQError::RequestError(_) => (ErrorKind::IoError, "BigQuery request failed"),
+        BQError::TonicTransportError(_) => (ErrorKind::IoError, "BigQuery transport error"),
+
+        // Query and data errors
+        BQError::ResponseError { .. } => (ErrorKind::QueryFailed, "BigQuery response error"),
+        BQError::NoDataAvailable => (
+            ErrorKind::InvalidState,
+            "BigQuery result set positioning error",
+        ),
+        BQError::InvalidColumnIndex { .. } => {
+            (ErrorKind::InvalidData, "BigQuery invalid column index")
+        }
+        BQError::InvalidColumnName { .. } => {
+            (ErrorKind::InvalidData, "BigQuery invalid column name")
+        }
+        BQError::InvalidColumnType { .. } => {
+            (ErrorKind::ConversionError, "BigQuery column type mismatch")
+        }
+
+        // Serialization errors
+        BQError::SerializationError(_) => (
+            ErrorKind::SerializationError,
+            "BigQuery JSON serialization error",
+        ),
+
+        // gRPC errors
+        BQError::TonicInvalidMetadataValueError(_) => {
+            (ErrorKind::ConfigError, "BigQuery invalid metadata value")
+        }
+        BQError::TonicStatusError(_) => (ErrorKind::DestinationError, "BigQuery gRPC status error"),
+    };
+
+    etl_error!(kind, description, err.to_string())
+}
+
+/// Converts BigQuery row errors to [`EtlError`] with [`ErrorKind::DestinationError`].
+fn row_error_to_etl_error(err: RowError) -> EtlError {
+    etl_error!(
+        ErrorKind::DestinationError,
+        "BigQuery row error",
+        format!("{err:?}")
+    )
+}
+
 #[cfg(test)]
 mod tests {
-    use postgres::schema::ColumnSchema;
-    use tokio_postgres::types::Type;
-
     use super::*;
 
     #[test]

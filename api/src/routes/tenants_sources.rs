@@ -79,7 +79,6 @@ pub struct CreateTenantSourceResponse {
 }
 
 #[utoipa::path(
-    context_path = "/v1",
     request_body = CreateTenantSourceRequest,
     responses(
         (status = 200, description = "Create a new tenant and a source", body = CreateTenantSourceResponse),

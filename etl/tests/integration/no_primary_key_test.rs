@@ -1,13 +1,10 @@
-use etl::{
-    destination::memory::MemoryDestination,
-    pipeline::PipelineId,
-    state::{store::notify::NotifyingStateStore, table::TableReplicationPhaseType},
-    test_utils::{
-        database::{spawn_database, test_table_name},
-        pipeline::create_pipeline,
-        test_destination_wrapper::TestDestinationWrapper,
-    },
-};
+use etl::destination::memory::MemoryDestination;
+use etl::state::store::notify::NotifyingStateStore;
+use etl::state::table::TableReplicationPhaseType;
+use etl::test_utils::database::{spawn_database, test_table_name};
+use etl::test_utils::pipeline::create_pipeline;
+use etl::test_utils::test_destination_wrapper::TestDestinationWrapper;
+use etl::types::PipelineId;
 use rand::random;
 use telemetry::init_test_tracing;
 

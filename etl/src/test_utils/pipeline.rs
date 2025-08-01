@@ -1,9 +1,10 @@
 use config::shared::{BatchConfig, PgConnectionConfig, PipelineConfig};
 use uuid::Uuid;
 
-use crate::destination::base::Destination;
-use crate::pipeline::{Pipeline, PipelineId};
-use crate::state::store::base::StateStore;
+use crate::destination::Destination;
+use crate::pipeline::Pipeline;
+use crate::state::store::StateStore;
+use crate::types::PipelineId;
 
 /// Generates a test-specific replication slot name with a random component.
 ///

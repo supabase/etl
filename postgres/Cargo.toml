@@ -8,9 +8,6 @@ config = { workspace = true }
 
 bytes = { workspace = true }
 pg_escape = { workspace = true }
-rustls = { workspace = true }
-serde = { workspace = true, features = ["derive"] }
-secrecy = { workspace = true, features = ["serde", "alloc"] }
 sqlx = { workspace = true, features = [
     "runtime-tokio-rustls",
     "macros",
@@ -27,8 +24,6 @@ tokio-postgres = { workspace = true, features = [
 ] }
 thiserror = { workspace = true }
 tracing = { workspace = true }
-utoipa = { workspace = true }
-uuid = { workspace = true, features = ["v4"] }
 
 
 [features]

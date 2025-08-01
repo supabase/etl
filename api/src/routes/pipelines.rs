@@ -15,12 +15,12 @@ use std::ops::DerefMut;
 use thiserror::Error;
 use utoipa::ToSchema;
 
-use crate::db;
 use crate::db::destinations::{Destination, DestinationsDbError, destination_exists};
 use crate::db::images::{Image, ImagesDbError};
 use crate::db::pipelines::{Pipeline, PipelineConfig, PipelinesDbError};
 use crate::db::replicators::{Replicator, ReplicatorsDbError};
 use crate::db::sources::{Source, SourceConfig, SourcesDbError, source_exists};
+use crate::db::{self, pipelines::OptionalPipelineConfig};
 use crate::encryption::EncryptionKey;
 use crate::k8s_client::TRUSTED_ROOT_CERT_KEY_NAME;
 use crate::k8s_client::{K8sClient, K8sError, PodPhase, TRUSTED_ROOT_CERT_CONFIG_MAP_NAME};
@@ -185,6 +185,17 @@ pub struct UpdatePipelineRequest {
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct UpdatePipelineConfigRequest {
+    #[schema(required = true)]
+    pub config: OptionalPipelineConfig,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct UpdatePipelineConfigResponse {
+    pub config: PipelineConfig,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct ReadPipelineResponse {
     #[schema(example = 1)]
     pub id: i64,
@@ -282,7 +293,6 @@ pub enum PipelineStatus {
 }
 
 #[utoipa::path(
-    context_path = "/v1",
     request_body = CreatePipelineRequest,
     params(
         ("tenant_id" = String, Header, description = "The tenant ID")
@@ -333,7 +343,6 @@ pub async fn create_pipeline(
 }
 
 #[utoipa::path(
-    context_path = "/v1",
     params(
         ("pipeline_id" = i64, Path, description = "Id of the pipeline"),
         ("tenant_id" = String, Header, description = "The tenant ID")
@@ -375,7 +384,6 @@ pub async fn read_pipeline(
 }
 
 #[utoipa::path(
-    context_path = "/v1",
     request_body = UpdatePipelineRequest,
     params(
         ("pipeline_id" = i64, Path, description = "Id of the pipeline"),
@@ -426,7 +434,6 @@ pub async fn update_pipeline(
 }
 
 #[utoipa::path(
-    context_path = "/v1",
     params(
         ("pipeline_id" = i64, Path, description = "Id of the pipeline"),
         ("tenant_id" = String, Header, description = "The tenant ID")
@@ -455,7 +462,6 @@ pub async fn delete_pipeline(
 }
 
 #[utoipa::path(
-    context_path = "/v1",
     params(
         ("tenant_id" = String, Header, description = "The tenant ID")
     ),
@@ -493,7 +499,6 @@ pub async fn read_all_pipelines(
 }
 
 #[utoipa::path(
-    context_path = "/v1",
     params(
         ("pipeline_id" = i64, Path, description = "Id of the pipeline"),
         ("tenant_id" = String, Header, description = "The tenant ID")
@@ -501,7 +506,8 @@ pub async fn read_all_pipelines(
     responses(
         (status = 200, description = "Start a pipeline"),
         (status = 500, description = "Internal server error", body = ErrorMessage)
-    )
+    ),
+    tag = "Pipelines"
 )]
 #[post("/pipelines/{pipeline_id}/start")]
 pub async fn start_pipeline(
@@ -536,7 +542,6 @@ pub async fn start_pipeline(
 }
 
 #[utoipa::path(
-    context_path = "/v1",
     params(
         ("pipeline_id" = i64, Path, description = "Id of the pipeline"),
         ("tenant_id" = String, Header, description = "The tenant ID")
@@ -544,7 +549,8 @@ pub async fn start_pipeline(
     responses(
         (status = 200, description = "Stop a pipeline"),
         (status = 500, description = "Internal server error", body = ErrorMessage)
-    )
+    ),
+    tag = "Pipelines"
 )]
 #[post("/pipelines/{pipeline_id}/stop")]
 pub async fn stop_pipeline(
@@ -570,14 +576,14 @@ pub async fn stop_pipeline(
 }
 
 #[utoipa::path(
-    context_path = "/v1",
     params(
         ("tenant_id" = String, Header, description = "The tenant ID")
     ),
     responses(
         (status = 200, description = "Stop all pipelines"),
         (status = 500, description = "Internal server error", body = ErrorMessage)
-    )
+    ),
+    tag = "Pipelines"
 )]
 #[post("/pipelines/stop")]
 pub async fn stop_all_pipelines(
@@ -599,7 +605,6 @@ pub async fn stop_all_pipelines(
 }
 
 #[utoipa::path(
-    context_path = "/v1",
     params(
         ("pipeline_id" = i64, Path, description = "Id of the pipeline"),
         ("tenant_id" = String, Header, description = "The tenant ID")
@@ -607,7 +612,8 @@ pub async fn stop_all_pipelines(
     responses(
         (status = 200, description = "Get pipeline status", body = GetPipelineStatusResponse),
         (status = 500, description = "Internal server error", body = ErrorMessage)
-    )
+    ),
+    tag = "Pipelines"
 )]
 #[get("/pipelines/{pipeline_id}/status")]
 pub async fn get_pipeline_status(
@@ -667,13 +673,12 @@ pub async fn get_pipeline_status(
 }
 
 #[utoipa::path(
-    context_path = "/v1",
     params(
         ("pipeline_id" = i64, Path, description = "Id of the pipeline"),
         ("tenant_id" = String, Header, description = "The tenant ID")
     ),
     responses(
-        (status = 200, description = "Get replication status for all tables in the pipeline", body = GetReplicationStatusResponse),
+        (status = 200, description = "Get replication status for all tables in the pipeline", body = GetPipelineReplicationStatusResponse),
         (status = 404, description = "Pipeline not found", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage)
     ),
@@ -737,7 +742,6 @@ pub async fn get_pipeline_replication_status(
 }
 
 #[utoipa::path(
-    context_path = "/v1",
     request_body = UpdatePipelineImageRequest,
     params(
         ("pipeline_id" = i64, Path, description = "Id of the pipeline"),
@@ -814,13 +818,55 @@ pub async fn update_pipeline_image(
     Ok(HttpResponse::Ok().finish())
 }
 
+#[utoipa::path(
+    context_path = "/v1",
+    request_body = UpdatePipelineConfigRequest,
+    params(
+        ("pipeline_id" = i64, Path, description = "Id of the pipeline"),
+        ("tenant_id" = String, Header, description = "The tenant ID")
+    ),
+    responses(
+        (status = 200, description = "Config updated successfully", body = UpdatePipelineConfigResponse),
+        (status = 400, description = "Pipeline not running or bad request", body = ErrorMessage),
+        (status = 404, description = "Pipeline not found", body = ErrorMessage),
+        (status = 500, description = "Internal server error", body = ErrorMessage)
+    ),
+    tag = "Pipelines"
+)]
+#[post("/pipelines/{pipeline_id}/update-config")]
+pub async fn update_pipeline_config(
+    req: HttpRequest,
+    pool: Data<PgPool>,
+    pipeline_id: Path<i64>,
+    update_request: Json<UpdatePipelineConfigRequest>,
+) -> Result<impl Responder, PipelineError> {
+    let tenant_id = extract_tenant_id(&req)?;
+    let pipeline_id = pipeline_id.into_inner();
+    let update_request = update_request.into_inner();
+    let mut txn = pool.begin().await?;
+
+    let config = db::pipelines::update_pipeline_config(
+        &mut txn,
+        tenant_id,
+        pipeline_id,
+        update_request.config,
+    )
+    .await?
+    .ok_or(PipelineError::PipelineNotFound(pipeline_id))?;
+
+    txn.commit().await?;
+
+    let response = UpdatePipelineConfigResponse { config };
+
+    Ok(Json(response))
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct Secrets {
     postgres_password: String,
     big_query_service_account_key: Option<String>,
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn create_or_update_pipeline_in_k8s(
     k8s_client: &dyn K8sClient,
     tenant_id: &str,

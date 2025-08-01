@@ -6,9 +6,9 @@ use std::sync::Arc;
 use tokio::sync::{Mutex, Notify};
 use tracing::{debug, warn};
 
-use crate::destination::base::Destination;
+use crate::destination::Destination;
 use crate::error::EtlResult;
-use crate::state::store::base::StateStore;
+use crate::state::store::StateStore;
 use crate::workers::base::{Worker, WorkerHandle};
 use crate::workers::table_sync::{TableSyncWorker, TableSyncWorkerHandle, TableSyncWorkerState};
 

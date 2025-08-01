@@ -1,0 +1,16 @@
+[package]
+name = "etl-examples"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+etl = { workspace = true }
+etl-destinations = { workspace = true, features = ["bigquery"] }
+
+clap = { workspace = true, default-features = true, features = [
+    "std",
+    "derive",
+] }
+tokio = { workspace = true, features = ["macros", "signal"] }
+tracing = { workspace = true, default-features = true }
+tracing-subscriber = { workspace = true, default-features = true, features = ["env-filter"] }

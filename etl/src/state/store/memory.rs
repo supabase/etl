@@ -5,7 +5,7 @@ use tokio::sync::Mutex;
 
 use crate::error::{ErrorKind, EtlError, EtlResult};
 use crate::etl_error;
-use crate::state::store::base::StateStore;
+use crate::state::store::StateStore;
 use crate::state::table::TableReplicationPhase;
 
 #[derive(Debug)]

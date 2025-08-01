@@ -1,21 +1,19 @@
+use crate::bigquery::client::{BigQueryClient, BigQueryOperationType};
+use etl::destination::Destination;
+use etl::error::{ErrorKind, EtlError, EtlResult};
+use etl::etl_error;
+use etl::schema::SchemaCache;
+use etl::types::{
+    Cell, ColumnSchema, Event, PgLsn, TableId, TableName, TableRow, TableSchema, TruncateEvent,
+    Type,
+};
 use gcp_bigquery_client::model::query_request::QueryRequest;
 use gcp_bigquery_client::storage::TableDescriptor;
-use postgres::schema::{ColumnSchema, TableId, TableName, TableSchema};
 use std::collections::HashMap;
 use std::ops::Deref;
 use std::sync::{Arc, LazyLock};
 use tokio::sync::Mutex;
-use tokio_postgres::types::{PgLsn, Type};
 use tracing::{debug, info, warn};
-
-use crate::clients::bigquery::{BigQueryClient, BigQueryOperationType};
-use crate::conversions::Cell;
-use crate::conversions::event::{Event, TruncateEvent};
-use crate::conversions::table_row::TableRow;
-use crate::destination::base::Destination;
-use crate::error::{ErrorKind, EtlError, EtlResult};
-use crate::etl_error;
-use crate::schema::cache::SchemaCache;
 
 /// Table name for storing ETL table schema metadata in BigQuery.
 const ETL_TABLE_SCHEMAS_NAME: &str = "etl_table_schemas";
@@ -173,6 +171,11 @@ impl BigQueryDestination {
         })
     }
 
+    /// Returns the BigQuery table id as [`String`] for a supplied [`TableName`].
+    pub fn table_name_to_bigquery_table_id(table_name: &TableName) -> String {
+        format!("{}_{}", table_name.schema, table_name.name)
+    }
+
     /// Loads BigQuery table ID and descriptor that are used for streaming operations.
     ///
     /// Returns the BigQuery-formatted table name and its column descriptor for streaming operations.
@@ -200,7 +203,7 @@ impl BigQueryDestination {
             )
         })?;
 
-        let table_id = table_schema.name.as_bigquery_table_id();
+        let table_id = Self::table_name_to_bigquery_table_id(&table_schema.name);
         let table_descriptor = BigQueryClient::column_schemas_to_table_descriptor(
             &table_schema.column_schemas,
             use_cdc_sequence_column,
@@ -222,7 +225,7 @@ impl BigQueryDestination {
             .client
             .create_table_if_missing(
                 &dataset_id,
-                &table_schema.name.as_bigquery_table_id(),
+                &Self::table_name_to_bigquery_table_id(&table_schema.name),
                 &table_schema.column_schemas,
                 inner.max_staleness_mins,
             )
@@ -235,7 +238,7 @@ impl BigQueryDestination {
         let mut table_schema_row = Self::table_schema_to_table_row(&table_schema);
         table_schema_row
             .values
-            .push(BigQueryOperationType::UPSERT.into_cell());
+            .push(BigQueryOperationType::Upsert.into_cell());
         let table_schema_descriptor =
             BigQueryClient::column_schemas_to_table_descriptor(&ETL_TABLE_SCHEMAS_COLUMNS, false);
         inner
@@ -253,7 +256,7 @@ impl BigQueryDestination {
         for column_row in column_rows.iter_mut() {
             column_row
                 .values
-                .push(BigQueryOperationType::UPSERT.into_cell());
+                .push(BigQueryOperationType::Upsert.into_cell());
         }
         let column_descriptors =
             BigQueryClient::column_schemas_to_table_descriptor(&ETL_TABLE_COLUMNS_COLUMNS, false);
@@ -405,7 +408,7 @@ impl BigQueryDestination {
         for table_row in table_rows.iter_mut() {
             table_row
                 .values
-                .push(BigQueryOperationType::UPSERT.into_cell());
+                .push(BigQueryOperationType::Upsert.into_cell());
         }
         inner
             .client
@@ -441,7 +444,7 @@ impl BigQueryDestination {
                         insert
                             .table_row
                             .values
-                            .push(BigQueryOperationType::UPSERT.into_cell());
+                            .push(BigQueryOperationType::Upsert.into_cell());
                         insert.table_row.values.push(Cell::String(sequence_number));
 
                         let table_rows: &mut Vec<TableRow> =
@@ -454,7 +457,7 @@ impl BigQueryDestination {
                         update
                             .table_row
                             .values
-                            .push(BigQueryOperationType::UPSERT.into_cell());
+                            .push(BigQueryOperationType::Upsert.into_cell());
                         update.table_row.values.push(Cell::String(sequence_number));
 
                         let table_rows: &mut Vec<TableRow> =
@@ -471,7 +474,7 @@ impl BigQueryDestination {
                             Self::generate_sequence_number(delete.start_lsn, delete.commit_lsn);
                         old_table_row
                             .values
-                            .push(BigQueryOperationType::DELETE.into_cell());
+                            .push(BigQueryOperationType::Delete.into_cell());
                         old_table_row.values.push(Cell::String(sequence_number));
 
                         let table_rows: &mut Vec<TableRow> =
@@ -551,7 +554,7 @@ impl BigQueryDestination {
                         .client
                         .truncate_table(
                             &inner.dataset_id,
-                            &table_schema.name.as_bigquery_table_id(),
+                            &Self::table_name_to_bigquery_table_id(&table_schema.name),
                         )
                         .await?;
                 } else {
@@ -721,11 +724,6 @@ impl Destination for BigQueryDestination {
 
 #[cfg(test)]
 mod tests {
-    use postgres::schema::{ColumnSchema, TableName, TableSchema};
-    use tokio_postgres::types::Type;
-
-    use crate::conversions::Cell;
-
     use super::*;
 
     #[test]

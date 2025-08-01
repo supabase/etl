@@ -1,4 +1,4 @@
-pub mod base;
-#[cfg(feature = "bigquery")]
-pub mod bigquery;
+mod base;
 pub mod memory;
+
+pub use base::Destination;

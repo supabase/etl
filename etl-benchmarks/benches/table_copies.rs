@@ -44,27 +44,22 @@ Usage Examples:
      --username postgres --password mypass
 */
 
-use std::error::Error;
-
 use clap::{Parser, Subcommand, ValueEnum};
-use config::{
-    Environment,
-    shared::{BatchConfig, PgConnectionConfig, PipelineConfig, TlsConfig},
-};
-use etl::{
-    conversions::{event::Event, table_row::TableRow},
-    destination::base::Destination,
-    pipeline::Pipeline,
-    state::{store::notify::NotifyingStateStore, table::TableReplicationPhaseType},
-};
+use config::Environment;
+use config::shared::{BatchConfig, PgConnectionConfig, PipelineConfig, TlsConfig};
+use etl::destination::Destination;
+use etl::error::EtlResult;
+use etl::pipeline::Pipeline;
+use etl::schema::SchemaCache;
+use etl::state::store::notify::NotifyingStateStore;
+use etl::state::table::TableReplicationPhaseType;
+use etl::types::{Event, TableRow};
+use etl_destinations::bigquery::{BigQueryDestination, install_crypto_provider_for_bigquery};
 use postgres::schema::{TableId, TableSchema};
 use sqlx::postgres::PgPool;
+use std::error::Error;
 use telemetry::init_tracing;
 use tracing::info;
-
-#[cfg(feature = "bigquery")]
-use etl::destination::bigquery::BigQueryDestination;
-use etl::error::EtlResult;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -104,7 +99,6 @@ enum DestinationType {
     /// Use a null destination that discards all data (fastest)
     Null,
     /// Use BigQuery as the destination
-    #[cfg(feature = "bigquery")]
     BigQuery,
 }
 
@@ -165,22 +159,22 @@ enum Commands {
         destination: DestinationType,
 
         /// BigQuery project ID (required when using BigQuery destination)
-        #[cfg(feature = "bigquery")]
+
         #[arg(long)]
         bq_project_id: Option<String>,
 
         /// BigQuery dataset ID (required when using BigQuery destination)
-        #[cfg(feature = "bigquery")]
+
         #[arg(long)]
         bq_dataset_id: Option<String>,
 
         /// BigQuery service account key file path (required when using BigQuery destination)
-        #[cfg(feature = "bigquery")]
+
         #[arg(long)]
         bq_sa_key_file: Option<String>,
 
         /// BigQuery maximum staleness in minutes (optional)
-        #[cfg(feature = "bigquery")]
+
         #[arg(long)]
         bq_max_staleness_mins: Option<u16>,
     },
@@ -209,10 +203,6 @@ enum Commands {
         /// Enable TLS
         #[arg(long, default_value = "false")]
         tls_enabled: bool,
-
-        /// TLS trusted root certificates
-        #[arg(long, default_value = "")]
-        tls_certs: String,
     },
 }
 
@@ -245,13 +235,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
             max_table_sync_workers,
             table_ids,
             destination,
-            #[cfg(feature = "bigquery")]
+
             bq_project_id,
-            #[cfg(feature = "bigquery")]
+
             bq_dataset_id,
-            #[cfg(feature = "bigquery")]
+
             bq_sa_key_file,
-            #[cfg(feature = "bigquery")]
+
             bq_max_staleness_mins,
         } => {
             start_pipeline(RunArgs {
@@ -268,13 +258,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 max_table_sync_workers,
                 table_ids,
                 destination,
-                #[cfg(feature = "bigquery")]
+
                 bq_project_id,
-                #[cfg(feature = "bigquery")]
+
                 bq_dataset_id,
-                #[cfg(feature = "bigquery")]
+
                 bq_sa_key_file,
-                #[cfg(feature = "bigquery")]
+
                 bq_max_staleness_mins,
             })
             .await
@@ -286,7 +276,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
             username,
             password,
             tls_enabled,
-            tls_certs,
         } => {
             prepare_benchmark(PrepareArgs {
                 host,
@@ -295,7 +284,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 username,
                 password,
                 tls_enabled,
-                tls_certs,
             })
             .await
         }
@@ -317,18 +305,17 @@ struct RunArgs {
     max_table_sync_workers: u16,
     table_ids: Vec<u32>,
     destination: DestinationType,
-    #[cfg(feature = "bigquery")]
+
     bq_project_id: Option<String>,
-    #[cfg(feature = "bigquery")]
+
     bq_dataset_id: Option<String>,
-    #[cfg(feature = "bigquery")]
+
     bq_sa_key_file: Option<String>,
-    #[cfg(feature = "bigquery")]
+
     bq_max_staleness_mins: Option<u16>,
 }
 
 #[derive(Debug)]
-#[allow(dead_code)]
 struct PrepareArgs {
     host: String,
     port: u16,
@@ -336,7 +323,6 @@ struct PrepareArgs {
     username: String,
     password: Option<String>,
     tls_enabled: bool,
-    tls_certs: String,
 }
 
 async fn prepare_benchmark(args: PrepareArgs) -> Result<(), Box<dyn Error>> {
@@ -416,11 +402,10 @@ async fn start_pipeline(args: RunArgs) -> Result<(), Box<dyn Error>> {
     // Create the appropriate destination based on the argument
     let destination = match args.destination {
         DestinationType::Null => BenchDestination::Null(NullDestination),
-        #[cfg(feature = "bigquery")]
+
         DestinationType::BigQuery => {
-            rustls::crypto::aws_lc_rs::default_provider()
-                .install_default()
-                .expect("failed to install default crypto provider");
+            install_crypto_provider_for_bigquery();
+
             let project_id = args
                 .bq_project_id
                 .ok_or("BigQuery project ID is required when using BigQuery destination")?;
@@ -494,15 +479,15 @@ struct NullDestination;
 #[derive(Clone)]
 enum BenchDestination {
     Null(NullDestination),
-    #[cfg(feature = "bigquery")]
+
     BigQuery(BigQueryDestination),
 }
 
 impl Destination for BenchDestination {
-    async fn inject(&self, schema_cache: etl::schema::cache::SchemaCache) -> EtlResult<()> {
+    async fn inject(&self, schema_cache: SchemaCache) -> EtlResult<()> {
         match self {
             BenchDestination::Null(dest) => dest.inject(schema_cache).await,
-            #[cfg(feature = "bigquery")]
+
             BenchDestination::BigQuery(dest) => dest.inject(schema_cache).await,
         }
     }
@@ -510,7 +495,7 @@ impl Destination for BenchDestination {
     async fn write_table_schema(&self, table_schema: TableSchema) -> EtlResult<()> {
         match self {
             BenchDestination::Null(dest) => dest.write_table_schema(table_schema).await,
-            #[cfg(feature = "bigquery")]
+
             BenchDestination::BigQuery(dest) => dest.write_table_schema(table_schema).await,
         }
     }
@@ -518,7 +503,7 @@ impl Destination for BenchDestination {
     async fn load_table_schemas(&self) -> EtlResult<Vec<TableSchema>> {
         match self {
             BenchDestination::Null(dest) => dest.load_table_schemas().await,
-            #[cfg(feature = "bigquery")]
+
             BenchDestination::BigQuery(dest) => dest.load_table_schemas().await,
         }
     }
@@ -530,7 +515,7 @@ impl Destination for BenchDestination {
     ) -> EtlResult<()> {
         match self {
             BenchDestination::Null(dest) => dest.write_table_rows(table_id, table_rows).await,
-            #[cfg(feature = "bigquery")]
+
             BenchDestination::BigQuery(dest) => dest.write_table_rows(table_id, table_rows).await,
         }
     }
@@ -538,14 +523,14 @@ impl Destination for BenchDestination {
     async fn write_events(&self, events: Vec<Event>) -> EtlResult<()> {
         match self {
             BenchDestination::Null(dest) => dest.write_events(events).await,
-            #[cfg(feature = "bigquery")]
+
             BenchDestination::BigQuery(dest) => dest.write_events(events).await,
         }
     }
 }
 
 impl Destination for NullDestination {
-    async fn inject(&self, _schema_cache: etl::schema::cache::SchemaCache) -> EtlResult<()> {
+    async fn inject(&self, _schema_cache: SchemaCache) -> EtlResult<()> {
         Ok(())
     }
 

@@ -11,7 +11,7 @@ use crate::conversions::table_row::TableRow;
 use crate::conversions::text::TextFormatConverter;
 use crate::error::EtlError;
 use crate::error::{ErrorKind, EtlResult};
-use crate::schema::cache::SchemaCache;
+use crate::schema::SchemaCache;
 use crate::{bail, etl_error};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -273,7 +273,7 @@ fn convert_tuple_to_row(
                 if column_schema.nullable {
                     Cell::Null
                 } else if use_default_for_missing_cols {
-                    TextFormatConverter::default_value(&column_schema.typ)
+                    TextFormatConverter::default_value(&column_schema.typ)?
                 } else {
                     // This is protocol level error, so we panic instead of carrying on
                     // with incorrect data to avoid corruption downstream.
@@ -284,7 +284,7 @@ fn convert_tuple_to_row(
                 }
             }
             protocol::TupleData::UnchangedToast => {
-                TextFormatConverter::default_value(&column_schema.typ)
+                TextFormatConverter::default_value(&column_schema.typ)?
             }
             protocol::TupleData::Binary(_) => {
                 bail!(

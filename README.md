@@ -29,28 +29,29 @@ The `etl` crate supports the following destinations:
 
 ## Installation
 
-To use `etl` in your Rust project, add it via a git dependency in `Cargo.toml`:
+To use `etl` in your Rust project, add the core library and desired destinations via git dependencies in `Cargo.toml`:
 
 ```toml
 [dependencies]
-etl = { git = "https://github.com/supabase/etl", features = ["bigquery"] }
+etl = { git = "https://github.com/supabase/etl" }
+etl-destinations = { git = "https://github.com/supabase/etl", features = ["bigquery"] }
 ```
 
-Each destination is behind a feature of the same name, so remember to enable the right feature. The git dependency is needed for now because `etl` is not yet published on crates.io.
+The `etl` crate provides the core replication functionality, while `etl-destinations` contains destination-specific implementations. Each destination is behind a feature of the same name in the `etl-destinations` crate. The git dependency is needed for now because the crates are not yet published on crates.io.
 
 ## Quickstart
 
-To quickly try out `etl`, you can run the `bigquery` example, which will replicate the data to BigQuery. First, create a publication in Postgres which includes the tables you want to replicate:
+To quickly try out `etl`, you can run the BigQuery example from the `etl-examples` crate. First, create a publication in Postgres which includes the tables you want to replicate:
 
 ```sql
 create publication my_publication
 for table table1, table2;
 ```
 
-Then run the `bigquery` example:
+Then run the BigQuery example:
 
 ```bash
-cargo run --example bigquery --features bigquery -- \
+cargo run -p etl-examples -- \
         --db-host localhost \
         --db-port 5432 \
         --db-name postgres \
@@ -59,15 +60,14 @@ cargo run --example bigquery --features bigquery -- \
         --bq-sa-key-file /path/to/your/service-account-key.json \
         --bq-project-id your-gcp-project-id \
         --bq-dataset-id your_bigquery_dataset_id \
-        --publication my_publication \
-        --publication int_types_pub
+        --publication my_publication
 ```
 
 In the above example, `etl` connects to a Postgres database named `postgres` running on `localhost:5432` with a username `postgres` and password `password`.
 
 ## Examples
 
-For code examples on how to use `etl`, please refer to the [examples](https://github.com/supabase/etl/tree/main/etl/examples) folder in the source.
+For code examples on how to use `etl`, please refer to the [etl-examples](https://github.com/supabase/etl/tree/main/etl-examples) crate. The main example demonstrates BigQuery integration and can be found in `etl-examples/src/main.rs`.
 
 ## Database Setup
 

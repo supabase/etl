@@ -1,9 +1,10 @@
 use actix_web::HttpRequest;
 use config::shared::PgConnectionConfig;
 use postgres::replication::connect_to_source_database;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use thiserror::Error;
+use utoipa::ToSchema;
 
 pub mod destinations;
 pub mod destinations_pipelines;
@@ -19,8 +20,9 @@ const MIN_POOL_CONNECTIONS: u32 = 1;
 /// Maximum number of connections for the source Postgres connection pool.
 const MAX_POOL_CONNECTIONS: u32 = 1;
 
-#[derive(Serialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct ErrorMessage {
+    #[schema(example = "an error occurred in the api")]
     pub error: String,
 }
 

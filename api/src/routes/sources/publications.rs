@@ -97,7 +97,6 @@ pub struct ReadPublicationsResponse {
 }
 
 #[utoipa::path(
-    context_path = "/v1",
     tag = "Publications",
     request_body = CreatePublicationRequest,
     params(
@@ -137,7 +136,6 @@ pub async fn create_publication(
 }
 
 #[utoipa::path(
-    context_path = "/v1",
     tag = "Publications",
     params(
         ("source_id" = i64, Path, description = "Id of the source"),
@@ -174,7 +172,6 @@ pub async fn read_publication(
 }
 
 #[utoipa::path(
-    context_path = "/v1",
     tag = "Publications",
     request_body = UpdatePublicationRequest,
     params(
@@ -216,7 +213,6 @@ pub async fn update_publication(
 }
 
 #[utoipa::path(
-    context_path = "/v1",
     tag = "Publications",
     params(
         ("source_id" = i64, Path, description = "Id of the source"),
@@ -251,7 +247,6 @@ pub async fn delete_publication(
 }
 
 #[utoipa::path(
-    context_path = "/v1",
     tag = "Publications",
     params(
         ("source_id" = i64, Path, description = "Id of the source"),
