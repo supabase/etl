@@ -9,7 +9,7 @@ use tracing::{Instrument, debug, error, info};
 
 use crate::concurrency::shutdown::ShutdownRx;
 use crate::concurrency::signal::SignalTx;
-use crate::concurrency::signal::{SignalRx, create_signal};
+use crate::concurrency::signal::create_signal;
 use crate::destination::Destination;
 use crate::etl_error;
 use crate::replication::apply::{ApplyLoopHook, start_apply_loop};
