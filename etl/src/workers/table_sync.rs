@@ -371,6 +371,7 @@ where
                             let mut pool = pool.lock().await;
                             pool.mark_worker_finished(table_id);
 
+                            // Update the state store
                             let table_replication_phase = table_error.into();
                             if let Err(err) = TableSyncWorkerState::set_and_store(
                                 &pool,
@@ -395,6 +396,7 @@ where
                     let mut pool = pool.lock().await;
                     pool.mark_worker_finished(table_id);
 
+                    // Update the state store
                     if let Err(err) = TableSyncWorkerState::set_and_store(
                         &pool,
                         &state_store,
@@ -495,7 +497,7 @@ where
         let worker_type = WorkerType::TableSync {
             table_id: self.table_id,
         };
-        let slot_name = get_slot_name(self.pipeline_id, worker_type).unwrap();
+        let slot_name = get_slot_name(self.pipeline_id, worker_type)?;
         let result = tokio::time::timeout(
             MAX_DELETE_SLOT_WAIT,
             replication_client.delete_slot(&slot_name),
