@@ -8,8 +8,8 @@ use tokio_postgres::types::PgLsn;
 use tracing::{Instrument, debug, error, info};
 
 use crate::concurrency::shutdown::ShutdownRx;
-use crate::concurrency::signal::SignalRx;
 use crate::concurrency::signal::SignalTx;
+use crate::concurrency::signal::{SignalRx, create_signal};
 use crate::destination::Destination;
 use crate::etl_error;
 use crate::replication::apply::{ApplyLoopHook, start_apply_loop};
@@ -61,7 +61,6 @@ pub struct ApplyWorker<S, D> {
     state_store: S,
     destination: D,
     shutdown_rx: ShutdownRx,
-    force_syncing_tables_signals: (SignalTx, SignalRx),
     table_sync_worker_permits: Arc<Semaphore>,
 }
 
@@ -76,7 +75,6 @@ impl<S, D> ApplyWorker<S, D> {
         state_store: S,
         destination: D,
         shutdown_rx: ShutdownRx,
-        force_syncing_tables_signals: (SignalTx, SignalRx),
         table_sync_worker_permits: Arc<Semaphore>,
     ) -> Self {
         Self {
@@ -88,7 +86,6 @@ impl<S, D> ApplyWorker<S, D> {
             state_store,
             destination,
             shutdown_rx,
-            force_syncing_tables_signals,
             table_sync_worker_permits,
         }
     }
@@ -112,8 +109,8 @@ where
         let apply_worker = async move {
             let start_lsn = get_start_lsn(self.pipeline_id, &self.replication_client).await?;
 
-            let (force_syncing_tables_tx, force_syncing_tables_rx) =
-                self.force_syncing_tables_signals;
+            // We create the signal used to notify the apply worker that it should force syncing tables.
+            let (force_syncing_tables_tx, force_syncing_tables_rx) = create_signal();
 
             start_apply_loop(
                 self.pipeline_id,

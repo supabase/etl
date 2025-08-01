@@ -89,8 +89,6 @@ impl TableSyncWorkerStateInner {
     }
 }
 
-// TODO: we would like to put the state of tables in a shared state structure which can be referenced
-//  by table sync workers.
 #[derive(Debug, Clone)]
 pub struct TableSyncWorkerState {
     inner: Arc<Mutex<TableSyncWorkerStateInner>>,

@@ -96,9 +96,6 @@ where
         // We create the table sync workers pool to manage all table sync workers in a central place.
         let pool = TableSyncWorkerPool::new();
 
-        // We create the signal used to notify the apply worker that it should force syncing tables.
-        let (force_syncing_tables_tx, force_syncing_tables_rx) = create_signal();
-
         // We create the permits semaphore which is used to control how many table sync workers can
         // be running at the same time.
         let table_sync_worker_permits =
@@ -112,11 +109,9 @@ where
             replication_client,
             pool.clone(),
             schema_cache,
-            // retries_orchestrator parameter removed - need to update ApplyWorker
             self.state_store.clone(),
             self.destination.clone(),
             self.shutdown_tx.subscribe(),
-            (force_syncing_tables_tx, force_syncing_tables_rx),
             table_sync_worker_permits,
         )
         .start()
