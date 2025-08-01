@@ -1,4 +1,5 @@
 use crate::error::{ErrorKind, EtlError, EtlResult};
+use crate::utils::tokio::MakeRustlsConnect;
 use crate::{bail, etl_error};
 use config::shared::{IntoConnectOptions, PgConnectionConfig};
 use pg_escape::{quote_identifier, quote_literal};
@@ -16,7 +17,6 @@ use tokio_postgres::{
     Client, Config, Connection, CopyOutStream, NoTls, SimpleQueryMessage, SimpleQueryRow, Socket,
     config::ReplicationMode, types::PgLsn,
 };
-use tokio_postgres_rustls::MakeRustlsConnect;
 use tracing::{Instrument, error, info, warn};
 
 /// Spawns a background task to monitor a PostgreSQL connection until it terminates.

@@ -30,6 +30,7 @@ base64 = { version = "0.22.1", default-features = false }
 bytes = { version = "1.10.1" }
 byteorder = { version = "1.5.0", default-features = false }
 chrono = { version = "0.4.41", default-features = false }
+const-oid = { version = "0.9.6", default-features = false }
 clap = { version = "4.5.42", default-features = false }
 constant_time_eq = { version = "0.4.2" }
 fail = { version = "0.5.1", default-features = false }
@@ -40,13 +41,14 @@ k8s-openapi = { version = "0.25.0", default-features = false }
 kube = { version = "1.1.0", default-features = false }
 pg_escape = { version = "0.1.1", default-features = false }
 pin-project-lite = { version = "0.2.16", default-features = false }
-postgres-replication = { git = "https://github.com/imor/rust-postgres", default-features = false, rev = "20265ef38e32a06f76b6f9b678e2077fc2211f6b" }
+postgres-replication = { git = "https://github.com/MaterializeInc/rust-postgres", default-features = false, rev = "c4b473b478b3adfbf8667d2fbe895d8423f1290b" }
 prost = { version = "0.13.5", default-features = false }
 rand = { version = "0.9.2", default-features = false }
 reqwest = { version = "0.12.22", default-features = false }
 rustls = { version = "0.23.31", default-features = false }
 rustls-pemfile = { version = "2.2.0", default-features = false }
 rust-cli-config = { package = "config", version = "0.14", default-features = false }
+ring = { version = "0.17.14", default-features = false }
 secrecy = { version = "0.10.3", default-features = false }
 sentry = { version = "0.42.0" }
 serde = { version = "1.0.219", default-features = false }
@@ -54,8 +56,8 @@ serde_json = { version = "1.0.141", default-features = false }
 sqlx = { version = "0.8.6", default-features = false }
 thiserror = "2.0.12"
 tokio = { version = "1.47.0", default-features = false }
-tokio-postgres = { git = "https://github.com/imor/rust-postgres", default-features = false, rev = "20265ef38e32a06f76b6f9b678e2077fc2211f6b" }
-tokio-postgres-rustls = { git = "https://github.com/imor/tokio-postgres-rustls", default-features = false }
+tokio-rustls = { version = "0.26.2", default-features = false }
+tokio-postgres = { git = "https://github.com/MaterializeInc/rust-postgres", default-features = false, rev = "c4b473b478b3adfbf8667d2fbe895d8423f1290b" }
 tracing = { version = "0.1.41", default-features = false }
 tracing-actix-web = { version = "0.7.19", default-features = false }
 tracing-appender = { version = "0.2.3", default-features = false }
@@ -64,3 +66,4 @@ tracing-subscriber = { version = "0.3.19", default-features = false }
 utoipa = { version = "5.4.0", default-features = false }
 utoipa-swagger-ui = { version = "9.0.2", default-features = false }
 uuid = { version = "1.17.0", default-features = false }
+x509-cert = { version = "0.2.2", default-features = false }

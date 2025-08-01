@@ -18,6 +18,11 @@ required-features = ["failpoints", "test-utils"]
 config = { workspace = true }
 postgres = { workspace = true, features = ["tokio", "replication"] }
 
+const-oid = { workspace = true, default-features = false }
+ring = { workspace = true, default-features = false }
+tokio-rustls = { workspace = true, default-features = false }
+x509-cert = { workspace = true, default-features = false }
+
 bytes = { workspace = true }
 byteorder = { workspace = true }
 chrono = { workspace = true }
@@ -37,7 +42,6 @@ tokio-postgres = { workspace = true, features = [
     "with-uuid-1",
     "with-serde_json-1",
 ] }
-tokio-postgres-rustls = { workspace = true }
 tracing = { workspace = true, default-features = true }
 uuid = { workspace = true, features = ["v4"] }
 
