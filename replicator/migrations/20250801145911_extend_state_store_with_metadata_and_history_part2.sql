@@ -17,8 +17,7 @@ set
     state = 'errored',
     metadata = jsonb_build_object(
         'type', 'errored',
-        'reason', 'Migrated error',
-        'solution', 'Migrated solution',
+        'reason', 'An error occurred in ETL',
         'retry_policy', jsonb_build_object('type', 'no_retry')
     )
 where state = 'skipped';
@@ -47,5 +46,3 @@ alter table etl.replication_state
 
 -- Drop the deprecated sync_done_lsn column since LSN is now stored in metadata
 alter table etl.replication_state drop column sync_done_lsn;
-
--- Note: We cannot remove 'skipped' from enum in same transaction.
