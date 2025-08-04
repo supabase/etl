@@ -1091,7 +1091,7 @@ async fn pipeline_replication_status_returns_table_states_and_names() {
             'finished_copy',
             'sync_done',
             'ready',
-            'skipped'
+            'errored'
         )
     "#,
     )
@@ -1099,15 +1099,17 @@ async fn pipeline_replication_status_returns_table_states_and_names() {
     .await
     .expect("Failed to create table_state enum");
 
-    // Create the replication_state table
+    // Create the replication_state table with new schema
     sqlx::query(
         r#"
         CREATE TABLE etl.replication_state (
+            id BIGSERIAL PRIMARY KEY,
             pipeline_id BIGINT NOT NULL,
             table_id OID NOT NULL,
             state etl.table_state NOT NULL,
-            sync_done_lsn TEXT NULL,
-            PRIMARY KEY (pipeline_id, table_id)
+            metadata JSONB NULL,
+            prev BIGINT NULL REFERENCES etl.replication_state(id),
+            is_current BOOLEAN NOT NULL DEFAULT true
         )
     "#,
     )
@@ -1152,10 +1154,10 @@ async fn pipeline_replication_status_returns_table_states_and_names() {
     // Insert test data into etl.replication_state table
     sqlx::query(
         r#"
-        INSERT INTO etl.replication_state (pipeline_id, table_id, state, sync_done_lsn)
+        INSERT INTO etl.replication_state (pipeline_id, table_id, state, metadata, prev, is_current)
         VALUES 
-            ($1, $2, 'data_sync'::etl.table_state, NULL),
-            ($1, $3, 'ready'::etl.table_state, '0/12345678')
+            ($1, $2, 'data_sync'::etl.table_state, '{"type": "data_sync"}'::jsonb, NULL, true),
+            ($1, $3, 'ready'::etl.table_state, '{"type": "ready"}'::jsonb, NULL, true)
     "#,
     )
     .bind(pipeline_id)
