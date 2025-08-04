@@ -111,6 +111,51 @@ pub async fn create_pipeline_with_config(
     response.id
 }
 
+/// Creates the ETL schema and replication_state table structure in the given database pool.
+/// This includes creating the etl schema, table_state enum, and replication_state table.
+pub async fn create_etl_table_schema(source_pool: &sqlx::PgPool) {
+    // Create etl schema
+    sqlx::query("CREATE SCHEMA IF NOT EXISTS etl")
+        .execute(source_pool)
+        .await
+        .expect("Failed to create etl schema");
+
+    // Create the table_state enum
+    sqlx::query(
+        r#"
+        CREATE TYPE etl.table_state AS ENUM (
+            'init',
+            'data_sync',
+            'finished_copy',
+            'sync_done',
+            'ready',
+            'errored'
+        )
+    "#,
+    )
+    .execute(source_pool)
+    .await
+    .expect("Failed to create table_state enum");
+
+    // Create the replication_state table
+    sqlx::query(
+        r#"
+        CREATE TABLE etl.replication_state (
+            id BIGSERIAL PRIMARY KEY,
+            pipeline_id BIGINT NOT NULL,
+            table_id OID NOT NULL,
+            state etl.table_state NOT NULL,
+            metadata JSONB NULL,
+            prev BIGINT NULL REFERENCES etl.replication_state(id),
+            is_current BOOLEAN NOT NULL DEFAULT true
+        )
+    "#,
+    )
+    .execute(source_pool)
+    .await
+    .expect("Failed to create replication_state table");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn pipeline_can_be_created() {
     init_test_tracing();
@@ -1077,45 +1122,7 @@ async fn pipeline_replication_status_returns_table_states_and_names() {
     let pipeline_id = response.id;
 
     // Create etl schema and replication_state table with proper enum
-    sqlx::query("CREATE SCHEMA IF NOT EXISTS etl")
-        .execute(&source_pool)
-        .await
-        .expect("Failed to create etl schema");
-
-    // Create the table_state enum
-    sqlx::query(
-        r#"
-        CREATE TYPE etl.table_state AS ENUM (
-            'init',
-            'data_sync',
-            'finished_copy',
-            'sync_done',
-            'ready',
-            'errored'
-        )
-    "#,
-    )
-    .execute(&source_pool)
-    .await
-    .expect("Failed to create table_state enum");
-
-    // Create the replication_state table
-    sqlx::query(
-        r#"
-        CREATE TABLE etl.replication_state (
-            id BIGSERIAL PRIMARY KEY,
-            pipeline_id BIGINT NOT NULL,
-            table_id OID NOT NULL,
-            state etl.table_state NOT NULL,
-            metadata JSONB NULL,
-            prev BIGINT NULL REFERENCES etl.replication_state(id),
-            is_current BOOLEAN NOT NULL DEFAULT true
-        )
-    "#,
-    )
-    .execute(&source_pool)
-    .await
-    .expect("Failed to create replication_state table");
+    create_etl_table_schema(&source_pool).await;
 
     // Create some test tables to get real OIDs
     let users_table_name = "public.test_table_users";
@@ -1261,45 +1268,7 @@ async fn rollback_table_state_succeeds_for_manual_retry_errors() {
     let pipeline_id = response.id;
 
     // Create etl schema and replication_state table with proper enum
-    sqlx::query("CREATE SCHEMA IF NOT EXISTS etl")
-        .execute(&source_pool)
-        .await
-        .expect("Failed to create etl schema");
-
-    // Create the table_state enum
-    sqlx::query(
-        r#"
-        CREATE TYPE etl.table_state AS ENUM (
-            'init',
-            'data_sync',
-            'finished_copy',
-            'sync_done',
-            'ready',
-            'errored'
-        )
-    "#,
-    )
-    .execute(&source_pool)
-    .await
-    .expect("Failed to create table_state enum");
-
-    // Create the replication_state table with new schema
-    sqlx::query(
-        r#"
-        CREATE TABLE etl.replication_state (
-            id BIGSERIAL PRIMARY KEY,
-            pipeline_id BIGINT NOT NULL,
-            table_id OID NOT NULL,
-            state etl.table_state NOT NULL,
-            metadata JSONB NULL,
-            prev BIGINT NULL REFERENCES etl.replication_state(id),
-            is_current BOOLEAN NOT NULL DEFAULT true
-        )
-    "#,
-    )
-    .execute(&source_pool)
-    .await
-    .expect("Failed to create replication_state table");
+    create_etl_table_schema(&source_pool).await;
 
     // Create test table to get real OID
     sqlx::query("CREATE TABLE IF NOT EXISTS test_table_users (id SERIAL PRIMARY KEY, name TEXT)")

@@ -8,7 +8,12 @@ use config::shared::{
     DestinationConfig, PgConnectionConfig, PipelineConfig as SharedPipelineConfig,
     ReplicatorConfig, SupabaseConfig, TlsConfig,
 };
+use postgres::replication::{
+    TableLookupError, TableReplicationState, get_table_name_from_oid,
+    get_table_replication_state_rows, rollback_replication_state,
+};
 use postgres::schema::TableId;
+use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 use sqlx::{PgPool, PgTransaction};
 use std::ops::DerefMut;
@@ -27,11 +32,6 @@ use crate::k8s_client::{K8sClient, K8sError, PodPhase, TRUSTED_ROOT_CERT_CONFIG_
 use crate::routes::{
     ErrorMessage, TenantIdError, connect_to_source_database_with_defaults, extract_tenant_id,
 };
-use postgres::replication::{
-    TableLookupError, TableReplicationState, get_table_name_from_oid,
-    get_table_replication_state_rows, rollback_replication_state,
-};
-use secrecy::ExposeSecret;
 
 #[derive(Debug, Error)]
 enum PipelineError {
@@ -265,7 +265,7 @@ pub enum SimpleTableReplicationState {
 /// Simplified retry policy for UI display
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
-#[serde(tag = "type")]
+#[serde(tag = "policy")]
 pub enum SimpleRetryPolicy {
     NoRetry,
     ManualRetry,
