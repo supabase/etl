@@ -1099,7 +1099,7 @@ async fn pipeline_replication_status_returns_table_states_and_names() {
     .await
     .expect("Failed to create table_state enum");
 
-    // Create the replication_state table with new schema
+    // Create the replication_state table
     sqlx::query(
         r#"
         CREATE TABLE etl.replication_state (
