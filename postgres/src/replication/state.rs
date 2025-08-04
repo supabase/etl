@@ -121,48 +121,46 @@ pub async fn rollback_replication_state(
     .fetch_optional(&mut *tx)
     .await?;
 
-    if let Some((current_id, prev_id)) = current_row {
-        if let Some(prev_id) = prev_id {
-            // Set current row to not current
-            sqlx::query(
-                r#"
-                update etl.replication_state 
-                set is_current = false 
-                where id = $1
-                "#,
-            )
-            .bind(current_id)
-            .execute(&mut *tx)
-            .await?;
+    if let Some((current_id, Some(prev_id))) = current_row {
+        // Set current row to not current
+        sqlx::query(
+            r#"
+            update etl.replication_state
+            set is_current = false
+            where id = $1
+            "#,
+        )
+        .bind(current_id)
+        .execute(&mut *tx)
+        .await?;
 
-            // Set previous row to current
-            sqlx::query(
-                r#"
-                update etl.replication_state 
-                set is_current = true 
-                where id = $1
-                "#,
-            )
-            .bind(prev_id)
-            .execute(&mut *tx)
-            .await?;
+        // Set previous row to current
+        sqlx::query(
+            r#"
+            update etl.replication_state
+            set is_current = true
+            where id = $1
+            "#,
+        )
+        .bind(prev_id)
+        .execute(&mut *tx)
+        .await?;
 
-            // Fetch the restored row
-            let restored_row = sqlx::query_as::<_, TableReplicationStateRow>(
-                r#"
-                select id, pipeline_id, table_id, state, metadata, prev, is_current
-                from etl.replication_state 
-                where id = $1
-                "#,
-            )
-            .bind(prev_id)
-            .fetch_one(&mut *tx)
-            .await?;
+        // Fetch the restored row
+        let restored_row = sqlx::query_as::<_, TableReplicationStateRow>(
+            r#"
+            select id, pipeline_id, table_id, state, metadata, prev, is_current
+            from etl.replication_state
+            where id = $1
+            "#,
+        )
+        .bind(prev_id)
+        .fetch_one(&mut *tx)
+        .await?;
 
-            tx.commit().await?;
+        tx.commit().await?;
 
-            return Ok(Some(restored_row));
-        }
+        return Ok(Some(restored_row));
     }
 
     tx.rollback().await?;

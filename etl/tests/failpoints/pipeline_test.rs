@@ -106,7 +106,7 @@ async fn table_copy_fails_after_data_sync_threw_an_error_with_no_retry() {
     let users_state_notify = state_store
         .notify_on_table_state(
             database_schema.users_schema().id,
-            TableReplicationPhaseType::Skipped,
+            TableReplicationPhaseType::Errored,
         )
         .await;
 
