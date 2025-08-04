@@ -1,6 +1,23 @@
--- Add new columns to support metadata, history chaining, and current state tracking
+-- Add the id column first as a regular BIGINT
+ALTER TABLE etl.replication_state ADD COLUMN id BIGINT;
+
+-- Create a sequence for the ID column
+CREATE SEQUENCE etl.replication_state_id_seq;
+
+-- Backfill existing rows with sequential IDs
+UPDATE etl.replication_state 
+SET id = nextval('etl.replication_state_id_seq');
+
+-- Set the id column to NOT NULL and make it use the sequence as default
+ALTER TABLE etl.replication_state 
+    ALTER COLUMN id SET NOT NULL,
+    ALTER COLUMN id SET DEFAULT nextval('etl.replication_state_id_seq');
+
+-- Set the sequence ownership to the column (makes it behave like BIGSERIAL)
+ALTER SEQUENCE etl.replication_state_id_seq OWNED BY etl.replication_state.id;
+
+-- Add the other new columns
 ALTER TABLE etl.replication_state
-    ADD COLUMN id BIGSERIAL,
     ADD COLUMN metadata JSONB,
     ADD COLUMN prev BIGINT,
     ADD COLUMN is_current BOOLEAN NOT NULL DEFAULT true;
@@ -67,5 +84,4 @@ ALTER TYPE etl.table_state ADD VALUE 'errored';
 -- Drop the deprecated sync_done_lsn column since LSN is now stored in metadata
 ALTER TABLE etl.replication_state DROP COLUMN sync_done_lsn;
 
--- Note: We cannot remove 'skipped' from enum in same transaction, 
--- but we'll handle the migration in the Rust code
+-- Note: We cannot remove 'skipped' from enum in same transaction.

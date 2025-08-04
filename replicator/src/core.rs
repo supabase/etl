@@ -134,7 +134,7 @@ async fn init_state_store(
     pg_connection_config: PgConnectionConfig,
 ) -> anyhow::Result<impl StateStore + Clone> {
     migrate_state_store(&pg_connection_config).await?;
-    Ok(PostgresStateStore::new(pipeline_id, pg_connection_config).await?)
+    Ok(PostgresStateStore::new(pipeline_id, pg_connection_config))
 }
 
 #[tracing::instrument(skip(pipeline), fields(pipeline_id = pipeline.id()))]

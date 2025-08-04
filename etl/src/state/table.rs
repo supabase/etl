@@ -137,13 +137,10 @@ impl TableReplicationError {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum RetryPolicy {
     /// No retry should be attempted, the system has to be fixed by hand.
-    #[serde(rename = "none")]
     NoRetry,
     /// Retry after it was manually triggered.
-    #[serde(rename = "user_intervention")]
     ManualRetry,
     /// Retry after the specified timestamp.
-    #[serde(rename = "backoff")]
     TimedRetry { next_retry: DateTime<Utc> },
 }
 
@@ -315,7 +312,8 @@ mod lsn_serde {
         D: Deserializer<'de>,
     {
         let s = String::deserialize(deserializer)?;
-        s.parse().map_err(|e| serde::de::Error::custom(format!("{:?}", e)))
+        s.parse()
+            .map_err(|e| serde::de::Error::custom(format!("{e:?}")))
     }
 }
 
@@ -330,28 +328,33 @@ mod tests {
         // Test NoRetry
         let no_retry = RetryPolicy::NoRetry;
         let json = serde_json::to_value(&no_retry).unwrap();
-        assert_eq!(json, serde_json::json!({"type": "none"}));
-        
+        assert_eq!(json, serde_json::json!({"type": "no_retry"}));
+
         let deserialized: RetryPolicy = serde_json::from_value(json).unwrap();
         assert!(matches!(deserialized, RetryPolicy::NoRetry));
 
         // Test ManualRetry
         let manual_retry = RetryPolicy::ManualRetry;
         let json = serde_json::to_value(&manual_retry).unwrap();
-        assert_eq!(json, serde_json::json!({"type": "user_intervention"}));
-        
+        assert_eq!(json, serde_json::json!({"type": "manual_retry"}));
+
         let deserialized: RetryPolicy = serde_json::from_value(json).unwrap();
         assert!(matches!(deserialized, RetryPolicy::ManualRetry));
 
         // Test TimedRetry
         let timestamp = Utc::now();
-        let timed_retry = RetryPolicy::TimedRetry { next_retry: timestamp };
+        let timed_retry = RetryPolicy::TimedRetry {
+            next_retry: timestamp,
+        };
         let json = serde_json::to_value(&timed_retry).unwrap();
-        assert_eq!(json, serde_json::json!({
-            "type": "backoff",
-            "next_retry": timestamp
-        }));
-        
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "type": "timed_retry",
+                "next_retry": timestamp
+            })
+        );
+
         let deserialized: RetryPolicy = serde_json::from_value(json).unwrap();
         if let RetryPolicy::TimedRetry { next_retry } = deserialized {
             assert_eq!(next_retry, timestamp);
@@ -366,7 +369,7 @@ mod tests {
         let init = TableReplicationPhase::Init;
         let json = serde_json::to_value(&init).unwrap();
         assert_eq!(json, serde_json::json!({"type": "init"}));
-        
+
         let deserialized: TableReplicationPhase = serde_json::from_value(json).unwrap();
         assert_eq!(deserialized, TableReplicationPhase::Init);
 
@@ -374,13 +377,19 @@ mod tests {
         let lsn = "0/1000000".parse::<PgLsn>().unwrap();
         let sync_done = TableReplicationPhase::SyncDone { lsn };
         let json = serde_json::to_value(&sync_done).unwrap();
-        assert_eq!(json, serde_json::json!({
-            "type": "sync_done",
-            "lsn": "0/1000000"
-        }));
-        
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "type": "sync_done",
+                "lsn": "0/1000000"
+            })
+        );
+
         let deserialized: TableReplicationPhase = serde_json::from_value(json).unwrap();
-        if let TableReplicationPhase::SyncDone { lsn: deserialized_lsn } = deserialized {
+        if let TableReplicationPhase::SyncDone {
+            lsn: deserialized_lsn,
+        } = deserialized
+        {
             assert_eq!(deserialized_lsn, lsn);
         } else {
             panic!("Expected SyncDone variant");
@@ -393,48 +402,28 @@ mod tests {
             retry_policy: RetryPolicy::NoRetry,
         };
         let json = serde_json::to_value(&errored).unwrap();
-        assert_eq!(json, serde_json::json!({
-            "type": "errored",
-            "reason": "Test error",
-            "solution": "Test solution",
-            "retry_policy": {"type": "none"}
-        }));
-        
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "type": "errored",
+                "reason": "Test error",
+                "solution": "Test solution",
+                "retry_policy": {"type": "no_retry"}
+            })
+        );
+
         let deserialized: TableReplicationPhase = serde_json::from_value(json).unwrap();
-        if let TableReplicationPhase::Errored { reason, solution, retry_policy } = deserialized {
+        if let TableReplicationPhase::Errored {
+            reason,
+            solution,
+            retry_policy,
+        } = deserialized
+        {
             assert_eq!(reason, "Test error");
             assert_eq!(solution, Some("Test solution".to_string()));
             assert!(matches!(retry_policy, RetryPolicy::NoRetry));
         } else {
             panic!("Expected Errored variant");
         }
-    }
-
-    #[test]
-    fn test_flattened_jsonb_structure() {
-        // Test that serialization produces flattened structure (no nested `data`)
-        let errored = TableReplicationPhase::Errored {
-            reason: "Replication slot limit reached".to_string(),
-            solution: Some("Drop unused replication slots".to_string()),
-            retry_policy: RetryPolicy::ManualRetry,
-        };
-        
-        let json = serde_json::to_value(&errored).unwrap();
-        let obj = json.as_object().unwrap();
-        
-        // Ensure top-level fields are present (flattened)
-        assert!(obj.contains_key("type"));
-        assert!(obj.contains_key("reason"));
-        assert!(obj.contains_key("solution"));
-        assert!(obj.contains_key("retry_policy"));
-        
-        // Ensure no nested "data" object
-        assert!(!obj.contains_key("data"));
-        
-        // Verify values
-        assert_eq!(obj["type"], "errored");
-        assert_eq!(obj["reason"], "Replication slot limit reached");
-        assert_eq!(obj["solution"], "Drop unused replication slots");
-        assert_eq!(obj["retry_policy"]["type"], "user_intervention");
     }
 }

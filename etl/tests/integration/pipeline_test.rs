@@ -546,7 +546,7 @@ async fn table_processing_converges_to_apply_loop_with_no_events_coming() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn table_processing_with_schema_change_skips_table() {
+async fn table_processing_with_schema_change_errors_table() {
     init_test_tracing();
     let database = spawn_database().await;
     let database_schema = setup_test_database_schema(&database, TableSelection::OrdersOnly).await;
@@ -626,11 +626,11 @@ async fn table_processing_with_schema_change_skips_table() {
 
     orders_state_notify.notified().await;
 
-    // Register notification for the skipped state.
+    // Register notification for the errored state.
     let orders_state_notify = state_store
         .notify_on_table_state(
             database_schema.orders_schema().id,
-            TableReplicationPhaseType::Skipped,
+            TableReplicationPhaseType::Errored,
         )
         .await;
 

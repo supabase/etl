@@ -3,7 +3,7 @@ use std::{collections::HashMap, sync::Arc};
 use config::shared::PgConnectionConfig;
 use postgres::replication::{
     TableReplicationState, TableReplicationStateRow, connect_to_source_database,
-    get_table_replication_state_rows, update_replication_state, rollback_replication_state,
+    get_table_replication_state_rows, rollback_replication_state, update_replication_state,
 };
 use postgres::schema::TableId;
 use sqlx::PgPool;
@@ -16,7 +16,7 @@ use crate::state::table::{RetryPolicy, TableReplicationPhase};
 use crate::types::PipelineId;
 use crate::{bail, etl_error};
 
-const NUM_POOL_CONNECTIONS: u32 = 3;
+const NUM_POOL_CONNECTIONS: u32 = 1;
 
 impl TryFrom<TableReplicationPhase> for (TableReplicationState, serde_json::Value) {
     type Error = EtlError;
@@ -29,7 +29,7 @@ impl TryFrom<TableReplicationPhase> for (TableReplicationState, serde_json::Valu
                 format!("Failed to serialize TableReplicationPhase: {err}")
             )
         })?;
-        
+
         let state = match value {
             TableReplicationPhase::Init => TableReplicationState::Init,
             TableReplicationPhase::DataSync => TableReplicationState::DataSync,
@@ -45,13 +45,12 @@ impl TryFrom<TableReplicationPhase> for (TableReplicationState, serde_json::Valu
                 );
             }
         };
-        
+
         Ok((state, metadata))
     }
 }
 
 impl TryFrom<TableReplicationStateRow> for TableReplicationPhase {
-
     type Error = EtlError;
 
     fn try_from(value: TableReplicationStateRow) -> Result<Self, Self::Error> {
@@ -78,10 +77,10 @@ impl TryFrom<TableReplicationStateRow> for TableReplicationPhase {
                 // For SyncDone without metadata, we can't recover the LSN, so create a default
                 bail!(
                     ErrorKind::ValidationError,
-                    "Missing metadata for SyncDone state",
-                    "SyncDone state without metadata is not supported after migration"
+                    "Missing metadata for 'SyncDone' state",
+                    "'SyncDone' state without metadata is not supported after migration"
                 )
-            },
+            }
             TableReplicationState::Ready => Ok(TableReplicationPhase::Ready),
             TableReplicationState::Errored => Ok(TableReplicationPhase::Errored {
                 reason: "Legacy error state".to_string(),
@@ -95,7 +94,6 @@ impl TryFrom<TableReplicationStateRow> for TableReplicationPhase {
 #[derive(Debug)]
 struct Inner {
     table_states: HashMap<TableId, TableReplicationPhase>,
-    pool: PgPool,
 }
 
 /// A state store which saves the replication state in the source
@@ -103,27 +101,36 @@ struct Inner {
 #[derive(Debug, Clone)]
 pub struct PostgresStateStore {
     pipeline_id: PipelineId,
+    source_config: PgConnectionConfig,
     inner: Arc<Mutex<Inner>>,
 }
 
 impl PostgresStateStore {
-    pub async fn new(pipeline_id: PipelineId, source_config: PgConnectionConfig) -> Result<Self, sqlx::Error> {
+    pub fn new(pipeline_id: PipelineId, source_config: PgConnectionConfig) -> Self {
+        let inner = Inner {
+            table_states: HashMap::new(),
+        };
+
+        Self {
+            pipeline_id,
+            source_config,
+            inner: Arc::new(Mutex::new(inner)),
+        }
+    }
+
+    async fn connect_to_source(&self) -> Result<PgPool, sqlx::Error> {
+        // We connect to source database each time we update because we assume that
+        // these updates will be infrequent. It has some overhead to establish a
+        // connection, but it's better than holding a connection open for long periods
+        // when there's little activity on it.
         let pool = connect_to_source_database(
-            &source_config,
+            &self.source_config,
             NUM_POOL_CONNECTIONS,
             NUM_POOL_CONNECTIONS,
         )
         .await?;
 
-        let inner = Inner {
-            table_states: HashMap::new(),
-            pool,
-        };
-
-        Ok(Self {
-            pipeline_id,
-            inner: Arc::new(Mutex::new(inner)),
-        })
+        Ok(pool)
     }
 }
 
@@ -146,20 +153,19 @@ impl StateStore for PostgresStateStore {
     async fn load_table_replication_states(&self) -> EtlResult<usize> {
         debug!("loading table replication states from postgres state store");
 
-        // Perform database operation without holding the lock
-        let pool = {
-            let inner = self.inner.lock().await;
-            inner.pool.clone()
-        };
-        let replication_state_rows = get_table_replication_state_rows(&pool, self.pipeline_id as i64).await?;
-        
+        let pool = self.connect_to_source().await?;
+        let replication_state_rows =
+            get_table_replication_state_rows(&pool, self.pipeline_id as i64).await?;
+
         let mut table_states: HashMap<TableId, TableReplicationPhase> = HashMap::new();
         for row in replication_state_rows {
-            let phase = self.replication_phase_from_row(&row).await?;
-            table_states.insert(TableId::new(row.table_id.0), phase);
+            let table_id = TableId::new(row.table_id.0);
+            let phase: TableReplicationPhase = row.try_into()?;
+            table_states.insert(table_id, phase);
         }
-        
-        // Update cache after processing all rows
+
+        // For performance reasons, since we load the replication states only once during startup
+        // and from a single thread, we can afford to have a super short critical section.
         let mut inner = self.inner.lock().await;
         inner.table_states = table_states.clone();
 
@@ -177,16 +183,21 @@ impl StateStore for PostgresStateStore {
         state: TableReplicationPhase,
     ) -> EtlResult<()> {
         let (table_state, metadata) = state.clone().try_into()?;
-        
-        // Perform database operation without holding the lock
-        let pool = {
-            let inner = self.inner.lock().await;
-            inner.pool.clone()
-        };
-        update_replication_state(&pool, self.pipeline_id, table_id, table_state, metadata).await?;
-        
-        // Update cache after successful database operation
+
+        let pool = self.connect_to_source().await?;
+
+        // We lock the inner state before updating the state in the database, to make sure we are
+        // consistent. If we were to lock the states only after the db state is modified, we might
+        // be inconsistent since there are some interleaved executions that lead to a wrong state.
         let mut inner = self.inner.lock().await;
+        update_replication_state(
+            &pool,
+            self.pipeline_id as i64,
+            table_id,
+            table_state,
+            metadata,
+        )
+        .await?;
         inner.table_states.insert(table_id, state);
 
         Ok(())
@@ -196,21 +207,15 @@ impl StateStore for PostgresStateStore {
         &self,
         table_id: TableId,
     ) -> EtlResult<TableReplicationPhase> {
-        // Perform database operation without holding the lock
-        let pool = {
-            let inner = self.inner.lock().await;
-            inner.pool.clone()
-        };
-        let result = rollback_replication_state(&pool, self.pipeline_id, table_id).await?;
-        
-        match result {
-            Some(restored_row) => {
-                let restored_phase = self.replication_phase_from_row(&restored_row).await?;
+        let pool = self.connect_to_source().await?;
 
-                // Update cache after successful database operation
-                let mut inner = self.inner.lock().await;
+        // Here we perform locking for the same reasons stated in `update_table_replication_state`.
+        let mut inner = self.inner.lock().await;
+        match rollback_replication_state(&pool, self.pipeline_id, table_id).await? {
+            Some(restored_row) => {
+                let restored_phase: TableReplicationPhase = restored_row.try_into()?;
                 inner.table_states.insert(table_id, restored_phase.clone());
-                
+
                 Ok(restored_phase)
             }
             None => Err(etl_error!(

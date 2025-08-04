@@ -9,7 +9,7 @@ use rand::random;
 use telemetry::init_test_tracing;
 
 #[tokio::test(flavor = "multi_thread")]
-async fn tables_without_primary_key_are_skipped() {
+async fn tables_without_primary_key_are_errored() {
     init_test_tracing();
     let database = spawn_database().await;
 
@@ -44,7 +44,7 @@ async fn tables_without_primary_key_are_skipped() {
     );
 
     let notification = state_store
-        .notify_on_table_state(table_id, TableReplicationPhaseType::Skipped)
+        .notify_on_table_state(table_id, TableReplicationPhaseType::Errored)
         .await;
 
     pipeline.start().await.unwrap();
