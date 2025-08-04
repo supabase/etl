@@ -36,20 +36,6 @@ pub struct TestApp {
     server_handle: tokio::task::JoinHandle<io::Result<()>>,
 }
 
-impl Drop for TestApp {
-    fn drop(&mut self) {
-        // First, abort the server task to ensure it's terminated.
-        self.server_handle.abort();
-
-        // To use `block_in_place,` we need a multithreaded runtime since when a blocking
-        // task is issued, the runtime will offload existing tasks to another worker.
-        tokio::task::block_in_place(move || {
-            Handle::current()
-                .block_on(async move { drop_pg_database(&self.config.database).await });
-        });
-    }
-}
-
 impl TestApp {
     fn get_authenticated<U: IntoUrl>(&self, url: U) -> RequestBuilder {
         self.api_client.get(url).bearer_auth(self.api_key.clone())
@@ -470,6 +456,20 @@ impl TestApp {
         .send()
         .await
         .expect("failed to execute request")
+    }
+}
+
+impl Drop for TestApp {
+    fn drop(&mut self) {
+        // First, abort the server task to ensure it's terminated.
+        self.server_handle.abort();
+
+        // To use `block_in_place,` we need a multithreaded runtime since when a blocking
+        // task is issued, the runtime will offload existing tasks to another worker.
+        tokio::task::block_in_place(move || {
+            Handle::current()
+                .block_on(async move { drop_pg_database(&self.config.database).await });
+        });
     }
 }
 

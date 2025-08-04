@@ -226,7 +226,7 @@ impl StateStore for PostgresStateStore {
 
         // Here we perform locking for the same reasons stated in `update_table_replication_state`.
         let mut inner = self.inner.lock().await;
-        match rollback_replication_state(&pool, self.pipeline_id, table_id).await? {
+        match rollback_replication_state(&pool, self.pipeline_id as i64, table_id).await? {
             Some(restored_row) => {
                 let restored_phase: TableReplicationPhase = restored_row.try_into()?;
                 inner.table_states.insert(table_id, restored_phase.clone());
