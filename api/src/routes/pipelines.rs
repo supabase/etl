@@ -10,7 +10,7 @@ use config::shared::{
 };
 use postgres::replication::{
     TableLookupError, TableReplicationState, TableReplicationStateType, get_table_name_from_oid,
-    get_table_replication_state_rows, rollback_replication_state,
+    get_table_replication_state_rows, reset_replication_state, rollback_replication_state,
 };
 use postgres::schema::TableId;
 use secrecy::ExposeSecret;
@@ -329,10 +329,18 @@ pub struct GetPipelineReplicationStatusResponse {
     pub table_statuses: Vec<TableReplicationStatus>,
 }
 
+#[derive(Debug, Copy, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum RollbackType {
+    Individual,
+    Full,
+}
+
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct RollbackTableStateRequest {
     #[schema(example = 1)]
     pub table_id: u32,
+    pub rollback_type: RollbackType,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
@@ -841,6 +849,7 @@ pub async fn rollback_table_state(
     let tenant_id = extract_tenant_id(&req)?;
     let pipeline_id = pipeline_id.into_inner();
     let table_id = rollback_request.table_id;
+    let rollback_type = rollback_request.rollback_type;
 
     let mut txn = pool.begin().await?;
 
@@ -881,17 +890,26 @@ pub async fn rollback_table_state(
         ));
     }
 
-    // Perform the rollback
-    let Some(new_state) =
-        rollback_replication_state(&source_pool, pipeline_id as u64, TableId::new(table_id))
-            .await?
-    else {
-        return Err(PipelineError::NotRollbackable(
-            "No previous state to rollback to".to_string(),
-        ));
+    let new_state_row = match rollback_type {
+        RollbackType::Individual => {
+            let Some(new_state_row) =
+                rollback_replication_state(&source_pool, pipeline_id, TableId::new(table_id))
+                    .await?
+            else {
+                return Err(PipelineError::NotRollbackable(
+                    "No previous state to rollback to".to_string(),
+                ));
+            };
+
+            new_state_row
+        }
+        RollbackType::Full => {
+            reset_replication_state(&source_pool, pipeline_id, TableId::new(table_id)).await?
+        }
     };
 
-    let new_state = new_state
+    // We extract the state from the metadata of the row
+    let new_state = new_state_row
         .deserialize_metadata()
         .map_err(PipelineError::InvalidTableReplicationState)?
         .ok_or(PipelineError::MissingTableReplicationState)?;

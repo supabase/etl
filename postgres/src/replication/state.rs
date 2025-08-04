@@ -24,6 +24,27 @@ pub enum TableReplicationState {
     },
 }
 
+/// Helper functions for state conversion
+impl TableReplicationState {
+    /// Converts a full state to database storage format (type + metadata)
+    pub fn to_storage_format(
+        &self,
+    ) -> Result<(TableReplicationStateType, serde_json::Value), serde_json::Error> {
+        let state_type = match self {
+            TableReplicationState::Init => TableReplicationStateType::Init,
+            TableReplicationState::DataSync => TableReplicationStateType::DataSync,
+            TableReplicationState::FinishedCopy => TableReplicationStateType::FinishedCopy,
+            TableReplicationState::SyncDone { .. } => TableReplicationStateType::SyncDone,
+            TableReplicationState::Ready => TableReplicationStateType::Ready,
+            TableReplicationState::Errored { .. } => TableReplicationStateType::Errored,
+        };
+
+        let metadata = serde_json::to_value(self)?;
+
+        Ok((state_type, metadata))
+    }
+}
+
 /// Retry policy as stored in the database
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -77,32 +98,6 @@ impl TableReplicationStateRow {
     }
 }
 
-/// Helper functions for state conversion
-impl TableReplicationState {
-    /// Converts a full state to database storage format (type + metadata)
-    pub fn to_storage_format(&self) -> (TableReplicationStateType, serde_json::Value) {
-        let state_type = match self {
-            TableReplicationState::Init => TableReplicationStateType::Init,
-            TableReplicationState::DataSync => TableReplicationStateType::DataSync,
-            TableReplicationState::FinishedCopy => TableReplicationStateType::FinishedCopy,
-            TableReplicationState::SyncDone { .. } => TableReplicationStateType::SyncDone,
-            TableReplicationState::Ready => TableReplicationStateType::Ready,
-            TableReplicationState::Errored { .. } => TableReplicationStateType::Errored,
-        };
-
-        let metadata = serde_json::to_value(self).unwrap_or_else(
-            |_| serde_json::json!({"type": format!("{state_type:?}").to_lowercase()}),
-        );
-
-        (state_type, metadata)
-    }
-
-    /// Gets the simple state type from a full state
-    pub fn to_state_type(&self) -> TableReplicationStateType {
-        self.to_storage_format().0
-    }
-}
-
 /// Fetch replication state rows for a specific pipeline from the source database
 #[cfg(feature = "sqlx")]
 pub async fn get_table_replication_state_rows(
@@ -130,7 +125,9 @@ pub async fn update_replication_state(
     table_id: TableId,
     state: TableReplicationState,
 ) -> sqlx::Result<()> {
-    let (state_type, metadata) = state.to_storage_format();
+    let (state_type, metadata) = state
+        .to_storage_format()
+        .map_err(|e| sqlx::Error::Encode(Box::new(e)))?;
     update_replication_state_raw(pool, pipeline_id, table_id, state_type, metadata).await
 }
 
@@ -192,7 +189,7 @@ pub async fn update_replication_state_raw(
 /// Rollback to the previous state for a table
 pub async fn rollback_replication_state(
     pool: &PgPool,
-    pipeline_id: u64,
+    pipeline_id: i64,
     table_id: TableId,
 ) -> sqlx::Result<Option<TableReplicationStateRow>> {
     let mut tx = pool.begin().await?;
@@ -204,7 +201,7 @@ pub async fn rollback_replication_state(
         where pipeline_id = $1 and table_id = $2 and is_current = true
         "#,
     )
-    .bind(pipeline_id as i64)
+    .bind(pipeline_id)
     .bind(SqlxTableId(table_id.into_inner()))
     .fetch_optional(&mut *tx)
     .await?;
@@ -254,6 +251,50 @@ pub async fn rollback_replication_state(
     tx.rollback().await?;
 
     Ok(None)
+}
+
+/// Resets the replication state for a specific pipeline and table by removing all entries
+/// and creating a new entry with [`TableReplicationState::Init`] state
+pub async fn reset_replication_state(
+    pool: &PgPool,
+    pipeline_id: i64,
+    table_id: TableId,
+) -> sqlx::Result<TableReplicationStateRow> {
+    let mut tx = pool.begin().await?;
+
+    // Delete all existing entries for this pipeline and table
+    sqlx::query(
+        r#"
+        delete from etl.replication_state 
+        where pipeline_id = $1 and table_id = $2
+        "#,
+    )
+    .bind(pipeline_id)
+    .bind(SqlxTableId(table_id.into_inner()))
+    .execute(&mut *tx)
+    .await?;
+
+    // Insert new Init state entry and return it
+    let (state_type, metadata) = TableReplicationState::Init
+        .to_storage_format()
+        .map_err(|e| sqlx::Error::Encode(Box::new(e)))?;
+    let row = sqlx::query_as::<_, TableReplicationStateRow>(
+        r#"
+        insert into etl.replication_state (pipeline_id, table_id, state, metadata, prev, is_current)
+        values ($1, $2, $3, $4, null, true)
+        returning id, pipeline_id, table_id, state, metadata, prev, is_current
+        "#,
+    )
+    .bind(pipeline_id)
+    .bind(SqlxTableId(table_id.into_inner()))
+    .bind(state_type)
+    .bind(metadata)
+    .fetch_one(&mut *tx)
+    .await?;
+
+    tx.commit().await?;
+
+    Ok(row)
 }
 
 mod lsn_serde {
