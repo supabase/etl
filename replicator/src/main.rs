@@ -1,6 +1,4 @@
 use ::config::Environment;
-use std::backtrace::Backtrace;
-use std::panic;
 use std::sync::Arc;
 use telemetry::init_tracing;
 use thiserror::__private::AsDynError;
@@ -14,14 +12,6 @@ mod core;
 mod migrations;
 
 fn main() -> anyhow::Result<()> {
-    // We want to crash on any panic happening in the code. It's important to have this at the beginning
-    // so that any other panic hooks are chained to be executed before this.
-    panic::set_hook(Box::new(|info| {
-        let stacktrace = Backtrace::force_capture();
-        println!("Got panic. @info:{info}\n@stackTrace:{stacktrace}");
-        std::process::abort();
-    }));
-
     // Initialize tracing from the binary name
     let _log_flusher = init_tracing(env!("CARGO_BIN_NAME"))?;
 
