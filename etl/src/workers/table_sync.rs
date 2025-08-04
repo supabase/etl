@@ -343,13 +343,23 @@ where
                     let mut pool = pool.lock().await;
 
                     // Update the state store
-                    TableSyncWorkerState::set_and_store(
+                    if let Err(err) = TableSyncWorkerState::set_and_store(
                         &pool,
                         &state_store,
                         table_id,
                         table_error.into(),
                     )
-                    .await?;
+                    .await
+                    {
+                        error!(
+                            "failed to update table sync worker state for table {}: {}",
+                            table_id, err
+                        );
+
+                        pool.mark_worker_finished(table_id);
+
+                        return Err(err);
+                    };
 
                     match retry_policy {
                         RetryPolicy::TimedRetry { next_retry } => {
@@ -373,14 +383,22 @@ where
                             }
 
                             // After sleeping, we rollback to the previous state and retry
-                            state_store
-                                .rollback_table_replication_state(table_id)
-                                .await?;
+                            if let Err(err) =
+                                state_store.rollback_table_replication_state(table_id).await
+                            {
+                                error!(
+                                    "failed to rollback table sync worker state for table {}: {}",
+                                    table_id, err
+                                );
+
+                                pool.mark_worker_finished(table_id);
+
+                                return Err(err);
+                            };
 
                             continue;
                         }
                         RetryPolicy::NoRetry | RetryPolicy::ManualRetry => {
-                            // Exit the worker and mark as finished
                             pool.mark_worker_finished(table_id);
 
                             return Err(err);
