@@ -171,9 +171,9 @@ where
                     .update_table_replication_state(
                         table_id,
                         TableReplicationPhase::Errored {
-                            reason: "Table sync failed".to_string(),
-                            solution: Some("Check logs for detailed error information".to_string()),
-                            retry_policy: RetryPolicy::NoRetry,
+                            reason: "The table has no primary keys".to_string(),
+                            solution: Some(format!("You should set at least one primary key on the table {table_id}")),
+                            retry_policy: RetryPolicy::ManualRetry,
                         },
                     )
                     .await?;
