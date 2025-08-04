@@ -172,7 +172,9 @@ where
                         table_id,
                         TableReplicationPhase::Errored {
                             reason: "The table has no primary keys".to_string(),
-                            solution: Some(format!("You should set at least one primary key on the table {table_id}")),
+                            solution: Some(format!(
+                                "You should set at least one primary key on the table {table_id}"
+                            )),
                             retry_policy: RetryPolicy::ManualRetry,
                         },
                     )

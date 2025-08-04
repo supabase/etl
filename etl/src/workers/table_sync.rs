@@ -338,51 +338,50 @@ where
                     // Convert error to table replication error to determine retry policy
                     let table_error =
                         TableReplicationError::from_etl_error(&config, table_id, &err);
+                    let retry_policy = table_error.retry_policy().clone();
 
-                    match table_error.retry_policy() {
+                    let mut pool = pool.lock().await;
+
+                    // Update the state store
+                    TableSyncWorkerState::set_and_store(
+                        &pool,
+                        &state_store,
+                        table_id,
+                        table_error.into(),
+                    )
+                    .await?;
+
+                    match retry_policy {
                         RetryPolicy::TimedRetry { next_retry } => {
-                            // Calculate how long to sleep
                             let now = Utc::now();
-                            if now < *next_retry {
-                                let sleep_duration = (*next_retry - now)
+                            if now < next_retry {
+                                let sleep_duration = (next_retry - now)
                                     .to_std()
                                     .unwrap_or(Duration::from_secs(0));
+
                                 info!(
                                     "retrying table sync worker for table {} in {:?}",
                                     table_id, sleep_duration
                                 );
+
                                 tokio::time::sleep(sleep_duration).await;
-                                // Continue the loop to retry
-                                continue;
                             } else {
-                                // Retry time has already passed, retry immediately
                                 info!(
                                     "retrying table sync worker for table {} immediately",
                                     table_id
                                 );
-                                continue;
                             }
+
+                            // After sleeping, we rollback to the previous state and retry
+                            state_store
+                                .rollback_table_replication_state(table_id)
+                                .await?;
+
+                            continue;
                         }
                         RetryPolicy::NoRetry | RetryPolicy::ManualRetry => {
                             // Exit the worker and mark as finished
-                            let mut pool = pool.lock().await;
                             pool.mark_worker_finished(table_id);
-
-                            // Update the state store
-                            let table_replication_phase = table_error.into();
-                            if let Err(err) = TableSyncWorkerState::set_and_store(
-                                &pool,
-                                &state_store,
-                                table_id,
-                                table_replication_phase,
-                            )
-                            .await
-                            {
-                                error!(
-                                    "failed to store error state for table {} during error: {}",
-                                    table_id, err
-                                );
-                            }
 
                             return Err(err);
                         }
