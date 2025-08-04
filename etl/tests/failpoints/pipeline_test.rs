@@ -13,64 +13,6 @@ use rand::random;
 use telemetry::init_test_tracing;
 
 #[tokio::test(flavor = "multi_thread")]
-async fn table_copy_fails_after_data_sync_threw_a_panic() {
-    let _scenario = FailScenario::setup();
-    fail::cfg(START_TABLE_SYNC__AFTER_DATA_SYNC, "1*panic").unwrap();
-
-    init_test_tracing();
-
-    let mut database = spawn_database().await;
-    let database_schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
-
-    // Insert initial test data.
-    let rows_inserted = 10;
-    insert_users_data(
-        &mut database,
-        &database_schema.users_schema().name,
-        1..=rows_inserted,
-    )
-    .await;
-
-    let state_store = NotifyingStateStore::new();
-    let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
-
-    // We start the pipeline from scratch.
-    let pipeline_id: PipelineId = random();
-    let mut pipeline = create_pipeline(
-        &database.config,
-        pipeline_id,
-        database_schema.publication_name(),
-        state_store.clone(),
-        destination.clone(),
-    );
-
-    // Register notifications for table sync phases.
-    let users_state_notify = state_store
-        .notify_on_table_state(
-            database_schema.users_schema().id,
-            TableReplicationPhaseType::DataSync,
-        )
-        .await;
-
-    pipeline.start().await.unwrap();
-
-    users_state_notify.notified().await;
-
-    // We expect to have a panic error.
-    let err = pipeline.shutdown_and_wait().await.err().unwrap();
-    assert_eq!(err.kinds().len(), 1);
-    assert_eq!(err.kinds()[0], ErrorKind::TableSyncWorkerPanic);
-
-    // Verify no data is there.
-    let table_rows = destination.get_table_rows().await;
-    assert!(table_rows.is_empty());
-
-    // Verify table schemas were correctly stored.
-    let table_schemas = destination.get_table_schemas().await;
-    assert!(table_schemas.is_empty());
-}
-
-#[tokio::test(flavor = "multi_thread")]
 async fn table_copy_fails_after_data_sync_threw_an_error_with_no_retry() {
     let _scenario = FailScenario::setup();
     fail::cfg(START_TABLE_SYNC__AFTER_DATA_SYNC, "1*return(no_retry)").unwrap();

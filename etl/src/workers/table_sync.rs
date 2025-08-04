@@ -1,9 +1,7 @@
 use chrono::Utc;
 use config::shared::PipelineConfig;
-use futures::FutureExt;
 use postgres::schema::TableId;
 use std::ops::Deref;
-use std::panic::{AssertUnwindSafe, resume_unwind};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{Mutex, MutexGuard, Notify, Semaphore};
@@ -324,18 +322,17 @@ where
                 run_permit: run_permit.clone(),
             };
 
-            let table_sync_worker = AssertUnwindSafe(worker.run_table_sync_worker(state.clone()));
-            let result = table_sync_worker.catch_unwind().await;
+            let result = worker.run_table_sync_worker(state.clone()).await;
 
             match result {
-                Ok(Ok(())) => {
+                Ok(_) => {
                     // Worker completed successfully, mark as finished
                     let mut pool = pool.lock().await;
                     pool.mark_worker_finished(table_id);
 
                     return Ok(());
                 }
-                Ok(Err(err)) => {
+                Err(err) => {
                     error!("table sync worker failed for table {}: {}", table_id, err);
 
                     // Convert error to table replication error to determine retry policy
@@ -390,14 +387,6 @@ where
                             return Err(err);
                         }
                     }
-                }
-                Err(err) => {
-                    // Exit the worker and mark as finished
-                    let mut pool = pool.lock().await;
-                    pool.mark_worker_finished(table_id);
-
-                    // Resume panic
-                    resume_unwind(err);
                 }
             }
         }
