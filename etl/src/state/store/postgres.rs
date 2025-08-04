@@ -18,25 +18,36 @@ use crate::{bail, etl_error};
 
 const NUM_POOL_CONNECTIONS: u32 = 1;
 
-impl TryFrom<TableReplicationPhase> for (TableReplicationState, serde_json::Value) {
+impl TryFrom<TableReplicationPhase> for TableReplicationState {
     type Error = EtlError;
 
     fn try_from(value: TableReplicationPhase) -> Result<Self, Self::Error> {
-        let metadata = serde_json::to_value(&value).map_err(|err| {
-            etl_error!(
-                ErrorKind::SerializationError,
-                "Serialization failed",
-                format!("Failed to serialize TableReplicationPhase: {err}")
-            )
-        })?;
+        match value {
+            TableReplicationPhase::Init => Ok(TableReplicationState::Init),
+            TableReplicationPhase::DataSync => Ok(TableReplicationState::DataSync),
+            TableReplicationPhase::FinishedCopy => Ok(TableReplicationState::FinishedCopy),
+            TableReplicationPhase::SyncDone { lsn } => Ok(TableReplicationState::SyncDone { lsn }),
+            TableReplicationPhase::Ready => Ok(TableReplicationState::Ready),
+            TableReplicationPhase::Errored {
+                reason,
+                solution,
+                retry_policy,
+            } => {
+                // Convert ETL RetryPolicy to postgres RetryPolicy
+                let db_retry_policy = match retry_policy {
+                    RetryPolicy::NoRetry => postgres::replication::RetryPolicy::NoRetry,
+                    RetryPolicy::ManualRetry => postgres::replication::RetryPolicy::ManualRetry,
+                    RetryPolicy::TimedRetry { next_retry } => {
+                        postgres::replication::RetryPolicy::TimedRetry { next_retry }
+                    }
+                };
 
-        let state = match value {
-            TableReplicationPhase::Init => TableReplicationState::Init,
-            TableReplicationPhase::DataSync => TableReplicationState::DataSync,
-            TableReplicationPhase::FinishedCopy => TableReplicationState::FinishedCopy,
-            TableReplicationPhase::SyncDone { .. } => TableReplicationState::SyncDone,
-            TableReplicationPhase::Ready => TableReplicationState::Ready,
-            TableReplicationPhase::Errored { .. } => TableReplicationState::Errored,
+                Ok(TableReplicationState::Errored {
+                    reason,
+                    solution,
+                    retry_policy: db_retry_policy,
+                })
+            }
             TableReplicationPhase::SyncWait | TableReplicationPhase::Catchup { .. } => {
                 bail!(
                     ErrorKind::InvalidState,
@@ -44,9 +55,7 @@ impl TryFrom<TableReplicationPhase> for (TableReplicationState, serde_json::Valu
                     "In-memory table replication phase can't be saved in the state store"
                 );
             }
-        };
-
-        Ok((state, metadata))
+        }
     }
 }
 
@@ -54,39 +63,52 @@ impl TryFrom<TableReplicationStateRow> for TableReplicationPhase {
     type Error = EtlError;
 
     fn try_from(value: TableReplicationStateRow) -> Result<Self, Self::Error> {
-        if let Some(metadata) = &value.metadata {
-            // Try to deserialize from the metadata JSONB
-            match serde_json::from_value::<TableReplicationPhase>(metadata.clone()) {
-                Ok(phase) => return Ok(phase),
-                Err(e) => {
-                    info!(
-                        "Failed to deserialize metadata, falling back to legacy conversion: {}",
-                        e
-                    );
-                }
-            }
-        }
+        // Parse the metadata field from the row, which contains all the data we need to build the
+        // replication phase
+        let Some(table_replication_state) = value.deserialize_metadata().map_err(|err| {
+            etl_error!(
+                ErrorKind::DeserializationError,
+                "Failed to deserialize table replication state",
+                format!(
+                    "Failed to deserialize table replication state from metadata column in Postgres: {err}"
+                )
+            )
+        })?
+        else {
+            bail!(
+                ErrorKind::InvalidState,
+                "The table replication state does not exist",
+                "The table replication state does not exist in the metadata column in Postgres"
+            );
+        };
 
-        // Fallback to legacy conversion for backwards compatibility
-        // This should only happen for very old data that was created before the metadata migration
-        match value.state {
+        // Convert postgres state to phase (they are the same structs but one is meant to represent
+        // only the state which can be saved in the db).
+        match table_replication_state {
             TableReplicationState::Init => Ok(TableReplicationPhase::Init),
             TableReplicationState::DataSync => Ok(TableReplicationPhase::DataSync),
             TableReplicationState::FinishedCopy => Ok(TableReplicationPhase::FinishedCopy),
-            TableReplicationState::SyncDone => {
-                // For SyncDone without metadata, we can't recover the LSN, so create a default
-                bail!(
-                    ErrorKind::ValidationError,
-                    "Missing metadata for 'SyncDone' state",
-                    "'SyncDone' state without metadata is not supported after migration"
-                )
-            }
+            TableReplicationState::SyncDone { lsn } => Ok(TableReplicationPhase::SyncDone { lsn }),
             TableReplicationState::Ready => Ok(TableReplicationPhase::Ready),
-            TableReplicationState::Errored => Ok(TableReplicationPhase::Errored {
-                reason: "Legacy error state".to_string(),
-                solution: Some("Check logs for more details".to_string()),
-                retry_policy: RetryPolicy::NoRetry,
-            }),
+            TableReplicationState::Errored {
+                reason,
+                solution,
+                retry_policy,
+            } => {
+                let etl_retry_policy = match retry_policy {
+                    postgres::replication::RetryPolicy::NoRetry => RetryPolicy::NoRetry,
+                    postgres::replication::RetryPolicy::ManualRetry => RetryPolicy::ManualRetry,
+                    postgres::replication::RetryPolicy::TimedRetry { next_retry } => {
+                        RetryPolicy::TimedRetry { next_retry }
+                    }
+                };
+
+                Ok(TableReplicationPhase::Errored {
+                    reason,
+                    solution,
+                    retry_policy: etl_retry_policy,
+                })
+            }
         }
     }
 }
@@ -182,7 +204,7 @@ impl StateStore for PostgresStateStore {
         table_id: TableId,
         state: TableReplicationPhase,
     ) -> EtlResult<()> {
-        let (table_state, metadata) = state.clone().try_into()?;
+        let db_state: TableReplicationState = state.clone().try_into()?;
 
         let pool = self.connect_to_source().await?;
 
@@ -190,14 +212,7 @@ impl StateStore for PostgresStateStore {
         // consistent. If we were to lock the states only after the db state is modified, we might
         // be inconsistent since there are some interleaved executions that lead to a wrong state.
         let mut inner = self.inner.lock().await;
-        update_replication_state(
-            &pool,
-            self.pipeline_id as i64,
-            table_id,
-            table_state,
-            metadata,
-        )
-        .await?;
+        update_replication_state(&pool, self.pipeline_id as i64, table_id, db_state).await?;
         inner.table_states.insert(table_id, state);
 
         Ok(())

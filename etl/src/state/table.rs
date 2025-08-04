@@ -1,7 +1,6 @@
 use chrono::{DateTime, Duration, Utc};
 use config::shared::PipelineConfig;
 use postgres::schema::TableId;
-use serde::{Deserialize, Serialize};
 use std::fmt;
 use tokio_postgres::types::PgLsn;
 
@@ -12,7 +11,6 @@ use crate::error::{ErrorKind, EtlError};
 /// Contains diagnostic information including the table that failed, the reason for failure,
 /// an optional solution suggestion, and the retry policy to apply.
 #[derive(Debug)]
-#[allow(dead_code)]
 pub struct TableReplicationError {
     table_id: TableId,
     reason: String,
@@ -133,8 +131,7 @@ impl TableReplicationError {
 }
 
 /// Defines the retry strategy for a failed table replication.
-#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub enum RetryPolicy {
     /// No retry should be attempted, the system has to be fixed by hand.
     NoRetry,
@@ -152,8 +149,7 @@ impl RetryPolicy {
     }
 }
 
-#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub enum TableReplicationPhase {
     /// Set by the pipeline when it first starts and encounters a table for the first time
     Init,
@@ -175,7 +171,6 @@ pub enum TableReplicationPhase {
     /// This phase is stored in memory only and not persisted to the state store
     Catchup {
         /// The lsn to catch up to. This is the location where the apply worker is paused
-        #[serde(with = "lsn_serde")]
         lsn: PgLsn,
     },
 
@@ -183,7 +178,6 @@ pub enum TableReplicationPhase {
     /// worker has caught up with the apply worker's lsn position
     SyncDone {
         /// The lsn up to which the table-sync worker has caught up
-        #[serde(with = "lsn_serde")]
         lsn: PgLsn,
     },
 
@@ -292,138 +286,6 @@ impl fmt::Display for TableReplicationPhaseType {
             Self::SyncDone => write!(f, "sync_done"),
             Self::Ready => write!(f, "ready"),
             Self::Errored => write!(f, "errored"),
-        }
-    }
-}
-
-mod lsn_serde {
-    use serde::{Deserialize, Deserializer, Serialize, Serializer};
-    use tokio_postgres::types::PgLsn;
-
-    pub fn serialize<S>(lsn: &PgLsn, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        lsn.to_string().serialize(serializer)
-    }
-
-    pub fn deserialize<'de, D>(deserializer: D) -> Result<PgLsn, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let s = String::deserialize(deserializer)?;
-        s.parse()
-            .map_err(|e| serde::de::Error::custom(format!("{e:?}")))
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use chrono::Utc;
-    use tokio_postgres::types::PgLsn;
-
-    #[test]
-    fn test_retry_policy_serialization() {
-        // Test NoRetry
-        let no_retry = RetryPolicy::NoRetry;
-        let json = serde_json::to_value(&no_retry).unwrap();
-        assert_eq!(json, serde_json::json!({"type": "no_retry"}));
-
-        let deserialized: RetryPolicy = serde_json::from_value(json).unwrap();
-        assert!(matches!(deserialized, RetryPolicy::NoRetry));
-
-        // Test ManualRetry
-        let manual_retry = RetryPolicy::ManualRetry;
-        let json = serde_json::to_value(&manual_retry).unwrap();
-        assert_eq!(json, serde_json::json!({"type": "manual_retry"}));
-
-        let deserialized: RetryPolicy = serde_json::from_value(json).unwrap();
-        assert!(matches!(deserialized, RetryPolicy::ManualRetry));
-
-        // Test TimedRetry
-        let timestamp = Utc::now();
-        let timed_retry = RetryPolicy::TimedRetry {
-            next_retry: timestamp,
-        };
-        let json = serde_json::to_value(&timed_retry).unwrap();
-        assert_eq!(
-            json,
-            serde_json::json!({
-                "type": "timed_retry",
-                "next_retry": timestamp
-            })
-        );
-
-        let deserialized: RetryPolicy = serde_json::from_value(json).unwrap();
-        if let RetryPolicy::TimedRetry { next_retry } = deserialized {
-            assert_eq!(next_retry, timestamp);
-        } else {
-            panic!("Expected TimedRetry variant");
-        }
-    }
-
-    #[test]
-    fn test_table_replication_phase_serialization() {
-        // Test Init
-        let init = TableReplicationPhase::Init;
-        let json = serde_json::to_value(&init).unwrap();
-        assert_eq!(json, serde_json::json!({"type": "init"}));
-
-        let deserialized: TableReplicationPhase = serde_json::from_value(json).unwrap();
-        assert_eq!(deserialized, TableReplicationPhase::Init);
-
-        // Test SyncDone
-        let lsn = "0/1000000".parse::<PgLsn>().unwrap();
-        let sync_done = TableReplicationPhase::SyncDone { lsn };
-        let json = serde_json::to_value(&sync_done).unwrap();
-        assert_eq!(
-            json,
-            serde_json::json!({
-                "type": "sync_done",
-                "lsn": "0/1000000"
-            })
-        );
-
-        let deserialized: TableReplicationPhase = serde_json::from_value(json).unwrap();
-        if let TableReplicationPhase::SyncDone {
-            lsn: deserialized_lsn,
-        } = deserialized
-        {
-            assert_eq!(deserialized_lsn, lsn);
-        } else {
-            panic!("Expected SyncDone variant");
-        }
-
-        // Test Errored
-        let errored = TableReplicationPhase::Errored {
-            reason: "Test error".to_string(),
-            solution: Some("Test solution".to_string()),
-            retry_policy: RetryPolicy::NoRetry,
-        };
-        let json = serde_json::to_value(&errored).unwrap();
-        assert_eq!(
-            json,
-            serde_json::json!({
-                "type": "errored",
-                "reason": "Test error",
-                "solution": "Test solution",
-                "retry_policy": {"type": "no_retry"}
-            })
-        );
-
-        let deserialized: TableReplicationPhase = serde_json::from_value(json).unwrap();
-        if let TableReplicationPhase::Errored {
-            reason,
-            solution,
-            retry_policy,
-        } = deserialized
-        {
-            assert_eq!(reason, "Test error");
-            assert_eq!(solution, Some("Test solution".to_string()));
-            assert!(matches!(retry_policy, RetryPolicy::NoRetry));
-        } else {
-            panic!("Expected Errored variant");
         }
     }
 }

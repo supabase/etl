@@ -56,6 +56,12 @@ enum PipelineError {
     #[error(transparent)]
     TenantId(#[from] TenantIdError),
 
+    #[error("The table replication state is not present")]
+    MissingTableReplicationState,
+
+    #[error("The table replication state is not valid: {0}")]
+    InvalidTableReplicationState(serde_json::Error),
+
     #[error("invalid destination config")]
     InvalidConfig(#[from] serde_json::Error),
 
@@ -135,7 +141,9 @@ impl ResponseError for PipelineError {
             | PipelineError::K8s(_)
             | PipelineError::TrustedRootCertsConfigMissing
             | PipelineError::Database(_)
-            | PipelineError::TableLookup(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            | PipelineError::TableLookup(_)
+            | PipelineError::InvalidTableReplicationState(_)
+            | PipelineError::MissingTableReplicationState => StatusCode::INTERNAL_SERVER_ERROR,
             PipelineError::PipelineNotFound(_) | PipelineError::ImageNotFoundById(_) => {
                 StatusCode::NOT_FOUND
             }
@@ -251,11 +259,19 @@ impl From<TableReplicationState> for SimpleTableReplicationState {
             TableReplicationState::DataSync => SimpleTableReplicationState::CopyingTable,
             TableReplicationState::FinishedCopy => SimpleTableReplicationState::CopiedTable,
             // TODO: add lag metric when available.
-            TableReplicationState::SyncDone => SimpleTableReplicationState::FollowingWal { lag: 0 },
+            TableReplicationState::SyncDone { .. } => {
+                SimpleTableReplicationState::FollowingWal { lag: 0 }
+            }
             TableReplicationState::Ready => SimpleTableReplicationState::FollowingWal { lag: 0 },
-            TableReplicationState::Errored => SimpleTableReplicationState::Error {
-                message: "Table encountered an error during replication".to_string(),
-            },
+            TableReplicationState::Errored {
+                reason, solution, ..
+            } => {
+                let message = match solution {
+                    Some(solution) => format!("{reason}: {solution}"),
+                    None => reason,
+                };
+                SimpleTableReplicationState::Error { message }
+            }
         }
     }
 }
@@ -726,10 +742,18 @@ pub async fn get_pipeline_replication_status(
         let table_id = row.table_id.0;
         let table_name =
             get_table_name_from_oid(&source_pool, TableId::new(row.table_id.0)).await?;
+
+        // Convert database row to full state with metadata
+        let Some(table_replication_state) = row
+            .deserialize_metadata()
+            .map_err(PipelineError::InvalidTableReplicationState)? else {
+            return Err(PipelineError::MissingTableReplicationState);
+        };
+
         tables.push(TableReplicationStatus {
             table_id,
             table_name: table_name.to_string(),
-            state: row.state.into(),
+            state: table_replication_state.into(),
         });
     }
 
