@@ -5,7 +5,7 @@ use etl::destination::Destination;
 use etl::destination::memory::MemoryDestination;
 use etl::pipeline::Pipeline;
 use etl::state::store::StateStore;
-use etl::state::store::postgres::PostgresStateStore;
+use etl::store::both::postgres::PostgresStore;
 use etl::types::PipelineId;
 use etl_destinations::bigquery::{BigQueryDestination, install_crypto_provider_for_bigquery};
 use secrecy::ExposeSecret;
@@ -136,7 +136,7 @@ async fn init_state_store(
 ) -> anyhow::Result<impl StateStore + Clone> {
     migrate_state_store(&pg_connection_config).await?;
 
-    Ok(PostgresStateStore::new(pipeline_id, pg_connection_config))
+    Ok(PostgresStore::new(pipeline_id, pg_connection_config))
 }
 
 #[tracing::instrument(skip(pipeline), fields(pipeline_id = pipeline.id()))]

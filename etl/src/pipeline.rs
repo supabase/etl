@@ -8,9 +8,9 @@ use crate::concurrency::shutdown::{ShutdownTx, create_shutdown_channel};
 use crate::destination::Destination;
 use crate::error::{ErrorKind, EtlError, EtlResult};
 use crate::replication::client::PgReplicationClient;
-use crate::schema::SchemaCache;
-use crate::state::store::StateStore;
 use crate::state::table::TableReplicationPhase;
+use crate::store::schema::SchemaStore;
+use crate::store::state::StateStore;
 use crate::types::PipelineId;
 use crate::workers::apply::{ApplyWorker, ApplyWorkerHandle};
 use crate::workers::base::{Worker, WorkerHandle};
@@ -31,7 +31,7 @@ enum PipelineState {
 pub struct Pipeline<S, D> {
     id: PipelineId,
     config: Arc<PipelineConfig>,
-    state_store: S,
+    store: S,
     destination: D,
     state: PipelineState,
     shutdown_tx: ShutdownTx,
@@ -39,7 +39,7 @@ pub struct Pipeline<S, D> {
 
 impl<S, D> Pipeline<S, D>
 where
-    S: StateStore + Clone + Send + Sync + 'static,
+    S: StateStore + SchemaStore + Clone + Send + Sync + 'static,
     D: Destination + Clone + Send + Sync + 'static,
 {
     pub fn new(id: PipelineId, config: PipelineConfig, state_store: S, destination: D) -> Self {
@@ -53,7 +53,7 @@ where
         Self {
             id,
             config: Arc::new(config),
-            state_store,
+            store: state_store,
             destination,
             state: PipelineState::NotStarted,
             shutdown_tx,
@@ -74,14 +74,8 @@ where
             self.config.publication_name, self.id
         );
 
-        // We create the schema cache, which will be shared also with the destination.
-        let schema_cache = SchemaCache::default();
-
-        // We inject pipeline specific dependencies within the destination.
-        self.destination.inject(schema_cache.clone()).await?;
-
-        // We prepare the schema cache with table schemas loaded, in case there is the need.
-        self.prepare_schema_cache(&schema_cache).await?;
+        // We load the table schemas from the store.
+        self.store.load_table_schemas().await?;
 
         // We create the first connection to Postgres.
         let replication_client =
@@ -107,8 +101,7 @@ where
             self.config.clone(),
             replication_client,
             pool.clone(),
-            schema_cache,
-            self.state_store.clone(),
+            self.store.clone(),
             self.destination.clone(),
             self.shutdown_tx.subscribe(),
             table_sync_worker_permits,
@@ -188,15 +181,6 @@ where
         self.wait().await
     }
 
-    async fn prepare_schema_cache(&self, schema_cache: &SchemaCache) -> EtlResult<()> {
-        // We initialize the schema cache, which is local to a pipeline, and we try to load existing
-        // schemas that were previously stored at the destination (if any).
-        let table_schemas = self.destination.load_table_schemas().await?;
-        schema_cache.add_table_schemas(table_schemas).await;
-
-        Ok(())
-    }
-
     async fn initialize_table_states(
         &self,
         replication_client: &PgReplicationClient,
@@ -230,11 +214,11 @@ where
             .get_publication_table_ids(&self.config.publication_name)
             .await?;
 
-        self.state_store.load_table_replication_states().await?;
-        let states = self.state_store.get_table_replication_states().await?;
+        self.store.load_table_replication_states().await?;
+        let states = self.store.get_table_replication_states().await?;
         for table_id in table_ids {
             if !states.contains_key(&table_id) {
-                self.state_store
+                self.store
                     .update_table_replication_state(table_id, TableReplicationPhase::Init)
                     .await?;
             }

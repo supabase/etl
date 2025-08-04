@@ -1,8 +1,8 @@
 use etl::destination::memory::MemoryDestination;
 use etl::error::ErrorKind;
 use etl::failpoints::START_TABLE_SYNC__AFTER_DATA_SYNC;
-use etl::state::store::notify::NotifyingStateStore;
 use etl::state::table::TableReplicationPhaseType;
+use etl::store::both::notify::NotifyingStateStore;
 use etl::test_utils::database::spawn_database;
 use etl::test_utils::pipeline::create_pipeline;
 use etl::test_utils::test_destination_wrapper::TestDestinationWrapper;

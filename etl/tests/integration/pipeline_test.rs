@@ -1,8 +1,8 @@
 use config::shared::BatchConfig;
 use etl::destination::memory::MemoryDestination;
 use etl::replication::slot::get_slot_name;
-use etl::state::store::notify::NotifyingStateStore;
 use etl::state::table::TableReplicationPhaseType;
+use etl::store::both::notify::NotifyingStateStore;
 use postgres::tokio::test_utils::TableModification;
 use rand::random;
 use telemetry::init_test_tracing;

@@ -1,8 +1,8 @@
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use etl::config::BatchConfig;
-use etl::destination::Destination;
-use etl::state::store::notify::NotifyingStateStore;
+use etl::state::store::StateStore;
 use etl::state::table::TableReplicationPhaseType;
+use etl::store::both::notify::NotifyingStateStore;
 use etl::test_utils::database::{spawn_database, test_table_name};
 use etl::test_utils::pipeline::{create_pipeline, create_pipeline_with};
 use etl::test_utils::test_destination_wrapper::TestDestinationWrapper;
@@ -73,8 +73,9 @@ async fn table_copy_and_streaming_with_restart() {
 
     pipeline.shutdown_and_wait().await.unwrap();
 
-    // We load the table schemas and check that they are correctly fetched.
-    let mut table_schemas = destination.load_table_schemas().await.unwrap();
+    // We load the table schemas from state store and check that they are correctly stored.
+    state_store.load_table_schemas().await.unwrap();
+    let mut table_schemas = state_store.get_table_schemas().await.unwrap();
     table_schemas.sort();
     assert_eq!(table_schemas[0], database_schema.orders_schema());
     assert_eq!(table_schemas[1], database_schema.users_schema());
@@ -136,8 +137,9 @@ async fn table_copy_and_streaming_with_restart() {
 
     pipeline.shutdown_and_wait().await.unwrap();
 
-    // We load the table schemas and check that they are correctly fetched.
-    let mut table_schemas = destination.load_table_schemas().await.unwrap();
+    // We load the table schemas from state store and check that they are correctly stored.
+    state_store.load_table_schemas().await.unwrap();
+    let mut table_schemas = state_store.get_table_schemas().await.unwrap();
     table_schemas.sort();
     assert_eq!(table_schemas[0], database_schema.orders_schema());
     assert_eq!(table_schemas[1], database_schema.users_schema());

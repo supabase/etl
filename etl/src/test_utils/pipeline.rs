@@ -3,7 +3,8 @@ use uuid::Uuid;
 
 use crate::destination::Destination;
 use crate::pipeline::Pipeline;
-use crate::state::store::StateStore;
+use crate::store::schema::SchemaStore;
+use crate::store::state::StateStore;
 use crate::types::PipelineId;
 
 /// Generates a test-specific replication slot name with a random component.
@@ -19,11 +20,11 @@ pub fn create_pipeline<S, D>(
     pg_connection_config: &PgConnectionConfig,
     pipeline_id: PipelineId,
     publication_name: String,
-    state_store: S,
+    store: S,
     destination: D,
 ) -> Pipeline<S, D>
 where
-    S: StateStore + Clone + Send + Sync + 'static,
+    S: StateStore + SchemaStore + Clone + Send + Sync + 'static,
     D: Destination + Clone + Send + Sync + 'static,
 {
     let config = PipelineConfig {
@@ -38,19 +39,19 @@ where
         max_table_sync_workers: 1,
     };
 
-    Pipeline::new(pipeline_id, config, state_store, destination)
+    Pipeline::new(pipeline_id, config, store, destination)
 }
 
 pub fn create_pipeline_with<S, D>(
     pg_connection_config: &PgConnectionConfig,
     pipeline_id: PipelineId,
     publication_name: String,
-    state_store: S,
+    store: S,
     destination: D,
     batch_config: Option<BatchConfig>,
 ) -> Pipeline<S, D>
 where
-    S: StateStore + Clone + Send + Sync + 'static,
+    S: StateStore + SchemaStore + Clone + Send + Sync + 'static,
     D: Destination + Clone + Send + Sync + 'static,
 {
     let batch = batch_config.unwrap_or(BatchConfig {
@@ -67,5 +68,5 @@ where
         max_table_sync_workers: 1,
     };
 
-    Pipeline::new(pipeline_id, config, state_store, destination)
+    Pipeline::new(pipeline_id, config, store, destination)
 }

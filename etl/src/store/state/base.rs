@@ -4,7 +4,7 @@ use std::{collections::HashMap, future::Future};
 use crate::error::EtlResult;
 use crate::state::table::TableReplicationPhase;
 
-/// This trait represents a state store for the replication state of all tables.
+/// This trait represents a state store for the replication state of all tables and their schemas.
 /// It assumes that the implementers keep a cache of the state to avoid having
 /// to keep reading from the backing persistent store again and again.
 pub trait StateStore {

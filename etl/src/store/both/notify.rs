@@ -1,6 +1,6 @@
 use std::{collections::HashMap, fmt, sync::Arc};
 
-use postgres::schema::TableId;
+use postgres::schema::{TableId, TableSchema};
 use tokio::{
     runtime::Handle,
     sync::{Notify, RwLock},
@@ -8,10 +8,9 @@ use tokio::{
 
 use crate::error::{ErrorKind, EtlError, EtlResult};
 use crate::etl_error;
-use crate::state::{
-    store::base::StateStore,
-    table::{TableReplicationPhase, TableReplicationPhaseType},
-};
+use crate::state::table::{TableReplicationPhase, TableReplicationPhaseType};
+use crate::store::schema::SchemaStore;
+use crate::store::state::StateStore;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum StateStoreMethod {
@@ -25,6 +24,7 @@ pub enum StateStoreMethod {
 struct Inner {
     table_replication_states: HashMap<TableId, TableReplicationPhase>,
     table_state_history: HashMap<TableId, Vec<TableReplicationPhase>>,
+    table_schemas: HashMap<TableId, Arc<TableSchema>>,
     table_state_conditions: Vec<(TableId, TableReplicationPhaseType, Arc<Notify>)>,
     method_call_notifiers: HashMap<StateStoreMethod, Vec<Arc<Notify>>>,
 }
@@ -66,6 +66,7 @@ impl NotifyingStateStore {
         let inner = Inner {
             table_replication_states: HashMap::new(),
             table_state_history: HashMap::new(),
+            table_schemas: HashMap::new(),
             table_state_conditions: Vec::new(),
             method_call_notifiers: HashMap::new(),
         };
@@ -202,6 +203,34 @@ impl StateStore for NotifyingStateStore {
     }
 }
 
+impl SchemaStore for NotifyingStateStore {
+    async fn get_table_schema(&self, table_id: &TableId) -> EtlResult<Option<Arc<TableSchema>>> {
+        let inner = self.inner.read().await;
+
+        Ok(inner.table_schemas.get(table_id).cloned())
+    }
+
+    async fn get_table_schemas(&self) -> EtlResult<Vec<Arc<TableSchema>>> {
+        let inner = self.inner.read().await;
+
+        Ok(inner.table_schemas.values().cloned().collect())
+    }
+
+    async fn load_table_schemas(&self) -> EtlResult<usize> {
+        let inner = self.inner.read().await;
+        Ok(inner.table_schemas.len())
+    }
+
+    async fn store_table_schema(&self, table_schema: TableSchema) -> EtlResult<()> {
+        let mut inner = self.inner.write().await;
+        inner
+            .table_schemas
+            .insert(table_schema.id, Arc::new(table_schema));
+
+        Ok(())
+    }
+}
+
 impl fmt::Debug for NotifyingStateStore {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let inner = tokio::task::block_in_place(move || {
@@ -209,6 +238,7 @@ impl fmt::Debug for NotifyingStateStore {
         });
         f.debug_struct("NotifyingStateStore")
             .field("table_replication_states", &inner.table_replication_states)
+            .field("table_schemas", &inner.table_schemas)
             .finish()
     }
 }

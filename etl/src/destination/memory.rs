@@ -4,12 +4,11 @@ use tracing::info;
 
 use crate::destination::Destination;
 use crate::error::EtlResult;
-use crate::types::{Event, TableId, TableRow, TableSchema};
+use crate::types::{Event, TableId, TableRow};
 
 #[derive(Debug)]
 struct Inner {
     events: Vec<Event>,
-    table_schemas: Vec<TableSchema>,
     table_rows: Vec<(TableId, Vec<TableRow>)>,
 }
 
@@ -22,7 +21,6 @@ impl MemoryDestination {
     pub fn new() -> Self {
         let inner = Inner {
             events: Vec::new(),
-            table_schemas: Vec::new(),
             table_rows: Vec::new(),
         };
 
@@ -39,24 +37,6 @@ impl Default for MemoryDestination {
 }
 
 impl Destination for MemoryDestination {
-    async fn write_table_schema(&self, table_schema: TableSchema) -> EtlResult<()> {
-        let mut inner = self.inner.lock().await;
-        info!("writing table schema:");
-        info!("{:?}", table_schema);
-        inner.table_schemas.push(table_schema);
-
-        Ok(())
-    }
-
-    async fn load_table_schemas(&self) -> EtlResult<Vec<TableSchema>> {
-        let inner = self.inner.lock().await;
-        let schemas = inner.table_schemas.to_vec();
-        info!("loaded {} table schemas:", schemas.len());
-        info!("{:?}", schemas);
-
-        Ok(schemas)
-    }
-
     async fn write_table_rows(
         &self,
         table_id: TableId,

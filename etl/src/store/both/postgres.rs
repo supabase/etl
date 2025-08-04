@@ -1,18 +1,20 @@
 use std::{collections::HashMap, sync::Arc};
 
 use config::shared::PgConnectionConfig;
+use postgres::replication::schema;
 use postgres::replication::{
     TableReplicationState, TableReplicationStateRow, connect_to_source_database,
     get_table_replication_state_rows, rollback_replication_state, update_replication_state,
 };
-use postgres::schema::TableId;
+use postgres::schema::{TableId, TableSchema};
 use sqlx::PgPool;
 use tokio::sync::Mutex;
 use tracing::{debug, info};
 
 use crate::error::{ErrorKind, EtlError, EtlResult};
-use crate::state::store::StateStore;
 use crate::state::table::{RetryPolicy, TableReplicationPhase};
+use crate::store::schema::SchemaStore;
+use crate::store::state::StateStore;
 use crate::types::PipelineId;
 use crate::{bail, etl_error};
 
@@ -116,21 +118,23 @@ impl TryFrom<TableReplicationStateRow> for TableReplicationPhase {
 #[derive(Debug)]
 struct Inner {
     table_states: HashMap<TableId, TableReplicationPhase>,
+    table_schemas: HashMap<TableId, Arc<TableSchema>>,
 }
 
 /// A state store which saves the replication state in the source
 /// postgres database.
 #[derive(Debug, Clone)]
-pub struct PostgresStateStore {
+pub struct PostgresStore {
     pipeline_id: PipelineId,
     source_config: PgConnectionConfig,
     inner: Arc<Mutex<Inner>>,
 }
 
-impl PostgresStateStore {
+impl PostgresStore {
     pub fn new(pipeline_id: PipelineId, source_config: PgConnectionConfig) -> Self {
         let inner = Inner {
             table_states: HashMap::new(),
+            table_schemas: HashMap::new(),
         };
 
         Self {
@@ -156,7 +160,7 @@ impl PostgresStateStore {
     }
 }
 
-impl StateStore for PostgresStateStore {
+impl StateStore for PostgresStore {
     async fn get_table_replication_state(
         &self,
         table_id: TableId,
@@ -239,5 +243,73 @@ impl StateStore for PostgresStateStore {
                 "There is no previous state to rollback to for this table"
             )),
         }
+    }
+}
+
+impl SchemaStore for PostgresStore {
+    async fn get_table_schema(&self, table_id: &TableId) -> EtlResult<Option<Arc<TableSchema>>> {
+        let inner = self.inner.lock().await;
+
+        Ok(inner.table_schemas.get(table_id).cloned())
+    }
+
+    async fn get_table_schemas(&self) -> EtlResult<Vec<Arc<TableSchema>>> {
+        let inner = self.inner.lock().await;
+
+        Ok(inner.table_schemas.values().cloned().collect())
+    }
+
+    async fn load_table_schemas(&self) -> EtlResult<usize> {
+        debug!("loading table schemas from postgres state store");
+
+        let pool = self.connect_to_source().await?;
+        let table_schemas = schema::load_table_schemas(&pool, self.pipeline_id as i64)
+            .await
+            .map_err(|err| {
+                etl_error!(
+                    ErrorKind::QueryFailed,
+                    "Failed to load table schemas",
+                    format!("Failed to load table schemas from postgres: {err}")
+                )
+            })?;
+        let table_schemas_len = table_schemas.len();
+
+        let mut inner = self.inner.lock().await;
+        inner.table_schemas.clear();
+        for table_schema in table_schemas {
+            inner
+                .table_schemas
+                .insert(table_schema.id, Arc::new(table_schema));
+        }
+
+        info!(
+            "loaded {} table schemas from postgres state store",
+            table_schemas_len
+        );
+
+        Ok(table_schemas_len)
+    }
+
+    async fn store_table_schema(&self, table_schema: TableSchema) -> EtlResult<()> {
+        debug!("storing table schema for table '{}'", table_schema.name);
+
+        let pool = self.connect_to_source().await?;
+
+        schema::store_table_schema(&pool, self.pipeline_id as i64, &table_schema)
+            .await
+            .map_err(|err| {
+                etl_error!(
+                    ErrorKind::QueryFailed,
+                    "Failed to store table schema",
+                    format!("Failed to store table schema in postgres: {err}")
+                )
+            })?;
+
+        let mut inner = self.inner.lock().await;
+        inner
+            .table_schemas
+            .insert(table_schema.id, Arc::new(table_schema));
+
+        Ok(())
     }
 }

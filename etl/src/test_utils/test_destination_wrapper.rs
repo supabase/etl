@@ -9,7 +9,6 @@ use crate::conversions::event::{Event, EventType};
 use crate::conversions::table_row::TableRow;
 use crate::destination::Destination;
 use crate::error::EtlResult;
-use crate::schema::SchemaCache;
 use crate::test_utils::event::check_events_count;
 
 type EventCondition = Box<dyn Fn(&[Event]) -> bool + Send + Sync>;
@@ -19,7 +18,6 @@ type TableRowCondition = Box<dyn Fn(&HashMap<TableId, Vec<TableRow>>) -> bool + 
 struct Inner<D> {
     wrapped_destination: D,
     events: Vec<Event>,
-    table_schemas: Vec<TableSchema>,
     table_rows: HashMap<TableId, Vec<TableRow>>,
     event_conditions: Vec<(EventCondition, Arc<Notify>)>,
     table_schema_conditions: Vec<(SchemaCondition, Arc<Notify>)>,
@@ -32,16 +30,6 @@ impl<D> Inner<D> {
         let events = self.events.clone();
         self.event_conditions.retain(|(condition, notify)| {
             let should_retain = !condition(&events);
-            if !should_retain {
-                notify.notify_one();
-            }
-            should_retain
-        });
-
-        // Check schema conditions
-        let schemas = self.table_schemas.clone();
-        self.table_schema_conditions.retain(|(condition, notify)| {
-            let should_retain = !condition(&schemas);
             if !should_retain {
                 notify.notify_one();
             }
@@ -74,7 +62,6 @@ impl<D: fmt::Debug> fmt::Debug for TestDestinationWrapper<D> {
         f.debug_struct("TestDestinationWrapper")
             .field("wrapped_destination", &inner.wrapped_destination)
             .field("events", &inner.events)
-            .field("schemas", &inner.table_schemas)
             .field("table_rows", &inner.table_rows)
             .finish()
     }
@@ -86,7 +73,6 @@ impl<D> TestDestinationWrapper<D> {
         let inner = Inner {
             wrapped_destination: destination,
             events: Vec::new(),
-            table_schemas: Vec::new(),
             table_rows: HashMap::new(),
             event_conditions: Vec::new(),
             table_schema_conditions: Vec::new(),
@@ -96,13 +82,6 @@ impl<D> TestDestinationWrapper<D> {
         Self {
             inner: Arc::new(RwLock::new(inner)),
         }
-    }
-
-    /// Get all table schemas that have been written
-    pub async fn get_table_schemas(&self) -> Vec<TableSchema> {
-        let mut table_schemas = self.inner.read().await.table_schemas.clone();
-        table_schemas.sort();
-        table_schemas
     }
 
     /// Get all table rows that have been written
@@ -157,44 +136,6 @@ impl<D> TestDestinationWrapper<D> {
 }
 
 impl<D: Destination + Send + Sync + Clone> Destination for TestDestinationWrapper<D> {
-    async fn inject(&self, schema_cache: SchemaCache) -> EtlResult<()> {
-        let destination = {
-            let inner = self.inner.read().await;
-            inner.wrapped_destination.clone()
-        };
-
-        destination.inject(schema_cache).await
-    }
-
-    async fn write_table_schema(&self, table_schema: TableSchema) -> EtlResult<()> {
-        let destination = {
-            let inner = self.inner.read().await;
-            inner.wrapped_destination.clone()
-        };
-
-        let result = destination.write_table_schema(table_schema.clone()).await;
-
-        {
-            let mut inner = self.inner.write().await;
-            if result.is_ok() {
-                inner.table_schemas.push(table_schema);
-            }
-
-            inner.check_conditions().await;
-        }
-
-        result
-    }
-
-    async fn load_table_schemas(&self) -> EtlResult<Vec<TableSchema>> {
-        let destination = {
-            let inner = self.inner.read().await;
-            inner.wrapped_destination.clone()
-        };
-
-        destination.load_table_schemas().await
-    }
-
     async fn write_table_rows(
         &self,
         table_id: TableId,

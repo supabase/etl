@@ -34,7 +34,7 @@ The pipeline will automatically:
 use clap::{Args, Parser};
 use etl::config::{BatchConfig, PgConnectionConfig, PipelineConfig, TlsConfig};
 use etl::pipeline::Pipeline;
-use etl::state::store::memory::MemoryStateStore;
+use etl::store::both::memory::MemoryStore;
 use etl_destinations::bigquery::{BigQueryDestination, install_crypto_provider_for_bigquery};
 use std::error::Error;
 use tokio::signal;
@@ -168,7 +168,7 @@ async fn main_impl() -> Result<(), Box<dyn Error>> {
 
     // Create in-memory state store for tracking table replication states
     // In production, you might want to use a persistent state store like PostgresStateStore
-    let state_store = MemoryStateStore::new();
+    let state_store = MemoryStore::new();
 
     // Create pipeline configuration with batching and retry settings
     let pipeline_config = PipelineConfig {

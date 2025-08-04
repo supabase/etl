@@ -17,11 +17,11 @@ use crate::replication::apply::{ApplyLoopHook, start_apply_loop};
 use crate::replication::client::PgReplicationClient;
 use crate::replication::slot::get_slot_name;
 use crate::replication::table_sync::{TableSyncResult, start_table_sync};
-use crate::schema::SchemaCache;
-use crate::state::store::StateStore;
 use crate::state::table::{
     RetryPolicy, TableReplicationError, TableReplicationPhase, TableReplicationPhaseType,
 };
+use crate::store::schema::SchemaStore;
+use crate::store::state::StateStore;
 use crate::types::PipelineId;
 use crate::workers::base::{Worker, WorkerHandle, WorkerType};
 use crate::workers::pool::{TableSyncWorkerPool, TableSyncWorkerPoolInner};
@@ -257,8 +257,7 @@ pub struct TableSyncWorker<S, D> {
     config: Arc<PipelineConfig>,
     pool: TableSyncWorkerPool,
     table_id: TableId,
-    schema_cache: SchemaCache,
-    state_store: S,
+    store: S,
     destination: D,
     shutdown_rx: ShutdownRx,
     force_syncing_tables_tx: SignalTx,
@@ -272,8 +271,7 @@ impl<S, D> TableSyncWorker<S, D> {
         config: Arc<PipelineConfig>,
         pool: TableSyncWorkerPool,
         table_id: TableId,
-        schema_cache: SchemaCache,
-        state_store: S,
+        store: S,
         destination: D,
         shutdown_rx: ShutdownRx,
         force_syncing_tables_tx: SignalTx,
@@ -284,8 +282,7 @@ impl<S, D> TableSyncWorker<S, D> {
             config,
             pool,
             table_id,
-            schema_cache,
-            state_store,
+            store,
             destination,
             shutdown_rx,
             force_syncing_tables_tx,
@@ -300,18 +297,17 @@ impl<S, D> TableSyncWorker<S, D> {
 
 impl<S, D> TableSyncWorker<S, D>
 where
-    S: StateStore + Clone + Send + Sync + 'static,
+    S: StateStore + SchemaStore + Clone + Send + Sync + 'static,
     D: Destination + Clone + Send + Sync + 'static,
 {
     async fn guarded_run_table_sync_worker(self, state: TableSyncWorkerState) -> EtlResult<()> {
         let table_id = self.table_id;
         let pool = self.pool.clone();
-        let state_store = self.state_store.clone();
+        let store = self.store.clone();
         let config = self.config.clone();
 
         // Clone all the fields we need for retries
         let pipeline_id = self.pipeline_id;
-        let schema_cache = self.schema_cache.clone();
         let destination = self.destination.clone();
         let shutdown_rx = self.shutdown_rx.clone();
         let force_syncing_tables_tx = self.force_syncing_tables_tx.clone();
@@ -324,8 +320,7 @@ where
                 config: config.clone(),
                 pool: pool.clone(),
                 table_id,
-                schema_cache: schema_cache.clone(),
-                state_store: state_store.clone(),
+                store: store.clone(),
                 destination: destination.clone(),
                 shutdown_rx: shutdown_rx.clone(),
                 force_syncing_tables_tx: force_syncing_tables_tx.clone(),
@@ -355,10 +350,7 @@ where
                     let mut state_guard = state.lock().await;
 
                     // Update the state and store with the error
-                    if let Err(err) = state_guard
-                        .set_and_store(table_error.into(), &state_store)
-                        .await
-                    {
+                    if let Err(err) = state_guard.set_and_store(table_error.into(), &store).await {
                         error!(
                             "failed to update table sync worker state for table {}: {}",
                             table_id, err
@@ -400,7 +392,7 @@ where
                             let mut pool_guard = pool.lock().await;
 
                             // After sleeping, we rollback to the previous state and retry
-                            if let Err(err) = state_guard.rollback(&state_store).await {
+                            if let Err(err) = state_guard.rollback(&store).await {
                                 error!(
                                     "failed to rollback table sync worker state for table {}: {}",
                                     table_id, err
@@ -462,8 +454,7 @@ where
             replication_client.clone(),
             self.table_id,
             state.clone(),
-            self.schema_cache.clone(),
-            self.state_store.clone(),
+            self.store.clone(),
             self.destination.clone(),
             self.shutdown_rx.clone(),
             self.force_syncing_tables_tx,
@@ -486,9 +477,9 @@ where
             start_lsn,
             self.config,
             replication_client.clone(),
-            self.schema_cache,
+            self.store.clone(),
             self.destination,
-            TableSyncWorkerHook::new(self.table_id, state, self.state_store),
+            TableSyncWorkerHook::new(self.table_id, state, self.store),
             self.shutdown_rx,
             None,
         )
@@ -529,7 +520,7 @@ where
 
 impl<S, D> Worker<TableSyncWorkerHandle, TableSyncWorkerState> for TableSyncWorker<S, D>
 where
-    S: StateStore + Clone + Send + Sync + 'static,
+    S: StateStore + SchemaStore + Clone + Send + Sync + 'static,
     D: Destination + Clone + Send + Sync + 'static,
 {
     type Error = EtlError;
@@ -538,7 +529,7 @@ where
         info!("starting table sync worker for table {}", self.table_id);
 
         let Some(table_replication_phase) = self
-            .state_store
+            .store
             .get_table_replication_state(self.table_id)
             .await?
         else {
