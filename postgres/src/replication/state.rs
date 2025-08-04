@@ -58,7 +58,10 @@ pub struct TableReplicationStateRow {
 }
 
 impl TableReplicationStateRow {
-    /// Converts the database row to a full [`TableReplicationState`] using metadata, if present.
+    /// Deserializes the `metadata` field from the database into a [`TableReplicationState`].
+    ///
+    /// This method is used to perform lazy deserialization of the field, since it might not be needed
+    /// all the time.
     pub fn deserialize_metadata(&self) -> Result<Option<TableReplicationState>, serde_json::Error> {
         let Some(metadata) = &self.metadata else {
             return Ok(None);

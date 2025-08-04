@@ -743,7 +743,7 @@ pub async fn get_pipeline_replication_status(
         let table_name =
             get_table_name_from_oid(&source_pool, TableId::new(row.table_id.0)).await?;
 
-        // Convert database row to full state with metadata
+        // Extract the metadata row from the database
         let Some(table_replication_state) = row
             .deserialize_metadata()
             .map_err(PipelineError::InvalidTableReplicationState)?
