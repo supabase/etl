@@ -9,7 +9,7 @@ use config::shared::{
     ReplicatorConfig, SupabaseConfig, TlsConfig,
 };
 use postgres::replication::{
-    TableLookupError, TableReplicationState, get_table_name_from_oid,
+    TableLookupError, TableReplicationState, TableReplicationStateType, get_table_name_from_oid,
     get_table_replication_state_rows, rollback_replication_state,
 };
 use postgres::schema::TableId;
@@ -796,12 +796,10 @@ pub async fn get_pipeline_replication_status(
             get_table_name_from_oid(&source_pool, TableId::new(row.table_id.0)).await?;
 
         // Extract the metadata row from the database
-        let Some(table_replication_state) = row
+        let table_replication_state = row
             .deserialize_metadata()
             .map_err(PipelineError::InvalidTableReplicationState)?
-        else {
-            return Err(PipelineError::MissingTableReplicationState);
-        };
+            .ok_or(PipelineError::MissingTableReplicationState)?;
 
         tables.push(TableReplicationStatus {
             table_id,
@@ -875,19 +873,8 @@ pub async fn rollback_table_state(
         .ok_or(PipelineError::MissingTableReplicationState)?;
 
     // Check if the current state is rollbackable (has ManualRetry policy)
-    let current_state = current_row
-        .deserialize_metadata()
-        .map_err(PipelineError::InvalidTableReplicationState)?
-        .ok_or(PipelineError::MissingTableReplicationState)?;
-
-    let is_rollbackable = matches!(
-        current_state,
-        TableReplicationState::Errored {
-            retry_policy: postgres::replication::RetryPolicy::ManualRetry,
-            ..
-        }
-    );
-
+    let current_state = current_row.state_type();
+    let is_rollbackable = matches!(current_state, TableReplicationStateType::Errored);
     if !is_rollbackable {
         return Err(PipelineError::NotRollbackable(
             "Only manual retry errors can be rolled back".to_string(),
