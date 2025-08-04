@@ -166,6 +166,7 @@ impl StateStore for NotifyingStateStore {
         inner
             .dispatch_method_notification(StateStoreMethod::StoreTableReplicationState)
             .await;
+
         Ok(())
     }
 

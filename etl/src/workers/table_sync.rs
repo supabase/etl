@@ -82,6 +82,16 @@ impl TableSyncWorkerStateInner {
         Ok(())
     }
 
+    pub async fn rollback<S: StateStore>(&mut self, state_store: &S) -> EtlResult<()> {
+        // We rollback the state in the store and then also set the rolled back state in memory.
+        let previous_phase = state_store
+            .rollback_table_replication_state(self.table_id)
+            .await?;
+        self.set(previous_phase);
+
+        Ok(())
+    }
+
     pub fn replication_phase(&self) -> TableReplicationPhase {
         self.table_replication_phase.clone()
     }
@@ -340,23 +350,21 @@ where
                         TableReplicationError::from_etl_error(&config, table_id, &err);
                     let retry_policy = table_error.retry_policy().clone();
 
-                    let mut pool = pool.lock().await;
+                    // We lock both the pool and the table sync worker state to be consistent
+                    let mut pool_guard = pool.lock().await;
+                    let mut state_guard = state.lock().await;
 
-                    // Update the state store
-                    if let Err(err) = TableSyncWorkerState::set_and_store(
-                        &pool,
-                        &state_store,
-                        table_id,
-                        table_error.into(),
-                    )
-                    .await
+                    // Update the state and store with the error
+                    if let Err(err) = state_guard
+                        .set_and_store(table_error.into(), &state_store)
+                        .await
                     {
                         error!(
                             "failed to update table sync worker state for table {}: {}",
                             table_id, err
                         );
 
-                        pool.mark_worker_finished(table_id);
+                        pool_guard.mark_worker_finished(table_id);
 
                         return Err(err);
                     };
@@ -374,6 +382,12 @@ where
                                     table_id, sleep_duration
                                 );
 
+                                // We drop the lock on the pool while waiting. We do not do the same
+                                // for the state guard since we want to hold the lock for that state
+                                // since when we are waiting to retry, nobody should be allowed to
+                                // modify it.
+                                drop(pool_guard);
+
                                 tokio::time::sleep(sleep_duration).await;
                             } else {
                                 info!(
@@ -382,16 +396,17 @@ where
                                 );
                             }
 
+                            // Before rolling back, we acquire the pool lock again for consistency
+                            let mut pool_guard = pool.lock().await;
+
                             // After sleeping, we rollback to the previous state and retry
-                            if let Err(err) =
-                                state_store.rollback_table_replication_state(table_id).await
-                            {
+                            if let Err(err) = state_guard.rollback(&state_store).await {
                                 error!(
                                     "failed to rollback table sync worker state for table {}: {}",
                                     table_id, err
                                 );
 
-                                pool.mark_worker_finished(table_id);
+                                pool_guard.mark_worker_finished(table_id);
 
                                 return Err(err);
                             };
@@ -399,7 +414,7 @@ where
                             continue;
                         }
                         RetryPolicy::NoRetry | RetryPolicy::ManualRetry => {
-                            pool.mark_worker_finished(table_id);
+                            pool_guard.mark_worker_finished(table_id);
 
                             return Err(err);
                         }

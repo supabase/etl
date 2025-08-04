@@ -89,7 +89,7 @@ where
                 ErrorKind::InvalidState,
                 "Invalid replication phase",
                 format!(
-                    "Invalid replication phase '{}': expected Init, DataSync, or FinishedCopy",
+                    "Invalid replication phase '{:?}': expected 'Init', 'DataSync', or 'FinishedCopy'",
                     phase_type
                 )
             );

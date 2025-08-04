@@ -112,7 +112,7 @@ async fn table_copy_is_consistent_after_data_sync_threw_an_error_with_timed_retr
 
     pipeline.start().await.unwrap();
 
-    // users_state_notify.notified().await;
+    users_state_notify.notified().await;
 
     // We expect no errors, since the same table sync worker task is retried.
     pipeline.shutdown_and_wait().await.unwrap();
