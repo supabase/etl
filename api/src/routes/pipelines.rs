@@ -29,7 +29,7 @@ use crate::routes::{
 };
 use postgres::replication::{
     TableLookupError, TableReplicationState, get_table_name_from_oid,
-    get_table_replication_state_rows,
+    get_table_replication_state_rows, rollback_replication_state,
 };
 use secrecy::ExposeSecret;
 
@@ -61,6 +61,9 @@ enum PipelineError {
 
     #[error("The table replication state is not valid: {0}")]
     InvalidTableReplicationState(serde_json::Error),
+
+    #[error("The table state is not rollbackable: {0}")]
+    NotRollbackable(String),
 
     #[error("invalid destination config")]
     InvalidConfig(#[from] serde_json::Error),
@@ -144,6 +147,7 @@ impl ResponseError for PipelineError {
             | PipelineError::TableLookup(_)
             | PipelineError::InvalidTableReplicationState(_)
             | PipelineError::MissingTableReplicationState => StatusCode::INTERNAL_SERVER_ERROR,
+            PipelineError::NotRollbackable(_) => StatusCode::BAD_REQUEST,
             PipelineError::PipelineNotFound(_) | PipelineError::ImageNotFoundById(_) => {
                 StatusCode::NOT_FOUND
             }
@@ -248,8 +252,27 @@ pub enum SimpleTableReplicationState {
     Queued,
     CopyingTable,
     CopiedTable,
-    FollowingWal { lag: u64 },
-    Error { message: String },
+    FollowingWal {
+        lag: u64,
+    },
+    Error {
+        reason: String,
+        solution: Option<String>,
+        retry_policy: SimpleRetryPolicy,
+    },
+}
+
+/// Simplified retry policy for UI display
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+#[serde(tag = "type")]
+pub enum SimpleRetryPolicy {
+    NoRetry,
+    ManualRetry,
+    TimedRetry {
+        #[schema(example = "2023-12-25T12:00:00Z")]
+        next_retry: String,
+    },
 }
 
 impl From<TableReplicationState> for SimpleTableReplicationState {
@@ -264,13 +287,27 @@ impl From<TableReplicationState> for SimpleTableReplicationState {
             }
             TableReplicationState::Ready => SimpleTableReplicationState::FollowingWal { lag: 0 },
             TableReplicationState::Errored {
-                reason, solution, ..
+                reason,
+                solution,
+                retry_policy,
             } => {
-                let message = match solution {
-                    Some(solution) => format!("{reason}: {solution}"),
-                    None => reason,
+                let simple_retry_policy = match retry_policy {
+                    postgres::replication::RetryPolicy::NoRetry => SimpleRetryPolicy::NoRetry,
+                    postgres::replication::RetryPolicy::ManualRetry => {
+                        SimpleRetryPolicy::ManualRetry
+                    }
+                    postgres::replication::RetryPolicy::TimedRetry { next_retry } => {
+                        SimpleRetryPolicy::TimedRetry {
+                            next_retry: next_retry.to_rfc3339(),
+                        }
+                    }
                 };
-                SimpleTableReplicationState::Error { message }
+
+                SimpleTableReplicationState::Error {
+                    reason,
+                    solution,
+                    retry_policy: simple_retry_policy,
+                }
             }
         }
     }
@@ -290,6 +327,21 @@ pub struct GetPipelineReplicationStatusResponse {
     #[schema(example = 1)]
     pub pipeline_id: i64,
     pub table_statuses: Vec<TableReplicationStatus>,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct RollbackTableStateRequest {
+    #[schema(example = 1)]
+    pub table_id: u32,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct RollbackTableStateResponse {
+    #[schema(example = 1)]
+    pub pipeline_id: i64,
+    #[schema(example = 1)]
+    pub table_id: u32,
+    pub new_state: SimpleTableReplicationState,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
@@ -761,6 +813,106 @@ pub async fn get_pipeline_replication_status(
     let response = GetPipelineReplicationStatusResponse {
         pipeline_id,
         table_statuses: tables,
+    };
+
+    Ok(Json(response))
+}
+
+#[utoipa::path(
+    request_body = RollbackTableStateRequest,
+    params(
+        ("pipeline_id" = i64, Path, description = "Id of the pipeline"),
+        ("tenant_id" = String, Header, description = "The tenant ID")
+    ),
+    responses(
+        (status = 200, description = "Table state rolled back successfully", body = RollbackTableStateResponse),
+        (status = 400, description = "Bad request - state is not rollbackable", body = ErrorMessage),
+        (status = 404, description = "Pipeline or table not found", body = ErrorMessage),
+        (status = 500, description = "Internal server error", body = ErrorMessage)
+    ),
+    tag = "Pipelines"
+)]
+#[post("/pipelines/{pipeline_id}/rollback-table-state")]
+pub async fn rollback_table_state(
+    req: HttpRequest,
+    pool: Data<PgPool>,
+    encryption_key: Data<EncryptionKey>,
+    pipeline_id: Path<i64>,
+    rollback_request: Json<RollbackTableStateRequest>,
+) -> Result<impl Responder, PipelineError> {
+    let tenant_id = extract_tenant_id(&req)?;
+    let pipeline_id = pipeline_id.into_inner();
+    let table_id = rollback_request.table_id;
+
+    let mut txn = pool.begin().await?;
+
+    // Read the pipeline to ensure it exists and get the source configuration
+    let pipeline = db::pipelines::read_pipeline(txn.deref_mut(), tenant_id, pipeline_id)
+        .await?
+        .ok_or(PipelineError::PipelineNotFound(pipeline_id))?;
+
+    // Get the source configuration
+    let source = db::sources::read_source(
+        txn.deref_mut(),
+        tenant_id,
+        pipeline.source_id,
+        &encryption_key,
+    )
+    .await?
+    .ok_or(PipelineError::SourceNotFound(pipeline.source_id))?;
+
+    txn.commit().await?;
+
+    // Connect to the source database to perform rollback
+    let source_pool =
+        connect_to_source_database_with_defaults(&source.config.into_connection_config()).await?;
+
+    // First, check current state to ensure it's rollbackable (manual retry policy)
+    let state_rows = get_table_replication_state_rows(&source_pool, pipeline_id).await?;
+    let current_row = state_rows
+        .into_iter()
+        .find(|row| row.table_id.0 == table_id)
+        .ok_or(PipelineError::MissingTableReplicationState)?;
+
+    // Check if the current state is rollbackable (has ManualRetry policy)
+    let current_state = current_row
+        .deserialize_metadata()
+        .map_err(PipelineError::InvalidTableReplicationState)?
+        .ok_or(PipelineError::MissingTableReplicationState)?;
+
+    let is_rollbackable = matches!(
+        current_state,
+        TableReplicationState::Errored {
+            retry_policy: postgres::replication::RetryPolicy::ManualRetry,
+            ..
+        }
+    );
+
+    if !is_rollbackable {
+        return Err(PipelineError::NotRollbackable(
+            "Only manual retry errors can be rolled back".to_string(),
+        ));
+    }
+
+    // Perform the rollback
+    let Some(new_state) =
+        rollback_replication_state(&source_pool, pipeline_id as u64, TableId::new(table_id))
+            .await?
+    else {
+        return Err(PipelineError::NotRollbackable(
+            "No previous state to rollback to".to_string(),
+        ));
+    };
+
+    let new_state = new_state
+        .deserialize_metadata()
+        .map_err(PipelineError::InvalidTableReplicationState)?
+        .ok_or(PipelineError::MissingTableReplicationState)?;
+
+    let response = RollbackTableStateResponse {
+        pipeline_id,
+        table_id,
+        new_state: new_state.into(),
     };
 
     Ok(Json(response))

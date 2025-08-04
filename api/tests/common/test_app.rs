@@ -7,8 +7,8 @@ use api::routes::destinations_pipelines::{
 };
 use api::routes::images::{CreateImageRequest, UpdateImageRequest};
 use api::routes::pipelines::{
-    CreatePipelineRequest, UpdatePipelineConfigRequest, UpdatePipelineImageRequest,
-    UpdatePipelineRequest,
+    CreatePipelineRequest, RollbackTableStateRequest, UpdatePipelineConfigRequest,
+    UpdatePipelineImageRequest, UpdatePipelineRequest,
 };
 use api::routes::sources::{CreateSourceRequest, UpdateSourceRequest};
 use api::routes::tenants::{CreateOrUpdateTenantRequest, CreateTenantRequest, UpdateTenantRequest};
@@ -450,6 +450,23 @@ impl TestApp {
             &self.address, pipeline_id
         ))
         .header("tenant_id", tenant_id)
+        .send()
+        .await
+        .expect("failed to execute request")
+    }
+
+    pub async fn rollback_table_state(
+        &self,
+        tenant_id: &str,
+        pipeline_id: i64,
+        rollback_request: &RollbackTableStateRequest,
+    ) -> reqwest::Response {
+        self.post_authenticated(format!(
+            "{}/v1/pipelines/{}/rollback-table-state",
+            &self.address, pipeline_id
+        ))
+        .header("tenant_id", tenant_id)
+        .json(rollback_request)
         .send()
         .await
         .expect("failed to execute request")

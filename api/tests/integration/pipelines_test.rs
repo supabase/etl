@@ -2,9 +2,9 @@ use api::db::pipelines::{OptionalPipelineConfig, PipelineConfig};
 use api::db::sources::SourceConfig;
 use api::routes::pipelines::{
     CreatePipelineRequest, CreatePipelineResponse, GetPipelineReplicationStatusResponse,
-    ReadPipelineResponse, ReadPipelinesResponse, SimpleTableReplicationState,
-    UpdatePipelineConfigRequest, UpdatePipelineConfigResponse, UpdatePipelineImageRequest,
-    UpdatePipelineRequest,
+    ReadPipelineResponse, ReadPipelinesResponse, RollbackTableStateRequest,
+    RollbackTableStateResponse, SimpleTableReplicationState, UpdatePipelineConfigRequest,
+    UpdatePipelineConfigResponse, UpdatePipelineImageRequest, UpdatePipelineRequest,
 };
 use api::routes::sources::{CreateSourceRequest, CreateSourceResponse};
 use config::SerializableSecretString;
@@ -1203,6 +1203,300 @@ async fn pipeline_replication_status_returns_table_states_and_names() {
         SimpleTableReplicationState::FollowingWal { lag: _ } => {} // Expected for ready state
         other => panic!("Expected FollowingWal state for orders table, got {other:?}"),
     }
+
+    // We destroy the database
+    drop_pg_database(&source_db_config).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn rollback_table_state_succeeds_for_manual_retry_errors() {
+    init_test_tracing();
+    // Arrange
+    let app = spawn_test_app().await;
+    create_default_image(&app).await;
+    let tenant_id = &create_tenant(&app).await;
+
+    // Create a separate database for the source using create_pg_database
+    let mut source_db_config = app.database_config().clone();
+    source_db_config.name = format!("fake_source_db_{}", Uuid::new_v4());
+    let source_pool = create_pg_database(&source_db_config).await;
+    let source_config = SourceConfig {
+        host: source_db_config.host.clone(),
+        port: source_db_config.port,
+        name: source_db_config.name.clone(),
+        username: source_db_config.username.clone(),
+        password: source_db_config
+            .password
+            .as_ref()
+            .map(|p| SerializableSecretString::from(p.expose_secret().to_string())),
+    };
+
+    let source = CreateSourceRequest {
+        name: "Test Source".to_string(),
+        config: source_config,
+    };
+
+    let response = app.create_source(tenant_id, &source).await;
+    let response: CreateSourceResponse = response
+        .json()
+        .await
+        .expect("failed to deserialize response");
+    let source_id = response.id;
+
+    let destination_id = create_destination(&app, tenant_id).await;
+
+    // Create pipeline
+    let pipeline = CreatePipelineRequest {
+        source_id,
+        destination_id,
+        config: new_pipeline_config(),
+    };
+    let response = app.create_pipeline(tenant_id, &pipeline).await;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let response: CreatePipelineResponse = response
+        .json()
+        .await
+        .expect("failed to deserialize response");
+    let pipeline_id = response.id;
+
+    // Create etl schema and replication_state table with proper enum
+    sqlx::query("CREATE SCHEMA IF NOT EXISTS etl")
+        .execute(&source_pool)
+        .await
+        .expect("Failed to create etl schema");
+
+    // Create the table_state enum
+    sqlx::query(
+        r#"
+        CREATE TYPE etl.table_state AS ENUM (
+            'init',
+            'data_sync',
+            'finished_copy',
+            'sync_done',
+            'ready',
+            'errored'
+        )
+    "#,
+    )
+    .execute(&source_pool)
+    .await
+    .expect("Failed to create table_state enum");
+
+    // Create the replication_state table with new schema
+    sqlx::query(
+        r#"
+        CREATE TABLE etl.replication_state (
+            id BIGSERIAL PRIMARY KEY,
+            pipeline_id BIGINT NOT NULL,
+            table_id OID NOT NULL,
+            state etl.table_state NOT NULL,
+            metadata JSONB NULL,
+            prev BIGINT NULL REFERENCES etl.replication_state(id),
+            is_current BOOLEAN NOT NULL DEFAULT true
+        )
+    "#,
+    )
+    .execute(&source_pool)
+    .await
+    .expect("Failed to create replication_state table");
+
+    // Create test table to get real OID
+    sqlx::query("CREATE TABLE IF NOT EXISTS test_table_users (id SERIAL PRIMARY KEY, name TEXT)")
+        .execute(&source_pool)
+        .await
+        .expect("Failed to create test_table_users");
+
+    // Get the OID of the test table
+    let users_table_oid = sqlx::query_scalar::<_, Oid>(
+        "SELECT c.oid FROM pg_class c JOIN pg_namespace n ON c.relnamespace = n.oid WHERE c.relname = $1 AND n.nspname = $2"
+    )
+    .bind("test_table_users")
+    .bind("public")
+    .fetch_one(&source_pool)
+    .await
+    .expect("Failed to get users table OID").0 as i64;
+
+    // Insert initial ready state
+    let ready_row_id = sqlx::query_scalar::<_, i64>(
+        r#"
+        INSERT INTO etl.replication_state (pipeline_id, table_id, state, metadata, prev, is_current)
+        VALUES ($1, $2, 'ready'::etl.table_state, '{"type": "ready"}'::jsonb, NULL, false)
+        RETURNING id
+        "#,
+    )
+    .bind(pipeline_id)
+    .bind(users_table_oid)
+    .fetch_one(&source_pool)
+    .await
+    .expect("Failed to insert initial ready state");
+
+    // Insert current errored state with ManualRetry policy
+    sqlx::query(
+        r#"
+        INSERT INTO etl.replication_state (pipeline_id, table_id, state, metadata, prev, is_current)
+        VALUES ($1, $2, 'errored'::etl.table_state, 
+            '{"type": "errored", "reason": "Test error", "solution": "Fix manually", "retry_policy": {"type": "manual_retry"}}'::jsonb, 
+            $3, true)
+        "#,
+    )
+    .bind(pipeline_id)
+    .bind(users_table_oid)
+    .bind(ready_row_id)
+    .execute(&source_pool)
+    .await
+    .expect("Failed to insert errored state");
+
+    // Test the rollback endpoint
+    let rollback_request = RollbackTableStateRequest {
+        table_id: users_table_oid as u32,
+    };
+
+    let response = app
+        .rollback_table_state(tenant_id, pipeline_id, &rollback_request)
+        .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let response: RollbackTableStateResponse = response
+        .json()
+        .await
+        .expect("failed to deserialize response");
+
+    assert_eq!(response.pipeline_id, pipeline_id);
+    assert_eq!(response.table_id, users_table_oid as u32);
+
+    // Verify the new state is ready
+    match response.new_state {
+        SimpleTableReplicationState::FollowingWal { .. } => {} // Expected for ready state
+        other => panic!("Expected FollowingWal state, got {other:?}"),
+    }
+
+    // We destroy the database
+    drop_pg_database(&source_db_config).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn rollback_table_state_fails_for_non_manual_retry_errors() {
+    init_test_tracing();
+    // Arrange - similar setup but with NoRetry policy
+    let app = spawn_test_app().await;
+    create_default_image(&app).await;
+    let tenant_id = &create_tenant(&app).await;
+
+    let mut source_db_config = app.database_config().clone();
+    source_db_config.name = format!("fake_source_db_{}", Uuid::new_v4());
+    let source_pool = create_pg_database(&source_db_config).await;
+    let source_config = SourceConfig {
+        host: source_db_config.host.clone(),
+        port: source_db_config.port,
+        name: source_db_config.name.clone(),
+        username: source_db_config.username.clone(),
+        password: source_db_config
+            .password
+            .as_ref()
+            .map(|p| SerializableSecretString::from(p.expose_secret().to_string())),
+    };
+
+    let source = CreateSourceRequest {
+        name: "Test Source".to_string(),
+        config: source_config,
+    };
+
+    let response = app.create_source(tenant_id, &source).await;
+    let response: CreateSourceResponse = response
+        .json()
+        .await
+        .expect("failed to deserialize response");
+    let source_id = response.id;
+
+    let destination_id = create_destination(&app, tenant_id).await;
+
+    let pipeline = CreatePipelineRequest {
+        source_id,
+        destination_id,
+        config: new_pipeline_config(),
+    };
+    let response = app.create_pipeline(tenant_id, &pipeline).await;
+    let response: CreatePipelineResponse = response
+        .json()
+        .await
+        .expect("failed to deserialize response");
+    let pipeline_id = response.id;
+
+    // Create schema and table
+    sqlx::query("CREATE SCHEMA IF NOT EXISTS etl")
+        .execute(&source_pool)
+        .await
+        .expect("Failed to create etl schema");
+
+    sqlx::query(
+        r#"
+        CREATE TYPE etl.table_state AS ENUM (
+            'init', 'data_sync', 'finished_copy', 'sync_done', 'ready', 'errored'
+        )
+    "#,
+    )
+    .execute(&source_pool)
+    .await
+    .expect("Failed to create table_state enum");
+
+    sqlx::query(
+        r#"
+        CREATE TABLE etl.replication_state (
+            id BIGSERIAL PRIMARY KEY,
+            pipeline_id BIGINT NOT NULL,
+            table_id OID NOT NULL,
+            state etl.table_state NOT NULL,
+            metadata JSONB NULL,
+            prev BIGINT NULL REFERENCES etl.replication_state(id),
+            is_current BOOLEAN NOT NULL DEFAULT true
+        )
+    "#,
+    )
+    .execute(&source_pool)
+    .await
+    .expect("Failed to create replication_state table");
+
+    sqlx::query("CREATE TABLE IF NOT EXISTS test_table_users (id SERIAL PRIMARY KEY, name TEXT)")
+        .execute(&source_pool)
+        .await
+        .expect("Failed to create test_table_users");
+
+    let users_table_oid = sqlx::query_scalar::<_, Oid>(
+        "SELECT c.oid FROM pg_class c JOIN pg_namespace n ON c.relnamespace = n.oid WHERE c.relname = $1 AND n.nspname = $2"
+    )
+    .bind("test_table_users")
+    .bind("public")
+    .fetch_one(&source_pool)
+    .await
+    .expect("Failed to get users table OID").0 as i64;
+
+    // Insert errored state with NoRetry policy (not rollbackable)
+    sqlx::query(
+        r#"
+        INSERT INTO etl.replication_state (pipeline_id, table_id, state, metadata, prev, is_current)
+        VALUES ($1, $2, 'errored'::etl.table_state, 
+            '{"type": "errored", "reason": "Test error", "solution": null, "retry_policy": {"type": "no_retry"}}'::jsonb, 
+            NULL, true)
+        "#,
+    )
+    .bind(pipeline_id)
+    .bind(users_table_oid)
+    .execute(&source_pool)
+    .await
+    .expect("Failed to insert errored state");
+
+    // Test the rollback endpoint - should fail
+    let rollback_request = RollbackTableStateRequest {
+        table_id: users_table_oid as u32,
+    };
+
+    let response = app
+        .rollback_table_state(tenant_id, pipeline_id, &rollback_request)
+        .await;
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 
     // We destroy the database
     drop_pg_database(&source_db_config).await;
