@@ -746,7 +746,8 @@ pub async fn get_pipeline_replication_status(
         // Convert database row to full state with metadata
         let Some(table_replication_state) = row
             .deserialize_metadata()
-            .map_err(PipelineError::InvalidTableReplicationState)? else {
+            .map_err(PipelineError::InvalidTableReplicationState)?
+        else {
             return Err(PipelineError::MissingTableReplicationState);
         };
 
