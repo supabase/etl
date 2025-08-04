@@ -1393,39 +1393,8 @@ async fn rollback_table_state_fails_for_non_manual_retry_errors() {
         .expect("failed to deserialize response");
     let pipeline_id = response.id;
 
-    // Create schema and table
-    sqlx::query("CREATE SCHEMA IF NOT EXISTS etl")
-        .execute(&source_pool)
-        .await
-        .expect("Failed to create etl schema");
-
-    sqlx::query(
-        r#"
-        CREATE TYPE etl.table_state AS ENUM (
-            'init', 'data_sync', 'finished_copy', 'sync_done', 'ready', 'errored'
-        )
-    "#,
-    )
-    .execute(&source_pool)
-    .await
-    .expect("Failed to create table_state enum");
-
-    sqlx::query(
-        r#"
-        CREATE TABLE etl.replication_state (
-            id BIGSERIAL PRIMARY KEY,
-            pipeline_id BIGINT NOT NULL,
-            table_id OID NOT NULL,
-            state etl.table_state NOT NULL,
-            metadata JSONB NULL,
-            prev BIGINT NULL REFERENCES etl.replication_state(id),
-            is_current BOOLEAN NOT NULL DEFAULT true
-        )
-    "#,
-    )
-    .execute(&source_pool)
-    .await
-    .expect("Failed to create replication_state table");
+    // Create etl schema and replication_state table with proper enum
+    create_etl_table_schema(&source_pool).await;
 
     sqlx::query("CREATE TABLE IF NOT EXISTS test_table_users (id SERIAL PRIMARY KEY, name TEXT)")
         .execute(&source_pool)
