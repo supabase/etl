@@ -11,15 +11,27 @@ use etl_destinations::bigquery::{BigQueryDestination, install_crypto_provider_fo
 use secrecy::ExposeSecret;
 use std::fmt;
 use tokio::signal::unix::{SignalKind, signal};
-use tracing::{debug, info, warn};
+use tracing::{debug, info, instrument, warn};
 
 use crate::config::load_replicator_config;
 use crate::migrations::migrate_state_store;
 
 pub async fn start_replicator() -> anyhow::Result<()> {
-    info!("starting replicator service");
-
     let replicator_config = load_replicator_config()?;
+    let project_ref = replicator_config
+        .supabase
+        .as_ref()
+        .map(|s| s.project_ref.clone())
+        .unwrap_or_default();
+    start_with_config(replicator_config, &project_ref).await
+}
+
+#[instrument(name = "replication", skip(replicator_config), fields(project = project_ref))]
+async fn start_with_config(
+    replicator_config: ReplicatorConfig,
+    project_ref: &str,
+) -> anyhow::Result<()> {
+    info!("starting replicator service");
 
     log_config(&replicator_config);
 
