@@ -1,5 +1,5 @@
 pipeline:
-  id: 1
+  id: 2
   publication_name: "replicator_publication"
   batch:
     max_size: 10000

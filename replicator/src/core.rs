@@ -18,6 +18,7 @@ use crate::migrations::migrate_state_store;
 
 pub async fn start_replicator() -> anyhow::Result<()> {
     info!("starting replicator service");
+
     let replicator_config = load_replicator_config()?;
 
     log_config(&replicator_config);
@@ -134,6 +135,7 @@ async fn init_state_store(
     pg_connection_config: PgConnectionConfig,
 ) -> anyhow::Result<impl StateStore + Clone> {
     migrate_state_store(&pg_connection_config).await?;
+
     Ok(PostgresStateStore::new(pipeline_id, pg_connection_config))
 }
 

@@ -1,38 +1,5 @@
--- Add the id column first as a regular BIGINT
-alter table etl.replication_state add column id bigint;
-
--- Create a sequence for the ID column
-create sequence etl.replication_state_id_seq;
-
--- Backfill existing rows with sequential IDs
-update etl.replication_state 
-set id = nextval('etl.replication_state_id_seq');
-
--- Set the id column to NOT NULL and make it use the sequence as default
-alter table etl.replication_state 
-    alter column id set not null,
-    alter column id set default nextval('etl.replication_state_id_seq');
-
--- Set the sequence ownership to the column (makes it behave like BIGSERIAL)
-alter sequence etl.replication_state_id_seq owned by etl.replication_state.id;
-
--- Add the other new columns
-alter table etl.replication_state
-    add column metadata jsonb,
-    add column prev bigint,
-    add column is_current boolean not null default true;
-
--- Create indexes for performance
-create index concurrently idx_replication_state_is_current 
-    on etl.replication_state (pipeline_id, table_id, is_current);
-
-create index concurrently idx_replication_state_prev 
-    on etl.replication_state (prev);
-
--- Create unique index to enforce uniqueness constraint for current states
-create unique index uq_replication_state_current_true
-    on etl.replication_state (pipeline_id, table_id)
-    where is_current = true;
+-- Part 2: Migrate data using the new enum value
+-- This must be in a separate transaction after the enum value is committed
 
 -- Migrate existing SyncDone state to flattened JSONB metadata
 update etl.replication_state
@@ -64,6 +31,7 @@ set metadata = jsonb_build_object('type',
         when 'data_sync' then 'data_sync'
         when 'finished_copy' then 'finished_copy'
         when 'ready' then 'ready'
+        when 'errored' then 'errored'
     end
 )
 where metadata is null;
@@ -76,9 +44,6 @@ alter table etl.replication_state add primary key (id);
 alter table etl.replication_state 
     add constraint fk_replication_state_prev 
     foreign key (prev) references etl.replication_state(id);
-
--- Update the enum to include 'errored' and remove 'skipped'
-alter type etl.table_state add value 'errored';
 
 -- Drop the deprecated sync_done_lsn column since LSN is now stored in metadata
 alter table etl.replication_state drop column sync_done_lsn;

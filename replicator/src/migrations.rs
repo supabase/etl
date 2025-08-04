@@ -3,6 +3,7 @@ use sqlx::{
     Executor,
     postgres::{PgConnectOptions, PgPoolOptions},
 };
+use tracing::info;
 
 const NUM_POOL_CONNECTIONS: u32 = 1;
 
@@ -24,14 +25,19 @@ pub async fn migrate_state_store(
                 // metadata table is created inside that schema instead of the public
                 // schema
                 conn.execute("set search_path = 'etl';").await?;
+
                 Ok(())
             })
         })
         .connect_with(options)
         .await?;
 
+    info!("applying migrations in the state store before starting replicator");
+
     let migrator = sqlx::migrate!("./migrations");
     migrator.run(&pool).await?;
+
+    info!("migrations successfully applied in the state store");
 
     Ok(())
 }
