@@ -1,6 +1,7 @@
 use sqlx::postgres::PgRow;
 use sqlx::{PgPool, Row};
 use std::collections::HashMap;
+use sqlx::postgres::types::Oid;
 use tokio_postgres::types::Type as PgType;
 
 use crate::schema::{ColumnSchema, TableId, TableName, TableSchema};
@@ -163,7 +164,8 @@ pub async fn load_table_schemas(
     let mut table_schemas = HashMap::new();
 
     for row in rows {
-        let table_id = TableId::new(row.get::<i64, _>("table_id") as u32);
+        let table_oid: Oid = row.get("table_id");
+        let table_id = TableId::new(table_oid.0);
         let schema_name: String = row.get("schema_name");
         let table_name: String = row.get("table_name");
 

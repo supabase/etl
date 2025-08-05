@@ -184,11 +184,6 @@ where
         &self,
         replication_client: &PgReplicationClient,
     ) -> EtlResult<()> {
-        info!(
-            "initializing table states for tables in publication '{}'",
-            self.config.publication_name
-        );
-
         // We need to make sure that the publication exists.
         if !replication_client
             .publication_exists(&self.config.publication_name)
