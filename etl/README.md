@@ -14,24 +14,6 @@ This is the main crate of the ETL system, providing the core functionality for P
 
 The ETL core implements a pipeline architecture that replicates data from PostgreSQL to various destinations.
 
-```mermaid
-graph TB
-    PostgreSQL["🐘 PostgreSQL"] --> Pipeline["🎭 Pipeline"]
-    Pipeline --> Workers["⚙️ Workers"]
-    Pipeline --> State["💾 State Store"]
-    Workers --> Destination["🎯 Destination"]
-    
-    subgraph "Pipeline Components"
-        ReplicationStream["📡 Replication Stream"]
-        TableSync["🔄 Table Sync"]
-        CDC["📦 Change Processing"]
-    end
-    
-    Pipeline --> ReplicationStream
-    Pipeline --> TableSync  
-    Pipeline --> CDC
-```
-
 ### Key Components
 
 - **Pipeline**: Main orchestrator that manages the replication process
@@ -41,3 +23,58 @@ graph TB
   to the apply worker
 - **State Store**: Tracks the state of the pipeline
 - **Schema Store**: Tracks the table schemas of the tables involved in the replication
+
+### Information Flow
+
+```mermaid
+graph TB    
+    subgraph "ETL Pipeline"
+        Pipeline["🎭 Pipeline"]
+        
+        ApplyWorker["⚙️ Apply Worker"]
+
+        subgraph "Worker Pool"
+            TSWorker1["🔄 Table Sync Worker 1"]
+            TSWorkerN["🔄 Table Sync Worker N"]
+        end
+        
+        subgraph "Store"
+            StateStore["💾 State Store"]
+            SchemaStore["📋 Schema Store"]
+        end
+    end
+
+    PG[("🐘 PostgreSQL<br/>Source Database")]
+    
+    Destination[("🎯 Destination<br/>BigQuery, etc.")]
+    
+    Pipeline --> ApplyWorker
+    
+    ApplyWorker --> TSWorker1
+    ApplyWorker --> TSWorkerN
+    
+    ApplyWorker --> Destination
+    TSWorker1 --> Destination
+    TSWorkerN --> Destination
+
+    ApplyWorker <--> PG
+    TSWorker1 <--> PG
+
+    ApplyWorker <--> StateStore
+    ApplyWorker <--> SchemaStore
+
+    TSWorker1 <--> StateStore
+    TSWorker1 <--> SchemaStore
+
+    TSWorker2 <--> StateStore
+    TSWorker2 <--> SchemaStore
+```
+
+### How It Works
+
+1. **Pipeline** orchestrates the entire replication process
+2. **Apply Worker** processes CDC events from the replication stream and spawns table sync workers as needed
+3. **Table Sync Workers** are created in a pool to handle initial table copying independently
+4. Each worker **polls PostgreSQL independently** - Apply Worker reads CDC stream, Table Sync Workers copy table data
+5. All workers **write independently to destinations** for optimal throughput
+
