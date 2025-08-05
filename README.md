@@ -67,7 +67,7 @@ We provide a convenient script to help you with this setup. For detailed instruc
 To run the test suite:
 
 ```bash
-cargo test
+cargo test --all-features
 ```
 
 ## Docker
