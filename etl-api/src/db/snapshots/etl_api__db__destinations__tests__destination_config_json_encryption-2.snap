@@ -1,6 +1,6 @@
 ---
-source: api/src/db/destinations.rs
-expression: deserialized.unwrap()
+source: etl-api/src/db/destinations.rs
+expression: deserialized_config
 ---
 BigQuery {
     project_id: "project-id",
@@ -9,6 +9,6 @@ BigQuery {
         SecretBox<str>([REDACTED]),
     ),
     max_staleness_mins: Some(
-        42,
+        99,
     ),
 }
