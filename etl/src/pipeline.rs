@@ -74,16 +74,15 @@ where
             self.config.publication_name, self.id
         );
 
-        // We load the table schemas from the store.
-        self.store.load_table_schemas().await?;
-
         // We create the first connection to Postgres.
         let replication_client =
             PgReplicationClient::connect(self.config.pg_connection.clone()).await?;
 
-        // We synchronize the relation subscription states with the publication, to make sure we
-        // always know which tables to work with. Maybe in the future we also want to react in real
-        // time to new relation ids being sent over by the cdc event stream.
+        // We load the table schemas from the store.
+        self.store.load_table_schemas().await?;
+
+        // We load the table states by checking the table ids of a publication and loading/creating
+        // the table replication states based on the current state.
         self.initialize_table_states(&replication_client).await?;
 
         // We create the table sync workers pool to manage all table sync workers in a central place.

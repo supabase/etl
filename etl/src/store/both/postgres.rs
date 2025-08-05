@@ -1,11 +1,7 @@
 use std::{collections::HashMap, sync::Arc};
 
 use config::shared::PgConnectionConfig;
-use postgres::replication::schema;
-use postgres::replication::{
-    TableReplicationState, TableReplicationStateRow, connect_to_source_database,
-    get_table_replication_state_rows, rollback_replication_state, update_replication_state,
-};
+use postgres::replication::{connect_to_source_database, schema, state};
 use postgres::schema::{TableId, TableSchema};
 use sqlx::PgPool;
 use tokio::sync::Mutex;
@@ -20,16 +16,18 @@ use crate::{bail, etl_error};
 
 const NUM_POOL_CONNECTIONS: u32 = 1;
 
-impl TryFrom<TableReplicationPhase> for TableReplicationState {
+impl TryFrom<TableReplicationPhase> for state::TableReplicationState {
     type Error = EtlError;
 
     fn try_from(value: TableReplicationPhase) -> Result<Self, Self::Error> {
         match value {
-            TableReplicationPhase::Init => Ok(TableReplicationState::Init),
-            TableReplicationPhase::DataSync => Ok(TableReplicationState::DataSync),
-            TableReplicationPhase::FinishedCopy => Ok(TableReplicationState::FinishedCopy),
-            TableReplicationPhase::SyncDone { lsn } => Ok(TableReplicationState::SyncDone { lsn }),
-            TableReplicationPhase::Ready => Ok(TableReplicationState::Ready),
+            TableReplicationPhase::Init => Ok(state::TableReplicationState::Init),
+            TableReplicationPhase::DataSync => Ok(state::TableReplicationState::DataSync),
+            TableReplicationPhase::FinishedCopy => Ok(state::TableReplicationState::FinishedCopy),
+            TableReplicationPhase::SyncDone { lsn } => {
+                Ok(state::TableReplicationState::SyncDone { lsn })
+            }
+            TableReplicationPhase::Ready => Ok(state::TableReplicationState::Ready),
             TableReplicationPhase::Errored {
                 reason,
                 solution,
@@ -37,14 +35,14 @@ impl TryFrom<TableReplicationPhase> for TableReplicationState {
             } => {
                 // Convert ETL RetryPolicy to postgres RetryPolicy
                 let db_retry_policy = match retry_policy {
-                    RetryPolicy::NoRetry => postgres::replication::RetryPolicy::NoRetry,
-                    RetryPolicy::ManualRetry => postgres::replication::RetryPolicy::ManualRetry,
+                    RetryPolicy::NoRetry => state::RetryPolicy::NoRetry,
+                    RetryPolicy::ManualRetry => state::RetryPolicy::ManualRetry,
                     RetryPolicy::TimedRetry { next_retry } => {
-                        postgres::replication::RetryPolicy::TimedRetry { next_retry }
+                        state::RetryPolicy::TimedRetry { next_retry }
                     }
                 };
 
-                Ok(TableReplicationState::Errored {
+                Ok(state::TableReplicationState::Errored {
                     reason,
                     solution,
                     retry_policy: db_retry_policy,
@@ -61,10 +59,10 @@ impl TryFrom<TableReplicationPhase> for TableReplicationState {
     }
 }
 
-impl TryFrom<TableReplicationStateRow> for TableReplicationPhase {
+impl TryFrom<state::TableReplicationStateRow> for TableReplicationPhase {
     type Error = EtlError;
 
-    fn try_from(value: TableReplicationStateRow) -> Result<Self, Self::Error> {
+    fn try_from(value: state::TableReplicationStateRow) -> Result<Self, Self::Error> {
         // Parse the metadata field from the row, which contains all the data we need to build the
         // replication phase
         let Some(table_replication_state) = value.deserialize_metadata().map_err(|err| {
@@ -87,20 +85,22 @@ impl TryFrom<TableReplicationStateRow> for TableReplicationPhase {
         // Convert postgres state to phase (they are the same structs but one is meant to represent
         // only the state which can be saved in the db).
         match table_replication_state {
-            TableReplicationState::Init => Ok(TableReplicationPhase::Init),
-            TableReplicationState::DataSync => Ok(TableReplicationPhase::DataSync),
-            TableReplicationState::FinishedCopy => Ok(TableReplicationPhase::FinishedCopy),
-            TableReplicationState::SyncDone { lsn } => Ok(TableReplicationPhase::SyncDone { lsn }),
-            TableReplicationState::Ready => Ok(TableReplicationPhase::Ready),
-            TableReplicationState::Errored {
+            state::TableReplicationState::Init => Ok(TableReplicationPhase::Init),
+            state::TableReplicationState::DataSync => Ok(TableReplicationPhase::DataSync),
+            state::TableReplicationState::FinishedCopy => Ok(TableReplicationPhase::FinishedCopy),
+            state::TableReplicationState::SyncDone { lsn } => {
+                Ok(TableReplicationPhase::SyncDone { lsn })
+            }
+            state::TableReplicationState::Ready => Ok(TableReplicationPhase::Ready),
+            state::TableReplicationState::Errored {
                 reason,
                 solution,
                 retry_policy,
             } => {
                 let etl_retry_policy = match retry_policy {
-                    postgres::replication::RetryPolicy::NoRetry => RetryPolicy::NoRetry,
-                    postgres::replication::RetryPolicy::ManualRetry => RetryPolicy::ManualRetry,
-                    postgres::replication::RetryPolicy::TimedRetry { next_retry } => {
+                    state::RetryPolicy::NoRetry => RetryPolicy::NoRetry,
+                    state::RetryPolicy::ManualRetry => RetryPolicy::ManualRetry,
+                    state::RetryPolicy::TimedRetry { next_retry } => {
                         RetryPolicy::TimedRetry { next_retry }
                     }
                 };
@@ -166,6 +166,7 @@ impl StateStore for PostgresStore {
         table_id: TableId,
     ) -> EtlResult<Option<TableReplicationPhase>> {
         let inner = self.inner.lock().await;
+
         Ok(inner.table_states.get(&table_id).cloned())
     }
 
@@ -173,6 +174,7 @@ impl StateStore for PostgresStore {
         &self,
     ) -> EtlResult<HashMap<TableId, TableReplicationPhase>> {
         let inner = self.inner.lock().await;
+
         Ok(inner.table_states.clone())
     }
 
@@ -180,8 +182,9 @@ impl StateStore for PostgresStore {
         debug!("loading table replication states from postgres state store");
 
         let pool = self.connect_to_source().await?;
+
         let replication_state_rows =
-            get_table_replication_state_rows(&pool, self.pipeline_id as i64).await?;
+            state::get_table_replication_state_rows(&pool, self.pipeline_id as i64).await?;
 
         let mut table_states: HashMap<TableId, TableReplicationPhase> = HashMap::new();
         for row in replication_state_rows {
@@ -208,7 +211,7 @@ impl StateStore for PostgresStore {
         table_id: TableId,
         state: TableReplicationPhase,
     ) -> EtlResult<()> {
-        let db_state: TableReplicationState = state.clone().try_into()?;
+        let db_state: state::TableReplicationState = state.clone().try_into()?;
 
         let pool = self.connect_to_source().await?;
 
@@ -216,7 +219,7 @@ impl StateStore for PostgresStore {
         // consistent. If we were to lock the states only after the db state is modified, we might
         // be inconsistent since there are some interleaved executions that lead to a wrong state.
         let mut inner = self.inner.lock().await;
-        update_replication_state(&pool, self.pipeline_id as i64, table_id, db_state).await?;
+        state::update_replication_state(&pool, self.pipeline_id as i64, table_id, db_state).await?;
         inner.table_states.insert(table_id, state);
 
         Ok(())
@@ -230,7 +233,7 @@ impl StateStore for PostgresStore {
 
         // Here we perform locking for the same reasons stated in `update_table_replication_state`.
         let mut inner = self.inner.lock().await;
-        match rollback_replication_state(&pool, self.pipeline_id as i64, table_id).await? {
+        match state::rollback_replication_state(&pool, self.pipeline_id as i64, table_id).await? {
             Some(restored_row) => {
                 let restored_phase: TableReplicationPhase = restored_row.try_into()?;
                 inner.table_states.insert(table_id, restored_phase.clone());
@@ -263,6 +266,7 @@ impl SchemaStore for PostgresStore {
         debug!("loading table schemas from postgres state store");
 
         let pool = self.connect_to_source().await?;
+
         let table_schemas = schema::load_table_schemas(&pool, self.pipeline_id as i64)
             .await
             .map_err(|err| {
@@ -274,6 +278,8 @@ impl SchemaStore for PostgresStore {
             })?;
         let table_schemas_len = table_schemas.len();
 
+        // For performance reasons, since we load the table schemas only once during startup
+        // and from a single thread, we can afford to have a super short critical section.
         let mut inner = self.inner.lock().await;
         inner.table_schemas.clear();
         for table_schema in table_schemas {
@@ -295,6 +301,8 @@ impl SchemaStore for PostgresStore {
 
         let pool = self.connect_to_source().await?;
 
+        // We also lock the entire section to be consistent.
+        let mut inner = self.inner.lock().await;
         schema::store_table_schema(&pool, self.pipeline_id as i64, &table_schema)
             .await
             .map_err(|err| {
@@ -304,8 +312,6 @@ impl SchemaStore for PostgresStore {
                     format!("Failed to store table schema in postgres: {err}")
                 )
             })?;
-
-        let mut inner = self.inner.lock().await;
         inner
             .table_schemas
             .insert(table_schema.id, Arc::new(table_schema));

@@ -120,6 +120,7 @@ pub async fn store_table_schema(
     }
 
     tx.commit().await?;
+
     Ok(())
 }
 
