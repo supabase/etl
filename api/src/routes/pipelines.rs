@@ -9,7 +9,7 @@ use config::shared::{
     ReplicatorConfig, SupabaseConfig, TlsConfig,
 };
 use postgres::replication::{
-    TableLookupError, TableReplicationState, TableReplicationStateType, get_table_name_from_oid,
+    TableLookupError, TableReplicationState, get_table_name_from_oid,
     get_table_replication_state_rows, reset_replication_state, rollback_replication_state,
 };
 use postgres::schema::TableId;
