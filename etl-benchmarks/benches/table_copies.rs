@@ -397,7 +397,7 @@ async fn start_pipeline(args: RunArgs) -> Result<(), Box<dyn Error>> {
             enabled: args.tls_enabled,
         },
     };
-    
+
     let store = NotifyingStore::new();
 
     // Create the appropriate destination based on the argument
@@ -422,7 +422,7 @@ async fn start_pipeline(args: RunArgs) -> Result<(), Box<dyn Error>> {
                 dataset_id,
                 &sa_key_file,
                 args.bq_max_staleness_mins,
-                store.clone()
+                store.clone(),
             )
             .await?;
 
@@ -505,7 +505,6 @@ impl Destination for BenchDestination {
 }
 
 impl Destination for NullDestination {
-
     async fn write_table_rows(
         &self,
         _table_id: TableId,
