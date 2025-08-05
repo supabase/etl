@@ -39,11 +39,12 @@ fn create_another_table_schema() -> TableSchema {
 #[tokio::test(flavor = "multi_thread")]
 async fn test_state_store_operations() {
     init_test_tracing();
+
     let database = spawn_source_database_for_store().await;
     let pipeline_id = 1;
     let table_id = TableId::new(12345);
 
-    let store = PostgresStore::new(pipeline_id, database.database.config.clone());
+    let store = PostgresStore::new(pipeline_id, database.config.clone());
 
     // Test initial state - should be empty
     let state = store.get_table_replication_state(table_id).await.unwrap();
@@ -110,7 +111,7 @@ async fn test_state_store_rollback() {
     let pipeline_id = 1;
     let table_id = TableId::new(12345);
 
-    let store = PostgresStore::new(pipeline_id, database.database.config.clone());
+    let store = PostgresStore::new(pipeline_id, database.config.clone());
 
     // Set initial state
     let init_phase = TableReplicationPhase::Init;
@@ -155,7 +156,7 @@ async fn test_state_store_load_states() {
     let table_id1 = TableId::new(12345);
     let table_id2 = TableId::new(67890);
 
-    let store = PostgresStore::new(pipeline_id, database.database.config.clone());
+    let store = PostgresStore::new(pipeline_id, database.config.clone());
 
     // Add some states directly to the database
     let init_phase = TableReplicationPhase::Init;
@@ -171,7 +172,7 @@ async fn test_state_store_load_states() {
         .unwrap();
 
     // Create a new store instance (simulating restart)
-    let new_store = PostgresStore::new(pipeline_id, database.database.config.clone());
+    let new_store = PostgresStore::new(pipeline_id, database.config.clone());
 
     // Initially empty (not loaded yet)
     let states = new_store.get_table_replication_states().await.unwrap();
@@ -191,6 +192,7 @@ async fn test_state_store_load_states() {
 #[tokio::test(flavor = "multi_thread")]
 async fn test_schema_store_operations() {
     init_test_tracing();
+
     let database = spawn_source_database_for_store().await;
     let pipeline_id = 1;
 
@@ -238,6 +240,7 @@ async fn test_schema_store_operations() {
 #[tokio::test(flavor = "multi_thread")]
 async fn test_schema_store_load_schemas() {
     init_test_tracing();
+
     let database = spawn_source_database_for_store().await;
     let pipeline_id = 1;
 
@@ -286,6 +289,7 @@ async fn test_schema_store_load_schemas() {
 #[tokio::test(flavor = "multi_thread")]
 async fn test_schema_store_update_existing() {
     init_test_tracing();
+
     let database = spawn_source_database_for_store().await;
     let pipeline_id = 1;
 
@@ -330,6 +334,7 @@ async fn test_schema_store_update_existing() {
 #[tokio::test(flavor = "multi_thread")]
 async fn test_multiple_pipelines_isolation() {
     init_test_tracing();
+
     let database = spawn_source_database_for_store().await;
     let pipeline_id1 = 1;
     let pipeline_id2 = 2;
@@ -385,6 +390,7 @@ async fn test_multiple_pipelines_isolation() {
 #[tokio::test(flavor = "multi_thread")]
 async fn test_errored_state_with_different_retry_policies() {
     init_test_tracing();
+
     let database = spawn_source_database_for_store().await;
     let pipeline_id = 1;
     let table_id = TableId::new(12345);
@@ -424,6 +430,7 @@ async fn test_errored_state_with_different_retry_policies() {
 #[tokio::test(flavor = "multi_thread")]
 async fn test_state_transitions_and_history() {
     init_test_tracing();
+
     let database = spawn_source_database_for_store().await;
     let pipeline_id = 1;
     let table_id = TableId::new(12345);
