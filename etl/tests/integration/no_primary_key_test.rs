@@ -1,7 +1,7 @@
 use etl::destination::memory::MemoryDestination;
 use etl::state::table::TableReplicationPhaseType;
 use etl::store::both::notify::NotifyingStore;
-use etl::test_utils::database::{spawn_database, test_table_name};
+use etl::test_utils::database::{spawn_source_database, test_table_name};
 use etl::test_utils::pipeline::create_pipeline;
 use etl::test_utils::test_destination_wrapper::TestDestinationWrapper;
 use etl::types::PipelineId;
@@ -11,7 +11,7 @@ use telemetry::init_test_tracing;
 #[tokio::test(flavor = "multi_thread")]
 async fn tables_without_primary_key_are_errored() {
     init_test_tracing();
-    let database = spawn_database().await;
+    let database = spawn_source_database().await;
 
     let table_name = test_table_name("no_primary_key");
     let table_id = database

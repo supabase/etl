@@ -1,6 +1,6 @@
 use etl::error::ErrorKind;
 use etl::replication::client::PgReplicationClient;
-use etl::test_utils::database::{spawn_database, test_table_name};
+use etl::test_utils::database::{spawn_source_database, test_table_name};
 use etl::test_utils::pipeline::test_slot_name;
 use etl::test_utils::table::assert_table_schema;
 use futures::StreamExt;
@@ -79,7 +79,7 @@ where
 #[tokio::test(flavor = "multi_thread")]
 async fn test_replication_client_creates_slot() {
     init_test_tracing();
-    let database = spawn_database().await;
+    let database = spawn_source_database().await;
 
     let client = PgReplicationClient::connect(database.config.clone())
         .await
@@ -100,7 +100,7 @@ async fn test_replication_client_creates_slot() {
 #[tokio::test(flavor = "multi_thread")]
 async fn test_create_and_delete_slot() {
     init_test_tracing();
-    let database = spawn_database().await;
+    let database = spawn_source_database().await;
 
     let client = PgReplicationClient::connect(database.config.clone())
         .await
@@ -126,7 +126,7 @@ async fn test_create_and_delete_slot() {
 #[tokio::test(flavor = "multi_thread")]
 async fn test_delete_nonexistent_slot() {
     init_test_tracing();
-    let database = spawn_database().await;
+    let database = spawn_source_database().await;
 
     let client = PgReplicationClient::connect(database.config.clone())
         .await
@@ -142,7 +142,7 @@ async fn test_delete_nonexistent_slot() {
 #[tokio::test(flavor = "multi_thread")]
 async fn test_replication_client_doesnt_recreate_slot() {
     init_test_tracing();
-    let database = spawn_database().await;
+    let database = spawn_source_database().await;
 
     let client = PgReplicationClient::connect(database.config.clone())
         .await
@@ -159,7 +159,7 @@ async fn test_replication_client_doesnt_recreate_slot() {
 #[tokio::test(flavor = "multi_thread")]
 async fn test_table_schema_copy_is_consistent() {
     init_test_tracing();
-    let database = spawn_database().await;
+    let database = spawn_source_database().await;
 
     let client = PgReplicationClient::connect(database.config.clone())
         .await
@@ -201,7 +201,7 @@ async fn test_table_schema_copy_is_consistent() {
 #[tokio::test(flavor = "multi_thread")]
 async fn test_table_schema_copy_across_multiple_connections() {
     init_test_tracing();
-    let database = spawn_database().await;
+    let database = spawn_source_database().await;
 
     let first_client = PgReplicationClient::connect(database.config.clone())
         .await
@@ -298,7 +298,7 @@ async fn test_table_schema_copy_across_multiple_connections() {
 #[tokio::test(flavor = "multi_thread")]
 async fn test_table_copy_stream_is_consistent() {
     init_test_tracing();
-    let database = spawn_database().await;
+    let database = spawn_source_database().await;
 
     let parent_client = PgReplicationClient::connect(database.config.clone())
         .await
@@ -362,7 +362,7 @@ async fn test_table_copy_stream_is_consistent() {
 #[tokio::test(flavor = "multi_thread")]
 async fn test_publication_creation_and_check() {
     init_test_tracing();
-    let database = spawn_database().await;
+    let database = spawn_source_database().await;
 
     let parent_client = PgReplicationClient::connect(database.config.clone())
         .await
@@ -413,7 +413,7 @@ async fn test_publication_creation_and_check() {
 #[tokio::test(flavor = "multi_thread")]
 async fn test_start_logical_replication() {
     init_test_tracing();
-    let database = spawn_database().await;
+    let database = spawn_source_database().await;
 
     let parent_client = PgReplicationClient::connect(database.config.clone())
         .await

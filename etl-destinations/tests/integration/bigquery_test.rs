@@ -2,7 +2,7 @@ use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use etl::config::BatchConfig;
 use etl::state::table::TableReplicationPhaseType;
 use etl::store::both::notify::NotifyingStore;
-use etl::test_utils::database::{spawn_database, test_table_name};
+use etl::test_utils::database::{spawn_source_database, test_table_name};
 use etl::test_utils::pipeline::{create_pipeline, create_pipeline_with};
 use etl::test_utils::test_destination_wrapper::TestDestinationWrapper;
 use etl::test_utils::test_schema::{TableSelection, insert_mock_data, setup_test_database_schema};
@@ -22,7 +22,7 @@ async fn table_copy_and_streaming_with_restart() {
     init_test_tracing();
     install_crypto_provider_for_bigquery();
 
-    let mut database = spawn_database().await;
+    let mut database = spawn_source_database().await;
     let database_schema = setup_test_database_schema(&database, TableSelection::Both).await;
 
     let bigquery_database = setup_bigquery_connection().await;
@@ -165,7 +165,7 @@ async fn table_insert_update_delete() {
     init_test_tracing();
     install_crypto_provider_for_bigquery();
 
-    let database = spawn_database().await;
+    let database = spawn_source_database().await;
     let database_schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
 
     let bigquery_database = setup_bigquery_connection().await;
@@ -281,7 +281,7 @@ async fn table_subsequent_updates() {
     init_test_tracing();
     install_crypto_provider_for_bigquery();
 
-    let mut database_1 = spawn_database().await;
+    let mut database_1 = spawn_source_database().await;
     let mut database_2 = database_1.duplicate().await;
     let database_schema = setup_test_database_schema(&database_1, TableSelection::UsersOnly).await;
 
@@ -372,7 +372,7 @@ async fn table_truncate_with_batching() {
     init_test_tracing();
     install_crypto_provider_for_bigquery();
 
-    let mut database = spawn_database().await;
+    let mut database = spawn_source_database().await;
     let database_schema = setup_test_database_schema(&database, TableSelection::Both).await;
 
     let bigquery_database = setup_bigquery_connection().await;
@@ -479,7 +479,7 @@ async fn table_nullable_scalar_columns() {
     init_test_tracing();
     install_crypto_provider_for_bigquery();
 
-    let database = spawn_database().await;
+    let database = spawn_source_database().await;
     let bigquery_database = setup_bigquery_connection().await;
     let table_name = test_table_name("nullable_cols_scalar");
     let table_id = database
@@ -688,7 +688,7 @@ async fn table_nullable_array_columns() {
     init_test_tracing();
     install_crypto_provider_for_bigquery();
 
-    let database = spawn_database().await;
+    let database = spawn_source_database().await;
     let bigquery_database = setup_bigquery_connection().await;
     let table_name = test_table_name("nullable_cols_array");
     let table_id = database
@@ -923,7 +923,7 @@ async fn table_non_nullable_scalar_columns() {
     init_test_tracing();
     install_crypto_provider_for_bigquery();
 
-    let database = spawn_database().await;
+    let database = spawn_source_database().await;
     let bigquery_database = setup_bigquery_connection().await;
     let table_name = test_table_name("non_nullable_cols_scalar");
     let table_id = database
@@ -1173,7 +1173,7 @@ async fn table_non_nullable_array_columns() {
     init_test_tracing();
     install_crypto_provider_for_bigquery();
 
-    let database = spawn_database().await;
+    let database = spawn_source_database().await;
     let bigquery_database = setup_bigquery_connection().await;
     let table_name = test_table_name("non_nullable_cols_array");
     let table_id = database

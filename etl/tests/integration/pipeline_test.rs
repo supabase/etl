@@ -7,7 +7,7 @@ use postgres::tokio::test_utils::TableModification;
 use rand::random;
 use telemetry::init_test_tracing;
 
-use etl::test_utils::database::spawn_database;
+use etl::test_utils::database::spawn_source_database;
 use etl::test_utils::event::group_events_by_type_and_table_id;
 use etl::test_utils::pipeline::{create_pipeline, create_pipeline_with};
 use etl::test_utils::test_destination_wrapper::TestDestinationWrapper;
@@ -22,7 +22,7 @@ use etl::workers::base::WorkerType;
 #[tokio::test(flavor = "multi_thread")]
 async fn table_schema_copy_survives_pipeline_restarts() {
     init_test_tracing();
-    let mut database = spawn_database().await;
+    let mut database = spawn_source_database().await;
     let database_schema = setup_test_database_schema(&database, TableSelection::Both).await;
 
     let state_store = NotifyingStore::new();
@@ -142,7 +142,7 @@ async fn table_schema_copy_survives_pipeline_restarts() {
 #[tokio::test(flavor = "multi_thread")]
 async fn table_copy_replicates_existing_data() {
     init_test_tracing();
-    let mut database = spawn_database().await;
+    let mut database = spawn_source_database().await;
     let database_schema = setup_test_database_schema(&database, TableSelection::Both).await;
 
     // Insert initial test data.
@@ -235,7 +235,7 @@ async fn table_copy_replicates_existing_data() {
 #[tokio::test(flavor = "multi_thread")]
 async fn table_copy_and_sync_streams_new_data() {
     init_test_tracing();
-    let mut database = spawn_database().await;
+    let mut database = spawn_source_database().await;
     let database_schema = setup_test_database_schema(&database, TableSelection::Both).await;
 
     // Insert initial test data.
@@ -409,7 +409,7 @@ async fn table_copy_and_sync_streams_new_data() {
 #[tokio::test(flavor = "multi_thread")]
 async fn table_sync_streams_new_data_with_batch() {
     init_test_tracing();
-    let mut database = spawn_database().await;
+    let mut database = spawn_source_database().await;
     let database_schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
 
     let state_store = NotifyingStore::new();
@@ -494,7 +494,7 @@ async fn table_sync_streams_new_data_with_batch() {
 #[tokio::test(flavor = "multi_thread")]
 async fn table_processing_converges_to_apply_loop_with_no_events_coming() {
     init_test_tracing();
-    let mut database = spawn_database().await;
+    let mut database = spawn_source_database().await;
     let database_schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
 
     let state_store = NotifyingStore::new();
@@ -555,7 +555,7 @@ async fn table_processing_converges_to_apply_loop_with_no_events_coming() {
 #[tokio::test(flavor = "multi_thread")]
 async fn table_processing_with_schema_change_errors_table() {
     init_test_tracing();
-    let database = spawn_database().await;
+    let database = spawn_source_database().await;
     let database_schema = setup_test_database_schema(&database, TableSelection::OrdersOnly).await;
 
     // Insert data in the table.

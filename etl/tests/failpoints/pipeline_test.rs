@@ -3,7 +3,7 @@ use etl::error::ErrorKind;
 use etl::failpoints::START_TABLE_SYNC__AFTER_DATA_SYNC;
 use etl::state::table::TableReplicationPhaseType;
 use etl::store::both::notify::NotifyingStore;
-use etl::test_utils::database::spawn_database;
+use etl::test_utils::database::spawn_source_database;
 use etl::test_utils::pipeline::create_pipeline;
 use etl::test_utils::test_destination_wrapper::TestDestinationWrapper;
 use etl::test_utils::test_schema::{TableSelection, insert_users_data, setup_test_database_schema};
@@ -19,7 +19,7 @@ async fn table_copy_fails_after_data_sync_threw_an_error_with_no_retry() {
 
     init_test_tracing();
 
-    let mut database = spawn_database().await;
+    let mut database = spawn_source_database().await;
     let database_schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
 
     // Insert initial test data.
@@ -77,7 +77,7 @@ async fn table_copy_is_consistent_after_data_sync_threw_an_error_with_timed_retr
 
     init_test_tracing();
 
-    let mut database = spawn_database().await;
+    let mut database = spawn_source_database().await;
     let database_schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
 
     // Insert initial test data.

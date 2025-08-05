@@ -1,7 +1,7 @@
 use sqlx::postgres::PgRow;
+use sqlx::postgres::types::Oid;
 use sqlx::{PgPool, Row};
 use std::collections::HashMap;
-use sqlx::postgres::types::Oid;
 use tokio_postgres::types::Type as PgType;
 
 use crate::schema::{ColumnSchema, TableId, TableName, TableSchema};
