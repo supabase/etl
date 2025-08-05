@@ -7,8 +7,8 @@ use api::routes::destinations_pipelines::{
 };
 use api::routes::images::{CreateImageRequest, UpdateImageRequest};
 use api::routes::pipelines::{
-    CreatePipelineRequest, UpdatePipelineConfigRequest, UpdatePipelineImageRequest,
-    UpdatePipelineRequest,
+    CreatePipelineRequest, RollbackTableStateRequest, UpdatePipelineConfigRequest,
+    UpdatePipelineImageRequest, UpdatePipelineRequest,
 };
 use api::routes::sources::{CreateSourceRequest, UpdateSourceRequest};
 use api::routes::tenants::{CreateOrUpdateTenantRequest, CreateTenantRequest, UpdateTenantRequest};
@@ -34,20 +34,6 @@ pub struct TestApp {
     pub api_key: String,
     config: ApiConfig,
     server_handle: tokio::task::JoinHandle<io::Result<()>>,
-}
-
-impl Drop for TestApp {
-    fn drop(&mut self) {
-        // First, abort the server task to ensure it's terminated.
-        self.server_handle.abort();
-
-        // To use `block_in_place,` we need a multithreaded runtime since when a blocking
-        // task is issued, the runtime will offload existing tasks to another worker.
-        tokio::task::block_in_place(move || {
-            Handle::current()
-                .block_on(async move { drop_pg_database(&self.config.database).await });
-        });
-    }
 }
 
 impl TestApp {
@@ -453,6 +439,37 @@ impl TestApp {
         .send()
         .await
         .expect("failed to execute request")
+    }
+
+    pub async fn rollback_table_state(
+        &self,
+        tenant_id: &str,
+        pipeline_id: i64,
+        rollback_request: &RollbackTableStateRequest,
+    ) -> reqwest::Response {
+        self.post_authenticated(format!(
+            "{}/v1/pipelines/{}/rollback-table-state",
+            &self.address, pipeline_id
+        ))
+        .header("tenant_id", tenant_id)
+        .json(rollback_request)
+        .send()
+        .await
+        .expect("failed to execute request")
+    }
+}
+
+impl Drop for TestApp {
+    fn drop(&mut self) {
+        // First, abort the server task to ensure it's terminated.
+        self.server_handle.abort();
+
+        // To use `block_in_place,` we need a multithreaded runtime since when a blocking
+        // task is issued, the runtime will offload existing tasks to another worker.
+        tokio::task::block_in_place(move || {
+            Handle::current()
+                .block_on(async move { drop_pg_database(&self.config.database).await });
+        });
     }
 }
 

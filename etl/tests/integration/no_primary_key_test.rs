@@ -1,7 +1,7 @@
 use etl::destination::memory::MemoryDestination;
-use etl::state::store::notify::NotifyingStateStore;
 use etl::state::table::TableReplicationPhaseType;
-use etl::test_utils::database::{spawn_database, test_table_name};
+use etl::store::both::notify::NotifyingStore;
+use etl::test_utils::database::{spawn_source_database, test_table_name};
 use etl::test_utils::pipeline::create_pipeline;
 use etl::test_utils::test_destination_wrapper::TestDestinationWrapper;
 use etl::types::PipelineId;
@@ -11,7 +11,7 @@ use telemetry::init_test_tracing;
 #[tokio::test(flavor = "multi_thread")]
 async fn tables_without_primary_key_are_errored() {
     init_test_tracing();
-    let database = spawn_database().await;
+    let database = spawn_source_database().await;
 
     let table_name = test_table_name("no_primary_key");
     let table_id = database
@@ -31,7 +31,7 @@ async fn tables_without_primary_key_are_errored() {
         .await
         .unwrap();
 
-    let state_store = NotifyingStateStore::new();
+    let state_store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
 
     let pipeline_id: PipelineId = random();

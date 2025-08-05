@@ -50,12 +50,11 @@ use config::shared::{BatchConfig, PgConnectionConfig, PipelineConfig, TlsConfig}
 use etl::destination::Destination;
 use etl::error::EtlResult;
 use etl::pipeline::Pipeline;
-use etl::schema::SchemaCache;
-use etl::state::store::notify::NotifyingStateStore;
 use etl::state::table::TableReplicationPhaseType;
+use etl::store::both::notify::NotifyingStore;
 use etl::types::{Event, TableRow};
 use etl_destinations::bigquery::{BigQueryDestination, install_crypto_provider_for_bigquery};
-use postgres::schema::{TableId, TableSchema};
+use postgres::schema::TableId;
 use sqlx::postgres::PgPool;
 use std::error::Error;
 use telemetry::init_tracing;
@@ -399,6 +398,8 @@ async fn start_pipeline(args: RunArgs) -> Result<(), Box<dyn Error>> {
         },
     };
 
+    let store = NotifyingStore::new();
+
     // Create the appropriate destination based on the argument
     let destination = match args.destination {
         DestinationType::Null => BenchDestination::Null(NullDestination),
@@ -421,6 +422,7 @@ async fn start_pipeline(args: RunArgs) -> Result<(), Box<dyn Error>> {
                 dataset_id,
                 &sa_key_file,
                 args.bq_max_staleness_mins,
+                store.clone(),
             )
             .await?;
 
@@ -428,11 +430,9 @@ async fn start_pipeline(args: RunArgs) -> Result<(), Box<dyn Error>> {
         }
     };
 
-    let state_store = NotifyingStateStore::new();
-
     let mut table_copied_notifications = vec![];
     for table_id in &args.table_ids {
-        let table_copied = state_store
+        let table_copied = store
             .notify_on_table_state(
                 TableId::new(*table_id),
                 TableReplicationPhaseType::FinishedCopy,
@@ -453,7 +453,7 @@ async fn start_pipeline(args: RunArgs) -> Result<(), Box<dyn Error>> {
         max_table_sync_workers: args.max_table_sync_workers,
     };
 
-    let mut pipeline = Pipeline::new(1, pipeline_config, state_store, destination);
+    let mut pipeline = Pipeline::new(1, pipeline_config, store, destination);
     info!("Starting pipeline...");
     pipeline.start().await?;
 
@@ -479,35 +479,10 @@ struct NullDestination;
 #[derive(Clone)]
 enum BenchDestination {
     Null(NullDestination),
-
-    BigQuery(BigQueryDestination),
+    BigQuery(BigQueryDestination<NotifyingStore>),
 }
 
 impl Destination for BenchDestination {
-    async fn inject(&self, schema_cache: SchemaCache) -> EtlResult<()> {
-        match self {
-            BenchDestination::Null(dest) => dest.inject(schema_cache).await,
-
-            BenchDestination::BigQuery(dest) => dest.inject(schema_cache).await,
-        }
-    }
-
-    async fn write_table_schema(&self, table_schema: TableSchema) -> EtlResult<()> {
-        match self {
-            BenchDestination::Null(dest) => dest.write_table_schema(table_schema).await,
-
-            BenchDestination::BigQuery(dest) => dest.write_table_schema(table_schema).await,
-        }
-    }
-
-    async fn load_table_schemas(&self) -> EtlResult<Vec<TableSchema>> {
-        match self {
-            BenchDestination::Null(dest) => dest.load_table_schemas().await,
-
-            BenchDestination::BigQuery(dest) => dest.load_table_schemas().await,
-        }
-    }
-
     async fn write_table_rows(
         &self,
         table_id: TableId,
@@ -530,18 +505,6 @@ impl Destination for BenchDestination {
 }
 
 impl Destination for NullDestination {
-    async fn inject(&self, _schema_cache: SchemaCache) -> EtlResult<()> {
-        Ok(())
-    }
-
-    async fn write_table_schema(&self, _table_schema: TableSchema) -> EtlResult<()> {
-        Ok(())
-    }
-
-    async fn load_table_schemas(&self) -> EtlResult<Vec<TableSchema>> {
-        Ok(vec![])
-    }
-
     async fn write_table_rows(
         &self,
         _table_id: TableId,

@@ -205,6 +205,11 @@ impl TableSchema {
         }
     }
 
+    /// Adds a new column schema to this [`TableSchema`].
+    pub fn add_column_schema(&mut self, column_schema: ColumnSchema) {
+        self.column_schemas.push(column_schema);
+    }
+
     /// Returns whether the table has any primary key columns.
     ///
     /// This method checks if any column in the table is marked as part of the primary key.

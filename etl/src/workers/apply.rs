@@ -16,11 +16,11 @@ use crate::replication::apply::{ApplyLoopHook, start_apply_loop};
 use crate::replication::client::PgReplicationClient;
 use crate::replication::common::get_table_replication_states;
 use crate::replication::slot::get_slot_name;
-use crate::schema::SchemaCache;
-use crate::state::store::StateStore;
 use crate::state::table::{
     TableReplicationError, TableReplicationPhase, TableReplicationPhaseType,
 };
+use crate::store::schema::SchemaStore;
+use crate::store::state::StateStore;
 use crate::types::PipelineId;
 use crate::workers::base::{Worker, WorkerHandle, WorkerType};
 use crate::workers::pool::TableSyncWorkerPool;
@@ -57,8 +57,7 @@ pub struct ApplyWorker<S, D> {
     config: Arc<PipelineConfig>,
     replication_client: PgReplicationClient,
     pool: TableSyncWorkerPool,
-    schema_cache: SchemaCache,
-    state_store: S,
+    store: S,
     destination: D,
     shutdown_rx: ShutdownRx,
     table_sync_worker_permits: Arc<Semaphore>,
@@ -71,8 +70,7 @@ impl<S, D> ApplyWorker<S, D> {
         config: Arc<PipelineConfig>,
         replication_client: PgReplicationClient,
         pool: TableSyncWorkerPool,
-        schema_cache: SchemaCache,
-        state_store: S,
+        store: S,
         destination: D,
         shutdown_rx: ShutdownRx,
         table_sync_worker_permits: Arc<Semaphore>,
@@ -82,8 +80,7 @@ impl<S, D> ApplyWorker<S, D> {
             config,
             replication_client,
             pool,
-            schema_cache,
-            state_store,
+            store,
             destination,
             shutdown_rx,
             table_sync_worker_permits,
@@ -93,7 +90,7 @@ impl<S, D> ApplyWorker<S, D> {
 
 impl<S, D> Worker<ApplyWorkerHandle, ()> for ApplyWorker<S, D>
 where
-    S: StateStore + Clone + Send + Sync + 'static,
+    S: StateStore + SchemaStore + Clone + Send + Sync + 'static,
     D: Destination + Clone + Send + Sync + 'static,
 {
     type Error = EtlError;
@@ -117,14 +114,13 @@ where
                 start_lsn,
                 self.config.clone(),
                 self.replication_client.clone(),
-                self.schema_cache.clone(),
+                self.store.clone(),
                 self.destination.clone(),
                 ApplyWorkerHook::new(
                     self.pipeline_id,
                     self.config,
                     self.pool,
-                    self.schema_cache,
-                    self.state_store,
+                    self.store,
                     self.destination,
                     self.shutdown_rx.clone(),
                     force_syncing_tables_tx,
@@ -174,8 +170,7 @@ struct ApplyWorkerHook<S, D> {
     pipeline_id: PipelineId,
     config: Arc<PipelineConfig>,
     pool: TableSyncWorkerPool,
-    schema_cache: SchemaCache,
-    state_store: S,
+    store: S,
     destination: D,
     shutdown_rx: ShutdownRx,
     force_syncing_tables_tx: SignalTx,
@@ -188,8 +183,7 @@ impl<S, D> ApplyWorkerHook<S, D> {
         pipeline_id: PipelineId,
         config: Arc<PipelineConfig>,
         pool: TableSyncWorkerPool,
-        schema_cache: SchemaCache,
-        state_store: S,
+        store: S,
         destination: D,
         shutdown_rx: ShutdownRx,
         force_syncing_tables_tx: SignalTx,
@@ -199,8 +193,7 @@ impl<S, D> ApplyWorkerHook<S, D> {
             pipeline_id,
             config,
             pool,
-            schema_cache,
-            state_store,
+            store,
             destination,
             shutdown_rx,
             force_syncing_tables_tx,
@@ -211,7 +204,7 @@ impl<S, D> ApplyWorkerHook<S, D> {
 
 impl<S, D> ApplyWorkerHook<S, D>
 where
-    S: StateStore + Clone + Send + Sync + 'static,
+    S: StateStore + SchemaStore + Clone + Send + Sync + 'static,
     D: Destination + Clone + Send + Sync + 'static,
 {
     async fn build_table_sync_worker(&self, table_id: TableId) -> TableSyncWorker<S, D> {
@@ -222,8 +215,7 @@ where
             self.config.clone(),
             self.pool.clone(),
             table_id,
-            self.schema_cache.clone(),
-            self.state_store.clone(),
+            self.store.clone(),
             self.destination.clone(),
             self.shutdown_rx.clone(),
             self.force_syncing_tables_tx.clone(),
@@ -265,7 +257,7 @@ where
                 inner
                     .set_and_store(
                         TableReplicationPhase::Catchup { lsn: current_lsn },
-                        &self.state_store,
+                        &self.store,
                     )
                     .await?;
 
@@ -301,14 +293,14 @@ where
 
 impl<S, D> ApplyLoopHook for ApplyWorkerHook<S, D>
 where
-    S: StateStore + Clone + Send + Sync + 'static,
+    S: StateStore + SchemaStore + Clone + Send + Sync + 'static,
     D: Destination + Clone + Send + Sync + 'static,
 {
     async fn before_loop(&self, _start_lsn: PgLsn) -> EtlResult<bool> {
         info!("starting table sync workers before the main apply loop");
 
         let active_table_replication_states =
-            get_table_replication_states(&self.state_store, false).await?;
+            get_table_replication_states(&self.store, false).await?;
 
         for (table_id, table_replication_phase) in active_table_replication_states {
             // A table in `SyncDone` doesn't need to have its worker started, since the main apply
@@ -344,7 +336,7 @@ where
         update_state: bool,
     ) -> EtlResult<bool> {
         let active_table_replication_states =
-            get_table_replication_states(&self.state_store, false).await?;
+            get_table_replication_states(&self.store, false).await?;
         debug!(
             "processing syncing tables for apply worker with lsn {}",
             current_lsn
@@ -369,7 +361,7 @@ where
                             table_id
                         );
 
-                        self.state_store
+                        self.store
                             .update_table_replication_state(table_id, TableReplicationPhase::Ready)
                             .await?;
                     }
@@ -400,7 +392,7 @@ where
         let table_id = table_replication_error.table_id();
         TableSyncWorkerState::set_and_store(
             &pool,
-            &self.state_store,
+            &self.store,
             table_id,
             table_replication_error.into(),
         )
@@ -426,11 +418,7 @@ where
                 inner.replication_phase()
             }
             None => {
-                let Some(state) = self
-                    .state_store
-                    .get_table_replication_state(table_id)
-                    .await?
-                else {
+                let Some(state) = self.store.get_table_replication_state(table_id).await? else {
                     // If we don't even find the state for this table, we skip the event entirely.
                     return Ok(false);
                 };

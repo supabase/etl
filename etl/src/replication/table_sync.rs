@@ -17,10 +17,10 @@ use crate::failpoints::{START_TABLE_SYNC__AFTER_DATA_SYNC, etl_fail_point};
 use crate::replication::client::PgReplicationClient;
 use crate::replication::slot::get_slot_name;
 use crate::replication::stream::TableCopyStream;
-use crate::schema::SchemaCache;
-use crate::state::store::StateStore;
 use crate::state::table::RetryPolicy;
 use crate::state::table::{TableReplicationPhase, TableReplicationPhaseType};
+use crate::store::schema::SchemaStore;
+use crate::store::state::StateStore;
 use crate::types::PipelineId;
 use crate::workers::base::WorkerType;
 use crate::workers::table_sync::TableSyncWorkerState;
@@ -39,14 +39,13 @@ pub async fn start_table_sync<S, D>(
     replication_client: PgReplicationClient,
     table_id: TableId,
     table_sync_worker_state: TableSyncWorkerState,
-    schema_cache: SchemaCache,
-    state_store: S,
+    store: S,
     destination: D,
     shutdown_rx: ShutdownRx,
     force_syncing_tables_tx: SignalTx,
 ) -> EtlResult<TableSyncResult>
 where
-    S: StateStore + Clone + Send + 'static,
+    S: StateStore + SchemaStore + Clone + Send + 'static,
     D: Destination + Clone + Send + 'static,
 {
     info!("starting table sync for table {}", table_id);
@@ -137,7 +136,7 @@ where
             {
                 let mut inner = table_sync_worker_state.lock().await;
                 inner
-                    .set_and_store(TableReplicationPhase::DataSync, &state_store)
+                    .set_and_store(TableReplicationPhase::DataSync, &store)
                     .await?;
             }
 
@@ -167,7 +166,7 @@ where
                 .await?;
 
             if !table_schema.has_primary_keys() {
-                state_store
+                store
                     .update_table_replication_state(
                         table_id,
                         TableReplicationPhase::Errored {
@@ -187,8 +186,9 @@ where
                 );
             }
 
-            schema_cache.add_table_schema(table_schema.clone()).await;
-            destination.write_table_schema(table_schema.clone()).await?;
+            // We store the table schema in the schema store to be able to retrieve it even when the
+            // pipeline is restarted, since it's outside the lifecycle of the pipeline.
+            store.store_table_schema(table_schema.clone()).await?;
 
             // We create the copy table stream.
             let table_copy_stream = transaction
@@ -237,7 +237,7 @@ where
             {
                 let mut inner = table_sync_worker_state.lock().await;
                 inner
-                    .set_and_store(TableReplicationPhase::FinishedCopy, &state_store)
+                    .set_and_store(TableReplicationPhase::FinishedCopy, &store)
                     .await?;
             }
 
@@ -260,7 +260,7 @@ where
     {
         let mut inner = table_sync_worker_state.lock().await;
         inner
-            .set_and_store(TableReplicationPhase::SyncWait, &state_store)
+            .set_and_store(TableReplicationPhase::SyncWait, &store)
             .await?;
 
         // We notify the main apply worker to force syncing tables. In this way, the `Catchup` phase

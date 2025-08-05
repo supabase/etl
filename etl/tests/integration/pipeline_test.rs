@@ -1,13 +1,13 @@
 use config::shared::BatchConfig;
 use etl::destination::memory::MemoryDestination;
 use etl::replication::slot::get_slot_name;
-use etl::state::store::notify::NotifyingStateStore;
 use etl::state::table::TableReplicationPhaseType;
+use etl::store::both::notify::NotifyingStore;
 use postgres::tokio::test_utils::TableModification;
 use rand::random;
 use telemetry::init_test_tracing;
 
-use etl::test_utils::database::spawn_database;
+use etl::test_utils::database::spawn_source_database;
 use etl::test_utils::event::group_events_by_type_and_table_id;
 use etl::test_utils::pipeline::{create_pipeline, create_pipeline_with};
 use etl::test_utils::test_destination_wrapper::TestDestinationWrapper;
@@ -22,10 +22,10 @@ use etl::workers::base::WorkerType;
 #[tokio::test(flavor = "multi_thread")]
 async fn table_schema_copy_survives_pipeline_restarts() {
     init_test_tracing();
-    let mut database = spawn_database().await;
+    let mut database = spawn_source_database().await;
     let database_schema = setup_test_database_schema(&database, TableSelection::Both).await;
 
-    let state_store = NotifyingStateStore::new();
+    let state_store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
 
     // We start the pipeline from scratch.
@@ -38,8 +38,6 @@ async fn table_schema_copy_survives_pipeline_restarts() {
         destination.clone(),
     );
 
-    // We wait for two table schemas to be received.
-    let schemas_notify = destination.wait_for_n_schemas(2).await;
     // We wait for both table states to be in sync done.
     let users_state_notify = state_store
         .notify_on_table_state(
@@ -56,7 +54,6 @@ async fn table_schema_copy_survives_pipeline_restarts() {
 
     pipeline.start().await.unwrap();
 
-    schemas_notify.notified().await;
     users_state_notify.notified().await;
     orders_state_notify.notified().await;
 
@@ -81,10 +78,20 @@ async fn table_schema_copy_survives_pipeline_restarts() {
     );
 
     // We check that the table schemas have been stored.
-    let table_schemas = destination.get_table_schemas().await;
+    let table_schemas = state_store.get_table_schemas().await;
     assert_eq!(table_schemas.len(), 2);
-    assert_eq!(table_schemas[0], database_schema.orders_schema());
-    assert_eq!(table_schemas[1], database_schema.users_schema());
+    assert_eq!(
+        *table_schemas
+            .get(&database_schema.users_schema().id)
+            .unwrap(),
+        database_schema.users_schema()
+    );
+    assert_eq!(
+        *table_schemas
+            .get(&database_schema.orders_schema().id)
+            .unwrap(),
+        database_schema.orders_schema()
+    );
 
     // We recreate a pipeline, assuming the other one was stopped, using the same state and destination.
     let mut pipeline = create_pipeline(
@@ -135,7 +142,7 @@ async fn table_schema_copy_survives_pipeline_restarts() {
 #[tokio::test(flavor = "multi_thread")]
 async fn table_copy_replicates_existing_data() {
     init_test_tracing();
-    let mut database = spawn_database().await;
+    let mut database = spawn_source_database().await;
     let database_schema = setup_test_database_schema(&database, TableSelection::Both).await;
 
     // Insert initial test data.
@@ -149,7 +156,7 @@ async fn table_copy_replicates_existing_data() {
     )
     .await;
 
-    let state_store = NotifyingStateStore::new();
+    let state_store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
 
     // Start pipeline from scratch.
@@ -228,7 +235,7 @@ async fn table_copy_replicates_existing_data() {
 #[tokio::test(flavor = "multi_thread")]
 async fn table_copy_and_sync_streams_new_data() {
     init_test_tracing();
-    let mut database = spawn_database().await;
+    let mut database = spawn_source_database().await;
     let database_schema = setup_test_database_schema(&database, TableSelection::Both).await;
 
     // Insert initial test data.
@@ -242,7 +249,7 @@ async fn table_copy_and_sync_streams_new_data() {
     )
     .await;
 
-    let state_store = NotifyingStateStore::new();
+    let state_store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
 
     // Start pipeline from scratch.
@@ -402,10 +409,10 @@ async fn table_copy_and_sync_streams_new_data() {
 #[tokio::test(flavor = "multi_thread")]
 async fn table_sync_streams_new_data_with_batch() {
     init_test_tracing();
-    let mut database = spawn_database().await;
+    let mut database = spawn_source_database().await;
     let database_schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
 
-    let state_store = NotifyingStateStore::new();
+    let state_store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
 
     // Start pipeline from scratch.
@@ -487,10 +494,10 @@ async fn table_sync_streams_new_data_with_batch() {
 #[tokio::test(flavor = "multi_thread")]
 async fn table_processing_converges_to_apply_loop_with_no_events_coming() {
     init_test_tracing();
-    let mut database = spawn_database().await;
+    let mut database = spawn_source_database().await;
     let database_schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
 
-    let state_store = NotifyingStateStore::new();
+    let state_store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
 
     // Insert some data to test that the table copy is performed.
@@ -548,7 +555,7 @@ async fn table_processing_converges_to_apply_loop_with_no_events_coming() {
 #[tokio::test(flavor = "multi_thread")]
 async fn table_processing_with_schema_change_errors_table() {
     init_test_tracing();
-    let database = spawn_database().await;
+    let database = spawn_source_database().await;
     let database_schema = setup_test_database_schema(&database, TableSelection::OrdersOnly).await;
 
     // Insert data in the table.
@@ -561,7 +568,7 @@ async fn table_processing_with_schema_change_errors_table() {
         .await
         .unwrap();
 
-    let state_store = NotifyingStateStore::new();
+    let state_store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
 
     // Start pipeline from scratch.
@@ -661,9 +668,14 @@ async fn table_processing_with_schema_change_errors_table() {
     pipeline.shutdown_and_wait().await.unwrap();
 
     // We assert that the schema is the initial one.
-    let table_schemas = destination.get_table_schemas().await;
+    let table_schemas = state_store.get_table_schemas().await;
     assert_eq!(table_schemas.len(), 1);
-    assert_eq!(table_schemas[0], database_schema.orders_schema());
+    assert_eq!(
+        *table_schemas
+            .get(&database_schema.orders_schema().id)
+            .unwrap(),
+        database_schema.orders_schema()
+    );
 
     // We check that we got the insert events after the first data of the table has been copied.
     let events = destination.get_events().await;

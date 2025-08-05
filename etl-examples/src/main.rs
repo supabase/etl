@@ -34,7 +34,7 @@ The pipeline will automatically:
 use clap::{Args, Parser};
 use etl::config::{BatchConfig, PgConnectionConfig, PipelineConfig, TlsConfig};
 use etl::pipeline::Pipeline;
-use etl::state::store::memory::MemoryStateStore;
+use etl::store::both::memory::MemoryStore;
 use etl_destinations::bigquery::{BigQueryDestination, install_crypto_provider_for_bigquery};
 use std::error::Error;
 use tokio::signal;
@@ -156,6 +156,10 @@ async fn main_impl() -> Result<(), Box<dyn Error>> {
         },
     };
 
+    // Create in-memory store for tracking table replication states and table schemas
+    // In production, you might want to use a persistent store like PostgresStore
+    let store = MemoryStore::new();
+
     // Initialize BigQuery destination with service account authentication
     // Tables will be automatically created to match PostgreSQL schema
     let bigquery_destination = BigQueryDestination::new_with_key_path(
@@ -163,12 +167,9 @@ async fn main_impl() -> Result<(), Box<dyn Error>> {
         args.bq_args.bq_dataset_id,
         &args.bq_args.bq_sa_key_file,
         None, // Use default max_staleness_mins (5 minutes)
+        store.clone(),
     )
     .await?;
-
-    // Create in-memory state store for tracking table replication states
-    // In production, you might want to use a persistent state store like PostgresStateStore
-    let state_store = MemoryStateStore::new();
 
     // Create pipeline configuration with batching and retry settings
     let pipeline_config = PipelineConfig {
@@ -185,7 +186,7 @@ async fn main_impl() -> Result<(), Box<dyn Error>> {
 
     // Create the pipeline instance with all components
     // Pipeline ID (1) should match the config ID for consistency
-    let mut pipeline = Pipeline::new(1, pipeline_config, state_store, bigquery_destination);
+    let mut pipeline = Pipeline::new(1, pipeline_config, store, bigquery_destination);
 
     info!(
         "Starting BigQuery CDC pipeline - connecting to PostgreSQL and initializing replication..."
