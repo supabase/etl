@@ -43,6 +43,16 @@ impl TableReplicationState {
 
         Ok((state_type, metadata))
     }
+
+    pub fn supports_manual_retry(&self) -> bool {
+        matches!(
+            self,
+            TableReplicationState::Errored {
+                retry_policy: RetryPolicy::ManualRetry,
+                ..
+            }
+        )
+    }
 }
 
 /// Retry policy as stored in the database
@@ -183,6 +193,7 @@ pub async fn update_replication_state_raw(
     .await?;
 
     tx.commit().await?;
+
     Ok(())
 }
 

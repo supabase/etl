@@ -657,7 +657,8 @@ where
     /// and if it is greater than or equal to the `Catchup` `lsn`:
     ///
     /// * Marks the table as sync done in state store if `update_state` is true.
-    /// * Returns Ok(false) to indicate to the callers that this table has been marked sync done.
+    /// * Returns Ok(false) to indicate to the callers that this table has been marked sync done,
+    ///   meaning that the apply loop should not continue.
     ///
     /// In all other cases it returns Ok(true)
     async fn process_syncing_tables(
