@@ -26,7 +26,10 @@ pub async fn start_replicator() -> anyhow::Result<()> {
     start_with_config(replicator_config, &project_ref).await
 }
 
-#[instrument(name = "replication", skip(replicator_config), fields(project = project_ref))]
+// The name of the field emitted in the instrumented span should be `project`
+// not `project_ref` because the vector config in the etl-k8s project expects
+// this. These should be kept in sync if changed in future.
+#[instrument(skip(replicator_config, project_ref), fields(project = project_ref))]
 async fn start_with_config(
     replicator_config: ReplicatorConfig,
     project_ref: &str,
