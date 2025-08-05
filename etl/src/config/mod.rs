@@ -1,2 +1,2 @@
 // Re-exports.
-pub use config::shared::*;
+pub use etl_config::shared::*;

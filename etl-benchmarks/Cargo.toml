@@ -4,11 +4,11 @@ version = "0.1.0"
 edition = "2024"
 
 [dev-dependencies]
-config = { workspace = true }
 etl = { workspace = true }
+etl-config = { workspace = true }
 etl-destinations = { workspace = true, features = ["bigquery"] }
-postgres = { workspace = true, features = ["sqlx"] }
-telemetry = { workspace = true }
+etl-postgres = { workspace = true, features = ["sqlx"] }
+etl-telemetry = { workspace = true }
 
 clap = { workspace = true, default-features = true, features = [
     "std",

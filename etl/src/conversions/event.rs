@@ -1,6 +1,6 @@
 use core::str;
-use postgres::schema::{ColumnSchema, TableId, TableName, TableSchema};
-use postgres::types::convert_type_oid_to_type;
+use etl_postgres::schema::{ColumnSchema, TableId, TableName, TableSchema};
+use etl_postgres::types::convert_type_oid_to_type;
 use postgres_replication::protocol;
 use postgres_replication::protocol::LogicalReplicationMessage;
 use std::fmt;

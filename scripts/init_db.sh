@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -eo pipefail
 
-if [ ! -d "api/migrations" ]; then
-  echo >&2 "❌ Error: 'api/migrations' folder not found."
+if [ ! -d "etl-api/migrations" ]; then
+  echo >&2 "❌ Error: 'etl-api/migrations' folder not found."
   echo >&2 "Please run this script from the 'etl' directory."
   exit 1
 fi
@@ -90,7 +90,7 @@ export DATABASE_URL=postgres://${DB_USER}:${DB_PASSWORD}@${DB_HOST}:${DB_PORT}/$
 if [[ -z "${SKIP_MIGRATIONS}" ]]; then
   echo "🔄 Running database migrations..."
   sqlx database create
-  sqlx migrate run --source api/migrations
+  sqlx migrate run --source etl-api/migrations
   echo "✨ Database setup complete with migrations! Ready to go!"
 else
   echo "⏭️ Skipping migrations as requested."

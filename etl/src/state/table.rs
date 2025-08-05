@@ -1,6 +1,6 @@
 use chrono::{DateTime, Duration, Utc};
-use config::shared::PipelineConfig;
-use postgres::schema::TableId;
+use etl_config::shared::PipelineConfig;
+use etl_postgres::schema::TableId;
 use std::fmt;
 use tokio_postgres::types::PgLsn;
 

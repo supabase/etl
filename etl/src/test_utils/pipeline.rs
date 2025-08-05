@@ -1,4 +1,4 @@
-use config::shared::{BatchConfig, PgConnectionConfig, PipelineConfig};
+use etl_config::shared::{BatchConfig, PgConnectionConfig, PipelineConfig};
 use uuid::Uuid;
 
 use crate::destination::Destination;

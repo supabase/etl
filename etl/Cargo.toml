@@ -6,13 +6,13 @@ autotests = false
 
 [features]
 unknown-types-to-bytes = []
-test-utils = ["postgres/test-utils"]
+test-utils = ["etl-postgres/test-utils"]
 failpoints = ["fail/failpoints"]
 default = ["unknown-types-to-bytes"]
 
 [dependencies]
-config = { workspace = true }
-postgres = { workspace = true, features = ["tokio", "replication"] }
+etl-config = { workspace = true }
+etl-postgres = { workspace = true, features = ["tokio", "replication"] }
 
 byteorder = { workspace = true }
 bytes = { workspace = true }
@@ -41,8 +41,8 @@ uuid = { workspace = true, features = ["v4"] }
 x509-cert = { workspace = true, default-features = false }
 
 [dev-dependencies]
-postgres = { workspace = true, features = ["tokio", "replication", "test-utils"] }
-telemetry = { workspace = true }
+etl-postgres = { workspace = true, features = ["tokio", "replication", "test-utils"] }
+etl-telemetry = { workspace = true }
 
 rand = { workspace = true, features = ["thread_rng"] }
 

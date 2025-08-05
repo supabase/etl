@@ -10,7 +10,7 @@ use etl::test_utils::test_schema::{TableSelection, insert_users_data, setup_test
 use etl::types::PipelineId;
 use fail::FailScenario;
 use rand::random;
-use telemetry::init_test_tracing;
+use etl_telemetry::init_test_tracing;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn table_copy_fails_after_data_sync_threw_an_error_with_no_retry() {

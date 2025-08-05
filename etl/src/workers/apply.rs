@@ -1,6 +1,6 @@
 use crate::error::{ErrorKind, EtlError, EtlResult};
-use config::shared::PipelineConfig;
-use postgres::schema::TableId;
+use etl_config::shared::PipelineConfig;
+use etl_postgres::schema::TableId;
 use std::sync::Arc;
 use tokio::sync::Semaphore;
 use tokio::task::JoinHandle;

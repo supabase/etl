@@ -1,6 +1,6 @@
 use chrono::Utc;
-use config::shared::PipelineConfig;
-use postgres::schema::TableId;
+use etl_config::shared::PipelineConfig;
+use etl_postgres::schema::TableId;
 use std::ops::Deref;
 use std::sync::Arc;
 use std::time::Duration;

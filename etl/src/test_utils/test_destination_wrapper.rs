@@ -1,4 +1,4 @@
-use postgres::schema::TableId;
+use etl_postgres::schema::TableId;
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;

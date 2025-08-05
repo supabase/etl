@@ -1,7 +1,7 @@
-use config::shared::{PgConnectionConfig, TlsConfig};
-use postgres::replication::connect_to_source_database;
-use postgres::schema::TableName;
-use postgres::tokio::test_utils::PgDatabase;
+use etl_config::shared::{PgConnectionConfig, TlsConfig};
+use etl_postgres::replication::connect_to_source_database;
+use etl_postgres::schema::TableName;
+use etl_postgres::tokio::test_utils::PgDatabase;
 use tokio_postgres::Client;
 use uuid::Uuid;
 
@@ -103,7 +103,7 @@ pub async fn spawn_source_database_for_store() -> PgDatabase<Client> {
         .expect("Failed to set search path to 'etl'");
 
     // Run replicator migrations to create the state store tables.
-    sqlx::migrate!("../replicator/migrations")
+    sqlx::migrate!("../etl-replicator/migrations")
         .run(&pool)
         .await
         .expect("Failed to run replicator migrations");

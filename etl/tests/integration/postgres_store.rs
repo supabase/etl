@@ -3,8 +3,8 @@ use etl::store::both::postgres::PostgresStore;
 use etl::store::schema::SchemaStore;
 use etl::store::state::StateStore;
 use etl::test_utils::database::spawn_source_database_for_store;
-use postgres::schema::{ColumnSchema, TableId, TableName, TableSchema};
-use telemetry::init_test_tracing;
+use etl_postgres::schema::{ColumnSchema, TableId, TableName, TableSchema};
+use etl_telemetry::init_test_tracing;
 use tokio_postgres::types::{PgLsn, Type as PgType};
 
 fn create_sample_table_schema() -> TableSchema {

@@ -1,5 +1,5 @@
 use crate::concurrency::shutdown::{ShutdownResult, ShutdownRx};
-use config::shared::BatchConfig;
+use etl_config::shared::BatchConfig;
 use core::pin::Pin;
 use core::task::{Context, Poll};
 use futures::{Future, Stream, ready};

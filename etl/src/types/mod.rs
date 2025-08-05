@@ -9,6 +9,6 @@ pub use crate::conversions::{
 pub use pipeline::*;
 
 // Re-exports.
-pub use postgres::schema::{ColumnSchema, Oid, TableId, TableName, TableSchema};
+pub use etl_postgres::schema::{ColumnSchema, Oid, TableId, TableName, TableSchema};
 pub use tokio_postgres::types::PgLsn;
 pub use tokio_postgres::types::Type;

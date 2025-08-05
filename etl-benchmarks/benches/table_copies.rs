@@ -1,6 +1,6 @@
 use clap::{Parser, Subcommand, ValueEnum};
-use config::Environment;
-use config::shared::{BatchConfig, PgConnectionConfig, PipelineConfig, TlsConfig};
+use etl_config::Environment;
+use etl_config::shared::{BatchConfig, PgConnectionConfig, PipelineConfig, TlsConfig};
 use etl::destination::Destination;
 use etl::error::EtlResult;
 use etl::pipeline::Pipeline;
@@ -8,10 +8,10 @@ use etl::state::table::TableReplicationPhaseType;
 use etl::store::both::notify::NotifyingStore;
 use etl::types::{Event, TableRow};
 use etl_destinations::bigquery::{BigQueryDestination, install_crypto_provider_for_bigquery};
-use postgres::schema::TableId;
+use etl_postgres::schema::TableId;
 use sqlx::postgres::PgPool;
 use std::error::Error;
-use telemetry::init_tracing;
+use etl_telemetry::init_tracing;
 use tracing::info;
 
 #[derive(Parser, Debug)]

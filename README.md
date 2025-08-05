@@ -76,10 +76,10 @@ The repository includes Docker support for both the `replicator` and `api` compo
 
 ```bash
 # Build replicator image
-docker build -f ./replicator/Dockerfile .
+docker build -f ./etl-replicator/Dockerfile .
 
 # Build api image
-docker build -f ./api/Dockerfile .
+docker build -f ./etl-api/Dockerfile .
 ```
 
 ## Architecture

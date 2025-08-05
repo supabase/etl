@@ -1,0 +1,16 @@
+[package]
+name = "etl-config"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+utoipa = ["dep:utoipa"]
+
+[dependencies]
+config = { workspace = true, features = ["yaml"] }
+secrecy = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+sqlx = { workspace = true, features = ["postgres"] }
+thiserror = { workspace = true }
+tokio-postgres = { workspace = true }
+utoipa = { workspace = true, optional = true }

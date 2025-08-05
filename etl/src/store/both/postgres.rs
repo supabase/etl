@@ -1,8 +1,8 @@
 use std::{collections::HashMap, sync::Arc};
 
-use config::shared::PgConnectionConfig;
-use postgres::replication::{connect_to_source_database, schema, state};
-use postgres::schema::{TableId, TableSchema};
+use etl_config::shared::PgConnectionConfig;
+use etl_postgres::replication::{connect_to_source_database, schema, state};
+use etl_postgres::schema::{TableId, TableSchema};
 use sqlx::PgPool;
 use tokio::sync::Mutex;
 use tracing::{debug, info};
