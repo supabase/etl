@@ -32,30 +32,10 @@ create table etl.table_columns (
     unique (table_schema_id, column_order)
 );
 
--- Indexes for performance
+-- Index to speed up queries that target just a pipeline or also a specific table
 create index idx_table_schemas_pipeline_table 
     on etl.table_schemas (pipeline_id, table_id);
 
-create index idx_table_schemas_pipeline 
-    on etl.table_schemas (pipeline_id);
-
-create index idx_table_columns_table_schema 
-    on etl.table_columns (table_schema_id);
-
+-- Index to speed up joins of `etl.table_schemas` and `etl.table_columns`
 create index idx_table_columns_order 
-    on etl.table_columns (table_schema_id, column_order);
-
--- Function to update the updated_at timestamp
-create or replace function etl.update_table_schemas_updated_at()
-returns trigger as $$
-begin
-    new.updated_at = now();
-    return new;
-end;
-$$ language plpgsql;
-
--- Trigger to automatically update the updated_at column
-create trigger trigger_update_table_schemas_updated_at
-    before update on etl.table_schemas
-    for each row
-    execute function etl.update_table_schemas_updated_at();
+    on etl.table_columns (table_schema_id);
