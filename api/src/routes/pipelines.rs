@@ -885,8 +885,9 @@ pub async fn rollback_table_state(
     // Check if the current state is rollbackable (has ManualRetry policy)
     let current_state = current_row
         .deserialize_metadata()
-        .map_err(PipelineError::InvalidTableReplicationState)?
-        .ok_or(PipelineError::MissingTableReplicationState)?;
+        .unwrap().unwrap();
+        // .map_err(PipelineError::InvalidTableReplicationState)?
+        // .ok_or(PipelineError::MissingTableReplicationState)?;
     if !current_state.supports_manual_retry() {
         return Err(PipelineError::NotRollbackable(
             "Only manual retry errors can be rolled back".to_string(),
