@@ -1,18 +1,35 @@
+<br />
+<p align="center">
+  <a href="https://supabase.io">
+        <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/supabase/supabase/master/packages/common/assets/images/supabase-logo-wordmark--dark.svg">
+      <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/supabase/supabase/master/packages/common/assets/images/supabase-logo-wordmark--light.svg">
+      <img alt="Supabase Logo" width="300" src="https://raw.githubusercontent.com/supabase/supabase/master/packages/common/assets/images/logo-preview.jpg">
+    </picture>
+  </a>
+
+  <h1 align="center">Supabase ETL</h1>
+
+  <p align="center">
+    A Rust crate to quickly build replication solutions for Postgres. Build data pipelines which continually copy data from Postgres to other systems.
+    <br />
+    <a href="https://github.com/supabase/etl/tree/main/etl-examples">Examples</a>
+  </p>
+</p>
+
 # ETL
 
-A Rust crate to quickly build replication solutions for Postgres. It provides building blocks to construct data pipelines which can continually copy data from Postgres to other systems. It builds abstractions on top of Postgres's [logical streaming replication protocol](https://www.postgresql.org/docs/current/protocol-logical-replication.html) and pushes users towards the pit of success without letting them worry about low level details of the protocol.
+This crate builds abstractions on top of Postgres's [logical streaming replication protocol](https://www.postgresql.org/docs/current/protocol-logical-replication.html) and pushes users towards the pit of success without letting them worry about low level details of the protocol.
 
 ## Table of Contents
 
 - [Features](#features)
 - [Installation](#installation)
 - [Quickstart](#quickstart)
-- [Examples](#examples)
 - [Database Setup](#database-setup)
 - [Running Tests](#running-tests)
 - [Docker](#docker)
 - [Architecture](#architecture)
-- [Roadmap](#roadmap)
 - [Troubleshooting](#troubleshooting)
 - [License](#license)
 
@@ -21,11 +38,8 @@ A Rust crate to quickly build replication solutions for Postgres. It provides bu
 The `etl` crate supports the following destinations:
 
 - [x] BigQuery
-- [ ] DuckDB
-- [ ] MotherDuck
-- [ ] Snowflake (planned)
-- [ ] ClickHouse (planned)
-- [ ] Many more to come...
+- [ ] Apache Iceberg (planned)
+- [ ] DuckDB (planned)
 
 ## Installation
 
@@ -41,33 +55,7 @@ The `etl` crate provides the core replication functionality, while `etl-destinat
 
 ## Quickstart
 
-To quickly try out `etl`, you can run the BigQuery example from the `etl-examples` crate. First, create a publication in Postgres which includes the tables you want to replicate:
-
-```sql
-create publication my_publication
-for table table1, table2;
-```
-
-Then run the BigQuery example:
-
-```bash
-cargo run -p etl-examples -- \
-        --db-host localhost \
-        --db-port 5432 \
-        --db-name postgres \
-        --db-username postgres \
-        --db-password password \
-        --bq-sa-key-file /path/to/your/service-account-key.json \
-        --bq-project-id your-gcp-project-id \
-        --bq-dataset-id your_bigquery_dataset_id \
-        --publication my_publication
-```
-
-In the above example, `etl` connects to a Postgres database named `postgres` running on `localhost:5432` with a username `postgres` and password `password`.
-
-## Examples
-
-For code examples on how to use `etl`, please refer to the [etl-examples](https://github.com/supabase/etl/tree/main/etl-examples) crate. The main example demonstrates BigQuery integration and can be found in `etl-examples/src/main.rs`.
+To quickly get started with `etl`, see the [etl-examples](etl-examples/README.md) crate which contains practical examples and detailed setup instructions.
 
 ## Database Setup
 
