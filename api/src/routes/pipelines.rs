@@ -8,10 +8,7 @@ use config::shared::{
     DestinationConfig, PgConnectionConfig, PipelineConfig as SharedPipelineConfig,
     ReplicatorConfig, SupabaseConfig, TlsConfig,
 };
-use postgres::replication::{
-    TableLookupError, TableReplicationState, TableReplicationStateType, get_table_name_from_oid,
-    get_table_replication_state_rows, reset_replication_state, rollback_replication_state,
-};
+use postgres::replication::{TableLookupError, get_table_name_from_oid, state};
 use postgres::schema::TableId;
 use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
@@ -257,6 +254,7 @@ pub enum SimpleTableReplicationState {
     },
     Error {
         reason: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
         solution: Option<String>,
         retry_policy: SimpleRetryPolicy,
     },
@@ -275,28 +273,28 @@ pub enum SimpleRetryPolicy {
     },
 }
 
-impl From<TableReplicationState> for SimpleTableReplicationState {
-    fn from(state: TableReplicationState) -> Self {
+impl From<state::TableReplicationState> for SimpleTableReplicationState {
+    fn from(state: state::TableReplicationState) -> Self {
         match state {
-            TableReplicationState::Init => SimpleTableReplicationState::Queued,
-            TableReplicationState::DataSync => SimpleTableReplicationState::CopyingTable,
-            TableReplicationState::FinishedCopy => SimpleTableReplicationState::CopiedTable,
+            state::TableReplicationState::Init => SimpleTableReplicationState::Queued,
+            state::TableReplicationState::DataSync => SimpleTableReplicationState::CopyingTable,
+            state::TableReplicationState::FinishedCopy => SimpleTableReplicationState::CopiedTable,
             // TODO: add lag metric when available.
-            TableReplicationState::SyncDone { .. } => {
+            state::TableReplicationState::SyncDone { .. } => {
                 SimpleTableReplicationState::FollowingWal { lag: 0 }
             }
-            TableReplicationState::Ready => SimpleTableReplicationState::FollowingWal { lag: 0 },
-            TableReplicationState::Errored {
+            state::TableReplicationState::Ready => {
+                SimpleTableReplicationState::FollowingWal { lag: 0 }
+            }
+            state::TableReplicationState::Errored {
                 reason,
                 solution,
                 retry_policy,
             } => {
                 let simple_retry_policy = match retry_policy {
-                    postgres::replication::RetryPolicy::NoRetry => SimpleRetryPolicy::NoRetry,
-                    postgres::replication::RetryPolicy::ManualRetry => {
-                        SimpleRetryPolicy::ManualRetry
-                    }
-                    postgres::replication::RetryPolicy::TimedRetry { next_retry } => {
+                    state::RetryPolicy::NoRetry => SimpleRetryPolicy::NoRetry,
+                    state::RetryPolicy::ManualRetry => SimpleRetryPolicy::ManualRetry,
+                    state::RetryPolicy::TimedRetry { next_retry } => {
                         SimpleRetryPolicy::TimedRetry {
                             next_retry: next_retry.to_rfc3339(),
                         }
@@ -794,7 +792,7 @@ pub async fn get_pipeline_replication_status(
         connect_to_source_database_with_defaults(&source.config.into_connection_config()).await?;
 
     // Fetch replication state for all tables in this pipeline
-    let state_rows = get_table_replication_state_rows(&source_pool, pipeline_id).await?;
+    let state_rows = state::get_table_replication_state_rows(&source_pool, pipeline_id).await?;
 
     // Convert database states to UI-friendly format and fetch table names
     let mut tables: Vec<TableReplicationStatus> = Vec::new();
@@ -875,16 +873,18 @@ pub async fn rollback_table_state(
         connect_to_source_database_with_defaults(&source.config.into_connection_config()).await?;
 
     // First, check current state to ensure it's rollbackable (manual retry policy)
-    let state_rows = get_table_replication_state_rows(&source_pool, pipeline_id).await?;
+    let state_rows = state::get_table_replication_state_rows(&source_pool, pipeline_id).await?;
     let current_row = state_rows
         .into_iter()
         .find(|row| row.table_id.0 == table_id)
         .ok_or(PipelineError::MissingTableReplicationState)?;
 
     // Check if the current state is rollbackable (has ManualRetry policy)
-    let current_state = current_row.state_type();
-    let is_rollbackable = matches!(current_state, TableReplicationStateType::Errored);
-    if !is_rollbackable {
+    let current_state = current_row
+        .deserialize_metadata()
+        .map_err(PipelineError::InvalidTableReplicationState)?
+        .ok_or(PipelineError::MissingTableReplicationState)?;
+    if !current_state.supports_manual_retry() {
         return Err(PipelineError::NotRollbackable(
             "Only manual retry errors can be rolled back".to_string(),
         ));
@@ -892,9 +892,12 @@ pub async fn rollback_table_state(
 
     let new_state_row = match rollback_type {
         RollbackType::Individual => {
-            let Some(new_state_row) =
-                rollback_replication_state(&source_pool, pipeline_id, TableId::new(table_id))
-                    .await?
+            let Some(new_state_row) = state::rollback_replication_state(
+                &source_pool,
+                pipeline_id,
+                TableId::new(table_id),
+            )
+            .await?
             else {
                 return Err(PipelineError::NotRollbackable(
                     "No previous state to rollback to".to_string(),
@@ -904,7 +907,8 @@ pub async fn rollback_table_state(
             new_state_row
         }
         RollbackType::Full => {
-            reset_replication_state(&source_pool, pipeline_id, TableId::new(table_id)).await?
+            state::reset_replication_state(&source_pool, pipeline_id, TableId::new(table_id))
+                .await?
         }
     };
 

@@ -1,8 +1,9 @@
 use base64::Engine;
 use base64::prelude::BASE64_STANDARD;
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
+use etl::store::schema::SchemaStore;
 use etl::types::{PgNumeric, TableName};
-use etl_destinations::bigquery::BigQueryDestination;
+use etl_destinations::bigquery::{BigQueryDestination, table_name_to_bigquery_table_id};
 use gcp_bigquery_client::Client;
 use gcp_bigquery_client::client_builder::ClientBuilder;
 use gcp_bigquery_client::model::dataset::Dataset;
@@ -75,7 +76,10 @@ impl BigQueryDatabase {
     ///
     /// Returns a destination suitable for ETL operations, configured with
     /// zero staleness to ensure immediate consistency for testing.
-    pub async fn build_destination(&self) -> BigQueryDestination {
+    pub async fn build_destination<S>(&self, schema_store: S) -> BigQueryDestination<S>
+    where
+        S: SchemaStore,
+    {
         BigQueryDestination::new_with_key_path(
             self.project_id.clone(),
             self.dataset_id.clone(),
@@ -83,6 +87,7 @@ impl BigQueryDatabase {
             // We set a `max_staleness_mins` to 0 since we want the changes to be applied at
             // query time.
             Some(0),
+            schema_store,
         )
         .await
         .unwrap()
@@ -97,7 +102,7 @@ impl BigQueryDatabase {
 
         let project_id = self.project_id();
         let dataset_id = self.dataset_id();
-        let table_id = BigQueryDestination::table_name_to_bigquery_table_id(&table_name);
+        let table_id = table_name_to_bigquery_table_id(&table_name);
 
         let full_table_path = format!("`{project_id}.{dataset_id}.{table_id}`");
 

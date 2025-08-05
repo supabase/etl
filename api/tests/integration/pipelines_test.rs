@@ -1287,7 +1287,7 @@ async fn rollback_table_state_succeeds_for_manual_retry_errors() {
             ("ready", r#"{"type": "ready"}"#),
             (
                 "errored",
-                r#"{"type": "errored", "retry_policy": {"type": "manual_retry"}}"#,
+                r#"{"type": "errored", "reason": "connection failed", "retry_policy": {"type": "manual_retry"}}"#,
             ),
         ],
     )
@@ -1326,7 +1326,7 @@ async fn rollback_table_state_fails_for_non_manual_retry_errors() {
         "test_users",
         &[(
             "errored",
-            r#"{"type": "errored", "retry_policy": {"type": "no_retry"}}"#,
+            r#"{"type": "errored", "reason": "connection failed", "retry_policy": {"type": "no_retry"}}"#,
         )],
     )
     .await;
@@ -1358,7 +1358,7 @@ async fn rollback_table_state_with_full_reset_succeeds() {
             ("ready", r#"{"type": "ready"}"#),
             (
                 "errored",
-                r#"{"type": "errored", "retry_policy": {"type": "manual_retry"}}"#,
+                r#"{"type": "errored", "reason": "connection failed", "retry_policy": {"type": "manual_retry"}}"#,
             ),
         ],
     )

@@ -1,29 +1,32 @@
-use postgres::schema::TableId;
+use postgres::schema::{TableId, TableSchema};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
 use crate::error::{ErrorKind, EtlError, EtlResult};
 use crate::etl_error;
-use crate::state::store::StateStore;
 use crate::state::table::TableReplicationPhase;
+use crate::store::schema::SchemaStore;
+use crate::store::state::StateStore;
 
 #[derive(Debug)]
 struct Inner {
     table_replication_states: HashMap<TableId, TableReplicationPhase>,
     table_state_history: HashMap<TableId, Vec<TableReplicationPhase>>,
+    table_schemas: HashMap<TableId, Arc<TableSchema>>,
 }
 
 #[derive(Debug, Clone)]
-pub struct MemoryStateStore {
+pub struct MemoryStore {
     inner: Arc<Mutex<Inner>>,
 }
 
-impl MemoryStateStore {
+impl MemoryStore {
     pub fn new() -> Self {
         let inner = Inner {
             table_replication_states: HashMap::new(),
             table_state_history: HashMap::new(),
+            table_schemas: HashMap::new(),
         };
 
         Self {
@@ -32,13 +35,13 @@ impl MemoryStateStore {
     }
 }
 
-impl Default for MemoryStateStore {
+impl Default for MemoryStore {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl StateStore for MemoryStateStore {
+impl StateStore for MemoryStore {
     async fn get_table_replication_state(
         &self,
         table_id: TableId,
@@ -107,5 +110,34 @@ impl StateStore for MemoryStateStore {
             .insert(table_id, previous_state.clone());
 
         Ok(previous_state)
+    }
+}
+
+impl SchemaStore for MemoryStore {
+    async fn get_table_schema(&self, table_id: &TableId) -> EtlResult<Option<Arc<TableSchema>>> {
+        let inner = self.inner.lock().await;
+
+        Ok(inner.table_schemas.get(table_id).cloned())
+    }
+
+    async fn get_table_schemas(&self) -> EtlResult<Vec<Arc<TableSchema>>> {
+        let inner = self.inner.lock().await;
+
+        Ok(inner.table_schemas.values().cloned().collect())
+    }
+
+    async fn load_table_schemas(&self) -> EtlResult<usize> {
+        let inner = self.inner.lock().await;
+
+        Ok(inner.table_schemas.len())
+    }
+
+    async fn store_table_schema(&self, table_schema: TableSchema) -> EtlResult<()> {
+        let mut inner = self.inner.lock().await;
+        inner
+            .table_schemas
+            .insert(table_schema.id, Arc::new(table_schema));
+
+        Ok(())
     }
 }

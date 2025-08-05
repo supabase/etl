@@ -19,8 +19,8 @@ use crate::error::{ErrorKind, EtlError, EtlResult};
 use crate::replication::client::PgReplicationClient;
 use crate::replication::slot::get_slot_name;
 use crate::replication::stream::EventsStream;
-use crate::schema::SchemaCache;
 use crate::state::table::{RetryPolicy, TableReplicationError};
+use crate::store::schema::SchemaStore;
 use crate::types::PipelineId;
 use crate::workers::base::WorkerType;
 use crate::{bail, etl_error};
@@ -207,18 +207,19 @@ impl ApplyLoopState {
 }
 
 #[expect(clippy::too_many_arguments)]
-pub async fn start_apply_loop<D, T>(
+pub async fn start_apply_loop<S, D, T>(
     pipeline_id: PipelineId,
     start_lsn: PgLsn,
     config: Arc<PipelineConfig>,
     replication_client: PgReplicationClient,
-    schema_cache: SchemaCache,
+    schema_store: S,
     destination: D,
     hook: T,
     mut shutdown_rx: ShutdownRx,
     mut force_syncing_tables_rx: Option<SignalRx>,
 ) -> EtlResult<ApplyLoopResult>
 where
+    S: SchemaStore + Clone + Send + 'static,
     D: Destination + Clone + Send + 'static,
     T: ApplyLoopHook,
 {
@@ -284,7 +285,7 @@ where
                     &mut state,
                     logical_replication_stream.as_mut(),
                     message?,
-                    &schema_cache,
+                    &schema_store,
                     &destination,
                     &hook,
                     config.batch.max_size,
@@ -335,22 +336,23 @@ where
 }
 
 #[expect(clippy::too_many_arguments)]
-async fn handle_replication_message_batch<D, T>(
+async fn handle_replication_message_batch<S, D, T>(
     state: &mut ApplyLoopState,
     events_stream: Pin<&mut EventsStream>,
     message: ReplicationMessage<LogicalReplicationMessage>,
-    schema_cache: &SchemaCache,
+    schema_store: &S,
     destination: &D,
     hook: &T,
     max_batch_size: usize,
     max_batch_fill_duration: Duration,
 ) -> EtlResult<bool>
 where
+    S: SchemaStore + Clone + Send + 'static,
     D: Destination + Clone + Send + 'static,
     T: ApplyLoopHook,
 {
     let result =
-        handle_replication_message(state, events_stream, message, schema_cache, hook).await?;
+        handle_replication_message(state, events_stream, message, schema_store, hook).await?;
 
     if let Some(event) = result.event
         && matches!(result.end_batch, None | Some(EndBatch::Inclusive))
@@ -457,14 +459,15 @@ where
     Ok(false)
 }
 
-async fn handle_replication_message<T>(
+async fn handle_replication_message<S, T>(
     state: &mut ApplyLoopState,
     events_stream: Pin<&mut EventsStream>,
     message: ReplicationMessage<LogicalReplicationMessage>,
-    schema_cache: &SchemaCache,
+    schema_store: &S,
     hook: &T,
 ) -> EtlResult<HandleMessageResult>
 where
+    S: SchemaStore + Clone + Send + 'static,
     T: ApplyLoopHook,
 {
     match message {
@@ -484,7 +487,7 @@ where
                 state,
                 start_lsn,
                 message.into_data(),
-                schema_cache,
+                schema_store,
                 hook,
             )
             .await
@@ -513,14 +516,15 @@ where
     }
 }
 
-async fn handle_logical_replication_message<T>(
+async fn handle_logical_replication_message<S, T>(
     state: &mut ApplyLoopState,
     start_lsn: PgLsn,
     message: LogicalReplicationMessage,
-    schema_cache: &SchemaCache,
+    schema_store: &S,
     hook: &T,
 ) -> EtlResult<HandleMessageResult>
 where
+    S: SchemaStore + Clone + Send + 'static,
     T: ApplyLoopHook,
 {
     // We perform the conversion of the message to our own event format which is used downstream
@@ -532,7 +536,7 @@ where
     // an entry with `start_lsn` greater than another but because logical replication sends transactions
     // in the order of commit, the actual insert could happen before.
     let commit_lsn = get_commit_lsn(state, &message)?;
-    let event = convert_message_to_event(schema_cache, start_lsn, commit_lsn, &message).await?;
+    let event = convert_message_to_event(schema_store, start_lsn, commit_lsn, &message).await?;
 
     let event_type = EventType::from(&event);
     debug!("message converted to event type {}", event_type);
@@ -545,7 +549,7 @@ where
             handle_commit_message(state, event, &message, hook).await
         }
         LogicalReplicationMessage::Relation(message) => {
-            handle_relation_message(state, event, &message, schema_cache, hook).await
+            handle_relation_message(state, event, &message, schema_store, hook).await
         }
         LogicalReplicationMessage::Insert(message) => {
             handle_insert_message(state, event, &message, hook).await
@@ -690,14 +694,15 @@ where
     Ok(result)
 }
 
-async fn handle_relation_message<T>(
+async fn handle_relation_message<S, T>(
     state: &mut ApplyLoopState,
     event: Event,
     message: &protocol::RelationBody,
-    schema_cache: &SchemaCache,
+    schema_store: &S,
     hook: &T,
 ) -> EtlResult<HandleMessageResult>
 where
+    S: SchemaStore + Clone + Send + 'static,
     T: ApplyLoopHook,
 {
     let Event::Relation(event) = event else {
@@ -728,19 +733,19 @@ where
         return Ok(HandleMessageResult::default());
     }
 
-    // If no table schema is found, it means that something went wrong and we throw an error, which is
-    // dealt with differently based on the worker type.
-    // TODO: explore how to deal with applying relation messages to the schema (creating it if missing).
-    let schema_cache = schema_cache.lock_inner().await;
-    let existing_table_schema = schema_cache
-        .get_table_schema_ref(&table_id)
-        .ok_or_else(|| {
-            etl_error!(
-                ErrorKind::MissingTableSchema,
-                "Table not found in the schema cache",
-                format!("The table schema for table {table_id} was not found in the cache")
-            )
-        })?;
+    // If no table schema is found, it means that something went wrong since we should have schemas
+    // ready before starting the apply loop.
+    let existing_table_schema =
+        schema_store
+            .get_table_schema(&table_id)
+            .await?
+            .ok_or_else(|| {
+                etl_error!(
+                    ErrorKind::MissingTableSchema,
+                    "Table not found in the schema cache",
+                    format!("The table schema for table {table_id} was not found in the cache")
+                )
+            })?;
 
     // We compare the table schema from the relation message with the existing schema (if any).
     // The purpose of this comparison is that we want to throw an error and stop the processing

@@ -8,7 +8,8 @@ use tracing::{debug, warn};
 
 use crate::destination::Destination;
 use crate::error::EtlResult;
-use crate::state::store::StateStore;
+use crate::store::schema::SchemaStore;
+use crate::store::state::StateStore;
 use crate::workers::base::{Worker, WorkerHandle};
 use crate::workers::table_sync::{TableSyncWorker, TableSyncWorkerHandle, TableSyncWorkerState};
 
@@ -34,7 +35,7 @@ impl TableSyncWorkerPoolInner {
 
     pub async fn start_worker<S, D>(&mut self, worker: TableSyncWorker<S, D>) -> EtlResult<bool>
     where
-        S: StateStore + Clone + Send + Sync + 'static,
+        S: StateStore + SchemaStore + Clone + Send + Sync + 'static,
         D: Destination + Clone + Send + Sync + 'static,
     {
         let table_id = worker.table_id();

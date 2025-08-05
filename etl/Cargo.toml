@@ -41,7 +41,7 @@ uuid = { workspace = true, features = ["v4"] }
 x509-cert = { workspace = true, default-features = false }
 
 [dev-dependencies]
-postgres = { workspace = true, features = ["test-utils", "tokio"] }
+postgres = { workspace = true, features = ["tokio", "replication", "test-utils"] }
 telemetry = { workspace = true }
 
 rand = { workspace = true, features = ["thread_rng"] }

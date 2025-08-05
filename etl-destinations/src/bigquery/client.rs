@@ -28,6 +28,10 @@ const BIGQUERY_CDC_SPECIAL_COLUMN: &str = "_CHANGE_TYPE";
 /// Special column name for Change Data Capture sequence ordering in BigQuery.
 const BIGQUERY_CDC_SEQUENCE_COLUMN: &str = "_CHANGE_SEQUENCE_NUMBER";
 
+pub type BigQueryProjectId = String;
+pub type BigQueryDatasetId = String;
+pub type BigQueryTableId = String;
+
 /// Change Data Capture operation types for BigQuery streaming.
 #[derive(Debug)]
 pub enum BigQueryOperationType {
@@ -56,7 +60,7 @@ impl fmt::Display for BigQueryOperationType {
 /// This client provides methods for managing tables, inserting data,
 /// and executing queries against a BigQuery project.
 pub struct BigQueryClient {
-    project_id: String,
+    project_id: BigQueryProjectId,
     client: Client,
 }
 
@@ -66,7 +70,7 @@ impl BigQueryClient {
     /// Reads the service account key from the specified file path and uses it to
     /// authenticate with the BigQuery API.
     pub async fn new_with_key_path(
-        project_id: String,
+        project_id: BigQueryProjectId,
         sa_key_path: &str,
     ) -> EtlResult<BigQueryClient> {
         let client = Client::from_service_account_key_file(sa_key_path)
@@ -80,7 +84,10 @@ impl BigQueryClient {
     ///
     /// Parses the provided service account key string to authenticate with the
     /// BigQuery API.
-    pub async fn new_with_key(project_id: String, sa_key: &str) -> EtlResult<BigQueryClient> {
+    pub async fn new_with_key(
+        project_id: BigQueryProjectId,
+        sa_key: &str,
+    ) -> EtlResult<BigQueryClient> {
         let sa_key = parse_service_account_key(sa_key)
             .map_err(BQError::from)
             .map_err(bq_error_to_etl_error)?;
@@ -92,7 +99,11 @@ impl BigQueryClient {
     }
 
     /// Returns the full BigQuery table name in the form `project_id.dataset_id.table_id`.
-    pub fn full_table_name(&self, dataset_id: &str, table_id: &str) -> String {
+    pub fn full_table_name(
+        &self,
+        dataset_id: &BigQueryDatasetId,
+        table_id: &BigQueryTableId,
+    ) -> String {
         format!("`{}.{}.{}`", self.project_id, dataset_id, table_id)
     }
 
@@ -102,8 +113,8 @@ impl BigQueryClient {
     /// already existed.
     pub async fn create_table_if_missing(
         &self,
-        dataset_id: &str,
-        table_id: &str,
+        dataset_id: &BigQueryDatasetId,
+        table_id: &BigQueryTableId,
         column_schemas: &[ColumnSchema],
         max_staleness_mins: Option<u16>,
     ) -> EtlResult<bool> {
@@ -120,8 +131,8 @@ impl BigQueryClient {
     /// Creates a table in a BigQuery dataset.
     pub async fn create_table(
         &self,
-        dataset_id: &str,
-        table_id: &str,
+        dataset_id: &BigQueryDatasetId,
+        table_id: &BigQueryTableId,
         column_schemas: &[ColumnSchema],
         max_staleness_mins: Option<u16>,
     ) -> EtlResult<()> {
@@ -145,7 +156,11 @@ impl BigQueryClient {
 
     /// Truncates a table in a BigQuery dataset.
     #[allow(dead_code)]
-    pub async fn truncate_table(&self, dataset_id: &str, table_id: &str) -> EtlResult<()> {
+    pub async fn truncate_table(
+        &self,
+        dataset_id: &BigQueryDatasetId,
+        table_id: &BigQueryTableId,
+    ) -> EtlResult<()> {
         let full_table_name = self.full_table_name(dataset_id, table_id);
 
         info!("Truncating table {full_table_name} in BigQuery");
@@ -162,7 +177,11 @@ impl BigQueryClient {
     /// # Panics
     ///
     /// Panics if the query result does not contain the expected `table_exists` column.
-    pub async fn table_exists(&self, dataset_id: &str, table_id: &str) -> EtlResult<bool> {
+    pub async fn table_exists(
+        &self,
+        dataset_id: &BigQueryDatasetId,
+        table_id: &BigQueryTableId,
+    ) -> EtlResult<bool> {
         let table = self
             .client
             .table()
@@ -181,8 +200,8 @@ impl BigQueryClient {
     /// to respect the maximum request size.
     pub async fn stream_rows(
         &mut self,
-        dataset_id: &str,
-        table_id: String,
+        dataset_id: &BigQueryDatasetId,
+        table_id: &BigQueryTableId,
         table_descriptor: &TableDescriptor,
         table_rows: Vec<TableRow>,
     ) -> EtlResult<()> {

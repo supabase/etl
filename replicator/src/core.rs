@@ -4,27 +4,42 @@ use config::shared::{
 use etl::destination::Destination;
 use etl::destination::memory::MemoryDestination;
 use etl::pipeline::Pipeline;
-use etl::state::store::StateStore;
-use etl::state::store::postgres::PostgresStateStore;
+use etl::store::both::postgres::PostgresStore;
+use etl::store::schema::SchemaStore;
+use etl::store::state::StateStore;
 use etl::types::PipelineId;
 use etl_destinations::bigquery::{BigQueryDestination, install_crypto_provider_for_bigquery};
 use secrecy::ExposeSecret;
-use std::fmt;
 use tokio::signal::unix::{SignalKind, signal};
-use tracing::{debug, info, warn};
+use tracing::{debug, info, instrument, warn};
 
 use crate::config::load_replicator_config;
 use crate::migrations::migrate_state_store;
 
 pub async fn start_replicator() -> anyhow::Result<()> {
-    info!("starting replicator service");
-
     let replicator_config = load_replicator_config()?;
+    let project_ref = replicator_config
+        .supabase
+        .as_ref()
+        .map(|s| s.project_ref.clone())
+        .unwrap_or_default();
+    start_with_config(replicator_config, &project_ref).await
+}
+
+// The name of the field emitted in the instrumented span should be `project`
+// not `project_ref` because the vector config in the etl-k8s project expects
+// this. These should be kept in sync if changed in future.
+#[instrument(skip(replicator_config, project_ref), fields(project = project_ref))]
+async fn start_with_config(
+    replicator_config: ReplicatorConfig,
+    project_ref: &str,
+) -> anyhow::Result<()> {
+    info!("starting replicator service");
 
     log_config(&replicator_config);
 
     // We initialize the state store, which for the replicator is not configurable.
-    let state_store = init_state_store(
+    let state_store = init_store(
         replicator_config.pipeline.id,
         replicator_config.pipeline.pg_connection.clone(),
     )
@@ -57,6 +72,7 @@ pub async fn start_replicator() -> anyhow::Result<()> {
                 dataset_id.clone(),
                 service_account_key.expose_secret(),
                 *max_staleness_mins,
+                state_store.clone(),
             )
             .await?;
 
@@ -130,20 +146,20 @@ fn log_batch_config(config: &BatchConfig) {
     );
 }
 
-async fn init_state_store(
+async fn init_store(
     pipeline_id: PipelineId,
     pg_connection_config: PgConnectionConfig,
-) -> anyhow::Result<impl StateStore + Clone> {
+) -> anyhow::Result<impl StateStore + SchemaStore + Clone> {
     migrate_state_store(&pg_connection_config).await?;
 
-    Ok(PostgresStateStore::new(pipeline_id, pg_connection_config))
+    Ok(PostgresStore::new(pipeline_id, pg_connection_config))
 }
 
 #[tracing::instrument(skip(pipeline), fields(pipeline_id = pipeline.id()))]
 async fn start_pipeline<S, D>(mut pipeline: Pipeline<S, D>) -> anyhow::Result<()>
 where
-    S: StateStore + Clone + Send + Sync + 'static,
-    D: Destination + Clone + Send + Sync + fmt::Debug + 'static,
+    S: StateStore + SchemaStore + Clone + Send + Sync + 'static,
+    D: Destination + Clone + Send + Sync + 'static,
 {
     // Start the pipeline.
     pipeline.start().await?;
