@@ -187,7 +187,7 @@ where
             }
 
             // We store the table schema in the schema store to be able to retrieve it even when the
-            // pipeline is restarted (if the store implementation is durable).
+            // pipeline is restarted, since it's outside the lifecycle of the pipeline.
             store.store_table_schema(table_schema.clone()).await?;
 
             // We create the copy table stream.

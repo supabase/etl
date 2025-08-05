@@ -156,7 +156,7 @@ async fn main_impl() -> Result<(), Box<dyn Error>> {
         },
     };
 
-    // Create in-memory state store for tracking table replication states and table schemas
+    // Create in-memory store for tracking table replication states and table schemas
     // In production, you might want to use a persistent store like PostgresStore
     let store = MemoryStore::new();
 

@@ -1,5 +1,3 @@
-use crate::config::load_replicator_config;
-use crate::migrations::migrate_state_store;
 use config::shared::{
     BatchConfig, DestinationConfig, PgConnectionConfig, PipelineConfig, ReplicatorConfig,
 };
@@ -14,6 +12,9 @@ use etl_destinations::bigquery::{BigQueryDestination, install_crypto_provider_fo
 use secrecy::ExposeSecret;
 use tokio::signal::unix::{SignalKind, signal};
 use tracing::{debug, info, warn};
+
+use crate::config::load_replicator_config;
+use crate::migrations::migrate_state_store;
 
 pub async fn start_replicator() -> anyhow::Result<()> {
     info!("starting replicator service");

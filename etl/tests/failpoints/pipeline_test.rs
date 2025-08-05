@@ -31,7 +31,7 @@ async fn table_copy_fails_after_data_sync_threw_an_error_with_no_retry() {
     )
     .await;
 
-    let state_store = NotifyingStore::new();
+    let store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
 
     // We start the pipeline from scratch.
@@ -40,12 +40,12 @@ async fn table_copy_fails_after_data_sync_threw_an_error_with_no_retry() {
         &database.config,
         pipeline_id,
         database_schema.publication_name(),
-        state_store.clone(),
+        store.clone(),
         destination.clone(),
     );
 
     // Register notifications for table sync phases.
-    let users_state_notify = state_store
+    let users_state_notify = store
         .notify_on_table_state(
             database_schema.users_schema().id,
             TableReplicationPhaseType::Errored,
@@ -66,7 +66,7 @@ async fn table_copy_fails_after_data_sync_threw_an_error_with_no_retry() {
     assert!(table_rows.is_empty());
 
     // Verify table schemas were correctly stored.
-    let table_schemas = state_store.get_table_schemas().await;
+    let table_schemas = store.get_table_schemas().await;
     assert!(table_schemas.is_empty());
 }
 
@@ -89,7 +89,7 @@ async fn table_copy_is_consistent_after_data_sync_threw_an_error_with_timed_retr
     )
     .await;
 
-    let state_store = NotifyingStore::new();
+    let store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
 
     // We start the pipeline from scratch.
@@ -98,12 +98,12 @@ async fn table_copy_is_consistent_after_data_sync_threw_an_error_with_timed_retr
         &database.config,
         pipeline_id,
         database_schema.publication_name(),
-        state_store.clone(),
+        store.clone(),
         destination.clone(),
     );
 
     // We register the interest in waiting for both table syncs to have started.
-    let users_state_notify = state_store
+    let users_state_notify = store
         .notify_on_table_state(
             database_schema.users_schema().id,
             TableReplicationPhaseType::SyncDone,
@@ -123,7 +123,7 @@ async fn table_copy_is_consistent_after_data_sync_threw_an_error_with_timed_retr
     assert_eq!(users_table_rows.len(), rows_inserted);
 
     // Verify table schemas were correctly stored.
-    let table_schemas = state_store.get_table_schemas().await;
+    let table_schemas = store.get_table_schemas().await;
     assert_eq!(table_schemas.len(), 1);
     assert_eq!(
         *table_schemas

@@ -1,3 +1,5 @@
+use crate::bigquery::client::{BigQueryClient, BigQueryOperationType};
+use crate::bigquery::{BigQueryDatasetId, BigQueryTableId};
 use etl::destination::Destination;
 use etl::error::{ErrorKind, EtlError, EtlResult};
 use etl::etl_error;
@@ -9,8 +11,6 @@ use std::ops::Deref;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::{info, warn};
-
-use crate::bigquery::client::{BigQueryClient, BigQueryOperationType};
 
 /// Generates a sequence number from the LSNs of an event.
 ///
@@ -32,8 +32,8 @@ fn generate_sequence_number(start_lsn: PgLsn, commit_lsn: PgLsn) -> String {
     format!("{commit_lsn:016x}/{start_lsn:016x}")
 }
 
-/// Returns the BigQuery table id as [`String`] for a supplied [`TableName`].
-pub fn table_name_to_bigquery_table_id(table_name: &TableName) -> String {
+/// Returns the [`BigQueryTableId`] for a supplied [`TableName`].
+pub fn table_name_to_bigquery_table_id(table_name: &TableName) -> BigQueryTableId {
     format!("{}_{}", table_name.schema, table_name.name)
 }
 
@@ -43,7 +43,7 @@ pub fn table_name_to_bigquery_table_id(table_name: &TableName) -> String {
 #[derive(Debug)]
 struct Inner<S> {
     client: BigQueryClient,
-    dataset_id: String,
+    dataset_id: BigQueryDatasetId,
     max_staleness_mins: Option<u16>,
     schema_store: S,
 }
@@ -51,7 +51,7 @@ struct Inner<S> {
 /// A BigQuery destination that implements the ETL [`Destination`] trait.
 ///
 /// Provides PostgreSQL-to-BigQuery data pipeline functionality including streaming inserts
-/// and CDC operation handling. Schema information is now managed by the state store.
+/// and CDC operation handling.
 #[derive(Debug, Clone)]
 pub struct BigQueryDestination<S> {
     inner: Arc<Mutex<Inner<S>>>,
@@ -67,7 +67,7 @@ where
     /// The `max_staleness_mins` parameter controls table metadata cache freshness.
     pub async fn new_with_key_path(
         project_id: String,
-        dataset_id: String,
+        dataset_id: BigQueryDatasetId,
         sa_key: &str,
         max_staleness_mins: Option<u16>,
         schema_store: S,
@@ -91,7 +91,7 @@ where
     /// rather than a file path. Useful when credentials are stored in environment variables.
     pub async fn new_with_key(
         project_id: String,
-        dataset_id: String,
+        dataset_id: BigQueryDatasetId,
         sa_key: &str,
         max_staleness_mins: Option<u16>,
         schema_store: S,
@@ -109,14 +109,17 @@ where
         })
     }
 
-    /// Loads BigQuery table ID and descriptor that are used for streaming operations.
+    /// Prepares the table for CDC streaming.
     ///
-    /// Returns the BigQuery-formatted table name and its column descriptor for streaming operations.
-    async fn load_table_id_and_descriptor<I: Deref<Target = Inner<S>>>(
+    /// This function loads the table schema, crates the table in BigQuery (if missing) and sets up
+    /// the required table id and table descriptor that are required by BigQuery for CDC streaming.
+    async fn prepare_cdc_streaming_for_table<I: Deref<Target = Inner<S>>>(
         inner: &I,
         table_id: &TableId,
         use_cdc_sequence_column: bool,
-    ) -> EtlResult<(String, TableDescriptor)> {
+    ) -> EtlResult<(BigQueryTableId, TableDescriptor)> {
+        // We load the schema of the table, if present. This is needed to create the table in BigQuery
+        // and also prepare the table descriptor for CDC streaming.
         let table_schema = inner
             .schema_store
             .get_table_schema(table_id)
@@ -132,6 +135,19 @@ where
             })?;
 
         let table_id = table_name_to_bigquery_table_id(&table_schema.name);
+
+        // TODO: store the fact that the table was created to avoid every time the check, if we then
+        //  try to create the value and fail, we can re-create the table.
+        inner
+            .client
+            .create_table_if_missing(
+                &inner.dataset_id,
+                &table_id,
+                &table_schema.column_schemas,
+                inner.max_staleness_mins,
+            )
+            .await?;
+
         let table_descriptor = BigQueryClient::column_schemas_to_table_descriptor(
             &table_schema.column_schemas,
             use_cdc_sequence_column,
@@ -150,38 +166,8 @@ where
     ) -> EtlResult<()> {
         let mut inner = self.inner.lock().await;
 
-        let dataset_id = inner.dataset_id.clone();
-        let table_schema = inner
-            .schema_store
-            .get_table_schema(&table_id)
-            .await?
-            .ok_or_else(|| {
-                etl_error!(
-                    ErrorKind::MissingTableSchema,
-                    "Table not found in the schema store",
-                    format!(
-                        "The table schema for table {table_id} was not found in the schema store"
-                    )
-                )
-            })?;
-
-        // Create the actual data table
-        // TODO: store the fact that the table was created to avoid every time the check, if we then
-        //  try to create the value and fail, we can re-create the table.
-        inner
-            .client
-            .create_table_if_missing(
-                &dataset_id,
-                &table_name_to_bigquery_table_id(&table_schema.name),
-                &table_schema.column_schemas,
-                inner.max_staleness_mins,
-            )
-            .await?;
-
-        // We do not use the sequence column for table rows, since we assume that table rows are always
-        // unique by primary key, thus there is no need to order them.
         let (table_id, table_descriptor) =
-            Self::load_table_id_and_descriptor(&inner, &table_id, false).await?;
+            Self::prepare_cdc_streaming_for_table(&inner, &table_id, false).await?;
 
         let dataset_id = inner.dataset_id.clone();
         for table_row in table_rows.iter_mut() {
@@ -191,7 +177,7 @@ where
         }
         inner
             .client
-            .stream_rows(&dataset_id, table_id, &table_descriptor, table_rows)
+            .stream_rows(&dataset_id, &table_id, &table_descriptor, table_rows)
             .await?;
 
         Ok(())
@@ -272,12 +258,12 @@ where
 
                 for (table_id, table_rows) in table_id_to_table_rows {
                     let (table_id, table_descriptor) =
-                        Self::load_table_id_and_descriptor(&inner, &table_id, true).await?;
+                        Self::prepare_cdc_streaming_for_table(&inner, &table_id, true).await?;
 
                     let dataset_id = inner.dataset_id.clone();
                     inner
                         .client
-                        .stream_rows(&dataset_id, table_id, &table_descriptor, table_rows)
+                        .stream_rows(&dataset_id, &table_id, &table_descriptor, table_rows)
                         .await?;
                 }
             }
