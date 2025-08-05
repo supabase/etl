@@ -4,8 +4,8 @@ use etl_api::routes::destinations::{
 };
 use etl_config::SerializableSecretString;
 use etl_config::shared::DestinationConfig;
-use reqwest::StatusCode;
 use etl_telemetry::init_test_tracing;
+use reqwest::StatusCode;
 
 use crate::{
     common::test_app::{TestApp, spawn_test_app},

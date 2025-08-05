@@ -8,9 +8,9 @@ use etl::test_utils::pipeline::create_pipeline;
 use etl::test_utils::test_destination_wrapper::TestDestinationWrapper;
 use etl::test_utils::test_schema::{TableSelection, insert_users_data, setup_test_database_schema};
 use etl::types::PipelineId;
+use etl_telemetry::init_test_tracing;
 use fail::FailScenario;
 use rand::random;
-use etl_telemetry::init_test_tracing;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn table_copy_fails_after_data_sync_threw_an_error_with_no_retry() {

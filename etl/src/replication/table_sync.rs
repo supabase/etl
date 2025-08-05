@@ -1,6 +1,6 @@
 use etl_config::shared::PipelineConfig;
-use futures::StreamExt;
 use etl_postgres::schema::TableId;
+use futures::StreamExt;
 use std::sync::Arc;
 use tokio::pin;
 use tokio_postgres::types::PgLsn;

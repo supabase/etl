@@ -2,8 +2,8 @@ use etl_api::routes::images::{
     CreateImageRequest, CreateImageResponse, ReadImageResponse, ReadImagesResponse,
     UpdateImageRequest,
 };
-use reqwest::StatusCode;
 use etl_telemetry::init_test_tracing;
+use reqwest::StatusCode;
 
 use crate::common::test_app::{TestApp, spawn_test_app};
 

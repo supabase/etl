@@ -1,11 +1,11 @@
-use etl_config::shared::BatchConfig;
 use etl::destination::memory::MemoryDestination;
 use etl::replication::slot::get_slot_name;
 use etl::state::table::TableReplicationPhaseType;
 use etl::store::both::notify::NotifyingStore;
+use etl_config::shared::BatchConfig;
 use etl_postgres::tokio::test_utils::TableModification;
-use rand::random;
 use etl_telemetry::init_test_tracing;
+use rand::random;
 
 use etl::test_utils::database::spawn_source_database;
 use etl::test_utils::event::group_events_by_type_and_table_id;

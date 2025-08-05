@@ -1,7 +1,7 @@
-use futures::{Stream, ready};
-use pin_project_lite::pin_project;
 use etl_postgres::schema::ColumnSchema;
 use etl_postgres::time::POSTGRES_EPOCH;
+use futures::{Stream, ready};
+use pin_project_lite::pin_project;
 use postgres_replication::LogicalReplicationStream;
 use postgres_replication::protocol::{LogicalReplicationMessage, ReplicationMessage};
 use std::pin::Pin;

@@ -4,8 +4,8 @@ use etl_api::routes::sources::{
     UpdateSourceRequest,
 };
 use etl_config::SerializableSecretString;
-use reqwest::StatusCode;
 use etl_telemetry::init_test_tracing;
+use reqwest::StatusCode;
 
 use crate::{
     common::test_app::{TestApp, spawn_test_app},

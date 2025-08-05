@@ -11,7 +11,9 @@ use etl_api::routes::pipelines::{
     UpdatePipelineImageRequest, UpdatePipelineRequest,
 };
 use etl_api::routes::sources::{CreateSourceRequest, UpdateSourceRequest};
-use etl_api::routes::tenants::{CreateOrUpdateTenantRequest, CreateTenantRequest, UpdateTenantRequest};
+use etl_api::routes::tenants::{
+    CreateOrUpdateTenantRequest, CreateTenantRequest, UpdateTenantRequest,
+};
 use etl_api::routes::tenants_sources::CreateTenantSourceRequest;
 use etl_api::{
     config::ApiConfig,

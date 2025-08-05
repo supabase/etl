@@ -5,8 +5,8 @@ use etl::test_utils::database::{spawn_source_database, test_table_name};
 use etl::test_utils::pipeline::create_pipeline;
 use etl::test_utils::test_destination_wrapper::TestDestinationWrapper;
 use etl::types::PipelineId;
-use rand::random;
 use etl_telemetry::init_test_tracing;
+use rand::random;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn tables_without_primary_key_are_errored() {

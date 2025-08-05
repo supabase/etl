@@ -1,6 +1,3 @@
-use etl_config::shared::{
-    BatchConfig, DestinationConfig, PgConnectionConfig, PipelineConfig, ReplicatorConfig,
-};
 use etl::destination::Destination;
 use etl::destination::memory::MemoryDestination;
 use etl::pipeline::Pipeline;
@@ -8,6 +5,9 @@ use etl::store::both::postgres::PostgresStore;
 use etl::store::schema::SchemaStore;
 use etl::store::state::StateStore;
 use etl::types::PipelineId;
+use etl_config::shared::{
+    BatchConfig, DestinationConfig, PgConnectionConfig, PipelineConfig, ReplicatorConfig,
+};
 use etl_destinations::bigquery::{BigQueryDestination, install_crypto_provider_for_bigquery};
 use secrecy::ExposeSecret;
 use tokio::signal::unix::{SignalKind, signal};

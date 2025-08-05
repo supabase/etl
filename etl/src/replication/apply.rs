@@ -1,6 +1,6 @@
 use etl_config::shared::PipelineConfig;
-use futures::{FutureExt, StreamExt};
 use etl_postgres::schema::TableId;
+use futures::{FutureExt, StreamExt};
 use postgres_replication::protocol;
 use postgres_replication::protocol::{LogicalReplicationMessage, ReplicationMessage};
 use std::future::{Future, pending};
