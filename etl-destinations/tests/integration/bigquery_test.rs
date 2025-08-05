@@ -1,8 +1,7 @@
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use etl::config::BatchConfig;
-use etl::state::store::StateStore;
 use etl::state::table::TableReplicationPhaseType;
-use etl::store::both::notify::NotifyingStateStore;
+use etl::store::both::notify::NotifyingStore;
 use etl::test_utils::database::{spawn_database, test_table_name};
 use etl::test_utils::pipeline::{create_pipeline, create_pipeline_with};
 use etl::test_utils::test_destination_wrapper::TestDestinationWrapper;
@@ -38,8 +37,8 @@ async fn table_copy_and_streaming_with_restart() {
     )
     .await;
 
-    let state_store = NotifyingStateStore::new();
-    let raw_destination = bigquery_database.build_destination().await;
+    let store = NotifyingStore::new();
+    let raw_destination = bigquery_database.build_destination(store.clone()).await;
     let destination = TestDestinationWrapper::wrap(raw_destination);
 
     // Start pipeline from scratch.
@@ -48,18 +47,18 @@ async fn table_copy_and_streaming_with_restart() {
         &database.config,
         pipeline_id,
         database_schema.publication_name(),
-        state_store.clone(),
+        store.clone(),
         destination.clone(),
     );
 
     // Register notifications for table copy completion.
-    let users_state_notify = state_store
+    let users_state_notify = store
         .notify_on_table_state(
             database_schema.users_schema().id,
             TableReplicationPhaseType::SyncDone,
         )
         .await;
-    let orders_state_notify = state_store
+    let orders_state_notify = store
         .notify_on_table_state(
             database_schema.orders_schema().id,
             TableReplicationPhaseType::SyncDone,
@@ -72,13 +71,6 @@ async fn table_copy_and_streaming_with_restart() {
     orders_state_notify.notified().await;
 
     pipeline.shutdown_and_wait().await.unwrap();
-
-    // We load the table schemas from state store and check that they are correctly stored.
-    state_store.load_table_schemas().await.unwrap();
-    let mut table_schemas = state_store.get_table_schemas().await.unwrap();
-    table_schemas.sort();
-    assert_eq!(table_schemas[0], database_schema.orders_schema());
-    assert_eq!(table_schemas[1], database_schema.users_schema());
 
     // We query BigQuery directly to get the data which has been inserted by tests.
     let users_rows = bigquery_database
@@ -112,7 +104,7 @@ async fn table_copy_and_streaming_with_restart() {
         &database.config,
         pipeline_id,
         database_schema.publication_name(),
-        state_store.clone(),
+        store.clone(),
         destination.clone(),
     );
 
@@ -136,13 +128,6 @@ async fn table_copy_and_streaming_with_restart() {
     event_notify.notified().await;
 
     pipeline.shutdown_and_wait().await.unwrap();
-
-    // We load the table schemas from state store and check that they are correctly stored.
-    state_store.load_table_schemas().await.unwrap();
-    let mut table_schemas = state_store.get_table_schemas().await.unwrap();
-    table_schemas.sort();
-    assert_eq!(table_schemas[0], database_schema.orders_schema());
-    assert_eq!(table_schemas[1], database_schema.users_schema());
 
     // We query BigQuery directly to get the data which has been inserted by tests.
     let users_rows = bigquery_database
@@ -185,8 +170,8 @@ async fn table_insert_update_delete() {
 
     let bigquery_database = setup_bigquery_connection().await;
 
-    let state_store = NotifyingStateStore::new();
-    let raw_destination = bigquery_database.build_destination().await;
+    let store = NotifyingStore::new();
+    let raw_destination = bigquery_database.build_destination(store.clone()).await;
     let destination = TestDestinationWrapper::wrap(raw_destination);
 
     // Start pipeline from scratch.
@@ -195,12 +180,12 @@ async fn table_insert_update_delete() {
         &database.config,
         pipeline_id,
         database_schema.publication_name(),
-        state_store.clone(),
+        store.clone(),
         destination.clone(),
     );
 
     // Register notifications for table copy completion.
-    let users_state_notify = state_store
+    let users_state_notify = store
         .notify_on_table_state(
             database_schema.users_schema().id,
             TableReplicationPhaseType::SyncDone,
@@ -302,8 +287,8 @@ async fn table_subsequent_updates() {
 
     let bigquery_database = setup_bigquery_connection().await;
 
-    let state_store = NotifyingStateStore::new();
-    let raw_destination = bigquery_database.build_destination().await;
+    let store = NotifyingStore::new();
+    let raw_destination = bigquery_database.build_destination(store.clone()).await;
     let destination = TestDestinationWrapper::wrap(raw_destination);
 
     // Start pipeline from scratch.
@@ -312,12 +297,12 @@ async fn table_subsequent_updates() {
         &database_1.config,
         pipeline_id,
         database_schema.publication_name(),
-        state_store.clone(),
+        store.clone(),
         destination.clone(),
     );
 
     // Register notifications for table copy completion.
-    let users_state_notify = state_store
+    let users_state_notify = store
         .notify_on_table_state(
             database_schema.users_schema().id,
             TableReplicationPhaseType::SyncDone,
@@ -392,8 +377,8 @@ async fn table_truncate_with_batching() {
 
     let bigquery_database = setup_bigquery_connection().await;
 
-    let state_store = NotifyingStateStore::new();
-    let raw_destination = bigquery_database.build_destination().await;
+    let store = NotifyingStore::new();
+    let raw_destination = bigquery_database.build_destination(store.clone()).await;
     let destination = TestDestinationWrapper::wrap(raw_destination);
 
     // Start pipeline from scratch.
@@ -402,7 +387,7 @@ async fn table_truncate_with_batching() {
         &database.config,
         pipeline_id,
         database_schema.publication_name(),
-        state_store.clone(),
+        store.clone(),
         destination.clone(),
         // We use a batch size > 1, so that we can make sure that interleaved truncate statements
         // work well with multiple batches of events.
@@ -413,13 +398,13 @@ async fn table_truncate_with_batching() {
     );
 
     // Register notifications for table copy completion.
-    let users_state_notify = state_store
+    let users_state_notify = store
         .notify_on_table_state(
             database_schema.users_schema().id,
             TableReplicationPhaseType::SyncDone,
         )
         .await;
-    let orders_state_notify = state_store
+    let orders_state_notify = store
         .notify_on_table_state(
             database_schema.orders_schema().id,
             TableReplicationPhaseType::SyncDone,
@@ -524,8 +509,8 @@ async fn table_nullable_scalar_columns() {
         .await
         .unwrap();
 
-    let state_store = NotifyingStateStore::new();
-    let raw_destination = bigquery_database.build_destination().await;
+    let store = NotifyingStore::new();
+    let raw_destination = bigquery_database.build_destination(store.clone()).await;
     let destination = TestDestinationWrapper::wrap(raw_destination);
 
     let publication_name = "test_pub".to_string();
@@ -539,11 +524,11 @@ async fn table_nullable_scalar_columns() {
         &database.config,
         pipeline_id,
         publication_name,
-        state_store.clone(),
+        store.clone(),
         destination.clone(),
     );
 
-    let table_sync_done_notification = state_store
+    let table_sync_done_notification = store
         .notify_on_table_state(table_id, TableReplicationPhaseType::SyncDone)
         .await;
 
@@ -733,8 +718,8 @@ async fn table_nullable_array_columns() {
         .await
         .unwrap();
 
-    let state_store = NotifyingStateStore::new();
-    let raw_destination = bigquery_database.build_destination().await;
+    let store = NotifyingStore::new();
+    let raw_destination = bigquery_database.build_destination(store.clone()).await;
     let destination = TestDestinationWrapper::wrap(raw_destination);
 
     let publication_name = "test_pub_array".to_string();
@@ -748,11 +733,11 @@ async fn table_nullable_array_columns() {
         &database.config,
         pipeline_id,
         publication_name,
-        state_store.clone(),
+        store.clone(),
         destination.clone(),
     );
 
-    let table_sync_done_notification = state_store
+    let table_sync_done_notification = store
         .notify_on_table_state(table_id, TableReplicationPhaseType::SyncDone)
         .await;
 
@@ -968,8 +953,8 @@ async fn table_non_nullable_scalar_columns() {
         .await
         .unwrap();
 
-    let state_store = NotifyingStateStore::new();
-    let raw_destination = bigquery_database.build_destination().await;
+    let store = NotifyingStore::new();
+    let raw_destination = bigquery_database.build_destination(store.clone()).await;
     let destination = TestDestinationWrapper::wrap(raw_destination);
 
     let publication_name = "test_pub_non_null".to_string();
@@ -983,11 +968,11 @@ async fn table_non_nullable_scalar_columns() {
         &database.config,
         pipeline_id,
         publication_name,
-        state_store.clone(),
+        store.clone(),
         destination.clone(),
     );
 
-    let table_sync_done_notification = state_store
+    let table_sync_done_notification = store
         .notify_on_table_state(table_id, TableReplicationPhaseType::SyncDone)
         .await;
 
@@ -1218,8 +1203,8 @@ async fn table_non_nullable_array_columns() {
         .await
         .unwrap();
 
-    let state_store = NotifyingStateStore::new();
-    let raw_destination = bigquery_database.build_destination().await;
+    let store = NotifyingStore::new();
+    let raw_destination = bigquery_database.build_destination(store.clone()).await;
     let destination = TestDestinationWrapper::wrap(raw_destination);
 
     let publication_name = "test_pub_non_null_array".to_string();
@@ -1233,11 +1218,11 @@ async fn table_non_nullable_array_columns() {
         &database.config,
         pipeline_id,
         publication_name,
-        state_store.clone(),
+        store.clone(),
         destination.clone(),
     );
 
-    let table_sync_done_notification = state_store
+    let table_sync_done_notification = store
         .notify_on_table_state(table_id, TableReplicationPhaseType::SyncDone)
         .await;
 

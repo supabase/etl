@@ -1,6 +1,6 @@
 use etl::destination::memory::MemoryDestination;
 use etl::state::table::TableReplicationPhaseType;
-use etl::store::both::notify::NotifyingStateStore;
+use etl::store::both::notify::NotifyingStore;
 use etl::test_utils::database::{spawn_database, test_table_name};
 use etl::test_utils::pipeline::create_pipeline;
 use etl::test_utils::test_destination_wrapper::TestDestinationWrapper;
@@ -31,7 +31,7 @@ async fn tables_without_primary_key_are_errored() {
         .await
         .unwrap();
 
-    let state_store = NotifyingStateStore::new();
+    let state_store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
 
     let pipeline_id: PipelineId = random();

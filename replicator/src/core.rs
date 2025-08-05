@@ -4,15 +4,14 @@ use config::shared::{
 use etl::destination::Destination;
 use etl::destination::memory::MemoryDestination;
 use etl::pipeline::Pipeline;
-use etl::state::store::StateStore;
+use etl::store::state::StateStore;
 use etl::store::both::postgres::PostgresStore;
 use etl::types::PipelineId;
 use etl_destinations::bigquery::{BigQueryDestination, install_crypto_provider_for_bigquery};
 use secrecy::ExposeSecret;
-use std::fmt;
 use tokio::signal::unix::{SignalKind, signal};
 use tracing::{debug, info, warn};
-
+use etl::store::schema::SchemaStore;
 use crate::config::load_replicator_config;
 use crate::migrations::migrate_state_store;
 
@@ -24,7 +23,7 @@ pub async fn start_replicator() -> anyhow::Result<()> {
     log_config(&replicator_config);
 
     // We initialize the state store, which for the replicator is not configurable.
-    let state_store = init_state_store(
+    let state_store = init_store(
         replicator_config.pipeline.id,
         replicator_config.pipeline.pg_connection.clone(),
     )
@@ -57,6 +56,7 @@ pub async fn start_replicator() -> anyhow::Result<()> {
                 dataset_id.clone(),
                 service_account_key.expose_secret(),
                 *max_staleness_mins,
+                state_store.clone(),
             )
             .await?;
 
@@ -130,10 +130,10 @@ fn log_batch_config(config: &BatchConfig) {
     );
 }
 
-async fn init_state_store(
+async fn init_store(
     pipeline_id: PipelineId,
     pg_connection_config: PgConnectionConfig,
-) -> anyhow::Result<impl StateStore + Clone> {
+) -> anyhow::Result<impl StateStore + SchemaStore + Clone> {
     migrate_state_store(&pg_connection_config).await?;
 
     Ok(PostgresStore::new(pipeline_id, pg_connection_config))
@@ -142,8 +142,8 @@ async fn init_state_store(
 #[tracing::instrument(skip(pipeline), fields(pipeline_id = pipeline.id()))]
 async fn start_pipeline<S, D>(mut pipeline: Pipeline<S, D>) -> anyhow::Result<()>
 where
-    S: StateStore + Clone + Send + Sync + 'static,
-    D: Destination + Clone + Send + Sync + fmt::Debug + 'static,
+    S: StateStore + SchemaStore + Clone + Send + Sync + 'static,
+    D: Destination + Clone + Send + Sync + 'static,
 {
     // Start the pipeline.
     pipeline.start().await?;

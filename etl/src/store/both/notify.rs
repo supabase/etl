@@ -57,11 +57,11 @@ impl Inner {
 
 /// A state store which notifying about changes to the table states
 #[derive(Clone)]
-pub struct NotifyingStateStore {
+pub struct NotifyingStore {
     inner: Arc<RwLock<Inner>>,
 }
 
-impl NotifyingStateStore {
+impl NotifyingStore {
     pub fn new() -> Self {
         let inner = Inner {
             table_replication_states: HashMap::new(),
@@ -81,6 +81,15 @@ impl NotifyingStateStore {
         inner.table_replication_states.clone()
     }
 
+    pub async fn get_table_schemas(&self) -> HashMap<TableId, TableSchema> {
+        let inner = self.inner.read().await;
+        inner
+            .table_schemas
+            .iter()
+            .map(|(id, schema)| (*id, Arc::as_ref(schema).clone()))
+            .collect()
+    }
+
     pub async fn notify_on_table_state(
         &self,
         table_id: TableId,
@@ -91,8 +100,9 @@ impl NotifyingStateStore {
         inner
             .table_state_conditions
             .push((table_id, expected_state, notify.clone()));
+
         // Checking conditions here as well because it is possible that the state
-        // the conditions are checking for is already reached by the time the
+        // the conditions are checking for is already reached by the time
         // this method is called, in which case this notification will not ever
         // fire if conditions are not checked here.
         inner.check_conditions().await;
@@ -101,13 +111,13 @@ impl NotifyingStateStore {
     }
 }
 
-impl Default for NotifyingStateStore {
+impl Default for NotifyingStore {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl StateStore for NotifyingStateStore {
+impl StateStore for NotifyingStore {
     async fn get_table_replication_state(
         &self,
         table_id: TableId,
@@ -203,7 +213,7 @@ impl StateStore for NotifyingStateStore {
     }
 }
 
-impl SchemaStore for NotifyingStateStore {
+impl SchemaStore for NotifyingStore {
     async fn get_table_schema(&self, table_id: &TableId) -> EtlResult<Option<Arc<TableSchema>>> {
         let inner = self.inner.read().await;
 
@@ -231,7 +241,7 @@ impl SchemaStore for NotifyingStateStore {
     }
 }
 
-impl fmt::Debug for NotifyingStateStore {
+impl fmt::Debug for NotifyingStore {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let inner = tokio::task::block_in_place(move || {
             Handle::current().block_on(async move { self.inner.read().await })

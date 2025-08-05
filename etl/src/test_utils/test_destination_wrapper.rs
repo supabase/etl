@@ -1,4 +1,4 @@
-use postgres::schema::{TableId, TableSchema};
+use postgres::schema::TableId;
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
@@ -12,7 +12,6 @@ use crate::error::EtlResult;
 use crate::test_utils::event::check_events_count;
 
 type EventCondition = Box<dyn Fn(&[Event]) -> bool + Send + Sync>;
-type SchemaCondition = Box<dyn Fn(&[TableSchema]) -> bool + Send + Sync>;
 type TableRowCondition = Box<dyn Fn(&HashMap<TableId, Vec<TableRow>>) -> bool + Send + Sync>;
 
 struct Inner<D> {
@@ -20,7 +19,6 @@ struct Inner<D> {
     events: Vec<Event>,
     table_rows: HashMap<TableId, Vec<TableRow>>,
     event_conditions: Vec<(EventCondition, Arc<Notify>)>,
-    table_schema_conditions: Vec<(SchemaCondition, Arc<Notify>)>,
     table_row_conditions: Vec<(TableRowCondition, Arc<Notify>)>,
 }
 
@@ -75,7 +73,6 @@ impl<D> TestDestinationWrapper<D> {
             events: Vec::new(),
             table_rows: HashMap::new(),
             event_conditions: Vec::new(),
-            table_schema_conditions: Vec::new(),
             table_row_conditions: Vec::new(),
         };
 
@@ -111,26 +108,6 @@ impl<D> TestDestinationWrapper<D> {
     /// Wait for a specific number of events of given types
     pub async fn wait_for_events_count(&self, conditions: Vec<(EventType, u64)>) -> Arc<Notify> {
         self.notify_on_events(move |events| check_events_count(events, conditions.clone()))
-            .await
-    }
-
-    /// Wait for a specific condition on schemas
-    pub async fn notify_on_schemas<F>(&self, condition: F) -> Arc<Notify>
-    where
-        F: Fn(&[TableSchema]) -> bool + Send + Sync + 'static,
-    {
-        let notify = Arc::new(Notify::new());
-        let mut inner = self.inner.write().await;
-        inner
-            .table_schema_conditions
-            .push((Box::new(condition), notify.clone()));
-
-        notify
-    }
-
-    /// Wait for a specific number of schemas
-    pub async fn wait_for_n_schemas(&self, n: usize) -> Arc<Notify> {
-        self.notify_on_schemas(move |schemas| schemas.len() == n)
             .await
     }
 }

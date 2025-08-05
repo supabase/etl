@@ -2,7 +2,7 @@ use etl::destination::memory::MemoryDestination;
 use etl::error::ErrorKind;
 use etl::failpoints::START_TABLE_SYNC__AFTER_DATA_SYNC;
 use etl::state::table::TableReplicationPhaseType;
-use etl::store::both::notify::NotifyingStateStore;
+use etl::store::both::notify::NotifyingStore;
 use etl::test_utils::database::spawn_database;
 use etl::test_utils::pipeline::create_pipeline;
 use etl::test_utils::test_destination_wrapper::TestDestinationWrapper;
@@ -31,7 +31,7 @@ async fn table_copy_fails_after_data_sync_threw_an_error_with_no_retry() {
     )
     .await;
 
-    let state_store = NotifyingStateStore::new();
+    let state_store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
 
     // We start the pipeline from scratch.
@@ -66,7 +66,7 @@ async fn table_copy_fails_after_data_sync_threw_an_error_with_no_retry() {
     assert!(table_rows.is_empty());
 
     // Verify table schemas were correctly stored.
-    let table_schemas = destination.get_table_schemas().await;
+    let table_schemas = state_store.get_table_schemas().await;
     assert!(table_schemas.is_empty());
 }
 
@@ -89,7 +89,7 @@ async fn table_copy_is_consistent_after_data_sync_threw_an_error_with_timed_retr
     )
     .await;
 
-    let state_store = NotifyingStateStore::new();
+    let state_store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
 
     // We start the pipeline from scratch.
@@ -123,7 +123,12 @@ async fn table_copy_is_consistent_after_data_sync_threw_an_error_with_timed_retr
     assert_eq!(users_table_rows.len(), rows_inserted);
 
     // Verify table schemas were correctly stored.
-    let table_schemas = destination.get_table_schemas().await;
+    let table_schemas = state_store.get_table_schemas().await;
     assert_eq!(table_schemas.len(), 1);
-    assert_eq!(table_schemas[0], database_schema.users_schema());
+    assert_eq!(
+        *table_schemas
+            .get(&database_schema.users_schema().id)
+            .unwrap(),
+        database_schema.users_schema()
+    );
 }
