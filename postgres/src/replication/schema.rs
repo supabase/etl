@@ -1,4 +1,5 @@
 use sqlx::{PgPool, Row};
+use std::collections::HashMap;
 use tokio_postgres::types::Type as PgType;
 
 use crate::schema::{ColumnSchema, TableId, TableName, TableSchema};
@@ -145,7 +146,7 @@ pub async fn load_table_schemas(
             tc.primary_key,
             tc.column_order
         FROM etl.table_schemas ts
-        LEFT JOIN etl.table_columns tc ON ts.id = tc.table_schema_id
+        INNER JOIN etl.table_columns tc ON ts.id = tc.table_schema_id
         WHERE ts.pipeline_id = $1
         ORDER BY ts.table_id, tc.column_order
         "#,
@@ -154,46 +155,35 @@ pub async fn load_table_schemas(
     .fetch_all(pool)
     .await?;
 
-    let mut table_schemas = std::collections::HashMap::new();
-
+    let mut table_schemas = HashMap::new();
     for row in rows {
         let table_id = TableId::new(row.get::<i64, _>("table_id") as u32);
         let schema_name: String = row.get("schema_name");
-        let table_name_str: String = row.get("table_name");
-        let table_name = TableName::new(schema_name, table_name_str);
+        let table_name = TableName::new(schema_name, row.get("table_name"));
 
         let entry = table_schemas
             .entry(table_id)
-            .or_insert_with(|| (table_name, Vec::new()));
+            .or_insert_with(|| TableSchema::new(table_id, table_name, vec![]));
 
-        // If we have column data, add it to the column list
-        let column_name: Option<String> = row.get("column_name");
-        let column_type: Option<String> = row.get("column_type");
+        let column_name: String = row.get("column_name");
+        let column_type: String = row.get("column_type");
+        let type_modifier: i32 = row.get("type_modifier");
+        let nullable: bool = row.get("nullable");
+        let primary_key: bool = row.get("primary_key");
 
-        if let (Some(column_name), Some(column_type)) = (column_name, column_type) {
-            let pg_type = string_to_postgres_type(&column_type);
-            let type_modifier: Option<i32> = row.get("type_modifier");
-            let nullable: Option<bool> = row.get("nullable");
-            let primary_key: Option<bool> = row.get("primary_key");
-
-            let column_schema = ColumnSchema::new(
-                column_name,
-                pg_type,
-                type_modifier.unwrap_or(-1),
-                nullable.unwrap_or(true),
-                primary_key.unwrap_or(false),
-            );
-            entry.1.push(column_schema);
-        }
+        let column_schema = ColumnSchema::new(
+            column_name,
+            string_to_postgres_type(&column_type),
+            type_modifier,
+            nullable,
+            primary_key,
+        );
+        entry.add_column_schema(column_schema);
     }
 
-    let mut result = Vec::new();
-    for (table_id, (table_name, column_schemas)) in table_schemas {
-        let table_schema = TableSchema::new(table_id, table_name, column_schemas);
-        result.push(table_schema);
-    }
+    let table_schemas = table_schemas.into_values().collect();
 
-    Ok(result)
+    Ok(table_schemas)
 }
 
 /// Loads a specific table schema by table ID.
@@ -259,6 +249,7 @@ pub async fn load_table_schema(
     }
 
     let table_schema = TableSchema::new(table_id, table_name, column_schemas);
+
     Ok(Some(table_schema))
 }
 
