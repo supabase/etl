@@ -21,8 +21,8 @@ The ETL core implements a pipeline architecture that replicates data from Postgr
 - **Apply Worker**: Main worker that handles the creation of table sync workers and processes CDC events
 - **Table Sync Worker**: Handles initial copying of existing table data and processes CDC events until it has caught up
   to the apply worker
-- **State Store**: Tracks the state of the pipeline
-- **Schema Store**: Tracks the table schemas of the tables involved in the replication
+- **State Store**: Stores the state of the pipeline
+- **Schema Store**: Stores the table schemas of the tables involved in the replication
 
 ### Information Flow
 
@@ -69,12 +69,3 @@ graph TB
     TSWorker2 <--> StateStore
     TSWorker2 <--> SchemaStore
 ```
-
-### How It Works
-
-1. **Pipeline** orchestrates the entire replication process
-2. **Apply Worker** processes CDC events from the replication stream and spawns table sync workers as needed
-3. **Table Sync Workers** are created in a pool to handle initial table copying independently
-4. Each worker **polls PostgreSQL independently** - Apply Worker reads CDC stream, Table Sync Workers copy table data
-5. All workers **write independently to destinations** for optimal throughput
-
