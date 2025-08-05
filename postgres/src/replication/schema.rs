@@ -1,3 +1,4 @@
+use sqlx::postgres::PgRow;
 use sqlx::{PgPool, Row};
 use std::collections::HashMap;
 use tokio_postgres::types::Type as PgType;
@@ -129,13 +130,17 @@ pub async fn store_table_schema(
 ///
 /// This function retrieves table schemas and their columns from the schema storage tables,
 /// reconstructing [`TableSchema`] objects.
+/// Loads all table schemas for a given pipeline from the database.
+///
+/// This function retrieves table schemas and their columns from the schema storage tables,
+/// reconstructing [`TableSchema`] objects.
 pub async fn load_table_schemas(
     pool: &PgPool,
     pipeline_id: i64,
 ) -> Result<Vec<TableSchema>, sqlx::Error> {
     let rows = sqlx::query(
         r#"
-        SELECT 
+        SELECT
             ts.table_id,
             ts.schema_name,
             ts.table_name,
@@ -156,101 +161,39 @@ pub async fn load_table_schemas(
     .await?;
 
     let mut table_schemas = HashMap::new();
+
     for row in rows {
         let table_id = TableId::new(row.get::<i64, _>("table_id") as u32);
         let schema_name: String = row.get("schema_name");
-        let table_name = TableName::new(schema_name, row.get("table_name"));
+        let table_name: String = row.get("table_name");
 
-        let entry = table_schemas
-            .entry(table_id)
-            .or_insert_with(|| TableSchema::new(table_id, table_name, vec![]));
+        let entry = table_schemas.entry(table_id).or_insert_with(|| {
+            TableSchema::new(table_id, TableName::new(schema_name, table_name), vec![])
+        });
 
-        let column_name: String = row.get("column_name");
-        let column_type: String = row.get("column_type");
-        let type_modifier: i32 = row.get("type_modifier");
-        let nullable: bool = row.get("nullable");
-        let primary_key: bool = row.get("primary_key");
-
-        let column_schema = ColumnSchema::new(
-            column_name,
-            string_to_postgres_type(&column_type),
-            type_modifier,
-            nullable,
-            primary_key,
-        );
-        entry.add_column_schema(column_schema);
+        entry.add_column_schema(parse_column_schema(&row));
     }
 
-    let table_schemas = table_schemas.into_values().collect();
-
-    Ok(table_schemas)
+    Ok(table_schemas.into_values().collect())
 }
 
-/// Loads a specific table schema by table ID.
+/// Builds a `ColumnSchema` from a database row.
 ///
-/// This function retrieves a single table schema and its columns from the schema storage tables.
-pub async fn load_table_schema(
-    pool: &PgPool,
-    pipeline_id: i64,
-    table_id: TableId,
-) -> Result<Option<TableSchema>, sqlx::Error> {
-    let rows = sqlx::query(
-        r#"
-        SELECT 
-            ts.table_id,
-            ts.schema_name,
-            ts.table_name,
-            tc.column_name,
-            tc.column_type,
-            tc.type_modifier,
-            tc.nullable,
-            tc.primary_key,
-            tc.column_order
-        FROM etl.table_schemas ts
-        LEFT JOIN etl.table_columns tc ON ts.id = tc.table_schema_id
-        WHERE ts.pipeline_id = $1 AND ts.table_id = $2
-        ORDER BY tc.column_order
-        "#,
+/// Assumes all required fields are present (e.g. after INNER JOIN).
+fn parse_column_schema(row: &PgRow) -> ColumnSchema {
+    let column_name: String = row.get("column_name");
+    let column_type: String = row.get("column_type");
+    let type_modifier: i32 = row.get("type_modifier");
+    let nullable: bool = row.get("nullable");
+    let primary_key: bool = row.get("primary_key");
+
+    ColumnSchema::new(
+        column_name,
+        string_to_postgres_type(&column_type),
+        type_modifier,
+        nullable,
+        primary_key,
     )
-    .bind(pipeline_id)
-    .bind(table_id.into_inner() as i64)
-    .fetch_all(pool)
-    .await?;
-
-    if rows.is_empty() {
-        return Ok(None);
-    }
-
-    let first_row = &rows[0];
-    let schema_name: String = first_row.get("schema_name");
-    let table_name_str: String = first_row.get("table_name");
-    let table_name = TableName::new(schema_name, table_name_str);
-
-    let mut column_schemas = Vec::new();
-    for row in rows {
-        let column_name: Option<String> = row.get("column_name");
-        let column_type: Option<String> = row.get("column_type");
-
-        if let (Some(column_name), Some(column_type)) = (column_name, column_type) {
-            let pg_type = string_to_postgres_type(&column_type);
-            let type_modifier: Option<i32> = row.get("type_modifier");
-            let nullable: Option<bool> = row.get("nullable");
-            let primary_key: Option<bool> = row.get("primary_key");
-
-            let column_schema = ColumnSchema::new(
-                column_name,
-                pg_type,
-                type_modifier.unwrap_or(-1),
-                nullable.unwrap_or(true),
-                primary_key.unwrap_or(false),
-            );
-            column_schemas.push(column_schema);
-        }
-    }
-
-    let table_schema = TableSchema::new(table_id, table_name, column_schemas);
-
-    Ok(Some(table_schema))
 }
 
 #[cfg(test)]
