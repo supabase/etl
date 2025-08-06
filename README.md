@@ -104,7 +104,8 @@ ulimit -n 10000
 
 ### Performance Considerations
 
-Currently, the data source and destinations copy table row and CDC events one at a time. This is expected to be slow. Batching and other strategies will likely improve the performance drastically. But at this early stage, the focus is on correctness rather than performance. There are also zero benchmarks at this stage, so commentary about performance is closer to speculation than reality.
+Currently, the system parallelizes the copying of different tables, but each individual table is still copied in sequential batches.
+This limits performance for large tables. We plan to address this once the ETL system reaches greater stability.
 
 ## License
 
