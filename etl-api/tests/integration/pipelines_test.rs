@@ -314,16 +314,16 @@ async fn create_test_table(source_pool: &PgPool, table_name: &str) -> Oid {
     .await
     .expect("Failed to create test table");
 
-    let table_oid = sqlx::query_scalar::<_, Oid>(
+    
+
+    sqlx::query_scalar::<_, Oid>(
         "SELECT c.oid FROM pg_class c JOIN pg_namespace n ON c.relnamespace = n.oid WHERE c.relname = $1 AND n.nspname = $2"
     )
     .bind(table_name)
     .bind("test")
     .fetch_one(source_pool)
     .await
-    .expect("Failed to get table OID");
-
-    table_oid
+    .expect("Failed to get table OID")
 }
 
 #[tokio::test(flavor = "multi_thread")]
