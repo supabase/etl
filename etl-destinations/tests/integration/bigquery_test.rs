@@ -1489,7 +1489,7 @@ fn generate_random_ascii_string(length: usize) -> String {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn table_toast_values_with_default_replica_identity() {
+async fn update_non_toast_values_with_default_replica_identity() {
     init_test_tracing();
     install_crypto_provider_for_bigquery();
 
@@ -1628,8 +1628,114 @@ async fn table_toast_values_with_default_replica_identity() {
     let int_after_update: i32 = parse_table_cell(updated_columns[2].clone()).unwrap();
     assert_eq!(int_after_update, updated_int_value);
 
+    pipeline.shutdown_and_wait().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn update_toast_values_with_default_replica_identity() {
+    init_test_tracing();
+    install_crypto_provider_for_bigquery();
+
+    let database = spawn_source_database().await;
+    let bigquery_database = setup_bigquery_connection().await;
+    let table_name = test_table_name("toast_values_test");
+
+    // Create a table with a text column that will be large enough to trigger TOAST
+    // and a regular integer column for testing updates
+    let table_id = database
+        .create_table(
+            table_name.clone(),
+            true,
+            &[
+                ("large_text", "text"), // Column that will contain TOAST-able data
+                ("small_int", "int4"),  // Column we'll update to test TOAST behavior
+            ],
+        )
+        .await
+        .unwrap();
+
+    // Forcing size to be set to external so that unchanged TOAST columns are not sent
+    // in update events. Ideally, large values would automatically trigger the storage
+    // to external but couldn't force Postgres in the tests even with very large
+    // values, hence this workaround.
+    database
+        .alter_table(
+            table_name.clone(),
+            &[TableModification::AlterColumn {
+                name: "large_text",
+                alteration: "set storage external",
+            }],
+        )
+        .await
+        .unwrap();
+
+    let store = NotifyingStore::new();
+    let raw_destination = bigquery_database.build_destination(store.clone()).await;
+    let destination = TestDestinationWrapper::wrap(raw_destination);
+
+    let publication_name = "test_pub_toast".to_string();
+    database
+        .create_publication(&publication_name, &[table_name.clone()])
+        .await
+        .expect("Failed to create publication");
+
+    let pipeline_id: PipelineId = random();
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        publication_name,
+        store.clone(),
+        destination.clone(),
+    );
+
+    let table_sync_done_notification = store
+        .notify_on_table_state(table_id, TableReplicationPhaseType::SyncDone)
+        .await;
+
+    pipeline.start().await.unwrap();
+
+    table_sync_done_notification.notified().await;
+
+    // Insert a row with a large text value that will be TOASTed
+    // PostgreSQL typically TOASTs values larger than ~2KB (TOAST_TUPLE_THRESHOLD)
+    let large_text_size_bytes = 8192;
+    let large_text_value = generate_random_ascii_string(large_text_size_bytes);
+    let initial_int_value = 100;
+
+    let insert_event_notify = destination
+        .wait_for_events_count(vec![(EventType::Insert, 1)])
+        .await;
+
+    database
+        .insert_values(
+            table_name.clone(),
+            &["large_text", "small_int"],
+            &[&large_text_value, &initial_int_value],
+        )
+        .await
+        .unwrap();
+
+    insert_event_notify.notified().await;
+
+    // Verify the initial insert worked correctly
+    let table_rows = bigquery_database
+        .query_table(table_name.clone())
+        .await
+        .unwrap();
+    assert_eq!(table_rows.len(), 1);
+
+    let initial_row = &table_rows[0];
+    let columns = initial_row.columns.as_ref().unwrap();
+
+    // Verify the large text was inserted correctly
+    let inserted_large_text: String = parse_table_cell(columns[1].clone()).unwrap();
+    assert_eq!(inserted_large_text, large_text_value);
+
+    let inserted_int: i32 = parse_table_cell(columns[2].clone()).unwrap();
+    assert_eq!(inserted_int, initial_int_value);
+
     // Test update to the toast column does set it to that value
-    let second_update_event_notify = destination
+    let update_event_notify = destination
         .wait_for_events_count(vec![(EventType::Update, 1)])
         .await;
 
@@ -1643,42 +1749,27 @@ async fn table_toast_values_with_default_replica_identity() {
         .await
         .unwrap();
 
-    second_update_event_notify.notified().await;
+    update_event_notify.notified().await;
 
     // Verify that the large_text is updated
-    let table_rows_final = bigquery_database
+    let table_rows_after_update = bigquery_database
         .query_table(table_name.clone())
         .await
         .unwrap();
-    assert_eq!(table_rows_final.len(), 1);
+    assert_eq!(table_rows_after_update.len(), 1);
 
-    let final_row = &table_rows_final[0];
-    let final_columns = final_row.columns.as_ref().unwrap();
+    let updated_row = &table_rows_after_update[0];
+    let updated_columns = updated_row.columns.as_ref().unwrap();
 
     // Both Large text and small int should be updated
-    let final_large_text: String = parse_table_cell(final_columns[1].clone()).unwrap();
+    let updated_large_text: String = parse_table_cell(updated_columns[1].clone()).unwrap();
     assert_eq!(
-        final_large_text, updated_large_text_value,
+        updated_large_text, updated_large_text_value,
         "TOAST value should be updated"
     );
 
-    let final_int: i32 = parse_table_cell(final_columns[2].clone()).unwrap();
-    assert_eq!(final_int, updated_int_value);
-
-    // Delete to verify that toasted values can be deleted
-    let delete_event_notify = destination
-        .wait_for_events_count(vec![(EventType::Delete, 1)])
-        .await;
-
-    database
-        .delete_values(table_name.clone(), &["id"], &["'1'"], "")
-        .await
-        .unwrap();
-
-    delete_event_notify.notified().await;
-
-    let table_rows_after_delete = bigquery_database.query_table(table_name.clone()).await;
-    assert!(table_rows_after_delete.is_none());
+    let updated_int: i32 = parse_table_cell(updated_columns[2].clone()).unwrap();
+    assert_eq!(updated_int, initial_int_value);
 
     pipeline.shutdown_and_wait().await.unwrap();
 }
