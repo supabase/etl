@@ -1,7 +1,7 @@
 use etl::destination::memory::MemoryDestination;
 use etl::replication::slot::get_slot_name;
 use etl::state::table::TableReplicationPhaseType;
-use etl::store::both::notify::NotifyingStore;
+use etl::test_utils::notify::NotifyingStore;
 use etl_config::shared::BatchConfig;
 use etl_postgres::tokio::test_utils::TableModification;
 use etl_telemetry::init_test_tracing;

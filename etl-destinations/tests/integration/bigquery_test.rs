@@ -1,8 +1,8 @@
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use etl::config::BatchConfig;
 use etl::state::table::TableReplicationPhaseType;
-use etl::store::both::notify::NotifyingStore;
 use etl::test_utils::database::{spawn_source_database, test_table_name};
+use etl::test_utils::notify::NotifyingStore;
 use etl::test_utils::pipeline::{create_pipeline, create_pipeline_with};
 use etl::test_utils::test_destination_wrapper::TestDestinationWrapper;
 use etl::test_utils::test_schema::{TableSelection, insert_mock_data, setup_test_database_schema};

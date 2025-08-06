@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dev-dependencies]
-etl = { workspace = true }
+etl = { workspace = true, features = ["test-utils"] }
 etl-config = { workspace = true }
 etl-destinations = { workspace = true, features = ["bigquery"] }
 etl-postgres = { workspace = true, features = ["sqlx"] }

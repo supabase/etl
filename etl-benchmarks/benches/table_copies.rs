@@ -3,7 +3,7 @@ use etl::destination::Destination;
 use etl::error::EtlResult;
 use etl::pipeline::Pipeline;
 use etl::state::table::TableReplicationPhaseType;
-use etl::store::both::notify::NotifyingStore;
+use etl::test_utils::notify::NotifyingStore;
 use etl::types::{Event, TableRow};
 use etl_config::Environment;
 use etl_config::shared::{BatchConfig, PgConnectionConfig, PipelineConfig, TlsConfig};
