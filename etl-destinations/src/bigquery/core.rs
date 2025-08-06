@@ -12,6 +12,12 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::{info, warn};
 
+/// The delimiter used when generating table names in BigQuery that splits the schema from the name
+/// of the table.
+const BIGQUERY_TABLE_ID_DELIMITER: &str = "_";
+/// The replacement string used to escape characters in the original schema and table names.
+const BIGQUERY_TABLE_ID_DELIMITER_ESCAPE_REPLACEMENT: &str = "__";
+
 /// Generates a sequence number from the LSNs of an event.
 ///
 /// Creates a hex-encoded sequence number that ensures events are processed in the correct order
@@ -41,8 +47,14 @@ fn generate_sequence_number(start_lsn: PgLsn, commit_lsn: PgLsn) -> String {
 /// We opted for this escaping strategy since it's easy to undo on the reading end. Just split at a
 /// single `_` and revert each `__` into `_`.
 pub fn table_name_to_bigquery_table_id(table_name: &TableName) -> BigQueryTableId {
-    let escaped_schema = table_name.schema.replace('_', "__");
-    let escaped_table = table_name.name.replace('_', "__");
+    let escaped_schema = table_name.schema.replace(
+        BIGQUERY_TABLE_ID_DELIMITER,
+        BIGQUERY_TABLE_ID_DELIMITER_ESCAPE_REPLACEMENT,
+    );
+    let escaped_table = table_name.name.replace(
+        BIGQUERY_TABLE_ID_DELIMITER,
+        BIGQUERY_TABLE_ID_DELIMITER_ESCAPE_REPLACEMENT,
+    );
 
     format!("{escaped_schema}_{escaped_table}")
 }
