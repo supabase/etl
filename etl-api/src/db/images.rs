@@ -1,10 +1,13 @@
-use sqlx::PgExecutor;
+use sqlx::{PgExecutor, PgPool};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum ImagesDbError {
     #[error("Error while interacting with PostgreSQL for images: {0}")]
     Database(#[from] sqlx::Error),
+
+    #[error("Cannot delete the default image")]
+    CannotDeleteDefault,
 }
 
 pub struct Image {
@@ -13,14 +16,26 @@ pub struct Image {
     pub is_default: bool,
 }
 
-pub async fn create_image<'c, E>(
-    executor: E,
+pub async fn create_image(
+    pool: &PgPool,
     name: &str,
     is_default: bool,
-) -> Result<i64, ImagesDbError>
-where
-    E: PgExecutor<'c>,
-{
+) -> Result<i64, ImagesDbError> {
+    let mut txn = pool.begin().await?;
+
+    // If this is to be the new default image, first unset any existing default
+    if is_default {
+        sqlx::query!(
+            r#"
+            update app.images
+            set is_default = false
+            where is_default = true
+            "#
+        )
+        .execute(&mut *txn)
+        .await?;
+    }
+
     let record = sqlx::query!(
         r#"
         insert into app.images (name, is_default)
@@ -30,8 +45,10 @@ where
         name,
         is_default
     )
-    .fetch_one(executor)
+    .fetch_one(&mut *txn)
     .await?;
+
+    txn.commit().await?;
 
     Ok(record.id)
 }
@@ -79,15 +96,28 @@ where
     }))
 }
 
-pub async fn update_image<'c, E>(
-    executor: E,
+pub async fn update_image(
+    pool: &PgPool,
     image_id: i64,
     name: &str,
     is_default: bool,
-) -> Result<Option<i64>, ImagesDbError>
-where
-    E: PgExecutor<'c>,
-{
+) -> Result<Option<i64>, ImagesDbError> {
+    let mut txn = pool.begin().await?;
+
+    // If this is to be the new default image, first unset any existing default
+    if is_default {
+        sqlx::query!(
+            r#"
+            update app.images
+            set is_default = false
+            where is_default = true and id != $1
+            "#,
+            image_id
+        )
+        .execute(&mut *txn)
+        .await?;
+    }
+
     let record = sqlx::query!(
         r#"
         update app.images
@@ -99,16 +129,43 @@ where
         is_default,
         image_id
     )
-    .fetch_optional(executor)
+    .fetch_optional(&mut *txn)
     .await?;
+
+    txn.commit().await?;
 
     Ok(record.map(|r| r.id))
 }
 
-pub async fn delete_image<'c, E>(executor: E, image_id: i64) -> Result<Option<i64>, ImagesDbError>
-where
-    E: PgExecutor<'c>,
-{
+pub async fn delete_image(pool: &PgPool, image_id: i64) -> Result<Option<i64>, ImagesDbError> {
+    let mut txn = pool.begin().await?;
+
+    // First check if the image exists and if it's a default
+    let image = sqlx::query!(
+        r#"
+        select id, is_default
+        from app.images
+        where id = $1
+        "#,
+        image_id
+    )
+    .fetch_optional(&mut *txn)
+    .await?;
+
+    let image = match image {
+        Some(img) => img,
+        None => {
+            // Image doesn't exist, return None
+            return Ok(None);
+        }
+    };
+
+    // Prevent deletion if it's a default image
+    if image.is_default {
+        return Err(ImagesDbError::CannotDeleteDefault);
+    }
+
+    // Proceed with deletion
     let record = sqlx::query!(
         r#"
         delete from app.images
@@ -117,8 +174,10 @@ where
         "#,
         image_id
     )
-    .fetch_optional(executor)
+    .fetch_optional(&mut *txn)
     .await?;
+
+    txn.commit().await?;
 
     Ok(record.map(|r| r.id))
 }
