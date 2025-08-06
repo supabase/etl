@@ -314,8 +314,6 @@ async fn create_test_table(source_pool: &PgPool, table_name: &str) -> Oid {
     .await
     .expect("Failed to create test table");
 
-    
-
     sqlx::query_scalar::<_, Oid>(
         "SELECT c.oid FROM pg_class c JOIN pg_namespace n ON c.relnamespace = n.oid WHERE c.relname = $1 AND n.nspname = $2"
     )
@@ -1502,13 +1500,20 @@ async fn deleting_pipeline_succeeds_even_if_source_database_cleanup_fails() {
         &[("test_users", "ready", r#"{"type": "ready"}"#)],
     )
     .await;
-    source_pool.close().await;
 
+    // We drop the `etl.replication_state` table to make the state deletion fail
+    sqlx::query("drop table etl.replication_state")
+        .execute(&source_pool)
+        .await
+        .unwrap();
+
+    // The deletion should fail.
     let response = app.delete_pipeline(&tenant_id, pipeline_id).await;
-    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
 
+    // The pipeline should still be there.
     let response = app.read_pipeline(&tenant_id, pipeline_id).await;
-    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert_eq!(response.status(), StatusCode::OK);
 
     drop_pg_database(&source_db_config).await;
 }

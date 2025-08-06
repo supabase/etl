@@ -15,7 +15,6 @@ use serde::{Deserialize, Serialize};
 use sqlx::{PgPool, PgTransaction};
 use std::ops::DerefMut;
 use thiserror::Error;
-use tracing::{info, warn};
 use utoipa::ToSchema;
 
 use crate::db::destinations::{Destination, DestinationsDbError, destination_exists};
@@ -547,50 +546,24 @@ pub async fn delete_pipeline(
         .await?
         .ok_or(PipelineError::PipelineNotFound(pipeline_id))?;
 
-    txn.commit().await?;
-
-    // Now cleanup replication state and table schemas from the source database.
-    //
-    // This is done in a separate connection since it's a different database. And it's also not doneprevious modifications, since if we have a failure in the source
-    // database, we might revert the deleted pipeline, making it active but the source database state
-    // might be corrupted. We prefer to just have orphan data in the source database than consistency
-    // issues.
     let source_pool =
         connect_to_source_database_with_defaults(&source.config.into_connection_config()).await?;
 
+    // We start a transaction in the source database while the other transaction is active in the
+    // api database so that in case of failures when deleting the state, we also rollback the transaction
+    // in the api database.
+    let mut source_txn = source_pool.begin().await?;
+
     // Delete replication state (best effort)
-    match state::delete_pipeline_replication_state(&source_pool, pipeline_id).await {
-        Ok(deleted_rows) => {
-            info!(
-                "deleted {} replication state rows for pipeline {}",
-                deleted_rows, pipeline_id
-            );
-        }
-        Err(e) => {
-            warn!(
-                "failed to delete replication state for pipeline {}: {}",
-                pipeline_id, e
-            );
-            // We continue execution since the main pipeline is already deleted
-        }
-    }
+    state::delete_pipeline_replication_state(source_txn.deref_mut(), pipeline_id).await?;
 
     // Delete table schemas (best effort)
-    match schema::delete_pipeline_table_schemas(&source_pool, pipeline_id).await {
-        Ok(deleted_rows) => {
-            info!(
-                "deleted {} table schema rows for pipeline {}",
-                deleted_rows, pipeline_id
-            );
-        }
-        Err(e) => {
-            warn!(
-                "failed to delete table schemas for pipeline {}: {}",
-                pipeline_id, e
-            );
-            // We continue execution since the main pipeline is already deleted
-        }
-    }
+    schema::delete_pipeline_table_schemas(source_txn.deref_mut(), pipeline_id).await?;
+
+    // Here we finish `txn` before `source_txn` since we want the guarantee that the pipeline has
+    // been deleted before committing the state deletions.
+    txn.commit().await?;
+    source_txn.commit().await?;
 
     Ok(HttpResponse::Ok().finish())
 }
