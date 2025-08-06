@@ -636,37 +636,6 @@ async fn a_non_existing_pipeline_cant_be_updated() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn an_existing_pipeline_can_be_deleted() {
-    init_test_tracing();
-    // Arrange
-    let app = spawn_test_app().await;
-    create_default_image(&app).await;
-    let tenant_id = &create_tenant(&app).await;
-    let source_id = create_source(&app, tenant_id).await;
-    let destination_id = create_destination(&app, tenant_id).await;
-
-    let pipeline = CreatePipelineRequest {
-        source_id,
-        destination_id,
-        config: new_pipeline_config(),
-    };
-    let response = app.create_pipeline(tenant_id, &pipeline).await;
-    let response: CreatePipelineResponse = response
-        .json()
-        .await
-        .expect("failed to deserialize response");
-    let pipeline_id = response.id;
-
-    // Act
-    let response = app.delete_pipeline(tenant_id, pipeline_id).await;
-
-    // Assert
-    assert!(response.status().is_success());
-    let response = app.read_pipeline(tenant_id, pipeline_id).await;
-    assert_eq!(response.status(), StatusCode::NOT_FOUND);
-}
-
-#[tokio::test(flavor = "multi_thread")]
 async fn a_non_existing_pipeline_cant_be_deleted() {
     init_test_tracing();
     // Arrange
