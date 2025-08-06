@@ -1,4 +1,5 @@
 use etl_config::shared::{IntoConnectOptions, PgConnectionConfig};
+use sqlx::postgres::PgPoolOptions;
 use sqlx::{Connection, Executor, PgConnection, PgPool};
 
 /// Creates a new PostgreSQL database and returns a connection pool to it.
@@ -16,8 +17,11 @@ pub async fn create_pg_database(config: &PgConnectionConfig) -> PgPool {
         .await
         .expect("Failed to create database");
 
-    // Create a connection pool to the database.
-    PgPool::connect_with(config.with_db())
+    // Create a connection pool to the database with 1 connection only.
+    PgPoolOptions::new()
+        .min_connections(1)
+        .max_connections(1)
+        .connect_with(config.with_db())
         .await
         .expect("Failed to connect to Postgres")
 }
