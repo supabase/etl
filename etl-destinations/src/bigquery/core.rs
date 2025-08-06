@@ -43,6 +43,7 @@ fn generate_sequence_number(start_lsn: PgLsn, commit_lsn: PgLsn) -> String {
 pub fn table_name_to_bigquery_table_id(table_name: &TableName) -> BigQueryTableId {
     let escaped_schema = table_name.schema.replace('_', "__");
     let escaped_table = table_name.name.replace('_', "__");
+    
     format!("{escaped_schema}_{escaped_table}")
 }
 
