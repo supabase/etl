@@ -359,11 +359,7 @@ pub enum PipelineStatus {
     Started,
     Stopping,
     Unknown,
-    Failed {
-        exit_code: Option<i32>,
-        message: Option<String>,
-        reason: Option<String>,
-    },
+    Failed,
 }
 
 #[utoipa::path(
@@ -710,30 +706,20 @@ pub async fn get_pipeline_status(
     // We load the pod phase.
     let pod_phase = k8s_client.get_pod_phase(&prefix).await?;
 
-    // We check the status of the replicator container.
+    // Check if there's a container error.
     //
-    // Note that this is dumping all the logs within the container, meaning that anything on stdout
-    // and stderr will be returned. In case we want to be more careful with what we return we can
-    // embed within the logs some special characters that will be used to determine which error message
-    // to return to the user.
-    let replicator_error = k8s_client.get_replicator_container_error(&prefix).await?;
+    // We are not exposing the error to not leak any internal information of the pod and because we
+    // will expose it through logs.
+    let has_container_error = k8s_client.has_replicator_container_error(&prefix).await?;
 
-    let status = if let Some(replicator_error) = replicator_error {
-        PipelineStatus::Failed {
-            exit_code: replicator_error.exit_code,
-            message: replicator_error.message,
-            reason: replicator_error.reason,
-        }
+    let status = if has_container_error {
+        PipelineStatus::Failed
     } else {
         match pod_phase {
             PodPhase::Pending => PipelineStatus::Starting,
             PodPhase::Running => PipelineStatus::Started,
             PodPhase::Succeeded => PipelineStatus::Stopped,
-            PodPhase::Failed => PipelineStatus::Failed {
-                exit_code: None,
-                message: None,
-                reason: None,
-            },
+            PodPhase::Failed => PipelineStatus::Failed,
             PodPhase::Unknown => PipelineStatus::Unknown,
         }
     };

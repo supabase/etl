@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use async_trait::async_trait;
 use etl_api::k8s_client::{
-    ContainerError, K8sClient, K8sError, PodPhase, TRUSTED_ROOT_CERT_CONFIG_MAP_NAME,
+    K8sClient, K8sError, PodPhase, TRUSTED_ROOT_CERT_CONFIG_MAP_NAME,
     TRUSTED_ROOT_CERT_KEY_NAME,
 };
 use k8s_openapi::api::core::v1::ConfigMap;
@@ -80,21 +80,13 @@ impl K8sClient for MockK8sClient {
         Ok(PodPhase::Running)
     }
 
-    async fn get_replicator_container_error(
+    async fn has_replicator_container_error(
         &self,
         _prefix: &str,
-    ) -> Result<Option<ContainerError>, K8sError> {
-        Ok(None)
+    ) -> Result<bool, K8sError> {
+        Ok(false)
     }
 
-    async fn get_container_logs(
-        &self,
-        _pod_name: &str,
-        _container_name: &str,
-        _previous: bool,
-    ) -> Result<String, K8sError> {
-        Ok(String::new())
-    }
 
     async fn delete_pod(&self, _prefix: &str) -> Result<(), K8sError> {
         Ok(())

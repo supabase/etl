@@ -10,7 +10,7 @@ use tracing::*;
 
 use kube::{
     Client,
-    api::{Api, DeleteParams, LogParams, Patch, PatchParams},
+    api::{Api, DeleteParams, Patch, PatchParams},
 };
 
 #[derive(Debug, Error)]
@@ -28,13 +28,6 @@ pub enum PodPhase {
     Succeeded,
     Failed,
     Unknown,
-}
-
-#[derive(Debug, Clone)]
-pub struct ContainerError {
-    pub exit_code: Option<i32>,
-    pub message: Option<String>,
-    pub reason: Option<String>,
 }
 
 impl From<&str> for PodPhase {
@@ -88,17 +81,11 @@ pub trait K8sClient: Send + Sync {
 
     async fn get_pod_phase(&self, prefix: &str) -> Result<PodPhase, K8sError>;
 
-    async fn get_replicator_container_error(
+    async fn has_replicator_container_error(
         &self,
         prefix: &str,
-    ) -> Result<Option<ContainerError>, K8sError>;
+    ) -> Result<bool, K8sError>;
 
-    async fn get_container_logs(
-        &self,
-        pod_name: &str,
-        container_name: &str,
-        previous: bool,
-    ) -> Result<String, K8sError>;
 
     async fn delete_pod(&self, prefix: &str) -> Result<(), K8sError>;
 }
@@ -534,11 +521,11 @@ impl K8sClient for HttpK8sClient {
         Ok(phase)
     }
 
-    async fn get_replicator_container_error(
+    async fn has_replicator_container_error(
         &self,
         prefix: &str,
-    ) -> Result<Option<ContainerError>, K8sError> {
-        info!("getting replicator error information");
+    ) -> Result<bool, K8sError> {
+        info!("checking for replicator container error");
 
         let pod_name = format!("{prefix}-{STATEFUL_SET_NAME_SUFFIX}-0");
         let pod = match self.pods_api.get(&pod_name).await {
@@ -547,7 +534,7 @@ impl K8sClient for HttpK8sClient {
                 return match e {
                     kube::Error::Api(ref er) => {
                         if er.code == 404 {
-                            return Ok(None);
+                            return Ok(false);
                         }
                         Err(e.into())
                     }
@@ -569,32 +556,17 @@ impl K8sClient for HttpK8sClient {
         });
 
         let Some(container_status) = container_status else {
-            return Ok(None);
+            return Ok(false);
         };
 
-        // Check last terminated state.
-        //
-        // `last_state` is only set when there’s a previous termination, and remains empty if the
-        // container has never failed, so this is what we want, having access to the previous failure
+        // Check last terminated state for non-zero exit code
         if let Some(last_state) = &container_status.last_state {
             if let Some(terminated) = &last_state.terminated {
-                if terminated.exit_code != 0 {
-                    // Fetch logs from the previous container run
-                    let log_message = self
-                        .get_container_logs(&pod_name, &replicator_container_name, true)
-                        .await
-                        .ok();
-
-                    return Ok(Some(ContainerError {
-                        exit_code: Some(terminated.exit_code),
-                        message: log_message.or_else(|| terminated.message.clone()),
-                        reason: terminated.reason.clone(),
-                    }));
-                }
+                return Ok(terminated.exit_code != 0);
             }
         }
 
-        Ok(None)
+        Ok(false)
     }
 
     async fn delete_pod(&self, prefix: &str) -> Result<(), K8sError> {
@@ -618,22 +590,4 @@ impl K8sClient for HttpK8sClient {
         Ok(())
     }
 
-    async fn get_container_logs(
-        &self,
-        pod_name: &str,
-        container_name: &str,
-        previous: bool,
-    ) -> Result<String, K8sError> {
-        let log_params = LogParams {
-            container: Some(container_name.to_string()),
-            tail_lines: Some(50), // Get last 50 lines
-            timestamps: false,
-            previous, // Get logs from previous container instance or not
-            ..Default::default()
-        };
-
-        let logs = self.pods_api.logs(pod_name, &log_params).await?;
-
-        Ok(logs)
-    }
 }
