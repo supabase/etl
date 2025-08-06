@@ -9,6 +9,7 @@ pub enum TableModification<'a> {
     AddColumn { name: &'a str, data_type: &'a str },
     DropColumn { name: &'a str },
     AlterColumn { name: &'a str, alteration: &'a str },
+    ReplicaIdentity { value: &'a str }
 }
 
 pub struct PgDatabase<G> {
@@ -106,6 +107,9 @@ impl<G: GenericClient> PgDatabase<G> {
                 }
                 TableModification::AlterColumn { name, alteration } => {
                     format!("alter column {name} {alteration}")
+                }
+                TableModification::ReplicaIdentity { value } => {
+                    format!("replica identity {value}")
                 }
             })
             .collect::<Vec<_>>()
