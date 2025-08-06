@@ -81,11 +81,7 @@ pub trait K8sClient: Send + Sync {
 
     async fn get_pod_phase(&self, prefix: &str) -> Result<PodPhase, K8sError>;
 
-    async fn has_replicator_container_error(
-        &self,
-        prefix: &str,
-    ) -> Result<bool, K8sError>;
-
+    async fn has_replicator_container_error(&self, prefix: &str) -> Result<bool, K8sError>;
 
     async fn delete_pod(&self, prefix: &str) -> Result<(), K8sError>;
 }
@@ -521,10 +517,7 @@ impl K8sClient for HttpK8sClient {
         Ok(phase)
     }
 
-    async fn has_replicator_container_error(
-        &self,
-        prefix: &str,
-    ) -> Result<bool, K8sError> {
+    async fn has_replicator_container_error(&self, prefix: &str) -> Result<bool, K8sError> {
         info!("checking for replicator container error");
 
         let pod_name = format!("{prefix}-{STATEFUL_SET_NAME_SUFFIX}-0");
@@ -589,5 +582,4 @@ impl K8sClient for HttpK8sClient {
 
         Ok(())
     }
-
 }
