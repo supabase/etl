@@ -179,6 +179,28 @@ pub async fn load_table_schemas(
     Ok(table_schemas.into_values().collect())
 }
 
+/// Deletes all table schemas for a given pipeline from the database.
+///
+/// This function removes all table schema records and their associated columns 
+/// for a specific pipeline. Uses CASCADE delete from the foreign key constraint
+/// to automatically remove related column records.
+pub async fn delete_pipeline_table_schemas(
+    pool: &PgPool,
+    pipeline_id: i64,
+) -> Result<u64, sqlx::Error> {
+    let result = sqlx::query(
+        r#"
+        delete from etl.table_schemas
+        where pipeline_id = $1
+        "#,
+    )
+    .bind(pipeline_id)
+    .execute(pool)
+    .await?;
+
+    Ok(result.rows_affected())
+}
+
 /// Builds a `ColumnSchema` from a database row.
 ///
 /// Assumes all required fields are present (e.g. after INNER JOIN).

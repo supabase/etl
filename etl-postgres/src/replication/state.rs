@@ -308,6 +308,27 @@ pub async fn reset_replication_state(
     Ok(row)
 }
 
+/// Deletes all replication state entries for a pipeline
+/// 
+/// This function removes all replication state records for a given pipeline,
+/// including all historical entries. Used during pipeline cleanup.
+pub async fn delete_pipeline_replication_state(
+    pool: &PgPool,
+    pipeline_id: i64,
+) -> sqlx::Result<u64> {
+    let result = sqlx::query(
+        r#"
+        delete from etl.replication_state 
+        where pipeline_id = $1
+        "#,
+    )
+    .bind(pipeline_id)
+    .execute(pool)
+    .await?;
+
+    Ok(result.rows_affected())
+}
+
 mod lsn_serde {
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
     use tokio_postgres::types::PgLsn;
