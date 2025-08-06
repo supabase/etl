@@ -1,11 +1,3 @@
-use crate::{
-    common::test_app::{TestApp, spawn_test_app},
-    integration::destination_test::create_destination,
-    integration::images_test::create_default_image,
-    integration::sources_test::create_source,
-    integration::tenants_test::create_tenant,
-    integration::tenants_test::create_tenant_with_id_and_name,
-};
 use etl_api::db::pipelines::{OptionalPipelineConfig, PipelineConfig};
 use etl_api::db::sources::SourceConfig;
 use etl_api::routes::pipelines::{
@@ -26,6 +18,15 @@ use secrecy::ExposeSecret;
 use sqlx::PgPool;
 use sqlx::postgres::types::Oid;
 use uuid::Uuid;
+
+use crate::{
+    common::test_app::{TestApp, spawn_test_app},
+    integration::destination_test::create_destination,
+    integration::images_test::create_default_image,
+    integration::sources_test::create_source,
+    integration::tenants_test::create_tenant,
+    integration::tenants_test::create_tenant_with_id_and_name,
+};
 
 pub fn new_pipeline_config() -> PipelineConfig {
     PipelineConfig {
