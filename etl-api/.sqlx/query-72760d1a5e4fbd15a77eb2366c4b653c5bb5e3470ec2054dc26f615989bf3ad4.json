@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            update app.images\n            set is_default = false\n            where is_default = true and id != $1\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "72760d1a5e4fbd15a77eb2366c4b653c5bb5e3470ec2054dc26f615989bf3ad4"
+}
