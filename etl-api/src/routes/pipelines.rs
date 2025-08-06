@@ -144,9 +144,7 @@ impl ResponseError for PipelineError {
             | PipelineError::Database(_)
             | PipelineError::TableLookup(_)
             | PipelineError::InvalidTableReplicationState(_)
-            | PipelineError::MissingTableReplicationState
-            | PipelineError::ReplicationStateCleanup(_)
-            | PipelineError::TableSchemaCleanup(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            | PipelineError::MissingTableReplicationState => StatusCode::INTERNAL_SERVER_ERROR,
             PipelineError::NotRollbackable(_) => StatusCode::BAD_REQUEST,
             PipelineError::PipelineNotFound(_) | PipelineError::ImageNotFoundById(_) => {
                 StatusCode::NOT_FOUND
