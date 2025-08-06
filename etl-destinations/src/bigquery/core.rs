@@ -385,19 +385,13 @@ mod tests {
     #[test]
     fn test_table_name_to_bigquery_table_id_no_underscores() {
         let table_name = TableName::new("schema".to_string(), "table".to_string());
-        assert_eq!(
-            table_name_to_bigquery_table_id(&table_name),
-            "schema_table"
-        );
+        assert_eq!(table_name_to_bigquery_table_id(&table_name), "schema_table");
     }
 
     #[test]
     fn test_table_name_to_bigquery_table_id_with_underscores() {
         let table_name = TableName::new("a_b".to_string(), "c_d".to_string());
-        assert_eq!(
-            table_name_to_bigquery_table_id(&table_name),
-            "a__b_c__d"
-        );
+        assert_eq!(table_name_to_bigquery_table_id(&table_name), "a__b_c__d");
     }
 
     #[test]
@@ -405,10 +399,10 @@ mod tests {
         // These two cases previously collided to "a_b_c"
         let table_name1 = TableName::new("a_b".to_string(), "c".to_string());
         let table_name2 = TableName::new("a".to_string(), "b_c".to_string());
-        
+
         let id1 = table_name_to_bigquery_table_id(&table_name1);
         let id2 = table_name_to_bigquery_table_id(&table_name2);
-        
+
         assert_eq!(id1, "a__b_c");
         assert_eq!(id2, "a_b__c");
         assert_ne!(id1, id2, "Table IDs should not collide");
@@ -422,5 +416,4 @@ mod tests {
             "a____b_c____d"
         );
     }
-
 }
