@@ -1,3 +1,11 @@
+use crate::{
+    common::test_app::{TestApp, spawn_test_app},
+    integration::destination_test::create_destination,
+    integration::images_test::create_default_image,
+    integration::sources_test::create_source,
+    integration::tenants_test::create_tenant,
+    integration::tenants_test::create_tenant_with_id_and_name,
+};
 use etl_api::db::pipelines::{OptionalPipelineConfig, PipelineConfig};
 use etl_api::db::sources::SourceConfig;
 use etl_api::routes::pipelines::{
@@ -10,6 +18,7 @@ use etl_api::routes::pipelines::{
 use etl_api::routes::sources::{CreateSourceRequest, CreateSourceResponse};
 use etl_config::SerializableSecretString;
 use etl_config::shared::{BatchConfig, PgConnectionConfig};
+use etl_postgres::replication::connect_to_source_database;
 use etl_postgres::sqlx::test_utils::{create_pg_database, drop_pg_database};
 use etl_telemetry::init_test_tracing;
 use reqwest::StatusCode;
@@ -17,15 +26,6 @@ use secrecy::ExposeSecret;
 use sqlx::PgPool;
 use sqlx::postgres::types::Oid;
 use uuid::Uuid;
-
-use crate::{
-    common::test_app::{TestApp, spawn_test_app},
-    integration::destination_test::create_destination,
-    integration::images_test::create_default_image,
-    integration::sources_test::create_source,
-    integration::tenants_test::create_tenant,
-    integration::tenants_test::create_tenant_with_id_and_name,
-};
 
 pub fn new_pipeline_config() -> PipelineConfig {
     PipelineConfig {
@@ -149,29 +149,34 @@ async fn setup_pipeline_with_source_db() -> (TestApp, String, i64, PgPool, PgCon
     .await;
 
     // We run the migrations to create all the tables used by `etl`.
-    run_etl_migrations_on_source_db(&source_pool).await;
+    run_etl_migrations_on_source_db(&source_db_config).await;
 
     (app, tenant_id, pipeline_id, source_pool, source_db_config)
 }
 
 /// Runs etl migrations on the source database.
-async fn run_etl_migrations_on_source_db(source_pool: &PgPool) {
+async fn run_etl_migrations_on_source_db(source_db_config: &PgConnectionConfig) {
+    // We create a pool just for the migrations.
+    let source_pool = connect_to_source_database(source_db_config, 1, 1)
+        .await
+        .unwrap();
+
     // Create the `etl` schema first.
     sqlx::query("create schema if not exists etl")
-        .execute(source_pool)
+        .execute(&source_pool)
         .await
         .unwrap();
 
     // Set the `etl` schema as search path (this is done to have the migrations metadata table created
     // by sqlx within the `etl` schema).
     sqlx::query("set search_path = 'etl';")
-        .execute(source_pool)
+        .execute(&source_pool)
         .await
         .unwrap();
 
     // Run replicator migrations to create the state store tables.
     sqlx::migrate!("../etl-replicator/migrations")
-        .run(source_pool)
+        .run(&source_pool)
         .await
         .unwrap();
 }
@@ -274,6 +279,7 @@ async fn create_test_source_database(
 ) -> (PgPool, i64, PgConnectionConfig) {
     let mut source_db_config = app.database_config().clone();
     source_db_config.name = format!("test_source_db_{}", Uuid::new_v4());
+
     let source_pool = create_pg_database(&source_db_config).await;
 
     let source_config = SourceConfig {
