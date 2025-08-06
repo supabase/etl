@@ -33,8 +33,17 @@ fn generate_sequence_number(start_lsn: PgLsn, commit_lsn: PgLsn) -> String {
 }
 
 /// Returns the [`BigQueryTableId`] for a supplied [`TableName`].
+///
+/// Escapes underscores in schema and table names to prevent collisions when combining them.
+/// Original underscores become double underscores, and a single underscore separates schema from table.
+/// This ensures that `a_b.c` and `a.b_c` map to different BigQuery table names.
+///
+/// We opted for this escaping strategy since it's easy to undo on the reading end. Just split at a
+/// single `_` and revert each `__` into `_`.
 pub fn table_name_to_bigquery_table_id(table_name: &TableName) -> BigQueryTableId {
-    format!("{}_{}", table_name.schema, table_name.name)
+    let escaped_schema = table_name.schema.replace('_', "__");
+    let escaped_table = table_name.name.replace('_', "__");
+    format!("{escaped_schema}_{escaped_table}")
 }
 
 /// Internal state for [`BigQueryDestination`] wrapped in `Arc<Mutex<>>`.
@@ -372,4 +381,46 @@ mod tests {
             "0000000000000000/ffffffffffffffff"
         );
     }
+
+    #[test]
+    fn test_table_name_to_bigquery_table_id_no_underscores() {
+        let table_name = TableName::new("schema".to_string(), "table".to_string());
+        assert_eq!(
+            table_name_to_bigquery_table_id(&table_name),
+            "schema_table"
+        );
+    }
+
+    #[test]
+    fn test_table_name_to_bigquery_table_id_with_underscores() {
+        let table_name = TableName::new("a_b".to_string(), "c_d".to_string());
+        assert_eq!(
+            table_name_to_bigquery_table_id(&table_name),
+            "a__b_c__d"
+        );
+    }
+
+    #[test]
+    fn test_table_name_to_bigquery_table_id_collision_prevention() {
+        // These two cases previously collided to "a_b_c"
+        let table_name1 = TableName::new("a_b".to_string(), "c".to_string());
+        let table_name2 = TableName::new("a".to_string(), "b_c".to_string());
+        
+        let id1 = table_name_to_bigquery_table_id(&table_name1);
+        let id2 = table_name_to_bigquery_table_id(&table_name2);
+        
+        assert_eq!(id1, "a__b_c");
+        assert_eq!(id2, "a_b__c");
+        assert_ne!(id1, id2, "Table IDs should not collide");
+    }
+
+    #[test]
+    fn test_table_name_to_bigquery_table_id_multiple_underscores() {
+        let table_name = TableName::new("a__b".to_string(), "c__d".to_string());
+        assert_eq!(
+            table_name_to_bigquery_table_id(&table_name),
+            "a____b_c____d"
+        );
+    }
+
 }
