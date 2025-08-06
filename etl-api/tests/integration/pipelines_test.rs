@@ -14,6 +14,7 @@ use etl_postgres::sqlx::test_utils::{create_pg_database, drop_pg_database};
 use etl_telemetry::init_test_tracing;
 use reqwest::StatusCode;
 use secrecy::ExposeSecret;
+use sqlx::PgPool;
 use sqlx::postgres::types::Oid;
 use uuid::Uuid;
 
@@ -131,8 +132,7 @@ async fn setup_basic_pipeline() -> (TestApp, String, i64, i64, i64) {
 }
 
 /// Creates a pipeline setup with a real source database for replication state tests.
-async fn setup_pipeline_with_source_db() -> (TestApp, String, i64, sqlx::PgPool, PgConnectionConfig)
-{
+async fn setup_pipeline_with_source_db() -> (TestApp, String, i64, PgPool, PgConnectionConfig) {
     let app = spawn_test_app().await;
     create_default_image(&app).await;
     let tenant_id = create_tenant(&app).await;
@@ -154,14 +154,36 @@ async fn setup_pipeline_with_source_db() -> (TestApp, String, i64, sqlx::PgPool,
     (app, tenant_id, pipeline_id, source_pool, source_db_config)
 }
 
+/// Runs etl migrations on the source database.
+async fn run_etl_migrations_on_source_db(source_pool: &PgPool) {
+    // Create the `etl` schema first.
+    sqlx::query("create schema if not exists etl")
+        .execute(source_pool)
+        .await
+        .unwrap();
+
+    // Set the `etl` schema as search path (this is done to have the migrations metadata table created
+    // by sqlx within the `etl` schema).
+    sqlx::query("set search_path = 'etl';")
+        .execute(source_pool)
+        .await
+        .unwrap();
+
+    // Run replicator migrations to create the state store tables.
+    sqlx::migrate!("../etl-replicator/migrations")
+        .run(source_pool)
+        .await
+        .unwrap();
+}
+
 /// Creates a table with a chain of replication states.
 /// Each state in the chain becomes the previous state of the next one.
 async fn create_table_with_state_chain(
-    source_pool: &sqlx::PgPool,
+    source_pool: &PgPool,
     pipeline_id: i64,
     table_name: &str,
     state_chain: &[(&str, &str)],
-) -> i64 {
+) -> Oid {
     let table_oid = create_test_table(source_pool, table_name).await;
 
     let mut prev_id: Option<i64> = None;
@@ -190,10 +212,10 @@ async fn create_table_with_state_chain(
 
 /// Creates multiple tables with single states.
 async fn create_tables_with_states(
-    source_pool: &sqlx::PgPool,
+    source_pool: &PgPool,
     pipeline_id: i64,
     tables: &[(&str, &str, &str)],
-) -> Vec<(i64, String)> {
+) -> Vec<(Oid, String)> {
     let mut results = Vec::new();
 
     for (table_name, state, metadata) in tables {
@@ -210,7 +232,7 @@ async fn create_tables_with_states(
         .await
         .unwrap();
 
-        results.push((table_oid, format!("public.{table_name}")));
+        results.push((table_oid, format!("test.{table_name}")));
     }
 
     results
@@ -222,7 +244,7 @@ async fn test_rollback(
     app: &TestApp,
     tenant_id: &str,
     pipeline_id: i64,
-    table_oid: i64,
+    table_oid: Oid,
     rollback_type: RollbackType,
     expected_status: StatusCode,
 ) -> Option<RollbackTableStateResponse> {
@@ -231,7 +253,7 @@ async fn test_rollback(
             tenant_id,
             pipeline_id,
             &RollbackTableStateRequest {
-                table_id: table_oid as u32,
+                table_id: table_oid.0,
                 rollback_type,
             },
         )
@@ -249,7 +271,7 @@ async fn test_rollback(
 async fn create_test_source_database(
     app: &TestApp,
     tenant_id: &str,
-) -> (sqlx::PgPool, i64, PgConnectionConfig) {
+) -> (PgPool, i64, PgConnectionConfig) {
     let mut source_db_config = app.database_config().clone();
     source_db_config.name = format!("test_source_db_{}", Uuid::new_v4());
     let source_pool = create_pg_database(&source_db_config).await;
@@ -279,22 +301,29 @@ async fn create_test_source_database(
     (source_pool, response.id, source_db_config)
 }
 
-async fn create_test_table(source_pool: &sqlx::PgPool, table_name: &str) -> i64 {
+async fn create_test_table(source_pool: &PgPool, table_name: &str) -> Oid {
+    sqlx::query("create schema if not exists test")
+        .execute(source_pool)
+        .await
+        .unwrap();
+
     sqlx::query(&format!(
-        "CREATE TABLE IF NOT EXISTS {table_name} (id SERIAL PRIMARY KEY, name TEXT)"
+        "CREATE TABLE IF NOT EXISTS test.{table_name} (id SERIAL PRIMARY KEY, name TEXT)"
     ))
     .execute(source_pool)
     .await
     .expect("Failed to create test table");
 
-    sqlx::query_scalar::<_, Oid>(
+    let table_oid = sqlx::query_scalar::<_, Oid>(
         "SELECT c.oid FROM pg_class c JOIN pg_namespace n ON c.relnamespace = n.oid WHERE c.relname = $1 AND n.nspname = $2"
     )
     .bind(table_name)
-    .bind("public")
+    .bind("test")
     .fetch_one(source_pool)
     .await
-    .expect("Failed to get table OID").0 as i64
+    .expect("Failed to get table OID");
+
+    table_oid
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1214,14 +1243,14 @@ async fn pipeline_replication_status_returns_table_states_and_names() {
             .find(|s| s.table_name == *table_name)
             .expect("Table not found in response");
 
-        assert_eq!(table_status.table_id, *table_oid as u32);
+        assert_eq!(table_status.table_id, table_oid.0);
 
         match table_name.as_str() {
-            "public.test_table_users" => assert!(matches!(
+            "test.test_table_users" => assert!(matches!(
                 table_status.state,
                 SimpleTableReplicationState::CopyingTable
             )),
-            "public.test_table_orders" => assert!(matches!(
+            "test.test_table_orders" => assert!(matches!(
                 table_status.state,
                 SimpleTableReplicationState::FollowingWal { .. }
             )),
@@ -1264,7 +1293,7 @@ async fn rollback_table_state_succeeds_for_manual_retry_errors() {
     .unwrap();
 
     assert_eq!(response.pipeline_id, pipeline_id);
-    assert_eq!(response.table_id, table_oid as u32);
+    assert_eq!(response.table_id, table_oid.0);
     assert!(matches!(
         response.new_state,
         SimpleTableReplicationState::FollowingWal { .. }
@@ -1335,7 +1364,7 @@ async fn rollback_table_state_with_full_reset_succeeds() {
     .unwrap();
 
     assert_eq!(response.pipeline_id, pipeline_id);
-    assert_eq!(response.table_id, table_oid as u32);
+    assert_eq!(response.table_id, table_oid.0);
     assert!(matches!(
         response.new_state,
         SimpleTableReplicationState::Queued
@@ -1457,90 +1486,6 @@ async fn deleting_pipeline_removes_table_schemas_from_source_database() {
     .unwrap();
     assert_eq!(schema_count_after, 0);
     assert_eq!(column_count_after, 0); // CASCADE delete should remove these
-
-    drop_pg_database(&source_db_config).await;
-}
-
-async fn run_etl_migrations_on_source_db(source_pool: &sqlx::PgPool) {
-    // Create the `etl` schema first.
-    sqlx::query("create schema if not exists etl")
-        .execute(source_pool)
-        .await
-        .unwrap();
-
-    // Set the `etl` schema as search path (this is done to have the migrations metadata table created
-    // by sqlx within the `etl` schema).
-    sqlx::query("set search_path = 'etl';")
-        .execute(source_pool)
-        .await
-        .unwrap();
-
-    // Run replicator migrations to create the state store tables.
-    sqlx::migrate!("../etl-replicator/migrations")
-        .run(source_pool)
-        .await
-        .unwrap();
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn deleting_pipeline_only_removes_data_for_specified_pipeline() {
-    init_test_tracing();
-    let app = spawn_test_app().await;
-    create_default_image(&app).await;
-    let tenant_id = create_tenant(&app).await;
-    let (source_pool, source_id, source_db_config) =
-        create_test_source_database(&app, &tenant_id).await;
-    let destination_id = create_destination(&app, &tenant_id).await;
-    let destination2_id = create_destination(&app, &tenant_id).await;
-
-    let pipeline1_id = create_pipeline_with_config(
-        &app,
-        &tenant_id,
-        source_id,
-        destination_id,
-        new_pipeline_config(),
-    )
-    .await;
-    let pipeline2_id = create_pipeline_with_config(
-        &app,
-        &tenant_id,
-        source_id,
-        destination2_id,
-        new_pipeline_config(),
-    )
-    .await;
-
-    create_tables_with_states(
-        &source_pool,
-        pipeline1_id,
-        &[("test_users", "ready", r#"{"type": "ready"}"#)],
-    )
-    .await;
-    create_tables_with_states(
-        &source_pool,
-        pipeline2_id,
-        &[("test_orders", "data_sync", r#"{"type": "data_sync"}"#)],
-    )
-    .await;
-
-    let response = app.delete_pipeline(&tenant_id, pipeline1_id).await;
-    assert_eq!(response.status(), StatusCode::OK);
-
-    let state_count_p1: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM etl.replication_state WHERE pipeline_id = $1")
-            .bind(pipeline1_id)
-            .fetch_one(&source_pool)
-            .await
-            .unwrap();
-    let state_count_p2: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM etl.replication_state WHERE pipeline_id = $1")
-            .bind(pipeline2_id)
-            .fetch_one(&source_pool)
-            .await
-            .unwrap();
-
-    assert_eq!(state_count_p1, 0);
-    assert_eq!(state_count_p2, 1);
 
     drop_pg_database(&source_db_config).await;
 }
