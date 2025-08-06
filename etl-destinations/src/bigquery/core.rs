@@ -46,6 +46,11 @@ fn generate_sequence_number(start_lsn: PgLsn, commit_lsn: PgLsn) -> String {
 ///
 /// We opted for this escaping strategy since it's easy to undo on the reading end. Just split at a
 /// single `_` and revert each `__` into `_`.
+///
+/// BigQuery accepts up to 1024 UTF-8 characters, whereas Postgres names operate with a maximum size
+/// determined by `NAMEDATALEN`. We assume that most people are running this as default value, which
+/// is 63, meaning that in the worst case of a schema name and table name containing only _, the resulting
+/// string will be made up of (63 * 2) + 1 + (63 * 2) = 253 characters which is much less than 1024.
 pub fn table_name_to_bigquery_table_id(table_name: &TableName) -> BigQueryTableId {
     let escaped_schema = table_name.schema.replace(
         BIGQUERY_TABLE_ID_DELIMITER,
