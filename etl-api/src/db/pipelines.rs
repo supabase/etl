@@ -254,8 +254,7 @@ where
 
     let mut pipelines = Vec::with_capacity(records.len());
     for record in records {
-        let config = deserialize_from_value::<PipelineConfig>(record.config.clone())
-            .expect("failed to deserialize pipeline config");
+        let config = deserialize_from_value::<PipelineConfig>(record.config.clone())?;
 
         pipelines.push(Pipeline {
             id: record.id,
