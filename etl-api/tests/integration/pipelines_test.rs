@@ -138,7 +138,6 @@ async fn setup_pipeline_with_source_db() -> (TestApp, String, i64, sqlx::PgPool,
     let tenant_id = create_tenant(&app).await;
     let (source_pool, source_id, source_db_config) =
         create_test_source_database(&app, &tenant_id).await;
-    run_etl_migrations_on_source_db(&source_pool).await;
     let destination_id = create_destination(&app, &tenant_id).await;
     let pipeline_id = create_pipeline_with_config(
         &app,
@@ -148,6 +147,9 @@ async fn setup_pipeline_with_source_db() -> (TestApp, String, i64, sqlx::PgPool,
         new_pipeline_config(),
     )
     .await;
+
+    // We run the migrations to create all the tables used by `etl`.
+    run_etl_migrations_on_source_db(&source_pool).await;
 
     (app, tenant_id, pipeline_id, source_pool, source_db_config)
 }
@@ -1359,8 +1361,6 @@ async fn deleting_pipeline_removes_replication_state_from_source_database() {
     let (app, tenant_id, pipeline_id, source_pool, source_db_config) =
         setup_pipeline_with_source_db().await;
 
-    // Use production migrations instead of test schema
-    run_etl_migrations_on_source_db(&source_pool).await;
     create_tables_with_states(
         &source_pool,
         pipeline_id,
@@ -1399,9 +1399,6 @@ async fn deleting_pipeline_removes_table_schemas_from_source_database() {
 
     let (app, tenant_id, pipeline_id, source_pool, source_db_config) =
         setup_pipeline_with_source_db().await;
-
-    // Run actual production migrations instead of test schema
-    run_etl_migrations_on_source_db(&source_pool).await;
 
     let table1_oid = create_test_table(&source_pool, "test_users").await;
     let table2_oid = create_test_table(&source_pool, "test_orders").await;
@@ -1465,18 +1462,24 @@ async fn deleting_pipeline_removes_table_schemas_from_source_database() {
 }
 
 async fn run_etl_migrations_on_source_db(source_pool: &sqlx::PgPool) {
+    // Create the `etl` schema first.
     sqlx::query("create schema if not exists etl")
         .execute(source_pool)
         .await
         .unwrap();
+
+    // Set the `etl` schema as search path (this is done to have the migrations metadata table created
+    // by sqlx within the `etl` schema).
     sqlx::query("set search_path = 'etl';")
         .execute(source_pool)
         .await
         .unwrap();
 
-    // Run the replicator migrations in order
-    let migrator = sqlx::migrate!("../etl-replicator/migrations");
-    migrator.run(source_pool).await.unwrap();
+    // Run replicator migrations to create the state store tables.
+    sqlx::migrate!("../etl-replicator/migrations")
+        .run(source_pool)
+        .await
+        .unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread")]
