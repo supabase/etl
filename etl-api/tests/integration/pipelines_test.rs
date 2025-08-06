@@ -650,6 +650,22 @@ async fn a_non_existing_pipeline_cant_be_deleted() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn deleting_a_pipeline_succeeds() {
+    init_test_tracing();
+    let (app, tenant_id, pipeline_id, _, source_db_config) = setup_pipeline_with_source_db().await;
+
+    // The deletion should fail.
+    let response = app.delete_pipeline(&tenant_id, pipeline_id).await;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // The pipeline should still be there.
+    let response = app.read_pipeline(&tenant_id, pipeline_id).await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+    drop_pg_database(&source_db_config).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn all_pipelines_can_be_read() {
     init_test_tracing();
     // Arrange
@@ -1458,7 +1474,7 @@ async fn deleting_pipeline_removes_table_schemas_from_source_database() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn deleting_pipeline_succeeds_even_if_source_database_cleanup_fails() {
+async fn deleting_a_pipeline_is_rolled_back_if_state_deletion_fails() {
     init_test_tracing();
     let (app, tenant_id, pipeline_id, source_pool, source_db_config) =
         setup_pipeline_with_source_db().await;

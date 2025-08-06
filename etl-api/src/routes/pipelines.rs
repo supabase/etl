@@ -554,10 +554,7 @@ pub async fn delete_pipeline(
     // in the api database.
     let mut source_txn = source_pool.begin().await?;
 
-    // Delete replication state (best effort)
     state::delete_pipeline_replication_state(source_txn.deref_mut(), pipeline_id).await?;
-
-    // Delete table schemas (best effort)
     schema::delete_pipeline_table_schemas(source_txn.deref_mut(), pipeline_id).await?;
 
     // Here we finish `txn` before `source_txn` since we want the guarantee that the pipeline has
