@@ -181,7 +181,7 @@ pub async fn load_table_schemas(
 
 /// Deletes all table schemas for a given pipeline from the database.
 ///
-/// This function removes all table schema records and their associated columns 
+/// This function removes all table schema records and their associated columns
 /// for a specific pipeline. Uses CASCADE delete from the foreign key constraint
 /// to automatically remove related column records.
 pub async fn delete_pipeline_table_schemas(

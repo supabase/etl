@@ -302,27 +302,36 @@ pub async fn create_etl_table_schema(source_pool: &sqlx::PgPool) {
         .await
         .expect("Failed to create etl schema");
 
-    // Create the table_state enum
-    sqlx::query(
-        r#"
-        CREATE TYPE etl.table_state AS ENUM (
-            'init',
-            'data_sync',
-            'finished_copy',
-            'sync_done',
-            'ready',
-            'errored'
-        )
-    "#,
+    // Create the table_state enum (check if exists first)
+    let enum_exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'table_state' AND typnamespace = (SELECT oid FROM pg_namespace WHERE nspname = 'etl'))"
     )
-    .execute(source_pool)
+    .fetch_one(source_pool)
     .await
-    .expect("Failed to create table_state enum");
+    .expect("Failed to check if table_state enum exists");
+
+    if !enum_exists {
+        sqlx::query(
+            r#"
+            CREATE TYPE etl.table_state AS ENUM (
+                'init',
+                'data_sync',
+                'finished_copy',
+                'sync_done',
+                'ready',
+                'errored'
+            )
+        "#,
+        )
+        .execute(source_pool)
+        .await
+        .expect("Failed to create table_state enum");
+    }
 
     // Create the replication_state table
     sqlx::query(
         r#"
-        CREATE TABLE etl.replication_state (
+        CREATE TABLE IF NOT EXISTS etl.replication_state (
             id BIGSERIAL PRIMARY KEY,
             pipeline_id BIGINT NOT NULL,
             table_id OID NOT NULL,
@@ -336,6 +345,47 @@ pub async fn create_etl_table_schema(source_pool: &sqlx::PgPool) {
     .execute(source_pool)
     .await
     .expect("Failed to create replication_state table");
+
+    // Create table_schemas table for testing schema cleanup
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS etl.table_schemas (
+            id BIGSERIAL PRIMARY KEY,
+            pipeline_id BIGINT NOT NULL,
+            table_id OID NOT NULL,
+            schema_name TEXT NOT NULL,
+            table_name TEXT NOT NULL,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            UNIQUE (pipeline_id, table_id)
+        )
+        "#,
+    )
+    .execute(source_pool)
+    .await
+    .expect("Failed to create table_schemas table");
+
+    // Create table_columns table for testing schema cleanup
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS etl.table_columns (
+            id BIGSERIAL PRIMARY KEY,
+            table_schema_id BIGINT NOT NULL REFERENCES etl.table_schemas(id) ON DELETE CASCADE,
+            column_name TEXT NOT NULL,
+            column_type TEXT NOT NULL,
+            type_modifier INTEGER NOT NULL,
+            nullable BOOLEAN NOT NULL,
+            primary_key BOOLEAN NOT NULL,
+            column_order INTEGER NOT NULL,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            UNIQUE (table_schema_id, column_name),
+            UNIQUE (table_schema_id, column_order)
+        )
+        "#,
+    )
+    .execute(source_pool)
+    .await
+    .expect("Failed to create table_columns table");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1392,6 +1442,455 @@ async fn rollback_table_state_with_full_reset_succeeds() {
     .await
     .unwrap();
     assert_eq!(count, 1);
+
+    drop_pg_database(&source_db_config).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn deleting_pipeline_removes_replication_state_from_source_database() {
+    init_test_tracing();
+
+    // Arrange
+    let (app, tenant_id, pipeline_id, source_pool, source_db_config) =
+        setup_pipeline_with_source_db().await;
+
+    // Create test tables with replication state in the source database
+    create_tables_with_states(
+        &source_pool,
+        pipeline_id,
+        &[
+            ("test_users", "ready", r#"{"type": "ready"}"#),
+            ("test_orders", "data_sync", r#"{"type": "data_sync"}"#),
+            ("test_products", "errored", r#"{"type": "errored", "reason": "connection failed", "retry_policy": {"type": "manual_retry"}}"#),
+        ],
+    )
+    .await;
+
+    // Verify replication state exists before deletion
+    let count_before: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM etl.replication_state WHERE pipeline_id = $1")
+            .bind(pipeline_id)
+            .fetch_one(&source_pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        count_before, 3,
+        "Should have 3 replication state entries before deletion"
+    );
+
+    // Act - Delete the pipeline
+    let response = app.delete_pipeline(&tenant_id, pipeline_id).await;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // Assert - Pipeline should be deleted from main database
+    let response = app.read_pipeline(&tenant_id, pipeline_id).await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+    // Assert - Replication state should be deleted from source database
+    let count_after: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM etl.replication_state WHERE pipeline_id = $1")
+            .bind(pipeline_id)
+            .fetch_one(&source_pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        count_after, 0,
+        "All replication state entries should be deleted"
+    );
+
+    drop_pg_database(&source_db_config).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn deleting_pipeline_removes_table_schemas_from_source_database() {
+    init_test_tracing();
+
+    // Arrange
+    let (app, tenant_id, pipeline_id, source_pool, source_db_config) =
+        setup_pipeline_with_source_db().await;
+
+    // Create table schemas in the source database
+    create_etl_table_schema(&source_pool).await;
+
+    let table1_oid = create_test_table(&source_pool, "test_users").await;
+    let table2_oid = create_test_table(&source_pool, "test_orders").await;
+
+    // Insert table schemas
+    sqlx::query(
+        r#"
+        INSERT INTO etl.table_schemas (pipeline_id, table_id, schema_name, table_name)
+        VALUES ($1, $2, 'public', 'test_users')
+        "#,
+    )
+    .bind(pipeline_id)
+    .bind(table1_oid)
+    .execute(&source_pool)
+    .await
+    .unwrap();
+
+    let table_schema_id = sqlx::query_scalar::<_, i64>(
+        r#"
+        INSERT INTO etl.table_schemas (pipeline_id, table_id, schema_name, table_name)
+        VALUES ($1, $2, 'public', 'test_orders')
+        RETURNING id
+        "#,
+    )
+    .bind(pipeline_id)
+    .bind(table2_oid)
+    .fetch_one(&source_pool)
+    .await
+    .unwrap();
+
+    // Insert table columns
+    sqlx::query(
+        r#"
+        INSERT INTO etl.table_columns 
+        (table_schema_id, column_name, column_type, type_modifier, nullable, primary_key, column_order)
+        VALUES ($1, 'id', 'INT4', -1, false, true, 0)
+        "#,
+    )
+    .bind(table_schema_id)
+    .execute(&source_pool)
+    .await
+    .unwrap();
+
+    sqlx::query(
+        r#"
+        INSERT INTO etl.table_columns 
+        (table_schema_id, column_name, column_type, type_modifier, nullable, primary_key, column_order)
+        VALUES ($1, 'name', 'TEXT', -1, true, false, 1)
+        "#,
+    )
+    .bind(table_schema_id)
+    .execute(&source_pool)
+    .await
+    .unwrap();
+
+    // Verify table schemas exist before deletion
+    let schema_count_before: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM etl.table_schemas WHERE pipeline_id = $1")
+            .bind(pipeline_id)
+            .fetch_one(&source_pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        schema_count_before, 2,
+        "Should have 2 table schemas before deletion"
+    );
+
+    let column_count_before: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM etl.table_columns WHERE table_schema_id = $1")
+            .bind(table_schema_id)
+            .fetch_one(&source_pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        column_count_before, 2,
+        "Should have 2 table columns before deletion"
+    );
+
+    // Act - Delete the pipeline
+    let response = app.delete_pipeline(&tenant_id, pipeline_id).await;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // Assert - Pipeline should be deleted from main database
+    let response = app.read_pipeline(&tenant_id, pipeline_id).await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+    // Assert - Table schemas should be deleted from source database
+    let schema_count_after: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM etl.table_schemas WHERE pipeline_id = $1")
+            .bind(pipeline_id)
+            .fetch_one(&source_pool)
+            .await
+            .unwrap();
+    assert_eq!(schema_count_after, 0, "All table schemas should be deleted");
+
+    // Assert - Table columns should be cascade deleted
+    let column_count_after: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM etl.table_columns WHERE table_schema_id = $1")
+            .bind(table_schema_id)
+            .fetch_one(&source_pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        column_count_after, 0,
+        "All table columns should be cascade deleted"
+    );
+
+    drop_pg_database(&source_db_config).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn deleting_pipeline_cleans_up_both_replication_state_and_table_schemas() {
+    init_test_tracing();
+
+    // Arrange
+    let (app, tenant_id, pipeline_id, source_pool, source_db_config) =
+        setup_pipeline_with_source_db().await;
+
+    // Create comprehensive test data with both replication state and table schemas
+    create_tables_with_states(
+        &source_pool,
+        pipeline_id,
+        &[
+            ("test_users", "ready", r#"{"type": "ready"}"#),
+            ("test_orders", "data_sync", r#"{"type": "data_sync"}"#),
+        ],
+    )
+    .await;
+
+    // Create table schemas for the same tables
+    let table1_oid = create_test_table(&source_pool, "test_products").await;
+    let table2_oid = create_test_table(&source_pool, "test_categories").await;
+
+    sqlx::query(
+        r#"
+        INSERT INTO etl.table_schemas (pipeline_id, table_id, schema_name, table_name)
+        VALUES ($1, $2, 'public', 'test_products'), ($1, $3, 'public', 'test_categories')
+        "#,
+    )
+    .bind(pipeline_id)
+    .bind(table1_oid)
+    .bind(table2_oid)
+    .execute(&source_pool)
+    .await
+    .unwrap();
+
+    // Verify both types of data exist before deletion
+    let state_count_before: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM etl.replication_state WHERE pipeline_id = $1")
+            .bind(pipeline_id)
+            .fetch_one(&source_pool)
+            .await
+            .unwrap();
+
+    let schema_count_before: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM etl.table_schemas WHERE pipeline_id = $1")
+            .bind(pipeline_id)
+            .fetch_one(&source_pool)
+            .await
+            .unwrap();
+
+    assert_eq!(
+        state_count_before, 2,
+        "Should have 2 replication state entries"
+    );
+    assert_eq!(schema_count_before, 2, "Should have 2 table schemas");
+
+    // Act - Delete the pipeline
+    let response = app.delete_pipeline(&tenant_id, pipeline_id).await;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // Assert - Pipeline should be deleted from main database
+    let response = app.read_pipeline(&tenant_id, pipeline_id).await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+    // Assert - Both replication state and table schemas should be deleted
+    let state_count_after: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM etl.replication_state WHERE pipeline_id = $1")
+            .bind(pipeline_id)
+            .fetch_one(&source_pool)
+            .await
+            .unwrap();
+
+    let schema_count_after: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM etl.table_schemas WHERE pipeline_id = $1")
+            .bind(pipeline_id)
+            .fetch_one(&source_pool)
+            .await
+            .unwrap();
+
+    assert_eq!(
+        state_count_after, 0,
+        "All replication state should be deleted"
+    );
+    assert_eq!(schema_count_after, 0, "All table schemas should be deleted");
+
+    drop_pg_database(&source_db_config).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn deleting_pipeline_only_removes_data_for_specified_pipeline() {
+    init_test_tracing();
+
+    // Arrange - Create two pipelines to ensure we only delete data for the target pipeline
+    let app = spawn_test_app().await;
+    create_default_image(&app).await;
+    let tenant_id = create_tenant(&app).await;
+    let (source_pool, source_id, source_db_config) =
+        create_test_source_database(&app, &tenant_id).await;
+    let destination_id = create_destination(&app, &tenant_id).await;
+
+    // Create first pipeline
+    let pipeline1_id = create_pipeline_with_config(
+        &app,
+        &tenant_id,
+        source_id,
+        destination_id,
+        new_pipeline_config(),
+    )
+    .await;
+
+    // Create second pipeline with same source (different destination)
+    let destination2_id = create_destination(&app, &tenant_id).await;
+    let pipeline2_id = create_pipeline_with_config(
+        &app,
+        &tenant_id,
+        source_id,
+        destination2_id,
+        new_pipeline_config(),
+    )
+    .await;
+
+    // Create test data for both pipelines
+    create_tables_with_states(
+        &source_pool,
+        pipeline1_id,
+        &[("test_users", "ready", r#"{"type": "ready"}"#)],
+    )
+    .await;
+
+    create_tables_with_states(
+        &source_pool,
+        pipeline2_id,
+        &[("test_orders", "data_sync", r#"{"type": "data_sync"}"#)],
+    )
+    .await;
+
+    // Create table schemas for both pipelines
+    let table1_oid = create_test_table(&source_pool, "schema_test1").await;
+    let table2_oid = create_test_table(&source_pool, "schema_test2").await;
+
+    sqlx::query(
+        r#"
+        INSERT INTO etl.table_schemas (pipeline_id, table_id, schema_name, table_name)
+        VALUES ($1, $2, 'public', 'schema_test1'), ($3, $4, 'public', 'schema_test2')
+        "#,
+    )
+    .bind(pipeline1_id)
+    .bind(table1_oid)
+    .bind(pipeline2_id)
+    .bind(table2_oid)
+    .execute(&source_pool)
+    .await
+    .unwrap();
+
+    // Verify both pipelines have data
+    let state_count_p1_before: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM etl.replication_state WHERE pipeline_id = $1")
+            .bind(pipeline1_id)
+            .fetch_one(&source_pool)
+            .await
+            .unwrap();
+
+    let state_count_p2_before: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM etl.replication_state WHERE pipeline_id = $1")
+            .bind(pipeline2_id)
+            .fetch_one(&source_pool)
+            .await
+            .unwrap();
+
+    assert_eq!(
+        state_count_p1_before, 1,
+        "Pipeline 1 should have 1 state entry"
+    );
+    assert_eq!(
+        state_count_p2_before, 1,
+        "Pipeline 2 should have 1 state entry"
+    );
+
+    // Act - Delete only pipeline1
+    let response = app.delete_pipeline(&tenant_id, pipeline1_id).await;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // Assert - Pipeline1 should be deleted, Pipeline2 should remain
+    let response = app.read_pipeline(&tenant_id, pipeline1_id).await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+    let response = app.read_pipeline(&tenant_id, pipeline2_id).await;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // Assert - Only Pipeline1's data should be deleted from source database
+    let state_count_p1_after: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM etl.replication_state WHERE pipeline_id = $1")
+            .bind(pipeline1_id)
+            .fetch_one(&source_pool)
+            .await
+            .unwrap();
+
+    let state_count_p2_after: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM etl.replication_state WHERE pipeline_id = $1")
+            .bind(pipeline2_id)
+            .fetch_one(&source_pool)
+            .await
+            .unwrap();
+
+    let schema_count_p1_after: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM etl.table_schemas WHERE pipeline_id = $1")
+            .bind(pipeline1_id)
+            .fetch_one(&source_pool)
+            .await
+            .unwrap();
+
+    let schema_count_p2_after: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM etl.table_schemas WHERE pipeline_id = $1")
+            .bind(pipeline2_id)
+            .fetch_one(&source_pool)
+            .await
+            .unwrap();
+
+    assert_eq!(
+        state_count_p1_after, 0,
+        "Pipeline1's state should be deleted"
+    );
+    assert_eq!(state_count_p2_after, 1, "Pipeline2's state should remain");
+    assert_eq!(
+        schema_count_p1_after, 0,
+        "Pipeline1's schemas should be deleted"
+    );
+    assert_eq!(
+        schema_count_p2_after, 1,
+        "Pipeline2's schemas should remain"
+    );
+
+    drop_pg_database(&source_db_config).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn deleting_pipeline_succeeds_even_if_source_database_cleanup_fails() {
+    init_test_tracing();
+
+    // Arrange - Create a pipeline and then disconnect/damage the source database
+    let (app, tenant_id, pipeline_id, source_pool, source_db_config) =
+        setup_pipeline_with_source_db().await;
+
+    // Create some test data
+    create_tables_with_states(
+        &source_pool,
+        pipeline_id,
+        &[("test_users", "ready", r#"{"type": "ready"}"#)],
+    )
+    .await;
+
+    // Close the source database pool to simulate connection failure
+    source_pool.close().await;
+
+    // Act - Delete the pipeline (this should succeed despite source DB being unavailable)
+    let response = app.delete_pipeline(&tenant_id, pipeline_id).await;
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "Pipeline deletion should succeed even with source DB issues"
+    );
+
+    // Assert - Pipeline should still be deleted from main database
+    let response = app.read_pipeline(&tenant_id, pipeline_id).await;
+    assert_eq!(
+        response.status(),
+        StatusCode::NOT_FOUND,
+        "Pipeline should be deleted from main database"
+    );
 
     drop_pg_database(&source_db_config).await;
 }

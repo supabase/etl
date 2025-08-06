@@ -8,7 +8,7 @@ use etl_config::shared::{
     DestinationConfig, PgConnectionConfig, PipelineConfig as SharedPipelineConfig,
     ReplicatorConfig, SupabaseConfig, TlsConfig,
 };
-use etl_postgres::replication::{TableLookupError, get_table_name_from_oid, state, schema};
+use etl_postgres::replication::{TableLookupError, get_table_name_from_oid, schema, state};
 use etl_postgres::schema::TableId;
 use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
@@ -98,12 +98,6 @@ enum PipelineError {
 
     #[error("Database error: {0}")]
     Database(#[from] sqlx::Error),
-
-    #[error("Failed to cleanup replication state: {0}")]
-    ReplicationStateCleanup(String),
-
-    #[error("Failed to cleanup table schemas: {0}")]
-    TableSchemaCleanup(String),
 }
 
 impl From<PipelinesDbError> for PipelineError {
@@ -126,9 +120,7 @@ impl PipelineError {
             | PipelineError::PipelinesDb(PipelinesDbError::Database(_))
             | PipelineError::ReplicatorsDb(ReplicatorsDbError::Database(_))
             | PipelineError::ImagesDb(ImagesDbError::Database(_))
-            | PipelineError::Database(_)
-            | PipelineError::ReplicationStateCleanup(_)
-            | PipelineError::TableSchemaCleanup(_) => "internal server error".to_string(),
+            | PipelineError::Database(_) => "internal server error".to_string(),
             // Every other message is ok, as they do not divulge sensitive information
             e => e.to_string(),
         }
@@ -544,10 +536,10 @@ pub async fn delete_pipeline(
         .ok_or(PipelineError::PipelineNotFound(pipeline_id))?;
 
     let source = db::sources::read_source(
-        txn.deref_mut(), 
-        tenant_id, 
-        pipeline.source_id, 
-        &encryption_key
+        txn.deref_mut(),
+        tenant_id,
+        pipeline.source_id,
+        &encryption_key,
     )
     .await?
     .ok_or(PipelineError::SourceNotFound(pipeline.source_id))?;
@@ -565,15 +557,22 @@ pub async fn delete_pipeline(
     // database, we might revert the deleted pipeline, making it active but the source database state
     // might be corrupted. We prefer to just have orphan data in the source database than consistency
     // issues.
-    let source_pool = connect_to_source_database_with_defaults(&source.config.into_connection_config()).await?;
+    let source_pool =
+        connect_to_source_database_with_defaults(&source.config.into_connection_config()).await?;
 
     // Delete replication state (best effort)
     match state::delete_pipeline_replication_state(&source_pool, pipeline_id).await {
         Ok(deleted_rows) => {
-            info!("deleted {} replication state rows for pipeline {}", deleted_rows, pipeline_id);
+            info!(
+                "deleted {} replication state rows for pipeline {}",
+                deleted_rows, pipeline_id
+            );
         }
         Err(e) => {
-            warn!("failed to delete replication state for pipeline {}: {}", pipeline_id, e);
+            warn!(
+                "failed to delete replication state for pipeline {}: {}",
+                pipeline_id, e
+            );
             // We continue execution since the main pipeline is already deleted
         }
     }
@@ -581,10 +580,16 @@ pub async fn delete_pipeline(
     // Delete table schemas (best effort)
     match schema::delete_pipeline_table_schemas(&source_pool, pipeline_id).await {
         Ok(deleted_rows) => {
-            info!("deleted {} table schema rows for pipeline {}", deleted_rows, pipeline_id);
+            info!(
+                "deleted {} table schema rows for pipeline {}",
+                deleted_rows, pipeline_id
+            );
         }
         Err(e) => {
-            warn!("failed to delete table schemas for pipeline {}: {}", pipeline_id, e);
+            warn!(
+                "failed to delete table schemas for pipeline {}: {}",
+                pipeline_id, e
+            );
             // We continue execution since the main pipeline is already deleted
         }
     }

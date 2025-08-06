@@ -309,7 +309,7 @@ pub async fn reset_replication_state(
 }
 
 /// Deletes all replication state entries for a pipeline
-/// 
+///
 /// This function removes all replication state records for a given pipeline,
 /// including all historical entries. Used during pipeline cleanup.
 pub async fn delete_pipeline_replication_state(
