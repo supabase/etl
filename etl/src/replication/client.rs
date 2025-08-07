@@ -306,22 +306,22 @@ impl PgReplicationClient {
                 Ok(())
             }
             Err(err) => {
-                if let Some(code) = err.code() {
-                    if *code == SqlState::UNDEFINED_OBJECT {
-                        warn!(
-                            "attempted to delete non-existent replication slot '{}'",
-                            slot_name
-                        );
+                if let Some(code) = err.code()
+                    && *code == SqlState::UNDEFINED_OBJECT
+                {
+                    warn!(
+                        "attempted to delete non-existent replication slot '{}'",
+                        slot_name
+                    );
 
-                        bail!(
-                            ErrorKind::ReplicationSlotNotFound,
-                            "Replication slot not found",
-                            format!(
-                                "Replication slot '{}' not found in database while attempting its deletion",
-                                slot_name
-                            )
-                        );
-                    }
+                    bail!(
+                        ErrorKind::ReplicationSlotNotFound,
+                        "Replication slot not found",
+                        format!(
+                            "Replication slot '{}' not found in database while attempting its deletion",
+                            slot_name
+                        )
+                    );
                 }
 
                 error!("failed to delete replication slot '{}': {}", slot_name, err);
@@ -496,17 +496,17 @@ impl PgReplicationClient {
                 }
             }
             Err(err) => {
-                if let Some(code) = err.code() {
-                    if *code == SqlState::DUPLICATE_OBJECT {
-                        bail!(
-                            ErrorKind::ReplicationSlotAlreadyExists,
-                            "Replication slot already exists",
-                            format!(
-                                "Replication slot '{}' already exists in database",
-                                slot_name
-                            )
-                        );
-                    }
+                if let Some(code) = err.code()
+                    && *code == SqlState::DUPLICATE_OBJECT
+                {
+                    bail!(
+                        ErrorKind::ReplicationSlotAlreadyExists,
+                        "Replication slot already exists",
+                        format!(
+                            "Replication slot '{}' already exists in database",
+                            slot_name
+                        )
+                    );
                 }
 
                 return Err(err.into());

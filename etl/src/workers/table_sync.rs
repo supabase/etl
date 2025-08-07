@@ -606,28 +606,28 @@ where
         let mut inner = self.table_sync_worker_state.lock().await;
 
         // If we caught up with the lsn, we mark this table as `SyncDone` and stop the worker.
-        if let TableReplicationPhase::Catchup { lsn } = inner.replication_phase() {
-            if current_lsn >= lsn {
-                // If we are told to update the state, we mark the phase as actually changes. We do
-                // this because we want to update the actual state only when we are sure that the
-                // progress has been persisted to the destination. When `update_state` is `false` this
-                // function is used as a lookahead, to determine whether the worker should be stopped.
-                if update_state {
-                    inner
-                        .set_and_store(
-                            TableReplicationPhase::SyncDone { lsn: current_lsn },
-                            &self.state_store,
-                        )
-                        .await?;
+        if let TableReplicationPhase::Catchup { lsn } = inner.replication_phase()
+            && current_lsn >= lsn
+        {
+            // If we are told to update the state, we mark the phase as actually changes. We do
+            // this because we want to update the actual state only when we are sure that the
+            // progress has been persisted to the destination. When `update_state` is `false` this
+            // function is used as a lookahead, to determine whether the worker should be stopped.
+            if update_state {
+                inner
+                    .set_and_store(
+                        TableReplicationPhase::SyncDone { lsn: current_lsn },
+                        &self.state_store,
+                    )
+                    .await?;
 
-                    info!(
-                        "table sync worker for table {} is in sync with the apply worker, the worker will terminate",
-                        self.table_id
-                    );
-                }
-
-                return Ok(false);
+                info!(
+                    "table sync worker for table {} is in sync with the apply worker, the worker will terminate",
+                    self.table_id
+                );
             }
+
+            return Ok(false);
         }
 
         Ok(true)

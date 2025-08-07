@@ -48,7 +48,7 @@ impl SchemaCache {
         inner.table_schemas.get(table_id).cloned()
     }
 
-    pub async fn lock_inner(&self) -> MutexGuard<Inner> {
+    pub async fn lock_inner(&'_ self) -> MutexGuard<'_, Inner> {
         self.inner.lock().await
     }
 }

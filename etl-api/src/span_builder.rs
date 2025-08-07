@@ -53,10 +53,10 @@ impl RootSpanBuilder for ApiRootSpanBuilder {
 
         // In case we have a positive response, we want to log the success. In case of error, it will
         // be logged automatically since we have the `emit_event_on_error` feature enabled.
-        if let Ok(response) = outcome {
-            if response.response().error().is_none() {
-                info!("HTTP request completed successfully");
-            }
+        if let Ok(response) = outcome
+            && response.response().error().is_none()
+        {
+            info!("HTTP request completed successfully");
         }
     }
 }
