@@ -553,10 +553,10 @@ impl K8sClient for HttpK8sClient {
         };
 
         // Check last terminated state for non-zero exit code
-        if let Some(last_state) = &container_status.last_state {
-            if let Some(terminated) = &last_state.terminated {
-                return Ok(terminated.exit_code != 0);
-            }
+        if let Some(last_state) = &container_status.last_state
+            && let Some(terminated) = &last_state.terminated
+        {
+            return Ok(terminated.exit_code != 0);
         }
 
         Ok(false)

@@ -103,28 +103,28 @@ impl EventsStream {
         let this = self.project();
 
         // If we are not forced to send an update, we can willingly do so based on a set of conditions.
-        if !force {
-            if let (Some(last_update), Some(last_flush), Some(last_apply)) = (
+        if !force
+            && let (Some(last_update), Some(last_flush), Some(last_apply)) = (
                 this.last_update.as_mut(),
                 this.last_flush_lsn.as_mut(),
                 this.last_apply_lsn.as_mut(),
-            ) {
-                // The reason for only checking `flush_lsn` and `apply_lsn` is that if we are not
-                // forced to send a status update to Postgres (when reply is requested), we want to just
-                // notify it in case we actually durably flushed and persisted events, which is signalled via
-                // the two aforementioned fields. The `write_lsn` field is mostly used by Postgres for
-                // tracking what was received by the replication client but not what the client actually
-                // safely stored.
-                //
-                // If we were to check `write_lsn` too, we would end up sending updates more frequently
-                // when they are not requested, simply because the `write_lsn` is updated for every
-                // incoming message in the apply loop.
-                if flush_lsn == *last_flush
-                    && apply_lsn == *last_apply
-                    && last_update.elapsed() < STATUS_UPDATE_INTERVAL
-                {
-                    return Ok(());
-                }
+            )
+        {
+            // The reason for only checking `flush_lsn` and `apply_lsn` is that if we are not
+            // forced to send a status update to Postgres (when reply is requested), we want to just
+            // notify it in case we actually durably flushed and persisted events, which is signalled via
+            // the two aforementioned fields. The `write_lsn` field is mostly used by Postgres for
+            // tracking what was received by the replication client but not what the client actually
+            // safely stored.
+            //
+            // If we were to check `write_lsn` too, we would end up sending updates more frequently
+            // when they are not requested, simply because the `write_lsn` is updated for every
+            // incoming message in the apply loop.
+            if flush_lsn == *last_flush
+                && apply_lsn == *last_apply
+                && last_update.elapsed() < STATUS_UPDATE_INTERVAL
+            {
+                return Ok(());
             }
         }
 

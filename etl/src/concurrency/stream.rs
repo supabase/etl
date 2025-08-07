@@ -136,13 +136,13 @@ impl<B, S: Stream<Item = B>> Stream for BatchStream<B, S> {
 
         // If there are items, we want to check the deadline, if it's met, we return the batch
         // we currently have in memory, otherwise, we return.
-        if !this.items.is_empty() {
-            if let Some(deadline) = this.deadline.as_pin_mut() {
-                ready!(deadline.poll(cx));
-                *this.reset_timer = true;
+        if !this.items.is_empty()
+            && let Some(deadline) = this.deadline.as_pin_mut()
+        {
+            ready!(deadline.poll(cx));
+            *this.reset_timer = true;
 
-                return Poll::Ready(Some(ShutdownResult::Ok(std::mem::take(this.items))));
-            }
+            return Poll::Ready(Some(ShutdownResult::Ok(std::mem::take(this.items))));
         }
 
         Poll::Pending

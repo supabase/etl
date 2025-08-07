@@ -90,34 +90,34 @@ where
 {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         // Only try to inject project field if we have one and the content looks like JSON
-        if let Some(project_ref) = get_global_project_ref() {
-            if let Ok(json_str) = std::str::from_utf8(buf) {
-                // Try to parse as JSON
-                if let Ok(serde_json::Value::Object(mut map)) =
-                    serde_json::from_str::<serde_json::Value>(json_str)
-                {
-                    // Only inject if "project" field doesn't already exist
-                    if !map.contains_key(PROJECT_KEY_IN_LOG) {
-                        map.insert(
-                            PROJECT_KEY_IN_LOG.to_string(),
-                            serde_json::Value::String(project_ref.to_string()),
-                        );
+        if let Some(project_ref) = get_global_project_ref()
+            && let Ok(json_str) = std::str::from_utf8(buf)
+        {
+            // Try to parse as JSON
+            if let Ok(serde_json::Value::Object(mut map)) =
+                serde_json::from_str::<serde_json::Value>(json_str)
+            {
+                // Only inject if "project" field doesn't already exist
+                if !map.contains_key(PROJECT_KEY_IN_LOG) {
+                    map.insert(
+                        PROJECT_KEY_IN_LOG.to_string(),
+                        serde_json::Value::String(project_ref.to_string()),
+                    );
 
-                        // Try to serialize back to JSON
-                        if let Ok(modified) = serde_json::to_string(&map) {
-                            // Add new line if it was there
-                            let output = if json_str.ends_with('\n') {
-                                format!("{modified}\n")
-                            } else {
-                                modified
-                            };
+                    // Try to serialize back to JSON
+                    if let Ok(modified) = serde_json::to_string(&map) {
+                        // Add new line if it was there
+                        let output = if json_str.ends_with('\n') {
+                            format!("{modified}\n")
+                        } else {
+                            modified
+                        };
 
-                            // Write the modified JSON and return the original buffer length
-                            return match self.inner.write(output.as_bytes()) {
-                                Ok(_) => Ok(buf.len()),
-                                Err(e) => Err(e),
-                            };
-                        }
+                        // Write the modified JSON and return the original buffer length
+                        return match self.inner.write(output.as_bytes()) {
+                            Ok(_) => Ok(buf.len()),
+                            Err(e) => Err(e),
+                        };
                     }
                 }
             }

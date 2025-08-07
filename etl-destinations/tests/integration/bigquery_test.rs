@@ -516,7 +516,7 @@ async fn table_nullable_scalar_columns() {
 
     let publication_name = "test_pub".to_string();
     database
-        .create_publication(&publication_name, &[table_name.clone()])
+        .create_publication(&publication_name, std::slice::from_ref(&table_name))
         .await
         .expect("Failed to create publication");
 
@@ -725,7 +725,7 @@ async fn table_nullable_array_columns() {
 
     let publication_name = "test_pub_array".to_string();
     database
-        .create_publication(&publication_name, &[table_name.clone()])
+        .create_publication(&publication_name, std::slice::from_ref(&table_name))
         .await
         .expect("Failed to create publication");
 
@@ -960,7 +960,7 @@ async fn table_non_nullable_scalar_columns() {
 
     let publication_name = "test_pub_non_null".to_string();
     database
-        .create_publication(&publication_name, &[table_name.clone()])
+        .create_publication(&publication_name, std::slice::from_ref(&table_name))
         .await
         .expect("Failed to create publication");
 
@@ -1210,7 +1210,7 @@ async fn table_non_nullable_array_columns() {
 
     let publication_name = "test_pub_non_null_array".to_string();
     database
-        .create_publication(&publication_name, &[table_name.clone()])
+        .create_publication(&publication_name, std::slice::from_ref(&table_name))
         .await
         .expect("Failed to create publication");
 

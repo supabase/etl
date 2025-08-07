@@ -168,11 +168,6 @@ impl TruncateEvent {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct KeepAliveEvent {
-    pub reply: bool,
-}
-
-#[derive(Debug, Clone, PartialEq)]
 pub enum Event {
     Begin(BeginEvent),
     Commit(CommitEvent),
