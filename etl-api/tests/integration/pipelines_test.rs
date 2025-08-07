@@ -1,5 +1,4 @@
 use etl_api::db::pipelines::{OptionalPipelineConfig, PipelineConfig};
-use etl_api::db::sources::SourceConfig;
 use etl_api::routes::pipelines::{
     CreatePipelineRequest, CreatePipelineResponse, GetPipelineReplicationStatusResponse,
     ReadPipelineResponse, ReadPipelinesResponse, RollbackTableStateRequest,
@@ -7,17 +6,12 @@ use etl_api::routes::pipelines::{
     UpdatePipelineConfigRequest, UpdatePipelineConfigResponse, UpdatePipelineImageRequest,
     UpdatePipelineRequest,
 };
-use etl_api::routes::sources::{CreateSourceRequest, CreateSourceResponse};
-use etl_config::SerializableSecretString;
 use etl_config::shared::{BatchConfig, PgConnectionConfig};
-use etl_postgres::replication::connect_to_source_database;
-use etl_postgres::sqlx::test_utils::{create_pg_database, drop_pg_database};
+use etl_postgres::sqlx::test_utils::drop_pg_database;
 use etl_telemetry::init_test_tracing;
 use reqwest::StatusCode;
-use secrecy::ExposeSecret;
 use sqlx::PgPool;
 use sqlx::postgres::types::Oid;
-use uuid::Uuid;
 
 use crate::common::database::{create_test_source_database, run_etl_migrations_on_source_database};
 use crate::{
