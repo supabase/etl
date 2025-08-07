@@ -1532,7 +1532,7 @@ async fn update_non_toast_values_with_default_replica_identity() {
 
     let publication_name = "test_pub_toast".to_string();
     database
-        .create_publication(&publication_name, &[table_name.clone()])
+        .create_publication(&publication_name, std::slice::from_ref(&table_name))
         .await
         .expect("Failed to create publication");
 
@@ -1686,7 +1686,7 @@ async fn update_non_toast_values_with_full_replica_identity() {
 
     let publication_name = "test_pub_toast".to_string();
     database
-        .create_publication(&publication_name, &[table_name.clone()])
+        .create_publication(&publication_name, std::slice::from_ref(&table_name))
         .await
         .expect("Failed to create publication");
 
@@ -1829,7 +1829,7 @@ async fn update_toast_values_with_default_replica_identity() {
 
     let publication_name = "test_pub_toast".to_string();
     database
-        .create_publication(&publication_name, &[table_name.clone()])
+        .create_publication(&publication_name, std::slice::from_ref(&table_name))
         .await
         .expect("Failed to create publication");
 
