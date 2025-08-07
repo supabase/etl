@@ -36,6 +36,7 @@ impl ImageError {
 impl ResponseError for ImageError {
     fn status_code(&self) -> StatusCode {
         match self {
+            ImageError::ImagesDb(ImagesDbError::CannotDeleteDefault) => StatusCode::BAD_REQUEST,
             ImageError::ImagesDb(_) => StatusCode::INTERNAL_SERVER_ERROR,
             ImageError::ImageNotFound(_) => StatusCode::NOT_FOUND,
         }
@@ -106,7 +107,7 @@ pub async fn create_image(
 ) -> Result<impl Responder, ImageError> {
     let image = image.into_inner();
 
-    let id = db::images::create_image(&**pool, &image.name, image.is_default).await?;
+    let id = db::images::create_image(&pool, &image.name, image.is_default).await?;
 
     let response = CreateImageResponse { id };
 
@@ -164,7 +165,7 @@ pub async fn update_image(
     let image_id = image_id.into_inner();
     let image = image.into_inner();
 
-    db::images::update_image(&**pool, image_id, &image.name, image.is_default)
+    db::images::update_image(&pool, image_id, &image.name, image.is_default)
         .await?
         .ok_or(ImageError::ImageNotFound(image_id))?;
 
@@ -189,7 +190,7 @@ pub async fn delete_image(
 ) -> Result<impl Responder, ImageError> {
     let image_id = image_id.into_inner();
 
-    db::images::delete_image(&**pool, image_id)
+    db::images::delete_image(&pool, image_id)
         .await?
         .ok_or(ImageError::ImageNotFound(image_id))?;
 

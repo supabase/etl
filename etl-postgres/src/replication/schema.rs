@@ -1,6 +1,6 @@
 use sqlx::postgres::PgRow;
 use sqlx::postgres::types::Oid;
-use sqlx::{PgPool, Row};
+use sqlx::{PgExecutor, PgPool, Row};
 use std::collections::HashMap;
 use tokio_postgres::types::Type as PgType;
 
@@ -177,6 +177,31 @@ pub async fn load_table_schemas(
     }
 
     Ok(table_schemas.into_values().collect())
+}
+
+/// Deletes all table schemas for a given pipeline from the database.
+///
+/// This function removes all table schema records and their associated columns
+/// for a specific pipeline. Uses CASCADE delete from the foreign key constraint
+/// to automatically remove related column records.
+pub async fn delete_pipeline_table_schemas<'c, E>(
+    executor: E,
+    pipeline_id: i64,
+) -> Result<u64, sqlx::Error>
+where
+    E: PgExecutor<'c>,
+{
+    let result = sqlx::query(
+        r#"
+        delete from etl.table_schemas
+        where pipeline_id = $1
+        "#,
+    )
+    .bind(pipeline_id)
+    .execute(executor)
+    .await?;
+
+    Ok(result.rows_affected())
 }
 
 /// Builds a `ColumnSchema` from a database row.

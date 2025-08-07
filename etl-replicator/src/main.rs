@@ -1,19 +1,28 @@
+use crate::config::load_replicator_config;
+use crate::core::start_replicator_with_config;
 use etl_config::Environment;
-use etl_telemetry::init_tracing;
+use etl_config::shared::ReplicatorConfig;
+use etl_telemetry::init_tracing_with_project;
 use std::sync::Arc;
 use thiserror::__private::AsDynError;
 use tracing::{error, info};
-
-use crate::config::load_replicator_config;
-use crate::core::start_replicator;
 
 mod config;
 mod core;
 mod migrations;
 
 fn main() -> anyhow::Result<()> {
-    // Initialize tracing from the binary name
-    let _log_flusher = init_tracing(env!("CARGO_BIN_NAME"))?;
+    // Load replicator config
+    let replicator_config = load_replicator_config()?;
+
+    // Extract project reference to use in logs
+    let project_ref = replicator_config
+        .supabase
+        .as_ref()
+        .map(|s| s.project_ref.clone());
+
+    // Initialize tracing with project reference
+    let _log_flusher = init_tracing_with_project(env!("CARGO_BIN_NAME"), project_ref)?;
 
     // Initialize Sentry before the async runtime starts
     let _sentry_guard = init_sentry()?;
@@ -22,14 +31,14 @@ fn main() -> anyhow::Result<()> {
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?
-        .block_on(async_main())?;
+        .block_on(async_main(replicator_config))?;
 
     Ok(())
 }
 
-async fn async_main() -> anyhow::Result<()> {
+async fn async_main(replicator_config: ReplicatorConfig) -> anyhow::Result<()> {
     // We start the replicator and catch any errors.
-    if let Err(err) = start_replicator().await {
+    if let Err(err) = start_replicator_with_config(replicator_config).await {
         sentry::capture_error(err.as_dyn_error());
         error!("an error occurred in the replicator: {err}");
 

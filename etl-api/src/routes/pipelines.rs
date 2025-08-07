@@ -8,7 +8,7 @@ use etl_config::shared::{
     DestinationConfig, PgConnectionConfig, PipelineConfig as SharedPipelineConfig,
     ReplicatorConfig, SupabaseConfig, TlsConfig,
 };
-use etl_postgres::replication::{TableLookupError, get_table_name_from_oid, state};
+use etl_postgres::replication::{TableLookupError, get_table_name_from_oid, schema, state};
 use etl_postgres::schema::TableId;
 use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
@@ -519,14 +519,48 @@ pub async fn update_pipeline(
 pub async fn delete_pipeline(
     req: HttpRequest,
     pool: Data<PgPool>,
+    encryption_key: Data<EncryptionKey>,
     pipeline_id: Path<i64>,
 ) -> Result<impl Responder, PipelineError> {
     let tenant_id = extract_tenant_id(&req)?;
     let pipeline_id = pipeline_id.into_inner();
 
-    db::pipelines::delete_pipeline(&**pool, tenant_id, pipeline_id)
+    let mut txn = pool.begin().await?;
+
+    // First, verify the pipeline exists and get source info for cleanup
+    let pipeline = db::pipelines::read_pipeline(txn.deref_mut(), tenant_id, pipeline_id)
         .await?
         .ok_or(PipelineError::PipelineNotFound(pipeline_id))?;
+
+    let source = db::sources::read_source(
+        txn.deref_mut(),
+        tenant_id,
+        pipeline.source_id,
+        &encryption_key,
+    )
+    .await?
+    .ok_or(PipelineError::SourceNotFound(pipeline.source_id))?;
+
+    // Delete the pipeline from the main database (this will cascade delete the replicator)
+    db::pipelines::delete_pipeline(txn.deref_mut(), tenant_id, pipeline_id)
+        .await?
+        .ok_or(PipelineError::PipelineNotFound(pipeline_id))?;
+
+    let source_pool =
+        connect_to_source_database_with_defaults(&source.config.into_connection_config()).await?;
+
+    // We start a transaction in the source database while the other transaction is active in the
+    // api database so that in case of failures when deleting the state, we also rollback the transaction
+    // in the api database.
+    let mut source_txn = source_pool.begin().await?;
+
+    state::delete_pipeline_replication_state(source_txn.deref_mut(), pipeline_id).await?;
+    schema::delete_pipeline_table_schemas(source_txn.deref_mut(), pipeline_id).await?;
+
+    // Here we finish `txn` before `source_txn` since we want the guarantee that the pipeline has
+    // been deleted before committing the state deletions.
+    txn.commit().await?;
+    source_txn.commit().await?;
 
     Ok(HttpResponse::Ok().finish())
 }

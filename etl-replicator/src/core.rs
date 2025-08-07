@@ -11,28 +11,12 @@ use etl_config::shared::{
 use etl_destinations::bigquery::{BigQueryDestination, install_crypto_provider_for_bigquery};
 use secrecy::ExposeSecret;
 use tokio::signal::unix::{SignalKind, signal};
-use tracing::{debug, info, instrument, warn};
+use tracing::{debug, info, warn};
 
-use crate::config::load_replicator_config;
 use crate::migrations::migrate_state_store;
 
-pub async fn start_replicator() -> anyhow::Result<()> {
-    let replicator_config = load_replicator_config()?;
-    let project_ref = replicator_config
-        .supabase
-        .as_ref()
-        .map(|s| s.project_ref.clone())
-        .unwrap_or_default();
-    start_with_config(replicator_config, &project_ref).await
-}
-
-// The name of the field emitted in the instrumented span should be `project`
-// not `project_ref` because the vector config in the etl-k8s project expects
-// this. These should be kept in sync if changed in future.
-#[instrument(skip(replicator_config, project_ref), fields(project = project_ref))]
-async fn start_with_config(
+pub async fn start_replicator_with_config(
     replicator_config: ReplicatorConfig,
-    project_ref: &str,
 ) -> anyhow::Result<()> {
     info!("starting replicator service");
 

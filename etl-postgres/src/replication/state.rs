@@ -1,6 +1,6 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use sqlx::{PgPool, Type, postgres::types::Oid as SqlxTableId, prelude::FromRow};
+use sqlx::{PgExecutor, PgPool, Type, postgres::types::Oid as SqlxTableId, prelude::FromRow};
 use tokio_postgres::types::PgLsn;
 
 use crate::schema::TableId;
@@ -306,6 +306,30 @@ pub async fn reset_replication_state(
     tx.commit().await?;
 
     Ok(row)
+}
+
+/// Deletes all replication state entries for a pipeline
+///
+/// This function removes all replication state records for a given pipeline,
+/// including all historical entries. Used during pipeline cleanup.
+pub async fn delete_pipeline_replication_state<'c, E>(
+    executor: E,
+    pipeline_id: i64,
+) -> sqlx::Result<u64>
+where
+    E: PgExecutor<'c>,
+{
+    let result = sqlx::query(
+        r#"
+        delete from etl.replication_state 
+        where pipeline_id = $1
+        "#,
+    )
+    .bind(pipeline_id)
+    .execute(executor)
+    .await?;
+
+    Ok(result.rows_affected())
 }
 
 mod lsn_serde {

@@ -16,8 +16,8 @@ RUN cargo chef cook --release --recipe-path recipe.json
 
 # Build application
 COPY . .
-RUN cargo build --release -p replicator && \
-    strip target/release/replicator
+RUN RUSTFLAGS="-C panic=abort" cargo build --release -p etl-replicator && \
+    strip target/release/etl-replicator
 
 # Runtime stage with distroless for security
 FROM gcr.io/distroless/cc-debian12:nonroot
@@ -27,8 +27,8 @@ WORKDIR /app
 USER nonroot:nonroot
 
 # Copy binary and configuration
-COPY --from=builder /app/target/release/replicator ./replicator
-COPY --chown=nonroot:nonroot replicator/configuration ./configuration
+COPY --from=builder /app/target/release/etl-replicator ./etl-replicator
+COPY --chown=nonroot:nonroot etl-replicator/configuration ./configuration
 
 # Use exec form for proper signal handling
-ENTRYPOINT ["./replicator"]
+ENTRYPOINT ["./etl-replicator"]
