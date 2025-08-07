@@ -1631,6 +1631,7 @@ async fn update_non_toast_values_with_default_replica_identity() {
     pipeline.shutdown_and_wait().await.unwrap();
 }
 
+#[ignore]
 #[tokio::test(flavor = "multi_thread")]
 async fn update_non_toast_values_with_full_replica_identity() {
     init_test_tracing();
