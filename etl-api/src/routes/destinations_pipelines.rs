@@ -15,7 +15,7 @@ use crate::db;
 use crate::db::destinations::{DestinationsDbError, destination_exists};
 use crate::db::destinations_pipelines::DestinationPipelinesDbError;
 use crate::db::images::ImagesDbError;
-use crate::db::pipelines::{PipelineConfig, PipelinesDbError};
+use crate::db::pipelines::{PipelineConfig, PipelinesDbError, read_pipeline};
 use crate::db::sources::{SourcesDbError, source_exists};
 use crate::encryption::EncryptionKey;
 
@@ -37,6 +37,9 @@ enum DestinationPipelineError {
 
     #[error("The pipeline with id {0} was not found")]
     PipelineNotFound(i64),
+
+    #[error("The pipeline with id {0} is not connected to destination with id {1}")]
+    PipelineDestinationMismatch(i64, i64),
 
     #[error(transparent)]
     Destination(#[from] DestinationError),
@@ -108,7 +111,10 @@ impl ResponseError for DestinationPipelineError {
             DestinationPipelineError::TenantId(_)
             | DestinationPipelineError::SourceNotFound(_)
             | DestinationPipelineError::DestinationNotFound(_)
-            | DestinationPipelineError::PipelineNotFound(_) => StatusCode::BAD_REQUEST,
+            | DestinationPipelineError::PipelineNotFound(_)
+            | DestinationPipelineError::PipelineDestinationMismatch(_, _) => {
+                StatusCode::BAD_REQUEST
+            }
             DestinationPipelineError::DuplicatePipeline => StatusCode::CONFLICT,
         }
     }
@@ -181,6 +187,7 @@ pub async fn create_destination_and_pipeline(
     let destination_and_pipeline = destination_and_pipeline.into_inner();
 
     let mut txn = pool.begin().await?;
+
     if !source_exists(
         txn.deref_mut(),
         tenant_id,
@@ -196,6 +203,7 @@ pub async fn create_destination_and_pipeline(
     let image = db::images::read_default_image(&**pool)
         .await?
         .ok_or(DestinationPipelineError::NoDefaultImageFound)?;
+
     let (destination_id, pipeline_id) =
         db::destinations_pipelines::create_destination_and_pipeline(
             &mut txn,
@@ -208,6 +216,7 @@ pub async fn create_destination_and_pipeline(
             &encryption_key,
         )
         .await?;
+
     txn.commit().await?;
 
     let response = CreateDestinationPipelineResponse {
@@ -246,6 +255,7 @@ pub async fn update_destination_and_pipeline(
     let destination_and_pipeline = destination_and_pipeline.into_inner();
 
     let mut txn = pool.begin().await?;
+
     if !source_exists(
         txn.deref_mut(),
         tenant_id,
@@ -260,6 +270,17 @@ pub async fn update_destination_and_pipeline(
 
     if !destination_exists(txn.deref_mut(), tenant_id, destination_id).await? {
         return Err(DestinationPipelineError::DestinationNotFound(
+            destination_id,
+        ));
+    }
+
+    let pipeline = read_pipeline(txn.deref_mut(), tenant_id, pipeline_id)
+        .await?
+        .ok_or(DestinationPipelineError::PipelineNotFound(pipeline_id))?;
+
+    if pipeline.destination_id != destination_id {
+        return Err(DestinationPipelineError::PipelineDestinationMismatch(
+            pipeline_id,
             destination_id,
         ));
     }
@@ -315,16 +336,27 @@ pub async fn delete_destination_and_pipeline(
 
     let mut txn = pool.begin().await?;
 
-    // First, verify both the pipeline and destination exist and get source info for cleanup
-    let pipeline = db::pipelines::read_pipeline(txn.deref_mut(), tenant_id, pipeline_id)
+    let pipeline = read_pipeline(txn.deref_mut(), tenant_id, pipeline_id)
         .await?
         .ok_or(DestinationPipelineError::PipelineNotFound(pipeline_id))?;
 
-    if !destination_exists(txn.deref_mut(), tenant_id, destination_id).await? {
-        return Err(DestinationPipelineError::DestinationNotFound(
+    if pipeline.destination_id != destination_id {
+        return Err(DestinationPipelineError::PipelineDestinationMismatch(
+            pipeline_id,
             destination_id,
         ));
     }
+
+    let destination = db::destinations::read_destination(
+        txn.deref_mut(),
+        tenant_id,
+        destination_id,
+        &encryption_key,
+    )
+    .await?
+    .ok_or(DestinationPipelineError::DestinationNotFound(
+        destination_id,
+    ))?;
 
     let source = db::sources::read_source(
         txn.deref_mut(),
@@ -335,15 +367,14 @@ pub async fn delete_destination_and_pipeline(
     .await?
     .ok_or(DestinationPipelineError::SourceNotFound(pipeline.source_id))?;
 
-    // We delete the destination (which is going to succeed since constraints checks are deferred at
-    // the end of the transaction).
-    db::destinations::delete_destination(txn.deref_mut(), tenant_id, destination_id)
-        .await
-        .unwrap();
-
-    // Use the helper function from pipelines module to delete pipeline and its state
-    // We need to convert the error type
-    db::pipelines::delete_pipeline_full(txn, tenant_id, pipeline_id, &pipeline, &source).await?;
+    db::pipelines::delete_pipeline_cascading(
+        txn,
+        tenant_id,
+        &pipeline,
+        &source,
+        Some(&destination),
+    )
+    .await?;
 
     Ok(HttpResponse::Ok().finish())
 }

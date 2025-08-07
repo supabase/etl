@@ -527,7 +527,6 @@ pub async fn delete_pipeline(
 
     let mut txn = pool.begin().await?;
 
-    // First, verify the pipeline exists and get source info for cleanup
     let pipeline = db::pipelines::read_pipeline(txn.deref_mut(), tenant_id, pipeline_id)
         .await?
         .ok_or(PipelineError::PipelineNotFound(pipeline_id))?;
@@ -541,8 +540,7 @@ pub async fn delete_pipeline(
     .await?
     .ok_or(PipelineError::SourceNotFound(pipeline.source_id))?;
 
-    // Use the helper function to delete pipeline and its state
-    db::pipelines::delete_pipeline_full(txn, tenant_id, pipeline_id, &pipeline, &source).await?;
+    db::pipelines::delete_pipeline_cascading(txn, tenant_id, &pipeline, &source, None).await?;
 
     Ok(HttpResponse::Ok().finish())
 }
