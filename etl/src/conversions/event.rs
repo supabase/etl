@@ -258,6 +258,7 @@ where
 fn convert_tuple_to_row(
     column_schemas: &[ColumnSchema],
     tuple_data: &[protocol::TupleData],
+    old_table_row: &Option<TableRow>,
     use_default_for_missing_cols: bool,
 ) -> EtlResult<TableRow> {
     let mut values = Vec::with_capacity(column_schemas.len());
@@ -288,7 +289,11 @@ fn convert_tuple_to_row(
                 }
             }
             protocol::TupleData::UnchangedToast => {
-                TextFormatConverter::default_value(&column_schema.typ)?
+                if let Some(row) = old_table_row {
+                    row.values[i].clone()
+                } else {
+                    TextFormatConverter::default_value(&column_schema.typ)?
+                }
             }
             protocol::TupleData::Binary(_) => {
                 bail!(
@@ -323,6 +328,7 @@ where
     let table_row = convert_tuple_to_row(
         &table_schema.column_schemas,
         insert_body.tuple().tuple_data(),
+        &None,
         false,
     )?;
 
@@ -346,12 +352,6 @@ where
     let table_id = update_body.rel_id();
     let table_schema = get_table_schema(schema_store, TableId::new(table_id)).await?;
 
-    let table_row = convert_tuple_to_row(
-        &table_schema.column_schemas,
-        update_body.new_tuple().tuple_data(),
-        false,
-    )?;
-
     // We try to extract the old tuple by either taking the entire old tuple or the key of the old
     // tuple.
     let is_key = update_body.old_tuple().is_none();
@@ -360,11 +360,20 @@ where
         Some(identity) => Some(convert_tuple_to_row(
             &table_schema.column_schemas,
             identity.tuple_data(),
+            &None,
             true,
         )?),
         None => None,
-    }
-    .map(|row| (is_key, row));
+    };
+
+    let table_row = convert_tuple_to_row(
+        &table_schema.column_schemas,
+        update_body.new_tuple().tuple_data(),
+        &old_table_row,
+        false,
+    )?;
+
+    let old_table_row = old_table_row.map(|row| (is_key, row));
 
     Ok(UpdateEvent {
         start_lsn,
@@ -395,6 +404,7 @@ where
         Some(identity) => Some(convert_tuple_to_row(
             &table_schema.column_schemas,
             identity.tuple_data(),
+            &None,
             true,
         )?),
         None => None,
