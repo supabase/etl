@@ -353,6 +353,22 @@ impl TestApp {
         .expect("Failed to execute request.")
     }
 
+    pub async fn delete_destination_pipeline(
+        &self,
+        tenant_id: &str,
+        destination_id: i64,
+        pipeline_id: i64,
+    ) -> reqwest::Response {
+        self.delete_authenticated(format!(
+            "{}/v1/destinations-pipelines/{destination_id}/{pipeline_id}",
+            &self.address
+        ))
+        .header("tenant_id", tenant_id)
+        .send()
+        .await
+        .expect("Failed to execute request.")
+    }
+
     pub async fn create_image(&self, image: &CreateImageRequest) -> reqwest::Response {
         self.post_authenticated(format!("{}/v1/images", &self.address))
             .json(image)

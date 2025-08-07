@@ -1,4 +1,5 @@
 use etl_api::db::sources::SourceConfig;
+use etl_api::routes::pipelines::{CreatePipelineRequest, CreatePipelineResponse};
 use etl_api::routes::sources::{
     CreateSourceRequest, CreateSourceResponse, ReadSourceResponse, ReadSourcesResponse,
     UpdateSourceRequest,
@@ -9,7 +10,10 @@ use reqwest::StatusCode;
 
 use crate::{
     common::test_app::{TestApp, spawn_test_app},
-    integration::tenants_test::create_tenant,
+    integration::{
+        destination_test::create_destination, images_test::create_default_image,
+        pipelines_test::new_pipeline_config, tenants_test::create_tenant,
+    },
 };
 
 pub fn new_name() -> String {
@@ -261,4 +265,41 @@ async fn all_sources_can_be_read() {
             insta::assert_debug_snapshot!(source.config);
         }
     }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn source_with_active_pipeline_cannot_be_deleted() {
+    init_test_tracing();
+    // Arrange
+    let app = spawn_test_app().await;
+    let tenant_id = &create_tenant(&app).await;
+    create_default_image(&app).await;
+
+    // Create source and destination
+    let source_id = create_source(&app, tenant_id).await;
+    let destination_id = create_destination(&app, tenant_id).await;
+
+    // Create a pipeline that uses this source
+    let pipeline = CreatePipelineRequest {
+        source_id,
+        destination_id,
+        config: new_pipeline_config(),
+    };
+    let pipeline_response = app.create_pipeline(tenant_id, &pipeline).await;
+    assert!(pipeline_response.status().is_success());
+    let pipeline_response: CreatePipelineResponse = pipeline_response
+        .json()
+        .await
+        .expect("failed to deserialize response");
+    let _pipeline_id = pipeline_response.id;
+
+    // Act - Try to delete the source
+    let response = app.delete_source(tenant_id, source_id).await;
+
+    // Assert - Should fail due to foreign key constraint
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+    // Verify source still exists
+    let source_response = app.read_source(tenant_id, source_id).await;
+    assert!(source_response.status().is_success());
 }

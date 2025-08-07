@@ -8,7 +8,7 @@ use etl_config::shared::{
     DestinationConfig, PgConnectionConfig, PipelineConfig as SharedPipelineConfig,
     ReplicatorConfig, SupabaseConfig, TlsConfig,
 };
-use etl_postgres::replication::{TableLookupError, get_table_name_from_oid, schema, state};
+use etl_postgres::replication::{TableLookupError, get_table_name_from_oid, state};
 use etl_postgres::schema::TableId;
 use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
@@ -31,7 +31,7 @@ use crate::routes::{
 };
 
 #[derive(Debug, Error)]
-enum PipelineError {
+pub enum PipelineError {
     #[error("The pipeline with id {0} was not found")]
     PipelineNotFound(i64),
 
@@ -541,26 +541,8 @@ pub async fn delete_pipeline(
     .await?
     .ok_or(PipelineError::SourceNotFound(pipeline.source_id))?;
 
-    // Delete the pipeline from the main database (this will cascade delete the replicator)
-    db::pipelines::delete_pipeline(txn.deref_mut(), tenant_id, pipeline_id)
-        .await?
-        .ok_or(PipelineError::PipelineNotFound(pipeline_id))?;
-
-    let source_pool =
-        connect_to_source_database_with_defaults(&source.config.into_connection_config()).await?;
-
-    // We start a transaction in the source database while the other transaction is active in the
-    // api database so that in case of failures when deleting the state, we also rollback the transaction
-    // in the api database.
-    let mut source_txn = source_pool.begin().await?;
-
-    state::delete_pipeline_replication_state(source_txn.deref_mut(), pipeline_id).await?;
-    schema::delete_pipeline_table_schemas(source_txn.deref_mut(), pipeline_id).await?;
-
-    // Here we finish `txn` before `source_txn` since we want the guarantee that the pipeline has
-    // been deleted before committing the state deletions.
-    txn.commit().await?;
-    source_txn.commit().await?;
+    // Use the helper function to delete pipeline and its state
+    db::pipelines::delete_pipeline_full(txn, tenant_id, pipeline_id, &pipeline, &source).await?;
 
     Ok(HttpResponse::Ok().finish())
 }

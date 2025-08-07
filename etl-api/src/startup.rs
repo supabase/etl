@@ -26,7 +26,7 @@ use crate::{
         destinations_pipelines::{
             CreateDestinationPipelineRequest, CreateDestinationPipelineResponse,
             UpdateDestinationPipelineRequest, create_destination_and_pipeline,
-            update_destination_and_pipeline,
+            delete_destination_and_pipeline, update_destination_and_pipeline,
         },
         health_check::health_check,
         images::{
@@ -240,6 +240,7 @@ pub async fn run(
         crate::routes::tenants_sources::create_tenant_and_source,
         crate::routes::destinations_pipelines::create_destination_and_pipeline,
         crate::routes::destinations_pipelines::update_destination_and_pipeline,
+        crate::routes::destinations_pipelines::delete_destination_and_pipeline,
     ))]
     struct ApiV1;
 
@@ -314,7 +315,8 @@ pub async fn run(
                     .service(create_tenant_and_source)
                     // destinations-pipelines
                     .service(create_destination_and_pipeline)
-                    .service(update_destination_and_pipeline),
+                    .service(update_destination_and_pipeline)
+                    .service(delete_destination_and_pipeline),
             )
             .app_data(config.clone())
             .app_data(connection_pool.clone())

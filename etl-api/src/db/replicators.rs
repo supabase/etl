@@ -118,3 +118,26 @@ where
 
     Ok(record.map(|r| r.id))
 }
+
+pub async fn delete_replicator<'c, E>(
+    executor: E,
+    tenant_id: &str,
+    replicator_id: i64,
+) -> Result<Option<i64>, ReplicatorsDbError>
+where
+    E: PgExecutor<'c>,
+{
+    let record = sqlx::query!(
+        r#"
+        delete from app.replicators
+        where tenant_id = $1 and id = $2
+        returning id
+        "#,
+        tenant_id,
+        replicator_id
+    )
+    .fetch_optional(executor)
+    .await?;
+
+    Ok(record.map(|r| r.id))
+}

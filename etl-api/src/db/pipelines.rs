@@ -1,14 +1,18 @@
 use etl_config::shared::BatchConfig;
+use etl_postgres::replication::{schema, state};
 use serde::{Deserialize, Serialize};
 use sqlx::{PgExecutor, PgTransaction};
 use std::ops::DerefMut;
 use thiserror::Error;
 use utoipa::ToSchema;
 
+use crate::db;
 use crate::db::replicators::{ReplicatorsDbError, create_replicator};
 use crate::db::serde::{
     DbDeserializationError, DbSerializationError, deserialize_from_value, serialize,
 };
+use crate::db::sources::Source;
+use crate::routes::connect_to_source_database_with_defaults;
 
 /// Pipeline configuration used during replication. This struct's fields
 /// should be kept in sync with [`OptionalPipelineConfig`]. If a new optional
@@ -223,6 +227,49 @@ where
     .await?;
 
     Ok(record.map(|r| r.id))
+}
+
+/// Deletes a pipeline along with its replicator and state cleanup
+///
+/// This function handles the complete deletion of a pipeline including:
+/// - Deleting the pipeline record from the API database
+/// - Deleting the associated replicator
+/// - Cleaning up replication state from the source database
+/// - Cleaning up table schemas from the source database
+///
+/// The function uses proper transaction handling to ensure atomicity.
+pub async fn delete_pipeline_full(
+    mut txn: PgTransaction<'_>,
+    tenant_id: &str,
+    pipeline_id: i64,
+    pipeline: &Pipeline,
+    source: &Source,
+) -> Result<(), PipelinesDbError> {
+    let source_pool =
+        connect_to_source_database_with_defaults(&source.config.clone().into_connection_config())
+            .await?;
+
+    // We start a transaction in the source database while the other transaction is active in the
+    // api database so that in case of failures when deleting the state, we also rollback the transaction
+    // in the api database.
+    let mut source_txn = source_pool.begin().await?;
+
+    // Delete the pipeline from the main database (this does NOT cascade delete the replicator due to missing constraint)
+    delete_pipeline(txn.deref_mut(), tenant_id, pipeline_id).await?;
+
+    // Manually delete the replicator since there's no cascade constraint
+    db::replicators::delete_replicator(txn.deref_mut(), tenant_id, pipeline.replicator_id).await?;
+
+    // Delete state and schema from the source database
+    state::delete_pipeline_replication_state(source_txn.deref_mut(), pipeline_id).await?;
+    schema::delete_pipeline_table_schemas(source_txn.deref_mut(), pipeline_id).await?;
+
+    // Here we finish `txn` before `source_txn` since we want the guarantee that the pipeline has
+    // been deleted before committing the state deletions.
+    txn.commit().await?;
+    source_txn.commit().await?;
+
+    Ok(())
 }
 
 pub async fn read_all_pipelines<'c, E>(

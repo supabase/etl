@@ -2,6 +2,7 @@ use etl_api::routes::destinations::{
     CreateDestinationRequest, CreateDestinationResponse, ReadDestinationResponse,
     ReadDestinationsResponse, UpdateDestinationRequest,
 };
+use etl_api::routes::pipelines::{CreatePipelineRequest, CreatePipelineResponse};
 use etl_config::SerializableSecretString;
 use etl_config::shared::DestinationConfig;
 use etl_telemetry::init_test_tracing;
@@ -9,7 +10,10 @@ use reqwest::StatusCode;
 
 use crate::{
     common::test_app::{TestApp, spawn_test_app},
-    integration::tenants_test::create_tenant,
+    integration::{
+        images_test::create_default_image, pipelines_test::new_pipeline_config,
+        sources_test::create_source, tenants_test::create_tenant,
+    },
 };
 
 pub fn new_name() -> String {
@@ -266,4 +270,41 @@ async fn all_destinations_can_be_read() {
             insta::assert_debug_snapshot!(destination.config);
         }
     }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn destination_with_active_pipeline_cannot_be_deleted() {
+    init_test_tracing();
+    // Arrange
+    let app = spawn_test_app().await;
+    let tenant_id = &create_tenant(&app).await;
+    create_default_image(&app).await;
+
+    // Create source and destination
+    let source_id = create_source(&app, tenant_id).await;
+    let destination_id = create_destination(&app, tenant_id).await;
+
+    // Create a pipeline that uses this destination
+    let pipeline = CreatePipelineRequest {
+        source_id,
+        destination_id,
+        config: new_pipeline_config(),
+    };
+    let pipeline_response = app.create_pipeline(tenant_id, &pipeline).await;
+    assert!(pipeline_response.status().is_success());
+    let pipeline_response: CreatePipelineResponse = pipeline_response
+        .json()
+        .await
+        .expect("failed to deserialize response");
+    let _pipeline_id = pipeline_response.id;
+
+    // Act - Try to delete the destination
+    let response = app.delete_destination(tenant_id, destination_id).await;
+
+    // Assert - Should fail due to foreign key constraint
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+    // Verify destination still exists
+    let destination_response = app.read_destination(tenant_id, destination_id).await;
+    assert!(destination_response.status().is_success());
 }

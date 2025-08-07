@@ -404,3 +404,55 @@ async fn duplicate_destination_pipeline_with_same_source_cant_be_created() {
     // Assert
     assert_eq!(response.status(), StatusCode::CONFLICT);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn destination_and_pipeline_can_be_deleted() {
+    init_test_tracing();
+
+    // Arrange
+    let app = spawn_test_app().await;
+    let tenant_id = &create_tenant(&app).await;
+    let source_id = create_source(&app, tenant_id).await;
+    create_default_image(&app).await;
+
+    // Create destination and pipeline
+    let destination_pipeline = CreateDestinationPipelineRequest {
+        destination_name: new_name(),
+        destination_config: new_destination_config(),
+        source_id,
+        pipeline_config: new_pipeline_config(),
+    };
+    let response = app
+        .create_destination_pipeline(tenant_id, &destination_pipeline)
+        .await;
+    assert!(response.status().is_success());
+    let response: CreateDestinationPipelineResponse = response
+        .json()
+        .await
+        .expect("failed to deserialize response");
+    let destination_id = response.destination_id;
+    let pipeline_id = response.pipeline_id;
+
+    // Verify they exist before deletion
+    let destination_response = app.read_destination(tenant_id, destination_id).await;
+    assert!(destination_response.status().is_success());
+
+    let pipeline_response = app.read_pipeline(tenant_id, pipeline_id).await;
+    assert!(pipeline_response.status().is_success());
+
+    // Act - Delete destination and pipeline
+    let response = app
+        .delete_destination_pipeline(tenant_id, destination_id, pipeline_id)
+        .await;
+
+    // Assert
+    let status = response.status();
+    assert!(status.is_success());
+
+    // Verify they no longer exist
+    let destination_response = app.read_destination(tenant_id, destination_id).await;
+    assert_eq!(destination_response.status(), StatusCode::NOT_FOUND);
+
+    let pipeline_response = app.read_pipeline(tenant_id, pipeline_id).await;
+    assert_eq!(pipeline_response.status(), StatusCode::NOT_FOUND);
+}
