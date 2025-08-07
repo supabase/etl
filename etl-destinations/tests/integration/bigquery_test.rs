@@ -1511,7 +1511,7 @@ async fn update_non_toast_values_with_default_replica_identity() {
         .await
         .unwrap();
 
-    // Forcing size to be set to external so that unchanged TOAST columns are not sent
+    // Forcing storage to be set to external so that unchanged TOAST columns are not sent
     // in update events. Ideally, large values would automatically trigger the storage
     // to external but couldn't force Postgres in the tests even with very large
     // values, hence this workaround.
@@ -1654,7 +1654,7 @@ async fn update_non_toast_values_with_full_replica_identity() {
         .await
         .unwrap();
 
-    // Forcing size to be set to external so that unchanged TOAST columns are not sent
+    // Forcing storage to be set to external so that unchanged TOAST columns are not sent
     // in update events. Ideally, large values would automatically trigger the storage
     // to external but couldn't force Postgres in the tests even with very large
     // values, hence this workaround.
@@ -1760,8 +1760,8 @@ async fn update_non_toast_values_with_full_replica_identity() {
 
     update_event_notify.notified().await;
 
-    // Verify the update behavior - the large_text should be replaced with
-    // default value (empty string) and small_int should be updated
+    // Verify the update behavior - the large_text should not be replaced with
+    // a default value and small_int should be updated
     let table_rows_after_update = bigquery_database
         .query_table(table_name.clone())
         .await
