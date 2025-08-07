@@ -9,7 +9,7 @@ pub enum TableModification<'a> {
     AddColumn { name: &'a str, data_type: &'a str },
     DropColumn { name: &'a str },
     AlterColumn { name: &'a str, alteration: &'a str },
-    ReplicaIdentity { value: &'a str }
+    ReplicaIdentity { value: &'a str },
 }
 
 pub struct PgDatabase<G> {
