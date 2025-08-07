@@ -8,7 +8,7 @@ path = "src/lib.rs"
 
 [[bin]]
 path = "src/main.rs"
-name = "api"
+name = "etl-api"
 
 [dependencies]
 etl-config = { workspace = true, features = ["utoipa"] }
