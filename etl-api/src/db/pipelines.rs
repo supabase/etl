@@ -7,7 +7,7 @@ use thiserror::Error;
 use utoipa::ToSchema;
 
 use crate::db;
-use crate::db::destinations::Destination;
+use crate::db::destinations::{Destination, DestinationsDbError};
 use crate::db::replicators::{ReplicatorsDbError, create_replicator};
 use crate::db::serde::{
     DbDeserializationError, DbSerializationError, deserialize_from_value, serialize,
@@ -94,7 +94,7 @@ pub enum PipelinesDbError {
     ReplicatorsDb(#[from] ReplicatorsDbError),
 
     #[error(transparent)]
-    DestinationsDb(#[from] crate::db::destinations::DestinationsDbError),
+    DestinationsDb(#[from] DestinationsDbError),
 }
 
 pub async fn create_pipeline(
@@ -255,10 +255,10 @@ pub async fn delete_pipeline_cascading(
     // Manually delete the replicator since there's no cascade constraint
     db::replicators::delete_replicator(txn.deref_mut(), tenant_id, pipeline.replicator_id).await?;
 
-    // If a destination is supplied, also the destination will be deleted.
-    if let Some(destination) = destination {
-        db::destinations::delete_destination(txn.deref_mut(), tenant_id, destination.id).await?;
-    }
+    // // If a destination is supplied, also the destination will be deleted.
+    // if let Some(destination) = destination {
+    //     db::destinations::delete_destination(txn.deref_mut(), tenant_id, destination.id).await?;
+    // }
 
     // Delete state and schema from the source database
     state::delete_pipeline_replication_state(source_txn.deref_mut(), pipeline.id).await?;

@@ -7,6 +7,7 @@ use etl_api::routes::pipelines::{CreatePipelineRequest, ReadPipelineResponse};
 use etl_telemetry::init_test_tracing;
 use reqwest::StatusCode;
 
+use crate::common::database::{create_test_source_database, run_etl_migrations_on_source_database};
 use crate::{
     common::test_app::spawn_test_app,
     integration::destination_test::{
@@ -412,8 +413,12 @@ async fn destination_and_pipeline_can_be_deleted() {
     // Arrange
     let app = spawn_test_app().await;
     let tenant_id = &create_tenant(&app).await;
-    let source_id = create_source(&app, tenant_id).await;
     create_default_image(&app).await;
+
+    // We set up the source database (just to make the deletion of state tables work)
+    let (_source_pool, source_id, source_db_config) =
+        create_test_source_database(&app, tenant_id).await;
+    run_etl_migrations_on_source_database(&source_db_config).await;
 
     // Create destination and pipeline
     let destination_pipeline = CreateDestinationPipelineRequest {
