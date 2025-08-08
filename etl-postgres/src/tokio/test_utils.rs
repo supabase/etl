@@ -8,12 +8,22 @@ use tracing::info;
 /// Table modification operations for ALTER TABLE statements.
 pub enum TableModification<'a> {
     /// Add a new column with specified name and data type.
-    AddColumn { name: &'a str, data_type: &'a str },
+    AddColumn {
+        name: &'a str,
+        data_type: &'a str,
+    },
     /// Drop an existing column by name.
-    DropColumn { name: &'a str },
+    DropColumn {
+        name: &'a str,
+    },
     /// Alter an existing column with the specified alteration.
-    AlterColumn { name: &'a str, alteration: &'a str },
-    ReplicaIdentity { value: &'a str },
+    AlterColumn {
+        name: &'a str,
+        alteration: &'a str,
+    },
+    ReplicaIdentity {
+        value: &'a str,
+    },
 }
 
 /// PostgreSQL database wrapper for testing operations.
