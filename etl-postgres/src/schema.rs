@@ -91,12 +91,13 @@ impl ColumnSchema {
     /// This method is used for comparing table schemas loaded via the initial table sync and the
     /// relation messages received via CDC. The reason for skipping the `nullable` field is that
     /// unfortunately Postgres doesn't seem to propagate nullable information of a column via
-    /// relation messages.
+    /// relation messages. The reason for skipping the `primary` field is that if the replica
+    /// identity of a table is set to full, the relation message sets all columns as primary
+    /// key, irrespective of what the actual primary key in the table is.
     fn partial_eq(&self, other: &ColumnSchema) -> bool {
         self.name == other.name
             && self.typ == other.typ
             && self.modifier == other.modifier
-            && self.primary == other.primary
     }
 }
 
