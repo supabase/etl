@@ -1774,7 +1774,7 @@ async fn update_non_toast_values_with_full_replica_identity() {
     let large_text_after_update: String = parse_table_cell(updated_columns[1].clone()).unwrap();
     assert_eq!(
         large_text_after_update, inserted_large_text,
-        "TOAST value should be reset to default during updates of other columns"
+        "TOAST value should be updated"
     );
 
     // The small_int should be updated
