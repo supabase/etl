@@ -568,7 +568,20 @@ fn bq_error_to_etl_error(err: BQError) -> EtlError {
         BQError::TonicInvalidMetadataValueError(_) => {
             (ErrorKind::ConfigError, "BigQuery invalid metadata value")
         }
-        BQError::TonicStatusError(_) => (ErrorKind::DestinationError, "BigQuery gRPC status error"),
+        BQError::TonicStatusError(status) => {
+            // We have no real clarify from BigQuery when an operation fails because the table is absent
+            // so here we are trying to do best effort.
+            //
+            // From our testing, when trying to send data to a missing table, this is the error that is
+            // returned:
+            // `Status { code: PermissionDenied, message: "Permission 'TABLES_UPDATE_DATA' denied on
+            // resource 'x' (or it may not exist).", source: None }`
+            if status.message().ends_with("(or it may not exist).") {
+                (ErrorKind::TableNotFound, "BigQuery resource not found")
+            } else {
+                (ErrorKind::DestinationError, "BigQuery gRPC status error")
+            }
+        }
     };
 
     etl_error!(kind, description, err.to_string())

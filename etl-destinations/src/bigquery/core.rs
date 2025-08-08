@@ -7,7 +7,6 @@ use etl::store::schema::SchemaStore;
 use etl::types::{Cell, Event, PgLsn, TableId, TableName, TableRow, TruncateEvent};
 use gcp_bigquery_client::storage::TableDescriptor;
 use std::collections::{HashMap, HashSet};
-use std::ops::Deref;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::{info, warn};
@@ -17,6 +16,9 @@ use tracing::{info, warn};
 const BIGQUERY_TABLE_ID_DELIMITER: &str = "_";
 /// The replacement string used to escape characters in the original schema and table names.
 const BIGQUERY_TABLE_ID_DELIMITER_ESCAPE_REPLACEMENT: &str = "__";
+
+/// Maximum number of table IDs to cache to prevent unbounded memory growth.
+const MAX_CREATED_TABLES_CACHE_SIZE: usize = 100;
 
 /// Generates a sequence number from the LSNs of an event.
 ///
@@ -76,6 +78,7 @@ struct Inner<S> {
     schema_store: S,
     /// Cache of table IDs that have been successfully created or verified to exist.
     /// This avoids redundant `create_table_if_missing` calls for known tables.
+    /// Limited to `MAX_CREATED_TABLES_CACHE_SIZE` entries with random eviction when full.
     created_tables: HashSet<BigQueryTableId>,
 }
 
@@ -182,8 +185,8 @@ where
                 )
                 .await?;
 
-            // Mark the table as created to avoid future checks
-            inner.created_tables.insert(table_id.clone());
+            // Add the table to the cache (with random eviction if needed)
+            Self::add_to_created_tables_cache(inner, table_id.clone());
             info!("table {table_id} added to creation cache");
         } else {
             info!("table {table_id} found in creation cache, skipping existence check");
@@ -195,6 +198,38 @@ where
         );
 
         Ok((table_id, table_descriptor))
+    }
+
+    /// Adds a table ID to the created tables cache with random eviction if full.
+    ///
+    /// If the cache is at maximum size, removes a random table before adding the new one.
+    fn add_to_created_tables_cache(inner: &mut Inner<impl SchemaStore>, table_id: BigQueryTableId) {
+        // If table is already in cache, nothing to do
+        if inner.created_tables.contains(&table_id) {
+            return;
+        }
+
+        // If cache is full, evict a random item
+        if inner.created_tables.len() >= MAX_CREATED_TABLES_CACHE_SIZE {
+            // Get a random table from the set to remove
+            if let Some(random_table_id) = inner.created_tables.iter().next().cloned() {
+                inner.created_tables.remove(&random_table_id);
+                info!("evicted table {random_table_id} from creation cache (cache full)");
+            }
+        }
+
+        // Add the new table to cache
+        inner.created_tables.insert(table_id);
+    }
+
+    /// Removes a table ID from the created tables cache.
+    ///
+    /// Used when a table is found to not exist during streaming operations.
+    fn remove_from_created_tables_cache(
+        inner: &mut Inner<impl SchemaStore>,
+        table_id: &BigQueryTableId,
+    ) {
+        inner.created_tables.remove(table_id);
     }
 
     /// Handles streaming rows with fallback table creation on missing table errors.
@@ -219,16 +254,22 @@ where
         match result {
             Ok(()) => Ok(()),
             Err(err) => {
-                // Check if this is a table not found error
-                if Self::is_table_not_found_error(&err) {
-                    warn!("table {table_id} not found during streaming, removing from cache and recreating");
+                if err.kind() == ErrorKind::TableNotFound {
+                    warn!(
+                        "table {table_id} not found during streaming, removing from cache and recreating"
+                    );
                     // Remove the table from our cache since it doesn't exist
-                    inner.created_tables.remove(table_id);
-                    
+                    Self::remove_from_created_tables_cache(inner, table_id);
+
                     // Recreate the table and table descriptor
                     let (new_table_id, new_table_descriptor) =
-                        Self::prepare_cdc_streaming_for_table(inner, orig_table_id, use_cdc_sequence_column).await?;
-                    
+                        Self::prepare_cdc_streaming_for_table(
+                            inner,
+                            orig_table_id,
+                            use_cdc_sequence_column,
+                        )
+                        .await?;
+
                     // Retry the streaming operation
                     inner
                         .client
@@ -240,20 +281,6 @@ where
                 }
             }
         }
-    }
-
-    /// Checks if an error indicates a table not found condition.
-    ///
-    /// BigQuery streaming API may return various error types when a table is missing.
-    /// This function checks for common patterns that indicate table absence.
-    fn is_table_not_found_error(err: &EtlError) -> bool {
-        // TODO: figure out which error type this is.
-        // Check if the error message contains indicators of missing table
-        let error_msg = err.to_string().to_lowercase();
-        error_msg.contains("table") && 
-        (error_msg.contains("not found") || 
-         error_msg.contains("does not exist") ||
-         error_msg.contains("404"))
     }
 
     /// Writes data rows to a BigQuery table, adding CDC mode metadata.
@@ -275,7 +302,7 @@ where
                 .values
                 .push(BigQueryOperationType::Upsert.into_cell());
         }
-        
+
         Self::stream_rows_with_fallback(
             &mut inner,
             &dataset_id,

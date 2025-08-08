@@ -66,6 +66,8 @@ pub enum ErrorKind {
     InvalidState,
     /// Invalid data
     InvalidData,
+    /// Table not found
+    TableNotFound,
     /// Data validation error
     ValidationError,
     /// Apply worker error
