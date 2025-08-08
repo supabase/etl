@@ -1,6 +1,7 @@
 use etl::destination::memory::MemoryDestination;
 use etl::state::table::TableReplicationPhaseType;
 use etl::test_utils::database::{spawn_source_database, test_table_name};
+use etl::test_utils::materialize::{FromTableRow, materialize_events};
 use etl::test_utils::notify::NotifyingStore;
 use etl::test_utils::pipeline::create_pipeline;
 use etl::test_utils::test_destination_wrapper::TestDestinationWrapper;
@@ -9,8 +10,6 @@ use etl_postgres::tokio::test_utils::TableModification;
 use etl_telemetry::init_test_tracing;
 use rand::distr::Alphanumeric;
 use rand::{Rng, random};
-
-use crate::common::event_materializer::{FromTableRow, materialize_events};
 
 /// Simple struct to represent a row in our toast test table
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
