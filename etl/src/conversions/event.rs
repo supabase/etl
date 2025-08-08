@@ -285,7 +285,7 @@ fn convert_tuple_to_row(
             }
             protocol::TupleData::UnchangedToast => {
                 // For unchanged toast values we try to use the value from the old row if it is present
-                // but only if it is not null. In all other cases we send the default value for 
+                // but only if it is not null. In all other cases we send the default value for
                 // consistency. As a bit of a practical hack we take the value out of the old row and
                 // move a null value in its place to avoid a clone because toast values tend to be large.
                 if let Some(row) = old_table_row {
