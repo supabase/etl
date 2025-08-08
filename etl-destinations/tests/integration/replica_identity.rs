@@ -10,7 +10,7 @@ use etl_telemetry::init_test_tracing;
 use rand::distr::Alphanumeric;
 use rand::{Rng, random};
 
-use crate::common::bigquery::{parse_table_cell, setup_bigquery_connection};
+use crate::common::bigquery::{ToastTable, parse_bigquery_table_rows, setup_bigquery_connection};
 
 /// Generates a string of random ASCII printable characters of the specified length.
 /// This is useful for creating large text values that won't compress well,
@@ -22,6 +22,8 @@ fn generate_random_ascii_string(length: usize) -> String {
         .map(char::from)
         .collect()
 }
+
+const LARGE_TEXT_SIZE_BYTES: usize = 8192;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn update_non_toast_values_with_default_replica_identity() {
@@ -90,8 +92,7 @@ async fn update_non_toast_values_with_default_replica_identity() {
 
     // Insert a row with a large text value that will be TOASTed
     // PostgreSQL typically TOASTs values larger than ~2KB (TOAST_TUPLE_THRESHOLD)
-    let large_text_size_bytes = 8192;
-    let large_text_value = generate_random_ascii_string(large_text_size_bytes);
+    let large_text_value = generate_random_ascii_string(LARGE_TEXT_SIZE_BYTES);
     let initial_int_value = 100;
 
     let insert_event_notify = destination
@@ -114,17 +115,11 @@ async fn update_non_toast_values_with_default_replica_identity() {
         .query_table(table_name.clone())
         .await
         .unwrap();
-    assert_eq!(table_rows.len(), 1);
+    let parsed_table_rows = parse_bigquery_table_rows::<ToastTable>(table_rows);
+    assert_eq!(parsed_table_rows.len(), 1);
 
-    let initial_row = &table_rows[0];
-    let columns = initial_row.columns.as_ref().unwrap();
-
-    // Verify the large text was inserted correctly
-    let inserted_large_text: String = parse_table_cell(columns[1].clone()).unwrap();
-    assert_eq!(inserted_large_text, large_text_value);
-
-    let inserted_int: i32 = parse_table_cell(columns[2].clone()).unwrap();
-    assert_eq!(inserted_int, initial_int_value);
+    let expected_initial_row = ToastTable::new(1, &large_text_value, initial_int_value);
+    assert_eq!(parsed_table_rows, vec![expected_initial_row]);
 
     // Now update only the small_int column, leaving the large_text unchanged
     // This should trigger TOAST behavior where PostgreSQL sends UnchangedToast
@@ -148,20 +143,12 @@ async fn update_non_toast_values_with_default_replica_identity() {
         .query_table(table_name.clone())
         .await
         .unwrap();
-    assert_eq!(table_rows_after_update.len(), 1);
+    let parsed_table_rows_after_update =
+        parse_bigquery_table_rows::<ToastTable>(table_rows_after_update);
+    assert_eq!(parsed_table_rows_after_update.len(), 1);
 
-    let updated_row = &table_rows_after_update[0];
-    let updated_columns = updated_row.columns.as_ref().unwrap();
-
-    let large_text_after_update: String = parse_table_cell(updated_columns[1].clone()).unwrap();
-    assert_eq!(
-        large_text_after_update, "",
-        "TOAST value should be reset to default during updates of other columns"
-    );
-
-    // The small_int should be updated
-    let int_after_update: i32 = parse_table_cell(updated_columns[2].clone()).unwrap();
-    assert_eq!(int_after_update, updated_int_value);
+    let expected_updated_row = ToastTable::new(1, "", updated_int_value);
+    assert_eq!(parsed_table_rows_after_update, vec![expected_updated_row]);
 
     pipeline.shutdown_and_wait().await.unwrap();
 }
@@ -243,8 +230,7 @@ async fn update_non_toast_values_with_full_replica_identity() {
 
     // Insert a row with a large text value that will be TOASTed
     // PostgreSQL typically TOASTs values larger than ~2KB (TOAST_TUPLE_THRESHOLD)
-    let large_text_size_bytes = 8192;
-    let large_text_value = generate_random_ascii_string(large_text_size_bytes);
+    let large_text_value = generate_random_ascii_string(LARGE_TEXT_SIZE_BYTES);
     let initial_int_value = 100;
 
     let insert_event_notify = destination
@@ -267,17 +253,11 @@ async fn update_non_toast_values_with_full_replica_identity() {
         .query_table(table_name.clone())
         .await
         .unwrap();
-    assert_eq!(table_rows.len(), 1);
+    let parsed_table_rows = parse_bigquery_table_rows::<ToastTable>(table_rows);
+    assert_eq!(parsed_table_rows.len(), 1);
 
-    let initial_row = &table_rows[0];
-    let columns = initial_row.columns.as_ref().unwrap();
-
-    // Verify the large text was inserted correctly
-    let inserted_large_text: String = parse_table_cell(columns[1].clone()).unwrap();
-    assert_eq!(inserted_large_text, large_text_value);
-
-    let inserted_int: i32 = parse_table_cell(columns[2].clone()).unwrap();
-    assert_eq!(inserted_int, initial_int_value);
+    let expected_initial_row = ToastTable::new(1, &large_text_value, initial_int_value);
+    assert_eq!(parsed_table_rows, vec![expected_initial_row]);
 
     // Now update only the small_int column, leaving the large_text unchanged
     // This should trigger TOAST behavior where PostgreSQL sends UnchangedToast
@@ -301,20 +281,12 @@ async fn update_non_toast_values_with_full_replica_identity() {
         .query_table(table_name.clone())
         .await
         .unwrap();
-    assert_eq!(table_rows_after_update.len(), 1);
+    let parsed_table_rows_after_update =
+        parse_bigquery_table_rows::<ToastTable>(table_rows_after_update);
+    assert_eq!(parsed_table_rows_after_update.len(), 1);
 
-    let updated_row = &table_rows_after_update[0];
-    let updated_columns = updated_row.columns.as_ref().unwrap();
-
-    let large_text_after_update: String = parse_table_cell(updated_columns[1].clone()).unwrap();
-    assert_eq!(
-        large_text_after_update, inserted_large_text,
-        "TOAST value should be updated"
-    );
-
-    // The small_int should be updated
-    let int_after_update: i32 = parse_table_cell(updated_columns[2].clone()).unwrap();
-    assert_eq!(int_after_update, updated_int_value);
+    let expected_updated_row = ToastTable::new(1, &large_text_value, updated_int_value);
+    assert_eq!(parsed_table_rows_after_update, vec![expected_updated_row]);
 
     pipeline.shutdown_and_wait().await.unwrap();
 }
@@ -386,8 +358,7 @@ async fn update_toast_values_with_default_replica_identity() {
 
     // Insert a row with a large text value that will be TOASTed
     // PostgreSQL typically TOASTs values larger than ~2KB (TOAST_TUPLE_THRESHOLD)
-    let large_text_size_bytes = 8192;
-    let large_text_value = generate_random_ascii_string(large_text_size_bytes);
+    let large_text_value = generate_random_ascii_string(LARGE_TEXT_SIZE_BYTES);
     let initial_int_value = 100;
 
     let insert_event_notify = destination
@@ -410,24 +381,18 @@ async fn update_toast_values_with_default_replica_identity() {
         .query_table(table_name.clone())
         .await
         .unwrap();
-    assert_eq!(table_rows.len(), 1);
+    let parsed_table_rows = parse_bigquery_table_rows::<ToastTable>(table_rows);
+    assert_eq!(parsed_table_rows.len(), 1);
 
-    let initial_row = &table_rows[0];
-    let columns = initial_row.columns.as_ref().unwrap();
-
-    // Verify the large text was inserted correctly
-    let inserted_large_text: String = parse_table_cell(columns[1].clone()).unwrap();
-    assert_eq!(inserted_large_text, large_text_value);
-
-    let inserted_int: i32 = parse_table_cell(columns[2].clone()).unwrap();
-    assert_eq!(inserted_int, initial_int_value);
+    let expected_initial_row = ToastTable::new(1, &large_text_value, initial_int_value);
+    assert_eq!(parsed_table_rows, vec![expected_initial_row]);
 
     // Test update to the toast column does set it to that value
     let update_event_notify = destination
         .wait_for_events_count(vec![(EventType::Update, 1)])
         .await;
 
-    let updated_large_text_value = generate_random_ascii_string(large_text_size_bytes);
+    let updated_large_text_value = generate_random_ascii_string(LARGE_TEXT_SIZE_BYTES);
     database
         .update_values(
             table_name.clone(),
@@ -444,20 +409,12 @@ async fn update_toast_values_with_default_replica_identity() {
         .query_table(table_name.clone())
         .await
         .unwrap();
-    assert_eq!(table_rows_after_update.len(), 1);
+    let parsed_table_rows_after_update =
+        parse_bigquery_table_rows::<ToastTable>(table_rows_after_update);
+    assert_eq!(parsed_table_rows_after_update.len(), 1);
 
-    let updated_row = &table_rows_after_update[0];
-    let updated_columns = updated_row.columns.as_ref().unwrap();
-
-    // Both Large text and small int should be updated
-    let updated_large_text: String = parse_table_cell(updated_columns[1].clone()).unwrap();
-    assert_eq!(
-        updated_large_text, updated_large_text_value,
-        "TOAST value should be updated"
-    );
-
-    let updated_int: i32 = parse_table_cell(updated_columns[2].clone()).unwrap();
-    assert_eq!(updated_int, initial_int_value);
+    let expected_updated_row = ToastTable::new(1, &updated_large_text_value, initial_int_value);
+    assert_eq!(parsed_table_rows_after_update, vec![expected_updated_row]);
 
     pipeline.shutdown_and_wait().await.unwrap();
 }
@@ -543,8 +500,7 @@ async fn update_non_toast_values_with_none_replica_identity() {
 
     // Insert a row with a large text value that will be TOASTed
     // PostgreSQL typically TOASTs values larger than ~2KB (TOAST_TUPLE_THRESHOLD)
-    let large_text_size_bytes = 8192;
-    let large_text_value = generate_random_ascii_string(large_text_size_bytes);
+    let large_text_value = generate_random_ascii_string(LARGE_TEXT_SIZE_BYTES);
     let initial_int_value = 100;
 
     let insert_event_notify = destination
@@ -567,17 +523,11 @@ async fn update_non_toast_values_with_none_replica_identity() {
         .query_table(table_name.clone())
         .await
         .unwrap();
-    assert_eq!(table_rows.len(), 1);
+    let parsed_table_rows = parse_bigquery_table_rows::<ToastTable>(table_rows);
+    assert_eq!(parsed_table_rows.len(), 1);
 
-    let initial_row = &table_rows[0];
-    let columns = initial_row.columns.as_ref().unwrap();
-
-    // Verify the large text was inserted correctly
-    let inserted_large_text: String = parse_table_cell(columns[1].clone()).unwrap();
-    assert_eq!(inserted_large_text, large_text_value);
-
-    let inserted_int: i32 = parse_table_cell(columns[2].clone()).unwrap();
-    assert_eq!(inserted_int, initial_int_value);
+    let expected_initial_row = ToastTable::new(1, &large_text_value, initial_int_value);
+    assert_eq!(parsed_table_rows, vec![expected_initial_row]);
 
     // Now attempt to update only the small_int column
     // With replica identity NONE, PostgreSQL should reject the update operation

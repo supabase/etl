@@ -923,3 +923,32 @@ where
 
     parsed_table_rows
 }
+
+#[derive(Debug, Eq, PartialEq, Ord, PartialOrd)]
+pub struct ToastTable {
+    pub id: i32,
+    pub large_text: String,
+    pub small_int: i32,
+}
+
+impl ToastTable {
+    pub fn new(id: i32, large_text: &str, small_int: i32) -> Self {
+        Self {
+            id,
+            large_text: large_text.to_owned(),
+            small_int,
+        }
+    }
+}
+
+impl From<TableRow> for ToastTable {
+    fn from(value: TableRow) -> Self {
+        let columns = value.columns.unwrap();
+
+        ToastTable {
+            id: parse_table_cell(columns[0].clone()).unwrap(),
+            large_text: parse_table_cell(columns[1].clone()).unwrap(),
+            small_int: parse_table_cell(columns[2].clone()).unwrap(),
+        }
+    }
+}
