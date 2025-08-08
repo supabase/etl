@@ -25,6 +25,10 @@ fn generate_random_ascii_string(length: usize) -> String {
 
 const LARGE_TEXT_SIZE_BYTES: usize = 8192;
 
+/// Tests that TOAST values are replaced with default values when updating non-TOAST columns
+/// with default replica identity. When a table uses default replica identity (primary key)
+/// and non-TOAST columns are updated, PostgreSQL sends UnchangedToast for TOAST values.
+/// We send a default to the destination for the missing values .
 #[tokio::test(flavor = "multi_thread")]
 async fn update_non_toast_values_with_default_replica_identity() {
     init_test_tracing();
@@ -153,6 +157,9 @@ async fn update_non_toast_values_with_default_replica_identity() {
     pipeline.shutdown_and_wait().await.unwrap();
 }
 
+/// Tests that TOAST values are preserved when updating non-TOAST columns with full replica identity.
+/// When a table uses full replica identity and non-TOAST columns are updated, PostgreSQL includes
+/// all column values in the update event. We send these values to the destination.
 #[tokio::test(flavor = "multi_thread")]
 async fn update_non_toast_values_with_full_replica_identity() {
     init_test_tracing();
@@ -291,6 +298,10 @@ async fn update_non_toast_values_with_full_replica_identity() {
     pipeline.shutdown_and_wait().await.unwrap();
 }
 
+/// Tests that TOAST values are correctly updated when directly modifying TOAST columns
+/// with default replica identity. When updating the TOAST column itself, PostgreSQL
+/// sends the new value regardless of replica identity settings, ensuring the destination
+/// receives and applies the updated TOAST data correctly.
 #[tokio::test(flavor = "multi_thread")]
 async fn update_toast_values_with_default_replica_identity() {
     init_test_tracing();
@@ -419,8 +430,8 @@ async fn update_toast_values_with_default_replica_identity() {
     pipeline.shutdown_and_wait().await.unwrap();
 }
 
-/// Tests that PostgreSQL rejects update operations when replica identity is set to NONE.
-/// When a table has replica identity NONE and is part of a publication that publishes updates,
+/// Tests that PostgreSQL rejects update operations when replica identity is set to none.
+/// When a table has replica identity none and is part of a publication that publishes updates,
 /// PostgreSQL will reject update operations because it cannot identify which row to update
 /// without sufficient replica identity information.
 #[tokio::test(flavor = "multi_thread")]
@@ -564,8 +575,8 @@ async fn update_non_toast_values_with_none_replica_identity() {
 /// Tests that TOAST values are replaced with default values when the table uses
 /// replica identity with a unique index that includes columns being updated.
 /// When updating columns that are part of the replica identity index, PostgreSQL sends
-/// UnchangedToast for large TOAST values, which the destination handles by setting them
-/// to default (empty string).
+/// UnchangedToast for large TOAST values. We send a default to the destination for the
+/// missing values .
 #[tokio::test(flavor = "multi_thread")]
 async fn update_non_toast_values_with_unique_index_replica_identity() {
     init_test_tracing();
