@@ -607,24 +607,17 @@ async fn update_non_toast_values_with_unique_index_replica_identity() {
     // Create a unique index on id and small_int columns
     let index_name = "unique_id_small_int_idx";
     let create_index_query = format!(
-        "create unique index {} on {} (id, small_int)",
-        index_name,
+        "create unique index {index_name} on {} (id, small_int)",
         table_name.as_quoted_identifier()
     );
-    database
-        .client
-        .as_ref()
-        .unwrap()
-        .execute(&create_index_query, &[])
-        .await
-        .unwrap();
+    database.run_sql(&create_index_query).await.unwrap();
 
     // Set replica identity to use the unique index
     database
         .alter_table(
             table_name.clone(),
             &[TableModification::ReplicaIdentity {
-                value: &format!("USING INDEX {}", index_name),
+                value: &format!("using index {index_name}"),
             }],
         )
         .await

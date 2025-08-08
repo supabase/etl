@@ -282,6 +282,11 @@ impl<G: GenericClient> PgDatabase<G> {
 
         Ok(row.get(0))
     }
+
+    /// Executes arbitrary SQL on the database.
+    pub async fn run_sql(&self, sql: &str) -> Result<u64, tokio_postgres::Error> {
+        self.client.as_ref().unwrap().execute(sql, &[]).await
+    }
 }
 
 impl PgDatabase<Client> {
