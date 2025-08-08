@@ -24,156 +24,40 @@ pub enum ArrayCellNonOptional {
     Bytes(Vec<Vec<u8>>),
 }
 
+macro_rules! convert_array_variant {
+    ($variant:ident, $vec:expr) => {
+        if $vec.iter().any(|v| v.is_none()) {
+            Err("NULL values in arrays are not supported by BigQuery")
+        } else {
+            Ok(ArrayCellNonOptional::$variant(
+                $vec.into_iter().flatten().collect(),
+            ))
+        }
+    };
+}
+
 impl TryFrom<ArrayCell> for ArrayCellNonOptional {
     type Error = &'static str;
 
     fn try_from(array_cell: ArrayCell) -> Result<Self, Self::Error> {
         match array_cell {
             ArrayCell::Null => Ok(ArrayCellNonOptional::Null),
-            ArrayCell::Bool(vec) => {
-                if vec.iter().any(|v| v.is_none()) {
-                    Err("NULL values in arrays are not supported by BigQuery")
-                } else {
-                    Ok(ArrayCellNonOptional::Bool(
-                        vec.into_iter().flatten().collect(),
-                    ))
-                }
-            }
-            ArrayCell::String(vec) => {
-                if vec.iter().any(|v| v.is_none()) {
-                    Err("NULL values in arrays are not supported by BigQuery")
-                } else {
-                    Ok(ArrayCellNonOptional::String(
-                        vec.into_iter().flatten().collect(),
-                    ))
-                }
-            }
-            ArrayCell::I16(vec) => {
-                if vec.iter().any(|v| v.is_none()) {
-                    Err("NULL values in arrays are not supported by BigQuery")
-                } else {
-                    Ok(ArrayCellNonOptional::I16(
-                        vec.into_iter().flatten().collect(),
-                    ))
-                }
-            }
-            ArrayCell::I32(vec) => {
-                if vec.iter().any(|v| v.is_none()) {
-                    Err("NULL values in arrays are not supported by BigQuery")
-                } else {
-                    Ok(ArrayCellNonOptional::I32(
-                        vec.into_iter().flatten().collect(),
-                    ))
-                }
-            }
-            ArrayCell::U32(vec) => {
-                if vec.iter().any(|v| v.is_none()) {
-                    Err("NULL values in arrays are not supported by BigQuery")
-                } else {
-                    Ok(ArrayCellNonOptional::U32(
-                        vec.into_iter().flatten().collect(),
-                    ))
-                }
-            }
-            ArrayCell::I64(vec) => {
-                if vec.iter().any(|v| v.is_none()) {
-                    Err("NULL values in arrays are not supported by BigQuery")
-                } else {
-                    Ok(ArrayCellNonOptional::I64(
-                        vec.into_iter().flatten().collect(),
-                    ))
-                }
-            }
-            ArrayCell::F32(vec) => {
-                if vec.iter().any(|v| v.is_none()) {
-                    Err("NULL values in arrays are not supported by BigQuery")
-                } else {
-                    Ok(ArrayCellNonOptional::F32(
-                        vec.into_iter().flatten().collect(),
-                    ))
-                }
-            }
-            ArrayCell::F64(vec) => {
-                if vec.iter().any(|v| v.is_none()) {
-                    Err("NULL values in arrays are not supported by BigQuery")
-                } else {
-                    Ok(ArrayCellNonOptional::F64(
-                        vec.into_iter().flatten().collect(),
-                    ))
-                }
-            }
-            ArrayCell::Numeric(vec) => {
-                if vec.iter().any(|v| v.is_none()) {
-                    Err("NULL values in arrays are not supported by BigQuery")
-                } else {
-                    Ok(ArrayCellNonOptional::Numeric(
-                        vec.into_iter().flatten().collect(),
-                    ))
-                }
-            }
-            ArrayCell::Date(vec) => {
-                if vec.iter().any(|v| v.is_none()) {
-                    Err("NULL values in arrays are not supported by BigQuery")
-                } else {
-                    Ok(ArrayCellNonOptional::Date(
-                        vec.into_iter().flatten().collect(),
-                    ))
-                }
-            }
-            ArrayCell::Time(vec) => {
-                if vec.iter().any(|v| v.is_none()) {
-                    Err("NULL values in arrays are not supported by BigQuery")
-                } else {
-                    Ok(ArrayCellNonOptional::Time(
-                        vec.into_iter().flatten().collect(),
-                    ))
-                }
-            }
-            ArrayCell::TimeStamp(vec) => {
-                if vec.iter().any(|v| v.is_none()) {
-                    Err("NULL values in arrays are not supported by BigQuery")
-                } else {
-                    Ok(ArrayCellNonOptional::TimeStamp(
-                        vec.into_iter().flatten().collect(),
-                    ))
-                }
-            }
-            ArrayCell::TimeStampTz(vec) => {
-                if vec.iter().any(|v| v.is_none()) {
-                    Err("NULL values in arrays are not supported by BigQuery")
-                } else {
-                    Ok(ArrayCellNonOptional::TimeStampTz(
-                        vec.into_iter().flatten().collect(),
-                    ))
-                }
-            }
-            ArrayCell::Uuid(vec) => {
-                if vec.iter().any(|v| v.is_none()) {
-                    Err("NULL values in arrays are not supported by BigQuery")
-                } else {
-                    Ok(ArrayCellNonOptional::Uuid(
-                        vec.into_iter().flatten().collect(),
-                    ))
-                }
-            }
-            ArrayCell::Json(vec) => {
-                if vec.iter().any(|v| v.is_none()) {
-                    Err("NULL values in arrays are not supported by BigQuery")
-                } else {
-                    Ok(ArrayCellNonOptional::Json(
-                        vec.into_iter().flatten().collect(),
-                    ))
-                }
-            }
-            ArrayCell::Bytes(vec) => {
-                if vec.iter().any(|v| v.is_none()) {
-                    Err("NULL values in arrays are not supported by BigQuery")
-                } else {
-                    Ok(ArrayCellNonOptional::Bytes(
-                        vec.into_iter().flatten().collect(),
-                    ))
-                }
-            }
+            ArrayCell::Bool(vec) => convert_array_variant!(Bool, vec),
+            ArrayCell::String(vec) => convert_array_variant!(String, vec),
+            ArrayCell::I16(vec) => convert_array_variant!(I16, vec),
+            ArrayCell::I32(vec) => convert_array_variant!(I32, vec),
+            ArrayCell::U32(vec) => convert_array_variant!(U32, vec),
+            ArrayCell::I64(vec) => convert_array_variant!(I64, vec),
+            ArrayCell::F32(vec) => convert_array_variant!(F32, vec),
+            ArrayCell::F64(vec) => convert_array_variant!(F64, vec),
+            ArrayCell::Numeric(vec) => convert_array_variant!(Numeric, vec),
+            ArrayCell::Date(vec) => convert_array_variant!(Date, vec),
+            ArrayCell::Time(vec) => convert_array_variant!(Time, vec),
+            ArrayCell::TimeStamp(vec) => convert_array_variant!(TimeStamp, vec),
+            ArrayCell::TimeStampTz(vec) => convert_array_variant!(TimeStampTz, vec),
+            ArrayCell::Uuid(vec) => convert_array_variant!(Uuid, vec),
+            ArrayCell::Json(vec) => convert_array_variant!(Json, vec),
+            ArrayCell::Bytes(vec) => convert_array_variant!(Bytes, vec),
         }
     }
 }
@@ -351,72 +235,60 @@ pub fn array_cell_non_optional_encode_prost(
         ArrayCellNonOptional::Null => {}
         ArrayCellNonOptional::Bool(vec) => {
             prost::encoding::bool::encode_packed(tag, &vec, buf);
-        }
+        },
         ArrayCellNonOptional::String(vec) => {
             prost::encoding::string::encode_repeated(tag, &vec, buf);
-        }
+        },
         ArrayCellNonOptional::I16(vec) => {
             let values: Vec<i32> = vec.into_iter().map(|v| v as i32).collect();
             prost::encoding::int32::encode_packed(tag, &values, buf);
-        }
+        },
         ArrayCellNonOptional::I32(vec) => {
             prost::encoding::int32::encode_packed(tag, &vec, buf);
-        }
+        },
         ArrayCellNonOptional::U32(vec) => {
             prost::encoding::uint32::encode_packed(tag, &vec, buf);
-        }
+        },
         ArrayCellNonOptional::I64(vec) => {
             prost::encoding::int64::encode_packed(tag, &vec, buf);
-        }
+        },
         ArrayCellNonOptional::F32(vec) => {
             prost::encoding::float::encode_packed(tag, &vec, buf);
-        }
+        },
         ArrayCellNonOptional::F64(vec) => {
             prost::encoding::double::encode_packed(tag, &vec, buf);
-        }
+        },
         ArrayCellNonOptional::Numeric(vec) => {
             let values: Vec<String> = vec.into_iter().map(|v| v.to_string()).collect();
             prost::encoding::string::encode_repeated(tag, &values, buf);
-        }
+        },
         ArrayCellNonOptional::Date(vec) => {
-            let values: Vec<String> = vec
-                .into_iter()
-                .map(|v| v.format("%Y-%m-%d").to_string())
-                .collect();
+            let values: Vec<String> = vec.into_iter().map(|v| v.format("%Y-%m-%d").to_string()).collect();
             prost::encoding::string::encode_repeated(tag, &values, buf);
-        }
+        },
         ArrayCellNonOptional::Time(vec) => {
-            let values: Vec<String> = vec
-                .into_iter()
-                .map(|v| v.format("%H:%M:%S%.f").to_string())
-                .collect();
+            let values: Vec<String> = vec.into_iter().map(|v| v.format("%H:%M:%S%.f").to_string()).collect();
             prost::encoding::string::encode_repeated(tag, &values, buf);
-        }
+        },
         ArrayCellNonOptional::TimeStamp(vec) => {
-            let values: Vec<String> = vec
-                .into_iter()
-                .map(|v| v.format("%Y-%m-%d %H:%M:%S%.f").to_string())
-                .collect();
+            let values: Vec<String> = vec.into_iter().map(|v| v.format("%Y-%m-%d %H:%M:%S%.f").to_string()).collect();
             prost::encoding::string::encode_repeated(tag, &values, buf);
-        }
+        },
         ArrayCellNonOptional::TimeStampTz(vec) => {
-            let values: Vec<String> = vec
-                .into_iter()
-                .map(|v| v.format("%Y-%m-%d %H:%M:%S%.f%:z").to_string())
-                .collect();
+            let values: Vec<String> = vec.into_iter().map(|v| v.format("%Y-%m-%d %H:%M:%S%.f%:z").to_string()).collect();
             prost::encoding::string::encode_repeated(tag, &values, buf);
-        }
+        },
         ArrayCellNonOptional::Uuid(vec) => {
             let values: Vec<String> = vec.into_iter().map(|v| v.to_string()).collect();
             prost::encoding::string::encode_repeated(tag, &values, buf);
-        }
+        },
         ArrayCellNonOptional::Json(vec) => {
             let values: Vec<String> = vec.into_iter().map(|v| v.to_string()).collect();
             prost::encoding::string::encode_repeated(tag, &values, buf);
-        }
+        },
         ArrayCellNonOptional::Bytes(vec) => {
             prost::encoding::bytes::encode_repeated(tag, &vec, buf);
-        }
+        },
     }
 }
 
@@ -427,13 +299,11 @@ pub fn array_cell_non_optional_encoded_len_prost(
     match array_cell {
         ArrayCellNonOptional::Null => 0,
         ArrayCellNonOptional::Bool(vec) => prost::encoding::bool::encoded_len_packed(tag, &vec),
-        ArrayCellNonOptional::String(vec) => {
-            prost::encoding::string::encoded_len_repeated(tag, &vec)
-        }
+        ArrayCellNonOptional::String(vec) => prost::encoding::string::encoded_len_repeated(tag, &vec),
         ArrayCellNonOptional::I16(vec) => {
             let values: Vec<i32> = vec.into_iter().map(|v| v as i32).collect();
             prost::encoding::int32::encoded_len_packed(tag, &values)
-        }
+        },
         ArrayCellNonOptional::I32(vec) => prost::encoding::int32::encoded_len_packed(tag, &vec),
         ArrayCellNonOptional::U32(vec) => prost::encoding::uint32::encoded_len_packed(tag, &vec),
         ArrayCellNonOptional::I64(vec) => prost::encoding::int64::encoded_len_packed(tag, &vec),
@@ -442,43 +312,31 @@ pub fn array_cell_non_optional_encoded_len_prost(
         ArrayCellNonOptional::Numeric(vec) => {
             let values: Vec<String> = vec.into_iter().map(|v| v.to_string()).collect();
             prost::encoding::string::encoded_len_repeated(tag, &values)
-        }
+        },
         ArrayCellNonOptional::Date(vec) => {
-            let values: Vec<String> = vec
-                .into_iter()
-                .map(|v| v.format("%Y-%m-%d").to_string())
-                .collect();
+            let values: Vec<String> = vec.into_iter().map(|v| v.format("%Y-%m-%d").to_string()).collect();
             prost::encoding::string::encoded_len_repeated(tag, &values)
-        }
+        },
         ArrayCellNonOptional::Time(vec) => {
-            let values: Vec<String> = vec
-                .into_iter()
-                .map(|v| v.format("%H:%M:%S%.f").to_string())
-                .collect();
+            let values: Vec<String> = vec.into_iter().map(|v| v.format("%H:%M:%S%.f").to_string()).collect();
             prost::encoding::string::encoded_len_repeated(tag, &values)
-        }
+        },
         ArrayCellNonOptional::TimeStamp(vec) => {
-            let values: Vec<String> = vec
-                .into_iter()
-                .map(|v| v.format("%Y-%m-%d %H:%M:%S%.f").to_string())
-                .collect();
+            let values: Vec<String> = vec.into_iter().map(|v| v.format("%Y-%m-%d %H:%M:%S%.f").to_string()).collect();
             prost::encoding::string::encoded_len_repeated(tag, &values)
-        }
+        },
         ArrayCellNonOptional::TimeStampTz(vec) => {
-            let values: Vec<String> = vec
-                .into_iter()
-                .map(|v| v.format("%Y-%m-%d %H:%M:%S%.f%:z").to_string())
-                .collect();
+            let values: Vec<String> = vec.into_iter().map(|v| v.format("%Y-%m-%d %H:%M:%S%.f%:z").to_string()).collect();
             prost::encoding::string::encoded_len_repeated(tag, &values)
-        }
+        },
         ArrayCellNonOptional::Uuid(vec) => {
             let values: Vec<String> = vec.into_iter().map(|v| v.to_string()).collect();
             prost::encoding::string::encoded_len_repeated(tag, &values)
-        }
+        },
         ArrayCellNonOptional::Json(vec) => {
             let values: Vec<String> = vec.into_iter().map(|v| v.to_string()).collect();
             prost::encoding::string::encoded_len_repeated(tag, &values)
-        }
+        },
         ArrayCellNonOptional::Bytes(vec) => prost::encoding::bytes::encoded_len_repeated(tag, &vec),
     }
 }
