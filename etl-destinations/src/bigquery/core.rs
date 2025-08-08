@@ -6,7 +6,7 @@ use etl::etl_error;
 use etl::store::schema::SchemaStore;
 use etl::types::{Cell, Event, PgLsn, TableId, TableName, TableRow, TruncateEvent};
 use gcp_bigquery_client::storage::TableDescriptor;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ops::Deref;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -66,13 +66,17 @@ pub fn table_name_to_bigquery_table_id(table_name: &TableName) -> BigQueryTableI
 
 /// Internal state for [`BigQueryDestination`] wrapped in `Arc<Mutex<>>`.
 ///
-/// Contains the BigQuery client, dataset configuration, and injected schema cache.
+/// Contains the BigQuery client, dataset configuration, injected schema cache,
+/// and table creation state cache for performance optimization.
 #[derive(Debug)]
 struct Inner<S> {
     client: BigQueryClient,
     dataset_id: BigQueryDatasetId,
     max_staleness_mins: Option<u16>,
     schema_store: S,
+    /// Cache of table IDs that have been successfully created or verified to exist.
+    /// This avoids redundant `create_table_if_missing` calls for known tables.
+    created_tables: HashSet<BigQueryTableId>,
 }
 
 /// A BigQuery destination that implements the ETL [`Destination`] trait.
@@ -105,6 +109,7 @@ where
             dataset_id,
             max_staleness_mins,
             schema_store,
+            created_tables: HashSet::new(),
         };
 
         Ok(Self {
@@ -129,6 +134,7 @@ where
             dataset_id,
             max_staleness_mins,
             schema_store,
+            created_tables: HashSet::new(),
         };
 
         Ok(Self {
@@ -136,12 +142,13 @@ where
         })
     }
 
-    /// Prepares the table for CDC streaming.
+    /// Prepares the table for CDC streaming with optimistic table creation caching.
     ///
-    /// This function loads the table schema, crates the table in BigQuery (if missing) and sets up
-    /// the required table id and table descriptor that are required by BigQuery for CDC streaming.
-    async fn prepare_cdc_streaming_for_table<I: Deref<Target = Inner<S>>>(
-        inner: &I,
+    /// Loads the table schema and creates the table in BigQuery if missing. Uses an internal
+    /// cache to avoid redundant existence checks for tables that have already been created.
+    /// If streaming fails with a table not found error, the cache entry is invalidated.
+    async fn prepare_cdc_streaming_for_table(
+        inner: &mut Inner<S>,
         table_id: &TableId,
         use_cdc_sequence_column: bool,
     ) -> EtlResult<(BigQueryTableId, TableDescriptor)> {
@@ -163,17 +170,24 @@ where
 
         let table_id = table_name_to_bigquery_table_id(&table_schema.name);
 
-        // TODO: store the fact that the table was created to avoid every time the check, if we then
-        //  try to create the value and fail, we can re-create the table.
-        inner
-            .client
-            .create_table_if_missing(
-                &inner.dataset_id,
-                &table_id,
-                &table_schema.column_schemas,
-                inner.max_staleness_mins,
-            )
-            .await?;
+        // Optimistically skip table creation if we've already seen this table
+        if !inner.created_tables.contains(&table_id) {
+            inner
+                .client
+                .create_table_if_missing(
+                    &inner.dataset_id,
+                    &table_id,
+                    &table_schema.column_schemas,
+                    inner.max_staleness_mins,
+                )
+                .await?;
+
+            // Mark the table as created to avoid future checks
+            inner.created_tables.insert(table_id.clone());
+            info!("table {table_id} added to creation cache");
+        } else {
+            info!("table {table_id} found in creation cache, skipping existence check");
+        }
 
         let table_descriptor = BigQueryClient::column_schemas_to_table_descriptor(
             &table_schema.column_schemas,
@@ -181,6 +195,65 @@ where
         );
 
         Ok((table_id, table_descriptor))
+    }
+
+    /// Handles streaming rows with fallback table creation on missing table errors.
+    ///
+    /// Attempts to stream rows to BigQuery. If streaming fails with a table not found error,
+    /// removes the table from the cache and retries with table creation.
+    async fn stream_rows_with_fallback(
+        inner: &mut Inner<S>,
+        dataset_id: &BigQueryDatasetId,
+        table_id: &BigQueryTableId,
+        table_descriptor: &TableDescriptor,
+        table_rows: Vec<TableRow>,
+        orig_table_id: &TableId,
+        use_cdc_sequence_column: bool,
+    ) -> EtlResult<()> {
+        // First attempt - optimistically assume the table exists
+        let result = inner
+            .client
+            .stream_rows(dataset_id, table_id, table_descriptor, table_rows.clone())
+            .await;
+
+        match result {
+            Ok(()) => Ok(()),
+            Err(err) => {
+                // Check if this is a table not found error
+                if Self::is_table_not_found_error(&err) {
+                    warn!("table {table_id} not found during streaming, removing from cache and recreating");
+                    // Remove the table from our cache since it doesn't exist
+                    inner.created_tables.remove(table_id);
+                    
+                    // Recreate the table and table descriptor
+                    let (new_table_id, new_table_descriptor) =
+                        Self::prepare_cdc_streaming_for_table(inner, orig_table_id, use_cdc_sequence_column).await?;
+                    
+                    // Retry the streaming operation
+                    inner
+                        .client
+                        .stream_rows(dataset_id, &new_table_id, &new_table_descriptor, table_rows)
+                        .await
+                } else {
+                    // Not a table not found error, propagate the original error
+                    Err(err)
+                }
+            }
+        }
+    }
+
+    /// Checks if an error indicates a table not found condition.
+    ///
+    /// BigQuery streaming API may return various error types when a table is missing.
+    /// This function checks for common patterns that indicate table absence.
+    fn is_table_not_found_error(err: &EtlError) -> bool {
+        // TODO: figure out which error type this is.
+        // Check if the error message contains indicators of missing table
+        let error_msg = err.to_string().to_lowercase();
+        error_msg.contains("table") && 
+        (error_msg.contains("not found") || 
+         error_msg.contains("does not exist") ||
+         error_msg.contains("404"))
     }
 
     /// Writes data rows to a BigQuery table, adding CDC mode metadata.
@@ -193,8 +266,8 @@ where
     ) -> EtlResult<()> {
         let mut inner = self.inner.lock().await;
 
-        let (table_id, table_descriptor) =
-            Self::prepare_cdc_streaming_for_table(&inner, &table_id, false).await?;
+        let (bq_table_id, table_descriptor) =
+            Self::prepare_cdc_streaming_for_table(&mut inner, &table_id, false).await?;
 
         let dataset_id = inner.dataset_id.clone();
         for table_row in table_rows.iter_mut() {
@@ -202,10 +275,17 @@ where
                 .values
                 .push(BigQueryOperationType::Upsert.into_cell());
         }
-        inner
-            .client
-            .stream_rows(&dataset_id, &table_id, &table_descriptor, table_rows)
-            .await?;
+        
+        Self::stream_rows_with_fallback(
+            &mut inner,
+            &dataset_id,
+            &bq_table_id,
+            &table_descriptor,
+            table_rows,
+            &table_id,
+            false,
+        )
+        .await?;
 
         Ok(())
     }
@@ -284,14 +364,20 @@ where
                 let mut inner = self.inner.lock().await;
 
                 for (table_id, table_rows) in table_id_to_table_rows {
-                    let (table_id, table_descriptor) =
-                        Self::prepare_cdc_streaming_for_table(&inner, &table_id, true).await?;
+                    let (bq_table_id, table_descriptor) =
+                        Self::prepare_cdc_streaming_for_table(&mut inner, &table_id, true).await?;
 
                     let dataset_id = inner.dataset_id.clone();
-                    inner
-                        .client
-                        .stream_rows(&dataset_id, &table_id, &table_descriptor, table_rows)
-                        .await?;
+                    Self::stream_rows_with_fallback(
+                        &mut inner,
+                        &dataset_id,
+                        &bq_table_id,
+                        &table_descriptor,
+                        table_rows,
+                        &table_id,
+                        true,
+                    )
+                    .await?;
                 }
             }
 
