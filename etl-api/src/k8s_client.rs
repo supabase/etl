@@ -1,12 +1,12 @@
 use async_trait::async_trait;
-use base64::{Engine, prelude::BASE64_STANDARD};
+use base64::{prelude::BASE64_STANDARD, Engine};
 use k8s_openapi::api::{
     apps::v1::StatefulSet,
     core::v1::{ConfigMap, Pod, Secret},
 };
 use serde_json::json;
 use thiserror::Error;
-use tracing::*;
+use tracing::info;
 
 use kube::{
     Client,
@@ -15,10 +15,10 @@ use kube::{
 
 #[derive(Debug, Error)]
 pub enum K8sError {
-    #[error["serde_json error: {0}"]]
+    #[error("serde_json error: {0}")]
     Serde(#[from] serde_json::error::Error),
 
-    #[error["kube error: {0}"]]
+    #[error("kube error: {0}")]
     Kube(#[from] kube::Error),
 }
 

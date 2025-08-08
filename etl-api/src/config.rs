@@ -1,7 +1,7 @@
-use base64::{Engine, prelude::BASE64_STANDARD};
+use base64::{prelude::BASE64_STANDARD, Engine};
 use etl_config::shared::{PgConnectionConfig, SentryConfig};
 use serde::de::{MapAccess, Visitor};
-use serde::{Deserialize, Deserializer, de};
+use serde::{de, Deserialize, Deserializer};
 use std::fmt;
 use thiserror::Error;
 
@@ -60,7 +60,7 @@ pub enum ApiKeyConversionError {
 
     /// The API key does not have the expected length of 32 bytes.
     #[error("expected length of api key is 32, but actual length is {0}")]
-    LengthNot32IBytes(usize),
+    LengthNot32Bytes(usize),
 }
 
 /// A validated API key, represented as a fixed-size byte array.
@@ -86,7 +86,7 @@ impl TryFrom<&str> for ApiKey {
             .map_err(|_| ApiKeyConversionError::NotBase64Encoded)?;
 
         if key.len() != API_KEY_LENGTH_IN_BYTES {
-            return Err(ApiKeyConversionError::LengthNot32IBytes(key.len()));
+            return Err(ApiKeyConversionError::LengthNot32Bytes(key.len()));
         }
 
         Ok(ApiKey {

@@ -28,7 +28,7 @@ pub struct ErrorMessage {
 
 #[derive(Debug, Error)]
 pub enum TenantIdError {
-    #[error("The tenant id missing in the request")]
+    #[error("The tenant id is missing in the request")]
     TenantIdMissing,
 
     #[error("The tenant id in the request is invalid")]

@@ -92,7 +92,7 @@ pub enum PipelineError {
     #[error("The specified image with id {0} was not found")]
     ImageNotFoundById(i64),
 
-    #[error("There was an error while loolking up table information in the source database: {0}")]
+    #[error("There was an error while looking up table information in the source database: {0}")]
     TableLookup(#[from] TableLookupError),
 
     #[error("Database error: {0}")]
