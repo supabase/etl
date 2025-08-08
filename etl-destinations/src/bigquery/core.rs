@@ -1,5 +1,3 @@
-use crate::bigquery::client::{BigQueryClient, BigQueryOperationType};
-use crate::bigquery::{BigQueryDatasetId, BigQueryTableId};
 use etl::destination::Destination;
 use etl::error::{ErrorKind, EtlError, EtlResult};
 use etl::etl_error;
@@ -9,7 +7,10 @@ use gcp_bigquery_client::storage::TableDescriptor;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
+
+use crate::bigquery::client::{BigQueryClient, BigQueryOperationType};
+use crate::bigquery::{BigQueryDatasetId, BigQueryTableId};
 
 /// The delimiter used when generating table names in BigQuery that splits the schema from the name
 /// of the table.
@@ -187,9 +188,10 @@ where
 
             // Add the table to the cache (with random eviction if needed)
             Self::add_to_created_tables_cache(inner, table_id.clone());
-            info!("table {table_id} added to creation cache");
+
+            debug!("table {table_id} added to creation cache");
         } else {
-            info!("table {table_id} found in creation cache, skipping existence check");
+            debug!("table {table_id} found in creation cache, skipping existence check");
         }
 
         let table_descriptor = BigQueryClient::column_schemas_to_table_descriptor(
@@ -204,21 +206,20 @@ where
     ///
     /// If the cache is at maximum size, removes a random table before adding the new one.
     fn add_to_created_tables_cache(inner: &mut Inner<impl SchemaStore>, table_id: BigQueryTableId) {
-        // If table is already in cache, nothing to do
         if inner.created_tables.contains(&table_id) {
             return;
         }
 
         // If cache is full, evict a random item
         if inner.created_tables.len() >= MAX_CREATED_TABLES_CACHE_SIZE {
-            // Get a random table from the set to remove
+            // Get a random table from the set to remove (since we are using a hash set, the next item
+            // is returned in an arbitrary order).
             if let Some(random_table_id) = inner.created_tables.iter().next().cloned() {
                 inner.created_tables.remove(&random_table_id);
                 info!("evicted table {random_table_id} from creation cache (cache full)");
             }
         }
 
-        // Add the new table to cache
         inner.created_tables.insert(table_id);
     }
 
