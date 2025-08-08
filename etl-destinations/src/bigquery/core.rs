@@ -12,25 +12,17 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::{info, warn};
 
-/// The delimiter used when generating table names in BigQuery that splits the schema from the name
-/// of the table.
+/// Delimiter used to separate schema from table name in BigQuery table identifiers.
 const BIGQUERY_TABLE_ID_DELIMITER: &str = "_";
-/// The replacement string used to escape characters in the original schema and table names.
+/// Replacement string for escaping underscores in original schema and table names.
 const BIGQUERY_TABLE_ID_DELIMITER_ESCAPE_REPLACEMENT: &str = "__";
 
-/// Generates a sequence number from the LSNs of an event.
+/// Generates a hex-encoded sequence number from PostgreSQL LSNs.
 ///
-/// Creates a hex-encoded sequence number that ensures events are processed in the correct order
-/// even when they have the same system time. The format is compatible with BigQuery's
-/// `_CHANGE_SEQUENCE_NUMBER` column requirements.
-///
-/// The rationale for using the LSN is that BigQuery will preserve the highest sequence number
-/// in case of equal primary key, which is what we want since in case of updates, we want the
-/// latest update in Postgres order to be the winner. We have first the `commit_lsn` in the key
-/// so that BigQuery can first order operations based on the LSN at which the transaction committed
-/// and if two operations belong to the same transaction (meaning they have the same LSN), the
-/// `start_lsn` will be used. We first order by `commit_lsn` to preserve the order in which operations
-/// are received by the pipeline since transactions are ordered by commit time and not interleaved.
+/// Creates a sequence number that ensures events are processed in the correct order
+/// even when they have the same system time. Uses commit LSN for transaction ordering
+/// and start LSN for intra-transaction ordering, ensuring BigQuery preserves the
+/// correct event sequence for CDC operations.
 fn generate_sequence_number(start_lsn: PgLsn, commit_lsn: PgLsn) -> String {
     let start_lsn = u64::from(start_lsn);
     let commit_lsn = u64::from(commit_lsn);
@@ -64,9 +56,10 @@ pub fn table_name_to_bigquery_table_id(table_name: &TableName) -> BigQueryTableI
     format!("{escaped_schema}_{escaped_table}")
 }
 
-/// Internal state for [`BigQueryDestination`] wrapped in `Arc<Mutex<>>`.
+/// Internal state for [`BigQueryDestination`] with thread-safe access.
 ///
-/// Contains the BigQuery client, dataset configuration, and injected schema cache.
+/// Contains the BigQuery client, dataset configuration, and schema store for
+/// managing table metadata and CDC operations.
 #[derive(Debug)]
 struct Inner<S> {
     client: BigQueryClient,
@@ -75,10 +68,10 @@ struct Inner<S> {
     schema_store: S,
 }
 
-/// A BigQuery destination that implements the ETL [`Destination`] trait.
+/// BigQuery destination implementation for ETL pipelines.
 ///
-/// Provides PostgreSQL-to-BigQuery data pipeline functionality including streaming inserts
-/// and CDC operation handling.
+/// Provides PostgreSQL-to-BigQuery replication with CDC support, streaming inserts,
+/// and automatic table creation with schema mapping.
 #[derive(Debug, Clone)]
 pub struct BigQueryDestination<S> {
     inner: Arc<Mutex<Inner<S>>>,
@@ -88,10 +81,9 @@ impl<S> BigQueryDestination<S>
 where
     S: SchemaStore,
 {
-    /// Creates a new [`BigQueryDestination`] using a service account key file path.
+    /// Creates a new [`BigQueryDestination`] using a service account key file.
     ///
-    /// Initializes the BigQuery client with the provided credentials and project settings.
-    /// The `max_staleness_mins` parameter controls table metadata cache freshness.
+    /// Initializes the BigQuery client with credentials from the specified file path.
     pub async fn new_with_key_path(
         project_id: String,
         dataset_id: BigQueryDatasetId,
@@ -114,8 +106,8 @@ where
 
     /// Creates a new [`BigQueryDestination`] using a service account key JSON string.
     ///
-    /// Similar to [`BigQueryDestination::new_with_key_path`] but accepts the key content directly
-    /// rather than a file path. Useful when credentials are stored in environment variables.
+    /// Initializes the BigQuery client with credentials provided as a JSON string,
+    /// useful when credentials are stored in environment variables or secrets.
     pub async fn new_with_key(
         project_id: String,
         dataset_id: BigQueryDatasetId,
@@ -136,10 +128,10 @@ where
         })
     }
 
-    /// Prepares the table for CDC streaming.
+    /// Prepares a table for CDC streaming operations.
     ///
-    /// This function loads the table schema, crates the table in BigQuery (if missing) and sets up
-    /// the required table id and table descriptor that are required by BigQuery for CDC streaming.
+    /// Loads the table schema from the schema store, creates the BigQuery table if missing,
+    /// and returns the table identifier and descriptor required for streaming operations.
     async fn prepare_cdc_streaming_for_table<I: Deref<Target = Inner<S>>>(
         inner: &I,
         table_id: &TableId,
@@ -183,9 +175,9 @@ where
         Ok((table_id, table_descriptor))
     }
 
-    /// Writes data rows to a BigQuery table, adding CDC mode metadata.
+    /// Writes table rows to BigQuery with CDC metadata.
     ///
-    /// Each row gets a CDC mode column and sequence number appended before streaming to BigQuery.
+    /// Appends CDC mode columns to each row and streams them to the target BigQuery table.
     async fn write_table_rows(
         &self,
         table_id: TableId,
@@ -212,8 +204,8 @@ where
 
     /// Processes and writes a batch of CDC events to BigQuery.
     ///
-    /// Groups events by type, handles inserts/updates/deletes via streaming, and processes truncates separately.
-    /// Adds sequence numbers to ensure proper ordering of events with the same system time.
+    /// Groups events by table, handles inserts/updates/deletes via streaming,
+    /// and adds sequence numbers to ensure proper event ordering.
     async fn write_events(&self, events: Vec<Event>) -> EtlResult<()> {
         let mut event_iter = events.into_iter().peekable();
 
@@ -317,9 +309,9 @@ where
         Ok(())
     }
 
-    /// Processes truncate events by executing `TRUNCATE TABLE` statements in BigQuery.
+    /// Processes truncate events by executing `TRUNCATE TABLE` statements.
     ///
-    /// Maps PostgreSQL table OIDs to BigQuery table names and issues truncate commands.
+    /// Maps PostgreSQL table OIDs to BigQuery table names and executes truncate operations.
     #[allow(dead_code)]
     async fn process_truncate_events(&self, truncate_events: Vec<TruncateEvent>) -> EtlResult<()> {
         let inner = self.inner.lock().await;

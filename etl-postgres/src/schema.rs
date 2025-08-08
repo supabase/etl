@@ -86,7 +86,7 @@ impl ColumnSchema {
     }
 
     /// Compares two [`ColumnSchema`] instances excluding the nullable field.
-    /// 
+    ///
     /// Returns `true` if all fields except `nullable` are equal. Used for comparing
     /// schemas from initial table sync against CDC relation messages, which don't
     /// include nullability information.

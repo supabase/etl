@@ -5,7 +5,7 @@ use sqlx::{Connection, Executor, PgConnection, PgPool};
 ///
 /// Connects to PostgreSQL server, creates a new database, and returns a [`PgPool`]
 /// connected to the newly created database.
-/// 
+///
 /// # Panics
 /// Panics if connection or database creation fails.
 pub async fn create_pg_database(config: &PgConnectionConfig) -> PgPool {

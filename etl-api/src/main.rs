@@ -6,6 +6,10 @@ use std::env;
 use std::sync::Arc;
 use tracing::{error, info};
 
+/// Entry point for the ETL API service.
+///
+/// Initializes tracing, Sentry, and starts the Actix web server with command-line
+/// argument handling for both server mode and database migration.
 fn main() -> anyhow::Result<()> {
     // Initialize tracing from the binary name
     let _log_flusher = init_tracing(env!("CARGO_BIN_NAME"))?;
@@ -19,6 +23,9 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Main async function that handles command-line arguments and starts the service.
+///
+/// Supports two modes: server mode (no arguments) and migration mode ("migrate" argument).
 async fn async_main() -> anyhow::Result<()> {
     let mut args = env::args();
     match args.len() {
@@ -56,6 +63,10 @@ async fn async_main() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Initializes Sentry error tracking and performance monitoring.
+///
+/// Configures Sentry with environment-specific settings and service tagging.
+/// Returns `None` if Sentry configuration is not provided.
 fn init_sentry() -> anyhow::Result<Option<sentry::ClientInitGuard>> {
     if let Ok(config) = load_config::<ApiConfig>()
         && let Some(sentry_config) = &config.sentry

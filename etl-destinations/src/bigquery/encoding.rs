@@ -1,10 +1,15 @@
 use etl::types::{ArrayCell, Cell, TableRow};
 use prost::bytes;
 
+/// Wrapper around [`TableRow`] that implements protobuf encoding for BigQuery.
+///
+/// Enables serialization of table rows using the protobuf format required by
+/// BigQuery's Storage Write API.
 #[derive(Debug)]
 pub struct BigQueryTableRow(pub TableRow);
 
 impl prost::Message for BigQueryTableRow {
+    /// Encodes the table row using protobuf format for BigQuery streaming.
     fn encode_raw(&self, buf: &mut impl bytes::BufMut)
     where
         Self: Sized,
@@ -16,6 +21,9 @@ impl prost::Message for BigQueryTableRow {
         }
     }
 
+    /// Merges protobuf field data into the table row.
+    ///
+    /// Not implemented as decoding is not required for the BigQuery use case.
     fn merge_field(
         &mut self,
         _tag: u32,
@@ -29,6 +37,7 @@ impl prost::Message for BigQueryTableRow {
         unimplemented!("merge_field not implemented yet");
     }
 
+    /// Returns the encoded length of the table row in bytes.
     fn encoded_len(&self) -> usize {
         let mut len = 0;
         let mut tag = 1;
@@ -40,6 +49,7 @@ impl prost::Message for BigQueryTableRow {
         len
     }
 
+    /// Clears all cell values in the table row.
     fn clear(&mut self) {
         for cell in &mut self.0.values {
             cell.clear();
@@ -47,6 +57,10 @@ impl prost::Message for BigQueryTableRow {
     }
 }
 
+/// Encodes a single [`Cell`] value using protobuf format.
+///
+/// Maps each cell type to its appropriate protobuf encoding method,
+/// handling type conversion and formatting as needed for BigQuery.
 pub fn cell_encode_prost(cell: &Cell, tag: u32, buf: &mut impl bytes::BufMut) {
     match cell {
         Cell::Null => {}
@@ -112,6 +126,7 @@ pub fn cell_encode_prost(cell: &Cell, tag: u32, buf: &mut impl bytes::BufMut) {
     }
 }
 
+/// Returns the encoded length of a [`Cell`] in protobuf format.
 pub fn cell_encode_len_prost(cell: &Cell, tag: u32) -> usize {
     match cell {
         Cell::Null => 0,
@@ -159,6 +174,10 @@ pub fn cell_encode_len_prost(cell: &Cell, tag: u32) -> usize {
     }
 }
 
+/// Encodes an [`ArrayCell`] using protobuf repeated field format.
+///
+/// Handles PostgreSQL array types by filtering out null values and encoding
+/// the remaining elements using the appropriate protobuf repeated encoding.
 pub fn array_cell_encode_prost(array_cell: ArrayCell, tag: u32, buf: &mut impl bytes::BufMut) {
     match array_cell {
         ArrayCell::Null => {}
@@ -261,6 +280,7 @@ pub fn array_cell_encode_prost(array_cell: ArrayCell, tag: u32, buf: &mut impl b
     }
 }
 
+/// Returns the encoded length of an [`ArrayCell`] in protobuf format.
 pub fn array_cell_encoded_len_prost(array_cell: ArrayCell, tag: u32) -> usize {
     match array_cell {
         ArrayCell::Null => 0,

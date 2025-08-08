@@ -48,7 +48,7 @@ fn main() -> anyhow::Result<()> {
 }
 
 /// Main async entry point that starts the replicator pipeline.
-/// 
+///
 /// Launches the replicator with the provided configuration and captures any errors
 /// to Sentry before propagating them up.
 async fn async_main(replicator_config: ReplicatorConfig) -> anyhow::Result<()> {

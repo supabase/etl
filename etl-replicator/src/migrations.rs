@@ -9,7 +9,7 @@ use tracing::info;
 const NUM_POOL_CONNECTIONS: u32 = 1;
 
 /// Runs database migrations on the state store.
-/// 
+///
 /// Creates a connection pool to the source database, sets up the `etl` schema,
 /// and applies all pending migrations. The migrations are run in the `etl` schema
 /// to avoid cluttering the public schema with migration metadata tables created by `sqlx`.

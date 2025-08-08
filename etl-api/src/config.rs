@@ -5,12 +5,13 @@ use serde::{Deserialize, Deserializer, de};
 use std::fmt;
 use thiserror::Error;
 
-/// The length in bytes required for a valid API key.
+/// Required length in bytes for a valid API key.
 const API_KEY_LENGTH_IN_BYTES: usize = 32;
 
-/// Top-level configuration for the API service.
+/// Complete configuration for the ETL API service.
 ///
-/// Contains database, application, encryption, API key, and optional Sentry settings.
+/// Contains all settings required to run the API including database connection,
+/// server settings, encryption, authentication, and optional monitoring.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ApiConfig {
     /// Database connection configuration.
@@ -25,7 +26,7 @@ pub struct ApiConfig {
     pub sentry: Option<SentryConfig>,
 }
 
-/// Network and server settings for the API.
+/// HTTP server configuration settings.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ApplicationSettings {
     /// Host address the API listens on.
@@ -35,14 +36,14 @@ pub struct ApplicationSettings {
 }
 
 impl fmt::Display for ApplicationSettings {
-    /// Formats the [`ApplicationSettings`] for display, showing host and port.
+    /// Formats application settings for display.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f, "    host: {}", self.host)?;
         writeln!(f, "    port: {}", self.port)
     }
 }
 
-/// Configuration for an encryption key.
+/// Encryption key configuration with identifier and key material.
 #[derive(Debug, Clone, Deserialize)]
 pub struct EncryptionKey {
     /// Unique identifier for the key.
@@ -51,7 +52,7 @@ pub struct EncryptionKey {
     pub key: String,
 }
 
-/// Errors that can occur when converting a string to an [`ApiKey`].
+/// Errors that can occur during API key validation and conversion.
 #[derive(Debug, Error)]
 pub enum ApiKeyConversionError {
     /// The API key is not valid base64.
@@ -63,7 +64,9 @@ pub enum ApiKeyConversionError {
     LengthNot32Bytes(usize),
 }
 
-/// A validated API key, represented as a fixed-size byte array.
+/// Validated API key as a 32-byte array.
+///
+/// Ensures API keys meet length requirements and are properly decoded from base64.
 #[derive(Debug)]
 pub struct ApiKey {
     /// The 32-byte decoded API key.
@@ -73,13 +76,12 @@ pub struct ApiKey {
 impl TryFrom<&str> for ApiKey {
     type Error = ApiKeyConversionError;
 
-    /// Attempts to decode a base64-encoded string into an [`ApiKey`].
+    /// Creates an [`ApiKey`] from a base64-encoded string.
     ///
-    /// Returns an error if the string is not valid base64 or does not decode to 32 bytes.
+    /// Validates that the string is valid base64 and decodes to exactly 32 bytes.
     ///
     /// # Panics
-    ///
-    /// Panics if the decoded key cannot be converted to a 32-byte array, which should never occur if the length check passes.
+    /// Panics if the decoded key cannot be converted to a 32-byte array.
     fn try_from(value: &str) -> Result<Self, Self::Error> {
         let key = BASE64_STANDARD
             .decode(value)
@@ -98,9 +100,9 @@ impl TryFrom<&str> for ApiKey {
 }
 
 impl<'de> Deserialize<'de> for ApiKey {
-    /// Deserializes an [`ApiKey`] from a struct with a base64-encoded `key` field.
+    /// Deserializes an [`ApiKey`] from configuration.
     ///
-    /// Returns an error if the field is missing, duplicated, not base64, or not 32 bytes.
+    /// Expects a struct with a base64-encoded `key` field that decodes to 32 bytes.
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
@@ -116,10 +118,12 @@ impl<'de> Deserialize<'de> for ApiKey {
         impl<'de> Visitor<'de> for ApiKeyVisitor {
             type Value = ApiKey;
 
+            /// Returns the expected input format description.
             fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
                 formatter.write_str("struct ApiKey")
             }
 
+            /// Visits a map to deserialize an [`ApiKey`].
             fn visit_map<V>(self, mut map: V) -> Result<ApiKey, V::Error>
             where
                 V: MapAccess<'de>,
