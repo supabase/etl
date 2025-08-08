@@ -173,8 +173,8 @@ pub fn array_cell_encode_prost(array_cell: ArrayCell, tag: u32, buf: &mut impl b
         ArrayCell::I16(mut vec) => {
             let vec: Vec<i32> = vec
                 .drain(..)
-                .filter(|v| v.is_some())
-                .map(|v| v.unwrap() as i32)
+                .flatten()
+                .map(|v| v as i32)
                 .collect();
             prost::encoding::int32::encode_packed(tag, &vec, buf);
         }
@@ -201,56 +201,56 @@ pub fn array_cell_encode_prost(array_cell: ArrayCell, tag: u32, buf: &mut impl b
         ArrayCell::Numeric(mut vec) => {
             let vec: Vec<String> = vec
                 .drain(..)
-                .filter(|v| v.is_some())
-                .map(|v| v.unwrap().to_string())
+                .flatten()
+                .map(|v| v.to_string())
                 .collect();
             prost::encoding::string::encode_repeated(tag, &vec, buf);
         }
         ArrayCell::Date(mut vec) => {
             let vec: Vec<String> = vec
                 .drain(..)
-                .filter(|v| v.is_some())
-                .map(|v| v.unwrap().format("%Y-%m-%d").to_string())
+                .flatten()
+                .map(|v| v.format("%Y-%m-%d").to_string())
                 .collect();
             prost::encoding::string::encode_repeated(tag, &vec, buf);
         }
         ArrayCell::Time(mut vec) => {
             let vec: Vec<String> = vec
                 .drain(..)
-                .filter(|v| v.is_some())
-                .map(|v| v.unwrap().format("%H:%M:%S%.f").to_string())
+                .flatten()
+                .map(|v| v.format("%H:%M:%S%.f").to_string())
                 .collect();
             prost::encoding::string::encode_repeated(tag, &vec, buf);
         }
         ArrayCell::TimeStamp(mut vec) => {
             let vec: Vec<String> = vec
                 .drain(..)
-                .filter(|v| v.is_some())
-                .map(|v| v.unwrap().format("%Y-%m-%d %H:%M:%S%.f").to_string())
+                .flatten()
+                .map(|v| v.format("%Y-%m-%d %H:%M:%S%.f").to_string())
                 .collect();
             prost::encoding::string::encode_repeated(tag, &vec, buf);
         }
         ArrayCell::TimeStampTz(mut vec) => {
             let vec: Vec<String> = vec
                 .drain(..)
-                .filter(|v| v.is_some())
-                .map(|v| v.unwrap().format("%Y-%m-%d %H:%M:%S%.f%:z").to_string())
+                .flatten()
+                .map(|v| v.format("%Y-%m-%d %H:%M:%S%.f%:z").to_string())
                 .collect();
             prost::encoding::string::encode_repeated(tag, &vec, buf);
         }
         ArrayCell::Uuid(mut vec) => {
             let vec: Vec<String> = vec
                 .drain(..)
-                .filter(|v| v.is_some())
-                .map(|v| v.unwrap().to_string())
+                .flatten()
+                .map(|v| v.to_string())
                 .collect();
             prost::encoding::string::encode_repeated(tag, &vec, buf);
         }
         ArrayCell::Json(mut vec) => {
             let vec: Vec<String> = vec
                 .drain(..)
-                .filter(|v| v.is_some())
-                .map(|v| v.unwrap().to_string())
+                .flatten()
+                .map(|v| v.to_string())
                 .collect();
             prost::encoding::string::encode_repeated(tag, &vec, buf);
         }
@@ -275,8 +275,8 @@ pub fn array_cell_encoded_len_prost(array_cell: ArrayCell, tag: u32) -> usize {
         ArrayCell::I16(mut vec) => {
             let vec: Vec<i32> = vec
                 .drain(..)
-                .filter(|v| v.is_some())
-                .map(|v| v.unwrap() as i32)
+                .flatten()
+                .map(|v| v as i32)
                 .collect();
             prost::encoding::int32::encoded_len_packed(tag, &vec)
         }
@@ -303,56 +303,56 @@ pub fn array_cell_encoded_len_prost(array_cell: ArrayCell, tag: u32) -> usize {
         ArrayCell::Numeric(mut vec) => {
             let vec: Vec<String> = vec
                 .drain(..)
-                .filter(|v| v.is_some())
-                .map(|v| v.unwrap().to_string())
+                .flatten()
+                .map(|v| v.to_string())
                 .collect();
             prost::encoding::string::encoded_len_repeated(tag, &vec)
         }
         ArrayCell::Date(mut vec) => {
             let vec: Vec<String> = vec
                 .drain(..)
-                .filter(|v| v.is_some())
-                .map(|v| v.unwrap().format("%Y-%m-%d").to_string())
+                .flatten()
+                .map(|v| v.format("%Y-%m-%d").to_string())
                 .collect();
             prost::encoding::string::encoded_len_repeated(tag, &vec)
         }
         ArrayCell::Time(mut vec) => {
             let vec: Vec<String> = vec
                 .drain(..)
-                .filter(|v| v.is_some())
-                .map(|v| v.unwrap().format("%H:%M:%S%.f").to_string())
+                .flatten()
+                .map(|v| v.format("%H:%M:%S%.f").to_string())
                 .collect();
             prost::encoding::string::encoded_len_repeated(tag, &vec)
         }
         ArrayCell::TimeStamp(mut vec) => {
             let vec: Vec<String> = vec
                 .drain(..)
-                .filter(|v| v.is_some())
-                .map(|v| v.unwrap().format("%Y-%m-%d %H:%M:%S%.f").to_string())
+                .flatten()
+                .map(|v| v.format("%Y-%m-%d %H:%M:%S%.f").to_string())
                 .collect();
             prost::encoding::string::encoded_len_repeated(tag, &vec)
         }
         ArrayCell::TimeStampTz(mut vec) => {
             let vec: Vec<String> = vec
                 .drain(..)
-                .filter(|v| v.is_some())
-                .map(|v| v.unwrap().format("%Y-%m-%d %H:%M:%S%.f%:z").to_string())
+                .flatten()
+                .map(|v| v.format("%Y-%m-%d %H:%M:%S%.f%:z").to_string())
                 .collect();
             prost::encoding::string::encoded_len_repeated(tag, &vec)
         }
         ArrayCell::Uuid(mut vec) => {
             let vec: Vec<String> = vec
                 .drain(..)
-                .filter(|v| v.is_some())
-                .map(|v| v.unwrap().to_string())
+                .flatten()
+                .map(|v| v.to_string())
                 .collect();
             prost::encoding::string::encoded_len_repeated(tag, &vec)
         }
         ArrayCell::Json(mut vec) => {
             let vec: Vec<String> = vec
                 .drain(..)
-                .filter(|v| v.is_some())
-                .map(|v| v.unwrap().to_string())
+                .flatten()
+                .map(|v| v.to_string())
                 .collect();
             prost::encoding::string::encoded_len_repeated(tag, &vec)
         }
