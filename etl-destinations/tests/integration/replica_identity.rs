@@ -4,22 +4,24 @@ use etl::test_utils::database::{spawn_source_database, test_table_name};
 use etl::test_utils::notify::NotifyingStore;
 use etl::test_utils::pipeline::create_pipeline;
 use etl::test_utils::test_destination_wrapper::TestDestinationWrapper;
-use etl::types::{Cell, Event, EventType, PipelineId};
+use etl::types::{Cell, EventType, PipelineId};
 use etl_postgres::tokio::test_utils::TableModification;
 use etl_telemetry::init_test_tracing;
 use rand::distr::Alphanumeric;
 use rand::{Rng, random};
 
+use crate::common::event_materializer::{FromTableRow, materialize_events};
+
 /// Simple struct to represent a row in our toast test table
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct ToastTable {
-    pub id: i32,
+    pub id: i64,
     pub large_text: String,
     pub small_int: i32,
 }
 
 impl ToastTable {
-    pub fn new(id: i32, large_text: &str, small_int: i32) -> Self {
+    pub fn new(id: i64, large_text: &str, small_int: i32) -> Self {
         Self {
             id,
             large_text: large_text.to_owned(),
@@ -28,62 +30,40 @@ impl ToastTable {
     }
 }
 
-/// Helper function to extract table data from memory destination events and parse it into ToastTable structs
-async fn get_table_data_from_memory(
-    destination: &TestDestinationWrapper<MemoryDestination>,
-) -> Vec<ToastTable> {
-    let events = destination.get_events().await;
+impl FromTableRow for ToastTable {
+    type Id = i64;
 
-    // For this test, we only care about the final state after all events
-    let mut final_table_data = Vec::new();
-    for event in events {
-        match event {
-            Event::Insert(insert_event) => {
-                if let Some(toast_table) = parse_table_row_to_toast(&insert_event.table_row) {
-                    final_table_data.push(toast_table);
+    fn from_table_row(table_row: &etl::types::TableRow) -> Option<Self> {
+        let values = &table_row.values;
+        if values.len() == 3 {
+            let id = match &values[0] {
+                Cell::I64(i) => *i,
+                _other => {
+                    return None;
                 }
-            }
-            Event::Update(update_event) => {
-                // For this test, we only care about the final state after update
-                final_table_data.clear(); // Remove previous state
-                if let Some(toast_table) = parse_table_row_to_toast(&update_event.table_row) {
-                    final_table_data.push(toast_table);
+            };
+            let large_text = match &values[1] {
+                Cell::String(s) => s.clone(),
+                Cell::Null => String::new(),
+                _other => {
+                    return None;
                 }
-            }
-            _ => {} // Ignore other event types
+            };
+            let small_int = match &values[2] {
+                Cell::I32(i) => *i,
+                _other => {
+                    return None;
+                }
+            };
+
+            Some(ToastTable::new(id, &large_text, small_int))
+        } else {
+            None
         }
     }
 
-    final_table_data
-}
-
-fn parse_table_row_to_toast(table_row: &etl::types::TableRow) -> Option<ToastTable> {
-    let values = &table_row.values;
-    if values.len() >= 3 {
-        let id = match &values[0] {
-            Cell::I64(i) => *i as i32, // id is i64 in the data
-            Cell::I32(i) => *i,
-            _other => {
-                return None;
-            }
-        };
-        let large_text = match &values[1] {
-            Cell::String(s) => s.clone(),
-            Cell::Null => String::new(),
-            _other => {
-                return None;
-            }
-        };
-        let small_int = match &values[2] {
-            Cell::I32(i) => *i,
-            _other => {
-                return None;
-            }
-        };
-
-        Some(ToastTable::new(id, &large_text, small_int))
-    } else {
-        None
+    fn id(&self) -> Self::Id {
+        self.id
     }
 }
 
@@ -118,8 +98,8 @@ async fn update_non_toast_values_with_default_replica_identity() {
             table_name.clone(),
             true,
             &[
-                ("large_text", "text"), // Column that will contain TOAST-able data
-                ("small_int", "int4"),  // Column we'll update to test TOAST behavior
+                ("large_text", "text not null"), // Column that will contain TOAST-able data
+                ("small_int", "int4 not null"),  // Column we'll update to test TOAST behavior
             ],
         )
         .await
@@ -188,7 +168,8 @@ async fn update_non_toast_values_with_default_replica_identity() {
     insert_event_notify.notified().await;
 
     // Verify the initial insert worked correctly
-    let parsed_table_rows = get_table_data_from_memory(&destination).await;
+    let parsed_table_rows =
+        materialize_events::<ToastTable>(&destination.get_events().await, None).await;
     assert_eq!(parsed_table_rows.len(), 1);
 
     let expected_initial_row = ToastTable::new(1, &large_text_value, initial_int_value);
@@ -212,7 +193,8 @@ async fn update_non_toast_values_with_default_replica_identity() {
 
     // Verify the update behavior - the large_text should be replaced with
     // default value (empty string) and small_int should be updated
-    let parsed_table_rows_after_update = get_table_data_from_memory(&destination).await;
+    let parsed_table_rows_after_update =
+        materialize_events::<ToastTable>(&destination.get_events().await, None).await;
     assert_eq!(parsed_table_rows_after_update.len(), 1);
 
     let expected_updated_row = ToastTable::new(1, "", updated_int_value);
@@ -238,8 +220,8 @@ async fn update_non_toast_values_with_full_replica_identity() {
             table_name.clone(),
             true,
             &[
-                ("large_text", "text"), // Column that will contain TOAST-able data
-                ("small_int", "int4"),  // Column we'll update to test TOAST behavior
+                ("large_text", "text not null"), // Column that will contain TOAST-able data
+                ("small_int", "int4 not null"),  // Column we'll update to test TOAST behavior
             ],
         )
         .await
@@ -318,7 +300,8 @@ async fn update_non_toast_values_with_full_replica_identity() {
     insert_event_notify.notified().await;
 
     // Verify the initial insert worked correctly
-    let parsed_table_rows = get_table_data_from_memory(&destination).await;
+    let parsed_table_rows =
+        materialize_events::<ToastTable>(&destination.get_events().await, None).await;
     assert_eq!(parsed_table_rows.len(), 1);
 
     let expected_initial_row = ToastTable::new(1, &large_text_value, initial_int_value);
@@ -342,7 +325,8 @@ async fn update_non_toast_values_with_full_replica_identity() {
 
     // Verify the update behavior - the large_text should not be replaced with
     // a default value and small_int should be updated
-    let parsed_table_rows_after_update = get_table_data_from_memory(&destination).await;
+    let parsed_table_rows_after_update =
+        materialize_events::<ToastTable>(&destination.get_events().await, None).await;
     assert_eq!(parsed_table_rows_after_update.len(), 1);
 
     let expected_updated_row = ToastTable::new(1, &large_text_value, updated_int_value);
@@ -369,8 +353,8 @@ async fn update_toast_values_with_default_replica_identity() {
             table_name.clone(),
             true,
             &[
-                ("large_text", "text"), // Column that will contain TOAST-able data
-                ("small_int", "int4"),  // Column we'll update to test TOAST behavior
+                ("large_text", "text not null"), // Column that will contain TOAST-able data
+                ("small_int", "int4 not null"),  // Column we'll update to test TOAST behavior
             ],
         )
         .await
@@ -439,7 +423,8 @@ async fn update_toast_values_with_default_replica_identity() {
     insert_event_notify.notified().await;
 
     // Verify the initial insert worked correctly
-    let parsed_table_rows = get_table_data_from_memory(&destination).await;
+    let parsed_table_rows =
+        materialize_events::<ToastTable>(&destination.get_events().await, None).await;
     assert_eq!(parsed_table_rows.len(), 1);
 
     let expected_initial_row = ToastTable::new(1, &large_text_value, initial_int_value);
@@ -463,7 +448,8 @@ async fn update_toast_values_with_default_replica_identity() {
     update_event_notify.notified().await;
 
     // Verify that the large_text is updated
-    let parsed_table_rows_after_update = get_table_data_from_memory(&destination).await;
+    let parsed_table_rows_after_update =
+        materialize_events::<ToastTable>(&destination.get_events().await, None).await;
     assert_eq!(parsed_table_rows_after_update.len(), 1);
 
     let expected_updated_row = ToastTable::new(1, &updated_large_text_value, initial_int_value);
@@ -490,8 +476,8 @@ async fn update_non_toast_values_with_none_replica_identity() {
             table_name.clone(),
             true,
             &[
-                ("large_text", "text"), // Column that will contain TOAST-able data
-                ("small_int", "int4"),  // Column we'll update to test TOAST behavior
+                ("large_text", "text not null"), // Column that will contain TOAST-able data
+                ("small_int", "int4 not null"),  // Column we'll update to test TOAST behavior
             ],
         )
         .await
@@ -570,7 +556,8 @@ async fn update_non_toast_values_with_none_replica_identity() {
     insert_event_notify.notified().await;
 
     // Verify the initial insert worked correctly
-    let parsed_table_rows = get_table_data_from_memory(&destination).await;
+    let parsed_table_rows =
+        materialize_events::<ToastTable>(&destination.get_events().await, None).await;
     assert_eq!(parsed_table_rows.len(), 1);
 
     let expected_initial_row = ToastTable::new(1, &large_text_value, initial_int_value);
@@ -627,8 +614,8 @@ async fn update_non_toast_values_with_unique_index_replica_identity() {
             table_name.clone(),
             true,
             &[
-                ("large_text", "text"),         // Column that will contain TOAST-able data
-                ("small_int", "int4 not null"), // Column we'll update to test TOAST behavior
+                ("large_text", "text not null"), // Column that will contain TOAST-able data
+                ("small_int", "int4 not null"),  // Column we'll update to test TOAST behavior
             ],
         )
         .await
@@ -717,7 +704,8 @@ async fn update_non_toast_values_with_unique_index_replica_identity() {
     insert_event_notify.notified().await;
 
     // Verify the initial insert worked correctly
-    let parsed_table_rows = get_table_data_from_memory(&destination).await;
+    let parsed_table_rows =
+        materialize_events::<ToastTable>(&destination.get_events().await, None).await;
     assert_eq!(parsed_table_rows.len(), 1);
 
     let expected_initial_row = ToastTable::new(1, &large_text_value, initial_int_value);
@@ -741,7 +729,8 @@ async fn update_non_toast_values_with_unique_index_replica_identity() {
 
     // Verify the update behavior - the large_text should be replaced with
     // default value (empty string) and small_int should be updated
-    let parsed_table_rows_after_update = get_table_data_from_memory(&destination).await;
+    let parsed_table_rows_after_update =
+        materialize_events::<ToastTable>(&destination.get_events().await, None).await;
     assert_eq!(parsed_table_rows_after_update.len(), 1);
 
     let expected_updated_row = ToastTable::new(1, "", updated_int_value);
