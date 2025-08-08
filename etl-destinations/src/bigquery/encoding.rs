@@ -1,5 +1,182 @@
-use etl::types::{ArrayCell, Cell, TableRow};
+use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
+use etl::types::{ArrayCell, Cell, PgNumeric, TableRow};
 use prost::bytes;
+use uuid::Uuid;
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ArrayCellNonOptional {
+    Null,
+    Bool(Vec<bool>),
+    String(Vec<String>),
+    I16(Vec<i16>),
+    I32(Vec<i32>),
+    U32(Vec<u32>),
+    I64(Vec<i64>),
+    F32(Vec<f32>),
+    F64(Vec<f64>),
+    Numeric(Vec<PgNumeric>),
+    Date(Vec<NaiveDate>),
+    Time(Vec<NaiveTime>),
+    TimeStamp(Vec<NaiveDateTime>),
+    TimeStampTz(Vec<DateTime<Utc>>),
+    Uuid(Vec<Uuid>),
+    Json(Vec<serde_json::Value>),
+    Bytes(Vec<Vec<u8>>),
+}
+
+impl TryFrom<ArrayCell> for ArrayCellNonOptional {
+    type Error = &'static str;
+
+    fn try_from(array_cell: ArrayCell) -> Result<Self, Self::Error> {
+        match array_cell {
+            ArrayCell::Null => Ok(ArrayCellNonOptional::Null),
+            ArrayCell::Bool(vec) => {
+                if vec.iter().any(|v| v.is_none()) {
+                    Err("NULL values in arrays are not supported by BigQuery")
+                } else {
+                    Ok(ArrayCellNonOptional::Bool(
+                        vec.into_iter().flatten().collect(),
+                    ))
+                }
+            }
+            ArrayCell::String(vec) => {
+                if vec.iter().any(|v| v.is_none()) {
+                    Err("NULL values in arrays are not supported by BigQuery")
+                } else {
+                    Ok(ArrayCellNonOptional::String(
+                        vec.into_iter().flatten().collect(),
+                    ))
+                }
+            }
+            ArrayCell::I16(vec) => {
+                if vec.iter().any(|v| v.is_none()) {
+                    Err("NULL values in arrays are not supported by BigQuery")
+                } else {
+                    Ok(ArrayCellNonOptional::I16(
+                        vec.into_iter().flatten().collect(),
+                    ))
+                }
+            }
+            ArrayCell::I32(vec) => {
+                if vec.iter().any(|v| v.is_none()) {
+                    Err("NULL values in arrays are not supported by BigQuery")
+                } else {
+                    Ok(ArrayCellNonOptional::I32(
+                        vec.into_iter().flatten().collect(),
+                    ))
+                }
+            }
+            ArrayCell::U32(vec) => {
+                if vec.iter().any(|v| v.is_none()) {
+                    Err("NULL values in arrays are not supported by BigQuery")
+                } else {
+                    Ok(ArrayCellNonOptional::U32(
+                        vec.into_iter().flatten().collect(),
+                    ))
+                }
+            }
+            ArrayCell::I64(vec) => {
+                if vec.iter().any(|v| v.is_none()) {
+                    Err("NULL values in arrays are not supported by BigQuery")
+                } else {
+                    Ok(ArrayCellNonOptional::I64(
+                        vec.into_iter().flatten().collect(),
+                    ))
+                }
+            }
+            ArrayCell::F32(vec) => {
+                if vec.iter().any(|v| v.is_none()) {
+                    Err("NULL values in arrays are not supported by BigQuery")
+                } else {
+                    Ok(ArrayCellNonOptional::F32(
+                        vec.into_iter().flatten().collect(),
+                    ))
+                }
+            }
+            ArrayCell::F64(vec) => {
+                if vec.iter().any(|v| v.is_none()) {
+                    Err("NULL values in arrays are not supported by BigQuery")
+                } else {
+                    Ok(ArrayCellNonOptional::F64(
+                        vec.into_iter().flatten().collect(),
+                    ))
+                }
+            }
+            ArrayCell::Numeric(vec) => {
+                if vec.iter().any(|v| v.is_none()) {
+                    Err("NULL values in arrays are not supported by BigQuery")
+                } else {
+                    Ok(ArrayCellNonOptional::Numeric(
+                        vec.into_iter().flatten().collect(),
+                    ))
+                }
+            }
+            ArrayCell::Date(vec) => {
+                if vec.iter().any(|v| v.is_none()) {
+                    Err("NULL values in arrays are not supported by BigQuery")
+                } else {
+                    Ok(ArrayCellNonOptional::Date(
+                        vec.into_iter().flatten().collect(),
+                    ))
+                }
+            }
+            ArrayCell::Time(vec) => {
+                if vec.iter().any(|v| v.is_none()) {
+                    Err("NULL values in arrays are not supported by BigQuery")
+                } else {
+                    Ok(ArrayCellNonOptional::Time(
+                        vec.into_iter().flatten().collect(),
+                    ))
+                }
+            }
+            ArrayCell::TimeStamp(vec) => {
+                if vec.iter().any(|v| v.is_none()) {
+                    Err("NULL values in arrays are not supported by BigQuery")
+                } else {
+                    Ok(ArrayCellNonOptional::TimeStamp(
+                        vec.into_iter().flatten().collect(),
+                    ))
+                }
+            }
+            ArrayCell::TimeStampTz(vec) => {
+                if vec.iter().any(|v| v.is_none()) {
+                    Err("NULL values in arrays are not supported by BigQuery")
+                } else {
+                    Ok(ArrayCellNonOptional::TimeStampTz(
+                        vec.into_iter().flatten().collect(),
+                    ))
+                }
+            }
+            ArrayCell::Uuid(vec) => {
+                if vec.iter().any(|v| v.is_none()) {
+                    Err("NULL values in arrays are not supported by BigQuery")
+                } else {
+                    Ok(ArrayCellNonOptional::Uuid(
+                        vec.into_iter().flatten().collect(),
+                    ))
+                }
+            }
+            ArrayCell::Json(vec) => {
+                if vec.iter().any(|v| v.is_none()) {
+                    Err("NULL values in arrays are not supported by BigQuery")
+                } else {
+                    Ok(ArrayCellNonOptional::Json(
+                        vec.into_iter().flatten().collect(),
+                    ))
+                }
+            }
+            ArrayCell::Bytes(vec) => {
+                if vec.iter().any(|v| v.is_none()) {
+                    Err("NULL values in arrays are not supported by BigQuery")
+                } else {
+                    Ok(ArrayCellNonOptional::Bytes(
+                        vec.into_iter().flatten().collect(),
+                    ))
+                }
+            }
+        }
+    }
+}
 
 #[derive(Debug)]
 pub struct BigQueryTableRow(pub TableRow);
@@ -107,7 +284,9 @@ pub fn cell_encode_prost(cell: &Cell, tag: u32, buf: &mut impl bytes::BufMut) {
             prost::encoding::bytes::encode(tag, b, buf);
         }
         Cell::Array(a) => {
-            array_cell_encode_prost(a.clone(), tag, buf);
+            let non_optional = ArrayCellNonOptional::try_from(a.clone())
+                .expect("NULL values in arrays are not supported by BigQuery");
+            array_cell_non_optional_encode_prost(non_optional, tag, buf);
         }
     }
 }
@@ -155,210 +334,204 @@ pub fn cell_encode_len_prost(cell: &Cell, tag: u32) -> usize {
         }
         Cell::U32(i) => prost::encoding::uint32::encoded_len(tag, i),
         Cell::Bytes(b) => prost::encoding::bytes::encoded_len(tag, b),
-        Cell::Array(array_cell) => array_cell_encoded_len_prost(array_cell.clone(), tag),
+        Cell::Array(array_cell) => {
+            let non_optional = ArrayCellNonOptional::try_from(array_cell.clone())
+                .expect("NULL values in arrays are not supported by BigQuery");
+            array_cell_non_optional_encoded_len_prost(non_optional, tag)
+        }
     }
 }
 
-pub fn array_cell_encode_prost(array_cell: ArrayCell, tag: u32, buf: &mut impl bytes::BufMut) {
+pub fn array_cell_non_optional_encode_prost(
+    array_cell: ArrayCellNonOptional,
+    tag: u32,
+    buf: &mut impl bytes::BufMut,
+) {
     match array_cell {
-        ArrayCell::Null => {}
-        ArrayCell::Bool(mut vec) => {
-            let vec: Vec<bool> = vec.drain(..).flatten().collect();
+        ArrayCellNonOptional::Null => {}
+        ArrayCellNonOptional::Bool(vec) => {
             prost::encoding::bool::encode_packed(tag, &vec, buf);
         }
-        ArrayCell::String(mut vec) => {
-            let vec: Vec<String> = vec.drain(..).flatten().collect();
+        ArrayCellNonOptional::String(vec) => {
             prost::encoding::string::encode_repeated(tag, &vec, buf);
         }
-        ArrayCell::I16(mut vec) => {
-            let vec: Vec<i32> = vec
-                .drain(..)
-                .flatten()
-                .map(|v| v as i32)
-                .collect();
+        ArrayCellNonOptional::I16(vec) => {
+            let values: Vec<i32> = vec.into_iter().map(|v| v as i32).collect();
+            prost::encoding::int32::encode_packed(tag, &values, buf);
+        }
+        ArrayCellNonOptional::I32(vec) => {
             prost::encoding::int32::encode_packed(tag, &vec, buf);
         }
-        ArrayCell::I32(mut vec) => {
-            let vec: Vec<i32> = vec.drain(..).flatten().collect();
-            prost::encoding::int32::encode_packed(tag, &vec, buf);
-        }
-        ArrayCell::U32(mut vec) => {
-            let vec: Vec<u32> = vec.drain(..).flatten().collect();
+        ArrayCellNonOptional::U32(vec) => {
             prost::encoding::uint32::encode_packed(tag, &vec, buf);
         }
-        ArrayCell::I64(mut vec) => {
-            let vec: Vec<i64> = vec.drain(..).flatten().collect();
+        ArrayCellNonOptional::I64(vec) => {
             prost::encoding::int64::encode_packed(tag, &vec, buf);
         }
-        ArrayCell::F32(mut vec) => {
-            let vec: Vec<f32> = vec.drain(..).flatten().collect();
+        ArrayCellNonOptional::F32(vec) => {
             prost::encoding::float::encode_packed(tag, &vec, buf);
         }
-        ArrayCell::F64(mut vec) => {
-            let vec: Vec<f64> = vec.drain(..).flatten().collect();
+        ArrayCellNonOptional::F64(vec) => {
             prost::encoding::double::encode_packed(tag, &vec, buf);
         }
-        ArrayCell::Numeric(mut vec) => {
-            let vec: Vec<String> = vec
-                .drain(..)
-                .flatten()
-                .map(|v| v.to_string())
-                .collect();
-            prost::encoding::string::encode_repeated(tag, &vec, buf);
+        ArrayCellNonOptional::Numeric(vec) => {
+            let values: Vec<String> = vec.into_iter().map(|v| v.to_string()).collect();
+            prost::encoding::string::encode_repeated(tag, &values, buf);
         }
-        ArrayCell::Date(mut vec) => {
-            let vec: Vec<String> = vec
-                .drain(..)
-                .flatten()
+        ArrayCellNonOptional::Date(vec) => {
+            let values: Vec<String> = vec
+                .into_iter()
                 .map(|v| v.format("%Y-%m-%d").to_string())
                 .collect();
-            prost::encoding::string::encode_repeated(tag, &vec, buf);
+            prost::encoding::string::encode_repeated(tag, &values, buf);
         }
-        ArrayCell::Time(mut vec) => {
-            let vec: Vec<String> = vec
-                .drain(..)
-                .flatten()
+        ArrayCellNonOptional::Time(vec) => {
+            let values: Vec<String> = vec
+                .into_iter()
                 .map(|v| v.format("%H:%M:%S%.f").to_string())
                 .collect();
-            prost::encoding::string::encode_repeated(tag, &vec, buf);
+            prost::encoding::string::encode_repeated(tag, &values, buf);
         }
-        ArrayCell::TimeStamp(mut vec) => {
-            let vec: Vec<String> = vec
-                .drain(..)
-                .flatten()
+        ArrayCellNonOptional::TimeStamp(vec) => {
+            let values: Vec<String> = vec
+                .into_iter()
                 .map(|v| v.format("%Y-%m-%d %H:%M:%S%.f").to_string())
                 .collect();
-            prost::encoding::string::encode_repeated(tag, &vec, buf);
+            prost::encoding::string::encode_repeated(tag, &values, buf);
         }
-        ArrayCell::TimeStampTz(mut vec) => {
-            let vec: Vec<String> = vec
-                .drain(..)
-                .flatten()
+        ArrayCellNonOptional::TimeStampTz(vec) => {
+            let values: Vec<String> = vec
+                .into_iter()
                 .map(|v| v.format("%Y-%m-%d %H:%M:%S%.f%:z").to_string())
                 .collect();
-            prost::encoding::string::encode_repeated(tag, &vec, buf);
+            prost::encoding::string::encode_repeated(tag, &values, buf);
         }
-        ArrayCell::Uuid(mut vec) => {
-            let vec: Vec<String> = vec
-                .drain(..)
-                .flatten()
-                .map(|v| v.to_string())
-                .collect();
-            prost::encoding::string::encode_repeated(tag, &vec, buf);
+        ArrayCellNonOptional::Uuid(vec) => {
+            let values: Vec<String> = vec.into_iter().map(|v| v.to_string()).collect();
+            prost::encoding::string::encode_repeated(tag, &values, buf);
         }
-        ArrayCell::Json(mut vec) => {
-            let vec: Vec<String> = vec
-                .drain(..)
-                .flatten()
-                .map(|v| v.to_string())
-                .collect();
-            prost::encoding::string::encode_repeated(tag, &vec, buf);
+        ArrayCellNonOptional::Json(vec) => {
+            let values: Vec<String> = vec.into_iter().map(|v| v.to_string()).collect();
+            prost::encoding::string::encode_repeated(tag, &values, buf);
         }
-        ArrayCell::Bytes(mut vec) => {
-            let vec: Vec<Vec<u8>> = vec.drain(..).flatten().collect();
+        ArrayCellNonOptional::Bytes(vec) => {
             prost::encoding::bytes::encode_repeated(tag, &vec, buf);
         }
     }
 }
 
-pub fn array_cell_encoded_len_prost(array_cell: ArrayCell, tag: u32) -> usize {
+pub fn array_cell_non_optional_encoded_len_prost(
+    array_cell: ArrayCellNonOptional,
+    tag: u32,
+) -> usize {
     match array_cell {
-        ArrayCell::Null => 0,
-        ArrayCell::Bool(mut vec) => {
-            let vec: Vec<bool> = vec.drain(..).flatten().collect();
-            prost::encoding::bool::encoded_len_packed(tag, &vec)
-        }
-        ArrayCell::String(mut vec) => {
-            let vec: Vec<String> = vec.drain(..).flatten().collect();
+        ArrayCellNonOptional::Null => 0,
+        ArrayCellNonOptional::Bool(vec) => prost::encoding::bool::encoded_len_packed(tag, &vec),
+        ArrayCellNonOptional::String(vec) => {
             prost::encoding::string::encoded_len_repeated(tag, &vec)
         }
-        ArrayCell::I16(mut vec) => {
-            let vec: Vec<i32> = vec
-                .drain(..)
-                .flatten()
-                .map(|v| v as i32)
-                .collect();
-            prost::encoding::int32::encoded_len_packed(tag, &vec)
+        ArrayCellNonOptional::I16(vec) => {
+            let values: Vec<i32> = vec.into_iter().map(|v| v as i32).collect();
+            prost::encoding::int32::encoded_len_packed(tag, &values)
         }
-        ArrayCell::I32(mut vec) => {
-            let vec: Vec<i32> = vec.drain(..).flatten().collect();
-            prost::encoding::int32::encoded_len_packed(tag, &vec)
+        ArrayCellNonOptional::I32(vec) => prost::encoding::int32::encoded_len_packed(tag, &vec),
+        ArrayCellNonOptional::U32(vec) => prost::encoding::uint32::encoded_len_packed(tag, &vec),
+        ArrayCellNonOptional::I64(vec) => prost::encoding::int64::encoded_len_packed(tag, &vec),
+        ArrayCellNonOptional::F32(vec) => prost::encoding::float::encoded_len_packed(tag, &vec),
+        ArrayCellNonOptional::F64(vec) => prost::encoding::double::encoded_len_packed(tag, &vec),
+        ArrayCellNonOptional::Numeric(vec) => {
+            let values: Vec<String> = vec.into_iter().map(|v| v.to_string()).collect();
+            prost::encoding::string::encoded_len_repeated(tag, &values)
         }
-        ArrayCell::U32(mut vec) => {
-            let vec: Vec<u32> = vec.drain(..).flatten().collect();
-            prost::encoding::uint32::encoded_len_packed(tag, &vec)
-        }
-        ArrayCell::I64(mut vec) => {
-            let vec: Vec<i64> = vec.drain(..).flatten().collect();
-            prost::encoding::int64::encoded_len_packed(tag, &vec)
-        }
-        ArrayCell::F32(mut vec) => {
-            let vec: Vec<f32> = vec.drain(..).flatten().collect();
-            prost::encoding::float::encoded_len_packed(tag, &vec)
-        }
-        ArrayCell::F64(mut vec) => {
-            let vec: Vec<f64> = vec.drain(..).flatten().collect();
-            prost::encoding::double::encoded_len_packed(tag, &vec)
-        }
-        ArrayCell::Numeric(mut vec) => {
-            let vec: Vec<String> = vec
-                .drain(..)
-                .flatten()
-                .map(|v| v.to_string())
-                .collect();
-            prost::encoding::string::encoded_len_repeated(tag, &vec)
-        }
-        ArrayCell::Date(mut vec) => {
-            let vec: Vec<String> = vec
-                .drain(..)
-                .flatten()
+        ArrayCellNonOptional::Date(vec) => {
+            let values: Vec<String> = vec
+                .into_iter()
                 .map(|v| v.format("%Y-%m-%d").to_string())
                 .collect();
-            prost::encoding::string::encoded_len_repeated(tag, &vec)
+            prost::encoding::string::encoded_len_repeated(tag, &values)
         }
-        ArrayCell::Time(mut vec) => {
-            let vec: Vec<String> = vec
-                .drain(..)
-                .flatten()
+        ArrayCellNonOptional::Time(vec) => {
+            let values: Vec<String> = vec
+                .into_iter()
                 .map(|v| v.format("%H:%M:%S%.f").to_string())
                 .collect();
-            prost::encoding::string::encoded_len_repeated(tag, &vec)
+            prost::encoding::string::encoded_len_repeated(tag, &values)
         }
-        ArrayCell::TimeStamp(mut vec) => {
-            let vec: Vec<String> = vec
-                .drain(..)
-                .flatten()
+        ArrayCellNonOptional::TimeStamp(vec) => {
+            let values: Vec<String> = vec
+                .into_iter()
                 .map(|v| v.format("%Y-%m-%d %H:%M:%S%.f").to_string())
                 .collect();
-            prost::encoding::string::encoded_len_repeated(tag, &vec)
+            prost::encoding::string::encoded_len_repeated(tag, &values)
         }
-        ArrayCell::TimeStampTz(mut vec) => {
-            let vec: Vec<String> = vec
-                .drain(..)
-                .flatten()
+        ArrayCellNonOptional::TimeStampTz(vec) => {
+            let values: Vec<String> = vec
+                .into_iter()
                 .map(|v| v.format("%Y-%m-%d %H:%M:%S%.f%:z").to_string())
                 .collect();
-            prost::encoding::string::encoded_len_repeated(tag, &vec)
+            prost::encoding::string::encoded_len_repeated(tag, &values)
         }
-        ArrayCell::Uuid(mut vec) => {
-            let vec: Vec<String> = vec
-                .drain(..)
-                .flatten()
-                .map(|v| v.to_string())
-                .collect();
-            prost::encoding::string::encoded_len_repeated(tag, &vec)
+        ArrayCellNonOptional::Uuid(vec) => {
+            let values: Vec<String> = vec.into_iter().map(|v| v.to_string()).collect();
+            prost::encoding::string::encoded_len_repeated(tag, &values)
         }
-        ArrayCell::Json(mut vec) => {
-            let vec: Vec<String> = vec
-                .drain(..)
-                .flatten()
-                .map(|v| v.to_string())
-                .collect();
-            prost::encoding::string::encoded_len_repeated(tag, &vec)
+        ArrayCellNonOptional::Json(vec) => {
+            let values: Vec<String> = vec.into_iter().map(|v| v.to_string()).collect();
+            prost::encoding::string::encoded_len_repeated(tag, &values)
         }
-        ArrayCell::Bytes(mut vec) => {
-            let vec: Vec<Vec<u8>> = vec.drain(..).flatten().collect();
-            prost::encoding::bytes::encoded_len_repeated(tag, &vec)
+        ArrayCellNonOptional::Bytes(vec) => prost::encoding::bytes::encoded_len_repeated(tag, &vec),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_array_cell_non_optional_try_from_success() {
+        let array_cell =
+            ArrayCell::String(vec![Some("hello".to_string()), Some("world".to_string())]);
+        let result = ArrayCellNonOptional::try_from(array_cell);
+        assert!(result.is_ok());
+        match result.unwrap() {
+            ArrayCellNonOptional::String(v) => {
+                assert_eq!(v, vec!["hello".to_string(), "world".to_string()]);
+            }
+            _ => panic!("Expected String variant"),
         }
+    }
+
+    #[test]
+    fn test_array_cell_non_optional_try_from_with_null_fails() {
+        let array_cell = ArrayCell::String(vec![
+            Some("hello".to_string()),
+            None,
+            Some("world".to_string()),
+        ]);
+        let result = ArrayCellNonOptional::try_from(array_cell);
+        assert!(result.is_err());
+        assert_eq!(
+            result.unwrap_err(),
+            "NULL values in arrays are not supported by BigQuery"
+        );
+    }
+
+    #[test]
+    fn test_array_cell_non_optional_try_from_numeric_with_null_fails() {
+        let array_cell = ArrayCell::Numeric(vec![Some(PgNumeric::default()), None]);
+        let result = ArrayCellNonOptional::try_from(array_cell);
+        assert!(result.is_err());
+        assert_eq!(
+            result.unwrap_err(),
+            "NULL values in arrays are not supported by BigQuery"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "NULL values in arrays are not supported by BigQuery")]
+    fn test_cell_encode_panics_with_null_array_elements() {
+        let cell = Cell::Array(ArrayCell::String(vec![Some("hello".to_string()), None]));
+        let mut buf = Vec::new();
+        cell_encode_prost(&cell, 1, &mut buf);
     }
 }
