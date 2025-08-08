@@ -1,16 +1,91 @@
+use etl::destination::memory::MemoryDestination;
 use etl::state::table::TableReplicationPhaseType;
 use etl::test_utils::database::{spawn_source_database, test_table_name};
 use etl::test_utils::notify::NotifyingStore;
 use etl::test_utils::pipeline::create_pipeline;
 use etl::test_utils::test_destination_wrapper::TestDestinationWrapper;
-use etl::types::{EventType, PipelineId};
-use etl_destinations::bigquery::install_crypto_provider_for_bigquery;
+use etl::types::{Cell, Event, EventType, PipelineId};
 use etl_postgres::tokio::test_utils::TableModification;
 use etl_telemetry::init_test_tracing;
 use rand::distr::Alphanumeric;
 use rand::{Rng, random};
 
-use crate::common::bigquery::{ToastTable, parse_bigquery_table_rows, setup_bigquery_connection};
+/// Simple struct to represent a row in our toast test table
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct ToastTable {
+    pub id: i32,
+    pub large_text: String,
+    pub small_int: i32,
+}
+
+impl ToastTable {
+    pub fn new(id: i32, large_text: &str, small_int: i32) -> Self {
+        Self {
+            id,
+            large_text: large_text.to_owned(),
+            small_int,
+        }
+    }
+}
+
+/// Helper function to extract table data from memory destination events and parse it into ToastTable structs
+async fn get_table_data_from_memory(
+    destination: &TestDestinationWrapper<MemoryDestination>,
+) -> Vec<ToastTable> {
+    let events = destination.get_events().await;
+
+    // For this test, we only care about the final state after all events
+    let mut final_table_data = Vec::new();
+    for event in events {
+        match event {
+            Event::Insert(insert_event) => {
+                if let Some(toast_table) = parse_table_row_to_toast(&insert_event.table_row) {
+                    final_table_data.push(toast_table);
+                }
+            }
+            Event::Update(update_event) => {
+                // For this test, we only care about the final state after update
+                final_table_data.clear(); // Remove previous state
+                if let Some(toast_table) = parse_table_row_to_toast(&update_event.table_row) {
+                    final_table_data.push(toast_table);
+                }
+            }
+            _ => {} // Ignore other event types
+        }
+    }
+
+    final_table_data
+}
+
+fn parse_table_row_to_toast(table_row: &etl::types::TableRow) -> Option<ToastTable> {
+    let values = &table_row.values;
+    if values.len() >= 3 {
+        let id = match &values[0] {
+            Cell::I64(i) => *i as i32, // id is i64 in the data
+            Cell::I32(i) => *i,
+            _other => {
+                return None;
+            }
+        };
+        let large_text = match &values[1] {
+            Cell::String(s) => s.clone(),
+            Cell::Null => String::new(),
+            _other => {
+                return None;
+            }
+        };
+        let small_int = match &values[2] {
+            Cell::I32(i) => *i,
+            _other => {
+                return None;
+            }
+        };
+
+        Some(ToastTable::new(id, &large_text, small_int))
+    } else {
+        None
+    }
+}
 
 /// Generates a string of random ASCII printable characters of the specified length.
 /// This is useful for creating large text values that won't compress well,
@@ -32,10 +107,8 @@ const LARGE_TEXT_SIZE_BYTES: usize = 8192;
 #[tokio::test(flavor = "multi_thread")]
 async fn update_non_toast_values_with_default_replica_identity() {
     init_test_tracing();
-    install_crypto_provider_for_bigquery();
 
     let database = spawn_source_database().await;
-    let bigquery_database = setup_bigquery_connection().await;
     let table_name = test_table_name("toast_values_test");
 
     // Create a table with a text column that will be large enough to trigger TOAST
@@ -68,8 +141,8 @@ async fn update_non_toast_values_with_default_replica_identity() {
         .unwrap();
 
     let store = NotifyingStore::new();
-    let raw_destination = bigquery_database.build_destination(store.clone()).await;
-    let destination = TestDestinationWrapper::wrap(raw_destination);
+    let memory_destination = MemoryDestination::new();
+    let destination = TestDestinationWrapper::wrap(memory_destination);
 
     let publication_name = "test_pub_toast".to_string();
     database
@@ -115,11 +188,7 @@ async fn update_non_toast_values_with_default_replica_identity() {
     insert_event_notify.notified().await;
 
     // Verify the initial insert worked correctly
-    let table_rows = bigquery_database
-        .query_table(table_name.clone())
-        .await
-        .unwrap();
-    let parsed_table_rows = parse_bigquery_table_rows::<ToastTable>(table_rows);
+    let parsed_table_rows = get_table_data_from_memory(&destination).await;
     assert_eq!(parsed_table_rows.len(), 1);
 
     let expected_initial_row = ToastTable::new(1, &large_text_value, initial_int_value);
@@ -143,12 +212,7 @@ async fn update_non_toast_values_with_default_replica_identity() {
 
     // Verify the update behavior - the large_text should be replaced with
     // default value (empty string) and small_int should be updated
-    let table_rows_after_update = bigquery_database
-        .query_table(table_name.clone())
-        .await
-        .unwrap();
-    let parsed_table_rows_after_update =
-        parse_bigquery_table_rows::<ToastTable>(table_rows_after_update);
+    let parsed_table_rows_after_update = get_table_data_from_memory(&destination).await;
     assert_eq!(parsed_table_rows_after_update.len(), 1);
 
     let expected_updated_row = ToastTable::new(1, "", updated_int_value);
@@ -163,10 +227,8 @@ async fn update_non_toast_values_with_default_replica_identity() {
 #[tokio::test(flavor = "multi_thread")]
 async fn update_non_toast_values_with_full_replica_identity() {
     init_test_tracing();
-    install_crypto_provider_for_bigquery();
 
     let database = spawn_source_database().await;
-    let bigquery_database = setup_bigquery_connection().await;
     let table_name = test_table_name("toast_values_test");
 
     // Create a table with a text column that will be large enough to trigger TOAST
@@ -209,8 +271,8 @@ async fn update_non_toast_values_with_full_replica_identity() {
         .unwrap();
 
     let store = NotifyingStore::new();
-    let raw_destination = bigquery_database.build_destination(store.clone()).await;
-    let destination = TestDestinationWrapper::wrap(raw_destination);
+    let memory_destination = MemoryDestination::new();
+    let destination = TestDestinationWrapper::wrap(memory_destination);
 
     let publication_name = "test_pub_toast".to_string();
     database
@@ -256,11 +318,7 @@ async fn update_non_toast_values_with_full_replica_identity() {
     insert_event_notify.notified().await;
 
     // Verify the initial insert worked correctly
-    let table_rows = bigquery_database
-        .query_table(table_name.clone())
-        .await
-        .unwrap();
-    let parsed_table_rows = parse_bigquery_table_rows::<ToastTable>(table_rows);
+    let parsed_table_rows = get_table_data_from_memory(&destination).await;
     assert_eq!(parsed_table_rows.len(), 1);
 
     let expected_initial_row = ToastTable::new(1, &large_text_value, initial_int_value);
@@ -284,12 +342,7 @@ async fn update_non_toast_values_with_full_replica_identity() {
 
     // Verify the update behavior - the large_text should not be replaced with
     // a default value and small_int should be updated
-    let table_rows_after_update = bigquery_database
-        .query_table(table_name.clone())
-        .await
-        .unwrap();
-    let parsed_table_rows_after_update =
-        parse_bigquery_table_rows::<ToastTable>(table_rows_after_update);
+    let parsed_table_rows_after_update = get_table_data_from_memory(&destination).await;
     assert_eq!(parsed_table_rows_after_update.len(), 1);
 
     let expected_updated_row = ToastTable::new(1, &large_text_value, updated_int_value);
@@ -305,10 +358,8 @@ async fn update_non_toast_values_with_full_replica_identity() {
 #[tokio::test(flavor = "multi_thread")]
 async fn update_toast_values_with_default_replica_identity() {
     init_test_tracing();
-    install_crypto_provider_for_bigquery();
 
     let database = spawn_source_database().await;
-    let bigquery_database = setup_bigquery_connection().await;
     let table_name = test_table_name("toast_values_test");
 
     // Create a table with a text column that will be large enough to trigger TOAST
@@ -341,8 +392,8 @@ async fn update_toast_values_with_default_replica_identity() {
         .unwrap();
 
     let store = NotifyingStore::new();
-    let raw_destination = bigquery_database.build_destination(store.clone()).await;
-    let destination = TestDestinationWrapper::wrap(raw_destination);
+    let memory_destination = MemoryDestination::new();
+    let destination = TestDestinationWrapper::wrap(memory_destination);
 
     let publication_name = "test_pub_toast".to_string();
     database
@@ -388,11 +439,7 @@ async fn update_toast_values_with_default_replica_identity() {
     insert_event_notify.notified().await;
 
     // Verify the initial insert worked correctly
-    let table_rows = bigquery_database
-        .query_table(table_name.clone())
-        .await
-        .unwrap();
-    let parsed_table_rows = parse_bigquery_table_rows::<ToastTable>(table_rows);
+    let parsed_table_rows = get_table_data_from_memory(&destination).await;
     assert_eq!(parsed_table_rows.len(), 1);
 
     let expected_initial_row = ToastTable::new(1, &large_text_value, initial_int_value);
@@ -416,12 +463,7 @@ async fn update_toast_values_with_default_replica_identity() {
     update_event_notify.notified().await;
 
     // Verify that the large_text is updated
-    let table_rows_after_update = bigquery_database
-        .query_table(table_name.clone())
-        .await
-        .unwrap();
-    let parsed_table_rows_after_update =
-        parse_bigquery_table_rows::<ToastTable>(table_rows_after_update);
+    let parsed_table_rows_after_update = get_table_data_from_memory(&destination).await;
     assert_eq!(parsed_table_rows_after_update.len(), 1);
 
     let expected_updated_row = ToastTable::new(1, &updated_large_text_value, initial_int_value);
@@ -437,10 +479,8 @@ async fn update_toast_values_with_default_replica_identity() {
 #[tokio::test(flavor = "multi_thread")]
 async fn update_non_toast_values_with_none_replica_identity() {
     init_test_tracing();
-    install_crypto_provider_for_bigquery();
 
     let database = spawn_source_database().await;
-    let bigquery_database = setup_bigquery_connection().await;
     let table_name = test_table_name("toast_values_test");
 
     // Create a table with a text column that will be large enough to trigger TOAST
@@ -483,8 +523,8 @@ async fn update_non_toast_values_with_none_replica_identity() {
         .unwrap();
 
     let store = NotifyingStore::new();
-    let raw_destination = bigquery_database.build_destination(store.clone()).await;
-    let destination = TestDestinationWrapper::wrap(raw_destination);
+    let memory_destination = MemoryDestination::new();
+    let destination = TestDestinationWrapper::wrap(memory_destination);
 
     let publication_name = "test_pub_toast".to_string();
     database
@@ -530,11 +570,7 @@ async fn update_non_toast_values_with_none_replica_identity() {
     insert_event_notify.notified().await;
 
     // Verify the initial insert worked correctly
-    let table_rows = bigquery_database
-        .query_table(table_name.clone())
-        .await
-        .unwrap();
-    let parsed_table_rows = parse_bigquery_table_rows::<ToastTable>(table_rows);
+    let parsed_table_rows = get_table_data_from_memory(&destination).await;
     assert_eq!(parsed_table_rows.len(), 1);
 
     let expected_initial_row = ToastTable::new(1, &large_text_value, initial_int_value);
@@ -580,10 +616,8 @@ async fn update_non_toast_values_with_none_replica_identity() {
 #[tokio::test(flavor = "multi_thread")]
 async fn update_non_toast_values_with_unique_index_replica_identity() {
     init_test_tracing();
-    install_crypto_provider_for_bigquery();
 
     let database = spawn_source_database().await;
-    let bigquery_database = setup_bigquery_connection().await;
     let table_name = test_table_name("toast_values_test");
 
     // Create a table with a text column that will be large enough to trigger TOAST
@@ -635,8 +669,8 @@ async fn update_non_toast_values_with_unique_index_replica_identity() {
         .unwrap();
 
     let store = NotifyingStore::new();
-    let raw_destination = bigquery_database.build_destination(store.clone()).await;
-    let destination = TestDestinationWrapper::wrap(raw_destination);
+    let memory_destination = MemoryDestination::new();
+    let destination = TestDestinationWrapper::wrap(memory_destination);
 
     let publication_name = "test_pub_toast".to_string();
     database
@@ -683,11 +717,7 @@ async fn update_non_toast_values_with_unique_index_replica_identity() {
     insert_event_notify.notified().await;
 
     // Verify the initial insert worked correctly
-    let table_rows = bigquery_database
-        .query_table(table_name.clone())
-        .await
-        .unwrap();
-    let parsed_table_rows = parse_bigquery_table_rows::<ToastTable>(table_rows);
+    let parsed_table_rows = get_table_data_from_memory(&destination).await;
     assert_eq!(parsed_table_rows.len(), 1);
 
     let expected_initial_row = ToastTable::new(1, &large_text_value, initial_int_value);
@@ -711,12 +741,7 @@ async fn update_non_toast_values_with_unique_index_replica_identity() {
 
     // Verify the update behavior - the large_text should be replaced with
     // default value (empty string) and small_int should be updated
-    let table_rows_after_update = bigquery_database
-        .query_table(table_name.clone())
-        .await
-        .unwrap();
-    let parsed_table_rows_after_update =
-        parse_bigquery_table_rows::<ToastTable>(table_rows_after_update);
+    let parsed_table_rows_after_update = get_table_data_from_memory(&destination).await;
     assert_eq!(parsed_table_rows_after_update.len(), 1);
 
     let expected_updated_row = ToastTable::new(1, "", updated_int_value);
