@@ -18,9 +18,6 @@ const BIGQUERY_TABLE_ID_DELIMITER: &str = "_";
 /// The replacement string used to escape characters in the original schema and table names.
 const BIGQUERY_TABLE_ID_DELIMITER_ESCAPE_REPLACEMENT: &str = "__";
 
-/// Maximum number of table IDs to cache to prevent unbounded memory growth.
-const MAX_CREATED_TABLES_CACHE_SIZE: usize = 100;
-
 /// Generates a sequence number from the LSNs of an event.
 ///
 /// Creates a hex-encoded sequence number that ensures events are processed in the correct order
@@ -79,7 +76,6 @@ struct Inner<S> {
     schema_store: S,
     /// Cache of table IDs that have been successfully created or verified to exist.
     /// This avoids redundant `create_table_if_missing` calls for known tables.
-    /// Limited to `MAX_CREATED_TABLES_CACHE_SIZE` entries with random eviction when full.
     created_tables: HashSet<BigQueryTableId>,
 }
 
@@ -202,22 +198,10 @@ where
         Ok((table_id, table_descriptor))
     }
 
-    /// Adds a table ID to the created tables cache with random eviction if full.
-    ///
-    /// If the cache is at maximum size, removes a random table before adding the new one.
+    /// Adds a table ID to the created tables cache if not present.
     fn add_to_created_tables_cache(inner: &mut Inner<impl SchemaStore>, table_id: BigQueryTableId) {
         if inner.created_tables.contains(&table_id) {
             return;
-        }
-
-        // If cache is full, evict a random item
-        if inner.created_tables.len() >= MAX_CREATED_TABLES_CACHE_SIZE {
-            // Get a random table from the set to remove (since we are using a hash set, the next item
-            // is returned in an arbitrary order).
-            if let Some(random_table_id) = inner.created_tables.iter().next().cloned() {
-                inner.created_tables.remove(&random_table_id);
-                info!("evicted table {random_table_id} from creation cache (cache full)");
-            }
         }
 
         inner.created_tables.insert(table_id);
