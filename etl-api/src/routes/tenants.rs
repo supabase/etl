@@ -102,9 +102,11 @@ pub struct ReadTenantsResponse {
 }
 
 #[utoipa::path(
+    summary = "Create a tenant",
+    description = "Creates a new tenant with the provided ID and name.",
     request_body = CreateTenantRequest,
     responses(
-        (status = 200, description = "Create new tenant", body = CreateTenantResponse),
+        (status = 200, description = "Tenant created successfully", body = CreateTenantResponse),
         (status = 400, description = "Bad request", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage),
     ),
@@ -128,12 +130,14 @@ pub async fn create_tenant(
 }
 
 #[utoipa::path(
+    summary = "Create or update a tenant",
+    description = "Creates a tenant if it does not exist; otherwise updates its name.",
     request_body = CreateOrUpdateTenantRequest,
     params(
-        ("tenant_id" = String, Path, description = "Id of the tenant"),
+        ("tenant_id" = String, Path, description = "Unique ID of the tenant"),
     ),
     responses(
-        (status = 200, description = "Create a new tenant or update an existing one", body = CreateOrUpdateTenantResponse),
+        (status = 200, description = "Tenant created or updated successfully", body = CreateOrUpdateTenantResponse),
         (status = 400, description = "Bad request", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage),
     ),
@@ -158,11 +162,13 @@ pub async fn create_or_update_tenant(
 }
 
 #[utoipa::path(
+    summary = "Retrieve a tenant",
+    description = "Returns the tenant identified by the provided ID.",
     params(
-        ("tenant_id" = String, Path, description = "Id of the tenant"),
+        ("tenant_id" = String, Path, description = "Unique ID of the tenant"),
     ),
     responses(
-        (status = 200, description = "Return tenant with id = tenant_id", body = ReadTenantResponse),
+        (status = 200, description = "Tenant retrieved successfully", body = ReadTenantResponse),
         (status = 404, description = "Tenant not found", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage),
     ),
@@ -190,12 +196,14 @@ pub async fn read_tenant(
 }
 
 #[utoipa::path(
+    summary = "Update a tenant",
+    description = "Updates the tenant's display name.",
     request_body = UpdateTenantRequest,
     params(
-        ("tenant_id" = String, Path, description = "Id of the tenant"),
+        ("tenant_id" = String, Path, description = "Unique ID of the tenant"),
     ),
     responses(
-        (status = 200, description = "Update tenant with id = tenant_id"),
+        (status = 200, description = "Tenant updated successfully"),
         (status = 404, description = "Tenant not found", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage),
     ),
@@ -221,11 +229,13 @@ pub async fn update_tenant(
 }
 
 #[utoipa::path(
+    summary = "Delete a tenant",
+    description = "Deletes the tenant identified by the provided ID.",
     params(
-        ("tenant_id" = String, Path, description = "Id of the tenant"),
+        ("tenant_id" = String, Path, description = "Unique ID of the tenant"),
     ),
     responses(
-        (status = 200, description = "Delete tenant with id = tenant_id"),
+        (status = 200, description = "Tenant deleted successfully"),
         (status = 404, description = "Tenant not found", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage),
     ),
@@ -247,8 +257,10 @@ pub async fn delete_tenant(
 }
 
 #[utoipa::path(
+    summary = "List tenants",
+    description = "Returns all tenants.",
     responses(
-        (status = 200, description = "Return all tenants", body = ReadTenantsResponse),
+        (status = 200, description = "Tenants listed successfully", body = ReadTenantsResponse),
         (status = 500, description = "Internal server error", body = ErrorMessage),
     ),
     tag = "Tenants"

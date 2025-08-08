@@ -79,9 +79,11 @@ pub struct CreateTenantSourceResponse {
 }
 
 #[utoipa::path(
+    summary = "Create tenant and source",
+    description = "Creates a new tenant and source within a single transaction.",
     request_body = CreateTenantSourceRequest,
     responses(
-        (status = 200, description = "Create a new tenant and a source", body = CreateTenantSourceResponse),
+        (status = 200, description = "Tenant and source created successfully", body = CreateTenantSourceResponse),
         (status = 400, description = "Bad request", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage),
     ),

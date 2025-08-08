@@ -1,7 +1,7 @@
-use base64::{prelude::BASE64_STANDARD, Engine};
+use base64::{Engine, prelude::BASE64_STANDARD};
 use etl_config::shared::{PgConnectionConfig, SentryConfig};
 use serde::de::{MapAccess, Visitor};
-use serde::{de, Deserialize, Deserializer};
+use serde::{Deserialize, Deserializer, de};
 use std::fmt;
 use thiserror::Error;
 

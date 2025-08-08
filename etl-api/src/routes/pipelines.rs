@@ -363,12 +363,14 @@ pub enum PipelineStatus {
 }
 
 #[utoipa::path(
+    summary = "Create a pipeline",
+    description = "Creates a pipeline linking a source to a destination.",
     request_body = CreatePipelineRequest,
     params(
-        ("tenant_id" = String, Header, description = "The tenant ID")
+        ("tenant_id" = String, Header, description = "Tenant ID used to scope the request")
     ),
     responses(
-        (status = 200, description = "Create new pipeline", body = CreatePipelineResponse),
+        (status = 200, description = "Pipeline created successfully", body = CreatePipelineResponse),
         (status = 400, description = "Bad request", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage),
     ),
@@ -413,12 +415,14 @@ pub async fn create_pipeline(
 }
 
 #[utoipa::path(
+    summary = "Retrieve a pipeline",
+    description = "Returns a pipeline by ID for the given tenant.",
     params(
-        ("pipeline_id" = i64, Path, description = "Id of the pipeline"),
-        ("tenant_id" = String, Header, description = "The tenant ID")
+        ("pipeline_id" = i64, Path, description = "Unique ID of the pipeline"),
+        ("tenant_id" = String, Header, description = "Tenant ID used to scope the request")
     ),
     responses(
-        (status = 200, description = "Return pipeline with id = pipeline_id", body = ReadPipelineResponse),
+        (status = 200, description = "Pipeline retrieved successfully", body = ReadPipelineResponse),
         (status = 404, description = "Pipeline not found", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage)
     ),
@@ -454,13 +458,15 @@ pub async fn read_pipeline(
 }
 
 #[utoipa::path(
+    summary = "Update a pipeline",
+    description = "Updates a pipeline's source, destination, or configuration.",
     request_body = UpdatePipelineRequest,
     params(
-        ("pipeline_id" = i64, Path, description = "Id of the pipeline"),
-        ("tenant_id" = String, Header, description = "The tenant ID")
+        ("pipeline_id" = i64, Path, description = "Unique ID of the pipeline"),
+        ("tenant_id" = String, Header, description = "Tenant ID used to scope the request")
     ),
     responses(
-        (status = 200, description = "Update pipeline with id = pipeline_id"),
+        (status = 200, description = "Pipeline updated successfully"),
         (status = 404, description = "Pipeline not found", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage)
     ),
@@ -504,12 +510,14 @@ pub async fn update_pipeline(
 }
 
 #[utoipa::path(
+    summary = "Delete a pipeline",
+    description = "Deletes a pipeline and its associated resources.",
     params(
-        ("pipeline_id" = i64, Path, description = "Id of the pipeline"),
-        ("tenant_id" = String, Header, description = "The tenant ID")
+        ("pipeline_id" = i64, Path, description = "Unique ID of the pipeline"),
+        ("tenant_id" = String, Header, description = "Tenant ID used to scope the request")
     ),
     responses(
-        (status = 200, description = "Delete pipeline with id = pipeline_id"),
+        (status = 200, description = "Pipeline deleted successfully"),
         (status = 404, description = "Pipeline not found", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage)
     ),
@@ -546,11 +554,13 @@ pub async fn delete_pipeline(
 }
 
 #[utoipa::path(
+    summary = "List pipelines",
+    description = "Returns all pipelines for the specified tenant.",
     params(
-        ("tenant_id" = String, Header, description = "The tenant ID")
+        ("tenant_id" = String, Header, description = "Tenant ID used to scope the request")
     ),
     responses(
-        (status = 200, description = "Return all pipelines", body = ReadPipelinesResponse),
+        (status = 200, description = "Pipelines listed successfully", body = ReadPipelinesResponse),
         (status = 500, description = "Internal server error", body = ErrorMessage)
     ),
     tag = "Pipelines"
@@ -583,12 +593,14 @@ pub async fn read_all_pipelines(
 }
 
 #[utoipa::path(
+    summary = "Start a pipeline",
+    description = "Starts the pipeline by deploying its replicator.",
     params(
-        ("pipeline_id" = i64, Path, description = "Id of the pipeline"),
-        ("tenant_id" = String, Header, description = "The tenant ID")
+        ("pipeline_id" = i64, Path, description = "Unique ID of the pipeline"),
+        ("tenant_id" = String, Header, description = "Tenant ID used to scope the request")
     ),
     responses(
-        (status = 200, description = "Start a pipeline"),
+        (status = 200, description = "Pipeline started successfully"),
         (status = 500, description = "Internal server error", body = ErrorMessage)
     ),
     tag = "Pipelines"
@@ -626,12 +638,14 @@ pub async fn start_pipeline(
 }
 
 #[utoipa::path(
+    summary = "Stop a pipeline",
+    description = "Stops the pipeline by terminating its replicator.",
     params(
-        ("pipeline_id" = i64, Path, description = "Id of the pipeline"),
-        ("tenant_id" = String, Header, description = "The tenant ID")
+        ("pipeline_id" = i64, Path, description = "Unique ID of the pipeline"),
+        ("tenant_id" = String, Header, description = "Tenant ID used to scope the request")
     ),
     responses(
-        (status = 200, description = "Stop a pipeline"),
+        (status = 200, description = "Pipeline stopped successfully"),
         (status = 500, description = "Internal server error", body = ErrorMessage)
     ),
     tag = "Pipelines"
@@ -660,11 +674,13 @@ pub async fn stop_pipeline(
 }
 
 #[utoipa::path(
+    summary = "Stop all pipelines",
+    description = "Stops all pipelines for the specified tenant.",
     params(
-        ("tenant_id" = String, Header, description = "The tenant ID")
+        ("tenant_id" = String, Header, description = "Tenant ID used to scope the request")
     ),
     responses(
-        (status = 200, description = "Stop all pipelines"),
+        (status = 200, description = "All pipelines stopped successfully"),
         (status = 500, description = "Internal server error", body = ErrorMessage)
     ),
     tag = "Pipelines"
@@ -689,12 +705,14 @@ pub async fn stop_all_pipelines(
 }
 
 #[utoipa::path(
+    summary = "Check pipeline status",
+    description = "Returns the current status of the pipeline's replicator.",
     params(
-        ("pipeline_id" = i64, Path, description = "Id of the pipeline"),
-        ("tenant_id" = String, Header, description = "The tenant ID")
+        ("pipeline_id" = i64, Path, description = "Unique ID of the pipeline"),
+        ("tenant_id" = String, Header, description = "Tenant ID used to scope the request")
     ),
     responses(
-        (status = 200, description = "Get pipeline status", body = GetPipelineStatusResponse),
+        (status = 200, description = "Pipeline status retrieved successfully", body = GetPipelineStatusResponse),
         (status = 500, description = "Internal server error", body = ErrorMessage)
     ),
     tag = "Pipelines"
@@ -747,12 +765,14 @@ pub async fn get_pipeline_status(
 }
 
 #[utoipa::path(
+    summary = "Get replication status",
+    description = "Returns the replication status for all tables in the pipeline.",
     params(
-        ("pipeline_id" = i64, Path, description = "Id of the pipeline"),
-        ("tenant_id" = String, Header, description = "The tenant ID")
+        ("pipeline_id" = i64, Path, description = "Unique ID of the pipeline"),
+        ("tenant_id" = String, Header, description = "Tenant ID used to scope the request")
     ),
     responses(
-        (status = 200, description = "Get replication status for all tables in the pipeline", body = GetPipelineReplicationStatusResponse),
+        (status = 200, description = "Replication status retrieved successfully", body = GetPipelineReplicationStatusResponse),
         (status = 404, description = "Pipeline not found", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage)
     ),
@@ -823,14 +843,16 @@ pub async fn get_pipeline_replication_status(
 }
 
 #[utoipa::path(
+    summary = "Roll back table state",
+    description = "Rolls back the replication state of a specific table in the pipeline.",
     request_body = RollbackTableStateRequest,
     params(
-        ("pipeline_id" = i64, Path, description = "Id of the pipeline"),
-        ("tenant_id" = String, Header, description = "The tenant ID")
+        ("pipeline_id" = i64, Path, description = "Unique ID of the pipeline"),
+        ("tenant_id" = String, Header, description = "Tenant ID used to scope the request")
     ),
     responses(
         (status = 200, description = "Table state rolled back successfully", body = RollbackTableStateResponse),
-        (status = 400, description = "Bad request - state is not rollbackable", body = ErrorMessage),
+        (status = 400, description = "Bad request – state not rollbackable", body = ErrorMessage),
         (status = 404, description = "Pipeline or table not found", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage)
     ),
@@ -928,14 +950,16 @@ pub async fn rollback_table_state(
 }
 
 #[utoipa::path(
+    summary = "Update pipeline image",
+    description = "Updates the pipeline's container image while preserving its state.",
     request_body = UpdatePipelineImageRequest,
     params(
-        ("pipeline_id" = i64, Path, description = "Id of the pipeline"),
-        ("tenant_id" = String, Header, description = "The tenant ID")
+        ("pipeline_id" = i64, Path, description = "Unique ID of the pipeline"),
+        ("tenant_id" = String, Header, description = "Tenant ID used to scope the request")
     ),
     responses(
-        (status = 200, description = "Image updated successfully"),
-        (status = 400, description = "Pipeline not running or bad request", body = ErrorMessage),
+        (status = 200, description = "Pipeline image updated successfully"),
+        (status = 400, description = "Bad request or pipeline not running", body = ErrorMessage),
         (status = 404, description = "Pipeline or image not found", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage)
     ),
@@ -1005,15 +1029,17 @@ pub async fn update_pipeline_image(
 }
 
 #[utoipa::path(
+    summary = "Update pipeline config",
+    description = "Updates the pipeline's configuration while preserving its running state.",
     context_path = "/v1",
     request_body = UpdatePipelineConfigRequest,
     params(
-        ("pipeline_id" = i64, Path, description = "Id of the pipeline"),
-        ("tenant_id" = String, Header, description = "The tenant ID")
+        ("pipeline_id" = i64, Path, description = "Unique ID of the pipeline"),
+        ("tenant_id" = String, Header, description = "Tenant ID used to scope the request")
     ),
     responses(
-        (status = 200, description = "Config updated successfully", body = UpdatePipelineConfigResponse),
-        (status = 400, description = "Pipeline not running or bad request", body = ErrorMessage),
+        (status = 200, description = "Pipeline configuration updated successfully", body = UpdatePipelineConfigResponse),
+        (status = 400, description = "Bad request or pipeline not running", body = ErrorMessage),
         (status = 404, description = "Pipeline not found", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage)
     ),

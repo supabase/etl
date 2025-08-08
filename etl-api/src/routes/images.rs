@@ -92,9 +92,11 @@ pub struct ReadImagesResponse {
 }
 
 #[utoipa::path(
+    summary = "Create an image",
+    description = "Creates an image entry; can be marked as the default.",
     request_body = CreateImageRequest,
     responses(
-        (status = 200, description = "Create new image", body = CreateImageResponse),
+        (status = 200, description = "Image created successfully", body = CreateImageResponse),
         (status = 400, description = "Bad request", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage),
     ),
@@ -115,11 +117,13 @@ pub async fn create_image(
 }
 
 #[utoipa::path(
+    summary = "Retrieve an image",
+    description = "Returns an image identified by its ID.",
     params(
-        ("image_id" = i64, Path, description = "Id of the image"),
+        ("image_id" = i64, Path, description = "Unique ID of the image"),
     ),
     responses(
-        (status = 200, description = "Return image with id = image_id", body = ReadImageResponse),
+        (status = 200, description = "Image retrieved successfully", body = ReadImageResponse),
         (status = 404, description = "Image not found", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage),
     ),
@@ -145,12 +149,14 @@ pub async fn read_image(
 }
 
 #[utoipa::path(
+    summary = "Update an image",
+    description = "Updates an image's name and default flag.",
     request_body = UpdateImageRequest,
     params(
-        ("image_id" = i64, Path, description = "Id of the image"),
+        ("image_id" = i64, Path, description = "Unique ID of the image"),
     ),
     responses(
-        (status = 200, description = "Update image with id = image_id"),
+        (status = 200, description = "Image updated successfully"),
         (status = 404, description = "Image not found", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage),
     ),
@@ -173,11 +179,13 @@ pub async fn update_image(
 }
 
 #[utoipa::path(
+    summary = "Delete an image",
+    description = "Deletes an image by ID. Default images cannot be deleted.",
     params(
-        ("image_id" = i64, Path, description = "Id of the image"),
+        ("image_id" = i64, Path, description = "Unique ID of the image"),
     ),
     responses(
-        (status = 200, description = "Delete image with id = image_id"),
+        (status = 200, description = "Image deleted successfully"),
         (status = 404, description = "Image not found", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage),
     ),
@@ -198,8 +206,10 @@ pub async fn delete_image(
 }
 
 #[utoipa::path(
+    summary = "List images",
+    description = "Returns all available images.",
     responses(
-        (status = 200, description = "Return all images", body = ReadImagesResponse),
+        (status = 200, description = "Images listed successfully", body = ReadImagesResponse),
         (status = 500, description = "Internal server error", body = ErrorMessage),
     ),
     tag = "Images"

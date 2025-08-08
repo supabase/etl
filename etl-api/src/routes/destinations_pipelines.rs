@@ -164,13 +164,15 @@ pub struct UpdateDestinationPipelineRequest {
 }
 
 #[utoipa::path(
+    summary = "Create destination and pipeline",
+    description = "Creates a destination and a pipeline linked to the specified source.",
     request_body = CreateDestinationPipelineRequest,
     params(
-        ("tenant_id" = String, Header, description = "The tenant ID")
+        ("tenant_id" = String, Header, description = "Tenant ID used to scope the request")
     ),
     responses(
-        (status = 200, description = "Create a new destination and a pipeline", body = CreateDestinationPipelineResponse),
-        (status = 409, description = "A pipeline already exists for this source and destination combination", body = ErrorMessage),
+        (status = 200, description = "Destination and pipeline created successfully", body = CreateDestinationPipelineResponse),
+        (status = 409, description = "Conflict – a pipeline already exists for this source and destination", body = ErrorMessage),
         (status = 400, description = "Bad request", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage)
     ),
@@ -228,14 +230,16 @@ pub async fn create_destination_and_pipeline(
 }
 
 #[utoipa::path(
+    summary = "Update destination and pipeline",
+    description = "Updates the destination and pipeline ensuring they remain linked.",
     request_body = UpdateDestinationPipelineRequest,
     params(
-        ("destination_id" = i64, Path, description = "ID of the destination to update"),
-        ("pipeline_id" = i64, Path, description = "ID of the pipeline to update"),
-        ("tenant_id" = String, Header, description = "The tenant ID")
+        ("destination_id" = i64, Path, description = "Unique ID of the destination"),
+        ("pipeline_id" = i64, Path, description = "Unique ID of the pipeline"),
+        ("tenant_id" = String, Header, description = "Tenant ID used to scope the request")
     ),
     responses(
-        (status = 200, description = "Update a destination and a pipeline"),
+        (status = 200, description = "Destination and pipeline updated successfully"),
         (status = 404, description = "Pipeline or destination not found", body = ErrorMessage),
         (status = 400, description = "Bad request", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage)
@@ -311,13 +315,15 @@ pub async fn update_destination_and_pipeline(
 }
 
 #[utoipa::path(
+    summary = "Delete destination and pipeline",
+    description = "Deletes the pipeline and its destination after validation.",
     params(
-        ("destination_id" = i64, Path, description = "ID of the destination to delete"),
-        ("pipeline_id" = i64, Path, description = "ID of the pipeline to delete"),
-        ("tenant_id" = String, Header, description = "The tenant ID")
+        ("destination_id" = i64, Path, description = "Unique ID of the destination"),
+        ("pipeline_id" = i64, Path, description = "Unique ID of the pipeline"),
+        ("tenant_id" = String, Header, description = "Tenant ID used to scope the request")
     ),
     responses(
-        (status = 200, description = "Delete destination and pipeline"),
+        (status = 200, description = "Destination and pipeline deleted successfully"),
         (status = 404, description = "Pipeline or destination not found", body = ErrorMessage),
         (status = 400, description = "Bad request", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage)

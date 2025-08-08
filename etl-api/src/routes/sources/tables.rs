@@ -78,12 +78,14 @@ impl ResponseError for TableError {
 }
 
 #[utoipa::path(
+    summary = "List source tables",
+    description = "Returns all tables discovered for the specified source.",
     tag = "Tables",
     params(
-        ("source_id" = i64, Path, description = "Id of the source"),
+        ("source_id" = i64, Path, description = "Unique ID of the source"),
     ),
     responses(
-        (status = 200, description = "Return all tables from source with id = source_id", body = ReadTablesResponse),
+        (status = 200, description = "Tables listed successfully", body = ReadTablesResponse),
         (status = 500, description = "Internal server error", body = ErrorMessage)
     )
 )]

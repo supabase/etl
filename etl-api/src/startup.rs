@@ -1,9 +1,9 @@
 use std::{net::TcpListener, sync::Arc};
 
-use actix_web::{dev::Server, App, HttpServer, web};
+use actix_web::{App, HttpServer, dev::Server, web};
 use actix_web_httpauth::middleware::HttpAuthentication;
 use aws_lc_rs::aead::{AES_256_GCM, RandomizedNonceKey};
-use base64::{prelude::BASE64_STANDARD, Engine};
+use base64::{Engine, prelude::BASE64_STANDARD};
 use etl_config::shared::{IntoConnectOptions, PgConnectionConfig};
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use tracing::warn;

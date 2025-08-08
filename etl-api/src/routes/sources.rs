@@ -125,12 +125,14 @@ pub struct ReadSourcesResponse {
 }
 
 #[utoipa::path(
+    summary = "Create a source",
+    description = "Creates a source for the specified tenant.",
     request_body = CreateSourceRequest,
     params(
-        ("tenant_id" = String, Header, description = "The tenant ID")
+        ("tenant_id" = String, Header, description = "Tenant ID used to scope the request")
     ),
     responses(
-        (status = 200, description = "Create new source", body = CreateSourceResponse),
+        (status = 200, description = "Source created successfully", body = CreateSourceResponse),
         (status = 400, description = "Bad request", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage),
     ),
@@ -161,12 +163,14 @@ pub async fn create_source(
 }
 
 #[utoipa::path(
+    summary = "Retrieve a source",
+    description = "Returns a source by ID. Sensitive fields are omitted from the configuration.",
     params(
-        ("source_id" = i64, Path, description = "Id of the source"),
-        ("tenant_id" = String, Header, description = "The tenant ID")
+        ("source_id" = i64, Path, description = "Unique ID of the source"),
+        ("tenant_id" = String, Header, description = "Tenant ID used to scope the request")
     ),
     responses(
-        (status = 200, description = "Return source with id = source_id", body = ReadSourceResponse),
+        (status = 200, description = "Source retrieved successfully", body = ReadSourceResponse),
         (status = 404, description = "Source not found", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage),
     ),
@@ -196,13 +200,15 @@ pub async fn read_source(
 }
 
 #[utoipa::path(
+    summary = "Update a source",
+    description = "Updates a source's name and configuration.",
     request_body = UpdateSourceRequest,
     params(
-        ("source_id" = i64, Path, description = "Id of the source"),
-        ("tenant_id" = String, Header, description = "The tenant ID")
+        ("source_id" = i64, Path, description = "Unique ID of the source"),
+        ("tenant_id" = String, Header, description = "Tenant ID used to scope the request")
     ),
     responses(
-        (status = 200, description = "Update source with id = source_id"),
+        (status = 200, description = "Source updated successfully"),
         (status = 404, description = "Source not found", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage),
     ),
@@ -235,12 +241,14 @@ pub async fn update_source(
 }
 
 #[utoipa::path(
+    summary = "Delete a source",
+    description = "Deletes a source by ID for the given tenant.",
     params(
-        ("source_id" = i64, Path, description = "Id of the source"),
-        ("tenant_id" = String, Header, description = "The tenant ID")
+        ("source_id" = i64, Path, description = "Unique ID of the source"),
+        ("tenant_id" = String, Header, description = "Tenant ID used to scope the request")
     ),
     responses(
-        (status = 200, description = "Delete source with id = source_id"),
+        (status = 200, description = "Source deleted successfully"),
         (status = 404, description = "Source not found", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage),
     ),
@@ -263,11 +271,13 @@ pub async fn delete_source(
 }
 
 #[utoipa::path(
+    summary = "List sources",
+    description = "Returns all sources for the specified tenant.",
     params(
-        ("tenant_id" = String, Header, description = "The tenant ID")
+        ("tenant_id" = String, Header, description = "Tenant ID used to scope the request")
     ),
     responses(
-        (status = 200, description = "Return all sources", body = ReadSourcesResponse),
+        (status = 200, description = "Sources listed successfully", body = ReadSourcesResponse),
         (status = 500, description = "Internal server error", body = ErrorMessage),
     ),
     tag = "Sources"

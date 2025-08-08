@@ -97,13 +97,15 @@ pub struct ReadPublicationsResponse {
 }
 
 #[utoipa::path(
+    summary = "Create a publication",
+    description = "Creates a publication on the given source with the specified tables.",
     tag = "Publications",
     request_body = CreatePublicationRequest,
     params(
-        ("source_id" = i64, Path, description = "Id of the source"),
+        ("source_id" = i64, Path, description = "Unique ID of the source"),
     ),
     responses(
-        (status = 200, description = "Create new publication"),
+        (status = 200, description = "Publication created successfully"),
         (status = 500, description = "Internal server error", body = ErrorMessage)
     )
 )]
@@ -136,13 +138,15 @@ pub async fn create_publication(
 }
 
 #[utoipa::path(
+    summary = "Retrieve a publication",
+    description = "Returns a publication identified by name within the given source.",
     tag = "Publications",
     params(
-        ("source_id" = i64, Path, description = "Id of the source"),
-        ("publication_name" = String, Path, description = "Name of the publication"),
+        ("source_id" = i64, Path, description = "Unique ID of the source"),
+        ("publication_name" = String, Path, description = "Publication name within the source"),
     ),
     responses(
-        (status = 200, description = "Return publication with name = publication_name from source with id = source_id", body = Publication),
+        (status = 200, description = "Publication retrieved successfully", body = Publication),
         (status = 404, description = "Publication not found", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage)
     )
@@ -172,14 +176,16 @@ pub async fn read_publication(
 }
 
 #[utoipa::path(
+    summary = "Update a publication",
+    description = "Replaces the publication's table list on the given source.",
     tag = "Publications",
     request_body = UpdatePublicationRequest,
     params(
-        ("source_id" = i64, Path, description = "Id of the source"),
-        ("publication_name" = String, Path, description = "Name of the publication"),
+        ("source_id" = i64, Path, description = "Unique ID of the source"),
+        ("publication_name" = String, Path, description = "Publication name within the source"),
     ),
     responses(
-        (status = 200, description = "Update publication with name = publication_name from source with id = source_id"),
+        (status = 200, description = "Publication updated successfully"),
         (status = 404, description = "Publication not found", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage)
     )
@@ -213,13 +219,15 @@ pub async fn update_publication(
 }
 
 #[utoipa::path(
+    summary = "Delete a publication",
+    description = "Deletes a publication by name on the given source.",
     tag = "Publications",
     params(
-        ("source_id" = i64, Path, description = "Id of the source"),
-        ("publication_name" = String, Path, description = "Name of the publication"),
+        ("source_id" = i64, Path, description = "Unique ID of the source"),
+        ("publication_name" = String, Path, description = "Publication name within the source"),
     ),
     responses(
-        (status = 200, description = "Delete publication with name = publication_name from source with id = source_id"),
+        (status = 200, description = "Publication deleted successfully"),
         (status = 404, description = "Publication not found", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage)
     )
@@ -247,12 +255,14 @@ pub async fn delete_publication(
 }
 
 #[utoipa::path(
+    summary = "List publications",
+    description = "Returns all publications defined on the given source.",
     tag = "Publications",
     params(
-        ("source_id" = i64, Path, description = "Id of the source"),
+        ("source_id" = i64, Path, description = "Unique ID of the source"),
     ),
     responses(
-        (status = 200, description = "Return all publications", body = ReadPublicationsResponse),
+        (status = 200, description = "Publications listed successfully", body = ReadPublicationsResponse),
         (status = 500, description = "Internal server error", body = ErrorMessage)
     )
 )]
