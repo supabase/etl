@@ -2,13 +2,11 @@ use crate::shared::pipeline::PipelineConfig;
 use crate::shared::{DestinationConfig, SentryConfig, SupabaseConfig, ValidationError};
 use serde::{Deserialize, Serialize};
 
-/// Configuration for the replicator service.
+/// Complete configuration for the replicator service.
 ///
-/// This struct aggregates all configuration required to run the replicator, including source,
-/// destination, pipeline, state store, and optional Supabase-specific settings.
-///
-/// The [`ReplicatorConfig`] is typically deserialized from a configuration file and passed to the
-/// replicator at startup.
+/// Aggregates all configuration required to run a replicator including pipeline
+/// settings, destination configuration, and optional service integrations like
+/// Sentry and Supabase. Typically loaded from configuration files at startup.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct ReplicatorConfig {
@@ -29,13 +27,9 @@ pub struct ReplicatorConfig {
 }
 
 impl ReplicatorConfig {
-    /// Validates the loaded [`ReplicatorConfig`].
+    /// Validates the complete replicator configuration.
     ///
-    /// Checks the validity of the configuration.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ValidationError`] if validation fails.
+    /// Performs comprehensive validation of all configuration components.
     pub fn validate(&self) -> Result<(), ValidationError> {
         self.pipeline.validate()
     }

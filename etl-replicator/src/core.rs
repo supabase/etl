@@ -15,6 +15,11 @@ use tracing::{debug, info, warn};
 
 use crate::migrations::migrate_state_store;
 
+/// Starts the replicator service with the provided configuration.
+///
+/// Initializes the state store, creates the appropriate destination based on
+/// configuration, and starts the pipeline. Handles both memory and BigQuery
+/// destinations with proper initialization and error handling.
 pub async fn start_replicator_with_config(
     replicator_config: ReplicatorConfig,
 ) -> anyhow::Result<()> {
@@ -130,6 +135,10 @@ fn log_batch_config(config: &BatchConfig) {
     );
 }
 
+/// Initializes the state store with migrations.
+///
+/// Runs necessary database migrations on the state store and creates a
+/// [`PostgresStore`] instance for the given pipeline and connection configuration.
 async fn init_store(
     pipeline_id: PipelineId,
     pg_connection_config: PgConnectionConfig,
@@ -139,6 +148,11 @@ async fn init_store(
     Ok(PostgresStore::new(pipeline_id, pg_connection_config))
 }
 
+/// Starts a pipeline and handles graceful shutdown signals.
+///
+/// Launches the pipeline, sets up signal handlers for SIGTERM and SIGINT,
+/// and ensures proper cleanup on shutdown. The pipeline will attempt to
+/// finish processing current batches before terminating.
 #[tracing::instrument(skip(pipeline), fields(pipeline_id = pipeline.id()))]
 async fn start_pipeline<S, D>(mut pipeline: Pipeline<S, D>) -> anyhow::Result<()>
 where

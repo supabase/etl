@@ -8,10 +8,10 @@ use utoipa::ToSchema;
 use crate::SerializableSecretString;
 use crate::shared::ValidationError;
 
-/// PostgreSQL connection options for customizing server behavior.
+/// PostgreSQL server options for ETL workloads.
 ///
-/// These options are passed to PostgreSQL during connection establishment to configure
-/// session-specific settings that affect how the server processes queries and data.
+/// Configures session-specific settings that are applied during connection
+/// establishment to optimize PostgreSQL behavior for ETL operations.
 #[derive(Debug, Clone)]
 pub struct PgConnectionOptions {
     /// Sets the display format for date values.
@@ -66,9 +66,9 @@ impl Default for PgConnectionOptions {
 }
 
 impl PgConnectionOptions {
-    /// Returns the options as a string suitable for tokio-postgres options parameter.
+    /// Formats options as a string for tokio-postgres connection.
     ///
-    /// Returns a space-separated list of `-c key=value` pairs.
+    /// Returns space-separated `-c key=value` pairs suitable for the options parameter.
     pub fn to_options_string(&self) -> String {
         format!(
             "-c datestyle={} -c intervalstyle={} -c extra_float_digits={} -c client_encoding={} -c timezone={} -c statement_timeout={} -c lock_timeout={} -c idle_in_transaction_session_timeout={} -c application_name={}",
@@ -84,9 +84,9 @@ impl PgConnectionOptions {
         )
     }
 
-    /// Returns the options as key-value pairs suitable for sqlx.
+    /// Formats options as key-value pairs for sqlx connection.
     ///
-    /// Returns a vector of (key, value) tuples.
+    /// Returns a vector of (key, value) tuples suitable for sqlx configuration.
     pub fn to_key_value_pairs(&self) -> Vec<(String, String)> {
         vec![
             ("datestyle".to_string(), self.datestyle.clone()),
@@ -114,9 +114,10 @@ impl PgConnectionOptions {
     }
 }
 
-/// Configuration for connecting to a Postgres database.
+/// PostgreSQL database connection configuration.
 ///
-/// This struct holds all necessary connection parameters and settings.
+/// Contains all parameters required to establish a connection to a PostgreSQL
+/// database, including authentication, TLS settings, and connection options.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(ToSchema))]
 #[serde(rename_all = "snake_case")]
@@ -140,7 +141,7 @@ pub struct PgConnectionConfig {
     pub tls: TlsConfig,
 }
 
-/// TLS settings for secure Postgres connections.
+/// TLS configuration for secure PostgreSQL connections.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(ToSchema))]
 #[serde(rename_all = "snake_case")]
@@ -159,11 +160,9 @@ pub struct TlsConfig {
 }
 
 impl TlsConfig {
-    /// Validates the [`TlsConfig`].
+    /// Validates TLS configuration consistency.
     ///
-    /// If [`TlsConfig::enabled`] is true, this method checks that [`TlsConfig::trusted_root_certs`] is not empty.
-    ///
-    /// Returns [`ValidationError::MissingTrustedRootCerts`] if TLS is enabled but no certificates are provided.
+    /// Ensures that when TLS is enabled, trusted root certificates are provided.
     pub fn validate(&self) -> Result<(), ValidationError> {
         if self.enabled && self.trusted_root_certs.is_empty() {
             return Err(ValidationError::MissingTrustedRootCerts);
@@ -173,29 +172,26 @@ impl TlsConfig {
     }
 }
 
-/// A trait which can be used to convert the implementation into a crate
-/// specific connect options. Since we have two crates for Postgres: sqlx
-/// and tokio_postgres, we keep the connection options centralized in
-/// [`PgConnectionConfig`] and implement this trait twice, once for each
-/// sqlx and tokio_postgres connect options.
+/// Trait for converting configuration to database client connection options.
+///
+/// Provides a common interface for creating connection options for different
+/// PostgreSQL client libraries (sqlx and tokio-postgres) while centralizing
+/// configuration in [`PgConnectionConfig`].
 pub trait IntoConnectOptions<Output> {
-    /// Creates connection options for connecting to the PostgreSQL server without
-    /// specifying a database.
+    /// Creates connection options without specifying a database.
     ///
-    /// Returns [`Output`] configured with the host, port, username, SSL mode
-    /// and optional password from this instance. Useful for administrative operations
-    /// that must be performed before connecting to a specific database, like database
-    /// creation.
+    /// Used for administrative operations like database creation that require
+    /// connecting to the PostgreSQL server without targeting a specific database.
     fn without_db(&self) -> Output;
 
-    /// Creates connection options for connecting to a specific database.
+    /// Creates connection options for connecting to the configured database.
     ///
-    /// Returns [`Output`] configured with all connection parameters including
-    /// the database name from this instance.
+    /// Includes all connection parameters including the specific database name.
     fn with_db(&self) -> Output;
 }
 
 impl IntoConnectOptions<SqlxConnectOptions> for PgConnectionConfig {
+    /// Creates sqlx connection options without database name.
     fn without_db(&self) -> SqlxConnectOptions {
         let ssl_mode = if self.tls.enabled {
             SqlxSslMode::VerifyFull
@@ -218,6 +214,7 @@ impl IntoConnectOptions<SqlxConnectOptions> for PgConnectionConfig {
         options
     }
 
+    /// Creates sqlx connection options with database name.
     fn with_db(&self) -> SqlxConnectOptions {
         let options: SqlxConnectOptions = self.without_db();
         options.database(&self.name)
@@ -225,6 +222,7 @@ impl IntoConnectOptions<SqlxConnectOptions> for PgConnectionConfig {
 }
 
 impl IntoConnectOptions<TokioPgConnectOptions> for PgConnectionConfig {
+    /// Creates tokio-postgres connection options without database name.
     fn without_db(&self) -> TokioPgConnectOptions {
         let ssl_mode = if self.tls.enabled {
             TokioPgSslMode::VerifyFull
@@ -256,6 +254,7 @@ impl IntoConnectOptions<TokioPgConnectOptions> for PgConnectionConfig {
         config
     }
 
+    /// Creates tokio-postgres connection options with database name.
     fn with_db(&self) -> TokioPgConnectOptions {
         let mut options: TokioPgConnectOptions = self.without_db();
         options.dbname(self.name.clone());

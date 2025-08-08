@@ -5,12 +5,20 @@ use tokio_postgres::types::{ToSql, Type};
 use tokio_postgres::{Client, GenericClient, NoTls, Transaction};
 use tracing::info;
 
+/// Table modification operations for ALTER TABLE statements.
 pub enum TableModification<'a> {
+    /// Add a new column with specified name and data type.
     AddColumn { name: &'a str, data_type: &'a str },
+    /// Drop an existing column by name.
     DropColumn { name: &'a str },
+    /// Alter an existing column with the specified alteration.
     AlterColumn { name: &'a str, alteration: &'a str },
 }
 
+/// PostgreSQL database wrapper for testing operations.
+///
+/// Provides a unified interface for database operations across different client types
+/// with automatic cleanup functionality.
 pub struct PgDatabase<G> {
     pub config: PgConnectionConfig,
     pub client: Option<G>,
@@ -18,7 +26,10 @@ pub struct PgDatabase<G> {
 }
 
 impl<G: GenericClient> PgDatabase<G> {
-    /// Creates a new publication for the specified tables.
+    /// Creates a PostgreSQL publication for the specified tables.
+    ///
+    /// Sets up logical replication by creating a publication that includes
+    /// the given tables for change data capture.
     pub async fn create_publication(
         &self,
         publication_name: &str,
@@ -43,7 +54,10 @@ impl<G: GenericClient> PgDatabase<G> {
         Ok(())
     }
 
-    /// Creates a new table with the specified name and columns.
+    /// Creates a new table with the given name and column definitions.
+    ///
+    /// Optionally adds a primary key column named `id` of type `bigserial`.
+    /// Returns the PostgreSQL OID of the created table.
     pub async fn create_table(
         &self,
         table_name: TableName,
@@ -89,7 +103,10 @@ impl<G: GenericClient> PgDatabase<G> {
         Ok(table_id)
     }
 
-    /// Modifies a table by adding, dropping, or altering columns.
+    /// Modifies an existing table using ALTER TABLE operations.
+    ///
+    /// Applies the specified modifications (add/drop/alter columns) to the table
+    /// in a single ALTER TABLE statement.
     pub async fn alter_table(
         &self,
         table_name: TableName,
@@ -125,7 +142,10 @@ impl<G: GenericClient> PgDatabase<G> {
         Ok(())
     }
 
-    /// Inserts values into the specified table.
+    /// Inserts a single row of values into the specified table.
+    ///
+    /// Takes column names and corresponding values, generating appropriate
+    /// parameterized placeholders for the INSERT statement.
     pub async fn insert_values(
         &self,
         table_name: TableName,
@@ -150,8 +170,10 @@ impl<G: GenericClient> PgDatabase<G> {
             .await
     }
 
-    /// Generates values using PostgreSQL's `generate_series` function
-    /// and inserts them into the specified table.
+    /// Inserts multiple rows using PostgreSQL's `generate_series` function.
+    ///
+    /// Generates and inserts rows with values created by `generate_series`
+    /// for efficient bulk data insertion during testing.
     pub async fn insert_generate_series(
         &self,
         table_name: TableName,
@@ -178,7 +200,10 @@ impl<G: GenericClient> PgDatabase<G> {
             .await
     }
 
-    /// Updates all rows in the specified table with the given values.
+    /// Updates all rows in the table with new values.
+    ///
+    /// Sets the specified columns to new values across all rows in the table.
+    /// Returns the number of rows affected.
     pub async fn update_values(
         &self,
         table_name: TableName,
@@ -205,7 +230,10 @@ impl<G: GenericClient> PgDatabase<G> {
             .await
     }
 
-    /// Updates all rows in the specified table with the given values.
+    /// Deletes rows from the table based on column conditions.
+    ///
+    /// Constructs a DELETE statement with WHERE clause using the provided
+    /// column names, expressions, and logical operator.
     pub async fn delete_values(
         &self,
         table_name: TableName,
@@ -233,7 +261,10 @@ impl<G: GenericClient> PgDatabase<G> {
             .await
     }
 
-    /// Queries rows from a single column of a table.
+    /// Queries values from a single column with optional WHERE clause.
+    ///
+    /// Returns all values from the specified column, optionally filtered
+    /// by the provided WHERE condition.
     pub async fn query_table<T>(
         &self,
         table_name: &TableName,
@@ -255,6 +286,9 @@ impl<G: GenericClient> PgDatabase<G> {
         Ok(rows.iter().map(|row| row.get(0)).collect())
     }
 
+    /// Truncates all data from the specified table.
+    ///
+    /// Removes all rows from the table while preserving the table structure.
     pub async fn truncate_table(&self, table_name: TableName) -> Result<(), tokio_postgres::Error> {
         let query = format!("truncate table {}", table_name.as_quoted_identifier(),);
 
@@ -263,7 +297,10 @@ impl<G: GenericClient> PgDatabase<G> {
         Ok(())
     }
 
-    /// Checks if a replication slot exists.
+    /// Checks whether a PostgreSQL replication slot exists.
+    ///
+    /// Queries the `pg_replication_slots` system catalog to determine
+    /// if a replication slot with the given name exists.
     pub async fn replication_slot_exists(
         &self,
         slot_name: &str,
@@ -281,6 +318,10 @@ impl<G: GenericClient> PgDatabase<G> {
 }
 
 impl PgDatabase<Client> {
+    /// Creates a new test database with automatic cleanup.
+    ///
+    /// Creates a new PostgreSQL database and establishes a client connection.
+    /// The database will be dropped automatically when this instance is dropped.
     pub async fn new(config: PgConnectionConfig) -> Self {
         let client = create_pg_database(&config).await;
 
@@ -291,6 +332,10 @@ impl PgDatabase<Client> {
         }
     }
 
+    /// Creates a duplicate connection to the same database.
+    ///
+    /// Establishes an additional client connection to the existing database
+    /// without creating a new database.
     pub async fn duplicate(&self) -> Self {
         let config = self.config.clone();
         // This connects to the database assuming it already exists since this is meant to be
@@ -304,10 +349,10 @@ impl PgDatabase<Client> {
         }
     }
 
-    /// Begins a new transaction.
+    /// Begins a new database transaction.
     ///
-    /// Returns a `Transaction` object that can be used to execute queries within the transaction.
-    /// The transaction must be committed or rolled back before it is dropped.
+    /// Returns a [`PgDatabase`] wrapping a [`Transaction`] for executing queries
+    /// within a transaction context. The transaction must be committed or rolled back.
     pub async fn begin_transaction(&mut self) -> PgDatabase<Transaction<'_>> {
         let transaction = self.client.as_mut().unwrap().transaction().await.unwrap();
 
@@ -320,6 +365,9 @@ impl PgDatabase<Client> {
 }
 
 impl PgDatabase<Transaction<'_>> {
+    /// Commits the current transaction.
+    ///
+    /// Finalizes all changes made within the transaction and releases the transaction.
     pub async fn commit_transaction(mut self) {
         if let Some(client) = self.client.take() {
             client.commit().await.unwrap();
@@ -339,9 +387,10 @@ impl<G> Drop for PgDatabase<G> {
     }
 }
 
-/// Returns a [`ColumnSchema`] representing a non-nullable, primary key column
-/// named "id" of type `INT8` which is added by default to all tables created within
-/// [`PgDatabase`].
+/// Returns the default ID column schema for test tables.
+///
+/// Creates a [`ColumnSchema`] for a non-nullable, primary key column named "id"
+/// of type `INT8` that is added by default to tables created by [`PgDatabase`].
 pub fn id_column_schema() -> ColumnSchema {
     ColumnSchema {
         name: "id".to_string(),
@@ -352,11 +401,13 @@ pub fn id_column_schema() -> ColumnSchema {
     }
 }
 
-/// Creates a new PostgreSQL database and returns a client connected to it.
+/// Creates a new PostgreSQL database and returns a connected client.
 ///
-/// Establishes a connection to the PostgreSQL server using the provided options,
-/// creates a new database, and returns a [`Client`] connected to the new database.
-/// Panics if the connection fails or if database creation fails.
+/// Establishes connection to PostgreSQL server, creates a new database,
+/// and returns a [`Client`] connected to the newly created database.
+///
+/// # Panics
+/// Panics if connection or database creation fails.
 pub async fn create_pg_database(config: &PgConnectionConfig) -> Client {
     // Create the database via a single connection
     let (client, connection) = {
@@ -384,6 +435,10 @@ pub async fn create_pg_database(config: &PgConnectionConfig) -> Client {
     connect_to_pg_database(config).await
 }
 
+/// Connects to an existing PostgreSQL database.
+///
+/// Establishes a client connection to the database specified in the configuration.
+/// Assumes the database already exists.
 pub async fn connect_to_pg_database(config: &PgConnectionConfig) -> Client {
     // Create a new client connected to the created database
     let (client, connection) = {
@@ -404,12 +459,13 @@ pub async fn connect_to_pg_database(config: &PgConnectionConfig) -> Client {
     client
 }
 
-/// Drops a PostgreSQL database and cleans up all connections.
+/// Drops a PostgreSQL database and cleans up all resources.
 ///
-/// Connects to the PostgreSQL server, forcefully terminates all active connections
-/// to the target database, and drops the database if it exists. Useful for cleaning
-/// up test databases. Takes a reference to [`PgConnectionConfig`] specifying the database
-/// to drop. Panics if any operation fails.
+/// Terminates all active connections, drops replication slots, and removes
+/// the database. Used for thorough cleanup of test databases.
+///
+/// # Panics
+/// Panics if any database operation fails.
 pub async fn drop_pg_database(config: &PgConnectionConfig) {
     // Connect to the default database
     let (client, connection) = {

@@ -1,7 +1,9 @@
 use tokio_postgres::types::{Kind, Type};
 
-/// Converts a type oid to a [`Type`] defaulting to an unnamed type in case of failure to
-/// look up the type.
+/// Converts a PostgreSQL type OID to a [`Type`] instance.
+///
+/// Returns a properly constructed [`Type`] for the given OID, or creates an unnamed
+/// type as fallback if the OID lookup fails.
 pub fn convert_type_oid_to_type(type_oid: u32) -> Type {
     Type::from_oid(type_oid).unwrap_or(Type::new(
         format!("unnamed_type({type_oid})"),

@@ -5,13 +5,13 @@ use std::str::FromStr;
 use pg_escape::quote_identifier;
 use tokio_postgres::types::{FromSql, ToSql, Type};
 
-/// An object identifier in PostgreSQL.
+/// PostgreSQL object identifier.
 pub type Oid = u32;
 
-/// A fully qualified PostgreSQL table name consisting of a schema and table name.
+/// Fully qualified PostgreSQL table name with schema and table components.
 ///
-/// This type represents a table identifier in PostgreSQL, which requires both a schema name
-/// and a table name. It provides methods for formatting the name in different contexts.
+/// Represents a complete table identifier that includes both schema and table name,
+/// providing methods for proper SQL identifier quoting and formatting.
 #[derive(Debug, Clone, Eq, PartialEq, PartialOrd, Ord)]
 pub struct TableName {
     /// The schema name containing the table
@@ -21,14 +21,15 @@ pub struct TableName {
 }
 
 impl TableName {
+    /// Creates a new [`TableName`] with the given schema and table name.
     pub fn new(schema: String, name: String) -> TableName {
         Self { schema, name }
     }
 
     /// Returns the table name as a properly quoted PostgreSQL identifier.
     ///
-    /// This method ensures the schema and table names are properly escaped according to
-    /// PostgreSQL identifier quoting rules.
+    /// Escapes both schema and table names according to PostgreSQL identifier
+    /// quoting rules to handle special characters and reserved keywords safely.
     pub fn as_quoted_identifier(&self) -> String {
         let quoted_schema = quote_identifier(&self.schema);
         let quoted_name = quote_identifier(&self.name);
@@ -43,16 +44,15 @@ impl fmt::Display for TableName {
     }
 }
 
-/// A type alias for PostgreSQL type modifiers.
+/// PostgreSQL type modifier for specifying type-specific attributes.
 ///
-/// Type modifiers in PostgreSQL are used to specify additional type-specific attributes,
-/// such as length for varchar or precision for numeric types.
+/// Used to store additional type information such as varchar length or numeric precision.
 type TypeModifier = i32;
 
-/// Represents the schema of a single column in a PostgreSQL table.
+/// Schema metadata for a single PostgreSQL table column.
 ///
-/// This type contains all metadata about a column including its name, data type,
-/// type modifier, nullability, and whether it's part of the primary key.
+/// Contains complete column information including name, data type, type modifier,
+/// nullability constraint, and primary key membership.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct ColumnSchema {
     /// The name of the column
@@ -68,6 +68,7 @@ pub struct ColumnSchema {
 }
 
 impl ColumnSchema {
+    /// Creates a new [`ColumnSchema`] with the specified metadata.
     pub fn new(
         name: String,
         typ: Type,
@@ -84,14 +85,11 @@ impl ColumnSchema {
         }
     }
 
-    /// Compares two [`ColumnSchema`] instances, excluding the `nullable` field.
-    ///
-    /// Return `true` if all fields except `nullable` are equal, `false` otherwise.
-    ///
-    /// This method is used for comparing table schemas loaded via the initial table sync and the
-    /// relation messages received via CDC. The reason for skipping the `nullable` field is that
-    /// unfortunately Postgres doesn't seem to propagate nullable information of a column via
-    /// relation messages.
+    /// Compares two [`ColumnSchema`] instances excluding the nullable field.
+    /// 
+    /// Returns `true` if all fields except `nullable` are equal. Used for comparing
+    /// schemas from initial table sync against CDC relation messages, which don't
+    /// include nullability information.
     fn partial_eq(&self, other: &ColumnSchema) -> bool {
         self.name == other.name
             && self.typ == other.typ
@@ -100,22 +98,20 @@ impl ColumnSchema {
     }
 }
 
-/// A type-safe wrapper for PostgreSQL table OIDs.
+/// Type-safe wrapper for PostgreSQL table OIDs.
 ///
-/// Table OIDs are unique identifiers assigned to tables in PostgreSQL.
-///
-/// This newtype provides type safety by preventing accidental use of raw [`Oid`] values
-/// where a table identifier is expected.
+/// Provides type safety for table identifiers by wrapping raw [`Oid`] values
+/// and preventing accidental misuse in function parameters.
 #[derive(Debug, Clone, Copy, Eq, PartialEq, PartialOrd, Ord, Hash)]
 pub struct TableId(pub Oid);
 
 impl TableId {
-    /// Creates a new [`TableId`] from an [`Oid`].
+    /// Creates a new [`TableId`] from the given [`Oid`].
     pub fn new(oid: Oid) -> Self {
         Self(oid)
     }
 
-    /// Returns the underlying [`Oid`] value.
+    /// Returns the wrapped [`Oid`] value.
     pub fn into_inner(self) -> Oid {
         self.0
     }
@@ -182,10 +178,10 @@ impl ToSql for TableId {
     tokio_postgres::types::to_sql_checked!();
 }
 
-/// Represents the complete schema of a PostgreSQL table.
+/// Complete schema metadata for a PostgreSQL table.
 ///
-/// This type contains all metadata about a table including its name, OID,
-/// and the schemas of all its columns.
+/// Contains table identification (OID and name) along with the schemas
+/// of all columns in the table.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct TableSchema {
     /// The PostgreSQL OID of the table
@@ -197,6 +193,7 @@ pub struct TableSchema {
 }
 
 impl TableSchema {
+    /// Creates a new [`TableSchema`] with the given components.
     pub fn new(id: TableId, name: TableName, column_schemas: Vec<ColumnSchema>) -> Self {
         Self {
             id,
@@ -205,21 +202,21 @@ impl TableSchema {
         }
     }
 
-    /// Adds a new column schema to this [`TableSchema`].
+    /// Adds a column schema to this table schema.
     pub fn add_column_schema(&mut self, column_schema: ColumnSchema) {
         self.column_schemas.push(column_schema);
     }
 
-    /// Returns whether the table has any primary key columns.
+    /// Returns whether the table has primary key columns.
     ///
-    /// This method checks if any column in the table is marked as part of the primary key.
+    /// Checks if any column in the table is marked as part of the primary key.
     pub fn has_primary_keys(&self) -> bool {
         self.column_schemas.iter().any(|cs| cs.primary)
     }
 
-    /// Compares two [`TableSchema`] instances, excluding the [`ColumnSchema`]'s `nullable` field.
+    /// Compares two [`TableSchema`] instances excluding column nullable fields.
     ///
-    /// Return `true` if all fields except `nullable` are equal, `false` otherwise.
+    /// Returns `true` if all fields match except for column nullability information.
     pub fn partial_eq(&self, other: &TableSchema) -> bool {
         self.id == other.id
             && self.name == other.name

@@ -2,40 +2,35 @@ use serde::de::DeserializeOwned;
 
 use crate::environment::Environment;
 
-/// Directory containing configuration files relative to the application root.
+/// Directory containing configuration files relative to application root.
 const CONFIGURATION_DIR: &str = "configuration";
 
-/// Name of the base configuration file loaded for all environments.
+/// Base configuration file loaded for all environments.
 const BASE_CONFIG_FILE: &str = "base.yaml";
 
-/// Prefix for environment variable overrides in configuration.
-///
-/// Environment variables with this prefix are used to override configuration values.
+/// Prefix for environment variable configuration overrides.
 const ENV_PREFIX: &str = "APP";
 
-/// Separator between the environment variable prefix and the first key segment.
+/// Separator between environment variable prefix and key segments.
 const ENV_PREFIX_SEPARATOR: &str = "_";
 
 /// Separator for nested configuration keys in environment variables.
 ///
-/// For example, `APP_DATABASE__URL` sets the `database.url` field.
+/// Example: `APP_DATABASE__URL` sets the `database.url` field.
 const ENV_SEPARATOR: &str = "__";
 
-/// Loads the application configuration from YAML files and environment variables.
+/// Loads hierarchical configuration from YAML files and environment variables.
 ///
-/// This function loads the base configuration file, then an environment-specific file
-/// (determined by the `APP_ENVIRONMENT` variable, defaulting to `dev`), and finally
-/// applies overrides from environment variables prefixed with `APP`. Nested keys are
-/// separated by double underscores (`__`).
+/// Loads configuration in this order:
+/// 1. Base configuration from `configuration/base.yaml`
+/// 2. Environment-specific file from `configuration/{environment}.yaml`
+/// 3. Environment variable overrides prefixed with `APP`
 ///
-/// The resulting configuration is deserialized into the type `T`.
+/// Nested keys use double underscores: `APP_DATABASE__URL` → `database.url`
 ///
 /// # Panics
-///
-/// Panics if the current working directory cannot be determined or if the value of
-/// `APP_ENVIRONMENT` cannot be parsed into an [`Environment`].
-///
-/// Returns an error if configuration loading or deserialization fails.
+/// Panics if current directory cannot be determined or if `APP_ENVIRONMENT`
+/// cannot be parsed.
 pub fn load_config<T>() -> Result<T, config::ConfigError>
 where
     T: DeserializeOwned,

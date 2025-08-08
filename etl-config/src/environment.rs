@@ -1,21 +1,22 @@
 use std::fmt;
 use std::io::Error;
 
-/// Names of the environment variable which contains the environment name.
+/// Environment variable name containing the environment identifier.
 const APP_ENVIRONMENT_ENV_NAME: &str = "APP_ENVIRONMENT";
 
-/// The name of the production environment.
+/// Production environment identifier.
 const PROD_ENV_NAME: &str = "prod";
 
-/// The name of the staging environment.
+/// Staging environment identifier.
 const STAGING_ENV_NAME: &str = "staging";
 
-/// The name of the development environment.
+/// Development environment identifier.
 const DEV_ENV_NAME: &str = "dev";
 
-/// Represents the runtime environment for the application.
+/// Runtime environment for the application.
 ///
-/// Use [`Environment`] to distinguish between development and production modes.
+/// Used to distinguish between development, staging, and production modes
+/// for configuration loading and feature toggles.
 #[derive(Debug, Clone)]
 pub enum Environment {
     /// Production environment.
@@ -27,19 +28,23 @@ pub enum Environment {
 }
 
 impl Environment {
-    /// Loads the environment from the `APP_ENVIRONMENT` env variable.
+    /// Loads the environment from the `APP_ENVIRONMENT` environment variable.
     ///
-    /// In case no environment is specified, we default to [`Environment::Prod`].
+    /// Defaults to [`Environment::Prod`] if the variable is not set.
     pub fn load() -> Result<Environment, Error> {
         std::env::var(APP_ENVIRONMENT_ENV_NAME)
             .unwrap_or_else(|_| PROD_ENV_NAME.into())
             .try_into()
     }
 
+    /// Sets the `APP_ENVIRONMENT` environment variable to this environment's value.
     pub fn set(&self) {
         unsafe { std::env::set_var(APP_ENVIRONMENT_ENV_NAME, self.to_string()) }
     }
 
+    /// Returns whether this is a production-like environment.
+    ///
+    /// Returns `true` for both [`Environment::Prod`] and [`Environment::Staging`].
     pub fn is_prod(&self) -> bool {
         matches!(self, Self::Prod | Self::Staging)
     }
@@ -58,9 +63,9 @@ impl fmt::Display for Environment {
 impl TryFrom<String> for Environment {
     type Error = Error;
 
-    /// Attempts to create an [`Environment`] from a string, case-insensitively.
+    /// Creates an [`Environment`] from a string, case-insensitively.
     ///
-    /// Accepts "dev" or "prod". Returns an error if the input does not match a supported environment.
+    /// Accepts "dev", "staging", or "prod". Returns an error for unsupported values.
     fn try_from(s: String) -> Result<Self, Self::Error> {
         match s.to_lowercase().as_str() {
             PROD_ENV_NAME => Ok(Self::Prod),
