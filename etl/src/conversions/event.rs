@@ -253,6 +253,7 @@ where
 fn convert_tuple_to_row(
     column_schemas: &[ColumnSchema],
     tuple_data: &[protocol::TupleData],
+    old_table_row: &mut Option<TableRow>,
     use_default_for_missing_cols: bool,
 ) -> EtlResult<TableRow> {
     let mut values = Vec::with_capacity(column_schemas.len());
@@ -283,7 +284,20 @@ fn convert_tuple_to_row(
                 }
             }
             protocol::TupleData::UnchangedToast => {
-                TextFormatConverter::default_value(&column_schema.typ)?
+                // For unchanged toast values we try to use the value from the old row if it is present
+                // but only if it is not null. In all other cases we send the default value for
+                // consistency. As a bit of a practical hack we take the value out of the old row and
+                // move a null value in its place to avoid a clone because toast values tend to be large.
+                if let Some(row) = old_table_row {
+                    let old_row_value = std::mem::replace(&mut row.values[i], Cell::Null);
+                    if old_row_value == Cell::Null {
+                        TextFormatConverter::default_value(&column_schema.typ)?
+                    } else {
+                        old_row_value
+                    }
+                } else {
+                    TextFormatConverter::default_value(&column_schema.typ)?
+                }
             }
             protocol::TupleData::Binary(_) => {
                 bail!(
@@ -318,6 +332,7 @@ where
     let table_row = convert_tuple_to_row(
         &table_schema.column_schemas,
         insert_body.tuple().tuple_data(),
+        &mut None,
         false,
     )?;
 
@@ -341,12 +356,6 @@ where
     let table_id = update_body.rel_id();
     let table_schema = get_table_schema(schema_store, TableId::new(table_id)).await?;
 
-    let table_row = convert_tuple_to_row(
-        &table_schema.column_schemas,
-        update_body.new_tuple().tuple_data(),
-        false,
-    )?;
-
     // We try to extract the old tuple by either taking the entire old tuple or the key of the old
     // tuple.
     let is_key = update_body.old_tuple().is_none();
@@ -355,11 +364,21 @@ where
         Some(identity) => Some(convert_tuple_to_row(
             &table_schema.column_schemas,
             identity.tuple_data(),
+            &mut None,
             true,
         )?),
         None => None,
-    }
-    .map(|row| (is_key, row));
+    };
+
+    let mut old_table_row_mut = old_table_row;
+    let table_row = convert_tuple_to_row(
+        &table_schema.column_schemas,
+        update_body.new_tuple().tuple_data(),
+        &mut old_table_row_mut,
+        false,
+    )?;
+
+    let old_table_row = old_table_row_mut.map(|row| (is_key, row));
 
     Ok(UpdateEvent {
         start_lsn,
@@ -390,6 +409,7 @@ where
         Some(identity) => Some(convert_tuple_to_row(
             &table_schema.column_schemas,
             identity.tuple_data(),
+            &mut None,
             true,
         )?),
         None => None,

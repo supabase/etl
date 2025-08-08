@@ -74,6 +74,8 @@ pub enum ErrorKind {
     StateRollbackError,
     /// Table sync worker error
     TableSyncWorkerPanic,
+    /// Permission denied error
+    PermissionDenied,
     /// Destination-specific error
     DestinationError,
     /// Replication slot not found

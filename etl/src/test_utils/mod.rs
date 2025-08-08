@@ -5,6 +5,7 @@
 //! It also includes common testing patterns like waiting for conditions to be met.
 pub mod database;
 pub mod event;
+pub mod materialize;
 pub mod notify;
 pub mod pipeline;
 pub mod table;

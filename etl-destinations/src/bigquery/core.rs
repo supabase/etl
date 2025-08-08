@@ -1,28 +1,36 @@
-use crate::bigquery::client::{BigQueryClient, BigQueryOperationType};
-use crate::bigquery::{BigQueryDatasetId, BigQueryTableId};
 use etl::destination::Destination;
 use etl::error::{ErrorKind, EtlError, EtlResult};
 use etl::etl_error;
 use etl::store::schema::SchemaStore;
 use etl::types::{Cell, Event, PgLsn, TableId, TableName, TableRow, TruncateEvent};
 use gcp_bigquery_client::storage::TableDescriptor;
-use std::collections::HashMap;
-use std::ops::Deref;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
-/// Delimiter used to separate schema from table name in BigQuery table identifiers.
+use crate::bigquery::client::{BigQueryClient, BigQueryOperationType};
+use crate::bigquery::{BigQueryDatasetId, BigQueryTableId};
+
+/// The delimiter used when generating table names in BigQuery that splits the schema from the name
+/// of the table.
 const BIGQUERY_TABLE_ID_DELIMITER: &str = "_";
-/// Replacement string for escaping underscores in original schema and table names.
+/// The replacement string used to escape characters in the original schema and table names.
 const BIGQUERY_TABLE_ID_DELIMITER_ESCAPE_REPLACEMENT: &str = "__";
 
-/// Generates a hex-encoded sequence number from PostgreSQL LSNs.
+/// Generates a sequence number from the LSNs of an event.
 ///
-/// Creates a sequence number that ensures events are processed in the correct order
-/// even when they have the same system time. Uses commit LSN for transaction ordering
-/// and start LSN for intra-transaction ordering, ensuring BigQuery preserves the
-/// correct event sequence for CDC operations.
+/// Creates a hex-encoded sequence number that ensures events are processed in the correct order
+/// even when they have the same system time. The format is compatible with BigQuery's
+/// `_CHANGE_SEQUENCE_NUMBER` column requirements.
+///
+/// The rationale for using the LSN is that BigQuery will preserve the highest sequence number
+/// in case of equal primary key, which is what we want since in case of updates, we want the
+/// latest update in Postgres order to be the winner. We have first the `commit_lsn` in the key
+/// so that BigQuery can first order operations based on the LSN at which the transaction committed
+/// and if two operations belong to the same transaction (meaning they have the same LSN), the
+/// `start_lsn` will be used. We first order by `commit_lsn` to preserve the order in which operations
+/// are received by the pipeline since transactions are ordered by commit time and not interleaved.
 fn generate_sequence_number(start_lsn: PgLsn, commit_lsn: PgLsn) -> String {
     let start_lsn = u64::from(start_lsn);
     let commit_lsn = u64::from(commit_lsn);
@@ -56,22 +64,25 @@ pub fn table_name_to_bigquery_table_id(table_name: &TableName) -> BigQueryTableI
     format!("{escaped_schema}_{escaped_table}")
 }
 
-/// Internal state for [`BigQueryDestination`] with thread-safe access.
+/// Internal state for [`BigQueryDestination`] wrapped in `Arc<Mutex<>>`.
 ///
-/// Contains the BigQuery client, dataset configuration, and schema store for
-/// managing table metadata and CDC operations.
+/// Contains the BigQuery client, dataset configuration, injected schema cache,
+/// and table creation state cache for performance optimization.
 #[derive(Debug)]
 struct Inner<S> {
     client: BigQueryClient,
     dataset_id: BigQueryDatasetId,
     max_staleness_mins: Option<u16>,
     schema_store: S,
+    /// Cache of table IDs that have been successfully created or verified to exist.
+    /// This avoids redundant `create_table_if_missing` calls for known tables.
+    created_tables: HashSet<BigQueryTableId>,
 }
 
-/// BigQuery destination implementation for ETL pipelines.
+/// A BigQuery destination that implements the ETL [`Destination`] trait.
 ///
-/// Provides PostgreSQL-to-BigQuery replication with CDC support, streaming inserts,
-/// and automatic table creation with schema mapping.
+/// Provides PostgreSQL-to-BigQuery data pipeline functionality including streaming inserts
+/// and CDC operation handling.
 #[derive(Debug, Clone)]
 pub struct BigQueryDestination<S> {
     inner: Arc<Mutex<Inner<S>>>,
@@ -81,9 +92,10 @@ impl<S> BigQueryDestination<S>
 where
     S: SchemaStore,
 {
-    /// Creates a new [`BigQueryDestination`] using a service account key file.
+    /// Creates a new [`BigQueryDestination`] using a service account key file path.
     ///
-    /// Initializes the BigQuery client with credentials from the specified file path.
+    /// Initializes the BigQuery client with the provided credentials and project settings.
+    /// The `max_staleness_mins` parameter controls table metadata cache freshness.
     pub async fn new_with_key_path(
         project_id: String,
         dataset_id: BigQueryDatasetId,
@@ -97,6 +109,7 @@ where
             dataset_id,
             max_staleness_mins,
             schema_store,
+            created_tables: HashSet::new(),
         };
 
         Ok(Self {
@@ -106,8 +119,8 @@ where
 
     /// Creates a new [`BigQueryDestination`] using a service account key JSON string.
     ///
-    /// Initializes the BigQuery client with credentials provided as a JSON string,
-    /// useful when credentials are stored in environment variables or secrets.
+    /// Similar to [`BigQueryDestination::new_with_key_path`] but accepts the key content directly
+    /// rather than a file path. Useful when credentials are stored in environment variables.
     pub async fn new_with_key(
         project_id: String,
         dataset_id: BigQueryDatasetId,
@@ -121,6 +134,7 @@ where
             dataset_id,
             max_staleness_mins,
             schema_store,
+            created_tables: HashSet::new(),
         };
 
         Ok(Self {
@@ -128,12 +142,13 @@ where
         })
     }
 
-    /// Prepares a table for CDC streaming operations.
+    /// Prepares the table for CDC streaming with optimistic table creation caching.
     ///
-    /// Loads the table schema from the schema store, creates the BigQuery table if missing,
-    /// and returns the table identifier and descriptor required for streaming operations.
-    async fn prepare_cdc_streaming_for_table<I: Deref<Target = Inner<S>>>(
-        inner: &I,
+    /// Loads the table schema and creates the table in BigQuery if missing. Uses an internal
+    /// cache to avoid redundant existence checks for tables that have already been created.
+    /// If streaming fails with a table not found error, the cache entry is invalidated.
+    async fn prepare_cdc_streaming_for_table(
+        inner: &mut Inner<S>,
         table_id: &TableId,
         use_cdc_sequence_column: bool,
     ) -> EtlResult<(BigQueryTableId, TableDescriptor)> {
@@ -155,17 +170,25 @@ where
 
         let table_id = table_name_to_bigquery_table_id(&table_schema.name);
 
-        // TODO: store the fact that the table was created to avoid every time the check, if we then
-        //  try to create the value and fail, we can re-create the table.
-        inner
-            .client
-            .create_table_if_missing(
-                &inner.dataset_id,
-                &table_id,
-                &table_schema.column_schemas,
-                inner.max_staleness_mins,
-            )
-            .await?;
+        // Optimistically skip table creation if we've already seen this table
+        if !inner.created_tables.contains(&table_id) {
+            inner
+                .client
+                .create_table_if_missing(
+                    &inner.dataset_id,
+                    &table_id,
+                    &table_schema.column_schemas,
+                    inner.max_staleness_mins,
+                )
+                .await?;
+
+            // Add the table to the cache (with random eviction if needed)
+            Self::add_to_created_tables_cache(inner, table_id.clone());
+
+            debug!("table {table_id} added to creation cache");
+        } else {
+            debug!("table {table_id} found in creation cache, skipping existence check");
+        }
 
         let table_descriptor = BigQueryClient::column_schemas_to_table_descriptor(
             &table_schema.column_schemas,
@@ -175,9 +198,85 @@ where
         Ok((table_id, table_descriptor))
     }
 
-    /// Writes table rows to BigQuery with CDC metadata.
+    /// Adds a table ID to the created tables cache if not present.
+    fn add_to_created_tables_cache(inner: &mut Inner<impl SchemaStore>, table_id: BigQueryTableId) {
+        if inner.created_tables.contains(&table_id) {
+            return;
+        }
+
+        inner.created_tables.insert(table_id);
+    }
+
+    /// Removes a table ID from the created tables cache.
     ///
-    /// Appends CDC mode columns to each row and streams them to the target BigQuery table.
+    /// Used when a table is found to not exist during streaming operations.
+    fn remove_from_created_tables_cache(
+        inner: &mut Inner<impl SchemaStore>,
+        table_id: &BigQueryTableId,
+    ) {
+        inner.created_tables.remove(table_id);
+    }
+
+    /// Handles streaming rows with fallback table creation on missing table errors.
+    ///
+    /// Attempts to stream rows to BigQuery. If streaming fails with a table not found error,
+    /// removes the table from the cache and retries with table creation.
+    async fn stream_rows_with_fallback(
+        inner: &mut Inner<S>,
+        dataset_id: &BigQueryDatasetId,
+        table_id: &BigQueryTableId,
+        table_descriptor: &TableDescriptor,
+        table_rows: Vec<TableRow>,
+        orig_table_id: &TableId,
+        use_cdc_sequence_column: bool,
+    ) -> EtlResult<()> {
+        // First attempt - optimistically assume the table exists
+        let result = inner
+            .client
+            .stream_rows(dataset_id, table_id, table_descriptor, table_rows.clone())
+            .await;
+
+        match result {
+            Ok(()) => Ok(()),
+            Err(err) => {
+                // From our testing, when trying to send data to a missing table, this is the error that is
+                // returned:
+                // `Status { code: PermissionDenied, message: "Permission 'TABLES_UPDATE_DATA' denied on
+                // resource 'x' (or it may not exist).", source: None }`
+                //
+                // If we get permission denied, we assume that the table doesn't exist.
+                if err.kind() == ErrorKind::PermissionDenied {
+                    warn!(
+                        "table {table_id} not found during streaming, removing from cache and recreating"
+                    );
+                    // Remove the table from our cache since it doesn't exist
+                    Self::remove_from_created_tables_cache(inner, table_id);
+
+                    // Recreate the table and table descriptor
+                    let (new_table_id, new_table_descriptor) =
+                        Self::prepare_cdc_streaming_for_table(
+                            inner,
+                            orig_table_id,
+                            use_cdc_sequence_column,
+                        )
+                        .await?;
+
+                    // Retry the streaming operation
+                    inner
+                        .client
+                        .stream_rows(dataset_id, &new_table_id, &new_table_descriptor, table_rows)
+                        .await
+                } else {
+                    // Not a table not found error, propagate the original error
+                    Err(err)
+                }
+            }
+        }
+    }
+
+    /// Writes data rows to a BigQuery table, adding CDC mode metadata.
+    ///
+    /// Each row gets a CDC mode column and sequence number appended before streaming to BigQuery.
     async fn write_table_rows(
         &self,
         table_id: TableId,
@@ -185,8 +284,8 @@ where
     ) -> EtlResult<()> {
         let mut inner = self.inner.lock().await;
 
-        let (table_id, table_descriptor) =
-            Self::prepare_cdc_streaming_for_table(&inner, &table_id, false).await?;
+        let (bq_table_id, table_descriptor) =
+            Self::prepare_cdc_streaming_for_table(&mut inner, &table_id, false).await?;
 
         let dataset_id = inner.dataset_id.clone();
         for table_row in table_rows.iter_mut() {
@@ -194,18 +293,25 @@ where
                 .values
                 .push(BigQueryOperationType::Upsert.into_cell());
         }
-        inner
-            .client
-            .stream_rows(&dataset_id, &table_id, &table_descriptor, table_rows)
-            .await?;
+
+        Self::stream_rows_with_fallback(
+            &mut inner,
+            &dataset_id,
+            &bq_table_id,
+            &table_descriptor,
+            table_rows,
+            &table_id,
+            false,
+        )
+        .await?;
 
         Ok(())
     }
 
     /// Processes and writes a batch of CDC events to BigQuery.
     ///
-    /// Groups events by table, handles inserts/updates/deletes via streaming,
-    /// and adds sequence numbers to ensure proper event ordering.
+    /// Groups events by type, handles inserts/updates/deletes via streaming, and processes truncates separately.
+    /// Adds sequence numbers to ensure proper ordering of events with the same system time.
     async fn write_events(&self, events: Vec<Event>) -> EtlResult<()> {
         let mut event_iter = events.into_iter().peekable();
 
@@ -276,14 +382,20 @@ where
                 let mut inner = self.inner.lock().await;
 
                 for (table_id, table_rows) in table_id_to_table_rows {
-                    let (table_id, table_descriptor) =
-                        Self::prepare_cdc_streaming_for_table(&inner, &table_id, true).await?;
+                    let (bq_table_id, table_descriptor) =
+                        Self::prepare_cdc_streaming_for_table(&mut inner, &table_id, true).await?;
 
                     let dataset_id = inner.dataset_id.clone();
-                    inner
-                        .client
-                        .stream_rows(&dataset_id, &table_id, &table_descriptor, table_rows)
-                        .await?;
+                    Self::stream_rows_with_fallback(
+                        &mut inner,
+                        &dataset_id,
+                        &bq_table_id,
+                        &table_descriptor,
+                        table_rows,
+                        &table_id,
+                        true,
+                    )
+                    .await?;
                 }
             }
 
@@ -309,9 +421,9 @@ where
         Ok(())
     }
 
-    /// Processes truncate events by executing `TRUNCATE TABLE` statements.
+    /// Processes truncate events by executing `TRUNCATE TABLE` statements in BigQuery.
     ///
-    /// Maps PostgreSQL table OIDs to BigQuery table names and executes truncate operations.
+    /// Maps PostgreSQL table OIDs to BigQuery table names and issues truncate commands.
     #[allow(dead_code)]
     async fn process_truncate_events(&self, truncate_events: Vec<TruncateEvent>) -> EtlResult<()> {
         let inner = self.inner.lock().await;

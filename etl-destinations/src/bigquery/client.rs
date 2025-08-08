@@ -575,7 +575,17 @@ fn bq_error_to_etl_error(err: BQError) -> EtlError {
         BQError::TonicInvalidMetadataValueError(_) => {
             (ErrorKind::ConfigError, "BigQuery invalid metadata value")
         }
-        BQError::TonicStatusError(_) => (ErrorKind::DestinationError, "BigQuery gRPC status error"),
+        BQError::TonicStatusError(status) => {
+            // Since we do not have access to the `Code` type from `tonic`, we just match on the description
+            // statically.
+            if status.code().description()
+                == "The caller does not have permission to execute the specified operation"
+            {
+                (ErrorKind::PermissionDenied, "BigQuery permission denied")
+            } else {
+                (ErrorKind::DestinationError, "BigQuery gRPC status error")
+            }
+        }
     };
 
     etl_error!(kind, description, err.to_string())
