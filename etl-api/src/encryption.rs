@@ -8,7 +8,7 @@ use base64::{Engine, prelude::BASE64_STANDARD};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-/// Errors that can occur during encryption operations.
+/// Errors that occur during data encryption.
 #[derive(Debug, Error)]
 pub enum EncryptionError {
     /// An unspecified error occurred while encrypting data.
@@ -16,7 +16,7 @@ pub enum EncryptionError {
     Unspecified(#[from] aws_lc_rs::error::Unspecified),
 }
 
-/// Errors that can occur during decryption operations.
+/// Errors that occur during data decryption.
 #[derive(Debug, Error)]
 pub enum DecryptionError {
     /// An unspecified error occurred while decrypting data.
@@ -36,19 +36,19 @@ pub enum DecryptionError {
     MismatchedKeyId(u32, u32),
 }
 
-/// Trait for types that can be encrypted into another type.
+/// Trait for types that can be encrypted.
 pub trait Encrypt<T> {
-    /// Encrypts `self` using the provided [`EncryptionKey`].
+    /// Encrypts this value using the provided encryption key.
     fn encrypt(self, encryption_key: &EncryptionKey) -> Result<T, EncryptionError>;
 }
 
-/// Trait for types that can be decrypted into another type.
+/// Trait for types that can be decrypted.
 pub trait Decrypt<T> {
-    /// Decrypts `self` using the provided [`EncryptionKey`].
+    /// Decrypts this value using the provided encryption key.
     fn decrypt(self, encryption_key: &EncryptionKey) -> Result<T, DecryptionError>;
 }
 
-/// Holds an encryption key and its identifier.
+/// Encryption key with identifier for key management.
 pub struct EncryptionKey {
     /// Unique identifier for the key.
     pub id: u32,
@@ -56,7 +56,7 @@ pub struct EncryptionKey {
     pub key: RandomizedNonceKey,
 }
 
-/// Represents an encrypted value with its key ID and nonce.
+/// Encrypted value with metadata for decryption.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct EncryptedValue {
     /// Identifier of the key used for encryption.
@@ -67,10 +67,10 @@ pub struct EncryptedValue {
     pub value: String,
 }
 
-/// Encrypts a string value using the provided [`EncryptionKey`].
+/// Encrypts a string using AES-256-GCM encryption.
 ///
-/// The result is an [`EncryptedValue`] containing the key ID, base64-encoded nonce,
-/// and base64-encoded ciphertext.
+/// Returns an [`EncryptedValue`] containing the key ID, nonce, and encrypted data,
+/// all base64-encoded for safe storage and transmission.
 pub fn encrypt_text(
     value: String,
     encryption_key: &EncryptionKey,
@@ -86,10 +86,10 @@ pub fn encrypt_text(
     })
 }
 
-/// Decrypts an [`EncryptedValue`] using the provided [`EncryptionKey`].
+/// Decrypts an [`EncryptedValue`] back to the original string.
 ///
-/// Returns the original string if decryption succeeds. Fails if the key ID does not match or if
-/// decoding or decryption fails.
+/// Validates the key ID matches before attempting decryption. Returns the original
+/// plaintext string if decryption succeeds.
 pub fn decrypt_text(
     encrypted_value: EncryptedValue,
     encryption_key: &EncryptionKey,
@@ -111,9 +111,9 @@ pub fn decrypt_text(
     Ok(decrypted_value)
 }
 
-/// Encrypts a byte slice using the given [`RandomizedNonceKey`].
+/// Encrypts bytes using AES-256-GCM with a randomized nonce.
 ///
-/// Returns the ciphertext and the nonce used for encryption.
+/// Returns the encrypted data and the nonce used for encryption.
 fn encrypt(
     plaintext: &[u8],
     key: &RandomizedNonceKey,
@@ -124,9 +124,9 @@ fn encrypt(
     Ok((in_out, nonce))
 }
 
-/// Decrypts a ciphertext using the given [`RandomizedNonceKey`] and [`Nonce`].
+/// Decrypts AES-256-GCM encrypted data using the key and nonce.
 ///
-/// Returns the decrypted plaintext bytes.
+/// Returns the original plaintext bytes.
 fn decrypt(
     mut ciphertext: Vec<u8>,
     nonce: Nonce,
@@ -137,13 +137,13 @@ fn decrypt(
     Ok(plaintext.to_vec())
 }
 
-/// Generates a random [`RandomizedNonceKey`] of length `T` bytes for use with AES-256-GCM.
+/// Generates a cryptographically secure random encryption key.
 ///
-/// The key is filled with cryptographically secure random bytes.
+/// Creates a new [`RandomizedNonceKey`] for AES-256-GCM encryption using
+/// secure random bytes.
 ///
 /// # Panics
-///
-/// Panics if `T` does not match the required key length for the cipher.
+/// Panics if `T` doesn't match the required key length for AES-256-GCM.
 pub fn generate_random_key<const T: usize>()
 -> Result<RandomizedNonceKey, aws_lc_rs::error::Unspecified> {
     let mut key_bytes = [0u8; T];

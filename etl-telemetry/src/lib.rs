@@ -1,3 +1,9 @@
+//! Tracing and telemetry utilities for ETL applications.
+//!
+//! Provides centralized logging and telemetry configuration with support for
+//! structured logging, project identification, panic handling, and both
+//! development and production logging modes.
+
 use etl_config::Environment;
 use std::io::Error;
 use std::io::Write;
@@ -17,9 +23,10 @@ use tracing_log::{LogTracer, log_tracer::SetLoggerError};
 use tracing_subscriber::fmt::MakeWriter;
 use tracing_subscriber::{EnvFilter, FmtSubscriber, Registry, fmt, layer::SubscriberExt};
 
-/// The key used in the log to identify the project.
+/// JSON field name for project identification in logs.
 const PROJECT_KEY_IN_LOG: &str = "project";
 
+/// Errors that can occur during tracing initialization.
 #[derive(Debug, Error)]
 pub enum TracingError {
     #[error("failed to build rolling file appender: {0}")]
@@ -35,19 +42,26 @@ pub enum TracingError {
     Io(#[from] Error),
 }
 
+/// Log flusher handle for ensuring logs are written before shutdown.
+///
+/// Production mode returns a [`WorkerGuard`] that must be kept alive to ensure
+/// logs are flushed. Development mode doesn't require flushing.
 #[must_use]
 pub enum LogFlusher {
+    /// Production flusher that ensures logs are written to files.
     Flusher(WorkerGuard),
+    /// Development flusher that doesn't require explicit flushing.
     NullFlusher,
 }
 
 static INIT_TEST_TRACING: Once = Once::new();
 
-/// Call this function once at the beginning of a test and then set the ENABLE_TRACING
-/// environment variable to 1 to view tracing in the terminal:
+/// Initializes tracing for test environments.
 ///
-/// ENABLE_TRACING=1 cargo test <test_name>
-///
+/// Call once at the beginning of tests. Set `ENABLE_TRACING=1` to view tracing output:
+/// ```bash
+/// ENABLE_TRACING=1 cargo test test_name
+/// ```
 pub fn init_test_tracing() {
     INIT_TEST_TRACING.call_once(|| {
         if std::env::var("ENABLE_TRACING").is_ok() {
@@ -63,22 +77,31 @@ pub fn init_test_tracing() {
 /// Global project reference storage
 static PROJECT_REF: OnceLock<String> = OnceLock::new();
 
-/// Sets the global project reference for all tracing events
+/// Sets the global project reference for all tracing events.
+///
+/// The project reference will be injected into all structured log entries
+/// for identification and filtering purposes.
 pub fn set_global_project_ref(project_ref: String) {
     let _ = PROJECT_REF.set(project_ref);
 }
 
-/// Gets the global project reference
+/// Returns the current global project reference.
+///
+/// Returns `None` if no project reference has been set.
 pub fn get_global_project_ref() -> Option<&'static str> {
     PROJECT_REF.get().map(|s| s.as_str())
 }
 
-/// A writer wrapper that injects project field into JSON
+/// Writer wrapper that injects project field into JSON log entries.
+///
+/// Parses JSON log entries and adds a project field if one doesn't already exist,
+/// enabling project-based filtering and identification in log aggregation systems.
 struct ProjectInjectingWriter<W> {
     inner: W,
 }
 
 impl<W> ProjectInjectingWriter<W> {
+    /// Creates a new project-injecting writer wrapping the inner writer.
     fn new(inner: W) -> Self {
         Self { inner }
     }
@@ -88,6 +111,12 @@ impl<W> Write for ProjectInjectingWriter<W>
 where
     W: Write,
 {
+    /// Writes log data, injecting project field into JSON entries.
+    ///
+    /// Attempts to parse the buffer as JSON and inject a project field if:
+    /// - A global project reference is set
+    /// - The content is valid JSON
+    /// - No project field already exists
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         // Only try to inject project field if we have one and the content looks like JSON
         if let Some(project_ref) = get_global_project_ref()
@@ -127,17 +156,24 @@ where
         self.inner.write(buf)
     }
 
+    /// Flushes the underlying writer.
     fn flush(&mut self) -> std::io::Result<()> {
         self.inner.flush()
     }
 }
 
 /// Initializes tracing for the application.
+///
+/// Sets up structured logging with environment-appropriate configuration.
+/// Production environments log to rotating files, development to console.
 pub fn init_tracing(app_name: &str) -> Result<LogFlusher, TracingError> {
     init_tracing_with_project(app_name, None)
 }
 
-/// Initializes tracing for the application with an optional project reference.
+/// Initializes tracing with optional project identification.
+///
+/// Like [`init_tracing`] but allows specifying a project reference that will
+/// be injected into all structured log entries for identification.
 pub fn init_tracing_with_project(
     app_name: &str,
     project_ref: Option<String>,
@@ -170,6 +206,9 @@ pub fn init_tracing_with_project(
     Ok(log_flusher)
 }
 
+/// Configures tracing for production environments.
+///
+/// Sets up structured JSON logging to rotating daily files with project injection.
 fn configure_prod_tracing(filter: EnvFilter, app_name: &str) -> Result<LogFlusher, TracingError> {
     let filename_suffix = "log";
     let log_dir = "logs";
@@ -208,6 +247,9 @@ fn configure_prod_tracing(filter: EnvFilter, app_name: &str) -> Result<LogFlushe
     Ok(LogFlusher::Flusher(guard))
 }
 
+/// Configures tracing for development environments.
+///
+/// Sets up pretty-printed console logging with ANSI colors for readability.
 fn configure_dev_tracing(filter: EnvFilter) -> Result<LogFlusher, TracingError> {
     let format = fmt::format()
         // Emit the log level in the log output
@@ -233,10 +275,10 @@ fn configure_dev_tracing(filter: EnvFilter) -> Result<LogFlusher, TracingError> 
     Ok(LogFlusher::NullFlusher)
 }
 
-/// The default panic hook logs the panic information to stderr, which means
-/// it will not be sent to our logging system. This function replaces the default panic
-/// hook with a custom one that logs the panic information using `tracing`.
-/// It also calls the original panic hook after logging the panic information.
+/// Sets up custom panic hook for structured panic logging.
+///
+/// Replaces the default panic hook to ensure panic information is captured
+/// by the tracing system instead of only going to stderr.
 fn set_tracing_panic_hook() {
     let prev_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
@@ -245,7 +287,10 @@ fn set_tracing_panic_hook() {
     }));
 }
 
-/// A custom panic hook that logs the panic information using `tracing`.
+/// Custom panic hook that logs panic information using tracing.
+///
+/// Captures panic payload, location, and backtrace information as structured
+/// log entries for better debugging and monitoring.
 fn panic_hook(panic_info: &PanicHookInfo) {
     let backtrace = Backtrace::capture();
     let (backtrace, note) = match backtrace.status() {
@@ -273,7 +318,7 @@ fn panic_hook(panic_info: &PanicHookInfo) {
     tracing::error!(
         panic.payload = payload,
         payload.location = location,
-        panic.backtrace = backtrace.map(tracing::field::display),
+        panic.backtrace = backtrace.map(display),
         panic.note = note,
         "a panic occurred",
     );

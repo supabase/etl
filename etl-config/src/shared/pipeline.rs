@@ -4,7 +4,10 @@ use utoipa::ToSchema;
 
 use crate::shared::{PgConnectionConfig, ValidationError, batch::BatchConfig};
 
-/// Configuration for a pipeline's batching and worker retry behavior.
+/// Configuration for an ETL pipeline.
+///
+/// Contains all settings required to run a replication pipeline including
+/// source database connection, batching parameters, and worker limits.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(ToSchema))]
 #[serde(rename_all = "snake_case")]
@@ -31,11 +34,9 @@ pub struct PipelineConfig {
 }
 
 impl PipelineConfig {
-    /// Validates the [`PipelineConfig`].
+    /// Validates pipeline configuration settings.
     ///
-    /// This method checks that the [`PipelineConfig::pg_connection`] and [`PipelineConfig::max_table_sync_workers`] are valid.
-    ///
-    /// Returns [`ValidationError::MaxTableSyncWorkersZero`] if [`PipelineConfig::max_table_sync_workers`] is zero.
+    /// Checks connection settings and ensures worker count is non-zero.
     pub fn validate(&self) -> Result<(), ValidationError> {
         self.pg_connection.tls.validate()?;
 

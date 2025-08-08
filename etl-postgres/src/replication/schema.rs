@@ -6,10 +6,10 @@ use tokio_postgres::types::Type as PgType;
 
 use crate::schema::{ColumnSchema, TableId, TableName, TableSchema};
 
-/// Converts a PostgreSQL type name string back to a [`PgType`].
+/// Converts a PostgreSQL type name string to a [`PgType`].
 ///
-/// This function maps string representations back to their corresponding PostgreSQL types.
-/// It handles the most common PostgreSQL types and falls back to `TEXT` for unknown types.
+/// Maps string representations to their corresponding PostgreSQL types,
+/// handling common types and falling back to `TEXT` for unknown types.
 pub fn string_to_postgres_type(type_str: &str) -> PgType {
     match type_str {
         "BOOL" => PgType::BOOL,
@@ -36,8 +36,8 @@ pub fn string_to_postgres_type(type_str: &str) -> PgType {
 
 /// Converts a PostgreSQL [`PgType`] to its string representation.
 ///
-/// This function maps PostgreSQL types to their string equivalents for storage in the database.
-/// It handles the most common PostgreSQL types and provides a fallback for unknown types.
+/// Maps PostgreSQL types to string equivalents for database storage,
+/// handling common types with fallback for unknown types.
 pub fn postgres_type_to_string(pg_type: &PgType) -> String {
     match *pg_type {
         PgType::BOOL => "BOOL".to_string(),
@@ -64,8 +64,8 @@ pub fn postgres_type_to_string(pg_type: &PgType) -> String {
 
 /// Stores a table schema in the database.
 ///
-/// This function inserts or updates a table schema and its columns in the schema storage tables.
-/// It uses a transaction to ensure atomicity.
+/// Inserts or updates table schema and column information in schema storage tables
+/// using a transaction to ensure atomicity.
 pub async fn store_table_schema(
     pool: &PgPool,
     pipeline_id: i64,
@@ -127,14 +127,10 @@ pub async fn store_table_schema(
     Ok(())
 }
 
-/// Loads all table schemas for a given pipeline from the database.
+/// Loads all table schemas for a pipeline from the database.
 ///
-/// This function retrieves table schemas and their columns from the schema storage tables,
-/// reconstructing [`TableSchema`] objects.
-/// Loads all table schemas for a given pipeline from the database.
-///
-/// This function retrieves table schemas and their columns from the schema storage tables,
-/// reconstructing [`TableSchema`] objects.
+/// Retrieves table schemas and columns from schema storage tables,
+/// reconstructing complete [`TableSchema`] objects.
 pub async fn load_table_schemas(
     pool: &PgPool,
     pipeline_id: i64,
@@ -179,11 +175,10 @@ pub async fn load_table_schemas(
     Ok(table_schemas.into_values().collect())
 }
 
-/// Deletes all table schemas for a given pipeline from the database.
+/// Deletes all table schemas for a pipeline from the database.
 ///
-/// This function removes all table schema records and their associated columns
-/// for a specific pipeline. Uses CASCADE delete from the foreign key constraint
-/// to automatically remove related column records.
+/// Removes all table schema records and associated columns for the specified
+/// pipeline, using CASCADE delete for automatic cleanup of related column records.
 pub async fn delete_pipeline_table_schemas<'c, E>(
     executor: E,
     pipeline_id: i64,
@@ -204,9 +199,9 @@ where
     Ok(result.rows_affected())
 }
 
-/// Builds a `ColumnSchema` from a database row.
+/// Builds a [`ColumnSchema`] from a database row.
 ///
-/// Assumes all required fields are present (e.g. after INNER JOIN).
+/// Assumes all required fields are present in the row after appropriate joins.
 fn parse_column_schema(row: &PgRow) -> ColumnSchema {
     let column_name: String = row.get("column_name");
     let column_type: String = row.get("column_type");

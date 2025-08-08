@@ -5,7 +5,7 @@ use tokio_postgres::types::PgLsn;
 
 use crate::schema::TableId;
 
-/// Table replication state as stored in the database
+/// Replication state of a table during the ETL process.
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum TableReplicationState {
@@ -24,9 +24,10 @@ pub enum TableReplicationState {
     },
 }
 
-/// Helper functions for state conversion
 impl TableReplicationState {
-    /// Converts a full state to database storage format (type + metadata)
+    /// Converts state to database storage format with type and metadata.
+    ///
+    /// Separates the state type from its associated data for efficient querying.
     pub fn to_storage_format(
         &self,
     ) -> Result<(TableReplicationStateType, serde_json::Value), serde_json::Error> {
@@ -44,6 +45,9 @@ impl TableReplicationState {
         Ok((state_type, metadata))
     }
 
+    /// Returns whether this state supports manual retry operations.
+    ///
+    /// Only errored states with [`RetryPolicy::ManualRetry`] can be manually retried.
     pub fn supports_manual_retry(&self) -> bool {
         matches!(
             self,
@@ -55,7 +59,7 @@ impl TableReplicationState {
     }
 }
 
-/// Retry policy as stored in the database
+/// Retry policy for handling table replication errors.
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum RetryPolicy {
@@ -64,7 +68,7 @@ pub enum RetryPolicy {
     TimedRetry { next_retry: DateTime<Utc> },
 }
 
-/// Table replication state type as stored in the database
+/// Database enum type for table replication states.
 #[derive(Debug, Clone, Copy, Type, PartialEq)]
 #[sqlx(type_name = "etl.table_state", rename_all = "snake_case")]
 pub enum TableReplicationStateType {
@@ -76,7 +80,7 @@ pub enum TableReplicationStateType {
     Errored,
 }
 
-/// A row from the etl.replication_state table
+/// Database row representation of table replication state.
 #[derive(Debug, FromRow)]
 pub struct TableReplicationStateRow {
     pub id: i64,
@@ -89,10 +93,10 @@ pub struct TableReplicationStateRow {
 }
 
 impl TableReplicationStateRow {
-    /// Deserializes the `metadata` field from the database into a [`TableReplicationState`].
+    /// Deserializes metadata field into a [`TableReplicationState`].
     ///
-    /// This method is used to perform lazy deserialization of the field, since it might not be needed
-    /// all the time.
+    /// Performs lazy deserialization of the metadata field when the full state
+    /// information is needed.
     pub fn deserialize_metadata(&self) -> Result<Option<TableReplicationState>, serde_json::Error> {
         let Some(metadata) = &self.metadata else {
             return Ok(None);
@@ -102,14 +106,15 @@ impl TableReplicationStateRow {
         serde_json::from_value(metadata.clone())
     }
 
-    /// Gets the simple state type
+    /// Returns the state type without deserializing metadata.
     pub fn state_type(&self) -> TableReplicationStateType {
         self.state
     }
 }
 
-/// Fetch replication state rows for a specific pipeline from the source database
-#[cfg(feature = "sqlx")]
+/// Fetches current replication state rows for a pipeline.
+///
+/// Retrieves the current replication state records of all tables of a pipeline.
 pub async fn get_table_replication_state_rows(
     pool: &PgPool,
     pipeline_id: i64,
@@ -128,7 +133,10 @@ pub async fn get_table_replication_state_rows(
     Ok(states)
 }
 
-/// Update replication state using transactional approach with history chaining
+/// Updates table replication state with history tracking.
+///
+/// Creates a new state record and chains it to the previous state for audit history,
+/// using a transaction to ensure consistency.
 pub async fn update_replication_state(
     pool: &PgPool,
     pipeline_id: i64,
@@ -141,7 +149,10 @@ pub async fn update_replication_state(
     update_replication_state_raw(pool, pipeline_id, table_id, state_type, metadata).await
 }
 
-/// Update replication state using raw types (for internal use)
+/// Updates replication state using raw database types.
+///
+/// Internal function that performs the actual database update with pre-serialized
+/// state data and proper history chaining.
 pub async fn update_replication_state_raw(
     pool: &PgPool,
     pipeline_id: i64,
@@ -197,7 +208,10 @@ pub async fn update_replication_state_raw(
     Ok(())
 }
 
-/// Rollback to the previous state for a table
+/// Rolls back table state to the previous entry in the history chain.
+///
+/// Restores the previous state by updating the current flags in the database,
+/// returning the restored state if successful.
 pub async fn rollback_replication_state(
     pool: &PgPool,
     pipeline_id: i64,
@@ -264,8 +278,10 @@ pub async fn rollback_replication_state(
     Ok(None)
 }
 
-/// Resets the replication state for a specific pipeline and table by removing all entries
-/// and creating a new entry with [`TableReplicationState::Init`] state
+/// Resets table replication state to initial state.
+///
+/// Removes all existing state entries for the table and creates a new
+/// [`TableReplicationState::Init`] entry, effectively restarting replication.
 pub async fn reset_replication_state(
     pool: &PgPool,
     pipeline_id: i64,
@@ -308,10 +324,10 @@ pub async fn reset_replication_state(
     Ok(row)
 }
 
-/// Deletes all replication state entries for a pipeline
+/// Deletes all replication state entries for a pipeline.
 ///
-/// This function removes all replication state records for a given pipeline,
-/// including all historical entries. Used during pipeline cleanup.
+/// Removes all replication state records including historical entries
+/// for the specified pipeline. Used during pipeline cleanup.
 pub async fn delete_pipeline_replication_state<'c, E>(
     executor: E,
     pipeline_id: i64,
@@ -332,10 +348,12 @@ where
     Ok(result.rows_affected())
 }
 
+/// Serde serialization helpers for PostgreSQL LSN values.
 mod lsn_serde {
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
     use tokio_postgres::types::PgLsn;
 
+    /// Serializes a [`PgLsn`] as a string.
     pub fn serialize<S>(lsn: &PgLsn, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
@@ -343,6 +361,7 @@ mod lsn_serde {
         lsn.to_string().serialize(serializer)
     }
 
+    /// Deserializes a [`PgLsn`] from a string representation.
     pub fn deserialize<'de, D>(deserializer: D) -> Result<PgLsn, D::Error>
     where
         D: Deserializer<'de>,

@@ -1,3 +1,9 @@
+//! ETL API service for managing data replication pipelines.
+//!
+//! Provides a REST API for configuring and managing ETL pipelines, including tenants,
+//! sources, destinations, and replication monitoring. Includes authentication, encryption,
+//! Kubernetes integration, and comprehensive OpenAPI documentation.
+
 pub mod authentication;
 pub mod config;
 pub mod db;

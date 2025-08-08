@@ -4,6 +4,7 @@ use thiserror::Error;
 
 use crate::schema::{TableId, TableName};
 
+/// Errors that can occur during table lookups.
 #[derive(Debug, Error)]
 pub enum TableLookupError {
     #[error("Database error: {0}")]
@@ -13,7 +14,10 @@ pub enum TableLookupError {
     TableNotFound(TableId),
 }
 
-/// Connect to the source database with a minimal connection pool
+/// Connects to the source database with a connection pool.
+///
+/// Creates a PostgreSQL connection pool with the specified minimum and maximum
+/// connection counts for accessing the source database.
 #[cfg(feature = "replication")]
 pub async fn connect_to_source_database(
     config: &PgConnectionConfig,
@@ -31,10 +35,10 @@ pub async fn connect_to_source_database(
     Ok(pool)
 }
 
-/// Loads the table name from a table OID by querying the source database.
+/// Retrieves table name from table OID by querying system catalogs.
 ///
-/// This function connects to the source database and looks up the schema and table name
-/// for the given table OID using the pg_class and pg_namespace system tables.
+/// Looks up the schema and table name for the given table OID using PostgreSQL's
+/// pg_class and pg_namespace system tables.
 pub async fn get_table_name_from_oid(
     pool: &PgPool,
     table_id: TableId,

@@ -67,12 +67,19 @@ use crate::{
     span_builder::ApiRootSpanBuilder,
 };
 
+/// ETL API application server wrapper.
+///
+/// Manages the HTTP server lifecycle including startup, migration, and shutdown.
 pub struct Application {
     port: u16,
     server: Server,
 }
 
 impl Application {
+    /// Builds and configures the API application server.
+    ///
+    /// Sets up database connections, encryption, Kubernetes client, and HTTP server
+    /// with all routes and middleware configured.
     pub async fn build(config: ApiConfig) -> Result<Self, anyhow::Error> {
         let connection_pool = get_connection_pool(&config.database);
 
@@ -110,6 +117,9 @@ impl Application {
         Ok(Self { port, server })
     }
 
+    /// Runs database migrations using the provided configuration.
+    ///
+    /// Applies all pending SQLx migrations from the migrations directory.
     pub async fn migrate_database(config: PgConnectionConfig) -> Result<(), anyhow::Error> {
         let connection_pool = get_connection_pool(&config);
 
@@ -118,22 +128,26 @@ impl Application {
         Ok(())
     }
 
+    /// Returns the port the server is listening on.
     pub fn port(&self) -> u16 {
         self.port
     }
 
+    /// Runs the server until it receives a shutdown signal.
     pub async fn run_until_stopped(self) -> Result<(), std::io::Error> {
         self.server.await
     }
 }
 
+/// Creates a PostgreSQL connection pool from the provided configuration.
 pub fn get_connection_pool(config: &PgConnectionConfig) -> PgPool {
     PgPoolOptions::new().connect_lazy_with(config.with_db())
 }
 
-// HttpK8sClient is wrapped in an option because creating it
-// in tests involves setting a default CryptoProvider and it
-// interferes with parallel tasks because only one can be set.
+/// Creates and configures the HTTP server with all routes and middleware.
+///
+/// Sets up authentication, tracing, Swagger UI, and all API endpoints.
+/// The Kubernetes client is optional to support testing scenarios.
 pub async fn run(
     config: ApiConfig,
     listener: TcpListener,

@@ -28,8 +28,11 @@ const BIGQUERY_CDC_SPECIAL_COLUMN: &str = "_CHANGE_TYPE";
 /// Special column name for Change Data Capture sequence ordering in BigQuery.
 const BIGQUERY_CDC_SEQUENCE_COLUMN: &str = "_CHANGE_SEQUENCE_NUMBER";
 
+/// BigQuery project identifier.
 pub type BigQueryProjectId = String;
+/// BigQuery dataset identifier.
 pub type BigQueryDatasetId = String;
+/// BigQuery table identifier.
 pub type BigQueryTableId = String;
 
 /// Change Data Capture operation types for BigQuery streaming.
@@ -40,7 +43,7 @@ pub enum BigQueryOperationType {
 }
 
 impl BigQueryOperationType {
-    /// Converts the [`BigQueryOperationType`] into a [`Cell`] value.
+    /// Converts the operation type into a [`Cell`] for streaming.
     pub fn into_cell(self) -> Cell {
         Cell::String(self.to_string())
     }
@@ -55,20 +58,19 @@ impl fmt::Display for BigQueryOperationType {
     }
 }
 
-/// A client for interacting with Google BigQuery.
+/// Client for interacting with Google BigQuery.
 ///
-/// This client provides methods for managing tables, inserting data,
-/// and executing queries against a BigQuery project.
+/// Provides methods for table management, data insertion, and query execution
+/// against BigQuery datasets with authentication and error handling.
 pub struct BigQueryClient {
     project_id: BigQueryProjectId,
     client: Client,
 }
 
 impl BigQueryClient {
-    /// Creates a new [`BigQueryClient`] from a Google Cloud service account key file.
+    /// Creates a new [`BigQueryClient`] from a service account key file.
     ///
-    /// Reads the service account key from the specified file path and uses it to
-    /// authenticate with the BigQuery API.
+    /// Authenticates with BigQuery using the service account key at the specified file path.
     pub async fn new_with_key_path(
         project_id: BigQueryProjectId,
         sa_key_path: &str,
@@ -80,10 +82,9 @@ impl BigQueryClient {
         Ok(BigQueryClient { project_id, client })
     }
 
-    /// Creates a new [`BigQueryClient`] from a Google Cloud service account key string.
+    /// Creates a new [`BigQueryClient`] from a service account key JSON string.
     ///
-    /// Parses the provided service account key string to authenticate with the
-    /// BigQuery API.
+    /// Parses and uses the provided service account key to authenticate with BigQuery.
     pub async fn new_with_key(
         project_id: BigQueryProjectId,
         sa_key: &str,
@@ -98,7 +99,9 @@ impl BigQueryClient {
         Ok(BigQueryClient { project_id, client })
     }
 
-    /// Returns the full BigQuery table name in the form `project_id.dataset_id.table_id`.
+    /// Returns the fully qualified BigQuery table name.
+    ///
+    /// Formats the table name as `project_id.dataset_id.table_id` with proper quoting.
     pub fn full_table_name(
         &self,
         dataset_id: &BigQueryDatasetId,
@@ -107,10 +110,9 @@ impl BigQueryClient {
         format!("`{}.{}.{}`", self.project_id, dataset_id, table_id)
     }
 
-    /// Creates a new table in the specified dataset if it does not already exist.
+    /// Creates a table in BigQuery if it doesn't already exist.
     ///
-    /// Returns `true` if the table was created, and `false` if the table
-    /// already existed.
+    /// Returns `true` if the table was created, `false` if it already existed.
     pub async fn create_table_if_missing(
         &self,
         dataset_id: &BigQueryDatasetId,
@@ -128,7 +130,10 @@ impl BigQueryClient {
         Ok(true)
     }
 
-    /// Creates a table in a BigQuery dataset.
+    /// Creates a new table in the BigQuery dataset.
+    ///
+    /// Builds and executes a CREATE TABLE statement with the provided column schemas
+    /// and optional staleness configuration for CDC operations.
     pub async fn create_table(
         &self,
         dataset_id: &BigQueryDatasetId,
@@ -154,7 +159,9 @@ impl BigQueryClient {
         Ok(())
     }
 
-    /// Truncates a table in a BigQuery dataset.
+    /// Truncates all data from a BigQuery table.
+    ///
+    /// Executes a TRUNCATE TABLE statement to remove all rows while preserving the table structure.
     #[allow(dead_code)]
     pub async fn truncate_table(
         &self,
@@ -172,11 +179,9 @@ impl BigQueryClient {
         Ok(())
     }
 
-    /// Checks if a table exists in the specified dataset.
+    /// Checks whether a table exists in the BigQuery dataset.
     ///
-    /// # Panics
-    ///
-    /// Panics if the query result does not contain the expected `table_exists` column.
+    /// Returns `true` if the table exists, `false` otherwise.
     pub async fn table_exists(
         &self,
         dataset_id: &BigQueryDatasetId,
@@ -194,10 +199,10 @@ impl BigQueryClient {
         Ok(exists)
     }
 
-    /// Streams rows to a BigQuery table using the Storage Write API.
+    /// Streams rows to BigQuery using the Storage Write API.
     ///
-    /// This method is efficient for high-throughput ingestion. It batches rows
-    /// to respect the maximum request size.
+    /// Efficiently ingests data by batching rows to respect size limits and
+    /// using the high-performance Storage Write API.
     pub async fn stream_rows(
         &mut self,
         dataset_id: &BigQueryDatasetId,
@@ -259,7 +264,7 @@ impl BigQueryClient {
         Ok(())
     }
 
-    /// Executes an SQL query and returns the result set.
+    /// Executes a BigQuery SQL query and returns the result set.
     pub async fn query(&self, request: QueryRequest) -> EtlResult<ResultSet> {
         let query_response = self
             .client
@@ -271,7 +276,7 @@ impl BigQueryClient {
         Ok(ResultSet::new_from_query_response(query_response))
     }
 
-    /// Generates an SQL column specification for a `CREATE TABLE` statement.
+    /// Generates SQL column specification for CREATE TABLE statements.
     fn column_spec(column_schema: &ColumnSchema) -> String {
         let mut column_spec = format!(
             "`{}` {}",
@@ -286,7 +291,9 @@ impl BigQueryClient {
         column_spec
     }
 
-    /// Creates a primary key clause string for table creation.
+    /// Creates a primary key clause for table creation.
+    ///
+    /// Generates a primary key constraint clause from columns marked as primary key.
     fn add_primary_key_clause(column_schemas: &[ColumnSchema]) -> String {
         let identity_columns: Vec<String> = column_schemas
             .iter()
@@ -304,7 +311,7 @@ impl BigQueryClient {
         )
     }
 
-    /// Builds the complete column specification clause for table creation.
+    /// Builds complete column specifications for CREATE TABLE statements.
     fn create_columns_spec(column_schemas: &[ColumnSchema]) -> String {
         let mut s = column_schemas
             .iter()
@@ -317,12 +324,12 @@ impl BigQueryClient {
         format!("({s})")
     }
 
-    /// Creates the max staleness option clause for table creation.
+    /// Creates max staleness option clause for CDC table creation.
     fn max_staleness_option(max_staleness_mins: u16) -> String {
         format!("options (max_staleness = interval {max_staleness_mins} minute)")
     }
 
-    /// Converts a PostgreSQL [`Type`] to its BigQuery equivalent data type string.
+    /// Converts PostgreSQL data types to BigQuery equivalent types.
     fn postgres_to_bigquery_type(typ: &Type) -> String {
         if Self::is_array_type(typ) {
             let element_type = match typ {
@@ -366,7 +373,7 @@ impl BigQueryClient {
         .to_string()
     }
 
-    /// Returns true if the PostgreSQL [`Type`] represents an array type.
+    /// Returns whether the PostgreSQL type is an array type.
     fn is_array_type(typ: &Type) -> bool {
         matches!(
             typ,
@@ -394,11 +401,10 @@ impl BigQueryClient {
         )
     }
 
-    /// Converts PostgreSQL column schemas to a BigQuery [`TableDescriptor`] for Storage Write API.
+    /// Converts PostgreSQL column schemas to a BigQuery [`TableDescriptor`].
     ///
-    /// Maps PostgreSQL data types to BigQuery column types and sets the appropriate
-    /// column mode (`NULLABLE`, `REQUIRED`, or `REPEATED`). Automatically adds the
-    /// Change Data Capture special column.
+    /// Maps data types and nullability to BigQuery column specifications, setting
+    /// appropriate column modes and automatically adding CDC special columns.
     pub fn column_schemas_to_table_descriptor(
         column_schemas: &[ColumnSchema],
         use_cdc_sequence_column: bool,
@@ -490,6 +496,7 @@ impl BigQueryClient {
 }
 
 impl fmt::Debug for BigQueryClient {
+    /// Formats the client for debugging, excluding sensitive client details.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("BigQueryClient")
             .field("project_id", &self.project_id)
@@ -497,9 +504,9 @@ impl fmt::Debug for BigQueryClient {
     }
 }
 
-/// Converts [`BQError`] to [`EtlError`] with appropriate error kind.
+/// Converts BigQuery errors to ETL errors with appropriate classification.
 ///
-/// Maps errors based on their specific type for better error classification and handling.
+/// Maps BigQuery error types to ETL error kinds for consistent error handling.
 fn bq_error_to_etl_error(err: BQError) -> EtlError {
     use BQError;
 
@@ -584,7 +591,7 @@ fn bq_error_to_etl_error(err: BQError) -> EtlError {
     etl_error!(kind, description, err.to_string())
 }
 
-/// Converts BigQuery row errors to [`EtlError`] with [`ErrorKind::DestinationError`].
+/// Converts BigQuery row errors to ETL destination errors.
 fn row_error_to_etl_error(err: RowError) -> EtlError {
     etl_error!(
         ErrorKind::DestinationError,

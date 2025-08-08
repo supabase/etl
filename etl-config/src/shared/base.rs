@@ -1,9 +1,9 @@
 use thiserror::Error;
 
-/// Errors that can occur during configuration validation.
+/// Configuration validation errors.
 #[derive(Debug, Error)]
 pub enum ValidationError {
-    /// Max table sync workers can't be zero
+    /// Maximum table sync workers cannot be zero.
     #[error("`max_table_sync_workers` cannot be zero")]
     MaxTableSyncWorkersZero,
     /// TLS is enabled but no trusted root certificates are provided.

@@ -2,7 +2,10 @@ use serde::{Deserialize, Serialize};
 #[cfg(feature = "utoipa")]
 use utoipa::ToSchema;
 
-/// Retry policy configuration for operations such as worker initialization.
+/// Retry policy with exponential backoff configuration.
+///
+/// Configures retry behavior for operations that may fail temporarily,
+/// such as worker initialization or external service connections.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(ToSchema))]
 pub struct RetryConfig {

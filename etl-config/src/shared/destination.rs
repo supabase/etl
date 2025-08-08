@@ -4,10 +4,10 @@ use utoipa::ToSchema;
 
 use crate::SerializableSecretString;
 
-/// Configuration options for supported data destinations.
+/// Configuration for supported ETL data destinations.
 ///
-/// This enum is used to specify the destination type and its configuration
-/// for the replicator. Variants correspond to different supported destinations.
+/// Specifies the destination type and its associated configuration parameters.
+/// Each variant corresponds to a different supported destination system.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(ToSchema))]
 #[serde(rename_all = "snake_case")]

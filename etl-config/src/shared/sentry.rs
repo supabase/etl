@@ -1,13 +1,12 @@
 use serde::{Deserialize, Serialize};
 
-/// Configuration for Sentry error tracking and performance monitoring.
+/// Sentry error tracking and monitoring configuration.
 ///
-/// This struct holds the necessary configuration to initialize Sentry in the application.
-/// It includes the DSN (Data Source Name) and optional service-specific tags to differentiate
-/// between different services reporting to the same Sentry project.
+/// Contains the DSN and other settings required to initialize Sentry for
+/// error tracking and performance monitoring in ETL applications.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct SentryConfig {
-    /// Sentry DSN (Data Source Name) for error reporting.
+    /// Sentry DSN (Data Source Name) for error reporting and monitoring.
     pub dsn: String,
 }
