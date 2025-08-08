@@ -2,9 +2,9 @@ mod pipeline;
 
 // TODO: properly implement types in this module and export them.
 pub use crate::conversions::{
-    ArrayCell, Cell, event::BeginEvent, event::CommitEvent, event::DeleteEvent, event::Event,
-    event::EventType, event::InsertEvent, event::TruncateEvent, event::UpdateEvent,
-    numeric::ParseNumericError, numeric::PgNumeric, table_row::TableRow,
+    ArrayCell, ArrayCellNonOptional, Cell, CellNonOptional, event::BeginEvent, event::CommitEvent,
+    event::DeleteEvent, event::Event, event::EventType, event::InsertEvent, event::TruncateEvent,
+    event::UpdateEvent, numeric::ParseNumericError, numeric::PgNumeric, table_row::TableRow,
 };
 pub use pipeline::*;
 

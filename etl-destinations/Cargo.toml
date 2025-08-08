@@ -16,9 +16,7 @@ bigquery = [
 [dependencies]
 etl = { workspace = true }
 
-uuid = { workspace = true, features = ["v4"] }
 futures = { workspace = true, optional = true }
-chrono = { workspace = true }
 gcp-bigquery-client = { workspace = true, optional = true, features = [
     "rust-tls",
     "aws-lc-rs",
@@ -30,7 +28,6 @@ rustls = { workspace = true, optional = true, features = [
 ] }
 tokio = { workspace = true, optional = true, features = ["sync"] }
 tracing = { workspace = true, optional = true, default-features = true }
-serde_json = { workspace = true }
 
 [dev-dependencies]
 etl = { workspace = true, features = ["test-utils"] }
