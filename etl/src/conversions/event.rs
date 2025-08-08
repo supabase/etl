@@ -285,7 +285,12 @@ fn convert_tuple_to_row(
             }
             protocol::TupleData::UnchangedToast => {
                 if let Some(row) = old_table_row {
-                    row.values[i].clone()
+                    let old_row_value = row.values[i].clone();
+                    if old_row_value == Cell::Null {
+                        TextFormatConverter::default_value(&column_schema.typ)?
+                    } else {
+                        old_row_value
+                    }
                 } else {
                     TextFormatConverter::default_value(&column_schema.typ)?
                 }
