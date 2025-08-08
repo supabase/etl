@@ -239,7 +239,13 @@ where
         match result {
             Ok(()) => Ok(()),
             Err(err) => {
-                if err.kind() == ErrorKind::TableNotFound {
+                // From our testing, when trying to send data to a missing table, this is the error that is
+                // returned:
+                // `Status { code: PermissionDenied, message: "Permission 'TABLES_UPDATE_DATA' denied on
+                // resource 'x' (or it may not exist).", source: None }`
+                //
+                // If we get permission denied, we assume that the table doesn't exist.
+                if err.kind() == ErrorKind::PermissionDenied {
                     warn!(
                         "table {table_id} not found during streaming, removing from cache and recreating"
                     );
