@@ -294,11 +294,13 @@ impl TextFormatConverter {
                     }
                 }
             }
+
             let val = if !val_quoted && val_str.to_lowercase() == "null" {
                 None
             } else {
                 parse(&val_str)?
             };
+
             res.push(val);
             val_str.clear();
             val_quoted = false;
@@ -325,7 +327,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_text_array_unquoted_null_is_none() {
+    fn parse_text_array_unquoted_null_is_parsed_correctly() {
         let cell = TextFormatConverter::try_from_str(&Type::TEXT_ARRAY, "{a,NULL}").unwrap();
         match cell {
             Cell::Array(ArrayCell::String(v)) => {
@@ -333,5 +335,15 @@ mod tests {
             }
             _ => panic!("unexpected cell"),
         }
+    }
+
+    #[test]
+    fn parse_numeric_array_with_parsing_error() {
+        // This should return an error because "invalid" cannot be parsed as a number
+        let result = TextFormatConverter::try_from_str(&Type::INT4_ARRAY, "{1,invalid,3}");
+        assert!(result.is_err());
+        // The error should be a parsing error, not related to NULL handling
+        let error = result.unwrap_err();
+        assert!(!error.to_string().contains("NULL"));
     }
 }
