@@ -171,7 +171,7 @@ pub async fn update_image(
     let image_id = image_id.into_inner();
     let image = image.into_inner();
 
-    db::images::update_image(&**pool, image_id, &image.name, image.is_default)
+    db::images::update_image(&pool, image_id, &image.name, image.is_default)
         .await?
         .ok_or(ImageError::ImageNotFound(image_id))?;
 
@@ -198,7 +198,7 @@ pub async fn delete_image(
 ) -> Result<impl Responder, ImageError> {
     let image_id = image_id.into_inner();
 
-    db::images::delete_image(&**pool, image_id)
+    db::images::delete_image(&pool, image_id)
         .await?
         .ok_or(ImageError::ImageNotFound(image_id))?;
 
