@@ -1,3 +1,9 @@
+//! ETL replicator service binary.
+//!
+//! Initializes and runs the replicator pipeline that handles PostgreSQL logical replication
+//! and routes data to configured destinations. Includes telemetry, error handling, and
+//! graceful shutdown capabilities.
+
 use crate::config::load_replicator_config;
 use crate::core::start_replicator_with_config;
 use etl_config::Environment;
@@ -11,6 +17,11 @@ mod config;
 mod core;
 mod migrations;
 
+/// Entry point for the replicator service.
+///
+/// Loads configuration, initializes tracing and Sentry, starts the async runtime,
+/// and launches the replicator pipeline. Handles all errors and ensures proper
+/// service initialization sequence.
 fn main() -> anyhow::Result<()> {
     // Load replicator config
     let replicator_config = load_replicator_config()?;
@@ -36,6 +47,10 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Main async entry point that starts the replicator pipeline.
+///
+/// Launches the replicator with the provided configuration and captures any errors
+/// to Sentry before propagating them up.
 async fn async_main(replicator_config: ReplicatorConfig) -> anyhow::Result<()> {
     // We start the replicator and catch any errors.
     if let Err(err) = start_replicator_with_config(replicator_config).await {
@@ -50,9 +65,9 @@ async fn async_main(replicator_config: ReplicatorConfig) -> anyhow::Result<()> {
 
 /// Initializes Sentry with replicator-specific configuration.
 ///
-/// Loads the configuration and initializes Sentry if a DSN is provided.
-/// Tags all errors and transactions with the "replicator" service identifier.
-/// Configures panic handling to automatically capture panics and send them to Sentry.
+/// Loads configuration and sets up Sentry if a DSN is provided in the config.
+/// Tags all errors with the "replicator" service identifier and configures
+/// panic handling to automatically capture and send panics to Sentry.
 fn init_sentry() -> anyhow::Result<Option<sentry::ClientInitGuard>> {
     if let Ok(config) = load_replicator_config()
         && let Some(sentry_config) = &config.sentry
