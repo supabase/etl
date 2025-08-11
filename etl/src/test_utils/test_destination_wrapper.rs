@@ -154,14 +154,12 @@ impl<D: Destination + Send + Sync + Clone> Destination for TestDestinationWrappe
             inner.wrapped_destination.clone()
         };
 
-        println!("EVENTS BEFORE {:#?}", events);
         let result = destination.write_events(events.clone()).await;
 
         {
             let mut inner = self.inner.write().await;
             if result.is_ok() {
                 inner.events.extend(events);
-                println!("EVENTS {:#?}", inner.events);
             }
 
             inner.check_conditions().await;

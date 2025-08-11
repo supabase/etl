@@ -1524,7 +1524,7 @@ async fn table_array_with_null_values() {
         .unwrap()
         .execute(
             &format!(
-                "INSERT INTO {} (int_array) VALUES (ARRAY[1, NULL, 3])",
+                "INSERT INTO {} (int_array) VALUES (ARRAY[1, NULL])",
                 table_name.as_quoted_identifier()
             ),
             &[],
@@ -1573,7 +1573,13 @@ async fn table_array_with_null_values() {
         destination.clone(),
     );
 
+    let table_sync_done_notification = store
+        .notify_on_table_state(table_id, TableReplicationPhaseType::SyncDone)
+        .await;
+
     pipeline.start().await.unwrap();
+
+    table_sync_done_notification.notified().await;
 
     let event_notify = destination
         .wait_for_events_count(vec![(EventType::Insert, 1)])
@@ -1594,8 +1600,7 @@ async fn table_array_with_null_values() {
         .await
         .unwrap();
 
-    sleep(Duration::from_secs(1)).await;
-    // event_notify.notified().await;
+    event_notify.notified().await;
 
     pipeline.shutdown_and_wait().await.unwrap();
 
@@ -1608,9 +1613,14 @@ async fn table_array_with_null_values() {
     // Check that there is only the valid row in BigQuery
     assert_eq!(table_rows.len(), 1);
 
-    // Check that we have an int_array column with values [1, 2, 3]
+    // Check that the int array contains 3 elements, meaning it must be the second insert with all
+    // NON-NULL values
     let row = &table_rows[0];
-    if let Some(int_array_cell) = &row.columns {
-        println!("int_array_cell: {:?}", int_array_cell);
+    if let Some(columns) = &row.columns {
+        assert_eq!(columns.len(), 2);
+        assert_eq!(
+            columns[1].value.clone().unwrap().as_array().unwrap().len(),
+            3
+        );
     }
 }
