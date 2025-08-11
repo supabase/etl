@@ -35,13 +35,14 @@ impl TableRowConverter {
         let mut done = false;
 
         while !done {
+            let mut is_null = false;
+
             loop {
                 match chars.next() {
                     Some(c) => match c {
                         c if in_escape => {
                             if c == 'N' {
-                                val_str.push('\\');
-                                val_str.push(c);
+                                is_null = true;
                             } else if c == 'b' {
                                 val_str.push(8 as char);
                             } else if c == 'f' {
@@ -57,6 +58,7 @@ impl TableRowConverter {
                             } else {
                                 val_str.push(c);
                             }
+
                             in_escape = false;
                         }
                         '\t' => {
@@ -66,7 +68,9 @@ impl TableRowConverter {
                             row_terminated = true;
                             break;
                         }
-                        '\\' => in_escape = true,
+                        '\\' => {
+                            in_escape = true
+                        },
                         c => {
                             val_str.push(c);
                         }
@@ -95,7 +99,7 @@ impl TableRowConverter {
                     );
                 };
 
-                let value = if val_str == "\\N" {
+                let value = if is_null {
                     // In case of a null value, we store the type information since that will be used to
                     // correctly compute default values when needed.
                     Cell::Null
@@ -270,7 +274,6 @@ mod tests {
     fn try_from_trailing_escape() {
         let schema = create_single_column_schema("data", Type::TEXT);
 
-        // Test escape at end of string
         let row_data = b"Text\\\\\n";
         let result = TableRowConverter::try_from(row_data, &schema).unwrap();
 
@@ -282,26 +285,16 @@ mod tests {
     fn try_from_null_literal_vs_null_marker() {
         let schema = create_single_column_schema("value", Type::TEXT);
 
-        // Test actual null marker
         let row_data = b"\\N\n";
         let result = TableRowConverter::try_from(row_data, &schema).unwrap();
         assert_eq!(result.values[0], Cell::Null);
 
-        // Looking at the parsing logic: when in escape mode and encountering 'N',
-        // it pushes both '\' and 'N', creating literal \N
-        // So \\N (which is \ followed by \N) becomes \ + \N = \\N
         let row_data = b"\\\\N\n";
-        let _result = TableRowConverter::try_from(row_data, &schema).unwrap();
-        println!("{:?}", _result);
-        // Actually, \\N should be: first \ escapes the second \, so we get literal \, then N is regular N
-        // But the logic shows that \N in escape mode pushes \N literally
-        // So \\N is parsed as: \ (escaped) + \N (special case) = \ + \N = \\N
-        // But the test result shows it's actually parsed as Null, meaning \\N is being treated as \N
-        // This suggests the first \ escapes the second \, leaving just \N which triggers null
+        let result_test = TableRowConverter::try_from(row_data, &schema).unwrap();
+        assert_eq!(result_test.values[0], Cell::String("\\N".to_string()));
 
-        // Let me test a different pattern - escaped backslash not followed by N
-        let row_data_test = b"\\\\A\n";
-        let result_test = TableRowConverter::try_from(row_data_test, &schema).unwrap();
+        let row_data = b"\\\\A\n";
+        let result_test = TableRowConverter::try_from(row_data, &schema).unwrap();
         assert_eq!(result_test.values[0], Cell::String("\\A".to_string()));
     }
 
@@ -309,7 +302,6 @@ mod tests {
     fn try_from_whitespace_handling() {
         let schema = create_test_schema();
 
-        // Test with spaces around values
         let row_data = b"123\t John Doe \tt\n";
         let result = TableRowConverter::try_from(row_data, &schema).unwrap();
 
@@ -321,7 +313,6 @@ mod tests {
 
     #[test]
     fn try_from_large_row() {
-        // Test with many columns
         let mut schema = Vec::new();
         let mut expected_row = String::new();
 
@@ -471,27 +462,17 @@ mod tests {
         let test_cases: Vec<(&[u8], Cell)> = vec![
             (b"\\N\n", Cell::Null),                                  // NULL marker
             (b"\n", Cell::String("".to_string())),                   // empty string
-            ("\\\\N\n".as_bytes(), Cell::String("\\N".to_string())), // escaped literal \N (if implementation is correct)
+            ("\\\\N\n".as_bytes(), Cell::String("\\N".to_string())), // escaped literal \N
         ];
 
         for (input, expected) in test_cases {
             let result = TableRowConverter::try_from(input, &schema).unwrap();
-
-            // Handle the known edge case with \\N parsing
-            match (&result.values[0], &expected) {
-                (Cell::Null, Cell::String(s)) if s == "\\N" => {
-                    // Document the current parsing behavior - this may need fixing
-                    println!("Note: \\\\\\\\N currently parsed as NULL instead of literal \\\\N");
-                }
-                _ => {
-                    assert_eq!(
-                        result.values[0],
-                        expected,
-                        "Failed for input: {:?}",
-                        str::from_utf8(input).unwrap_or("<invalid UTF-8>")
-                    );
-                }
-            }
+            assert_eq!(
+                result.values[0],
+                expected,
+                "Failed for input: {:?}",
+                str::from_utf8(input).unwrap_or("<invalid UTF-8>")
+            );
         }
     }
 }
