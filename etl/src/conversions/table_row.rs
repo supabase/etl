@@ -41,7 +41,7 @@ impl TableRowConverter {
                         c if in_escape => {
                             if c == 'N' {
                                 val_str.push('\\');
-                                val_str.push('N');
+                                val_str.push(c);
                             } else if c == 'b' {
                                 val_str.push(8 as char);
                             } else if c == 'f' {
