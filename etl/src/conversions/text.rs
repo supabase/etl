@@ -377,11 +377,11 @@ mod tests {
 
     #[test]
     fn try_from_str_floats() {
-        let cell = TextFormatConverter::try_from_str(&Type::FLOAT4, "3.14").unwrap();
-        assert_eq!(cell, Cell::F32(3.14));
+        let cell = TextFormatConverter::try_from_str(&Type::FLOAT4, "3.15").unwrap();
+        assert_eq!(cell, Cell::F32(3.15));
 
-        let cell = TextFormatConverter::try_from_str(&Type::FLOAT8, "-2.71828").unwrap();
-        assert_eq!(cell, Cell::F64(-2.71828));
+        let cell = TextFormatConverter::try_from_str(&Type::FLOAT8, "-2.818").unwrap();
+        assert_eq!(cell, Cell::F64(-2.818));
 
         let cell = TextFormatConverter::try_from_str(&Type::FLOAT4, "inf").unwrap();
         assert_eq!(cell, Cell::F32(f32::INFINITY));

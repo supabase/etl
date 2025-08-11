@@ -23,12 +23,12 @@ mod tests {
 
     #[test]
     fn parse_bool_true() {
-        assert_eq!(parse_bool("t").unwrap(), true);
+        assert!(parse_bool("t").unwrap());
     }
 
     #[test]
     fn parse_bool_false() {
-        assert_eq!(parse_bool("f").unwrap(), false);
+        assert!(!parse_bool("f").unwrap());
     }
 
     #[test]

@@ -215,13 +215,13 @@ mod tests {
             ColumnSchema::new("bool_col".to_string(), Type::BOOL, -1, false, false),
         ];
 
-        let row_data = b"123\t3.14\tHello World\tt\n";
+        let row_data = b"123\t3.15\tHello World\tt\n";
 
         let result = TableRowConverter::try_from(row_data, &schema).unwrap();
 
         assert_eq!(result.values.len(), 4);
         assert_eq!(result.values[0], Cell::I32(123));
-        assert_eq!(result.values[1], Cell::F64(3.14));
+        assert_eq!(result.values[1], Cell::F64(3.15));
         assert_eq!(result.values[2], Cell::String("Hello World".to_string()));
         assert_eq!(result.values[3], Cell::Bool(true));
     }
