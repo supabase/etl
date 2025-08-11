@@ -6,60 +6,132 @@ use tokio_postgres::types::Type as PgType;
 
 use crate::schema::{ColumnSchema, TableId, TableName, TableSchema};
 
-/// Converts a PostgreSQL type name string to a [`PgType`].
-///
-/// Maps string representations to their corresponding PostgreSQL types,
-/// handling common types and falling back to `TEXT` for unknown types.
-pub fn string_to_postgres_type(type_str: &str) -> PgType {
-    match type_str {
-        "BOOL" => PgType::BOOL,
-        "CHAR" => PgType::CHAR,
-        "INT2" => PgType::INT2,
-        "INT4" => PgType::INT4,
-        "INT8" => PgType::INT8,
-        "FLOAT4" => PgType::FLOAT4,
-        "FLOAT8" => PgType::FLOAT8,
-        "TEXT" => PgType::TEXT,
-        "VARCHAR" => PgType::VARCHAR,
-        "TIMESTAMP" => PgType::TIMESTAMP,
-        "TIMESTAMPTZ" => PgType::TIMESTAMPTZ,
-        "DATE" => PgType::DATE,
-        "TIME" => PgType::TIME,
-        "TIMETZ" => PgType::TIMETZ,
-        "BYTEA" => PgType::BYTEA,
-        "UUID" => PgType::UUID,
-        "JSON" => PgType::JSON,
-        "JSONB" => PgType::JSONB,
-        _ => PgType::TEXT, // Fallback for unknown types
-    }
+macro_rules! define_type_mappings {
+    (
+        $(
+            $pg_type:ident => $string_name:literal
+        ),* $(,)?
+    ) => {
+        /// Converts a PostgreSQL type name string to a [`PgType`].
+        ///
+        /// Maps string representations to their corresponding PostgreSQL types,
+        /// handling common types and falling back to `TEXT` for unknown types.
+        pub fn string_to_postgres_type(type_str: &str) -> PgType {
+            match type_str {
+                $(
+                    $string_name => PgType::$pg_type,
+                )*
+                _ => PgType::TEXT, // Fallback for unknown types
+            }
+        }
+
+        /// Converts a PostgreSQL [`PgType`] to its string representation.
+        ///
+        /// Maps PostgreSQL types to string equivalents for database storage,
+        /// handling common types with fallback for unknown types.
+        pub fn postgres_type_to_string(pg_type: &PgType) -> String {
+            match *pg_type {
+                $(
+                    PgType::$pg_type => $string_name.to_string(),
+                )*
+                _ => format!("UNKNOWN({})", pg_type.name()),
+            }
+        }
+
+        #[cfg(test)]
+        pub fn get_test_type_mappings() -> Vec<(PgType, &'static str)> {
+            vec![
+                $(
+                    (PgType::$pg_type, $string_name),
+                )*
+            ]
+        }
+    };
 }
 
-/// Converts a PostgreSQL [`PgType`] to its string representation.
-///
-/// Maps PostgreSQL types to string equivalents for database storage,
-/// handling common types with fallback for unknown types.
-pub fn postgres_type_to_string(pg_type: &PgType) -> String {
-    match *pg_type {
-        PgType::BOOL => "BOOL".to_string(),
-        PgType::CHAR => "CHAR".to_string(),
-        PgType::INT2 => "INT2".to_string(),
-        PgType::INT4 => "INT4".to_string(),
-        PgType::INT8 => "INT8".to_string(),
-        PgType::FLOAT4 => "FLOAT4".to_string(),
-        PgType::FLOAT8 => "FLOAT8".to_string(),
-        PgType::TEXT => "TEXT".to_string(),
-        PgType::VARCHAR => "VARCHAR".to_string(),
-        PgType::TIMESTAMP => "TIMESTAMP".to_string(),
-        PgType::TIMESTAMPTZ => "TIMESTAMPTZ".to_string(),
-        PgType::DATE => "DATE".to_string(),
-        PgType::TIME => "TIME".to_string(),
-        PgType::TIMETZ => "TIMETZ".to_string(),
-        PgType::BYTEA => "BYTEA".to_string(),
-        PgType::UUID => "UUID".to_string(),
-        PgType::JSON => "JSON".to_string(),
-        PgType::JSONB => "JSONB".to_string(),
-        _ => format!("UNKNOWN({})", pg_type.name()),
-    }
+define_type_mappings! {
+    // Basic types
+    BOOL => "BOOL",
+    CHAR => "CHAR",
+    INT2 => "INT2",
+    INT4 => "INT4",
+    INT8 => "INT8",
+    FLOAT4 => "FLOAT4",
+    FLOAT8 => "FLOAT8",
+    TEXT => "TEXT",
+    VARCHAR => "VARCHAR",
+    TIMESTAMP => "TIMESTAMP",
+    TIMESTAMPTZ => "TIMESTAMPTZ",
+    DATE => "DATE",
+    TIME => "TIME",
+    TIMETZ => "TIMETZ",
+    BYTEA => "BYTEA",
+    UUID => "UUID",
+    JSON => "JSON",
+    JSONB => "JSONB",
+
+    // Character types
+    NAME => "NAME",
+    BPCHAR => "BPCHAR",
+
+    // Numeric types
+    NUMERIC => "NUMERIC",
+    MONEY => "MONEY",
+
+    // Date/time types
+    INTERVAL => "INTERVAL",
+
+    // Network types
+    INET => "INET",
+    CIDR => "CIDR",
+    MACADDR => "MACADDR",
+    MACADDR8 => "MACADDR8",
+
+    // Bit string types
+    BIT => "BIT",
+    VARBIT => "VARBIT",
+
+    // Geometric types
+    POINT => "POINT",
+    LSEG => "LSEG",
+    PATH => "PATH",
+    BOX => "BOX",
+    POLYGON => "POLYGON",
+    LINE => "LINE",
+    CIRCLE => "CIRCLE",
+
+    // Other common types
+    OID => "OID",
+    XML => "XML",
+
+    // Text search types
+    TS_VECTOR => "TSVECTOR",
+    TSQUERY => "TSQUERY",
+
+    // Array types
+    BOOL_ARRAY => "BOOL_ARRAY",
+    INT2_ARRAY => "INT2_ARRAY",
+    INT4_ARRAY => "INT4_ARRAY",
+    INT8_ARRAY => "INT8_ARRAY",
+    FLOAT4_ARRAY => "FLOAT4_ARRAY",
+    FLOAT8_ARRAY => "FLOAT8_ARRAY",
+    TEXT_ARRAY => "TEXT_ARRAY",
+    VARCHAR_ARRAY => "VARCHAR_ARRAY",
+    TIMESTAMP_ARRAY => "TIMESTAMP_ARRAY",
+    TIMESTAMPTZ_ARRAY => "TIMESTAMPTZ_ARRAY",
+    DATE_ARRAY => "DATE_ARRAY",
+    UUID_ARRAY => "UUID_ARRAY",
+    JSON_ARRAY => "JSON_ARRAY",
+    JSONB_ARRAY => "JSONB_ARRAY",
+    NUMERIC_ARRAY => "NUMERIC_ARRAY",
+
+    // Range types
+    INT4_RANGE => "INT4_RANGE",
+    INT8_RANGE => "INT8_RANGE",
+    NUM_RANGE => "NUM_RANGE",
+    TS_RANGE => "TS_RANGE",
+    TSTZ_RANGE => "TSTZ_RANGE",
+    DATE_RANGE => "DATE_RANGE"
 }
 
 /// Stores a table schema in the database.
@@ -225,26 +297,7 @@ mod tests {
 
     #[test]
     fn test_type_string_conversion() {
-        let test_types = vec![
-            (Type::BOOL, "BOOL"),
-            (Type::CHAR, "CHAR"),
-            (Type::INT2, "INT2"),
-            (Type::INT4, "INT4"),
-            (Type::INT8, "INT8"),
-            (Type::FLOAT4, "FLOAT4"),
-            (Type::FLOAT8, "FLOAT8"),
-            (Type::TEXT, "TEXT"),
-            (Type::VARCHAR, "VARCHAR"),
-            (Type::TIMESTAMP, "TIMESTAMP"),
-            (Type::TIMESTAMPTZ, "TIMESTAMPTZ"),
-            (Type::DATE, "DATE"),
-            (Type::TIME, "TIME"),
-            (Type::TIMETZ, "TIMETZ"),
-            (Type::BYTEA, "BYTEA"),
-            (Type::UUID, "UUID"),
-            (Type::JSON, "JSON"),
-            (Type::JSONB, "JSONB"),
-        ];
+        let test_types = get_test_type_mappings();
 
         // Test type to string conversion
         for (pg_type, expected_string) in &test_types {
@@ -270,5 +323,13 @@ mod tests {
 
         // Test unknown type fallback
         assert_eq!(string_to_postgres_type("UNKNOWN_TYPE"), Type::TEXT);
+
+        // Test array and range syntax specifically
+        assert_eq!(string_to_postgres_type("INT4_ARRAY"), Type::INT4_ARRAY);
+        assert_eq!(string_to_postgres_type("TEXT_ARRAY"), Type::TEXT_ARRAY);
+        assert_eq!(postgres_type_to_string(&Type::BOOL_ARRAY), "BOOL_ARRAY");
+        assert_eq!(postgres_type_to_string(&Type::UUID_ARRAY), "UUID_ARRAY");
+        assert_eq!(string_to_postgres_type("INT4_RANGE"), Type::INT4_RANGE);
+        assert_eq!(postgres_type_to_string(&Type::DATE_RANGE), "DATE_RANGE");
     }
 }
