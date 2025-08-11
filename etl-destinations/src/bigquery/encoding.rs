@@ -12,7 +12,7 @@ impl TryFrom<TableRow> for BigQueryTableRow {
         let table_rows = value
             .values
             .into_iter()
-            .map(|cell| CellNonOptional::try_from(cell))
+            .map(CellNonOptional::try_from)
             .collect::<EtlResult<Vec<_>>>()?;
 
         Ok(BigQueryTableRow(table_rows))
@@ -122,9 +122,7 @@ pub fn cell_encode_prost(cell: &CellNonOptional, tag: u32, buf: &mut impl bytes:
             prost::encoding::bytes::encode(tag, b, buf);
         }
         CellNonOptional::Array(a) => {
-            let non_optional = ArrayCellNonOptional::try_from(a.clone())
-                .expect("NULL values in arrays are not supported by BigQuery");
-            array_cell_encode_prost(non_optional, tag, buf);
+            array_cell_encode_prost(a.clone(), tag, buf);
         }
     }
 }
@@ -172,11 +170,7 @@ pub fn cell_encode_len_prost(cell: &CellNonOptional, tag: u32) -> usize {
         }
         CellNonOptional::U32(i) => prost::encoding::uint32::encoded_len(tag, i),
         CellNonOptional::Bytes(b) => prost::encoding::bytes::encoded_len(tag, b),
-        CellNonOptional::Array(array_cell) => {
-            let non_optional = ArrayCellNonOptional::try_from(array_cell.clone())
-                .expect("NULL values in arrays are not supported by BigQuery");
-            array_cell_non_optional_encoded_len_prost(non_optional, tag)
-        }
+        CellNonOptional::Array(a) => array_cell_non_optional_encoded_len_prost(a.clone(), tag),
     }
 }
 

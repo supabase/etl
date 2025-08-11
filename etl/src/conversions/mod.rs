@@ -3,9 +3,9 @@ use numeric::PgNumeric;
 use std::fmt::Debug;
 use uuid::Uuid;
 
+use crate::bail;
 use crate::error::ErrorKind;
 use crate::error::EtlError;
-use crate::bail;
 
 pub mod bool;
 pub mod event;
@@ -153,8 +153,8 @@ impl TryFrom<Cell> for CellNonOptional {
             Cell::Json(val) => Ok(CellNonOptional::Json(val)),
             Cell::Bytes(val) => Ok(CellNonOptional::Bytes(val)),
             Cell::Array(array_cell) => {
-                let array_non_optional = ArrayCellNonOptional::try_from(array_cell)?;
-                Ok(CellNonOptional::Array(array_non_optional))
+                let array_cell_non_optional = ArrayCellNonOptional::try_from(array_cell)?;
+                Ok(CellNonOptional::Array(array_cell_non_optional))
             }
         }
     }
@@ -211,7 +211,14 @@ pub enum ArrayCellNonOptional {
 macro_rules! convert_array_variant {
     ($variant:ident, $vec:expr) => {
         if $vec.iter().any(|v| v.is_none()) {
-            bail!(ErrorKind::InvalidData, "NULL values in arrays are not supported")
+            bail!(
+                ErrorKind::NullValuesNotSupportedInArray,
+                "NULL values in arrays are not supported",
+                format!(
+                    "Remove the NULL values from the array {:?} and try again",
+                    $vec
+                )
+            )
         } else {
             Ok(ArrayCellNonOptional::$variant(
                 $vec.into_iter().flatten().collect(),

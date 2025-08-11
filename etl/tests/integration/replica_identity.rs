@@ -587,8 +587,7 @@ async fn update_non_toast_values_with_none_replica_identity() {
     assert_eq!(
         error_message,
         "cannot update table \"toast_values_test\" because it does not have a replica identity and publishes updates",
-        "Expected replica identity error, got: {}",
-        error_message
+        "Expected replica identity error, got: {error_message}"
     );
 
     pipeline.shutdown_and_wait().await.unwrap();

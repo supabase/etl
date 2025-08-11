@@ -208,8 +208,8 @@ impl BigQueryClient {
         // We have to map table rows into the new type due to the limitations of how Rust works.
         let table_rows = table_rows
             .into_iter()
-            .map(BigQueryTableRow)
-            .collect::<Vec<_>>();
+            .map(BigQueryTableRow::try_from)
+            .collect::<EtlResult<Vec<_>>>()?;
 
         // We create a slice on table rows, which will be updated while the streaming progresses.
         //

@@ -66,6 +66,8 @@ pub enum ErrorKind {
     InvalidState,
     /// Invalid data
     InvalidData,
+    /// NULL values are unsupported in an array
+    NullValuesNotSupportedInArray,
     /// Data validation error
     ValidationError,
     /// Apply worker error
