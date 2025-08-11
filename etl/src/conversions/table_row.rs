@@ -457,9 +457,9 @@ mod tests {
 
         // Test NULL marker vs empty string vs literal \N
         let test_cases: Vec<(&[u8], Cell)> = vec![
-            (b"\\N\n", Cell::Null),                                  // NULL marker
-            (b"\n", Cell::String("".to_string())),                   // empty string
-            ("\\\\N\n".as_bytes(), Cell::Null),                      // NULL marker
+            (b"\\N\n", Cell::Null),                // NULL marker
+            (b"\n", Cell::String("".to_string())), // empty string
+            ("\\\\N\n".as_bytes(), Cell::Null),    // NULL marker
         ];
 
         for (input, expected) in test_cases {
