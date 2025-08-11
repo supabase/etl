@@ -55,10 +55,7 @@ impl TableRowConverter {
                                 val_str.push('\t');
                             } else if c == 'v' {
                                 val_str.push(11 as char)
-                            } else if c == '\\' {
-                                val_str.push('\\');
                             } else {
-                                val_str.push('\\');
                                 val_str.push(c);
                             }
 
@@ -416,12 +413,12 @@ mod tests {
             (b"\\t\n", "\t"),       // tab
             (b"\\v\n", "\u{000B}"), // vertical tab
             (b"\\\\\n", "\\"),      // backslash
-            // Non-special characters (backslash preserved)
-            (b"\\x\n", "\\x"),   // letter
-            (b"\\1\n", "\\1"),   // digit
-            (b"\\!\n", "\\!"),   // punctuation
-            (b"\\@\n", "\\@"),   // symbol
-            (b"\\\"\n", "\\\""), // quote
+            // Non-special characters (backslash removed, character kept)
+            (b"\\x\n", "x"),   // letter
+            (b"\\1\n", "1"),   // digit
+            (b"\\!\n", "!"),   // punctuation
+            (b"\\@\n", "@"),   // symbol
+            (b"\\\"\n", "\""), // quote
             // Complex patterns
             (
                 "Text\\bwith\\bbackspaces\n".as_bytes(),
