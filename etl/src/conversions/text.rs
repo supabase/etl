@@ -1,12 +1,14 @@
-use crate::error::EtlError;
 use chrono::{DateTime, FixedOffset, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use core::str;
+use etl_postgres::time::{
+    DATE_FORMAT, TIME_FORMAT, TIMESTAMP_FORMAT, TIMESTAMPTZ_FORMAT_HH_MM, TIMESTAMPTZ_FORMAT_HHMM,
+};
 use tokio_postgres::types::Type;
 use uuid::Uuid;
 
 use crate::bail;
 use crate::conversions::{bool::parse_bool, hex};
-use crate::error::{ErrorKind, EtlResult};
+use crate::error::{ErrorKind, EtlError, EtlResult};
 
 use super::{ArrayCell, Cell, numeric::PgNumeric};
 
@@ -129,43 +131,38 @@ impl TextFormatConverter {
                 ArrayCell::Bytes,
             ),
             Type::DATE => {
-                let val = NaiveDate::parse_from_str(str, "%Y-%m-%d")?;
+                let val = NaiveDate::parse_from_str(str, DATE_FORMAT)?;
                 Ok(Cell::Date(val))
             }
             Type::DATE_ARRAY => TextFormatConverter::parse_array(
                 str,
-                |str| Ok(Some(NaiveDate::parse_from_str(str, "%Y-%m-%d")?)),
+                |str| Ok(Some(NaiveDate::parse_from_str(str, DATE_FORMAT)?)),
                 ArrayCell::Date,
             ),
             Type::TIME => {
-                let val = NaiveTime::parse_from_str(str, "%H:%M:%S%.f")?;
+                let val = NaiveTime::parse_from_str(str, TIME_FORMAT)?;
                 Ok(Cell::Time(val))
             }
             Type::TIME_ARRAY => TextFormatConverter::parse_array(
                 str,
-                |str| Ok(Some(NaiveTime::parse_from_str(str, "%H:%M:%S%.f")?)),
+                |str| Ok(Some(NaiveTime::parse_from_str(str, TIME_FORMAT)?)),
                 ArrayCell::Time,
             ),
             Type::TIMESTAMP => {
-                let val = NaiveDateTime::parse_from_str(str, "%Y-%m-%d %H:%M:%S%.f")?;
+                let val = NaiveDateTime::parse_from_str(str, TIMESTAMP_FORMAT)?;
                 Ok(Cell::TimeStamp(val))
             }
             Type::TIMESTAMP_ARRAY => TextFormatConverter::parse_array(
                 str,
-                |str| {
-                    Ok(Some(NaiveDateTime::parse_from_str(
-                        str,
-                        "%Y-%m-%d %H:%M:%S%.f",
-                    )?))
-                },
+                |str| Ok(Some(NaiveDateTime::parse_from_str(str, TIMESTAMP_FORMAT)?)),
                 ArrayCell::TimeStamp,
             ),
             Type::TIMESTAMPTZ => {
                 let val =
-                    match DateTime::<FixedOffset>::parse_from_str(str, "%Y-%m-%d %H:%M:%S%.f%#z") {
+                    match DateTime::<FixedOffset>::parse_from_str(str, TIMESTAMPTZ_FORMAT_HHMM) {
                         Ok(val) => val,
                         Err(_) => {
-                            DateTime::<FixedOffset>::parse_from_str(str, "%Y-%m-%d %H:%M:%S%.f%:z")?
+                            DateTime::<FixedOffset>::parse_from_str(str, TIMESTAMPTZ_FORMAT_HH_MM)?
                         }
                     };
                 Ok(Cell::TimeStampTz(val.into()))
@@ -175,11 +172,8 @@ impl TextFormatConverter {
                     str,
                     |str| {
                         Ok(Some(
-                            DateTime::<FixedOffset>::parse_from_str(
-                                str,
-                                "%Y-%m-%d %H:%M:%S%.f%#z",
-                            )?
-                            .into(),
+                            DateTime::<FixedOffset>::parse_from_str(str, TIMESTAMPTZ_FORMAT_HHMM)?
+                                .into(),
                         ))
                     },
                     ArrayCell::TimeStampTz,
@@ -191,7 +185,7 @@ impl TextFormatConverter {
                             Ok(Some(
                                 DateTime::<FixedOffset>::parse_from_str(
                                     str,
-                                    "%Y-%m-%d %H:%M:%S%.f%:z",
+                                    TIMESTAMPTZ_FORMAT_HH_MM,
                                 )?
                                 .into(),
                             ))
@@ -352,10 +346,10 @@ mod tests {
     fn try_from_str_bool() {
         let cell = TextFormatConverter::try_from_str(&Type::BOOL, "t").unwrap();
         assert_eq!(cell, Cell::Bool(true));
-        
+
         let cell = TextFormatConverter::try_from_str(&Type::BOOL, "f").unwrap();
         assert_eq!(cell, Cell::Bool(false));
-        
+
         assert!(TextFormatConverter::try_from_str(&Type::BOOL, "invalid").is_err());
     }
 
@@ -363,13 +357,13 @@ mod tests {
     fn try_from_str_integers() {
         let cell = TextFormatConverter::try_from_str(&Type::INT2, "123").unwrap();
         assert_eq!(cell, Cell::I16(123));
-        
+
         let cell = TextFormatConverter::try_from_str(&Type::INT4, "-456").unwrap();
         assert_eq!(cell, Cell::I32(-456));
-        
+
         let cell = TextFormatConverter::try_from_str(&Type::INT8, "9223372036854775807").unwrap();
         assert_eq!(cell, Cell::I64(9223372036854775807));
-        
+
         let cell = TextFormatConverter::try_from_str(&Type::OID, "12345").unwrap();
         assert_eq!(cell, Cell::U32(12345));
     }
@@ -385,13 +379,13 @@ mod tests {
     fn try_from_str_floats() {
         let cell = TextFormatConverter::try_from_str(&Type::FLOAT4, "3.14").unwrap();
         assert_eq!(cell, Cell::F32(3.14));
-        
+
         let cell = TextFormatConverter::try_from_str(&Type::FLOAT8, "-2.71828").unwrap();
         assert_eq!(cell, Cell::F64(-2.71828));
-        
+
         let cell = TextFormatConverter::try_from_str(&Type::FLOAT4, "inf").unwrap();
         assert_eq!(cell, Cell::F32(f32::INFINITY));
-        
+
         let cell = TextFormatConverter::try_from_str(&Type::FLOAT8, "NaN").unwrap();
         assert!(matches!(cell, Cell::F64(val) if val.is_nan()));
     }
@@ -399,13 +393,13 @@ mod tests {
     #[test]
     fn try_from_str_string_types() {
         let test_string = "Hello, World!";
-        
+
         let cell = TextFormatConverter::try_from_str(&Type::TEXT, test_string).unwrap();
         assert_eq!(cell, Cell::String(test_string.to_string()));
-        
+
         let cell = TextFormatConverter::try_from_str(&Type::VARCHAR, test_string).unwrap();
         assert_eq!(cell, Cell::String(test_string.to_string()));
-        
+
         let cell = TextFormatConverter::try_from_str(&Type::CHAR, test_string).unwrap();
         assert_eq!(cell, Cell::String(test_string.to_string()));
     }
@@ -418,7 +412,7 @@ mod tests {
         } else {
             panic!("Expected Numeric cell");
         }
-        
+
         let cell = TextFormatConverter::try_from_str(&Type::NUMERIC, "NaN").unwrap();
         assert_eq!(cell, Cell::Numeric(PgNumeric::NaN));
     }
@@ -427,7 +421,7 @@ mod tests {
     fn try_from_str_bytea() {
         let cell = TextFormatConverter::try_from_str(&Type::BYTEA, "\\x48656c6c6f").unwrap();
         assert_eq!(cell, Cell::Bytes(b"Hello".to_vec()));
-        
+
         assert!(TextFormatConverter::try_from_str(&Type::BYTEA, "invalid").is_err());
     }
 
@@ -441,7 +435,7 @@ mod tests {
         } else {
             panic!("Expected Date cell");
         }
-        
+
         assert!(TextFormatConverter::try_from_str(&Type::DATE, "invalid-date").is_err());
     }
 
@@ -455,13 +449,14 @@ mod tests {
         } else {
             panic!("Expected Time cell");
         }
-        
+
         assert!(TextFormatConverter::try_from_str(&Type::TIME, "invalid-time").is_err());
     }
 
     #[test]
     fn try_from_str_timestamp() {
-        let cell = TextFormatConverter::try_from_str(&Type::TIMESTAMP, "2023-12-25 14:30:45.123").unwrap();
+        let cell =
+            TextFormatConverter::try_from_str(&Type::TIMESTAMP, "2023-12-25 14:30:45.123").unwrap();
         if let Cell::TimeStamp(ts) = cell {
             assert_eq!(ts.date().year(), 2023);
             assert_eq!(ts.time().hour(), 14);
@@ -472,15 +467,19 @@ mod tests {
 
     #[test]
     fn try_from_str_timestamptz() {
-        let cell = TextFormatConverter::try_from_str(&Type::TIMESTAMPTZ, "2023-12-25 14:30:45.123+00:00").unwrap();
+        let cell =
+            TextFormatConverter::try_from_str(&Type::TIMESTAMPTZ, "2023-12-25 14:30:45.123+00:00")
+                .unwrap();
         if let Cell::TimeStampTz(ts) = cell {
             assert_eq!(ts.year(), 2023);
         } else {
             panic!("Expected TimeStampTz cell");
         }
-        
+
         // Test fallback format
-        let cell = TextFormatConverter::try_from_str(&Type::TIMESTAMPTZ, "2023-12-25 14:30:45.123+00").unwrap();
+        let cell =
+            TextFormatConverter::try_from_str(&Type::TIMESTAMPTZ, "2023-12-25 14:30:45.123+00")
+                .unwrap();
         assert!(matches!(cell, Cell::TimeStampTz(_)));
     }
 
@@ -493,7 +492,7 @@ mod tests {
         } else {
             panic!("Expected Uuid cell");
         }
-        
+
         assert!(TextFormatConverter::try_from_str(&Type::UUID, "invalid-uuid").is_err());
     }
 
@@ -507,10 +506,10 @@ mod tests {
         } else {
             panic!("Expected Json cell");
         }
-        
+
         let cell = TextFormatConverter::try_from_str(&Type::JSONB, json_str).unwrap();
         assert!(matches!(cell, Cell::Json(_)));
-        
+
         assert!(TextFormatConverter::try_from_str(&Type::JSON, "invalid json").is_err());
     }
 
@@ -538,14 +537,21 @@ mod tests {
 
     #[test]
     fn parse_array_quoted_strings() {
-        let cell = TextFormatConverter::try_from_str(&Type::TEXT_ARRAY, r#"{"hello","world with spaces","with\"quotes"}"#).unwrap();
+        let cell = TextFormatConverter::try_from_str(
+            &Type::TEXT_ARRAY,
+            r#"{"hello","world with spaces","with\"quotes"}"#,
+        )
+        .unwrap();
         match cell {
             Cell::Array(ArrayCell::String(v)) => {
-                assert_eq!(v, vec![
-                    Some("hello".to_string()),
-                    Some("world with spaces".to_string()),
-                    Some("with\"quotes".to_string())
-                ]);
+                assert_eq!(
+                    v,
+                    vec![
+                        Some("hello".to_string()),
+                        Some("world with spaces".to_string()),
+                        Some("with\"quotes".to_string())
+                    ]
+                );
             }
             _ => panic!("Expected TEXT array"),
         }
@@ -577,10 +583,10 @@ mod tests {
     fn parse_array_invalid_format() {
         // Missing opening brace
         assert!(TextFormatConverter::try_from_str(&Type::INT4_ARRAY, "1,2,3}").is_err());
-        
+
         // Missing closing brace
         assert!(TextFormatConverter::try_from_str(&Type::INT4_ARRAY, "{1,2,3").is_err());
-        
+
         // Too short
         assert!(TextFormatConverter::try_from_str(&Type::INT4_ARRAY, "{").is_err());
         assert!(TextFormatConverter::try_from_str(&Type::INT4_ARRAY, "}").is_err());
@@ -591,14 +597,21 @@ mod tests {
     fn parse_array_escape_sequences() {
         // The array parser doesn't process escape sequences in the same way as the table row parser
         // It expects literal characters in the array string
-        let cell = TextFormatConverter::try_from_str(&Type::TEXT_ARRAY, r#"{"line1\\nline2","tab\\there"}"#).unwrap();
+        let cell = TextFormatConverter::try_from_str(
+            &Type::TEXT_ARRAY,
+            r#"{"line1\\nline2","tab\\there"}"#,
+        )
+        .unwrap();
         match cell {
             Cell::Array(ArrayCell::String(v)) => {
                 // These should be literal strings since array parser doesn't decode escapes like table parser
-                assert_eq!(v, vec![
-                    Some("line1\\nline2".to_string()),
-                    Some("tab\\there".to_string())
-                ]);
+                assert_eq!(
+                    v,
+                    vec![
+                        Some("line1\\nline2".to_string()),
+                        Some("tab\\there".to_string())
+                    ]
+                );
             }
             _ => panic!("Expected TEXT array with escape sequences"),
         }
@@ -607,7 +620,11 @@ mod tests {
     #[test]
     fn parse_timestamptz_array_fallback() {
         // Test the fallback parsing for timestamptz arrays
-        let cell = TextFormatConverter::try_from_str(&Type::TIMESTAMPTZ_ARRAY, "{\"2023-01-01 12:00:00.000+00\"}").unwrap();
+        let cell = TextFormatConverter::try_from_str(
+            &Type::TIMESTAMPTZ_ARRAY,
+            "{\"2023-01-01 12:00:00.000+00\"}",
+        )
+        .unwrap();
         match cell {
             Cell::Array(ArrayCell::TimeStampTz(v)) => {
                 assert_eq!(v.len(), 1);
@@ -622,11 +639,16 @@ mod tests {
     fn unknown_types_to_string() {
         use tokio_postgres::types::Type;
         // Create a custom type that's not normally supported
-        let custom_type = Type::new("custom".to_string(), 99999, tokio_postgres::types::Kind::Simple, "public".to_string());
-        
+        let custom_type = Type::new(
+            "custom".to_string(),
+            99999,
+            tokio_postgres::types::Kind::Simple,
+            "public".to_string(),
+        );
+
         let cell = TextFormatConverter::default_value(&custom_type).unwrap();
         assert_eq!(cell, Cell::String(String::new()));
-        
+
         let cell = TextFormatConverter::try_from_str(&custom_type, "test").unwrap();
         assert_eq!(cell, Cell::String("test".to_string()));
     }

@@ -1,6 +1,21 @@
 use std::sync::LazyLock;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+/// PostgreSQL date format string for parsing dates in YYYY-MM-DD format.
+pub const DATE_FORMAT: &str = "%Y-%m-%d";
+
+/// PostgreSQL time format string for parsing times with optional fractional seconds.
+pub const TIME_FORMAT: &str = "%H:%M:%S%.f";
+
+/// PostgreSQL timestamp format string for parsing timestamps with optional fractional seconds.
+pub const TIMESTAMP_FORMAT: &str = "%Y-%m-%d %H:%M:%S%.f";
+
+/// PostgreSQL timestamptz format string with timezone offset in +HHMM format.
+pub const TIMESTAMPTZ_FORMAT_HHMM: &str = "%Y-%m-%d %H:%M:%S%.f%#z";
+
+/// PostgreSQL timestamptz format string with timezone offset in +HH:MM format.
+pub const TIMESTAMPTZ_FORMAT_HH_MM: &str = "%Y-%m-%d %H:%M:%S%.f%:z";
+
 /// Number of seconds between Unix epoch (1970-01-01) and PostgreSQL epoch (2000-01-01).
 const POSTGRES_EPOCH_OFFSET_SECONDS: u64 = 946_684_800;
 

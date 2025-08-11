@@ -1,18 +1,7 @@
 use etl::error::{EtlError, EtlResult};
 use etl::types::{ArrayCellNonOptional, CellNonOptional, TableRow};
+use etl_postgres::time::{DATE_FORMAT, TIME_FORMAT, TIMESTAMP_FORMAT, TIMESTAMPTZ_FORMAT_HH_MM};
 use prost::bytes;
-
-/// Date format string for BigQuery DATE columns (YYYY-MM-DD).
-const DATE_FORMAT: &str = "%Y-%m-%d";
-
-/// Time format string for BigQuery TIME columns (HH:MM:SS.sss).
-const TIME_FORMAT: &str = "%H:%M:%S%.f";
-
-/// Timestamp format string for BigQuery TIMESTAMP columns (YYYY-MM-DD HH:MM:SS.sss).
-const TIMESTAMP_FORMAT: &str = "%Y-%m-%d %H:%M:%S%.f";
-
-/// Timestamp with timezone format string for BigQuery TIMESTAMPTZ columns (YYYY-MM-DD HH:MM:SS.sss+TZ).
-const TIMESTAMPTZ_FORMAT: &str = "%Y-%m-%d %H:%M:%S%.f%:z";
 
 /// Protocol buffer wrapper for a BigQuery table row containing non-optional cells.
 ///
@@ -142,7 +131,7 @@ pub fn cell_encode_prost(cell: &CellNonOptional, tag: u32, buf: &mut impl bytes:
             prost::encoding::string::encode(tag, &s, buf);
         }
         CellNonOptional::TimeStampTz(t) => {
-            let s = t.format(TIMESTAMPTZ_FORMAT).to_string();
+            let s = t.format(TIMESTAMPTZ_FORMAT_HH_MM).to_string();
             prost::encoding::string::encode(tag, &s, buf);
         }
         CellNonOptional::Uuid(u) => {
@@ -200,7 +189,7 @@ pub fn cell_encode_len_prost(cell: &CellNonOptional, tag: u32) -> usize {
             prost::encoding::string::encoded_len(tag, &s)
         }
         CellNonOptional::TimeStampTz(t) => {
-            let s = t.format(TIMESTAMPTZ_FORMAT).to_string();
+            let s = t.format(TIMESTAMPTZ_FORMAT_HH_MM).to_string();
             prost::encoding::string::encoded_len(tag, &s)
         }
         CellNonOptional::Uuid(u) => {
@@ -282,7 +271,7 @@ pub fn array_cell_encode_prost(
         ArrayCellNonOptional::TimeStampTz(vec) => {
             let values: Vec<String> = vec
                 .into_iter()
-                .map(|v| v.format(TIMESTAMPTZ_FORMAT).to_string())
+                .map(|v| v.format(TIMESTAMPTZ_FORMAT_HH_MM).to_string())
                 .collect();
             prost::encoding::string::encode_repeated(tag, &values, buf);
         }
@@ -352,7 +341,7 @@ pub fn array_cell_non_optional_encoded_len_prost(
         ArrayCellNonOptional::TimeStampTz(vec) => {
             let values: Vec<String> = vec
                 .into_iter()
-                .map(|v| v.format(TIMESTAMPTZ_FORMAT).to_string())
+                .map(|v| v.format(TIMESTAMPTZ_FORMAT_HH_MM).to_string())
                 .collect();
             prost::encoding::string::encoded_len_repeated(tag, &values)
         }
