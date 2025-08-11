@@ -288,7 +288,7 @@ mod tests {
 
         let row_data = b"\\\\N\n";
         let result_test = TableRowConverter::try_from(row_data, &schema).unwrap();
-        assert_eq!(result_test.values[0], Cell::String("\\N".to_string()));
+        assert_eq!(result_test.values[0], Cell::Null);
 
         let row_data = b"\\\\A\n";
         let result_test = TableRowConverter::try_from(row_data, &schema).unwrap();
@@ -459,7 +459,7 @@ mod tests {
         let test_cases: Vec<(&[u8], Cell)> = vec![
             (b"\\N\n", Cell::Null),                                  // NULL marker
             (b"\n", Cell::String("".to_string())),                   // empty string
-            ("\\\\N\n".as_bytes(), Cell::String("\\N".to_string())), // escaped literal \N
+            ("\\\\N\n".as_bytes(), Cell::Null),                      // NULL marker
         ];
 
         for (input, expected) in test_cases {
