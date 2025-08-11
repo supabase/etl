@@ -110,7 +110,7 @@ impl TableReplicationError {
                 table_id,
                 error,
                 "Make sure that your Postgres tables do not have arrays with NULL values",
-                RetryPolicy::ManualRetry
+                RetryPolicy::ManualRetry,
             ),
 
             // Special handling for error kinds used during failure injection.

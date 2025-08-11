@@ -2,12 +2,32 @@ use etl::error::{EtlError, EtlResult};
 use etl::types::{ArrayCellNonOptional, CellNonOptional, TableRow};
 use prost::bytes;
 
+/// Date format string for BigQuery DATE columns (YYYY-MM-DD).
+const DATE_FORMAT: &str = "%Y-%m-%d";
+
+/// Time format string for BigQuery TIME columns (HH:MM:SS.sss).
+const TIME_FORMAT: &str = "%H:%M:%S%.f";
+
+/// Timestamp format string for BigQuery TIMESTAMP columns (YYYY-MM-DD HH:MM:SS.sss).
+const TIMESTAMP_FORMAT: &str = "%Y-%m-%d %H:%M:%S%.f";
+
+/// Timestamp with timezone format string for BigQuery TIMESTAMPTZ columns (YYYY-MM-DD HH:MM:SS.sss+TZ).
+const TIMESTAMPTZ_FORMAT: &str = "%Y-%m-%d %H:%M:%S%.f%:z";
+
+/// Protocol buffer wrapper for a BigQuery table row containing non-optional cells.
+///
+/// Wraps a vector of [`CellNonOptional`] values and implements the [`prost::Message`]
+/// trait to enable Protocol Buffer serialization for BigQuery streaming inserts.
 #[derive(Debug)]
 pub struct BigQueryTableRow(Vec<CellNonOptional>);
 
 impl TryFrom<TableRow> for BigQueryTableRow {
     type Error = EtlError;
 
+    /// Converts a [`TableRow`] to a [`BigQueryTableRow`] by transforming all cell values
+    /// to their non-optional equivalents.
+    ///
+    /// Returns an error if any cell conversion fails during the transformation process.
     fn try_from(value: TableRow) -> Result<Self, Self::Error> {
         let table_rows = value
             .values
@@ -20,6 +40,10 @@ impl TryFrom<TableRow> for BigQueryTableRow {
 }
 
 impl prost::Message for BigQueryTableRow {
+    /// Encodes the table row into the provided buffer using Protocol Buffer format.
+    ///
+    /// Each cell is encoded with a sequential tag starting from 1, using the
+    /// appropriate prost encoding method for the cell's data type.
     fn encode_raw(&self, buf: &mut impl bytes::BufMut)
     where
         Self: Sized,
@@ -31,6 +55,10 @@ impl prost::Message for BigQueryTableRow {
         }
     }
 
+    /// Merges a field from a Protocol Buffer message into this table row.
+    ///
+    /// Currently unimplemented as this functionality is not required for BigQuery
+    /// streaming inserts, which only need encoding capabilities.
     fn merge_field(
         &mut self,
         _tag: u32,
@@ -44,6 +72,10 @@ impl prost::Message for BigQueryTableRow {
         unimplemented!("merge_field not implemented yet");
     }
 
+    /// Calculates the encoded length of the table row in bytes.
+    ///
+    /// Sums the encoded lengths of all cells with their respective tags to
+    /// determine the total serialized size.
     fn encoded_len(&self) -> usize {
         let mut len = 0;
         let mut tag = 1;
@@ -55,6 +87,7 @@ impl prost::Message for BigQueryTableRow {
         len
     }
 
+    /// Clears all cell values in the table row by calling clear on each cell.
     fn clear(&mut self) {
         for cell in &mut self.0 {
             cell.clear();
@@ -62,6 +95,11 @@ impl prost::Message for BigQueryTableRow {
     }
 }
 
+/// Encodes a single [`CellNonOptional`] into Protocol Buffer format using the specified tag.
+///
+/// Each cell type is encoded using the appropriate prost encoding method. Temporal types
+/// and UUIDs are formatted as strings, while numeric types use their native encoding.
+/// Null cells produce no encoded output.
 pub fn cell_encode_prost(cell: &CellNonOptional, tag: u32, buf: &mut impl bytes::BufMut) {
     match cell {
         CellNonOptional::Null => {}
@@ -92,19 +130,19 @@ pub fn cell_encode_prost(cell: &CellNonOptional, tag: u32, buf: &mut impl bytes:
             prost::encoding::string::encode(tag, &s, buf);
         }
         CellNonOptional::Date(t) => {
-            let s = t.format("%Y-%m-%d").to_string();
+            let s = t.format(DATE_FORMAT).to_string();
             prost::encoding::string::encode(tag, &s, buf);
         }
         CellNonOptional::Time(t) => {
-            let s = t.format("%H:%M:%S%.f").to_string();
+            let s = t.format(TIME_FORMAT).to_string();
             prost::encoding::string::encode(tag, &s, buf);
         }
         CellNonOptional::TimeStamp(t) => {
-            let s = t.format("%Y-%m-%d %H:%M:%S%.f").to_string();
+            let s = t.format(TIMESTAMP_FORMAT).to_string();
             prost::encoding::string::encode(tag, &s, buf);
         }
         CellNonOptional::TimeStampTz(t) => {
-            let s = t.format("%Y-%m-%d %H:%M:%S%.f%:z").to_string();
+            let s = t.format(TIMESTAMPTZ_FORMAT).to_string();
             prost::encoding::string::encode(tag, &s, buf);
         }
         CellNonOptional::Uuid(u) => {
@@ -127,6 +165,11 @@ pub fn cell_encode_prost(cell: &CellNonOptional, tag: u32, buf: &mut impl bytes:
     }
 }
 
+/// Calculates the encoded length in bytes for a single [`CellNonOptional`] with the specified tag.
+///
+/// Returns the number of bytes that would be produced when encoding this cell in Protocol
+/// Buffer format. Null cells return zero length, while other types calculate their
+/// encoded size using the corresponding prost length functions.
 pub fn cell_encode_len_prost(cell: &CellNonOptional, tag: u32) -> usize {
     match cell {
         CellNonOptional::Null => 0,
@@ -145,19 +188,19 @@ pub fn cell_encode_len_prost(cell: &CellNonOptional, tag: u32) -> usize {
             prost::encoding::string::encoded_len(tag, &s)
         }
         CellNonOptional::Date(t) => {
-            let s = t.format("%Y-%m-%d").to_string();
+            let s = t.format(DATE_FORMAT).to_string();
             prost::encoding::string::encoded_len(tag, &s)
         }
         CellNonOptional::Time(t) => {
-            let s = t.format("%H:%M:%S%.f").to_string();
+            let s = t.format(TIME_FORMAT).to_string();
             prost::encoding::string::encoded_len(tag, &s)
         }
         CellNonOptional::TimeStamp(t) => {
-            let s = t.format("%Y-%m-%d %H:%M:%S%.f").to_string();
+            let s = t.format(TIMESTAMP_FORMAT).to_string();
             prost::encoding::string::encoded_len(tag, &s)
         }
         CellNonOptional::TimeStampTz(t) => {
-            let s = t.format("%Y-%m-%d %H:%M:%S%.f%:z").to_string();
+            let s = t.format(TIMESTAMPTZ_FORMAT).to_string();
             prost::encoding::string::encoded_len(tag, &s)
         }
         CellNonOptional::Uuid(u) => {
@@ -174,6 +217,11 @@ pub fn cell_encode_len_prost(cell: &CellNonOptional, tag: u32) -> usize {
     }
 }
 
+/// Encodes an [`ArrayCellNonOptional`] into Protocol Buffer format using the specified tag.
+///
+/// Array cells are encoded using either packed encoding for numeric types or repeated
+/// encoding for string-based types. Temporal arrays are converted to string arrays
+/// with appropriate formatting before encoding.
 pub fn array_cell_encode_prost(
     array_cell: ArrayCellNonOptional,
     tag: u32,
@@ -213,28 +261,28 @@ pub fn array_cell_encode_prost(
         ArrayCellNonOptional::Date(vec) => {
             let values: Vec<String> = vec
                 .into_iter()
-                .map(|v| v.format("%Y-%m-%d").to_string())
+                .map(|v| v.format(DATE_FORMAT).to_string())
                 .collect();
             prost::encoding::string::encode_repeated(tag, &values, buf);
         }
         ArrayCellNonOptional::Time(vec) => {
             let values: Vec<String> = vec
                 .into_iter()
-                .map(|v| v.format("%H:%M:%S%.f").to_string())
+                .map(|v| v.format(TIME_FORMAT).to_string())
                 .collect();
             prost::encoding::string::encode_repeated(tag, &values, buf);
         }
         ArrayCellNonOptional::TimeStamp(vec) => {
             let values: Vec<String> = vec
                 .into_iter()
-                .map(|v| v.format("%Y-%m-%d %H:%M:%S%.f").to_string())
+                .map(|v| v.format(TIMESTAMP_FORMAT).to_string())
                 .collect();
             prost::encoding::string::encode_repeated(tag, &values, buf);
         }
         ArrayCellNonOptional::TimeStampTz(vec) => {
             let values: Vec<String> = vec
                 .into_iter()
-                .map(|v| v.format("%Y-%m-%d %H:%M:%S%.f%:z").to_string())
+                .map(|v| v.format(TIMESTAMPTZ_FORMAT).to_string())
                 .collect();
             prost::encoding::string::encode_repeated(tag, &values, buf);
         }
@@ -252,6 +300,11 @@ pub fn array_cell_encode_prost(
     }
 }
 
+/// Calculates the encoded length in bytes for an [`ArrayCellNonOptional`] with the specified tag.
+///
+/// Returns the number of bytes that would be produced when encoding this array cell in
+/// Protocol Buffer format. Uses packed length calculation for numeric arrays and repeated
+/// length calculation for string-based arrays.
 pub fn array_cell_non_optional_encoded_len_prost(
     array_cell: ArrayCellNonOptional,
     tag: u32,
@@ -278,28 +331,28 @@ pub fn array_cell_non_optional_encoded_len_prost(
         ArrayCellNonOptional::Date(vec) => {
             let values: Vec<String> = vec
                 .into_iter()
-                .map(|v| v.format("%Y-%m-%d").to_string())
+                .map(|v| v.format(DATE_FORMAT).to_string())
                 .collect();
             prost::encoding::string::encoded_len_repeated(tag, &values)
         }
         ArrayCellNonOptional::Time(vec) => {
             let values: Vec<String> = vec
                 .into_iter()
-                .map(|v| v.format("%H:%M:%S%.f").to_string())
+                .map(|v| v.format(TIME_FORMAT).to_string())
                 .collect();
             prost::encoding::string::encoded_len_repeated(tag, &values)
         }
         ArrayCellNonOptional::TimeStamp(vec) => {
             let values: Vec<String> = vec
                 .into_iter()
-                .map(|v| v.format("%Y-%m-%d %H:%M:%S%.f").to_string())
+                .map(|v| v.format(TIMESTAMP_FORMAT).to_string())
                 .collect();
             prost::encoding::string::encoded_len_repeated(tag, &values)
         }
         ArrayCellNonOptional::TimeStampTz(vec) => {
             let values: Vec<String> = vec
                 .into_iter()
-                .map(|v| v.format("%Y-%m-%d %H:%M:%S%.f%:z").to_string())
+                .map(|v| v.format(TIMESTAMPTZ_FORMAT).to_string())
                 .collect();
             prost::encoding::string::encoded_len_repeated(tag, &values)
         }
