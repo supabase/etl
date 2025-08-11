@@ -547,10 +547,13 @@ where
                         base_table_id, new_versioned_table_id
                     );
 
-                    // Create the new table
+                    // Create or replace the new table.
+                    //
+                    // We unconditionally replace the table if it's there because here we know that
+                    // we need the table to be empty given the truncation.
                     inner
                         .client
-                        .create_table(
+                        .create_or_replace_table(
                             &inner.dataset_id,
                             &new_versioned_table_id,
                             &table_schema.column_schemas,
@@ -558,15 +561,16 @@ where
                         )
                         .await?;
 
-                    // Update the view to point to the new table (uses cache to avoid redundant operations)
+                    // Update the view to point to the new table.
+                    //
+                    // We do this after the table has been created to that in case of failure, the
+                    // view can be manually updated to point to the new table.
                     Self::ensure_view_points_to_table(
                         &mut inner,
                         &base_table_id,
                         &new_versioned_table_id,
                     )
                     .await?;
-
-                    // Add new table to creation cache
                     Self::add_to_created_tables_cache(&mut inner, new_versioned_table_id.clone());
 
                     info!(

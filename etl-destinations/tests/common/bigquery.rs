@@ -154,7 +154,7 @@ impl Drop for BigQueryDatabase {
         // task is issued, the runtime will offload existing tasks to another worker.
         tokio::task::block_in_place(move || {
             Handle::current().block_on(async move {
-                destroy_bigquery(&client, self.project_id(), self.dataset_id()).await;
+                // destroy_bigquery(&client, self.project_id(), self.dataset_id()).await;
             });
         });
     }
