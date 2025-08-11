@@ -84,6 +84,9 @@ struct Inner<S> {
     /// Cache of views that have been created and the versioned table they point to.
     /// This avoids redundant `CREATE OR REPLACE VIEW` calls for views that already point to the correct table.
     /// Maps view name to the versioned table it currently points to.
+    ///
+    /// # Example
+    /// `{ users_table: users_table_10, orders_table: orders_table_3 }`
     created_views: HashMap<BigQueryTableId, BigQueryTableId>,
 }
 
@@ -276,6 +279,7 @@ where
             .entry(base_table_id.clone())
             .or_insert(0);
         *version += 1;
+
         format!("{base_table_id}_{version}")
     }
 
@@ -313,6 +317,7 @@ where
             "view {} created/updated to point to {}",
             view_name, target_table_id
         );
+
         Ok(true)
     }
 
