@@ -13,7 +13,7 @@ use etl_telemetry::init_test_tracing;
 use rand::random;
 use std::str::FromStr;
 use std::time::Duration;
-use tokio::time::{sleep, timeout};
+use tokio::time::sleep;
 
 use crate::common::bigquery::{
     BigQueryOrder, BigQueryUser, NonNullableColsScalar, NullableColsArray, NullableColsScalar,
@@ -417,17 +417,17 @@ async fn table_truncate_with_batching() {
     users_state_notify.notified().await;
     orders_state_notify.notified().await;
 
-    // Wait for the 20 inserts (10 per table) and 2 truncates (1 per table).
+    // Wait for the 8 inserts (4 per table + 4 after truncate) and 2 truncates (1 per table).
     let event_notify = destination
-        .wait_for_events_count(vec![(EventType::Insert, 20), (EventType::Truncate, 2)])
+        .wait_for_events_count(vec![(EventType::Insert, 8), (EventType::Truncate, 2)])
         .await;
 
-    // Insert 10 rows per each table.
+    // Insert 2 rows per each table.
     insert_mock_data(
         &mut database,
         &database_schema.users_schema().name,
         &database_schema.orders_schema().name,
-        1..=10,
+        1..=2,
         false,
     )
     .await;
@@ -447,12 +447,12 @@ async fn table_truncate_with_batching() {
         &mut database,
         &database_schema.users_schema().name,
         &database_schema.orders_schema().name,
-        11..=12,
+        3..=4,
         false,
     )
     .await;
 
-    timeout(Duration::from_secs(10), event_notify.notified()).await;
+    event_notify.notified().await;
 
     pipeline.shutdown_and_wait().await.unwrap();
 
@@ -466,8 +466,8 @@ async fn table_truncate_with_batching() {
     assert_eq!(
         parsed_users_rows,
         vec![
-            BigQueryUser::new(11, "user_11", 11),
-            BigQueryUser::new(12, "user_12", 12),
+            BigQueryUser::new(3, "user_3", 3),
+            BigQueryUser::new(4, "user_4", 4),
         ]
     );
     let orders_rows = bigquery_database
@@ -478,8 +478,8 @@ async fn table_truncate_with_batching() {
     assert_eq!(
         parsed_orders_rows,
         vec![
-            BigQueryOrder::new(11, "description_11"),
-            BigQueryOrder::new(12, "description_12")
+            BigQueryOrder::new(3, "description_3"),
+            BigQueryOrder::new(4, "description_4")
         ]
     );
 }

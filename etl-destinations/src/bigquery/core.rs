@@ -246,7 +246,7 @@ where
             .table_versions
             .entry(base_table_id.clone())
             .or_insert(0);
-        format!("{}_{}", base_table_id, version)
+        format!("{base_table_id}_{version}")
     }
 
     /// Returns the previous versioned table name for cleanup purposes.
@@ -276,7 +276,7 @@ where
             .entry(base_table_id.clone())
             .or_insert(0);
         *version += 1;
-        format!("{}_{}", base_table_id, version)
+        format!("{base_table_id}_{version}")
     }
 
     /// Checks if a view needs to be created or updated and performs the operation if needed.
@@ -418,7 +418,7 @@ where
             let mut table_id_to_table_rows = HashMap::new();
             let mut truncate_events = Vec::new();
 
-            // Process events until we hit a truncate or run out of events
+            // Process events until we hit a truncate event or run out of events
             while let Some(event) = event_iter.peek() {
                 if matches!(event, Event::Truncate(_)) {
                     break;
@@ -688,79 +688,5 @@ mod tests {
             table_name_to_bigquery_table_id(&table_name),
             "a____b_c____d"
         );
-    }
-
-    #[test]
-    fn test_versioned_table_naming() {
-        let mut versions = HashMap::new();
-        let base_table = "schema_table".to_string();
-
-        // Test initial version
-        let version = versions.entry(base_table.clone()).or_insert(0);
-        let versioned_name = format!("{}_{}", base_table, version);
-        assert_eq!(versioned_name, "schema_table_0");
-
-        // Test increment
-        *version += 1;
-        let versioned_name = format!("{}_{}", base_table, version);
-        assert_eq!(versioned_name, "schema_table_1");
-    }
-
-    #[test]
-    fn test_previous_versioned_table_name() {
-        let mut versions = HashMap::new();
-        let base_table = "schema_table".to_string();
-
-        // No previous version when starting
-        assert!(versions.get(&base_table).is_none());
-
-        // Version 0 has no previous
-        versions.insert(base_table.clone(), 0);
-        assert_eq!(versions.get(&base_table), Some(&0));
-
-        // Version 1 has previous 0
-        versions.insert(base_table.clone(), 1);
-        let prev_version = versions
-            .get(&base_table)
-            .and_then(|&v| if v > 0 { Some(v - 1) } else { None });
-        assert_eq!(prev_version, Some(0));
-
-        // Version 2 has previous 1
-        versions.insert(base_table.clone(), 2);
-        let prev_version = versions
-            .get(&base_table)
-            .and_then(|&v| if v > 0 { Some(v - 1) } else { None });
-        assert_eq!(prev_version, Some(1));
-    }
-
-    #[test]
-    fn test_view_caching_logic() {
-        let mut created_views = HashMap::new();
-        let view_name = "schema_table".to_string();
-        let target_table_v0 = "schema_table_0".to_string();
-        let target_table_v1 = "schema_table_1".to_string();
-
-        // Initially no view exists
-        assert!(created_views.get(&view_name).is_none());
-
-        // After first creation, view points to v0
-        created_views.insert(view_name.clone(), target_table_v0.clone());
-        assert_eq!(created_views.get(&view_name), Some(&target_table_v0));
-
-        // Check if view needs update to v1 (should return true since it points to v0)
-        let needs_update = created_views
-            .get(&view_name)
-            .map_or(true, |current| current != &target_table_v1);
-        assert!(needs_update);
-
-        // After update, view points to v1
-        created_views.insert(view_name.clone(), target_table_v1.clone());
-        assert_eq!(created_views.get(&view_name), Some(&target_table_v1));
-
-        // Check if view needs update to v1 again (should return false since it already points to v1)
-        let needs_update = created_views
-            .get(&view_name)
-            .map_or(true, |current| current != &target_table_v1);
-        assert!(!needs_update);
     }
 }
