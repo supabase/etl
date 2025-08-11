@@ -1,7 +1,3 @@
-use crate::common::bigquery::{
-    BigQueryOrder, BigQueryUser, NonNullableColsScalar, NullableColsArray, NullableColsScalar,
-    parse_bigquery_table_rows, setup_bigquery_connection,
-};
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use etl::config::BatchConfig;
 use etl::error::ErrorKind;
@@ -18,6 +14,11 @@ use rand::random;
 use std::str::FromStr;
 use std::time::Duration;
 use tokio::time::sleep;
+
+use crate::common::bigquery::{
+    BigQueryOrder, BigQueryUser, NonNullableColsScalar, NullableColsArray, NullableColsScalar,
+    parse_bigquery_table_rows, setup_bigquery_connection,
+};
 
 #[tokio::test(flavor = "multi_thread")]
 async fn table_copy_and_streaming_with_restart() {
