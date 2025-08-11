@@ -62,6 +62,7 @@ impl fmt::Display for BigQueryOperationType {
 ///
 /// Provides methods for table management, data insertion, and query execution
 /// against BigQuery datasets with authentication and error handling.
+#[derive(Clone)]
 pub struct BigQueryClient {
     project_id: BigQueryProjectId,
     client: Client,
@@ -175,6 +176,48 @@ impl BigQueryClient {
         let delete_query = format!("truncate table {full_table_name}",);
 
         let _ = self.query(QueryRequest::new(delete_query)).await?;
+
+        Ok(())
+    }
+
+    /// Creates or replaces a view that points to the specified versioned table.
+    ///
+    /// This is used during truncation operations to redirect the view to a new table version.
+    pub async fn create_or_replace_view(
+        &self,
+        dataset_id: &BigQueryDatasetId,
+        view_name: &BigQueryTableId,
+        target_table_id: &BigQueryTableId,
+    ) -> EtlResult<()> {
+        let full_view_name = self.full_table_name(dataset_id, view_name);
+        let full_target_table_name = self.full_table_name(dataset_id, target_table_id);
+
+        info!("Creating/replacing view {full_view_name} pointing to {full_target_table_name}");
+
+        let query = format!(
+            "CREATE OR REPLACE VIEW {full_view_name} AS SELECT * FROM {full_target_table_name}"
+        );
+
+        let _ = self.query(QueryRequest::new(query)).await?;
+
+        Ok(())
+    }
+
+    /// Drops a table from BigQuery.
+    ///
+    /// Executes a DROP TABLE statement to remove the table and all its data.
+    pub async fn drop_table(
+        &self,
+        dataset_id: &BigQueryDatasetId,
+        table_id: &BigQueryTableId,
+    ) -> EtlResult<()> {
+        let full_table_name = self.full_table_name(dataset_id, table_id);
+
+        info!("Dropping table {full_table_name} from BigQuery");
+
+        let query = format!("DROP TABLE IF EXISTS {full_table_name}");
+
+        let _ = self.query(QueryRequest::new(query)).await?;
 
         Ok(())
     }
