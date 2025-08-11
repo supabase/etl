@@ -34,6 +34,29 @@ fn random_dataset_id() -> String {
 ///
 /// Provides a unified interface for BigQuery operations in tests, automatically
 /// handling setup and teardown of test datasets using actual Google Cloud credentials.
+///
+/// # Table Creation Examples
+///
+/// ```rust
+/// // Create a simple table with column definitions
+/// let table_name = TableName::new("public".to_string(), "users".to_string());
+/// let columns = &[
+///     ("id", "INT64"),
+///     ("name", "STRING"),
+///     ("age", "INT64"),
+///     ("created_at", "TIMESTAMP")
+/// ];
+/// db.create_table(table_name, columns).await;
+///
+/// // Create a table with custom DDL
+/// let ddl = "CREATE TABLE `project.dataset.public_products` (
+///     id INT64,
+///     name STRING,
+///     price NUMERIC(10,2),
+///     tags ARRAY<STRING>
+/// )";
+/// db.create_table_with_ddl(table_name, ddl).await;
+/// ```
 pub struct BigQueryDatabase {
     client: Option<Client>,
     sa_key_path: String,
@@ -113,6 +136,36 @@ impl BigQueryDatabase {
             .await
             .unwrap()
             .rows
+    }
+
+    /// Manually creates a table in the test dataset using column definitions.
+    ///
+    /// Creates a table by generating a DDL statement from the provided column specifications.
+    /// Each column is specified as a tuple of (column_name, bigquery_type).
+    pub async fn create_table(&self, table_name: TableName, columns: &[(&str, &str)]) {
+        let client = self.client().unwrap();
+        let project_id = self.project_id();
+        let dataset_id = self.dataset_id();
+        let table_id = table_name_to_bigquery_table_id(&table_name);
+
+        let column_definitions: Vec<String> = columns
+            .iter()
+            .map(|(name, data_type)| format!("{} {}", name, data_type))
+            .collect();
+
+        let ddl = format!(
+            "CREATE TABLE `{}.{}.{}` ({})",
+            project_id,
+            dataset_id,
+            table_id,
+            column_definitions.join(", ")
+        );
+
+        client
+            .job()
+            .query(project_id, QueryRequest::new(ddl))
+            .await
+            .unwrap();
     }
 
     /// Returns the Google Cloud project ID for this database instance.

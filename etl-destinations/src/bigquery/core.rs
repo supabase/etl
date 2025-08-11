@@ -292,14 +292,15 @@ where
         target_table_id: &BigQueryTableId,
     ) -> EtlResult<bool> {
         // Check if the view already points to the correct table
-        if let Some(current_target) = inner.created_views.get(view_name) {
-            if current_target == target_table_id {
-                debug!(
-                    "view {} already points to {}, skipping creation",
-                    view_name, target_table_id
-                );
-                return Ok(false);
-            }
+        if let Some(current_target) = inner.created_views.get(view_name)
+            && current_target == target_table_id
+        {
+            debug!(
+                "view {} already points to {}, skipping creation",
+                view_name, target_table_id
+            );
+
+            return Ok(false);
         }
 
         // Create or replace the view
