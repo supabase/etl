@@ -522,83 +522,94 @@ where
     ///
     /// Maps PostgreSQL table OIDs to BigQuery table names, creates new versioned tables,
     /// updates views to point to new tables, and schedules old table cleanup.
+    /// Deduplicates table IDs to avoid redundant truncate operations on the same table.
     async fn process_truncate_events(&self, truncate_events: Vec<TruncateEvent>) -> EtlResult<()> {
         let mut inner = self.inner.lock().await;
 
+        // Collect and deduplicate all table IDs from all truncate events.
+        //
+        // This is done as an optimization since if we have multiple table ids being truncated in a
+        // row without applying other events in the meanwhile, it doesn't make any sense to create
+        // new empty tables for each of them.
+        let mut unique_table_ids = HashSet::new();
         for truncate_event in truncate_events {
             for table_id in truncate_event.rel_ids {
-                if let Some(table_schema) = inner
-                    .schema_store
-                    .get_table_schema(&TableId::new(table_id))
-                    .await?
-                {
-                    let base_table_id = table_name_to_bigquery_table_id(&table_schema.name);
+                unique_table_ids.insert(table_id);
+            }
+        }
 
-                    // Get the previous table name for cleanup
-                    let previous_table_id =
-                        Self::get_previous_versioned_table_name(&inner, &base_table_id);
+        for table_id in unique_table_ids {
+            let Some(table_schema) = inner
+                .schema_store
+                .get_table_schema(&TableId::new(table_id))
+                .await?
+            else {
+                info!(
+                    "table schema not found for table_id: {}, skipping truncate",
+                    table_id
+                );
+                continue;
+            };
 
-                    // Create the new versioned table
-                    let new_versioned_table_id =
-                        Self::increment_table_version(&mut inner, &base_table_id);
+            let base_table_id = table_name_to_bigquery_table_id(&table_schema.name);
 
-                    info!(
-                        "processing truncate for table {}: creating new version {}",
-                        base_table_id, new_versioned_table_id
-                    );
+            // Get the previous table name for cleanup
+            let previous_table_id = Self::get_previous_versioned_table_name(&inner, &base_table_id);
 
-                    // Create or replace the new table.
-                    //
-                    // We unconditionally replace the table if it's there because here we know that
-                    // we need the table to be empty given the truncation.
-                    inner
-                        .client
-                        .create_or_replace_table(
-                            &inner.dataset_id,
-                            &new_versioned_table_id,
-                            &table_schema.column_schemas,
-                            inner.max_staleness_mins,
-                        )
-                        .await?;
+            // Create the new versioned table
+            let new_versioned_table_id = Self::increment_table_version(&mut inner, &base_table_id);
 
-                    // Update the view to point to the new table.
-                    //
-                    // We do this after the table has been created to that in case of failure, the
-                    // view can be manually updated to point to the new table.
-                    Self::ensure_view_points_to_table(
-                        &mut inner,
-                        &base_table_id,
-                        &new_versioned_table_id,
-                    )
-                    .await?;
-                    Self::add_to_created_tables_cache(&mut inner, new_versioned_table_id.clone());
+            info!(
+                "processing truncate for table {}: creating new version {}",
+                base_table_id, new_versioned_table_id
+            );
 
-                    info!(
-                        "successfully processed truncate for {}: new table {}, view updated",
-                        base_table_id, new_versioned_table_id
-                    );
+            // Create or replace the new table.
+            //
+            // We unconditionally replace the table if it's there because here we know that
+            // we need the table to be empty given the truncation.
+            inner
+                .client
+                .create_or_replace_table(
+                    &inner.dataset_id,
+                    &new_versioned_table_id,
+                    &table_schema.column_schemas,
+                    inner.max_staleness_mins,
+                )
+                .await?;
 
-                    // Schedule cleanup of the previous table (done asynchronously to avoid blocking)
-                    if let Some(prev_table_id) = previous_table_id {
-                        Self::remove_from_created_tables_cache(&mut inner, &prev_table_id);
+            // Update the view to point to the new table.
+            //
+            // We do this after the table has been created to that in case of failure, the
+            // view can be manually updated to point to the new table.
+            //
+            // Unfortunately, BigQuery doesn't seem to offer transactions for DDL operations so our
+            // implementation is best effort.
+            Self::ensure_view_points_to_table(&mut inner, &base_table_id, &new_versioned_table_id)
+                .await?;
+            Self::add_to_created_tables_cache(&mut inner, new_versioned_table_id.clone());
 
-                        let client = inner.client.clone();
-                        let dataset_id = inner.dataset_id.clone();
+            info!(
+                "successfully processed truncate for {}: new table {}, view updated",
+                base_table_id, new_versioned_table_id
+            );
 
-                        tokio::spawn(async move {
-                            if let Err(err) = client.drop_table(&dataset_id, &prev_table_id).await {
-                                warn!("failed to drop previous table {}: {}", prev_table_id, err);
-                            } else {
-                                info!("successfully cleaned up previous table {}", prev_table_id);
-                            }
-                        });
+            if let Some(prev_table_id) = previous_table_id {
+                Self::remove_from_created_tables_cache(&mut inner, &prev_table_id);
+
+                let client = inner.client.clone();
+                let dataset_id = inner.dataset_id.clone();
+
+                // Schedule cleanup of the previous table. We do not care to track this task since
+                // if it fails, users can clean up the table on their own, but the view will still point
+                // to the new data.
+                tokio::spawn(async move {
+                    if let Err(err) = client.drop_table(&dataset_id, &prev_table_id).await {
+                        warn!("failed to drop previous table {}: {}", prev_table_id, err);
+                    } else {
+                        info!("successfully cleaned up previous table {}", prev_table_id);
                     }
-                } else {
-                    info!(
-                        "table schema not found for table_id: {}, skipping truncate",
-                        table_id
-                    );
-                }
+                });
             }
         }
 
