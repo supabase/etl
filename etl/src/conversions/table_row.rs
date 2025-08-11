@@ -68,9 +68,7 @@ impl TableRowConverter {
                             row_terminated = true;
                             break;
                         }
-                        '\\' => {
-                            in_escape = true
-                        },
+                        '\\' => in_escape = true,
                         c => {
                             val_str.push(c);
                         }
