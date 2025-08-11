@@ -35,14 +35,13 @@ impl TableRowConverter {
         let mut done = false;
 
         while !done {
-            let mut is_null = false;
-
             loop {
                 match chars.next() {
                     Some(c) => match c {
                         c if in_escape => {
                             if c == 'N' {
-                                is_null = true;
+                                val_str.push('\\');
+                                val_str.push('N');
                             } else if c == 'b' {
                                 val_str.push(8 as char);
                             } else if c == 'f' {
@@ -97,7 +96,7 @@ impl TableRowConverter {
                     );
                 };
 
-                let value = if is_null {
+                let value = if val_str == "\\N" {
                     // In case of a null value, we store the type information since that will be used to
                     // correctly compute default values when needed.
                     Cell::Null
