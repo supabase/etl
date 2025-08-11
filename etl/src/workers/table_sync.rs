@@ -391,7 +391,11 @@ where
                             // Before rolling back, we acquire the pool lock again for consistency
                             let mut pool_guard = pool.lock().await;
 
-                            // After sleeping, we rollback to the previous state and retry
+                            // After sleeping, we rollback to the previous state and retry.
+                            //
+                            // Note that this rollback is one state before, so for this to work properly
+                            // we have to make sure that the error kinds that have a timed retry, could
+                            // be solved with a simple rollback instead of a full reset.
                             if let Err(err) = state_guard.rollback(&store).await {
                                 error!(
                                     "failed to rollback table sync worker state for table {}: {}",

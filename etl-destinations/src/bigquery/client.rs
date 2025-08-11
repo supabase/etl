@@ -205,7 +205,8 @@ impl BigQueryClient {
         table_descriptor: &TableDescriptor,
         table_rows: Vec<TableRow>,
     ) -> EtlResult<()> {
-        // We have to map table rows into the new type due to the limitations of how Rust works.
+        // We map the table rows into `BigQueryTableRow`s instances, so that we also do a validation
+        // of the cells.
         let table_rows = table_rows
             .into_iter()
             .map(BigQueryTableRow::try_from)

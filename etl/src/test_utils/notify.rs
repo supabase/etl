@@ -109,6 +109,18 @@ impl NotifyingStore {
 
         notify
     }
+
+    pub async fn reset_table_state(&self, table_id: TableId) -> EtlResult<()> {
+        let mut inner = self.inner.write().await;
+        inner.table_replication_states.remove(&table_id);
+        inner.table_state_history.remove(&table_id);
+
+        inner
+            .table_replication_states
+            .insert(table_id, TableReplicationPhase::Init);
+
+        Ok(())
+    }
 }
 
 impl Default for NotifyingStore {
