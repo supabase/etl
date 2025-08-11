@@ -106,6 +106,12 @@ impl TableReplicationError {
                 "Check if the Postgres database allows the creation of new replication slots",
                 RetryPolicy::ManualRetry,
             ),
+            ErrorKind::NullValuesNotSupportedInArray => Self::with_solution(
+                table_id,
+                error,
+                "Make sure that your Postgres tables do not have arrays with NULL values",
+                RetryPolicy::ManualRetry
+            ),
 
             // Special handling for error kinds used during failure injection.
             #[cfg(feature = "failpoints")]
