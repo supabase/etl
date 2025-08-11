@@ -142,11 +142,10 @@ impl BigQueryDatabase {
     ///
     /// Creates a table by generating a DDL statement from the provided column specifications.
     /// Each column is specified as a tuple of (column_name, bigquery_type).
-    pub async fn create_table(&self, table_name: TableName, columns: &[(&str, &str)]) {
+    pub async fn create_table(&self, table_id: &str, columns: &[(&str, &str)]) {
         let client = self.client().unwrap();
         let project_id = self.project_id();
         let dataset_id = self.dataset_id();
-        let table_id = table_name_to_bigquery_table_id(&table_name);
 
         let column_definitions: Vec<String> = columns
             .iter()

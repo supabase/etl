@@ -381,7 +381,7 @@ async fn table_truncate_with_batching() {
     // We create table `test_users_1` to simulate an error in the system where a table with that name
     // already exists and should be replaced for replication to work correctly.
     bigquery_database
-        .create_table(test_table_name("users_1"), &[("age", "integer")])
+        .create_table("test_users_1", &[("age", "integer")])
         .await;
 
     let store = NotifyingStore::new();
