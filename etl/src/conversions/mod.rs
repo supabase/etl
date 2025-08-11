@@ -276,3 +276,118 @@ impl ArrayCellNonOptional {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cell_try_from_to_cell_non_optional() {
+        // Test successful conversions
+        let cell = Cell::I32(42);
+        let non_opt = CellNonOptional::try_from(cell).unwrap();
+        assert_eq!(non_opt, CellNonOptional::I32(42));
+
+        let cell = Cell::String("test".to_string());
+        let non_opt = CellNonOptional::try_from(cell).unwrap();
+        assert_eq!(non_opt, CellNonOptional::String("test".to_string()));
+
+        let cell = Cell::Null;
+        let non_opt = CellNonOptional::try_from(cell).unwrap();
+        assert_eq!(non_opt, CellNonOptional::Null);
+    }
+
+    #[test]
+    fn cell_try_from_array_conversion() {
+        let array_cell = ArrayCell::I32(vec![Some(1), Some(2), Some(3)]);
+        let cell = Cell::Array(array_cell);
+        
+        let non_opt = CellNonOptional::try_from(cell).unwrap();
+        if let CellNonOptional::Array(ArrayCellNonOptional::I32(vec)) = non_opt {
+            assert_eq!(vec, vec![1, 2, 3]);
+        } else {
+            panic!("Expected non-optional i32 array");
+        }
+    }
+
+    #[test]
+    fn array_cell_try_from_with_nulls() {
+        let array_cell = ArrayCell::String(vec![Some("test".to_string()), None, Some("hello".to_string())]);
+        
+        let result = ArrayCellNonOptional::try_from(array_cell);
+        assert!(result.is_err());
+        
+        let error = result.unwrap_err();
+        assert!(error.to_string().contains("NULL values in arrays are not supported"));
+    }
+
+    #[test]
+    fn array_cell_try_from_without_nulls() {
+        let array_cell = ArrayCell::I32(vec![Some(1), Some(2), Some(3)]);
+        
+        let result = ArrayCellNonOptional::try_from(array_cell).unwrap();
+        if let ArrayCellNonOptional::I32(vec) = result {
+            assert_eq!(vec, vec![1, 2, 3]);
+        } else {
+            panic!("Expected i32 array");
+        }
+    }
+
+    #[test]
+    fn array_cell_try_from_null_variant() {
+        let array_cell = ArrayCell::Null;
+        
+        let result = ArrayCellNonOptional::try_from(array_cell).unwrap();
+        assert_eq!(result, ArrayCellNonOptional::Null);
+    }
+
+    #[test]
+    fn cell_types_equality() {
+        // Test that equal cells are actually equal
+        assert_eq!(Cell::I32(42), Cell::I32(42));
+        assert_ne!(Cell::I32(42), Cell::I32(43));
+        
+        assert_eq!(Cell::String("test".to_string()), Cell::String("test".to_string()));
+        assert_ne!(Cell::String("test".to_string()), Cell::String("different".to_string()));
+        
+        assert_eq!(Cell::Null, Cell::Null);
+        assert_ne!(Cell::Null, Cell::I32(0));
+    }
+
+    #[test]
+    fn cell_types_clone() {
+        let cell = Cell::String("test".to_string());
+        let cloned = cell.clone();
+        assert_eq!(cell, cloned);
+        
+        let array_cell = Cell::Array(ArrayCell::I32(vec![Some(1), None, Some(3)]));
+        let cloned_array = array_cell.clone();
+        assert_eq!(array_cell, cloned_array);
+    }
+
+    #[test]
+    fn complex_array_conversions() {
+        // Test complex array type conversions
+        let mixed_types = vec![
+            ArrayCell::Bool(vec![Some(true), Some(false)]),
+            ArrayCell::String(vec![Some("hello".to_string()), Some("world".to_string())]),
+            ArrayCell::I32(vec![Some(1), Some(2), Some(3)]),
+            ArrayCell::Null,
+        ];
+
+        for array_cell in mixed_types {
+            let cell = Cell::Array(array_cell);
+            
+            // Test that we can convert to CellNonOptional if no nulls are present
+            let non_opt_result = CellNonOptional::try_from(cell);
+            
+            // Some will succeed (Bool, String, I32 without nulls, Null)
+            // Others may fail if they contain nulls
+            if let Ok(non_opt) = non_opt_result {
+                // Test that clear works on the result
+                let mut non_opt_clone = non_opt.clone();
+                non_opt_clone.clear();
+            }
+        }
+    }
+}

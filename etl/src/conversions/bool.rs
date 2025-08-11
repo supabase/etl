@@ -15,3 +15,87 @@ pub fn parse_bool(s: &str) -> EtlResult<bool> {
         );
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::error::ErrorKind;
+
+    #[test]
+    fn parse_bool_true() {
+        assert_eq!(parse_bool("t").unwrap(), true);
+    }
+
+    #[test]
+    fn parse_bool_false() {
+        assert_eq!(parse_bool("f").unwrap(), false);
+    }
+
+    #[test]
+    fn parse_bool_invalid_empty() {
+        let result = parse_bool("");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err.kind(), ErrorKind::InvalidData));
+        assert!(err.to_string().contains("Boolean value must be 't' or 'f'"));
+        assert!(err.to_string().contains("received: "));
+    }
+
+    #[test]
+    fn parse_bool_invalid_true_word() {
+        let result = parse_bool("true");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err.kind(), ErrorKind::InvalidData));
+        assert!(err.to_string().contains("received: true"));
+    }
+
+    #[test]
+    fn parse_bool_invalid_false_word() {
+        let result = parse_bool("false");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err.kind(), ErrorKind::InvalidData));
+        assert!(err.to_string().contains("received: false"));
+    }
+
+    #[test]
+    fn parse_bool_invalid_numbers() {
+        assert!(parse_bool("0").is_err());
+        assert!(parse_bool("1").is_err());
+    }
+
+    #[test]
+    fn parse_bool_invalid_case_sensitive() {
+        assert!(parse_bool("T").is_err());
+        assert!(parse_bool("F").is_err());
+    }
+
+    #[test]
+    fn parse_bool_invalid_whitespace() {
+        assert!(parse_bool(" t").is_err());
+        assert!(parse_bool("t ").is_err());
+        assert!(parse_bool(" f ").is_err());
+    }
+
+    #[test]
+    fn parse_bool_invalid_special_chars() {
+        assert!(parse_bool("t\n").is_err());
+        assert!(parse_bool("f\t").is_err());
+        assert!(parse_bool("t\0").is_err());
+    }
+
+    #[test]
+    fn parse_bool_invalid_unicode() {
+        assert!(parse_bool("🤔").is_err());
+        assert!(parse_bool("ÿ").is_err());
+    }
+
+    #[test]
+    fn parse_bool_invalid_multiple_chars() {
+        assert!(parse_bool("tt").is_err());
+        assert!(parse_bool("tf").is_err());
+        assert!(parse_bool("ft").is_err());
+        assert!(parse_bool("ff").is_err());
+    }
+}

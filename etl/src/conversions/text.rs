@@ -313,6 +313,7 @@ impl TextFormatConverter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::{Datelike, Timelike};
 
     #[test]
     fn parse_text_array_quoted_null_as_string() {
@@ -345,5 +346,288 @@ mod tests {
         // The error should be a parsing error, not related to NULL handling
         let error = result.unwrap_err();
         assert!(!error.to_string().contains("NULL"));
+    }
+
+    #[test]
+    fn try_from_str_bool() {
+        let cell = TextFormatConverter::try_from_str(&Type::BOOL, "t").unwrap();
+        assert_eq!(cell, Cell::Bool(true));
+        
+        let cell = TextFormatConverter::try_from_str(&Type::BOOL, "f").unwrap();
+        assert_eq!(cell, Cell::Bool(false));
+        
+        assert!(TextFormatConverter::try_from_str(&Type::BOOL, "invalid").is_err());
+    }
+
+    #[test]
+    fn try_from_str_integers() {
+        let cell = TextFormatConverter::try_from_str(&Type::INT2, "123").unwrap();
+        assert_eq!(cell, Cell::I16(123));
+        
+        let cell = TextFormatConverter::try_from_str(&Type::INT4, "-456").unwrap();
+        assert_eq!(cell, Cell::I32(-456));
+        
+        let cell = TextFormatConverter::try_from_str(&Type::INT8, "9223372036854775807").unwrap();
+        assert_eq!(cell, Cell::I64(9223372036854775807));
+        
+        let cell = TextFormatConverter::try_from_str(&Type::OID, "12345").unwrap();
+        assert_eq!(cell, Cell::U32(12345));
+    }
+
+    #[test]
+    fn try_from_str_integer_overflow() {
+        assert!(TextFormatConverter::try_from_str(&Type::INT2, "99999").is_err());
+        assert!(TextFormatConverter::try_from_str(&Type::INT4, "9999999999").is_err());
+        assert!(TextFormatConverter::try_from_str(&Type::OID, "-1").is_err());
+    }
+
+    #[test]
+    fn try_from_str_floats() {
+        let cell = TextFormatConverter::try_from_str(&Type::FLOAT4, "3.14").unwrap();
+        assert_eq!(cell, Cell::F32(3.14));
+        
+        let cell = TextFormatConverter::try_from_str(&Type::FLOAT8, "-2.71828").unwrap();
+        assert_eq!(cell, Cell::F64(-2.71828));
+        
+        let cell = TextFormatConverter::try_from_str(&Type::FLOAT4, "inf").unwrap();
+        assert_eq!(cell, Cell::F32(f32::INFINITY));
+        
+        let cell = TextFormatConverter::try_from_str(&Type::FLOAT8, "NaN").unwrap();
+        assert!(matches!(cell, Cell::F64(val) if val.is_nan()));
+    }
+
+    #[test]
+    fn try_from_str_string_types() {
+        let test_string = "Hello, World!";
+        
+        let cell = TextFormatConverter::try_from_str(&Type::TEXT, test_string).unwrap();
+        assert_eq!(cell, Cell::String(test_string.to_string()));
+        
+        let cell = TextFormatConverter::try_from_str(&Type::VARCHAR, test_string).unwrap();
+        assert_eq!(cell, Cell::String(test_string.to_string()));
+        
+        let cell = TextFormatConverter::try_from_str(&Type::CHAR, test_string).unwrap();
+        assert_eq!(cell, Cell::String(test_string.to_string()));
+    }
+
+    #[test]
+    fn try_from_str_numeric() {
+        let cell = TextFormatConverter::try_from_str(&Type::NUMERIC, "123.45").unwrap();
+        if let Cell::Numeric(num) = cell {
+            assert_eq!(num.to_string(), "123.45");
+        } else {
+            panic!("Expected Numeric cell");
+        }
+        
+        let cell = TextFormatConverter::try_from_str(&Type::NUMERIC, "NaN").unwrap();
+        assert_eq!(cell, Cell::Numeric(PgNumeric::NaN));
+    }
+
+    #[test]
+    fn try_from_str_bytea() {
+        let cell = TextFormatConverter::try_from_str(&Type::BYTEA, "\\x48656c6c6f").unwrap();
+        assert_eq!(cell, Cell::Bytes(b"Hello".to_vec()));
+        
+        assert!(TextFormatConverter::try_from_str(&Type::BYTEA, "invalid").is_err());
+    }
+
+    #[test]
+    fn try_from_str_dates() {
+        let cell = TextFormatConverter::try_from_str(&Type::DATE, "2023-12-25").unwrap();
+        if let Cell::Date(date) = cell {
+            assert_eq!(date.year(), 2023);
+            assert_eq!(date.month(), 12);
+            assert_eq!(date.day(), 25);
+        } else {
+            panic!("Expected Date cell");
+        }
+        
+        assert!(TextFormatConverter::try_from_str(&Type::DATE, "invalid-date").is_err());
+    }
+
+    #[test]
+    fn try_from_str_time() {
+        let cell = TextFormatConverter::try_from_str(&Type::TIME, "14:30:45.123").unwrap();
+        if let Cell::Time(time) = cell {
+            assert_eq!(time.hour(), 14);
+            assert_eq!(time.minute(), 30);
+            assert_eq!(time.second(), 45);
+        } else {
+            panic!("Expected Time cell");
+        }
+        
+        assert!(TextFormatConverter::try_from_str(&Type::TIME, "invalid-time").is_err());
+    }
+
+    #[test]
+    fn try_from_str_timestamp() {
+        let cell = TextFormatConverter::try_from_str(&Type::TIMESTAMP, "2023-12-25 14:30:45.123").unwrap();
+        if let Cell::TimeStamp(ts) = cell {
+            assert_eq!(ts.date().year(), 2023);
+            assert_eq!(ts.time().hour(), 14);
+        } else {
+            panic!("Expected TimeStamp cell");
+        }
+    }
+
+    #[test]
+    fn try_from_str_timestamptz() {
+        let cell = TextFormatConverter::try_from_str(&Type::TIMESTAMPTZ, "2023-12-25 14:30:45.123+00:00").unwrap();
+        if let Cell::TimeStampTz(ts) = cell {
+            assert_eq!(ts.year(), 2023);
+        } else {
+            panic!("Expected TimeStampTz cell");
+        }
+        
+        // Test fallback format
+        let cell = TextFormatConverter::try_from_str(&Type::TIMESTAMPTZ, "2023-12-25 14:30:45.123+00").unwrap();
+        assert!(matches!(cell, Cell::TimeStampTz(_)));
+    }
+
+    #[test]
+    fn try_from_str_uuid() {
+        let uuid_str = "550e8400-e29b-41d4-a716-446655440000";
+        let cell = TextFormatConverter::try_from_str(&Type::UUID, uuid_str).unwrap();
+        if let Cell::Uuid(uuid) = cell {
+            assert_eq!(uuid.to_string(), uuid_str);
+        } else {
+            panic!("Expected Uuid cell");
+        }
+        
+        assert!(TextFormatConverter::try_from_str(&Type::UUID, "invalid-uuid").is_err());
+    }
+
+    #[test]
+    fn try_from_str_json() {
+        let json_str = r#"{"key": "value", "number": 42}"#;
+        let cell = TextFormatConverter::try_from_str(&Type::JSON, json_str).unwrap();
+        if let Cell::Json(json) = cell {
+            assert_eq!(json["key"], "value");
+            assert_eq!(json["number"], 42);
+        } else {
+            panic!("Expected Json cell");
+        }
+        
+        let cell = TextFormatConverter::try_from_str(&Type::JSONB, json_str).unwrap();
+        assert!(matches!(cell, Cell::Json(_)));
+        
+        assert!(TextFormatConverter::try_from_str(&Type::JSON, "invalid json").is_err());
+    }
+
+    #[test]
+    fn parse_array_basic() {
+        let cell = TextFormatConverter::try_from_str(&Type::INT4_ARRAY, "{1,2,3}").unwrap();
+        match cell {
+            Cell::Array(ArrayCell::I32(v)) => {
+                assert_eq!(v, vec![Some(1), Some(2), Some(3)]);
+            }
+            _ => panic!("Expected INT4 array"),
+        }
+    }
+
+    #[test]
+    fn parse_array_with_nulls() {
+        let cell = TextFormatConverter::try_from_str(&Type::INT4_ARRAY, "{1,NULL,3}").unwrap();
+        match cell {
+            Cell::Array(ArrayCell::I32(v)) => {
+                assert_eq!(v, vec![Some(1), None, Some(3)]);
+            }
+            _ => panic!("Expected INT4 array"),
+        }
+    }
+
+    #[test]
+    fn parse_array_quoted_strings() {
+        let cell = TextFormatConverter::try_from_str(&Type::TEXT_ARRAY, r#"{"hello","world with spaces","with\"quotes"}"#).unwrap();
+        match cell {
+            Cell::Array(ArrayCell::String(v)) => {
+                assert_eq!(v, vec![
+                    Some("hello".to_string()),
+                    Some("world with spaces".to_string()),
+                    Some("with\"quotes".to_string())
+                ]);
+            }
+            _ => panic!("Expected TEXT array"),
+        }
+    }
+
+    #[test]
+    fn parse_array_empty() {
+        let cell = TextFormatConverter::try_from_str(&Type::INT4_ARRAY, "{}").unwrap();
+        match cell {
+            Cell::Array(ArrayCell::I32(v)) => {
+                assert!(v.is_empty());
+            }
+            _ => panic!("Expected empty INT4 array"),
+        }
+    }
+
+    #[test]
+    fn parse_array_single_element() {
+        let cell = TextFormatConverter::try_from_str(&Type::BOOL_ARRAY, "{t}").unwrap();
+        match cell {
+            Cell::Array(ArrayCell::Bool(v)) => {
+                assert_eq!(v, vec![Some(true)]);
+            }
+            _ => panic!("Expected BOOL array"),
+        }
+    }
+
+    #[test]
+    fn parse_array_invalid_format() {
+        // Missing opening brace
+        assert!(TextFormatConverter::try_from_str(&Type::INT4_ARRAY, "1,2,3}").is_err());
+        
+        // Missing closing brace
+        assert!(TextFormatConverter::try_from_str(&Type::INT4_ARRAY, "{1,2,3").is_err());
+        
+        // Too short
+        assert!(TextFormatConverter::try_from_str(&Type::INT4_ARRAY, "{").is_err());
+        assert!(TextFormatConverter::try_from_str(&Type::INT4_ARRAY, "}").is_err());
+        assert!(TextFormatConverter::try_from_str(&Type::INT4_ARRAY, "").is_err());
+    }
+
+    #[test]
+    fn parse_array_escape_sequences() {
+        // The array parser doesn't process escape sequences in the same way as the table row parser
+        // It expects literal characters in the array string
+        let cell = TextFormatConverter::try_from_str(&Type::TEXT_ARRAY, r#"{"line1\\nline2","tab\\there"}"#).unwrap();
+        match cell {
+            Cell::Array(ArrayCell::String(v)) => {
+                // These should be literal strings since array parser doesn't decode escapes like table parser
+                assert_eq!(v, vec![
+                    Some("line1\\nline2".to_string()),
+                    Some("tab\\there".to_string())
+                ]);
+            }
+            _ => panic!("Expected TEXT array with escape sequences"),
+        }
+    }
+
+    #[test]
+    fn parse_timestamptz_array_fallback() {
+        // Test the fallback parsing for timestamptz arrays
+        let cell = TextFormatConverter::try_from_str(&Type::TIMESTAMPTZ_ARRAY, "{\"2023-01-01 12:00:00.000+00\"}").unwrap();
+        match cell {
+            Cell::Array(ArrayCell::TimeStampTz(v)) => {
+                assert_eq!(v.len(), 1);
+                assert!(v[0].is_some());
+            }
+            _ => panic!("Expected TIMESTAMPTZ array"),
+        }
+    }
+
+    #[cfg(feature = "unknown-types-to-bytes")]
+    #[test]
+    fn unknown_types_to_string() {
+        use tokio_postgres::types::Type;
+        // Create a custom type that's not normally supported
+        let custom_type = Type::new("custom".to_string(), 99999, tokio_postgres::types::Kind::Simple, "public".to_string());
+        
+        let cell = TextFormatConverter::default_value(&custom_type).unwrap();
+        assert_eq!(cell, Cell::String(String::new()));
+        
+        let cell = TextFormatConverter::try_from_str(&custom_type, "test").unwrap();
+        assert_eq!(cell, Cell::String("test".to_string()));
     }
 }
