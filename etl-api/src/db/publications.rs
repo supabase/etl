@@ -27,7 +27,9 @@ pub async fn create_publication(
     let quoted_publication_name = quote_identifier(&publication.name);
     query.push_str("create publication ");
     query.push_str(&quoted_publication_name);
-    query.push_str(" for table only ");
+    if !publication.tables.is_empty() {
+        query.push_str(" for table only ");
+    }
 
     for (i, table) in publication.tables.iter().enumerate() {
         let quoted_schema = quote_identifier(&table.schema);
