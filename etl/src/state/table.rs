@@ -68,70 +68,122 @@ impl TableReplicationError {
         let retry_duration = Duration::milliseconds(config.table_error_retry_delay_ms as i64);
         match error.kind() {
             // Transient errors with retry
-            ErrorKind::ConnectionFailed => Self::with_solution(
+            ErrorKind::ConnectionFailed => Self::without_solution(
                 table_id,
                 error,
-                "Check network connectivity and database availability",
                 RetryPolicy::retry_in(retry_duration),
             ),
+
+            // Authentication errors require manual intervention
             ErrorKind::AuthenticationError => Self::with_solution(
                 table_id,
                 error,
-                "Check credentials and token validity",
-                RetryPolicy::retry_in(retry_duration),
+                "Verify database credentials and authentication token validity.",
+                RetryPolicy::ManualRetry,
             ),
 
             // Errors that could disappear after user intervention
             ErrorKind::SourceSchemaError => Self::with_solution(
                 table_id,
                 error,
-                "Fix the schema of the Postgres database",
+                "Update the Postgres database schema to resolve compatibility issues.",
                 RetryPolicy::ManualRetry,
             ),
             ErrorKind::ConfigError => Self::with_solution(
                 table_id,
                 error,
-                "Fix application or service configuration",
+                "Update the application or service configuration settings.",
                 RetryPolicy::ManualRetry,
             ),
             ErrorKind::ReplicationSlotAlreadyExists => Self::with_solution(
                 table_id,
                 error,
-                "Remove the existing slot from the Postgres database",
+                "Remove the existing replication slot from the Postgres database.",
                 RetryPolicy::ManualRetry,
             ),
             ErrorKind::ReplicationSlotNotCreated => Self::with_solution(
                 table_id,
                 error,
-                "Check if the Postgres database allows the creation of new replication slots",
+                "Verify the Postgres database allows creation of new replication slots.",
                 RetryPolicy::ManualRetry,
             ),
             ErrorKind::NullValuesNotSupportedInArray => Self::with_solution(
                 table_id,
                 error,
-                "Make sure that your Postgres tables do not have arrays with NULL values",
+                "Remove NULL values from array columns in the Postgres tables.",
+                RetryPolicy::ManualRetry,
+            ),
+
+            // Replication-specific errors
+            ErrorKind::SourceSnapshotTooOld => Self::with_solution(
+                table_id,
+                error,
+                "Check replication slot status and database configuration.",
+                RetryPolicy::ManualRetry,
+            ),
+            ErrorKind::DatabaseInRecovery => Self::without_solution(
+                table_id,
+                error,
+                RetryPolicy::retry_in(retry_duration),
+            ),
+
+            // Administrative actions that may be temporary
+            ErrorKind::OperationCanceled => Self::without_solution(
+                table_id,
+                error,
+                RetryPolicy::retry_in(retry_duration),
+            ),
+            ErrorKind::DatabaseShutdown => Self::without_solution(
+                table_id,
+                error,
+                RetryPolicy::retry_in(retry_duration),
+            ),
+
+            // Lock timeouts can be retried
+            ErrorKind::LockTimeout => Self::without_solution(
+                table_id,
+                error,
+                RetryPolicy::retry_in(retry_duration),
+            ),
+
+            // Statement timeouts usually require manual intervention
+            ErrorKind::StatementTimeout => Self::with_solution(
+                table_id,
+                error,
+                "Increase statement timeout or optimize query performance.",
+                RetryPolicy::ManualRetry,
+            ),
+
+            // Database I/O errors may be transient
+            ErrorKind::SourceIoError => Self::with_solution(
+                table_id,
+                error,
+                "Check database storage and I/O subsystem.",
                 RetryPolicy::ManualRetry,
             ),
 
             // Special handling for error kinds used during failure injection.
             #[cfg(feature = "failpoints")]
             ErrorKind::WithNoRetry => {
-                Self::with_solution(table_id, error, "Cannot retry", RetryPolicy::NoRetry)
+                Self::with_solution(table_id, error, "Cannot retry this error.", RetryPolicy::NoRetry)
             }
             #[cfg(feature = "failpoints")]
             ErrorKind::WithManualRetry => {
-                Self::with_solution(table_id, error, "Retry manually", RetryPolicy::ManualRetry)
+                Self::with_solution(table_id, error, "Manually trigger retry after resolving the issue.", RetryPolicy::ManualRetry)
             }
             #[cfg(feature = "failpoints")]
             ErrorKind::WithTimedRetry => Self::with_solution(
                 table_id,
                 error,
-                "Will retry",
+                "Will automatically retry after the configured delay.",
                 RetryPolicy::retry_in(retry_duration),
             ),
 
-            // By default, all errors are not retriable
-            _ => Self::without_solution(table_id, error, RetryPolicy::NoRetry),
+            // By default, all errors are retriable but without a solution. The reason for why we do
+            // this is to let customers fix the system on their own, since right now we don't have
+            // a clean understanding of all possible recoverable cases of the system (since we can't
+            // infer that only by looking at the statically defined errors).
+            _ => Self::without_solution(table_id, error, RetryPolicy::ManualRetry),
         }
     }
 }

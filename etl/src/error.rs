@@ -54,6 +54,8 @@ pub enum ErrorKind {
     ConfigError,
     /// Network or I/O error
     IoError,
+    /// Database I/O error
+    SourceIoError,
     /// Serialization error
     SerializationError,
     /// Deserialization error
@@ -86,6 +88,18 @@ pub enum ErrorKind {
     ReplicationSlotAlreadyExists,
     /// Replication slot could not be created
     ReplicationSlotNotCreated,
+    /// Logical replication error
+    SourceSnapshotTooOld,
+    /// Database is in recovery mode
+    DatabaseInRecovery,
+    /// Operation canceled by administrator
+    OperationCanceled,
+    /// Database shutdown in progress
+    DatabaseShutdown,
+    /// Lock timeout occurred
+    LockTimeout,
+    /// Statement timeout occurred
+    StatementTimeout,
     /// Unknown error
     Unknown,
 
@@ -334,8 +348,6 @@ impl From<std::num::ParseFloatError> for EtlError {
     }
 }
 
-// PostgreSQL-specific error conversions
-
 /// Converts [`tokio_postgres::Error`] to [`EtlError`] with appropriate error kind.
 ///
 /// Maps errors based on PostgreSQL SQLSTATE codes to provide granular error classification
@@ -415,8 +427,204 @@ impl From<tokio_postgres::Error> for EtlError {
                     }
 
                     // System errors (58xxx, XX xxx)
-                    SqlState::SYSTEM_ERROR | SqlState::IO_ERROR | SqlState::INTERNAL_ERROR => {
-                        (ErrorKind::IoError, "PostgreSQL system error")
+                    SqlState::SYSTEM_ERROR | SqlState::INTERNAL_ERROR => {
+                        (ErrorKind::QueryFailed, "PostgreSQL system error")
+                    }
+                    SqlState::IO_ERROR => {
+                        (ErrorKind::SourceIoError, "PostgreSQL I/O error")
+                    }
+
+                    // Operator intervention errors (57xxx)
+                    SqlState::OPERATOR_INTERVENTION => {
+                        (ErrorKind::OperationCanceled, "PostgreSQL operation canceled")
+                    }
+                    SqlState::QUERY_CANCELED => {
+                        (ErrorKind::OperationCanceled, "PostgreSQL query canceled")
+                    }
+                    SqlState::ADMIN_SHUTDOWN => {
+                        (ErrorKind::DatabaseShutdown, "PostgreSQL admin shutdown")
+                    }
+                    SqlState::CRASH_SHUTDOWN => {
+                        (ErrorKind::DatabaseShutdown, "PostgreSQL crash shutdown")
+                    }
+                    SqlState::CANNOT_CONNECT_NOW => {
+                        (ErrorKind::DatabaseInRecovery, "PostgreSQL database in recovery")
+                    }
+                    SqlState::DATABASE_DROPPED => {
+                        (ErrorKind::SourceSchemaError, "PostgreSQL database dropped")
+                    }
+                    SqlState::IDLE_SESSION_TIMEOUT => {
+                        (ErrorKind::ConnectionFailed, "PostgreSQL idle session timeout")
+                    }
+
+                    // Object state errors (55xxx)
+                    SqlState::OBJECT_NOT_IN_PREREQUISITE_STATE => {
+                        (ErrorKind::InvalidState, "PostgreSQL object not in prerequisite state")
+                    }
+                    SqlState::OBJECT_IN_USE => {
+                        (ErrorKind::InvalidState, "PostgreSQL object in use")
+                    }
+                    SqlState::LOCK_NOT_AVAILABLE => {
+                        (ErrorKind::LockTimeout, "PostgreSQL lock not available")
+                    }
+
+                    // Program limit errors (54xxx)
+                    SqlState::PROGRAM_LIMIT_EXCEEDED
+                    | SqlState::STATEMENT_TOO_COMPLEX
+                    | SqlState::TOO_MANY_COLUMNS
+                    | SqlState::TOO_MANY_ARGUMENTS => {
+                        (ErrorKind::QueryFailed, "PostgreSQL program limit exceeded")
+                    }
+
+                    // Configuration errors (53xxx)
+                    SqlState::DISK_FULL => (ErrorKind::SourceIoError, "PostgreSQL disk full"),
+                    SqlState::CONFIGURATION_LIMIT_EXCEEDED => {
+                        (ErrorKind::ConfigError, "PostgreSQL configuration limit exceeded")
+                    }
+
+                    // Transaction state errors (25xxx)
+                    SqlState::ACTIVE_SQL_TRANSACTION
+                    | SqlState::NO_ACTIVE_SQL_TRANSACTION
+                    | SqlState::IN_FAILED_SQL_TRANSACTION
+                    | SqlState::IDLE_IN_TRANSACTION_SESSION_TIMEOUT => {
+                        (ErrorKind::InvalidState, "PostgreSQL transaction state error")
+                    }
+
+                    // Cursor errors (24xxx, 34xxx)
+                    SqlState::INVALID_CURSOR_STATE | SqlState::INVALID_CURSOR_NAME => {
+                        (ErrorKind::InvalidState, "PostgreSQL cursor error")
+                    }
+
+                    // Data corruption errors (XX xxx)
+                    SqlState::DATA_CORRUPTED | SqlState::INDEX_CORRUPTED => {
+                        (ErrorKind::SourceIoError, "PostgreSQL data corruption")
+                    }
+
+                    // Configuration file errors (F0xxx)
+                    SqlState::CONFIG_FILE_ERROR | SqlState::LOCK_FILE_EXISTS => {
+                        (ErrorKind::ConfigError, "PostgreSQL configuration error")
+                    }
+
+                    // Feature not supported (0Axxx)
+                    SqlState::FEATURE_NOT_SUPPORTED => {
+                        (ErrorKind::SourceSchemaError, "PostgreSQL feature not supported")
+                    }
+
+                    // Invalid transaction initiation (0Bxxx)
+                    SqlState::INVALID_TRANSACTION_INITIATION => {
+                        (ErrorKind::InvalidState, "PostgreSQL invalid transaction initiation")
+                    }
+
+                    // Dependent objects errors (2Bxxx)
+                    SqlState::DEPENDENT_PRIVILEGE_DESCRIPTORS_STILL_EXIST
+                    | SqlState::DEPENDENT_OBJECTS_STILL_EXIST => {
+                        (ErrorKind::InvalidState, "PostgreSQL dependent objects exist")
+                    }
+
+                    // SQL routine errors (2Fxxx)
+                    SqlState::SQL_ROUTINE_EXCEPTION
+                    | SqlState::S_R_E_FUNCTION_EXECUTED_NO_RETURN_STATEMENT
+                    | SqlState::S_R_E_MODIFYING_SQL_DATA_NOT_PERMITTED
+                    | SqlState::S_R_E_PROHIBITED_SQL_STATEMENT_ATTEMPTED
+                    | SqlState::S_R_E_READING_SQL_DATA_NOT_PERMITTED => {
+                        (ErrorKind::QueryFailed, "PostgreSQL routine exception")
+                    }
+
+                    // External routine errors (38xxx, 39xxx)
+                    SqlState::EXTERNAL_ROUTINE_EXCEPTION
+                    | SqlState::E_R_E_CONTAINING_SQL_NOT_PERMITTED
+                    | SqlState::E_R_E_MODIFYING_SQL_DATA_NOT_PERMITTED
+                    | SqlState::E_R_E_PROHIBITED_SQL_STATEMENT_ATTEMPTED
+                    | SqlState::E_R_E_READING_SQL_DATA_NOT_PERMITTED
+                    | SqlState::EXTERNAL_ROUTINE_INVOCATION_EXCEPTION
+                    | SqlState::E_R_I_E_INVALID_SQLSTATE_RETURNED
+                    | SqlState::E_R_I_E_NULL_VALUE_NOT_ALLOWED
+                    | SqlState::E_R_I_E_TRIGGER_PROTOCOL_VIOLATED
+                    | SqlState::E_R_I_E_SRF_PROTOCOL_VIOLATED
+                    | SqlState::E_R_I_E_EVENT_TRIGGER_PROTOCOL_VIOLATED => {
+                        (ErrorKind::QueryFailed, "PostgreSQL external routine error")
+                    }
+
+                    // PL/pgSQL errors (P0xxx)
+                    SqlState::PLPGSQL_ERROR
+                    | SqlState::RAISE_EXCEPTION
+                    | SqlState::NO_DATA_FOUND
+                    | SqlState::TOO_MANY_ROWS
+                    | SqlState::ASSERT_FAILURE => (ErrorKind::QueryFailed, "PostgreSQL PL/pgSQL error"),
+
+                    // Foreign Data Wrapper errors (HVxxx) - connection/schema related
+                    SqlState::FDW_ERROR
+                    | SqlState::FDW_UNABLE_TO_ESTABLISH_CONNECTION => {
+                        (ErrorKind::ConnectionFailed, "PostgreSQL FDW connection error")
+                    }
+                    SqlState::FDW_SCHEMA_NOT_FOUND
+                    | SqlState::FDW_TABLE_NOT_FOUND
+                    | SqlState::FDW_COLUMN_NAME_NOT_FOUND
+                    | SqlState::FDW_INVALID_COLUMN_NAME
+                    | SqlState::FDW_NO_SCHEMAS => {
+                        (ErrorKind::SourceSchemaError, "PostgreSQL FDW schema error")
+                    }
+                    SqlState::FDW_INVALID_DATA_TYPE
+                    | SqlState::FDW_INVALID_DATA_TYPE_DESCRIPTORS
+                    | SqlState::FDW_INVALID_STRING_FORMAT => {
+                        (ErrorKind::ConversionError, "PostgreSQL FDW data type error")
+                    }
+                    SqlState::FDW_OUT_OF_MEMORY => {
+                        (ErrorKind::ConnectionFailed, "PostgreSQL FDW out of memory")
+                    }
+                    SqlState::FDW_DYNAMIC_PARAMETER_VALUE_NEEDED
+                    | SqlState::FDW_FUNCTION_SEQUENCE_ERROR
+                    | SqlState::FDW_INCONSISTENT_DESCRIPTOR_INFORMATION
+                    | SqlState::FDW_INVALID_ATTRIBUTE_VALUE
+                    | SqlState::FDW_INVALID_COLUMN_NUMBER
+                    | SqlState::FDW_INVALID_DESCRIPTOR_FIELD_IDENTIFIER
+                    | SqlState::FDW_INVALID_HANDLE
+                    | SqlState::FDW_INVALID_OPTION_INDEX
+                    | SqlState::FDW_INVALID_OPTION_NAME
+                    | SqlState::FDW_INVALID_STRING_LENGTH_OR_BUFFER_LENGTH
+                    | SqlState::FDW_INVALID_USE_OF_NULL_POINTER
+                    | SqlState::FDW_TOO_MANY_HANDLES
+                    | SqlState::FDW_OPTION_NAME_NOT_FOUND
+                    | SqlState::FDW_REPLY_HANDLE
+                    | SqlState::FDW_UNABLE_TO_CREATE_EXECUTION
+                    | SqlState::FDW_UNABLE_TO_CREATE_REPLY => {
+                        (ErrorKind::QueryFailed, "PostgreSQL FDW operation error")
+                    }
+
+                    // Snapshot errors (72xxx) - important for replication consistency
+                    SqlState::SNAPSHOT_TOO_OLD => {
+                        (ErrorKind::SourceSnapshotTooOld, "PostgreSQL snapshot too old")
+                    }
+
+                    // Array errors - relevant for replication data handling  
+                    SqlState::ARRAY_ELEMENT_ERROR => {
+                        (ErrorKind::ConversionError, "PostgreSQL array error")
+                    }
+
+                    // XML/JSON errors that could occur during replication
+                    SqlState::NOT_AN_XML_DOCUMENT
+                    | SqlState::INVALID_XML_DOCUMENT
+                    | SqlState::INVALID_XML_CONTENT
+                    | SqlState::INVALID_XML_COMMENT
+                    | SqlState::INVALID_XML_PROCESSING_INSTRUCTION
+                    | SqlState::DUPLICATE_JSON_OBJECT_KEY_VALUE
+                    | SqlState::INVALID_ARGUMENT_FOR_SQL_JSON_DATETIME_FUNCTION
+                    | SqlState::INVALID_JSON_TEXT
+                    | SqlState::INVALID_SQL_JSON_SUBSCRIPT
+                    | SqlState::MORE_THAN_ONE_SQL_JSON_ITEM
+                    | SqlState::NO_SQL_JSON_ITEM
+                    | SqlState::NON_NUMERIC_SQL_JSON_ITEM
+                    | SqlState::NON_UNIQUE_KEYS_IN_A_JSON_OBJECT
+                    | SqlState::SINGLETON_SQL_JSON_ITEM_REQUIRED
+                    | SqlState::SQL_JSON_ARRAY_NOT_FOUND
+                    | SqlState::SQL_JSON_MEMBER_NOT_FOUND
+                    | SqlState::SQL_JSON_NUMBER_NOT_FOUND
+                    | SqlState::SQL_JSON_OBJECT_NOT_FOUND
+                    | SqlState::TOO_MANY_JSON_ARRAY_ELEMENTS
+                    | SqlState::TOO_MANY_JSON_OBJECT_MEMBERS
+                    | SqlState::SQL_JSON_SCALAR_REQUIRED
+                    | SqlState::SQL_JSON_ITEM_CANNOT_BE_CAST_TO_TARGET_TYPE => {
+                        (ErrorKind::ConversionError, "PostgreSQL XML/JSON error")
                     }
 
                     // Default for other SQL states
