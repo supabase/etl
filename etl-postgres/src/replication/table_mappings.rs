@@ -1,4 +1,4 @@
-use sqlx::{PgExecutor, PgPool, Row};
+use sqlx::{PgExecutor, PgPool, Row, postgres::types::Oid as SqlxTableId};
 use std::collections::HashMap;
 
 use crate::schema::TableId;
@@ -10,7 +10,7 @@ use crate::schema::TableId;
 pub async fn store_table_mapping(
     pool: &PgPool,
     pipeline_id: i64,
-    source_table_id: &str,
+    source_table_id: &TableId,
     destination_table_id: &str,
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
@@ -24,7 +24,7 @@ pub async fn store_table_mapping(
         "#,
     )
     .bind(pipeline_id)
-    .bind(source_table_id)
+    .bind(SqlxTableId(source_table_id.into_inner()))
     .bind(destination_table_id)
     .execute(pool)
     .await?;
@@ -52,12 +52,10 @@ pub async fn load_table_mappings(
 
     let mut mappings = HashMap::new();
     for row in rows {
-        let source_table_id: String = row.get("source_table_id");
+        let source_table_id: SqlxTableId = row.get("source_table_id");
         let destination_table_id: String = row.get("destination_table_id");
 
-        let source_table_id = TableId::new(source_table_id.parse()?);
-        
-        mappings.insert(source_table_id, destination_table_id);
+        mappings.insert(TableId::new(source_table_id.0), destination_table_id);
     }
 
     Ok(mappings)

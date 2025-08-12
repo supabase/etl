@@ -1,12 +1,9 @@
-use crate::bigquery::client::{BigQueryClient, BigQueryOperationType};
-use crate::bigquery::{BigQueryDatasetId, BigQueryTableId};
 use etl::destination::Destination;
 use etl::error::{ErrorKind, EtlError, EtlResult};
 use etl::store::schema::SchemaStore;
 use etl::store::state::StateStore;
 use etl::types::{Cell, Event, PgLsn, TableId, TableName, TableRow, TruncateEvent};
 use etl::{bail, etl_error};
-use gcp_bigquery_client::model::training_options::HolidayRegion::Se;
 use gcp_bigquery_client::storage::TableDescriptor;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
@@ -14,6 +11,9 @@ use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
+
+use crate::bigquery::client::{BigQueryClient, BigQueryOperationType};
+use crate::bigquery::{BigQueryDatasetId, BigQueryTableId};
 
 /// The delimiter used when generating table names in BigQuery that splits the schema from the name
 /// of the table.
@@ -118,7 +118,7 @@ impl FromStr for SequencedBigQueryTableId {
 
 impl Display for SequencedBigQueryTableId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", format!("{}_{}", self.0, self.1))
+        write!(f, "{}_{}", self.0, self.1)
     }
 }
 
@@ -281,7 +281,7 @@ where
         inner: &mut Inner<impl SchemaStore>,
         table_id: &SequencedBigQueryTableId,
     ) {
-        if inner.created_tables.contains(&table_id) {
+        if inner.created_tables.contains(table_id) {
             return;
         }
 
@@ -310,10 +310,10 @@ where
                 SequencedBigQueryTableId::new(bigquery_table_id.clone());
             inner
                 .store
-                .store_table_mapping(table_id.clone(), sequenced_bigquery_table_id.to_string())
+                .store_table_mapping(*table_id, sequenced_bigquery_table_id.to_string())
                 .await?;
 
-            Ok(sequenced_bigquery_table_id)
+            return Ok(sequenced_bigquery_table_id);
         };
 
         Ok(sequenced_bigquery_table_id)
@@ -323,7 +323,7 @@ where
         inner: &Inner<S>,
         table_id: &TableId,
     ) -> EtlResult<Option<SequencedBigQueryTableId>> {
-        let Some(current_table_id) = inner.store.get_table_mapping(&table_id).await? else {
+        let Some(current_table_id) = inner.store.get_table_mapping(table_id).await? else {
             return Ok(None);
         };
 
@@ -710,7 +710,7 @@ where
 
 impl<S> Destination for BigQueryDestination<S>
 where
-    S: SchemaStore + Send + Sync,
+    S: StateStore + SchemaStore + Send + Sync,
 {
     async fn write_table_rows(
         &self,

@@ -502,3 +502,136 @@ async fn test_state_transitions_and_history() {
     let result = store.rollback_table_replication_state(table_id).await;
     assert!(result.is_err());
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_table_mappings_basic_operations() {
+    init_test_tracing();
+
+    let database = spawn_source_database_for_store().await;
+    let pipeline_id = 1;
+
+    let store = PostgresStore::new(pipeline_id, database.config.clone());
+
+    let table_id1 = TableId::new(12345);
+    let table_id2 = TableId::new(67890);
+
+    // Test initial state - should be empty
+    let mapping = store.get_table_mapping(&table_id1).await.unwrap();
+    assert!(mapping.is_none());
+
+    let all_mappings = store.get_table_mappings().await.unwrap();
+    assert!(all_mappings.is_empty());
+
+    // Test storing and retrieving mappings
+    store
+        .store_table_mapping(table_id1, "public_users_1".to_string())
+        .await
+        .unwrap();
+
+    store
+        .store_table_mapping(table_id2, "public_orders_2".to_string())
+        .await
+        .unwrap();
+
+    let all_mappings = store.get_table_mappings().await.unwrap();
+    assert_eq!(all_mappings.len(), 2);
+    assert_eq!(
+        all_mappings.get(&table_id1),
+        Some(&"public_users_1".to_string())
+    );
+    assert_eq!(
+        all_mappings.get(&table_id2),
+        Some(&"public_orders_2".to_string())
+    );
+
+    // Test updating an existing mapping (upsert)
+    store
+        .store_table_mapping(table_id1, "public_users_1_updated".to_string())
+        .await
+        .unwrap();
+
+    let mapping = store.get_table_mapping(&table_id1).await.unwrap();
+    assert_eq!(mapping, Some("public_users_1_updated".to_string()));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_table_mappings_persistence_and_loading() {
+    init_test_tracing();
+
+    let database = spawn_source_database_for_store().await;
+    let pipeline_id = 1;
+
+    let store = PostgresStore::new(pipeline_id, database.config.clone());
+
+    // Store some mappings
+    store
+        .store_table_mapping(TableId::new(1), "dest_table_1".to_string())
+        .await
+        .unwrap();
+    store
+        .store_table_mapping(TableId::new(2), "dest_table_2".to_string())
+        .await
+        .unwrap();
+
+    // Create a new store instance (simulating restart)
+    let new_store = PostgresStore::new(pipeline_id, database.config.clone());
+
+    // Initially empty cache
+    let mappings = new_store.get_table_mappings().await.unwrap();
+    assert!(mappings.is_empty());
+
+    // Load all mappings from database
+    let loaded_count = new_store.load_table_mappings().await.unwrap();
+    assert_eq!(loaded_count, 2);
+
+    // Verify loaded mappings
+    let mappings = new_store.get_table_mappings().await.unwrap();
+    assert_eq!(mappings.len(), 2);
+    assert_eq!(
+        mappings.get(&TableId::new(1)),
+        Some(&"dest_table_1".to_string())
+    );
+    assert_eq!(
+        mappings.get(&TableId::new(2)),
+        Some(&"dest_table_2".to_string())
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_table_mappings_pipeline_isolation() {
+    init_test_tracing();
+
+    let database = spawn_source_database_for_store().await;
+    let pipeline_id1 = 1;
+    let pipeline_id2 = 2;
+
+    let store1 = PostgresStore::new(pipeline_id1, database.config.clone());
+    let store2 = PostgresStore::new(pipeline_id2, database.config.clone());
+
+    let table_id = TableId::new(12345);
+
+    // Store different mappings for the same table ID in different pipelines
+    store1
+        .store_table_mapping(table_id, "pipeline1_table".to_string())
+        .await
+        .unwrap();
+
+    store2
+        .store_table_mapping(table_id, "pipeline2_table".to_string())
+        .await
+        .unwrap();
+
+    // Verify isolation - each pipeline sees only its own mapping
+    let mapping1 = store1.get_table_mapping(&table_id).await.unwrap();
+    assert_eq!(mapping1, Some("pipeline1_table".to_string()));
+
+    let mapping2 = store2.get_table_mapping(&table_id).await.unwrap();
+    assert_eq!(mapping2, Some("pipeline2_table".to_string()));
+
+    // Verify isolation persists after loading from database
+    let new_store1 = PostgresStore::new(pipeline_id1, database.config.clone());
+    new_store1.load_table_mappings().await.unwrap();
+
+    let loaded_mapping1 = new_store1.get_table_mapping(&table_id).await.unwrap();
+    assert_eq!(loaded_mapping1, Some("pipeline1_table".to_string()));
+}

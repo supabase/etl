@@ -5,7 +5,7 @@
 create table etl.table_mappings (
     id bigserial primary key,
     pipeline_id bigint not null,
-    source_table_id text not null,
+    source_table_id oid not null,
     destination_table_id text not null,
     created_at timestamptz not null default now(),
     updated_at timestamptz not null default now(),
