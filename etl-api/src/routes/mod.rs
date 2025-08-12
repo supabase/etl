@@ -10,6 +10,7 @@ pub mod destinations;
 pub mod destinations_pipelines;
 pub mod health_check;
 pub mod images;
+pub mod metrics;
 pub mod pipelines;
 pub mod sources;
 pub mod tenants;

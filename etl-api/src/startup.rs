@@ -17,6 +17,7 @@ use crate::{
     db::publications::Publication,
     encryption,
     k8s_client::{HttpK8sClient, K8sClient},
+    metrics::init_metrics,
     routes::{
         destinations::{
             CreateDestinationRequest, CreateDestinationResponse, ReadDestinationResponse,
@@ -34,6 +35,7 @@ use crate::{
             UpdateImageRequest, create_image, delete_image, read_all_images, read_image,
             update_image,
         },
+        metrics::metrics,
         pipelines::{
             CreatePipelineRequest, CreatePipelineResponse, GetPipelineReplicationStatusResponse,
             GetPipelineStatusResponse, ReadPipelineResponse, ReadPipelinesResponse,
@@ -155,6 +157,8 @@ pub async fn run(
     encryption_key: encryption::EncryptionKey,
     http_k8s_client: Option<Arc<dyn K8sClient>>,
 ) -> Result<Server, anyhow::Error> {
+    let prometheus_handle = init_metrics()?;
+    let prometheus_handle = web::ThinData(prometheus_handle);
     let config = web::Data::new(config);
     let connection_pool = web::Data::new(connection_pool);
     let encryption_key = web::Data::new(encryption_key);
@@ -164,6 +168,7 @@ pub async fn run(
     #[openapi(
         paths(
             crate::routes::health_check::health_check,
+            crate::routes::metrics::metrics,
         ),
         components(schemas(
             CreateImageRequest,
@@ -272,6 +277,7 @@ pub async fn run(
             )
             .wrap(tracing_logger)
             .service(health_check)
+            .service(metrics)
             .service(
                 SwaggerUi::new("/swagger-ui/{_:.*}").url("/api-docs/openapi.json", openapi.clone()),
             )
@@ -327,11 +333,12 @@ pub async fn run(
                     .service(read_all_images)
                     //tenants_sources
                     .service(create_tenant_and_source)
-                    // destinations-pipelines
+                    //destinations-pipelines
                     .service(create_destination_and_pipeline)
                     .service(update_destination_and_pipeline)
                     .service(delete_destination_and_pipeline),
             )
+            .app_data(prometheus_handle.clone())
             .app_data(config.clone())
             .app_data(connection_pool.clone())
             .app_data(encryption_key.clone());
