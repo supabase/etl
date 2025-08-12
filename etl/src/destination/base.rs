@@ -6,6 +6,8 @@ use crate::conversions::table_row::TableRow;
 use crate::error::EtlResult;
 
 pub trait Destination {
+    fn truncate_table(&self, table_id: TableId) -> impl Future<Output = EtlResult<()>> + Send;
+
     fn write_table_rows(
         &self,
         table_id: TableId,

@@ -722,6 +722,10 @@ impl<S> Destination for BigQueryDestination<S>
 where
     S: StateStore + SchemaStore + Send + Sync,
 {
+    fn truncate_table(&self, table_id: TableId) -> impl Future<Output = EtlResult<()>> + Send {
+        todo!()
+    }
+
     async fn write_table_rows(
         &self,
         table_id: TableId,
