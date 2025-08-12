@@ -271,7 +271,7 @@ impl SchemaStore for PostgresStore {
             .await
             .map_err(|err| {
                 etl_error!(
-                    ErrorKind::QueryFailed,
+                    ErrorKind::SourceQueryFailed,
                     "Failed to load table schemas",
                     format!("Failed to load table schemas from postgres: {err}")
                 )
@@ -307,7 +307,7 @@ impl SchemaStore for PostgresStore {
             .await
             .map_err(|err| {
                 etl_error!(
-                    ErrorKind::QueryFailed,
+                    ErrorKind::SourceQueryFailed,
                     "Failed to store table schema",
                     format!("Failed to store table schema in postgres: {err}")
                 )

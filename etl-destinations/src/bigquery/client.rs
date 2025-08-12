@@ -630,11 +630,15 @@ fn bq_error_to_etl_error(err: BQError) -> EtlError {
         ),
 
         // Network and transport errors
-        BQError::RequestError(_) => (ErrorKind::IoError, "BigQuery request failed"),
-        BQError::TonicTransportError(_) => (ErrorKind::IoError, "BigQuery transport error"),
+        BQError::RequestError(_) => (ErrorKind::DestinationIoError, "BigQuery request failed"),
+        BQError::TonicTransportError(_) => {
+            (ErrorKind::DestinationIoError, "BigQuery transport error")
+        }
 
         // Query and data errors
-        BQError::ResponseError { .. } => (ErrorKind::QueryFailed, "BigQuery response error"),
+        BQError::ResponseError { .. } => {
+            (ErrorKind::DestinationQueryFailed, "BigQuery response error")
+        }
         BQError::NoDataAvailable => (
             ErrorKind::InvalidState,
             "BigQuery result set positioning error",
@@ -657,7 +661,7 @@ fn bq_error_to_etl_error(err: BQError) -> EtlError {
 
         // gRPC errors
         BQError::TonicInvalidMetadataValueError(_) => {
-            (ErrorKind::ConfigError, "BigQuery invalid metadata value")
+            (ErrorKind::InvalidData, "BigQuery invalid metadata value")
         }
         BQError::TonicStatusError(status) => {
             // Since we do not have access to the `Code` type from `tonic`, we just match on the description

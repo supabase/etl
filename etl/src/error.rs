@@ -40,67 +40,39 @@ enum ErrorRepr {
 #[derive(PartialEq, Eq, Copy, Clone, Debug)]
 #[non_exhaustive]
 pub enum ErrorKind {
-    /// Database connection failed or resource limitations
-    ConnectionFailed,
-    /// Query execution failed
-    QueryFailed,
-    /// Source schema mismatch or validation error
+    SourceConnectionFailed,
+    DestinationConnectionFailed,
+    SourceQueryFailed,
+    DestinationQueryFailed,
     SourceSchemaError,
-    /// Missing table schema
     MissingTableSchema,
-    /// Data type conversion error
     ConversionError,
-    /// Configuration error
     ConfigError,
-    /// Network or I/O error
     IoError,
-    /// Database I/O error
     SourceIoError,
-    /// Serialization error
+    SourceConfigurationLimitExceeded,
+    DestinationIoError,
     SerializationError,
-    /// Deserialization error
     DeserializationError,
-    /// Encryption/decryption error
     EncryptionError,
-    /// Authentication failed
     AuthenticationError,
-    /// Invalid state error
     InvalidState,
-    /// Invalid data
     InvalidData,
-    /// NULL values are unsupported in an array
     NullValuesNotSupportedInArray,
-    /// Data validation error
     ValidationError,
-    /// Apply worker error
     ApplyWorkerPanic,
-    /// State rollback error,
     StateRollbackError,
-    /// Table sync worker error
     TableSyncWorkerPanic,
-    /// Permission denied error
     PermissionDenied,
-    /// Destination-specific error
     DestinationError,
-    /// Replication slot not found
     ReplicationSlotNotFound,
-    /// Replication slot already exists
     ReplicationSlotAlreadyExists,
-    /// Replication slot could not be created
     ReplicationSlotNotCreated,
-    /// Logical replication error
     SourceSnapshotTooOld,
-    /// Database is in recovery mode
-    DatabaseInRecovery,
-    /// Operation canceled by administrator
-    OperationCanceled,
-    /// Database shutdown in progress
-    DatabaseShutdown,
-    /// Lock timeout occurred
-    LockTimeout,
-    /// Statement timeout occurred
-    StatementTimeout,
-    /// Unknown error
+    SourceDatabaseInRecovery,
+    SourceOperationCanceled,
+    SourceDatabaseShutdown,
+    SourceLockTimeout,
     Unknown,
 
     // Special error kinds used for tests that trigger specific retry behaviors via fault injection.
@@ -364,9 +336,10 @@ impl From<tokio_postgres::Error> for EtlError {
                     | SqlState::CONNECTION_DOES_NOT_EXIST
                     | SqlState::CONNECTION_FAILURE
                     | SqlState::SQLCLIENT_UNABLE_TO_ESTABLISH_SQLCONNECTION
-                    | SqlState::SQLSERVER_REJECTED_ESTABLISHMENT_OF_SQLCONNECTION => {
-                        (ErrorKind::ConnectionFailed, "PostgreSQL connection error")
-                    }
+                    | SqlState::SQLSERVER_REJECTED_ESTABLISHMENT_OF_SQLCONNECTION => (
+                        ErrorKind::SourceConnectionFailed,
+                        "PostgreSQL connection error",
+                    ),
 
                     // Authentication errors (28xxx)
                     SqlState::INVALID_AUTHORIZATION_SPECIFICATION | SqlState::INVALID_PASSWORD => (
@@ -406,15 +379,16 @@ impl From<tokio_postgres::Error> for EtlError {
                     // Syntax and access errors (42xxx)
                     SqlState::SYNTAX_ERROR
                     | SqlState::SYNTAX_ERROR_OR_ACCESS_RULE_VIOLATION
-                    | SqlState::INSUFFICIENT_PRIVILEGE => {
-                        (ErrorKind::QueryFailed, "PostgreSQL syntax or access error")
-                    }
+                    | SqlState::INSUFFICIENT_PRIVILEGE => (
+                        ErrorKind::SourceQueryFailed,
+                        "PostgreSQL syntax or access error",
+                    ),
 
                     // Resource errors (53xxx)
                     SqlState::INSUFFICIENT_RESOURCES
                     | SqlState::OUT_OF_MEMORY
                     | SqlState::TOO_MANY_CONNECTIONS => (
-                        ErrorKind::ConnectionFailed,
+                        ErrorKind::SourceConnectionFailed,
                         "PostgreSQL resource limitation",
                     ),
 
@@ -428,67 +402,76 @@ impl From<tokio_postgres::Error> for EtlError {
 
                     // System errors (58xxx, XX xxx)
                     SqlState::SYSTEM_ERROR | SqlState::INTERNAL_ERROR => {
-                        (ErrorKind::QueryFailed, "PostgreSQL system error")
+                        (ErrorKind::SourceQueryFailed, "PostgreSQL system error")
                     }
-                    SqlState::IO_ERROR => {
-                        (ErrorKind::SourceIoError, "PostgreSQL I/O error")
-                    }
+                    SqlState::IO_ERROR => (ErrorKind::SourceIoError, "PostgreSQL I/O error"),
 
                     // Operator intervention errors (57xxx)
-                    SqlState::OPERATOR_INTERVENTION => {
-                        (ErrorKind::OperationCanceled, "PostgreSQL operation canceled")
-                    }
-                    SqlState::QUERY_CANCELED => {
-                        (ErrorKind::OperationCanceled, "PostgreSQL query canceled")
-                    }
-                    SqlState::ADMIN_SHUTDOWN => {
-                        (ErrorKind::DatabaseShutdown, "PostgreSQL admin shutdown")
-                    }
-                    SqlState::CRASH_SHUTDOWN => {
-                        (ErrorKind::DatabaseShutdown, "PostgreSQL crash shutdown")
-                    }
-                    SqlState::CANNOT_CONNECT_NOW => {
-                        (ErrorKind::DatabaseInRecovery, "PostgreSQL database in recovery")
-                    }
+                    SqlState::OPERATOR_INTERVENTION => (
+                        ErrorKind::SourceOperationCanceled,
+                        "PostgreSQL operation canceled",
+                    ),
+                    SqlState::QUERY_CANCELED => (
+                        ErrorKind::SourceOperationCanceled,
+                        "PostgreSQL query canceled",
+                    ),
+                    SqlState::ADMIN_SHUTDOWN => (
+                        ErrorKind::SourceDatabaseShutdown,
+                        "PostgreSQL admin shutdown",
+                    ),
+                    SqlState::CRASH_SHUTDOWN => (
+                        ErrorKind::SourceDatabaseShutdown,
+                        "PostgreSQL crash shutdown",
+                    ),
+                    SqlState::CANNOT_CONNECT_NOW => (
+                        ErrorKind::SourceDatabaseInRecovery,
+                        "PostgreSQL database in recovery",
+                    ),
                     SqlState::DATABASE_DROPPED => {
                         (ErrorKind::SourceSchemaError, "PostgreSQL database dropped")
                     }
-                    SqlState::IDLE_SESSION_TIMEOUT => {
-                        (ErrorKind::ConnectionFailed, "PostgreSQL idle session timeout")
-                    }
+                    SqlState::IDLE_SESSION_TIMEOUT => (
+                        ErrorKind::SourceConnectionFailed,
+                        "PostgreSQL idle session timeout",
+                    ),
 
                     // Object state errors (55xxx)
-                    SqlState::OBJECT_NOT_IN_PREREQUISITE_STATE => {
-                        (ErrorKind::InvalidState, "PostgreSQL object not in prerequisite state")
-                    }
+                    SqlState::OBJECT_NOT_IN_PREREQUISITE_STATE => (
+                        ErrorKind::InvalidState,
+                        "PostgreSQL object not in prerequisite state",
+                    ),
                     SqlState::OBJECT_IN_USE => {
                         (ErrorKind::InvalidState, "PostgreSQL object in use")
                     }
-                    SqlState::LOCK_NOT_AVAILABLE => {
-                        (ErrorKind::LockTimeout, "PostgreSQL lock not available")
-                    }
+                    SqlState::LOCK_NOT_AVAILABLE => (
+                        ErrorKind::SourceLockTimeout,
+                        "PostgreSQL lock not available",
+                    ),
 
                     // Program limit errors (54xxx)
                     SqlState::PROGRAM_LIMIT_EXCEEDED
                     | SqlState::STATEMENT_TOO_COMPLEX
                     | SqlState::TOO_MANY_COLUMNS
-                    | SqlState::TOO_MANY_ARGUMENTS => {
-                        (ErrorKind::QueryFailed, "PostgreSQL program limit exceeded")
-                    }
+                    | SqlState::TOO_MANY_ARGUMENTS => (
+                        ErrorKind::SourceQueryFailed,
+                        "PostgreSQL program limit exceeded",
+                    ),
 
                     // Configuration errors (53xxx)
                     SqlState::DISK_FULL => (ErrorKind::SourceIoError, "PostgreSQL disk full"),
-                    SqlState::CONFIGURATION_LIMIT_EXCEEDED => {
-                        (ErrorKind::ConfigError, "PostgreSQL configuration limit exceeded")
-                    }
+                    SqlState::CONFIGURATION_LIMIT_EXCEEDED => (
+                        ErrorKind::SourceConfigurationLimitExceeded,
+                        "PostgreSQL configuration limit exceeded",
+                    ),
 
                     // Transaction state errors (25xxx)
                     SqlState::ACTIVE_SQL_TRANSACTION
                     | SqlState::NO_ACTIVE_SQL_TRANSACTION
                     | SqlState::IN_FAILED_SQL_TRANSACTION
-                    | SqlState::IDLE_IN_TRANSACTION_SESSION_TIMEOUT => {
-                        (ErrorKind::InvalidState, "PostgreSQL transaction state error")
-                    }
+                    | SqlState::IDLE_IN_TRANSACTION_SESSION_TIMEOUT => (
+                        ErrorKind::InvalidState,
+                        "PostgreSQL transaction state error",
+                    ),
 
                     // Cursor errors (24xxx, 34xxx)
                     SqlState::INVALID_CURSOR_STATE | SqlState::INVALID_CURSOR_NAME => {
@@ -506,20 +489,23 @@ impl From<tokio_postgres::Error> for EtlError {
                     }
 
                     // Feature not supported (0Axxx)
-                    SqlState::FEATURE_NOT_SUPPORTED => {
-                        (ErrorKind::SourceSchemaError, "PostgreSQL feature not supported")
-                    }
+                    SqlState::FEATURE_NOT_SUPPORTED => (
+                        ErrorKind::SourceSchemaError,
+                        "PostgreSQL feature not supported",
+                    ),
 
                     // Invalid transaction initiation (0Bxxx)
-                    SqlState::INVALID_TRANSACTION_INITIATION => {
-                        (ErrorKind::InvalidState, "PostgreSQL invalid transaction initiation")
-                    }
+                    SqlState::INVALID_TRANSACTION_INITIATION => (
+                        ErrorKind::InvalidState,
+                        "PostgreSQL invalid transaction initiation",
+                    ),
 
                     // Dependent objects errors (2Bxxx)
                     SqlState::DEPENDENT_PRIVILEGE_DESCRIPTORS_STILL_EXIST
-                    | SqlState::DEPENDENT_OBJECTS_STILL_EXIST => {
-                        (ErrorKind::InvalidState, "PostgreSQL dependent objects exist")
-                    }
+                    | SqlState::DEPENDENT_OBJECTS_STILL_EXIST => (
+                        ErrorKind::InvalidState,
+                        "PostgreSQL dependent objects exist",
+                    ),
 
                     // SQL routine errors (2Fxxx)
                     SqlState::SQL_ROUTINE_EXCEPTION
@@ -527,7 +513,7 @@ impl From<tokio_postgres::Error> for EtlError {
                     | SqlState::S_R_E_MODIFYING_SQL_DATA_NOT_PERMITTED
                     | SqlState::S_R_E_PROHIBITED_SQL_STATEMENT_ATTEMPTED
                     | SqlState::S_R_E_READING_SQL_DATA_NOT_PERMITTED => {
-                        (ErrorKind::QueryFailed, "PostgreSQL routine exception")
+                        (ErrorKind::SourceQueryFailed, "PostgreSQL routine exception")
                     }
 
                     // External routine errors (38xxx, 39xxx)
@@ -541,22 +527,25 @@ impl From<tokio_postgres::Error> for EtlError {
                     | SqlState::E_R_I_E_NULL_VALUE_NOT_ALLOWED
                     | SqlState::E_R_I_E_TRIGGER_PROTOCOL_VIOLATED
                     | SqlState::E_R_I_E_SRF_PROTOCOL_VIOLATED
-                    | SqlState::E_R_I_E_EVENT_TRIGGER_PROTOCOL_VIOLATED => {
-                        (ErrorKind::QueryFailed, "PostgreSQL external routine error")
-                    }
+                    | SqlState::E_R_I_E_EVENT_TRIGGER_PROTOCOL_VIOLATED => (
+                        ErrorKind::SourceQueryFailed,
+                        "PostgreSQL external routine error",
+                    ),
 
                     // PL/pgSQL errors (P0xxx)
                     SqlState::PLPGSQL_ERROR
                     | SqlState::RAISE_EXCEPTION
                     | SqlState::NO_DATA_FOUND
                     | SqlState::TOO_MANY_ROWS
-                    | SqlState::ASSERT_FAILURE => (ErrorKind::QueryFailed, "PostgreSQL PL/pgSQL error"),
+                    | SqlState::ASSERT_FAILURE => {
+                        (ErrorKind::SourceQueryFailed, "PostgreSQL PL/pgSQL error")
+                    }
 
                     // Foreign Data Wrapper errors (HVxxx) - connection/schema related
-                    SqlState::FDW_ERROR
-                    | SqlState::FDW_UNABLE_TO_ESTABLISH_CONNECTION => {
-                        (ErrorKind::ConnectionFailed, "PostgreSQL FDW connection error")
-                    }
+                    SqlState::FDW_ERROR | SqlState::FDW_UNABLE_TO_ESTABLISH_CONNECTION => (
+                        ErrorKind::SourceConnectionFailed,
+                        "PostgreSQL FDW connection error",
+                    ),
                     SqlState::FDW_SCHEMA_NOT_FOUND
                     | SqlState::FDW_TABLE_NOT_FOUND
                     | SqlState::FDW_COLUMN_NAME_NOT_FOUND
@@ -569,9 +558,10 @@ impl From<tokio_postgres::Error> for EtlError {
                     | SqlState::FDW_INVALID_STRING_FORMAT => {
                         (ErrorKind::ConversionError, "PostgreSQL FDW data type error")
                     }
-                    SqlState::FDW_OUT_OF_MEMORY => {
-                        (ErrorKind::ConnectionFailed, "PostgreSQL FDW out of memory")
-                    }
+                    SqlState::FDW_OUT_OF_MEMORY => (
+                        ErrorKind::SourceConnectionFailed,
+                        "PostgreSQL FDW out of memory",
+                    ),
                     SqlState::FDW_DYNAMIC_PARAMETER_VALUE_NEEDED
                     | SqlState::FDW_FUNCTION_SEQUENCE_ERROR
                     | SqlState::FDW_INCONSISTENT_DESCRIPTOR_INFORMATION
@@ -587,16 +577,18 @@ impl From<tokio_postgres::Error> for EtlError {
                     | SqlState::FDW_OPTION_NAME_NOT_FOUND
                     | SqlState::FDW_REPLY_HANDLE
                     | SqlState::FDW_UNABLE_TO_CREATE_EXECUTION
-                    | SqlState::FDW_UNABLE_TO_CREATE_REPLY => {
-                        (ErrorKind::QueryFailed, "PostgreSQL FDW operation error")
-                    }
+                    | SqlState::FDW_UNABLE_TO_CREATE_REPLY => (
+                        ErrorKind::SourceQueryFailed,
+                        "PostgreSQL FDW operation error",
+                    ),
 
                     // Snapshot errors (72xxx) - important for replication consistency
-                    SqlState::SNAPSHOT_TOO_OLD => {
-                        (ErrorKind::SourceSnapshotTooOld, "PostgreSQL snapshot too old")
-                    }
+                    SqlState::SNAPSHOT_TOO_OLD => (
+                        ErrorKind::SourceSnapshotTooOld,
+                        "PostgreSQL snapshot too old",
+                    ),
 
-                    // Array errors - relevant for replication data handling  
+                    // Array errors - relevant for replication data handling
                     SqlState::ARRAY_ELEMENT_ERROR => {
                         (ErrorKind::ConversionError, "PostgreSQL array error")
                     }
@@ -628,11 +620,14 @@ impl From<tokio_postgres::Error> for EtlError {
                     }
 
                     // Default for other SQL states
-                    _ => (ErrorKind::QueryFailed, "PostgreSQL query failed"),
+                    _ => (ErrorKind::SourceQueryFailed, "PostgreSQL query failed"),
                 }
             }
             // No SQL state means connection issue
-            None => (ErrorKind::ConnectionFailed, "PostgreSQL connection failed"),
+            None => (
+                ErrorKind::SourceConnectionFailed,
+                "PostgreSQL connection failed",
+            ),
         };
 
         EtlError {
@@ -695,15 +690,17 @@ impl From<ParseNumericError> for EtlError {
 
 /// Converts [`sqlx::Error`] to [`EtlError`] with appropriate error kind.
 ///
-/// Maps database errors to [`ErrorKind::QueryFailed`], I/O errors to [`ErrorKind::IoError`],
-/// and connection pool errors to [`ErrorKind::ConnectionFailed`].
+/// Maps database errors to [`ErrorKind::SourceQueryFailed`], I/O errors to [`ErrorKind::IoError`],
+/// and connection pool errors to [`ErrorKind::SourceConnectionFailed`].
 impl From<sqlx::Error> for EtlError {
     fn from(err: sqlx::Error) -> EtlError {
         let kind = match &err {
-            sqlx::Error::Database(_) => ErrorKind::QueryFailed,
+            sqlx::Error::Database(_) => ErrorKind::SourceQueryFailed,
             sqlx::Error::Io(_) => ErrorKind::IoError,
-            sqlx::Error::PoolClosed | sqlx::Error::PoolTimedOut => ErrorKind::ConnectionFailed,
-            _ => ErrorKind::QueryFailed,
+            sqlx::Error::PoolClosed | sqlx::Error::PoolTimedOut => {
+                ErrorKind::SourceConnectionFailed
+            }
+            _ => ErrorKind::SourceQueryFailed,
         };
 
         EtlError {
@@ -723,22 +720,25 @@ mod tests {
 
     #[test]
     fn test_simple_error_creation() {
-        let err = EtlError::from((ErrorKind::ConnectionFailed, "Database connection failed"));
-        assert_eq!(err.kind(), ErrorKind::ConnectionFailed);
+        let err = EtlError::from((
+            ErrorKind::SourceConnectionFailed,
+            "Database connection failed",
+        ));
+        assert_eq!(err.kind(), ErrorKind::SourceConnectionFailed);
         assert_eq!(err.detail(), None);
-        assert_eq!(err.kinds(), vec![ErrorKind::ConnectionFailed]);
+        assert_eq!(err.kinds(), vec![ErrorKind::SourceConnectionFailed]);
     }
 
     #[test]
     fn test_error_with_detail() {
         let err = EtlError::from((
-            ErrorKind::QueryFailed,
+            ErrorKind::SourceQueryFailed,
             "SQL query execution failed",
             "Table 'users' doesn't exist".to_string(),
         ));
-        assert_eq!(err.kind(), ErrorKind::QueryFailed);
+        assert_eq!(err.kind(), ErrorKind::SourceQueryFailed);
         assert_eq!(err.detail(), Some("Table 'users' doesn't exist"));
-        assert_eq!(err.kinds(), vec![ErrorKind::QueryFailed]);
+        assert_eq!(err.kinds(), vec![ErrorKind::SourceQueryFailed]);
     }
 
     #[test]
@@ -797,9 +797,9 @@ mod tests {
 
     #[test]
     fn test_error_equality() {
-        let err1 = EtlError::from((ErrorKind::ConnectionFailed, "Connection failed"));
-        let err2 = EtlError::from((ErrorKind::ConnectionFailed, "Connection failed"));
-        let err3 = EtlError::from((ErrorKind::QueryFailed, "Query failed"));
+        let err1 = EtlError::from((ErrorKind::SourceConnectionFailed, "Connection failed"));
+        let err2 = EtlError::from((ErrorKind::SourceConnectionFailed, "Connection failed"));
+        let err3 = EtlError::from((ErrorKind::SourceQueryFailed, "Query failed"));
 
         assert_eq!(err1, err2);
         assert_ne!(err1, err3);
@@ -807,7 +807,10 @@ mod tests {
 
     #[test]
     fn test_error_display() {
-        let err = EtlError::from((ErrorKind::ConnectionFailed, "Database connection failed"));
+        let err = EtlError::from((
+            ErrorKind::SourceConnectionFailed,
+            "Database connection failed",
+        ));
         let display_str = format!("{err}");
         assert!(display_str.contains("ConnectionFailed"));
         assert!(display_str.contains("Database connection failed"));
@@ -816,7 +819,7 @@ mod tests {
     #[test]
     fn test_error_display_with_detail() {
         let err = EtlError::from((
-            ErrorKind::QueryFailed,
+            ErrorKind::SourceQueryFailed,
             "SQL query failed",
             "Invalid table name".to_string(),
         ));
@@ -898,21 +901,6 @@ mod tests {
         assert!(kinds.contains(&ErrorKind::ConversionError));
         assert!(kinds.contains(&ErrorKind::ValidationError));
         assert!(kinds.contains(&ErrorKind::IoError));
-    }
-
-    #[test]
-    fn test_postgres_error_mapping() {
-        // Test that our PostgreSQL error mapping logic is correctly structured
-        // by verifying that we can convert standard IO errors to ETL errors
-        let io_err =
-            std::io::Error::new(std::io::ErrorKind::ConnectionRefused, "Connection refused");
-        let etl_err = EtlError::from(io_err);
-        assert_eq!(etl_err.kind(), ErrorKind::IoError);
-        assert!(etl_err.detail().unwrap().contains("Connection refused"));
-
-        // Note: Testing actual PostgreSQL SQLSTATE mapping would require
-        // creating mock database errors, which is complex. The mapping logic
-        // is verified through the comprehensive match patterns above.
     }
 
     #[test]
