@@ -78,7 +78,13 @@ where
         let replication_client =
             PgReplicationClient::connect(self.config.pg_connection.clone()).await?;
 
-        // We load the table schemas from the store.
+        // We load the table mappings and schemas from the store to have them cached for quick
+        // access.
+        //
+        // It's really important to load the mappings and schemas before starting the apply worker
+        // since downstream code relies on the assumption that the mappings and schemas are loaded
+        // in the cache.
+        self.store.load_table_mappings().await?;
         self.store.load_table_schemas().await?;
 
         // We load the table states by checking the table ids of a publication and loading/creating

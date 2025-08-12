@@ -1,7 +1,7 @@
 use std::{collections::HashMap, sync::Arc};
 
 use etl_config::shared::PgConnectionConfig;
-use etl_postgres::replication::{connect_to_source_database, schema, state};
+use etl_postgres::replication::{connect_to_source_database, schema, state, table_mappings};
 use etl_postgres::schema::{TableId, TableSchema};
 use sqlx::PgPool;
 use tokio::sync::Mutex;
@@ -119,6 +119,7 @@ impl TryFrom<state::TableReplicationStateRow> for TableReplicationPhase {
 struct Inner {
     table_states: HashMap<TableId, TableReplicationPhase>,
     table_schemas: HashMap<TableId, Arc<TableSchema>>,
+    table_mappings: HashMap<TableId, String>,
 }
 
 /// A state store which saves the replication state in the source
@@ -135,6 +136,7 @@ impl PostgresStore {
         let inner = Inner {
             table_states: HashMap::new(),
             table_schemas: HashMap::new(),
+            table_mappings: HashMap::new(),
         };
 
         Self {
@@ -315,6 +317,79 @@ impl SchemaStore for PostgresStore {
         inner
             .table_schemas
             .insert(table_schema.id, Arc::new(table_schema));
+
+        Ok(())
+    }
+
+    async fn get_table_mapping(&self, source_table_id: &TableId) -> EtlResult<Option<String>> {
+        let inner = self.inner.lock().await;
+
+        Ok(inner.table_mappings.get(source_table_id).cloned())
+    }
+
+    async fn get_table_mappings(&self) -> EtlResult<HashMap<TableId, String>> {
+        let inner = self.inner.lock().await;
+
+        Ok(inner.table_mappings.clone())
+    }
+
+    async fn load_table_mappings(&self) -> EtlResult<usize> {
+        debug!("loading table mappings from postgres state store");
+
+        let pool = self.connect_to_source().await?;
+
+        let table_mappings = table_mappings::load_table_mappings(&pool, self.pipeline_id as i64)
+            .await
+            .map_err(|err| {
+                etl_error!(
+                    ErrorKind::QueryFailed,
+                    "Failed to load table mappings",
+                    format!("Failed to load table mappings from postgres: {err}")
+                )
+            })?;
+        let table_mappings_len = table_mappings.len();
+
+        let mut inner = self.inner.lock().await;
+        inner.table_mappings = table_mappings;
+
+        info!(
+            "loaded {} table mappings from postgres state store",
+            table_mappings_len
+        );
+
+        Ok(table_mappings_len)
+    }
+
+    async fn store_table_mapping(
+        &self,
+        source_table_id: TableId,
+        destination_table_id: String,
+    ) -> EtlResult<()> {
+        debug!(
+            "storing table mapping: '{}' -> '{}'",
+            source_table_id, destination_table_id
+        );
+
+        let pool = self.connect_to_source().await?;
+
+        let mut inner = self.inner.lock().await;
+        table_mappings::store_table_mapping(
+            &pool,
+            self.pipeline_id as i64,
+            &source_table_id,
+            &destination_table_id,
+        )
+        .await
+        .map_err(|err| {
+            etl_error!(
+                ErrorKind::QueryFailed,
+                "Failed to store table mapping",
+                format!("Failed to store table mapping in postgres: {err}")
+            )
+        })?;
+        inner
+            .table_mappings
+            .insert(source_table_id, destination_table_id);
 
         Ok(())
     }

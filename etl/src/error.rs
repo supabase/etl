@@ -40,53 +40,31 @@ enum ErrorRepr {
 #[derive(PartialEq, Eq, Copy, Clone, Debug)]
 #[non_exhaustive]
 pub enum ErrorKind {
-    /// Database connection failed or resource limitations
     ConnectionFailed,
-    /// Query execution failed
     QueryFailed,
-    /// Source schema mismatch or validation error
     SourceSchemaError,
-    /// Missing table schema
     MissingTableSchema,
-    /// Data type conversion error
+    MissingTableMapping,
     ConversionError,
-    /// Configuration error
     ConfigError,
-    /// Network or I/O error
     IoError,
-    /// Serialization error
     SerializationError,
-    /// Deserialization error
     DeserializationError,
-    /// Encryption/decryption error
     EncryptionError,
-    /// Authentication failed
     AuthenticationError,
-    /// Invalid state error
     InvalidState,
-    /// Invalid data
     InvalidData,
-    /// NULL values are unsupported in an array
     NullValuesNotSupportedInArray,
-    /// Data validation error
     ValidationError,
-    /// Apply worker error
     ApplyWorkerPanic,
-    /// State rollback error,
     StateRollbackError,
-    /// Table sync worker error
     TableSyncWorkerPanic,
-    /// Permission denied error
     PermissionDenied,
-    /// Destination-specific error
     DestinationError,
-    /// Replication slot not found
+    InvalidTableName,
     ReplicationSlotNotFound,
-    /// Replication slot already exists
     ReplicationSlotAlreadyExists,
-    /// Replication slot could not be created
     ReplicationSlotNotCreated,
-    /// Unknown error
     Unknown,
 
     // Special error kinds used for tests that trigger specific retry behaviors via fault injection.
