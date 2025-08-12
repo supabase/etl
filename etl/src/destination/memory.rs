@@ -43,6 +43,8 @@ impl Destination for MemoryDestination {
         // of that table.
         let mut inner = self.inner.lock().await;
 
+        info!("truncating table {}", table_id);
+
         inner.table_rows.remove(&table_id);
         inner.events.retain_mut(|event| {
             let has_table_id = event.has_table_id(&table_id);
@@ -73,7 +75,9 @@ impl Destination for MemoryDestination {
         table_rows: Vec<TableRow>,
     ) -> EtlResult<()> {
         let mut inner = self.inner.lock().await;
+
         info!("writing a batch of {} table rows:", table_rows.len());
+
         for table_row in &table_rows {
             info!("  {:?}", table_row);
         }
@@ -84,7 +88,9 @@ impl Destination for MemoryDestination {
 
     async fn write_events(&self, events: Vec<Event>) -> EtlResult<()> {
         let mut inner = self.inner.lock().await;
+
         info!("writing a batch of {} events:", events.len());
+
         for event in &events {
             info!("  {:?}", event);
         }
