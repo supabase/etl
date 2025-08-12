@@ -15,13 +15,12 @@ use tracing::{debug, info, warn};
 use crate::bigquery::client::{BigQueryClient, BigQueryOperationType};
 use crate::bigquery::{BigQueryDatasetId, BigQueryTableId};
 
-/// The delimiter used when generating table names in BigQuery that splits the schema from the name
-/// of the table.
+/// Delimiter separating schema from table name in BigQuery table identifiers.
 const BIGQUERY_TABLE_ID_DELIMITER: &str = "_";
-/// The replacement string used to escape characters in the original schema and table names.
+/// Replacement string for escaping underscores in PostgreSQL names.
 const BIGQUERY_TABLE_ID_DELIMITER_ESCAPE_REPLACEMENT: &str = "__";
 
-/// Generates a sequence number from the LSNs of an event.
+/// Creates a hex-encoded sequence number from PostgreSQL LSNs to ensure correct event ordering.
 ///
 /// Creates a hex-encoded sequence number that ensures events are processed in the correct order
 /// even when they have the same system time. The format is compatible with BigQuery's
@@ -67,18 +66,25 @@ pub fn table_name_to_bigquery_table_id(table_name: &TableName) -> BigQueryTableI
     format!("{escaped_schema}_{escaped_table}")
 }
 
+/// A BigQuery table identifier with version sequence for truncate operations.
+///
+/// Combines a base table name with a sequence number to enable versioned tables.
+/// Used for truncate handling where each truncate creates a new table version.
 #[derive(Debug, Clone, Eq, PartialEq, Hash)]
 struct SequencedBigQueryTableId(BigQueryTableId, u64);
 
 impl SequencedBigQueryTableId {
+    /// Creates a new sequenced table ID starting at version 0.
     pub fn new(table_id: BigQueryTableId) -> Self {
         Self(table_id, 0)
     }
 
+    /// Returns the next version of this sequenced table ID.
     pub fn next(&self) -> Self {
         Self(self.0.clone(), self.1 + 1)
     }
 
+    /// Extracts the base BigQuery table ID without the sequence number.
     pub fn to_bigquery_table_id(&self) -> BigQueryTableId {
         self.0.clone()
     }
@@ -87,6 +93,9 @@ impl SequencedBigQueryTableId {
 impl FromStr for SequencedBigQueryTableId {
     type Err = EtlError;
 
+    /// Parses a sequenced table ID from string format `table_name_sequence`.
+    ///
+    /// Expects the last underscore to separate the table name from the sequence number.
     fn from_str(table_id: &str) -> Result<Self, Self::Err> {
         if let Some(last_underscore) = table_id.rfind('_') {
             let table_id = &table_id[..last_underscore];
@@ -117,6 +126,7 @@ impl FromStr for SequencedBigQueryTableId {
 }
 
 impl Display for SequencedBigQueryTableId {
+    /// Formats the sequenced table ID as `table_name_sequence`.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}_{}", self.0, self.1)
     }
@@ -209,11 +219,11 @@ where
         })
     }
 
-    /// Prepares the table for CDC streaming with optimistic table creation caching.
+    /// Prepares a table for CDC streaming operations with schema-aware table creation.
     ///
-    /// Loads the table schema and creates the table in BigQuery if missing. Uses an internal
-    /// cache to avoid redundant existence checks for tables that have already been created.
-    /// If streaming fails with a table not found error, the cache entry is invalidated.
+    /// Retrieves the table schema from the store, creates or verifies the BigQuery table exists,
+    /// and ensures the view points to the current versioned table. Uses caching to avoid
+    /// redundant table creation checks.
     async fn prepare_cdc_streaming_for_table(
         inner: &mut Inner<S>,
         table_id: &TableId,
@@ -276,7 +286,7 @@ where
         Ok((sequenced_bigquery_table_id, table_descriptor))
     }
 
-    /// Adds a table ID to the created tables cache if not present.
+    /// Adds a table to the creation cache to avoid redundant existence checks.
     fn add_to_created_tables_cache(
         inner: &mut Inner<impl SchemaStore>,
         table_id: &SequencedBigQueryTableId,
@@ -288,9 +298,7 @@ where
         inner.created_tables.insert(table_id.clone());
     }
 
-    /// Removes a table ID from the created tables cache.
-    ///
-    /// Used when a table is found to not exist during streaming operations.
+    /// Removes a table from the creation cache when it's found to not exist.
     fn remove_from_created_tables_cache(
         inner: &mut Inner<impl SchemaStore>,
         table_id: &SequencedBigQueryTableId,
@@ -298,6 +306,7 @@ where
         inner.created_tables.remove(table_id);
     }
 
+    /// Retrieves the current sequenced table ID or creates a new one starting at version 0.
     async fn get_or_create_sequenced_bigquery_table_id(
         inner: &Inner<S>,
         table_id: &TableId,
@@ -319,6 +328,7 @@ where
         Ok(sequenced_bigquery_table_id)
     }
 
+    /// Retrieves the current sequenced table ID from the state store.
     async fn get_sequenced_bigquery_table_id(
         inner: &Inner<S>,
         table_id: &TableId,
@@ -332,9 +342,9 @@ where
         Ok(Some(sequenced_bigquery_table_id))
     }
 
-    /// Checks if a view needs to be created or updated and performs the operation if needed.
+    /// Ensures a view points to the specified target table, creating or updating as needed.
     ///
-    /// Returns `true` if the view was created/updated, `false` if it was already pointing to the correct table.
+    /// Returns `true` if the view was created or updated, `false` if already correct.
     async fn ensure_view_points_to_table(
         inner: &mut Inner<impl SchemaStore>,
         view_name: &BigQueryTableId,
@@ -368,10 +378,10 @@ where
         Ok(true)
     }
 
-    /// Handles streaming rows with fallback table creation on missing table errors.
+    /// Streams rows to BigQuery with automatic retry on missing table errors.
     ///
-    /// Attempts to stream rows to BigQuery. If streaming fails with a table not found error,
-    /// removes the table from the cache and retries with table creation.
+    /// First attempts optimistic streaming. If the table is missing (detected via permission denied),
+    /// clears the cache, recreates the table, and retries the operation.
     async fn stream_rows_with_fallback(
         inner: &mut Inner<S>,
         dataset_id: &BigQueryDatasetId,
@@ -435,9 +445,9 @@ where
         }
     }
 
-    /// Writes data rows to a BigQuery table, adding CDC mode metadata.
+    /// Writes table rows with CDC metadata for non-event streaming operations.
     ///
-    /// Each row gets a CDC mode column and sequence number appended before streaming to BigQuery.
+    /// Adds an `Upsert` operation type to each row and streams to the appropriate BigQuery table.
     async fn write_table_rows(
         &self,
         table_id: TableId,
@@ -469,10 +479,10 @@ where
         Ok(())
     }
 
-    /// Processes and writes a batch of CDC events to BigQuery.
+    /// Processes CDC events in batches with proper ordering and truncate handling.
     ///
-    /// Groups events by type, handles inserts/updates/deletes via streaming, and processes truncates separately.
-    /// Adds sequence numbers to ensure proper ordering of events with the same system time.
+    /// Groups streaming operations (insert/update/delete) by table and processes them together,
+    /// then handles truncate events separately by creating new versioned tables.
     async fn write_events(&self, events: Vec<Event>) -> EtlResult<()> {
         let mut event_iter = events.into_iter().peekable();
 
@@ -580,11 +590,11 @@ where
         Ok(())
     }
 
-    /// Processes truncate events by creating new versioned tables and updating views.
+    /// Handles table truncation by creating new versioned tables and updating views.
     ///
-    /// Maps PostgreSQL table OIDs to BigQuery table names, creates new versioned tables,
-    /// updates views to point to new tables, and schedules old table cleanup.
-    /// Deduplicates table IDs to avoid redundant truncate operations on the same table.
+    /// Creates fresh empty tables with incremented version numbers, updates views to point
+    /// to new tables, and schedules cleanup of old table versions. Deduplicates table IDs
+    /// to optimize multiple truncates of the same table.
     async fn process_truncate_events(&self, truncate_events: Vec<TruncateEvent>) -> EtlResult<()> {
         let mut inner = self.inner.lock().await;
 
