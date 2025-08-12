@@ -2,6 +2,7 @@ use base64::Engine;
 use base64::prelude::BASE64_STANDARD;
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use etl::store::schema::SchemaStore;
+use etl::store::state::StateStore;
 use etl::types::{PgNumeric, TableName};
 use etl_destinations::bigquery::{BigQueryDestination, table_name_to_bigquery_table_id};
 use gcp_bigquery_client::Client;
@@ -101,7 +102,7 @@ impl BigQueryDatabase {
     /// zero staleness to ensure immediate consistency for testing.
     pub async fn build_destination<S>(&self, schema_store: S) -> BigQueryDestination<S>
     where
-        S: SchemaStore,
+        S: StateStore + SchemaStore,
     {
         BigQueryDestination::new_with_key_path(
             self.project_id.clone(),

@@ -1,5 +1,5 @@
 use etl_config::shared::BatchConfig;
-use etl_postgres::replication::{schema, state};
+use etl_postgres::replication::{schema, state, table_mappings};
 use serde::{Deserialize, Serialize};
 use sqlx::{PgExecutor, PgTransaction};
 use std::ops::DerefMut;
@@ -260,9 +260,12 @@ pub async fn delete_pipeline_cascading(
         db::destinations::delete_destination(txn.deref_mut(), tenant_id, destination.id).await?;
     }
 
-    // Delete state and schema from the source database
+    // Delete state, schema, and table mappings from the source database
     state::delete_pipeline_replication_state(source_txn.deref_mut(), pipeline.id).await?;
     schema::delete_pipeline_table_schemas(source_txn.deref_mut(), pipeline.id).await?;
+    table_mappings::delete_pipeline_table_mappings(source_txn.deref_mut(), pipeline.id).await?;
+
+    // TODO: delete replication slots.
 
     // Here we finish `txn` before `source_txn` since we want the guarantee that the pipeline has
     // been deleted before committing the state deletions.

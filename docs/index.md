@@ -62,8 +62,8 @@ This documentation is designed to help you effectively use the ETL crate to buil
 
 - [**Tutorials**](tutorials/index.md): Step-by-step guides to get started with the ETL crate, including setting up a basic data pipeline, configuring Postgres logical replication, and connecting to destinations like BigQuery or other OLAP databases. Check the [examples folder](https://github.com/supabase/etl/tree/main/etl/examples) for practical code samples.
 - [**Guides**](guides/index.md): In-depth explanations of key concepts, such as building custom data pipelines, handling change data capture (CDC), and optimizing performance for specific use cases.
-- [**Reference**](reference/index.md): Detailed documentation of the crate’s API, including modules like `etl::pipeline`, `etl::sources::postgres`, and available destinations (e.g., `BigQueryDestination`). Each destination is feature-gated, so you can enable only what you need.
-- [**Design**](design/index.md): Overview of the crate’s architecture, including its modular pipeline structure, source-destination flow, and extensibility for custom integrations.
+- [**Reference**](reference/index.md): Detailed documentation of the crate's API, including modules like `etl::pipeline`, `etl::sources::postgres`, and available destinations (e.g., `BigQueryDestination`). Each destination is feature-gated, so you can enable only what you need.
+- [**Design**](design/index.md): Overview of the crate's architecture, including its modular pipeline structure, source-destination flow, and extensibility for custom integrations.
 
 The ETL crate is distributed under the [Apache-2.0 License](https://www.apache.org/licenses/LICENSE-2.0). See the [LICENSE](https://github.com/supabase/etl/blob/main/LICENSE) file for more information.
 
