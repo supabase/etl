@@ -100,16 +100,39 @@ impl FromStr for SequencedBigQueryTableId {
     fn from_str(table_id: &str) -> Result<Self, Self::Err> {
         if let Some(last_underscore) = table_id.rfind('_') {
             let table_name = &table_id[..last_underscore];
-            let sequence_number = table_id[last_underscore + 1..]
+            let sequence_str = &table_id[last_underscore + 1..];
+
+            if table_name.is_empty() {
+                bail!(
+                    ErrorKind::InvalidTableName,
+                    "Invalid sequenced BigQuery table ID format",
+                    format!(
+                        "Table name cannot be empty in sequenced table ID '{table_id}'. Expected format: 'table_name_sequence'"
+                    )
+                )
+            }
+
+            if sequence_str.is_empty() {
+                bail!(
+                    ErrorKind::InvalidTableName,
+                    "Invalid sequenced BigQuery table ID format",
+                    format!(
+                        "Sequence number cannot be empty in sequenced table ID '{table_id}'. Expected format: 'table_name_sequence'"
+                    )
+                )
+            }
+
+            let sequence_number = sequence_str
                 .parse::<u64>()
                 .map_err(|e| {
                     etl_error!(
-                    ErrorKind::InvalidTableName,
-                    "Could not parse BigQuery table ID",
-                    format!(
-                        "The table ID {table_id} could not be parsed as a BigQuery table ID: {e}"
+                        ErrorKind::InvalidTableName,
+                        "Invalid sequence number in BigQuery table ID",
+                        format!(
+                            "Failed to parse sequence number '{sequence_str}' in table ID '{table_id}': {e}. Expected a non-negative integer (0-{max})",
+                            max = u64::MAX
+                        )
                     )
-                )
                 })?;
 
             Ok(SequencedBigQueryTableId(
@@ -119,8 +142,10 @@ impl FromStr for SequencedBigQueryTableId {
         } else {
             bail!(
                 ErrorKind::InvalidTableName,
-                "Could not parse BigQuery table ID",
-                format!("The table ID {table_id} could not be parsed as a BigQuery table ID")
+                "Invalid sequenced BigQuery table ID format",
+                format!(
+                    "No underscore found in table ID '{table_id}'. Expected format: 'table_name_sequence' where sequence is a non-negative integer"
+                )
             )
         }
     }
@@ -921,14 +946,16 @@ mod tests {
 
     #[test]
     fn test_sequenced_bigquery_table_id_from_str_no_underscore() {
-        let result = "table_without_sequence".parse::<SequencedBigQueryTableId>();
+        let result = "tablewithoutsequence".parse::<SequencedBigQueryTableId>();
         assert!(result.is_err());
 
         let err = result.unwrap_err();
         assert_eq!(err.kind(), ErrorKind::InvalidTableName);
+        assert!(err.to_string().contains("No underscore found"));
+        assert!(err.to_string().contains("tablewithoutsequence"));
         assert!(
             err.to_string()
-                .contains("Could not parse BigQuery table ID")
+                .contains("Expected format: 'table_name_sequence'")
         );
     }
 
@@ -939,10 +966,23 @@ mod tests {
 
         let err = result.unwrap_err();
         assert_eq!(err.kind(), ErrorKind::InvalidTableName);
-        assert!(
-            err.to_string()
-                .contains("Could not parse BigQuery table ID")
-        );
+        assert!(err.to_string().contains("Failed to parse sequence number"));
+        assert!(err.to_string().contains("not_a_number"));
+        assert!(err.to_string().contains("users_table_not_a_number"));
+        assert!(err.to_string().contains("Expected a non-negative integer"));
+    }
+
+    #[test]
+    fn test_sequenced_bigquery_table_id_from_str_sequence_is_word() {
+        let result = "table_word".parse::<SequencedBigQueryTableId>();
+        assert!(result.is_err());
+
+        let err = result.unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::InvalidTableName);
+        assert!(err.to_string().contains("Failed to parse sequence number"));
+        assert!(err.to_string().contains("word"));
+        assert!(err.to_string().contains("table_word"));
+        assert!(err.to_string().contains("Expected a non-negative integer"));
     }
 
     #[test]
@@ -952,10 +992,9 @@ mod tests {
 
         let err = result.unwrap_err();
         assert_eq!(err.kind(), ErrorKind::InvalidTableName);
-        assert!(
-            err.to_string()
-                .contains("Could not parse BigQuery table ID")
-        );
+        assert!(err.to_string().contains("Failed to parse sequence number"));
+        assert!(err.to_string().contains("-123"));
+        assert!(err.to_string().contains("users_table_-123"));
     }
 
     #[test]
@@ -965,10 +1004,9 @@ mod tests {
 
         let err = result.unwrap_err();
         assert_eq!(err.kind(), ErrorKind::InvalidTableName);
-        assert!(
-            err.to_string()
-                .contains("Could not parse BigQuery table ID")
-        );
+        assert!(err.to_string().contains("Failed to parse sequence number"));
+        assert!(err.to_string().contains("18446744073709551616"));
+        assert!(err.to_string().contains("users_table_18446744073709551616"));
     }
 
     #[test]
@@ -978,9 +1016,11 @@ mod tests {
 
         let err = result.unwrap_err();
         assert_eq!(err.kind(), ErrorKind::InvalidTableName);
+        assert!(err.to_string().contains("No underscore found"));
+        assert!(err.to_string().contains("''"));
         assert!(
             err.to_string()
-                .contains("Could not parse BigQuery table ID")
+                .contains("Expected format: 'table_name_sequence'")
         );
     }
 
@@ -991,9 +1031,26 @@ mod tests {
 
         let err = result.unwrap_err();
         assert_eq!(err.kind(), ErrorKind::InvalidTableName);
+        assert!(err.to_string().contains("Sequence number cannot be empty"));
+        assert!(err.to_string().contains("users_table_"));
         assert!(
             err.to_string()
-                .contains("Could not parse BigQuery table ID")
+                .contains("Expected format: 'table_name_sequence'")
+        );
+    }
+
+    #[test]
+    fn test_sequenced_bigquery_table_id_from_str_empty_table_name() {
+        let result = "_123".parse::<SequencedBigQueryTableId>();
+        assert!(result.is_err());
+
+        let err = result.unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::InvalidTableName);
+        assert!(err.to_string().contains("Table name cannot be empty"));
+        assert!(err.to_string().contains("_123"));
+        assert!(
+            err.to_string()
+                .contains("Expected format: 'table_name_sequence'")
         );
     }
 
