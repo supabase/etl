@@ -1,6 +1,6 @@
 use etl::destination::memory::MemoryDestination;
 use etl::error::ErrorKind;
-use etl::failpoints::START_TABLE_SYNC__AFTER_DATA_SYNC;
+use etl::failpoints::{START_TABLE_SYNC__AFTER_DATA_SYNC, START_TABLE_SYNC__DURING_DATA_SYNC};
 use etl::state::table::TableReplicationPhaseType;
 use etl::test_utils::database::spawn_source_database;
 use etl::test_utils::notify::NotifyingStore;
@@ -74,6 +74,69 @@ async fn table_copy_fails_after_data_sync_threw_an_error_with_no_retry() {
 async fn table_copy_is_consistent_after_data_sync_threw_an_error_with_timed_retry() {
     let _scenario = FailScenario::setup();
     fail::cfg(START_TABLE_SYNC__AFTER_DATA_SYNC, "1*return(timed_retry)").unwrap();
+
+    init_test_tracing();
+
+    let mut database = spawn_source_database().await;
+    let database_schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
+
+    // Insert initial test data.
+    let rows_inserted = 10;
+    insert_users_data(
+        &mut database,
+        &database_schema.users_schema().name,
+        1..=rows_inserted,
+    )
+    .await;
+
+    let store = NotifyingStore::new();
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
+
+    // We start the pipeline from scratch.
+    let pipeline_id: PipelineId = random();
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        database_schema.publication_name(),
+        store.clone(),
+        destination.clone(),
+    );
+
+    // We register the interest in waiting for both table syncs to have started.
+    let users_state_notify = store
+        .notify_on_table_state(
+            database_schema.users_schema().id,
+            TableReplicationPhaseType::SyncDone,
+        )
+        .await;
+
+    pipeline.start().await.unwrap();
+
+    users_state_notify.notified().await;
+
+    // We expect no errors, since the same table sync worker task is retried.
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    // Verify copied data.
+    let table_rows = destination.get_table_rows().await;
+    let users_table_rows = table_rows.get(&database_schema.users_schema().id).unwrap();
+    assert_eq!(users_table_rows.len(), rows_inserted);
+
+    // Verify table schemas were correctly stored.
+    let table_schemas = store.get_table_schemas().await;
+    assert_eq!(table_schemas.len(), 1);
+    assert_eq!(
+        *table_schemas
+            .get(&database_schema.users_schema().id)
+            .unwrap(),
+        database_schema.users_schema()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn table_copy_is_consistent_during_data_sync_threw_an_error_with_timed_retry() {
+    let _scenario = FailScenario::setup();
+    fail::cfg(START_TABLE_SYNC__DURING_DATA_SYNC, "1*return(timed_retry)").unwrap();
 
     init_test_tracing();
 

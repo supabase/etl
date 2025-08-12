@@ -10,6 +10,7 @@ use crate::bail;
 use crate::error::{ErrorKind, EtlError, EtlResult};
 
 pub const START_TABLE_SYNC__AFTER_DATA_SYNC: &str = "start_table_sync.after_data_sync";
+pub const START_TABLE_SYNC__DURING_DATA_SYNC: &str = "start_table_sync.during_data_sync";
 
 /// Executes a configurable failpoint for testing error scenarios.
 ///

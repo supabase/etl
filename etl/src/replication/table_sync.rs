@@ -12,6 +12,7 @@ use crate::concurrency::signal::SignalTx;
 use crate::concurrency::stream::BatchStream;
 use crate::destination::Destination;
 use crate::error::{ErrorKind, EtlError, EtlResult};
+use crate::failpoints::START_TABLE_SYNC__DURING_DATA_SYNC;
 #[cfg(feature = "failpoints")]
 use crate::failpoints::{START_TABLE_SYNC__AFTER_DATA_SYNC, etl_fail_point};
 use crate::replication::client::PgReplicationClient;
@@ -211,6 +212,10 @@ where
                         let table_rows = table_rows.into_iter().collect::<Result<Vec<_>, _>>()?;
                         rows_copied += table_rows.len();
                         destination.write_table_rows(table_id, table_rows).await?;
+
+                        // Fail point to test when the table sync fails after copying one batch.
+                        #[cfg(feature = "failpoints")]
+                        etl_fail_point(START_TABLE_SYNC__DURING_DATA_SYNC)?;
                     }
                     ShutdownResult::Shutdown(_) => {
                         // If we received a shutdown in the middle of a table copy, we bail knowing
