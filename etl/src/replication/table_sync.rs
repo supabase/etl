@@ -13,7 +13,9 @@ use crate::concurrency::stream::BatchStream;
 use crate::destination::Destination;
 use crate::error::{ErrorKind, EtlError, EtlResult};
 #[cfg(feature = "failpoints")]
-use crate::failpoints::{START_TABLE_SYNC__AFTER_DATA_SYNC, START_TABLE_SYNC__DURING_DATA_SYNC, etl_fail_point};
+use crate::failpoints::{
+    START_TABLE_SYNC__AFTER_DATA_SYNC, START_TABLE_SYNC__DURING_DATA_SYNC, etl_fail_point,
+};
 use crate::replication::client::PgReplicationClient;
 use crate::replication::slot::get_slot_name;
 use crate::replication::stream::TableCopyStream;
