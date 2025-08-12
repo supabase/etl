@@ -29,6 +29,7 @@ kube = { workspace = true, features = [
     "client",
     "rustls-tls",
 ] }
+metrics-exporter-prometheus = { workspace = true, features = ["http-listener"] }
 pg_escape = { workspace = true }
 rand = { workspace = true, features = ["std"] }
 reqwest = { workspace = true, features = ["json"] }
