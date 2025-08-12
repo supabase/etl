@@ -17,7 +17,7 @@ use crate::routes::connect_to_source_database_with_defaults;
 
 /// Pipeline configuration used during replication. This struct's fields
 /// should be kept in sync with [`OptionalPipelineConfig`]. If a new optional
-/// field is added, it should also be included in the [`OptionalPipelineConfig::merge`]
+/// field is added, it should also be included in the pipeline config merge
 /// implementation.
 ///
 /// A separate struct was created because `publication_name` is not optional and

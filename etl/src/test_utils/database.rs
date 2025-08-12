@@ -13,7 +13,7 @@ const TEST_DATABASE_SCHEMA: &str = "test";
 
 /// Creates a [`TableName`] in the test schema.
 ///
-/// This helper function constructs a [`TableName`] with the schema set to [`TEST_DATABASE_SCHEMA`]
+/// This helper function constructs a [`TableName`] with the schema set to the test schema
 /// and the provided name as the table name. It's used to ensure consistent table naming
 /// across test scenarios.
 pub fn test_table_name(name: &str) -> TableName {
