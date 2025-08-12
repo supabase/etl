@@ -99,7 +99,7 @@ impl FromStr for SequencedBigQueryTableId {
     /// Expects the last underscore to separate the table name from the sequence number.
     fn from_str(table_id: &str) -> Result<Self, Self::Err> {
         if let Some(last_underscore) = table_id.rfind('_') {
-            let table_id = &table_id[..last_underscore];
+            let table_name = &table_id[..last_underscore];
             let sequence_number = table_id[last_underscore + 1..]
                 .parse::<u64>()
                 .map_err(|e| {
@@ -113,7 +113,7 @@ impl FromStr for SequencedBigQueryTableId {
                 })?;
 
             Ok(SequencedBigQueryTableId(
-                table_id.to_string(),
+                table_name.to_string(),
                 sequence_number,
             ))
         } else {
@@ -801,5 +801,217 @@ mod tests {
             table_name_to_bigquery_table_id(&table_name),
             "a____b_c____d"
         );
+    }
+
+    #[test]
+    fn test_sequenced_bigquery_table_id_from_str_valid() {
+        let table_id = "users_table_123";
+        let parsed = table_id.parse::<SequencedBigQueryTableId>().unwrap();
+        assert_eq!(parsed.to_bigquery_table_id(), "users_table");
+        assert_eq!(parsed.1, 123);
+    }
+
+    #[test]
+    fn test_sequenced_bigquery_table_id_from_str_zero_sequence() {
+        let table_id = "simple_table_0";
+        let parsed = table_id.parse::<SequencedBigQueryTableId>().unwrap();
+        assert_eq!(parsed.to_bigquery_table_id(), "simple_table");
+        assert_eq!(parsed.1, 0);
+    }
+
+    #[test]
+    fn test_sequenced_bigquery_table_id_from_str_large_sequence() {
+        let table_id = "test_table_18446744073709551615"; // u64::MAX
+        let parsed = table_id.parse::<SequencedBigQueryTableId>().unwrap();
+        assert_eq!(parsed.to_bigquery_table_id(), "test_table");
+        assert_eq!(parsed.1, u64::MAX);
+    }
+
+    #[test]
+    fn test_sequenced_bigquery_table_id_from_str_escaped_underscores() {
+        let table_id = "a__b_c__d_42";
+        let parsed = table_id.parse::<SequencedBigQueryTableId>().unwrap();
+        assert_eq!(parsed.to_bigquery_table_id(), "a__b_c__d");
+        assert_eq!(parsed.1, 42);
+    }
+
+    #[test]
+    fn test_sequenced_bigquery_table_id_display_formatting() {
+        let table_id = SequencedBigQueryTableId("users_table".to_string(), 123);
+        assert_eq!(table_id.to_string(), "users_table_123");
+    }
+
+    #[test]
+    fn test_sequenced_bigquery_table_id_display_zero_sequence() {
+        let table_id = SequencedBigQueryTableId("simple_table".to_string(), 0);
+        assert_eq!(table_id.to_string(), "simple_table_0");
+    }
+
+    #[test]
+    fn test_sequenced_bigquery_table_id_display_large_sequence() {
+        let table_id = SequencedBigQueryTableId("test_table".to_string(), u64::MAX);
+        assert_eq!(table_id.to_string(), "test_table_18446744073709551615");
+    }
+
+    #[test]
+    fn test_sequenced_bigquery_table_id_display_with_escaped_underscores() {
+        let table_id = SequencedBigQueryTableId("a__b_c__d".to_string(), 42);
+        assert_eq!(table_id.to_string(), "a__b_c__d_42");
+    }
+
+    #[test]
+    fn test_sequenced_bigquery_table_id_new() {
+        let table_id = SequencedBigQueryTableId::new("users_table".to_string());
+        assert_eq!(table_id.to_bigquery_table_id(), "users_table");
+        assert_eq!(table_id.1, 0);
+    }
+
+    #[test]
+    fn test_sequenced_bigquery_table_id_new_with_underscores() {
+        let table_id = SequencedBigQueryTableId::new("a__b_c__d".to_string());
+        assert_eq!(table_id.to_bigquery_table_id(), "a__b_c__d");
+        assert_eq!(table_id.1, 0);
+    }
+
+    #[test]
+    fn test_sequenced_bigquery_table_id_next() {
+        let table_id = SequencedBigQueryTableId::new("users_table".to_string());
+        let next_table_id = table_id.next();
+
+        assert_eq!(table_id.1, 0);
+        assert_eq!(next_table_id.1, 1);
+        assert_eq!(next_table_id.to_bigquery_table_id(), "users_table");
+    }
+
+    #[test]
+    fn test_sequenced_bigquery_table_id_next_increments_correctly() {
+        let table_id = SequencedBigQueryTableId("test_table".to_string(), 42);
+        let next_table_id = table_id.next();
+
+        assert_eq!(next_table_id.1, 43);
+        assert_eq!(next_table_id.to_bigquery_table_id(), "test_table");
+    }
+
+    #[test]
+    fn test_sequenced_bigquery_table_id_next_max_value() {
+        let table_id = SequencedBigQueryTableId("test_table".to_string(), u64::MAX - 1);
+        let next_table_id = table_id.next();
+
+        assert_eq!(next_table_id.1, u64::MAX);
+        assert_eq!(next_table_id.to_bigquery_table_id(), "test_table");
+    }
+
+    #[test]
+    fn test_sequenced_bigquery_table_id_to_bigquery_table_id() {
+        let table_id = SequencedBigQueryTableId("users_table".to_string(), 123);
+        assert_eq!(table_id.to_bigquery_table_id(), "users_table");
+    }
+
+    #[test]
+    fn test_sequenced_bigquery_table_id_to_bigquery_table_id_with_underscores() {
+        let table_id = SequencedBigQueryTableId("a__b_c__d".to_string(), 42);
+        assert_eq!(table_id.to_bigquery_table_id(), "a__b_c__d");
+    }
+
+    #[test]
+    fn test_sequenced_bigquery_table_id_to_bigquery_table_id_zero_sequence() {
+        let table_id = SequencedBigQueryTableId("simple_table".to_string(), 0);
+        assert_eq!(table_id.to_bigquery_table_id(), "simple_table");
+    }
+
+    #[test]
+    fn test_sequenced_bigquery_table_id_from_str_no_underscore() {
+        let result = "table_without_sequence".parse::<SequencedBigQueryTableId>();
+        assert!(result.is_err());
+
+        let err = result.unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::InvalidTableName);
+        assert!(
+            err.to_string()
+                .contains("Could not parse BigQuery table ID")
+        );
+    }
+
+    #[test]
+    fn test_sequenced_bigquery_table_id_from_str_invalid_sequence_number() {
+        let result = "users_table_not_a_number".parse::<SequencedBigQueryTableId>();
+        assert!(result.is_err());
+
+        let err = result.unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::InvalidTableName);
+        assert!(
+            err.to_string()
+                .contains("Could not parse BigQuery table ID")
+        );
+    }
+
+    #[test]
+    fn test_sequenced_bigquery_table_id_from_str_negative_sequence() {
+        let result = "users_table_-123".parse::<SequencedBigQueryTableId>();
+        assert!(result.is_err());
+
+        let err = result.unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::InvalidTableName);
+        assert!(
+            err.to_string()
+                .contains("Could not parse BigQuery table ID")
+        );
+    }
+
+    #[test]
+    fn test_sequenced_bigquery_table_id_from_str_sequence_overflow() {
+        let result = "users_table_18446744073709551616".parse::<SequencedBigQueryTableId>(); // u64::MAX + 1
+        assert!(result.is_err());
+
+        let err = result.unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::InvalidTableName);
+        assert!(
+            err.to_string()
+                .contains("Could not parse BigQuery table ID")
+        );
+    }
+
+    #[test]
+    fn test_sequenced_bigquery_table_id_from_str_empty_string() {
+        let result = "".parse::<SequencedBigQueryTableId>();
+        assert!(result.is_err());
+
+        let err = result.unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::InvalidTableName);
+        assert!(
+            err.to_string()
+                .contains("Could not parse BigQuery table ID")
+        );
+    }
+
+    #[test]
+    fn test_sequenced_bigquery_table_id_from_str_empty_sequence() {
+        let result = "users_table_".parse::<SequencedBigQueryTableId>();
+        assert!(result.is_err());
+
+        let err = result.unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::InvalidTableName);
+        assert!(
+            err.to_string()
+                .contains("Could not parse BigQuery table ID")
+        );
+    }
+
+    #[test]
+    fn test_sequenced_bigquery_table_id_round_trip() {
+        let original = "users_table_123";
+        let parsed = original.parse::<SequencedBigQueryTableId>().unwrap();
+        let formatted = parsed.to_string();
+        assert_eq!(original, formatted);
+    }
+
+    #[test]
+    fn test_sequenced_bigquery_table_id_round_trip_complex() {
+        let original = "a__b_c__d_999";
+        let parsed = original.parse::<SequencedBigQueryTableId>().unwrap();
+        let formatted = parsed.to_string();
+        assert_eq!(original, formatted);
+        assert_eq!(parsed.to_bigquery_table_id(), "a__b_c__d");
+        assert_eq!(parsed.1, 999);
     }
 }
