@@ -2,11 +2,12 @@ use etl::destination::Destination;
 use etl::error::{ErrorKind, EtlError, EtlResult};
 use etl::store::schema::SchemaStore;
 use etl::store::state::StateStore;
-use etl::types::{Cell, Event, PgLsn, TableId, TableName, TableRow, TruncateEvent};
+use etl::types::{Cell, Event, PgLsn, TableId, TableName, TableRow};
 use etl::{bail, etl_error};
 use gcp_bigquery_client::storage::TableDescriptor;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
+use std::iter;
 use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -488,7 +489,13 @@ where
 
         while event_iter.peek().is_some() {
             let mut table_id_to_table_rows = HashMap::new();
-            let mut truncate_events = Vec::new();
+
+            // Collect and deduplicate all table IDs from all truncate events.
+            //
+            // This is done as an optimization since if we have multiple table ids being truncated in a
+            // row without applying other events in the meanwhile, it doesn't make any sense to create
+            // new empty tables for each of them.
+            let mut truncate_table_ids = HashSet::new();
 
             // Process events until we hit a truncate event or run out of events
             while let Some(event) = event_iter.peek() {
@@ -573,17 +580,16 @@ where
             // Collect all consecutive truncate events
             while let Some(Event::Truncate(_)) = event_iter.peek() {
                 if let Some(Event::Truncate(truncate_event)) = event_iter.next() {
-                    truncate_events.push(truncate_event);
+                    for table_id in truncate_event.rel_ids {
+                        truncate_table_ids.insert(TableId::new(table_id));
+                    }
                 }
             }
 
             // Process truncate events
-            if !truncate_events.is_empty() {
-                info!(
-                    "Processing {} 'TRUNCATE' events with versioned table recreation",
-                    truncate_events.len()
-                );
-                self.process_truncate_events(truncate_events).await?;
+            if !truncate_table_ids.is_empty() {
+                self.process_truncate_for_table_ids(truncate_table_ids.into_iter())
+                    .await?;
             }
         }
 
@@ -595,23 +601,13 @@ where
     /// Creates fresh empty tables with incremented version numbers, updates views to point
     /// to new tables, and schedules cleanup of old table versions. Deduplicates table IDs
     /// to optimize multiple truncates of the same table.
-    async fn process_truncate_events(&self, truncate_events: Vec<TruncateEvent>) -> EtlResult<()> {
+    async fn process_truncate_for_table_ids(
+        &self,
+        table_ids: impl IntoIterator<Item = TableId>,
+    ) -> EtlResult<()> {
         let mut inner = self.inner.lock().await;
 
-        // Collect and deduplicate all table IDs from all truncate events.
-        //
-        // This is done as an optimization since if we have multiple table ids being truncated in a
-        // row without applying other events in the meanwhile, it doesn't make any sense to create
-        // new empty tables for each of them.
-        let mut unique_table_ids = HashSet::new();
-        for truncate_event in truncate_events {
-            for table_id in truncate_event.rel_ids {
-                unique_table_ids.insert(table_id);
-            }
-        }
-
-        for table_id in unique_table_ids {
-            let table_id = TableId::new(table_id);
+        for table_id in table_ids {
             let table_schema = inner.store.get_table_schema(&table_id).await?.ok_or_else(|| etl_error!(
                 ErrorKind::MissingTableSchema,
                     "Table not found in the schema store",
@@ -722,8 +718,9 @@ impl<S> Destination for BigQueryDestination<S>
 where
     S: StateStore + SchemaStore + Send + Sync,
 {
-    fn truncate_table(&self, table_id: TableId) -> impl Future<Output = EtlResult<()>> + Send {
-        todo!()
+    async fn truncate_table(&self, table_id: TableId) -> EtlResult<()> {
+        self.process_truncate_for_table_ids(iter::once(table_id))
+            .await
     }
 
     async fn write_table_rows(
