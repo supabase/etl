@@ -13,7 +13,9 @@ use crate::concurrency::stream::BatchStream;
 use crate::destination::Destination;
 use crate::error::{ErrorKind, EtlError, EtlResult};
 #[cfg(feature = "failpoints")]
-use crate::failpoints::{START_TABLE_SYNC__AFTER_DATA_SYNC, etl_fail_point};
+use crate::failpoints::{
+    START_TABLE_SYNC__AFTER_DATA_SYNC, START_TABLE_SYNC__DURING_DATA_SYNC, etl_fail_point,
+};
 use crate::replication::client::PgReplicationClient;
 use crate::replication::slot::get_slot_name;
 use crate::replication::stream::TableCopyStream;
@@ -110,25 +112,26 @@ where
     // In case the phase is any other phase, we will return an error.
     let start_lsn = match phase_type {
         TableReplicationPhaseType::Init | TableReplicationPhaseType::DataSync => {
-            // If we are in `DataSync` it means we failed during table copying, so we want to delete the
-            // existing slot before continuing.
             if phase_type == TableReplicationPhaseType::DataSync {
-                // TODO: After we delete the slot we will have to truncate the table in the destination,
-                // otherwise there can be an inconsistent copy of the data. E.g. consider this scenario:
-                // A table had a single row with id 1 and this was copied to the destination during initial
-                // table copy. Before the table's phase was set to FinishedCopy, the process crashed.
-                // While the process was down, row with id 1 in the source was deleted and another row with
-                // id 2 was inserted. The process comes back up to find the table's state in DataSync,
-                // deletes the slot and makes a copy again. This time it copies the row with id 2. Now
-                // the destinations contains two rows (with id 1 and 2) instead of only one (with id 2).
-                // The simplest fix here would be to unconditionally send a truncate to the destination
-                // before starting a table copy.
+                // If we are in `DataSync` it means we failed during table copying, so we want to delete the
+                // existing slot before continuing.
                 if let Err(err) = replication_client.delete_slot(&slot_name).await {
                     // If the slot is not found, we are safe to continue, for any other error, we bail.
                     if err.kind() != ErrorKind::ReplicationSlotNotFound {
                         return Err(err);
                     }
                 }
+
+                // We must truncate the destination table before starting a copy to avoid data inconsistencies.
+                // Example scenario:
+                // 1. The source table has a single row (id = 1) that is copied to the destination during the initial copy.
+                // 2. Before the table’s phase is set to `FinishedCopy`, the process crashes.
+                // 3. While down, the source deletes row id = 1 and inserts row id = 2.
+                // 4. When restarted, the process sees the table in the ` DataSync ` state, deletes the slot, and copies again.
+                // 5. This time, only row id = 2 is copied, but row id = 1 still exists in the destination.
+                // Result: the destination has two rows (id = 1 and id = 2) instead of only one (id = 2).
+                // Fix: Always truncate the destination table before starting a copy.
+                destination.truncate_table(table_id).await?;
             }
 
             // We are ready to start copying table data, and we update the state accordingly.
@@ -210,6 +213,10 @@ where
                         let table_rows = table_rows.into_iter().collect::<Result<Vec<_>, _>>()?;
                         rows_copied += table_rows.len();
                         destination.write_table_rows(table_id, table_rows).await?;
+
+                        // Fail point to test when the table sync fails after copying one batch.
+                        #[cfg(feature = "failpoints")]
+                        etl_fail_point(START_TABLE_SYNC__DURING_DATA_SYNC)?;
                     }
                     ShutdownResult::Shutdown(_) => {
                         // If we received a shutdown in the middle of a table copy, we bail knowing

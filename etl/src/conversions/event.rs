@@ -184,6 +184,24 @@ impl Event {
     pub fn event_type(&self) -> EventType {
         self.into()
     }
+
+    /// Returns true if the event has the supplied table_id.
+    pub fn has_table_id(&self, table_id: &TableId) -> bool {
+        match self {
+            Event::Insert(insert_event) => insert_event.table_id == *table_id,
+            Event::Update(update_event) => update_event.table_id == *table_id,
+            Event::Delete(delete_event) => delete_event.table_id == *table_id,
+            Event::Relation(relation_event) => relation_event.table_schema.id == *table_id,
+            Event::Truncate(event) => {
+                let Some(_) = event.rel_ids.iter().find(|&&id| table_id.0 == id) else {
+                    return false;
+                };
+
+                true
+            }
+            _ => false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

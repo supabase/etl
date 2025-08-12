@@ -25,6 +25,7 @@ struct Inner {
     table_replication_states: HashMap<TableId, TableReplicationPhase>,
     table_state_history: HashMap<TableId, Vec<TableReplicationPhase>>,
     table_schemas: HashMap<TableId, Arc<TableSchema>>,
+    table_mappings: HashMap<TableId, String>,
     table_state_conditions: Vec<(TableId, TableReplicationPhaseType, Arc<Notify>)>,
     method_call_notifiers: HashMap<StateStoreMethod, Vec<Arc<Notify>>>,
 }
@@ -67,6 +68,7 @@ impl NotifyingStore {
             table_replication_states: HashMap::new(),
             table_state_history: HashMap::new(),
             table_schemas: HashMap::new(),
+            table_mappings: HashMap::new(),
             table_state_conditions: Vec::new(),
             method_call_notifiers: HashMap::new(),
         };
@@ -249,6 +251,33 @@ impl SchemaStore for NotifyingStore {
             .table_schemas
             .insert(table_schema.id, Arc::new(table_schema));
 
+        Ok(())
+    }
+
+    async fn get_table_mapping(&self, source_table_id: &TableId) -> EtlResult<Option<String>> {
+        let inner = self.inner.read().await;
+        Ok(inner.table_mappings.get(source_table_id).cloned())
+    }
+
+    async fn get_table_mappings(&self) -> EtlResult<HashMap<TableId, String>> {
+        let inner = self.inner.read().await;
+        Ok(inner.table_mappings.clone())
+    }
+
+    async fn load_table_mappings(&self) -> EtlResult<usize> {
+        let inner = self.inner.read().await;
+        Ok(inner.table_mappings.len())
+    }
+
+    async fn store_table_mapping(
+        &self,
+        source_table_id: TableId,
+        destination_table_id: String,
+    ) -> EtlResult<()> {
+        let mut inner = self.inner.write().await;
+        inner
+            .table_mappings
+            .insert(source_table_id, destination_table_id);
         Ok(())
     }
 }

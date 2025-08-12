@@ -117,7 +117,37 @@ impl<D> TestDestinationWrapper<D> {
     }
 }
 
-impl<D: Destination + Send + Sync + Clone> Destination for TestDestinationWrapper<D> {
+impl<D> Destination for TestDestinationWrapper<D>
+where
+    D: Destination + Send + Sync + Clone,
+{
+    async fn truncate_table(&self, table_id: TableId) -> EtlResult<()> {
+        let mut inner = self.inner.write().await;
+
+        inner.table_rows.remove(&table_id);
+        inner.events.retain_mut(|event| {
+            let has_table_id = event.has_table_id(&table_id);
+            if let Event::Truncate(event) = event
+                && has_table_id
+            {
+                let Some(index) = event.rel_ids.iter().position(|&id| table_id.0 == id) else {
+                    return true;
+                };
+
+                event.rel_ids.remove(index);
+                if event.rel_ids.is_empty() {
+                    return false;
+                }
+
+                return true;
+            }
+
+            !has_table_id
+        });
+
+        Ok(())
+    }
+
     async fn write_table_rows(
         &self,
         table_id: TableId,

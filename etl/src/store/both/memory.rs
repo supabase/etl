@@ -14,6 +14,7 @@ struct Inner {
     table_replication_states: HashMap<TableId, TableReplicationPhase>,
     table_state_history: HashMap<TableId, Vec<TableReplicationPhase>>,
     table_schemas: HashMap<TableId, Arc<TableSchema>>,
+    table_mappings: HashMap<TableId, String>,
 }
 
 #[derive(Debug, Clone)]
@@ -27,6 +28,7 @@ impl MemoryStore {
             table_replication_states: HashMap::new(),
             table_state_history: HashMap::new(),
             table_schemas: HashMap::new(),
+            table_mappings: HashMap::new(),
         };
 
         Self {
@@ -137,6 +139,37 @@ impl SchemaStore for MemoryStore {
         inner
             .table_schemas
             .insert(table_schema.id, Arc::new(table_schema));
+
+        Ok(())
+    }
+
+    async fn get_table_mapping(&self, source_table_id: &TableId) -> EtlResult<Option<String>> {
+        let inner = self.inner.lock().await;
+
+        Ok(inner.table_mappings.get(source_table_id).cloned())
+    }
+
+    async fn get_table_mappings(&self) -> EtlResult<HashMap<TableId, String>> {
+        let inner = self.inner.lock().await;
+
+        Ok(inner.table_mappings.clone())
+    }
+
+    async fn load_table_mappings(&self) -> EtlResult<usize> {
+        let inner = self.inner.lock().await;
+
+        Ok(inner.table_mappings.len())
+    }
+
+    async fn store_table_mapping(
+        &self,
+        source_table_id: TableId,
+        destination_table_id: String,
+    ) -> EtlResult<()> {
+        let mut inner = self.inner.lock().await;
+        inner
+            .table_mappings
+            .insert(source_table_id, destination_table_id);
 
         Ok(())
     }

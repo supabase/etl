@@ -40,39 +40,63 @@ enum ErrorRepr {
 #[derive(PartialEq, Eq, Copy, Clone, Debug)]
 #[non_exhaustive]
 pub enum ErrorKind {
+    // Connection Errors
     SourceConnectionFailed,
     DestinationConnectionFailed,
+
+    // Query & Execution Errors
     SourceQueryFailed,
     DestinationQueryFailed,
+    SourceLockTimeout,
+    SourceOperationCanceled,
+
+    // Schema & Mapping Errors
     SourceSchemaError,
     MissingTableSchema,
+    MissingTableMapping,
+    DestinationTableNameInvalid,
+
+    // Data & Transformation Errors
     ConversionError,
-    ConfigError,
-    IoError,
-    SourceIoError,
-    SourceConfigurationLimitExceeded,
-    DestinationIoError,
-    SerializationError,
-    DeserializationError,
-    EncryptionError,
-    AuthenticationError,
-    InvalidState,
     InvalidData,
     NullValuesNotSupportedInArray,
     ValidationError,
-    ApplyWorkerPanic,
-    StateRollbackError,
-    TableSyncWorkerPanic,
+
+    // Configuration & Limit Errors
+    ConfigError,
+    SourceConfigurationLimitExceeded,
+
+    // IO & Serialization Errors
+    IoError,
+    SourceIoError,
+    DestinationIoError,
+    SerializationError,
+    DeserializationError,
+
+    // Security & Authentication Errors
+    EncryptionError,
+    AuthenticationError,
     PermissionDenied,
-    DestinationError,
+
+    // State & Workflow Errors
+    InvalidState,
+    ApplyWorkerPanic,
+    TableSyncWorkerPanic,
+    StateRollbackError,
+
+    // Replication Errors
     ReplicationSlotNotFound,
     ReplicationSlotAlreadyExists,
     ReplicationSlotNotCreated,
     SourceSnapshotTooOld,
     SourceDatabaseInRecovery,
-    SourceOperationCanceled,
     SourceDatabaseShutdown,
-    SourceLockTimeout,
+
+    // General Errors
+    SourceError,
+    DestinationError,
+
+    // Unknown / Uncategorized
     Unknown,
 
     // Special error kinds used for tests that trigger specific retry behaviors via fault injection.
@@ -620,7 +644,7 @@ impl From<tokio_postgres::Error> for EtlError {
                     }
 
                     // Default for other SQL states
-                    _ => (ErrorKind::SourceQueryFailed, "PostgreSQL query failed"),
+                    _ => (ErrorKind::SourceError, "PostgreSQL error"),
                 }
             }
             // No SQL state means connection issue

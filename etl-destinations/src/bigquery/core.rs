@@ -1,10 +1,14 @@
 use etl::destination::Destination;
 use etl::error::{ErrorKind, EtlError, EtlResult};
-use etl::etl_error;
 use etl::store::schema::SchemaStore;
-use etl::types::{Cell, Event, PgLsn, TableId, TableName, TableRow, TruncateEvent};
+use etl::store::state::StateStore;
+use etl::types::{Cell, Event, PgLsn, TableId, TableName, TableRow};
+use etl::{bail, etl_error};
 use gcp_bigquery_client::storage::TableDescriptor;
 use std::collections::{HashMap, HashSet};
+use std::fmt::Display;
+use std::iter;
+use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
@@ -12,13 +16,12 @@ use tracing::{debug, info, warn};
 use crate::bigquery::client::{BigQueryClient, BigQueryOperationType};
 use crate::bigquery::{BigQueryDatasetId, BigQueryTableId};
 
-/// The delimiter used when generating table names in BigQuery that splits the schema from the name
-/// of the table.
+/// Delimiter separating schema from table name in BigQuery table identifiers.
 const BIGQUERY_TABLE_ID_DELIMITER: &str = "_";
-/// The replacement string used to escape characters in the original schema and table names.
+/// Replacement string for escaping underscores in PostgreSQL names.
 const BIGQUERY_TABLE_ID_DELIMITER_ESCAPE_REPLACEMENT: &str = "__";
 
-/// Generates a sequence number from the LSNs of an event.
+/// Creates a hex-encoded sequence number from PostgreSQL LSNs to ensure correct event ordering.
 ///
 /// Creates a hex-encoded sequence number that ensures events are processed in the correct order
 /// even when they have the same system time. The format is compatible with BigQuery's
@@ -64,6 +67,97 @@ pub fn table_name_to_bigquery_table_id(table_name: &TableName) -> BigQueryTableI
     format!("{escaped_schema}_{escaped_table}")
 }
 
+/// A BigQuery table identifier with version sequence for truncate operations.
+///
+/// Combines a base table name with a sequence number to enable versioned tables.
+/// Used for truncate handling where each truncate creates a new table version.
+#[derive(Debug, Clone, Eq, PartialEq, Hash)]
+struct SequencedBigQueryTableId(BigQueryTableId, u64);
+
+impl SequencedBigQueryTableId {
+    /// Creates a new sequenced table ID starting at version 0.
+    pub fn new(table_id: BigQueryTableId) -> Self {
+        Self(table_id, 0)
+    }
+
+    /// Returns the next version of this sequenced table ID.
+    pub fn next(&self) -> Self {
+        Self(self.0.clone(), self.1 + 1)
+    }
+
+    /// Extracts the base BigQuery table ID without the sequence number.
+    pub fn to_bigquery_table_id(&self) -> BigQueryTableId {
+        self.0.clone()
+    }
+}
+
+impl FromStr for SequencedBigQueryTableId {
+    type Err = EtlError;
+
+    /// Parses a sequenced table ID from string format `table_name_sequence`.
+    ///
+    /// Expects the last underscore to separate the table name from the sequence number.
+    fn from_str(table_id: &str) -> Result<Self, Self::Err> {
+        if let Some(last_underscore) = table_id.rfind('_') {
+            let table_name = &table_id[..last_underscore];
+            let sequence_str = &table_id[last_underscore + 1..];
+
+            if table_name.is_empty() {
+                bail!(
+                    ErrorKind::DestinationTableNameInvalid,
+                    "Invalid sequenced BigQuery table ID format",
+                    format!(
+                        "Table name cannot be empty in sequenced table ID '{table_id}'. Expected format: 'table_name_sequence'"
+                    )
+                )
+            }
+
+            if sequence_str.is_empty() {
+                bail!(
+                    ErrorKind::DestinationTableNameInvalid,
+                    "Invalid sequenced BigQuery table ID format",
+                    format!(
+                        "Sequence number cannot be empty in sequenced table ID '{table_id}'. Expected format: 'table_name_sequence'"
+                    )
+                )
+            }
+
+            let sequence_number = sequence_str
+                .parse::<u64>()
+                .map_err(|e| {
+                    etl_error!(
+                        ErrorKind::DestinationTableNameInvalid,
+                        "Invalid sequence number in BigQuery table ID",
+                        format!(
+                            "Failed to parse sequence number '{sequence_str}' in table ID '{table_id}': {e}. Expected a non-negative integer (0-{max})",
+                            max = u64::MAX
+                        )
+                    )
+                })?;
+
+            Ok(SequencedBigQueryTableId(
+                table_name.to_string(),
+                sequence_number,
+            ))
+        } else {
+            bail!(
+                ErrorKind::DestinationTableNameInvalid,
+                "Invalid sequenced BigQuery table ID format",
+                format!(
+                    "No underscore found in table ID '{table_id}'. Expected format: 'table_name_sequence' where sequence is a non-negative integer"
+                )
+            )
+        }
+    }
+}
+
+impl Display for SequencedBigQueryTableId {
+    /// Formats the sequenced table ID as `table_name_sequence`.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}_{}", self.0, self.1)
+    }
+}
+
 /// Internal state for [`BigQueryDestination`] wrapped in `Arc<Mutex<>>`.
 ///
 /// Contains the BigQuery client, dataset configuration, injected schema cache,
@@ -73,21 +167,17 @@ struct Inner<S> {
     client: BigQueryClient,
     dataset_id: BigQueryDatasetId,
     max_staleness_mins: Option<u16>,
-    schema_store: S,
+    store: S,
     /// Cache of table IDs that have been successfully created or verified to exist.
     /// This avoids redundant `create_table_if_missing` calls for known tables.
-    created_tables: HashSet<BigQueryTableId>,
-    /// Tracks the current version number for each table to support truncation.
-    /// Maps base table name to its current version number (e.g., "schema_table" -> 2).
-    // TODO: add mapping in the store.
-    table_versions: HashMap<BigQueryTableId, u32>,
+    created_tables: HashSet<SequencedBigQueryTableId>,
     /// Cache of views that have been created and the versioned table they point to.
     /// This avoids redundant `CREATE OR REPLACE VIEW` calls for views that already point to the correct table.
     /// Maps view name to the versioned table it currently points to.
     ///
     /// # Example
     /// `{ users_table: users_table_10, orders_table: orders_table_3 }`
-    created_views: HashMap<BigQueryTableId, BigQueryTableId>,
+    created_views: HashMap<BigQueryTableId, SequencedBigQueryTableId>,
 }
 
 /// A BigQuery destination that implements the ETL [`Destination`] trait.
@@ -101,7 +191,7 @@ pub struct BigQueryDestination<S> {
 
 impl<S> BigQueryDestination<S>
 where
-    S: SchemaStore,
+    S: StateStore + SchemaStore,
 {
     /// Creates a new [`BigQueryDestination`] using a service account key file path.
     ///
@@ -112,16 +202,15 @@ where
         dataset_id: BigQueryDatasetId,
         sa_key: &str,
         max_staleness_mins: Option<u16>,
-        schema_store: S,
+        store: S,
     ) -> EtlResult<Self> {
         let client = BigQueryClient::new_with_key_path(project_id, sa_key).await?;
         let inner = Inner {
             client,
             dataset_id,
             max_staleness_mins,
-            schema_store,
+            store,
             created_tables: HashSet::new(),
-            table_versions: HashMap::new(),
             created_views: HashMap::new(),
         };
 
@@ -139,16 +228,15 @@ where
         dataset_id: BigQueryDatasetId,
         sa_key: &str,
         max_staleness_mins: Option<u16>,
-        schema_store: S,
+        store: S,
     ) -> EtlResult<Self> {
         let client = BigQueryClient::new_with_key(project_id, sa_key).await?;
         let inner = Inner {
             client,
             dataset_id,
             max_staleness_mins,
-            schema_store,
+            store,
             created_tables: HashSet::new(),
-            table_versions: HashMap::new(),
             created_views: HashMap::new(),
         };
 
@@ -157,20 +245,20 @@ where
         })
     }
 
-    /// Prepares the table for CDC streaming with optimistic table creation caching.
+    /// Prepares a table for CDC streaming operations with schema-aware table creation.
     ///
-    /// Loads the table schema and creates the table in BigQuery if missing. Uses an internal
-    /// cache to avoid redundant existence checks for tables that have already been created.
-    /// If streaming fails with a table not found error, the cache entry is invalidated.
+    /// Retrieves the table schema from the store, creates or verifies the BigQuery table exists,
+    /// and ensures the view points to the current versioned table. Uses caching to avoid
+    /// redundant table creation checks.
     async fn prepare_cdc_streaming_for_table(
         inner: &mut Inner<S>,
         table_id: &TableId,
         use_cdc_sequence_column: bool,
-    ) -> EtlResult<(BigQueryTableId, TableDescriptor)> {
+    ) -> EtlResult<(SequencedBigQueryTableId, TableDescriptor)> {
         // We load the schema of the table, if present. This is needed to create the table in BigQuery
         // and also prepare the table descriptor for CDC streaming.
         let table_schema = inner
-            .schema_store
+            .store
             .get_table_schema(table_id)
             .await?
             .ok_or_else(|| {
@@ -183,115 +271,111 @@ where
                 )
             })?;
 
-        let base_table_id = table_name_to_bigquery_table_id(&table_schema.name);
-        let versioned_table_id = Self::get_versioned_table_name(inner, &base_table_id);
+        // We determine the BigQuery table ID for the table together with the current sequence number.
+        let bigquery_table_id = table_name_to_bigquery_table_id(&table_schema.name);
+        let sequenced_bigquery_table_id =
+            Self::get_or_create_sequenced_bigquery_table_id(inner, table_id, &bigquery_table_id)
+                .await?;
 
-        // Optimistically skip table creation if we've already seen this versioned table
-        if !inner.created_tables.contains(&versioned_table_id) {
+        // Optimistically skip table creation if we've already seen this sequenced table.
+        if !inner.created_tables.contains(&sequenced_bigquery_table_id) {
             inner
                 .client
                 .create_table_if_missing(
                     &inner.dataset_id,
-                    &versioned_table_id,
+                    // TODO: down the line we might want to reduce an allocation here.
+                    &sequenced_bigquery_table_id.to_string(),
                     &table_schema.column_schemas,
                     inner.max_staleness_mins,
                 )
                 .await?;
 
-            // Add the versioned table to the cache
-            Self::add_to_created_tables_cache(inner, versioned_table_id.clone());
+            // Add the sequenced table to the cache.
+            Self::add_to_created_tables_cache(inner, &sequenced_bigquery_table_id);
 
-            debug!("versioned table {versioned_table_id} added to creation cache");
+            debug!("sequenced table {sequenced_bigquery_table_id} added to creation cache");
         } else {
             debug!(
-                "versioned table {versioned_table_id} found in creation cache, skipping existence check"
+                "sequenced table {sequenced_bigquery_table_id} found in creation cache, skipping existence check"
             );
         }
 
-        // Ensure view points to this versioned table (uses cache to avoid redundant operations)
-        Self::ensure_view_points_to_table(inner, &base_table_id, &versioned_table_id).await?;
+        // Ensure view points to this sequenced table (uses cache to avoid redundant operations)
+        Self::ensure_view_points_to_table(inner, &bigquery_table_id, &sequenced_bigquery_table_id)
+            .await?;
 
         let table_descriptor = BigQueryClient::column_schemas_to_table_descriptor(
             &table_schema.column_schemas,
             use_cdc_sequence_column,
         );
 
-        Ok((versioned_table_id, table_descriptor))
+        Ok((sequenced_bigquery_table_id, table_descriptor))
     }
 
-    /// Adds a table ID to the created tables cache if not present.
-    fn add_to_created_tables_cache(inner: &mut Inner<impl SchemaStore>, table_id: BigQueryTableId) {
-        if inner.created_tables.contains(&table_id) {
+    /// Adds a table to the creation cache to avoid redundant existence checks.
+    fn add_to_created_tables_cache(
+        inner: &mut Inner<impl SchemaStore>,
+        table_id: &SequencedBigQueryTableId,
+    ) {
+        if inner.created_tables.contains(table_id) {
             return;
         }
 
-        inner.created_tables.insert(table_id);
+        inner.created_tables.insert(table_id.clone());
     }
 
-    /// Removes a table ID from the created tables cache.
-    ///
-    /// Used when a table is found to not exist during streaming operations.
+    /// Removes a table from the creation cache when it's found to not exist.
     fn remove_from_created_tables_cache(
         inner: &mut Inner<impl SchemaStore>,
-        table_id: &BigQueryTableId,
+        table_id: &SequencedBigQueryTableId,
     ) {
         inner.created_tables.remove(table_id);
     }
 
-    /// Returns the versioned table name for the current version of a base table.
+    /// Retrieves the current sequenced table ID or creates a new one starting at version 0.
+    async fn get_or_create_sequenced_bigquery_table_id(
+        inner: &Inner<S>,
+        table_id: &TableId,
+        bigquery_table_id: &BigQueryTableId,
+    ) -> EtlResult<SequencedBigQueryTableId> {
+        let Some(sequenced_bigquery_table_id) =
+            Self::get_sequenced_bigquery_table_id(inner, table_id).await?
+        else {
+            let sequenced_bigquery_table_id =
+                SequencedBigQueryTableId::new(bigquery_table_id.clone());
+            inner
+                .store
+                .store_table_mapping(*table_id, sequenced_bigquery_table_id.to_string())
+                .await?;
+
+            return Ok(sequenced_bigquery_table_id);
+        };
+
+        Ok(sequenced_bigquery_table_id)
+    }
+
+    /// Retrieves the current sequenced table ID from the state store.
+    async fn get_sequenced_bigquery_table_id(
+        inner: &Inner<S>,
+        table_id: &TableId,
+    ) -> EtlResult<Option<SequencedBigQueryTableId>> {
+        let Some(current_table_id) = inner.store.get_table_mapping(table_id).await? else {
+            return Ok(None);
+        };
+
+        let sequenced_bigquery_table_id = current_table_id.parse()?;
+
+        Ok(Some(sequenced_bigquery_table_id))
+    }
+
+    /// Ensures a view points to the specified target table, creating or updating as needed.
     ///
-    /// If no version exists for the table, initializes it to version 0.
-    fn get_versioned_table_name(
-        inner: &mut Inner<impl SchemaStore>,
-        base_table_id: &BigQueryTableId,
-    ) -> BigQueryTableId {
-        let version = inner
-            .table_versions
-            .entry(base_table_id.clone())
-            .or_insert(0);
-        format!("{base_table_id}_{version}")
-    }
-
-    /// Returns the previous versioned table name for cleanup purposes.
-    fn get_previous_versioned_table_name(
-        inner: &Inner<impl SchemaStore>,
-        base_table_id: &BigQueryTableId,
-    ) -> Option<BigQueryTableId> {
-        inner
-            .table_versions
-            .get(base_table_id)
-            .and_then(|&version| {
-                if version > 0 {
-                    Some(format!("{}_{}", base_table_id, version - 1))
-                } else {
-                    None
-                }
-            })
-    }
-
-    /// Increments the version for a table and returns the new versioned table name.
-    fn increment_table_version(
-        inner: &mut Inner<impl SchemaStore>,
-        base_table_id: &BigQueryTableId,
-    ) -> BigQueryTableId {
-        let version = inner
-            .table_versions
-            .entry(base_table_id.clone())
-            .or_insert(0);
-        *version += 1;
-
-        format!("{base_table_id}_{version}")
-    }
-
-    /// Checks if a view needs to be created or updated and performs the operation if needed.
-    ///
-    /// Returns `true` if the view was created/updated, `false` if it was already pointing to the correct table.
+    /// Returns `true` if the view was created or updated, `false` if already correct.
     async fn ensure_view_points_to_table(
         inner: &mut Inner<impl SchemaStore>,
         view_name: &BigQueryTableId,
-        target_table_id: &BigQueryTableId,
+        target_table_id: &SequencedBigQueryTableId,
     ) -> EtlResult<bool> {
-        // Check if the view already points to the correct table
         if let Some(current_target) = inner.created_views.get(view_name)
             && current_target == target_table_id
         {
@@ -303,13 +387,11 @@ where
             return Ok(false);
         }
 
-        // Create or replace the view
         inner
             .client
-            .create_or_replace_view(&inner.dataset_id, view_name, target_table_id)
+            .create_or_replace_view(&inner.dataset_id, view_name, &target_table_id.to_string())
             .await?;
 
-        // Update cache
         inner
             .created_views
             .insert(view_name.clone(), target_table_id.clone());
@@ -322,14 +404,14 @@ where
         Ok(true)
     }
 
-    /// Handles streaming rows with fallback table creation on missing table errors.
+    /// Streams rows to BigQuery with automatic retry on missing table errors.
     ///
-    /// Attempts to stream rows to BigQuery. If streaming fails with a table not found error,
-    /// removes the table from the cache and retries with table creation.
+    /// First attempts optimistic streaming. If the table is missing (detected via permission denied),
+    /// clears the cache, recreates the table, and retries the operation.
     async fn stream_rows_with_fallback(
         inner: &mut Inner<S>,
         dataset_id: &BigQueryDatasetId,
-        table_id: &BigQueryTableId,
+        table_id: &SequencedBigQueryTableId,
         table_descriptor: &TableDescriptor,
         table_rows: Vec<TableRow>,
         orig_table_id: &TableId,
@@ -338,7 +420,12 @@ where
         // First attempt - optimistically assume the table exists
         let result = inner
             .client
-            .stream_rows(dataset_id, table_id, table_descriptor, table_rows.clone())
+            .stream_rows(
+                dataset_id,
+                &table_id.to_string(),
+                table_descriptor,
+                table_rows.clone(),
+            )
             .await;
 
         match result {
@@ -354,6 +441,7 @@ where
                     warn!(
                         "table {table_id} not found during streaming, removing from cache and recreating"
                     );
+
                     // Remove the table from our cache since it doesn't exist
                     Self::remove_from_created_tables_cache(inner, table_id);
 
@@ -369,19 +457,23 @@ where
                     // Retry the streaming operation
                     inner
                         .client
-                        .stream_rows(dataset_id, &new_table_id, &new_table_descriptor, table_rows)
+                        .stream_rows(
+                            dataset_id,
+                            &new_table_id.to_string(),
+                            &new_table_descriptor,
+                            table_rows,
+                        )
                         .await
                 } else {
-                    // Not a table not found error, propagate the original error
                     Err(err)
                 }
             }
         }
     }
 
-    /// Writes data rows to a BigQuery table, adding CDC mode metadata.
+    /// Writes table rows with CDC metadata for non-event streaming operations.
     ///
-    /// Each row gets a CDC mode column and sequence number appended before streaming to BigQuery.
+    /// Adds an `Upsert` operation type to each row and streams to the appropriate BigQuery table.
     async fn write_table_rows(
         &self,
         table_id: TableId,
@@ -389,7 +481,7 @@ where
     ) -> EtlResult<()> {
         let mut inner = self.inner.lock().await;
 
-        let (bq_table_id, table_descriptor) =
+        let (sequenced_bigquery_table_id, table_descriptor) =
             Self::prepare_cdc_streaming_for_table(&mut inner, &table_id, false).await?;
 
         let dataset_id = inner.dataset_id.clone();
@@ -402,7 +494,7 @@ where
         Self::stream_rows_with_fallback(
             &mut inner,
             &dataset_id,
-            &bq_table_id,
+            &sequenced_bigquery_table_id,
             &table_descriptor,
             table_rows,
             &table_id,
@@ -413,16 +505,22 @@ where
         Ok(())
     }
 
-    /// Processes and writes a batch of CDC events to BigQuery.
+    /// Processes CDC events in batches with proper ordering and truncate handling.
     ///
-    /// Groups events by type, handles inserts/updates/deletes via streaming, and processes truncates separately.
-    /// Adds sequence numbers to ensure proper ordering of events with the same system time.
+    /// Groups streaming operations (insert/update/delete) by table and processes them together,
+    /// then handles truncate events separately by creating new versioned tables.
     async fn write_events(&self, events: Vec<Event>) -> EtlResult<()> {
         let mut event_iter = events.into_iter().peekable();
 
         while event_iter.peek().is_some() {
             let mut table_id_to_table_rows = HashMap::new();
-            let mut truncate_events = Vec::new();
+
+            // Collect and deduplicate all table IDs from all truncate events.
+            //
+            // This is done as an optimization since if we have multiple table ids being truncated in a
+            // row without applying other events in the meanwhile, it doesn't make any sense to create
+            // new empty tables for each of them.
+            let mut truncate_table_ids = HashSet::new();
 
             // Process events until we hit a truncate event or run out of events
             while let Some(event) = event_iter.peek() {
@@ -507,67 +605,60 @@ where
             // Collect all consecutive truncate events
             while let Some(Event::Truncate(_)) = event_iter.peek() {
                 if let Some(Event::Truncate(truncate_event)) = event_iter.next() {
-                    truncate_events.push(truncate_event);
+                    for table_id in truncate_event.rel_ids {
+                        truncate_table_ids.insert(TableId::new(table_id));
+                    }
                 }
             }
 
             // Process truncate events
-            if !truncate_events.is_empty() {
-                info!(
-                    "Processing {} 'TRUNCATE' events with versioned table recreation",
-                    truncate_events.len()
-                );
-                self.process_truncate_events(truncate_events).await?;
+            if !truncate_table_ids.is_empty() {
+                self.process_truncate_for_table_ids(truncate_table_ids.into_iter())
+                    .await?;
             }
         }
 
         Ok(())
     }
 
-    /// Processes truncate events by creating new versioned tables and updating views.
+    /// Handles table truncation by creating new versioned tables and updating views.
     ///
-    /// Maps PostgreSQL table OIDs to BigQuery table names, creates new versioned tables,
-    /// updates views to point to new tables, and schedules old table cleanup.
-    /// Deduplicates table IDs to avoid redundant truncate operations on the same table.
-    async fn process_truncate_events(&self, truncate_events: Vec<TruncateEvent>) -> EtlResult<()> {
+    /// Creates fresh empty tables with incremented version numbers, updates views to point
+    /// to new tables, and schedules cleanup of old table versions. Deduplicates table IDs
+    /// to optimize multiple truncates of the same table.
+    async fn process_truncate_for_table_ids(
+        &self,
+        table_ids: impl IntoIterator<Item = TableId>,
+    ) -> EtlResult<()> {
         let mut inner = self.inner.lock().await;
 
-        // Collect and deduplicate all table IDs from all truncate events.
-        //
-        // This is done as an optimization since if we have multiple table ids being truncated in a
-        // row without applying other events in the meanwhile, it doesn't make any sense to create
-        // new empty tables for each of them.
-        let mut unique_table_ids = HashSet::new();
-        for truncate_event in truncate_events {
-            for table_id in truncate_event.rel_ids {
-                unique_table_ids.insert(table_id);
-            }
-        }
+        for table_id in table_ids {
+            let table_schema = inner.store.get_table_schema(&table_id).await?.ok_or_else(|| etl_error!(
+                ErrorKind::MissingTableSchema,
+                    "Table not found in the schema store",
+                    format!(
+                        "The table schema for table {table_id} was not found in the schema store while processing truncate events for BigQuery"
+                    )
+            ))?;
 
-        for table_id in unique_table_ids {
-            let Some(table_schema) = inner
-                .schema_store
-                .get_table_schema(&TableId::new(table_id))
-                .await?
-            else {
-                info!(
-                    "table schema not found for table_id: {}, skipping truncate",
-                    table_id
-                );
-                continue;
-            };
+            // We need to determine the current sequenced table ID for this table.
+            let sequenced_bigquery_table_id =
+                Self::get_sequenced_bigquery_table_id(&inner, &table_id)
+                    .await?
+                    .ok_or_else(|| etl_error!(
+                        ErrorKind::MissingTableMapping,
+                        "Table mapping not found",
+                        format!(
+                            "The table mapping for table id {table_id} was not found while processing truncate events for BigQuery"
+                        )
+                    ))?;
 
-            let base_table_id = table_name_to_bigquery_table_id(&table_schema.name);
-
-            // Get the previous table name for cleanup
-            let previous_table_id = Self::get_previous_versioned_table_name(&inner, &base_table_id);
-
-            // Create the new versioned table
-            let new_versioned_table_id = Self::increment_table_version(&mut inner, &base_table_id);
+            // We compute the new sequence table ID since we want a new table for each truncate event.
+            let next_sequenced_bigquery_table_id = sequenced_bigquery_table_id.next();
 
             info!(
                 "processing truncate for table {}: creating new version {}",
-                base_table_id, new_versioned_table_id
+                table_id, next_sequenced_bigquery_table_id
             );
 
             // Create or replace the new table.
@@ -578,45 +669,70 @@ where
                 .client
                 .create_or_replace_table(
                     &inner.dataset_id,
-                    &new_versioned_table_id,
+                    &next_sequenced_bigquery_table_id.to_string(),
                     &table_schema.column_schemas,
                     inner.max_staleness_mins,
                 )
                 .await?;
+            Self::add_to_created_tables_cache(&mut inner, &next_sequenced_bigquery_table_id);
 
             // Update the view to point to the new table.
-            //
-            // We do this after the table has been created to that in case of failure, the
-            // view can be manually updated to point to the new table.
-            //
-            // Unfortunately, BigQuery doesn't seem to offer transactions for DDL operations so our
-            // implementation is best effort.
-            Self::ensure_view_points_to_table(&mut inner, &base_table_id, &new_versioned_table_id)
+            Self::ensure_view_points_to_table(
+                &mut inner,
+                // We convert the sequenced table ID to a BigQuery table ID since the view will have
+                // the name of the BigQuery table id (without the sequence number).
+                &sequenced_bigquery_table_id.to_bigquery_table_id(),
+                &next_sequenced_bigquery_table_id,
+            )
+            .await?;
+
+            // Update the store table mappings to point to the new table.
+            inner
+                .store
+                .store_table_mapping(table_id, next_sequenced_bigquery_table_id.to_string())
                 .await?;
-            Self::add_to_created_tables_cache(&mut inner, new_versioned_table_id.clone());
+
+            // Please note that the three statements above are not transactional, so if one fails,
+            // there might be combinations of failures that require manual intervention. For example,
+            // - Table created, but view update failed -> in this case the system will still point to
+            //   table 'n', so the restart will reprocess events on table 'n', the table 'n + 1' will
+            //   be recreated and the view will be updated to point to the new table. No mappings are
+            //   changed.
+            // - Table created, view updated, but mapping update failed -> in this case the system will
+            //   still point to table 'n' but the customer will see the empty state of table 'n + 1' until the
+            //   system heals. Healing happens when the system is restarted, the mapping points to 'n'
+            //   meaning that events will be reprocessed and applied on table 'n' and then once the truncate
+            //   is successfully processed, the system should be consistent.
 
             info!(
                 "successfully processed truncate for {}: new table {}, view updated",
-                base_table_id, new_versioned_table_id
+                table_id, next_sequenced_bigquery_table_id
             );
 
-            if let Some(prev_table_id) = previous_table_id {
-                Self::remove_from_created_tables_cache(&mut inner, &prev_table_id);
+            // We remove the old table from the cache since it's no longer necessary.
+            Self::remove_from_created_tables_cache(&mut inner, &sequenced_bigquery_table_id);
 
-                let client = inner.client.clone();
-                let dataset_id = inner.dataset_id.clone();
-
-                // Schedule cleanup of the previous table. We do not care to track this task since
-                // if it fails, users can clean up the table on their own, but the view will still point
-                // to the new data.
-                tokio::spawn(async move {
-                    if let Err(err) = client.drop_table(&dataset_id, &prev_table_id).await {
-                        warn!("failed to drop previous table {}: {}", prev_table_id, err);
-                    } else {
-                        info!("successfully cleaned up previous table {}", prev_table_id);
-                    }
-                });
-            }
+            // Schedule cleanup of the previous table. We do not care to track this task since
+            // if it fails, users can clean up the table on their own, but the view will still point
+            // to the new data.
+            let client = inner.client.clone();
+            let dataset_id = inner.dataset_id.clone();
+            tokio::spawn(async move {
+                if let Err(err) = client
+                    .drop_table(&dataset_id, &sequenced_bigquery_table_id.to_string())
+                    .await
+                {
+                    warn!(
+                        "failed to drop previous table {}: {}",
+                        sequenced_bigquery_table_id, err
+                    );
+                } else {
+                    info!(
+                        "successfully cleaned up previous table {}",
+                        sequenced_bigquery_table_id
+                    );
+                }
+            });
         }
 
         Ok(())
@@ -625,8 +741,13 @@ where
 
 impl<S> Destination for BigQueryDestination<S>
 where
-    S: SchemaStore + Send + Sync,
+    S: StateStore + SchemaStore + Send + Sync,
 {
+    async fn truncate_table(&self, table_id: TableId) -> EtlResult<()> {
+        self.process_truncate_for_table_ids(iter::once(table_id))
+            .await
+    }
+
     async fn write_table_rows(
         &self,
         table_id: TableId,
@@ -705,5 +826,249 @@ mod tests {
             table_name_to_bigquery_table_id(&table_name),
             "a____b_c____d"
         );
+    }
+
+    #[test]
+    fn test_sequenced_bigquery_table_id_from_str_valid() {
+        let table_id = "users_table_123";
+        let parsed = table_id.parse::<SequencedBigQueryTableId>().unwrap();
+        assert_eq!(parsed.to_bigquery_table_id(), "users_table");
+        assert_eq!(parsed.1, 123);
+    }
+
+    #[test]
+    fn test_sequenced_bigquery_table_id_from_str_zero_sequence() {
+        let table_id = "simple_table_0";
+        let parsed = table_id.parse::<SequencedBigQueryTableId>().unwrap();
+        assert_eq!(parsed.to_bigquery_table_id(), "simple_table");
+        assert_eq!(parsed.1, 0);
+    }
+
+    #[test]
+    fn test_sequenced_bigquery_table_id_from_str_large_sequence() {
+        let table_id = "test_table_18446744073709551615"; // u64::MAX
+        let parsed = table_id.parse::<SequencedBigQueryTableId>().unwrap();
+        assert_eq!(parsed.to_bigquery_table_id(), "test_table");
+        assert_eq!(parsed.1, u64::MAX);
+    }
+
+    #[test]
+    fn test_sequenced_bigquery_table_id_from_str_escaped_underscores() {
+        let table_id = "a__b_c__d_42";
+        let parsed = table_id.parse::<SequencedBigQueryTableId>().unwrap();
+        assert_eq!(parsed.to_bigquery_table_id(), "a__b_c__d");
+        assert_eq!(parsed.1, 42);
+    }
+
+    #[test]
+    fn test_sequenced_bigquery_table_id_display_formatting() {
+        let table_id = SequencedBigQueryTableId("users_table".to_string(), 123);
+        assert_eq!(table_id.to_string(), "users_table_123");
+    }
+
+    #[test]
+    fn test_sequenced_bigquery_table_id_display_zero_sequence() {
+        let table_id = SequencedBigQueryTableId("simple_table".to_string(), 0);
+        assert_eq!(table_id.to_string(), "simple_table_0");
+    }
+
+    #[test]
+    fn test_sequenced_bigquery_table_id_display_large_sequence() {
+        let table_id = SequencedBigQueryTableId("test_table".to_string(), u64::MAX);
+        assert_eq!(table_id.to_string(), "test_table_18446744073709551615");
+    }
+
+    #[test]
+    fn test_sequenced_bigquery_table_id_display_with_escaped_underscores() {
+        let table_id = SequencedBigQueryTableId("a__b_c__d".to_string(), 42);
+        assert_eq!(table_id.to_string(), "a__b_c__d_42");
+    }
+
+    #[test]
+    fn test_sequenced_bigquery_table_id_new() {
+        let table_id = SequencedBigQueryTableId::new("users_table".to_string());
+        assert_eq!(table_id.to_bigquery_table_id(), "users_table");
+        assert_eq!(table_id.1, 0);
+    }
+
+    #[test]
+    fn test_sequenced_bigquery_table_id_new_with_underscores() {
+        let table_id = SequencedBigQueryTableId::new("a__b_c__d".to_string());
+        assert_eq!(table_id.to_bigquery_table_id(), "a__b_c__d");
+        assert_eq!(table_id.1, 0);
+    }
+
+    #[test]
+    fn test_sequenced_bigquery_table_id_next() {
+        let table_id = SequencedBigQueryTableId::new("users_table".to_string());
+        let next_table_id = table_id.next();
+
+        assert_eq!(table_id.1, 0);
+        assert_eq!(next_table_id.1, 1);
+        assert_eq!(next_table_id.to_bigquery_table_id(), "users_table");
+    }
+
+    #[test]
+    fn test_sequenced_bigquery_table_id_next_increments_correctly() {
+        let table_id = SequencedBigQueryTableId("test_table".to_string(), 42);
+        let next_table_id = table_id.next();
+
+        assert_eq!(next_table_id.1, 43);
+        assert_eq!(next_table_id.to_bigquery_table_id(), "test_table");
+    }
+
+    #[test]
+    fn test_sequenced_bigquery_table_id_next_max_value() {
+        let table_id = SequencedBigQueryTableId("test_table".to_string(), u64::MAX - 1);
+        let next_table_id = table_id.next();
+
+        assert_eq!(next_table_id.1, u64::MAX);
+        assert_eq!(next_table_id.to_bigquery_table_id(), "test_table");
+    }
+
+    #[test]
+    fn test_sequenced_bigquery_table_id_to_bigquery_table_id() {
+        let table_id = SequencedBigQueryTableId("users_table".to_string(), 123);
+        assert_eq!(table_id.to_bigquery_table_id(), "users_table");
+    }
+
+    #[test]
+    fn test_sequenced_bigquery_table_id_to_bigquery_table_id_with_underscores() {
+        let table_id = SequencedBigQueryTableId("a__b_c__d".to_string(), 42);
+        assert_eq!(table_id.to_bigquery_table_id(), "a__b_c__d");
+    }
+
+    #[test]
+    fn test_sequenced_bigquery_table_id_to_bigquery_table_id_zero_sequence() {
+        let table_id = SequencedBigQueryTableId("simple_table".to_string(), 0);
+        assert_eq!(table_id.to_bigquery_table_id(), "simple_table");
+    }
+
+    #[test]
+    fn test_sequenced_bigquery_table_id_from_str_no_underscore() {
+        let result = "tablewithoutsequence".parse::<SequencedBigQueryTableId>();
+        assert!(result.is_err());
+
+        let err = result.unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::DestinationTableNameInvalid);
+        assert!(err.to_string().contains("No underscore found"));
+        assert!(err.to_string().contains("tablewithoutsequence"));
+        assert!(
+            err.to_string()
+                .contains("Expected format: 'table_name_sequence'")
+        );
+    }
+
+    #[test]
+    fn test_sequenced_bigquery_table_id_from_str_invalid_sequence_number() {
+        let result = "users_table_not_a_number".parse::<SequencedBigQueryTableId>();
+        assert!(result.is_err());
+
+        let err = result.unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::DestinationTableNameInvalid);
+        assert!(err.to_string().contains("Failed to parse sequence number"));
+        assert!(err.to_string().contains("not_a_number"));
+        assert!(err.to_string().contains("users_table_not_a_number"));
+        assert!(err.to_string().contains("Expected a non-negative integer"));
+    }
+
+    #[test]
+    fn test_sequenced_bigquery_table_id_from_str_sequence_is_word() {
+        let result = "table_word".parse::<SequencedBigQueryTableId>();
+        assert!(result.is_err());
+
+        let err = result.unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::DestinationTableNameInvalid);
+        assert!(err.to_string().contains("Failed to parse sequence number"));
+        assert!(err.to_string().contains("word"));
+        assert!(err.to_string().contains("table_word"));
+        assert!(err.to_string().contains("Expected a non-negative integer"));
+    }
+
+    #[test]
+    fn test_sequenced_bigquery_table_id_from_str_negative_sequence() {
+        let result = "users_table_-123".parse::<SequencedBigQueryTableId>();
+        assert!(result.is_err());
+
+        let err = result.unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::DestinationTableNameInvalid);
+        assert!(err.to_string().contains("Failed to parse sequence number"));
+        assert!(err.to_string().contains("-123"));
+        assert!(err.to_string().contains("users_table_-123"));
+    }
+
+    #[test]
+    fn test_sequenced_bigquery_table_id_from_str_sequence_overflow() {
+        let result = "users_table_18446744073709551616".parse::<SequencedBigQueryTableId>(); // u64::MAX + 1
+        assert!(result.is_err());
+
+        let err = result.unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::DestinationTableNameInvalid);
+        assert!(err.to_string().contains("Failed to parse sequence number"));
+        assert!(err.to_string().contains("18446744073709551616"));
+        assert!(err.to_string().contains("users_table_18446744073709551616"));
+    }
+
+    #[test]
+    fn test_sequenced_bigquery_table_id_from_str_empty_string() {
+        let result = "".parse::<SequencedBigQueryTableId>();
+        assert!(result.is_err());
+
+        let err = result.unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::DestinationTableNameInvalid);
+        assert!(err.to_string().contains("No underscore found"));
+        assert!(err.to_string().contains("''"));
+        assert!(
+            err.to_string()
+                .contains("Expected format: 'table_name_sequence'")
+        );
+    }
+
+    #[test]
+    fn test_sequenced_bigquery_table_id_from_str_empty_sequence() {
+        let result = "users_table_".parse::<SequencedBigQueryTableId>();
+        assert!(result.is_err());
+
+        let err = result.unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::DestinationTableNameInvalid);
+        assert!(err.to_string().contains("Sequence number cannot be empty"));
+        assert!(err.to_string().contains("users_table_"));
+        assert!(
+            err.to_string()
+                .contains("Expected format: 'table_name_sequence'")
+        );
+    }
+
+    #[test]
+    fn test_sequenced_bigquery_table_id_from_str_empty_table_name() {
+        let result = "_123".parse::<SequencedBigQueryTableId>();
+        assert!(result.is_err());
+
+        let err = result.unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::DestinationTableNameInvalid);
+        assert!(err.to_string().contains("Table name cannot be empty"));
+        assert!(err.to_string().contains("_123"));
+        assert!(
+            err.to_string()
+                .contains("Expected format: 'table_name_sequence'")
+        );
+    }
+
+    #[test]
+    fn test_sequenced_bigquery_table_id_round_trip() {
+        let original = "users_table_123";
+        let parsed = original.parse::<SequencedBigQueryTableId>().unwrap();
+        let formatted = parsed.to_string();
+        assert_eq!(original, formatted);
+    }
+
+    #[test]
+    fn test_sequenced_bigquery_table_id_round_trip_complex() {
+        let original = "a__b_c__d_999";
+        let parsed = original.parse::<SequencedBigQueryTableId>().unwrap();
+        let formatted = parsed.to_string();
+        assert_eq!(original, formatted);
+        assert_eq!(parsed.to_bigquery_table_id(), "a__b_c__d");
+        assert_eq!(parsed.1, 999);
     }
 }

@@ -437,6 +437,13 @@ enum BenchDestination {
 }
 
 impl Destination for BenchDestination {
+    async fn truncate_table(&self, table_id: TableId) -> EtlResult<()> {
+        match self {
+            BenchDestination::Null(dest) => dest.truncate_table(table_id).await,
+            BenchDestination::BigQuery(dest) => dest.truncate_table(table_id).await,
+        }
+    }
+
     async fn write_table_rows(
         &self,
         table_id: TableId,
@@ -444,7 +451,6 @@ impl Destination for BenchDestination {
     ) -> EtlResult<()> {
         match self {
             BenchDestination::Null(dest) => dest.write_table_rows(table_id, table_rows).await,
-
             BenchDestination::BigQuery(dest) => dest.write_table_rows(table_id, table_rows).await,
         }
     }
@@ -452,13 +458,16 @@ impl Destination for BenchDestination {
     async fn write_events(&self, events: Vec<Event>) -> EtlResult<()> {
         match self {
             BenchDestination::Null(dest) => dest.write_events(events).await,
-
             BenchDestination::BigQuery(dest) => dest.write_events(events).await,
         }
     }
 }
 
 impl Destination for NullDestination {
+    async fn truncate_table(&self, _table_id: TableId) -> EtlResult<()> {
+        Ok(())
+    }
+
     async fn write_table_rows(
         &self,
         _table_id: TableId,
