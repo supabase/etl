@@ -1,4 +1,7 @@
-//! Core pipeline code that orchestrates replication.
+//! Core pipeline orchestration and execution.
+//!
+//! Contains the main [`Pipeline`] struct that coordinates PostgreSQL logical replication
+//! with destination systems. Manages worker lifecycles, shutdown coordination, and error handling.
 
 use etl_config::shared::PipelineConfig;
 use std::sync::Arc;

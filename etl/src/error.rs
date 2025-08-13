@@ -1,4 +1,8 @@
-//! Error system used by ETL.
+//! Error types and result definitions for ETL operations.
+//!
+//! Provides a comprehensive error system with classification, aggregation, and detailed error information
+//! for ETL pipeline operations. The [`EtlError`] type supports single errors, errors with additional detail,
+//! and multiple aggregated errors for complex failure scenarios.
 
 use std::error;
 use std::fmt;

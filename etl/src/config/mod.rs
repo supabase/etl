@@ -1,6 +1,6 @@
-//! Configuration objects for ETL.
+//! Configuration objects for ETL pipelines.
 //!
-//! This module contains re-exported configurations that are needed by ETL.
+//! Re-exports configuration types and utilities required for pipeline setup and operation.
 
 // Re-exports.
 pub use etl_config::shared::*;

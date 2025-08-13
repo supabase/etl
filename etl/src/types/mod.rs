@@ -1,4 +1,7 @@
-//! Types used by ETL.
+//! Common types used throughout the ETL system.
+//!
+//! Re-exports core data types, event types, and schema definitions used across the ETL pipeline.
+//! Includes PostgreSQL-specific types, replication events, and table structures.
 
 mod pipeline;
 

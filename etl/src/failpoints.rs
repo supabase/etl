@@ -1,4 +1,7 @@
-//! Fault injection utilities for testing purposes.
+//! Fault injection utilities for testing error scenarios.
+//!
+//! Provides configurable failpoints that can trigger specific error conditions during testing.
+//! Failpoints support different retry policies to test error handling and recovery behavior.
 
 use fail::fail_point;
 

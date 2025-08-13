@@ -1,4 +1,7 @@
-//! Macro exported by ETL.
+//! Macros for ETL error handling.
+//!
+//! Provides convenience macros for creating and returning [`crate::error::EtlError`] instances with
+//! reduced boilerplate for common error handling patterns.
 
 /// Creates an [`crate::error::EtlError`] from error kind and description.
 ///
