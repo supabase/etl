@@ -362,9 +362,9 @@ where
 {
     let rows = sqlx::query!(
         r#"
-        SELECT DISTINCT table_id
-        FROM etl.replication_state
-        WHERE pipeline_id = $1 AND is_current = true
+        select distinct table_id
+        from etl.replication_state
+        where pipeline_id = $1 and is_current = true
         "#,
         pipeline_id
     )
