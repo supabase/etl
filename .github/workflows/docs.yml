@@ -6,6 +6,10 @@ on:
   pull_request:
     branches: [main]
 
+concurrency:
+  group: docs
+  cancel-in-progress: false
+
 permissions:
   contents: write
 
