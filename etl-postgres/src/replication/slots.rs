@@ -42,6 +42,8 @@ pub fn get_slot_name(pipeline_id: u64, worker_type: WorkerType) -> Result<String
 ///
 /// This function deletes both the apply worker slot and all table sync worker slots
 /// for the tables associated with the pipeline.
+///
+/// If the slot name can't be computed, this function will silently skip the deletion of the slot.
 pub async fn delete_pipeline_replication_slots(
     pool: &PgPool,
     pipeline_id: u64,
@@ -51,18 +53,20 @@ pub async fn delete_pipeline_replication_slots(
     let mut slot_names = Vec::with_capacity(table_ids.len() + 1);
 
     // Add apply worker slot
-    let apply_slot_name = get_slot_name(pipeline_id, WorkerType::Apply)?;
-    slot_names.push(apply_slot_name.clone());
+    if let Ok(apply_slot_name) = get_slot_name(pipeline_id, WorkerType::Apply) {
+        slot_names.push(apply_slot_name.clone());
+    };
 
     // Add table sync worker slots
     for table_id in table_ids {
-        let table_sync_slot_name = get_slot_name(
+        if let Ok(table_sync_slot_name) = get_slot_name(
             pipeline_id,
             WorkerType::TableSync {
                 table_id: *table_id,
             },
-        )?;
-        slot_names.push(table_sync_slot_name);
+        ) {
+            slot_names.push(table_sync_slot_name);
+        };
     }
 
     // Delete only active slots

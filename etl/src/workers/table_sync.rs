@@ -1,3 +1,16 @@
+use chrono::Utc;
+use etl_config::shared::PipelineConfig;
+use etl_postgres::replication::slots::get_slot_name;
+use etl_postgres::replication::worker::WorkerType;
+use etl_postgres::schema::TableId;
+use std::ops::Deref;
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::sync::{Mutex, MutexGuard, Notify, Semaphore};
+use tokio::task::JoinHandle;
+use tokio_postgres::types::PgLsn;
+use tracing::{Instrument, debug, error, info, warn};
+
 use crate::concurrency::shutdown::{ShutdownResult, ShutdownRx};
 use crate::concurrency::signal::SignalTx;
 use crate::destination::Destination;
@@ -14,18 +27,6 @@ use crate::types::PipelineId;
 use crate::workers::base::{Worker, WorkerHandle};
 use crate::workers::pool::{TableSyncWorkerPool, TableSyncWorkerPoolInner};
 use crate::{bail, etl_error};
-use chrono::Utc;
-use etl_config::shared::PipelineConfig;
-use etl_postgres::replication::slots::get_slot_name;
-use etl_postgres::replication::worker::WorkerType;
-use etl_postgres::schema::TableId;
-use std::ops::Deref;
-use std::sync::Arc;
-use std::time::Duration;
-use tokio::sync::{Mutex, MutexGuard, Notify, Semaphore};
-use tokio::task::JoinHandle;
-use tokio_postgres::types::PgLsn;
-use tracing::{Instrument, debug, error, info, warn};
 
 /// Maximum time to wait for a phase change before trying again.
 const PHASE_CHANGE_REFRESH_FREQUENCY: Duration = Duration::from_millis(100);
