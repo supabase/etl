@@ -1,3 +1,5 @@
+//! Fault injection utilities for testing purposes.
+
 use fail::fail_point;
 
 use crate::bail;

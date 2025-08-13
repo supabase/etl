@@ -1,3 +1,5 @@
+//! Error system used by ETL.
+
 use std::error;
 use std::fmt;
 

@@ -1,3 +1,5 @@
+//! Workers used by ETL to perform replication tasks.
+
 pub mod apply;
 pub mod base;
 pub mod pool;

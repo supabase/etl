@@ -1,3 +1,5 @@
+//! Core pipeline code that orchestrates replication.
+
 use etl_config::shared::PipelineConfig;
 use std::sync::Arc;
 use tokio::sync::Semaphore;

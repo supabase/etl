@@ -73,7 +73,7 @@ impl TableSyncWorkerStateInner {
 
     /// Updates the table's replication phase with conditional persistence to external storage.
     ///
-    /// This method extends the basic [`set()`] method with durable persistence capabilities,
+    /// This method extends the basic [`TableSyncWorkerStateInner::set()`] method with durable persistence capabilities,
     /// ensuring that important state transitions survive process restarts and failures.
     ///
     /// The persistence behavior is controlled by the phase type's storage requirements.

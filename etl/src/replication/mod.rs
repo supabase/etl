@@ -1,3 +1,5 @@
+//! Replication specific code used by ETL.
+
 pub mod apply;
 pub mod client;
 pub mod common;

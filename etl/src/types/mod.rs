@@ -1,3 +1,5 @@
+//! Types used by ETL.
+
 mod pipeline;
 
 // TODO: properly implement types in this module and export them.

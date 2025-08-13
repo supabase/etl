@@ -1,3 +1,5 @@
+//! Macro exported by ETL.
+
 /// Creates an [`crate::error::EtlError`] from error kind and description.
 ///
 /// This macro provides a concise way to create [`crate::error::EtlError`] instances with

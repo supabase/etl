@@ -1,4 +1,4 @@
-//! Persistent storage abstractions for ETL state management.
+//! Store abstractions for ETL where state and schema are maintained.
 //!
 //! This module provides storage traits and implementations for maintaining ETL
 //! pipeline state across restarts. It includes state tracking for replication
