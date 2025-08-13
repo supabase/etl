@@ -1,16 +1,6 @@
-use etl_postgres::schema::TableId;
 use std::future::Future;
 
 use crate::error::EtlResult;
-
-/// The type of worker that is currently running.
-///
-/// A worker type can also have properties that uniquely identify it.
-#[derive(Debug, Copy, Clone)]
-pub enum WorkerType {
-    Apply,
-    TableSync { table_id: TableId },
-}
 
 /// A trait for types that can be started as workers.
 ///

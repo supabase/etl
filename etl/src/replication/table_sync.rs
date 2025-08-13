@@ -5,7 +5,8 @@ use std::sync::Arc;
 use tokio::pin;
 use tokio_postgres::types::PgLsn;
 use tracing::{error, info, warn};
-
+use etl_postgres::replication::slots::get_slot_name;
+use etl_postgres::replication::worker::WorkerType;
 use crate::bail;
 use crate::concurrency::shutdown::{ShutdownResult, ShutdownRx};
 use crate::concurrency::signal::SignalTx;
@@ -17,14 +18,12 @@ use crate::failpoints::{
     START_TABLE_SYNC__AFTER_DATA_SYNC, START_TABLE_SYNC__DURING_DATA_SYNC, etl_fail_point,
 };
 use crate::replication::client::PgReplicationClient;
-use crate::replication::slot::get_slot_name;
 use crate::replication::stream::TableCopyStream;
 use crate::state::table::RetryPolicy;
 use crate::state::table::{TableReplicationPhase, TableReplicationPhaseType};
 use crate::store::schema::SchemaStore;
 use crate::store::state::StateStore;
 use crate::types::PipelineId;
-use crate::workers::base::WorkerType;
 use crate::workers::table_sync::TableSyncWorkerState;
 
 #[derive(Debug)]
