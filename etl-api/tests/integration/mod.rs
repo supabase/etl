@@ -6,3 +6,5 @@ mod pipelines_test;
 mod sources_test;
 mod tenants_sources_test;
 mod tenants_test;
+
+mod metrics_test;
