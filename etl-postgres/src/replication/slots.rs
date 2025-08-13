@@ -15,9 +15,6 @@ const TABLE_SYNC_PREFIX: &str = "supabase_etl_table_sync";
 pub enum SlotError {
     #[error("Invalid slot name length: {0}")]
     InvalidSlotNameLength(String),
-
-    #[error("Database error: {0}")]
-    Database(#[from] sqlx::Error),
 }
 
 /// Generates a replication slot name for the given pipeline ID and worker type.
@@ -49,7 +46,7 @@ pub async fn delete_pipeline_replication_slots(
     pool: &PgPool,
     pipeline_id: u64,
     table_ids: &[TableId],
-) -> Result<(), SlotError> {
+) -> Result<(), sqlx::Error> {
     // Collect all slot names that need to be deleted
     let mut slot_names = Vec::with_capacity(table_ids.len() + 1);
 
@@ -76,11 +73,7 @@ pub async fn delete_pipeline_replication_slots(
         where r.slot_name = any($1) and r.active = false;
         "#,
     );
-    sqlx::query(&query)
-        .bind(slot_names)
-        .execute(pool)
-        .await
-        .map_err(SlotError::Database)?;
+    sqlx::query(&query).bind(slot_names).execute(pool).await?;
 
     Ok(())
 }
