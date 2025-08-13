@@ -65,24 +65,45 @@ etl = { git = "https://github.com/supabase/etl" }
 Get up and running with ETL in minutes using the built-in memory destination:
 
 ```rust
+use etl::config::{BatchConfig, PgConnectionConfig, PipelineConfig, TlsConfig};
 use etl::pipeline::Pipeline;
 use etl::destination::memory::MemoryDestination;
+use etl::store::both::memory::MemoryStore;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Configure your source database
-    let source_config = etl::config::SourceConfig {
+    // Configure PostgreSQL connection
+    let pg_connection_config = PgConnectionConfig {
         host: "localhost".to_string(),
         port: 5432,
-        database: "mydb".to_string(),
-        // ... other config
+        name: "mydb".to_string(),
+        username: "postgres".to_string(),
+        password: Some("password".into()),
+        tls: TlsConfig {
+            trusted_root_certs: String::new(),
+            enabled: false,
+        },
     };
 
-    // Use the built-in memory destination for testing
+    // Configure the pipeline
+    let pipeline_config = PipelineConfig {
+        id: 1,
+        publication_name: "my_publication".to_string(),
+        pg_connection: pg_connection_config,
+        batch: BatchConfig {
+            max_size: 1000,
+            max_fill_ms: 5000,
+        },
+        table_error_retry_delay_ms: 10000,
+        max_table_sync_workers: 4,
+    };
+
+    // Create in-memory store and destination for testing
+    let store = MemoryStore::new();
     let destination = MemoryDestination::new();
     
-    // Create and run the replication pipeline
-    let pipeline = Pipeline::new(source_config, destination).await?;
+    // Create and start the pipeline
+    let mut pipeline = Pipeline::new(1, pipeline_config, store, destination);
     pipeline.start().await?;
     
     Ok(())
