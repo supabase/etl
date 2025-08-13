@@ -1,4 +1,8 @@
-//! PostgreSQL logical replication ETL library.
+//! <p align="center">
+//!   <img src="https://raw.githubusercontent.com/supabase/supabase/master/packages/common/assets/images/supabase-logo-wordmark--light.svg" alt="Supabase" width="480">
+//! </p>
+//!
+//! ⚠️ **Warning:** These docs are a work in progress, for this reason they may be incomplete.
 //!
 //! This crate provides a high-performance, streaming ETL (Extract, Transform, Load) system
 //! built on PostgreSQL logical replication. It enables real-time data synchronization
@@ -24,13 +28,15 @@
 //! [`destination::Destination`] trait implementations define where replicated data should be sent.
 //! Built-in destinations include in-memory storage for testing and external integrations.
 //!
-//! ## Replication
-//! The [`replication`] module handles PostgreSQL logical replication protocol details,
-//! including slot management, streaming changes, and maintaining consistency.
+//! ## Store
+//! The [`store::schema::SchemaStore`] and [`store::state::StateStore`] traits define where the
+//! table schemas and replication state are stored. These stores are critical to a pipeline's
+//! operation, as they allow it to be safely paused and resumed.
 //!
-//! ## State Management
-//! The [`store`] module provides persistent state tracking for replication progress,
-//! table schemas, and synchronization status across restarts.
+//! **Note:** To pause and resume a pipeline after the process is stopped, it must be able to
+//! persist data durably. The crate itself provides no durability guarantees as it only transfers
+//! data between PostgreSQL and the destination relying on the store traits to provide the required
+//! data when needed.
 //!
 //! ## Error Handling
 //! All operations return [`error::EtlResult<T>`] which provides detailed error classification
@@ -78,7 +84,7 @@
 //!     
 //!     // Pipeline will run until stopped
 //!     pipeline.wait().await?;
-//! 
+//!
 //!     Ok(())
 //! }
 //! ```
