@@ -158,8 +158,7 @@ pub async fn run(
     encryption_key: encryption::EncryptionKey,
     http_k8s_client: Option<Arc<dyn K8sClient>>,
 ) -> Result<Server, anyhow::Error> {
-    let prometheus_handle = init_metrics()?;
-    let prometheus_handle = web::ThinData(prometheus_handle);
+    let prometheus_handle = web::ThinData(init_metrics()?);
     let config = web::Data::new(config);
     let connection_pool = web::Data::new(connection_pool);
     let encryption_key = web::Data::new(encryption_key);
