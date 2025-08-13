@@ -51,7 +51,7 @@
 //!     pipeline::Pipeline,
 //!     store::both::memory::MemoryStore,
 //! };
-//! 
+//!
 //! #[tokio::main]
 //! async fn main() -> Result<(), Box<dyn std::error::Error>> {
 //!     // Configure PostgreSQL connection
