@@ -36,6 +36,53 @@
 //! All operations return [`error::EtlResult<T>`] which provides detailed error classification
 //! for implementing appropriate retry and recovery strategies.
 //!
+//! # Basic Usage Example
+//!
+//! ```rust,no_run
+//! use etl::{
+//!     config::{BatchConfig, PgConnectionConfig, PipelineConfig, TlsConfig},
+//!     destination::memory::MemoryDestination,
+//!     pipeline::Pipeline,
+//!     store::both::memory::MemoryStore,
+//! };
+//! 
+//! #[tokio::main]
+//! async fn main() -> Result<(), Box<dyn std::error::Error>> {
+//!     // Configure PostgreSQL connection
+//!     let pg_config = PgConnectionConfig {
+//!         host: "localhost".to_string(),
+//!         port: 5432,
+//!         name: "mydb".to_string(),
+//!         username: "postgres".to_string(),
+//!         password: Some("password".to_string().into()),
+//!         tls: TlsConfig { enabled: false, trusted_root_certs: String::new() },
+//!     };
+//!
+//!     // Create memory-based store and destination for testing
+//!     let store = MemoryStore::new();
+//!     let destination = MemoryDestination::new();
+//!
+//!     // Configure the pipeline
+//!     let config = PipelineConfig {
+//!         id: 1,
+//!         publication_name: "my_publication".to_string(),
+//!         pg_connection: pg_config,
+//!         batch: BatchConfig { max_size: 1000, max_fill_ms: 5000 },
+//!         table_error_retry_delay_ms: 10000,
+//!         max_table_sync_workers: 4,
+//!     };
+//!
+//!     // Create and start the pipeline
+//!     let mut pipeline = Pipeline::new(1, config, store, destination);
+//!     pipeline.start().await?;
+//!     
+//!     // Pipeline will run until stopped
+//!     pipeline.wait().await?;
+//! 
+//!     Ok(())
+//! }
+//! ```
+//!
 //! # Feature Flags
 //!
 //! - `unknown-types-to-bytes`: Convert unknown PostgreSQL types to byte arrays (default)
