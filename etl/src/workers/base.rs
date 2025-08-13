@@ -19,7 +19,7 @@ where
     fn start(self) -> impl Future<Output = Result<H, Self::Error>> + Send;
 }
 
-/// A handle to a running worker that provides access to its state and completion status.
+/// A handle to a running worker that provides access to its state and join handle.
 ///
 /// The generic parameter `S` represents the type of state that can be accessed through this handle.
 pub trait WorkerHandle<S> {
