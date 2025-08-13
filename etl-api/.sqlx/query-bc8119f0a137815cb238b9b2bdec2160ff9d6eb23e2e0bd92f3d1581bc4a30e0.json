@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT DISTINCT table_id\n        FROM etl.replication_state\n        WHERE pipeline_id = $1 AND is_current = true\n        ",
+  "query": "\n        select distinct table_id\n        from etl.replication_state\n        where pipeline_id = $1 and is_current = true\n        ",
   "describe": {
     "columns": [
       {
@@ -18,5 +18,5 @@
       false
     ]
   },
-  "hash": "d845a89057d9e24e3117bb292308a45cebefcfabf456fbb789391db5e79cc964"
+  "hash": "bc8119f0a137815cb238b9b2bdec2160ff9d6eb23e2e0bd92f3d1581bc4a30e0"
 }
