@@ -7,19 +7,33 @@ repo_url: https://github.com/supabase/etl
 edit_uri: edit/main/docs/
 
 nav:
-  - Home:
-      - Welcome: index.md
+  - Home: index.md
+  - Getting Started:
+      - Installation: getting-started/installation.md
+      - Quick Start: getting-started/quickstart.md
+      - Your First Pipeline: getting-started/first-pipeline.md
   - Tutorials:
       - Overview: tutorials/index.md
-      - Getting started: tutorials/getting-started.md
-  - Guides:
-      - Overview: guides/index.md
-      - Database setup: guides/database-setup.md
-  - Design:
-      - Overview: design/index.md
-      - ETL crate design: design/etl-crate-design.md
-  - Reference:
-      - Overview: reference/index.md
+      - Basic Pipeline: tutorials/basic-pipeline.md
+      - Memory Destination: tutorials/memory-destination.md
+      - BigQuery Integration: tutorials/bigquery-integration.md
+      - Custom Destinations: tutorials/custom-destinations.md
+      - Testing Pipelines: tutorials/testing-pipelines.md
+  - How-to Guides:
+      - Overview: how-to/index.md
+      - Configure PostgreSQL: how-to/configure-postgres.md
+      - Handle Schema Changes: how-to/schema-changes.md
+      - Implement Custom Destinations: how-to/custom-destinations.md
+      - Debug Replication Issues: how-to/debugging.md
+      - Optimize Performance: how-to/performance.md
+      - Set Up Tests: how-to/testing.md
+  - Explanation:
+      - Overview: explanation/index.md
+      - ETL Architecture: explanation/architecture.md
+      - Replication Protocol: explanation/replication.md
+      - Design Philosophy: explanation/design.md
+      - Performance Model: explanation/performance.md
+      - Crate Structure: explanation/crate-structure.md
 
 theme:
   name: "material"
