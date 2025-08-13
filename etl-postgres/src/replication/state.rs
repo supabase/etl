@@ -348,6 +348,35 @@ where
     Ok(result.rows_affected())
 }
 
+/// Gets all table IDs that have replication state for a given pipeline.
+///
+/// Returns a vector of table IDs that are currently being replicated for the specified pipeline.
+/// This is useful for operations that need to act on all tables in a pipeline, such as
+/// cleaning up replication slots.
+pub async fn get_pipeline_table_ids<'c, E>(
+    executor: E,
+    pipeline_id: i64,
+) -> sqlx::Result<Vec<TableId>>
+where
+    E: PgExecutor<'c>,
+{
+    let rows = sqlx::query!(
+        r#"
+        select distinct table_id
+        from etl.replication_state
+        where pipeline_id = $1 and is_current = true
+        "#,
+        pipeline_id
+    )
+    .fetch_all(executor)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|row| TableId::new(row.table_id.0))
+        .collect())
+}
+
 /// Serde serialization helpers for PostgreSQL LSN values.
 mod lsn_serde {
     use serde::{Deserialize, Deserializer, Serialize, Serializer};

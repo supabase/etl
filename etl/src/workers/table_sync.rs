@@ -1,5 +1,7 @@
 use chrono::Utc;
 use etl_config::shared::PipelineConfig;
+use etl_postgres::replication::slots::get_slot_name;
+use etl_postgres::replication::worker::WorkerType;
 use etl_postgres::schema::TableId;
 use std::ops::Deref;
 use std::sync::Arc;
@@ -15,7 +17,6 @@ use crate::destination::Destination;
 use crate::error::{ErrorKind, EtlError, EtlResult};
 use crate::replication::apply::{ApplyLoopHook, start_apply_loop};
 use crate::replication::client::PgReplicationClient;
-use crate::replication::slot::get_slot_name;
 use crate::replication::table_sync::{TableSyncResult, start_table_sync};
 use crate::state::table::{
     RetryPolicy, TableReplicationError, TableReplicationPhase, TableReplicationPhaseType,
@@ -23,7 +24,7 @@ use crate::state::table::{
 use crate::store::schema::SchemaStore;
 use crate::store::state::StateStore;
 use crate::types::PipelineId;
-use crate::workers::base::{Worker, WorkerHandle, WorkerType};
+use crate::workers::base::{Worker, WorkerHandle};
 use crate::workers::pool::{TableSyncWorkerPool, TableSyncWorkerPoolInner};
 use crate::{bail, etl_error};
 

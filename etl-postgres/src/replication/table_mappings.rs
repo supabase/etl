@@ -15,10 +15,10 @@ pub async fn store_table_mapping(
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
         r#"
-        INSERT INTO etl.table_mappings (pipeline_id, source_table_id, destination_table_id)
-        VALUES ($1, $2, $3)
-        ON CONFLICT (pipeline_id, source_table_id)
-        DO UPDATE SET 
+        insert into etl.table_mappings (pipeline_id, source_table_id, destination_table_id)
+        values ($1, $2, $3)
+        on conflict (pipeline_id, source_table_id)
+        do update set 
             destination_table_id = EXCLUDED.destination_table_id,
             updated_at = now()
         "#,
@@ -41,9 +41,9 @@ pub async fn load_table_mappings(
 ) -> Result<HashMap<TableId, String>, sqlx::Error> {
     let rows = sqlx::query(
         r#"
-        SELECT source_table_id, destination_table_id
-        FROM etl.table_mappings
-        WHERE pipeline_id = $1
+        select source_table_id, destination_table_id
+        from etl.table_mappings
+        where pipeline_id = $1
         "#,
     )
     .bind(pipeline_id)
@@ -74,8 +74,8 @@ where
 {
     let result = sqlx::query(
         r#"
-        DELETE FROM etl.table_mappings
-        WHERE pipeline_id = $1
+        delete from etl.table_mappings
+        where pipeline_id = $1
         "#,
     )
     .bind(pipeline_id)

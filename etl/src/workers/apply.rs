@@ -1,4 +1,3 @@
-use crate::error::{ErrorKind, EtlError, EtlResult};
 use etl_config::shared::PipelineConfig;
 use etl_postgres::schema::TableId;
 use std::sync::Arc;
@@ -11,20 +10,22 @@ use crate::concurrency::shutdown::ShutdownRx;
 use crate::concurrency::signal::SignalTx;
 use crate::concurrency::signal::create_signal;
 use crate::destination::Destination;
+use crate::error::{ErrorKind, EtlError, EtlResult};
 use crate::etl_error;
 use crate::replication::apply::{ApplyLoopHook, start_apply_loop};
 use crate::replication::client::PgReplicationClient;
 use crate::replication::common::get_table_replication_states;
-use crate::replication::slot::get_slot_name;
 use crate::state::table::{
     TableReplicationError, TableReplicationPhase, TableReplicationPhaseType,
 };
 use crate::store::schema::SchemaStore;
 use crate::store::state::StateStore;
 use crate::types::PipelineId;
-use crate::workers::base::{Worker, WorkerHandle, WorkerType};
+use crate::workers::base::{Worker, WorkerHandle};
 use crate::workers::pool::TableSyncWorkerPool;
 use crate::workers::table_sync::{TableSyncWorker, TableSyncWorkerState};
+use etl_postgres::replication::slots::get_slot_name;
+use etl_postgres::replication::worker::WorkerType;
 
 /// Handle for monitoring and controlling the apply worker.
 ///
