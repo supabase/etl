@@ -263,12 +263,9 @@ pub async fn delete_pipeline_cascading(
         db::destinations::delete_destination(txn.deref_mut(), tenant_id, destination.id).await?;
     }
 
-    // Get all table IDs for this pipeline before deleting state
+    // Get all table IDs for this pipeline before deleting state.
     let table_ids = state::get_pipeline_table_ids(source_txn.deref_mut(), pipeline.id).await?;
-    
-    // Delete all replication slots (apply worker and table sync workers) before deleting state
-    slots::delete_pipeline_replication_slots(source_txn.deref_mut(), pipeline.id as u64, &table_ids).await?;
-    
+
     // Delete state, schema, and table mappings from the source database
     state::delete_pipeline_replication_state(source_txn.deref_mut(), pipeline.id).await?;
     schema::delete_pipeline_table_schemas(source_txn.deref_mut(), pipeline.id).await?;
@@ -278,6 +275,10 @@ pub async fn delete_pipeline_cascading(
     // been deleted before committing the state and slots deletions.
     txn.commit().await?;
     source_txn.commit().await?;
+
+    // If we succeeded to commit both transactions, we are safe to delete the slots. The reason for
+    // not deleting slots in the transaction is that `pg_drop_replication_slot(...)` is not transactional.
+    slots::delete_pipeline_replication_slots(&source_pool, pipeline.id as u64, &table_ids).await?;
 
     Ok(())
 }

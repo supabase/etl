@@ -1,12 +1,3 @@
-use etl_config::shared::PipelineConfig;
-use etl_postgres::schema::TableId;
-use futures::StreamExt;
-use std::sync::Arc;
-use tokio::pin;
-use tokio_postgres::types::PgLsn;
-use tracing::{error, info, warn};
-use etl_postgres::replication::slots::get_slot_name;
-use etl_postgres::replication::worker::WorkerType;
 use crate::bail;
 use crate::concurrency::shutdown::{ShutdownResult, ShutdownRx};
 use crate::concurrency::signal::SignalTx;
@@ -25,6 +16,15 @@ use crate::store::schema::SchemaStore;
 use crate::store::state::StateStore;
 use crate::types::PipelineId;
 use crate::workers::table_sync::TableSyncWorkerState;
+use etl_config::shared::PipelineConfig;
+use etl_postgres::replication::slots::get_slot_name;
+use etl_postgres::replication::worker::WorkerType;
+use etl_postgres::schema::TableId;
+use futures::StreamExt;
+use std::sync::Arc;
+use tokio::pin;
+use tokio_postgres::types::PgLsn;
+use tracing::{error, info, warn};
 
 #[derive(Debug)]
 pub enum TableSyncResult {

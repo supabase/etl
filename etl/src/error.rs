@@ -956,9 +956,7 @@ impl From<etl_postgres::replication::slots::SlotError> for EtlError {
                     ),
                 }
             }
-            etl_postgres::replication::slots::SlotError::Database(db_err) => {
-                EtlError::from(db_err)
-            }
+            etl_postgres::replication::slots::SlotError::Database(db_err) => EtlError::from(db_err),
         }
     }
 }

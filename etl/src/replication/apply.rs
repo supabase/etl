@@ -1,17 +1,3 @@
-use etl_config::shared::PipelineConfig;
-use etl_postgres::schema::TableId;
-use futures::{FutureExt, StreamExt};
-use postgres_replication::protocol;
-use postgres_replication::protocol::{LogicalReplicationMessage, ReplicationMessage};
-use std::future::{Future, pending};
-use std::pin::Pin;
-use std::sync::Arc;
-use std::time::{Duration, Instant};
-use tokio::pin;
-use tokio_postgres::types::PgLsn;
-use tracing::{debug, info};
-use etl_postgres::replication::slots::{get_slot_name};
-use etl_postgres::replication::worker::WorkerType;
 use crate::concurrency::shutdown::ShutdownRx;
 use crate::concurrency::signal::SignalRx;
 use crate::conversions::event::{Event, EventType, convert_message_to_event};
@@ -23,6 +9,20 @@ use crate::state::table::{RetryPolicy, TableReplicationError};
 use crate::store::schema::SchemaStore;
 use crate::types::PipelineId;
 use crate::{bail, etl_error};
+use etl_config::shared::PipelineConfig;
+use etl_postgres::replication::slots::get_slot_name;
+use etl_postgres::replication::worker::WorkerType;
+use etl_postgres::schema::TableId;
+use futures::{FutureExt, StreamExt};
+use postgres_replication::protocol;
+use postgres_replication::protocol::{LogicalReplicationMessage, ReplicationMessage};
+use std::future::{Future, pending};
+use std::pin::Pin;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+use tokio::pin;
+use tokio_postgres::types::PgLsn;
+use tracing::{debug, info};
 
 /// The amount of milliseconds that pass between one refresh and the other of the system, in case no
 /// events or shutdown signal are received.

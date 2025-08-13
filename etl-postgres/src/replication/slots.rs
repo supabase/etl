@@ -1,4 +1,4 @@
-use sqlx::PgExecutor;
+use sqlx::PgPool;
 
 use crate::replication::worker::WorkerType;
 use crate::schema::TableId;
@@ -27,7 +27,10 @@ pub fn get_slot_name(pipeline_id: u64, worker_type: WorkerType) -> Result<String
             format!("{APPLY_WORKER_PREFIX}_{pipeline_id}")
         }
         WorkerType::TableSync { table_id } => {
-            format!("{TABLE_SYNC_PREFIX}_{pipeline_id}_{}", table_id.into_inner())
+            format!(
+                "{TABLE_SYNC_PREFIX}_{pipeline_id}_{}",
+                table_id.into_inner()
+            )
         }
     };
 
@@ -39,47 +42,46 @@ pub fn get_slot_name(pipeline_id: u64, worker_type: WorkerType) -> Result<String
 }
 
 /// Deletes all replication slots for a given pipeline.
-/// 
+///
 /// This function deletes both the apply worker slot and all table sync worker slots
 /// for the tables associated with the pipeline.
-pub async fn delete_pipeline_replication_slots<'c, E>(
-    executor: E,
+pub async fn delete_pipeline_replication_slots(
+    pool: &PgPool,
     pipeline_id: u64,
     table_ids: &[TableId],
-) -> Result<(), SlotError>
-where
-    E: PgExecutor<'c>,
-{
+) -> Result<(), SlotError> {
     // Collect all slot names that need to be deleted
     let mut slot_names = Vec::with_capacity(table_ids.len() + 1);
-    
+
     // Add apply worker slot
     let apply_slot_name = get_slot_name(pipeline_id, WorkerType::Apply)?;
     slot_names.push(apply_slot_name.clone());
-    
+
     // Add table sync worker slots
     for table_id in table_ids {
         let table_sync_slot_name = get_slot_name(
             pipeline_id,
-            WorkerType::TableSync { table_id: *table_id }
+            WorkerType::TableSync {
+                table_id: *table_id,
+            },
         )?;
         slot_names.push(table_sync_slot_name);
     }
 
     // Delete only active slots
     let query = String::from(
-    r#"
+        r#"
         select pg_drop_replication_slot(r.slot_name)
         from pg_replication_slots r
         where r.slot_name = any($1) and r.active = false;
-        "#
+        "#,
     );
     sqlx::query(&query)
         .bind(slot_names)
-        .execute(executor)
+        .execute(pool)
         .await
         .map_err(SlotError::Database)?;
-    
+
     Ok(())
 }
 
@@ -124,9 +126,12 @@ mod tests {
         assert!(result.is_ok());
         let slot_name = result.unwrap();
         assert!(slot_name.len() <= MAX_SLOT_NAME_LENGTH);
-        
+
         // The longest possible slot name with current prefixes should still be valid
-        assert_eq!(slot_name, "supabase_etl_table_sync_9223372036854775807_4294967295");
+        assert_eq!(
+            slot_name,
+            "supabase_etl_table_sync_9223372036854775807_4294967295"
+        );
         assert!(slot_name.len() <= MAX_SLOT_NAME_LENGTH);
     }
 }

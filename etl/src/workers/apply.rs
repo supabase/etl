@@ -10,12 +10,11 @@ use crate::concurrency::shutdown::ShutdownRx;
 use crate::concurrency::signal::SignalTx;
 use crate::concurrency::signal::create_signal;
 use crate::destination::Destination;
+use crate::error::{ErrorKind, EtlError, EtlResult};
 use crate::etl_error;
 use crate::replication::apply::{ApplyLoopHook, start_apply_loop};
 use crate::replication::client::PgReplicationClient;
 use crate::replication::common::get_table_replication_states;
-use etl_postgres::replication::slots::get_slot_name;
-use etl_postgres::replication::worker::WorkerType;
 use crate::state::table::{
     TableReplicationError, TableReplicationPhase, TableReplicationPhaseType,
 };
@@ -25,7 +24,8 @@ use crate::types::PipelineId;
 use crate::workers::base::{Worker, WorkerHandle};
 use crate::workers::pool::TableSyncWorkerPool;
 use crate::workers::table_sync::{TableSyncWorker, TableSyncWorkerState};
-use crate::error::{ErrorKind, EtlError, EtlResult};
+use etl_postgres::replication::slots::get_slot_name;
+use etl_postgres::replication::worker::WorkerType;
 
 #[derive(Debug)]
 pub struct ApplyWorkerHandle {

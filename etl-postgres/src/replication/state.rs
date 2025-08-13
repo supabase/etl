@@ -348,30 +348,6 @@ where
     Ok(result.rows_affected())
 }
 
-/// Serde serialization helpers for PostgreSQL LSN values.
-mod lsn_serde {
-    use serde::{Deserialize, Deserializer, Serialize, Serializer};
-    use tokio_postgres::types::PgLsn;
-
-    /// Serializes a [`PgLsn`] as a string.
-    pub fn serialize<S>(lsn: &PgLsn, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        lsn.to_string().serialize(serializer)
-    }
-
-    /// Deserializes a [`PgLsn`] from a string representation.
-    pub fn deserialize<'de, D>(deserializer: D) -> Result<PgLsn, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let s = String::deserialize(deserializer)?;
-        s.parse()
-            .map_err(|e| serde::de::Error::custom(format!("{e:?}")))
-    }
-}
-
 /// Gets all table IDs that have replication state for a given pipeline.
 ///
 /// Returns a vector of table IDs that are currently being replicated for the specified pipeline.
@@ -399,6 +375,30 @@ where
         .into_iter()
         .map(|row| TableId::new(row.table_id.0))
         .collect())
+}
+
+/// Serde serialization helpers for PostgreSQL LSN values.
+mod lsn_serde {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use tokio_postgres::types::PgLsn;
+
+    /// Serializes a [`PgLsn`] as a string.
+    pub fn serialize<S>(lsn: &PgLsn, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        lsn.to_string().serialize(serializer)
+    }
+
+    /// Deserializes a [`PgLsn`] from a string representation.
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<PgLsn, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        s.parse()
+            .map_err(|e| serde::de::Error::custom(format!("{e:?}")))
+    }
 }
 
 #[cfg(test)]
