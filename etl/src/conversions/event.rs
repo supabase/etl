@@ -15,15 +15,28 @@ use crate::error::{ErrorKind, EtlResult};
 use crate::store::schema::SchemaStore;
 use crate::{bail, etl_error};
 
+/// Transaction begin event from PostgreSQL logical replication.
+///
+/// [`BeginEvent`] marks the start of a new transaction in the replication stream.
+/// It contains metadata about the transaction including LSN positions and timing
+/// information for proper sequencing and recovery.
 #[derive(Debug, Clone, PartialEq)]
 pub struct BeginEvent {
+    /// LSN position where the transaction started
     pub start_lsn: PgLsn,
+    /// LSN position where the transaction will commit
     pub commit_lsn: PgLsn,
+    /// Transaction start timestamp in PostgreSQL format
     pub timestamp: i64,
+    /// Transaction ID for tracking and coordination
     pub xid: u32,
 }
 
 impl BeginEvent {
+    /// Creates a [`BeginEvent`] from PostgreSQL protocol data.
+    ///
+    /// This method parses the replication protocol begin message and extracts
+    /// transaction metadata for use in the ETL pipeline.
     pub fn from_protocol(
         start_lsn: PgLsn,
         commit_lsn: PgLsn,
@@ -38,16 +51,30 @@ impl BeginEvent {
     }
 }
 
+/// Transaction commit event from PostgreSQL logical replication.
+///
+/// [`CommitEvent`] marks the successful completion of a transaction in the replication
+/// stream. It provides final metadata about the transaction including timing and
+/// LSN positions for maintaining consistency and ordering.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CommitEvent {
+    /// LSN position where the transaction started
     pub start_lsn: PgLsn,
+    /// LSN position where the transaction committed
     pub commit_lsn: PgLsn,
+    /// Transaction commit flags from PostgreSQL
     pub flags: i8,
+    /// Final LSN position after the transaction
     pub end_lsn: u64,
+    /// Transaction commit timestamp in PostgreSQL format
     pub timestamp: i64,
 }
 
 impl CommitEvent {
+    /// Creates a [`CommitEvent`] from PostgreSQL protocol data.
+    ///
+    /// This method parses the replication protocol commit message and extracts
+    /// transaction completion metadata for use in the ETL pipeline.
     pub fn from_protocol(
         start_lsn: PgLsn,
         commit_lsn: PgLsn,
@@ -63,14 +90,26 @@ impl CommitEvent {
     }
 }
 
+/// Table schema definition event from PostgreSQL logical replication.
+///
+/// [`RelationEvent`] provides schema information for tables involved in replication.
+/// It contains complete column definitions and metadata needed to interpret
+/// subsequent data modification events for the table.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RelationEvent {
+    /// LSN position where the event started
     pub start_lsn: PgLsn,
+    /// LSN position where the event will commit
     pub commit_lsn: PgLsn,
+    /// Complete table schema including columns and types
     pub table_schema: TableSchema,
 }
 
 impl RelationEvent {
+    /// Creates a [`RelationEvent`] from PostgreSQL protocol data.
+    ///
+    /// This method parses the replication protocol relation message and builds
+    /// a complete table schema for use in interpreting subsequent data events.
     pub fn from_protocol(
         start_lsn: PgLsn,
         commit_lsn: PgLsn,
@@ -113,46 +152,87 @@ impl RelationEvent {
     }
 }
 
+/// Row insertion event from PostgreSQL logical replication.
+///
+/// [`InsertEvent`] represents a new row being added to a table. It contains
+/// the complete row data for insertion into the destination system.
 #[derive(Debug, Clone, PartialEq)]
 pub struct InsertEvent {
+    /// LSN position where the event started
     pub start_lsn: PgLsn,
+    /// LSN position where the event will commit
     pub commit_lsn: PgLsn,
+    /// ID of the table where the row was inserted
     pub table_id: TableId,
+    /// Complete row data for the inserted row
     pub table_row: TableRow,
 }
 
+/// Row update event from PostgreSQL logical replication.
+///
+/// [`UpdateEvent`] represents an existing row being modified. It contains
+/// both the new row data and optionally the old row data for comparison
+/// and conflict resolution in the destination system.
 #[derive(Debug, Clone, PartialEq)]
 pub struct UpdateEvent {
+    /// LSN position where the event started
     pub start_lsn: PgLsn,
+    /// LSN position where the event will commit
     pub commit_lsn: PgLsn,
+    /// ID of the table where the row was updated
     pub table_id: TableId,
+    /// New row data after the update
     pub table_row: TableRow,
-    /// Represents the old table row that was deleted.
+    /// Previous row data before the update.
     ///
-    /// The boolean represents whether the row contains only the `key` columns or not.
+    /// The boolean indicates whether the row contains only key columns (`true`)
+    /// or the complete row data (`false`). This depends on the PostgreSQL
+    /// `REPLICA IDENTITY` setting for the table.
     pub old_table_row: Option<(bool, TableRow)>,
 }
 
+/// Row deletion event from PostgreSQL logical replication.
+///
+/// [`DeleteEvent`] represents a row being removed from a table. It contains
+/// information about the deleted row for proper cleanup in the destination system.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DeleteEvent {
+    /// LSN position where the event started
     pub start_lsn: PgLsn,
+    /// LSN position where the event will commit
     pub commit_lsn: PgLsn,
+    /// ID of the table where the row was deleted
     pub table_id: TableId,
-    /// Represents the old table row that was deleted.
+    /// Data from the deleted row.
     ///
-    /// The boolean represents whether the row contains only the `key` columns or not.
+    /// The boolean indicates whether the row contains only key columns (`true`)
+    /// or the complete row data (`false`). This depends on the PostgreSQL
+    /// `REPLICA IDENTITY` setting for the table.
     pub old_table_row: Option<(bool, TableRow)>,
 }
 
+/// Table truncation event from PostgreSQL logical replication.
+///
+/// [`TruncateEvent`] represents one or more tables being truncated (all rows deleted).
+/// This is a bulk operation that clears entire tables and may affect multiple tables
+/// in a single operation when using cascading truncates.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TruncateEvent {
+    /// LSN position where the event started
     pub start_lsn: PgLsn,
+    /// LSN position where the event will commit
     pub commit_lsn: PgLsn,
+    /// Truncate operation options from PostgreSQL
     pub options: i8,
+    /// List of table IDs that were truncated in this operation
     pub rel_ids: Vec<u32>,
 }
 
 impl TruncateEvent {
+    /// Creates a [`TruncateEvent`] from PostgreSQL protocol data.
+    ///
+    /// This method parses the replication protocol truncate message and extracts
+    /// information about which tables were truncated and with what options.
     pub fn from_protocol(
         start_lsn: PgLsn,
         commit_lsn: PgLsn,
@@ -167,25 +247,48 @@ impl TruncateEvent {
     }
 }
 
+/// Represents a single replication event from PostgreSQL logical replication.
+///
+/// [`Event`] encapsulates all possible events that can occur in a PostgreSQL replication
+/// stream, including data modification events and transaction control events. Each event
+/// type corresponds to specific operations in the source database.
+///
+/// Events are processed in order to maintain consistency in destination systems,
+/// with transaction boundaries providing atomicity guarantees.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Event {
+    /// Transaction begin event marking the start of a new transaction
     Begin(BeginEvent),
+    /// Transaction commit event marking successful transaction completion  
     Commit(CommitEvent),
+    /// Row insertion event with new row data
     Insert(InsertEvent),
+    /// Row update event with old and new row data
     Update(UpdateEvent),
+    /// Row deletion event with deleted row data
     Delete(DeleteEvent),
+    /// Relation schema information event describing table structure
     Relation(RelationEvent),
+    /// Table truncation event clearing all rows from tables
     Truncate(TruncateEvent),
+    /// Unsupported event type that cannot be processed
     Unsupported,
 }
 
 impl Event {
     /// Returns the [`EventType`] that corresponds to this event.
+    ///
+    /// This provides a lightweight way to identify the event type without
+    /// pattern matching on the full event structure.
     pub fn event_type(&self) -> EventType {
         self.into()
     }
 
-    /// Returns true if the event has the supplied table_id.
+    /// Returns true if the event is associated with the specified table.
+    ///
+    /// This method checks whether the event operates on the given table ID.
+    /// Transaction control events (Begin/Commit) are not associated with
+    /// specific tables and will return false.
     pub fn has_table_id(&self, table_id: &TableId) -> bool {
         match self {
             Event::Insert(insert_event) => insert_event.table_id == *table_id,
@@ -204,15 +307,28 @@ impl Event {
     }
 }
 
+/// Classification of PostgreSQL replication event types.
+///
+/// [`EventType`] provides a lightweight enumeration of possible replication events
+/// without carrying the associated data. This is useful for filtering, routing,
+/// and processing decisions based on event type alone.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum EventType {
+    /// Transaction begin marker
     Begin,
+    /// Transaction commit marker
     Commit,
+    /// Row insertion operation
     Insert,
+    /// Row update operation
     Update,
+    /// Row deletion operation
     Delete,
+    /// Table schema definition
     Relation,
+    /// Table truncation operation
     Truncate,
+    /// Unsupported or unknown event
     Unsupported,
 }
 

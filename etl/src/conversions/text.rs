@@ -12,9 +12,22 @@ use crate::error::{ErrorKind, EtlError, EtlResult};
 
 use super::{ArrayCell, Cell, numeric::PgNumeric};
 
+/// Utilities for converting PostgreSQL text-format data to typed [`Cell`] values.
+///
+/// This helper struct provides methods for parsing PostgreSQL's text representation
+/// of various data types into strongly-typed [`Cell`] variants. It handles PostgreSQL's
+/// specific text formatting conventions and provides fallback behavior for unknown types.
 pub struct TextFormatConverter;
 
 impl TextFormatConverter {
+    /// Creates a default [`Cell`] value for the given PostgreSQL type.
+    ///
+    /// This helper method provides sensible default values for PostgreSQL types,
+    /// primarily used during cell initialization and error recovery scenarios.
+    /// The defaults are chosen to be the zero/empty value for each type where possible.
+    ///
+    /// For complex types like arrays, empty vectors are returned. For temporal types,
+    /// minimal valid timestamps are used (year 1, month 1, day 1).
     pub fn default_value(typ: &Type) -> EtlResult<Cell> {
         const DEFAULT_DATE: NaiveDate = NaiveDate::from_ymd_opt(1, 1, 1).unwrap();
         const DEFAULT_TIMESTAMP: NaiveDateTime = NaiveDateTime::new(DEFAULT_DATE, NaiveTime::MIN);

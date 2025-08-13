@@ -26,6 +26,11 @@ use crate::workers::base::{Worker, WorkerHandle, WorkerType};
 use crate::workers::pool::TableSyncWorkerPool;
 use crate::workers::table_sync::{TableSyncWorker, TableSyncWorkerState};
 
+/// Handle for monitoring and controlling the apply worker.
+///
+/// [`ApplyWorkerHandle`] provides control over the apply worker that processes
+/// replication stream events and coordinates with table sync workers. The handle
+/// enables waiting for worker completion and checking final results.
 #[derive(Debug)]
 pub struct ApplyWorkerHandle {
     handle: Option<JoinHandle<EtlResult<()>>>,
@@ -51,6 +56,15 @@ impl WorkerHandle<()> for ApplyWorkerHandle {
     }
 }
 
+/// Worker that applies replication stream events to destinations.
+///
+/// [`ApplyWorker`] is the core worker responsible for processing PostgreSQL logical
+/// replication events and applying them to the configured destination. It coordinates
+/// with table sync workers during initial synchronization and handles the continuous
+/// replication stream during normal operation.
+///
+/// The worker manages transaction boundaries, coordinates table synchronization,
+/// and ensures data consistency throughout the replication process.
 #[derive(Debug)]
 pub struct ApplyWorker<S, D> {
     pipeline_id: PipelineId,
@@ -64,6 +78,11 @@ pub struct ApplyWorker<S, D> {
 }
 
 impl<S, D> ApplyWorker<S, D> {
+    /// Creates a new apply worker with the given configuration and dependencies.
+    ///
+    /// The worker will use the provided replication client to read the PostgreSQL
+    /// replication stream and coordinate with the table sync worker pool for
+    /// initial synchronization operations.
     #[expect(clippy::too_many_arguments)]
     pub fn new(
         pipeline_id: PipelineId,
@@ -145,11 +164,48 @@ where
     }
 }
 
+/// Determines the LSN position from which the apply worker should start reading the replication stream.
+///
+/// This function implements critical replication consistency logic by managing the apply worker's
+/// replication slot. The slot serves as a persistent marker in PostgreSQL's WAL (Write-Ahead Log)
+/// that tracks the apply worker's progress and prevents WAL deletion of unreplicated data.
+///
+/// # Slot Management Strategy
+///
+/// The function uses PostgreSQL's `get_or_create_slot` pattern which:
+/// 1. **Attempts to retrieve existing slot**: If a slot already exists, returns its `confirmed_flush_lsn`
+///    which represents the last successfully processed position
+/// 2. **Creates new slot if missing**: If no slot exists, creates one and returns its `consistent_point`
+///    which represents a snapshot-consistent starting position
+///
+/// # Consistency Considerations
+///
+/// **Critical Race Condition**: There's a potential consistency issue when recreating slots:
+/// - If the apply slot is deleted while table sync workers are active, recreating it may start
+///   from a different WAL position than where table sync operations began
+/// - This could lead to missing or duplicate data during the transition from table sync to continuous replication
+///
+/// **Current Limitation**: The function currently doesn't validate table states before slot creation.
+/// Ideally, it should:
+/// - Only create new slots when all tables are in `Init` state (fresh start)
+/// - Return an error if tables are in intermediate states but the slot is missing
+/// - This would indicate external slot deletion requiring manual intervention
+///
+/// **Future Enhancement**: The TODO indicates plans to move slot creation earlier in the pipeline
+/// lifecycle to avoid this race condition entirely.
+///
+/// # Error Conditions
+///
+/// - **Slot name generation failure**: If pipeline ID or worker type produces invalid slot name
+/// - **PostgreSQL connection errors**: Network or authentication issues
+/// - **Permission errors**: Insufficient privileges to create replication slots
+/// - **Resource limits**: PostgreSQL replication slot limits exceeded
 async fn get_start_lsn(
     pipeline_id: PipelineId,
     replication_client: &PgReplicationClient,
 ) -> EtlResult<PgLsn> {
     let slot_name = get_slot_name(pipeline_id, WorkerType::Apply)?;
+
     // TODO: validate that we only create the slot when we first start replication which
     //  means when all tables are in the Init state. In any other case we should raise an
     //  error because that means the apply slot was deleted and creating a fresh slot now
@@ -165,15 +221,75 @@ async fn get_start_lsn(
     Ok(start_lsn)
 }
 
+/// Internal coordination hook that implements apply loop integration with table sync workers.
+///
+/// [`ApplyWorkerHook`] serves as the critical coordination layer between the main apply loop
+/// that processes replication events and the table sync worker pool that handles initial data
+/// copying. This hook implements the [`ApplyLoopHook`] trait to provide custom logic for
+/// managing table lifecycle transitions and worker coordination.
+///
+/// # Coordination Responsibilities
+///
+/// The hook manages several complex coordination scenarios:
+///
+/// ## 1. Table Sync Worker Lifecycle Management
+/// - **Worker spawning**: Creates new table sync workers when tables need initial synchronization
+/// - **Resource limiting**: Uses semaphore-based permit system to control concurrent table sync workers
+/// - **Worker monitoring**: Tracks worker completion and handles worker failures
+/// - **Cleanup coordination**: Ensures proper resource cleanup when workers complete or fail
+///
+/// ## 2. State Transition Coordination
+/// - **Phase management**: Coordinates transitions between table replication phases (Init → DataSync → Ready)
+/// - **Consistency enforcement**: Ensures state transitions happen at appropriate transaction boundaries
+/// - **Error handling**: Manages error states and retry logic for failed operations
+/// - **Progress tracking**: Maintains accurate progress information across all coordinated workers
+///
+/// ## 3. Apply Loop Integration
+/// - **Event filtering**: Determines which replication events should be applied based on table states
+/// - **Batch coordination**: Coordinates batching decisions with table sync worker states
+/// - **LSN tracking**: Manages LSN progression to ensure consistency across all workers
+/// - **Signal propagation**: Routes coordination signals between different worker types
+///
+/// # Resource Management
+///
+/// The hook implements sophisticated resource management:
+/// - **Semaphore-based limiting**: `table_sync_worker_permits` controls maximum concurrent table sync workers
+/// - **Memory management**: Coordinates resource allocation and deallocation across worker pool
+/// - **Connection pooling**: Manages database connections efficiently across multiple workers
+/// - **Graceful degradation**: Handles resource exhaustion scenarios appropriately
+///
+/// # Error Recovery Patterns
+///
+/// The hook implements robust error recovery:
+/// - **Worker failure isolation**: Failed table sync workers don't affect other operations
+/// - **Retry coordination**: Implements appropriate retry logic based on error classification
+/// - **State consistency**: Maintains consistent state even during partial failures
+/// - **Progress preservation**: Preserves completed work during recovery scenarios
+///
+/// # Performance Considerations
+///
+/// The hook is designed for high-performance scenarios:
+/// - **Asynchronous coordination**: All coordination operations are fully asynchronous
+/// - **Minimal blocking**: Avoids blocking operations that could impact apply loop performance
+/// - **Efficient signaling**: Uses lock-free signaling mechanisms where possible
+/// - **Batch optimization**: Coordinates batching strategies to maximize throughput
 #[derive(Debug)]
 struct ApplyWorkerHook<S, D> {
+    /// Unique identifier for the pipeline this hook serves
     pipeline_id: PipelineId,
+    /// Shared configuration for all coordinated operations
     config: Arc<PipelineConfig>,
+    /// Pool of table sync workers that this hook coordinates
     pool: TableSyncWorkerPool,
+    /// State store for tracking table replication progress
     store: S,
+    /// Destination where replicated data is written
     destination: D,
+    /// Shutdown signal receiver for graceful termination
     shutdown_rx: ShutdownRx,
+    /// Signal transmitter for triggering table sync operations
     force_syncing_tables_tx: SignalTx,
+    /// Semaphore controlling maximum concurrent table sync workers
     table_sync_worker_permits: Arc<Semaphore>,
 }
 

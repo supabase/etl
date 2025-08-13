@@ -23,16 +23,63 @@ pub fn test_table_name(name: &str) -> TableName {
     }
 }
 
-/// Returns the [`PgConnectionConfig`] parameters to connect to the local instance of Postgres.
+/// Generates PostgreSQL connection configuration for isolated test databases.
 ///
-/// If you fail to connect locally to the Postgres instance you can modify this connection struct
-/// with your parameters.
+/// This function creates connection parameters for a local PostgreSQL instance with
+/// test-specific settings designed for isolation, reproducibility, and ease of debugging.
+/// Each invocation creates a unique database name to prevent test interference.
+///
+/// # Isolation Strategy
+///
+/// ## Unique Database Names
+/// - Uses UUID v4 for database names to ensure global uniqueness
+/// - Prevents conflicts between concurrent test executions
+/// - Enables parallel test execution without coordination
+/// - Simplifies cleanup - each test gets its own database instance
+///
+/// ## Default Test Configuration
+/// - **Host**: localhost (assumes local PostgreSQL development setup)
+/// - **Port**: 5430 (non-standard port to avoid conflicts with system PostgreSQL)
+/// - **Username**: postgres (standard superuser for test environments)
+/// - **Password**: postgres (simple password for local development)
+/// - **TLS**: Disabled (not needed for local development/testing)
+///
+/// # Configuration Flexibility
+///
+/// Currently uses hardcoded values optimized for local development environments.
+/// The TODO indicates planned support for environment variable configuration to enable:
+/// - CI/CD integration with different database setups
+/// - Developer customization for non-standard PostgreSQL installations
+/// - Container-based testing with dynamic connection parameters
+///
+/// # Security Considerations
+///
+/// ## Development-Only Settings
+/// - Simple credentials suitable only for isolated test environments
+/// - Disabled TLS appropriate for local development but not production
+/// - No connection pooling or advanced security features
+///
+/// ## Not for Production Use
+/// This configuration is designed exclusively for testing and should never be used
+/// for production workloads or environments with sensitive data.
+///
+/// # Performance Implications
+///
+/// ## Connection Overhead
+/// - Each test creates a new database, incurring creation/deletion overhead
+/// - Trade-off between isolation guarantees and test execution speed
+/// - Suitable for integration tests but may be slow for unit tests
+///
+/// ## Resource Usage
+/// - Temporary databases consume PostgreSQL resources during test execution
+/// - Cleanup relies on process termination - may leave orphaned databases if tests crash
+/// - Memory usage scales with number of concurrent tests
 fn local_pg_connection_config() -> PgConnectionConfig {
     // TODO: make this configurable via env variables.
     PgConnectionConfig {
         host: "localhost".to_owned(),
         port: 5430,
-        // We create a random database name to avoid conflicts with existing databases.
+        // Generate unique database name for test isolation
         name: Uuid::new_v4().to_string(),
         username: "postgres".to_owned(),
         password: Some("postgres".to_owned().into()),

@@ -122,8 +122,16 @@ struct Inner {
     table_mappings: HashMap<TableId, String>,
 }
 
-/// A state store which saves the replication state in the source
-/// postgres database.
+/// PostgreSQL-backed storage for ETL pipeline state and schema information.
+///
+/// [`PostgresStore`] implements both [`StateStore`] and [`SchemaStore`] traits,
+/// providing persistent storage of replication state and schema information
+/// directly in the source PostgreSQL database. This ensures durability and
+/// consistency of pipeline state across restarts.
+///
+/// The store maintains both in-memory cache and persistent database storage,
+/// connecting to the source database as needed for state updates while
+/// providing fast cached access for read operations.
 #[derive(Debug, Clone)]
 pub struct PostgresStore {
     pipeline_id: PipelineId,
@@ -132,6 +140,11 @@ pub struct PostgresStore {
 }
 
 impl PostgresStore {
+    /// Creates a new PostgreSQL-backed store for the given pipeline.
+    ///
+    /// The store will use the provided connection configuration to access
+    /// the source PostgreSQL database for persistent storage operations.
+    /// The pipeline ID ensures isolation between different pipeline instances.
     pub fn new(pipeline_id: PipelineId, source_config: PgConnectionConfig) -> Self {
         let inner = Inner {
             table_states: HashMap::new(),

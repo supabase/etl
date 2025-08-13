@@ -53,48 +53,114 @@ impl<B, S: Stream<Item = B>> BatchStream<B, S> {
 impl<B, S: Stream<Item = B>> Stream for BatchStream<B, S> {
     type Item = ShutdownResult<Vec<S::Item>, Vec<S::Item>>;
 
-    /// Polls the stream for the next batch of items.
+    /// Polls the stream for the next batch of items using a complex state machine.
     ///
-    /// Returns:
-    /// - `Poll::Ready(Some(batch))` when a complete batch is available
-    /// - `Poll::Ready(None)` when the stream has ended
-    /// - `Poll::Pending` when more items are needed to form a batch
+    /// This method implements a batching algorithm that balances throughput
+    /// and latency by collecting items into batches based on both size and time constraints.
+    /// The polling state machine handles multiple concurrent conditions and ensures proper
+    /// resource cleanup during shutdown scenarios.
     ///
-    /// The stream will emit a batch when:
-    /// - The batch reaches maximum size
-    /// - A timeout occurs
-    /// - The stream is forcefully stopped
+    /// # State Machine Overview
+    ///
+    /// The polling logic operates as a state machine with these primary states:
+    /// 1. **Active batching**: Collecting items and managing timeouts
+    /// 2. **Stream ended**: Underlying stream finished, handling final batch
+    /// 3. **Shutdown requested**: Graceful termination in progress
+    /// 4. **Stream stopped**: Terminal state, no more items will be emitted
+    ///
+    /// # Polling Decision Tree
+    ///
+    /// ```text
+    /// ┌─────────────────┐
+    /// │ poll_next()     │
+    /// └─────────┬───────┘
+    ///           │
+    ///           ▼
+    /// ┌─────────────────┐     Yes     ┌─────────────────┐
+    /// │ inner_stream_   │ ─────────→  │ Return None     │
+    /// │ ended?          │             │ (Terminal)      │
+    /// └─────────┬───────┘             └─────────────────┘
+    ///           │ No
+    ///           ▼
+    /// ┌─────────────────┐     Yes     ┌─────────────────┐
+    /// │ stream_stopped? │ ─────────→  │ Return None     │
+    /// │                 │             │ (Terminal)      │
+    /// └─────────┬───────┘             └─────────────────┘
+    ///           │ No
+    ///           ▼
+    /// ┌─────────────────┐     Yes     ┌─────────────────┐
+    /// │ shutdown_rx     │ ─────────→  │ Return Shutdown │
+    /// │ changed?        │             │ (with items)    │
+    /// └─────────┬───────┘             └─────────────────┘
+    ///           │ No
+    ///           ▼
+    /// ┌─────────────────┐
+    /// │ Reset timer if  │
+    /// │ needed          │
+    /// └─────────┬───────┘
+    ///           │
+    ///           ▼
+    /// ┌─────────────────┐
+    /// │ Poll underlying │
+    /// │ stream          │
+    /// └─────────┬───────┘
+    ///           │
+    ///           ▼
+    /// ┌─────────────────┐     Ready(Some)   ┌─────────────────┐
+    /// │ Stream result?  │ ─────────────────→│ Add to batch    │
+    /// │                 │                   └─────────┬───────┘
+    /// │                 │                             │
+    /// │                 │     Ready(None)             ▼
+    /// │                 │ ─────────────────→ ┌─────────────────┐
+    /// │                 │                   │ Return final    │
+    /// │                 │                   │ batch & mark    │
+    /// │                 │     Pending       │ stream ended    │
+    /// │                 │ ────────────────┐ └─────────────────┘
+    /// └─────────────────┘                 │
+    ///                                     ▼
+    ///                             ┌─────────────────┐     Yes     ┌─────────────────┐
+    ///                             │ Timeout &       │ ─────────→  │ Return current  │
+    ///                             │ items exist?    │             │ batch           │
+    ///                             └─────────┬───────┘             └─────────────────┘
+    ///                                       │ No
+    ///                                       ▼
+    ///                             ┌─────────────────┐
+    ///                             │ Return Pending  │
+    ///                             └─────────────────┘
+    /// ```
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let mut this = self.as_mut().project();
 
+        // Fast path: if the inner stream has already ended, we're done
         if *this.inner_stream_ended {
             return Poll::Ready(None);
         }
 
         loop {
+            // Fast path: if we've been marked as stopped, terminate immediately
             if *this.stream_stopped {
                 return Poll::Ready(None);
             }
 
-            // If the stream has been asked to stop, we mark the stream as stopped and return the
-            // remaining elements, irrespectively of boundaries.
+            // PRIORITY 1: Check for shutdown signal
+            // Shutdown handling takes priority over all other operations to ensure
+            // graceful termination. We return any accumulated items with shutdown indication.
             if this.shutdown_rx.has_changed().unwrap_or(false) {
                 info!("the stream has been forcefully stopped");
 
-                // We mark the stream as stopped, in this way any further call with return
-                // `Poll::Ready(None)`.
+                // Mark stream as permanently stopped to prevent further polling
                 *this.stream_stopped = true;
 
-                // We mark the current value as unchanged, effectively acknowledging that we have
-                // seen it. This does not affect the correctness, but it makes the implementation
-                // semantically more correct.
+                // Acknowledge that we've seen the shutdown signal to maintain watch semantics
                 this.shutdown_rx.mark_unchanged();
 
-                // Even if we have no items, we return this result, since we signal that a shutdown
-                // signal was received and the consumer side of the stream, can decide what to do.
+                // Return accumulated items (if any) with shutdown indication
+                // Even empty batches are returned to signal shutdown occurred
                 return Poll::Ready(Some(ShutdownResult::Shutdown(std::mem::take(this.items))));
             }
 
+            // PRIORITY 2: Timer management
+            // Reset the timeout timer when starting a new batch or after emitting a batch
             if *this.reset_timer {
                 this.deadline
                     .set(Some(tokio::time::sleep(Duration::from_millis(
@@ -103,48 +169,63 @@ impl<B, S: Stream<Item = B>> Stream for BatchStream<B, S> {
                 *this.reset_timer = false;
             }
 
+            // PRIORITY 3: Memory optimization
+            // Pre-allocate batch capacity when starting to collect items
+            // This avoids reallocations during batch collection
             if this.items.is_empty() {
                 this.items.reserve_exact(this.batch_config.max_size);
             }
 
+            // PRIORITY 4: Poll underlying stream for new items
             match this.stream.as_mut().poll_next(cx) {
-                Poll::Pending => break,
+                Poll::Pending => {
+                    // No more items available right now, check if we should emit due to timeout
+                    break;
+                }
                 Poll::Ready(Some(item)) => {
+                    // New item available - add to current batch
                     this.items.push(item);
 
-                    // If we reached the `max_batch_size` we want to return the batch and reset the
-                    // timer.
+                    // SIZE-BASED EMISSION: If batch is full, emit immediately
+                    // This provides throughput optimization for high-volume streams
                     if this.items.len() >= this.batch_config.max_size {
-                        *this.reset_timer = true;
+                        *this.reset_timer = true; // Schedule timer reset for next batch
                         return Poll::Ready(Some(ShutdownResult::Ok(std::mem::take(this.items))));
                     }
+                    // Continue loop to collect more items or check other conditions
                 }
                 Poll::Ready(None) => {
+                    // STREAM END: Underlying stream finished
+                    // Return final batch if we have items, otherwise signal completion
                     let last = if this.items.is_empty() {
-                        None
+                        None // No final batch needed
                     } else {
-                        *this.reset_timer = true;
+                        *this.reset_timer = true; // Clean up timer state
                         Some(ShutdownResult::Ok(std::mem::take(this.items)))
                     };
 
-                    *this.inner_stream_ended = true;
+                    *this.inner_stream_ended = true; // Mark stream as permanently ended
 
                     return Poll::Ready(last);
                 }
             }
         }
 
-        // If there are items, we want to check the deadline, if it's met, we return the batch
-        // we currently have in memory, otherwise, we return.
+        // PRIORITY 5: Time-based emission check
+        // If we have items and the timeout has expired, emit the current batch
+        // This provides latency bounds to prevent indefinite delays in low-volume scenarios
         if !this.items.is_empty()
             && let Some(deadline) = this.deadline.as_pin_mut()
         {
+            // Check if timeout has elapsed (this will register waker if not ready)
             ready!(deadline.poll(cx));
-            *this.reset_timer = true;
+
+            *this.reset_timer = true; // Schedule timer reset for next batch
 
             return Poll::Ready(Some(ShutdownResult::Ok(std::mem::take(this.items))));
         }
 
+        // No conditions met for batch emission - wait for more items or timeout
         Poll::Pending
     }
 }

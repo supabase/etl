@@ -38,14 +38,82 @@ const PHASE_CHANGE_REFRESH_FREQUENCY: Duration = Duration::from_millis(100);
 /// of new tables.
 const MAX_DELETE_SLOT_WAIT: Duration = Duration::from_secs(30);
 
+/// Internal state management for table synchronization workers with coordination mechanisms.
+///
+/// [`TableSyncWorkerStateInner`] maintains the authoritative state for a single table's
+/// synchronization process, providing thread-safe state transitions and coordination
+/// between different workers that may need to react to state changes.
+///
+/// # State Management Responsibilities
+///
+/// ## Authoritative State Tracking
+/// - Maintains the current replication phase for the associated table
+/// - Ensures state transitions are atomic and immediately visible to all observers
+/// - Coordinates with persistent storage to maintain durability across restarts
+///
+/// ## Cross-Worker Coordination
+/// - Provides notification mechanism for state changes using [`Notify`]
+/// - Enables apply workers to react immediately to table sync worker state changes
+/// - Supports blocking waits for specific phase transitions
+///
+/// ## Persistence Integration
+/// - Delegates to external state store for durable state persistence
+/// - Handles selective persistence based on phase type requirements
+/// - Provides rollback capabilities for error recovery scenarios
+///
+/// # Concurrency Model
+///
+/// The state inner uses an async notification pattern where:
+/// - State changes are immediately visible to the holding worker
+/// - External workers can wait for specific state transitions
+/// - All waiting workers are notified simultaneously when changes occur
+/// - No queuing or permit-based system - only active waiters are notified
+///
+/// # Performance Characteristics
+///
+/// - **State reads**: O(1) with shared memory access
+/// - **State writes**: O(1) plus potential database operation cost  
+/// - **Notification**: O(n) where n is the number of active waiters
+/// - **Memory overhead**: Minimal - single state enum plus Arc<Notify>
 #[derive(Debug)]
 pub struct TableSyncWorkerStateInner {
+    /// Unique identifier for the table whose state this structure tracks
     table_id: TableId,
+    /// Current replication phase - this is the authoritative in-memory state
     table_replication_phase: TableReplicationPhase,
+    /// Notification mechanism for broadcasting state changes to waiting workers
     phase_change: Arc<Notify>,
 }
 
 impl TableSyncWorkerStateInner {
+    /// Updates the table's replication phase and notifies all waiting workers.
+    ///
+    /// This method provides the core state transition mechanism for table synchronization.
+    /// It atomically updates the in-memory state and broadcasts the change to any workers
+    /// that may be waiting for state transitions.
+    ///
+    /// # Notification Semantics
+    ///
+    /// The notification system uses [`Notify::notify_waiters()`] which has specific semantics:
+    /// - **Current waiters**: All tasks currently blocked on `wait_for_phase_type()` are awakened
+    /// - **Future waiters**: Tasks that call `wait_for_phase_type()` after this notification
+    ///   will need to wait for the next state change
+    /// - **No queuing**: There's no permit or token system - notifications are broadcast events
+    ///
+    /// This design ensures that state changes are immediately visible to interested parties
+    /// while avoiding complex queuing semantics that could lead to missed notifications.
+    ///
+    /// # Logging and Observability
+    ///
+    /// State transitions are logged at INFO level for operational visibility. This provides
+    /// crucial debugging information for understanding table sync progression and helps
+    /// identify tables that may be stuck in specific phases.
+    ///
+    /// # Thread Safety
+    ///
+    /// While this method requires `&mut self`, the `TableSyncWorkerState` wrapper ensures
+    /// proper synchronization via an async mutex, making state transitions atomic across
+    /// the entire system.
     pub fn set(&mut self, phase: TableReplicationPhase) {
         info!(
             "table phase changing from '{:?}' to '{:?}'",
@@ -53,27 +121,83 @@ impl TableSyncWorkerStateInner {
         );
 
         self.table_replication_phase = phase;
-        // We want to notify all waiters that there was a phase change.
-        //
+
+        // Broadcast notification to all active waiters
         // Note that this notify will not wake up waiters that will be coming in the future since
         // no permit is stored, only active listeners will be notified.
         self.phase_change.notify_waiters();
     }
 
+    /// Updates the table's replication phase with conditional persistence to external storage.
+    ///
+    /// This method extends the basic [`set()`] method with durable persistence capabilities,
+    /// ensuring that important state transitions survive process restarts and failures.
+    /// The persistence behavior is controlled by the phase type's storage requirements.
+    ///
+    /// # Persistence Strategy
+    ///
+    /// Not all phase transitions require persistence - the system uses selective persistence
+    /// based on phase type significance:
+    ///
+    /// ## Persistable Phases
+    /// - **Long-lived states**: Phases that represent significant milestones or stable states
+    /// - **Recovery points**: Phases that enable recovery from specific points in the process
+    /// - **Coordination states**: Phases that other workers need to observe across restarts
+    ///
+    /// ## Transient Phases
+    /// - **Intermediate states**: Brief transitional phases during operations
+    /// - **In-memory coordination**: States used only for immediate worker coordination
+    /// - **Derived states**: Phases that can be reconstructed from other persistent information
+    ///
+    /// # Operation Ordering
+    ///
+    /// The method follows a specific ordering to ensure consistency:
+    /// 1. **In-memory update**: Immediately visible to all local workers
+    /// 2. **Persistence check**: Determines if external storage update is needed
+    /// 3. **External storage**: Updates persistent state if required
+    ///
+    /// This ordering ensures that local workers see state changes immediately while
+    /// maintaining eventual consistency with persistent storage.
+    ///
+    /// # Error Handling and Consistency
+    ///
+    /// ## Partial Failure Scenarios
+    /// - **In-memory success, persistence failure**: Local state is updated but not persisted
+    /// - **Recovery implications**: Process restart will revert to last successfully persisted state
+    /// - **Coordination impact**: Other workers see updated state until process restart
+    ///
+    /// ## Consistency Guarantees
+    /// - **Local consistency**: In-memory state is always updated before persistence attempts
+    /// - **Durability**: Persistent storage represents committed state changes
+    /// - **Recovery safety**: System can always restart from last persisted state
+    ///
+    /// # Performance Considerations
+    ///
+    /// ## Database Operations
+    /// - Persistence operations involve async database calls with network latency
+    /// - Selective persistence reduces database load for frequent state changes
+    /// - Failed persistence operations don't block immediate state visibility
+    ///
+    /// ## Concurrency Impact
+    /// - Method requires exclusive access to state inner (async mutex)
+    /// - Database operations occur while holding the state lock
+    /// - Other workers block until both in-memory and persistent updates complete
     pub async fn set_and_store<S: StateStore>(
         &mut self,
         phase: TableReplicationPhase,
         state_store: &S,
     ) -> EtlResult<()> {
+        // Apply in-memory state change first for immediate visibility
         self.set(phase.clone());
 
-        // If we should store this phase change, we want to do it via the supplied state store.
+        // Conditionally persist based on phase type requirements
         if phase.as_type().should_store() {
             info!(
                 "storing phase change '{:?}' for table {}",
                 phase, self.table_id
             );
 
+            // Persist to external storage - this may fail without affecting in-memory state
             state_store
                 .update_table_replication_state(self.table_id, phase)
                 .await?;

@@ -13,14 +13,18 @@ use crate::store::state::StateStore;
 use crate::workers::base::{Worker, WorkerHandle};
 use crate::workers::table_sync::{TableSyncWorker, TableSyncWorkerHandle, TableSyncWorkerState};
 
+/// Internal state for the table sync worker pool.
+///
+/// This private struct manages the lifecycle of table sync workers, tracking
+/// active workers and completed workers while providing notification mechanisms
+/// for pool state changes.
 #[derive(Debug)]
 pub struct TableSyncWorkerPoolInner {
-    /// The table sync workers that are currently active.
+    /// Currently active table sync workers indexed by table ID
     active: HashMap<TableId, TableSyncWorkerHandle>,
-    /// The table sync workers that are finished, meaning that either they completed or errored.
+    /// Completed or failed table sync workers, preserving history for inspection
     finished: HashMap<TableId, Vec<TableSyncWorkerHandle>>,
-    /// A [`Notify`] instance which notifies subscribers when there is a change in the pool (e.g.
-    /// a new worker changes from active to inactive).
+    /// Notification mechanism for pool state changes (worker completion, errors, etc.)
     pool_update: Option<Arc<Notify>>,
 }
 
@@ -111,18 +115,33 @@ impl TableSyncWorkerPoolInner {
     }
 }
 
+/// Pool for managing multiple table synchronization workers.
+///
+/// [`TableSyncWorkerPool`] coordinates the execution of multiple table sync workers
+/// that run in parallel during the initial synchronization phase of ETL pipelines.
+/// It provides methods for spawning workers, tracking their progress, and waiting
+/// for completion of all synchronization operations.
 #[derive(Debug, Clone)]
 pub struct TableSyncWorkerPool {
     inner: Arc<Mutex<TableSyncWorkerPoolInner>>,
 }
 
 impl TableSyncWorkerPool {
+    /// Creates a new empty table sync worker pool.
+    ///
+    /// The pool starts with no active workers and can accept new workers
+    /// as tables need to be synchronized.
     pub fn new() -> Self {
         Self {
             inner: Arc::new(Mutex::new(TableSyncWorkerPoolInner::new())),
         }
     }
 
+    /// Waits for all active table sync workers to complete.
+    ///
+    /// This method blocks until all workers in the pool have finished their
+    /// synchronization tasks. If any workers encounter errors, those errors
+    /// are collected and returned.
     pub async fn wait_all(&self) -> EtlResult<()> {
         loop {
             // We try first to wait for all workers to be finished, in case there are still active

@@ -1,3 +1,113 @@
+//! Data type conversions between PostgreSQL and destination formats.
+//!
+//! This module provides a comprehensive type conversion system that bridges PostgreSQL's
+//! rich type system with various destination formats while preserving data fidelity and
+//! semantic meaning. The conversion architecture supports both schema-driven and dynamic
+//! type mapping scenarios.
+//!
+//! # Architecture Overview
+//!
+//! The conversion system is built around three core concepts:
+//!
+//! 1. **Type-safe representation**: [`Cell`] and [`ArrayCell`] enums provide strongly-typed
+//!    containers for all PostgreSQL data types, preserving both value and nullability information.
+//!
+//! 2. **Flexible conversion strategies**: Different conversion paths handle various destination
+//!    requirements, from null-preserving systems to strict non-null environments.
+//!
+//! 3. **Error-aware processing**: Comprehensive error handling with specific error types for
+//!    different conversion failure modes, enabling appropriate retry and fallback strategies.
+//!
+//! # Supported Data Types
+//!
+//! ## Primitive Types
+//! - **Numeric**: `SMALLINT`, `INTEGER`, `BIGINT`, `REAL`, `DOUBLE PRECISION`, `NUMERIC`/`DECIMAL`
+//! - **Text**: `CHAR`, `VARCHAR`, `TEXT`, with full Unicode support
+//! - **Boolean**: `BOOLEAN` with three-state logic (true/false/null)
+//! - **Binary**: `BYTEA` for raw byte data
+//!
+//! ## Temporal Types
+//! - **Date**: `DATE` without time components
+//! - **Time**: `TIME` with optional timezone support
+//! - **Timestamp**: `TIMESTAMP` and `TIMESTAMPTZ` with nanosecond precision
+//!
+//! ## Complex Types
+//! - **UUID**: Native UUID support with validation
+//! - **JSON**: `JSON` and `JSONB` with structured data preservation
+//! - **Arrays**: Multi-dimensional arrays of any supported base type
+//!
+//! # Conversion Strategies
+//!
+//! ## Null-Preserving Conversion
+//! The default conversion path maintains PostgreSQL's three-value logic where any field
+//! can be NULL. This is suitable for destinations that support nullable fields:
+//!
+//! ```rust,no_run
+//! use etl::types::{Cell, ArrayCell};
+//!
+//! // Nullable string field
+//! let cell = Cell::String("example".to_string());
+//! let null_cell = Cell::Null;
+//!
+//! // Nullable array with some null elements
+//! let array = ArrayCell::I32(vec![Some(1), None, Some(3)]);
+//! ```
+//!
+//! ## Non-Null Conversion
+//! For destinations that don't support null values, the system provides conversion
+//! to [`CellNonOptional`] and [`ArrayCellNonOptional`] with explicit null handling:
+//!
+//! ```rust,no_run
+//! use etl::types::{Cell, CellNonOptional, ArrayCell, ArrayCellNonOptional};
+//!
+//! # fn example() -> Result<(), etl::error::EtlError> {
+//! // Convert nullable to non-nullable (fails if nulls present in arrays)
+//! let cell = Cell::String("example".to_string());
+//! let non_null: CellNonOptional = cell.try_into()?;
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! # Error Handling Patterns
+//!
+//! ## Type Conversion Errors
+//! - **Parse failures**: Invalid format for target type (e.g., "abc" → integer)
+//! - **Range violations**: Values outside destination type limits
+//! - **Encoding issues**: Character set or encoding problems
+//!
+//! ## Null Value Handling
+//! - **Null preservation**: Maintained in nullable conversion paths
+//! - **Null rejection**: Explicit errors when nulls aren't supported
+//! - **Default substitution**: Configurable fallback values for null fields
+//!
+//! ## Array-Specific Errors
+//! - **Dimension mismatches**: Inconsistent array structure
+//! - **Element conversion failures**: Individual array element conversion errors
+//! - **Null element constraints**: Violations when destination doesn't support nullable elements
+//!
+//! # Performance Considerations
+//!
+//! ## Memory Management
+//! The conversion system is designed for high-throughput scenarios:
+//! - [`Cell::clear()`] enables efficient memory reuse without reallocations
+//! - Vectorized operations for array conversions minimize per-element overhead
+//! - Lazy conversion strategies defer expensive operations until required
+//!
+//! ## Batch Processing
+//! For optimal performance with large data sets:
+//! - Process conversions in batches to amortize setup costs
+//! - Reuse conversion contexts and temporary buffers
+//! - Leverage schema information to optimize conversion paths
+//!
+//! # Module Organization
+//!
+//! - [`table_row`] - Complete row parsing and conversion from PostgreSQL COPY format
+//! - [`event`] - Replication event parsing and structured event conversion
+//! - [`text`] - Text format parsing for all PostgreSQL data types
+//! - [`numeric`] - High-precision numeric handling with arbitrary precision support
+//! - [`hex`] - Hexadecimal encoding/decoding utilities for binary data
+//! - [`mod@bool`] - Boolean conversion with PostgreSQL's three-value logic
+
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use numeric::PgNumeric;
 use std::fmt::Debug;
@@ -14,29 +124,63 @@ pub mod numeric;
 pub mod table_row;
 pub mod text;
 
+/// Represents a single database cell value with support for PostgreSQL types.
+///
+/// [`Cell`] is the primary data container for individual values during ETL processing.
+/// It supports all common PostgreSQL data types including arrays, JSON, and temporal types.
+/// Each variant handles nullable data appropriately for the destination system.
+///
+/// The enum is designed to preserve type information and enable efficient conversion
+/// to destination formats while maintaining data fidelity.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Cell {
+    /// Represents a NULL database value
     Null,
+    /// Boolean value (true/false)
     Bool(bool),
+    /// Text or character data
     String(String),
+    /// 16-bit signed integer
     I16(i16),
+    /// 32-bit signed integer  
     I32(i32),
+    /// 32-bit unsigned integer
     U32(u32),
+    /// 64-bit signed integer
     I64(i64),
+    /// 32-bit floating point number
     F32(f32),
+    /// 64-bit floating point number
     F64(f64),
+    /// PostgreSQL NUMERIC/DECIMAL type with arbitrary precision
     Numeric(PgNumeric),
+    /// Date without time information
     Date(NaiveDate),
+    /// Time without date information
     Time(NaiveTime),
+    /// Timestamp without timezone information
     TimeStamp(NaiveDateTime),
+    /// Timestamp with timezone information in UTC
     TimeStampTz(DateTime<Utc>),
+    /// UUID (Universally Unique Identifier)
     Uuid(Uuid),
+    /// JSON data as parsed value
     Json(serde_json::Value),
+    /// Raw byte data
     Bytes(Vec<u8>),
+    /// Array of values with nullable elements
     Array(ArrayCell),
 }
 
 impl Cell {
+    /// Clears the cell value to its default state.
+    ///
+    /// This method resets the cell to a default empty value for its current type variant.
+    /// Numeric types become zero, strings become empty, collections are cleared, and
+    /// dates/times reset to their default representations. The NULL variant remains unchanged.
+    ///
+    /// This is useful for reusing [`Cell`] instances in performance-critical code paths
+    /// to avoid repeated allocations.
     pub fn clear(&mut self) {
         match self {
             Cell::Null => {}
@@ -63,28 +207,58 @@ impl Cell {
     }
 }
 
+/// Represents array data from PostgreSQL with nullable elements.
+///
+/// [`ArrayCell`] handles PostgreSQL array types where individual elements can be NULL.
+/// Each variant corresponds to a PostgreSQL array type and maintains the nullable
+/// nature of array elements as they exist in the source database.
+///
+/// This type is used internally during data conversion and can be converted to
+/// [`ArrayCellNonOptional`] for destinations that don't support nullable array elements.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ArrayCell {
+    /// NULL array value
     Null,
+    /// Array of nullable boolean values
     Bool(Vec<Option<bool>>),
+    /// Array of nullable string values
     String(Vec<Option<String>>),
+    /// Array of nullable 16-bit integers
     I16(Vec<Option<i16>>),
+    /// Array of nullable 32-bit integers
     I32(Vec<Option<i32>>),
+    /// Array of nullable 32-bit unsigned integers
     U32(Vec<Option<u32>>),
+    /// Array of nullable 64-bit integers
     I64(Vec<Option<i64>>),
+    /// Array of nullable 32-bit floats
     F32(Vec<Option<f32>>),
+    /// Array of nullable 64-bit floats
     F64(Vec<Option<f64>>),
+    /// Array of nullable PostgreSQL numeric values
     Numeric(Vec<Option<PgNumeric>>),
+    /// Array of nullable dates
     Date(Vec<Option<NaiveDate>>),
+    /// Array of nullable times
     Time(Vec<Option<NaiveTime>>),
+    /// Array of nullable timestamps
     TimeStamp(Vec<Option<NaiveDateTime>>),
+    /// Array of nullable timestamps with timezone
     TimeStampTz(Vec<Option<DateTime<Utc>>>),
+    /// Array of nullable UUIDs
     Uuid(Vec<Option<Uuid>>),
+    /// Array of nullable JSON values
     Json(Vec<Option<serde_json::Value>>),
+    /// Array of nullable byte arrays
     Bytes(Vec<Option<Vec<u8>>>),
 }
 
 impl ArrayCell {
+    /// Clears all elements from the array while preserving the variant type.
+    ///
+    /// This private method is used internally for efficient memory reuse in
+    /// performance-critical code paths. Each vector is cleared to remove all
+    /// elements while keeping the allocated capacity.
     fn clear(&mut self) {
         match self {
             ArrayCell::Null => {}

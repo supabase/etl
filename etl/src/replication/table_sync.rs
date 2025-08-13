@@ -27,13 +27,28 @@ use crate::types::PipelineId;
 use crate::workers::base::WorkerType;
 use crate::workers::table_sync::TableSyncWorkerState;
 
+/// Result type for table synchronization operations.
+///
+/// [`TableSyncResult`] indicates the outcome of a table sync operation,
+/// providing context for how the apply worker should proceed with the table.
 #[derive(Debug)]
 pub enum TableSyncResult {
+    /// Synchronization was stopped due to shutdown or external signal
     SyncStopped,
+    /// Synchronization was not required (table already synchronized)
     SyncNotRequired,
-    SyncCompleted { start_lsn: PgLsn },
+    /// Synchronization completed successfully with the starting LSN for replication
+    SyncCompleted {
+        /// LSN position where continuous replication should begin for this table
+        start_lsn: PgLsn,
+    },
 }
 
+/// Starts table synchronization for a specific table.
+///
+/// This function performs the initial data copy for a table from the source
+/// PostgreSQL database to the destination. It handles the complete sync process
+/// including data copying, state management, and coordination with the apply worker.
 #[expect(clippy::too_many_arguments)]
 pub async fn start_table_sync<S, D>(
     pipeline_id: PipelineId,

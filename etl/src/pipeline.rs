@@ -1,3 +1,9 @@
+//! ETL pipeline orchestration and lifecycle management.
+//!
+//! This module contains the core [`Pipeline`] struct that orchestrates the entire ETL process.
+//! A pipeline manages the connection to PostgreSQL, coordinates multiple workers, and ensures
+//! data consistency throughout the replication process.
+
 use etl_config::shared::PipelineConfig;
 use std::sync::Arc;
 use tokio::sync::Semaphore;
@@ -16,9 +22,15 @@ use crate::workers::apply::{ApplyWorker, ApplyWorkerHandle};
 use crate::workers::base::{Worker, WorkerHandle};
 use crate::workers::pool::TableSyncWorkerPool;
 
+/// Internal state tracking for pipeline lifecycle.
+///
+/// Tracks whether the pipeline has been started and maintains handles to running workers.
+/// The pipeline can only be in one of these states at a time.
 #[derive(Debug)]
 enum PipelineState {
+    /// Pipeline has been created but not yet started.
     NotStarted,
+    /// Pipeline is running with active workers.
     Started {
         // TODO: investigate whether we could benefit from a central launcher that deals at a high-level
         //  with workers management, which should not be done in the pipeline.
@@ -27,6 +39,18 @@ enum PipelineState {
     },
 }
 
+/// Core ETL pipeline that orchestrates PostgreSQL logical replication.
+///
+/// A [`Pipeline`] represents a complete ETL workflow connecting a PostgreSQL publication
+/// to a destination through configurable transformations. It manages the replication
+/// stream, coordinates worker processes, and handles failures gracefully.
+///
+/// The pipeline operates in two main phases:
+/// 1. **Initial table synchronization** - Copies existing data from source tables
+/// 2. **Continuous replication** - Streams ongoing changes from the replication log
+///
+/// Multiple table sync workers run in parallel during the initial phase, while a single
+/// apply worker processes the replication stream to maintain consistency.
 #[derive(Debug)]
 pub struct Pipeline<S, D> {
     id: PipelineId,
@@ -42,6 +66,11 @@ where
     S: StateStore + SchemaStore + Clone + Send + Sync + 'static,
     D: Destination + Clone + Send + Sync + 'static,
 {
+    /// Creates a new pipeline with the given configuration.
+    ///
+    /// The pipeline is initially in the not-started state and must be
+    /// explicitly started using [`Pipeline::start`]. The state store is used for tracking
+    /// replication progress and table schemas, while the destination receives replicated data.
     pub fn new(id: PipelineId, config: PipelineConfig, state_store: S, destination: D) -> Self {
         // We create a watch channel of unit types since this is just used to notify all subscribers
         // that shutdown is needed.
@@ -60,14 +89,31 @@ where
         }
     }
 
+    /// Returns the unique identifier for this pipeline.
     pub fn id(&self) -> PipelineId {
         self.id
     }
 
+    /// Returns a handle for sending shutdown signals to this pipeline.
+    ///
+    /// Multiple components can hold shutdown handles to coordinate graceful termination.
+    /// When shutdown is signaled, all workers will complete their current operations
+    /// and terminate cleanly.
     pub fn shutdown_tx(&self) -> ShutdownTx {
         self.shutdown_tx.clone()
     }
 
+    /// Starts the pipeline and begins replication processing.
+    ///
+    /// This method initializes the connection to PostgreSQL, sets up table mappings and schemas,
+    /// creates the worker pool for table synchronization, and starts the apply worker for
+    /// processing replication stream events.
+    ///
+    /// The startup process includes:
+    /// 1. Establishing PostgreSQL replication connection
+    /// 2. Loading cached table mappings and schemas
+    /// 3. Initializing table replication states
+    /// 4. Starting the apply worker and table sync worker pool
     pub async fn start(&mut self) -> EtlResult<()> {
         info!(
             "starting pipeline for publication '{}' with id {}",
@@ -119,6 +165,16 @@ where
         Ok(())
     }
 
+    /// Waits for the pipeline to complete all processing and terminate.
+    ///
+    /// This method blocks until both the apply worker and all table sync workers have
+    /// finished their work. If the pipeline was never started, this returns immediately.
+    /// If any workers encounter errors, those errors are collected and returned.
+    ///
+    /// The wait process ensures proper shutdown ordering:
+    /// 1. Apply worker completes first (may spawn additional table sync workers)
+    /// 2. All table sync workers complete
+    /// 3. Any errors from workers are aggregated and returned
     pub async fn wait(self) -> EtlResult<()> {
         let PipelineState::Started { apply_worker, pool } = self.state else {
             info!("pipeline was not started, nothing to wait for");
@@ -170,6 +226,13 @@ where
         Ok(())
     }
 
+    /// Initiates graceful shutdown of the pipeline.
+    ///
+    /// Sends shutdown signals to all workers, instructing them to complete their current
+    /// operations and terminate. This method returns immediately after sending the signals
+    /// and does not wait for workers to actually stop.
+    ///
+    /// Use [`Pipeline::wait`] after calling this method to wait for complete shutdown.
     pub fn shutdown(&self) {
         info!("trying to shut down the pipeline");
 
@@ -181,11 +244,27 @@ where
         info!("shut down signal successfully sent to all workers");
     }
 
+    /// Initiates shutdown and waits for complete pipeline termination.
+    ///
+    /// This convenience method combines [`Pipeline::shutdown`] and [`Pipeline::wait`]
+    /// to provide a single call that both initiates shutdown and waits for completion.
+    /// Returns any errors encountered during the shutdown process.
     pub async fn shutdown_and_wait(self) -> EtlResult<()> {
         self.shutdown();
         self.wait().await
     }
 
+    /// Initializes table replication states for all tables in the publication.
+    ///
+    /// This private method ensures that each table in the PostgreSQL publication has
+    /// a corresponding replication state record. Tables without existing states are
+    /// initialized to the [`TableReplicationPhase::Init`] phase.
+    ///
+    /// The initialization process:
+    /// 1. Verifies the publication exists in the source database
+    /// 2. Retrieves all table IDs associated with the publication  
+    /// 3. Loads existing table states from the store
+    /// 4. Creates initial state records for any missing tables
     async fn initialize_table_states(
         &self,
         replication_client: &PgReplicationClient,

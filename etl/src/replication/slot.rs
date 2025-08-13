@@ -11,7 +11,15 @@ const MAX_SLOT_NAME_LENGTH: usize = 63;
 const APPLY_WORKER_PREFIX: &str = "supabase_etl_apply";
 const TABLE_SYNC_PREFIX: &str = "supabase_etl_table_sync";
 
-/// Generates a replication slot name.
+/// Generates a PostgreSQL replication slot name for the given pipeline and worker.
+///
+/// This function creates unique, deterministic slot names for different types of
+/// workers in the ETL system. Slot names follow PostgreSQL naming conventions
+/// and include the pipeline ID and worker type for identification.
+///
+/// # Panics
+///
+/// Panics if the generated slot name exceeds PostgreSQL's maximum slot name length.
 pub fn get_slot_name(pipeline_id: PipelineId, worker_type: WorkerType) -> EtlResult<String> {
     let slot_name = match worker_type {
         WorkerType::Apply => {

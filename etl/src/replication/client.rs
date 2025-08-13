@@ -42,19 +42,34 @@ where
     tokio::spawn(task);
 }
 
+/// Result returned when creating a new replication slot.
+///
+/// Contains the consistent point LSN that should be used as the starting point
+/// for logical replication.
 #[derive(Debug, Clone)]
 pub struct CreateSlotResult {
+    /// The LSN at which the slot was created, representing a consistent point in the WAL
     pub consistent_point: PgLsn,
 }
 
+/// Result returned when retrieving an existing replication slot.
+///
+/// Contains the confirmed flush LSN indicating how far replication has progressed.
 #[derive(Debug, Clone)]
 pub struct GetSlotResult {
+    /// The LSN up to which changes have been confirmed as processed by the consumer
     pub confirmed_flush_lsn: PgLsn,
 }
 
+/// Result type for operations that either get an existing slot or create a new one.
+///
+/// This enum distinguishes between whether a slot was newly created or already existed,
+/// providing appropriate result data for each case.
 #[derive(Debug, Clone)]
 pub enum GetOrCreateSlotResult {
+    /// A new slot was created with the given consistent point
     CreateSlot(CreateSlotResult),
+    /// An existing slot was found with the given confirmed flush LSN
     GetSlot(GetSlotResult),
 }
 

@@ -7,22 +7,69 @@ use core::str;
 use etl_postgres::schema::ColumnSchema;
 use tracing::error;
 
+/// Represents a complete row of data from a database table.
+///
+/// [`TableRow`] contains a vector of [`Cell`] values corresponding to the columns
+/// of a database table. The values are ordered to match the table's column order
+/// and include proper type information for each cell.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TableRow {
+    /// Column values in table column order
     pub values: Vec<Cell>,
 }
 
 impl TableRow {
+    /// Creates a new table row with the given cell values.
+    ///
+    /// The values should be ordered to match the target table's column schema.
+    /// Each [`Cell`] should contain properly typed data for its corresponding column.
     pub fn new(values: Vec<Cell>) -> Self {
         Self { values }
     }
 }
 
+/// Utility for converting raw data into typed [`TableRow`] instances.
+///
+/// [`TableRowConverter`] handles parsing of PostgreSQL's text format data
+/// into strongly-typed table rows with proper error handling and type conversion.
 pub struct TableRowConverter;
 
 impl TableRowConverter {
-    /// Parses text produced by this code in Postgres:
-    /// https://github.com/postgres/postgres/blob/263a3f5f7f508167dbeafc2aefd5835b41d77481/src/backend/commands/copyto.c#L988-L1134
+    /// Converts raw PostgreSQL COPY format data into a typed table row.
+    ///
+    /// This method parses the text format data produced by PostgreSQL's COPY command
+    /// and converts it into strongly-typed [`Cell`] values according to the provided
+    /// column schemas. It handles PostgreSQL's specific escaping rules and type formats.
+    ///
+    /// # PostgreSQL COPY Format Details
+    ///
+    /// The method implements a state machine that parses PostgreSQL's text format according to these rules:
+    /// - Fields are separated by tab characters (`\t`)
+    /// - Rows are terminated by newline characters (`\n`)
+    /// - Special values are escaped with backslash (`\`) followed by:
+    ///   - `b` → backspace (ASCII 8)
+    ///   - `f` → form feed (ASCII 12)
+    ///   - `n` → newline (`\n`)
+    ///   - `r` → carriage return (`\r`)
+    ///   - `t` → tab (`\t`)
+    ///   - `v` → vertical tab (ASCII 11)
+    ///   - `\` → literal backslash
+    ///   - `N` → preserved as `\N` (literal, not NULL marker)
+    ///   - any other character → the character itself (backslash is stripped)
+    /// - NULL values are represented as `\N` (without escaping)
+    ///
+    /// # Parsing Algorithm
+    ///
+    /// 1. **Character-by-character parsing**: Iterates through input characters maintaining escape state
+    /// 2. **Escape sequence handling**: When `\` is encountered, the next character determines the output
+    /// 3. **Field separation**: Tab characters (`\t`) mark field boundaries
+    /// 4. **Row termination**: Newline characters (`\n`) mark row end
+    /// 5. **Type conversion**: Each parsed field is converted to appropriate [`Cell`] type
+    /// 6. **Validation**: Ensures field count matches schema column count
+    ///
+    /// # Panics
+    ///
+    /// Panics if the number of parsed values doesn't match the number of column schemas.
     pub fn try_from(row: &[u8], column_schemas: &[ColumnSchema]) -> EtlResult<TableRow> {
         let mut values = Vec::with_capacity(column_schemas.len());
 
@@ -34,45 +81,59 @@ impl TableRowConverter {
         let mut row_terminated = false;
         let mut done = false;
 
+        // Main parsing loop - continues until all characters are processed
         while !done {
+            // Inner loop parses a single field value until tab, newline, or end of input
             loop {
                 match chars.next() {
                     Some(c) => match c {
+                        // Handle escaped characters - previous character was backslash
                         c if in_escape => {
+                            // Special case: \N when escaped becomes literal \N (not NULL)
                             if c == 'N' {
                                 val_str.push('\\');
                                 val_str.push(c);
-                            } else if c == 'b' {
-                                val_str.push(8 as char);
+                            }
+                            // Standard PostgreSQL escape sequences
+                            else if c == 'b' {
+                                val_str.push(8 as char); // backspace
                             } else if c == 'f' {
-                                val_str.push(12 as char);
+                                val_str.push(12 as char); // form feed
                             } else if c == 'n' {
-                                val_str.push('\n');
+                                val_str.push('\n'); // newline
                             } else if c == 'r' {
-                                val_str.push('\r');
+                                val_str.push('\r'); // carriage return
                             } else if c == 't' {
-                                val_str.push('\t');
+                                val_str.push('\t'); // tab
                             } else if c == 'v' {
-                                val_str.push(11 as char)
-                            } else {
+                                val_str.push(11 as char); // vertical tab
+                            }
+                            // Any other character: strip backslash, keep character
+                            else {
                                 val_str.push(c);
                             }
 
                             in_escape = false;
                         }
+                        // Field separator - end current field parsing
                         '\t' => {
                             break;
                         }
+                        // Row terminator - end current field and mark row complete
                         '\n' => {
                             row_terminated = true;
                             break;
                         }
+                        // Escape character - next character will be escaped
                         '\\' => in_escape = true,
+                        // Regular character - add to current field value
                         c => {
                             val_str.push(c);
                         }
                     },
+                    // End of input reached
                     None => {
+                        // Validate that row was properly terminated with newline
                         if !row_terminated {
                             bail!(ErrorKind::ConversionError, "The row is not terminated");
                         }
@@ -83,7 +144,9 @@ impl TableRowConverter {
                 }
             }
 
+            // Process the parsed field value if we're not done with the entire row
             if !done {
+                // Get the next column schema - error if we have more fields than expected
                 let Some(column_schema) = column_schemas_iter.next() else {
                     bail!(
                         ErrorKind::ConversionError,
@@ -96,14 +159,20 @@ impl TableRowConverter {
                     );
                 };
 
+                // Convert the parsed string value to appropriate Cell type
                 let value = if val_str == "\\N" {
-                    // In case of a null value, we store the type information since that will be used to
-                    // correctly compute default values when needed.
+                    // PostgreSQL NULL marker: \N represents a NULL value
+                    // We preserve this as Cell::Null rather than converting to a typed null
+                    // so that downstream code can handle null semantics appropriately
                     Cell::Null
                 } else {
+                    // Convert non-null field value to appropriate Cell type based on column schema
+                    // This delegates to TextFormatConverter which handles PostgreSQL text format
+                    // parsing for all supported data types (integers, floats, strings, booleans, etc.)
                     match TextFormatConverter::try_from_str(&column_schema.typ, &val_str) {
                         Ok(value) => value,
                         Err(e) => {
+                            // Log parsing error with context for debugging
                             error!(
                                 "error parsing column `{}` of type `{}` from text `{val_str}`",
                                 column_schema.name, column_schema.typ
@@ -113,13 +182,15 @@ impl TableRowConverter {
                     }
                 };
 
+                // Add the converted value to the row and prepare for next field
                 values.push(value);
-                val_str.clear();
+                val_str.clear(); // Reset string buffer for next field
             }
         }
 
-        // If there are columns left in the schema, they are not present in the row and this is
-        // a problem.
+        // Validate that all expected columns were present in the row
+        // If there are still columns left in the schema iterator, it means the row
+        // had fewer fields than expected, which is an error
         if column_schemas_iter.next().is_some() {
             bail!(
                 ErrorKind::ConversionError,

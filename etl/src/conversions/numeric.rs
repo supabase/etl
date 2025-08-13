@@ -13,9 +13,15 @@ const NAN_SIGN: u16 = 0xC000;
 const POSITIVE_INFINITY_SIGN: u16 = 0xC000;
 const NEGATIVE_INFINITY_SIGN: u16 = 0xF000;
 
+/// Sign indicator for PostgreSQL numeric values.
+///
+/// [`Sign`] represents whether a numeric value is positive or negative,
+/// used internally in the PostgreSQL numeric wire format representation.
 #[derive(Debug, Ord, PartialOrd, Eq, PartialEq, Clone)]
 pub enum Sign {
+    /// Positive numeric value
     Positive,
+    /// Negative numeric value  
     Negative,
 }
 
@@ -42,31 +48,38 @@ impl From<Sign> for u16 {
     }
 }
 
-/// A Postgres Numeric value. Closely matches the wire format.
+/// PostgreSQL NUMERIC/DECIMAL type with arbitrary precision.
+///
+/// [`PgNumeric`] represents PostgreSQL's NUMERIC and DECIMAL types, which support
+/// arbitrary precision arithmetic. This enum closely matches PostgreSQL's internal
+/// wire format and can represent special values like NaN and infinity.
+///
+/// The numeric format uses base-10000 digits internally for efficient storage
+/// and calculation while maintaining exact decimal precision.
 #[derive(Debug, Ord, PartialOrd, Eq, PartialEq, Clone)]
 pub enum PgNumeric {
-    /// Not a number
+    /// Not a number (NaN) - result of invalid operations
     NaN,
 
-    /// Positive infinity
+    /// Positive infinity - result of overflow in positive direction
     PositiveInfinity,
 
-    /// Negative infinity
+    /// Negative infinity - result of overflow in negative direction
     NegativeInfinity,
 
-    /// Numeric value
+    /// Regular numeric value with arbitrary precision
     Value {
-        /// Sign, can be positive or negative
+        /// Sign of the numeric value
         sign: Sign,
 
-        /// The weight represents the power of 100,00 for the first digit
-        /// For example, if weight=2, the first digit represents multiples of 100,00^2
+        /// Weight represents the power of 10000 for the first digit.
+        /// For example, if weight=2, the first digit represents multiples of 10000^2.
         weight: i16,
 
-        /// Number of decimal digits after the decimal point
+        /// Number of decimal digits after the decimal point for display purposes
         scale: u16,
 
-        /// Actual digits, stored in base 100,00
+        /// Actual numeric digits stored in base-10000 format for efficiency
         digits: Vec<i16>,
     },
 }
@@ -210,9 +223,15 @@ impl ToSql for PgNumeric {
     tokio_postgres::types::to_sql_checked!();
 }
 
+/// Error types that can occur when parsing numeric strings.
+///
+/// [`ParseNumericError`] provides specific error categories for numeric parsing
+/// failures, enabling appropriate error handling and user feedback.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ParseNumericError {
+    /// The input string has invalid numeric syntax
     InvalidSyntax,
+    /// The numeric value is outside the representable range
     ValueOutOfRange,
 }
 

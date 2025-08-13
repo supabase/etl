@@ -46,7 +46,14 @@ impl<D> Inner<D> {
     }
 }
 
-/// A test wrapper that can wrap any destination and track method calls and data
+/// Test wrapper for [`Destination`] implementations that tracks all operations.
+///
+/// [`TestDestinationWrapper`] wraps any destination implementation and records all
+/// method calls and data flowing through it. This enables test assertions on the
+/// behavior of ETL pipelines without requiring complex destination setup.
+///
+/// The wrapper supports waiting for specific conditions to be met, making it ideal
+/// for testing asynchronous ETL operations with deterministic assertions.
 #[derive(Clone)]
 pub struct TestDestinationWrapper<D> {
     inner: Arc<RwLock<Inner<D>>>,
@@ -66,7 +73,10 @@ impl<D: fmt::Debug> fmt::Debug for TestDestinationWrapper<D> {
 }
 
 impl<D> TestDestinationWrapper<D> {
-    /// Create a new test wrapper around any destination
+    /// Creates a new test wrapper around any destination implementation.
+    ///
+    /// The wrapper will track all method calls and data operations performed
+    /// on the destination, enabling comprehensive testing and verification.
     pub fn wrap(destination: D) -> Self {
         let inner = Inner {
             wrapped_destination: destination,

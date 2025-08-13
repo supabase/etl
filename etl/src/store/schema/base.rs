@@ -4,6 +4,14 @@ use std::sync::Arc;
 
 use crate::error::EtlResult;
 
+/// Trait for storing and retrieving database table schema information.
+///
+/// [`SchemaStore`] provides caching and persistent storage of PostgreSQL table schemas
+/// used during ETL operations. It maintains an in-memory cache for fast access while
+/// providing persistent storage for schema information across restarts.
+///
+/// Implementations should ensure thread-safety and handle concurrent access to both
+/// the cache and persistent storage layers.
 pub trait SchemaStore {
     /// Returns table schema for table with id `table_id` from the cache.
     ///

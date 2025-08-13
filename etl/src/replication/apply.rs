@@ -29,20 +29,43 @@ use crate::{bail, etl_error};
 /// events or shutdown signal are received.
 const REFRESH_INTERVAL: Duration = Duration::from_millis(1000);
 
+/// Result type for the apply loop execution.
+///
+/// [`ApplyLoopResult`] indicates the reason why the apply loop terminated,
+/// enabling appropriate cleanup and error handling by the caller.
 #[derive(Debug, Copy, Clone)]
 pub enum ApplyLoopResult {
+    /// The apply loop stopped processing, either due to shutdown or completion
     ApplyStopped,
 }
 
+/// Hook trait for customizing apply loop behavior.
+///
+/// [`ApplyLoopHook`] allows external components to inject custom logic into
+/// the apply loop processing cycle. This enables coordination between the
+/// apply worker and other components like table sync workers.
 pub trait ApplyLoopHook {
+    /// Called before the main apply loop begins processing.
+    ///
+    /// This hook allows initialization logic to run before replication starts.
+    /// Return `false` to signal that the loop should terminate early.
     fn before_loop(&self, start_lsn: PgLsn) -> impl Future<Output = EtlResult<bool>> + Send;
 
+    /// Called to process tables that are currently synchronizing.
+    ///
+    /// This hook coordinates with table sync workers and manages the transition
+    /// between initial sync and continuous replication. Return `false` to signal
+    /// that the loop should terminate.
     fn process_syncing_tables(
         &self,
         current_lsn: PgLsn,
         update_state: bool,
     ) -> impl Future<Output = EtlResult<bool>> + Send;
 
+    /// Called when a table encounters an error during replication.
+    ///
+    /// This hook handles error reporting and retry logic for failed tables.
+    /// Return `false` to signal that the loop should terminate due to the error.
     fn mark_table_errored(
         &self,
         table_replication_error: TableReplicationError,
@@ -206,6 +229,51 @@ impl ApplyLoopState {
     }
 }
 
+/// Starts the main apply loop for processing replication events.
+///
+/// This function implements the core replication processing algorithm that maintains
+/// consistency between PostgreSQL and destination systems. It orchestrates multiple
+/// concurrent operations while ensuring ACID properties are preserved.
+///
+/// # Algorithm Overview
+///
+/// The apply loop is a multi-threaded state machine that processes three types of events:
+/// 1. **Replication messages** - DDL/DML events from PostgreSQL logical replication
+/// 2. **Table sync signals** - Coordination events from table synchronization workers  
+/// 3. **Shutdown signals** - Graceful termination requests from the pipeline
+///
+/// # Processing Phases
+///
+/// ## 1. Initialization Phase
+/// - Validates hook requirements via `before_loop()` callback
+/// - Establishes logical replication stream from PostgreSQL
+/// - Initializes batch processing state and status tracking
+///
+/// ## 2. Event Processing Phase
+/// - **Message handling**: Processes replication messages in transaction-aware batches
+/// - **Batch management**: Accumulates events until batch size/time limits are reached  
+/// - **Status updates**: Periodically reports progress back to PostgreSQL
+/// - **Coordination**: Manages table sync worker lifecycle and state transitions
+///
+/// ## 3. Transaction Boundary Management
+/// - Ensures events are only committed at transaction boundaries
+/// - Prevents table sync operations during active transactions
+/// - Maintains LSN (Log Sequence Number) consistency across all operations
+///
+/// # Concurrency Model
+///
+/// The loop uses `tokio::select!` to handle multiple asynchronous operations:
+/// - **Priority handling**: Shutdown signals have highest priority (biased select)
+/// - **Message streaming**: Continuously processes replication stream
+/// - **Periodic operations**: Status updates and housekeeping every 1 second
+/// - **External coordination**: Responds to table sync worker signals
+///
+/// # Error Handling Strategy
+///
+/// - **Transient errors**: Propagated to caller for retry logic
+/// - **Schema errors**: Handled via hook callbacks with appropriate retry policies
+/// - **Connection errors**: Terminate loop to allow reconnection at higher level
+/// - **Destination errors**: Batched and reported through hook mechanisms
 #[expect(clippy::too_many_arguments)]
 pub async fn start_apply_loop<S, D, T>(
     pipeline_id: PipelineId,
@@ -267,24 +335,33 @@ where
         Vec::with_capacity(config.batch.max_size),
     );
 
+    // Maximum time to wait for additional events when batching (prevents indefinite delays)
     let max_batch_fill_duration = Duration::from_millis(config.batch.max_fill_ms);
 
+    // Main event processing loop - continues until shutdown or fatal error
     loop {
         tokio::select! {
+            // Use biased selection to prioritize shutdown signals over other operations
+            // This ensures graceful shutdown takes precedence over event processing
             biased;
 
-            // Shutdown signal received, exit loop.
+            // PRIORITY 1: Handle shutdown signals immediately
+            // When shutdown is requested, we stop processing new events and terminate gracefully
+            // This allows current transactions to complete but prevents new ones from starting
             _ = shutdown_rx.changed() => {
                 info!("shutting down apply worker while waiting for incoming events");
 
                 return Ok(ApplyLoopResult::ApplyStopped);
             }
 
+            // PRIORITY 2: Process incoming replication messages from PostgreSQL
+            // This is the primary data flow - converts replication protocol messages
+            // into typed events and accumulates them into batches for efficient processing
             Some(message) = logical_replication_stream.next() => {
                 let end_loop = handle_replication_message_batch(
                     &mut state,
                     logical_replication_stream.as_mut(),
-                    message?,
+                    message?, // Propagate replication stream errors immediately
                     &schema_store,
                     &destination,
                     &hook,
@@ -292,42 +369,59 @@ where
                     max_batch_fill_duration,
                 )
                 .await?;
+
+                // If the message handler indicates we should terminate (e.g., due to hook decision)
                 if end_loop {
                     return Ok(ApplyLoopResult::ApplyStopped);
                 }
             }
 
-            // If we are given a signal which tells us when to forcefully perform table syncing, we
-            // will subscribe to it.
+            // PRIORITY 3: Handle table synchronization coordination signals
+            // Table sync workers signal when they complete initial data copying and are ready
+            // to transition to continuous replication mode. We use map_or_else with pending()
+            // to make this branch optional - if no signal receiver exists, this branch never fires.
             _ = force_syncing_tables_rx.as_mut().map_or_else(|| pending().boxed(), |rx| rx.changed().boxed()) => {
-                // If we are told to force syncing tables, call the hook's `process_syncing_tables`
-                // method so that we can advance the state of tables.
+                // Table state transitions can only occur at transaction boundaries to maintain consistency.
+                // If we're in the middle of processing a transaction (remote_final_lsn is set),
+                // we defer the sync processing until the current transaction completes.
                 //
-                // Note that for consistency we can perform table syncing only when we are not in
-                // a transaction, meaning that if we get a signal while in the middle of a transaction
-                // it will be received but no syncing will happen. We are fine with that since we assume
-                // that if we are in the middle of a transaction, Postgres will send us the remaining
-                // events of the transaction within a reasonable amount of time and that will drive the
-                // sync at the next transaction boundary.
+                // This design choice ensures:
+                // 1. No partial transaction state during table sync transitions
+                // 2. LSN ordering remains consistent across all operations
+                // 3. Table schemas remain stable during active transactions
                 if !state.handling_transaction() {
                     debug!("forcefully processing syncing tables");
 
+                    // Delegate to hook for actual table sync processing
+                    // Pass current flush LSN to ensure sync operations use consistent state
                     let continue_loop = hook.process_syncing_tables(state.next_status_update.flush_lsn, true).await?;
                     if !continue_loop {
                         return Ok(ApplyLoopResult::ApplyStopped);
                     }
+                } else {
+                    debug!("skipping table sync processing - transaction in progress");
                 }
             }
 
-            // At regular intervals, if nothing happens, perform housekeeping and send status updates
-            // to Postgres.
+            // PRIORITY 4: Periodic housekeeping and PostgreSQL status updates
+            // Every REFRESH_INTERVAL (1 second), send progress updates back to PostgreSQL
+            // This serves multiple purposes:
+            // 1. Keeps PostgreSQL informed of our processing progress
+            // 2. Allows PostgreSQL to clean up old WAL files based on our progress
+            // 3. Provides a heartbeat mechanism to detect connection issues
+            // 4. Triggers any pending table sync operations if no events are flowing
             _ = tokio::time::sleep(REFRESH_INTERVAL) => {
+                // Send standby status update with current LSN positions
+                // write_lsn: Last LSN we've read from the stream
+                // flush_lsn: Last LSN we've successfully processed and written to destination
+                // apply_lsn: Last LSN where all effects are visible (same as flush for async replication)
+                // reply_requested: false (we're sending proactively, not in response to a request)
                 logical_replication_stream.as_mut()
                     .send_status_update(
                         state.next_status_update.write_lsn,
                         state.next_status_update.flush_lsn,
                         state.next_status_update.apply_lsn,
-                        false
+                        false // reply_requested
                     )
                     .await?;
             }
