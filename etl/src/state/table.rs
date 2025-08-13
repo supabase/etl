@@ -195,50 +195,53 @@ impl RetryPolicy {
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum TableReplicationPhase {
-    /// Set by the pipeline when it first starts and encounters a table for the first time
+    /// Set by the pipeline when it first starts and encounters a table for the first time.
     Init,
-
-    /// Set by table-sync worker just before starting initial table copy
+    /// Set by table-sync worker just before starting initial table copy.
     DataSync,
-
-    /// Set by table-sync worker when initial table copy is done
+    /// Set by table-sync worker when initial table copy is done.
     FinishedCopy,
-
-    /// Set by table-sync worker when waiting for the apply worker to pause
+    /// Set by table-sync worker when waiting for the apply worker to pause.
+    /// 
     /// On every transaction boundary the apply worker checks if any table-sync
-    /// worker is in the SyncWait state and pauses itself if it finds any.
+    /// worker is in the `SyncWait` state and pauses itself if it finds any. It resumes
+    /// only when the table sync worker has caught up with the `Catchup`'s LSN.
+    /// 
     /// This phase is stored in memory only and not persisted to the state store
     SyncWait,
-
     /// Set by the apply worker when it is paused. The table-sync worker waits
-    /// for the apply worker to set this state after setting the state to SyncWait.
+    /// for the apply worker to set this state after setting the state to `SyncWait`.
+    /// 
     /// This phase is stored in memory only and not persisted to the state store
     Catchup {
-        /// The lsn to catch up to. This is the location where the apply worker is paused
+        /// The lsn to catch up to. This is the location where the apply worker is paused.
         lsn: PgLsn,
     },
 
     /// Set by the table-sync worker when catch-up phase is completed and table-sync
-    /// worker has caught up with the apply worker's lsn position
+    /// worker has caught up with the apply worker's lsn position.
+    /// 
+    /// The apply worker is waiting on this phase to be reached before continuing to process other
+    /// tables or events in the apply loop.
     SyncDone {
-        /// The lsn up to which the table-sync worker has caught up
+        /// The lsn up to which the table-sync worker has caught up.
+        /// 
+        /// This LSN is guaranteed to be >= `Catchup.lsn`.
         lsn: PgLsn,
     },
-
     /// Set by apply worker when it has caught up with the table-sync worker's
     /// catch up lsn position. Tables with this state have successfully run their
     /// initial table copy and catch-up phases and any changes to them will now
-    /// be applied by the apply worker only
+    /// be applied by the apply worker only.
     Ready,
-
     /// Set by either the table-sync worker or the apply worker when a table encounters
     /// an error during replication. Contains diagnostic information and retry policy.
     Errored {
-        /// Human-readable description of what went wrong
+        /// Human-readable description of what went wrong.
         reason: String,
-        /// Optional suggestion for how to fix the issue
+        /// Optional suggestion for how to fix the issue.
         solution: Option<String>,
-        /// Retry policy specifying how/when to retry
+        /// Retry policy specifying how/when to retry.
         retry_policy: RetryPolicy,
     },
 }
@@ -259,6 +262,8 @@ impl From<TableReplicationError> for TableReplicationPhase {
     }
 }
 
+/// A variant of [`TableReplicationPhase`] that can be used to determine the current phase of a table
+/// without having to pattern match on the data fields.
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum TableReplicationPhaseType {
     Init,
@@ -289,7 +294,7 @@ impl TableReplicationPhaseType {
     /// Returns `true` if a table with this phase is done processing, `false` otherwise.
     ///
     /// A table is done processing, when its events are being processed by the apply worker instead
-    /// of a table sync worker.
+    /// of a table sync worker or when it has errored.
     pub fn is_done(&self) -> bool {
         match self {
             Self::Init => false,

@@ -9,91 +9,20 @@ use crate::state::table::TableReplicationPhase;
 use crate::store::schema::SchemaStore;
 use crate::store::state::StateStore;
 
-/// Internal storage structure for the memory store with carefully managed invariants.
-///
-/// This structure maintains all ETL pipeline state in memory using optimized data structures
-/// designed for concurrent access patterns. The design emphasizes consistency, performance,
-/// and observability while keeping everything in process memory.
-///
-/// # Data Structure Invariants
-///
-/// The following invariants are maintained across all operations:
-///
-/// ## State Consistency
-/// - Every table in `table_replication_states` represents the current authoritative state
-/// - Tables in `table_state_history` must have corresponding entries in `table_replication_states`
-/// - State history is append-only and maintains chronological ordering
-/// - Schema and mapping data must be consistent with state data
-///
-/// ## Memory Management
-/// - Table schemas are reference-counted via `Arc<TableSchema>` for efficient sharing
-/// - Hash maps use default capacity allocation strategy for balanced memory/performance
-/// - No explicit cleanup is performed - relies on process termination for memory reclamation
-/// - State history grows unboundedly and should be monitored in long-running processes
-///
-/// ## Concurrency Safety
-/// - All access is protected by a single async mutex to ensure atomic operations
-/// - Operations that modify multiple maps are performed atomically
-/// - Read operations obtain consistent snapshots across all data structures
-/// - No internal locks are used to avoid deadlock potential
-///
-/// # Performance Characteristics
-///
-/// ## Access Patterns
-/// - **State queries**: O(1) average case for table state lookups
-/// - **Schema retrieval**: O(1) average case with Arc cloning cost
-/// - **History tracking**: O(1) insertion, O(n) for full history retrieval
-/// - **Bulk operations**: O(n) where n is the number of tables
-///
-/// ## Memory Usage
-/// - **Base overhead**: ~4 empty HashMaps + Arc + Mutex overhead
-/// - **Per-table overhead**: ~3-4 HashMap entries + state data + schema Arc
-/// - **History growth**: Linear with number of state transitions per table
-/// - **Schema sharing**: Multiple references to same schema only store one copy
-///
-/// ## Concurrency Impact
-/// - Single mutex protects all data - no fine-grained locking
-/// - Write operations block all concurrent access
-/// - Read operations block all concurrent writes
-/// - Suitable for moderate concurrency levels and short operation times
-///
-/// # Data Structure Details
-///
-/// ## State Management
-/// - `table_replication_states`: Current state of each table (authoritative)
-/// - `table_state_history`: Complete history of state transitions for debugging/auditing
-///
-/// ## Schema Management  
-/// - `table_schemas`: Cached table schema definitions for efficient access
-/// - `table_mappings`: Table ID to name mappings for human-readable references
-///
-/// # Implementation Notes
-///
-/// ## Error Handling
-/// - Operations are designed to be atomic - either all changes succeed or none do
-/// - Partial failure scenarios are avoided through careful operation ordering
-/// - Consistency is maintained even during error conditions
-///
-/// ## Future Optimizations
-/// - Could be optimized with read-write locks for better concurrent read performance
-/// - State history could implement size limits or archival strategies
-/// - Schema caching could implement LRU eviction for memory-constrained environments
+/// Inner state of [`MemoryStore`]
 #[derive(Debug)]
 struct Inner {
     /// Current replication state for each table - this is the authoritative source of truth
     /// for table states. Every table being replicated must have an entry here.
     table_replication_states: HashMap<TableId, TableReplicationPhase>,
-
     /// Complete history of state transitions for each table, used for debugging and auditing.
     /// This is an append-only log that grows over time and provides visibility into
     /// table state evolution. Entries are chronologically ordered.
     table_state_history: HashMap<TableId, Vec<TableReplicationPhase>>,
-
     /// Cached table schema definitions, reference-counted for efficient sharing.
     /// Schemas are expensive to fetch from PostgreSQL, so they're cached here
     /// once retrieved and shared via Arc across the application.
     table_schemas: HashMap<TableId, Arc<TableSchema>>,
-
     /// Mapping from table IDs to human-readable table names for easier debugging
     /// and logging. These mappings are established during schema discovery.
     table_mappings: HashMap<TableId, String>,
@@ -107,55 +36,6 @@ struct Inner {
 ///
 /// All state information including table replication phases, schema definitions,
 /// and table mappings are stored in memory and will be lost on process restart.
-///
-/// # Examples
-///
-/// ```rust,no_run
-/// use etl::store::both::memory::MemoryStore;
-/// use etl::destination::memory::MemoryDestination;
-/// use etl::prelude::*;
-///
-/// # #[tokio::main]
-/// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
-/// // Create a memory store for development/testing
-/// let store = MemoryStore::new();
-///
-/// // The store can be used with any destination
-/// let destination = MemoryDestination::new();
-///
-/// // Complete pipeline setup with memory components
-/// let pipeline_config = PipelineConfig {
-///     id: 42,
-///     pg_connection: PgConnectionConfig {
-///         host: "localhost".to_string(),
-///         port: 5432,
-///         name: "source".to_string(),
-///         username: "postgres".to_string(),
-///         password: None,
-///         tls: TlsConfig {
-///             enabled: false,
-///             trusted_root_certs: String::new(),
-///         },
-///     },
-///     publication_name: "my_publication".to_string(),
-///     batch: BatchConfig::default(),
-///     table_error_retry_delay_ms: 5000,
-///     max_table_sync_workers: 4,
-/// };
-///
-/// let mut pipeline = Pipeline::new(
-///     42, // PipelineId
-///     pipeline_config,
-///     store,
-///     destination
-/// );
-///
-/// // Start pipeline - all state will be kept in memory
-/// pipeline.start().await?;
-/// pipeline.shutdown_and_wait().await?;
-/// # Ok(())
-/// # }
-/// ```
 #[derive(Debug, Clone)]
 pub struct MemoryStore {
     inner: Arc<Mutex<Inner>>,

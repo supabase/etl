@@ -16,6 +16,11 @@ use crate::{bail, etl_error};
 
 const NUM_POOL_CONNECTIONS: u32 = 1;
 
+/// Converts ETL table replication phases to PostgreSQL database state format.
+///
+/// This conversion transforms internal ETL replication states into the format
+/// used by the PostgreSQL state store for persistence. It handles all phase
+/// types except in-memory phases that cannot be persisted.
 impl TryFrom<TableReplicationPhase> for state::TableReplicationState {
     type Error = EtlError;
 
@@ -59,6 +64,11 @@ impl TryFrom<TableReplicationPhase> for state::TableReplicationState {
     }
 }
 
+/// Converts PostgreSQL state rows back to ETL table replication phases.
+///
+/// This conversion transforms persisted database state into internal ETL
+/// replication phase representations. It deserializes metadata from the
+/// database row and maps database state enums to ETL phase enums.
 impl TryFrom<state::TableReplicationStateRow> for TableReplicationPhase {
     type Error = EtlError;
 
@@ -115,10 +125,14 @@ impl TryFrom<state::TableReplicationStateRow> for TableReplicationPhase {
     }
 }
 
+/// Inner state of [`PostgresStore`].
 #[derive(Debug)]
 struct Inner {
+    /// Cached table replication states indexed by table ID.
     table_states: HashMap<TableId, TableReplicationPhase>,
+    /// Cached table schemas indexed by table ID.
     table_schemas: HashMap<TableId, Arc<TableSchema>>,
+    /// Cached table mappings from source table ID to destination table name.
     table_mappings: HashMap<TableId, String>,
 }
 
@@ -127,7 +141,7 @@ struct Inner {
 /// [`PostgresStore`] implements both [`StateStore`] and [`SchemaStore`] traits,
 /// providing persistent storage of replication state and schema information
 /// directly in the source PostgreSQL database. This ensures durability and
-/// consistency of pipeline state across restarts.
+/// consistency of the pipeline state across restarts.
 ///
 /// The store maintains both in-memory cache and persistent database storage,
 /// connecting to the source database as needed for state updates while
@@ -159,6 +173,11 @@ impl PostgresStore {
         }
     }
 
+    /// Establishes a connection to the source PostgreSQL database.
+    ///
+    /// This method creates a new connection pool each time it's called rather
+    /// than maintaining persistent connections. This approach trades connection
+    /// setup overhead for reduced resource usage during periods of low activity.
     async fn connect_to_source(&self) -> Result<PgPool, sqlx::Error> {
         // We connect to source database each time we update because we assume that
         // these updates will be infrequent. It has some overhead to establish a
@@ -176,6 +195,11 @@ impl PostgresStore {
 }
 
 impl StateStore for PostgresStore {
+    /// Retrieves the replication state for a specific table from cache.
+    ///
+    /// This method provides fast access to table replication states by reading
+    /// from the in-memory cache. The cache is populated during startup and
+    /// updated as states change during replication processing.
     async fn get_table_replication_state(
         &self,
         table_id: TableId,
@@ -185,6 +209,11 @@ impl StateStore for PostgresStore {
         Ok(inner.table_states.get(&table_id).cloned())
     }
 
+    /// Retrieves all table replication states from cache.
+    ///
+    /// This method returns a complete snapshot of all cached table replication
+    /// states. It's useful for pipeline initialization and state inspection
+    /// operations that need visibility into all tables.
     async fn get_table_replication_states(
         &self,
     ) -> EtlResult<HashMap<TableId, TableReplicationPhase>> {
@@ -193,6 +222,12 @@ impl StateStore for PostgresStore {
         Ok(inner.table_states.clone())
     }
 
+    /// Loads table replication states from PostgreSQL into memory cache.
+    ///
+    /// This method connects to the source database, retrieves all table
+    /// replication state rows for this pipeline, deserializes the state
+    /// metadata, and populates the in-memory cache. It's typically called
+    /// during pipeline startup to restore state from previous runs.
     async fn load_table_replication_states(&self) -> EtlResult<usize> {
         debug!("loading table replication states from postgres state store");
 
@@ -221,6 +256,12 @@ impl StateStore for PostgresStore {
         Ok(table_states.len())
     }
 
+    /// Updates a table's replication state in both database and cache.
+    ///
+    /// This method performs atomic updates by first acquiring the cache lock,
+    /// then updating the database, and finally updating the cache. This ordering
+    /// prevents inconsistencies that could occur from concurrent access during
+    /// the update process.
     async fn update_table_replication_state(
         &self,
         table_id: TableId,
@@ -240,6 +281,14 @@ impl StateStore for PostgresStore {
         Ok(())
     }
 
+    /// Rolls back a table's replication state to the previous version.
+    ///
+    /// This method restores the table to its previous replication state by
+    /// querying the database for the prior state entry. It updates both the
+    /// persistent storage and in-memory cache to reflect the rollback.
+    /// 
+    /// Returns the restored state on success, or an error if no previous
+    /// state exists for rollback.
     async fn rollback_table_replication_state(
         &self,
         table_id: TableId,
@@ -265,18 +314,34 @@ impl StateStore for PostgresStore {
 }
 
 impl SchemaStore for PostgresStore {
+    /// Retrieves a table schema from cache by table ID.
+    ///
+    /// This method provides fast access to cached table schemas, which are
+    /// essential for processing replication events. Schemas are loaded during
+    /// startup and cached for the lifetime of the pipeline.
     async fn get_table_schema(&self, table_id: &TableId) -> EtlResult<Option<Arc<TableSchema>>> {
         let inner = self.inner.lock().await;
 
         Ok(inner.table_schemas.get(table_id).cloned())
     }
 
+    /// Retrieves all cached table schemas as a vector.
+    ///
+    /// This method returns all currently cached table schemas, providing a
+    /// complete view of the schema information available to the pipeline.
+    /// Useful for operations that need to process or analyze all table schemas.
     async fn get_table_schemas(&self) -> EtlResult<Vec<Arc<TableSchema>>> {
         let inner = self.inner.lock().await;
 
         Ok(inner.table_schemas.values().cloned().collect())
     }
 
+    /// Loads table schemas from PostgreSQL into memory cache.
+    ///
+    /// This method connects to the source database, retrieves schema information
+    /// for all tables in this pipeline, and populates the in-memory cache.
+    /// Called during pipeline initialization to establish the schema context
+    /// needed for processing replication events.
     async fn load_table_schemas(&self) -> EtlResult<usize> {
         debug!("loading table schemas from postgres state store");
 
@@ -311,6 +376,11 @@ impl SchemaStore for PostgresStore {
         Ok(table_schemas_len)
     }
 
+    /// Stores a table schema in both database and cache.
+    ///
+    /// This method persists a table schema to the database and updates the
+    /// in-memory cache atomically. Used when new tables are discovered during
+    /// replication or when schema definitions need to be updated.
     async fn store_table_schema(&self, table_schema: TableSchema) -> EtlResult<()> {
         debug!("storing table schema for table '{}'", table_schema.name);
 
@@ -334,18 +404,34 @@ impl SchemaStore for PostgresStore {
         Ok(())
     }
 
+    /// Retrieves a table mapping from source table ID to destination name.
+    ///
+    /// This method looks up the destination table name for a given source table
+    /// ID from the cache. Table mappings define how source tables are mapped
+    /// to tables in the destination system.
     async fn get_table_mapping(&self, source_table_id: &TableId) -> EtlResult<Option<String>> {
         let inner = self.inner.lock().await;
 
         Ok(inner.table_mappings.get(source_table_id).cloned())
     }
 
+    /// Retrieves all table mappings from cache.
+    ///
+    /// This method returns a complete snapshot of all cached table mappings,
+    /// showing how source table IDs map to destination table names. Useful
+    /// for operations that need visibility into the complete mapping configuration.
     async fn get_table_mappings(&self) -> EtlResult<HashMap<TableId, String>> {
         let inner = self.inner.lock().await;
 
         Ok(inner.table_mappings.clone())
     }
 
+    /// Loads table mappings from PostgreSQL into memory cache.
+    ///
+    /// This method connects to the source database, retrieves all table mapping
+    /// definitions for this pipeline, and populates the in-memory cache.
+    /// Called during pipeline initialization to establish source-to-destination
+    /// table mappings.
     async fn load_table_mappings(&self) -> EtlResult<usize> {
         debug!("loading table mappings from postgres state store");
 
@@ -373,6 +459,12 @@ impl SchemaStore for PostgresStore {
         Ok(table_mappings_len)
     }
 
+    /// Stores a table mapping in both database and cache.
+    ///
+    /// This method persists a table mapping from source table ID to destination
+    /// table name in the database and updates the in-memory cache atomically.
+    /// Used when establishing or updating the mapping configuration between
+    /// source and destination systems.
     async fn store_table_mapping(
         &self,
         source_table_id: TableId,
