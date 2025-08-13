@@ -2,24 +2,26 @@
 <p align="center">
   <a href="https://supabase.io">
         <picture>
-      <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/supabase/supabase/master/packages/common/assets/images/supabase-logo-wordmark--dark.svg">
-      <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/supabase/supabase/master/packages/common/assets/images/supabase-logo-wordmark--light.svg">
-      <img alt="Supabase Logo" width="300" src="https://raw.githubusercontent.com/supabase/supabase/master/packages/common/assets/images/logo-preview.jpg">
+      <img alt="Supabase Logo" width="100%" src="res/etl-logo-extended.png">
     </picture>
   </a>
 
-  <h1 align="center">Supabase ETL</h1>
+  <h1 align="center">ETL</h1>
 
   <p align="center">
-    A Rust crate to quickly build replication solutions for Postgres. Build data pipelines which continually copy data from Postgres to other systems.
+    Build real-time Postgres replication applications in Rust
     <br />
-    <a href="https://github.com/supabase/etl/tree/main/etl-examples">Examples</a>
+    <a href="https://supabase.github.io/etl"><strong>Documentation</strong></a>
+    ·
+    <a href="https://github.com/supabase/etl/tree/main/etl-examples"><strong>Examples</strong></a>
+    ·
+    <a href="https://github.com/supabase/etl/issues"><strong>Issues</strong></a>
   </p>
 </p>
 
-# ETL
+**ETL** is a Rust framework by [Supabase](https://supabase.com) that enables you to build high-performance, real-time data replication applications for PostgreSQL. Whether you're creating ETL pipelines, implementing CDC (Change Data Capture), or building custom data synchronization solutions, ETL provides the building blocks you need.
 
-This crate builds abstractions on top of Postgres's [logical streaming replication protocol](https://www.postgresql.org/docs/current/protocol-logical-replication.html) and pushes users towards the pit of success without letting them worry about low level details of the protocol.
+Built on top of PostgreSQL's [logical streaming replication protocol](https://www.postgresql.org/docs/current/protocol-logical-replication.html), ETL handles the low-level complexities of database replication while providing a clean, Rust-native API that guides you towards the pit of success.
 
 ## Table of Contents
 
@@ -35,15 +37,59 @@ This crate builds abstractions on top of Postgres's [logical streaming replicati
 
 ## Features
 
-The `etl` crate supports the following destinations:
+**Core Capabilities:**
+- 🚀 **Real-time replication**: Stream changes from PostgreSQL as they happen
+- 🔄 **Multiple destinations**: Support for various data warehouses and databases (coming soon)
+- 🛡️ **Fault tolerance**: Built-in error handling, retries, and recovery mechanisms
+- ⚡ **High performance**: Efficient batching and parallel processing
+- 🔧 **Extensible**: Plugin architecture for custom destinations
 
-- [x] BigQuery
-- [ ] Apache Iceberg (planned)
-- [ ] DuckDB (planned)
+**Supported Destinations:**
+- [x] **BigQuery** - Google Cloud's data warehouse
+- [ ] **Apache Iceberg** (planned) - Open table format for analytics
+- [ ] **DuckDB** (planned) - In-process analytical database
 
 ## Installation
 
-To use `etl` in your Rust project, add the core library and desired destinations via git dependencies in `Cargo.toml`:
+Add ETL to your Rust project via git dependencies in `Cargo.toml`:
+
+```toml
+[dependencies]
+etl = { git = "https://github.com/supabase/etl" }
+```
+
+> **Note**: ETL is currently distributed via Git while we prepare for the initial crates.io release.
+
+## Quickstart
+
+Get up and running with ETL in minutes using the built-in memory destination:
+
+```rust
+use etl::pipeline::Pipeline;
+use etl::destination::memory::MemoryDestination;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Configure your source database
+    let source_config = etl::config::SourceConfig {
+        host: "localhost".to_string(),
+        port: 5432,
+        database: "mydb".to_string(),
+        // ... other config
+    };
+
+    // Use the built-in memory destination for testing
+    let destination = MemoryDestination::new();
+    
+    // Create and run the replication pipeline
+    let pipeline = Pipeline::new(source_config, destination).await?;
+    pipeline.start().await?;
+    
+    Ok(())
+}
+```
+
+**Need production destinations?** Add the `etl-destinations` crate with specific features:
 
 ```toml
 [dependencies]
@@ -51,11 +97,7 @@ etl = { git = "https://github.com/supabase/etl" }
 etl-destinations = { git = "https://github.com/supabase/etl", features = ["bigquery"] }
 ```
 
-The `etl` crate provides the core replication functionality, while `etl-destinations` contains destination-specific implementations. Each destination is behind a feature of the same name in the `etl-destinations` crate. The git dependency is needed for now because the crates are not yet published on crates.io.
-
-## Quickstart
-
-To quickly get started with `etl`, see the [etl-examples](etl-examples/README.md) crate which contains practical examples and detailed setup instructions.
+For comprehensive examples and tutorials, visit the [etl-examples](etl-examples/README.md) crate and our [documentation](https://supabase.github.io/etl).
 
 ## Database Setup
 
@@ -110,3 +152,9 @@ This limits performance for large tables. We plan to address this once the ETL s
 ## License
 
 Distributed under the Apache-2.0 License. See `LICENSE` for more information.
+
+---
+
+<p align="center">
+  Made with ❤️ by the <a href="https://supabase.com">Supabase</a> team
+</p>

@@ -1,6 +1,6 @@
 site_name: ETL
 site_url: https://supabase.github.io/etl
-site_description: Build Postgres replication apps in Rust
+site_description: Stream your Postgres data anywhere in real-time. Simple Rust building blocks for change data capture (CDC) pipelines.
 copyright: Copyright &copy; Supabase
 repo_name: supabase/etl
 repo_url: https://github.com/supabase/etl
@@ -8,57 +8,40 @@ edit_uri: edit/main/docs/
 
 nav:
   - Home:
-      - index.md
+      - Welcome: index.md
   - Tutorials:
-      - Tutorials: tutorials/index.md
+      - Overview: tutorials/index.md
       - Getting started: tutorials/getting-started.md
   - Guides:
-      - Guides: guides/index.md
+      - Overview: guides/index.md
       - Database setup: guides/database-setup.md
   - Design:
-      - Design: design/index.md
+      - Overview: design/index.md
       - ETL crate design: design/etl-crate-design.md
   - Reference:
-      - Reference: reference/index.md
+      - Overview: reference/index.md
 
 theme:
   name: "material"
   favicon: "assets/favicon.ico"
-  logo: "assets/etl.svg"
+  logo: "assets/etl.png"
   homepage: https://supabase.github.io/etl
   features:
-    - content.code.annotate
-    - content.code.copy
-    - content.action.edit
     - navigation.expand
+    - navigation.sections
+    - navigation.indexes
     - navigation.tabs
     - navigation.tabs.sticky
-    - navigation.indexes
-    - navigation.footer
     - navigation.top
-    - toc.follow
-    - search.suggest
-    - search.share
+    - toc.integrate
+    - content.code.copy
+    - content.code.annotate
   palette:
-    # Palette toggle for light mode
-    - media: "(prefers-color-scheme: light)"
-      scheme: default
-      toggle:
-        icon: material/weather-night
-        name: Switch to dark mode
-      primary: green
-      accent: green
-
-    # Palette toggle for dark mode
-    - media: "(prefers-color-scheme: dark)"
-      scheme: slate
-      toggle:
-        icon: material/weather-sunny
-        name: Switch to light mode
-      primary: green
-      accent: green
+    scheme: default
+    primary: custom
+    accent: custom
   font:
-    text: "IBM Plex Sans"
+    text: Roboto
     code: Roboto Mono
   icon:
     repo: material/github
@@ -81,23 +64,17 @@ extra:
       name: ETL on GitHub
 
 markdown_extensions:
-  - toc:
-      permalink: true
-      permalink_title: Anchor link to this section for reference
   - pymdownx.highlight:
       linenums: true
       guess_lang: false
       use_pygments: true
       pygments_style: default
+  - pymdownx.superfences
   - pymdownx.tabbed:
       alternate_style: true
-  - pymdownx.tasklist:
-      custom_checkbox: true
-  - pymdownx.superfences
-  - pymdownx.keys
+  - pymdownx.snippets
+  - pymdownx.tasklist
   - admonition
-  - tables
-  - footnotes
 
 plugins:
   - search
