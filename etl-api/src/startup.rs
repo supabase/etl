@@ -2,6 +2,7 @@ use std::{net::TcpListener, sync::Arc};
 
 use actix_web::{App, HttpServer, dev::Server, web};
 use actix_web_httpauth::middleware::HttpAuthentication;
+use actix_web_metrics::ActixWebMetricsBuilder;
 use aws_lc_rs::aead::{AES_256_GCM, RandomizedNonceKey};
 use base64::{Engine, prelude::BASE64_STANDARD};
 use etl_config::shared::{IntoConnectOptions, PgConnectionConfig};
@@ -264,6 +265,9 @@ pub async fn run(
     struct ApiV1;
 
     let openapi = ApiDoc::openapi();
+    let actix_metrics = ActixWebMetricsBuilder::new()
+        .build()
+        .map_err(anyhow::Error::from_boxed)?;
 
     let server = HttpServer::new(move || {
         let tracing_logger = TracingLogger::<ApiRootSpanBuilder>::new();
@@ -275,6 +279,7 @@ pub async fn run(
                     .start_transaction(true)
                     .finish(),
             )
+            .wrap(actix_metrics.clone())
             .wrap(tracing_logger)
             .service(health_check)
             .service(metrics)

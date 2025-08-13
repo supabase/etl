@@ -17,6 +17,7 @@ etl-telemetry = { workspace = true }
 
 actix-web = { workspace = true, features = ["macros", "http2"] }
 actix-web-httpauth = { workspace = true }
+actix-web-metrics = { workspace = true }
 anyhow = { workspace = true, features = ["std"] }
 async-trait = { workspace = true }
 aws-lc-rs = { workspace = true, features = ["alloc", "aws-lc-sys"] }
