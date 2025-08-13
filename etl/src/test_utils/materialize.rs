@@ -20,13 +20,6 @@ pub trait FromTableRow: Sized {
 /// - Insert: Add new record to collection
 /// - Update: Replace existing record with same ID, or add if not found
 /// - Delete: Remove record with matching ID
-///
-/// # Arguments
-/// * `destination` - The test destination wrapper containing events
-/// * `table_id` - Optional table ID to filter events (if None, processes all tables)
-///
-/// # Returns
-/// A vector containing the final state after all events are applied
 pub async fn materialize_events<T>(events: &[Event], table_id: Option<TableId>) -> Vec<T>
 where
     T: FromTableRow,
