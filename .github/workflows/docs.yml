@@ -1,7 +1,9 @@
-name: Deploy MkDocs
+name: Docs
 
 on:
   push:
+    branches: [main]
+  pull_request:
     branches: [main]
 
 permissions:
@@ -10,6 +12,7 @@ permissions:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    if: github.event_name == 'push'
     steps:
       - uses: actions/checkout@v4
       - name: Configure Git Credentials
@@ -28,3 +31,21 @@ jobs:
             mkdocs-material-
       - run: pip install -r docs/requirements_docs.txt
       - run: mkdocs gh-deploy --force
+
+  build:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: 3.x
+      - run: echo "cache_id=$(date --utc '+%V')" >> $GITHUB_ENV
+      - uses: actions/cache@v4
+        with:
+          key: mkdocs-material-${{ env.cache_id }}
+          path: ~/.cache
+          restore-keys: |
+            mkdocs-material-
+      - run: pip install -r docs/requirements_docs.txt
+      - run: mkdocs build --strict
