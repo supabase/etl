@@ -1,14 +1,3 @@
-use crate::concurrency::shutdown::ShutdownRx;
-use crate::concurrency::signal::SignalRx;
-use crate::conversions::event::{Event, EventType, convert_message_to_event};
-use crate::destination::Destination;
-use crate::error::{ErrorKind, EtlError, EtlResult};
-use crate::replication::client::PgReplicationClient;
-use crate::replication::stream::EventsStream;
-use crate::state::table::{RetryPolicy, TableReplicationError};
-use crate::store::schema::SchemaStore;
-use crate::types::PipelineId;
-use crate::{bail, etl_error};
 use etl_config::shared::PipelineConfig;
 use etl_postgres::replication::slots::get_slot_name;
 use etl_postgres::replication::worker::WorkerType;
@@ -23,6 +12,18 @@ use std::time::{Duration, Instant};
 use tokio::pin;
 use tokio_postgres::types::PgLsn;
 use tracing::{debug, info};
+
+use crate::concurrency::shutdown::ShutdownRx;
+use crate::concurrency::signal::SignalRx;
+use crate::conversions::event::{Event, EventType, convert_message_to_event};
+use crate::destination::Destination;
+use crate::error::{ErrorKind, EtlError, EtlResult};
+use crate::replication::client::PgReplicationClient;
+use crate::replication::stream::EventsStream;
+use crate::state::table::{RetryPolicy, TableReplicationError};
+use crate::store::schema::SchemaStore;
+use crate::types::PipelineId;
+use crate::{bail, etl_error};
 
 /// The amount of milliseconds that pass between one refresh and the other of the system, in case no
 /// events or shutdown signal are received.

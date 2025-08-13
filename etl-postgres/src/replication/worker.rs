@@ -1,6 +1,6 @@
 use crate::schema::TableId;
 
-/// Worker type for slot name generation.
+/// Enum representing the types of workers that can be involved with a replication task.
 #[derive(Debug, Copy, Clone)]
 pub enum WorkerType {
     Apply,
