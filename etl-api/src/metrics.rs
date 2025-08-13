@@ -9,7 +9,7 @@ pub fn init_metrics() -> Result<PrometheusHandle, BuildError> {
     let handle = builder.install_recorder()?;
     let handle_clone = handle.clone();
 
-    // This task periodically performs upkeep to avoid unbounded memory growth due to 
+    // This task periodically performs upkeep to avoid unbounded memory growth due to
     // metrics collection
     tokio::spawn(async move {
         loop {
