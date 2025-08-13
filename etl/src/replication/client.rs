@@ -48,7 +48,7 @@ where
 /// for logical replication.
 #[derive(Debug, Clone)]
 pub struct CreateSlotResult {
-    /// The LSN at which the slot was created, representing a consistent point in the WAL
+    /// The LSN at which the slot was created, representing a consistent point in the WAL.
     pub consistent_point: PgLsn,
 }
 
@@ -57,7 +57,7 @@ pub struct CreateSlotResult {
 /// Contains the confirmed flush LSN indicating how far replication has progressed.
 #[derive(Debug, Clone)]
 pub struct GetSlotResult {
-    /// The LSN up to which changes have been confirmed as processed by the consumer
+    /// The LSN up to which changes have been confirmed as processed by ETL.
     pub confirmed_flush_lsn: PgLsn,
 }
 
@@ -67,13 +67,15 @@ pub struct GetSlotResult {
 /// providing appropriate result data for each case.
 #[derive(Debug, Clone)]
 pub enum GetOrCreateSlotResult {
-    /// A new slot was created with the given consistent point
+    /// A new slot was created with the given consistent point.
     CreateSlot(CreateSlotResult),
-    /// An existing slot was found with the given confirmed flush LSN
+    /// An existing slot was found with the given confirmed flush LSN.
     GetSlot(GetSlotResult),
 }
 
 impl GetOrCreateSlotResult {
+
+    /// Returns the lsn that should be used as starting LSN during events replication.
     pub fn get_start_lsn(&self) -> PgLsn {
         match self {
             GetOrCreateSlotResult::CreateSlot(result) => result.consistent_point,

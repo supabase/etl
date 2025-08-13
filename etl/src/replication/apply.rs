@@ -42,8 +42,7 @@ pub enum ApplyLoopResult {
 /// Hook trait for customizing apply loop behavior.
 ///
 /// [`ApplyLoopHook`] allows external components to inject custom logic into
-/// the apply loop processing cycle. This enables coordination between the
-/// apply worker and other components like table sync workers.
+/// the apply loop processing cycle.
 pub trait ApplyLoopHook {
     /// Called before the main apply loop begins processing.
     ///
@@ -71,15 +70,23 @@ pub trait ApplyLoopHook {
         table_replication_error: TableReplicationError,
     ) -> impl Future<Output = EtlResult<bool>> + Send;
 
+    /// Called to check if the events processed by this apply loop should be applied in the destination.
+    ///
+    /// Returns `true` if the event should be applied, `false` otherwise.
     fn should_apply_changes(
         &self,
         table_id: TableId,
         remote_final_lsn: PgLsn,
     ) -> impl Future<Output = EtlResult<bool>> + Send;
 
+    /// Returns the [`WorkerType`] driving this instance of the apply loop.
     fn worker_type(&self) -> WorkerType;
 }
 
+/// The status update that is sent to PostgreSQL to report progress.
+///
+/// The status update is a crucial part since it enables Postgres to know our replication process
+/// and is required for WAL pruning.
 #[derive(Debug, Clone)]
 struct StatusUpdate {
     write_lsn: PgLsn,
@@ -88,6 +95,10 @@ struct StatusUpdate {
 }
 
 impl StatusUpdate {
+    /// Updates the write LSN to a higher value if the new LSN is greater.
+    ///
+    /// This method ensures LSN values only advance forward, preventing
+    /// regression in replication progress reporting to PostgreSQL.
     fn update_write_lsn(&mut self, new_write_lsn: PgLsn) {
         if new_write_lsn <= self.write_lsn {
             return;
@@ -96,6 +107,10 @@ impl StatusUpdate {
         self.write_lsn = new_write_lsn;
     }
 
+    /// Updates the flush LSN to a higher value if the new LSN is greater.
+    ///
+    /// This method tracks the highest LSN for data that has been durably
+    /// written to the destination, enabling PostgreSQL WAL cleanup.
     fn update_flush_lsn(&mut self, flush_lsn: PgLsn) {
         if flush_lsn <= self.flush_lsn {
             return;
@@ -104,6 +119,10 @@ impl StatusUpdate {
         self.flush_lsn = flush_lsn;
     }
 
+    /// Updates the apply LSN to a higher value if the new LSN is greater.
+    ///
+    /// This method tracks the highest LSN for data that has been successfully
+    /// applied to the destination system with all constraints satisfied.
     fn update_apply_lsn(&mut self, apply_lsn: PgLsn) {
         if apply_lsn <= self.apply_lsn {
             return;
@@ -113,12 +132,11 @@ impl StatusUpdate {
     }
 }
 
-/// An enum representing if the batch should be ended or not
+/// An enum representing if the batch should be ended or not.
 #[derive(Debug)]
 enum EndBatch {
     /// The batch should include the last processed event and end.
     Inclusive,
-
     /// The batch should exclude the last processed event and end.
     Exclusive,
 }
@@ -130,16 +148,13 @@ struct HandleMessageResult {
     /// Could be None if this event should not be added to the batch
     /// Will be None in the following cases:
     ///
-    /// * When the apply worker receives an event for a table which is not ready
-    /// * When the apply or table sync workers receive an event from a table which was skipped
-    /// * When the table sync worker receives an event from a table other than its own
-    /// * When the message is a primary keepalive message
-    ///
+    /// * When the apply worker receives an event for a table which is not ready.
+    /// * When the apply or table sync workers receive an event from a table which is errored.
+    /// * When the table sync worker receives an event from a table other than its own.
+    /// * When the message is a primary keepalive message.
     event: Option<Event>,
-
-    /// Set to a commit message's end_lsn value, None otherwise
+    /// Set to a commit message's end_lsn value, `None` otherwise.
     end_lsn: Option<PgLsn>,
-
     /// Set when a batch should be ended earlier than the normal batching parameters of
     /// max size and max fill duration. Currently, this will be set in the following
     /// conditions:
@@ -154,9 +169,7 @@ struct HandleMessageResult {
     ///   in schema. Since currently we are not handling any changes in schema, we
     ///   mark the table as skipped in this case. The replication event will be excluded
     ///   from the batch.
-    ///
     end_batch: Option<EndBatch>,
-
     /// Set when the table has encountered an error, and it should consequently be marked as errored
     /// in the state store.
     ///
@@ -173,6 +186,7 @@ struct HandleMessageResult {
     table_replication_error: Option<TableReplicationError>,
 }
 
+/// A shared state that is used throughout the apply loop to track progress.
 #[derive(Debug, Clone)]
 struct ApplyLoopState {
     /// The highest LSN received from the `end_lsn` field of a `Commit` message.
@@ -181,24 +195,24 @@ struct ApplyLoopState {
     /// of restarts and allows Postgres to determine whether some old entries could be pruned from the
     /// WAL.
     last_commit_end_lsn: Option<PgLsn>,
-
     /// The LSN of the commit WAL entry of the transaction that is currently being processed.
     ///
     /// This LSN is set at every `BEGIN` of a new transaction, and it's used to know the `commit_lsn`
     /// of the transaction which is currently being processed.
     remote_final_lsn: Option<PgLsn>,
-
     /// The LSNs of the status update that we want to send to Postgres.
     next_status_update: StatusUpdate,
-
-    /// Last time when the batch was sent (or since when the apply loop started)
+    /// Last time when the batch was sent (or since when the apply loop started).
     last_batch_send_time: Instant,
-
-    /// A batch of events to send to the destination
+    /// A batch of events to send to the destination.
     events_batch: Vec<Event>,
 }
 
 impl ApplyLoopState {
+    /// Creates a new [`ApplyLoopState`] with initial status update and event batch.
+    ///
+    /// This constructor initializes the state tracking structure used throughout
+    /// the apply loop to maintain replication progress and coordinate batching.
     fn new(next_status_update: StatusUpdate, events_batch: Vec<Event>) -> Self {
         Self {
             last_commit_end_lsn: None,
@@ -209,6 +223,11 @@ impl ApplyLoopState {
         }
     }
 
+    /// Updates the last commit end LSN to track transaction boundaries.
+    ///
+    /// This method maintains the highest commit end LSN seen, which represents
+    /// the next position to resume from after a transaction completes. Only
+    /// advances the LSN forward to ensure progress monotonicity.
     fn update_last_commit_end_lsn(&mut self, end_lsn: Option<PgLsn>) {
         match (self.last_commit_end_lsn, end_lsn) {
             (None, Some(end_lsn)) => {
@@ -224,6 +243,10 @@ impl ApplyLoopState {
     }
 
     /// Returns true if the apply loop is in the middle of processing a transaction, false otherwise.
+    ///
+    /// This method checks whether a transaction is currently active by examining
+    /// if `remote_final_lsn` is set, which indicates a `BEGIN` message was processed
+    /// but the corresponding `COMMIT` has not yet been handled.
     fn handling_transaction(&self) -> bool {
         self.remote_final_lsn.is_some()
     }
@@ -237,7 +260,7 @@ impl ApplyLoopState {
 ///
 /// # Algorithm Overview
 ///
-/// The apply loop is a multi-threaded state machine that processes three types of events:
+/// The apply loop processes three types of events:
 /// 1. **Replication messages** - DDL/DML events from PostgreSQL logical replication
 /// 2. **Table sync signals** - Coordination events from table synchronization workers  
 /// 3. **Shutdown signals** - Graceful termination requests from the pipeline
@@ -245,20 +268,15 @@ impl ApplyLoopState {
 /// # Processing Phases
 ///
 /// ## 1. Initialization Phase
-/// - Validates hook requirements via `before_loop()` callback
-/// - Establishes logical replication stream from PostgreSQL
-/// - Initializes batch processing state and status tracking
+/// - Validates hook requirements via `before_loop()` callback.
+/// - Establishes logical replication stream from PostgreSQL.
+/// - Initializes batch processing state and status tracking.
 ///
 /// ## 2. Event Processing Phase
-/// - **Message handling**: Processes replication messages in transaction-aware batches
-/// - **Batch management**: Accumulates events until batch size/time limits are reached  
-/// - **Status updates**: Periodically reports progress back to PostgreSQL
-/// - **Coordination**: Manages table sync worker lifecycle and state transitions
-///
-/// ## 3. Transaction Boundary Management
-/// - Ensures events are only committed at transaction boundaries
-/// - Prevents table sync operations during active transactions
-/// - Maintains LSN (Log Sequence Number) consistency across all operations
+/// - **Message handling**: Processes replication messages in transaction-aware batches.
+/// - **Batch management**: Accumulates events until batch size/time limits are reached.
+/// - **Status updates**: Periodically reports progress back to PostgreSQL.
+/// - **Coordination**: Manages table sync worker lifecycle and state transitions.
 ///
 /// # Concurrency Model
 ///
@@ -267,13 +285,6 @@ impl ApplyLoopState {
 /// - **Message streaming**: Continuously processes replication stream
 /// - **Periodic operations**: Status updates and housekeeping every 1 second
 /// - **External coordination**: Responds to table sync worker signals
-///
-/// # Error Handling Strategy
-///
-/// - **Transient errors**: Propagated to caller for retry logic
-/// - **Schema errors**: Handled via hook callbacks with appropriate retry policies
-/// - **Connection errors**: Terminate loop to allow reconnection at higher level
-/// - **Destination errors**: Batched and reported through hook mechanisms
 #[expect(clippy::too_many_arguments)]
 pub async fn start_apply_loop<S, D, T>(
     pipeline_id: PipelineId,
@@ -361,7 +372,7 @@ where
                 let end_loop = handle_replication_message_batch(
                     &mut state,
                     logical_replication_stream.as_mut(),
-                    message?, // Propagate replication stream errors immediately
+                    message?,
                     &schema_store,
                     &destination,
                     &hook,
@@ -370,7 +381,7 @@ where
                 )
                 .await?;
 
-                // If the message handler indicates we should terminate (e.g., due to hook decision)
+                // If the message handler indicates we should terminate (e.g., due to hook decision)/
                 if end_loop {
                     return Ok(ApplyLoopResult::ApplyStopped);
                 }
@@ -384,11 +395,6 @@ where
                 // Table state transitions can only occur at transaction boundaries to maintain consistency.
                 // If we're in the middle of processing a transaction (remote_final_lsn is set),
                 // we defer the sync processing until the current transaction completes.
-                //
-                // This design choice ensures:
-                // 1. No partial transaction state during table sync transitions
-                // 2. LSN ordering remains consistent across all operations
-                // 3. Table schemas remain stable during active transactions
                 if !state.handling_transaction() {
                     debug!("forcefully processing syncing tables");
 
@@ -409,19 +415,13 @@ where
             // 1. Keeps PostgreSQL informed of our processing progress
             // 2. Allows PostgreSQL to clean up old WAL files based on our progress
             // 3. Provides a heartbeat mechanism to detect connection issues
-            // 4. Triggers any pending table sync operations if no events are flowing
             _ = tokio::time::sleep(REFRESH_INTERVAL) => {
-                // Send standby status update with current LSN positions
-                // write_lsn: Last LSN we've read from the stream
-                // flush_lsn: Last LSN we've successfully processed and written to destination
-                // apply_lsn: Last LSN where all effects are visible (same as flush for async replication)
-                // reply_requested: false (we're sending proactively, not in response to a request)
                 logical_replication_stream.as_mut()
                     .send_status_update(
                         state.next_status_update.write_lsn,
                         state.next_status_update.flush_lsn,
                         state.next_status_update.apply_lsn,
-                        false // reply_requested
+                        false
                     )
                     .await?;
             }
@@ -429,6 +429,7 @@ where
     }
 }
 
+/// Processes a replication message and manages batch accumulation and sending.
 #[expect(clippy::too_many_arguments)]
 async fn handle_replication_message_batch<S, D, T>(
     state: &mut ApplyLoopState,
@@ -467,6 +468,15 @@ where
     .await
 }
 
+/// Evaluates whether to send the current event batch and executes the send operation.
+///
+/// This function implements the batching strategy by checking multiple conditions:
+/// size limits, timing constraints, and forced batch completion signals. When any
+/// condition is met, it sends the accumulated events to the destination and updates
+/// the replication state accordingly.
+///
+/// After confirming that events are durably persisted in the destination, it performs synchronization
+/// between all workers and notifies Postgres about the progress.
 async fn try_send_batch<D, T>(
     state: &mut ApplyLoopState,
     end_batch: Option<EndBatch>,
@@ -553,6 +563,15 @@ where
     Ok(false)
 }
 
+/// Dispatches replication protocol messages to appropriate handlers.
+///
+/// This function serves as the main routing mechanism for PostgreSQL replication
+/// messages, distinguishing between XLogData (containing actual logical replication
+/// events) and PrimaryKeepAlive (heartbeat and status) messages.
+///
+/// For XLogData messages, it extracts LSN boundaries and delegates to logical
+/// replication processing. For keepalive messages, it responds with status updates
+/// to maintain the replication connection and inform PostgreSQL of progress.
 async fn handle_replication_message<S, T>(
     state: &mut ApplyLoopState,
     events_stream: Pin<&mut EventsStream>,
@@ -610,6 +629,16 @@ where
     }
 }
 
+/// Processes logical replication messages and converts them to typed events.
+///
+/// This function handles the core logic of transforming PostgreSQL's logical
+/// replication protocol messages into strongly-typed [`Event`] instances. It
+/// determines transaction boundaries, validates message ordering, and routes
+/// each message type to its specialized handler.
+///
+/// The function ensures proper LSN tracking by combining start LSN (for WAL
+/// position) with commit LSN (for transaction ordering) to maintain both
+/// temporal and transactional consistency in the event stream.
 async fn handle_logical_replication_message<S, T>(
     state: &mut ApplyLoopState,
     start_lsn: PgLsn,
@@ -663,6 +692,12 @@ where
     }
 }
 
+/// Determines the commit LSN for a replication message based on transaction state.
+///
+/// This function extracts the appropriate commit LSN depending on the message type.
+/// For `BEGIN` messages, it uses the final LSN from the message payload. For all
+/// other message types, it retrieves the previously stored `remote_final_lsn`
+/// that was set when the transaction began.
 fn get_commit_lsn(state: &ApplyLoopState, message: &LogicalReplicationMessage) -> EtlResult<PgLsn> {
     // If we are in a `Begin` message, the `commit_lsn` is the `final_lsn` of the payload, in all the
     // other cases we read the `remote_final_lsn` which should be always set in case we are within or
@@ -680,6 +715,15 @@ fn get_commit_lsn(state: &ApplyLoopState, message: &LogicalReplicationMessage) -
     }
 }
 
+/// Handles PostgreSQL BEGIN messages that mark transaction boundaries.
+///
+/// This function processes transaction start events by validating the event type
+/// and storing the final LSN for the transaction. The final LSN represents where
+/// the transaction will commit in the WAL, enabling proper transaction ordering
+/// and consistency maintenance.
+///
+/// The stored `remote_final_lsn` is used by subsequent message handlers to ensure
+/// all events within the transaction share the same commit boundary identifier.
 async fn handle_begin_message(
     state: &mut ApplyLoopState,
     event: Event,
@@ -709,6 +753,16 @@ async fn handle_begin_message(
     })
 }
 
+/// Handles PostgreSQL COMMIT messages that complete transactions.
+///
+/// This function processes transaction completion events by validating LSN
+/// consistency, coordinating with table synchronization workers, and preparing
+/// the transaction boundary information for batch processing.
+///
+/// The function ensures the commit LSN matches the expected final LSN from the
+/// corresponding BEGIN message, maintaining transaction integrity. It also
+/// determines whether this commit should trigger worker termination (for table
+/// sync workers reaching their target LSN).
 async fn handle_commit_message<T>(
     state: &mut ApplyLoopState,
     event: Event,
@@ -788,6 +842,16 @@ where
     Ok(result)
 }
 
+/// Handles PostgreSQL RELATION messages that describe table schemas.
+///
+/// This function processes schema definition messages by validating that table
+/// schemas haven't changed unexpectedly during replication. Schema stability
+/// is critical for maintaining data consistency between source and destination.
+///
+/// When schema changes are detected, the function creates appropriate error
+/// conditions and signals batch termination to prevent processing of events
+/// with mismatched schemas. This protection mechanism ensures data integrity
+/// by failing fast on incompatible schema evolution.
 async fn handle_relation_message<S, T>(
     state: &mut ApplyLoopState,
     event: Event,
@@ -867,6 +931,7 @@ where
     })
 }
 
+/// Handles PostgreSQL INSERT messages for row insertion events.
 async fn handle_insert_message<T>(
     state: &mut ApplyLoopState,
     event: Event,
@@ -910,6 +975,7 @@ where
     })
 }
 
+/// Handles PostgreSQL UPDATE messages for row modification events.
 async fn handle_update_message<T>(
     state: &mut ApplyLoopState,
     event: Event,
@@ -953,6 +1019,7 @@ where
     })
 }
 
+/// Handles PostgreSQL DELETE messages for row removal events.
 async fn handle_delete_message<T>(
     state: &mut ApplyLoopState,
     event: Event,
@@ -996,6 +1063,12 @@ where
     })
 }
 
+/// Handles PostgreSQL TRUNCATE messages for bulk table clearing operations.
+///
+/// This function processes table truncation events by validating the event type,
+/// ensuring transaction context, and filtering the affected table list based on
+/// hook decisions. Since TRUNCATE can affect multiple tables simultaneously,
+/// it evaluates each table individually.
 async fn handle_truncate_message<T>(
     state: &mut ApplyLoopState,
     event: Event,

@@ -1,6 +1,5 @@
 use byteorder::{BigEndian, ReadBytesExt};
 use std::{
-    fmt::Display,
     io::Cursor,
     iter::Peekable,
     str::{Chars, FromStr},
@@ -19,12 +18,16 @@ const NEGATIVE_INFINITY_SIGN: u16 = 0xF000;
 /// used internally in the PostgreSQL numeric wire format representation.
 #[derive(Debug, Ord, PartialOrd, Eq, PartialEq, Clone)]
 pub enum Sign {
-    /// Positive numeric value
+    /// Positive numeric value.
     Positive,
-    /// Negative numeric value  
+    /// Negative numeric value.
     Negative,
 }
 
+/// Error indicating an invalid sign value in PostgreSQL numeric format.
+///
+/// [`InvalidSign`] wraps the invalid sign value encountered when parsing
+/// numeric data from PostgreSQL's wire format.
 pub struct InvalidSign(u16);
 
 impl TryFrom<u16> for Sign {
@@ -58,22 +61,22 @@ impl From<Sign> for u16 {
 /// and calculation while maintaining exact decimal precision.
 #[derive(Debug, Ord, PartialOrd, Eq, PartialEq, Clone)]
 pub enum PgNumeric {
-    /// Not a number (NaN) - result of invalid operations
+    /// Not a number (NaN) - result of invalid operations.
     NaN,
-    /// Positive infinity - result of overflow in positive direction
+    /// Positive infinity - result of overflow in a positive direction.
     PositiveInfinity,
-    /// Negative infinity - result of overflow in negative direction
+    /// Negative infinity - result of overflow in a negative direction.
     NegativeInfinity,
-    /// Regular numeric value with arbitrary precision
+    /// Regular numeric value with arbitrary precision.
     Value {
-        /// Sign of the numeric value
+        /// Sign of the numeric value.
         sign: Sign,
         /// Weight represents the power of 10000 for the first digit.
         /// For example, if weight=2, the first digit represents multiples of 10000^2.
         weight: i16,
-        /// Number of decimal digits after the decimal point for display purposes
+        /// Number of decimal digits after the decimal point for display purposes.
         scale: u16,
-        /// Actual numeric digits stored in base-10000 format for efficiency
+        /// Actual numeric digits stored in base-10000 format for efficiency.
         digits: Vec<i16>,
     },
 }
@@ -223,13 +226,16 @@ impl ToSql for PgNumeric {
 /// failures, enabling appropriate error handling and user feedback.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ParseNumericError {
-    /// The input string has invalid numeric syntax
+    /// The input string has invalid numeric syntax.
     InvalidSyntax,
-    /// The numeric value is outside the representable range
+    /// The numeric value is outside the representable range.
     ValueOutOfRange,
 }
 
-/// Skips whitespace from a peekable iterator over characters
+/// Skips whitespace characters from a peekable character iterator.
+///
+/// This helper function advances the iterator past all consecutive whitespace
+/// characters, stopping at the first non-whitespace character or end of input.
 fn skip_whitespace(chars: &mut Peekable<Chars>) {
     while let Some(&ch) = chars.peek() {
         if ch.is_whitespace() {
@@ -251,7 +257,11 @@ impl std::fmt::Display for ParseNumericError {
 
 impl std::error::Error for ParseNumericError {}
 
-/// Parses
+/// Parses special numeric values like NaN, Infinity, and -Infinity.
+///
+/// This function handles PostgreSQL's special numeric values when they appear
+/// in string format. NaN cannot have a negative sign, while infinity values
+/// respect the sign parameter.
 fn parse_special_value(
     chars: &mut Peekable<Chars>,
     sign: &Sign,
@@ -275,6 +285,11 @@ fn parse_special_value(
     }
 }
 
+/// Parses a regular numeric value from character input.
+///
+/// This function processes decimal digits, decimal points, underscores (digit
+/// separators), and scientific notation to construct a numeric value. It handles
+/// both integer and fractional parts with arbitrary precision.
 fn parse_numeric_value(
     chars: &mut Peekable<Chars>,
     sign: Sign,
@@ -393,6 +408,12 @@ fn parse_numeric_value(
     convert_to_base_10000(decimal_digits, dweight, dscale as u16, sign)
 }
 
+/// Converts decimal digits to PostgreSQL's base-10000 internal format.
+///
+/// This function transforms a sequence of decimal digits into PostgreSQL's
+/// efficient base-10000 representation, where each internal digit represents
+/// up to 10000 in decimal. This format balances storage efficiency with
+/// calculation performance.
 fn convert_to_base_10000(
     decimal_digits: Vec<u8>,
     dweight: i32,
@@ -457,6 +478,10 @@ fn convert_to_base_10000(
     })
 }
 
+/// Removes leading zero digits from a base-10000 digit sequence.
+///
+/// This function strips unnecessary leading zeros while preserving at least
+/// one digit to represent zero values correctly.
 fn strip_leading_zeros(digits: &mut Vec<i16>) {
     while let Some(&first) = digits.first() {
         if first == 0 && digits.len() > 1 {
@@ -467,6 +492,10 @@ fn strip_leading_zeros(digits: &mut Vec<i16>) {
     }
 }
 
+/// Removes trailing zero digits from a base-10000 digit sequence.
+///
+/// This function strips unnecessary trailing zeros while preserving at least
+/// one digit to represent zero values correctly.
 fn strip_trailing_zeros(digits: &mut Vec<i16>) {
     while let Some(&last) = digits.last() {
         if last == 0 && digits.len() > 1 {
@@ -477,7 +506,7 @@ fn strip_trailing_zeros(digits: &mut Vec<i16>) {
     }
 }
 
-impl Display for PgNumeric {
+impl std::fmt::Display for PgNumeric {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             PgNumeric::NaN => write!(f, "NaN"),
@@ -493,6 +522,11 @@ impl Display for PgNumeric {
     }
 }
 
+/// Formats a numeric value for display as a decimal string.
+///
+/// This function converts a [`PgNumeric::Value`] back into human-readable
+/// decimal format, handling the base-10000 to decimal conversion, proper
+/// decimal point placement, and scale formatting.
 fn format_numeric_value(
     f: &mut std::fmt::Formatter<'_>,
     sign: &Sign,

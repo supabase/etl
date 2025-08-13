@@ -38,9 +38,9 @@ pub trait Destination {
     ///
     /// This method handles real-time changes from the PostgreSQL replication stream.
     /// Events include inserts, updates, deletes, and transaction boundaries. The
-    /// destination should process events in order to maintain data consistency.
+    /// destination should process events in order, this is required to maintain data consistency.
     ///
-    /// Event ordering within a transaction is guaranteed, but the destination may
-    /// receive events from multiple concurrent transactions.
+    /// Event ordering within a transaction is guaranteed, and transactions are ordered according to
+    /// their commit time.
     fn write_events(&self, events: Vec<Event>) -> impl Future<Output = EtlResult<()>> + Send;
 }

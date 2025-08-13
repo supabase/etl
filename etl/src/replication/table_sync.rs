@@ -30,16 +30,16 @@ use crate::workers::table_sync::TableSyncWorkerState;
 /// Result type for table synchronization operations.
 ///
 /// [`TableSyncResult`] indicates the outcome of a table sync operation,
-/// providing context for how the apply worker should proceed with the table.
+/// providing context for how the table sync worker should proceed with the table.
 #[derive(Debug)]
 pub enum TableSyncResult {
-    /// Synchronization was stopped due to shutdown or external signal
+    /// Synchronization was stopped due to shutdown or external signal.
     SyncStopped,
-    /// Synchronization was not required (table already synchronized)
+    /// Synchronization was not required (table already synchronized).
     SyncNotRequired,
-    /// Synchronization completed successfully with the starting LSN for replication
+    /// Synchronization completed successfully with the starting LSN for replication.
     SyncCompleted {
-        /// LSN position where continuous replication should begin for this table
+        /// LSN position where continuous replication should begin for this table.
         start_lsn: PgLsn,
     },
 }

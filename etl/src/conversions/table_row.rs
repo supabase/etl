@@ -41,32 +41,6 @@ impl TableRowConverter {
     /// and converts it into strongly-typed [`Cell`] values according to the provided
     /// column schemas. It handles PostgreSQL's specific escaping rules and type formats.
     ///
-    /// # PostgreSQL COPY Format Details
-    ///
-    /// The method implements a state machine that parses PostgreSQL's text format according to these rules:
-    /// - Fields are separated by tab characters (`\t`)
-    /// - Rows are terminated by newline characters (`\n`)
-    /// - Special values are escaped with backslash (`\`) followed by:
-    ///   - `b` → backspace (ASCII 8)
-    ///   - `f` → form feed (ASCII 12)
-    ///   - `n` → newline (`\n`)
-    ///   - `r` → carriage return (`\r`)
-    ///   - `t` → tab (`\t`)
-    ///   - `v` → vertical tab (ASCII 11)
-    ///   - `\` → literal backslash
-    ///   - `N` → preserved as `\N` (literal, not NULL marker)
-    ///   - any other character → the character itself (backslash is stripped)
-    /// - NULL values are represented as `\N` (without escaping)
-    ///
-    /// # Parsing Algorithm
-    ///
-    /// 1. **Character-by-character parsing**: Iterates through input characters maintaining escape state
-    /// 2. **Escape sequence handling**: When `\` is encountered, the next character determines the output
-    /// 3. **Field separation**: Tab characters (`\t`) mark field boundaries
-    /// 4. **Row termination**: Newline characters (`\n`) mark row end
-    /// 5. **Type conversion**: Each parsed field is converted to appropriate [`Cell`] type
-    /// 6. **Validation**: Ensures field count matches schema column count
-    ///
     /// # Panics
     ///
     /// Panics if the number of parsed values doesn't match the number of column schemas.

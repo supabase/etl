@@ -18,61 +18,6 @@ struct Inner {
 /// [`MemoryDestination`] stores all replicated data in memory, making it ideal for
 /// testing ETL pipelines, debugging replication behavior, and development workflows.
 /// All data is held in memory and will be lost when the process terminates.
-///
-/// # Examples
-///
-/// ```rust,no_run
-/// use etl::destination::memory::MemoryDestination;
-/// use etl::store::both::memory::MemoryStore;
-/// use etl::prelude::*;
-///
-/// # #[tokio::main]
-/// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
-/// // Create a memory destination for testing
-/// let destination = MemoryDestination::new();
-///
-/// // Set up basic pipeline configuration
-/// let pipeline_config = PipelineConfig {
-///     id: 1,
-///     pg_connection: PgConnectionConfig {
-///         host: "localhost".to_string(),
-///         port: 5432,
-///         name: "testdb".to_string(),
-///         username: "postgres".to_string(),
-///         password: None,
-///         tls: TlsConfig {
-///             enabled: false,
-///             trusted_root_certs: String::new(),
-///         },
-///     },
-///     publication_name: "test_publication".to_string(),
-///     batch: BatchConfig::default(),
-///     table_error_retry_delay_ms: 1000,
-///     max_table_sync_workers: 2,
-/// };
-///
-/// // Memory destinations are perfect for integration tests
-/// // as you can inspect the captured data afterward
-/// let memory_store = MemoryStore::new();
-/// let mut pipeline = Pipeline::new(
-///     1, // PipelineId
-///     pipeline_config,
-///     memory_store,
-///     destination.clone()
-/// );
-///
-/// pipeline.start().await?;
-/// // ... pipeline processing ...
-/// pipeline.shutdown_and_wait().await?;
-///
-/// // Access captured data for verification
-/// let events = destination.events().await;
-/// let table_data = destination.table_rows().await;
-///
-/// println!("Captured {} events", events.len());
-/// # Ok(())
-/// # }
-/// ```
 #[derive(Debug, Clone)]
 pub struct MemoryDestination {
     inner: Arc<Mutex<Inner>>,
