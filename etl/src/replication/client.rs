@@ -74,7 +74,6 @@ pub enum GetOrCreateSlotResult {
 }
 
 impl GetOrCreateSlotResult {
-
     /// Returns the lsn that should be used as starting LSN during events replication.
     pub fn get_start_lsn(&self) -> PgLsn {
         match self {

@@ -202,16 +202,16 @@ pub enum TableReplicationPhase {
     /// Set by table-sync worker when initial table copy is done.
     FinishedCopy,
     /// Set by table-sync worker when waiting for the apply worker to pause.
-    /// 
+    ///
     /// On every transaction boundary the apply worker checks if any table-sync
     /// worker is in the `SyncWait` state and pauses itself if it finds any. It resumes
     /// only when the table sync worker has caught up with the `Catchup`'s LSN.
-    /// 
+    ///
     /// This phase is stored in memory only and not persisted to the state store
     SyncWait,
     /// Set by the apply worker when it is paused. The table-sync worker waits
     /// for the apply worker to set this state after setting the state to `SyncWait`.
-    /// 
+    ///
     /// This phase is stored in memory only and not persisted to the state store
     Catchup {
         /// The lsn to catch up to. This is the location where the apply worker is paused.
@@ -220,12 +220,12 @@ pub enum TableReplicationPhase {
 
     /// Set by the table-sync worker when catch-up phase is completed and table-sync
     /// worker has caught up with the apply worker's lsn position.
-    /// 
+    ///
     /// The apply worker is waiting on this phase to be reached before continuing to process other
     /// tables or events in the apply loop.
     SyncDone {
         /// The lsn up to which the table-sync worker has caught up.
-        /// 
+        ///
         /// This LSN is guaranteed to be >= `Catchup.lsn`.
         lsn: PgLsn,
     },

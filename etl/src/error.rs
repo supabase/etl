@@ -30,7 +30,7 @@ enum ErrorRepr {
     /// Error with kind, static description, and dynamic detail.
     WithDescriptionAndDetail(ErrorKind, &'static str, String),
     /// Multiple aggregated errors.
-    /// 
+    ///
     /// This variant is mainly useful to capture multiple workers failures.
     Many(Vec<EtlError>),
 }

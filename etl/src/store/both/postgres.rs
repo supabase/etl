@@ -286,7 +286,7 @@ impl StateStore for PostgresStore {
     /// This method restores the table to its previous replication state by
     /// querying the database for the prior state entry. It updates both the
     /// persistent storage and in-memory cache to reflect the rollback.
-    /// 
+    ///
     /// Returns the restored state on success, or an error if no previous
     /// state exists for rollback.
     async fn rollback_table_replication_state(

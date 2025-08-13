@@ -400,7 +400,7 @@ where
 ///
 /// # Panics
 ///
-/// Panics if a required (non-nullable) column receives null data and 
+/// Panics if a required (non-nullable) column receives null data and
 /// `use_default_for_missing_cols` is false, as this indicates protocol-level
 /// corruption that should not be handled gracefully.
 fn convert_tuple_to_row(

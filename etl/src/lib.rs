@@ -52,7 +52,6 @@ pub mod failpoints;
 pub mod macros;
 pub mod pipeline;
 pub mod replication;
-pub mod schema;
 pub mod state;
 pub mod store;
 #[cfg(any(test, feature = "test-utils"))]
