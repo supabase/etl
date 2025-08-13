@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        select distinct table_id\n        from etl.replication_state\n        where pipeline_id = $1 and is_current = true\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "table_id",
+        "type_info": "Oid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "bc8119f0a137815cb238b9b2bdec2160ff9d6eb23e2e0bd92f3d1581bc4a30e0"
+}
