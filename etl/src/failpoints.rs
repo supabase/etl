@@ -1,9 +1,3 @@
-//! Failpoint integration for testing error scenarios in the ETL pipeline.
-//!
-//! Provides utilities for injecting controlled failures during testing to verify
-//! error handling and retry behavior. Uses the `fail` crate for configurable
-//! failpoints that can be activated from tests.
-
 use fail::fail_point;
 
 use crate::bail;
@@ -14,7 +8,7 @@ pub const START_TABLE_SYNC__DURING_DATA_SYNC: &str = "start_table_sync.during_da
 
 /// Executes a configurable failpoint for testing error scenarios.
 ///
-/// When the failpoint is active, and it set to return an error, this function generates an [`EtlError`] with
+/// When the failpoint is active, and it's set to return an error, this function generates an [`EtlError`] with
 /// the specified retry policy. The retry behavior can be controlled through
 /// the failpoint parameter:
 ///

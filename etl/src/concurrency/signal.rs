@@ -1,9 +1,3 @@
-//! Simple signaling primitives for worker coordination.
-//!
-//! This module provides lightweight signaling mechanisms for coordinating between
-//! different workers in the ETL system. It abstracts tokio's watch channels into
-//! simple signal types focused on coordination events rather than data transfer.
-
 use tokio::sync::watch;
 
 /// Transmitter side of a coordination signal channel.
@@ -25,10 +19,6 @@ pub type SignalRx = watch::Receiver<()>;
 /// This function creates a watch-based signaling channel optimized for coordination
 /// scenarios where multiple receivers need to be notified of the same event. Unlike
 /// mpsc channels, all receivers see the same signal simultaneously.
-///
-/// The channel starts in the "signaled" state, meaning receivers that check immediately
-/// will see that a signal has occurred. This matches the common pattern where the
-/// initial state represents "ready" or "initialized".
 pub fn create_signal() -> (SignalTx, SignalRx) {
     let (tx, rx) = watch::channel(());
     (tx, rx)

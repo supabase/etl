@@ -1,9 +1,3 @@
-//! Graceful shutdown coordination for ETL workers.
-//!
-//! This module provides utilities for coordinating graceful shutdown across multiple workers
-//! in the ETL system. It ensures data consistency and proper resource cleanup during termination
-//! by providing structured shutdown signaling and result handling mechanisms.
-
 use tokio::sync::watch;
 
 use crate::concurrency::signal::{SignalRx, SignalTx, create_signal};
@@ -53,17 +47,14 @@ pub type ShutdownRx = SignalRx;
 /// It preserves both successful results and any partial data that was being processed
 /// when shutdown was requested.
 pub enum ShutdownResult<T, I> {
-    /// Normal successful completion with result data
+    /// Normal successful completion with result data.
     Ok(T),
-    /// Operation was interrupted by shutdown, with any partial data preserved
+    /// Operation was interrupted by shutdown, with any partial data preserved.
     Shutdown(I),
 }
 
 impl<T, I> ShutdownResult<T, I> {
     /// Returns true if this result represents a shutdown scenario.
-    ///
-    /// This helper method makes it easy for callers to check whether an operation
-    /// completed normally or was interrupted by shutdown without pattern matching.
     pub fn should_shutdown(&self) -> bool {
         matches!(self, ShutdownResult::Shutdown(_))
     }
@@ -74,11 +65,6 @@ impl<T, I> ShutdownResult<T, I> {
 /// This function creates a broadcast channel for coordinating shutdown across multiple
 /// workers. The transmitter can be used to trigger shutdown, while receivers can be
 /// distributed to workers that need to respond to shutdown signals.
-///
-/// The underlying implementation uses a watch channel, which means:
-/// - All receivers see the same shutdown signal simultaneously
-/// - New receivers created after shutdown will immediately see the shutdown state
-/// - The channel has minimal memory overhead regardless of receiver count
 pub fn create_shutdown_channel() -> (ShutdownTx, ShutdownRx) {
     let (tx, rx) = create_signal();
     (ShutdownTx::wrap(tx), rx)

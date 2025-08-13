@@ -1,9 +1,3 @@
-//! ETL pipeline orchestration and lifecycle management.
-//!
-//! This module contains the core [`Pipeline`] struct that orchestrates the entire ETL process.
-//! A pipeline manages the connection to PostgreSQL, coordinates multiple workers, and ensures
-//! data consistency throughout the replication process.
-
 use etl_config::shared::PipelineConfig;
 use std::sync::Arc;
 use tokio::sync::Semaphore;
@@ -50,7 +44,7 @@ enum PipelineState {
 /// 2. **Continuous replication** - Streams ongoing changes from the replication log
 ///
 /// Multiple table sync workers run in parallel during the initial phase, while a single
-/// apply worker processes the replication stream to maintain consistency.
+/// apply worker processes the replication stream of table that were already copied.
 #[derive(Debug)]
 pub struct Pipeline<S, D> {
     id: PipelineId,
@@ -108,12 +102,6 @@ where
     /// This method initializes the connection to PostgreSQL, sets up table mappings and schemas,
     /// creates the worker pool for table synchronization, and starts the apply worker for
     /// processing replication stream events.
-    ///
-    /// The startup process includes:
-    /// 1. Establishing PostgreSQL replication connection
-    /// 2. Loading cached table mappings and schemas
-    /// 3. Initializing table replication states
-    /// 4. Starting the apply worker and table sync worker pool
     pub async fn start(&mut self) -> EtlResult<()> {
         info!(
             "starting pipeline for publication '{}' with id {}",
@@ -259,12 +247,6 @@ where
     /// This private method ensures that each table in the PostgreSQL publication has
     /// a corresponding replication state record. Tables without existing states are
     /// initialized to the [`TableReplicationPhase::Init`] phase.
-    ///
-    /// The initialization process:
-    /// 1. Verifies the publication exists in the source database
-    /// 2. Retrieves all table IDs associated with the publication  
-    /// 3. Loads existing table states from the store
-    /// 4. Creates initial state records for any missing tables
     async fn initialize_table_states(
         &self,
         replication_client: &PgReplicationClient,

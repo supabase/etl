@@ -25,11 +25,13 @@ pub struct EtlError {
 /// Users should not interact with this type directly but use [`EtlError`] methods instead.
 #[derive(Debug, Clone)]
 enum ErrorRepr {
-    /// Error with kind and static description
+    /// Error with kind and static description.
     WithDescription(ErrorKind, &'static str),
-    /// Error with kind, static description, and dynamic detail
+    /// Error with kind, static description, and dynamic detail.
     WithDescriptionAndDetail(ErrorKind, &'static str, String),
-    /// Multiple aggregated errors
+    /// Multiple aggregated errors.
+    /// 
+    /// This variant is mainly useful to capture multiple workers failures.
     Many(Vec<EtlError>),
 }
 
@@ -111,7 +113,7 @@ pub enum ErrorKind {
 impl EtlError {
     /// Creates an [`EtlError`] containing multiple aggregated errors.
     ///
-    /// This is useful when multiple operations fail and you want to report all failures
+    /// This is useful when multiple operations fail, and you want to report all failures
     /// rather than just the first one.
     pub fn many(errors: Vec<EtlError>) -> EtlError {
         EtlError {
@@ -268,7 +270,7 @@ impl From<std::io::Error> for EtlError {
     }
 }
 
-/// Converts [`serde_json::Error`] to [`EtlError`] with appropriate error kind.
+/// Converts [`serde_json::Error`] to [`EtlError`] with the appropriate error kind.
 ///
 /// Maps to [`ErrorKind::SerializationError`] for serialization failures and
 /// [`ErrorKind::DeserializationError`] for deserialization failures based on error classification.
@@ -344,7 +346,7 @@ impl From<std::num::ParseFloatError> for EtlError {
     }
 }
 
-/// Converts [`tokio_postgres::Error`] to [`EtlError`] with appropriate error kind.
+/// Converts [`tokio_postgres::Error`] to [`EtlError`] with the appropriate error kind.
 ///
 /// Maps errors based on PostgreSQL SQLSTATE codes to provide granular error classification
 /// for better error handling in ETL operations.
@@ -712,7 +714,7 @@ impl From<ParseNumericError> for EtlError {
     }
 }
 
-/// Converts [`sqlx::Error`] to [`EtlError`] with appropriate error kind.
+/// Converts [`sqlx::Error`] to [`EtlError`] with the appropriate error kind.
 ///
 /// Maps database errors to [`ErrorKind::SourceQueryFailed`], I/O errors to [`ErrorKind::IoError`],
 /// and connection pool errors to [`ErrorKind::SourceConnectionFailed`].

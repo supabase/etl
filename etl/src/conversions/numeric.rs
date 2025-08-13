@@ -60,25 +60,19 @@ impl From<Sign> for u16 {
 pub enum PgNumeric {
     /// Not a number (NaN) - result of invalid operations
     NaN,
-
     /// Positive infinity - result of overflow in positive direction
     PositiveInfinity,
-
     /// Negative infinity - result of overflow in negative direction
     NegativeInfinity,
-
     /// Regular numeric value with arbitrary precision
     Value {
         /// Sign of the numeric value
         sign: Sign,
-
         /// Weight represents the power of 10000 for the first digit.
         /// For example, if weight=2, the first digit represents multiples of 10000^2.
         weight: i16,
-
         /// Number of decimal digits after the decimal point for display purposes
         scale: u16,
-
         /// Actual numeric digits stored in base-10000 format for efficiency
         digits: Vec<i16>,
     },
