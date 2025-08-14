@@ -18,6 +18,22 @@ Create a complete ETL pipeline that replicates data from PostgreSQL to a memory 
 
 *What you'll build:* A working pipeline that streams changes from a sample PostgreSQL table to an in-memory destination.
 
+### [Set Up Memory-Based Testing](memory-destination/)
+**10 minutes** • **Beginner**
+
+Learn how to use ETL's built-in memory destination for rapid prototyping and testing. Perfect for development and CI environments.
+
+*What you'll build:* A test environment that validates your pipeline logic without external dependencies.
+
+## Advanced Topics
+
+### [Build Custom Stores and Destinations](custom-implementations/)
+**45 minutes** • **Advanced**
+
+Implement production-ready custom stores and destinations. Learn ETL's design patterns, build persistent SQLite storage, and create HTTP-based destinations with retry logic.
+
+*What you'll build:* Custom SQLite store for persistent state/schema storage and HTTP destination with production-ready error handling.
+
 ## Before You Start
 
 **Prerequisites for all tutorials:**
@@ -44,6 +60,7 @@ Each tutorial follows the same pattern:
 ## Next Steps
 
 After completing the tutorials:
+
 - **Solve specific problems** → [How-To Guides](../how-to/)
 - **Understand the architecture** → [ETL Architecture](../explanation/architecture/)
 - **Look up technical details** → [API Reference](../reference/)
@@ -51,6 +68,7 @@ After completing the tutorials:
 ## Need Help?
 
 If you get stuck:
+
 1. Double-check the prerequisites
 2. Ensure your PostgreSQL setup matches the requirements
 3. Check our [debugging guide](../how-to/debugging/)

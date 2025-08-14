@@ -14,18 +14,46 @@ ETL's architecture is built around a few key abstractions that work together to 
 
 At its core, ETL connects PostgreSQL's logical replication stream to configurable destination systems:
 
-```
-PostgreSQL        ETL Pipeline           Destination
-┌─────────────┐   ┌──────────────┐      ┌─────────────┐
-│ WAL Stream  │──▷│ Data Processing │────▷│ BigQuery    │
-│ Publications│   │ Batching        │     │ Custom API  │
-│ Repl. Slots │   │ Error Handling  │     │ Memory      │
-└─────────────┘   └──────────────────┘     └─────────────┘
-                          │
-                    ┌──────▼──────┐
-                    │ State Store │
-                    │ Schema Info │
-                    └─────────────┘
+```mermaid
+flowchart LR
+    subgraph PostgreSQL
+        A["WAL Stream<br>Publications<br>Replication Slots"]
+    end
+
+    subgraph ETL_Pipeline[ETL Pipeline]
+        subgraph ApplyWorker[Apply Worker]
+            B1["CDC Events Processing and Tables Synchronization"]
+        end
+
+        subgraph TableSyncWorkers[Table Sync Workers]
+            B2["Table 1 Sync + CDC"]
+            B3["Table 2 Sync + CDC"]
+            B4["Table N Sync + CDC"]
+        end
+    end
+
+    subgraph Destination[Destination]
+        Dest["BigQuery<br>Custom API<br>Memory"]
+    end
+
+    subgraph Store[Store]
+        subgraph StateStore[State Store]
+            D1["Memory<br>PostgreSQL"]
+        end
+
+        subgraph SchemaStore[Schema Store]
+            D2["Memory<br>PostgreSQL"]
+        end
+    end
+
+    A --> ApplyWorker
+    ApplyWorker --> TableSyncWorkers
+
+    ApplyWorker --> Destination
+    TableSyncWorkers --> Destination
+
+    ApplyWorker --> Store
+    TableSyncWorkers --> Store
 ```
 
 The architecture separates concerns to make the system extensible, testable, and maintainable.
