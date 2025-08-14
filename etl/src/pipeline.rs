@@ -4,7 +4,6 @@
 //! with destination systems. Manages worker lifecycles, shutdown coordination, and error handling.
 
 use etl_config::shared::PipelineConfig;
-use metrics::gauge;
 use std::sync::Arc;
 use tokio::sync::Semaphore;
 use tracing::{error, info};
@@ -13,7 +12,6 @@ use crate::bail;
 use crate::concurrency::shutdown::{ShutdownTx, create_shutdown_channel};
 use crate::destination::Destination;
 use crate::error::{ErrorKind, EtlError, EtlResult};
-use crate::metrics::ETL_TABLES_TOTAL;
 use crate::replication::client::PgReplicationClient;
 use crate::state::table::TableReplicationPhase;
 use crate::store::schema::SchemaStore;
@@ -281,8 +279,6 @@ where
         let table_ids = replication_client
             .get_publication_table_ids(&self.config.publication_name)
             .await?;
-
-        gauge!(ETL_TABLES_TOTAL).set(table_ids.len() as f64);
 
         self.store.load_table_replication_states().await?;
         let states = self.store.get_table_replication_states().await?;
