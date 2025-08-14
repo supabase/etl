@@ -8,7 +8,7 @@ use crate::config::load_replicator_config;
 use crate::core::start_replicator_with_config;
 use etl_config::Environment;
 use etl_config::shared::ReplicatorConfig;
-use etl_telemetry::tracing::init_tracing_with_project;
+use etl_telemetry::{metrics::init_default_metrics, tracing::init_tracing_with_project};
 use std::sync::Arc;
 use thiserror::__private::AsDynError;
 use tracing::{error, info};
@@ -37,6 +37,8 @@ fn main() -> anyhow::Result<()> {
 
     // Initialize Sentry before the async runtime starts
     let _sentry_guard = init_sentry()?;
+
+    init_default_metrics()?;
 
     // We start the runtime.
     tokio::runtime::Builder::new_multi_thread()

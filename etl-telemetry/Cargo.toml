@@ -6,7 +6,7 @@ edition = "2024"
 [dependencies]
 etl-config = { workspace = true }
 
-metrics-exporter-prometheus = { workspace = true }
+metrics-exporter-prometheus = { workspace = true, features = ["http-listener"] }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }

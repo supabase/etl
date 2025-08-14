@@ -52,3 +52,11 @@ pub fn init_metrics() -> Result<PrometheusHandle, BuildError> {
 
     Ok(handle)
 }
+
+/// Initializes metrics endpoint at the default location of `0.0.0.0:9000/metrics`
+pub fn init_default_metrics() -> Result<(), BuildError> {
+    let builder = PrometheusBuilder::new();
+    builder.install()?;
+
+    Ok(())
+}
