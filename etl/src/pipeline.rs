@@ -52,7 +52,6 @@ enum PipelineState {
 /// apply worker processes the replication stream of table that were already copied.
 #[derive(Debug)]
 pub struct Pipeline<S, D> {
-    id: PipelineId,
     config: Arc<PipelineConfig>,
     store: S,
     destination: D,
@@ -80,21 +79,13 @@ where
         // via the `subscribe` method. This is done to make the code cleaner.
         let (shutdown_tx, _) = create_shutdown_channel();
 
-        let id = config.id;
-
         Self {
-            id,
             config: Arc::new(config),
             store: state_store,
             destination,
             state: PipelineState::NotStarted,
             shutdown_tx,
         }
-    }
-
-    /// Returns the unique identifier for this pipeline.
-    pub fn id(&self) -> PipelineId {
-        self.id
     }
 
     /// Returns a handle for sending shutdown signals to this pipeline.
@@ -114,7 +105,7 @@ where
     pub async fn start(&mut self) -> EtlResult<()> {
         info!(
             "starting pipeline for publication '{}' with id {}",
-            self.config.publication_name, self.id
+            self.config.publication_name, self.config.id
         );
 
         // We create the first connection to Postgres.
