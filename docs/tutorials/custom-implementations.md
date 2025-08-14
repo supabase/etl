@@ -22,58 +22,48 @@ Simple custom implementations to understand the patterns:
 
 - **Custom in-memory store** with logging to see the flow
 - **Custom HTTP destination** with basic retry logic
-- Understanding of ETL's architectural contracts
 
 **Time required:** 25 minutes  
 **Difficulty:** Advanced
 
-## Understanding ETL's Storage Design
+## Understanding ETL's Store Design
 
-ETL separates storage into two focused traits:
+ETL is design to be a modular replication library. This means that it relies on abstractions to allow for easy extension.
 
-### SchemaStore: Table Structure Information
+One core aspect of ETL is the store. The store is composed by two parts:
 
-```rust
-pub trait SchemaStore {
-    // Get cached schema (fast reads from memory)
-    fn get_table_schema(&self, table_id: &TableId) -> EtlResult<Option<Arc<TableSchema>>>;
-    
-    // Load schemas once at startup into cache
-    fn load_table_schemas(&self) -> EtlResult<usize>;
-    
-    // Store schema in both cache and persistent store
-    fn store_table_schema(&self, schema: TableSchema) -> EtlResult<()>;
-}
-```
+- **Schema Store**: Stores table schemas.
+- **State Store**: Stores replication state.
 
-### StateStore: Replication Progress Tracking  
+Having the store as an extension point allows you to implement your own store for your own use case. For example, you might
+want to store replication state in a simple text file, or you might just want the replication state to be stored in memory. It's
+important to note that the implementation of the store will significantly affect the performance and safety of the pipeline. This means
+that it's your responsibility to make sure that the store is designed to be performant, thread safe and durable (in case you need persistence). The pipeline
+doesn't make any assumptions about the store, it just stores data and retrieves it.
 
-```rust
-pub trait StateStore {
-    // Track replication progress (Pending → Syncing → Streaming)
-    fn get_table_replication_state(&self, table_id: TableId) -> EtlResult<Option<TableReplicationPhase>>;
-    
-    // Update progress in cache and persistent store
-    fn update_table_replication_state(&self, table_id: TableId, state: TableReplicationPhase) -> EtlResult<()>;
-    
-    // Map source table IDs to destination names  
-    fn get_table_mapping(&self, source_table_id: &TableId) -> EtlResult<Option<String>>;
-}
-```
+One important thing about the stores, is that they both offer `load_*` and `get_*` methods. The rationale behind this design is
+that `load_*` methods are used to load data into a cache implemented within the store and `get_*` exclusively read from that cache. If there is no
+need to load data into the cache, because the store implementation doesn't write data anywhere, you can just implement `load_*` as a no-op.`
 
-**Key Design Principles:**
+### `SchemaStore`: Store for Table Schemas
 
-- **Cache-first**: All reads from memory for performance
-- **Dual writes**: Updates go to both cache and persistent store
-- **Load-once**: Load persistent data into cache at startup only
-- **Thread-safe**: Arc/Mutex for concurrent worker access
+The `SchemaStore` trait is responsible for storing and retrieving table schemas.
+
+Table schemas are required by ETL since they are used to correctly parse and handle incoming data from PostgreSQL and they
+also serve to correctly map tables from Postgres to the destination.
+
+### `StateStore`: Store for Replication State
+
+The `StateStore` trait is responsible for storing and retrieving replication state.
+
+The state is crucial for proper pipeline operation since it's used to track the progress of replication and (if persistent)
+allows a pipeline to be safely paused and later resumed.
 
 ## Step 1: Create Simple Custom Store
 
 Create `src/custom_store.rs`:
 
 ```rust
-use etl_postgres::schema::{TableId, TableSchema};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -83,170 +73,223 @@ use etl::error::EtlResult;
 use etl::state::table::TableReplicationPhase;
 use etl::store::schema::SchemaStore;
 use etl::store::state::StateStore;
+use etl::types::{TableId, TableSchema};
 
-/// Educational custom store showing ETL's patterns.
-///
-/// This demonstrates:
-/// - Cache-first design (all reads from memory)
-/// - Dual-write pattern (cache + "persistent" store)
-/// - Thread safety with Arc/Mutex
-/// - Separation of schema vs state concerns
+#[derive(Debug, Clone)]
+struct CachedEntry {
+    schema: Option<Arc<TableSchema>>,
+    state: Option<TableReplicationPhase>,
+    mapping: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct PersistentEntry {
+    schema: Option<TableSchema>,
+    state: Option<TableReplicationPhase>,
+    mapping: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct CustomStore {
-    // In-memory caches (the source of truth for reads)
-    schema_cache: Arc<Mutex<HashMap<TableId, Arc<TableSchema>>>>,
-    state_cache: Arc<Mutex<HashMap<TableId, TableReplicationPhase>>>,
-    mapping_cache: Arc<Mutex<HashMap<TableId, String>>>,
-    
-    // "Persistent" storage simulation (in reality, this would be Redis, SQLite, etc.)
-    persistent_schemas: Arc<Mutex<HashMap<TableId, TableSchema>>>,
-    persistent_states: Arc<Mutex<HashMap<TableId, TableReplicationPhase>>>,
-    persistent_mappings: Arc<Mutex<HashMap<TableId, String>>>,
+    // We simulate cached entries.
+    cache: Arc<Mutex<HashMap<TableId, CachedEntry>>>,
+    // We simulate persistent entries.
+    persistent: Arc<Mutex<HashMap<TableId, PersistentEntry>>>,
 }
 
 impl CustomStore {
     pub fn new() -> Self {
-        info!("Creating custom store with cache-first architecture");
+        info!("Creating custom store (2 maps: cache + persistent)");
         Self {
-            schema_cache: Arc::new(Mutex::new(HashMap::new())),
-            state_cache: Arc::new(Mutex::new(HashMap::new())),
-            mapping_cache: Arc::new(Mutex::new(HashMap::new())),
-            persistent_schemas: Arc::new(Mutex::new(HashMap::new())),
-            persistent_states: Arc::new(Mutex::new(HashMap::new())),
-            persistent_mappings: Arc::new(Mutex::new(HashMap::new())),
+            cache: Arc::new(Mutex::new(HashMap::new())),
+            persistent: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    fn ensure_cache_slot<'a>(
+        cache: &'a mut HashMap<TableId, CachedEntry>,
+        id: TableId,
+    ) -> &'a mut CachedEntry {
+        cache
+            .entry(id)
+            .or_insert_with(|| CachedEntry { schema: None, state: None, mapping: None })
+    }
+
+    fn ensure_persistent_slot<'a>(
+        persistent: &'a mut HashMap<TableId, PersistentEntry>,
+        id: TableId,
+    ) -> &'a mut PersistentEntry {
+        persistent
+            .entry(id)
+            .or_insert_with(|| PersistentEntry { schema: None, state: None, mapping: None })
     }
 }
 
 impl SchemaStore for CustomStore {
     async fn get_table_schema(&self, table_id: &TableId) -> EtlResult<Option<Arc<TableSchema>>> {
-        // Always read from cache (never from persistent store)
-        let cache = self.schema_cache.lock().await;
-        let result = cache.get(table_id).cloned();
+        let cache = self.cache.lock().await;
+        let result = cache.get(table_id).and_then(|e| e.schema.clone());
         info!("Schema cache read for table {}: {}", table_id.0, result.is_some());
         Ok(result)
     }
 
     async fn get_table_schemas(&self) -> EtlResult<Vec<Arc<TableSchema>>> {
-        let cache = self.schema_cache.lock().await;
-        Ok(cache.values().cloned().collect())
+        let cache = self.cache.lock().await;
+        Ok(cache
+            .values()
+            .filter_map(|e| e.schema.clone())
+            .collect())
     }
 
     async fn load_table_schemas(&self) -> EtlResult<usize> {
-        info!("Loading schemas from 'persistent' store into cache (startup only)");
-        
-        // In production: read from database/file/Redis
-        let persistent = self.persistent_schemas.lock().await;
-        let mut cache = self.schema_cache.lock().await;
-        
-        for (table_id, schema) in persistent.iter() {
-            cache.insert(*table_id, Arc::new(schema.clone()));
+        info!("Loading schemas from 'persistent' into cache (startup)");
+        let persistent = self.persistent.lock().await;
+        let mut cache = self.cache.lock().await;
+
+        let mut loaded = 0;
+        for (id, pentry) in persistent.iter() {
+            if let Some(schema) = &pentry.schema {
+                let centry = Self::ensure_cache_slot(&mut cache, *id);
+                centry.schema = Some(Arc::new(schema.clone()));
+                loaded += 1;
+            }
         }
-        
-        let loaded_count = persistent.len();
-        info!("Loaded {} schemas into cache", loaded_count);
-        Ok(loaded_count)
+        info!("Loaded {} schemas into cache", loaded);
+        Ok(loaded)
     }
 
     async fn store_table_schema(&self, table_schema: TableSchema) -> EtlResult<()> {
-        let table_id = table_schema.id;
-        info!("Storing schema for table {} (dual-write: cache + persistent)", table_id.0);
+        let id = table_schema.id;
+        info!("Storing schema for table {} (dual-write)", id.0);
         
-        // Write to persistent store first (in production: database transaction)
         {
-            let mut persistent = self.persistent_schemas.lock().await;
-            persistent.insert(table_id, table_schema.clone());
+            let mut persistent = self.persistent.lock().await;
+            let p = Self::ensure_persistent_slot(&mut persistent, id);
+            p.schema = Some(table_schema.clone());
         }
-        
-        // Then update cache
         {
-            let mut cache = self.schema_cache.lock().await;
-            cache.insert(table_id, Arc::new(table_schema));
+            let mut cache = self.cache.lock().await;
+            let c = Self::ensure_cache_slot(&mut cache, id);
+            c.schema = Some(Arc::new(table_schema));
         }
-        
         Ok(())
     }
 }
 
 impl StateStore for CustomStore {
-    async fn get_table_replication_state(&self, table_id: TableId) -> EtlResult<Option<TableReplicationPhase>> {
-        let cache = self.state_cache.lock().await;
-        let result = cache.get(&table_id).copied();
+    async fn get_table_replication_state(
+        &self,
+        table_id: TableId,
+    ) -> EtlResult<Option<TableReplicationPhase>> {
+        let cache = self.cache.lock().await;
+        let result = cache.get(&table_id).and_then(|e| e.state.clone());
         info!("State cache read for table {}: {:?}", table_id.0, result);
         Ok(result)
     }
 
-    async fn get_table_replication_states(&self) -> EtlResult<HashMap<TableId, TableReplicationPhase>> {
-        let cache = self.state_cache.lock().await;
-        Ok(cache.clone())
+    async fn get_table_replication_states(
+        &self,
+    ) -> EtlResult<HashMap<TableId, TableReplicationPhase>> {
+        let cache = self.cache.lock().await;
+        Ok(cache
+            .iter()
+            .filter_map(|(id, e)| e.state.clone().map(|s| (*id, s)))
+            .collect())
     }
 
     async fn load_table_replication_states(&self) -> EtlResult<usize> {
-        info!("Loading states from 'persistent' store into cache");
-        
-        let persistent = self.persistent_states.lock().await;
-        let mut cache = self.state_cache.lock().await;
-        
-        *cache = persistent.clone();
-        let loaded_count = persistent.len();
-        info!("Loaded {} states into cache", loaded_count);
-        Ok(loaded_count)
+        info!("Loading states from 'persistent' into cache");
+        let persistent = self.persistent.lock().await;
+        let mut cache = self.cache.lock().await;
+
+        let mut loaded = 0;
+        for (id, pentry) in persistent.iter() {
+            if let Some(state) = pentry.state.clone() {
+                let centry = Self::ensure_cache_slot(&mut cache, *id);
+                centry.state = Some(state);
+                loaded += 1;
+            }
+        }
+        info!("Loaded {} states into cache", loaded);
+        Ok(loaded)
     }
 
-    async fn update_table_replication_state(&self, table_id: TableId, state: TableReplicationPhase) -> EtlResult<()> {
+    async fn update_table_replication_state(
+        &self,
+        table_id: TableId,
+        state: TableReplicationPhase,
+    ) -> EtlResult<()> {
         info!("Updating state for table {} to {:?} (dual-write)", table_id.0, state);
-        
-        // Write to persistent store first
+
         {
-            let mut persistent = self.persistent_states.lock().await;
-            persistent.insert(table_id, state);
+            let mut persistent = self.persistent.lock().await;
+            let p = Self::ensure_persistent_slot(&mut persistent, table_id);
+            p.state = Some(state.clone());
         }
-        
-        // Then update cache
         {
-            let mut cache = self.state_cache.lock().await;
-            cache.insert(table_id, state);
+            let mut cache = self.cache.lock().await;
+            let c = Self::ensure_cache_slot(&mut cache, table_id);
+            c.state = Some(state);
         }
-        
         Ok(())
     }
 
-    async fn rollback_table_replication_state(&self, _table_id: TableId) -> EtlResult<TableReplicationPhase> {
-        // Simplified for tutorial - in production, you'd track state history
+    async fn rollback_table_replication_state(
+        &self,
+        _table_id: TableId,
+    ) -> EtlResult<TableReplicationPhase> {
         todo!("Implement state history tracking for rollback")
     }
 
     async fn get_table_mapping(&self, source_table_id: &TableId) -> EtlResult<Option<String>> {
-        let cache = self.mapping_cache.lock().await;
-        Ok(cache.get(source_table_id).cloned())
+        let cache = self.cache.lock().await;
+        Ok(cache.get(source_table_id).and_then(|e| e.mapping.clone()))
     }
 
     async fn get_table_mappings(&self) -> EtlResult<HashMap<TableId, String>> {
-        let cache = self.mapping_cache.lock().await;
-        Ok(cache.clone())
+        let cache = self.cache.lock().await;
+        Ok(cache
+            .iter()
+            .filter_map(|(id, e)| e.mapping.clone().map(|m| (*id, m)))
+            .collect())
     }
 
     async fn load_table_mappings(&self) -> EtlResult<usize> {
-        info!("Loading mappings from 'persistent' store into cache");
-        let persistent = self.persistent_mappings.lock().await;
-        let mut cache = self.mapping_cache.lock().await;
-        *cache = persistent.clone();
-        Ok(persistent.len())
+        info!("Loading mappings from 'persistent' into cache");
+        let persistent = self.persistent.lock().await;
+        let mut cache = self.cache.lock().await;
+
+        let mut loaded = 0;
+        for (id, pentry) in persistent.iter() {
+            if let Some(m) = &pentry.mapping {
+                let centry = Self::ensure_cache_slot(&mut cache, *id);
+                centry.mapping = Some(m.clone());
+                loaded += 1;
+            }
+        }
+        Ok(loaded)
     }
 
-    async fn store_table_mapping(&self, source_table_id: TableId, destination_table_id: String) -> EtlResult<()> {
-        info!("Storing mapping: {} -> {} (dual-write)", source_table_id.0, destination_table_id);
-        
-        // Write to both stores
+    async fn store_table_mapping(
+        &self,
+        source_table_id: TableId,
+        destination_table_id: String,
+    ) -> EtlResult<()> {
+        info!(
+            "Storing mapping: {} -> {} (dual-write)",
+            source_table_id.0, destination_table_id
+        );
+
         {
-            let mut persistent = self.persistent_mappings.lock().await;
-            persistent.insert(source_table_id, destination_table_id.clone());
+            let mut persistent = self.persistent.lock().await;
+            let p = Self::ensure_persistent_slot(&mut persistent, source_table_id);
+            p.mapping = Some(destination_table_id.clone());
         }
         {
-            let mut cache = self.mapping_cache.lock().await;
-            cache.insert(source_table_id, destination_table_id);
+            let mut cache = self.cache.lock().await;
+            let c = Self::ensure_cache_slot(&mut cache, source_table_id);
+            c.mapping = Some(destination_table_id);
         }
-        
         Ok(())
     }
 }
@@ -257,26 +300,22 @@ impl StateStore for CustomStore {
 Create `src/http_destination.rs`:
 
 ```rust
-use reqwest::Client;
-use serde_json::json;
+use reqwest::{Client, Method};
+use serde_json::{Value, json};
 use std::time::Duration;
 use tracing::{info, warn};
 
 use etl::destination::Destination;
-use etl::error::{EtlError, EtlResult};
+use etl::error::{ErrorKind, EtlError, EtlResult};
 use etl::types::{Event, TableId, TableRow};
+use etl::{bail, etl_error};
 
-/// Simple HTTP destination showing core patterns.
-///
-/// Demonstrates:
-/// - Implementing the Destination trait
-/// - Basic retry logic with exponential backoff
-/// - Error handling (retry vs fail-fast)  
-/// - Data serialization for API compatibility
+const MAX_RETRIES: usize = 3;
+const BASE_BACKOFF_MS: u64 = 500;
+
 pub struct HttpDestination {
     client: Client,
     base_url: String,
-    max_retries: usize,
 }
 
 impl HttpDestination {
@@ -284,114 +323,146 @@ impl HttpDestination {
         let client = Client::builder()
             .timeout(Duration::from_secs(10))
             .build()
-            .map_err(|e| EtlError::new("Failed to create HTTP client".into(), e.into()))?;
-            
-        Ok(Self {
-            client,
-            base_url,
-            max_retries: 3,
-        })
+            .map_err(|e| etl_error!(ErrorKind::Unknown, "Failed to create HTTP client", e))?;
+        Ok(Self { client, base_url })
     }
 
-    /// Simple retry with exponential backoff
-    async fn retry_request<F, Fut>(&self, mut operation: F) -> EtlResult<()>
-    where
-        F: FnMut() -> Fut,
-        Fut: std::future::Future<Output = Result<reqwest::Response, reqwest::Error>>,
-    {
-        for attempt in 0..self.max_retries {
-            match operation().await {
-                Ok(response) if response.status().is_success() => {
-                    info!("HTTP request succeeded on attempt {}", attempt + 1);
+    fn url(&self, path: &str) -> String {
+        format!(
+            "{}/{}",
+            self.base_url.trim_end_matches('/'),
+            path.trim_start_matches('/')
+        )
+    }
+
+    /// Small, generic sender with retry + backoff.
+    async fn send_json(&self, method: Method, path: &str, body: Option<&Value>) -> EtlResult<()> {
+        let url = self.url(path);
+
+        for attempt in 0..MAX_RETRIES {
+            let mut req = self.client.request(method.clone(), &url);
+            if let Some(b) = body {
+                req = req.json(b);
+            }
+
+            match req.send().await {
+                Ok(resp) if resp.status().is_success() => {
+                    info!(
+                        "HTTP {} {} succeeded (attempt {})",
+                        method,
+                        url,
+                        attempt + 1
+                    );
                     return Ok(());
                 }
-                Ok(response) => {
-                    let status = response.status();
-                    warn!("HTTP request failed with status {}, attempt {}", status, attempt + 1);
-                    
-                    // Retry on server errors, fail fast on client errors
+                Ok(resp) => {
+                    let status = resp.status();
+                    warn!(
+                        "HTTP {} {} failed with {}, attempt {}",
+                        method,
+                        url,
+                        status,
+                        attempt + 1
+                    );
+                    // Fail-fast on 4xx
                     if !status.is_server_error() {
-                        return Err(EtlError::new(
-                            "HTTP client error".into(),
-                            anyhow::anyhow!("Status: {}", status).into(),
-                        ));
+                        bail!(
+                            ErrorKind::Unknown,
+                            "HTTP client error",
+                            format!("Status: {}", status)
+                        );
                     }
                 }
-                Err(e) => {
-                    warn!("HTTP request network error on attempt {}: {}", attempt + 1, e);
-                }
+                Err(e) => warn!(
+                    "HTTP {} {} network error on attempt {}: {}",
+                    method,
+                    url,
+                    attempt + 1,
+                    e
+                ),
             }
-            
+
             // Exponential backoff: 500ms, 1s, 2s
-            let delay = Duration::from_millis(500 * 2_u64.pow(attempt as u32));
+            let delay = Duration::from_millis(BASE_BACKOFF_MS * 2u64.pow(attempt as u32));
             tokio::time::sleep(delay).await;
         }
-        
-        Err(EtlError::new("HTTP request failed after retries".into(), anyhow::anyhow!("Max retries exceeded").into()))
+
+        bail!(
+            ErrorKind::Unknown,
+            "HTTP request failed after retries",
+            format!("Max retries ({MAX_RETRIES}) exceeded")
+        )
     }
 }
 
 impl Destination for HttpDestination {
     async fn truncate_table(&self, table_id: TableId) -> EtlResult<()> {
         info!("HTTP: Truncating table {}", table_id.0);
-        
-        let url = format!("{}/tables/{}/truncate", self.base_url, table_id.0);
-        let operation = || self.client.delete(&url).send();
-        
-        self.retry_request(operation).await?;
-        Ok(())
+        self.send_json(
+            Method::DELETE,
+            &format!("tables/{}/truncate", table_id.0),
+            None,
+        )
+            .await
     }
 
-    async fn write_table_rows(&self, table_id: TableId, table_rows: Vec<TableRow>) -> EtlResult<()> {
+    async fn write_table_rows(
+        &self,
+        table_id: TableId,
+        table_rows: Vec<TableRow>,
+    ) -> EtlResult<()> {
         if table_rows.is_empty() {
             return Ok(());
         }
-        
-        info!("HTTP: Writing {} rows for table {}", table_rows.len(), table_id.0);
-        
-        // Simple serialization - in production you'd handle all data types properly
-        let rows_json: Vec<_> = table_rows.iter().map(|row| {
-            json!({
-                "values": row.values.iter().map(|v| format!("{:?}", v)).collect::<Vec<_>>()
+
+        info!(
+            "HTTP: Writing {} rows for table {}",
+            table_rows.len(),
+            table_id.0
+        );
+
+        // Simple serialization — stringify values for demo-compat.
+        let rows_json: Vec<_> = table_rows
+            .iter()
+            .map(|row| {
+                json!({
+                    "values": row.values.iter().map(|v| format!("{:?}", v)).collect::<Vec<_>>()
+                })
             })
-        }).collect();
-        
+            .collect();
+
         let payload = json!({
             "table_id": table_id.0,
             "rows": rows_json
         });
-        
-        let url = format!("{}/tables/{}/rows", self.base_url, table_id.0);
-        let operation = || self.client.post(&url).json(&payload).send();
-        
-        self.retry_request(operation).await?;
-        Ok(())
+
+        self.send_json(
+            Method::POST,
+            &format!("tables/{}/rows", table_id.0),
+            Some(&payload),
+        )
+            .await
     }
 
     async fn write_events(&self, events: Vec<Event>) -> EtlResult<()> {
         if events.is_empty() {
             return Ok(());
         }
-        
+
         info!("HTTP: Writing {} events", events.len());
-        
-        // Simple event serialization
-        let events_json: Vec<_> = events.iter().map(|event| {
-            json!({
-                "event_type": format!("{:?}", event),
-                "timestamp": chrono::Utc::now()
+
+        let events_json: Vec<_> = events
+            .iter()
+            .map(|event| {
+                json!({
+                    "event_type": format!("{:?}", event),
+                })
             })
-        }).collect();
-        
-        let payload = json!({
-            "events": events_json
-        });
-        
-        let url = format!("{}/events", self.base_url);
-        let operation = || self.client.post(&url).json(&payload).send();
-        
-        self.retry_request(operation).await?;
-        Ok(())
+            .collect();
+
+        let payload = json!({ "events": events_json });
+
+        self.send_json(Method::POST, "events", Some(&payload)).await
     }
 }
 ```
@@ -473,36 +544,6 @@ anyhow = "1.0"
 - **Error classification**: Retry server errors, fail fast on client errors
 - **Data transformation**: Convert ETL types to API-friendly formats
 - **Batching awareness**: Handle empty batches gracefully
-
-### Production Extensions
-
-For real production use, extend these patterns:
-
-```rust
-// Custom Store Extensions
-impl CustomStore {
-    // Add connection pooling for database stores
-    async fn with_database_pool() -> Self { /* ... */ }
-    
-    // Add metrics collection
-    async fn get_cache_metrics(&self) -> Metrics { /* ... */ }
-    
-    // Add state history for rollbacks
-    async fn track_state_history(&self, table_id: TableId, state: TableReplicationPhase) { /* ... */ }
-}
-
-// Custom Destination Extensions  
-impl HttpDestination {
-    // Add circuit breaker pattern
-    async fn should_break_circuit(&self) -> bool { /* ... */ }
-    
-    // Add authentication handling
-    async fn refresh_auth_token(&mut self) -> EtlResult<()> { /* ... */ }
-    
-    // Add request batching
-    async fn batch_multiple_requests(&self, requests: Vec<Request>) -> EtlResult<()> { /* ... */ }
-}
-```
 
 ## What You've Learned
 
