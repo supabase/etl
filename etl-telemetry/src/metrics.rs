@@ -15,6 +15,15 @@ use tracing::trace;
 // operations but is called multiple times during tests.
 static PROMETHEUS_HANDLE: Mutex<Option<PrometheusHandle>> = Mutex::new(None);
 
+/// This method initializes metrics by:
+///
+/// 1. Installing a global metrics recorder.
+/// 2. Running a background task to run upkeep on the collected metrics to avoid unbounded memory growth
+/// 3. Returning a handle to the recorder.
+///
+/// The handle can be used by the caller to render metrics in a /metrics endpoint.
+/// Multiple threads can safely call this method to get a handle. This method ensures initialization
+/// happens only once and return cloned handles to all callers.
 pub fn init_metrics() -> Result<PrometheusHandle, BuildError> {
     let mut prometheus_handle = PROMETHEUS_HANDLE.lock().unwrap();
 
