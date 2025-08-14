@@ -8,31 +8,29 @@ edit_uri: edit/main/docs/
 
 nav:
   - Home: index.md
-  - Getting Started:
+  - Tutorials:
+      - Overview: tutorials/index.md
       - Installation: getting-started/installation.md
       - Quick Start: getting-started/quickstart.md
       - Your First Pipeline: getting-started/first-pipeline.md
-  - Tutorials:
-      - Overview: tutorials/index.md
-      - Basic Pipeline: tutorials/basic-pipeline.md
-      - Memory Destination: tutorials/memory-destination.md
-      - BigQuery Integration: tutorials/bigquery-integration.md
-      - Custom Destinations: tutorials/custom-destinations.md
+      - Working with Destinations: tutorials/memory-destination.md
       - Testing Pipelines: tutorials/testing-pipelines.md
   - How-to Guides:
       - Overview: how-to/index.md
       - Configure PostgreSQL: how-to/configure-postgres.md
       - Handle Schema Changes: how-to/schema-changes.md
-      - Implement Custom Destinations: how-to/custom-destinations.md
+      - Create Custom Destinations: how-to/custom-destinations.md
       - Debug Replication Issues: how-to/debugging.md
       - Optimize Performance: how-to/performance.md
-      - Set Up Tests: how-to/testing.md
+      - Test Your Pipelines: how-to/testing.md
+  - Reference:
+      - Overview: reference/index.md
   - Explanation:
       - Overview: explanation/index.md
-      - ETL Architecture: explanation/architecture.md
+      - Architecture: explanation/architecture.md
       - Replication Protocol: explanation/replication.md
       - Design Philosophy: explanation/design.md
-      - Performance Model: explanation/performance.md
+      - Performance Characteristics: explanation/performance.md
       - Crate Structure: explanation/crate-structure.md
 
 theme:
@@ -47,13 +45,23 @@ theme:
     - navigation.tabs
     - navigation.tabs.sticky
     - navigation.top
-    - toc.integrate
+    - navigation.footer
+    - toc.follow
     - content.code.copy
     - content.code.annotate
   palette:
-    scheme: default
-    primary: custom
-    accent: custom
+    - scheme: default
+      primary: custom
+      accent: custom
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - scheme: slate
+      primary: custom
+      accent: custom
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
   font:
     text: Roboto
     code: Roboto Mono

@@ -5,6 +5,9 @@ hide:
 
 # ETL
 
+!!! info "Coming Soon"
+    ETL docs are coming soon!
+
 Welcome to the ETL project, a Rust-based collection of tooling designed to build efficient and reliable Postgres replication applications. This documentation page provides an overview of the ETL project, the benefits of using ETL, the advantages of implementing it in Rust, and an introduction to Postgres logical replication. It also outlines the resources available in this documentation to help you get started.
 
 ## What is ETL
@@ -55,16 +58,3 @@ The ETL crate is written in Rust to leverage the language's unique strengths, ma
 - **Ecosystem Integration**: Rust’s growing ecosystem and compatibility with modern cloud and database technologies make it a natural fit for Postgres-focused infrastructure.
 
 By using Rust, the ETL crate provides a fast, safe, and scalable solution for building Postgres replication applications.
-
-## What Does the Documentation Cover?
-
-This documentation is designed to help you effectively use the ETL crate to build Postgres replication applications. It includes the following resources:
-
-- [**Tutorials**](tutorials/index.md): Step-by-step guides to get started with the ETL crate, including setting up a basic data pipeline, configuring Postgres logical replication, and connecting to destinations like BigQuery or other OLAP databases. Check the [examples folder](https://github.com/supabase/etl/tree/main/etl/examples) for practical code samples.
-- [**Guides**](guides/index.md): In-depth explanations of key concepts, such as building custom data pipelines, handling change data capture (CDC), and optimizing performance for specific use cases.
-- [**Reference**](reference/index.md): Detailed documentation of the crate's API, including modules like `etl::pipeline`, `etl::sources::postgres`, and available destinations (e.g., `BigQueryDestination`). Each destination is feature-gated, so you can enable only what you need.
-- [**Design**](design/index.md): Overview of the crate's architecture, including its modular pipeline structure, source-destination flow, and extensibility for custom integrations.
-
-The ETL crate is distributed under the [Apache-2.0 License](https://www.apache.org/licenses/LICENSE-2.0). See the [LICENSE](https://github.com/supabase/etl/blob/main/LICENSE) file for more information.
-
-Ready to start building your Postgres replication pipeline? Dive into the [Getting started guide](tutorials/getting-started.md) to set up your first pipeline.
