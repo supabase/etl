@@ -1,4 +1,3 @@
-use std::collections::HashSet;
 use std::{collections::HashMap, sync::Arc};
 
 use etl_config::shared::PgConnectionConfig;
@@ -131,8 +130,6 @@ impl TryFrom<state::TableReplicationStateRow> for TableReplicationPhase {
 /// Inner state of [`PostgresStore`].
 #[derive(Debug)]
 struct Inner {
-    /// Count of unique tables. Used for metrics.
-    table_ids: HashSet<TableId>,
     /// Count of number of tables in each phase. Used for metrics.
     phase_counts: HashMap<&'static str, u64>,
     /// Cached table replication states indexed by table ID.
@@ -180,7 +177,6 @@ impl PostgresStore {
     /// The pipeline ID ensures isolation between different pipeline instances.
     pub fn new(pipeline_id: PipelineId, source_config: PgConnectionConfig) -> Self {
         let inner = Inner {
-            table_ids: HashSet::new(),
             phase_counts: HashMap::new(),
             table_states: HashMap::new(),
             table_schemas: HashMap::new(),
@@ -272,24 +268,21 @@ impl StateStore for PostgresStore {
             table_states.insert(table_id, phase);
         }
 
-        let mut table_ids = HashSet::new();
         let mut phase_counts = HashMap::new();
-        for (table_id, phase) in &table_states {
+        for phase in table_states.values() {
             let entry = phase_counts
                 .entry(phase.as_type().as_static_str())
                 .or_insert(0u64);
             *entry += 1;
-            table_ids.insert(*table_id);
         }
 
         // For performance reasons, since we load the replication states only once during startup
         // and from a single thread, we can afford to have a super short critical section.
         let mut inner = self.inner.lock().await;
         inner.table_states = table_states.clone();
-        inner.table_ids = table_ids;
         inner.phase_counts = phase_counts;
 
-        emit_table_metrics(inner.table_ids.len(), &inner.phase_counts);
+        emit_table_metrics(inner.table_states.keys().len(), &inner.phase_counts);
 
         info!(
             "loaded {} table replication states from postgres state store",
@@ -335,8 +328,7 @@ impl StateStore for PostgresStore {
             inner.decrement_phase_count(phase_to_decrement);
         }
         inner.increment_phase_count(phase_to_increment);
-        inner.table_ids.insert(table_id);
-        emit_table_metrics(inner.table_ids.len(), &inner.phase_counts);
+        emit_table_metrics(inner.table_states.keys().len(), &inner.phase_counts);
 
         Ok(())
     }
@@ -375,8 +367,7 @@ impl StateStore for PostgresStore {
                     inner.decrement_phase_count(phase_to_decrement);
                 }
                 inner.increment_phase_count(phase_to_increment);
-                inner.table_ids.insert(table_id);
-                emit_table_metrics(inner.table_ids.len(), &inner.phase_counts);
+                emit_table_metrics(inner.table_states.keys().len(), &inner.phase_counts);
 
                 Ok(restored_phase)
             }
