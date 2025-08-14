@@ -16,6 +16,7 @@ use crate::replication::client::PgReplicationClient;
 use crate::state::table::TableReplicationPhase;
 use crate::store::schema::SchemaStore;
 use crate::store::state::StateStore;
+use crate::types::PipelineId;
 use crate::workers::apply::{ApplyWorker, ApplyWorkerHandle};
 use crate::workers::base::{Worker, WorkerHandle};
 use crate::workers::pool::TableSyncWorkerPool;
@@ -85,6 +86,11 @@ where
             state: PipelineState::NotStarted,
             shutdown_tx,
         }
+    }
+
+    /// Returns the unique identifier for this pipeline.
+    pub fn id(&self) -> PipelineId {
+        self.config.id
     }
 
     /// Returns a handle for sending shutdown signals to this pipeline.
