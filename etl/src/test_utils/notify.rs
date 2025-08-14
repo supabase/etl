@@ -225,6 +225,33 @@ impl StateStore for NotifyingStore {
 
         Ok(previous_state)
     }
+
+    async fn get_table_mapping(&self, source_table_id: &TableId) -> EtlResult<Option<String>> {
+        let inner = self.inner.read().await;
+        Ok(inner.table_mappings.get(source_table_id).cloned())
+    }
+
+    async fn get_table_mappings(&self) -> EtlResult<HashMap<TableId, String>> {
+        let inner = self.inner.read().await;
+        Ok(inner.table_mappings.clone())
+    }
+
+    async fn load_table_mappings(&self) -> EtlResult<usize> {
+        let inner = self.inner.read().await;
+        Ok(inner.table_mappings.len())
+    }
+
+    async fn store_table_mapping(
+        &self,
+        source_table_id: TableId,
+        destination_table_id: String,
+    ) -> EtlResult<()> {
+        let mut inner = self.inner.write().await;
+        inner
+            .table_mappings
+            .insert(source_table_id, destination_table_id);
+        Ok(())
+    }
 }
 
 impl SchemaStore for NotifyingStore {
@@ -251,33 +278,6 @@ impl SchemaStore for NotifyingStore {
             .table_schemas
             .insert(table_schema.id, Arc::new(table_schema));
 
-        Ok(())
-    }
-
-    async fn get_table_mapping(&self, source_table_id: &TableId) -> EtlResult<Option<String>> {
-        let inner = self.inner.read().await;
-        Ok(inner.table_mappings.get(source_table_id).cloned())
-    }
-
-    async fn get_table_mappings(&self) -> EtlResult<HashMap<TableId, String>> {
-        let inner = self.inner.read().await;
-        Ok(inner.table_mappings.clone())
-    }
-
-    async fn load_table_mappings(&self) -> EtlResult<usize> {
-        let inner = self.inner.read().await;
-        Ok(inner.table_mappings.len())
-    }
-
-    async fn store_table_mapping(
-        &self,
-        source_table_id: TableId,
-        destination_table_id: String,
-    ) -> EtlResult<()> {
-        let mut inner = self.inner.write().await;
-        inner
-            .table_mappings
-            .insert(source_table_id, destination_table_id);
         Ok(())
     }
 }

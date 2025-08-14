@@ -311,98 +311,6 @@ impl StateStore for PostgresStore {
             )),
         }
     }
-}
-
-impl SchemaStore for PostgresStore {
-    /// Retrieves a table schema from cache by table ID.
-    ///
-    /// This method provides fast access to cached table schemas, which are
-    /// essential for processing replication events. Schemas are loaded during
-    /// startup and cached for the lifetime of the pipeline.
-    async fn get_table_schema(&self, table_id: &TableId) -> EtlResult<Option<Arc<TableSchema>>> {
-        let inner = self.inner.lock().await;
-
-        Ok(inner.table_schemas.get(table_id).cloned())
-    }
-
-    /// Retrieves all cached table schemas as a vector.
-    ///
-    /// This method returns all currently cached table schemas, providing a
-    /// complete view of the schema information available to the pipeline.
-    /// Useful for operations that need to process or analyze all table schemas.
-    async fn get_table_schemas(&self) -> EtlResult<Vec<Arc<TableSchema>>> {
-        let inner = self.inner.lock().await;
-
-        Ok(inner.table_schemas.values().cloned().collect())
-    }
-
-    /// Loads table schemas from PostgreSQL into memory cache.
-    ///
-    /// This method connects to the source database, retrieves schema information
-    /// for all tables in this pipeline, and populates the in-memory cache.
-    /// Called during pipeline initialization to establish the schema context
-    /// needed for processing replication events.
-    async fn load_table_schemas(&self) -> EtlResult<usize> {
-        debug!("loading table schemas from postgres state store");
-
-        let pool = self.connect_to_source().await?;
-
-        let table_schemas = schema::load_table_schemas(&pool, self.pipeline_id as i64)
-            .await
-            .map_err(|err| {
-                etl_error!(
-                    ErrorKind::SourceQueryFailed,
-                    "Failed to load table schemas",
-                    format!("Failed to load table schemas from postgres: {err}")
-                )
-            })?;
-        let table_schemas_len = table_schemas.len();
-
-        // For performance reasons, since we load the table schemas only once during startup
-        // and from a single thread, we can afford to have a super short critical section.
-        let mut inner = self.inner.lock().await;
-        inner.table_schemas.clear();
-        for table_schema in table_schemas {
-            inner
-                .table_schemas
-                .insert(table_schema.id, Arc::new(table_schema));
-        }
-
-        info!(
-            "loaded {} table schemas from postgres state store",
-            table_schemas_len
-        );
-
-        Ok(table_schemas_len)
-    }
-
-    /// Stores a table schema in both database and cache.
-    ///
-    /// This method persists a table schema to the database and updates the
-    /// in-memory cache atomically. Used when new tables are discovered during
-    /// replication or when schema definitions need to be updated.
-    async fn store_table_schema(&self, table_schema: TableSchema) -> EtlResult<()> {
-        debug!("storing table schema for table '{}'", table_schema.name);
-
-        let pool = self.connect_to_source().await?;
-
-        // We also lock the entire section to be consistent.
-        let mut inner = self.inner.lock().await;
-        schema::store_table_schema(&pool, self.pipeline_id as i64, &table_schema)
-            .await
-            .map_err(|err| {
-                etl_error!(
-                    ErrorKind::SourceQueryFailed,
-                    "Failed to store table schema",
-                    format!("Failed to store table schema in postgres: {err}")
-                )
-            })?;
-        inner
-            .table_schemas
-            .insert(table_schema.id, Arc::new(table_schema));
-
-        Ok(())
-    }
 
     /// Retrieves a table mapping from source table ID to destination name.
     ///
@@ -495,6 +403,98 @@ impl SchemaStore for PostgresStore {
         inner
             .table_mappings
             .insert(source_table_id, destination_table_id);
+
+        Ok(())
+    }
+}
+
+impl SchemaStore for PostgresStore {
+    /// Retrieves a table schema from cache by table ID.
+    ///
+    /// This method provides fast access to cached table schemas, which are
+    /// essential for processing replication events. Schemas are loaded during
+    /// startup and cached for the lifetime of the pipeline.
+    async fn get_table_schema(&self, table_id: &TableId) -> EtlResult<Option<Arc<TableSchema>>> {
+        let inner = self.inner.lock().await;
+
+        Ok(inner.table_schemas.get(table_id).cloned())
+    }
+
+    /// Retrieves all cached table schemas as a vector.
+    ///
+    /// This method returns all currently cached table schemas, providing a
+    /// complete view of the schema information available to the pipeline.
+    /// Useful for operations that need to process or analyze all table schemas.
+    async fn get_table_schemas(&self) -> EtlResult<Vec<Arc<TableSchema>>> {
+        let inner = self.inner.lock().await;
+
+        Ok(inner.table_schemas.values().cloned().collect())
+    }
+
+    /// Loads table schemas from PostgreSQL into memory cache.
+    ///
+    /// This method connects to the source database, retrieves schema information
+    /// for all tables in this pipeline, and populates the in-memory cache.
+    /// Called during pipeline initialization to establish the schema context
+    /// needed for processing replication events.
+    async fn load_table_schemas(&self) -> EtlResult<usize> {
+        debug!("loading table schemas from postgres state store");
+
+        let pool = self.connect_to_source().await?;
+
+        let table_schemas = schema::load_table_schemas(&pool, self.pipeline_id as i64)
+            .await
+            .map_err(|err| {
+                etl_error!(
+                    ErrorKind::SourceQueryFailed,
+                    "Failed to load table schemas",
+                    format!("Failed to load table schemas from postgres: {err}")
+                )
+            })?;
+        let table_schemas_len = table_schemas.len();
+
+        // For performance reasons, since we load the table schemas only once during startup
+        // and from a single thread, we can afford to have a super short critical section.
+        let mut inner = self.inner.lock().await;
+        inner.table_schemas.clear();
+        for table_schema in table_schemas {
+            inner
+                .table_schemas
+                .insert(table_schema.id, Arc::new(table_schema));
+        }
+
+        info!(
+            "loaded {} table schemas from postgres state store",
+            table_schemas_len
+        );
+
+        Ok(table_schemas_len)
+    }
+
+    /// Stores a table schema in both database and cache.
+    ///
+    /// This method persists a table schema to the database and updates the
+    /// in-memory cache atomically. Used when new tables are discovered during
+    /// replication or when schema definitions need to be updated.
+    async fn store_table_schema(&self, table_schema: TableSchema) -> EtlResult<()> {
+        debug!("storing table schema for table '{}'", table_schema.name);
+
+        let pool = self.connect_to_source().await?;
+
+        // We also lock the entire section to be consistent.
+        let mut inner = self.inner.lock().await;
+        schema::store_table_schema(&pool, self.pipeline_id as i64, &table_schema)
+            .await
+            .map_err(|err| {
+                etl_error!(
+                    ErrorKind::SourceQueryFailed,
+                    "Failed to store table schema",
+                    format!("Failed to store table schema in postgres: {err}")
+                )
+            })?;
+        inner
+            .table_schemas
+            .insert(table_schema.id, Arc::new(table_schema));
 
         Ok(())
     }

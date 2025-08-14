@@ -137,35 +137,6 @@ impl StateStore for MemoryStore {
 
         Ok(previous_state)
     }
-}
-
-impl SchemaStore for MemoryStore {
-    async fn get_table_schema(&self, table_id: &TableId) -> EtlResult<Option<Arc<TableSchema>>> {
-        let inner = self.inner.lock().await;
-
-        Ok(inner.table_schemas.get(table_id).cloned())
-    }
-
-    async fn get_table_schemas(&self) -> EtlResult<Vec<Arc<TableSchema>>> {
-        let inner = self.inner.lock().await;
-
-        Ok(inner.table_schemas.values().cloned().collect())
-    }
-
-    async fn load_table_schemas(&self) -> EtlResult<usize> {
-        let inner = self.inner.lock().await;
-
-        Ok(inner.table_schemas.len())
-    }
-
-    async fn store_table_schema(&self, table_schema: TableSchema) -> EtlResult<()> {
-        let mut inner = self.inner.lock().await;
-        inner
-            .table_schemas
-            .insert(table_schema.id, Arc::new(table_schema));
-
-        Ok(())
-    }
 
     async fn get_table_mapping(&self, source_table_id: &TableId) -> EtlResult<Option<String>> {
         let inner = self.inner.lock().await;
@@ -194,6 +165,35 @@ impl SchemaStore for MemoryStore {
         inner
             .table_mappings
             .insert(source_table_id, destination_table_id);
+
+        Ok(())
+    }
+}
+
+impl SchemaStore for MemoryStore {
+    async fn get_table_schema(&self, table_id: &TableId) -> EtlResult<Option<Arc<TableSchema>>> {
+        let inner = self.inner.lock().await;
+
+        Ok(inner.table_schemas.get(table_id).cloned())
+    }
+
+    async fn get_table_schemas(&self) -> EtlResult<Vec<Arc<TableSchema>>> {
+        let inner = self.inner.lock().await;
+
+        Ok(inner.table_schemas.values().cloned().collect())
+    }
+
+    async fn load_table_schemas(&self) -> EtlResult<usize> {
+        let inner = self.inner.lock().await;
+
+        Ok(inner.table_schemas.len())
+    }
+
+    async fn store_table_schema(&self, table_schema: TableSchema) -> EtlResult<()> {
+        let mut inner = self.inner.lock().await;
+        inner
+            .table_schemas
+            .insert(table_schema.id, Arc::new(table_schema));
 
         Ok(())
     }

@@ -30,8 +30,11 @@
 //!
 //! ## Store
 //! The [`store::schema::SchemaStore`] and [`store::state::StateStore`] traits define where the
-//! table schemas and replication state are stored. These stores are critical to a pipeline's
+//! table schemas, replication state, and table mappings are stored. These stores are critical to a pipeline's
 //! operation, as they allow it to be safely paused and resumed.
+//!
+//! The [`store::state::StateStore`] trait handles both table replication states and table mappings,
+//! providing a single interface for all state-related storage operations.
 //!
 //! **Note:** To pause and resume a pipeline after the process is stopped, it must be able to
 //! persist data durably. The crate itself provides no durability guarantees as it only transfers
@@ -79,7 +82,7 @@
 //!     };
 //!
 //!     // Create and start the pipeline
-//!     let mut pipeline = Pipeline::new(1, config, store, destination);
+//!     let mut pipeline = Pipeline::new(config, store, destination);
 //!     pipeline.start().await?;
 //!     
 //!     // Pipeline will run until stopped

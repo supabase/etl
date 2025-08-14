@@ -407,7 +407,7 @@ async fn start_pipeline(args: RunArgs) -> Result<(), Box<dyn Error>> {
         max_table_sync_workers: args.max_table_sync_workers,
     };
 
-    let mut pipeline = Pipeline::new(1, pipeline_config, store, destination);
+    let mut pipeline = Pipeline::new(pipeline_config, store, destination);
     info!("Starting pipeline...");
     pipeline.start().await?;
 

@@ -40,12 +40,7 @@ pub async fn start_replicator_with_config(
         DestinationConfig::Memory => {
             let destination = MemoryDestination::new();
 
-            let pipeline = Pipeline::new(
-                replicator_config.pipeline.id,
-                replicator_config.pipeline,
-                state_store,
-                destination,
-            );
+            let pipeline = Pipeline::new(replicator_config.pipeline, state_store, destination);
             start_pipeline(pipeline).await?;
         }
         DestinationConfig::BigQuery {
@@ -65,12 +60,7 @@ pub async fn start_replicator_with_config(
             )
             .await?;
 
-            let pipeline = Pipeline::new(
-                replicator_config.pipeline.id,
-                replicator_config.pipeline,
-                state_store,
-                destination,
-            );
+            let pipeline = Pipeline::new(replicator_config.pipeline, state_store, destination);
             start_pipeline(pipeline).await?;
         }
     }

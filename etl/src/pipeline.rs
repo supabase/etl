@@ -69,14 +69,18 @@ where
     ///
     /// The pipeline is initially in the not-started state and must be
     /// explicitly started using [`Pipeline::start`]. The state store is used for tracking
-    /// replication progress and table schemas, while the destination receives replicated data.
-    pub fn new(id: PipelineId, config: PipelineConfig, state_store: S, destination: D) -> Self {
+    /// replication progress, table schemas, and table mappings, while the destination receives replicated data.
+    /// The pipeline ID is extracted from the configuration, ensuring consistency between
+    /// pipeline identity and configuration settings.
+    pub fn new(config: PipelineConfig, state_store: S, destination: D) -> Self {
         // We create a watch channel of unit types since this is just used to notify all subscribers
         // that shutdown is needed.
         //
         // Here we are not taking the `shutdown_rx` since we will just extract it from the `shutdown_tx`
         // via the `subscribe` method. This is done to make the code cleaner.
         let (shutdown_tx, _) = create_shutdown_channel();
+
+        let id = config.id;
 
         Self {
             id,
@@ -141,7 +145,7 @@ where
         // We create and start the apply worker (temporarily leaving out retries_orchestrator)
         // TODO: Remove retries_orchestrator from ApplyWorker constructor
         let apply_worker = ApplyWorker::new(
-            self.id,
+            self.config.id,
             self.config.clone(),
             replication_client,
             pool.clone(),

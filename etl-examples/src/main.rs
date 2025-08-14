@@ -185,8 +185,7 @@ async fn main_impl() -> Result<(), Box<dyn Error>> {
     };
 
     // Create the pipeline instance with all components
-    // Pipeline ID (1) should match the config ID for consistency
-    let mut pipeline = Pipeline::new(1, pipeline_config, store, bigquery_destination);
+    let mut pipeline = Pipeline::new(pipeline_config, store, bigquery_destination);
 
     info!(
         "Starting BigQuery CDC pipeline - connecting to PostgreSQL and initializing replication..."

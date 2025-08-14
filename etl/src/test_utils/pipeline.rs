@@ -39,7 +39,7 @@ where
         max_table_sync_workers: 1,
     };
 
-    Pipeline::new(pipeline_id, config, store, destination)
+    Pipeline::new(config, store, destination)
 }
 
 pub fn create_pipeline_with<S, D>(
@@ -68,5 +68,5 @@ where
         max_table_sync_workers: 1,
     };
 
-    Pipeline::new(pipeline_id, config, store, destination)
+    Pipeline::new(config, store, destination)
 }
