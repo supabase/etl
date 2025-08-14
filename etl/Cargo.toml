@@ -20,6 +20,7 @@ chrono = { workspace = true }
 const-oid = { workspace = true, default-features = false }
 fail = { workspace = true }
 futures = { workspace = true }
+metrics = { workspace = true }
 pg_escape = { workspace = true }
 pin-project-lite = { workspace = true }
 postgres-replication = { workspace = true }
@@ -41,7 +42,11 @@ uuid = { workspace = true, features = ["v4"] }
 x509-cert = { workspace = true, default-features = false }
 
 [dev-dependencies]
-etl-postgres = { workspace = true, features = ["tokio", "replication", "test-utils"] }
+etl-postgres = { workspace = true, features = [
+    "tokio",
+    "replication",
+    "test-utils",
+] }
 etl-telemetry = { workspace = true }
 
 rand = { workspace = true, features = ["thread_rng"] }
