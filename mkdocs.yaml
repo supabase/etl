@@ -15,13 +15,11 @@ nav:
   - How-to Guides:
       - Overview: how-to/index.md
       - Configure PostgreSQL: how-to/configure-postgres.md
-      - Debug Replication Issues: how-to/debugging.md
   - Reference:
       - Overview: reference/index.md
   - Explanation:
       - Overview: explanation/index.md
       - Architecture: explanation/architecture.md
-      - Replication Protocol: explanation/replication.md
 
 theme:
   name: "material"

@@ -1,18 +1,16 @@
 ---
 type: explanation
-title: ETL Architecture Overview
-last_reviewed: 2025-01-14
+title: ETL Architecture Overview  
+last_reviewed: 2025-08-14
 ---
 
 # ETL Architecture Overview
 
 **Understanding how ETL components work together to replicate data from PostgreSQL**
 
-ETL's architecture is built around a few key abstractions that work together to provide reliable, high-performance data replication. This document explains how these components interact and why they're designed the way they are.
+ETL's architecture centers around four core abstractions that work together to provide reliable, high-performance data replication: Pipeline, Destination, SchemaStore, and StateStore. This document explains how these components interact and coordinate data flow from PostgreSQL logical replication to target systems.
 
-## The Big Picture
-
-At its core, ETL connects PostgreSQL's logical replication stream to configurable destination systems:
+A diagram of the overall architecture is shown below:
 
 ```mermaid
 flowchart LR
@@ -56,189 +54,233 @@ flowchart LR
     TableSyncWorkers --> Store
 ```
 
-The architecture separates concerns to make the system extensible, testable, and maintainable.
-
-## Core Components
+## Core Abstractions
 
 ### Pipeline: The Orchestrator
 
-The [`Pipeline`](../reference/pipeline/) is ETL's central component that coordinates all other parts:
+The Pipeline is ETL's central component that orchestrates all replication activity. It manages worker lifecycles, coordinates data flow, and handles error recovery.
 
-**Responsibilities:**
-- Establishes connection to PostgreSQL replication stream
-- Manages initial table synchronization ("backfill")  
-- Processes ongoing change events from WAL
-- Coordinates batching and delivery to destinations
-- Handles errors and retries
+**Key responsibilities:**
+- Establishes PostgreSQL replication connection
+- Spawns and manages worker processes  
+- Coordinates initial table synchronization with ongoing replication
+- Handles shutdown and error scenarios
 
-**Why this design?** By centralizing orchestration in one component, we can ensure consistent behavior across all operations while keeping the interface simple for users.
+### Destination: Where Data Goes
 
-### Destinations: Where Data Goes
-
-The [`Destination`](../reference/destination-trait/) trait defines how data leaves ETL:
+The Destination trait defines how replicated data is delivered to target systems:
 
 ```rust
-trait Destination {
-    async fn write_batch(&mut self, batch: BatchedData) -> Result<(), DestinationError>;
-    async fn flush(&mut self) -> Result<(), DestinationError>;
+pub trait Destination {
+    fn truncate_table(&self, table_id: TableId) -> impl Future<Output = EtlResult<()>> + Send;
+    
+    fn write_table_rows(
+        &self,
+        table_id: TableId,
+        table_rows: Vec<TableRow>,
+    ) -> impl Future<Output = EtlResult<()>> + Send;
+    
+    fn write_events(&self, events: Vec<Event>) -> impl Future<Output = EtlResult<()>> + Send;
 }
 ```
 
-**Built-in implementations:**
-- [`MemoryDestination`](../reference/memory-destination/) - For testing and development
-- [`BigQueryDestination`](../reference/bigquery-destination/) - Google BigQuery integration
+The trait provides three operations: `truncate_table` clears destination tables before bulk loading, `write_table_rows` handles bulk data insertion during initial synchronization, and `write_events` processes streaming replication changes.
 
-**Why this abstraction?** The trait allows ETL to support any output system while providing consistent batching, error handling, and retry behavior. New destinations get all the pipeline reliability features automatically.
+### SchemaStore: Table Structure Management
 
-### Stores: Managing State and Schemas  
+The SchemaStore trait manages table schema information:
 
-ETL uses two types of storage via the [`Store`](../reference/store-trait/) trait:
+```rust  
+pub trait SchemaStore {
+    fn get_table_schema(
+        &self,
+        table_id: &TableId,
+    ) -> impl Future<Output = EtlResult<Option<Arc<TableSchema>>>> + Send;
+    
+    fn get_table_schemas(&self) -> impl Future<Output = EtlResult<Vec<Arc<TableSchema>>>> + Send;
+    
+    fn load_table_schemas(&self) -> impl Future<Output = EtlResult<usize>> + Send;
+    
+    fn store_table_schema(
+        &self,
+        table_schema: TableSchema,
+    ) -> impl Future<Output = EtlResult<()>> + Send;
+}
+```
 
-**State storage** tracks replication progress:
-- WAL positions for recovery
-- Table synchronization status  
-- Retry counters and backoff timers
+The store follows a cache-first pattern: `load_table_schemas` populates an in-memory cache at startup, while `get_*` methods read only from cache for performance. `store_table_schema` implements dual-write to both persistent storage and cache.
 
-**Schema storage** manages table structures:
-- Column names and types
-- Primary key information
-- Schema evolution tracking
+### StateStore: Replication Progress Tracking
 
-**Implementation options:**
-- [`MemoryStore`](../reference/memory-store/) - Fast, but loses state on restart
-- [`PostgresStore`](../reference/postgres-store/) - Persistent, production-ready
+The StateStore trait manages replication state and table mappings:
 
-**Why separate storage?** This allows ETL to work in different deployment scenarios: development (memory), cloud-native (external databases), or embedded (SQLite, eventually).
+```rust
+pub trait StateStore {
+    fn get_table_replication_state(
+        &self,
+        table_id: TableId,
+    ) -> impl Future<Output = EtlResult<Option<TableReplicationPhase>>> + Send;
+    
+    fn get_table_replication_states(
+        &self,
+    ) -> impl Future<Output = EtlResult<HashMap<TableId, TableReplicationPhase>>> + Send;
+    
+    fn load_table_replication_states(&self) -> impl Future<Output = EtlResult<usize>> + Send;
+    
+    fn update_table_replication_state(
+        &self,
+        table_id: TableId,
+        state: TableReplicationPhase,
+    ) -> impl Future<Output = EtlResult<()>> + Send;
+    
+    fn rollback_table_replication_state(
+        &self,
+        table_id: TableId,
+    ) -> impl Future<Output = EtlResult<TableReplicationPhase>> + Send;
+    
+    fn get_table_mapping(
+        &self,
+        source_table_id: &TableId,
+    ) -> impl Future<Output = EtlResult<Option<String>>> + Send;
+    
+    fn get_table_mappings(
+        &self,
+    ) -> impl Future<Output = EtlResult<HashMap<TableId, String>>> + Send;
+    
+    fn load_table_mappings(&self) -> impl Future<Output = EtlResult<usize>> + Send;
+    
+    fn store_table_mapping(
+        &self,
+        source_table_id: TableId,
+        destination_table_id: String,
+    ) -> impl Future<Output = EtlResult<()>> + Send;
+}
+```
+
+Like SchemaStore, StateStore uses cache-first reads with `load_*` methods for startup population and dual-write patterns for updates. The store tracks both replication progress through `TableReplicationPhase` and source-to-destination table name mappings.
 
 ## Data Flow Architecture
 
-### Initial Synchronization
+### Worker Coordination
 
-When a pipeline starts, ETL performs a full synchronization of existing data:
+ETL's data flow is orchestrated through two types of workers:
 
-1. **Discovery:** Query PostgreSQL catalogs to find tables in the publication
-2. **Schema capture:** Extract column information and primary keys
-3. **Snapshot:** Copy existing rows in batches to the destination
-4. **State tracking:** Record progress to support resumption
+**Apply Worker** - The primary replication processor:
+- Processes PostgreSQL logical replication stream  
+- Spawns table sync workers as needed
+- Coordinates with table sync workers through shared state
+- Handles final event processing for tables in `Ready` state
 
-This ensures the destination has complete data before processing real-time changes.
+**Table Sync Workers** - Initial data synchronization:
+- Perform bulk copying of existing table data
+- Coordinate handoff to apply worker when synchronization completes
+- Multiple workers run in parallel, limited by configured semaphore
 
-### Ongoing Replication  
+### Worker Startup Sequence
 
-After initial sync, ETL processes the PostgreSQL WAL stream:
+The Pipeline follows this startup sequence:
 
-1. **Stream connection:** Attach to the replication slot
-2. **Event parsing:** Decode WAL records into structured changes  
-3. **Batching:** Group changes for efficient destination writes
-4. **Delivery:** Send batches to destinations with retry logic
-5. **Acknowledgment:** Confirm WAL position to PostgreSQL
+1. **Pipeline Initialization**: Establishes PostgreSQL connection and loads cached state
+2. **Apply Worker Launch**: Creates and starts the primary apply worker first  
+3. **Table Discovery**: Apply worker identifies tables requiring synchronization
+4. **Table Sync Spawning**: Apply worker spawns table sync workers for tables in `Init` state
+5. **Coordination**: Workers communicate through shared state store
 
-### Error Handling Strategy
+The apply worker always starts first because it coordinates the overall replication process and spawns table sync workers on demand.
 
-ETL's error handling follows a layered approach:
+### Table Replication Phases
 
-**Transient errors** (network issues, destination overload):
-- Exponential backoff retry
-- Circuit breaker to prevent cascading failures
-- Eventual resumption from last known good state
+Each table progresses through distinct phases during replication:
 
-**Permanent errors** (schema mismatches, authentication failures):
-- Immediate pipeline halt
-- Clear error reporting to operators
-- Manual intervention required
+```rust
+pub enum TableReplicationPhase {
+    Init,
+    DataSync, 
+    FinishedCopy,
+    SyncWait,
+    Catchup { lsn: PgLsn },
+    SyncDone { lsn: PgLsn },
+    Ready,
+    Errored { reason: String, solution: Option<String>, retry_policy: RetryPolicy },
+}
+```
 
-**Partial failures** (some tables succeed, others fail):
-- Per-table error tracking
-- Independent retry schedules
-- Healthy tables continue processing
+**Phase Ownership and Transitions:**
 
-## Scalability Patterns
+- **Init**: Set by pipeline when table first discovered
+- **DataSync**: Table sync worker begins bulk data copying
+- **FinishedCopy**: Table sync worker completes bulk copy, begins catching up with replication stream
+- **SyncWait**: Table sync worker requests apply worker to pause (memory-only, not persisted)
+- **Catchup**: Apply worker pauses and signals LSN position for table sync worker (memory-only)
+- **SyncDone**: Table sync worker catches up to apply worker's LSN and signals completion
+- **Ready**: Apply worker takes over all processing for this table
+- **Errored**: Either worker encounters unrecoverable error
 
-### Vertical Scaling
+### Synchronization Handoff
 
-ETL supports scaling up through configuration:
+The critical coordination happens during the transition from table sync worker to apply worker control:
 
-- **Batch sizes:** Larger batches for higher throughput
-- **Worker threads:** Parallel table synchronization
-- **Buffer sizes:** More memory for better batching
+1. **Table sync worker** completes bulk copy (`FinishedCopy`)
+2. **Table sync worker** processes replication events to catch up
+3. **Table sync worker** sets state to `SyncWait` (signals apply worker to pause)
+4. **Apply worker** detects `SyncWait` at transaction boundary and pauses
+5. **Apply worker** sets state to `Catchup` with current LSN position
+6. **Table sync worker** processes events up to the `Catchup` LSN
+7. **Table sync worker** sets state to `SyncDone` with final LSN and terminates
+8. **Apply worker** detects `SyncDone` and transitions table to `Ready`
+9. **Apply worker** resumes processing and handles all future events for the table
 
-### Horizontal Scaling  
+This coordination ensures no events are lost during the handoff and that the table reaches a consistent state.
 
-For massive databases, ETL supports:
+### Event Processing Flow
 
-- **Multiple pipelines:** Split tables across different pipeline instances
-- **Destination sharding:** Route different tables to different destinations
-- **Read replicas:** Reduce load on primary database
+**Initial Synchronization (Table Sync Worker):**
+1. Truncate destination table using `Destination::truncate_table`
+2. Copy existing data in batches using `Destination::write_table_rows`
+3. Process replication stream events using `Destination::write_events`
+4. Coordinate handoff to apply worker
 
-### Resource Management
+**Continuous Replication (Apply Worker):**
+1. Read events from PostgreSQL logical replication stream
+2. Filter events for tables in `Ready` state  
+3. Batch events for efficiency
+4. Send batches to destination using `Destination::write_events`
+5. Acknowledge progress to PostgreSQL
 
-ETL is designed to be resource-predictable:
+### Concurrency and Synchronization
 
-- **Memory bounds:** Configurable limits on batch sizes and buffers
-- **Connection pooling:** Reuse PostgreSQL connections efficiently  
-- **Backpressure:** Slow down if destinations can't keep up
+ETL uses several concurrency primitives to coordinate workers:
 
-## Extension Points
+- **Semaphore**: Limits number of concurrent table sync workers
+- **Shutdown channels**: Broadcast shutdown signals to all workers
+- **Shared state**: StateStore provides atomic state transitions
+- **Message passing**: Workers coordinate through state changes rather than direct communication
 
-### Custom Destinations
+The apply worker holds the semaphore permits and distributes them to table sync workers, ensuring resource bounds while allowing parallel initial synchronization.
 
-The [`Destination`](../reference/destination-trait/) trait makes it straightforward to add support for new output systems:
+## Design Rationale
 
-- **REST APIs:** HTTP-based services
-- **Message queues:** Kafka, RabbitMQ, etc.
-- **Databases:** Any database with bulk insert capabilities
-- **File systems:** Parquet, JSON, CSV outputs
+### Cache-First Storage Pattern
 
-### Custom Stores
+Both SchemaStore and StateStore separate loading from reading. This pattern provides:
+- **Performance**: Fast cache-only reads during high-frequency operations
+- **Consistency**: Dual-write ensures cache and persistent storage stay synchronized
+- **Startup efficiency**: Bulk loading minimizes startup time
 
-The [`Store`](../reference/store-trait/) trait allows different persistence strategies:
+### Worker Separation
 
-- **Cloud databases:** RDS, CloudSQL, etc.
-- **Key-value stores:** Redis, DynamoDB
-- **Local storage:** SQLite, embedded databases
+Separating apply workers from table sync workers enables:
+- **Parallelism**: Multiple tables can synchronize concurrently
+- **Resource control**: Semaphore prevents resource exhaustion
+- **Clear handoff**: Explicit phase transitions ensure data consistency
+- **Error isolation**: Table-level failures don't affect other tables
 
-### Plugin Architecture
+### State-Driven Coordination
 
-ETL's trait-based design enables:
+Using shared state for worker coordination provides:
+- **Persistence**: State survives worker failures and restarts
+- **Observability**: External systems can monitor replication progress
+- **Recovery**: Workers can resume from last known state
+- **Simplicity**: No complex message passing between workers
 
-- **Runtime plugin loading:** Dynamic destination discovery
-- **Configuration-driven setup:** Choose implementations via config
-- **Testing isolation:** Mock implementations for unit tests
-
-## Design Philosophy
-
-### Correctness First
-
-ETL prioritizes data consistency over raw speed:
-- **At-least-once delivery:** Better to duplicate than lose data
-- **State durability:** Persist progress before acknowledging
-- **Schema safety:** Validate destination compatibility
-
-### Operational Simplicity  
-
-ETL aims to be easy to operate:
-- **Clear error messages:** Actionable information for operators
-- **Predictable behavior:** Minimal configuration surprises
-- **Observable:** Built-in metrics and logging
-
-### Performance Where It Matters
-
-ETL optimizes the bottlenecks:
-- **Batching:** Amortize per-operation overhead
-- **Async I/O:** Maximize network utilization
-- **Zero-copy:** Minimize data copying where possible
-
-## Next Steps
-
-Now that you understand ETL's architecture:
-
-- **See it in action** → [Build your first pipeline](../tutorials/first-pipeline/)
-- **Learn about performance** → [Performance characteristics](performance/)
-- **Understand the foundation** → [PostgreSQL logical replication](replication/)
-- **Compare with alternatives** → [ETL vs. other tools](comparisons/)
-
-## See Also
-
-- [Design decisions](design/) - Why ETL is built the way it is
-- [Crate structure](crate-structure/) - How code is organized  
-- [State management](state-management/) - Deep dive on state handling
+The architecture prioritizes data consistency and operational simplicity over raw throughput, ensuring reliable replication with clear error handling and recovery patterns.
