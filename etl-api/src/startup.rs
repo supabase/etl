@@ -6,6 +6,7 @@ use actix_web_metrics::ActixWebMetricsBuilder;
 use aws_lc_rs::aead::{AES_256_GCM, RandomizedNonceKey};
 use base64::{Engine, prelude::BASE64_STANDARD};
 use etl_config::shared::{IntoConnectOptions, PgConnectionConfig};
+use etl_telemetry::metrics::init_metrics;
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use tracing::warn;
 use tracing_actix_web::TracingLogger;
@@ -18,7 +19,6 @@ use crate::{
     db::publications::Publication,
     encryption,
     k8s_client::{HttpK8sClient, K8sClient},
-    metrics::init_metrics,
     routes::{
         destinations::{
             CreateDestinationRequest, CreateDestinationResponse, ReadDestinationResponse,
