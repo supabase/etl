@@ -5,7 +5,7 @@ use etl::test_utils::notify::NotifyingStore;
 use etl::test_utils::pipeline::create_pipeline;
 use etl::test_utils::test_destination_wrapper::TestDestinationWrapper;
 use etl::types::PipelineId;
-use etl_telemetry::init_test_tracing;
+use etl_telemetry::tracing::init_test_tracing;
 use rand::random;
 
 #[tokio::test(flavor = "multi_thread")]

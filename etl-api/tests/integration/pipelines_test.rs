@@ -8,7 +8,7 @@ use etl_api::routes::pipelines::{
 };
 use etl_config::shared::{BatchConfig, PgConnectionConfig};
 use etl_postgres::sqlx::test_utils::drop_pg_database;
-use etl_telemetry::init_test_tracing;
+use etl_telemetry::tracing::init_test_tracing;
 use reqwest::StatusCode;
 use sqlx::PgPool;
 use sqlx::postgres::types::Oid;
