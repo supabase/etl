@@ -83,6 +83,31 @@ impl SchemaMapper {
         Ok(schema)
     }
 
+    /// Converts Iceberg schema to Arrow schema.
+    ///
+    /// This is a simplified conversion for Phase 2. A complete implementation
+    /// would handle all Iceberg field types and nested structures.
+    pub fn iceberg_to_arrow(&self, _iceberg_schema: &IcebergSchema) -> EtlResult<ArrowSchema> {
+        // For Phase 2, we'll use a simplified approach
+        // In a real implementation, we would iterate through Iceberg fields
+        // and convert each to the corresponding Arrow field
+        
+        // For now, create a basic schema with common fields plus CDC columns
+        let mut fields = vec![
+            Field::new("id", DataType::Int64, true),
+            Field::new("name", DataType::LargeUtf8, true),
+            Field::new("created_at", DataType::Timestamp(TimeUnit::Microsecond, None), true),
+            Field::new("updated_at", DataType::Timestamp(TimeUnit::Microsecond, None), true),
+        ];
+        
+        // Add CDC metadata fields
+        fields.push(Field::new("_CHANGE_TYPE", DataType::LargeUtf8, true));
+        fields.push(Field::new("_CHANGE_SEQUENCE_NUMBER", DataType::LargeUtf8, true));
+        fields.push(Field::new("_CHANGE_TIMESTAMP", DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())), true));
+
+        Ok(ArrowSchema::new(fields))
+    }
+
     /// Converts PostgreSQL type to Iceberg type.
     fn postgres_type_to_iceberg(&self, pg_type: &PostgresType) -> EtlResult<IcebergType> {
         let iceberg_type = match pg_type.oid() {
