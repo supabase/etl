@@ -40,6 +40,25 @@ pub enum DestinationConfig {
         #[cfg_attr(feature = "utoipa", schema(example = 15))]
         max_staleness_mins: Option<u16>,
     },
+    /// Apache Iceberg destination configuration.
+    ///
+    /// Use this variant to configure an Iceberg destination with REST catalog.
+    /// Storage configuration is embedded in the warehouse URI.
+    #[cfg(feature = "iceberg")]
+    Iceberg {
+        /// REST catalog URI.
+        #[cfg_attr(feature = "utoipa", schema(example = "http://localhost:8181"))]
+        catalog_uri: String,
+        /// Warehouse location (includes storage configuration).
+        #[cfg_attr(feature = "utoipa", schema(example = "s3://my-bucket/warehouse"))]
+        warehouse: String,
+        /// Namespace for Iceberg tables.
+        #[cfg_attr(feature = "utoipa", schema(example = "etl"))]
+        namespace: String,
+        /// Optional authentication token.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        auth_token: Option<SerializableSecretString>,
+    },
 }
 
 impl Default for DestinationConfig {

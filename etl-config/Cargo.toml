@@ -5,6 +5,7 @@ edition = "2024"
 
 [features]
 utoipa = ["dep:utoipa"]
+iceberg = []
 
 [dependencies]
 config = { workspace = true, features = ["yaml"] }
