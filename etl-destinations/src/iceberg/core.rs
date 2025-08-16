@@ -11,7 +11,7 @@ use std::fmt::Display;
 use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::iceberg::client::{IcebergClient, IcebergOperationType};
 
@@ -291,18 +291,60 @@ where
 
         let row_count = enriched_rows.len();
         
-        // Stream to Iceberg
-        inner
-            .client
-            .stream_rows(&sequenced_table_id.to_string(), enriched_rows)
-            .await?;
-
-        info!(
-            table = %table_id,
-            iceberg_table = %sequenced_table_id,
-            rows = row_count,
-            "Successfully streamed rows to Iceberg table"
-        );
+        // Stream to Iceberg with retry logic for production robustness
+        const MAX_RETRIES: u32 = 3;
+        let mut retry_count = 0;
+        
+        loop {
+            match inner
+                .client
+                .stream_rows(&sequenced_table_id.to_string(), enriched_rows.clone())
+                .await
+            {
+                Ok(_) => {
+                    info!(
+                        table = %table_id,
+                        iceberg_table = %sequenced_table_id,
+                        rows = row_count,
+                        "Successfully streamed rows to Iceberg table"
+                    );
+                    break;
+                }
+                Err(e) if retry_count < MAX_RETRIES => {
+                    warn!(
+                        table = %table_id,
+                        error = %e,
+                        retry = retry_count + 1,
+                        "Failed to stream rows, retrying"
+                    );
+                    retry_count += 1;
+                    
+                    // Check if table needs to be recreated
+                    if !inner.client.table_exists(&sequenced_table_id.to_string()).await? {
+                        info!(
+                            table = %table_id,
+                            "Table missing, recreating before retry"
+                        );
+                        inner.client.create_table_if_not_exists(
+                            &sequenced_table_id.to_string(),
+                            &table_schema
+                        ).await?;
+                    }
+                    
+                    // Exponential backoff
+                    tokio::time::sleep(tokio::time::Duration::from_millis(100 * (1 << retry_count))).await;
+                }
+                Err(e) => {
+                    error!(
+                        table = %table_id,
+                        error = %e,
+                        retries = retry_count,
+                        "Failed to stream rows after retries"
+                    );
+                    return Err(e);
+                }
+            }
+        }
 
         Ok(())
     }
