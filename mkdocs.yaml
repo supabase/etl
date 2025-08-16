@@ -36,7 +36,7 @@ nav:
 theme:
   name: "material"
   favicon: "assets/favicon.ico"
-  logo: "assets/etl.png"
+  logo: "assets/etl-logo.png"
   homepage: https://supabase.github.io/etl
   features:
     - navigation.expand
