@@ -2,7 +2,7 @@
 <p align="center">
   <a href="https://supabase.io">
         <picture>
-      <img alt="Supabase Logo" width="100%" src="res/etl-logo-extended.png">
+      <img alt="Supabase Logo" width="100%" src="docs/assets/etl-logo-extended.png">
     </picture>
   </a>
 
@@ -38,6 +38,7 @@ Built on top of PostgreSQL's [logical streaming replication protocol](https://ww
 ## Features
 
 **Core Capabilities:**
+
 - 🚀 **Real-time replication**: Stream changes from PostgreSQL as they happen
 - 🔄 **Multiple destinations**: Support for various data warehouses and databases (coming soon)
 - 🛡️ **Fault tolerance**: Built-in error handling, retries, and recovery mechanisms
@@ -45,6 +46,7 @@ Built on top of PostgreSQL's [logical streaming replication protocol](https://ww
 - 🔧 **Extensible**: Plugin architecture for custom destinations
 
 **Supported Destinations:**
+
 - [x] **BigQuery** - Google Cloud's data warehouse
 - [ ] **Apache Iceberg** (planned) - Open table format for analytics
 - [ ] **DuckDB** (planned) - In-process analytical database
@@ -101,11 +103,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create in-memory store and destination for testing
     let store = MemoryStore::new();
     let destination = MemoryDestination::new();
-    
+
     // Create and start the pipeline
     let mut pipeline = Pipeline::new(1, pipeline_config, store, destination);
     pipeline.start().await?;
-    
+
     Ok(())
 }
 ```
