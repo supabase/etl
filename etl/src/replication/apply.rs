@@ -19,7 +19,9 @@ use crate::concurrency::signal::SignalRx;
 use crate::conversions::event::{Event, EventType, convert_message_to_event};
 use crate::destination::Destination;
 use crate::error::{ErrorKind, EtlError, EtlResult};
-use crate::metrics::{ETL_APPLY_EVENTS_COPIED_TOTAL, ETL_BATCH_SIZE};
+use crate::metrics::{
+    ETL_APPLY_EVENTS_COPIED_TOTAL, ETL_BATCH_SEND_MILLISECONDS_TOTAL, ETL_BATCH_SIZE,
+};
 use crate::replication::client::PgReplicationClient;
 use crate::replication::stream::EventsStream;
 use crate::state::table::{RetryPolicy, TableReplicationError};
@@ -508,11 +510,14 @@ where
 
             let num_events = events_batch.len();
             info!("sending batch of {} events to destination", num_events);
+            let before_sending = Instant::now();
 
             destination.write_events(events_batch).await?;
 
             counter!(ETL_APPLY_EVENTS_COPIED_TOTAL).increment(num_events as u64);
             gauge!(ETL_BATCH_SIZE).set(num_events as f64);
+            let time_taken_to_send = before_sending.elapsed().as_millis();
+            gauge!(ETL_BATCH_SEND_MILLISECONDS_TOTAL).set(time_taken_to_send as f64);
 
             state.last_batch_send_time = Instant::now();
         }
