@@ -264,11 +264,9 @@ pub async fn run(
     struct ApiV1;
 
     let openapi = ApiDoc::openapi();
-    let actix_metrics = ActixWebMetricsBuilder::new()
-        .build()
-        .map_err(anyhow::Error::from_boxed)?;
 
     let server = HttpServer::new(move || {
+        let actix_metrics = ActixWebMetricsBuilder::new().build();
         let tracing_logger = TracingLogger::<ApiRootSpanBuilder>::new();
         let authentication = HttpAuthentication::bearer(auth_validator);
         let app = App::new()
