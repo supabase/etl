@@ -296,7 +296,7 @@ pub fn estimate_row_size(row: &TableRow) -> usize {
 /// Estimates the memory size of a Cell.
 fn estimate_cell_size(cell: &Cell) -> usize {
     match cell {
-        Cell::Null => std::mem::size_of::<()>(),
+        Cell::Null => 1, // Null has at least some size for the discriminant
         Cell::Bool(_) => std::mem::size_of::<bool>(),
         Cell::String(s) => s.len() + std::mem::size_of::<String>(),
         Cell::I16(_) => std::mem::size_of::<i16>(),
@@ -387,7 +387,7 @@ pub fn batch_rows(rows: Vec<TableRow>, config: &BatchConfig) -> Vec<Vec<TableRow
 mod tests {
     use super::*;
     use arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
-    use etl::types::{Cell, TableId, TableRow};
+    use etl::types::{Cell, TableRow};
     use chrono::{NaiveDate, Utc};
 
     fn create_test_schema() -> ArrowSchema {
@@ -402,8 +402,7 @@ mod tests {
     fn create_test_rows() -> Vec<TableRow> {
         vec![
             TableRow {
-                table_id: TableId::new("public", "users"),
-                cells: vec![
+                values: vec![
                     Cell::I64(1),
                     Cell::String("Alice".to_string()),
                     Cell::Bool(true),
@@ -411,8 +410,7 @@ mod tests {
                 ],
             },
             TableRow {
-                table_id: TableId::new("public", "users"),
-                cells: vec![
+                values: vec![
                     Cell::I64(2),
                     Cell::String("Bob".to_string()),
                     Cell::Bool(false),
@@ -451,8 +449,7 @@ mod tests {
     #[test]
     fn test_estimate_row_size() {
         let row = TableRow {
-            table_id: TableId::new("public", "users"),
-            cells: vec![
+            values: vec![
                 Cell::I64(1),
                 Cell::String("test".to_string()),
                 Cell::Bool(true),
@@ -474,16 +471,13 @@ mod tests {
 
         let rows = vec![
             TableRow {
-                table_id: TableId::new("public", "users"),
-                cells: vec![Cell::I64(1)],
+                values: vec![Cell::I64(1)],
             },
             TableRow {
-                table_id: TableId::new("public", "users"),
-                cells: vec![Cell::I64(2)],
+                values: vec![Cell::I64(2)],
             },
             TableRow {
-                table_id: TableId::new("public", "users"),
-                cells: vec![Cell::I64(3)],
+                values: vec![Cell::I64(3)],
             },
         ];
 
@@ -506,12 +500,10 @@ mod tests {
     fn test_build_string_array() {
         let rows = vec![
             TableRow {
-                table_id: TableId::new("public", "test"),
-                cells: vec![Cell::String("hello".to_string())],
+                values: vec![Cell::String("hello".to_string())],
             },
             TableRow {
-                table_id: TableId::new("public", "test"),
-                cells: vec![Cell::Null],
+                values: vec![Cell::Null],
             },
         ];
 

@@ -2,7 +2,7 @@
 
 use etl::error::{ErrorKind, EtlError, EtlResult};
 use etl::{etl_error};
-use etl::types::{Cell, TableSchema, Type as PostgresType};
+use etl::types::{Cell, TableSchema, Type as PostgresType, ColumnSchema};
 use tokio_postgres::types::Kind;
 
 // PostgreSQL OID constants - match what's used in etl-postgres
@@ -382,7 +382,7 @@ impl CellToArrowConverter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use etl_postgres::schema::Oid;
+    use etl_postgres::schema::{Oid, TableId, TableName};
     use tokio_postgres::types::{Kind, Type};
 
     fn create_pg_type(oid: Oid, name: &str) -> Type {
@@ -393,29 +393,37 @@ mod tests {
         let columns = vec![
             ColumnSchema {
                 name: "id".to_string(),
-                r#type: create_pg_type(Oid::INT8, "bigint"),
+                typ: create_pg_type(20, "bigint"),  // INT8_OID
                 nullable: false,
+                modifier: 0,
+                primary: false,
             },
             ColumnSchema {
                 name: "name".to_string(),
-                r#type: create_pg_type(Oid::TEXT, "text"),
+                typ: create_pg_type(25, "text"),    // TEXT_OID
                 nullable: true,
+                modifier: 0,
+                primary: false,
             },
             ColumnSchema {
                 name: "active".to_string(),
-                r#type: create_pg_type(Oid::BOOL, "boolean"),
+                typ: create_pg_type(16, "boolean"), // BOOL_OID
                 nullable: false,
+                modifier: 0,
+                primary: false,
             },
             ColumnSchema {
                 name: "created_at".to_string(),
-                r#type: create_pg_type(Oid::TIMESTAMPTZ, "timestamptz"),
+                typ: create_pg_type(1184, "timestamptz"), // TIMESTAMPTZ_OID
                 nullable: false,
+                modifier: 0,
+                primary: false,
             },
         ];
 
         TableSchema {
-            id: etl_postgres::schema::TableId::new(12345), // Test table ID
-            name: etl_postgres::schema::TableName::new("test_schema".to_string(), "test_table".to_string()),
+            id: TableId::new(12345), // Test table ID
+            name: TableName::new("test_schema".to_string(), "test_table".to_string()),
             column_schemas: columns,
         }
     }
