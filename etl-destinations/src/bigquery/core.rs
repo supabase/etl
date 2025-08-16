@@ -14,6 +14,7 @@ use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
 
 use crate::bigquery::client::{BigQueryClient, BigQueryOperationType};
+use crate::bigquery::encryption::install_crypto_provider;
 use crate::bigquery::{BigQueryDatasetId, BigQueryTableId};
 use crate::metrics::register_metrics;
 
@@ -205,9 +206,11 @@ where
         max_staleness_mins: Option<u16>,
         store: S,
     ) -> EtlResult<Self> {
-        // Registring metrics here to avoid the callers having to remember to call this before
-        // creating a destination.
+        // Perform one time initialization here to avoid forcing the users of `etl-destinations`
+        // to remember to call these methods.
         register_metrics();
+        install_crypto_provider();
+
         let client = BigQueryClient::new_with_key_path(project_id, sa_key).await?;
         let inner = Inner {
             client,
@@ -234,9 +237,11 @@ where
         max_staleness_mins: Option<u16>,
         store: S,
     ) -> EtlResult<Self> {
-        // Registring metrics here to avoid the callers having to remember to call this before
-        // creating a destination.
+        // Perform one time initialization here to avoid forcing the users of `etl-destinations`
+        // to remember to call these methods.
         register_metrics();
+        install_crypto_provider();
+
         let client = BigQueryClient::new_with_key(project_id, sa_key).await?;
         let inner = Inner {
             client,

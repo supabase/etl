@@ -35,7 +35,7 @@ use clap::{Args, Parser};
 use etl::config::{BatchConfig, PgConnectionConfig, PipelineConfig, TlsConfig};
 use etl::pipeline::Pipeline;
 use etl::store::both::memory::MemoryStore;
-use etl_destinations::bigquery::{BigQueryDestination, install_crypto_provider_for_bigquery};
+use etl_destinations::bigquery::BigQueryDestination;
 use std::error::Error;
 use tokio::signal;
 use tracing::{error, info};
@@ -135,9 +135,6 @@ async fn main_impl() -> Result<(), Box<dyn Error>> {
     // Set up logging and tracing
     set_log_level();
     init_tracing();
-
-    // Install required crypto provider for BigQuery authentication
-    install_crypto_provider_for_bigquery();
 
     // Parse command line arguments
     let args = AppArgs::parse();

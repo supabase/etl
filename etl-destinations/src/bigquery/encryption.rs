@@ -7,7 +7,7 @@ static INIT_CRYPTO: Once = Once::new();
 ///
 /// Uses AWS LC cryptographic provider and ensures it's only installed once
 /// across the application lifetime to avoid conflicts.
-pub fn install_crypto_provider_for_bigquery() {
+pub fn install_crypto_provider() {
     INIT_CRYPTO.call_once(|| {
         rustls::crypto::aws_lc_rs::default_provider()
             .install_default()
