@@ -4,10 +4,11 @@
 //! and routes data to configured destinations. Includes telemetry, error handling, and
 //! graceful shutdown capabilities.
 
+use crate::config::load_replicator_config;
 use crate::core::start_replicator_with_config;
-use crate::{config::load_replicator_config, metrics::init_metrics};
 use etl_config::Environment;
 use etl_config::shared::ReplicatorConfig;
+use etl_telemetry::metrics::init_metrics;
 use etl_telemetry::tracing::init_tracing_with_project;
 use std::sync::Arc;
 use thiserror::__private::AsDynError;
@@ -15,7 +16,6 @@ use tracing::{error, info};
 
 mod config;
 mod core;
-mod metrics;
 mod migrations;
 
 /// Entry point for the replicator service.
@@ -34,12 +34,13 @@ fn main() -> anyhow::Result<()> {
         .map(|s| s.project_ref.clone());
 
     // Initialize tracing with project reference
-    let _log_flusher = init_tracing_with_project(env!("CARGO_BIN_NAME"), project_ref)?;
+    let _log_flusher = init_tracing_with_project(env!("CARGO_BIN_NAME"), project_ref.clone())?;
 
     // Initialize Sentry before the async runtime starts
     let _sentry_guard = init_sentry()?;
 
-    init_metrics()?;
+    // Initialize metrics collection
+    init_metrics(project_ref)?;
 
     // We start the runtime.
     tokio::runtime::Builder::new_multi_thread()

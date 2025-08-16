@@ -24,7 +24,7 @@ static PROMETHEUS_HANDLE: Mutex<Option<PrometheusHandle>> = Mutex::new(None);
 /// The handle can be used by the caller to render metrics in a /metrics endpoint.
 /// Multiple threads can safely call this method to get a handle. This method ensures initialization
 /// happens only once and return cloned handles to all callers.
-pub fn init_metrics() -> Result<PrometheusHandle, BuildError> {
+pub fn init_metrics_handle() -> Result<PrometheusHandle, BuildError> {
     let mut prometheus_handle = PROMETHEUS_HANDLE.lock().unwrap();
 
     if let Some(handle) = &*prometheus_handle {
@@ -53,9 +53,17 @@ pub fn init_metrics() -> Result<PrometheusHandle, BuildError> {
     Ok(handle)
 }
 
-/// Initializes metrics endpoint at the default location of `0.0.0.0:9000/metrics`
-pub fn init_default_metrics() -> Result<(), BuildError> {
-    let builder = PrometheusBuilder::new();
+/// This method initialized metrics by installing a global metrics recorder.
+/// It also starts listening on an http endpoint at `0.0.0.0:9000/metrics`
+/// for scrapers to collect metrics from. If the passed project_ref
+/// is not none, it is set as a global label named "project".
+pub fn init_metrics(project_ref: Option<String>) -> Result<(), BuildError> {
+    let mut builder = PrometheusBuilder::new();
+
+    if let Some(project_ref) = project_ref {
+        builder = builder.add_global_label("project", project_ref);
+    }
+
     builder.install()?;
 
     Ok(())
