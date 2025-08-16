@@ -3,6 +3,7 @@ use etl_postgres::replication::slots::get_slot_name;
 use etl_postgres::replication::worker::WorkerType;
 use etl_postgres::schema::TableId;
 use futures::StreamExt;
+use metrics::counter;
 use std::sync::Arc;
 use tokio::pin;
 use tokio_postgres::types::PgLsn;
@@ -18,6 +19,7 @@ use crate::error::{ErrorKind, EtlError, EtlResult};
 use crate::failpoints::{
     START_TABLE_SYNC__AFTER_DATA_SYNC, START_TABLE_SYNC__DURING_DATA_SYNC, etl_fail_point,
 };
+use crate::metrics::ETL_TABLE_SYNC_ROWS_COPIED_TOTAL;
 use crate::replication::client::PgReplicationClient;
 use crate::replication::stream::TableCopyStream;
 use crate::state::table::RetryPolicy;
@@ -229,6 +231,7 @@ where
                         rows_copied += table_rows.len();
                         destination.write_table_rows(table_id, table_rows).await?;
 
+                        counter!(ETL_TABLE_SYNC_ROWS_COPIED_TOTAL).increment(rows_copied as u64);
                         // Fail point to test when the table sync fails after copying one batch.
                         #[cfg(feature = "failpoints")]
                         etl_fail_point(START_TABLE_SYNC__DURING_DATA_SYNC)?;
@@ -255,6 +258,7 @@ where
                 "completed table copy for table {} ({} rows copied)",
                 table_id, rows_copied
             );
+
             // We mark that we finished the copy of the table schema and data.
             {
                 let mut inner = table_sync_worker_state.lock().await;

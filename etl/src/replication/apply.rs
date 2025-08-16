@@ -3,6 +3,7 @@ use etl_postgres::replication::slots::get_slot_name;
 use etl_postgres::replication::worker::WorkerType;
 use etl_postgres::schema::TableId;
 use futures::{FutureExt, StreamExt};
+use metrics::counter;
 use postgres_replication::protocol;
 use postgres_replication::protocol::{LogicalReplicationMessage, ReplicationMessage};
 use std::future::{Future, pending};
@@ -18,6 +19,7 @@ use crate::concurrency::signal::SignalRx;
 use crate::conversions::event::{Event, EventType, convert_message_to_event};
 use crate::destination::Destination;
 use crate::error::{ErrorKind, EtlError, EtlResult};
+use crate::metrics::ETL_APPLY_EVENTS_COPIED_TOTAL;
 use crate::replication::client::PgReplicationClient;
 use crate::replication::stream::EventsStream;
 use crate::state::table::{RetryPolicy, TableReplicationError};
@@ -504,12 +506,13 @@ where
             let events_batch =
                 std::mem::replace(&mut state.events_batch, Vec::with_capacity(max_batch_size));
 
-            info!(
-                "sending batch of {} events to destination",
-                events_batch.len()
-            );
+            let num_events = events_batch.len();
+            info!("sending batch of {} events to destination", num_events);
 
             destination.write_events(events_batch).await?;
+
+            counter!(ETL_APPLY_EVENTS_COPIED_TOTAL).increment(num_events as u64);
+
             state.last_batch_send_time = Instant::now();
         }
 
