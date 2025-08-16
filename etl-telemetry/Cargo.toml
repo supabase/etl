@@ -6,8 +6,10 @@ edition = "2024"
 [dependencies]
 etl-config = { workspace = true }
 
+metrics-exporter-prometheus = { workspace = true, features = ["http-listener"] }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+tokio = { workspace = true }
 tracing = { workspace = true, default-features = true }
 tracing-appender = { workspace = true }
 tracing-log = { workspace = true, features = ["std", "log-tracer"] }

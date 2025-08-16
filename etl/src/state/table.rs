@@ -307,6 +307,19 @@ impl TableReplicationPhaseType {
             Self::Errored => true,
         }
     }
+
+    pub fn as_static_str(&self) -> &'static str {
+        match self {
+            TableReplicationPhaseType::Init => "init",
+            TableReplicationPhaseType::DataSync => "data_sync",
+            TableReplicationPhaseType::FinishedCopy => "finished_copy",
+            TableReplicationPhaseType::SyncWait => "sync_wait",
+            TableReplicationPhaseType::Catchup => "catchup",
+            TableReplicationPhaseType::SyncDone => "sync_done",
+            TableReplicationPhaseType::Ready => "ready",
+            TableReplicationPhaseType::Errored => "errored",
+        }
+    }
 }
 
 impl<'a> From<&'a TableReplicationPhase> for TableReplicationPhaseType {
@@ -326,15 +339,6 @@ impl<'a> From<&'a TableReplicationPhase> for TableReplicationPhaseType {
 
 impl fmt::Display for TableReplicationPhaseType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Init => write!(f, "init"),
-            Self::DataSync => write!(f, "data_sync"),
-            Self::FinishedCopy => write!(f, "finished_copy"),
-            Self::SyncWait => write!(f, "sync_wait"),
-            Self::Catchup => write!(f, "catchup"),
-            Self::SyncDone => write!(f, "sync_done"),
-            Self::Ready => write!(f, "ready"),
-            Self::Errored => write!(f, "errored"),
-        }
+        write!(f, "{}", self.as_static_str())
     }
 }

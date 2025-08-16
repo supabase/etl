@@ -5,3 +5,4 @@
 
 #[cfg(feature = "bigquery")]
 pub mod bigquery;
+mod metrics;

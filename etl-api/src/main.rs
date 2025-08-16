@@ -1,7 +1,7 @@
 use anyhow::anyhow;
 use etl_api::{config::ApiConfig, startup::Application};
 use etl_config::{Environment, load_config, shared::PgConnectionConfig};
-use etl_telemetry::init_tracing;
+use etl_telemetry::tracing::init_tracing;
 use std::env;
 use std::sync::Arc;
 use tracing::{error, info};

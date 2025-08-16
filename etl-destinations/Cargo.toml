@@ -22,6 +22,7 @@ gcp-bigquery-client = { workspace = true, optional = true, features = [
     "rust-tls",
     "aws-lc-rs",
 ] }
+metrics = { workspace = true }
 prost = { workspace = true, optional = true }
 rustls = { workspace = true, optional = true, features = [
     "aws-lc-rs",

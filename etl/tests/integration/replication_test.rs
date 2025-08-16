@@ -5,7 +5,7 @@ use etl::test_utils::pipeline::test_slot_name;
 use etl::test_utils::table::assert_table_schema;
 use etl_postgres::schema::ColumnSchema;
 use etl_postgres::tokio::test_utils::{TableModification, id_column_schema};
-use etl_telemetry::init_test_tracing;
+use etl_telemetry::tracing::init_test_tracing;
 use futures::StreamExt;
 use postgres_replication::LogicalReplicationStream;
 use postgres_replication::protocol::{LogicalReplicationMessage, ReplicationMessage};

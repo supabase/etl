@@ -15,7 +15,16 @@ use tracing::trace;
 // operations but is called multiple times during tests.
 static PROMETHEUS_HANDLE: Mutex<Option<PrometheusHandle>> = Mutex::new(None);
 
-pub fn init_metrics() -> Result<PrometheusHandle, BuildError> {
+/// This method initializes metrics by:
+///
+/// 1. Installing a global metrics recorder.
+/// 2. Running a background task to run upkeep on the collected metrics to avoid unbounded memory growth
+/// 3. Returning a handle to the recorder.
+///
+/// The handle can be used by the caller to render metrics in a /metrics endpoint.
+/// Multiple threads can safely call this method to get a handle. This method ensures initialization
+/// happens only once and return cloned handles to all callers.
+pub fn init_metrics_handle() -> Result<PrometheusHandle, BuildError> {
     let mut prometheus_handle = PROMETHEUS_HANDLE.lock().unwrap();
 
     if let Some(handle) = &*prometheus_handle {
@@ -42,4 +51,20 @@ pub fn init_metrics() -> Result<PrometheusHandle, BuildError> {
     });
 
     Ok(handle)
+}
+
+/// This method initialized metrics by installing a global metrics recorder.
+/// It also starts listening on an http endpoint at `0.0.0.0:9000/metrics`
+/// for scrapers to collect metrics from. If the passed project_ref
+/// is not none, it is set as a global label named "project".
+pub fn init_metrics(project_ref: Option<String>) -> Result<(), BuildError> {
+    let mut builder = PrometheusBuilder::new();
+
+    if let Some(project_ref) = project_ref {
+        builder = builder.add_global_label("project", project_ref);
+    }
+
+    builder.install()?;
+
+    Ok(())
 }

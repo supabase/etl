@@ -15,7 +15,7 @@ use etl_config::shared::BatchConfig;
 use etl_postgres::replication::slots::get_slot_name;
 use etl_postgres::replication::worker::WorkerType;
 use etl_postgres::tokio::test_utils::TableModification;
-use etl_telemetry::init_test_tracing;
+use etl_telemetry::tracing::init_test_tracing;
 use rand::random;
 
 #[tokio::test(flavor = "multi_thread")]

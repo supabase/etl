@@ -106,6 +106,7 @@ pub mod error;
 #[cfg(feature = "failpoints")]
 pub mod failpoints;
 pub mod macros;
+mod metrics;
 pub mod pipeline;
 pub mod replication;
 pub mod state;

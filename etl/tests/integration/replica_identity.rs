@@ -7,7 +7,7 @@ use etl::test_utils::pipeline::create_pipeline;
 use etl::test_utils::test_destination_wrapper::TestDestinationWrapper;
 use etl::types::{Cell, EventType, PipelineId};
 use etl_postgres::tokio::test_utils::TableModification;
-use etl_telemetry::init_test_tracing;
+use etl_telemetry::tracing::init_test_tracing;
 use rand::distr::Alphanumeric;
 use rand::{Rng, random};
 

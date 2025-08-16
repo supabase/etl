@@ -5,7 +5,7 @@ use etl_api::routes::destinations::{
 use etl_api::routes::pipelines::{CreatePipelineRequest, CreatePipelineResponse};
 use etl_config::SerializableSecretString;
 use etl_config::shared::DestinationConfig;
-use etl_telemetry::init_test_tracing;
+use etl_telemetry::tracing::init_test_tracing;
 use reqwest::StatusCode;
 
 use crate::{

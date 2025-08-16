@@ -11,10 +11,13 @@ use gcp_bigquery_client::{
     model::{query_request::QueryRequest, query_response::ResultSet},
     storage::{ColumnType, FieldDescriptor, StreamName, TableDescriptor},
 };
+use metrics::gauge;
 use std::fmt;
+use std::time::Instant;
 use tracing::info;
 
 use crate::bigquery::encoding::BigQueryTableRow;
+use crate::metrics::{BQ_BATCH_SEND_MILLISECONDS_TOTAL, BQ_BATCH_SIZE};
 
 /// Maximum byte size for streaming data to BigQuery.
 const MAX_SIZE_BYTES: usize = 9 * 1024 * 1024;
@@ -315,12 +318,18 @@ impl BigQueryClient {
             let (rows, num_processed_rows) =
                 StorageApi::create_rows(table_descriptor, table_rows, MAX_SIZE_BYTES);
 
+            let before_sending = Instant::now();
+
             let mut append_rows_stream = self
                 .client
                 .storage_mut()
                 .append_rows(&default_stream, rows, ETL_TRACE_ID.to_owned())
                 .await
                 .map_err(bq_error_to_etl_error)?;
+
+            gauge!(BQ_BATCH_SIZE).set(num_processed_rows as f64);
+            let time_taken_to_send = before_sending.elapsed().as_millis();
+            gauge!(BQ_BATCH_SEND_MILLISECONDS_TOTAL).set(time_taken_to_send as f64);
 
             if let Some(append_rows_response) = append_rows_stream.next().await {
                 let append_rows_response = append_rows_response
