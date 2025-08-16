@@ -8,7 +8,6 @@ use etl::test_utils::pipeline::{create_pipeline, create_pipeline_with};
 use etl::test_utils::test_destination_wrapper::TestDestinationWrapper;
 use etl::test_utils::test_schema::{TableSelection, insert_mock_data, setup_test_database_schema};
 use etl::types::{EventType, PgNumeric, PipelineId};
-use etl_destinations::bigquery::install_crypto_provider;
 use etl_telemetry::tracing::init_test_tracing;
 use rand::random;
 use std::str::FromStr;
@@ -23,8 +22,6 @@ use crate::common::bigquery::{
 #[tokio::test(flavor = "multi_thread")]
 async fn table_copy_and_streaming_with_restart() {
     init_test_tracing();
-
-    install_crypto_provider();
 
     let mut database = spawn_source_database().await;
     let database_schema = setup_test_database_schema(&database, TableSelection::Both).await;
@@ -167,7 +164,6 @@ async fn table_copy_and_streaming_with_restart() {
 #[tokio::test(flavor = "multi_thread")]
 async fn table_insert_update_delete() {
     init_test_tracing();
-    install_crypto_provider();
 
     let database = spawn_source_database().await;
     let database_schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
@@ -283,7 +279,6 @@ async fn table_insert_update_delete() {
 #[tokio::test(flavor = "multi_thread")]
 async fn table_subsequent_updates() {
     init_test_tracing();
-    install_crypto_provider();
 
     let mut database_1 = spawn_source_database().await;
     let mut database_2 = database_1.duplicate().await;
@@ -371,7 +366,6 @@ async fn table_subsequent_updates() {
 #[tokio::test(flavor = "multi_thread")]
 async fn table_truncate_with_batching() {
     init_test_tracing();
-    install_crypto_provider();
 
     let mut database = spawn_source_database().await;
     let database_schema = setup_test_database_schema(&database, TableSelection::Both).await;
@@ -493,7 +487,6 @@ async fn table_truncate_with_batching() {
 #[tokio::test(flavor = "multi_thread")]
 async fn table_nullable_scalar_columns() {
     init_test_tracing();
-    install_crypto_provider();
 
     let database = spawn_source_database().await;
     let bigquery_database = setup_bigquery_connection().await;
@@ -702,7 +695,6 @@ async fn table_nullable_scalar_columns() {
 #[tokio::test(flavor = "multi_thread")]
 async fn table_nullable_array_columns() {
     init_test_tracing();
-    install_crypto_provider();
 
     let database = spawn_source_database().await;
     let bigquery_database = setup_bigquery_connection().await;
@@ -937,7 +929,6 @@ async fn table_nullable_array_columns() {
 #[tokio::test(flavor = "multi_thread")]
 async fn table_non_nullable_scalar_columns() {
     init_test_tracing();
-    install_crypto_provider();
 
     let database = spawn_source_database().await;
     let bigquery_database = setup_bigquery_connection().await;
@@ -1187,7 +1178,6 @@ async fn table_non_nullable_scalar_columns() {
 #[tokio::test(flavor = "multi_thread")]
 async fn table_non_nullable_array_columns() {
     init_test_tracing();
-    install_crypto_provider();
 
     let database = spawn_source_database().await;
     let bigquery_database = setup_bigquery_connection().await;
@@ -1493,7 +1483,6 @@ async fn table_non_nullable_array_columns() {
 #[tokio::test(flavor = "multi_thread")]
 async fn table_array_with_null_values() {
     init_test_tracing();
-    install_crypto_provider();
 
     let database = spawn_source_database().await;
     let bigquery_database = setup_bigquery_connection().await;
