@@ -8,7 +8,7 @@ use etl::types::PipelineId;
 use etl_config::shared::{
     BatchConfig, DestinationConfig, PgConnectionConfig, PipelineConfig, ReplicatorConfig,
 };
-use etl_destinations::bigquery::BigQueryDestination;
+use etl_destinations::bigquery::{BigQueryDestination, install_crypto_provider_for_bigquery};
 use secrecy::ExposeSecret;
 use tokio::signal::unix::{SignalKind, signal};
 use tracing::{debug, info, warn};
@@ -49,6 +49,8 @@ pub async fn start_replicator_with_config(
             service_account_key,
             max_staleness_mins,
         } => {
+            install_crypto_provider_for_bigquery();
+
             let destination = BigQueryDestination::new_with_key(
                 project_id.clone(),
                 dataset_id.clone(),

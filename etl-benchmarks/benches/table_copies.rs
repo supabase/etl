@@ -7,7 +7,7 @@ use etl::test_utils::notify::NotifyingStore;
 use etl::types::{Event, TableRow};
 use etl_config::Environment;
 use etl_config::shared::{BatchConfig, PgConnectionConfig, PipelineConfig, TlsConfig};
-use etl_destinations::bigquery::BigQueryDestination;
+use etl_destinations::bigquery::{BigQueryDestination, install_crypto_provider_for_bigquery};
 use etl_postgres::schema::TableId;
 use etl_telemetry::tracing::init_tracing;
 use sqlx::postgres::PgPool;
@@ -359,6 +359,8 @@ async fn start_pipeline(args: RunArgs) -> Result<(), Box<dyn Error>> {
         DestinationType::Null => BenchDestination::Null(NullDestination),
 
         DestinationType::BigQuery => {
+            install_crypto_provider_for_bigquery();
+
             let project_id = args
                 .bq_project_id
                 .ok_or("BigQuery project ID is required when using BigQuery destination")?;
