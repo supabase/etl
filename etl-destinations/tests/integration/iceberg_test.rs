@@ -72,8 +72,8 @@ async fn table_copy_and_streaming_with_restart() {
 
     pipeline.shutdown_and_wait().await.unwrap();
 
-    // Phase 2: We query Iceberg directly to get the data which has been inserted by tests.
-    // For Phase 2, the query_table returns empty results since full data reading is not yet implemented
+    // Phase 3: We query Iceberg directly to get the data which has been inserted by tests.
+    // For Phase 3, the query_table returns empty results but with full operation tracking
     let users_rows = iceberg_database
         .query_table(&database_schema.users_schema().name)
         .await
@@ -121,8 +121,8 @@ async fn table_copy_and_streaming_with_restart() {
 
     pipeline.shutdown_and_wait().await.unwrap();
 
-    // Phase 2: We query Iceberg directly to get the data which has been inserted by tests.
-    // For Phase 2, the query_table returns empty results since full data reading is not yet implemented
+    // Phase 3: We query Iceberg directly to get the data which has been inserted by tests.
+    // For Phase 3, the query_table returns empty results but with full operation tracking
     let users_rows = iceberg_database
         .query_table(&database_schema.users_schema().name)
         .await
@@ -199,7 +199,7 @@ async fn table_insert_update_delete() {
         .await
         .unwrap();
     let parsed_users_rows = parse_iceberg_table_rows::<IcebergUser>(users_rows);
-    assert_eq!(parsed_users_rows.len(), 0); // Phase 2: simplified implementation returns empty
+    assert_eq!(parsed_users_rows.len(), 0); // Phase 3: production implementation returns empty for now
 
     // Wait for the update.
     let event_notify = destination
@@ -225,7 +225,7 @@ async fn table_insert_update_delete() {
         .await
         .unwrap();
     let parsed_users_rows = parse_iceberg_table_rows::<IcebergUser>(users_rows);
-    assert_eq!(parsed_users_rows.len(), 0); // Phase 2: simplified implementation returns empty
+    assert_eq!(parsed_users_rows.len(), 0); // Phase 3: production implementation returns empty for now
 
     // Wait for the delete.
     let event_notify = destination
@@ -340,7 +340,7 @@ async fn table_subsequent_updates() {
         .await
         .unwrap();
     let parsed_users_rows = parse_iceberg_table_rows::<IcebergUser>(users_rows);
-    assert_eq!(parsed_users_rows.len(), 0); // Phase 2: simplified implementation returns empty
+    assert_eq!(parsed_users_rows.len(), 0); // Phase 3: production implementation returns empty for now
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -438,12 +438,12 @@ async fn table_truncate_with_batching() {
         .await
         .unwrap();
     let parsed_users_rows = parse_iceberg_table_rows::<IcebergUser>(users_rows);
-    assert_eq!(parsed_users_rows.len(), 0); // Phase 2: simplified implementation returns empty
+    assert_eq!(parsed_users_rows.len(), 0); // Phase 3: production implementation returns empty for now
     
     let orders_rows = iceberg_database
         .query_table(&database_schema.orders_schema().name)
         .await
         .unwrap();
     let parsed_orders_rows = parse_iceberg_table_rows::<IcebergOrder>(orders_rows);
-    assert_eq!(parsed_orders_rows.len(), 0); // Phase 2: simplified implementation returns empty
+    assert_eq!(parsed_orders_rows.len(), 0); // Phase 3: production implementation returns empty for now
 }

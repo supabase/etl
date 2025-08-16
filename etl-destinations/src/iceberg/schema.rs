@@ -2,7 +2,7 @@
 
 use etl::error::{ErrorKind, EtlError, EtlResult};
 use etl::{etl_error};
-use etl::types::{Cell, TableSchema, Type as PostgresType, ColumnSchema};
+use etl::types::{Cell, ColumnSchema, TableSchema, Type as PostgresType};
 use tokio_postgres::types::Kind;
 
 // PostgreSQL OID constants - match what's used in etl-postgres
