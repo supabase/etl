@@ -1,15 +1,15 @@
 //! Data encoding utilities for converting table rows to Arrow RecordBatch.
 
 use crate::iceberg::schema::{CellToArrowConverter, SchemaMapper};
-use etl::types::{Cell, TableRow};
 use etl::error::{ErrorKind, EtlError, EtlResult};
-use etl::{etl_error};
+use etl::etl_error;
+use etl::types::{Cell, TableRow};
 
 use arrow::{
     array::{
-        ArrayRef, BooleanBuilder, Date32Builder, Float32Builder, Float64Builder,
-        Int16Builder, Int32Builder, Int64Builder, LargeBinaryBuilder, LargeStringBuilder,
-        TimestampMicrosecondBuilder, Time64MicrosecondBuilder, UInt32Builder,
+        ArrayRef, BooleanBuilder, Date32Builder, Float32Builder, Float64Builder, Int16Builder,
+        Int32Builder, Int64Builder, LargeBinaryBuilder, LargeStringBuilder,
+        Time64MicrosecondBuilder, TimestampMicrosecondBuilder, UInt32Builder,
     },
     datatypes::{DataType, Schema as ArrowSchema, TimeUnit},
     record_batch::RecordBatch,
@@ -37,11 +37,12 @@ pub fn batch_rows(
 
     for (idx, row) in rows.iter().enumerate() {
         let row_size = estimate_row_size(row);
-        
+
         // Check if adding this row would exceed limits
-        if current_batch_len > 0 && 
-           (current_batch_len >= max_batch_size || 
-            current_size_bytes + row_size > max_batch_size_bytes) {
+        if current_batch_len > 0
+            && (current_batch_len >= max_batch_size
+                || current_size_bytes + row_size > max_batch_size_bytes)
+        {
             // Add current batch slice
             batches.push(&rows[start_idx..start_idx + current_batch_len]);
             start_idx = idx;
@@ -91,12 +92,13 @@ pub fn rows_to_record_batch(
         arrays.push(array);
     }
 
-    let batch = RecordBatch::try_new(Arc::new(schema.clone()), arrays)
-        .map_err(|e| etl_error!(
+    let batch = RecordBatch::try_new(Arc::new(schema.clone()), arrays).map_err(|e| {
+        etl_error!(
             ErrorKind::DestinationError,
             "Failed to create Arrow RecordBatch",
             e.to_string()
-        ))?;
+        )
+    })?;
 
     debug!(
         rows = batch.num_rows(),
@@ -335,11 +337,11 @@ fn build_timestamp_array(rows: &[TableRow], field_idx: usize) -> EtlResult<Array
 /// Estimates the memory size of a TableRow for batching decisions.
 pub fn estimate_row_size(row: &TableRow) -> usize {
     let mut size = std::mem::size_of::<TableRow>();
-    
+
     for cell in &row.values {
         size += estimate_cell_size(cell);
     }
-    
+
     size
 }
 
@@ -365,18 +367,17 @@ fn estimate_cell_size(cell: &Cell) -> usize {
         Cell::Bytes(b) => b.len() + std::mem::size_of::<Vec<u8>>(),
         Cell::Array(arr) => {
             // Estimate array size (simplified)
-            std::mem::size_of::<etl::types::ArrayCell>() + 
-            match arr {
-                etl::types::ArrayCell::String(vec) => {
-                    vec.iter().map(|opt| opt.as_ref().map(|s| s.len()).unwrap_or(0)).sum::<usize>()
+            std::mem::size_of::<etl::types::ArrayCell>()
+                + match arr {
+                    etl::types::ArrayCell::String(vec) => vec
+                        .iter()
+                        .map(|opt| opt.as_ref().map(|s| s.len()).unwrap_or(0))
+                        .sum::<usize>(),
+                    _ => 100, // Conservative estimate for other array types
                 }
-                _ => 100, // Conservative estimate for other array types
-            }
         }
     }
 }
-
-
 
 #[cfg(test)]
 mod tests {
@@ -472,7 +473,7 @@ mod tests {
 
         // Test with max batch size of 2 rows
         let batches = batch_rows(&rows, 2, 1024 * 1024); // 2 rows max, 1MB max
-        
+
         assert_eq!(batches.len(), 2); // 2 rows in first batch, 1 in second
         assert_eq!(batches[0].len(), 2);
         assert_eq!(batches[1].len(), 1);
@@ -519,11 +520,11 @@ mod tests {
 
         // Test with max batch size of 2 rows
         let batches = batch_rows(&rows, 2, 1024 * 1024); // 2 rows max, 1MB max
-        
+
         assert_eq!(batches.len(), 2); // 2 rows in first batch, 1 in second
         assert_eq!(batches[0].len(), 2);
         assert_eq!(batches[1].len(), 1);
-        
+
         // Check that slices point to original data (zero-copy)
         assert_eq!(batches[0][0].values[0], Cell::I64(1));
         assert_eq!(batches[0][1].values[0], Cell::I64(2));

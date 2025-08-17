@@ -9,19 +9,19 @@ use std::collections::HashMap;
 pub struct IcebergConfig {
     /// Catalog configuration
     pub catalog: CatalogConfig,
-    
+
     /// Namespace for Iceberg tables
     pub namespace: String,
-    
+
     /// Optional table prefix
     pub table_prefix: Option<String>,
-    
+
     /// Storage configuration
     pub storage: StorageConfig,
-    
+
     /// Writer configuration
     pub writer_config: WriterConfig,
-    
+
     /// CDC configuration
     pub cdc_config: CdcConfig,
 }
@@ -115,19 +115,18 @@ pub struct WriterConfig {
     /// Batch size for writing (default: 1000)
     #[serde(default = "default_batch_size")]
     pub batch_size: usize,
-    
+
     /// Maximum batch size in bytes (default: 30MB, optimized for S3)
     #[serde(default = "default_max_batch_size_bytes")]
     pub max_batch_size_bytes: usize,
-    
+
     /// Maximum time to wait before committing (default: 10s for low latency)
     #[serde(default = "default_max_commit_time_ms")]
     pub max_commit_time_ms: u64,
-    
+
     /// Enable metrics collection
     #[serde(default = "default_enable_metrics")]
     pub enable_metrics: bool,
-    
     // Note: Compression, target file size, and file management are now handled
     // automatically by the native Iceberg Writer API for optimal performance
 }
@@ -140,15 +139,15 @@ pub struct CdcConfig {
     /// Enable delete operations (default: true)
     #[serde(default = "default_enable_deletes")]
     pub enable_deletes: bool,
-    
+
     /// Track change types in data (default: true)
     #[serde(default = "default_track_changes")]
     pub track_changes: bool,
-    
+
     /// Add LSN column for ordering (default: true)
     #[serde(default = "default_add_lsn_column")]
     pub add_lsn_column: bool,
-    
+
     /// Add timestamp column (default: true)
     #[serde(default = "default_add_timestamp_column")]
     pub add_timestamp_column: bool,
@@ -266,7 +265,6 @@ impl IcebergConfig {
         }
     }
 
-
     /// Creates an AWS Glue catalog configuration.
     ///
     /// For use with AWS Glue Data Catalog and S3 storage.
@@ -304,7 +302,7 @@ impl WriterConfig {
         Self {
             batch_size: 1000,
             max_batch_size_bytes: 30 * 1024 * 1024, // 30MB for S3 Tables
-            max_commit_time_ms: 10_000, // 10s max latency
+            max_commit_time_ms: 10_000,             // 10s max latency
             enable_metrics: true,
         }
     }
@@ -315,10 +313,10 @@ impl WriterConfig {
 pub struct TableConfig {
     /// Override partition strategy for this table
     pub partition_strategy: Option<PartitionStrategy>,
-    
+
     /// Override sort order for this table
     pub sort_columns: Option<Vec<String>>,
-    
+
     /// Custom table properties
     pub properties: HashMap<String, String>,
 }
@@ -349,7 +347,7 @@ mod tests {
 
         let json = serde_json::to_string(&config).unwrap();
         let deserialized: IcebergConfig = serde_json::from_str(&json).unwrap();
-        
+
         match deserialized.catalog {
             CatalogConfig::Rest { uri, .. } => assert_eq!(uri, "http://localhost:8181"),
             _ => panic!("Wrong catalog type"),
@@ -411,5 +409,4 @@ mod tests {
         assert_eq!(config.max_commit_time_ms, 10_000); // 10s
         assert!(config.enable_metrics);
     }
-
 }

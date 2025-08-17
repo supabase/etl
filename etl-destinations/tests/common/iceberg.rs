@@ -9,8 +9,8 @@ use etl_destinations::iceberg::IcebergDestination;
 use std::collections::HashMap;
 use std::fmt;
 use std::str::FromStr;
-use uuid::Uuid;
 use tracing::debug;
+use uuid::Uuid;
 
 /// Environment variable name for the Iceberg REST catalog URI.
 /// Can also use ICEBERG_CATALOG_URI for Docker-based tests.
@@ -41,10 +41,10 @@ fn random_namespace() -> String {
 /// ```rust
 /// // Create a test database instance
 /// let db = IcebergDatabase::new().await;
-/// 
+///
 /// // Create a destination for testing
 /// let destination = db.build_destination(store).await;
-/// 
+///
 /// // Query tables after test operations
 /// let results = db.query_table("public_users").await.unwrap();
 /// ```
@@ -66,20 +66,22 @@ impl IcebergDatabase {
         let namespace = std::env::var(ICEBERG_NAMESPACE_ENV_NAME)
             .or_else(|_| std::env::var("ICEBERG_NAMESPACE"))
             .unwrap_or_else(|_| random_namespace());
-        
+
         let catalog_uri = std::env::var(ICEBERG_CATALOG_URI_ENV_NAME)
             .or_else(|_| std::env::var("ICEBERG_CATALOG_URI"))
             .unwrap_or_else(|_| "http://localhost:8181".to_string());
-        
+
         let warehouse = std::env::var(ICEBERG_WAREHOUSE_ENV_NAME)
             .or_else(|_| std::env::var("ICEBERG_WAREHOUSE"))
             .unwrap_or_else(|_| "file:///tmp/iceberg-warehouse".to_string());
-        
+
         let auth_token = std::env::var("TESTS_ICEBERG_AUTH_TOKEN").ok();
-        
+
         if std::env::var(ICEBERG_CATALOG_URI_ENV_NAME).is_err() {
-            eprintln!("Warning: Using default Iceberg configuration for tests. Set {} and {} for custom REST catalog testing.", 
-                     ICEBERG_CATALOG_URI_ENV_NAME, ICEBERG_WAREHOUSE_ENV_NAME);
+            eprintln!(
+                "Warning: Using default Iceberg configuration for tests. Set {} and {} for custom REST catalog testing.",
+                ICEBERG_CATALOG_URI_ENV_NAME, ICEBERG_WAREHOUSE_ENV_NAME
+            );
         }
 
         Self {
@@ -150,7 +152,7 @@ impl IcebergDatabase {
             table = %formatted_table_name,
             "Phase 2: Attempting real Iceberg table query"
         );
-        
+
         // Try to create a destination and query the table
         // This is a simplified approach for testing
         match self.try_query_real_table(&formatted_table_name).await {
@@ -174,47 +176,57 @@ impl IcebergDatabase {
             }
         }
     }
-    
+
     /// Helper method to attempt real table querying.
-    async fn try_query_real_table(&self, table_name: &str) -> Result<Vec<IcebergRow>, Box<dyn std::error::Error>> {
+    async fn try_query_real_table(
+        &self,
+        table_name: &str,
+    ) -> Result<Vec<IcebergRow>, Box<dyn std::error::Error>> {
         use etl_destinations::iceberg::IcebergClient;
-        
+
         // Create a client and attempt to query
         let client = IcebergClient::new_with_rest_catalog(
             self.catalog_uri.clone(),
             self.warehouse.clone(),
             self.namespace.clone(),
             self.auth_token.clone(),
-        ).await.map_err(|e| format!("Failed to create client: {}", e))?;
-        
+        )
+        .await
+        .map_err(|e| format!("Failed to create client: {}", e))?;
+
         // Query the table (limiting to prevent large results in tests)
-        let table_rows = client.query_table(table_name, Some(1000)).await
+        let table_rows = client
+            .query_table(table_name, Some(1000))
+            .await
             .map_err(|e| format!("Failed to query table: {}", e))?;
-        
+
         // Convert TableRows to IcebergRows
-        let iceberg_rows = table_rows.into_iter().map(|row| {
-            let mut columns = std::collections::HashMap::new();
-            
-            // For simplicity, convert each Cell to IcebergValue
-            // In a real implementation, we'd need proper column name mapping
-            for (idx, cell) in row.values.iter().enumerate() {
-                let value = match cell {
-                    etl::types::Cell::Null => IcebergValue::Null,
-                    etl::types::Cell::Bool(b) => IcebergValue::Boolean(*b),
-                    etl::types::Cell::I32(i) => IcebergValue::Integer(*i as i64),
-                    etl::types::Cell::I64(i) => IcebergValue::Integer(*i),
-                    etl::types::Cell::String(s) => IcebergValue::String(s.clone()),
-                    etl::types::Cell::F64(f) => IcebergValue::Float(*f),
-                    etl::types::Cell::Date(d) => IcebergValue::Date(*d),
-                    etl::types::Cell::TimeStampTz(ts) => IcebergValue::TimestampTz(*ts),
-                    _ => IcebergValue::String(format!("{:?}", cell)), // Fallback to string representation
-                };
-                columns.insert(format!("col_{}", idx), value);
-            }
-            
-            IcebergRow { columns }
-        }).collect();
-        
+        let iceberg_rows = table_rows
+            .into_iter()
+            .map(|row| {
+                let mut columns = std::collections::HashMap::new();
+
+                // For simplicity, convert each Cell to IcebergValue
+                // In a real implementation, we'd need proper column name mapping
+                for (idx, cell) in row.values.iter().enumerate() {
+                    let value = match cell {
+                        etl::types::Cell::Null => IcebergValue::Null,
+                        etl::types::Cell::Bool(b) => IcebergValue::Boolean(*b),
+                        etl::types::Cell::I32(i) => IcebergValue::Integer(*i as i64),
+                        etl::types::Cell::I64(i) => IcebergValue::Integer(*i),
+                        etl::types::Cell::String(s) => IcebergValue::String(s.clone()),
+                        etl::types::Cell::F64(f) => IcebergValue::Float(*f),
+                        etl::types::Cell::Date(d) => IcebergValue::Date(*d),
+                        etl::types::Cell::TimeStampTz(ts) => IcebergValue::TimestampTz(*ts),
+                        _ => IcebergValue::String(format!("{:?}", cell)), // Fallback to string representation
+                    };
+                    columns.insert(format!("col_{}", idx), value);
+                }
+
+                IcebergRow { columns }
+            })
+            .collect();
+
         Ok(iceberg_rows)
     }
 
@@ -326,7 +338,7 @@ impl From<DateTime<Utc>> for IcebergValue {
 
 impl TryFrom<IcebergValue> for bool {
     type Error = ();
-    
+
     fn try_from(value: IcebergValue) -> Result<Self, Self::Error> {
         match value {
             IcebergValue::Boolean(b) => Ok(b),
@@ -337,7 +349,7 @@ impl TryFrom<IcebergValue> for bool {
 
 impl TryFrom<IcebergValue> for i32 {
     type Error = ();
-    
+
     fn try_from(value: IcebergValue) -> Result<Self, Self::Error> {
         match value {
             IcebergValue::Integer(i) => Ok(i as i32),
@@ -348,7 +360,7 @@ impl TryFrom<IcebergValue> for i32 {
 
 impl TryFrom<IcebergValue> for i64 {
     type Error = ();
-    
+
     fn try_from(value: IcebergValue) -> Result<Self, Self::Error> {
         match value {
             IcebergValue::Integer(i) => Ok(i),
@@ -359,7 +371,7 @@ impl TryFrom<IcebergValue> for i64 {
 
 impl TryFrom<IcebergValue> for String {
     type Error = ();
-    
+
     fn try_from(value: IcebergValue) -> Result<Self, Self::Error> {
         match value {
             IcebergValue::String(s) => Ok(s),
@@ -447,7 +459,7 @@ mod tests {
     fn test_random_namespace_generation() {
         let ns1 = random_namespace();
         let ns2 = random_namespace();
-        
+
         assert!(ns1.starts_with("etl_tests_"));
         assert!(ns2.starts_with("etl_tests_"));
         assert_ne!(ns1, ns2);
@@ -457,10 +469,10 @@ mod tests {
     fn test_iceberg_value_conversions() {
         let bool_val: IcebergValue = true.into();
         assert_eq!(bool_val, IcebergValue::Boolean(true));
-        
+
         let int_val: IcebergValue = 42i64.into();
         assert_eq!(int_val, IcebergValue::Integer(42));
-        
+
         let str_val: IcebergValue = "test".into();
         assert_eq!(str_val, IcebergValue::String("test".to_string()));
     }
@@ -471,7 +483,7 @@ mod tests {
             .with_column("id", 1i64)
             .with_column("name", "test")
             .with_column("active", true);
-        
+
         assert_eq!(row.get::<i64>("id"), Some(1));
         assert_eq!(row.get::<String>("name"), Some("test".to_string()));
         assert_eq!(row.get::<bool>("active"), Some(true));
@@ -494,7 +506,7 @@ mod tests {
             namespace: "test".to_string(),
             auth_token: None,
         };
-        
+
         let table_name = TableName::new("public".to_string(), "users".to_string());
         let formatted = db.format_table_name(&table_name);
         assert_eq!(formatted, "public_users");

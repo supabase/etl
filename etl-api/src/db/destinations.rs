@@ -110,7 +110,9 @@ impl Decrypt<DestinationConfig> for EncryptedDestinationConfig {
                 auth_token: encrypted_auth_token,
             } => {
                 let auth_token = encrypted_auth_token
-                    .map(|token| decrypt_text(token, encryption_key).map(SerializableSecretString::from))
+                    .map(|token| {
+                        decrypt_text(token, encryption_key).map(SerializableSecretString::from)
+                    })
                     .transpose()?;
 
                 Ok(DestinationConfig::Iceberg {

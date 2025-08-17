@@ -99,7 +99,6 @@ impl SequencedIcebergTableId {
     pub fn next(&self) -> Self {
         Self(self.0.clone(), self.1 + 1)
     }
-
 }
 
 impl FromStr for SequencedIcebergTableId {
@@ -184,27 +183,27 @@ struct Inner<S> {
 ///
 /// Provides PostgreSQL-to-Iceberg data pipeline functionality including streaming writes
 /// and CDC operation handling for Iceberg tables.
-/// 
+///
 /// # Type Parameters
-/// 
+///
 /// * `S` - Store type that implements both [`SchemaStore`] and [`StateStore`] for
 ///   managing table schemas and pipeline state persistence.
-/// 
+///
 /// # Thread Safety
-/// 
+///
 /// This destination is `Clone` and `Send + Sync`, allowing safe use across async tasks.
 /// Internal state is protected by an `Arc<Mutex<>>` for thread-safe access.
-/// 
+///
 /// # Memory Management
-/// 
+///
 /// The destination maintains minimal memory overhead:
 /// - Table creation cache: ~100 entries typical
 /// - Current versions map: ~50 entries typical  
 /// - No row buffering (streaming processing)
 /// - Total overhead: <1MB under normal load
-/// 
+///
 /// # Error Handling
-/// 
+///
 /// All operations return [`EtlResult<T>`] with specific error types:
 /// - `ErrorKind::MissingTableSchema` - Schema not found in store
 /// - `ErrorKind::DestinationError` - Iceberg operation failures
@@ -233,7 +232,8 @@ where
             warehouse,
             namespace.clone(),
             auth_token,
-        ).await?;
+        )
+        .await?;
 
         let inner = Inner {
             client,
@@ -254,7 +254,6 @@ where
         inner: &mut Inner<S>,
         table_id: &TableId,
     ) -> EtlResult<SequencedIcebergTableId> {
-        
         // Get table schema to access the TableName
         let table_schema = inner
             .store
@@ -306,7 +305,7 @@ where
         lsn: PgLsn,
     ) -> EtlResult<()> {
         let mut inner = self.inner.lock().await;
-        
+
         // Ensure table exists and get the sequenced table ID
         let sequenced_table_id = Self::prepare_table_for_streaming(&mut inner, &table_id).await?;
 
@@ -315,25 +314,26 @@ where
         for mut row in rows {
             // Add CDC columns for operation tracking
             row.values.push(operation_type.clone().into_cell());
-            row.values.push(Cell::String(generate_sequence_number(lsn, lsn)));
+            row.values
+                .push(Cell::String(generate_sequence_number(lsn, lsn)));
             enriched_rows.push(row);
         }
 
         let row_count = enriched_rows.len();
-        
+
         // Stream to Iceberg with fallback pattern
         use crate::iceberg::encoding::batch_rows;
-        
+
         // Batch the enriched rows for efficient processing
         let batches = batch_rows(&enriched_rows, MAX_BATCH_SIZE, MAX_BATCH_SIZE_BYTES);
-        
+
         info!(
             table = %table_id,
             total_rows = row_count,
             num_batches = batches.len(),
             "Split rows into batches for streaming"
         );
-        
+
         // Process each batch with automatic retry on failure
         for (batch_idx, batch_rows) in batches.into_iter().enumerate() {
             debug!(
@@ -342,15 +342,16 @@ where
                 batch_size = batch_rows.len(),
                 "Streaming batch to Iceberg table"
             );
-            
+
             Self::stream_rows_with_fallback(
                 &mut inner,
                 &sequenced_table_id,
                 batch_rows.to_vec(), // Convert slice to owned Vec for API compatibility
                 &table_id,
-            ).await?;
+            )
+            .await?;
         }
-        
+
         info!(
             table = %table_id,
             iceberg_table = %sequenced_table_id,
@@ -364,7 +365,7 @@ where
     /// Streams rows to Iceberg with automatic retry on missing table errors.
     ///
     /// Streams rows to Iceberg with automatic retry on missing table errors.
-    /// First attempts optimistic streaming. If the table is missing, 
+    /// First attempts optimistic streaming. If the table is missing,
     /// clears the cache, recreates the table, and retries the operation.
     async fn stream_rows_with_fallback(
         inner: &mut Inner<S>,
@@ -390,7 +391,7 @@ where
                 // Remove the table from our cache since it doesn't exist
                 Self::remove_from_created_tables_cache(inner, sequenced_table_id);
 
-                // Recreate the table 
+                // Recreate the table
                 Self::prepare_table_for_streaming(inner, orig_table_id).await?;
 
                 // Retry the streaming operation
@@ -430,7 +431,7 @@ where
         info!(table = %table_id, "Truncating Iceberg table");
 
         let mut inner = self.inner.lock().await;
-        
+
         // Get table schema for new table creation
         let table_schema = inner
             .store
@@ -443,16 +444,16 @@ where
                     format!("No schema found for table {table_id}")
                 )
             })?;
-        
+
         let iceberg_table_id = table_name_to_iceberg_table_id(&table_schema.name);
-        
+
         // Get current version and create next version
         let current_version = inner
             .current_versions
             .get(&iceberg_table_id)
             .cloned()
             .unwrap_or_else(|| SequencedIcebergTableId::new(iceberg_table_id.clone()));
-        
+
         let next_version = current_version.next();
 
         // Create new empty table with next version
@@ -462,7 +463,9 @@ where
             .await?;
 
         // Update current version tracking
-        inner.current_versions.insert(iceberg_table_id, next_version.clone());
+        inner
+            .current_versions
+            .insert(iceberg_table_id, next_version.clone());
         inner.created_tables.insert(next_version.clone());
 
         // Remove old version from cache
@@ -477,7 +480,11 @@ where
         Ok(())
     }
 
-    async fn write_table_rows(&self, table_id: TableId, table_rows: Vec<TableRow>) -> EtlResult<()> {
+    async fn write_table_rows(
+        &self,
+        table_id: TableId,
+        table_rows: Vec<TableRow>,
+    ) -> EtlResult<()> {
         debug!(
             table = %table_id,
             row_count = table_rows.len(),
@@ -494,7 +501,10 @@ where
     }
 
     async fn write_events(&self, events: Vec<Event>) -> EtlResult<()> {
-        debug!(event_count = events.len(), "Processing events for Iceberg destination");
+        debug!(
+            event_count = events.len(),
+            "Processing events for Iceberg destination"
+        );
 
         for event in events {
             match event {

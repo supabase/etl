@@ -18,12 +18,18 @@ use chrono::{NaiveDate, NaiveTime, Utc};
 use etl::destination::Destination;
 use etl::store::both::memory::MemoryStore;
 use etl::store::schema::SchemaStore;
-use etl::types::{Event, InsertEvent, UpdateEvent, DeleteEvent, TruncateEvent, TableRow, Cell, PgNumeric, ArrayCell};
+use etl::types::{
+    ArrayCell, Cell, DeleteEvent, Event, InsertEvent, PgNumeric, TableRow, TruncateEvent,
+    UpdateEvent,
+};
 use etl_destinations::iceberg::IcebergDestination;
-use etl_postgres::schema::{TableId, TableName, TableSchema, ColumnSchema};
+use etl_postgres::schema::{ColumnSchema, TableId, TableName, TableSchema};
 use serde_json::json;
 use std::str::FromStr;
-use tokio_postgres::{Client, NoTls, types::{Type, PgLsn}};
+use tokio_postgres::{
+    Client, NoTls,
+    types::{PgLsn, Type},
+};
 use uuid::Uuid;
 
 fn skip_integration_tests() -> bool {
@@ -51,11 +57,15 @@ async fn test_iceberg_destination_creation() {
         "test_namespace".to_string(),
         None,
         store,
-    ).await;
+    )
+    .await;
 
     match result {
         Ok(_) => println!("✅ Iceberg destination created successfully"),
-        Err(e) => println!("ℹ️ Destination creation result (infrastructure may not be available): {}", e),
+        Err(e) => println!(
+            "ℹ️ Destination creation result (infrastructure may not be available): {}",
+            e
+        ),
     }
 }
 
@@ -75,7 +85,9 @@ async fn test_iceberg_basic_operations() {
         "test_basic".to_string(),
         None,
         store,
-    ).await {
+    )
+    .await
+    {
         Ok(dest) => dest,
         Err(e) => {
             println!("ℹ️ Skipping test, infrastructure not available: {}", e);
@@ -89,10 +101,7 @@ async fn test_iceberg_basic_operations() {
         start_lsn: PgLsn::from(1000_u64),
         commit_lsn: PgLsn::from(1000_u64),
         table_id,
-        table_row: TableRow::new(vec![
-            Cell::I32(1),
-            Cell::String("test".to_string()),
-        ]),
+        table_row: TableRow::new(vec![Cell::I32(1), Cell::String("test".to_string())]),
     });
 
     match destination.write_events(vec![event]).await {
@@ -129,7 +138,7 @@ fn create_test_table_schema(table_id: TableId, table_name: TableName) -> TableSc
         ColumnSchema::new("ip_address".to_string(), Type::INET, 0, true, false),
         ColumnSchema::new("mac_address".to_string(), Type::MACADDR, 0, true, false),
     ];
-    
+
     TableSchema::new(table_id, table_name, column_schemas)
 }
 
@@ -143,12 +152,15 @@ async fn test_comprehensive_data_types() {
     println!("🧪 Testing comprehensive PostgreSQL data type support");
 
     let store = MemoryStore::new();
-    
+
     // Create and populate schema store
     let table_id = TableId(12345);
-    let table_name = TableName::new("data_types_test".to_string(), "comprehensive_table".to_string());
+    let table_name = TableName::new(
+        "data_types_test".to_string(),
+        "comprehensive_table".to_string(),
+    );
     let table_schema = create_test_table_schema(table_id, table_name);
-    
+
     if let Err(e) = store.store_table_schema(table_schema).await {
         println!("❌ Failed to store table schema: {}", e);
         return;
@@ -160,7 +172,9 @@ async fn test_comprehensive_data_types() {
         "data_types_test".to_string(),
         None,
         store,
-    ).await {
+    )
+    .await
+    {
         Ok(dest) => dest,
         Err(e) => {
             println!("ℹ️ Skipping test, infrastructure not available: {}", e);
@@ -185,7 +199,11 @@ async fn test_comprehensive_data_types() {
             Cell::Bool(true),
             Cell::Date(NaiveDate::from_ymd_opt(1995, 6, 15).unwrap()),
             Cell::Time(NaiveTime::from_hms_opt(14, 30, 0).unwrap()),
-            Cell::TimeStamp(chrono::DateTime::from_timestamp(1640995200, 0).unwrap().naive_utc()),
+            Cell::TimeStamp(
+                chrono::DateTime::from_timestamp(1640995200, 0)
+                    .unwrap()
+                    .naive_utc(),
+            ),
             Cell::TimeStampTz(Utc::now()),
             Cell::Uuid(Uuid::new_v4()),
             Cell::Json(json!({"department": "engineering", "level": "senior"})),
@@ -221,17 +239,21 @@ async fn test_cdc_operations_pipeline() {
     println!("🧪 Testing CDC operations: Insert, Update, Delete, Truncate");
 
     let store = MemoryStore::new();
-    
+
     // Create simple table schema for CDC testing
     let table_id = TableId(54321);
     let table_name = TableName::new("cdc_test".to_string(), "operations_table".to_string());
-    let simple_schema = TableSchema::new(table_id, table_name, vec![
-        ColumnSchema::new("id".to_string(), Type::INT4, 0, false, true),
-        ColumnSchema::new("name".to_string(), Type::VARCHAR, 100, true, false),
-        ColumnSchema::new("value".to_string(), Type::INT4, 0, true, false),
-        ColumnSchema::new("updated_at".to_string(), Type::TIMESTAMPTZ, 0, true, false),
-    ]);
-    
+    let simple_schema = TableSchema::new(
+        table_id,
+        table_name,
+        vec![
+            ColumnSchema::new("id".to_string(), Type::INT4, 0, false, true),
+            ColumnSchema::new("name".to_string(), Type::VARCHAR, 100, true, false),
+            ColumnSchema::new("value".to_string(), Type::INT4, 0, true, false),
+            ColumnSchema::new("updated_at".to_string(), Type::TIMESTAMPTZ, 0, true, false),
+        ],
+    );
+
     if let Err(e) = store.store_table_schema(simple_schema).await {
         println!("❌ Failed to store table schema: {}", e);
         return;
@@ -243,7 +265,9 @@ async fn test_cdc_operations_pipeline() {
         "cdc_test".to_string(),
         None,
         store,
-    ).await {
+    )
+    .await
+    {
         Ok(dest) => dest,
         Err(e) => {
             println!("ℹ️ Skipping test, infrastructure not available: {}", e);
@@ -253,46 +277,61 @@ async fn test_cdc_operations_pipeline() {
 
     // Test sequence: Insert → Update → Delete → Truncate
     let operations = vec![
-        ("INSERT", Event::Insert(InsertEvent {
-            start_lsn: PgLsn::from(1000_u64),
-            commit_lsn: PgLsn::from(1000_u64),
-            table_id,
-            table_row: TableRow::new(vec![
-                Cell::I32(1),
-                Cell::String("Initial Record".to_string()),
-                Cell::I32(100),
-                Cell::TimeStampTz(Utc::now()),
-            ]),
-        })),
-        ("UPDATE", Event::Update(UpdateEvent {
-            start_lsn: PgLsn::from(1001_u64),
-            commit_lsn: PgLsn::from(1001_u64),
-            table_id,
-            table_row: TableRow::new(vec![
-                Cell::I32(1),
-                Cell::String("Updated Record".to_string()),
-                Cell::I32(200),
-                Cell::TimeStampTz(Utc::now()),
-            ]),
-            old_table_row: None,
-        })),
-        ("DELETE", Event::Delete(DeleteEvent {
-            start_lsn: PgLsn::from(1002_u64),
-            commit_lsn: PgLsn::from(1002_u64),
-            table_id,
-            old_table_row: Some((false, TableRow::new(vec![
-                Cell::I32(1),
-                Cell::String("Updated Record".to_string()),
-                Cell::I32(200),
-                Cell::TimeStampTz(Utc::now()),
-            ]))),
-        })),
-        ("TRUNCATE", Event::Truncate(TruncateEvent {
-            start_lsn: PgLsn::from(1003_u64),
-            commit_lsn: PgLsn::from(1003_u64),
-            rel_ids: vec![table_id.0],
-            options: 0,
-        })),
+        (
+            "INSERT",
+            Event::Insert(InsertEvent {
+                start_lsn: PgLsn::from(1000_u64),
+                commit_lsn: PgLsn::from(1000_u64),
+                table_id,
+                table_row: TableRow::new(vec![
+                    Cell::I32(1),
+                    Cell::String("Initial Record".to_string()),
+                    Cell::I32(100),
+                    Cell::TimeStampTz(Utc::now()),
+                ]),
+            }),
+        ),
+        (
+            "UPDATE",
+            Event::Update(UpdateEvent {
+                start_lsn: PgLsn::from(1001_u64),
+                commit_lsn: PgLsn::from(1001_u64),
+                table_id,
+                table_row: TableRow::new(vec![
+                    Cell::I32(1),
+                    Cell::String("Updated Record".to_string()),
+                    Cell::I32(200),
+                    Cell::TimeStampTz(Utc::now()),
+                ]),
+                old_table_row: None,
+            }),
+        ),
+        (
+            "DELETE",
+            Event::Delete(DeleteEvent {
+                start_lsn: PgLsn::from(1002_u64),
+                commit_lsn: PgLsn::from(1002_u64),
+                table_id,
+                old_table_row: Some((
+                    false,
+                    TableRow::new(vec![
+                        Cell::I32(1),
+                        Cell::String("Updated Record".to_string()),
+                        Cell::I32(200),
+                        Cell::TimeStampTz(Utc::now()),
+                    ]),
+                )),
+            }),
+        ),
+        (
+            "TRUNCATE",
+            Event::Truncate(TruncateEvent {
+                start_lsn: PgLsn::from(1003_u64),
+                commit_lsn: PgLsn::from(1003_u64),
+                rel_ids: vec![table_id.0],
+                options: 0,
+            }),
+        ),
     ];
 
     for (operation_name, event) in operations {
@@ -301,7 +340,7 @@ async fn test_cdc_operations_pipeline() {
             Ok(_) => println!("  ✅ {} operation processed successfully", operation_name),
             Err(e) => println!("  ℹ️ {} operation result: {}", operation_name, e),
         }
-        
+
         // Small delay between operations
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
@@ -325,14 +364,18 @@ async fn test_schema_evolution() {
     let store = MemoryStore::new();
     let table_id = TableId(67890);
     let table_name = TableName::new("schema_evolution".to_string(), "evolving_table".to_string());
-    
+
     // Start with basic schema
-    let initial_schema = TableSchema::new(table_id, table_name.clone(), vec![
-        ColumnSchema::new("id".to_string(), Type::INT4, 0, false, true),
-        ColumnSchema::new("name".to_string(), Type::VARCHAR, 100, true, false),
-        ColumnSchema::new("created_at".to_string(), Type::TIMESTAMPTZ, 0, true, false),
-    ]);
-    
+    let initial_schema = TableSchema::new(
+        table_id,
+        table_name.clone(),
+        vec![
+            ColumnSchema::new("id".to_string(), Type::INT4, 0, false, true),
+            ColumnSchema::new("name".to_string(), Type::VARCHAR, 100, true, false),
+            ColumnSchema::new("created_at".to_string(), Type::TIMESTAMPTZ, 0, true, false),
+        ],
+    );
+
     if let Err(e) = store.store_table_schema(initial_schema).await {
         println!("❌ Failed to store initial schema: {}", e);
         return;
@@ -344,7 +387,9 @@ async fn test_schema_evolution() {
         "schema_evolution".to_string(),
         None,
         store.clone(),
-    ).await {
+    )
+    .await
+    {
         Ok(dest) => dest,
         Err(e) => {
             println!("ℹ️ Skipping test, infrastructure not available: {}", e);
@@ -372,13 +417,17 @@ async fn test_schema_evolution() {
 
     // Evolve schema - add new column
     println!("  🔧 Evolving schema (adding description column)...");
-    let evolved_schema = TableSchema::new(table_id, table_name, vec![
-        ColumnSchema::new("id".to_string(), Type::INT4, 0, false, true),
-        ColumnSchema::new("name".to_string(), Type::VARCHAR, 100, true, false),
-        ColumnSchema::new("created_at".to_string(), Type::TIMESTAMPTZ, 0, true, false),
-        ColumnSchema::new("description".to_string(), Type::TEXT, 0, true, false), // New column
-    ]);
-    
+    let evolved_schema = TableSchema::new(
+        table_id,
+        table_name,
+        vec![
+            ColumnSchema::new("id".to_string(), Type::INT4, 0, false, true),
+            ColumnSchema::new("name".to_string(), Type::VARCHAR, 100, true, false),
+            ColumnSchema::new("created_at".to_string(), Type::TIMESTAMPTZ, 0, true, false),
+            ColumnSchema::new("description".to_string(), Type::TEXT, 0, true, false), // New column
+        ],
+    );
+
     if let Err(e) = store.store_table_schema(evolved_schema).await {
         println!("❌ Failed to store evolved schema: {}", e);
         return;
@@ -421,7 +470,7 @@ impl LivePipelineTest {
         // Connect to PostgreSQL for setup
         let conn_str = "host=localhost port=5434 dbname=test_db user=test_user password=test_pass";
         let (postgres_client, connection) = tokio_postgres::connect(conn_str, NoTls).await?;
-        
+
         tokio::spawn(async move {
             if let Err(e) = connection.await {
                 eprintln!("Database connection error: {}", e);
@@ -430,20 +479,24 @@ impl LivePipelineTest {
 
         // Create shared store for schema management
         let store = MemoryStore::new();
-        
+
         // Create simple test table schema
         let table_id = TableId(98765);
         let table_name = TableName::new("live_test".to_string(), "pipeline_table".to_string());
-        let table_schema = TableSchema::new(table_id, table_name, vec![
-            ColumnSchema::new("id".to_string(), Type::INT4, 0, false, true),
-            ColumnSchema::new("name".to_string(), Type::VARCHAR, 100, true, false),
-            ColumnSchema::new("value".to_string(), Type::INT4, 0, true, false),
-            ColumnSchema::new("created_at".to_string(), Type::TIMESTAMPTZ, 0, true, false),
-        ]);
-        
+        let table_schema = TableSchema::new(
+            table_id,
+            table_name,
+            vec![
+                ColumnSchema::new("id".to_string(), Type::INT4, 0, false, true),
+                ColumnSchema::new("name".to_string(), Type::VARCHAR, 100, true, false),
+                ColumnSchema::new("value".to_string(), Type::INT4, 0, true, false),
+                ColumnSchema::new("created_at".to_string(), Type::TIMESTAMPTZ, 0, true, false),
+            ],
+        );
+
         // Populate the schema store
         store.store_table_schema(table_schema).await?;
-        
+
         // Create Iceberg destination
         let iceberg_destination = IcebergDestination::new(
             "http://localhost:8182".to_string(),
@@ -451,7 +504,8 @@ impl LivePipelineTest {
             "live_test".to_string(),
             None,
             store.clone(),
-        ).await?;
+        )
+        .await?;
 
         Ok(Self {
             postgres_client,
@@ -462,13 +516,18 @@ impl LivePipelineTest {
 
     async fn setup_postgres_table(&self) -> Result<TableId, Box<dyn std::error::Error>> {
         let table_id = TableId(98765);
-        
+
         // Create schema and table
-        self.postgres_client.execute("CREATE SCHEMA IF NOT EXISTS live_test", &[]).await?;
-        self.postgres_client.execute("DROP TABLE IF EXISTS live_test.pipeline_table CASCADE", &[]).await?;
-        
-        self.postgres_client.execute(
-            r#"
+        self.postgres_client
+            .execute("CREATE SCHEMA IF NOT EXISTS live_test", &[])
+            .await?;
+        self.postgres_client
+            .execute("DROP TABLE IF EXISTS live_test.pipeline_table CASCADE", &[])
+            .await?;
+
+        self.postgres_client
+            .execute(
+                r#"
             CREATE TABLE live_test.pipeline_table (
                 id SERIAL PRIMARY KEY,
                 name VARCHAR(100),
@@ -476,19 +535,25 @@ impl LivePipelineTest {
                 created_at TIMESTAMPTZ DEFAULT NOW()
             )
             "#,
-            &[],
-        ).await?;
+                &[],
+            )
+            .await?;
 
         // Enable logical replication
-        self.postgres_client.execute(
-            "ALTER TABLE live_test.pipeline_table REPLICA IDENTITY FULL",
-            &[],
-        ).await?;
+        self.postgres_client
+            .execute(
+                "ALTER TABLE live_test.pipeline_table REPLICA IDENTITY FULL",
+                &[],
+            )
+            .await?;
 
         Ok(table_id)
     }
 
-    async fn process_live_cdc_events(&self, table_id: TableId) -> Result<(), Box<dyn std::error::Error>> {
+    async fn process_live_cdc_events(
+        &self,
+        table_id: TableId,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         // Create events that simulate real CDC capture
         let events = vec![
             Event::Insert(InsertEvent {
@@ -529,23 +594,33 @@ impl LivePipelineTest {
                 start_lsn: PgLsn::from(3003_u64),
                 commit_lsn: PgLsn::from(3003_u64),
                 table_id,
-                old_table_row: Some((false, TableRow::new(vec![
-                    Cell::I32(2),
-                    Cell::String("Live Pipeline Record 2".to_string()),
-                    Cell::I32(200),
-                    Cell::TimeStampTz(Utc::now()),
-                ]))),
+                old_table_row: Some((
+                    false,
+                    TableRow::new(vec![
+                        Cell::I32(2),
+                        Cell::String("Live Pipeline Record 2".to_string()),
+                        Cell::I32(200),
+                        Cell::TimeStampTz(Utc::now()),
+                    ]),
+                )),
             }),
         ];
 
-        println!("  📤 Processing {} CDC events through live pipeline...", events.len());
-        
+        println!(
+            "  📤 Processing {} CDC events through live pipeline...",
+            events.len()
+        );
+
         for (i, event) in events.iter().enumerate() {
-            match self.iceberg_destination.write_events(vec![event.clone()]).await {
+            match self
+                .iceberg_destination
+                .write_events(vec![event.clone()])
+                .await
+            {
                 Ok(_) => println!("    ✅ Event {} processed successfully", i + 1),
                 Err(e) => println!("    ℹ️ Event {} result: {}", i + 1, e),
             }
-            
+
             // Simulate realistic timing
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
@@ -616,19 +691,29 @@ async fn test_edge_cases_and_null_values() {
     println!("🧪 Testing edge cases and NULL value handling");
 
     let store = MemoryStore::new();
-    
+
     // Create schema that allows NULLs
     let table_id = TableId(11111);
     let table_name = TableName::new("edge_cases".to_string(), "null_test_table".to_string());
-    let null_schema = TableSchema::new(table_id, table_name, vec![
-        ColumnSchema::new("id".to_string(), Type::INT4, 0, false, true),
-        ColumnSchema::new("nullable_text".to_string(), Type::TEXT, 0, true, false),
-        ColumnSchema::new("nullable_int".to_string(), Type::INT4, 0, true, false),
-        ColumnSchema::new("nullable_bool".to_string(), Type::BOOL, 0, true, false),
-        ColumnSchema::new("nullable_json".to_string(), Type::JSONB, 0, true, false),
-        ColumnSchema::new("nullable_array".to_string(), Type::TEXT_ARRAY, 0, true, false),
-    ]);
-    
+    let null_schema = TableSchema::new(
+        table_id,
+        table_name,
+        vec![
+            ColumnSchema::new("id".to_string(), Type::INT4, 0, false, true),
+            ColumnSchema::new("nullable_text".to_string(), Type::TEXT, 0, true, false),
+            ColumnSchema::new("nullable_int".to_string(), Type::INT4, 0, true, false),
+            ColumnSchema::new("nullable_bool".to_string(), Type::BOOL, 0, true, false),
+            ColumnSchema::new("nullable_json".to_string(), Type::JSONB, 0, true, false),
+            ColumnSchema::new(
+                "nullable_array".to_string(),
+                Type::TEXT_ARRAY,
+                0,
+                true,
+                false,
+            ),
+        ],
+    );
+
     if let Err(e) = store.store_table_schema(null_schema).await {
         println!("❌ Failed to store null test schema: {}", e);
         return;
@@ -640,7 +725,9 @@ async fn test_edge_cases_and_null_values() {
         "edge_cases".to_string(),
         None,
         store,
-    ).await {
+    )
+    .await
+    {
         Ok(dest) => dest,
         Err(e) => {
             println!("ℹ️ Skipping test, infrastructure not available: {}", e);
@@ -677,10 +764,10 @@ async fn test_edge_cases_and_null_values() {
         table_id,
         table_row: TableRow::new(vec![
             Cell::I32(2),
-            Cell::String("".to_string()), // Empty string
-            Cell::I32(0), // Zero value
-            Cell::Bool(false), // False boolean
-            Cell::Json(json!({})), // Empty JSON object
+            Cell::String("".to_string()),           // Empty string
+            Cell::I32(0),                           // Zero value
+            Cell::Bool(false),                      // False boolean
+            Cell::Json(json!({})),                  // Empty JSON object
             Cell::Array(ArrayCell::String(vec![])), // Empty array
         ]),
     });
@@ -712,7 +799,8 @@ async fn test_error_conditions() {
         "test".to_string(),
         None,
         store.clone(),
-    ).await;
+    )
+    .await;
 
     match invalid_result {
         Ok(_) => println!("    ⚠️ Unexpected success with invalid config"),
@@ -726,7 +814,9 @@ async fn test_error_conditions() {
         "error_test".to_string(),
         None,
         store,
-    ).await {
+    )
+    .await
+    {
         println!("  🚫 Testing missing schema handling...");
         let missing_schema_event = Event::Insert(InsertEvent {
             start_lsn: PgLsn::from(5000_u64),

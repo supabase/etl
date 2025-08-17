@@ -28,21 +28,21 @@
 //! - **Memory**: <5MB typical usage (configurable 50MB limit)
 //! - **Latency**: ~70ms for 1,000-row batches
 
+use crate::iceberg::config::WriterConfig;
+use crate::iceberg::encoding::rows_to_record_batch;
+use crate::iceberg::schema::SchemaMapper;
+use arrow::datatypes::{DataType as ArrowDataType, Field as ArrowField, Schema as ArrowSchema};
 use etl::error::{ErrorKind, EtlError, EtlResult};
-use etl::{etl_error};
+use etl::etl_error;
 use etl::types::{Cell, TableRow, TableSchema};
-use iceberg::{Catalog, NamespaceIdent, TableCreation, TableIdent, Error as IcebergError};
 use iceberg::table::Table;
+use iceberg::{Catalog, Error as IcebergError, NamespaceIdent, TableCreation, TableIdent};
 use iceberg_catalog_rest::{RestCatalog, RestCatalogConfig};
+use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tracing::{info, debug, warn, error};
-use crate::iceberg::encoding::rows_to_record_batch;
-use crate::iceberg::schema::SchemaMapper;
-use crate::iceberg::config::WriterConfig;
-use arrow::datatypes::{Schema as ArrowSchema, Field as ArrowField, DataType as ArrowDataType};
-use std::collections::HashMap;
+use tracing::{debug, error, info, warn};
 
 /// Maximum byte size for streaming data to Iceberg (optimized for S3 throughput).
 const MAX_SIZE_BYTES: usize = 30 * 1024 * 1024; // 30MB
@@ -52,59 +52,54 @@ const MAX_SIZE_BYTES: usize = 30 * 1024 * 1024; // 30MB
 const ETL_TRACE_ID: &str = "ETL IcebergClient";
 
 /// Maps Iceberg errors to appropriate ETL error kinds with detailed context.
-/// 
+///
 /// Provides comprehensive error classification similar to BigQuery destination
 /// for consistent error handling across the ETL pipeline.
 fn iceberg_error_to_etl_error(err: IcebergError) -> EtlError {
     let (kind, description) = match err.to_string().to_lowercase() {
         // Authentication and authorization errors
-        msg if msg.contains("auth") || msg.contains("token") => {
-            (ErrorKind::AuthenticationError, "Iceberg authentication error")
-        }
+        msg if msg.contains("auth") || msg.contains("token") => (
+            ErrorKind::AuthenticationError,
+            "Iceberg authentication error",
+        ),
         msg if msg.contains("permission") => {
             (ErrorKind::PermissionDenied, "Iceberg permission denied")
         }
-        msg if msg.contains("unauthorized") => {
-            (ErrorKind::AuthenticationError, "Iceberg unauthorized access")
-        }
-        
+        msg if msg.contains("unauthorized") => (
+            ErrorKind::AuthenticationError,
+            "Iceberg unauthorized access",
+        ),
+
         // Table and schema errors
         msg if msg.contains("table") && msg.contains("not found") => {
             (ErrorKind::DestinationError, "Iceberg table not found")
         }
-        msg if msg.contains("schema") => {
-            (ErrorKind::MissingTableSchema, "Iceberg schema error")
-        }
-        
+        msg if msg.contains("schema") => (ErrorKind::MissingTableSchema, "Iceberg schema error"),
+
         // Network and I/O errors
-        msg if msg.contains("connection") => {
-            (ErrorKind::DestinationConnectionFailed, "Iceberg connection error")
-        }
+        msg if msg.contains("connection") => (
+            ErrorKind::DestinationConnectionFailed,
+            "Iceberg connection error",
+        ),
         msg if msg.contains("timeout") => {
             (ErrorKind::DestinationIoError, "Iceberg request timeout")
         }
         msg if msg.contains("i/o") || msg.contains("io error") => {
             (ErrorKind::DestinationIoError, "Iceberg I/O error")
         }
-        
+
         // Catalog-specific errors
-        msg if msg.contains("catalog") => {
-            (ErrorKind::DestinationError, "Iceberg catalog error")
-        }
-        
+        msg if msg.contains("catalog") => (ErrorKind::DestinationError, "Iceberg catalog error"),
+
         // Writer and transaction errors
-        msg if msg.contains("writer") => {
-            (ErrorKind::DestinationIoError, "Iceberg writer error")
-        }
+        msg if msg.contains("writer") => (ErrorKind::DestinationIoError, "Iceberg writer error"),
         msg if msg.contains("transaction") => {
             (ErrorKind::InvalidState, "Iceberg transaction error")
         }
-        
+
         // Data validation errors
-        msg if msg.contains("invalid") => {
-            (ErrorKind::InvalidData, "Iceberg data validation error")
-        }
-        
+        msg if msg.contains("invalid") => (ErrorKind::InvalidData, "Iceberg data validation error"),
+
         // Generic fallback
         _ => (ErrorKind::DestinationError, "Iceberg operation failed"),
     };
@@ -118,18 +113,21 @@ fn object_store_error_to_etl_error(err: object_store::Error) -> EtlError {
         object_store::Error::NotFound { .. } => {
             (ErrorKind::DestinationError, "Object storage path not found")
         }
-        object_store::Error::AlreadyExists { .. } => {
-            (ErrorKind::InvalidState, "Object storage path already exists")
-        }
+        object_store::Error::AlreadyExists { .. } => (
+            ErrorKind::InvalidState,
+            "Object storage path already exists",
+        ),
         object_store::Error::NotModified { .. } => {
             (ErrorKind::InvalidState, "Object storage not modified")
         }
-        object_store::Error::PermissionDenied { .. } => {
-            (ErrorKind::PermissionDenied, "Object storage permission denied")
-        }
-        object_store::Error::Unauthenticated { .. } => {
-            (ErrorKind::AuthenticationError, "Object storage authentication required")
-        }
+        object_store::Error::PermissionDenied { .. } => (
+            ErrorKind::PermissionDenied,
+            "Object storage permission denied",
+        ),
+        object_store::Error::Unauthenticated { .. } => (
+            ErrorKind::AuthenticationError,
+            "Object storage authentication required",
+        ),
         object_store::Error::InvalidPath { .. } => {
             (ErrorKind::InvalidData, "Object storage invalid path")
         }
@@ -172,9 +170,10 @@ fn parquet_error_to_etl_error(err: parquet::errors::ParquetError) -> EtlError {
         parquet::errors::ParquetError::General(_msg) => {
             (ErrorKind::DestinationIoError, "Parquet general error")
         }
-        parquet::errors::ParquetError::NYI(_msg) => {
-            (ErrorKind::DestinationError, "Parquet feature not implemented")
-        }
+        parquet::errors::ParquetError::NYI(_msg) => (
+            ErrorKind::DestinationError,
+            "Parquet feature not implemented",
+        ),
         parquet::errors::ParquetError::EOF(_msg) => {
             (ErrorKind::DestinationIoError, "Parquet unexpected EOF")
         }
@@ -215,7 +214,6 @@ impl IcebergOperationType {
         };
         Cell::String(op_str.to_string())
     }
-    
 }
 
 impl fmt::Display for IcebergOperationType {
@@ -245,21 +243,21 @@ pub struct PagedTableResult {
 ///
 /// Provides methods for table management, data insertion, and query execution
 /// against Iceberg tables with authentication and error handling.
-/// 
+///
 /// The client manages:
 /// - Automatic namespace creation and management  
 /// - Schema caching for optimal performance
 /// - Retry logic with exponential backoff
 /// - Schema conversion between PostgreSQL and Iceberg formats
-/// 
+///
 /// # Thread Safety
-/// 
+///
 /// This client is `Clone` and can be safely shared across async tasks. The internal
 /// schema cache is thread-safe with RwLock protection.
-/// 
+///
 /// # Memory Usage
-/// 
-/// The client maintains minimal memory overhead (~1MB) and uses streaming 
+///
+/// The client maintains minimal memory overhead (~1MB) and uses streaming
 /// processing to stay within configured batch size limits (30MB by default).
 #[derive(Clone, Debug)]
 pub struct IcebergClient {
@@ -283,35 +281,35 @@ impl IcebergClient {
     /// Creates a new [`IcebergClient`] with real REST catalog connectivity.
     ///
     /// Creates a new client with REST catalog connectivity and namespace initialization.
-    /// 
+    ///
     /// # Arguments
-    /// 
+    ///
     /// * `catalog_uri` - REST catalog endpoint (e.g., "http://localhost:8181")  
     /// * `warehouse` - Storage location (e.g., "s3://bucket/warehouse/")
     /// * `namespace` - Table namespace for organization (e.g., "etl_prod")
     /// * `auth_token` - Optional bearer token for REST catalog authentication
-    /// 
+    ///
     /// # Returns
-    /// 
+    ///
     /// Returns an `IcebergClient` configured for production use with connection pooling
     /// and automatic namespace creation.
-    /// 
+    ///
     /// # Errors
-    /// 
+    ///
     /// * `ErrorKind::DestinationError` - If catalog_uri, warehouse, or namespace is empty
     /// * `ErrorKind::DestinationError` - If HTTP client creation fails  
     /// * `ErrorKind::DestinationError` - If catalog connectivity test fails
-    /// 
+    ///
     /// # Example
-    /// 
+    ///
     /// ```rust,no_run
     /// use etl_destinations::iceberg::IcebergClient;
     /// use etl::store::both::memory::MemoryStore;
-    /// 
+    ///
     /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// let client = IcebergClient::new_with_rest_catalog(
     ///     "http://localhost:8181".to_string(),
-    ///     "s3://iceberg-warehouse/".to_string(), 
+    ///     "s3://iceberg-warehouse/".to_string(),
     ///     "production".to_string(),
     ///     None,
     /// ).await?;
@@ -330,7 +328,8 @@ impl IcebergClient {
             namespace,
             auth_token,
             WriterConfig::default(),
-        ).await
+        )
+        .await
     }
 
     /// Creates a new [`IcebergClient`] with custom writer configuration.
@@ -382,10 +381,10 @@ impl IcebergClient {
         let config = config_builder.build();
 
         let catalog = Arc::new(RestCatalog::new(config));
-        
+
         // Verify catalog connectivity and create namespace if needed
         let namespace_ident = NamespaceIdent::new(namespace.clone());
-        
+
         // Check if namespace exists, create if it doesn't
         match catalog.namespace_exists(&namespace_ident).await {
             Ok(true) => {
@@ -393,7 +392,10 @@ impl IcebergClient {
             }
             Ok(false) => {
                 info!(namespace = %namespace, "Creating new namespace");
-                match catalog.create_namespace(&namespace_ident, std::collections::HashMap::new()).await {
+                match catalog
+                    .create_namespace(&namespace_ident, std::collections::HashMap::new())
+                    .await
+                {
                     Ok(_) => info!(namespace = %namespace, "Successfully created namespace"),
                     Err(e) => warn!(
                         namespace = %namespace,
@@ -410,7 +412,7 @@ impl IcebergClient {
                 );
             }
         }
-        
+
         info!(
             catalog_uri = %catalog_uri,
             warehouse = %warehouse,
@@ -429,7 +431,6 @@ impl IcebergClient {
             auth_token,
         })
     }
-
 
     /// Creates a table if it doesn't exist with the given schema.
     ///
@@ -493,39 +494,39 @@ impl IcebergClient {
 
     /// Streams rows to an Iceberg table with efficient batching and retry logic.
     ///
-    /// Streams rows to an Iceberg table with automatic batching 
-    /// to optimize performance for large datasets. Uses fallback logic to 
+    /// Streams rows to an Iceberg table with automatic batching
+    /// to optimize performance for large datasets. Uses fallback logic to
     /// recreate missing tables automatically.
-    /// 
+    ///
     /// # Arguments
-    /// 
+    ///
     /// * `table_name` - Name of the target Iceberg table
     /// * `rows` - Vector of table rows to insert (will be batched automatically)
-    /// 
+    ///
     /// # Returns
-    /// 
+    ///
     /// Returns `Ok(())` when all rows are successfully written to Iceberg.
-    /// 
+    ///
     /// # Errors
-    /// 
+    ///
     /// * `ErrorKind::DestinationError` - If table loading fails
     /// * `ErrorKind::DestinationError` - If schema conversion fails
     /// * `ErrorKind::DestinationError` - If Arrow RecordBatch creation fails
     /// * `ErrorKind::DestinationError` - If Parquet writing fails after retries
-    /// 
+    ///
     /// # Performance
-    /// 
+    ///
     /// - Automatically batches rows into 1,000-row or 30MB chunks
     /// - Uses cached schemas to avoid repeated conversions
     /// - Processes batches sequentially to maintain order
     /// - Converts data to Arrow format for efficient serialization
-    /// 
+    ///
     /// # Example
-    /// 
+    ///
     /// ```rust,no_run
     /// use etl::types::{TableRow, Cell};
     /// # use etl_destinations::iceberg::IcebergClient;
-    /// 
+    ///
     /// # async fn example(client: &IcebergClient) -> Result<(), Box<dyn std::error::Error>> {
     /// let rows = vec![
     ///     TableRow {
@@ -535,20 +536,17 @@ impl IcebergClient {
     ///         ],
     ///     },
     /// ];
-    /// 
+    ///
     /// client.stream_rows("users", rows).await?;
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn stream_rows(
-        &self,
-        table_name: &str,
-        rows: Vec<TableRow>,
-    ) -> EtlResult<()> {
+    pub async fn stream_rows(&self, table_name: &str, rows: Vec<TableRow>) -> EtlResult<()> {
         // For backwards compatibility, default to upsert operations
-        self.stream_rows_with_operation(table_name, rows, IcebergOperationType::Upsert).await
+        self.stream_rows_with_operation(table_name, rows, IcebergOperationType::Upsert)
+            .await
     }
-    
+
     /// Streams rows to Iceberg table with specific CDC operation type.
     pub async fn stream_rows_with_operation(
         &self,
@@ -573,10 +571,10 @@ impl IcebergClient {
 
         // Import batching function for efficient data processing
         use crate::iceberg::encoding::batch_rows;
-        
+
         // Batch rows for optimal S3/cloud storage performance
         let batches = batch_rows(&rows, 1000, MAX_SIZE_BYTES);
-        
+
         info!(
             table = %table_name,
             total_rows = rows.len(),
@@ -588,39 +586,44 @@ impl IcebergClient {
         let table_ident = TableIdent::new(namespace_ident, table_name.to_string());
 
         // Load the table once for all batches (optimization)
-        let table = self.catalog.load_table(&table_ident).await.map_err(iceberg_error_to_etl_error)?;
+        let table = self
+            .catalog
+            .load_table(&table_ident)
+            .await
+            .map_err(iceberg_error_to_etl_error)?;
 
         let table_metadata = table.metadata();
         let schema_mapper = SchemaMapper::new();
         let arrow_schema = self.get_or_create_cached_schema(table_name, table_metadata)?;
-        
+
         // Process each batch separately to maintain memory limits
         let mut total_rows_processed = 0;
         let mut operation_result = Ok(());
-        
+
         for (batch_idx, batch_rows) in batches.into_iter().enumerate() {
             // Check timeout before processing each batch
             if let Err(timeout_err) = self.check_commit_timeout() {
                 operation_result = Err(timeout_err);
                 break;
             }
-            
+
             debug!(
                 table = %table_name,
                 batch = batch_idx + 1,
                 batch_size = batch_rows.len(),
                 "Processing batch"
             );
-            
+
             // Convert batch to Arrow RecordBatch
-            let record_batch = match rows_to_record_batch(&batch_rows, &arrow_schema, &schema_mapper) {
-                Ok(batch) => batch,
-                Err(err) => {
-                    operation_result = Err(err);
-                    break;
-                }
-            };
-            
+            let record_batch =
+                match rows_to_record_batch(&batch_rows, &arrow_schema, &schema_mapper) {
+                    Ok(batch) => batch,
+                    Err(err) => {
+                        operation_result = Err(err);
+                        break;
+                    }
+                };
+
             debug!(
                 table = %table_name,
                 batch = batch_idx + 1,
@@ -633,27 +636,32 @@ impl IcebergClient {
             let write_result = match operation_type {
                 IcebergOperationType::Upsert => {
                     // Upsert operations write to data files (append-only)
-                    self.write_record_batch_with_iceberg_writer(&table, record_batch, batch_idx).await
+                    self.write_record_batch_with_iceberg_writer(&table, record_batch, batch_idx)
+                        .await
                 }
                 IcebergOperationType::Delete => {
                     // Delete operations should write to delete manifest files
                     // For now, we'll implement this as position deletes
-                    self.write_record_batch_as_delete(&table, record_batch, batch_idx).await
+                    self.write_record_batch_as_delete(&table, record_batch, batch_idx)
+                        .await
                 }
             };
-            
+
             if let Err(write_err) = write_result {
                 operation_result = Err(write_err);
                 break;
             }
-            
-            if let Err(track_err) = self.track_write_operation(table_name, batch_rows.len()).await {
+
+            if let Err(track_err) = self
+                .track_write_operation(table_name, batch_rows.len())
+                .await
+            {
                 operation_result = Err(track_err);
                 break;
             }
-            
+
             total_rows_processed += batch_rows.len();
-            
+
             debug!(
                 table = %table_name,
                 batch = batch_idx + 1,
@@ -686,7 +694,6 @@ impl IcebergClient {
             }
         }
     }
-    
 
     /// Drops a table if it exists.
     ///
@@ -705,7 +712,7 @@ impl IcebergClient {
         match self.catalog.table_exists(&table_ident).await {
             Ok(true) => {
                 debug!(table = %table_name, "Table exists, proceeding with drop");
-                
+
                 match self.catalog.drop_table(&table_ident).await {
                     Ok(_) => {
                         info!(table = %table_name, "Successfully dropped Iceberg table");
@@ -774,7 +781,9 @@ impl IcebergClient {
     /// Lists all tables in the namespace.
     /// Lists all tables in the namespace without pagination (for backward compatibility).
     pub async fn list_tables(&self) -> EtlResult<Vec<String>> {
-        self.list_tables_paginated(None, None).await.map(|result| result.tables)
+        self.list_tables_paginated(None, None)
+            .await
+            .map(|result| result.tables)
     }
 
     /// Lists tables in the namespace with pagination support.
@@ -816,12 +825,12 @@ impl IcebergClient {
     /// # }
     /// ```
     pub async fn list_tables_paginated(
-        &self, 
-        page_size: Option<usize>, 
-        page_token: Option<String>
+        &self,
+        page_size: Option<usize>,
+        page_token: Option<String>,
     ) -> EtlResult<PagedTableResult> {
         let effective_page_size = page_size.unwrap_or(1000);
-        
+
         info!(
             namespace = %self.namespace,
             page_size = effective_page_size,
@@ -837,22 +846,23 @@ impl IcebergClient {
                     .into_iter()
                     .map(|ident| ident.name().to_string())
                     .collect();
-                
+
                 // Parse page token to get starting offset
                 let start_offset = if let Some(token) = &page_token {
                     token.parse::<usize>().unwrap_or(0)
                 } else {
                     0
                 };
-                
+
                 // Apply pagination
-                let end_offset = std::cmp::min(start_offset + effective_page_size, all_table_names.len());
+                let end_offset =
+                    std::cmp::min(start_offset + effective_page_size, all_table_names.len());
                 let page_tables = if start_offset < all_table_names.len() {
                     all_table_names[start_offset..end_offset].to_vec()
                 } else {
                     vec![]
                 };
-                
+
                 // Determine if there are more pages
                 let has_more = end_offset < all_table_names.len();
                 let next_page_token = if has_more {
@@ -860,7 +870,7 @@ impl IcebergClient {
                 } else {
                     None
                 };
-                
+
                 debug!(
                     namespace = %self.namespace,
                     total_tables = all_table_names.len(),
@@ -869,7 +879,7 @@ impl IcebergClient {
                     has_more = has_more,
                     "Successfully listed tables with pagination"
                 );
-                
+
                 Ok(PagedTableResult {
                     tables: page_tables,
                     next_page_token,
@@ -912,7 +922,7 @@ impl IcebergClient {
     pub fn start_commit_timeout(&self) {
         let mut start_time = self.commit_start_time.write().unwrap();
         *start_time = Some(Instant::now());
-        
+
         debug!(
             timeout_ms = self.writer_config.max_commit_time_ms,
             "Started commit timeout tracking"
@@ -924,18 +934,18 @@ impl IcebergClient {
     /// Returns an error if the operation has exceeded the configured timeout.
     pub fn check_commit_timeout(&self) -> EtlResult<()> {
         let start_time = self.commit_start_time.read().unwrap();
-        
+
         if let Some(start) = *start_time {
             let elapsed = start.elapsed();
             let timeout = Duration::from_millis(self.writer_config.max_commit_time_ms);
-            
+
             if elapsed > timeout {
                 error!(
                     elapsed_ms = elapsed.as_millis(),
                     timeout_ms = self.writer_config.max_commit_time_ms,
                     "Commit timeout exceeded"
                 );
-                
+
                 return Err(etl_error!(
                     ErrorKind::DestinationError,
                     "Commit timeout exceeded",
@@ -946,7 +956,7 @@ impl IcebergClient {
                     )
                 ));
             }
-            
+
             debug!(
                 elapsed_ms = elapsed.as_millis(),
                 timeout_ms = self.writer_config.max_commit_time_ms,
@@ -954,7 +964,7 @@ impl IcebergClient {
                 "Commit timeout check passed"
             );
         }
-        
+
         Ok(())
     }
 
@@ -964,16 +974,16 @@ impl IcebergClient {
     pub fn clear_commit_timeout(&self) {
         let mut start_time = self.commit_start_time.write().unwrap();
         *start_time = None;
-        
+
         debug!("Cleared commit timeout tracking");
     }
 
     /// Gets or creates a cached Arrow schema for the given table.
     /// Uses in-memory cache to avoid repeated schema conversions for better performance.
     fn get_or_create_cached_schema(
-        &self, 
-        table_name: &str, 
-        metadata: &iceberg::spec::TableMetadata
+        &self,
+        table_name: &str,
+        metadata: &iceberg::spec::TableMetadata,
     ) -> EtlResult<Arc<ArrowSchema>> {
         // Try to get from cache first (read lock)
         {
@@ -983,48 +993,55 @@ impl IcebergClient {
                 return Ok(cached_schema.clone());
             }
         }
-        
+
         // Not in cache, create new schema (write lock)
         let mut cache = self.schema_cache.write().unwrap();
-        
+
         // Check again in case another thread created it while we were waiting
         if let Some(cached_schema) = cache.get(table_name) {
             debug!(table = %table_name, "Found schema created by another thread");
             return Ok(cached_schema.clone());
         }
-        
+
         // Create new schema
         let schema = self.create_arrow_schema_from_metadata(metadata)?;
         let arc_schema = Arc::new(schema);
-        
+
         // Cache it
         cache.insert(table_name.to_string(), arc_schema.clone());
-        
+
         debug!(
             table = %table_name,
             fields = arc_schema.fields().len(),
             "Created and cached new Arrow schema"
         );
-        
+
         Ok(arc_schema)
     }
 
     /// Creates an Arrow schema from Iceberg table metadata.
     /// Creates an Arrow schema from Iceberg table metadata.
-    fn create_arrow_schema_from_metadata(&self, metadata: &iceberg::spec::TableMetadata) -> EtlResult<ArrowSchema> {
+    fn create_arrow_schema_from_metadata(
+        &self,
+        metadata: &iceberg::spec::TableMetadata,
+    ) -> EtlResult<ArrowSchema> {
         let iceberg_schema = metadata.current_schema();
-        
+
         debug!(
             schema_id = iceberg_schema.schema_id(),
             "Converting Iceberg schema to Arrow schema dynamically"
         );
-        
+
         // Convert the actual Iceberg schema to Arrow schema using our existing method
         let base_arrow_schema = self.iceberg_to_arrow_schema(iceberg_schema)?;
-        
+
         // Create a new schema that includes both the original fields and CDC columns
-        let mut all_fields: Vec<ArrowField> = base_arrow_schema.fields().iter().map(|f| (**f).clone()).collect();
-        
+        let mut all_fields: Vec<ArrowField> = base_arrow_schema
+            .fields()
+            .iter()
+            .map(|f| (**f).clone())
+            .collect();
+
         // Add CDC columns for consistency with BigQuery implementation
         // These are required for change data capture operations
         all_fields.push(ArrowField::new(
@@ -1042,20 +1059,19 @@ impl IcebergClient {
             ArrowDataType::Timestamp(arrow::datatypes::TimeUnit::Microsecond, Some("UTC".into())),
             false,
         ));
-        
+
         let final_schema = ArrowSchema::new(all_fields);
-        
+
         debug!(
             schema_id = iceberg_schema.schema_id(),
             original_fields = base_arrow_schema.fields().len(),
             total_fields = final_schema.fields().len(),
             "Successfully created dynamic Arrow schema with CDC columns"
         );
-        
+
         Ok(final_schema)
     }
-    
-    
+
     /// Tracks write operations for monitoring and debugging.
     /// Tracks write operations for monitoring and debugging.
     async fn track_write_operation(&self, table_name: &str, row_count: usize) -> EtlResult<()> {
@@ -1064,7 +1080,7 @@ impl IcebergClient {
         // 2. Log to audit trail
         // 3. Update table statistics
         // 4. Notify monitoring systems
-        
+
         info!(
             table = %table_name,
             namespace = %self.namespace,
@@ -1072,10 +1088,9 @@ impl IcebergClient {
             trace_id = ETL_TRACE_ID,
             "Tracked write operation"
         );
-        
+
         Ok(())
     }
-    
 
     /// Writes a RecordBatch using native Iceberg Writer API.
     ///
@@ -1118,7 +1133,7 @@ impl IcebergClient {
 
         // Since iceberg-rs 0.6 doesn't have a complete writer API, we'll use
         // the table transaction API to write Parquet files and commit them manually
-        
+
         // Create a unique file path for this batch
         let data_file_path = format!(
             "{}/data/batch_{:08}_{}.parquet",
@@ -1126,25 +1141,29 @@ impl IcebergClient {
             batch_idx,
             uuid::Uuid::new_v4()
         );
-        
+
         // Write RecordBatch to Parquet using Arrow's parquet writer
         let object_store = table.file_io().clone();
-        let file_path = url::Url::parse(&data_file_path)
-            .map_err(|e| etl_error!(
+        let file_path = url::Url::parse(&data_file_path).map_err(|e| {
+            etl_error!(
                 ErrorKind::InvalidData,
                 "Failed to parse data file path",
                 e.to_string()
-            ))?;
-        
+            )
+        })?;
+
         // Convert Arrow schema to Parquet-compatible schema
-        let _parquet_schema = arrow::datatypes::Schema::new(
-            record_batch.schema().fields().clone()
-        );
-        
+        let _parquet_schema = arrow::datatypes::Schema::new(record_batch.schema().fields().clone());
+
         // Write the RecordBatch as a Parquet file
-        let writer = object_store.new_output(&file_path.path())
-            .map_err(|e| etl_error!(ErrorKind::DestinationIoError, "Failed to create output file", e.to_string()))?;
-        
+        let writer = object_store.new_output(&file_path.path()).map_err(|e| {
+            etl_error!(
+                ErrorKind::DestinationIoError,
+                "Failed to create output file",
+                e.to_string()
+            )
+        })?;
+
         // Since iceberg OutputFile doesn't implement AsyncWrite, we need to use a different approach
         // We'll write to a temporary buffer and then write to the output file
         let mut buffer = Vec::new();
@@ -1154,27 +1173,33 @@ impl IcebergClient {
                 &mut buffer,
                 record_batch.schema(),
                 None, // Use default writer properties
-            ).map_err(parquet_error_to_etl_error)?;
-            
+            )
+            .map_err(parquet_error_to_etl_error)?;
+
             // Write the record batch
-            parquet_writer.write(&record_batch)
+            parquet_writer
+                .write(&record_batch)
                 .map_err(parquet_error_to_etl_error)?;
-            
+
             // Close the writer to finalize the file
-            parquet_writer.close()
-                .map_err(parquet_error_to_etl_error)?;
+            parquet_writer.close().map_err(parquet_error_to_etl_error)?;
         }
-        
+
         // Get buffer size before moving it
         let buffer_len = buffer.len();
-        
+
         // Write the buffer to the output file
-        writer.write(buffer.into()).await
-            .map_err(|e| etl_error!(ErrorKind::DestinationIoError, "Failed to write Parquet data to storage", e.to_string()))?;
-        
+        writer.write(buffer.into()).await.map_err(|e| {
+            etl_error!(
+                ErrorKind::DestinationIoError,
+                "Failed to write Parquet data to storage",
+                e.to_string()
+            )
+        })?;
+
         // Create a DataFile entry for the Iceberg manifest
-        use iceberg::spec::{DataFileBuilder, DataFileFormat, DataContentType};
-        
+        use iceberg::spec::{DataContentType, DataFileBuilder, DataFileFormat};
+
         let _data_file = DataFileBuilder::default()
             .content(DataContentType::Data)
             .file_path(data_file_path.clone())
@@ -1182,17 +1207,23 @@ impl IcebergClient {
             .record_count(record_batch.num_rows() as u64)
             .file_size_in_bytes(buffer_len as u64)
             .build()
-            .map_err(|e| etl_error!(ErrorKind::DestinationIoError, "Failed to create DataFile", e.to_string()))?;
-        
+            .map_err(|e| {
+                etl_error!(
+                    ErrorKind::DestinationIoError,
+                    "Failed to create DataFile",
+                    e.to_string()
+                )
+            })?;
+
         // For iceberg-rs 0.6, we need to use a different approach since the transaction API
         // may not be fully available. For now, we'll log that the file was written
         // and track it for a future commit operation.
         // TODO: Implement proper transaction handling when iceberg-rs supports it
-        
+
         // For now, we'll simulate the commit process
         let _commit_timeout = Duration::from_millis(self.writer_config.max_commit_time_ms);
         let commit_start = Instant::now();
-        
+
         // Log the data file information that would be committed
         debug!(
             file_path = %data_file_path,
@@ -1200,7 +1231,7 @@ impl IcebergClient {
             record_count = record_batch.num_rows(),
             "Data file written, ready for commit"
         );
-        
+
         let elapsed = commit_start.elapsed();
         info!(
             batch = batch_idx + 1,
@@ -1210,10 +1241,10 @@ impl IcebergClient {
             write_time_ms = elapsed.as_millis(),
             "Successfully wrote RecordBatch to Parquet file in Iceberg table location"
         );
-        
+
         Ok(())
     }
-    
+
     /// Writes a RecordBatch as delete operations using Iceberg position deletes.
     async fn write_record_batch_as_delete(
         &self,
@@ -1227,20 +1258,20 @@ impl IcebergClient {
             batch = batch_idx + 1,
             "Writing RecordBatch as delete operations to Iceberg table"
         );
-        
+
         // For iceberg-rs 0.6, delete operations are limited
         // In a full implementation, this would:
         // 1. Create position delete files with row positions
         // 2. Write delete manifest entries
         // 3. Update table metadata with delete files
-        
+
         // For now, we'll track the delete operation but note the limitation
         warn!(
             batch = batch_idx + 1,
             rows = record_batch.num_rows(),
             "Delete operations are tracked but not yet fully implemented in iceberg-rs 0.6"
         );
-        
+
         // Log the delete operation details for audit purposes
         info!(
             batch = batch_idx + 1,
@@ -1248,19 +1279,23 @@ impl IcebergClient {
             operation = "DELETE",
             "Processed delete operation (tracked but data retained due to iceberg-rs limitations)"
         );
-        
+
         // TODO: Implement actual delete file writing when iceberg-rs supports it
         // This would involve:
         // - Creating position delete files
         // - Writing to delete manifest
         // - Committing delete transaction
-        
+
         Ok(())
     }
 
     /// Queries a table and returns results.
     /// Queries a table and returns results.
-    pub async fn query_table(&self, table_name: &str, limit: Option<usize>) -> EtlResult<Vec<etl::types::TableRow>> {
+    pub async fn query_table(
+        &self,
+        table_name: &str,
+        limit: Option<usize>,
+    ) -> EtlResult<Vec<etl::types::TableRow>> {
         info!(
             table = %table_name,
             namespace = %self.namespace,
@@ -1287,7 +1322,7 @@ impl IcebergClient {
         // Implement real data reading from Iceberg table
         let metadata = table.metadata();
         let snapshot = metadata.current_snapshot();
-        
+
         if snapshot.is_none() {
             debug!(
                 table = %table_name,
@@ -1295,23 +1330,23 @@ impl IcebergClient {
             );
             return Ok(vec![]);
         }
-        
+
         let snapshot = snapshot.unwrap();
         debug!(
             table = %table_name,
             snapshot_id = snapshot.snapshot_id(),
             "Found current snapshot, scanning for data files"
         );
-        
+
         // Get the table schema for converting Arrow records to TableRows
         let iceberg_schema = metadata.current_schema();
         let arrow_schema = self.iceberg_to_arrow_schema(iceberg_schema)?;
-        
+
         // Read manifest files to find data files
         let mut all_rows = Vec::new();
         let mut total_files_scanned = 0;
         let mut total_records_read = 0;
-        
+
         // Get manifest list from snapshot
         let manifest_list_path = snapshot.manifest_list();
         debug!(
@@ -1319,13 +1354,13 @@ impl IcebergClient {
             manifest_list = %manifest_list_path,
             "Reading manifest list"
         );
-        
+
         // For iceberg-rs 0.6, we need to implement file scanning manually
         // This is a simplified implementation that reads data files directly
-        
+
         // Since we can't easily iterate through manifest files in this version,
         // we'll implement a basic file scanning approach
-        
+
         // Use the file IO to scan for Parquet files in the table location
         let table_location = metadata.location();
         debug!(
@@ -1333,19 +1368,22 @@ impl IcebergClient {
             location = %table_location,
             "Scanning table location for data files"
         );
-        
+
         // For now, we'll scan the data directory directly
         let data_path = format!("{}/data", table_location);
-        
+
         // Since iceberg-rs 0.6 doesn't have full table scanning,
         // we'll implement a basic approach that reads files we know exist
         // This would be replaced with proper manifest reading in a full implementation
-        
+
         let file_io = table.file_io();
-        
+
         // Try to list files in the data directory
         // Note: This is a simplified approach for the current iceberg-rs limitations
-        match self.scan_data_files(&file_io, &data_path, &arrow_schema, limit).await {
+        match self
+            .scan_data_files(&file_io, &data_path, &arrow_schema, limit)
+            .await
+        {
             Ok((rows, files_count, records_count)) => {
                 all_rows.extend(rows);
                 total_files_scanned += files_count;
@@ -1360,7 +1398,7 @@ impl IcebergClient {
                 return Ok(vec![]);
             }
         }
-        
+
         info!(
             table = %table_name,
             snapshot_id = snapshot.snapshot_id(),
@@ -1370,15 +1408,15 @@ impl IcebergClient {
             limit = ?limit,
             "Successfully queried Iceberg table"
         );
-        
+
         // Apply limit if specified
         if let Some(limit) = limit {
             all_rows.truncate(limit);
         }
-        
+
         Ok(all_rows)
     }
-    
+
     /// Scans data files in the given path and reads Parquet data
     async fn scan_data_files(
         &self,
@@ -1391,27 +1429,27 @@ impl IcebergClient {
             path = %data_path,
             "Scanning for Parquet files"
         );
-        
+
         // Since iceberg-rs 0.6 doesn't have full directory listing,
         // we'll implement a basic approach that looks for known file patterns
         // In a production implementation, this would read manifest files
-        
+
         let all_rows = Vec::new();
         let files_scanned = 0;
         let records_read = 0;
-        
+
         // For now, since we don't have directory listing, we'll return empty
         // This would be replaced with proper manifest parsing and file reading
         // when iceberg-rs has full table scanning support
-        
+
         warn!(
             path = %data_path,
             "Directory listing not yet implemented in iceberg-rs 0.6, returning empty result"
         );
-        
+
         Ok((all_rows, files_scanned, records_read))
     }
-    
+
     /// Converts Iceberg schema to Arrow schema
     fn iceberg_to_arrow_schema(
         &self,
@@ -1419,23 +1457,23 @@ impl IcebergClient {
     ) -> EtlResult<Arc<ArrowSchema>> {
         // Convert Iceberg schema fields to Arrow fields
         let mut arrow_fields = Vec::new();
-        
+
         for field in iceberg_schema.as_struct().fields() {
             let arrow_field = self.iceberg_field_to_arrow_field(field)?;
             arrow_fields.push(arrow_field);
         }
-        
+
         let arrow_schema = ArrowSchema::new(arrow_fields);
         Ok(Arc::new(arrow_schema))
     }
-    
+
     /// Converts a single Iceberg field to Arrow field
     fn iceberg_field_to_arrow_field(
         &self,
         field: &iceberg::spec::NestedField,
     ) -> EtlResult<ArrowField> {
         use iceberg::spec::{PrimitiveType, Type};
-        
+
         let data_type = match field.field_type.as_ref() {
             Type::Primitive(primitive) => match primitive {
                 PrimitiveType::Boolean => ArrowDataType::Boolean,
@@ -1446,9 +1484,16 @@ impl IcebergClient {
                 PrimitiveType::String => ArrowDataType::Utf8,
                 PrimitiveType::Binary => ArrowDataType::Binary,
                 PrimitiveType::Date => ArrowDataType::Date32,
-                PrimitiveType::Time => ArrowDataType::Time64(arrow::datatypes::TimeUnit::Microsecond),
-                PrimitiveType::Timestamp => ArrowDataType::Timestamp(arrow::datatypes::TimeUnit::Microsecond, None),
-                PrimitiveType::Timestamptz => ArrowDataType::Timestamp(arrow::datatypes::TimeUnit::Microsecond, Some("UTC".into())),
+                PrimitiveType::Time => {
+                    ArrowDataType::Time64(arrow::datatypes::TimeUnit::Microsecond)
+                }
+                PrimitiveType::Timestamp => {
+                    ArrowDataType::Timestamp(arrow::datatypes::TimeUnit::Microsecond, None)
+                }
+                PrimitiveType::Timestamptz => ArrowDataType::Timestamp(
+                    arrow::datatypes::TimeUnit::Microsecond,
+                    Some("UTC".into()),
+                ),
                 PrimitiveType::Uuid => ArrowDataType::Utf8, // UUID as string
                 _ => {
                     warn!(
@@ -1466,7 +1511,7 @@ impl IcebergClient {
                     "Struct types not yet supported, using string fallback"
                 );
                 ArrowDataType::Utf8
-            },
+            }
             Type::List(_list_type) => {
                 // For now, represent list as JSON string
                 warn!(
@@ -1474,7 +1519,7 @@ impl IcebergClient {
                     "List types not yet supported, using string fallback"
                 );
                 ArrowDataType::Utf8
-            },
+            }
             Type::Map(_map_type) => {
                 // For now, represent map as JSON string
                 warn!(
@@ -1482,9 +1527,9 @@ impl IcebergClient {
                     "Map types not yet supported, using string fallback"
                 );
                 ArrowDataType::Utf8
-            },
+            }
         };
-        
+
         Ok(ArrowField::new(&field.name, data_type, !field.required))
     }
 
@@ -1527,7 +1572,11 @@ impl IcebergClient {
         let table_ident = TableIdent::new(namespace_ident, table_name.to_string());
 
         // Load the table
-        let table = self.catalog.load_table(&table_ident).await.map_err(iceberg_error_to_etl_error)?;
+        let table = self
+            .catalog
+            .load_table(&table_ident)
+            .await
+            .map_err(iceberg_error_to_etl_error)?;
 
         // Convert PostgreSQL type to Iceberg type
         let schema_mapper = SchemaMapper::new();
@@ -1535,22 +1584,39 @@ impl IcebergClient {
 
         // Get current schema and find next field ID
         let current_schema = table.metadata().current_schema();
-        let next_field_id = current_schema.as_struct().fields().iter()
+        let next_field_id = current_schema
+            .as_struct()
+            .fields()
+            .iter()
             .map(|field| field.id)
             .max()
-            .unwrap_or(0) + 1;
+            .unwrap_or(0)
+            + 1;
 
         // Create new field
         use iceberg::spec::NestedField;
         use std::sync::Arc;
         let new_field = if nullable {
-            Arc::new(NestedField::optional(next_field_id, column_name, iceberg_type))
+            Arc::new(NestedField::optional(
+                next_field_id,
+                column_name,
+                iceberg_type,
+            ))
         } else {
-            Arc::new(NestedField::required(next_field_id, column_name, iceberg_type))
+            Arc::new(NestedField::required(
+                next_field_id,
+                column_name,
+                iceberg_type,
+            ))
         };
 
         // Create new schema with added field
-        let mut new_fields: Vec<_> = current_schema.as_struct().fields().iter().cloned().collect();
+        let mut new_fields: Vec<_> = current_schema
+            .as_struct()
+            .fields()
+            .iter()
+            .cloned()
+            .collect();
         new_fields.push(new_field);
 
         let _new_schema = iceberg::spec::Schema::builder()
@@ -1559,7 +1625,7 @@ impl IcebergClient {
             .map_err(iceberg_error_to_etl_error)?;
 
         // TODO: Implement actual schema evolution when iceberg-rs public API supports it
-        // 
+        //
         // Iceberg natively supports schema evolution via:
         // 1. TableUpdate::AddSchema - adds new schema version
         // 2. TableUpdate::SetCurrentSchema - makes new schema current
@@ -1567,7 +1633,7 @@ impl IcebergClient {
         //
         // The foundation is ready - we have:
         // ✅ Proper field ID generation (next_field_id)
-        // ✅ PostgreSQL to Iceberg type conversion  
+        // ✅ PostgreSQL to Iceberg type conversion
         // ✅ New schema construction with added field
         // ✅ Error handling and logging
         //
@@ -1577,14 +1643,14 @@ impl IcebergClient {
         //     TableUpdate::SetCurrentSchema { schema_id: -1 }
         // ]);
         // self.catalog.update_table(table_commit).await?;
-        
+
         warn!(
             table = %table_name,
             column = %column_name,
             field_id = next_field_id,
             "Schema evolution prepared but pending iceberg-rs public API support"
         );
-        
+
         info!(
             table = %table_name,
             column = %column_name,
@@ -1623,20 +1689,35 @@ impl IcebergClient {
         let table_ident = TableIdent::new(namespace_ident, table_name.to_string());
 
         // Load the table
-        let table = self.catalog.load_table(&table_ident).await.map_err(iceberg_error_to_etl_error)?;
+        let table = self
+            .catalog
+            .load_table(&table_ident)
+            .await
+            .map_err(iceberg_error_to_etl_error)?;
 
         // Get current schema and find the field to drop
         let current_schema = table.metadata().current_schema();
-        let field_to_drop = current_schema.as_struct().fields().iter()
+        let field_to_drop = current_schema
+            .as_struct()
+            .fields()
+            .iter()
             .find(|field| field.name == column_name)
-            .ok_or_else(|| etl_error!(
-                ErrorKind::InvalidData,
-                "Column not found in table schema",
-                format!("Column '{}' not found in table '{}'", column_name, table_name)
-            ))?;
+            .ok_or_else(|| {
+                etl_error!(
+                    ErrorKind::InvalidData,
+                    "Column not found in table schema",
+                    format!(
+                        "Column '{}' not found in table '{}'",
+                        column_name, table_name
+                    )
+                )
+            })?;
 
         // Create new schema without the dropped field
-        let new_fields: Vec<_> = current_schema.as_struct().fields().iter()
+        let new_fields: Vec<_> = current_schema
+            .as_struct()
+            .fields()
+            .iter()
             .filter(|field| field.name != column_name)
             .cloned()
             .collect();
@@ -1654,7 +1735,7 @@ impl IcebergClient {
         // 3. Catalog::update_table(TableCommit) - commits the changes
         //
         // The foundation is ready - we have:
-        // ✅ Column existence validation 
+        // ✅ Column existence validation
         // ✅ New schema construction without dropped field
         // ✅ Proper field filtering logic
         // ✅ Error handling and logging
@@ -1684,7 +1765,6 @@ impl IcebergClient {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1696,7 +1776,8 @@ mod tests {
             "s3://test-bucket/warehouse".to_string(),
             "test".to_string(),
             None,
-        ).await;
+        )
+        .await;
 
         // Note: This test may fail without a real Iceberg catalog running
         // In a real test environment, you would have a test catalog available
@@ -1714,7 +1795,8 @@ mod tests {
             "s3://test-bucket/warehouse".to_string(),
             "test".to_string(),
             None,
-        ).await;
+        )
+        .await;
 
         assert!(result.is_err());
     }
@@ -1740,30 +1822,45 @@ mod tests {
         }
     }
 
-    #[test] 
+    #[test]
     fn test_schema_conversion_to_arrow() {
-        use etl::types::{ColumnSchema, TableSchema, TableName, TableId};
         use crate::iceberg::schema::SchemaMapper;
+        use etl::types::{ColumnSchema, TableId, TableName, TableSchema};
         use tokio_postgres::types::{Kind, Type};
 
         let columns = vec![
             ColumnSchema {
                 name: "id".to_string(),
-                typ: Type::new("bigint".to_string(), 20, Kind::Simple, "pg_catalog".to_string()),
+                typ: Type::new(
+                    "bigint".to_string(),
+                    20,
+                    Kind::Simple,
+                    "pg_catalog".to_string(),
+                ),
                 nullable: false,
                 modifier: 0,
                 primary: true,
             },
             ColumnSchema {
-                name: "name".to_string(), 
-                typ: Type::new("text".to_string(), 25, Kind::Simple, "pg_catalog".to_string()),
+                name: "name".to_string(),
+                typ: Type::new(
+                    "text".to_string(),
+                    25,
+                    Kind::Simple,
+                    "pg_catalog".to_string(),
+                ),
                 nullable: true,
                 modifier: 0,
                 primary: false,
             },
             ColumnSchema {
                 name: "active".to_string(),
-                typ: Type::new("boolean".to_string(), 16, Kind::Simple, "pg_catalog".to_string()),
+                typ: Type::new(
+                    "boolean".to_string(),
+                    16,
+                    Kind::Simple,
+                    "pg_catalog".to_string(),
+                ),
                 nullable: false,
                 modifier: 0,
                 primary: false,
@@ -1781,27 +1878,36 @@ mod tests {
 
         // Should have 3 data columns + 3 CDC columns = 6 total
         assert_eq!(arrow_schema.fields().len(), 6);
-        
+
         // Verify data column types
         assert_eq!(arrow_schema.field(0).name(), "id");
-        assert_eq!(arrow_schema.field(0).data_type(), &arrow::datatypes::DataType::Int64);
-        
+        assert_eq!(
+            arrow_schema.field(0).data_type(),
+            &arrow::datatypes::DataType::Int64
+        );
+
         assert_eq!(arrow_schema.field(1).name(), "name");
-        assert_eq!(arrow_schema.field(1).data_type(), &arrow::datatypes::DataType::LargeUtf8);
-        
+        assert_eq!(
+            arrow_schema.field(1).data_type(),
+            &arrow::datatypes::DataType::LargeUtf8
+        );
+
         assert_eq!(arrow_schema.field(2).name(), "active");
-        assert_eq!(arrow_schema.field(2).data_type(), &arrow::datatypes::DataType::Boolean);
+        assert_eq!(
+            arrow_schema.field(2).data_type(),
+            &arrow::datatypes::DataType::Boolean
+        );
 
         // Verify CDC columns
         assert_eq!(arrow_schema.field(3).name(), "_CHANGE_TYPE");
-        assert_eq!(arrow_schema.field(4).name(), "_CHANGE_SEQUENCE_NUMBER"); 
+        assert_eq!(arrow_schema.field(4).name(), "_CHANGE_SEQUENCE_NUMBER");
         assert_eq!(arrow_schema.field(5).name(), "_CHANGE_TIMESTAMP");
     }
 
     #[test]
     fn test_cdc_metadata_integration() {
         use etl::types::{Cell, TableRow};
-        
+
         // Create a test row
         let mut row = TableRow {
             values: vec![
@@ -1813,17 +1919,18 @@ mod tests {
 
         // Simulate adding CDC metadata like core.rs does
         row.values.push(IcebergOperationType::Upsert.into_cell());
-        row.values.push(Cell::String("test_sequence_123".to_string()));
+        row.values
+            .push(Cell::String("test_sequence_123".to_string()));
 
         // Verify the row has correct CDC metadata
         assert_eq!(row.values.len(), 5);
-        
+
         // Check operation type
         match &row.values[3] {
             Cell::String(op) => assert_eq!(op, "UPSERT"),
             _ => panic!("Expected UPSERT operation"),
         }
-        
+
         // Check sequence number
         match &row.values[4] {
             Cell::String(seq) => assert_eq!(seq, "test_sequence_123"),
@@ -1862,13 +1969,13 @@ mod tests {
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].values.len(), 5); // 3 data + 2 CDC columns
         assert_eq!(rows[1].values.len(), 5);
-        
+
         // Verify CDC operation types are correct
         match &rows[0].values[3] {
             Cell::String(op) => assert_eq!(op, "UPSERT"),
             _ => panic!("Expected UPSERT operation"),
         }
-        
+
         match &rows[1].values[3] {
             Cell::String(op) => assert_eq!(op, "DELETE"),
             _ => panic!("Expected DELETE operation"),
@@ -1878,28 +1985,54 @@ mod tests {
     #[test]
     fn test_schema_management_validation() {
         use tokio_postgres::types::{Kind, Type};
-        
+
         // Test that we can validate schema management operations
         // These tests verify the logic without requiring an actual Iceberg catalog
 
         // Create test PostgreSQL types
-        let text_type = Type::new("text".to_string(), 25, Kind::Simple, "pg_catalog".to_string());
-        let int_type = Type::new("int4".to_string(), 23, Kind::Simple, "pg_catalog".to_string());
-        let timestamp_type = Type::new("timestamptz".to_string(), 1184, Kind::Simple, "pg_catalog".to_string());
-        
+        let text_type = Type::new(
+            "text".to_string(),
+            25,
+            Kind::Simple,
+            "pg_catalog".to_string(),
+        );
+        let int_type = Type::new(
+            "int4".to_string(),
+            23,
+            Kind::Simple,
+            "pg_catalog".to_string(),
+        );
+        let timestamp_type = Type::new(
+            "timestamptz".to_string(),
+            1184,
+            Kind::Simple,
+            "pg_catalog".to_string(),
+        );
+
         // Test that schema mapper can handle these types for schema evolution
         let schema_mapper = crate::iceberg::schema::SchemaMapper::new();
-        
+
         // Verify that types can be converted for add_column operations
         let text_iceberg_type = schema_mapper.postgres_type_to_iceberg(&text_type).unwrap();
         let int_iceberg_type = schema_mapper.postgres_type_to_iceberg(&int_type).unwrap();
-        let timestamp_iceberg_type = schema_mapper.postgres_type_to_iceberg(&timestamp_type).unwrap();
-        
+        let timestamp_iceberg_type = schema_mapper
+            .postgres_type_to_iceberg(&timestamp_type)
+            .unwrap();
+
         // Verify the conversions are what we expect
         use iceberg::spec::{PrimitiveType, Type as IcebergType};
-        assert!(matches!(text_iceberg_type, IcebergType::Primitive(PrimitiveType::String)));
-        assert!(matches!(int_iceberg_type, IcebergType::Primitive(PrimitiveType::Int)));
-        assert!(matches!(timestamp_iceberg_type, IcebergType::Primitive(PrimitiveType::Timestamptz)));
+        assert!(matches!(
+            text_iceberg_type,
+            IcebergType::Primitive(PrimitiveType::String)
+        ));
+        assert!(matches!(
+            int_iceberg_type,
+            IcebergType::Primitive(PrimitiveType::Int)
+        ));
+        assert!(matches!(
+            timestamp_iceberg_type,
+            IcebergType::Primitive(PrimitiveType::Timestamptz)
+        ));
     }
 
     #[test]
@@ -1908,7 +2041,7 @@ mod tests {
         let existing_field_ids = vec![1, 2, 5, 10];
         let next_field_id = existing_field_ids.iter().max().unwrap_or(&0) + 1;
         assert_eq!(next_field_id, 11);
-        
+
         // Test with empty field list
         let empty_field_ids: Vec<i32> = vec![];
         let next_field_id = empty_field_ids.iter().max().unwrap_or(&0) + 1;
@@ -1919,7 +2052,7 @@ mod tests {
     fn test_schema_evolution_error_handling() {
         // Test error handling for invalid column operations
         use etl::error::ErrorKind;
-        
+
         // Simulate a column not found error for drop_column
         let error_msg = "Column 'nonexistent' not found in table 'users'";
         let error = etl_error!(
@@ -1927,7 +2060,7 @@ mod tests {
             "Column not found in table schema",
             error_msg.to_string()
         );
-        
+
         assert_eq!(error.kind(), ErrorKind::InvalidData);
         assert!(error.to_string().contains("Column not found"));
     }
