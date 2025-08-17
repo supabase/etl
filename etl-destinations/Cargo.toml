@@ -32,7 +32,6 @@ iceberg = [
     "dep:url",
     "dep:uuid",
 ]
-integration-tests = []  # Feature flag for integration tests that require Docker infrastructure
 
 [dependencies]
 etl = { workspace = true }
