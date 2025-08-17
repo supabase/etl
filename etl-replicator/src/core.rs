@@ -9,6 +9,8 @@ use etl_config::shared::{
     BatchConfig, DestinationConfig, PgConnectionConfig, PipelineConfig, ReplicatorConfig,
 };
 use etl_destinations::bigquery::{BigQueryDestination, install_crypto_provider_for_bigquery};
+#[cfg(feature = "iceberg")]
+use etl_destinations::iceberg::IcebergDestination;
 use secrecy::ExposeSecret;
 use tokio::signal::unix::{SignalKind, signal};
 use tracing::{debug, info, warn};
@@ -63,6 +65,25 @@ pub async fn start_replicator_with_config(
             let pipeline = Pipeline::new(replicator_config.pipeline, state_store, destination);
             start_pipeline(pipeline).await?;
         }
+        #[cfg(feature = "iceberg")]
+        DestinationConfig::Iceberg {
+            catalog_uri,
+            warehouse,
+            namespace,
+            auth_token,
+        } => {
+            let destination = IcebergDestination::new(
+                catalog_uri.clone(),
+                warehouse.clone(),
+                namespace.clone(),
+                auth_token.as_ref().map(|t| t.expose_secret().to_string()),
+                state_store.clone(),
+            )
+            .await?;
+
+            let pipeline = Pipeline::new(replicator_config.pipeline, state_store, destination);
+            start_pipeline(pipeline).await?;
+        }
     }
 
     info!("replicator service completed");
@@ -89,6 +110,18 @@ fn log_destination_config(config: &DestinationConfig) {
             debug!(
                 project_id,
                 dataset_id, max_staleness_mins, "using bigquery destination config"
+            )
+        }
+        #[cfg(feature = "iceberg")]
+        DestinationConfig::Iceberg {
+            catalog_uri,
+            warehouse,
+            namespace,
+            auth_token: _,
+        } => {
+            debug!(
+                catalog_uri,
+                warehouse, namespace, "using iceberg destination config"
             )
         }
     }
