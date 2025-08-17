@@ -13,3 +13,6 @@ mod iceberg_integration;
 
 #[cfg(feature = "iceberg")]
 mod iceberg_comprehensive;
+
+#[cfg(feature = "iceberg")]
+mod iceberg_live_pipeline;

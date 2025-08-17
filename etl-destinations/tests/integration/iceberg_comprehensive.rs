@@ -25,6 +25,8 @@ use etl::types::{Event, InsertEvent, UpdateEvent, DeleteEvent, TruncateEvent, Ta
 use std::str::FromStr;
 use etl_destinations::iceberg::IcebergDestination;
 use etl_postgres::schema::{TableId, TableName, TableSchema, ColumnSchema};
+use etl::store::schema::SchemaStore;
+use tokio_postgres::types::Type;
 use serde_json::json;
 use tokio_postgres::{Client, NoTls, types::PgLsn};
 use uuid::Uuid;
@@ -51,8 +53,17 @@ impl CdcTestDatabase {
             }
         });
 
-        // Create Iceberg destination
+        // Create Iceberg destination with populated schema store
         let store = MemoryStore::new();
+        
+        // Create comprehensive table schema that matches our test table
+        let table_id = TableId(12345);
+        let table_name = TableName::new("cdc_test".to_string(), "comprehensive_table".to_string());
+        let table_schema = Self::create_comprehensive_table_schema(table_id, table_name);
+        
+        // Populate the schema store
+        store.store_table_schema(table_schema).await?;
+        
         let iceberg_destination = IcebergDestination::new(
             "http://localhost:8182".to_string(),
             "s3://warehouse/".to_string(),
@@ -65,6 +76,34 @@ impl CdcTestDatabase {
             client,
             iceberg_destination,
         })
+    }
+
+    /// Create a comprehensive table schema that matches our PostgreSQL test table
+    fn create_comprehensive_table_schema(table_id: TableId, table_name: TableName) -> TableSchema {
+        let column_schemas = vec![
+            ColumnSchema::new("id".to_string(), Type::INT4, 0, false, true),
+            ColumnSchema::new("name".to_string(), Type::VARCHAR, 100, true, false),
+            ColumnSchema::new("description".to_string(), Type::TEXT, 0, true, false),
+            ColumnSchema::new("small_int".to_string(), Type::INT2, 0, true, false),
+            ColumnSchema::new("big_int".to_string(), Type::INT8, 0, true, false),
+            ColumnSchema::new("decimal_val".to_string(), Type::NUMERIC, 0, true, false),
+            ColumnSchema::new("float_val".to_string(), Type::FLOAT4, 0, true, false),
+            ColumnSchema::new("double_val".to_string(), Type::FLOAT8, 0, true, false),
+            ColumnSchema::new("is_active".to_string(), Type::BOOL, 0, true, false),
+            ColumnSchema::new("birth_date".to_string(), Type::DATE, 0, true, false),
+            ColumnSchema::new("event_time".to_string(), Type::TIME, 0, true, false),
+            ColumnSchema::new("created_at".to_string(), Type::TIMESTAMP, 0, true, false),
+            ColumnSchema::new("updated_at".to_string(), Type::TIMESTAMPTZ, 0, true, false),
+            ColumnSchema::new("external_id".to_string(), Type::UUID, 0, true, false),
+            ColumnSchema::new("metadata".to_string(), Type::JSONB, 0, true, false),
+            ColumnSchema::new("binary_data".to_string(), Type::BYTEA, 0, true, false),
+            ColumnSchema::new("tags".to_string(), Type::TEXT_ARRAY, 0, true, false),
+            ColumnSchema::new("scores".to_string(), Type::INT4_ARRAY, 0, true, false),
+            ColumnSchema::new("ip_address".to_string(), Type::INET, 0, true, false),
+            ColumnSchema::new("mac_address".to_string(), Type::MACADDR, 0, true, false),
+        ];
+        
+        TableSchema::new(table_id, table_name, column_schemas)
     }
 
     /// Create a comprehensive test table with all supported data types

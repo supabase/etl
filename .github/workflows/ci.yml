@@ -113,9 +113,9 @@ jobs:
       - name: Start Iceberg test infrastructure
         working-directory: etl-destinations
         run: |
-          docker-compose -f docker-compose.test.yml up -d
+          docker compose -f docker-compose.test.yml up -d
           sleep 30  # Wait for services
-          timeout 60 bash -c 'until curl -f http://localhost:8181/v1/config 2>/dev/null; do sleep 2; done' || echo "Iceberg not ready"
+          timeout 60 bash -c 'until curl -f http://localhost:8182/v1/config 2>/dev/null; do sleep 2; done' || echo "Iceberg not ready"
 
       - name: Generate code coverage
         id: coverage
@@ -136,4 +136,4 @@ jobs:
       - name: Stop Iceberg infrastructure
         if: always()
         working-directory: etl-destinations
-        run: docker-compose -f docker-compose.test.yml down
+        run: docker compose -f docker-compose.test.yml down
