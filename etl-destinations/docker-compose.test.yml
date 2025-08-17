@@ -19,7 +19,7 @@ services:
       -c max_wal_senders=10
       -c max_replication_slots=10
     ports:
-      - "5432:5432"
+      - "5434:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U test_user -d test_db"]
       interval: 5s
@@ -35,8 +35,8 @@ services:
       MINIO_ROOT_PASSWORD: minioadmin
     command: server /data --console-address ":9001"
     ports:
-      - "9000:9000"
-      - "9001:9001"
+      - "9010:9000"
+      - "9011:9001"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
       interval: 5s
@@ -78,7 +78,7 @@ services:
       CATALOG_JDBC_USER: iceberg
       CATALOG_JDBC_PASSWORD: iceberg
     ports:
-      - "8181:8181"
+      - "8182:8181"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8181/v1/config"]
       interval: 10s

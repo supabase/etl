@@ -12,10 +12,13 @@
 use std::collections::HashMap;
 use std::env;
 
-use etl::types::{CdcEvent, ChangeType, TableName, TableRow};
-use etl_destinations::iceberg::{IcebergDestination, IcebergConfig};
+use etl::types::{Event, EventType, InsertEvent, TableRow, Cell};
+use etl::destination::Destination;
+use etl_destinations::iceberg::IcebergDestination;
+use etl_postgres::schema::TableId;
+use etl::store::both::memory::MemoryStore;
 use tokio_postgres::{Client, NoTls};
-use uuid::Uuid;
+use tokio_postgres::types::PgLsn;
 use chrono::Utc;
 
 fn skip_integration_tests() -> bool {
@@ -23,7 +26,7 @@ fn skip_integration_tests() -> bool {
 }
 
 async fn setup_test_database() -> Result<Client, Box<dyn std::error::Error>> {
-    let conn_str = "host=localhost port=5432 dbname=test_db user=test_user password=test_pass";
+    let conn_str = "host=localhost port=5434 dbname=test_db user=test_user password=test_pass";
     let (client, connection) = tokio_postgres::connect(conn_str, NoTls).await?;
     
     tokio::spawn(async move {
@@ -50,27 +53,18 @@ async fn setup_test_database() -> Result<Client, Box<dyn std::error::Error>> {
     Ok(client)
 }
 
-async fn create_iceberg_destination() -> Result<IcebergDestination, Box<dyn std::error::Error>> {
-    let config = IcebergConfig {
-        catalog_type: "rest".to_string(),
-        catalog_uri: "http://localhost:8181".to_string(),
-        warehouse: "s3://warehouse/".to_string(),
-        namespace: "test".to_string(),
-        file_format: Some("parquet".to_string()),
-        compression: Some("zstd".to_string()),
-        writer_config: None,
-        cdc_config: None,
-        aws_config: Some(HashMap::from([
-            ("region".to_string(), "us-east-1".to_string()),
-            ("endpoint".to_string(), "http://localhost:9000".to_string()),
-            ("access_key_id".to_string(), "minioadmin".to_string()),
-            ("secret_access_key".to_string(), "minioadmin".to_string()),
-            ("allow_http".to_string(), "true".to_string()),
-            ("path_style".to_string(), "true".to_string()),
-        ])),
-    };
+async fn create_iceberg_destination() -> Result<IcebergDestination<MemoryStore>, Box<dyn std::error::Error>> {
+    let store = MemoryStore::new();
     
-    IcebergDestination::new(config).await.map_err(|e| e.into())
+    let destination = IcebergDestination::new(
+        "http://localhost:8182".to_string(),
+        "s3://warehouse/".to_string(),
+        "test".to_string(),
+        None, // No auth token for local testing
+        store,
+    ).await?;
+    
+    Ok(destination)
 }
 
 // ============================================================================
@@ -101,25 +95,26 @@ async fn test_iceberg_basic_operations() {
     };
 
     // Test basic CDC event processing
-    let table_name = TableName::new("test_schema".to_string(), "users".to_string());
-    let event = CdcEvent {
-        table_name,
-        change_type: ChangeType::Insert,
-        table_row: TableRow {
-            values: vec![
-                Some("1".to_string()),
-                Some("Alice".to_string()),
-                Some("alice@example.com".to_string()),
-                Some("true".to_string()),
-                Some(Utc::now().to_rfc3339()),
-            ],
-        },
-        lsn: Some(1000),
-        sequence_number: Some(1),
+    let table_id = TableId(1001);
+    let table_row = TableRow::new(vec![
+        Cell::I32(1),
+        Cell::String("Alice".to_string()),
+        Cell::String("alice@example.com".to_string()),
+        Cell::Bool(true),
+        Cell::TimeStampTz(Utc::now()),
+    ]);
+    
+    let insert_event = InsertEvent {
+        start_lsn: PgLsn::from(1000_u64),
+        commit_lsn: PgLsn::from(1001_u64),
+        table_id,
+        table_row,
     };
+    
+    let event = Event::Insert(insert_event);
 
     // This should not panic - validates the basic integration
-    let result = destination.write_cdc_event(event).await;
+    let result = destination.write_events(vec![event]).await;
     
     // For now, we just ensure it doesn't crash
     // Full validation would require proper table setup
