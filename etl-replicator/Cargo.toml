@@ -10,7 +10,7 @@ iceberg = ["etl-destinations/iceberg"]
 
 [dependencies]
 etl = { workspace = true, features = ["unknown-types-to-bytes"] }
-etl-config = { workspace = true, features = ["iceberg"] }
+etl-config = { workspace = true }
 etl-destinations = { workspace = true }
 etl-telemetry = { workspace = true }
 

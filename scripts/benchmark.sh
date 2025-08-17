@@ -8,6 +8,7 @@ set -eo pipefail
 # Supported destinations:
 # - null: Discards all data (fastest, default)
 # - big-query: Streams data to Google BigQuery
+# - iceberg: Streams data to Apache Iceberg
 #
 # Environment Variables:
 #   Database Configuration:
@@ -24,6 +25,12 @@ set -eo pipefail
 #     BQ_DATASET_ID - BigQuery dataset ID
 #     BQ_SA_KEY_FILE - Path to service account key JSON file
 #     BQ_MAX_STALENESS_MINS - Optional staleness setting
+#   
+#   Iceberg Configuration (required when DESTINATION=iceberg):
+#     ICEBERG_CATALOG_URI - Iceberg REST catalog URI
+#     ICEBERG_WAREHOUSE - Iceberg warehouse location
+#     ICEBERG_NAMESPACE - Iceberg namespace for tables
+#     ICEBERG_AUTH_TOKEN - Optional authentication token
 #
 # Examples:
 #   # Run with null destination and terminal logs (default)
@@ -40,6 +47,13 @@ set -eo pipefail
 #   BQ_PROJECT_ID=my-project \
 #   BQ_DATASET_ID=my_dataset \
 #   BQ_SA_KEY_FILE=/path/to/sa-key.json \
+#   ./scripts/benchmark.sh
+#
+#   # Run with Iceberg destination
+#   DESTINATION=iceberg \
+#   ICEBERG_CATALOG_URI=http://localhost:8181 \
+#   ICEBERG_WAREHOUSE=s3://my-bucket/warehouse \
+#   ICEBERG_NAMESPACE=etl \
 #   ./scripts/benchmark.sh
 
 # Check if hyperfine is installed
@@ -75,11 +89,17 @@ MAX_TABLE_SYNC_WORKERS="${MAX_TABLE_SYNC_WORKERS:=8}"
 LOG_TARGET="${LOG_TARGET:=terminal}"  # terminal or file
 
 # Destination configuration
-DESTINATION="${DESTINATION:=null}"  # null or big-query
+DESTINATION="${DESTINATION:=null}"  # null, big-query, or iceberg
 BQ_PROJECT_ID="${BQ_PROJECT_ID:=}"
 BQ_DATASET_ID="${BQ_DATASET_ID:=}"
 BQ_SA_KEY_FILE="${BQ_SA_KEY_FILE:=}"
 BQ_MAX_STALENESS_MINS="${BQ_MAX_STALENESS_MINS:=}"
+
+# Iceberg configuration
+ICEBERG_CATALOG_URI="${ICEBERG_CATALOG_URI:=}"
+ICEBERG_WAREHOUSE="${ICEBERG_WAREHOUSE:=}"
+ICEBERG_NAMESPACE="${ICEBERG_NAMESPACE:=}"
+ICEBERG_AUTH_TOKEN="${ICEBERG_AUTH_TOKEN:=}"
 
 # Optional dry-run mode
 DRY_RUN="${DRY_RUN:=false}"
@@ -101,6 +121,13 @@ if [[ "${DESTINATION}" == "big-query" ]]; then
   echo "   BigQuery SA Key: ${BQ_SA_KEY_FILE}"
   if [[ -n "${BQ_MAX_STALENESS_MINS}" ]]; then
     echo "   BigQuery Max Staleness: ${BQ_MAX_STALENESS_MINS} mins"
+  fi
+elif [[ "${DESTINATION}" == "iceberg" ]]; then
+  echo "   Iceberg Catalog URI: ${ICEBERG_CATALOG_URI}"
+  echo "   Iceberg Warehouse: ${ICEBERG_WAREHOUSE}"
+  echo "   Iceberg Namespace: ${ICEBERG_NAMESPACE}"
+  if [[ -n "${ICEBERG_AUTH_TOKEN}" ]]; then
+    echo "   Iceberg Auth Token: [REDACTED]"
   fi
 fi
 
@@ -141,15 +168,33 @@ if [[ "${DESTINATION}" == "big-query" ]]; then
   fi
 fi
 
-# Determine if we need BigQuery features
+# Validate Iceberg configuration if using Iceberg destination
+if [[ "${DESTINATION}" == "iceberg" ]]; then
+  if [[ -z "${ICEBERG_CATALOG_URI}" ]]; then
+    echo "❌ Error: ICEBERG_CATALOG_URI environment variable is required when using Iceberg destination."
+    exit 1
+  fi
+  if [[ -z "${ICEBERG_WAREHOUSE}" ]]; then
+    echo "❌ Error: ICEBERG_WAREHOUSE environment variable is required when using Iceberg destination."
+    exit 1
+  fi
+  if [[ -z "${ICEBERG_NAMESPACE}" ]]; then
+    echo "❌ Error: ICEBERG_NAMESPACE environment variable is required when using Iceberg destination."
+    exit 1
+  fi
+fi
+
+# Determine if we need special features
 FEATURES_FLAG=""
 if [[ "${DESTINATION}" == "big-query" ]]; then
   FEATURES_FLAG="--features bigquery"
+elif [[ "${DESTINATION}" == "iceberg" ]]; then
+  FEATURES_FLAG="--features iceberg"
 fi
 
 # Validate destination option
-if [[ "${DESTINATION}" != "null" && "${DESTINATION}" != "big-query" ]]; then
-  echo "❌ Error: Invalid destination '${DESTINATION}'. Supported values: null, big-query"
+if [[ "${DESTINATION}" != "null" && "${DESTINATION}" != "big-query" && "${DESTINATION}" != "iceberg" ]]; then
+  echo "❌ Error: Invalid destination '${DESTINATION}'. Supported values: null, big-query, iceberg"
   exit 1
 fi
 
@@ -180,6 +225,13 @@ if [[ "${DESTINATION}" == "big-query" ]]; then
   RUN_CMD="${RUN_CMD} --bq-sa-key-file ${BQ_SA_KEY_FILE}"
   if [[ -n "${BQ_MAX_STALENESS_MINS}" ]]; then
     RUN_CMD="${RUN_CMD} --bq-max-staleness-mins ${BQ_MAX_STALENESS_MINS}"
+  fi
+elif [[ "${DESTINATION}" == "iceberg" ]]; then
+  RUN_CMD="${RUN_CMD} --iceberg-catalog-uri ${ICEBERG_CATALOG_URI}"
+  RUN_CMD="${RUN_CMD} --iceberg-warehouse ${ICEBERG_WAREHOUSE}"
+  RUN_CMD="${RUN_CMD} --iceberg-namespace ${ICEBERG_NAMESPACE}"
+  if [[ -n "${ICEBERG_AUTH_TOKEN}" ]]; then
+    RUN_CMD="${RUN_CMD} --iceberg-auth-token ${ICEBERG_AUTH_TOKEN}"
   fi
 fi
 

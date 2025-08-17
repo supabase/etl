@@ -292,7 +292,7 @@ impl SchemaMapper {
         let mut fields = Vec::new();
 
         for column in &pg_schema.column_schemas {
-            let data_type = self.postgres_type_to_arrow(&column.typ)?;
+            let data_type = Self::postgres_type_to_arrow(&column.typ)?;
             let field = Field::new(&column.name, data_type, true); // All fields nullable
             fields.push(field);
         }
@@ -310,7 +310,7 @@ impl SchemaMapper {
     }
 
     /// Converts PostgreSQL type to Arrow DataType.
-    fn postgres_type_to_arrow(&self, pg_type: &PostgresType) -> EtlResult<DataType> {
+    fn postgres_type_to_arrow(pg_type: &PostgresType) -> EtlResult<DataType> {
         let arrow_type = match pg_type.oid() {
             BOOL_OID => DataType::Boolean,
             INT2_OID => DataType::Int16,
@@ -362,7 +362,7 @@ impl SchemaMapper {
                         element_type.schema().to_string(),
                     );
 
-                    match self.postgres_type_to_arrow(&element_pg_type) {
+                    match Self::postgres_type_to_arrow(&element_pg_type) {
                         Ok(element_arrow_type) => {
                             DataType::List(Arc::new(Field::new("item", element_arrow_type, true)))
                         }

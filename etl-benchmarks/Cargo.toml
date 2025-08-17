@@ -3,10 +3,15 @@ name = "etl-benchmarks"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+default = ["bigquery"]
+bigquery = ["etl-destinations/bigquery"]
+iceberg = ["etl-destinations/iceberg"]
+
 [dev-dependencies]
 etl = { workspace = true, features = ["test-utils"] }
 etl-config = { workspace = true }
-etl-destinations = { workspace = true, features = ["bigquery"] }
+etl-destinations = { workspace = true, features = ["bigquery", "iceberg"] }
 etl-postgres = { workspace = true, features = ["sqlx"] }
 etl-telemetry = { workspace = true }
 

@@ -44,7 +44,6 @@ pub enum DestinationConfig {
     ///
     /// Use this variant to configure an Iceberg destination with REST catalog.
     /// Storage configuration is embedded in the warehouse URI.
-    #[cfg(feature = "iceberg")]
     Iceberg {
         /// REST catalog URI.
         #[cfg_attr(feature = "utoipa", schema(example = "http://localhost:8181"))]

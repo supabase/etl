@@ -257,7 +257,7 @@ where
         // Get table schema to access the TableName
         let table_schema = inner
             .store
-            .get_table_schema(&table_id)
+            .get_table_schema(table_id)
             .await?
             .ok_or_else(|| {
                 etl_error!(
@@ -564,5 +564,241 @@ where
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use etl::store::both::memory::MemoryStore;
+    use etl::types::{DeleteEvent, InsertEvent, PgLsn, TableId, TableRow, TruncateEvent, UpdateEvent};
+    use etl_postgres::schema::{ColumnSchema, TableName};
+    use tokio_postgres::types::Type;
+
+    #[test]
+    fn test_table_name_to_iceberg_table_id() {
+        let table_name = TableName::new("test_schema".to_string(), "test_table".to_string());
+        let iceberg_id = table_name_to_iceberg_table_id(&table_name);
+        assert_eq!(iceberg_id, "test_schema_test_table");
+    }
+
+    #[test]
+    fn test_table_name_with_underscores() {
+        let table_name = TableName::new("test_schema".to_string(), "test_table".to_string());
+        let iceberg_id = table_name_to_iceberg_table_id(&table_name);
+        assert_eq!(iceberg_id, "test_schema_test_table");
+    }
+
+    #[test]
+    fn test_generate_sequence_number() {
+        let start_lsn = PgLsn::from(1000u64);
+        let commit_lsn = PgLsn::from(2000u64);
+        let seq_num = generate_sequence_number(start_lsn, commit_lsn);
+        assert_eq!(seq_num, "00000000000007d0/00000000000003e8");
+    }
+
+    #[test]
+    fn test_sequenced_iceberg_table_id_new() {
+        let table_id = "test_table".to_string();
+        let sequenced = SequencedIcebergTableId::new(table_id.clone());
+        assert_eq!(sequenced.to_string(), "test_table_0");
+    }
+
+    #[test]
+    fn test_sequenced_iceberg_table_id_next() {
+        let table_id = "test_table".to_string();
+        let sequenced = SequencedIcebergTableId::new(table_id);
+        let next = sequenced.next();
+        assert_eq!(next.to_string(), "test_table_1");
+    }
+
+    #[test]
+    fn test_sequenced_iceberg_table_id_from_str() {
+        let table_id_str = "test_table_5";
+        let sequenced = SequencedIcebergTableId::from_str(table_id_str).unwrap();
+        assert_eq!(sequenced.to_string(), "test_table_5");
+    }
+
+    #[test]
+    fn test_sequenced_iceberg_table_id_from_str_invalid() {
+        let table_id_str = "test_table";
+        let result = SequencedIcebergTableId::from_str(table_id_str);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_sequenced_iceberg_table_id_from_str_empty_table() {
+        let table_id_str = "_5";
+        let result = SequencedIcebergTableId::from_str(table_id_str);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_sequenced_iceberg_table_id_from_str_empty_sequence() {
+        let table_id_str = "test_table_";
+        let result = SequencedIcebergTableId::from_str(table_id_str);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_sequenced_iceberg_table_id_from_str_invalid_sequence() {
+        let table_id_str = "test_table_abc";
+        let result = SequencedIcebergTableId::from_str(table_id_str);
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_iceberg_destination_creation_invalid_config() {
+        let store = MemoryStore::new();
+        let result = IcebergDestination::new(
+            "".to_string(), // Invalid empty URI
+            "s3://warehouse/".to_string(),
+            "test".to_string(),
+            None,
+            store,
+        )
+        .await;
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_operation_type_display() {
+        assert_eq!(IcebergOperationType::Upsert.to_string(), "UPSERT");
+        assert_eq!(IcebergOperationType::Delete.to_string(), "DELETE");
+    }
+
+    #[test]
+    fn test_operation_type_into_cell() {
+        let upsert_cell = IcebergOperationType::Upsert.into_cell();
+        let delete_cell = IcebergOperationType::Delete.into_cell();
+        
+        match upsert_cell {
+            Cell::String(s) => assert_eq!(s, "UPSERT"),
+            _ => panic!("Expected string cell"),
+        }
+        
+        match delete_cell {
+            Cell::String(s) => assert_eq!(s, "DELETE"),
+            _ => panic!("Expected string cell"),
+        }
+    }
+
+    #[test]
+    fn test_operation_type_clone() {
+        let op = IcebergOperationType::Upsert;
+        let cloned = op.clone();
+        assert_eq!(format!("{:?}", op), format!("{:?}", cloned));
+    }
+
+    // Mock test for destination methods that require external infrastructure
+    fn create_test_table_schema() -> TableSchema {
+        let table_id = TableId(123);
+        let table_name = TableName::new("test".to_string(), "table".to_string());
+        let columns = vec![
+            ColumnSchema::new("id".to_string(), Type::INT4, 0, false, true),
+            ColumnSchema::new("name".to_string(), Type::VARCHAR, 100, true, false),
+        ];
+        TableSchema::new(table_id, table_name, columns)
+    }
+
+    #[test]
+    fn test_table_schema_creation() {
+        let schema = create_test_table_schema();
+        assert_eq!(schema.id.0, 123);
+        assert_eq!(schema.name.schema, "test");
+        assert_eq!(schema.name.name, "table");
+        assert_eq!(schema.column_schemas.len(), 2);
+    }
+
+    #[test]
+    fn test_create_insert_event() {
+        let table_id = TableId(123);
+        let table_row = TableRow::new(vec![
+            Cell::I32(1),
+            Cell::String("test".to_string()),
+        ]);
+        
+        let event = Event::Insert(InsertEvent {
+            start_lsn: PgLsn::from(100u64),
+            commit_lsn: PgLsn::from(100u64),
+            table_id,
+            table_row,
+        });
+        
+        match event {
+            Event::Insert(insert) => {
+                assert_eq!(insert.table_id.0, 123);
+                assert_eq!(insert.table_row.values.len(), 2);
+            }
+            _ => panic!("Expected insert event"),
+        }
+    }
+
+    #[test]
+    fn test_create_update_event() {
+        let table_id = TableId(123);
+        let table_row = TableRow::new(vec![
+            Cell::I32(1),
+            Cell::String("updated".to_string()),
+        ]);
+        
+        let event = Event::Update(UpdateEvent {
+            start_lsn: PgLsn::from(101u64),
+            commit_lsn: PgLsn::from(101u64),
+            table_id,
+            table_row,
+            old_table_row: None,
+        });
+        
+        match event {
+            Event::Update(update) => {
+                assert_eq!(update.table_id.0, 123);
+                assert_eq!(update.table_row.values.len(), 2);
+            }
+            _ => panic!("Expected update event"),
+        }
+    }
+
+    #[test]
+    fn test_create_delete_event() {
+        let table_id = TableId(123);
+        let old_row = TableRow::new(vec![
+            Cell::I32(1),
+            Cell::String("deleted".to_string()),
+        ]);
+        
+        let event = Event::Delete(DeleteEvent {
+            start_lsn: PgLsn::from(102u64),
+            commit_lsn: PgLsn::from(102u64),
+            table_id,
+            old_table_row: Some((false, old_row)),
+        });
+        
+        match event {
+            Event::Delete(delete) => {
+                assert_eq!(delete.table_id.0, 123);
+                assert!(delete.old_table_row.is_some());
+            }
+            _ => panic!("Expected delete event"),
+        }
+    }
+
+    #[test]
+    fn test_create_truncate_event() {
+        let event = Event::Truncate(TruncateEvent {
+            start_lsn: PgLsn::from(103u64),
+            commit_lsn: PgLsn::from(103u64),
+            rel_ids: vec![123, 456],
+            options: 0,
+        });
+        
+        match event {
+            Event::Truncate(truncate) => {
+                assert_eq!(truncate.rel_ids.len(), 2);
+                assert_eq!(truncate.rel_ids[0], 123);
+                assert_eq!(truncate.rel_ids[1], 456);
+            }
+            _ => panic!("Expected truncate event"),
+        }
     }
 }

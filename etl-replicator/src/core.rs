@@ -84,6 +84,10 @@ pub async fn start_replicator_with_config(
             let pipeline = Pipeline::new(replicator_config.pipeline, state_store, destination);
             start_pipeline(pipeline).await?;
         }
+        #[cfg(not(feature = "iceberg"))]
+        DestinationConfig::Iceberg { .. } => {
+            anyhow::bail!("Iceberg destination not supported: compile with --features iceberg");
+        }
     }
 
     info!("replicator service completed");
@@ -123,6 +127,10 @@ fn log_destination_config(config: &DestinationConfig) {
                 catalog_uri,
                 warehouse, namespace, "using iceberg destination config"
             )
+        }
+        #[cfg(not(feature = "iceberg"))]
+        DestinationConfig::Iceberg { .. } => {
+            debug!("iceberg destination config (not compiled in)");
         }
     }
 }

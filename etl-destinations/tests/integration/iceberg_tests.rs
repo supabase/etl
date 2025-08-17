@@ -462,7 +462,6 @@ async fn test_schema_evolution() {
 struct LivePipelineTest {
     postgres_client: Client,
     iceberg_destination: IcebergDestination<MemoryStore>,
-    store: MemoryStore,
 }
 
 impl LivePipelineTest {
@@ -510,7 +509,6 @@ impl LivePipelineTest {
         Ok(Self {
             postgres_client,
             iceberg_destination,
-            store,
         })
     }
 

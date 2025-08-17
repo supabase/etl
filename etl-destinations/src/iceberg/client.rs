@@ -1,32 +1,4 @@
 //! Apache Iceberg client implementation for ETL pipelines.
-//!
-//! This module provides a production-ready client for Apache Iceberg tables
-//! with CDC support and optimized batching for cloud storage systems.
-//!
-//! # Features
-//!
-//! - **Schema Caching**: Reuses Arrow schemas to avoid repeated conversions
-//! - **Automatic Batching**: Splits large datasets into 30MB chunks (optimized for S3)  
-//! - **Retry Logic**: Exponential backoff with table recreation on missing table errors
-//! - **Memory Efficient**: Streaming processing with configurable memory limits
-//! - **Transaction Support**: Atomic operations with rollback capabilities
-//! - **Schema Evolution**: Automatic schema conversion from PostgreSQL to Iceberg
-//!
-//! # Architecture
-//!
-//! The client follows proven patterns for reliability:
-//! - Optimistic streaming with fallback table creation
-//! - Consistent error handling and logging
-//! - CDC metadata tracking with sequence numbers
-//! - Efficient schema caching and zero-copy batching
-//!
-//! # Performance
-//!
-//! Designed for high throughput CDC scenarios:
-//! - **Target**: 50+ million rows/hour sustained
-//! - **Peak**: 900+ million rows/hour with optimal batching
-//! - **Memory**: <5MB typical usage (configurable 50MB limit)
-//! - **Latency**: ~70ms for 1,000-row batches
 
 use crate::iceberg::config::WriterConfig;
 use crate::iceberg::encoding::rows_to_record_batch;
@@ -107,62 +79,6 @@ fn iceberg_error_to_etl_error(err: IcebergError) -> EtlError {
     etl_error!(kind, description, err.to_string())
 }
 
-/// Maps object_store errors to appropriate ETL error kinds.
-fn object_store_error_to_etl_error(err: object_store::Error) -> EtlError {
-    let (kind, description) = match &err {
-        object_store::Error::NotFound { .. } => {
-            (ErrorKind::DestinationError, "Object storage path not found")
-        }
-        object_store::Error::AlreadyExists { .. } => (
-            ErrorKind::InvalidState,
-            "Object storage path already exists",
-        ),
-        object_store::Error::NotModified { .. } => {
-            (ErrorKind::InvalidState, "Object storage not modified")
-        }
-        object_store::Error::PermissionDenied { .. } => (
-            ErrorKind::PermissionDenied,
-            "Object storage permission denied",
-        ),
-        object_store::Error::Unauthenticated { .. } => (
-            ErrorKind::AuthenticationError,
-            "Object storage authentication required",
-        ),
-        object_store::Error::InvalidPath { .. } => {
-            (ErrorKind::InvalidData, "Object storage invalid path")
-        }
-        _ => (ErrorKind::DestinationIoError, "Object storage error"),
-    };
-
-    etl_error!(kind, description, err.to_string())
-}
-
-/// Maps Arrow/Parquet errors to appropriate ETL error kinds.
-fn arrow_error_to_etl_error(err: arrow::error::ArrowError) -> EtlError {
-    let (kind, description) = match &err {
-        arrow::error::ArrowError::InvalidArgumentError(_msg) => {
-            (ErrorKind::InvalidData, "Arrow invalid argument")
-        }
-        arrow::error::ArrowError::ComputeError(_msg) => {
-            (ErrorKind::ConversionError, "Arrow compute error")
-        }
-        arrow::error::ArrowError::MemoryError(_msg) => {
-            (ErrorKind::DestinationIoError, "Arrow memory error")
-        }
-        arrow::error::ArrowError::ParseError(_msg) => {
-            (ErrorKind::SerializationError, "Arrow parse error")
-        }
-        arrow::error::ArrowError::SchemaError(_msg) => {
-            (ErrorKind::MissingTableSchema, "Arrow schema error")
-        }
-        arrow::error::ArrowError::IoError(_msg, _) => {
-            (ErrorKind::DestinationIoError, "Arrow I/O error")
-        }
-        _ => (ErrorKind::ConversionError, "Arrow processing error"),
-    };
-
-    etl_error!(kind, description, err.to_string())
-}
 
 /// Maps Parquet errors to appropriate ETL error kinds.
 fn parquet_error_to_etl_error(err: parquet::errors::ParquetError) -> EtlError {
@@ -240,25 +156,6 @@ pub struct PagedTableResult {
 }
 
 /// Client for interacting with Apache Iceberg tables via REST catalog.
-///
-/// Provides methods for table management, data insertion, and query execution
-/// against Iceberg tables with authentication and error handling.
-///
-/// The client manages:
-/// - Automatic namespace creation and management  
-/// - Schema caching for optimal performance
-/// - Retry logic with exponential backoff
-/// - Schema conversion between PostgreSQL and Iceberg formats
-///
-/// # Thread Safety
-///
-/// This client is `Clone` and can be safely shared across async tasks. The internal
-/// schema cache is thread-safe with RwLock protection.
-///
-/// # Memory Usage
-///
-/// The client maintains minimal memory overhead (~1MB) and uses streaming
-/// processing to stay within configured batch size limits (30MB by default).
 #[derive(Clone, Debug)]
 pub struct IcebergClient {
     catalog: Arc<dyn Catalog>,
@@ -278,44 +175,7 @@ pub struct IcebergClient {
 }
 
 impl IcebergClient {
-    /// Creates a new [`IcebergClient`] with real REST catalog connectivity.
-    ///
-    /// Creates a new client with REST catalog connectivity and namespace initialization.
-    ///
-    /// # Arguments
-    ///
-    /// * `catalog_uri` - REST catalog endpoint (e.g., "http://localhost:8181")  
-    /// * `warehouse` - Storage location (e.g., "s3://bucket/warehouse/")
-    /// * `namespace` - Table namespace for organization (e.g., "etl_prod")
-    /// * `auth_token` - Optional bearer token for REST catalog authentication
-    ///
-    /// # Returns
-    ///
-    /// Returns an `IcebergClient` configured for production use with connection pooling
-    /// and automatic namespace creation.
-    ///
-    /// # Errors
-    ///
-    /// * `ErrorKind::DestinationError` - If catalog_uri, warehouse, or namespace is empty
-    /// * `ErrorKind::DestinationError` - If HTTP client creation fails  
-    /// * `ErrorKind::DestinationError` - If catalog connectivity test fails
-    ///
-    /// # Example
-    ///
-    /// ```rust,no_run
-    /// use etl_destinations::iceberg::IcebergClient;
-    /// use etl::store::both::memory::MemoryStore;
-    ///
-    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-    /// let client = IcebergClient::new_with_rest_catalog(
-    ///     "http://localhost:8181".to_string(),
-    ///     "s3://iceberg-warehouse/".to_string(),
-    ///     "production".to_string(),
-    ///     None,
-    /// ).await?;
-    /// # Ok(())
-    /// # }
-    /// ```
+    /// Creates a new IcebergClient with REST catalog connectivity.
     pub async fn new_with_rest_catalog(
         catalog_uri: String,
         warehouse: String,
@@ -479,7 +339,7 @@ impl IcebergClient {
             .build();
 
         self.catalog
-            .create_table(&table_ident.namespace(), table_creation)
+            .create_table(table_ident.namespace(), table_creation)
             .await
             .map_err(iceberg_error_to_etl_error)?;
 
@@ -616,7 +476,7 @@ impl IcebergClient {
 
             // Convert batch to Arrow RecordBatch
             let record_batch =
-                match rows_to_record_batch(&batch_rows, &arrow_schema, &schema_mapper) {
+                match rows_to_record_batch(batch_rows, &arrow_schema, &schema_mapper) {
                     Ok(batch) => batch,
                     Err(err) => {
                         operation_result = Err(err);
@@ -1156,7 +1016,7 @@ impl IcebergClient {
         let _parquet_schema = arrow::datatypes::Schema::new(record_batch.schema().fields().clone());
 
         // Write the RecordBatch as a Parquet file
-        let writer = object_store.new_output(&file_path.path()).map_err(|e| {
+        let writer = object_store.new_output(file_path.path()).map_err(|e| {
             etl_error!(
                 ErrorKind::DestinationIoError,
                 "Failed to create output file",
@@ -1381,7 +1241,7 @@ impl IcebergClient {
         // Try to list files in the data directory
         // Note: This is a simplified approach for the current iceberg-rs limitations
         match self
-            .scan_data_files(&file_io, &data_path, &arrow_schema, limit)
+            .scan_data_files(file_io, &data_path, &arrow_schema, limit)
             .await
         {
             Ok((rows, files_count, records_count)) => {
@@ -1613,10 +1473,7 @@ impl IcebergClient {
         // Create new schema with added field
         let mut new_fields: Vec<_> = current_schema
             .as_struct()
-            .fields()
-            .iter()
-            .cloned()
-            .collect();
+            .fields().to_vec();
         new_fields.push(new_field);
 
         let _new_schema = iceberg::spec::Schema::builder()

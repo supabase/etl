@@ -33,3 +33,15 @@ pyvenv.cfg
 
 # Log files
 *.log
+
+# Coverage files
+*.info
+lcov*.info
+coverage/
+.coverage
+htmlcov/
+
+# Vim swap files
+*.swp
+*.swo
+*~

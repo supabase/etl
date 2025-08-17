@@ -1,15 +1,11 @@
 //! Test utilities for Iceberg destination integration tests.
 
-use base64::prelude::*;
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use etl::store::schema::SchemaStore;
 use etl::store::state::StateStore;
-use etl::types::{PgNumeric, TableName};
+use etl::types::TableName;
 use etl_destinations::iceberg::IcebergDestination;
 use std::collections::HashMap;
-use std::fmt;
-use std::str::FromStr;
-use tracing::debug;
 use uuid::Uuid;
 
 /// Environment variable name for the Iceberg REST catalog URI.
@@ -52,6 +48,7 @@ pub struct IcebergDatabase {
     catalog_uri: String,
     warehouse: String,
     namespace: String,
+    #[allow(dead_code)]
     auth_token: Option<String>,
 }
 
@@ -96,6 +93,7 @@ impl IcebergDatabase {
     ///
     /// Returns a destination that can be used with ETL pipelines for testing.
     /// The destination will automatically create tables in the test namespace.
+    #[allow(dead_code)]
     pub async fn build_destination<S>(&self, store: S) -> IcebergDestination<S>
     where
         S: StateStore + SchemaStore + Send + Sync + 'static,
@@ -132,113 +130,6 @@ impl IcebergDatabase {
         format!("{}_{}", table_name.schema, table_name.name)
     }
 
-    /// Lists all tables in the test namespace.
-    ///
-    /// Returns table names without the test prefix for easier comparison
-    /// with expected table names.
-    pub async fn list_tables(&self) -> Result<Vec<String>, Box<dyn std::error::Error>> {
-        // This would require implementing a direct Iceberg client call
-        // For now, return empty list - this can be enhanced when needed
-        Ok(vec![])
-    }
-
-    /// Queries a table and returns the results.
-    ///
-    /// Phase 2 implementation attempts real Iceberg table querying.
-    /// Falls back to mock data if real querying fails (for testing without live catalog).
-    pub async fn query_table(&self, table_name: &TableName) -> Option<Vec<IcebergRow>> {
-        let formatted_table_name = self.format_table_name(table_name);
-        debug!(
-            table = %formatted_table_name,
-            "Phase 2: Attempting real Iceberg table query"
-        );
-
-        // Try to create a destination and query the table
-        // This is a simplified approach for testing
-        match self.try_query_real_table(&formatted_table_name).await {
-            Ok(rows) => {
-                debug!(
-                    table = %formatted_table_name,
-                    row_count = rows.len(),
-                    "Successfully queried real Iceberg table"
-                );
-                Some(rows)
-            }
-            Err(e) => {
-                debug!(
-                    table = %formatted_table_name,
-                    error = %e,
-                    "Failed to query real table, returning empty result for testing"
-                );
-                // For Phase 2, return empty result to indicate table exists but has no data
-                // or is not accessible (e.g., no real catalog running)
-                Some(vec![])
-            }
-        }
-    }
-
-    /// Helper method to attempt real table querying.
-    async fn try_query_real_table(
-        &self,
-        table_name: &str,
-    ) -> Result<Vec<IcebergRow>, Box<dyn std::error::Error>> {
-        use etl_destinations::iceberg::IcebergClient;
-
-        // Create a client and attempt to query
-        let client = IcebergClient::new_with_rest_catalog(
-            self.catalog_uri.clone(),
-            self.warehouse.clone(),
-            self.namespace.clone(),
-            self.auth_token.clone(),
-        )
-        .await
-        .map_err(|e| format!("Failed to create client: {}", e))?;
-
-        // Query the table (limiting to prevent large results in tests)
-        let table_rows = client
-            .query_table(table_name, Some(1000))
-            .await
-            .map_err(|e| format!("Failed to query table: {}", e))?;
-
-        // Convert TableRows to IcebergRows
-        let iceberg_rows = table_rows
-            .into_iter()
-            .map(|row| {
-                let mut columns = std::collections::HashMap::new();
-
-                // For simplicity, convert each Cell to IcebergValue
-                // In a real implementation, we'd need proper column name mapping
-                for (idx, cell) in row.values.iter().enumerate() {
-                    let value = match cell {
-                        etl::types::Cell::Null => IcebergValue::Null,
-                        etl::types::Cell::Bool(b) => IcebergValue::Boolean(*b),
-                        etl::types::Cell::I32(i) => IcebergValue::Integer(*i as i64),
-                        etl::types::Cell::I64(i) => IcebergValue::Integer(*i),
-                        etl::types::Cell::String(s) => IcebergValue::String(s.clone()),
-                        etl::types::Cell::F64(f) => IcebergValue::Float(*f),
-                        etl::types::Cell::Date(d) => IcebergValue::Date(*d),
-                        etl::types::Cell::TimeStampTz(ts) => IcebergValue::TimestampTz(*ts),
-                        _ => IcebergValue::String(format!("{:?}", cell)), // Fallback to string representation
-                    };
-                    columns.insert(format!("col_{}", idx), value);
-                }
-
-                IcebergRow { columns }
-            })
-            .collect();
-
-        Ok(iceberg_rows)
-    }
-
-    /// Cleans up test data by dropping the namespace.
-    ///
-    /// This should be called in test teardown to clean up any created tables.
-    pub async fn cleanup(&self) -> Result<(), Box<dyn std::error::Error>> {
-        // This would drop the test namespace and all its tables
-        // For local filesystem, this would remove the directory
-        eprintln!("Cleanup for namespace: {}", self.namespace);
-        Ok(())
-    }
 }
 
 impl Drop for IcebergDatabase {
@@ -383,73 +274,6 @@ impl TryFrom<IcebergValue> for String {
 /// Test data structures that mirror the BigQuery test types
 /// for consistent testing across destinations.
 
-/// User record for testing - mirrors BigQueryUser.
-#[derive(Debug, Clone, PartialEq)]
-pub struct IcebergUser {
-    pub id: i64,
-    pub name: String,
-    pub organization_id: i64,
-    // CDC columns
-    pub change_type: String,
-    pub change_sequence_number: String,
-    pub change_timestamp: DateTime<Utc>,
-}
-
-impl IcebergUser {
-    pub fn new(id: i64, name: &str, organization_id: i64) -> Self {
-        Self {
-            id,
-            name: name.to_string(),
-            organization_id,
-            change_type: "UPSERT".to_string(),
-            change_sequence_number: "0000000000000000".to_string(),
-            change_timestamp: Utc::now(),
-        }
-    }
-}
-
-/// Order record for testing - mirrors BigQueryOrder.
-#[derive(Debug, Clone, PartialEq)]
-pub struct IcebergOrder {
-    pub id: i64,
-    pub description: String,
-    // CDC columns
-    pub change_type: String,
-    pub change_sequence_number: String,
-    pub change_timestamp: DateTime<Utc>,
-}
-
-impl IcebergOrder {
-    pub fn new(id: i64, description: &str) -> Self {
-        Self {
-            id,
-            description: description.to_string(),
-            change_type: "UPSERT".to_string(),
-            change_sequence_number: "0000000000000000".to_string(),
-            change_timestamp: Utc::now(),
-        }
-    }
-}
-
-/// Sets up an Iceberg connection for testing.
-///
-/// This function creates an [`IcebergDatabase`] instance configured
-/// for testing. It reads configuration from environment variables
-/// if available, otherwise uses local defaults.
-pub async fn setup_iceberg_connection() -> IcebergDatabase {
-    IcebergDatabase::new().await
-}
-
-/// Parses Iceberg table results into strongly-typed test structures.
-///
-/// This is a placeholder function that would parse the results from
-/// Iceberg table scans into the expected test data structures.
-pub fn parse_iceberg_table_rows<T>(_rows: Vec<IcebergRow>) -> Vec<T> {
-    // Placeholder implementation
-    // In a real implementation, this would convert IcebergRow instances
-    // into the specific test type T (like IcebergUser, IcebergOrder)
-    vec![]
-}
 
 #[cfg(test)]
 mod tests {
