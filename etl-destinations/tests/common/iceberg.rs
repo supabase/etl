@@ -13,10 +13,13 @@ use uuid::Uuid;
 use tracing::debug;
 
 /// Environment variable name for the Iceberg REST catalog URI.
+/// Can also use ICEBERG_CATALOG_URI for Docker-based tests.
 const ICEBERG_CATALOG_URI_ENV_NAME: &str = "TESTS_ICEBERG_CATALOG_URI";
 /// Environment variable name for the Iceberg warehouse location.
+/// Can also use ICEBERG_WAREHOUSE for Docker-based tests.
 const ICEBERG_WAREHOUSE_ENV_NAME: &str = "TESTS_ICEBERG_WAREHOUSE";
 /// Environment variable name for the Iceberg namespace.
+/// Can also use ICEBERG_NAMESPACE for Docker-based tests.
 const ICEBERG_NAMESPACE_ENV_NAME: &str = "TESTS_ICEBERG_NAMESPACE";
 
 /// Generates a unique namespace for test isolation.
@@ -59,13 +62,17 @@ impl IcebergDatabase {
     /// using environment variables for configuration. Falls back to local
     /// testing configuration if REST catalog is not available.
     pub async fn new() -> Self {
+        // Support both test env vars and Docker env vars
         let namespace = std::env::var(ICEBERG_NAMESPACE_ENV_NAME)
+            .or_else(|_| std::env::var("ICEBERG_NAMESPACE"))
             .unwrap_or_else(|_| random_namespace());
         
         let catalog_uri = std::env::var(ICEBERG_CATALOG_URI_ENV_NAME)
+            .or_else(|_| std::env::var("ICEBERG_CATALOG_URI"))
             .unwrap_or_else(|_| "http://localhost:8181".to_string());
         
         let warehouse = std::env::var(ICEBERG_WAREHOUSE_ENV_NAME)
+            .or_else(|_| std::env::var("ICEBERG_WAREHOUSE"))
             .unwrap_or_else(|_| "file:///tmp/iceberg-warehouse".to_string());
         
         let auth_token = std::env::var("TESTS_ICEBERG_AUTH_TOKEN").ok();

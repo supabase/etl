@@ -1,0 +1,187 @@
+version: '3.8'
+
+services:
+  # PostgreSQL source database with logical replication enabled
+  postgres-source:
+    image: postgres:15-alpine
+    container_name: etl-postgres-source
+    environment:
+      POSTGRES_DB: source_db
+      POSTGRES_USER: replication_user
+      POSTGRES_PASSWORD: replication_pass
+      POSTGRES_INITDB_ARGS: "-c wal_level=logical"
+    command: >
+      postgres
+      -c wal_level=logical
+      -c max_wal_senders=10
+      -c max_replication_slots=10
+      -c wal_sender_timeout=0
+      -c max_slot_wal_keep_size=-1
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./test-environment/init-source.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U replication_user -d source_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - etl-test-network
+
+  # MinIO for S3-compatible object storage
+  minio:
+    image: minio/minio:latest
+    container_name: etl-minio
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+      MINIO_DOMAIN: minio
+    command: server /data --console-address ":9001"
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - etl-test-network
+
+  # MinIO client to create initial buckets
+  minio-setup:
+    image: minio/mc:latest
+    container_name: etl-minio-setup
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set myminio http://minio:9000 minioadmin minioadmin;
+      mc mb myminio/iceberg-warehouse || true;
+      mc mb myminio/iceberg-catalog || true;
+      mc policy set public myminio/iceberg-warehouse;
+      mc policy set public myminio/iceberg-catalog;
+      exit 0;
+      "
+    networks:
+      - etl-test-network
+
+  # Apache Iceberg REST Catalog
+  iceberg-rest:
+    image: tabulario/iceberg-rest:0.10.0
+    container_name: etl-iceberg-rest
+    depends_on:
+      postgres-catalog:
+        condition: service_healthy
+      minio-setup:
+        condition: service_completed_successfully
+    environment:
+      CATALOG_WAREHOUSE: s3://iceberg-warehouse/
+      CATALOG_IO__IMPL: org.apache.iceberg.aws.s3.S3FileIO
+      CATALOG_S3_ENDPOINT: http://minio:9000
+      CATALOG_S3_ACCESS__KEY__ID: minioadmin
+      CATALOG_S3_SECRET__ACCESS__KEY: minioadmin
+      CATALOG_S3_PATH__STYLE__ACCESS: "true"
+      CATALOG_CATALOG__IMPL: org.apache.iceberg.jdbc.JdbcCatalog
+      CATALOG_URI: jdbc:postgresql://postgres-catalog:5432/iceberg_catalog
+      CATALOG_JDBC_USER: iceberg
+      CATALOG_JDBC_PASSWORD: iceberg
+      CATALOG_JDBC_CATALOG__NAME: iceberg
+      CATALOG_JDBC_SCHEMA__VERSION: V1
+      AWS_ACCESS_KEY_ID: minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin
+      AWS_REGION: us-east-1
+    ports:
+      - "8181:8181"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8181/v1/config"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+    networks:
+      - etl-test-network
+
+  # PostgreSQL for Iceberg catalog metadata
+  postgres-catalog:
+    image: postgres:15-alpine
+    container_name: etl-postgres-catalog
+    environment:
+      POSTGRES_DB: iceberg_catalog
+      POSTGRES_USER: iceberg
+      POSTGRES_PASSWORD: iceberg
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres-catalog-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U iceberg -d iceberg_catalog"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - etl-test-network
+
+  # Test runner container
+  test-runner:
+    build:
+      context: .
+      dockerfile: Dockerfile.test
+    container_name: etl-test-runner
+    depends_on:
+      postgres-source:
+        condition: service_healthy
+      iceberg-rest:
+        condition: service_healthy
+    environment:
+      # Source database
+      SOURCE_POSTGRES_HOST: postgres-source
+      SOURCE_POSTGRES_PORT: 5432
+      SOURCE_POSTGRES_DB: source_db
+      SOURCE_POSTGRES_USER: replication_user
+      SOURCE_POSTGRES_PASSWORD: replication_pass
+      
+      # Iceberg configuration
+      ICEBERG_CATALOG_URI: http://iceberg-rest:8181
+      ICEBERG_WAREHOUSE: s3://iceberg-warehouse/
+      ICEBERG_NAMESPACE: test_namespace
+      
+      # S3 (MinIO) configuration
+      AWS_ACCESS_KEY_ID: minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin
+      AWS_ENDPOINT: http://minio:9000
+      AWS_REGION: us-east-1
+      AWS_ALLOW_HTTP: "true"
+      S3_PATH_STYLE: "true"
+      
+      # Test configuration
+      RUST_LOG: debug
+      RUST_BACKTRACE: 1
+      TEST_INTEGRATION: "true"
+    volumes:
+      - .:/workspace
+      - cargo-cache:/usr/local/cargo/registry
+      - target-cache:/workspace/target
+    working_dir: /workspace
+    command: >
+      bash -c "
+      echo 'Waiting for services to be ready...';
+      sleep 10;
+      echo 'Running Iceberg integration tests...';
+      cargo test --features iceberg,integration-tests iceberg_integration --nocapture;
+      "
+    networks:
+      - etl-test-network
+
+networks:
+  etl-test-network:
+    driver: bridge
+
+volumes:
+  minio-data:
+  postgres-catalog-data:
+  cargo-cache:
+  target-cache:

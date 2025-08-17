@@ -1,0 +1,255 @@
+name: Iceberg Integration Tests
+
+on:
+  push:
+    branches: [main, develop, 'or/iceberg']
+    paths:
+      - 'etl-destinations/src/iceberg/**'
+      - 'etl-destinations/tests/integration/iceberg_*.rs'
+      - 'etl-destinations/docker-compose.test.yml'
+      - '.github/workflows/iceberg-integration-tests.yml'
+  pull_request:
+    branches: [main, develop]
+    paths:
+      - 'etl-destinations/src/iceberg/**'
+      - 'etl-destinations/tests/integration/iceberg_*.rs'
+      - 'etl-destinations/docker-compose.test.yml'
+      - '.github/workflows/iceberg-integration-tests.yml'
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  RUST_LOG: debug
+
+jobs:
+  test-iceberg:
+    name: Iceberg Integration Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    
+    services:
+      # We use docker-compose for complex multi-service setup
+      # GitHub Actions will handle the lifecycle
+      
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: stable
+          override: true
+          components: rustfmt, clippy
+
+      - name: Cache Cargo dependencies
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-iceberg-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-iceberg-
+            ${{ runner.os }}-cargo-
+
+      - name: Install Docker Compose
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y docker-compose
+
+      - name: Start test infrastructure
+        working-directory: etl-destinations
+        run: |
+          docker-compose -f docker-compose.test.yml up -d
+          echo "Waiting for services to be healthy..."
+          sleep 10
+          docker-compose -f docker-compose.test.yml ps
+
+      - name: Wait for services to be ready
+        working-directory: etl-destinations
+        run: |
+          # Wait for PostgreSQL source
+          timeout 60 bash -c 'until docker exec etl-postgres-source pg_isready -U replication_user -d source_db; do sleep 2; done'
+          
+          # Wait for MinIO
+          timeout 60 bash -c 'until curl -f http://localhost:9000/minio/health/live; do sleep 2; done'
+          
+          # Wait for Iceberg REST catalog
+          timeout 120 bash -c 'until curl -f http://localhost:8181/v1/config; do sleep 5; done'
+          
+          echo "All services are ready!"
+
+      - name: Run unit tests
+        run: |
+          cargo test --features iceberg --lib iceberg
+
+      - name: Run integration tests
+        working-directory: etl-destinations
+        env:
+          SOURCE_POSTGRES_HOST: localhost
+          SOURCE_POSTGRES_PORT: 5432
+          SOURCE_POSTGRES_DB: source_db
+          SOURCE_POSTGRES_USER: replication_user
+          SOURCE_POSTGRES_PASSWORD: replication_pass
+          ICEBERG_CATALOG_URI: http://localhost:8181
+          ICEBERG_WAREHOUSE: s3://iceberg-warehouse/
+          ICEBERG_NAMESPACE: test_namespace
+          AWS_ACCESS_KEY_ID: minioadmin
+          AWS_SECRET_ACCESS_KEY: minioadmin
+          AWS_ENDPOINT: http://localhost:9000
+          AWS_REGION: us-east-1
+          AWS_ALLOW_HTTP: "true"
+          S3_PATH_STYLE: "true"
+          TEST_INTEGRATION: "true"
+        run: |
+          cargo test --features "iceberg integration-tests" iceberg_integration --nocapture
+
+      - name: Generate coverage report
+        if: github.event_name == 'pull_request'
+        working-directory: etl-destinations
+        run: |
+          cargo install cargo-tarpaulin --version 0.27.0
+          cargo tarpaulin \
+            --features "iceberg integration-tests" \
+            --timeout 300 \
+            --out Xml \
+            --output-dir target/coverage \
+            -- iceberg
+
+      - name: Upload coverage to Codecov
+        if: github.event_name == 'pull_request'
+        uses: codecov/codecov-action@v3
+        with:
+          files: ./etl-destinations/target/coverage/cobertura.xml
+          flags: iceberg
+          name: iceberg-coverage
+          fail_ci_if_error: false
+
+      - name: Collect logs on failure
+        if: failure()
+        working-directory: etl-destinations
+        run: |
+          echo "=== Docker Compose Status ==="
+          docker-compose -f docker-compose.test.yml ps
+          
+          echo "=== PostgreSQL Source Logs ==="
+          docker logs etl-postgres-source --tail 100
+          
+          echo "=== MinIO Logs ==="
+          docker logs etl-minio --tail 100
+          
+          echo "=== Iceberg REST Catalog Logs ==="
+          docker logs etl-iceberg-rest --tail 100
+          
+          echo "=== Test Runner Logs (if exists) ==="
+          docker logs etl-test-runner --tail 200 || true
+
+      - name: Stop test infrastructure
+        if: always()
+        working-directory: etl-destinations
+        run: |
+          docker-compose -f docker-compose.test.yml down -v
+          docker system prune -f
+
+  lint-iceberg:
+    name: Lint Iceberg Code
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: stable
+          override: true
+          components: rustfmt, clippy
+
+      - name: Cache Cargo dependencies
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-lint-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-lint-
+            ${{ runner.os }}-cargo-
+
+      - name: Check formatting
+        run: |
+          cargo fmt --all -- --check
+
+      - name: Run Clippy
+        run: |
+          cargo clippy --features iceberg --all-targets -- -D warnings
+
+  benchmark-iceberg:
+    name: Benchmark Iceberg Performance
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: stable
+          override: true
+
+      - name: Cache Cargo dependencies
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-bench-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-bench-
+            ${{ runner.os }}-cargo-
+
+      - name: Start test infrastructure
+        working-directory: etl-destinations
+        run: |
+          docker-compose -f docker-compose.test.yml up -d
+          sleep 30  # Wait for services
+
+      - name: Run benchmarks
+        working-directory: etl-destinations
+        env:
+          SOURCE_POSTGRES_HOST: localhost
+          ICEBERG_CATALOG_URI: http://localhost:8181
+          AWS_ENDPOINT: http://localhost:9000
+        run: |
+          cargo bench --features iceberg iceberg
+
+      - name: Store benchmark results
+        uses: benchmark-action/github-action-benchmark@v1
+        with:
+          tool: 'cargo'
+          output-file-path: etl-destinations/target/criterion/iceberg/benchmark.json
+          benchmark-data-dir-path: 'benchmarks'
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          auto-push: true
+
+      - name: Stop test infrastructure
+        if: always()
+        working-directory: etl-destinations
+        run: |
+          docker-compose -f docker-compose.test.yml down -v
