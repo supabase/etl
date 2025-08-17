@@ -10,3 +10,6 @@ mod iceberg_test;
 
 #[cfg(feature = "iceberg")]
 mod iceberg_integration;
+
+#[cfg(feature = "iceberg")]
+mod iceberg_comprehensive;
