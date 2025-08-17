@@ -110,6 +110,13 @@ jobs:
           echo "TESTS_BIGQUERY_PROJECT_ID=${{ secrets.TESTS_BIGQUERY_PROJECT_ID }}" >> $GITHUB_ENV
           echo "TESTS_BIGQUERY_SA_KEY_PATH=/tmp/bigquery-sa-key.json" >> $GITHUB_ENV
 
+      - name: Start Iceberg test infrastructure
+        working-directory: etl-destinations
+        run: |
+          docker-compose -f docker-compose.test.yml up -d
+          sleep 30  # Wait for services
+          timeout 60 bash -c 'until curl -f http://localhost:8181/v1/config 2>/dev/null; do sleep 2; done' || echo "Iceberg not ready"
+
       - name: Generate code coverage
         id: coverage
         run: |
@@ -125,3 +132,8 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           path-to-lcov: lcov.info
           debug: true
+
+      - name: Stop Iceberg infrastructure
+        if: always()
+        working-directory: etl-destinations
+        run: docker-compose -f docker-compose.test.yml down
