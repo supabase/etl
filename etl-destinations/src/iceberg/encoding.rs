@@ -17,6 +17,56 @@ use arrow::{
 use std::sync::Arc;
 use tracing::{debug, warn};
 
+/// Batches table rows based on size constraints to optimize streaming performance.
+///
+/// Returns slices into the original row data, avoiding expensive cloning operations
+/// for better memory efficiency. Respects both row count and byte size limits.
+pub fn batch_rows(
+    rows: &[TableRow],
+    max_batch_size: usize,
+    max_batch_size_bytes: usize,
+) -> Vec<&[TableRow]> {
+    if rows.is_empty() {
+        return vec![];
+    }
+
+    let mut batches = Vec::new();
+    let mut start_idx = 0;
+    let mut current_size_bytes = 0;
+    let mut current_batch_len = 0;
+
+    for (idx, row) in rows.iter().enumerate() {
+        let row_size = estimate_row_size(row);
+        
+        // Check if adding this row would exceed limits
+        if current_batch_len > 0 && 
+           (current_batch_len >= max_batch_size || 
+            current_size_bytes + row_size > max_batch_size_bytes) {
+            // Add current batch slice
+            batches.push(&rows[start_idx..start_idx + current_batch_len]);
+            start_idx = idx;
+            current_size_bytes = 0;
+            current_batch_len = 0;
+        }
+
+        current_batch_len += 1;
+        current_size_bytes += row_size;
+    }
+
+    // Add final batch if not empty
+    if current_batch_len > 0 {
+        batches.push(&rows[start_idx..start_idx + current_batch_len]);
+    }
+
+    debug!(
+        total_rows = rows.len(),
+        num_batches = batches.len(),
+        "Batched rows for streaming"
+    );
+
+    batches
+}
+
 /// Converts a vector of table rows to an Arrow RecordBatch.
 pub fn rows_to_record_batch(
     rows: &[TableRow],
@@ -326,69 +376,13 @@ fn estimate_cell_size(cell: &Cell) -> usize {
     }
 }
 
-/// Batch configuration for controlling memory usage.
-#[derive(Debug, Clone)]
-pub struct BatchConfig {
-    /// Maximum number of rows per batch
-    pub max_rows: usize,
-    /// Maximum memory size per batch in bytes
-    pub max_memory_bytes: usize,
-}
 
-impl Default for BatchConfig {
-    fn default() -> Self {
-        Self {
-            max_rows: 1000,
-            max_memory_bytes: 64 * 1024 * 1024, // 64MB
-        }
-    }
-}
-
-/// Batches table rows based on size constraints.
-pub fn batch_rows(rows: Vec<TableRow>, config: &BatchConfig) -> Vec<Vec<TableRow>> {
-    if rows.is_empty() {
-        return vec![];
-    }
-
-    let mut batches = Vec::new();
-    let mut current_batch = Vec::new();
-    let mut current_size = 0;
-
-    for row in rows {
-        let row_size = estimate_row_size(&row);
-        
-        // Check if adding this row would exceed limits
-        if !current_batch.is_empty() && 
-           (current_batch.len() >= config.max_rows || 
-            current_size + row_size > config.max_memory_bytes) {
-            // Start new batch
-            batches.push(std::mem::take(&mut current_batch));
-            current_size = 0;
-        }
-        
-        current_batch.push(row);
-        current_size += row_size;
-    }
-
-    // Add remaining batch
-    if !current_batch.is_empty() {
-        batches.push(current_batch);
-    }
-
-    debug!(
-        total_batches = batches.len(),
-        "Split rows into batches"
-    );
-
-    batches
-}
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
     use etl::types::{Cell, TableRow};
-    use chrono::{NaiveDate, Utc};
 
     fn create_test_schema() -> ArrowSchema {
         ArrowSchema::new(vec![
@@ -464,11 +458,6 @@ mod tests {
 
     #[test]
     fn test_batch_rows() {
-        let config = BatchConfig {
-            max_rows: 2,
-            max_memory_bytes: 1024 * 1024, // 1MB
-        };
-
         let rows = vec![
             TableRow {
                 values: vec![Cell::I64(1)],
@@ -481,7 +470,8 @@ mod tests {
             },
         ];
 
-        let batches = batch_rows(rows, &config);
+        // Test with max batch size of 2 rows
+        let batches = batch_rows(&rows, 2, 1024 * 1024); // 2 rows max, 1MB max
         
         assert_eq!(batches.len(), 2); // 2 rows in first batch, 1 in second
         assert_eq!(batches[0].len(), 2);
@@ -511,5 +501,32 @@ mod tests {
         assert_eq!(array.len(), 2);
         assert!(!array.is_null(0));
         assert!(array.is_null(1));
+    }
+
+    #[test]
+    fn test_batch_rows_zero_copy() {
+        let rows = vec![
+            TableRow {
+                values: vec![Cell::I64(1)],
+            },
+            TableRow {
+                values: vec![Cell::I64(2)],
+            },
+            TableRow {
+                values: vec![Cell::I64(3)],
+            },
+        ];
+
+        // Test with max batch size of 2 rows
+        let batches = batch_rows(&rows, 2, 1024 * 1024); // 2 rows max, 1MB max
+        
+        assert_eq!(batches.len(), 2); // 2 rows in first batch, 1 in second
+        assert_eq!(batches[0].len(), 2);
+        assert_eq!(batches[1].len(), 1);
+        
+        // Check that slices point to original data (zero-copy)
+        assert_eq!(batches[0][0].values[0], Cell::I64(1));
+        assert_eq!(batches[0][1].values[0], Cell::I64(2));
+        assert_eq!(batches[1][0].values[0], Cell::I64(3));
     }
 }

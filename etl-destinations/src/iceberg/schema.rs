@@ -2,8 +2,10 @@
 
 use etl::error::{ErrorKind, EtlError, EtlResult};
 use etl::{etl_error};
-use etl::types::{Cell, ColumnSchema, TableSchema, Type as PostgresType};
-use tokio_postgres::types::Kind;
+use etl::types::{Cell, TableSchema, Type as PostgresType};
+#[cfg(test)]
+use etl::types::ColumnSchema;
+use tokio_postgres::types::{Kind, Type};
 
 // PostgreSQL OID constants - match what's used in etl-postgres
 const BOOL_OID: u32 = 16;
@@ -25,6 +27,21 @@ const TIMESTAMPTZ_OID: u32 = 1184;
 const UUID_OID: u32 = 2950;
 const JSON_OID: u32 = 114;
 const JSONB_OID: u32 = 3802;
+
+// Additional common PostgreSQL types
+const TIMETZ_OID: u32 = 1266;  // TIME WITH TIME ZONE
+const INTERVAL_OID: u32 = 1186; // INTERVAL
+const MONEY_OID: u32 = 790;     // MONEY type
+const INET_OID: u32 = 869;      // INET type (IP addresses)
+const CIDR_OID: u32 = 650;      // CIDR type (network addresses)
+const MACADDR_OID: u32 = 829;   // MAC address
+const POINT_OID: u32 = 600;     // POINT geometric type
+const BIT_OID: u32 = 1560;      // BIT type
+const VARBIT_OID: u32 = 1562;   // BIT VARYING
+const SMALLINT_ARRAY_OID: u32 = 1005; // INT2[]
+const INTEGER_ARRAY_OID: u32 = 1007;  // INT4[]
+const BIGINT_ARRAY_OID: u32 = 1016;   // INT8[]
+const TEXT_ARRAY_OID: u32 = 1009;     // TEXT[]
 
 use arrow::datatypes::{DataType, Field, Schema as ArrowSchema, TimeUnit};
 use chrono::{NaiveDate, NaiveTime};
@@ -85,19 +102,13 @@ impl SchemaMapper {
 
     /// Converts Iceberg schema to Arrow schema.
     ///
-    /// This is a simplified conversion for Phase 2. A complete implementation
-    /// would handle all Iceberg field types and nested structures.
+    /// This is a simplified conversion for compatibility with iceberg-rs 0.6.
+    /// In a complete implementation, this would dynamically convert each field.
     pub fn iceberg_to_arrow(&self, _iceberg_schema: &IcebergSchema) -> EtlResult<ArrowSchema> {
-        // For Phase 2, we'll use a simplified approach
-        // In a real implementation, we would iterate through Iceberg fields
-        // and convert each to the corresponding Arrow field
-        
-        // For now, create a basic schema with common fields plus CDC columns
+        // Simplified implementation - create a basic schema for now
         let mut fields = vec![
             Field::new("id", DataType::Int64, true),
-            Field::new("name", DataType::LargeUtf8, true),
-            Field::new("created_at", DataType::Timestamp(TimeUnit::Microsecond, None), true),
-            Field::new("updated_at", DataType::Timestamp(TimeUnit::Microsecond, None), true),
+            Field::new("data", DataType::LargeUtf8, true),
         ];
         
         // Add CDC metadata fields
@@ -109,7 +120,7 @@ impl SchemaMapper {
     }
 
     /// Converts PostgreSQL type to Iceberg type.
-    fn postgres_type_to_iceberg(&self, pg_type: &PostgresType) -> EtlResult<IcebergType> {
+    pub fn postgres_type_to_iceberg(&self, pg_type: &PostgresType) -> EtlResult<IcebergType> {
         let iceberg_type = match pg_type.oid() {
             // Boolean types
             BOOL_OID => IcebergType::Primitive(PrimitiveType::Boolean),
@@ -146,14 +157,70 @@ impl SchemaMapper {
             // JSON types - map to string
             JSON_OID | JSONB_OID => IcebergType::Primitive(PrimitiveType::String),
             
-            // Array types - map to string for now (simplified implementation)
-            _ if matches!(pg_type.kind(), Kind::Array(_)) => {
-                tracing::warn!(
-                    oid = %pg_type.oid(),
-                    name = %pg_type.name(),
-                    "Array type mapped to string for Phase 1 implementation"
-                );
-                IcebergType::Primitive(PrimitiveType::String)
+            // Additional time types
+            TIMETZ_OID => IcebergType::Primitive(PrimitiveType::Time),
+            
+            // Interval types - map to string (Iceberg doesn't have native interval)
+            INTERVAL_OID => IcebergType::Primitive(PrimitiveType::String),
+            
+            // Money type - map to string (preserve precision)
+            MONEY_OID => IcebergType::Primitive(PrimitiveType::String),
+            
+            // Network address types - map to string
+            INET_OID | CIDR_OID => IcebergType::Primitive(PrimitiveType::String),
+            
+            // MAC address type - map to string
+            MACADDR_OID => IcebergType::Primitive(PrimitiveType::String),
+            
+            // Geometric types - map to string (can be extended to proper geometry support later)
+            POINT_OID => IcebergType::Primitive(PrimitiveType::String),
+            
+            // Bit types - map to binary for bit strings
+            BIT_OID | VARBIT_OID => IcebergType::Primitive(PrimitiveType::Binary),
+            
+            // Common array types - map to proper Iceberg list types
+            SMALLINT_ARRAY_OID => self.create_iceberg_list_type(PrimitiveType::Int)?,
+            INTEGER_ARRAY_OID => self.create_iceberg_list_type(PrimitiveType::Int)?,
+            BIGINT_ARRAY_OID => self.create_iceberg_list_type(PrimitiveType::Long)?,
+            TEXT_ARRAY_OID => self.create_iceberg_list_type(PrimitiveType::String)?,
+            
+            // General array types - extract element type and create list
+            _ if matches!(pg_type.kind(), Kind::Array(_element_type)) => {
+                if let Kind::Array(element_type) = pg_type.kind() {
+                    // Get the element type OID and recursively convert it
+                    let element_oid = element_type.oid();
+                    let element_pg_type = Type::new(
+                        element_type.name().to_string(),
+                        element_oid,
+                        element_type.kind().clone(),
+                        element_type.schema().to_string(),
+                    );
+                    
+                    let element_iceberg_type = self.postgres_type_to_iceberg(&element_pg_type)?;
+                    
+                    // Create list type with the element type
+                    match element_iceberg_type {
+                        IcebergType::Primitive(primitive) => self.create_iceberg_list_type(primitive)?,
+                        other => {
+                            // For complex element types, fall back to string representation
+                            tracing::warn!(
+                                oid = %pg_type.oid(),
+                                name = %pg_type.name(),
+                                element_type = ?other,
+                                "Complex array element type mapped to string representation"
+                            );
+                            IcebergType::Primitive(PrimitiveType::String)
+                        }
+                    }
+                } else {
+                    // Fallback for unexpected array kind structure
+                    tracing::warn!(
+                        oid = %pg_type.oid(),
+                        name = %pg_type.name(),
+                        "Unknown array type structure, mapping to string"
+                    );
+                    IcebergType::Primitive(PrimitiveType::String)
+                }
             }
             
             // Default fallback to string for unknown types
@@ -168,6 +235,23 @@ impl SchemaMapper {
         };
 
         Ok(iceberg_type)
+    }
+
+    /// Creates an Iceberg list type with the specified element type.
+    fn create_iceberg_list_type(&self, element_type: PrimitiveType) -> EtlResult<IcebergType> {
+        use iceberg::spec::ListType;
+        
+        // Create the element field with a standard name
+        // Use field ID 0 for list elements (standard Iceberg convention)
+        let element_field = Arc::new(NestedField::required(
+            0, // Field ID for list element (lists use nested field ID 0)
+            "element", // Standard name for list elements
+            IcebergType::Primitive(element_type),
+        ));
+        
+        let list_type = ListType { element_field };
+        
+        Ok(IcebergType::List(list_type))
     }
 
     /// Creates CDC metadata fields for change tracking.
@@ -231,13 +315,53 @@ impl SchemaMapper {
             TIMESTAMPTZ_OID => DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
             UUID_OID => DataType::LargeUtf8, // Convert to string
             JSON_OID | JSONB_OID => DataType::LargeUtf8,
-            _ if matches!(pg_type.kind(), Kind::Array(_)) => {
-                tracing::warn!(
-                    oid = %pg_type.oid(),
-                    name = %pg_type.name(),
-                    "Array type mapped to string for Phase 1 implementation"
-                );
+            
+            // Additional time types
+            TIMETZ_OID => DataType::Time64(TimeUnit::Microsecond),
+            
+            // Interval, money, network, MAC, geometric types - map to string
+            INTERVAL_OID | MONEY_OID | INET_OID | CIDR_OID | MACADDR_OID | POINT_OID => {
                 DataType::LargeUtf8
+            }
+            
+            // Bit types - map to binary
+            BIT_OID | VARBIT_OID => DataType::LargeBinary,
+            
+            // Known array types - map to proper Arrow list types
+            SMALLINT_ARRAY_OID => DataType::List(Arc::new(Field::new("item", DataType::Int16, true))),
+            INTEGER_ARRAY_OID => DataType::List(Arc::new(Field::new("item", DataType::Int32, true))),
+            BIGINT_ARRAY_OID => DataType::List(Arc::new(Field::new("item", DataType::Int64, true))),
+            TEXT_ARRAY_OID => DataType::List(Arc::new(Field::new("item", DataType::LargeUtf8, true))),
+            
+            // General array types - extract element type and create list
+            _ if matches!(pg_type.kind(), Kind::Array(_)) => {
+                if let Kind::Array(element_type) = pg_type.kind() {
+                    // Get the element type and recursively convert it
+                    let element_pg_type = Type::new(
+                        element_type.name().to_string(),
+                        element_type.oid(),
+                        element_type.kind().clone(),
+                        element_type.schema().to_string(),
+                    );
+                    
+                    match self.postgres_type_to_arrow(&element_pg_type) {
+                        Ok(element_arrow_type) => {
+                            DataType::List(Arc::new(Field::new("item", element_arrow_type, true)))
+                        },
+                        Err(_) => {
+                            // Fall back to string for unsupported element types
+                            tracing::warn!(
+                                oid = %pg_type.oid(),
+                                name = %pg_type.name(),
+                                "Array with unsupported element type, mapping to string"
+                            );
+                            DataType::LargeUtf8
+                        }
+                    }
+                } else {
+                    // Fallback for unexpected array structure
+                    DataType::LargeUtf8
+                }
             }
             _ => {
                 tracing::warn!(
@@ -436,8 +560,8 @@ mod tests {
         let iceberg_schema = mapper.postgres_to_iceberg(&pg_schema).unwrap();
         
         // Note: iceberg::spec::Schema API doesn't expose fields() in this version
-        // For Phase 1, we validate that schema creation succeeds
-        // Field-level validation will be added in Phase 2
+        // Validate that schema creation succeeds
+        // Field-level validation will be added in future
         assert!(iceberg_schema.to_string().contains("id"));
         assert!(iceberg_schema.to_string().contains("name"));
     }
@@ -509,8 +633,192 @@ mod tests {
         let schema2 = mapper.postgres_to_iceberg(&pg_schema).unwrap();
         
         // Should be identical (cache hit)
-        // For Phase 1, just check that both schemas were created successfully
+        // Check that both schemas were created successfully
         assert!(!schema1.to_string().is_empty());
         assert!(!schema2.to_string().is_empty());
+    }
+
+    #[test]
+    fn test_additional_postgres_types_to_iceberg() {
+        let mapper = SchemaMapper::new();
+        
+        // Test additional time types
+        let timetz_type = create_pg_type(TIMETZ_OID, "timetz");
+        let result = mapper.postgres_type_to_iceberg(&timetz_type).unwrap();
+        assert!(matches!(result, IcebergType::Primitive(PrimitiveType::Time)));
+        
+        // Test interval type (maps to string)
+        let interval_type = create_pg_type(INTERVAL_OID, "interval");
+        let result = mapper.postgres_type_to_iceberg(&interval_type).unwrap();
+        assert!(matches!(result, IcebergType::Primitive(PrimitiveType::String)));
+        
+        // Test money type (maps to string to preserve precision)
+        let money_type = create_pg_type(MONEY_OID, "money");
+        let result = mapper.postgres_type_to_iceberg(&money_type).unwrap();
+        assert!(matches!(result, IcebergType::Primitive(PrimitiveType::String)));
+        
+        // Test network types (map to string)
+        let inet_type = create_pg_type(INET_OID, "inet");
+        let result = mapper.postgres_type_to_iceberg(&inet_type).unwrap();
+        assert!(matches!(result, IcebergType::Primitive(PrimitiveType::String)));
+        
+        let cidr_type = create_pg_type(CIDR_OID, "cidr");
+        let result = mapper.postgres_type_to_iceberg(&cidr_type).unwrap();
+        assert!(matches!(result, IcebergType::Primitive(PrimitiveType::String)));
+        
+        // Test MAC address type (maps to string)
+        let macaddr_type = create_pg_type(MACADDR_OID, "macaddr");
+        let result = mapper.postgres_type_to_iceberg(&macaddr_type).unwrap();
+        assert!(matches!(result, IcebergType::Primitive(PrimitiveType::String)));
+        
+        // Test geometric type (maps to string)
+        let point_type = create_pg_type(POINT_OID, "point");
+        let result = mapper.postgres_type_to_iceberg(&point_type).unwrap();
+        assert!(matches!(result, IcebergType::Primitive(PrimitiveType::String)));
+        
+        // Test bit types (map to binary)
+        let bit_type = create_pg_type(BIT_OID, "bit");
+        let result = mapper.postgres_type_to_iceberg(&bit_type).unwrap();
+        assert!(matches!(result, IcebergType::Primitive(PrimitiveType::Binary)));
+        
+        let varbit_type = create_pg_type(VARBIT_OID, "varbit");
+        let result = mapper.postgres_type_to_iceberg(&varbit_type).unwrap();
+        assert!(matches!(result, IcebergType::Primitive(PrimitiveType::Binary)));
+    }
+
+    #[test]
+    fn test_additional_postgres_types_to_arrow() {
+        let mapper = SchemaMapper::new();
+        
+        // Test additional time types
+        let timetz_type = create_pg_type(TIMETZ_OID, "timetz");
+        let result = mapper.postgres_type_to_arrow(&timetz_type).unwrap();
+        assert!(matches!(result, DataType::Time64(TimeUnit::Microsecond)));
+        
+        // Test interval type (maps to string)
+        let interval_type = create_pg_type(INTERVAL_OID, "interval");
+        let result = mapper.postgres_type_to_arrow(&interval_type).unwrap();
+        assert!(matches!(result, DataType::LargeUtf8));
+        
+        // Test money type (maps to string)
+        let money_type = create_pg_type(MONEY_OID, "money");
+        let result = mapper.postgres_type_to_arrow(&money_type).unwrap();
+        assert!(matches!(result, DataType::LargeUtf8));
+        
+        // Test network types (map to string)
+        let inet_type = create_pg_type(INET_OID, "inet");
+        let result = mapper.postgres_type_to_arrow(&inet_type).unwrap();
+        assert!(matches!(result, DataType::LargeUtf8));
+        
+        // Test bit types (map to binary)
+        let bit_type = create_pg_type(BIT_OID, "bit");
+        let result = mapper.postgres_type_to_arrow(&bit_type).unwrap();
+        assert!(matches!(result, DataType::LargeBinary));
+    }
+
+    #[test]
+    fn test_array_types_mapping() {
+        let mapper = SchemaMapper::new();
+        
+        // Test known array types (should map to list)
+        let int_array_type = create_pg_type(INTEGER_ARRAY_OID, "int4[]");
+        let result = mapper.postgres_type_to_iceberg(&int_array_type).unwrap();
+        assert!(matches!(result, IcebergType::List(_)));
+        
+        let text_array_type = create_pg_type(TEXT_ARRAY_OID, "text[]");
+        let result = mapper.postgres_type_to_iceberg(&text_array_type).unwrap();
+        assert!(matches!(result, IcebergType::List(_)));
+        
+        // Test Arrow conversion for arrays
+        let int_array_arrow = mapper.postgres_type_to_arrow(&int_array_type).unwrap();
+        assert!(matches!(int_array_arrow, DataType::List(_)));
+    }
+
+    #[test]
+    fn test_comprehensive_schema_with_new_types() {
+        let columns = vec![
+            // Original types
+            ColumnSchema {
+                name: "id".to_string(),
+                typ: create_pg_type(20, "bigint"),
+                nullable: false,
+                modifier: 0,
+                primary: false,
+            },
+            ColumnSchema {
+                name: "name".to_string(),
+                typ: create_pg_type(25, "text"),
+                nullable: true,
+                modifier: 0,
+                primary: false,
+            },
+            // New types
+            ColumnSchema {
+                name: "created_time".to_string(),
+                typ: create_pg_type(TIMETZ_OID, "timetz"),
+                nullable: true,
+                modifier: 0,
+                primary: false,
+            },
+            ColumnSchema {
+                name: "salary".to_string(),
+                typ: create_pg_type(MONEY_OID, "money"),
+                nullable: true,
+                modifier: 0,
+                primary: false,
+            },
+            ColumnSchema {
+                name: "ip_address".to_string(),
+                typ: create_pg_type(INET_OID, "inet"),
+                nullable: true,
+                modifier: 0,
+                primary: false,
+            },
+            ColumnSchema {
+                name: "location".to_string(),
+                typ: create_pg_type(POINT_OID, "point"),
+                nullable: true,
+                modifier: 0,
+                primary: false,
+            },
+            ColumnSchema {
+                name: "tags".to_string(),
+                typ: create_pg_type(TEXT_ARRAY_OID, "text[]"),
+                nullable: true,
+                modifier: 0,
+                primary: false,
+            },
+        ];
+
+        let comprehensive_schema = TableSchema {
+            id: TableId::new(12346),
+            name: TableName::new("test_schema".to_string(), "comprehensive_table".to_string()),
+            column_schemas: columns,
+        };
+
+        let mut mapper = SchemaMapper::new();
+        
+        // Test Iceberg schema conversion
+        let iceberg_schema = mapper.postgres_to_iceberg(&comprehensive_schema).unwrap();
+        assert!(iceberg_schema.to_string().contains("created_time"));
+        assert!(iceberg_schema.to_string().contains("salary"));
+        assert!(iceberg_schema.to_string().contains("ip_address"));
+        
+        // Test Arrow schema conversion
+        let arrow_schema = mapper.postgres_to_arrow(&comprehensive_schema).unwrap();
+        assert_eq!(arrow_schema.fields().len(), 10); // 7 columns + 3 CDC fields
+        
+        // Verify specific field types
+        let created_time_field = arrow_schema.field_with_name("created_time").unwrap();
+        assert!(matches!(created_time_field.data_type(), DataType::Time64(TimeUnit::Microsecond)));
+        
+        let salary_field = arrow_schema.field_with_name("salary").unwrap();
+        assert!(matches!(salary_field.data_type(), DataType::LargeUtf8));
+        
+        let ip_field = arrow_schema.field_with_name("ip_address").unwrap();
+        assert!(matches!(ip_field.data_type(), DataType::LargeUtf8));
+        
+        let tags_field = arrow_schema.field_with_name("tags").unwrap();
+        assert!(matches!(tags_field.data_type(), DataType::List(_)));
     }
 }

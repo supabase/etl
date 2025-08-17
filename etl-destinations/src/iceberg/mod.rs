@@ -53,7 +53,7 @@ pub const DEFAULT_NAMESPACE: &str = "etl";
 /// Default table prefix for PostgreSQL tables.
 pub const DEFAULT_TABLE_PREFIX: &str = "pg_";
 
-/// CDC metadata column names.
+/// CDC metadata column names for consistency across ETL destinations.
 pub mod cdc_columns {
     /// Column indicating the type of change (INSERT, UPDATE, DELETE, UPSERT).
     pub const CHANGE_TYPE: &str = "_CHANGE_TYPE";

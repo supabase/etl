@@ -27,10 +27,11 @@ pub struct IcebergConfig {
 }
 
 /// Catalog configuration for Iceberg.
+/// Focused on AWS-native catalogs with REST catalog support.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CatalogConfig {
-    /// REST catalog configuration
+    /// REST catalog configuration (AWS S3 Tables, Tabular, etc.)
     Rest {
         /// REST catalog URI
         uri: String,
@@ -39,14 +40,7 @@ pub enum CatalogConfig {
         /// Optional authentication credentials
         credentials: Option<RestCredentials>,
     },
-    /// SQL catalog configuration
-    Sql {
-        /// SQL database URI
-        uri: String,
-        /// Warehouse location
-        warehouse: String,
-    },
-    /// AWS Glue catalog configuration
+    /// AWS Glue catalog configuration (native AWS)
     Glue {
         /// AWS region
         region: String,
@@ -89,10 +83,11 @@ pub struct AwsCredentials {
 }
 
 /// Storage configuration for Iceberg tables.
+/// Currently optimized for AWS S3, with extensible design for future cloud providers.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StorageConfig {
-    /// Amazon S3 storage
+    /// Amazon S3 storage (production-ready)
     S3 {
         /// S3 bucket name
         bucket: String,
@@ -103,76 +98,41 @@ pub enum StorageConfig {
         /// AWS credentials (if not using instance profile)
         credentials: Option<AwsCredentials>,
     },
-    /// Google Cloud Storage
-    Gcs {
-        /// GCS bucket name
-        bucket: String,
-        /// Optional prefix for all objects
-        prefix: Option<String>,
-        /// Service account key JSON
-        service_account_key: SerializableSecretString,
-    },
-    /// Azure Blob Storage
-    Azure {
-        /// Storage account name
-        account: String,
-        /// Container name
-        container: String,
-        /// Optional prefix for all objects
-        prefix: Option<String>,
-        /// Storage account key
-        access_key: SerializableSecretString,
-    },
-    /// Local filesystem (for testing)
+    /// Local filesystem (for testing only)
     Local {
         /// Base directory path
         path: String,
     },
+    // Future cloud providers can be added here:
+    // Gcs { ... },
+    // Azure { ... },
 }
 
 /// Writer configuration for Iceberg.
+/// Simplified for native Iceberg Writer API - compression and file management handled automatically.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WriterConfig {
-    /// Target file size in bytes (default: 512MB)
-    #[serde(default = "default_target_file_size")]
-    pub target_file_size_bytes: usize,
-    
-    /// Maximum number of open files (default: 10)
-    #[serde(default = "default_max_open_files")]
-    pub max_open_files: usize,
-    
-    /// Compression type for Parquet files
-    #[serde(default = "default_compression")]
-    pub compression: CompressionType,
-    
     /// Batch size for writing (default: 1000)
     #[serde(default = "default_batch_size")]
     pub batch_size: usize,
     
-    /// Commit interval in milliseconds (default: 60000)
-    #[serde(default = "default_commit_interval_ms")]
-    pub commit_interval_ms: u64,
+    /// Maximum batch size in bytes (default: 30MB, optimized for S3)
+    #[serde(default = "default_max_batch_size_bytes")]
+    pub max_batch_size_bytes: usize,
+    
+    /// Maximum time to wait before committing (default: 10s for low latency)
+    #[serde(default = "default_max_commit_time_ms")]
+    pub max_commit_time_ms: u64,
     
     /// Enable metrics collection
     #[serde(default = "default_enable_metrics")]
     pub enable_metrics: bool,
+    
+    // Note: Compression, target file size, and file management are now handled
+    // automatically by the native Iceberg Writer API for optimal performance
 }
 
-/// Compression type for Parquet files.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum CompressionType {
-    /// No compression
-    None,
-    /// Snappy compression (default)
-    Snappy,
-    /// Gzip compression
-    Gzip,
-    /// LZ4 compression
-    Lz4,
-    /// Zstd compression
-    Zstd,
-}
+// CompressionType removed - now handled automatically by native Iceberg Writer API
 
 /// CDC (Change Data Capture) configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -198,11 +158,9 @@ pub struct CdcConfig {
 impl Default for WriterConfig {
     fn default() -> Self {
         Self {
-            target_file_size_bytes: default_target_file_size(),
-            max_open_files: default_max_open_files(),
-            compression: default_compression(),
             batch_size: default_batch_size(),
-            commit_interval_ms: default_commit_interval_ms(),
+            max_batch_size_bytes: default_max_batch_size_bytes(),
+            max_commit_time_ms: default_max_commit_time_ms(),
             enable_metrics: default_enable_metrics(),
         }
     }
@@ -220,24 +178,16 @@ impl Default for CdcConfig {
 }
 
 // Default value functions for serde
-fn default_target_file_size() -> usize {
-    512 * 1024 * 1024 // 512MB
-}
-
-fn default_max_open_files() -> usize {
-    10
-}
-
-fn default_compression() -> CompressionType {
-    CompressionType::Snappy
-}
-
 fn default_batch_size() -> usize {
     1000
 }
 
-fn default_commit_interval_ms() -> u64 {
-    60000 // 1 minute
+fn default_max_batch_size_bytes() -> usize {
+    30 * 1024 * 1024 // 30MB - optimized for S3 Tables API
+}
+
+fn default_max_commit_time_ms() -> u64 {
+    10_000 // 10 seconds max latency
 }
 
 fn default_enable_metrics() -> bool {
@@ -283,6 +233,80 @@ pub enum PartitionStrategy {
 impl Default for PartitionStrategy {
     fn default() -> Self {
         Self::None
+    }
+}
+
+/// AWS-specific configuration helpers for optimal setup.
+impl IcebergConfig {
+    /// Creates an AWS-optimized configuration for S3 Tables.
+    ///
+    /// This is the recommended setup for AWS S3 Tables with REST catalog.
+    pub fn aws_s3_tables(
+        rest_catalog_uri: String,
+        s3_bucket: String,
+        region: String,
+        namespace: String,
+    ) -> Self {
+        Self {
+            catalog: CatalogConfig::Rest {
+                uri: rest_catalog_uri,
+                warehouse: format!("s3://{}/warehouse", s3_bucket),
+                credentials: None, // Use IAM roles/instance profiles
+            },
+            namespace,
+            table_prefix: Some("etl_".to_string()),
+            storage: StorageConfig::S3 {
+                bucket: s3_bucket,
+                prefix: Some("data/".to_string()),
+                region,
+                credentials: None, // Use IAM roles/instance profiles
+            },
+            writer_config: WriterConfig::aws_optimized(),
+            cdc_config: CdcConfig::default(),
+        }
+    }
+
+
+    /// Creates an AWS Glue catalog configuration.
+    ///
+    /// For use with AWS Glue Data Catalog and S3 storage.
+    pub fn aws_glue(
+        s3_bucket: String,
+        region: String,
+        namespace: String,
+        credentials: AwsCredentials,
+    ) -> Self {
+        Self {
+            catalog: CatalogConfig::Glue {
+                region: region.clone(),
+                warehouse: format!("s3://{}/warehouse", s3_bucket),
+                credentials: credentials.clone(),
+            },
+            namespace,
+            table_prefix: Some("etl_".to_string()),
+            storage: StorageConfig::S3 {
+                bucket: s3_bucket,
+                prefix: Some("data/".to_string()),
+                region,
+                credentials: Some(credentials),
+            },
+            writer_config: WriterConfig::aws_optimized(),
+            cdc_config: CdcConfig::default(),
+        }
+    }
+}
+
+impl WriterConfig {
+    /// Creates AWS-optimized writer configuration.
+    ///
+    /// Optimized for S3 Tables API with 30MB batches and 10s max commit time for low latency.
+    pub fn aws_optimized() -> Self {
+        Self {
+            batch_size: 1000,
+            max_batch_size_bytes: 30 * 1024 * 1024, // 30MB for S3 Tables
+            max_commit_time_ms: 10_000, // 10s max latency
+            enable_metrics: true,
+        }
     }
 }
 
@@ -335,11 +359,10 @@ mod tests {
     #[test]
     fn test_default_writer_config() {
         let config = WriterConfig::default();
-        assert_eq!(config.target_file_size_bytes, 512 * 1024 * 1024);
-        assert_eq!(config.max_open_files, 10);
-        assert!(matches!(config.compression, CompressionType::Snappy));
         assert_eq!(config.batch_size, 1000);
-        assert_eq!(config.commit_interval_ms, 60000);
+        assert_eq!(config.max_batch_size_bytes, 30 * 1024 * 1024); // 30MB
+        assert_eq!(config.max_commit_time_ms, 10_000); // 10s
+        assert!(config.enable_metrics);
     }
 
     #[test]
@@ -350,4 +373,43 @@ mod tests {
         assert!(config.add_lsn_column);
         assert!(config.add_timestamp_column);
     }
+
+    #[test]
+    fn test_aws_s3_tables_config() {
+        let config = IcebergConfig::aws_s3_tables(
+            "https://s3-tables.us-east-1.amazonaws.com".to_string(),
+            "my-data-bucket".to_string(),
+            "us-east-1".to_string(),
+            "production".to_string(),
+        );
+
+        match config.catalog {
+            CatalogConfig::Rest { uri, warehouse, .. } => {
+                assert_eq!(uri, "https://s3-tables.us-east-1.amazonaws.com");
+                assert_eq!(warehouse, "s3://my-data-bucket/warehouse");
+            }
+            _ => panic!("Expected REST catalog"),
+        }
+
+        match config.storage {
+            StorageConfig::S3 { bucket, region, .. } => {
+                assert_eq!(bucket, "my-data-bucket");
+                assert_eq!(region, "us-east-1");
+            }
+            _ => panic!("Expected S3 storage"),
+        }
+
+        assert_eq!(config.namespace, "production");
+        assert_eq!(config.writer_config.max_batch_size_bytes, 30 * 1024 * 1024);
+    }
+
+    #[test]
+    fn test_aws_optimized_writer() {
+        let config = WriterConfig::aws_optimized();
+        assert_eq!(config.batch_size, 1000);
+        assert_eq!(config.max_batch_size_bytes, 30 * 1024 * 1024);
+        assert_eq!(config.max_commit_time_ms, 10_000); // 10s
+        assert!(config.enable_metrics);
+    }
+
 }

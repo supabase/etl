@@ -23,6 +23,7 @@ iceberg = [
     "dep:iceberg-catalog-rest",
     "dep:object_store",
     "dep:parquet",
+    "dep:reqwest",
     "dep:serde",
     "dep:serde_json",
     "dep:tokio",
@@ -64,8 +65,9 @@ rustls = { workspace = true, optional = true, features = [
 arrow = { version = "55.0", optional = true, features = ["prettyprint"] }
 iceberg = { version = "0.6", optional = true }
 iceberg-catalog-rest = { version = "0.6", optional = true }
-object_store = { version = "0.11", optional = true, features = ["aws", "gcp", "azure"] }
+object_store = { version = "0.11", optional = true, features = ["aws"] }
 parquet = { version = "55.0", optional = true, features = ["async", "arrow"] }
+reqwest = { version = "0.12", optional = true, features = ["json"] }
 url = { version = "2.5", optional = true }
 
 [dev-dependencies]
