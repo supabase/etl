@@ -40,6 +40,23 @@ impl Encrypt<EncryptedDestinationConfig> for DestinationConfig {
                     max_staleness_mins,
                 })
             }
+            Self::Iceberg {
+                catalog_uri,
+                warehouse,
+                namespace,
+                auth_token,
+            } => {
+                let encrypted_auth_token = auth_token
+                    .map(|token| encrypt_text(token.expose_secret().to_owned(), encryption_key))
+                    .transpose()?;
+
+                Ok(EncryptedDestinationConfig::Iceberg {
+                    catalog_uri,
+                    warehouse,
+                    namespace,
+                    auth_token: encrypted_auth_token,
+                })
+            }
         }
     }
 }
@@ -54,6 +71,13 @@ pub enum EncryptedDestinationConfig {
         service_account_key: EncryptedValue,
         #[serde(skip_serializing_if = "Option::is_none")]
         max_staleness_mins: Option<u16>,
+    },
+    Iceberg {
+        catalog_uri: String,
+        warehouse: String,
+        namespace: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        auth_token: Option<EncryptedValue>,
     },
 }
 
@@ -77,6 +101,23 @@ impl Decrypt<DestinationConfig> for EncryptedDestinationConfig {
                     dataset_id,
                     service_account_key,
                     max_staleness_mins,
+                })
+            }
+            Self::Iceberg {
+                catalog_uri,
+                warehouse,
+                namespace,
+                auth_token: encrypted_auth_token,
+            } => {
+                let auth_token = encrypted_auth_token
+                    .map(|token| decrypt_text(token, encryption_key).map(SerializableSecretString::from))
+                    .transpose()?;
+
+                Ok(DestinationConfig::Iceberg {
+                    catalog_uri,
+                    warehouse,
+                    namespace,
+                    auth_token,
                 })
             }
         }
