@@ -21,7 +21,7 @@ use crate::etl_error;
 const STATUS_UPDATE_INTERVAL: Duration = Duration::from_millis(100);
 
 pin_project! {
-    /// A stream that yields rows from a PostgreSQL COPY operation.
+    /// A stream that yields rows from a Postgres COPY operation.
     ///
     /// This stream wraps a [`CopyOutStream`] and converts each row into a [`TableRow`]
     /// using the provided column schemas. The conversion process handles both text and
@@ -37,7 +37,7 @@ pin_project! {
 impl<'a> TableCopyStream<'a> {
     /// Creates a new [`TableCopyStream`] from a [`CopyOutStream`] and column schemas.
     ///
-    /// The column schemas are used to convert the raw PostgreSQL data into [`TableRow`]s.
+    /// The column schemas are used to convert the raw Postgres data into [`TableRow`]s.
     pub fn wrap(stream: CopyOutStream, column_schemas: &'a [ColumnSchema]) -> Self {
         Self {
             stream,
@@ -51,7 +51,7 @@ impl<'a> Stream for TableCopyStream<'a> {
 
     /// Polls the stream for the next converted table row with comprehensive error handling.
     ///
-    /// This method handles the complex process of converting raw PostgreSQL COPY data into
+    /// This method handles the complex process of converting raw Postgres COPY data into
     /// structured [`TableRow`] objects, with detailed error reporting for various failure modes.
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.project();
@@ -70,7 +70,7 @@ impl<'a> Stream for TableCopyStream<'a> {
                 }
             }
             Some(Err(err)) => {
-                // PROTOCOL ERROR: PostgreSQL connection or protocol-level failure
+                // PROTOCOL ERROR: Postgres connection or protocol-level failure
                 // Convert tokio-postgres errors to ETL errors with additional context
                 Poll::Ready(Some(Err(err.into())))
             }
@@ -104,9 +104,9 @@ impl EventsStream {
         }
     }
 
-    /// Sends a status update to the PostgreSQL server.
+    /// Sends a status update to the Postgres server.
     ///
-    /// This method implements a status update logic that balances PostgreSQL's need for
+    /// This method implements a status update logic that balances Postgres's need for
     /// progress information with network efficiency and system performance. It handles multiple
     /// error scenarios and edge cases related to time synchronization and network communication.
     pub async fn send_status_update(

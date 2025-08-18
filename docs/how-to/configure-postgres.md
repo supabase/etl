@@ -1,40 +1,41 @@
-# Configure PostgreSQL for Replication
+# Configure Postgres for Replication
 
-**Set up PostgreSQL with the correct permissions and settings for ETL logical replication**
+**Set up Postgres with the correct permissions and settings for ETL logical replication**
 
-This guide covers the essential PostgreSQL concepts and configuration needed for logical replication with ETL.
+This guide covers the essential Postgres concepts and configuration needed for logical replication with ETL.
 
 ## Prerequisites
 
-- PostgreSQL 10 or later
-- Superuser access to the PostgreSQL server
-- Ability to restart PostgreSQL server (for configuration changes)
+- Postgres 10 or later
+- Superuser access to the Postgres server
+- Ability to restart Postgres server (for configuration changes)
 
 ## Understanding WAL Logical
 
-PostgreSQL's Write-Ahead Log (WAL) is the foundation of logical replication. When `wal_level = logical`, PostgreSQL:
+Postgres's Write-Ahead Log (WAL) is the foundation of logical replication. When `wal_level = logical`, Postgres:
 
 - Records detailed information about data changes (not just physical changes)
 - Includes enough metadata to reconstruct logical changes
 - Allows external tools to decode and stream these changes
 
 ```ini
-# Enable logical replication in postgresql.conf
+# Enable logical replication in Postgres.conf
 wal_level = logical
 ```
 
-**Restart PostgreSQL** after changing this setting:
+**Restart Postgres** after changing this setting:
+
 ```bash
-sudo systemctl restart postgresql
+sudo systemctl restart Postgres
 ```
 
 ## Replication Slots
 
-Replication slots ensure that PostgreSQL retains WAL data for logical replication consumers, even if they disconnect temporarily.
+Replication slots ensure that Postgres retains WAL data for logical replication consumers, even if they disconnect temporarily.
 
 ### What are Replication Slots?
 
-- **Persistent markers** in PostgreSQL that track replication progress
+- **Persistent markers** in Postgres that track replication progress
 - **Prevent WAL cleanup** until the consumer catches up
 - **Guarantee data consistency** across disconnections
 
@@ -49,7 +50,7 @@ SELECT pg_create_logical_replication_slot('my_slot', 'pgoutput');
 
 ```sql
 -- See all replication slots
-SELECT slot_name, slot_type, active, restart_lsn 
+SELECT slot_name, slot_type, active, restart_lsn
 FROM pg_replication_slots;
 ```
 
@@ -64,15 +65,15 @@ SELECT pg_drop_replication_slot('my_slot');
 
 ## Max Replication Slots
 
-Controls how many replication slots PostgreSQL can maintain simultaneously.
+Controls how many replication slots Postgres can maintain simultaneously.
 
 ```ini
 # Increase max replication slots (default is 10)
 max_replication_slots = 20
 ```
 
-ETL uses a **single replication slot** for its main apply worker. However, additional slots may be created for parallel table 
-copies when the pipeline is initialized or when a new table is added to the publication. The `max_table_sync_workers` parameter 
+ETL uses a **single replication slot** for its main apply worker. However, additional slots may be created for parallel table
+copies when the pipeline is initialized or when a new table is added to the publication. The `max_table_sync_workers` parameter
 controls the number of these parallel copies, ensuring that the total replication slots used by ETL never exceed `max_table_sync_workers + 1`.
 
 **When to increase:**
@@ -85,10 +86,10 @@ controls the number of these parallel copies, ensuring that the total replicatio
 Determines how much WAL data to retain on disk, providing a safety buffer for replication consumers.
 
 ```ini
-# Keep 1GB of WAL data (PostgreSQL 13+)
+# Keep 1GB of WAL data (Postgres 13+)
 wal_keep_size = 1GB
 
-# For PostgreSQL 12 and earlier, use:
+# For Postgres 12 and earlier, use:
 # wal_keep_segments = 256  # Each segment is typically 16MB
 ```
 
@@ -136,7 +137,7 @@ DROP PUBLICATION my_publication;
 
 ## Complete Configuration Example
 
-Here's a minimal `postgresql.conf` setup:
+Here's a minimal `Postgres.conf` setup:
 
 ```ini
 # Enable logical replication
@@ -147,13 +148,13 @@ max_replication_slots = 20
 max_wal_senders = 20
 
 # Keep WAL data for safety
-wal_keep_size = 1GB  # PostgreSQL 13+
-# wal_keep_segments = 64  # PostgreSQL 12 and earlier
+wal_keep_size = 1GB  # Postgres 13+
+# wal_keep_segments = 64  # Postgres 12 and earlier
 ```
 
 After editing the configuration:
 
-1. **Restart PostgreSQL**
+1. **Restart Postgres**
 2. **Create your publication**:
    ```sql
    CREATE PUBLICATION etl_publication FOR TABLE your_table;

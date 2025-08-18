@@ -1,6 +1,6 @@
 //! Core pipeline orchestration and execution.
 //!
-//! Contains the main [`Pipeline`] struct that coordinates PostgreSQL logical replication
+//! Contains the main [`Pipeline`] struct that coordinates Postgres logical replication
 //! with destination systems. Manages worker lifecycles, shutdown coordination, and error handling.
 
 use etl_config::shared::PipelineConfig;
@@ -39,9 +39,9 @@ enum PipelineState {
     },
 }
 
-/// Core ETL pipeline that orchestrates PostgreSQL logical replication.
+/// Core ETL pipeline that orchestrates Postgres logical replication.
 ///
-/// A [`Pipeline`] represents a complete ETL workflow connecting a PostgreSQL publication
+/// A [`Pipeline`] represents a complete ETL workflow connecting a Postgres publication
 /// to a destination through configurable transformations. It manages the replication
 /// stream, coordinates worker processes, and handles failures gracefully.
 ///
@@ -109,7 +109,7 @@ where
 
     /// Starts the pipeline and begins replication processing.
     ///
-    /// This method initializes the connection to PostgreSQL, sets up table mappings and schemas,
+    /// This method initializes the connection to Postgres, sets up table mappings and schemas,
     /// creates the worker pool for table synchronization, and starts the apply worker for
     /// processing replication stream events.
     pub async fn start(&mut self) -> EtlResult<()> {
@@ -254,7 +254,7 @@ where
 
     /// Initializes table replication states for all tables in the publication.
     ///
-    /// This private method ensures that each table in the PostgreSQL publication has
+    /// This private method ensures that each table in the Postgres publication has
     /// a corresponding replication state record. Tables without existing states are
     /// initialized to the [`TableReplicationPhase::Init`] phase.
     async fn initialize_table_states(

@@ -5,7 +5,7 @@ use utoipa::ToSchema;
 
 #[derive(Debug, Error)]
 pub enum TablesDbError {
-    #[error("Error while interacting with PostgreSQL for tables: {0}")]
+    #[error("Error while interacting with Postgres for tables: {0}")]
     Database(#[from] sqlx::Error),
 }
 

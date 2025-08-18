@@ -1,4 +1,3 @@
-
 # Explanations
 
 **Deep dives into ETL concepts, architecture, and design decisions**
@@ -8,11 +7,12 @@ Explanations help you build mental models of how ETL works and why it's designed
 ## Core Concepts
 
 ### [ETL Architecture Overview](architecture.md)
+
 **The big picture of how ETL components work together**
 
-Understand the relationship between pipelines, destinations, stores, and the PostgreSQL replication protocol. Learn how data flows through the system and where extension points exist.
+Understand the relationship between pipelines, destinations, stores, and the Postgres replication protocol. Learn how data flows through the system and where extension points exist.
 
-*Topics covered:* Component architecture, data flow, extension patterns, scalability considerations.
+_Topics covered:_ Component architecture, data flow, extension patterns, scalability considerations.
 
 ## Reading Guide
 
@@ -32,5 +32,5 @@ After building a conceptual understanding:
 
 ## Contributing to Explanations
 
-Found gaps in these explanations? See something that could be clearer? 
+Found gaps in these explanations? See something that could be clearer?
 [Open an issue](https://github.com/supabase/etl/issues) or contribute improvements to help other users build better mental models of ETL.

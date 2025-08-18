@@ -81,7 +81,7 @@ pub struct Pipeline {
 
 #[derive(Debug, Error)]
 pub enum PipelinesDbError {
-    #[error("Error while interacting with PostgreSQL for pipelines: {0}")]
+    #[error("Error while interacting with Postgres for pipelines: {0}")]
     Database(#[from] sqlx::Error),
 
     #[error("Error while serializing pipeline config: {0}")]
@@ -387,7 +387,7 @@ pub async fn update_pipeline_config(
 pub fn is_duplicate_pipeline_error(err: &sqlx::Error) -> bool {
     match err {
         sqlx::Error::Database(db_err) => {
-            // 23505 is PostgreSQL's unique constraint violation code
+            // 23505 is Postgres's unique constraint violation code
             // Check for our unique constraint name defined
             // in the migrations/20250605064229_add_unique_constraint_pipelines_source_destination.sql file
             db_err.code().as_deref() == Some("23505")

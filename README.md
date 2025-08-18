@@ -19,7 +19,7 @@
   </p>
 </p>
 
-ETL is a Rust framework by [Supabase](https://supabase.com) for building high‑performance, real‑time data replication apps on PostgreSQL. It sits on top of Postgres [logical replication](https://www.postgresql.org/docs/current/protocol-logical-replication.html) and gives you a clean, Rust‑native API for streaming changes to your own destinations.
+ETL is a Rust framework by [Supabase](https://supabase.com) for building high‑performance, real‑time data replication apps on Postgres. It sits on top of Postgres [logical replication](https://www.postgresql.org/docs/current/protocol-logical-replication.html) and gives you a clean, Rust‑native API for streaming changes to your own destinations.
 
 ## Highlights
 

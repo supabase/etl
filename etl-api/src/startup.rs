@@ -142,7 +142,7 @@ impl Application {
     }
 }
 
-/// Creates a PostgreSQL connection pool from the provided configuration.
+/// Creates a Postgres connection pool from the provided configuration.
 pub fn get_connection_pool(config: &PgConnectionConfig) -> PgPool {
     PgPoolOptions::new().connect_lazy_with(config.with_db())
 }

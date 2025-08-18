@@ -377,7 +377,7 @@ where
         .collect())
 }
 
-/// Serde serialization helpers for PostgreSQL LSN values.
+/// Serde serialization helpers for Postgres LSN values.
 mod lsn_serde {
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
     use tokio_postgres::types::PgLsn;

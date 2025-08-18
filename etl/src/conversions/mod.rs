@@ -14,10 +14,10 @@ pub mod numeric;
 pub mod table_row;
 pub mod text;
 
-/// Represents a single database cell value with support for PostgreSQL types.
+/// Represents a single database cell value with support for Postgres types.
 ///
 /// [`Cell`] is the primary data container for individual values during ETL processing.
-/// It supports all common PostgreSQL data types including arrays, JSON, and temporal types.
+/// It supports all common Postgres data types including arrays, JSON, and temporal types.
 /// Each variant handles nullable data appropriately for the destination system.
 ///
 /// The enum is designed to preserve type information and enable efficient conversion
@@ -42,7 +42,7 @@ pub enum Cell {
     F32(f32),
     /// 64-bit floating point number
     F64(f64),
-    /// PostgreSQL NUMERIC/DECIMAL type with arbitrary precision
+    /// Postgres NUMERIC/DECIMAL type with arbitrary precision
     Numeric(PgNumeric),
     /// Date without time information
     Date(NaiveDate),
@@ -90,10 +90,10 @@ impl Cell {
     }
 }
 
-/// Represents array data from PostgreSQL with nullable elements.
+/// Represents array data from Postgres with nullable elements.
 ///
-/// [`ArrayCell`] handles PostgreSQL array types where individual elements can be NULL.
-/// Each variant corresponds to a PostgreSQL array type and maintains the nullable
+/// [`ArrayCell`] handles Postgres array types where individual elements can be NULL.
+/// Each variant corresponds to a Postgres array type and maintains the nullable
 /// nature of array elements as they exist in the source database.
 ///
 /// This type is used internally during data conversion and can be converted to
@@ -118,7 +118,7 @@ pub enum ArrayCell {
     F32(Vec<Option<f32>>),
     /// Array of nullable 64-bit floats
     F64(Vec<Option<f64>>),
-    /// Array of nullable PostgreSQL numeric values
+    /// Array of nullable Postgres numeric values
     Numeric(Vec<Option<PgNumeric>>),
     /// Array of nullable dates
     Date(Vec<Option<NaiveDate>>),

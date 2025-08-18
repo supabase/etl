@@ -3,7 +3,7 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum ReplicatorsDbError {
-    #[error("Error while interacting with PostgreSQL for replicators: {0}")]
+    #[error("Error while interacting with Postgres for replicators: {0}")]
     Database(#[from] sqlx::Error),
 }
 

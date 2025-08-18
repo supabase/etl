@@ -1,6 +1,6 @@
-//! Testing utilities for PostgreSQL logical replication systems.
+//! Testing utilities for Postgres logical replication systems.
 //!
-//! Provides a complete testing framework for complex ETL scenarios involving PostgreSQL logical replication,
+//! Provides a complete testing framework for complex ETL scenarios involving Postgres logical replication,
 //! multiple workers, and various destination systems. Handles test database setup, replication slot management,
 //! worker lifecycle coordination, and data consistency validation.
 

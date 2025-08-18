@@ -422,7 +422,7 @@ impl BigQueryClient {
         format!("options (max_staleness = interval {max_staleness_mins} minute)")
     }
 
-    /// Converts PostgreSQL data types to BigQuery equivalent types.
+    /// Converts Postgres data types to BigQuery equivalent types.
     fn postgres_to_bigquery_type(typ: &Type) -> String {
         if Self::is_array_type(typ) {
             let element_type = match typ {
@@ -466,7 +466,7 @@ impl BigQueryClient {
         .to_string()
     }
 
-    /// Returns whether the PostgreSQL type is an array type.
+    /// Returns whether the Postgres type is an array type.
     fn is_array_type(typ: &Type) -> bool {
         matches!(
             typ,
@@ -494,7 +494,7 @@ impl BigQueryClient {
         )
     }
 
-    /// Converts PostgreSQL column schemas to a BigQuery [`TableDescriptor`].
+    /// Converts Postgres column schemas to a BigQuery [`TableDescriptor`].
     ///
     /// Maps data types and nullability to BigQuery column specifications, setting
     /// appropriate column modes and automatically adding CDC special columns.

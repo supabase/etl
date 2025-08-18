@@ -1,27 +1,29 @@
-
 # ETL Documentation
 
 **Build real-time Postgres replication applications in Rust**
 
-ETL is a Rust framework by [Supabase](https://supabase.com) that enables you to build high-performance, real-time data replication applications for PostgreSQL. Whether you're creating ETL pipelines, implementing CDC (Change Data Capture), or building custom data synchronization solutions, ETL provides the building blocks you need.
+ETL is a Rust framework by [Supabase](https://supabase.com) that enables you to build high-performance, real-time data replication applications for Postgres. Whether you're creating ETL pipelines, implementing CDC (Change Data Capture), or building custom data synchronization solutions, ETL provides the building blocks you need.
 
 ## Getting Started
 
 Choose your path based on your needs:
 
 ### New to ETL?
+
 Start with our **[Tutorials](tutorials/index.md)** to learn ETL through hands-on examples:
 
 - [Build your first ETL pipeline](tutorials/first-pipeline.md) - Complete beginner's guide (15 minutes)
 - [Build custom stores and destinations](tutorials/custom-implementations.md) - Advanced patterns (30 minutes)
 
 ### Ready to solve specific problems?
+
 Jump to our **[How-To Guides](how-to/index.md)** for practical solutions:
 
-- [Configure PostgreSQL for replication](how-to/configure-postgres.md)
+- [Configure Postgres for replication](how-to/configure-postgres.md)
 - More guides coming soon
 
 ### Want to understand the bigger picture?
+
 Read our **[Explanations](explanation/index.md)** for deeper insights:
 
 - [ETL architecture overview](explanation/architecture.md)
@@ -29,7 +31,7 @@ Read our **[Explanations](explanation/index.md)** for deeper insights:
 
 ## Core Concepts
 
-**Postgres Logical Replication** streams data changes from PostgreSQL databases in real-time using the Write-Ahead Log (WAL). ETL builds on this foundation to provide:
+**Postgres Logical Replication** streams data changes from Postgres databases in real-time using the Write-Ahead Log (WAL). ETL builds on this foundation to provide:
 
 - 🚀 **Real-time replication** - Stream changes as they happen
 - 🔄 **Multiple destinations** - BigQuery and more coming soon
@@ -49,7 +51,7 @@ use etl::{
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Configure PostgreSQL connection
+    // Configure Postgres connection
     let pg_config = PgConnectionConfig {
         host: "localhost".to_string(),
         port: 5432,
@@ -87,6 +89,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 ## Next Steps
 
 - **First time using ETL?** → Start with [Build your first pipeline](tutorials/first-pipeline.md)
-- **Need PostgreSQL setup help?** → Check [Configure PostgreSQL for Replication](how-to/configure-postgres.md)
+- **Need Postgres setup help?** → Check [Configure Postgres for Replication](how-to/configure-postgres.md)
 - **Need technical details?** → Check the [Reference](reference/index.md)
 - **Want to understand the architecture?** → Read [ETL Architecture](explanation/architecture.md)

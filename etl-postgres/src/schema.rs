@@ -5,12 +5,12 @@ use std::str::FromStr;
 use pg_escape::quote_identifier;
 use tokio_postgres::types::{FromSql, ToSql, Type};
 
-/// An object identifier in PostgreSQL.
+/// An object identifier in Postgres.
 pub type Oid = u32;
 
-/// A fully qualified PostgreSQL table name consisting of a schema and table name.
+/// A fully qualified Postgres table name consisting of a schema and table name.
 ///
-/// This type represents a table identifier in PostgreSQL, which requires both a schema name
+/// This type represents a table identifier in Postgres, which requires both a schema name
 /// and a table name. It provides methods for formatting the name in different contexts.
 #[derive(Debug, Clone, Eq, PartialEq, PartialOrd, Ord)]
 pub struct TableName {
@@ -25,10 +25,10 @@ impl TableName {
         Self { schema, name }
     }
 
-    /// Returns the table name as a properly quoted PostgreSQL identifier.
+    /// Returns the table name as a properly quoted Postgres identifier.
     ///
     /// This method ensures the schema and table names are properly escaped according to
-    /// PostgreSQL identifier quoting rules.
+    /// Postgres identifier quoting rules.
     pub fn as_quoted_identifier(&self) -> String {
         let quoted_schema = quote_identifier(&self.schema);
         let quoted_name = quote_identifier(&self.name);
@@ -43,13 +43,13 @@ impl fmt::Display for TableName {
     }
 }
 
-/// A type alias for PostgreSQL type modifiers.
+/// A type alias for Postgres type modifiers.
 ///
-/// Type modifiers in PostgreSQL are used to specify additional type-specific attributes,
+/// Type modifiers in Postgres are used to specify additional type-specific attributes,
 /// such as length for varchar or precision for numeric types.
 type TypeModifier = i32;
 
-/// Represents the schema of a single column in a PostgreSQL table.
+/// Represents the schema of a single column in a Postgres table.
 ///
 /// This type contains all metadata about a column including its name, data type,
 /// type modifier, nullability, and whether it's part of the primary key.
@@ -57,7 +57,7 @@ type TypeModifier = i32;
 pub struct ColumnSchema {
     /// The name of the column
     pub name: String,
-    /// The PostgreSQL data type of the column
+    /// The Postgres data type of the column
     pub typ: Type,
     /// Type-specific modifier value (e.g., length for varchar)
     pub modifier: TypeModifier,
@@ -99,9 +99,9 @@ impl ColumnSchema {
     }
 }
 
-/// A type-safe wrapper for PostgreSQL table OIDs.
+/// A type-safe wrapper for Postgres table OIDs.
 ///
-/// Table OIDs are unique identifiers assigned to tables in PostgreSQL.
+/// Table OIDs are unique identifiers assigned to tables in Postgres.
 ///
 /// This newtype provides type safety by preventing accidental use of raw [`Oid`] values
 /// where a table identifier is expected.
@@ -181,13 +181,13 @@ impl ToSql for TableId {
     tokio_postgres::types::to_sql_checked!();
 }
 
-/// Represents the complete schema of a PostgreSQL table.
+/// Represents the complete schema of a Postgres table.
 ///
 /// This type contains all metadata about a table including its name, OID,
 /// and the schemas of all its columns.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct TableSchema {
-    /// The PostgreSQL OID of the table
+    /// The Postgres OID of the table
     pub id: TableId,
     /// The fully qualified name of the table
     pub name: TableName,

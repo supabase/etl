@@ -19,10 +19,10 @@ use crate::metrics::register_metrics;
 
 /// Delimiter separating schema from table name in BigQuery table identifiers.
 const BIGQUERY_TABLE_ID_DELIMITER: &str = "_";
-/// Replacement string for escaping underscores in PostgreSQL names.
+/// Replacement string for escaping underscores in Postgres names.
 const BIGQUERY_TABLE_ID_DELIMITER_ESCAPE_REPLACEMENT: &str = "__";
 
-/// Creates a hex-encoded sequence number from PostgreSQL LSNs to ensure correct event ordering.
+/// Creates a hex-encoded sequence number from Postgres LSNs to ensure correct event ordering.
 ///
 /// Creates a hex-encoded sequence number that ensures events are processed in the correct order
 /// even when they have the same system time. The format is compatible with BigQuery's
@@ -183,7 +183,7 @@ struct Inner<S> {
 
 /// A BigQuery destination that implements the ETL [`Destination`] trait.
 ///
-/// Provides PostgreSQL-to-BigQuery data pipeline functionality including streaming inserts
+/// Provides Postgres-to-BigQuery data pipeline functionality including streaming inserts
 /// and CDC operation handling.
 #[derive(Debug, Clone)]
 pub struct BigQueryDestination<S> {

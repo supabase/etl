@@ -20,7 +20,7 @@ struct Inner {
     /// table state evolution. Entries are chronologically ordered.
     table_state_history: HashMap<TableId, Vec<TableReplicationPhase>>,
     /// Cached table schema definitions, reference-counted for efficient sharing.
-    /// Schemas are expensive to fetch from PostgreSQL, so they're cached here
+    /// Schemas are expensive to fetch from Postgres, so they're cached here
     /// once retrieved and shared via Arc across the application.
     table_schemas: HashMap<TableId, Arc<TableSchema>>,
     /// Mapping from table IDs to human-readable table names for easier debugging

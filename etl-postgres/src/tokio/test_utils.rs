@@ -26,7 +26,7 @@ pub enum TableModification<'a> {
     },
 }
 
-/// PostgreSQL database wrapper for testing operations.
+/// Postgres database wrapper for testing operations.
 ///
 /// Provides a unified interface for database operations across different client types
 /// with automatic cleanup functionality.
@@ -37,7 +37,7 @@ pub struct PgDatabase<G> {
 }
 
 impl<G: GenericClient> PgDatabase<G> {
-    /// Creates a PostgreSQL publication for the specified tables.
+    /// Creates a Postgres publication for the specified tables.
     ///
     /// Sets up logical replication by creating a publication that includes
     /// the given tables for change data capture.
@@ -68,7 +68,7 @@ impl<G: GenericClient> PgDatabase<G> {
     /// Creates a new table with the given name and column definitions.
     ///
     /// Optionally adds a primary key column named `id` of type `bigserial`.
-    /// Returns the PostgreSQL OID of the created table.
+    /// Returns the Postgres OID of the created table.
     pub async fn create_table(
         &self,
         table_name: TableName,
@@ -184,7 +184,7 @@ impl<G: GenericClient> PgDatabase<G> {
             .await
     }
 
-    /// Inserts multiple rows using PostgreSQL's `generate_series` function.
+    /// Inserts multiple rows using Postgres's `generate_series` function.
     ///
     /// Generates and inserts rows with values created by `generate_series`
     /// for efficient bulk data insertion during testing.
@@ -311,7 +311,7 @@ impl<G: GenericClient> PgDatabase<G> {
         Ok(())
     }
 
-    /// Checks whether a PostgreSQL replication slot exists.
+    /// Checks whether a Postgres replication slot exists.
     ///
     /// Queries the `pg_replication_slots` system catalog to determine
     /// if a replication slot with the given name exists.
@@ -339,7 +339,7 @@ impl<G: GenericClient> PgDatabase<G> {
 impl PgDatabase<Client> {
     /// Creates a new test database with automatic cleanup.
     ///
-    /// Creates a new PostgreSQL database and establishes a client connection.
+    /// Creates a new Postgres database and establishes a client connection.
     /// The database will be dropped automatically when this instance is dropped.
     pub async fn new(config: PgConnectionConfig) -> Self {
         let client = create_pg_database(&config).await;
@@ -420,9 +420,9 @@ pub fn id_column_schema() -> ColumnSchema {
     }
 }
 
-/// Creates a new PostgreSQL database and returns a connected client.
+/// Creates a new Postgres database and returns a connected client.
 ///
-/// Establishes connection to PostgreSQL server, creates a new database,
+/// Establishes connection to Postgres server, creates a new database,
 /// and returns a [`Client`] connected to the newly created database.
 ///
 /// # Panics
@@ -454,7 +454,7 @@ pub async fn create_pg_database(config: &PgConnectionConfig) -> Client {
     connect_to_pg_database(config).await
 }
 
-/// Connects to an existing PostgreSQL database.
+/// Connects to an existing Postgres database.
 ///
 /// Establishes a client connection to the database specified in the configuration.
 /// Assumes the database already exists.
@@ -478,7 +478,7 @@ pub async fn connect_to_pg_database(config: &PgConnectionConfig) -> Client {
     client
 }
 
-/// Drops a PostgreSQL database and cleans up all resources.
+/// Drops a Postgres database and cleans up all resources.
 ///
 /// Terminates all active connections, drops replication slots, and removes
 /// the database. Used for thorough cleanup of test databases.

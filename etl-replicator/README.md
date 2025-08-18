@@ -1,3 +1,3 @@
 # `etl` - Replicator
 
-Long-lived process that performs PostgreSQL logical replication using the `etl` crate.
+Long-lived process that performs Postgres logical replication using the `etl` crate.

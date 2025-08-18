@@ -1,4 +1,3 @@
-
 # Build Custom Stores and Destinations in 30 minutes
 
 **Learn ETL's extension patterns by implementing working custom components**
@@ -12,7 +11,7 @@ By the end of this tutorial, you'll have:
 - A **complete pipeline** using your custom components that processes real data
 
 **Time required:** 30 minutes  
-**Prerequisites:** Advanced Rust knowledge, running PostgreSQL, basic HTTP knowledge
+**Prerequisites:** Advanced Rust knowledge, running Postgres, basic HTTP knowledge
 
 ## Step 1: Create Project Structure
 
@@ -106,10 +105,10 @@ impl CustomStore {
     ) -> &'a mut CachedEntry {
         cache.entry(id).or_insert_with(|| {
             // Initialize empty entry if this table hasn't been seen before
-            CachedEntry { 
-                schema: None, 
-                state: None, 
-                mapping: None 
+            CachedEntry {
+                schema: None,
+                state: None,
+                mapping: None
             }
         })
     }
@@ -121,10 +120,10 @@ impl CustomStore {
     ) -> &'a mut PersistentEntry {
         persistent.entry(id).or_insert_with(|| {
             // Initialize empty persistent entry if this table hasn't been seen before
-            PersistentEntry { 
-                schema: None, 
-                state: None, 
-                mapping: None 
+            PersistentEntry {
+                schema: None,
+                state: None,
+                mapping: None
             }
         })
     }
@@ -173,7 +172,7 @@ impl SchemaStore for CustomStore {
     async fn store_table_schema(&self, table_schema: TableSchema) -> EtlResult<()> {
         let id = table_schema.id;
         info!("Storing schema for table {} using dual-write pattern", id.0);
-        
+
         // First write to persistent storage (this would be a file/database in reality)
         {
             let mut persistent = self.persistent.lock().await;
@@ -365,7 +364,7 @@ impl HttpDestination {
             .timeout(Duration::from_secs(10))  // 10 second timeout for each request
             .build()
             .map_err(|e| etl_error!(ErrorKind::Unknown, "Failed to create HTTP client", e))?;
-        
+
         info!("Created HTTP destination pointing to: {}", base_url);
         Ok(Self { client, base_url })
     }
@@ -410,7 +409,7 @@ impl HttpDestination {
                         "HTTP {} {} returned status {}, attempt {}/{}",
                         method, url, status, attempt + 1, MAX_RETRIES
                     );
-                    
+
                     // Don't retry client errors (4xx) - they won't succeed on retry
                     if status.is_client_error() {
                         bail!(
@@ -453,7 +452,7 @@ impl Destination for HttpDestination {
     /// Called when ETL needs to clear all data from a table (e.g., during full refresh)
     async fn truncate_table(&self, table_id: TableId) -> EtlResult<()> {
         info!("Truncating destination table: {}", table_id.0);
-        
+
         // Send DELETE request to truncate endpoint
         self.send_json(
             Method::DELETE,
@@ -559,76 +558,76 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
         .with_max_level(Level::INFO)
         .init();
-    
+
     info!("=== Starting ETL Pipeline with Custom Components ===");
-    
+
     // Step 1: Create our custom store
     // This will handle both schema storage and replication state tracking
     info!("Creating custom dual-layer store (cache + persistent simulation)");
     let store = CustomStore::new();
-    
+
     // Step 2: Create our custom HTTP destination
     // Using httpbin.org which echoes back what we send - perfect for testing
     info!("Creating HTTP destination with retry logic");
     let destination = HttpDestination::new(
         "https://httpbin.org/post".to_string()  // This endpoint will show us what we sent
     )?;
-    
-    // Step 3: Configure the PostgreSQL connection
-    // Update these values to match your local PostgreSQL setup
+
+    // Step 3: Configure the Postgres connection
+    // Update these values to match your local Postgres setup
     let pipeline_config = PipelineConfig {
         id: 1,  // Unique pipeline identifier
-        publication_name: "etl_demo_pub".to_string(),  // PostgreSQL publication name
-        
-        // PostgreSQL connection details - CHANGE THESE to match your setup
+        publication_name: "etl_demo_pub".to_string(),  // Postgres publication name
+
+        // Postgres connection details - CHANGE THESE to match your setup
         pg_connection: PgConnectionConfig {
             host: "localhost".to_string(),
             port: 5432,
             name: "postgres".to_string(),          // Database name
             username: "postgres".to_string(),      // Database user
             password: Some("postgres".to_string().into()),  // Update with your password
-            tls: TlsConfig { 
+            tls: TlsConfig {
                 enabled: false,  // Disable TLS for local development
-                trusted_root_certs: String::new() 
+                trusted_root_certs: String::new()
             },
         },
-        
+
         // Batching configuration - controls how ETL groups data for efficiency
-        batch: BatchConfig { 
+        batch: BatchConfig {
             max_size: 100,      // Send data when we have 100 rows
             max_fill_ms: 5000   // Or send data every 5 seconds, whichever comes first
         },
-        
+
         // Error handling configuration
         table_error_retry_delay_ms: 10000,  // Wait 10s before retrying failed tables
         max_table_sync_workers: 2,          // Use 2 workers for parallel table syncing
     };
-    
+
     // Step 4: Create the pipeline with our custom components
     // This combines your custom store and destination with ETL's core replication logic
     info!("Creating ETL pipeline with custom store and HTTP destination");
     let mut pipeline = Pipeline::new(pipeline_config, store, destination);
-    
+
     // Step 5: Start the pipeline
     // This will:
     // 1. Load any existing state from your custom store
-    // 2. Connect to PostgreSQL and start listening for changes
+    // 2. Connect to Postgres and start listening for changes
     // 3. Begin replicating data through your custom destination
-    info!("Starting pipeline - this will connect to PostgreSQL and begin replication");
+    info!("Starting pipeline - this will connect to Postgres and begin replication");
     pipeline.start().await?;
-    
+
     // For demo purposes, let it run for 30 seconds then gracefully shut down
     info!("Pipeline running! Watch the logs to see your custom components in action.");
     info!("Will run for 30 seconds then shut down gracefully...");
-    
+
     tokio::time::sleep(Duration::from_secs(30)).await;
-    
+
     info!("Shutting down pipeline gracefully...");
     // pipeline.shutdown().await?;  // Uncomment if available in your ETL version
-    
+
     // In production, you'd typically call:
     // pipeline.wait().await?;  // This blocks forever until manual shutdown
-    
+
     info!("=== ETL Pipeline Demo Complete ===");
     Ok(())
 }
@@ -648,7 +647,7 @@ cargo check
 **Result:** Should see "Finished dev [unoptimized + debuginfo] target(s)"
 
 ```bash
-# Run the pipeline (will fail without PostgreSQL setup, but shows component initialization)
+# Run the pipeline (will fail without Postgres setup, but shows component initialization)
 cargo run
 ```
 
@@ -668,7 +667,7 @@ You now have working custom ETL components:
 **Store Architecture:**
 
 - Cache-first reads for performance
-- Dual-write pattern for data consistency  
+- Dual-write pattern for data consistency
 - Startup loading from persistent storage
 - Thread-safe concurrent access with Arc/Mutex
 
@@ -681,7 +680,7 @@ You now have working custom ETL components:
 
 ## Next Steps
 
-- **Connect to real PostgreSQL** → [Configure PostgreSQL for Replication](../how-to/configure-postgres.md)
+- **Connect to real Postgres** → [Configure Postgres for Replication](../how-to/configure-postgres.md)
 - **Understand the architecture** → [ETL Architecture](../explanation/architecture.md)
 - **Contribute to ETL** → [Open an issue](https://github.com/supabase/etl/issues) with your custom implementations
 

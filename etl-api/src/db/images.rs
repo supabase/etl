@@ -3,7 +3,7 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum ImagesDbError {
-    #[error("Error while interacting with PostgreSQL for images: {0}")]
+    #[error("Error while interacting with Postgres for images: {0}")]
     Database(#[from] sqlx::Error),
 
     #[error("Cannot delete the default image")]

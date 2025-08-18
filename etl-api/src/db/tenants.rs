@@ -3,7 +3,7 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum TenantsDbError {
-    #[error("Error while interacting with PostgreSQL for tenants: {0}")]
+    #[error("Error while interacting with Postgres for tenants: {0}")]
     Database(#[from] sqlx::Error),
 }
 

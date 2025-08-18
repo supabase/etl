@@ -2,9 +2,9 @@ use crate::bail;
 use crate::error::EtlError;
 use crate::error::{ErrorKind, EtlResult};
 
-/// Converts a PostgreSQL bytea hex string to a byte array.
+/// Converts a Postgres bytea hex string to a byte array.
 ///
-/// This function parses PostgreSQL's hex-encoded bytea format, which uses
+/// This function parses Postgres's hex-encoded bytea format, which uses
 /// the `\x` prefix followed by hexadecimal digits. Each pair of hex digits
 /// represents one byte in the output array.
 pub fn from_bytea_hex(s: &str) -> EtlResult<Vec<u8>> {

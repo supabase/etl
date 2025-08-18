@@ -11,7 +11,7 @@ fi
 
 # Check if psql is installed
 if ! [ -x "$(command -v psql)" ]; then
-  echo >&2 "❌ Error: PostgreSQL client (psql) is not installed."
+  echo >&2 "❌ Error: Postgres client (psql) is not installed."
   echo >&2 "Please install it using your system's package manager."
   exit 1
 fi
@@ -32,14 +32,14 @@ echo "   User: ${DB_USER}"
 echo "   Warehouses: ${WAREHOUSES}"
 echo "   Threads: ${THREADS}"
 
-# Wait for PostgreSQL to be ready
-echo "⏳ Waiting for PostgreSQL to be ready..."
+# Wait for Postgres to be ready
+echo "⏳ Waiting for Postgres to be ready..."
 until PGPASSWORD="${DB_PASSWORD}" psql -h "${DB_HOST}" -U "${DB_USER}" -p "${DB_PORT}" -d "postgres" -c '\q'; do
-  echo "⏳ PostgreSQL is still starting up... waiting"
+  echo "⏳ Postgres is still starting up... waiting"
   sleep 1
 done
 
-echo "✅ PostgreSQL is up and running on port ${DB_PORT}"
+echo "✅ Postgres is up and running on port ${DB_PORT}"
 
 # Create the database if it doesn't exist
 echo "🔄 Ensuring database '${DB_NAME}' exists..."

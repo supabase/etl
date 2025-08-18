@@ -1,21 +1,21 @@
-
 # Build Your First ETL Pipeline
 
 **Learn the fundamentals by building a working pipeline in 15 minutes**
 
-By the end of this tutorial, you'll have a complete ETL pipeline that streams data changes from PostgreSQL to a memory destination in real-time. You'll see how to set up publications, configure pipelines, and handle live data replication.
+By the end of this tutorial, you'll have a complete ETL pipeline that streams data changes from Postgres to a memory destination in real-time. You'll see how to set up publications, configure pipelines, and handle live data replication.
 
 ## What You'll Build
 
 A real-time data pipeline that:
-- Monitors a PostgreSQL table for changes
-- Streams INSERT, UPDATE, and DELETE operations  
+
+- Monitors a Postgres table for changes
+- Streams INSERT, UPDATE, and DELETE operations
 - Stores replicated data in memory for immediate access
 
 ## Who This Tutorial Is For
 
 - Rust developers new to ETL
-- Anyone interested in PostgreSQL logical replication
+- Anyone interested in Postgres logical replication
 - Developers building data synchronization tools
 
 **Time required:** 15 minutes  
@@ -44,9 +44,9 @@ tokio = { version = "1.0", features = ["full"] }
 
 **Checkpoint:** Run `cargo check` - it should compile successfully.
 
-## Step 2: Prepare PostgreSQL
+## Step 2: Prepare Postgres
 
-Connect to your PostgreSQL server and create a test database:
+Connect to your Postgres server and create a test database:
 
 ```sql
 CREATE DATABASE etl_tutorial;
@@ -61,7 +61,7 @@ CREATE TABLE users (
 );
 
 -- Insert sample data
-INSERT INTO users (name, email) VALUES 
+INSERT INTO users (name, email) VALUES
     ('Alice Johnson', 'alice@example.com'),
     ('Bob Smith', 'bob@example.com');
 ```
@@ -73,9 +73,11 @@ CREATE PUBLICATION my_publication FOR TABLE users;
 ```
 
 **Checkpoint:** Verify the publication exists:
+
 ```sql
 SELECT * FROM pg_publication WHERE pubname = 'my_publication';
 ```
+
 You should see one row returned.
 
 ## Step 3: Configure Your Pipeline
@@ -91,7 +93,7 @@ use std::error::Error;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    // Configure PostgreSQL connection.
+    // Configure Postgres connection.
     let pg_connection_config = PgConnectionConfig {
         host: "localhost".to_string(),
         port: 5432,
@@ -159,7 +161,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 }
 ```
 
-**Important:** Replace `"your_password"` with your PostgreSQL password.
+**Important:** Replace `"your_password"` with your Postgres password.
 
 ## Step 4: Start Your Pipeline
 
@@ -170,6 +172,7 @@ cargo run
 ```
 
 You should see output like:
+
 ```
 Starting ETL pipeline...
 Waiting for pipeline to finish...
@@ -186,7 +189,7 @@ Table (TableId(245615)): [TableRow { values: [I32(1), Array(I32([Some(1), Some(2
 
 ## Step 5: Test Real-Time Replication
 
-With your pipeline running, open a new terminal and connect to PostgreSQL:
+With your pipeline running, open a new terminal and connect to Postgres:
 
 ```bash
 psql -d etl_tutorial
@@ -198,7 +201,7 @@ Make some changes to test replication:
 -- Insert a new user
 INSERT INTO users (name, email) VALUES ('Charlie Brown', 'charlie@example.com');
 
--- Update an existing user  
+-- Update an existing user
 UPDATE users SET name = 'Alice Cooper' WHERE email = 'alice@example.com';
 
 -- Delete a user
@@ -235,7 +238,7 @@ DROP DATABASE etl_tutorial;
 Now that you understand the basics:
 
 - **Build custom implementations** → [Custom Stores and Destinations](custom-implementations.md)
-- **Configure PostgreSQL properly** → [Configure PostgreSQL for Replication](../how-to/configure-postgres.md)
+- **Configure Postgres properly** → [Configure Postgres for Replication](../how-to/configure-postgres.md)
 - **Understand the architecture** → [ETL Architecture](../explanation/architecture.md)
 
 ## See Also

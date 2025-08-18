@@ -9,7 +9,7 @@ use crate::db::tables::Table;
 
 #[derive(Debug, Error)]
 pub enum PublicationsDbError {
-    #[error("Error while interacting with PostgreSQL for publications: {0}")]
+    #[error("Error while interacting with Postgres for publications: {0}")]
     Database(#[from] sqlx::Error),
 }
 

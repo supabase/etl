@@ -3,11 +3,11 @@
 BigQuery Example
 
 This example demonstrates how to use the pipeline to stream
-data from PostgreSQL to BigQuery using change data capture (CDC).
+data from Postgres to BigQuery using change data capture (CDC).
 
 Prerequisites:
-1. PostgreSQL server with logical replication enabled (wal_level = logical)
-2. A publication created in PostgreSQL (CREATE PUBLICATION my_publication FOR ALL TABLES;)
+1. Postgres server with logical replication enabled (wal_level = logical)
+2. A publication created in Postgres (CREATE PUBLICATION my_publication FOR ALL TABLES;)
 3. GCP service account with BigQuery Data Editor and Job User permissions
 4. Service account key file downloaded from GCP console
 
@@ -24,7 +24,7 @@ Usage:
         --publication my_publication
 
 The pipeline will automatically:
-- Create tables in BigQuery matching your PostgreSQL schema
+- Create tables in BigQuery matching your Postgres schema
 - Perform initial data sync for existing tables
 - Stream real-time changes using logical replication
 - Handle schema changes and DDL operations
@@ -45,18 +45,18 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 #[derive(Debug, Parser)]
 #[command(name = "bigquery", version, about, arg_required_else_help = true)]
 struct AppArgs {
-    // PostgreSQL connection parameters
+    // Postgres connection parameters
     #[clap(flatten)]
     db_args: DbArgs,
     // BigQuery destination parameters
     #[clap(flatten)]
     bq_args: BqArgs,
-    /// PostgreSQL publication name (must be created beforehand with CREATE PUBLICATION)
+    /// Postgres publication name (must be created beforehand with CREATE PUBLICATION)
     #[arg(long)]
     publication: String,
 }
 
-// PostgreSQL database connection configuration
+// Postgres database connection configuration
 #[derive(Debug, Args)]
 struct DbArgs {
     /// Host on which Postgres is running (e.g., localhost or IP address)
@@ -142,7 +142,7 @@ async fn main_impl() -> Result<(), Box<dyn Error>> {
     // Parse command line arguments
     let args = AppArgs::parse();
 
-    // Configure PostgreSQL connection settings
+    // Configure Postgres connection settings
     // Note: TLS is disabled in this example - enable for production use
     let pg_connection_config = PgConnectionConfig {
         host: args.db_args.db_host,
@@ -161,7 +161,7 @@ async fn main_impl() -> Result<(), Box<dyn Error>> {
     let store = MemoryStore::new();
 
     // Initialize BigQuery destination with service account authentication
-    // Tables will be automatically created to match PostgreSQL schema
+    // Tables will be automatically created to match Postgres schema
     let bigquery_destination = BigQueryDestination::new_with_key_path(
         args.bq_args.bq_project_id,
         args.bq_args.bq_dataset_id,
@@ -188,11 +188,11 @@ async fn main_impl() -> Result<(), Box<dyn Error>> {
     let mut pipeline = Pipeline::new(pipeline_config, store, bigquery_destination);
 
     info!(
-        "Starting BigQuery CDC pipeline - connecting to PostgreSQL and initializing replication..."
+        "Starting BigQuery CDC pipeline - connecting to Postgres and initializing replication..."
     );
 
     // Start the pipeline - this will:
-    // 1. Connect to PostgreSQL
+    // 1. Connect to Postgres
     // 2. Initialize table states based on the publication
     // 3. Start apply and table sync workers
     // 4. Begin streaming replication data

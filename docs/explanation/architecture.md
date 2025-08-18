@@ -1,15 +1,14 @@
-
 # ETL Architecture Overview
 
-**Understanding how ETL components work together to replicate data from PostgreSQL**
+**Understanding how ETL components work together to replicate data from Postgres**
 
-ETL's architecture centers around four core abstractions that work together to provide reliable, high-performance data replication: `Pipeline`, `Destination`, `SchemaStore`, and `StateStore`. This document explains how these components interact and coordinate data flow from PostgreSQL logical replication to target systems.
+ETL's architecture centers around four core abstractions that work together to provide reliable, high-performance data replication: `Pipeline`, `Destination`, `SchemaStore`, and `StateStore`. This document explains how these components interact and coordinate data flow from Postgres logical replication to target systems.
 
 A diagram of the overall architecture is shown below:
 
 ```mermaid
 flowchart LR
-    subgraph PostgreSQL
+    subgraph Postgres
         A["WAL Stream<br>Publications<br>Replication Slots"]
     end
 
@@ -31,11 +30,11 @@ flowchart LR
 
     subgraph Store[Store]
         subgraph StateStore[State Store]
-            D1["Memory<br>PostgreSQL"]
+            D1["Memory<br>Postgres"]
         end
 
         subgraph SchemaStore[Schema Store]
-            D2["Memory<br>PostgreSQL"]
+            D2["Memory<br>Postgres"]
         end
     end
 
@@ -69,13 +68,13 @@ The `Destination` trait defines how replicated data is delivered to target syste
 ```rust
 pub trait Destination {
     fn truncate_table(&self, table_id: TableId) -> impl Future<Output = EtlResult<()>> + Send;
-    
+
     fn write_table_rows(
         &self,
         table_id: TableId,
         table_rows: Vec<TableRow>,
     ) -> impl Future<Output = EtlResult<()>> + Send;
-    
+
     fn write_events(&self, events: Vec<Event>) -> impl Future<Output = EtlResult<()>> + Send;
 }
 ```
@@ -90,17 +89,17 @@ The trait provides three operations:
 
 The `SchemaStore` trait manages table schema information:
 
-```rust  
+```rust
 pub trait SchemaStore {
     fn get_table_schema(
         &self,
         table_id: &TableId,
     ) -> impl Future<Output = EtlResult<Option<Arc<TableSchema>>>> + Send;
-    
+
     fn get_table_schemas(&self) -> impl Future<Output = EtlResult<Vec<Arc<TableSchema>>>> + Send;
-    
+
     fn load_table_schemas(&self) -> impl Future<Output = EtlResult<usize>> + Send;
-    
+
     fn store_table_schema(
         &self,
         table_schema: TableSchema,
@@ -120,35 +119,35 @@ pub trait StateStore {
         &self,
         table_id: TableId,
     ) -> impl Future<Output = EtlResult<Option<TableReplicationPhase>>> + Send;
-    
+
     fn get_table_replication_states(
         &self,
     ) -> impl Future<Output = EtlResult<HashMap<TableId, TableReplicationPhase>>> + Send;
-    
+
     fn load_table_replication_states(&self) -> impl Future<Output = EtlResult<usize>> + Send;
-    
+
     fn update_table_replication_state(
         &self,
         table_id: TableId,
         state: TableReplicationPhase,
     ) -> impl Future<Output = EtlResult<()>> + Send;
-    
+
     fn rollback_table_replication_state(
         &self,
         table_id: TableId,
     ) -> impl Future<Output = EtlResult<TableReplicationPhase>> + Send;
-    
+
     fn get_table_mapping(
         &self,
         source_table_id: &TableId,
     ) -> impl Future<Output = EtlResult<Option<String>>> + Send;
-    
+
     fn get_table_mappings(
         &self,
     ) -> impl Future<Output = EtlResult<HashMap<TableId, String>>> + Send;
-    
+
     fn load_table_mappings(&self) -> impl Future<Output = EtlResult<usize>> + Send;
-    
+
     fn store_table_mapping(
         &self,
         source_table_id: TableId,
@@ -169,7 +168,7 @@ ETL's data flow is orchestrated through two types of workers.
 
 #### Apply Worker
 
-- Processes PostgreSQL logical replication stream  
+- Processes Postgres logical replication stream
 - Spawns table sync workers when new table are discovered
 - Coordinates with table sync workers through shared state
 - Handles final event processing for tables in `Ready` state
@@ -184,8 +183,8 @@ ETL's data flow is orchestrated through two types of workers.
 
 The Pipeline follows this startup sequence:
 
-1. **Pipeline Initialization**: Establishes PostgreSQL connection and loads cached state
-2. **Apply Worker Launch**: Creates and starts the primary apply worker first  
+1. **Pipeline Initialization**: Establishes Postgres connection and loads cached state
+2. **Apply Worker Launch**: Creates and starts the primary apply worker first
 3. **Table Discovery**: Apply worker identifies tables requiring synchronization
 4. **Table Sync Spawning**: Apply worker spawns table sync workers for tables in `Init` state
 5. **Coordination**: Workers communicate through shared state store
@@ -201,7 +200,7 @@ Each table progresses through distinct phases during replication:
 ```rust
 pub enum TableReplicationPhase {
     Init,
-    DataSync, 
+    DataSync,
     FinishedCopy,
     SyncWait,
     Catchup { lsn: PgLsn },
@@ -214,7 +213,7 @@ pub enum TableReplicationPhase {
 **Phase Ownership and Transitions:**
 
 - **Init**: The table is discovered and ready to be copied
-- **DataSync**: The table copy has started and is in progress 
+- **DataSync**: The table copy has started and is in progress
 - **FinishedCopy**: The table has been fully copied and is ready to start CDC streaming
 - **SyncWait**: The table is ready to start CDC streaming and is waiting for the apply worker to tell which LSN to catchup
 - **Catchup**: The table is catching up to the the LSN specified by the apply worker
@@ -228,11 +227,11 @@ Now that you understand ETL's architecture:
 
 - **Build your first pipeline** → [First Pipeline Tutorial](../tutorials/first-pipeline.md)
 - **Implement custom components** → [Custom Stores and Destinations](../tutorials/custom-implementations.md)
-- **Configure PostgreSQL properly** → [Configure PostgreSQL for Replication](../how-to/configure-postgres.md)
+- **Configure Postgres properly** → [Configure Postgres for Replication](../how-to/configure-postgres.md)
 
 ## See Also
 
 - [Build Your First ETL Pipeline](../tutorials/first-pipeline.md) - Hands-on tutorial using these components
 - [Custom Stores and Destinations](../tutorials/custom-implementations.md) - Implement your own stores and destinations
 - [API Reference](../reference/index.md) - Complete trait documentation
-- [Configure PostgreSQL for Replication](../how-to/configure-postgres.md) - Set up the source database
+- [Configure Postgres for Replication](../how-to/configure-postgres.md) - Set up the source database

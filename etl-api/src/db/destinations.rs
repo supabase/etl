@@ -85,7 +85,7 @@ impl Decrypt<DestinationConfig> for EncryptedDestinationConfig {
 
 #[derive(Debug, Error)]
 pub enum DestinationsDbError {
-    #[error("Error while interacting with PostgreSQL for destinations: {0}")]
+    #[error("Error while interacting with Postgres for destinations: {0}")]
     Database(#[from] sqlx::Error),
 
     #[error("Error while serializing destination config: {0}")]

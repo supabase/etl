@@ -10,7 +10,7 @@ use crate::encryption::EncryptionKey;
 
 #[derive(Debug, Error)]
 pub enum DestinationPipelinesDbError {
-    #[error("Error while interacting with PostgreSQL for destination and/or pipelines: {0}")]
+    #[error("Error while interacting with Postgres for destination and/or pipelines: {0}")]
     Database(#[from] sqlx::Error),
 
     #[error("The destination with id {0} was not found")]

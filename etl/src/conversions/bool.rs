@@ -2,9 +2,9 @@ use crate::bail;
 use crate::error::EtlResult;
 use crate::error::{ErrorKind, EtlError};
 
-/// Parses a PostgreSQL boolean value from its text format representation.
+/// Parses a Postgres boolean value from its text format representation.
 ///
-/// PostgreSQL represents boolean values in text format as single characters:
+/// Postgres represents boolean values in text format as single characters:
 /// - `"t"` → `true` (exactly one lowercase 't')
 /// - `"f"` → `false` (exactly one lowercase 'f')
 pub fn parse_bool(s: &str) -> EtlResult<bool> {

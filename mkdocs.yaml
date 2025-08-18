@@ -14,7 +14,7 @@ nav:
       - Custom Stores and Destinations: tutorials/custom-implementations.md
   - How-to Guides:
       - Overview: how-to/index.md
-      - Configure PostgreSQL: how-to/configure-postgres.md
+      - Configure Postgres: how-to/configure-postgres.md
   - Reference:
       - Overview: reference/index.md
   - Explanation:

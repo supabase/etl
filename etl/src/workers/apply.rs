@@ -68,7 +68,7 @@ impl WorkerHandle<()> for ApplyWorkerHandle {
 
 /// Worker that applies replication stream events to destinations.
 ///
-/// [`ApplyWorker`] is the core worker responsible for processing PostgreSQL logical
+/// [`ApplyWorker`] is the core worker responsible for processing Postgres logical
 /// replication events and applying them to the configured destination. It coordinates
 /// with table sync workers during initial synchronization and handles the continuous
 /// replication stream during normal operation.
@@ -90,7 +90,7 @@ pub struct ApplyWorker<S, D> {
 impl<S, D> ApplyWorker<S, D> {
     /// Creates a new apply worker with the given configuration and dependencies.
     ///
-    /// The worker will use the provided replication client to read the PostgreSQL
+    /// The worker will use the provided replication client to read the Postgres
     /// replication stream and coordinate with the table sync worker pool for
     /// initial synchronization operations.
     #[expect(clippy::too_many_arguments)]
@@ -182,7 +182,7 @@ where
 /// Determines the LSN position from which the apply worker should start reading the replication stream.
 ///
 /// This function implements critical replication consistency logic by managing the apply worker's
-/// replication slot. The slot serves as a persistent marker in PostgreSQL's WAL (Write-Ahead Log)
+/// replication slot. The slot serves as a persistent marker in Postgres's WAL (Write-Ahead Log)
 /// that tracks the apply worker's progress and prevents WAL deletion of unreplicated data.
 async fn get_start_lsn(
     pipeline_id: PipelineId,

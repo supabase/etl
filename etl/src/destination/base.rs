@@ -36,7 +36,7 @@ pub trait Destination {
 
     /// Writes streaming replication events to the destination.
     ///
-    /// This method handles real-time changes from the PostgreSQL replication stream.
+    /// This method handles real-time changes from the Postgres replication stream.
     /// Events include inserts, updates, deletes, and transaction boundaries. The
     /// destination should process events in order, this is required to maintain data consistency.
     ///

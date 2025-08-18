@@ -16,7 +16,7 @@ pub enum TableLookupError {
 
 /// Connects to the source database with a connection pool.
 ///
-/// Creates a PostgreSQL connection pool with the specified minimum and maximum
+/// Creates a Postgres connection pool with the specified minimum and maximum
 /// connection counts for accessing the source database.
 #[cfg(feature = "replication")]
 pub async fn connect_to_source_database(
@@ -37,7 +37,7 @@ pub async fn connect_to_source_database(
 
 /// Retrieves table name from table OID by querying system catalogs.
 ///
-/// Looks up the schema and table name for the given table OID using PostgreSQL's
+/// Looks up the schema and table name for the given table OID using Postgres's
 /// pg_class and pg_namespace system tables.
 pub async fn get_table_name_from_oid(
     pool: &PgPool,
