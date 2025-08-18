@@ -1,4 +1,4 @@
-use etl_telemetry::init_test_tracing;
+use etl_telemetry::tracing::init_test_tracing;
 
 use crate::common::test_app::spawn_test_app;
 

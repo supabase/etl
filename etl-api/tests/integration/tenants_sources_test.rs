@@ -1,7 +1,7 @@
 use etl_api::routes::sources::ReadSourceResponse;
 use etl_api::routes::tenants::ReadTenantResponse;
 use etl_api::routes::tenants_sources::{CreateTenantSourceRequest, CreateTenantSourceResponse};
-use etl_telemetry::init_test_tracing;
+use etl_telemetry::tracing::init_test_tracing;
 
 use crate::{
     common::test_app::spawn_test_app,

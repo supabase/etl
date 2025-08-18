@@ -6,6 +6,7 @@ use actix_web_metrics::ActixWebMetricsBuilder;
 use aws_lc_rs::aead::{AES_256_GCM, RandomizedNonceKey};
 use base64::{Engine, prelude::BASE64_STANDARD};
 use etl_config::shared::{IntoConnectOptions, PgConnectionConfig};
+use etl_telemetry::metrics::init_metrics_handle;
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use tracing::warn;
 use tracing_actix_web::TracingLogger;
@@ -18,7 +19,6 @@ use crate::{
     db::publications::Publication,
     encryption,
     k8s_client::{HttpK8sClient, K8sClient},
-    metrics::init_metrics,
     routes::{
         destinations::{
             CreateDestinationRequest, CreateDestinationResponse, ReadDestinationResponse,
@@ -158,7 +158,7 @@ pub async fn run(
     encryption_key: encryption::EncryptionKey,
     http_k8s_client: Option<Arc<dyn K8sClient>>,
 ) -> Result<Server, anyhow::Error> {
-    let prometheus_handle = web::ThinData(init_metrics()?);
+    let prometheus_handle = web::ThinData(init_metrics_handle()?);
     let config = web::Data::new(config);
     let connection_pool = web::Data::new(connection_pool);
     let encryption_key = web::Data::new(encryption_key);
@@ -264,11 +264,9 @@ pub async fn run(
     struct ApiV1;
 
     let openapi = ApiDoc::openapi();
-    let actix_metrics = ActixWebMetricsBuilder::new()
-        .build()
-        .map_err(anyhow::Error::from_boxed)?;
 
     let server = HttpServer::new(move || {
+        let actix_metrics = ActixWebMetricsBuilder::new().build();
         let tracing_logger = TracingLogger::<ApiRootSpanBuilder>::new();
         let authentication = HttpAuthentication::bearer(auth_validator);
         let app = App::new()

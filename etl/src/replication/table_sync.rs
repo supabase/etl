@@ -3,7 +3,9 @@ use etl_postgres::replication::slots::get_slot_name;
 use etl_postgres::replication::worker::WorkerType;
 use etl_postgres::schema::TableId;
 use futures::StreamExt;
+use metrics::{counter, gauge};
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::pin;
 use tokio_postgres::types::PgLsn;
 use tracing::{error, info, warn};
@@ -17,6 +19,9 @@ use crate::error::{ErrorKind, EtlError, EtlResult};
 #[cfg(feature = "failpoints")]
 use crate::failpoints::{
     START_TABLE_SYNC__AFTER_DATA_SYNC, START_TABLE_SYNC__DURING_DATA_SYNC, etl_fail_point,
+};
+use crate::metrics::{
+    ETL_BATCH_SEND_MILLISECONDS_TOTAL, ETL_BATCH_SIZE, ETL_TABLE_SYNC_ROWS_COPIED_TOTAL,
 };
 use crate::replication::client::PgReplicationClient;
 use crate::replication::stream::TableCopyStream;
@@ -227,8 +232,14 @@ where
                     ShutdownResult::Ok(table_rows) => {
                         let table_rows = table_rows.into_iter().collect::<Result<Vec<_>, _>>()?;
                         rows_copied += table_rows.len();
+                        let before_sending = Instant::now();
+
                         destination.write_table_rows(table_id, table_rows).await?;
 
+                        counter!(ETL_TABLE_SYNC_ROWS_COPIED_TOTAL).increment(rows_copied as u64);
+                        gauge!(ETL_BATCH_SIZE).set(rows_copied as f64);
+                        let time_taken_to_send = before_sending.elapsed().as_millis();
+                        gauge!(ETL_BATCH_SEND_MILLISECONDS_TOTAL).set(time_taken_to_send as f64);
                         // Fail point to test when the table sync fails after copying one batch.
                         #[cfg(feature = "failpoints")]
                         etl_fail_point(START_TABLE_SYNC__DURING_DATA_SYNC)?;
@@ -255,6 +266,7 @@ where
                 "completed table copy for table {} ({} rows copied)",
                 table_id, rows_copied
             );
+
             // We mark that we finished the copy of the table schema and data.
             {
                 let mut inner = table_sync_worker_state.lock().await;

@@ -9,7 +9,7 @@ use etl_config::Environment;
 use etl_config::shared::{BatchConfig, PgConnectionConfig, PipelineConfig, TlsConfig};
 use etl_destinations::bigquery::{BigQueryDestination, install_crypto_provider_for_bigquery};
 use etl_postgres::schema::TableId;
-use etl_telemetry::init_tracing;
+use etl_telemetry::tracing::init_tracing;
 use sqlx::postgres::PgPool;
 use std::error::Error;
 use tracing::info;

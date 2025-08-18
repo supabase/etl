@@ -3,11 +3,13 @@ use std::{collections::HashMap, sync::Arc};
 use etl_config::shared::PgConnectionConfig;
 use etl_postgres::replication::{connect_to_source_database, schema, state, table_mappings};
 use etl_postgres::schema::{TableId, TableSchema};
+use metrics::gauge;
 use sqlx::PgPool;
 use tokio::sync::Mutex;
 use tracing::{debug, info};
 
 use crate::error::{ErrorKind, EtlError, EtlResult};
+use crate::metrics::ETL_TABLES_TOTAL;
 use crate::state::table::{RetryPolicy, TableReplicationPhase};
 use crate::store::schema::SchemaStore;
 use crate::store::state::StateStore;
@@ -128,12 +130,26 @@ impl TryFrom<state::TableReplicationStateRow> for TableReplicationPhase {
 /// Inner state of [`PostgresStore`].
 #[derive(Debug)]
 struct Inner {
+    /// Count of number of tables in each phase. Used for metrics.
+    phase_counts: HashMap<&'static str, u64>,
     /// Cached table replication states indexed by table ID.
     table_states: HashMap<TableId, TableReplicationPhase>,
     /// Cached table schemas indexed by table ID.
     table_schemas: HashMap<TableId, Arc<TableSchema>>,
     /// Cached table mappings from source table ID to destination table name.
     table_mappings: HashMap<TableId, String>,
+}
+
+impl Inner {
+    fn decrement_phase_count(&mut self, phase: &'static str) {
+        let count = self.phase_counts.entry(phase).or_default();
+        *count -= 1;
+    }
+
+    fn increment_phase_count(&mut self, phase: &'static str) {
+        let count = self.phase_counts.entry(phase).or_default();
+        *count += 1;
+    }
 }
 
 /// PostgreSQL-backed storage for ETL pipeline state and schema information.
@@ -161,6 +177,7 @@ impl PostgresStore {
     /// The pipeline ID ensures isolation between different pipeline instances.
     pub fn new(pipeline_id: PipelineId, source_config: PgConnectionConfig) -> Self {
         let inner = Inner {
+            phase_counts: HashMap::new(),
             table_states: HashMap::new(),
             table_schemas: HashMap::new(),
             table_mappings: HashMap::new(),
@@ -191,6 +208,14 @@ impl PostgresStore {
         .await?;
 
         Ok(pool)
+    }
+}
+
+fn emit_table_metrics(total_tables: usize, phase_counts: &HashMap<&'static str, u64>) {
+    gauge!(ETL_TABLES_TOTAL).set(total_tables as f64);
+
+    for (phase, count) in phase_counts {
+        gauge!(ETL_TABLES_TOTAL, "phase" => *phase).set(*count as f64);
     }
 }
 
@@ -243,10 +268,21 @@ impl StateStore for PostgresStore {
             table_states.insert(table_id, phase);
         }
 
+        let mut phase_counts = HashMap::new();
+        for phase in table_states.values() {
+            let entry = phase_counts
+                .entry(phase.as_type().as_static_str())
+                .or_insert(0u64);
+            *entry += 1;
+        }
+
         // For performance reasons, since we load the replication states only once during startup
         // and from a single thread, we can afford to have a super short critical section.
         let mut inner = self.inner.lock().await;
         inner.table_states = table_states.clone();
+        inner.phase_counts = phase_counts;
+
+        emit_table_metrics(inner.table_states.keys().len(), &inner.phase_counts);
 
         info!(
             "loaded {} table replication states from postgres state store",
@@ -276,7 +312,23 @@ impl StateStore for PostgresStore {
         // be inconsistent since there are some interleaved executions that lead to a wrong state.
         let mut inner = self.inner.lock().await;
         state::update_replication_state(&pool, self.pipeline_id as i64, table_id, db_state).await?;
+
+        // Compute which phases need to be increment and decremented to
+        // keep table metrics updated
+        let phase_to_decrement = inner
+            .table_states
+            .get(&table_id)
+            .map(|table_state| table_state.as_type().as_static_str());
+        let phase_to_increment = state.as_type().as_static_str();
+
         inner.table_states.insert(table_id, state);
+
+        // Update the metrics and emit the latest values
+        if let Some(phase_to_decrement) = phase_to_decrement {
+            inner.decrement_phase_count(phase_to_decrement);
+        }
+        inner.increment_phase_count(phase_to_increment);
+        emit_table_metrics(inner.table_states.keys().len(), &inner.phase_counts);
 
         Ok(())
     }
@@ -299,8 +351,23 @@ impl StateStore for PostgresStore {
         let mut inner = self.inner.lock().await;
         match state::rollback_replication_state(&pool, self.pipeline_id as i64, table_id).await? {
             Some(restored_row) => {
+                // Compute which phases need to be increment and decremented to
+                // keep table metrics updated
+                let phase_to_decrement = inner
+                    .table_states
+                    .get(&table_id)
+                    .map(|table_state| table_state.as_type().as_static_str());
                 let restored_phase: TableReplicationPhase = restored_row.try_into()?;
+                let phase_to_increment = restored_phase.as_type().as_static_str();
+
                 inner.table_states.insert(table_id, restored_phase.clone());
+
+                // Update the metrics and emit the latest values
+                if let Some(phase_to_decrement) = phase_to_decrement {
+                    inner.decrement_phase_count(phase_to_decrement);
+                }
+                inner.increment_phase_count(phase_to_increment);
+                emit_table_metrics(inner.table_states.keys().len(), &inner.phase_counts);
 
                 Ok(restored_phase)
             }

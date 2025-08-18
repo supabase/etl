@@ -179,7 +179,7 @@ pub async fn update_replication_state_raw(
         sqlx::query(
             r#"
             update etl.replication_state 
-            set is_current = false 
+            set is_current = false, updated_at = now()
             where id = $1
             "#,
         )
@@ -236,7 +236,7 @@ pub async fn rollback_replication_state(
         sqlx::query(
             r#"
             update etl.replication_state
-            set is_current = false
+            set is_current = false, updated_at = now()
             where id = $1
             "#,
         )
@@ -248,7 +248,7 @@ pub async fn rollback_replication_state(
         sqlx::query(
             r#"
             update etl.replication_state
-            set is_current = true
+            set is_current = true, updated_at = now()
             where id = $1
             "#,
         )

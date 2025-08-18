@@ -4,7 +4,7 @@ use etl_api::routes::destinations_pipelines::{
     UpdateDestinationPipelineRequest,
 };
 use etl_api::routes::pipelines::{CreatePipelineRequest, ReadPipelineResponse};
-use etl_telemetry::init_test_tracing;
+use etl_telemetry::tracing::init_test_tracing;
 use reqwest::StatusCode;
 
 use crate::common::database::{create_test_source_database, run_etl_migrations_on_source_database};
