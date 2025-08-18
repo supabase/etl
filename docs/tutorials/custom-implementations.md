@@ -1,16 +1,3 @@
----
-type: tutorial
-audience: developers
-prerequisites:
-  - Complete first pipeline tutorial
-  - Advanced Rust knowledge (traits, async, Arc/Mutex)
-  - PostgreSQL database running locally
-  - curl command for testing HTTP endpoints
-version_last_tested: 0.1.0
-last_reviewed: 2025-08-14
-estimated_time: 30
-risk_level: medium
----
 
 # Build Custom Stores and Destinations in 30 minutes
 
@@ -696,14 +683,12 @@ You now have working custom ETL components:
 
 ## Next Steps
 
-- **Connect to real PostgreSQL** → [PostgreSQL Setup Guide](../how-to/postgresql-setup/) 
-- **Add production-ready persistence** → [Production Stores Guide](../how-to/production-stores/)
-- **Test your pipeline thoroughly** → [Testing ETL Pipelines](../how-to/testing-pipelines/)
-- **Deploy to production** → [Deployment Guide](../how-to/deployment/)
+- **Connect to real PostgreSQL** → [Configure PostgreSQL for Replication](../how-to/configure-postgres.md)
+- **Understand the architecture** → [ETL Architecture](../explanation/architecture.md)
+- **Contribute to ETL** → [Open an issue](https://github.com/supabase/etl/issues) with your custom implementations
 
 ## See Also
 
-- [ETL Store Design](../explanation/store-architecture/) - Deep dive on storage patterns  
-- [Destination Patterns](../explanation/destination-patterns/) - Advanced destination implementation
-- [Store Trait Reference](../reference/traits/store/) - Complete API documentation
-- [Destination Trait Reference](../reference/traits/destination/) - Complete API documentation
+- [ETL Architecture](../explanation/architecture.md) - Understanding the system design
+- [API Reference](../reference/index.md) - Complete trait documentation
+- [Build your first pipeline](first-pipeline.md) - Start with the basics if you haven't yet

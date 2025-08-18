@@ -1,7 +1,3 @@
----
-type: explanation
-title: Understanding ETL
----
 
 # Explanations
 
@@ -11,91 +7,28 @@ Explanations help you build mental models of how ETL works and why it's designed
 
 ## Core Concepts
 
-### [ETL Architecture Overview](architecture/)
+### [ETL Architecture Overview](architecture.md)
 **The big picture of how ETL components work together**
 
 Understand the relationship between pipelines, destinations, stores, and the PostgreSQL replication protocol. Learn how data flows through the system and where extension points exist.
 
 *Topics covered:* Component architecture, data flow, extension patterns, scalability considerations.
 
-### [Why Postgres Logical Replication?](replication/)
-**The foundation technology and its trade-offs**
-
-Explore how PostgreSQL's logical replication works, why ETL builds on this foundation, and how it compares to other change data capture approaches.
-
-*Topics covered:* WAL-based replication, publications and subscriptions, alternatives like triggers or polling, performance characteristics.
-
-### [Design Decisions and Trade-offs](design/)
-**Key choices that shape ETL's behavior**
-
-Learn about the major design decisions in ETL, the problems they solve, and the trade-offs they represent. Understanding these choices helps you use ETL effectively.
-
-*Topics covered:* Rust as implementation language, async architecture, batching strategy, error handling philosophy.
-
-## System Characteristics
-
-### [Performance and Scalability](performance/)
-**How ETL behaves under different loads and configurations**
-
-Understand ETL's performance characteristics, bottlenecks, and scaling patterns. Learn how different configuration choices affect throughput and resource usage.
-
-*Topics covered:* Throughput patterns, memory usage, network considerations, scaling strategies.
-
-### [Crate Structure and Organization](crate-structure/)
-**How ETL's modular design supports different use cases**
-
-Explore how ETL is organized into multiple crates, what each crate provides, and how they work together. Understand the reasoning behind this modular architecture.
-
-*Topics covered:* Core vs. optional crates, dependency management, feature flags, extensibility.
-
-## Integration Patterns
-
-### [Working with Destinations](destinations-explained/)
-**Understanding the destination abstraction and ecosystem**
-
-Learn how destinations work conceptually, why they're designed as they are, and how to choose between different destination options.
-
-*Topics covered:* Destination trait design, batching strategy, error handling patterns, building ecosystems.
-
-### [State Management Philosophy](state-management/)  
-**How ETL tracks replication state and schema changes**
-
-Understand ETL's approach to managing replication state, handling schema evolution, and ensuring consistency across restarts.
-
-*Topics covered:* State storage options, schema change handling, consistency guarantees, recovery behavior.
-
-## Broader Context
-
-### [ETL vs. Other Replication Tools](comparisons/)
-**How ETL fits in the data replication landscape**
-
-Compare ETL to other PostgreSQL replication tools, general-purpose ETL systems, and cloud-managed solutions. Understand when to choose each approach.
-
-*Topics covered:* Tool comparisons, use case fit, ecosystem integration, operational trade-offs.
-
-### [Future Directions](roadmap/)
-**Where ETL is heading and how to influence its evolution**
-
-Learn about planned features, architectural improvements, and community priorities. Understand how to contribute to ETL's development.
-
-*Topics covered:* Planned features, architectural evolution, community involvement, contribution guidelines.
-
 ## Reading Guide
 
-**New to data replication?** Start with [Postgres Logical Replication](replication/) to understand the foundation technology.
+**New to ETL?** Start with the [ETL Architecture](architecture.md) to understand how the system works.
 
-**Coming from other tools?** Jump to [ETL vs. Other Tools](comparisons/) to see how ETL fits in the landscape.
+**Planning a production deployment?** Read [Architecture](architecture.md) to understand system behavior.
 
-**Planning a production deployment?** Read [Architecture](architecture/) and [Performance](performance/) to understand system behavior.
-
-**Building extensions?** Focus on [Crate Structure](crate-structure/) and [Destinations](destinations-explained/) for extension patterns.
+**Building extensions?** Check out the [Custom Implementations Tutorial](../tutorials/custom-implementations.md).
 
 ## Next Steps
 
-After building conceptual understanding:
-- **Start building** → [Tutorials](../tutorials/)
-- **Solve specific problems** → [How-To Guides](../how-to/)
-- **Look up technical details** → [Reference](../reference/)
+After building a conceptual understanding:
+
+- **Start building** → [Tutorials](../tutorials/index.md)
+- **Solve specific problems** → [How-To Guides](../how-to/index.md)
+- **Look up technical details** → [Reference](../reference/index.md)
 
 ## Contributing to Explanations
 

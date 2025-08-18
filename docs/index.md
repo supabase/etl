@@ -1,8 +1,3 @@
----
-hide:
-  - navigation
-title: ETL Documentation
----
 
 # ETL Documentation
 
@@ -15,35 +10,22 @@ ETL is a Rust framework by [Supabase](https://supabase.com) that enables you to 
 Choose your path based on your needs:
 
 ### New to ETL?
-Start with our **[Tutorials](tutorials/)** to learn ETL through hands-on examples:
+Start with our **[Tutorials](tutorials/index.md)** to learn ETL through hands-on examples:
 
-- [Build your first ETL pipeline](tutorials/first-pipeline/) - Complete beginner's guide (15 minutes)
-- [Set up memory-based testing](tutorials/memory-destination/) - Test your pipeline locally (10 minutes)
-- [Testing ETL pipelines](tutorials/testing-pipelines/) - Ensure reliability (20 minutes)
+- [Build your first ETL pipeline](tutorials/first-pipeline.md) - Complete beginner's guide (15 minutes)
+- [Build custom stores and destinations](tutorials/custom-implementations.md) - Advanced patterns (30 minutes)
 
 ### Ready to solve specific problems?
-Jump to our **[How-To Guides](how-to/)** for practical solutions:
+Jump to our **[How-To Guides](how-to/index.md)** for practical solutions:
 
-- [Configure PostgreSQL for replication](how-to/configure-postgres/)
-- [Build custom destinations](how-to/custom-destinations/)
-- [Debug pipeline issues](how-to/debugging/)
-- [Handle schema changes](how-to/schema-changes/)
-- [Optimize performance](how-to/performance/)
-
-### Need detailed technical information?
-Consult our **[Reference](reference/)** documentation:
-
-- API reference
-- Configuration options
-- Error codes and messages
+- [Configure PostgreSQL for replication](how-to/configure-postgres.md)
+- More guides coming soon
 
 ### Want to understand the bigger picture?
-Read our **[Explanations](explanation/)** for deeper insights:
+Read our **[Explanations](explanation/index.md)** for deeper insights:
 
-- [ETL architecture overview](explanation/architecture/)
-- [Why Postgres logical replication?](explanation/replication/)
-- [Performance characteristics](explanation/performance/)
-- [Design decisions](explanation/design/)
+- [ETL architecture overview](explanation/architecture.md)
+- More explanations coming soon
 
 ## Core Concepts
 
@@ -92,7 +74,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     // Create and start the pipeline
-    let mut pipeline = Pipeline::new(1, config, store, destination);
+    let mut pipeline = Pipeline::new(config, store, destination);
     pipeline.start().await?;
 
     // Pipeline will run until stopped
@@ -104,7 +86,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ## Next Steps
 
-- **First time using ETL?** → Start with [Build your first pipeline](tutorials/first-pipeline/)
-- **Have a specific goal?** → Browse [How-To Guides](how-to/)  
-- **Need technical details?** → Check the [Reference](reference/)
-- **Want to understand ETL deeply?** → Read [Explanations](explanation/)
+- **First time using ETL?** → Start with [Build your first pipeline](tutorials/first-pipeline.md)
+- **Need PostgreSQL setup help?** → Check [Configure PostgreSQL for Replication](how-to/configure-postgres.md)
+- **Need technical details?** → Check the [Reference](reference/index.md)
+- **Want to understand the architecture?** → Read [ETL Architecture](explanation/architecture.md)

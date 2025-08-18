@@ -1,7 +1,3 @@
----
-type: reference
-title: API Reference
----
 
 # Reference
 
@@ -13,6 +9,6 @@ cargo doc --workspace --all-features --no-deps --open
 
 ## See Also
 
-- [How-to guides](../how-to/) - Task-oriented instructions
-- [Tutorials](../tutorials/) - Learning-oriented lessons  
-- [Explanations](../explanation/) - Understanding-oriented discussions
+- [How-to guides](../how-to/index.md) - Task-oriented instructions
+- [Tutorials](../tutorials/index.md) - Learning-oriented lessons  
+- [Explanations](../explanation/index.md) - Understanding-oriented discussions

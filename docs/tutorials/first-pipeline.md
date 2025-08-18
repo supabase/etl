@@ -1,14 +1,3 @@
----
-type: tutorial
-audience: developers
-prerequisites: 
-  - Rust 1.75 or later
-  - PostgreSQL server (local or remote)
-  - Basic Rust and SQL knowledge
-version_last_tested: 0.1.0
-last_reviewed: 2025-01-14
-estimated_time: 15
----
 
 # Build Your First ETL Pipeline
 
@@ -245,13 +234,12 @@ DROP DATABASE etl_tutorial;
 
 Now that you understand the basics:
 
-- **Add robust testing** → [Testing ETL Pipelines](testing-pipelines/)
-- **Connect to BigQuery** → [How to Set Up BigQuery Destination](../how-to/custom-destinations/)  
-- **Handle production scenarios** → [How to Debug Pipeline Issues](../how-to/debugging/)
-- **Understand the architecture** → [ETL Architecture](../explanation/architecture/)
+- **Build custom implementations** → [Custom Stores and Destinations](custom-implementations.md)
+- **Configure PostgreSQL properly** → [Configure PostgreSQL for Replication](../how-to/configure-postgres.md)
+- **Understand the architecture** → [ETL Architecture](../explanation/architecture.md)
 
 ## See Also
 
-- [Memory Destination Tutorial](memory-destination/) - Deep dive into testing with memory
-- [API Reference](../reference/) - Complete configuration options
-- [Performance Guide](../how-to/performance/) - Optimize your pipelines
+- [Custom Implementation Tutorial](custom-implementations.md) - Advanced patterns
+- [API Reference](../reference/index.md) - Complete configuration options
+- [ETL Architecture](../explanation/architecture.md) - Understand the design
