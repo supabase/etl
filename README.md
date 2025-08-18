@@ -85,9 +85,9 @@ For tutorials and deeper guidance, see the [Documentation](https://supabase.gith
 
 ETL is designed to be extensible. You can implement your own destinations to send data to any destination you like, however it comes with a few built in destinations:
 
-- BigQuery (via `etl-destinations`)
+- BigQuery
 
-To add BigQuery support:
+Out-of-the-box destinations are available in the `etl-destinations` crate:
 
 ```toml
 [dependencies]
