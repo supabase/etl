@@ -34,7 +34,7 @@ In the above example, `etl` connects to a Postgres database named `postgres` run
 
 ## Prerequisites
 
-Before running the examples, you'll need to set up a PostgreSQL database. For detailed instructions on how to use the database setup script, please refer to our [Database Setup Guide](../docs/guides/database-setup.md).
+Before running the examples, you'll need to set up a PostgreSQL database with logical replication enabled.
 
 ## BigQuery Setup
 

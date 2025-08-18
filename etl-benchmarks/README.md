@@ -9,7 +9,7 @@ Performance benchmarks for the ETL system to measure and track replication perfo
 ## Prerequisites
 
 Before running benchmarks, ensure you have:
-- A PostgreSQL database set up (see [Database Setup Guide](../docs/guides/database-setup.md))
+- A PostgreSQL database set up
 - A publication created with the tables you want to benchmark
 - For BigQuery benchmarks: GCP project, dataset, and service account key file
 
