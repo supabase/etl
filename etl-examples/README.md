@@ -6,7 +6,7 @@ This crate contains practical examples demonstrating how to use the ETL system f
 
 - **BigQuery Integration**: Demonstrates replicating PostgreSQL data to Google BigQuery
 
-## Quickstart
+## Quick Start
 
 To quickly try out `etl`, you can run the BigQuery example. First, create a publication in Postgres which includes the tables you want to replicate:
 
