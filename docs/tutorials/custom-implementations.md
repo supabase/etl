@@ -14,10 +14,6 @@ By the end of this tutorial, you'll have:
 **Time required:** 30 minutes  
 **Prerequisites:** Advanced Rust knowledge, running PostgreSQL, basic HTTP knowledge
 
-## Safety Note
-
-This tutorial creates files in your current directory and makes HTTP requests. To clean up afterward, simply delete the generated Rust project files.
-
 ## Step 1: Create Project Structure
 
 Create a new Rust project for your custom ETL components:
@@ -670,12 +666,14 @@ You now have working custom ETL components:
 ## Key Patterns You've Mastered
 
 **Store Architecture:**
+
 - Cache-first reads for performance
 - Dual-write pattern for data consistency  
 - Startup loading from persistent storage
 - Thread-safe concurrent access with Arc/Mutex
 
 **Destination Patterns:**
+
 - Exponential backoff retry logic
 - Smart error classification (retry 5xx, fail 4xx)
 - Efficient batching and empty batch handling
