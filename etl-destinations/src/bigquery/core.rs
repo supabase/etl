@@ -16,7 +16,9 @@ use tracing::{debug, info, warn};
 
 use crate::bigquery::client::{BigQueryClient, BigQueryOperationType};
 use crate::bigquery::{BigQueryDatasetId, BigQueryTableId};
-use crate::metrics::{APPLY, BQ_EGRESS_BYTES_TOTAL, SEND_PHASE, TABLE_COPY, register_metrics};
+use crate::metrics::{
+    APPLY, BIG_QUERY, DESTINATION, EGRESS_BYTES_TOTAL, SEND_PHASE, TABLE_COPY, register_metrics,
+};
 
 /// Delimiter separating schema from table name in BigQuery table identifiers.
 const BIGQUERY_TABLE_ID_DELIMITER: &str = "_";
@@ -510,7 +512,8 @@ where
         )
         .await?;
 
-        counter!(BQ_EGRESS_BYTES_TOTAL, SEND_PHASE => TABLE_COPY).increment(sent_bytes as u64);
+        counter!(EGRESS_BYTES_TOTAL, SEND_PHASE => TABLE_COPY, DESTINATION => BIG_QUERY)
+            .increment(sent_bytes as u64);
 
         Ok(())
     }
@@ -610,7 +613,7 @@ where
                     )
                     .await?;
 
-                    counter!(BQ_EGRESS_BYTES_TOTAL, SEND_PHASE => APPLY)
+                    counter!(EGRESS_BYTES_TOTAL, SEND_PHASE => APPLY, DESTINATION => BIG_QUERY)
                         .increment(sent_bytes as u64);
                 }
             }
