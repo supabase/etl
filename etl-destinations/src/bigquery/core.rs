@@ -818,9 +818,8 @@ fn split_table_rows(
     let rows_per_sub_batch = total_rows / num_sub_batches;
     let extra_rows = total_rows % num_sub_batches;
 
-    let mut result = Vec::with_capacity(num_sub_batches);
+    let mut batches = Vec::with_capacity(num_sub_batches);
     let mut start_idx = 0;
-
     for i in 0..num_sub_batches {
         let mut end_idx = start_idx + rows_per_sub_batch;
 
@@ -830,11 +829,11 @@ fn split_table_rows(
         }
 
         let sub_batch_rows = table_rows[start_idx..end_idx].to_vec();
-        result.push(sub_batch_rows);
+        batches.push(sub_batch_rows);
         start_idx = end_idx;
     }
 
-    result
+    batches
 }
 
 #[cfg(test)]
