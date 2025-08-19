@@ -34,7 +34,7 @@ pub(crate) fn register_metrics() {
         describe_counter!(
             EGRESS_BYTES_TOTAL,
             Unit::Milliseconds,
-            "Total bytes sent to BigQuery"
+            "Total bytes sent to the destination"
         );
     });
 }
