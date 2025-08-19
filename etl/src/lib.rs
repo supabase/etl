@@ -116,5 +116,3 @@ pub mod test_utils;
 pub mod types;
 mod utils;
 pub mod workers;
-
-pub use metrics::EGRESS_BYTES_TOTAL;
