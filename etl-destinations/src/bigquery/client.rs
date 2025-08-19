@@ -287,14 +287,15 @@ impl BigQueryClient {
     /// Streams rows to BigQuery using the Storage Write API.
     ///
     /// Efficiently ingests data by batching rows to respect size limits and
-    /// using the high-performance Storage Write API.
+    /// using the high-performance Storage Write API. Returns the size of the
+    /// rows sent in bytes.
     pub async fn stream_rows(
         &mut self,
         dataset_id: &BigQueryDatasetId,
         table_id: &BigQueryTableId,
         table_descriptor: &TableDescriptor,
         table_rows: Vec<TableRow>,
-    ) -> EtlResult<()> {
+    ) -> EtlResult<usize> {
         // We map the table rows into `BigQueryTableRow`s instances, so that we also do a validation
         // of the cells.
         let table_rows = table_rows
@@ -314,10 +315,18 @@ impl BigQueryClient {
             table_id.to_string(),
         );
 
+        // We use the rows' encoded length to measure the egress metric. This does not
+        // count some bytes sent as overhead during the gRPC API calls. Ideally we
+        // would want to count the bytes leaving the TCP connection but we do not have
+        // that low level access, hence will have to settle for something accessible
+        // in the application.
+        let mut total_rows_encoded_len = 0;
+
         loop {
             let (rows, num_processed_rows) =
                 StorageApi::create_rows(table_descriptor, table_rows, MAX_SIZE_BYTES);
 
+            let rows_encoded_len = rows.encoded_len();
             let before_sending = Instant::now();
 
             let mut append_rows_stream = self
@@ -348,13 +357,14 @@ impl BigQueryClient {
                 }
             }
 
+            total_rows_encoded_len += rows_encoded_len;
             table_rows = &table_rows[num_processed_rows..];
             if table_rows.is_empty() {
                 break;
             }
         }
 
-        Ok(())
+        Ok(total_rows_encoded_len)
     }
 
     /// Executes a BigQuery SQL query and returns the result set.

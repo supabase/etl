@@ -5,6 +5,7 @@ use etl::store::state::StateStore;
 use etl::types::{Cell, Event, PgLsn, TableId, TableName, TableRow};
 use etl::{bail, etl_error};
 use gcp_bigquery_client::storage::TableDescriptor;
+use metrics::counter;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
 use std::iter;
@@ -15,7 +16,7 @@ use tracing::{debug, info, warn};
 
 use crate::bigquery::client::{BigQueryClient, BigQueryOperationType};
 use crate::bigquery::{BigQueryDatasetId, BigQueryTableId};
-use crate::metrics::register_metrics;
+use crate::metrics::{APPLY, BQ_EGRESS_BYTES_TOTAL, SEND_PHASE, TABLE_COPY, register_metrics};
 
 /// Delimiter separating schema from table name in BigQuery table identifiers.
 const BIGQUERY_TABLE_ID_DELIMITER: &str = "_";
@@ -423,7 +424,7 @@ where
         table_rows: Vec<TableRow>,
         orig_table_id: &TableId,
         use_cdc_sequence_column: bool,
-    ) -> EtlResult<()> {
+    ) -> EtlResult<usize> {
         // First attempt - optimistically assume the table exists
         let result = inner
             .client
@@ -436,7 +437,7 @@ where
             .await;
 
         match result {
-            Ok(()) => Ok(()),
+            Ok(sent_bytes) => Ok(sent_bytes),
             Err(err) => {
                 // From our testing, when trying to send data to a missing table, this is the error that is
                 // returned:
@@ -498,7 +499,7 @@ where
                 .push(BigQueryOperationType::Upsert.into_cell());
         }
 
-        Self::stream_rows_with_fallback(
+        let sent_bytes = Self::stream_rows_with_fallback(
             &mut inner,
             &dataset_id,
             &sequenced_bigquery_table_id,
@@ -508,6 +509,8 @@ where
             false,
         )
         .await?;
+
+        counter!(BQ_EGRESS_BYTES_TOTAL, SEND_PHASE => TABLE_COPY).increment(sent_bytes as u64);
 
         Ok(())
     }
@@ -596,7 +599,7 @@ where
                         Self::prepare_cdc_streaming_for_table(&mut inner, &table_id, true).await?;
 
                     let dataset_id = inner.dataset_id.clone();
-                    Self::stream_rows_with_fallback(
+                    let sent_bytes = Self::stream_rows_with_fallback(
                         &mut inner,
                         &dataset_id,
                         &bq_table_id,
@@ -606,6 +609,9 @@ where
                         true,
                     )
                     .await?;
+
+                    counter!(BQ_EGRESS_BYTES_TOTAL, SEND_PHASE => APPLY)
+                        .increment(sent_bytes as u64);
                 }
             }
 
