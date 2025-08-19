@@ -4,7 +4,7 @@ use etl::store::schema::SchemaStore;
 use etl::store::state::StateStore;
 use etl::types::{Cell, Event, PgLsn, TableId, TableName, TableRow};
 use etl::{bail, etl_error};
-use gcp_bigquery_client::storage::TableDescriptor;
+use gcp_bigquery_client::storage::{TableBatch, TableDescriptor};
 use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
 use std::iter;
@@ -14,6 +14,7 @@ use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
 
 use crate::bigquery::client::{BigQueryClient, BigQueryOperationType};
+use crate::bigquery::encoding::BigQueryTableRow;
 use crate::bigquery::{BigQueryDatasetId, BigQueryTableId};
 use crate::metrics::register_metrics;
 
@@ -219,7 +220,8 @@ where
             client,
             dataset_id,
             max_staleness_mins,
-            max_concurrent_streams: max_concurrent_streams.unwrap_or(DEFAULT_MAX_CONCURRENT_STREAMS),
+            max_concurrent_streams: max_concurrent_streams
+                .unwrap_or(DEFAULT_MAX_CONCURRENT_STREAMS),
             store,
             created_tables: HashSet::new(),
             created_views: HashMap::new(),
@@ -252,7 +254,8 @@ where
             client,
             dataset_id,
             max_staleness_mins,
-            max_concurrent_streams: max_concurrent_streams.unwrap_or(DEFAULT_MAX_CONCURRENT_STREAMS),
+            max_concurrent_streams: max_concurrent_streams
+                .unwrap_or(DEFAULT_MAX_CONCURRENT_STREAMS),
             store,
             created_tables: HashSet::new(),
             created_views: HashMap::new(),
@@ -268,11 +271,11 @@ where
     /// Retrieves the table schema from the store, creates or verifies the BigQuery table exists,
     /// and ensures the view points to the current versioned table. Uses caching to avoid
     /// redundant table creation checks.
-    async fn prepare_cdc_streaming_for_table(
+    async fn prepare_table_for_streaming(
         inner: &mut Inner<S>,
         table_id: &TableId,
         use_cdc_sequence_column: bool,
-    ) -> EtlResult<(SequencedBigQueryTableId, TableDescriptor)> {
+    ) -> EtlResult<(SequencedBigQueryTableId, Arc<TableDescriptor>)> {
         // We load the schema of the table, if present. This is needed to create the table in BigQuery
         // and also prepare the table descriptor for CDC streaming.
         let table_schema = inner
@@ -327,7 +330,7 @@ where
             use_cdc_sequence_column,
         );
 
-        Ok((sequenced_bigquery_table_id, table_descriptor))
+        Ok((sequenced_bigquery_table_id, Arc::new(table_descriptor)))
     }
 
     /// Adds a table to the creation cache to avoid redundant existence checks.
@@ -422,31 +425,20 @@ where
         Ok(true)
     }
 
-    /// Streams batches of rows to BigQuery with automatic retry on missing table errors.
+    /// Streams table batches to BigQuery with automatic retry on missing table errors.
     ///
-    /// Similar to `stream_rows_with_fallback` but for concurrent batch processing.
-    /// First attempts optimistic streaming. If the table is missing, clears the cache,
-    /// recreates the table, and retries the operation.
-    async fn stream_rows_concurrent_with_fallback(
+    /// Accepts pre-constructed TableBatch objects and processes them concurrently.
+    /// First attempts optimistic streaming. If any table is missing, returns an error
+    /// since reconstructing batches after table recreation is complex.
+    async fn stream_table_batches_with_fallback(
         inner: &mut Inner<S>,
-        dataset_id: &BigQueryDatasetId,
-        table_id: &SequencedBigQueryTableId,
-        table_descriptor: &TableDescriptor,
-        batches: Vec<Vec<TableRow>>,
+        table_batches: Vec<TableBatch<BigQueryTableRow>>,
         max_concurrent_streams: usize,
-        orig_table_id: &TableId,
-        use_cdc_sequence_column: bool,
     ) -> EtlResult<()> {
-        // First attempt - optimistically assume the table exists
+        // First attempt - optimistically assume all tables exist
         let result = inner
             .client
-            .stream_rows_concurrent(
-                dataset_id,
-                &table_id.to_string(),
-                table_descriptor,
-                batches.clone(),
-                max_concurrent_streams,
-            )
+            .stream_table_batches_concurrent(table_batches, max_concurrent_streams)
             .await;
 
         match result {
@@ -457,35 +449,13 @@ where
                 // `Status { code: PermissionDenied, message: "Permission 'TABLES_UPDATE_DATA' denied on
                 // resource 'x' (or it may not exist).", source: None }`
                 //
-                // If we get permission denied, we assume that the table doesn't exist.
+                // If we get permission denied, we assume that a table doesn't exist.
+                // For now, we'll return the error since reconstructing batches is complex
                 if err.kind() == ErrorKind::PermissionDenied {
-                    warn!(
-                        "table {table_id} not found during concurrent streaming, removing from cache and recreating"
-                    );
-
-                    // Remove the table from our cache since it doesn't exist
-                    Self::remove_from_created_tables_cache(inner, table_id);
-
-                    // Recreate the table and table descriptor
-                    let (new_table_id, new_table_descriptor) =
-                        Self::prepare_cdc_streaming_for_table(
-                            inner,
-                            orig_table_id,
-                            use_cdc_sequence_column,
-                        )
-                        .await?;
-
-                    // Retry the streaming operation
-                    inner
-                        .client
-                        .stream_rows_concurrent(
-                            dataset_id,
-                            &new_table_id.to_string(),
-                            &new_table_descriptor,
-                            batches,
-                            max_concurrent_streams,
-                        )
-                        .await
+                    warn!("one or more tables not found during concurrent streaming");
+                    // TODO: figure out how we could get per-table errors here and try to recreate the
+                    //  tables.
+                    Err(err)
                 } else {
                     Err(err)
                 }
@@ -505,36 +475,29 @@ where
         let mut inner = self.inner.lock().await;
 
         let (sequenced_bigquery_table_id, table_descriptor) =
-            Self::prepare_cdc_streaming_for_table(&mut inner, &table_id, false).await?;
+            Self::prepare_table_for_streaming(&mut inner, &table_id, false).await?;
 
         let dataset_id = inner.dataset_id.clone();
         let max_concurrent_streams = inner.max_concurrent_streams;
 
-        // Add CDC operation type to all rows
+        // Add CDC operation type to all rows.
         for table_row in table_rows.iter_mut() {
             table_row
                 .values
                 .push(BigQueryOperationType::Upsert.into_cell());
         }
 
-        // Create batches based on configured batch size
-        let batches: Vec<Vec<TableRow>> = table_rows
-            .chunks(max_concurrent_streams)
-            .map(|chunk| chunk.to_vec())
-            .collect();
-
-        let max_concurrent_streams_for_batches = batches.len();
-
-        // Use the new concurrent streaming method
-        Self::stream_rows_concurrent_with_fallback(
-            &mut inner,
+        // We create the batch for the table and append it.
+        let table_batch = inner.client.create_table_batch(
             &dataset_id,
-            &sequenced_bigquery_table_id,
-            &table_descriptor,
-            batches,
-            max_concurrent_streams_for_batches,
-            &table_id,
-            false,
+            &sequenced_bigquery_table_id.to_string(),
+            table_descriptor,
+            table_rows,
+        )?;
+        Self::stream_table_batches_with_fallback(
+            &mut inner,
+            vec![table_batch],
+            max_concurrent_streams,
         )
         .await?;
 
@@ -619,32 +582,31 @@ where
             // Process accumulated streaming operations with ordered batching by table
             if !table_id_to_table_rows.is_empty() {
                 let mut inner = self.inner.lock().await;
-                let max_concurrent_streams = inner.max_concurrent_streams;
+                let dataset_id = inner.dataset_id.clone();
+
+                // Collect all table batches from all tables
+                let mut table_batches = Vec::with_capacity(table_id_to_table_rows.len());
 
                 for (table_id, table_rows) in table_id_to_table_rows {
-                    let (bq_table_id, table_descriptor) =
-                        Self::prepare_cdc_streaming_for_table(&mut inner, &table_id, true).await?;
+                    let (sequenced_bigquery_table_id, table_descriptor) =
+                        Self::prepare_table_for_streaming(&mut inner, &table_id, true).await?;
 
-                    let dataset_id = inner.dataset_id.clone();
-
-                    // Create ordered batches for this specific table
-                    // Events must remain in order within each batch for CDC consistency
-                    let batches: Vec<Vec<TableRow>> = table_rows
-                        .chunks(max_concurrent_streams)
-                        .map(|chunk| chunk.to_vec())
-                        .collect();
-
-                    let max_concurrent_streams_for_batches = batches.len();
-
-                    Self::stream_rows_concurrent_with_fallback(
-                        &mut inner,
+                    let table_batch = inner.client.create_table_batch(
                         &dataset_id,
-                        &bq_table_id,
-                        &table_descriptor,
-                        batches,
-                        max_concurrent_streams_for_batches,
-                        &table_id,
-                        true,
+                        &sequenced_bigquery_table_id.to_string(),
+                        table_descriptor.clone(),
+                        table_rows,
+                    )?;
+                    table_batches.push(table_batch);
+                }
+
+                // Stream all table batches in a single call
+                if !table_batches.is_empty() {
+                    let max_concurrent_streams = inner.max_concurrent_streams;
+                    Self::stream_table_batches_with_fallback(
+                        &mut inner,
+                        table_batches,
+                        max_concurrent_streams,
                     )
                     .await?;
                 }

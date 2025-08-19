@@ -91,7 +91,10 @@ fn log_destination_config(config: &DestinationConfig) {
         } => {
             debug!(
                 project_id,
-                dataset_id, max_staleness_mins, max_concurrent_streams, "using bigquery destination config"
+                dataset_id,
+                max_staleness_mins,
+                max_concurrent_streams,
+                "using bigquery destination config"
             )
         }
     }

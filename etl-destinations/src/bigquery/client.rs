@@ -19,9 +19,6 @@ use tracing::info;
 use crate::bigquery::encoding::BigQueryTableRow;
 use crate::metrics::{BQ_BATCH_SEND_MILLISECONDS_TOTAL, BQ_BATCH_SIZE};
 
-/// Maximum byte size for streaming data to BigQuery.
-const MAX_SIZE_BYTES: usize = 9 * 1024 * 1024;
-
 /// Trace identifier for ETL operations in BigQuery client.
 const ETL_TRACE_ID: &str = "ETL BigQueryClient";
 
@@ -284,46 +281,19 @@ impl BigQueryClient {
         Ok(exists)
     }
 
-    /// Streams batches of rows to BigQuery using the concurrent Storage Write API.
+    /// Streams table batches to BigQuery using the concurrent Storage Write API.
     ///
-    /// Processes multiple batches concurrently with controlled parallelism using the
-    /// new `append_table_batches_concurrent` method. Each batch is processed in parallel up to
-    /// the specified concurrency limit.
-    pub async fn stream_rows_concurrent(
+    /// Accepts pre-constructed TableBatch objects and processes them concurrently with
+    /// controlled parallelism. This allows streaming to multiple different tables efficiently
+    /// in a single call.
+    pub async fn stream_table_batches_concurrent(
         &mut self,
-        dataset_id: &BigQueryDatasetId,
-        table_id: &BigQueryTableId,
-        table_descriptor: &TableDescriptor,
-        batches: Vec<Vec<TableRow>>,
+        table_batches: Vec<TableBatch<BigQueryTableRow>>,
         max_concurrent_streams: usize,
     ) -> EtlResult<()> {
-        if batches.is_empty() {
+        if table_batches.is_empty() {
             return Ok(());
         }
-
-        // Convert all batches to BigQueryTableRow for validation
-        let validated_batches = batches
-            .into_iter()
-            .map(|batch| {
-                batch
-                    .into_iter()
-                    .map(BigQueryTableRow::try_from)
-                    .collect::<EtlResult<Vec<_>>>()
-            })
-            .collect::<EtlResult<Vec<_>>>()?;
-
-        let stream_name = StreamName::new_default(
-            self.project_id.clone(),
-            dataset_id.to_string(),
-            table_id.to_string(),
-        );
-
-        // Create TableBatch objects for each batch since they all target the same table
-        let table_descriptor_arc = Arc::new(table_descriptor.clone());
-        let table_batches: Vec<TableBatch<BigQueryTableRow>> = validated_batches
-            .into_iter()
-            .map(|rows| TableBatch::new(stream_name.clone(), table_descriptor_arc.clone(), rows))
-            .collect();
 
         let before_sending = Instant::now();
 
@@ -331,18 +301,15 @@ impl BigQueryClient {
         let results = self
             .client
             .storage_mut()
-            .append_table_batches_concurrent(
-                table_batches,
-                max_concurrent_streams,
-                ETL_TRACE_ID,
-            )
+            .append_table_batches_concurrent(table_batches, max_concurrent_streams, ETL_TRACE_ID)
             .await
             .map_err(bq_error_to_etl_error)?;
 
-        // Process results and check for errors
+        // Process results and check for errors.
         let mut total_rows = 0;
         for (batch_index, batch_results) in &results {
             total_rows += batch_results.len();
+
             for result in batch_results {
                 match result {
                     Ok(response) => {
@@ -352,6 +319,7 @@ impl BigQueryClient {
                                 .iter()
                                 .map(|err| row_error_to_etl_error(err.clone()))
                                 .collect::<Vec<_>>();
+
                             return Err(row_errors.into());
                         }
                     }
@@ -365,11 +333,41 @@ impl BigQueryClient {
                 }
             }
         }
+
         gauge!(BQ_BATCH_SIZE).set(total_rows as f64);
         let time_taken_to_send = before_sending.elapsed().as_millis();
         gauge!(BQ_BATCH_SEND_MILLISECONDS_TOTAL).set(time_taken_to_send as f64);
 
         Ok(())
+    }
+
+    /// Creates a TableBatch for a specific table with validated rows.
+    ///
+    /// Converts TableRow instances to BigQueryTableRow and creates a properly configured
+    /// TableBatch with the appropriate stream name and table descriptor.
+    pub fn create_table_batch(
+        &self,
+        dataset_id: &BigQueryDatasetId,
+        table_id: &BigQueryTableId,
+        table_descriptor: Arc<TableDescriptor>,
+        rows: Vec<TableRow>,
+    ) -> EtlResult<TableBatch<BigQueryTableRow>> {
+        let validated_rows = rows
+            .into_iter()
+            .map(BigQueryTableRow::try_from)
+            .collect::<EtlResult<Vec<_>>>()?;
+
+        let stream_name = StreamName::new_default(
+            self.project_id.clone(),
+            dataset_id.to_string(),
+            table_id.to_string(),
+        );
+
+        Ok(TableBatch::new(
+            stream_name,
+            table_descriptor,
+            validated_rows,
+        ))
     }
 
     /// Executes a BigQuery SQL query and returns the result set.
@@ -698,16 +696,15 @@ fn bq_error_to_etl_error(err: BQError) -> EtlError {
                 (ErrorKind::DestinationError, "BigQuery gRPC status error")
             }
         }
-        
+
         // Concurrency and task errors
         BQError::SemaphorePermitError(_) => (
             ErrorKind::DestinationError,
             "BigQuery semaphore permit error",
         ),
-        BQError::TokioTaskError(_) => (
-            ErrorKind::DestinationError,
-            "BigQuery task execution error",
-        ),
+        BQError::TokioTaskError(_) => {
+            (ErrorKind::DestinationError, "BigQuery task execution error")
+        }
     };
 
     etl_error!(kind, description, err.to_string())
