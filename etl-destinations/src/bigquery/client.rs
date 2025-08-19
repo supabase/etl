@@ -328,8 +328,6 @@ impl BigQueryClient {
                 .map_err(bq_error_to_etl_error)?;
 
             gauge!(BQ_BATCH_SIZE).set(num_processed_rows as f64);
-            let time_taken_to_send = before_sending.elapsed().as_millis();
-            gauge!(BQ_BATCH_SEND_MILLISECONDS_TOTAL).set(time_taken_to_send as f64);
 
             if let Some(append_rows_response) = append_rows_stream.next().await {
                 let append_rows_response = append_rows_response
@@ -347,6 +345,9 @@ impl BigQueryClient {
                     return Err(row_errors.into());
                 }
             }
+
+            let time_taken_to_send = before_sending.elapsed().as_millis();
+            gauge!(BQ_BATCH_SEND_MILLISECONDS_TOTAL).set(time_taken_to_send as f64);
 
             table_rows = &table_rows[num_processed_rows..];
             if table_rows.is_empty() {
