@@ -21,8 +21,8 @@ use crate::metrics::register_metrics;
 const BIGQUERY_TABLE_ID_DELIMITER: &str = "_";
 /// Replacement string for escaping underscores in PostgreSQL names.
 const BIGQUERY_TABLE_ID_DELIMITER_ESCAPE_REPLACEMENT: &str = "__";
-/// Default batch size for BigQuery operations when not specified.
-const DEFAULT_BATCH_SIZE: usize = 1000;
+/// Default maximum number of concurrent streams for BigQuery appends when not specified.
+const DEFAULT_MAX_CONCURRENT_STREAMS: usize = 10;
 
 /// Creates a hex-encoded sequence number from PostgreSQL LSNs to ensure correct event ordering.
 ///
@@ -170,7 +170,7 @@ struct Inner<S> {
     client: BigQueryClient,
     dataset_id: BigQueryDatasetId,
     max_staleness_mins: Option<u16>,
-    batch_size: usize,
+    max_concurrent_streams: usize,
     store: S,
     /// Cache of table IDs that have been successfully created or verified to exist.
     /// This avoids redundant `create_table_if_missing` calls for known tables.
@@ -201,24 +201,25 @@ where
     ///
     /// Initializes the BigQuery client with the provided credentials and project settings.
     /// The `max_staleness_mins` parameter controls table metadata cache freshness.
-    /// The `batch_size` parameter controls batching behavior for row operations.
+    /// The `max_concurrent_streams` parameter controls batching behavior for row operations.
     pub async fn new_with_key_path(
         project_id: String,
         dataset_id: BigQueryDatasetId,
         sa_key: &str,
         max_staleness_mins: Option<u16>,
-        batch_size: Option<usize>,
+        max_concurrent_streams: Option<usize>,
         store: S,
     ) -> EtlResult<Self> {
-        // Registring metrics here to avoid the callers having to remember to call this before
+        // Registering metrics here to avoid the callers having to remember to call this before
         // creating a destination.
         register_metrics();
+
         let client = BigQueryClient::new_with_key_path(project_id, sa_key).await?;
         let inner = Inner {
             client,
             dataset_id,
             max_staleness_mins,
-            batch_size: batch_size.unwrap_or(DEFAULT_BATCH_SIZE),
+            max_concurrent_streams: max_concurrent_streams.unwrap_or(DEFAULT_MAX_CONCURRENT_STREAMS),
             store,
             created_tables: HashSet::new(),
             created_views: HashMap::new(),
@@ -233,24 +234,25 @@ where
     ///
     /// Similar to [`BigQueryDestination::new_with_key_path`] but accepts the key content directly
     /// rather than a file path. Useful when credentials are stored in environment variables.
-    /// The `batch_size` parameter controls batching behavior for row operations.
+    /// The `max_concurrent_streams` parameter controls batching behavior for row operations.
     pub async fn new_with_key(
         project_id: String,
         dataset_id: BigQueryDatasetId,
         sa_key: &str,
         max_staleness_mins: Option<u16>,
-        batch_size: Option<usize>,
+        max_concurrent_streams: Option<usize>,
         store: S,
     ) -> EtlResult<Self> {
-        // Registring metrics here to avoid the callers having to remember to call this before
+        // Registering metrics here to avoid the callers having to remember to call this before
         // creating a destination.
         register_metrics();
+
         let client = BigQueryClient::new_with_key(project_id, sa_key).await?;
         let inner = Inner {
             client,
             dataset_id,
             max_staleness_mins,
-            batch_size: batch_size.unwrap_or(DEFAULT_BATCH_SIZE),
+            max_concurrent_streams: max_concurrent_streams.unwrap_or(DEFAULT_MAX_CONCURRENT_STREAMS),
             store,
             created_tables: HashSet::new(),
             created_views: HashMap::new(),
@@ -506,7 +508,7 @@ where
             Self::prepare_cdc_streaming_for_table(&mut inner, &table_id, false).await?;
 
         let dataset_id = inner.dataset_id.clone();
-        let batch_size = inner.batch_size;
+        let max_concurrent_streams = inner.max_concurrent_streams;
 
         // Add CDC operation type to all rows
         for table_row in table_rows.iter_mut() {
@@ -517,7 +519,7 @@ where
 
         // Create batches based on configured batch size
         let batches: Vec<Vec<TableRow>> = table_rows
-            .chunks(batch_size)
+            .chunks(max_concurrent_streams)
             .map(|chunk| chunk.to_vec())
             .collect();
 
@@ -617,7 +619,7 @@ where
             // Process accumulated streaming operations with ordered batching by table
             if !table_id_to_table_rows.is_empty() {
                 let mut inner = self.inner.lock().await;
-                let batch_size = inner.batch_size;
+                let max_concurrent_streams = inner.max_concurrent_streams;
 
                 for (table_id, table_rows) in table_id_to_table_rows {
                     let (bq_table_id, table_descriptor) =
@@ -628,7 +630,7 @@ where
                     // Create ordered batches for this specific table
                     // Events must remain in order within each batch for CDC consistency
                     let batches: Vec<Vec<TableRow>> = table_rows
-                        .chunks(batch_size)
+                        .chunks(max_concurrent_streams)
                         .map(|chunk| chunk.to_vec())
                         .collect();
 
