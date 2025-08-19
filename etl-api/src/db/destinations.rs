@@ -326,7 +326,7 @@ mod tests {
             dataset_id: "dataset-id".to_string(),
             service_account_key: SerializableSecretString::from("service-account-key".to_string()),
             max_staleness_mins: Some(42),
-            max_concurrent_streams: None
+            max_concurrent_streams: None,
         };
 
         insta::assert_json_snapshot!(config);
@@ -343,7 +343,7 @@ mod tests {
             dataset_id: "dataset-id".to_string(),
             service_account_key: SerializableSecretString::from("supersecretkey".to_string()),
             max_staleness_mins: Some(99),
-            max_concurrent_streams: None
+            max_concurrent_streams: None,
         };
 
         let config_in_db = encrypt_and_serialize::<DestinationConfig, EncryptedDestinationConfig>(
