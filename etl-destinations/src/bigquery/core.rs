@@ -21,6 +21,8 @@ use crate::metrics::register_metrics;
 const BIGQUERY_TABLE_ID_DELIMITER: &str = "_";
 /// Replacement string for escaping underscores in PostgreSQL names.
 const BIGQUERY_TABLE_ID_DELIMITER_ESCAPE_REPLACEMENT: &str = "__";
+/// Default batch size for BigQuery operations when not specified.
+const DEFAULT_BATCH_SIZE: usize = 1000;
 
 /// Creates a hex-encoded sequence number from PostgreSQL LSNs to ensure correct event ordering.
 ///
@@ -168,6 +170,7 @@ struct Inner<S> {
     client: BigQueryClient,
     dataset_id: BigQueryDatasetId,
     max_staleness_mins: Option<u16>,
+    batch_size: usize,
     store: S,
     /// Cache of table IDs that have been successfully created or verified to exist.
     /// This avoids redundant `create_table_if_missing` calls for known tables.
@@ -198,11 +201,13 @@ where
     ///
     /// Initializes the BigQuery client with the provided credentials and project settings.
     /// The `max_staleness_mins` parameter controls table metadata cache freshness.
+    /// The `batch_size` parameter controls batching behavior for row operations.
     pub async fn new_with_key_path(
         project_id: String,
         dataset_id: BigQueryDatasetId,
         sa_key: &str,
         max_staleness_mins: Option<u16>,
+        batch_size: Option<usize>,
         store: S,
     ) -> EtlResult<Self> {
         // Registring metrics here to avoid the callers having to remember to call this before
@@ -213,6 +218,7 @@ where
             client,
             dataset_id,
             max_staleness_mins,
+            batch_size: batch_size.unwrap_or(DEFAULT_BATCH_SIZE),
             store,
             created_tables: HashSet::new(),
             created_views: HashMap::new(),
@@ -227,11 +233,13 @@ where
     ///
     /// Similar to [`BigQueryDestination::new_with_key_path`] but accepts the key content directly
     /// rather than a file path. Useful when credentials are stored in environment variables.
+    /// The `batch_size` parameter controls batching behavior for row operations.
     pub async fn new_with_key(
         project_id: String,
         dataset_id: BigQueryDatasetId,
         sa_key: &str,
         max_staleness_mins: Option<u16>,
+        batch_size: Option<usize>,
         store: S,
     ) -> EtlResult<Self> {
         // Registring metrics here to avoid the callers having to remember to call this before
@@ -242,6 +250,7 @@ where
             client,
             dataset_id,
             max_staleness_mins,
+            batch_size: batch_size.unwrap_or(DEFAULT_BATCH_SIZE),
             store,
             created_tables: HashSet::new(),
             created_views: HashMap::new(),
@@ -411,27 +420,30 @@ where
         Ok(true)
     }
 
-    /// Streams rows to BigQuery with automatic retry on missing table errors.
+    /// Streams batches of rows to BigQuery with automatic retry on missing table errors.
     ///
-    /// First attempts optimistic streaming. If the table is missing (detected via permission denied),
-    /// clears the cache, recreates the table, and retries the operation.
-    async fn stream_rows_with_fallback(
+    /// Similar to `stream_rows_with_fallback` but for concurrent batch processing.
+    /// First attempts optimistic streaming. If the table is missing, clears the cache,
+    /// recreates the table, and retries the operation.
+    async fn stream_rows_concurrent_with_fallback(
         inner: &mut Inner<S>,
         dataset_id: &BigQueryDatasetId,
         table_id: &SequencedBigQueryTableId,
         table_descriptor: &TableDescriptor,
-        table_rows: Vec<TableRow>,
+        batches: Vec<Vec<TableRow>>,
+        max_concurrent_batches: usize,
         orig_table_id: &TableId,
         use_cdc_sequence_column: bool,
     ) -> EtlResult<()> {
         // First attempt - optimistically assume the table exists
         let result = inner
             .client
-            .stream_rows(
+            .stream_rows_concurrent(
                 dataset_id,
                 &table_id.to_string(),
                 table_descriptor,
-                table_rows.clone(),
+                batches.clone(),
+                max_concurrent_batches,
             )
             .await;
 
@@ -446,7 +458,7 @@ where
                 // If we get permission denied, we assume that the table doesn't exist.
                 if err.kind() == ErrorKind::PermissionDenied {
                     warn!(
-                        "table {table_id} not found during streaming, removing from cache and recreating"
+                        "table {table_id} not found during concurrent streaming, removing from cache and recreating"
                     );
 
                     // Remove the table from our cache since it doesn't exist
@@ -464,11 +476,12 @@ where
                     // Retry the streaming operation
                     inner
                         .client
-                        .stream_rows(
+                        .stream_rows_concurrent(
                             dataset_id,
                             &new_table_id.to_string(),
                             &new_table_descriptor,
-                            table_rows,
+                            batches,
+                            max_concurrent_batches,
                         )
                         .await
                 } else {
@@ -480,7 +493,8 @@ where
 
     /// Writes table rows with CDC metadata for non-event streaming operations.
     ///
-    /// Adds an `Upsert` operation type to each row and streams to the appropriate BigQuery table.
+    /// Adds an `Upsert` operation type to each row, creates batches based on the configured
+    /// batch size, and streams to the appropriate BigQuery table using concurrent processing.
     async fn write_table_rows(
         &self,
         table_id: TableId,
@@ -492,18 +506,31 @@ where
             Self::prepare_cdc_streaming_for_table(&mut inner, &table_id, false).await?;
 
         let dataset_id = inner.dataset_id.clone();
+        let batch_size = inner.batch_size;
+
+        // Add CDC operation type to all rows
         for table_row in table_rows.iter_mut() {
             table_row
                 .values
                 .push(BigQueryOperationType::Upsert.into_cell());
         }
 
-        Self::stream_rows_with_fallback(
+        // Create batches based on configured batch size
+        let batches: Vec<Vec<TableRow>> = table_rows
+            .chunks(batch_size)
+            .map(|chunk| chunk.to_vec())
+            .collect();
+
+        let max_concurrent_batches = batches.len();
+
+        // Use the new concurrent streaming method
+        Self::stream_rows_concurrent_with_fallback(
             &mut inner,
             &dataset_id,
             &sequenced_bigquery_table_id,
             &table_descriptor,
-            table_rows,
+            batches,
+            max_concurrent_batches,
             &table_id,
             false,
         )
@@ -587,21 +614,33 @@ where
                 }
             }
 
-            // Process accumulated streaming operations
+            // Process accumulated streaming operations with ordered batching by table
             if !table_id_to_table_rows.is_empty() {
                 let mut inner = self.inner.lock().await;
+                let batch_size = inner.batch_size;
 
                 for (table_id, table_rows) in table_id_to_table_rows {
                     let (bq_table_id, table_descriptor) =
                         Self::prepare_cdc_streaming_for_table(&mut inner, &table_id, true).await?;
 
                     let dataset_id = inner.dataset_id.clone();
-                    Self::stream_rows_with_fallback(
+
+                    // Create ordered batches for this specific table
+                    // Events must remain in order within each batch for CDC consistency
+                    let batches: Vec<Vec<TableRow>> = table_rows
+                        .chunks(batch_size)
+                        .map(|chunk| chunk.to_vec())
+                        .collect();
+
+                    let max_concurrent_batches = batches.len();
+
+                    Self::stream_rows_concurrent_with_fallback(
                         &mut inner,
                         &dataset_id,
                         &bq_table_id,
                         &table_descriptor,
-                        table_rows,
+                        batches,
+                        max_concurrent_batches,
                         &table_id,
                         true,
                     )

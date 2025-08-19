@@ -48,6 +48,7 @@ pub async fn start_replicator_with_config(
             dataset_id,
             service_account_key,
             max_staleness_mins,
+            batch_size,
         } => {
             install_crypto_provider_for_bigquery();
 
@@ -56,6 +57,7 @@ pub async fn start_replicator_with_config(
                 dataset_id.clone(),
                 service_account_key.expose_secret(),
                 *max_staleness_mins,
+                *batch_size,
                 state_store.clone(),
             )
             .await?;
@@ -85,10 +87,11 @@ fn log_destination_config(config: &DestinationConfig) {
             dataset_id,
             service_account_key: _,
             max_staleness_mins,
+            batch_size,
         } => {
             debug!(
                 project_id,
-                dataset_id, max_staleness_mins, "using bigquery destination config"
+                dataset_id, max_staleness_mins, batch_size, "using bigquery destination config"
             )
         }
     }

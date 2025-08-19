@@ -284,75 +284,85 @@ impl BigQueryClient {
         Ok(exists)
     }
 
-    /// Streams rows to BigQuery using the Storage Write API.
+    /// Streams batches of rows to BigQuery using the concurrent Storage Write API.
     ///
-    /// Efficiently ingests data by batching rows to respect size limits and
-    /// using the high-performance Storage Write API.
-    pub async fn stream_rows(
+    /// Processes multiple batches concurrently with controlled parallelism using the
+    /// new `append_rows_concurrent` method. Each batch is processed in parallel up to
+    /// the specified concurrency limit.
+    pub async fn stream_rows_concurrent(
         &mut self,
         dataset_id: &BigQueryDatasetId,
         table_id: &BigQueryTableId,
         table_descriptor: &TableDescriptor,
-        table_rows: Vec<TableRow>,
+        batches: Vec<Vec<TableRow>>,
+        max_concurrent_batches: usize,
     ) -> EtlResult<()> {
-        // We map the table rows into `BigQueryTableRow`s instances, so that we also do a validation
-        // of the cells.
-        let table_rows = table_rows
+        if batches.is_empty() {
+            return Ok(());
+        }
+
+        // Convert all batches to BigQueryTableRow for validation
+        let validated_batches = batches
             .into_iter()
-            .map(BigQueryTableRow::try_from)
+            .map(|batch| {
+                batch
+                    .into_iter()
+                    .map(BigQueryTableRow::try_from)
+                    .collect::<EtlResult<Vec<_>>>()
+            })
             .collect::<EtlResult<Vec<_>>>()?;
 
-        // We create a slice on table rows, which will be updated while the streaming progresses.
-        //
-        // Using a slice allows us to deallocate the vector only at the end of streaming, which leads
-        // to fewer operations being performed.
-        let mut table_rows = table_rows.as_slice();
-
-        let default_stream = StreamName::new_default(
+        let stream_name = StreamName::new_default(
             self.project_id.clone(),
             dataset_id.to_string(),
             table_id.to_string(),
         );
 
-        loop {
-            let (rows, num_processed_rows) =
-                StorageApi::create_rows(table_descriptor, table_rows, MAX_SIZE_BYTES);
+        let before_sending = Instant::now();
 
-            let before_sending = Instant::now();
+        // Use the new concurrent append_rows method
+        let results = self
+            .client
+            .storage_mut()
+            .append_rows_concurrent(
+                &stream_name,
+                table_descriptor,
+                validated_batches,
+                max_concurrent_batches,
+                ETL_TRACE_ID,
+            )
+            .await
+            .map_err(bq_error_to_etl_error)?;
 
-            let mut append_rows_stream = self
-                .client
-                .storage_mut()
-                .append_rows(&default_stream, rows, ETL_TRACE_ID.to_owned())
-                .await
-                .map_err(bq_error_to_etl_error)?;
-
-            gauge!(BQ_BATCH_SIZE).set(num_processed_rows as f64);
-            let time_taken_to_send = before_sending.elapsed().as_millis();
-            gauge!(BQ_BATCH_SEND_MILLISECONDS_TOTAL).set(time_taken_to_send as f64);
-
-            if let Some(append_rows_response) = append_rows_stream.next().await {
-                let append_rows_response = append_rows_response
-                    .map_err(BQError::from)
-                    .map_err(bq_error_to_etl_error)?;
-
-                if !append_rows_response.row_errors.is_empty() {
-                    // We convert the error into an `ETLError`.
-                    let row_errors = append_rows_response
-                        .row_errors
-                        .into_iter()
-                        .map(row_error_to_etl_error)
-                        .collect::<Vec<_>>();
-
-                    return Err(row_errors.into());
+        // Process results and check for errors
+        let mut total_rows = 0;
+        for (batch_index, batch_results) in &results {
+            total_rows += batch_results.len();
+            for result in batch_results {
+                match result {
+                    Ok(response) => {
+                        if !response.row_errors.is_empty() {
+                            let row_errors = response
+                                .row_errors
+                                .iter()
+                                .map(|err| row_error_to_etl_error(err.clone()))
+                                .collect::<Vec<_>>();
+                            return Err(row_errors.into());
+                        }
+                    }
+                    Err(status) => {
+                        return Err(etl_error!(
+                            ErrorKind::DestinationError,
+                            "BigQuery concurrent append failed",
+                            format!("Batch {}: {}", batch_index, status)
+                        ));
+                    }
                 }
             }
-
-            table_rows = &table_rows[num_processed_rows..];
-            if table_rows.is_empty() {
-                break;
-            }
         }
+        gauge!(BQ_BATCH_SIZE).set(total_rows as f64);
+        let time_taken_to_send = before_sending.elapsed().as_millis();
+        gauge!(BQ_BATCH_SEND_MILLISECONDS_TOTAL).set(time_taken_to_send as f64);
 
         Ok(())
     }
@@ -683,6 +693,16 @@ fn bq_error_to_etl_error(err: BQError) -> EtlError {
                 (ErrorKind::DestinationError, "BigQuery gRPC status error")
             }
         }
+        
+        // Concurrency and task errors
+        BQError::SemaphorePermitError(_) => (
+            ErrorKind::DestinationError,
+            "BigQuery semaphore permit error",
+        ),
+        BQError::TokioTaskError(_) => (
+            ErrorKind::DestinationError,
+            "BigQuery task execution error",
+        ),
     };
 
     etl_error!(kind, description, err.to_string())

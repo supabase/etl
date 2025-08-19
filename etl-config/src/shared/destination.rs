@@ -39,6 +39,13 @@ pub enum DestinationConfig {
         #[serde(skip_serializing_if = "Option::is_none")]
         #[cfg_attr(feature = "utoipa", schema(example = 15))]
         max_staleness_mins: Option<u16>,
+        /// Batch size for BigQuery row operations.
+        ///
+        /// Controls how many rows are batched together before sending to BigQuery.
+        /// If not set, a default batch size is used.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "utoipa", schema(example = 1000))]
+        batch_size: Option<usize>,
     },
 }
 
