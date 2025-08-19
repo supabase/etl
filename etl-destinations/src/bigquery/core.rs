@@ -796,28 +796,13 @@ fn split_table_rows(
     table_rows: Vec<TableRow>,
     max_concurrent_streams: usize,
 ) -> Vec<Vec<TableRow>> {
-    if table_rows.is_empty() || max_concurrent_streams == 0 {
-        return if table_rows.is_empty() {
-            vec![]
-        } else {
-            vec![table_rows]
-        };
-    }
-
     let total_rows = table_rows.len();
 
-    // If we only have one concurrent stream, don't split
-    if max_concurrent_streams == 1 {
-        return vec![table_rows];
+    if total_rows == 0 {
+        return vec![];
     }
 
-    // Don't split if we only have one row
-    if total_rows <= 1 {
-        return vec![table_rows];
-    }
-
-    // If we have fewer rows than concurrent streams, don't split
-    if total_rows <= max_concurrent_streams {
+    if total_rows <= 1 || max_concurrent_streams == 1 || total_rows <= max_concurrent_streams {
         return vec![table_rows];
     }
 
