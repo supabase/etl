@@ -326,7 +326,7 @@ impl BigQueryClient {
             let (rows, num_processed_rows) =
                 StorageApi::create_rows(table_descriptor, table_rows, MAX_SIZE_BYTES);
 
-            let rows_encoded_len = rows.encoded_len();
+            total_rows_encoded_len += rows.encoded_len();
             let before_sending = Instant::now();
 
             let mut append_rows_stream = self
@@ -354,8 +354,6 @@ impl BigQueryClient {
                     return Err(row_errors.into());
                 }
             }
-
-            total_rows_encoded_len += rows_encoded_len;
 
             let time_taken_to_send = before_sending.elapsed().as_millis();
             gauge!(BQ_BATCH_SEND_MILLISECONDS_TOTAL).set(time_taken_to_send as f64);
