@@ -3,7 +3,7 @@ use etl::error::{ErrorKind, EtlError, EtlResult};
 use etl::store::schema::SchemaStore;
 use etl::store::state::StateStore;
 use etl::types::{Cell, Event, PgLsn, TableId, TableName, TableRow};
-use etl::{bail, etl_error};
+use etl::{EGRESS_BYTES_TOTAL, bail, etl_error};
 use gcp_bigquery_client::storage::TableDescriptor;
 use metrics::counter;
 use std::collections::{HashMap, HashSet};
@@ -16,9 +16,7 @@ use tracing::{debug, info, warn};
 
 use crate::bigquery::client::{BigQueryClient, BigQueryOperationType};
 use crate::bigquery::{BigQueryDatasetId, BigQueryTableId};
-use crate::metrics::{
-    APPLY, BIG_QUERY, DESTINATION, EGRESS_BYTES_TOTAL, SEND_PHASE, TABLE_COPY, register_metrics,
-};
+use crate::metrics::{APPLY, BIG_QUERY, DESTINATION, SEND_PHASE, TABLE_COPY, register_metrics};
 
 /// Delimiter separating schema from table name in BigQuery table identifiers.
 const BIGQUERY_TABLE_ID_DELIMITER: &str = "_";

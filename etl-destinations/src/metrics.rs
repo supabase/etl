@@ -1,12 +1,11 @@
 use std::sync::Once;
 
-use metrics::{Unit, describe_counter, describe_gauge};
+use metrics::{Unit, describe_gauge};
 
 static REGISTER_METRICS: Once = Once::new();
 
 pub const BQ_BATCH_SIZE: &str = "bq_batch_size";
 pub const BQ_BATCH_SEND_MILLISECONDS_TOTAL: &str = "bq_batch_send_milliseconds_total";
-pub const EGRESS_BYTES_TOTAL: &str = "egress_bytes_total";
 
 pub const SEND_PHASE: &str = "send_phase";
 pub const TABLE_COPY: &str = "table_copy";
@@ -29,12 +28,6 @@ pub(crate) fn register_metrics() {
             BQ_BATCH_SEND_MILLISECONDS_TOTAL,
             Unit::Milliseconds,
             "Time taken in milliseconds to send a batch of events to BigQuery"
-        );
-
-        describe_counter!(
-            EGRESS_BYTES_TOTAL,
-            Unit::Milliseconds,
-            "Total bytes sent to the destination"
         );
     });
 }

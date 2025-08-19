@@ -9,6 +9,7 @@ pub const ETL_TABLE_SYNC_ROWS_COPIED_TOTAL: &str = "etl_table_sync_rows_copied_t
 pub const ETL_APPLY_EVENTS_COPIED_TOTAL: &str = "etl_apply_events_copied_total";
 pub const ETL_BATCH_SIZE: &str = "etl_batch_size";
 pub const ETL_BATCH_SEND_MILLISECONDS_TOTAL: &str = "etl_batch_send_milliseconds_total";
+pub const EGRESS_BYTES_TOTAL: &str = "egress_bytes_total";
 
 /// Register metrics emitted by etl. This should be called before starting a pipeline.
 /// It is safe to call this method multiple times. It is guaraneed to register the
@@ -43,6 +44,12 @@ pub(crate) fn register_metrics() {
             ETL_BATCH_SEND_MILLISECONDS_TOTAL,
             Unit::Milliseconds,
             "Time taken in milliseconds to send a batch of events to the destination"
+        );
+
+        describe_counter!(
+            EGRESS_BYTES_TOTAL,
+            Unit::Milliseconds,
+            "Total bytes sent to the destination"
         );
     });
 }
