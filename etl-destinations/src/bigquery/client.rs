@@ -287,7 +287,7 @@ impl BigQueryClient {
     /// controlled parallelism. This allows streaming to multiple different tables efficiently
     /// in a single call.
     pub async fn stream_table_batches_concurrent(
-        &mut self,
+        &self,
         table_batches: Vec<TableBatch<BigQueryTableRow>>,
         max_concurrent_streams: usize,
     ) -> EtlResult<()> {
@@ -313,7 +313,7 @@ impl BigQueryClient {
         // Use the new concurrent append_table_batches method
         let batches_responses = self
             .client
-            .storage_mut()
+            .storage()
             .append_table_batches_concurrent(table_batches, max_concurrent_streams, ETL_TRACE_ID)
             .await
             .map_err(bq_error_to_etl_error)?;
