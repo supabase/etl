@@ -302,6 +302,11 @@ impl BigQueryClient {
             gauge!(BQ_BATCH_SIZE).set(table_batch.rows.len() as f64);
         }
 
+        debug!(
+            "streaming {:?} table batches concurrently",
+            table_batches.len()
+        );
+
         let before_sending = Instant::now();
 
         // Use the new concurrent append_table_batches method
@@ -329,11 +334,7 @@ impl BigQueryClient {
                         }
                     }
                     Err(status) => {
-                        batches_responses_errors.push(etl_error!(
-                            ErrorKind::DestinationError,
-                            "BigQuery concurrent append failed",
-                            format!("Batch {}: {}", batch_index, status)
-                        ));
+                        batches_responses_errors.push(bq_error_to_etl_error(status.into()));
                     }
                 }
             }
@@ -342,7 +343,11 @@ impl BigQueryClient {
         let time_taken_to_send = before_sending.elapsed().as_millis();
         gauge!(BQ_BATCH_SEND_MILLISECONDS_TOTAL).set(time_taken_to_send as f64);
 
-        Ok(())
+        if batches_responses_errors.is_empty() {
+            return Ok(());
+        }
+
+        Err(batches_responses_errors.into())
     }
 
     /// Creates a TableBatch for a specific table with validated rows.
