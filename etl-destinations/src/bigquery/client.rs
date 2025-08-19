@@ -14,7 +14,7 @@ use metrics::gauge;
 use std::fmt;
 use std::sync::Arc;
 use std::time::Instant;
-use tracing::info;
+use tracing::{debug, info};
 
 use crate::bigquery::encoding::BigQueryTableRow;
 use crate::metrics::{BQ_BATCH_SEND_MILLISECONDS_TOTAL, BQ_BATCH_SIZE};
@@ -295,36 +295,41 @@ impl BigQueryClient {
             return Ok(());
         }
 
+        // We track the number of rows in each table batch. Note that this is not the actual batch
+        // being sent to BigQuery, since there might be optimizations performed by the append table
+        // batches method.
+        for table_batch in &table_batches {
+            gauge!(BQ_BATCH_SIZE).set(table_batch.rows.len() as f64);
+        }
+
         let before_sending = Instant::now();
 
         // Use the new concurrent append_table_batches method
-        let results = self
+        let batches_responses = self
             .client
             .storage_mut()
             .append_table_batches_concurrent(table_batches, max_concurrent_streams, ETL_TRACE_ID)
             .await
             .map_err(bq_error_to_etl_error)?;
 
-        // Process results and check for errors.
-        let mut total_rows = 0;
-        for (batch_index, batch_results) in &results {
-            total_rows += batch_results.len();
-
-            for result in batch_results {
+        // Process results and accumulate all errors.
+        let mut batches_responses_errors = Vec::new();
+        for (batch_index, batch_responses) in batches_responses {
+            for result in batch_responses {
                 match result {
                     Ok(response) => {
-                        if !response.row_errors.is_empty() {
-                            let row_errors = response
-                                .row_errors
-                                .iter()
-                                .map(|err| row_error_to_etl_error(err.clone()))
-                                .collect::<Vec<_>>();
+                        debug!(
+                            "append rows response for batch {:?}: {:?} ",
+                            batch_index, response
+                        );
 
-                            return Err(row_errors.into());
+                        for row_error in response.row_errors {
+                            let row_error = row_error_to_etl_error(row_error);
+                            batches_responses_errors.push(row_error);
                         }
                     }
                     Err(status) => {
-                        return Err(etl_error!(
+                        batches_responses_errors.push(etl_error!(
                             ErrorKind::DestinationError,
                             "BigQuery concurrent append failed",
                             format!("Batch {}: {}", batch_index, status)
@@ -334,7 +339,6 @@ impl BigQueryClient {
             }
         }
 
-        gauge!(BQ_BATCH_SIZE).set(total_rows as f64);
         let time_taken_to_send = before_sending.elapsed().as_millis();
         gauge!(BQ_BATCH_SEND_MILLISECONDS_TOTAL).set(time_taken_to_send as f64);
 
