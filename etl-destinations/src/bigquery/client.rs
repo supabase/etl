@@ -303,8 +303,9 @@ impl BigQueryClient {
         }
 
         debug!(
-            "streaming {:?} table batches concurrently",
-            table_batches.len()
+            "streaming {:?} table batches concurrently with maximum {:?} concurrent streams",
+            table_batches.len(),
+            max_concurrent_streams
         );
 
         let before_sending = Instant::now();
