@@ -463,6 +463,72 @@ where
         }
     }
 
+    /// Splits table rows into optimal sub-batches for parallel execution.
+    ///
+    /// Calculates the optimal distribution of rows across batches to maximize
+    /// utilization of available concurrent streams. Creates approximately equal-sized
+    /// sub-batches when splitting is beneficial for parallelism.
+    fn split_table_rows(
+        table_rows: Vec<TableRow>,
+        max_concurrent_streams: usize,
+    ) -> Vec<Vec<TableRow>> {
+        if table_rows.is_empty() || max_concurrent_streams == 0 {
+            return if table_rows.is_empty() {
+                vec![]
+            } else {
+                vec![table_rows]
+            };
+        }
+
+        let total_rows = table_rows.len();
+
+        // If we only have one concurrent stream, don't split
+        if max_concurrent_streams == 1 {
+            return vec![table_rows];
+        }
+
+        // Don't split if we only have one row
+        if total_rows <= 1 {
+            return vec![table_rows];
+        }
+
+        // If we have fewer rows than concurrent streams, don't split
+        if total_rows <= max_concurrent_streams {
+            return vec![table_rows];
+        }
+
+        // Calculate optimal rows per batch to maximize parallelism.
+        let optimal_rows_per_batch =
+            (total_rows + max_concurrent_streams - 1) / max_concurrent_streams;
+
+        if optimal_rows_per_batch == 0 {
+            return vec![table_rows];
+        }
+
+        // Split the rows into smaller sub-batches.
+        let num_sub_batches = (total_rows + optimal_rows_per_batch - 1) / optimal_rows_per_batch;
+        let rows_per_sub_batch = total_rows / num_sub_batches;
+        let extra_rows = total_rows % num_sub_batches;
+
+        let mut result = Vec::with_capacity(num_sub_batches);
+        let mut start_idx = 0;
+
+        for i in 0..num_sub_batches {
+            let mut end_idx = start_idx + rows_per_sub_batch;
+
+            // Distribute extra rows evenly across the first few batches
+            if i < extra_rows {
+                end_idx += 1;
+            }
+
+            let sub_batch_rows = table_rows[start_idx..end_idx].to_vec();
+            result.push(sub_batch_rows);
+            start_idx = end_idx;
+        }
+
+        result
+    }
+
     /// Writes table rows with CDC metadata for non-event streaming operations.
     ///
     /// Adds an `Upsert` operation type to each row, creates batches based on the configured
@@ -487,19 +553,31 @@ where
                 .push(BigQueryOperationType::Upsert.into_cell());
         }
 
-        // We create the batch for the table and append it.
-        let table_batch = inner.client.create_table_batch(
-            &dataset_id,
-            &sequenced_bigquery_table_id.to_string(),
-            table_descriptor,
-            table_rows,
-        )?;
-        Self::stream_table_batches_with_fallback(
-            &mut inner,
-            vec![table_batch],
-            max_concurrent_streams,
-        )
-        .await?;
+        // Split table rows into optimal batches for parallel execution.
+        let row_batches = Self::split_table_rows(table_rows, max_concurrent_streams);
+
+        // Create table batches from the split rows.
+        let mut table_batches = Vec::with_capacity(row_batches.len());
+        for rows in row_batches {
+            if !rows.is_empty() {
+                let table_batch = inner.client.create_table_batch(
+                    &dataset_id,
+                    &sequenced_bigquery_table_id.to_string(),
+                    table_descriptor.clone(),
+                    rows,
+                )?;
+                table_batches.push(table_batch);
+            }
+        }
+
+        if !table_batches.is_empty() {
+            Self::stream_table_batches_with_fallback(
+                &mut inner,
+                table_batches,
+                max_concurrent_streams,
+            )
+            .await?;
+        }
 
         Ok(())
     }
@@ -1080,5 +1158,160 @@ mod tests {
         assert_eq!(original, formatted);
         assert_eq!(parsed.to_bigquery_table_id(), "a__b_c__d");
         assert_eq!(parsed.1, 999);
+    }
+
+    // Helper function for tests that doesn't require trait bounds
+    fn split_table_rows_test_helper(
+        table_rows: Vec<TableRow>,
+        max_concurrent_streams: usize,
+    ) -> Vec<Vec<TableRow>> {
+        if table_rows.is_empty() || max_concurrent_streams == 0 {
+            return if table_rows.is_empty() {
+                vec![]
+            } else {
+                vec![table_rows]
+            };
+        }
+
+        let total_rows = table_rows.len();
+
+        // If we only have one concurrent stream, don't split
+        if max_concurrent_streams == 1 {
+            return vec![table_rows];
+        }
+
+        // If we have fewer rows than concurrent streams, don't split
+        if total_rows <= max_concurrent_streams {
+            return vec![table_rows];
+        }
+
+        // Calculate optimal rows per batch to maximize parallelism.
+        let optimal_rows_per_batch =
+            (total_rows + max_concurrent_streams - 1) / max_concurrent_streams;
+
+        if optimal_rows_per_batch == 0 {
+            return vec![table_rows];
+        }
+
+        // Don't split if we only have one row
+        if total_rows <= 1 {
+            return vec![table_rows];
+        }
+
+        // Split the rows into smaller sub-batches
+        let num_sub_batches = (total_rows + optimal_rows_per_batch - 1) / optimal_rows_per_batch;
+        let rows_per_sub_batch = total_rows / num_sub_batches;
+        let extra_rows = total_rows % num_sub_batches;
+
+        let mut result = Vec::with_capacity(num_sub_batches);
+        let mut start_idx = 0;
+
+        for i in 0..num_sub_batches {
+            let mut end_idx = start_idx + rows_per_sub_batch;
+
+            // Distribute extra rows evenly across the first few batches
+            if i < extra_rows {
+                end_idx += 1;
+            }
+
+            let sub_batch_rows = table_rows[start_idx..end_idx].to_vec();
+            result.push(sub_batch_rows);
+            start_idx = end_idx;
+        }
+
+        result
+    }
+
+    #[test]
+    fn test_split_table_rows_empty_input() {
+        let rows = vec![];
+        let result = split_table_rows_test_helper(rows, 4);
+        assert_eq!(result, Vec::<Vec<TableRow>>::new());
+    }
+
+    #[test]
+    fn test_split_table_rows_zero_concurrent_streams() {
+        let rows = vec![TableRow::new(vec![])];
+        let result = split_table_rows_test_helper(rows.clone(), 0);
+        assert_eq!(result, vec![rows]);
+    }
+
+    #[test]
+    fn test_split_table_rows_single_concurrent_stream() {
+        let rows = vec![TableRow::new(vec![]), TableRow::new(vec![])];
+        let result = split_table_rows_test_helper(rows.clone(), 1);
+        assert_eq!(result, vec![rows]);
+    }
+
+    #[test]
+    fn test_split_table_rows_fewer_rows_than_streams() {
+        let rows = vec![TableRow::new(vec![]), TableRow::new(vec![])];
+        let result = split_table_rows_test_helper(rows.clone(), 5);
+        assert_eq!(result, vec![rows]);
+    }
+
+    #[test]
+    fn test_split_table_rows_equal_distribution() {
+        let rows = vec![
+            TableRow::new(vec![]),
+            TableRow::new(vec![]),
+            TableRow::new(vec![]),
+            TableRow::new(vec![]),
+        ];
+        let result = split_table_rows_test_helper(rows, 2);
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].len(), 2);
+        assert_eq!(result[1].len(), 2);
+    }
+
+    #[test]
+    fn test_split_table_rows_uneven_distribution() {
+        let rows = vec![
+            TableRow::new(vec![]),
+            TableRow::new(vec![]),
+            TableRow::new(vec![]),
+            TableRow::new(vec![]),
+            TableRow::new(vec![]),
+        ];
+        let result = split_table_rows_test_helper(rows, 3);
+        assert_eq!(result.len(), 3);
+        assert_eq!(result[0].len(), 2); // Gets extra row
+        assert_eq!(result[1].len(), 2); // Gets extra row
+        assert_eq!(result[2].len(), 1);
+    }
+
+    #[test]
+    fn test_split_table_rows_many_streams() {
+        let rows = vec![
+            TableRow::new(vec![]),
+            TableRow::new(vec![]),
+            TableRow::new(vec![]),
+            TableRow::new(vec![]),
+            TableRow::new(vec![]),
+            TableRow::new(vec![]),
+            TableRow::new(vec![]),
+            TableRow::new(vec![]),
+            TableRow::new(vec![]),
+            TableRow::new(vec![]),
+        ];
+        let result = split_table_rows_test_helper(rows, 4);
+        assert_eq!(result.len(), 4);
+
+        // Verify all rows are accounted for
+        let total_rows: usize = result.iter().map(|batch| batch.len()).sum();
+        assert_eq!(total_rows, 10);
+
+        // Verify approximately equal distribution
+        assert_eq!(result[0].len(), 3); // Gets extra row
+        assert_eq!(result[1].len(), 3); // Gets extra row
+        assert_eq!(result[2].len(), 2);
+        assert_eq!(result[3].len(), 2);
+    }
+
+    #[test]
+    fn test_split_table_rows_single_row() {
+        let rows = vec![TableRow::new(vec![])];
+        let result = split_table_rows_test_helper(rows.clone(), 5);
+        assert_eq!(result, vec![rows]);
     }
 }
