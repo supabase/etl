@@ -327,7 +327,7 @@ impl WorkerHandle<TableSyncWorkerState> for TableSyncWorkerHandle {
     }
 }
 
-/// Worker responsible for synchronizing individual tables from PostgreSQL to destinations.
+/// Worker responsible for synchronizing individual tables from Postgres to destinations.
 ///
 /// [`TableSyncWorker`] handles the complete lifecycle of table synchronization, including
 /// initial data copying, incremental catchup, and coordination with apply workers. Each

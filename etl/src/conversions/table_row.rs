@@ -30,16 +30,16 @@ impl TableRow {
 
 /// Utility for converting raw data into typed [`TableRow`] instances.
 ///
-/// [`TableRowConverter`] handles parsing of PostgreSQL's text format data
+/// [`TableRowConverter`] handles parsing of Postgres's text format data
 /// into strongly-typed table rows with proper error handling and type conversion.
 pub struct TableRowConverter;
 
 impl TableRowConverter {
-    /// Converts raw PostgreSQL COPY format data into a typed table row.
+    /// Converts raw Postgres COPY format data into a typed table row.
     ///
-    /// This method parses the text format data produced by PostgreSQL's COPY command
+    /// This method parses the text format data produced by Postgres's COPY command
     /// and converts it into strongly-typed [`Cell`] values according to the provided
-    /// column schemas. It handles PostgreSQL's specific escaping rules and type formats.
+    /// column schemas. It handles Postgres's specific escaping rules and type formats.
     ///
     /// # Panics
     ///
@@ -68,7 +68,7 @@ impl TableRowConverter {
                                 val_str.push('\\');
                                 val_str.push(c);
                             }
-                            // Standard PostgreSQL escape sequences
+                            // Standard Postgres escape sequences
                             else if c == 'b' {
                                 val_str.push(8 as char); // backspace
                             } else if c == 'f' {
@@ -135,13 +135,13 @@ impl TableRowConverter {
 
                 // Convert the parsed string value to appropriate Cell type
                 let value = if val_str == "\\N" {
-                    // PostgreSQL NULL marker: \N represents a NULL value
+                    // Postgres NULL marker: \N represents a NULL value
                     // We preserve this as Cell::Null rather than converting to a typed null
                     // so that downstream code can handle null semantics appropriately
                     Cell::Null
                 } else {
                     // Convert non-null field value to appropriate Cell type based on column schema
-                    // This delegates to TextFormatConverter which handles PostgreSQL text format
+                    // This delegates to TextFormatConverter which handles Postgres text format
                     // parsing for all supported data types (integers, floats, strings, booleans, etc.)
                     match TextFormatConverter::try_from_str(&column_schema.typ, &val_str) {
                         Ok(value) => value,
@@ -398,7 +398,7 @@ mod tests {
             ColumnSchema::new("col2".to_string(), Type::TEXT, -1, false, false),
         ];
 
-        // PostgreSQL escapes tab characters in data with \\t
+        // Postgres escapes tab characters in data with \\t
         let row_data = b"value\\twith\\ttabs\tnormal\\tvalue\n";
         let result = TableRowConverter::try_from(row_data, &schema).unwrap();
 
@@ -447,7 +447,7 @@ mod tests {
     fn try_from_postgres_escape_sequences() {
         let schema = create_single_column_schema("data", Type::TEXT);
 
-        // Comprehensive test of all escape sequences that PostgreSQL COPY TO produces
+        // Comprehensive test of all escape sequences that Postgres COPY TO produces
         let test_cases: Vec<(&[u8], &str)> = vec![
             // Control character escapes
             (b"\\b\n", "\u{0008}"), // backspace

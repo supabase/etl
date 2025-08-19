@@ -10,7 +10,7 @@ use uuid::Uuid;
 
 use crate::common::test_app::TestApp;
 
-/// Creates and configures a new PostgreSQL database for the API.
+/// Creates and configures a new Postgres database for the API.
 ///
 /// Similar to [`create_pg_database`], but additionally runs all database migrations
 /// from the "./migrations" directory after creation. Returns a [`PgPool`]

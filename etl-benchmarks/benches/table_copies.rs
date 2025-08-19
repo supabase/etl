@@ -59,11 +59,11 @@ enum DestinationType {
 enum Commands {
     /// Run the table copies benchmark
     Run {
-        /// PostgreSQL host
+        /// Postgres host
         #[arg(long, default_value = "localhost")]
         host: String,
 
-        /// PostgreSQL port
+        /// Postgres port
         #[arg(long, default_value = "5432")]
         port: u16,
 
@@ -71,11 +71,11 @@ enum Commands {
         #[arg(long, default_value = "bench")]
         database: String,
 
-        /// PostgreSQL username
+        /// Postgres username
         #[arg(long, default_value = "postgres")]
         username: String,
 
-        /// PostgreSQL password (optional)
+        /// Postgres password (optional)
         #[arg(long)]
         password: Option<String>,
 
@@ -133,11 +133,11 @@ enum Commands {
     },
     /// Prepare the benchmark environment by cleaning up replication slots
     Prepare {
-        /// PostgreSQL host
+        /// Postgres host
         #[arg(long, default_value = "localhost")]
         host: String,
 
-        /// PostgreSQL port
+        /// Postgres port
         #[arg(long, default_value = "5432")]
         port: u16,
 
@@ -145,11 +145,11 @@ enum Commands {
         #[arg(long, default_value = "bench")]
         database: String,
 
-        /// PostgreSQL username
+        /// Postgres username
         #[arg(long, default_value = "postgres")]
         username: String,
 
-        /// PostgreSQL password (optional)
+        /// Postgres password (optional)
         #[arg(long)]
         password: Option<String>,
 
@@ -376,6 +376,7 @@ async fn start_pipeline(args: RunArgs) -> Result<(), Box<dyn Error>> {
                 dataset_id,
                 &sa_key_file,
                 args.bq_max_staleness_mins,
+                None, // Use default max_concurrent_streams
                 store.clone(),
             )
             .await?;

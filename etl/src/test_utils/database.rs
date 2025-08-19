@@ -23,9 +23,9 @@ pub fn test_table_name(name: &str) -> TableName {
     }
 }
 
-/// Generates PostgreSQL connection configuration for isolated test databases.
+/// Generates Postgres connection configuration for isolated test databases.
 ///
-/// This function creates connection parameters for a local PostgreSQL instance with
+/// This function creates connection parameters for a local Postgres instance with
 /// test-specific settings designed for isolation, reproducibility, and ease of debugging.
 /// Each invocation creates a unique database name to prevent test interference.
 fn local_pg_connection_config() -> PgConnectionConfig {
@@ -46,7 +46,7 @@ fn local_pg_connection_config() -> PgConnectionConfig {
 
 /// Creates a new test database instance with a unique name.
 ///
-/// This function spawns a new PostgreSQL database with a random UUID as its name,
+/// This function spawns a new Postgres database with a random UUID as its name,
 /// using default credentials and disabled SSL. It automatically creates the test schema
 /// for organizing test tables.
 ///
@@ -72,7 +72,7 @@ pub async fn spawn_source_database() -> PgDatabase<Client> {
 
 /// Creates a new test database instance with a unique name and all the ETL migrations run.
 ///
-/// This function spawns a new PostgreSQL database with a random UUID as its name,
+/// This function spawns a new Postgres database with a random UUID as its name,
 /// using default credentials and disabled SSL. It automatically creates the test schema
 /// for organizing test tables.
 ///

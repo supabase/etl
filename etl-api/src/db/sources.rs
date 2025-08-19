@@ -109,7 +109,7 @@ pub struct Source {
 
 #[derive(Debug, Error)]
 pub enum SourcesDbError {
-    #[error("Error while interacting with PostgreSQL for sources: {0}")]
+    #[error("Error while interacting with Postgres for sources: {0}")]
     Database(#[from] sqlx::Error),
 
     #[error("Error while serializing source config: {0}")]

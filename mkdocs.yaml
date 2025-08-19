@@ -10,28 +10,16 @@ nav:
   - Home: index.md
   - Tutorials:
       - Overview: tutorials/index.md
-      - Installation: getting-started/installation.md
-      - Quick Start: getting-started/quickstart.md
-      - Your First Pipeline: getting-started/first-pipeline.md
-      - Working with Destinations: tutorials/memory-destination.md
-      - Testing Pipelines: tutorials/testing-pipelines.md
+      - Your First Pipeline: tutorials/first-pipeline.md
+      - Custom Stores and Destinations: tutorials/custom-implementations.md
   - How-to Guides:
       - Overview: how-to/index.md
-      - Configure PostgreSQL: how-to/configure-postgres.md
-      - Handle Schema Changes: how-to/schema-changes.md
-      - Create Custom Destinations: how-to/custom-destinations.md
-      - Debug Replication Issues: how-to/debugging.md
-      - Optimize Performance: how-to/performance.md
-      - Test Your Pipelines: how-to/testing.md
+      - Configure Postgres: how-to/configure-postgres.md
   - Reference:
       - Overview: reference/index.md
   - Explanation:
       - Overview: explanation/index.md
       - Architecture: explanation/architecture.md
-      - Replication Protocol: explanation/replication.md
-      - Design Philosophy: explanation/design.md
-      - Performance Characteristics: explanation/performance.md
-      - Crate Structure: explanation/crate-structure.md
 
 theme:
   name: "material"
@@ -73,6 +61,9 @@ theme:
 extra_css:
   - stylesheets/extra.css
 
+extra_javascript:
+  - https://unpkg.com/mermaid@10.6.1/dist/mermaid.min.js
+
 extra:
   social:
     - icon: fontawesome/brands/x-twitter
@@ -91,7 +82,11 @@ markdown_extensions:
       guess_lang: false
       use_pygments: true
       pygments_style: default
-  - pymdownx.superfences
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
   - pymdownx.tabbed:
       alternate_style: true
   - pymdownx.snippets

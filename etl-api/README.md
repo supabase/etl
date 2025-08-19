@@ -1,8 +1,8 @@
-# `etl` API
+# `etl` - API
 
-This API service provides a RESTful interface for managing PostgreSQL replication pipelines. It enables you to:
+This API service provides a RESTful interface for managing Postgres replication pipelines. It enables you to:
 
-- Create and manage replication pipelines between PostgreSQL sources and destinations
+- Create and manage replication pipelines between Postgres sources and destinations
 - Handle multi-tenant replication configurations
 - Manage publications and tables for replication
 - Control pipeline lifecycle (start/stop/status)
@@ -26,7 +26,24 @@ This API service provides a RESTful interface for managing PostgreSQL replicatio
 
 ## Prerequisites
 
-Before you begin, please refer to our [Database Setup Guide](../docs/guides/database-setup.md).
+Before running the API, you must have:
+
+- A running Postgres instance reachable via `DATABASE_URL`.
+- The `etl-api` database schema applied (SQLx migrations).
+
+Quickest way: use the setup script to start Postgres (via Docker) and run migrations automatically.
+
+```bash
+# Starts a local Postgres (if needed) and applies etl-api migrations
+./scripts/init_db.sh
+```
+
+Alternative: if you already have a Postgres database, set `DATABASE_URL` and apply migrations manually:
+
+```bash
+export DATABASE_URL=postgres://USER:PASSWORD@HOST:PORT/DB
+sqlx migrate run --source etl-api/migrations
+```
 
 ## Development
 
@@ -45,7 +62,7 @@ sqlx migrate add <migration-name>
 To apply all pending migrations:
 
 ```bash
-sqlx migrate run
+sqlx migrate run --source etl-api/migrations
 ```
 
 #### Resetting Database

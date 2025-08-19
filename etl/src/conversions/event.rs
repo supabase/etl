@@ -15,7 +15,7 @@ use crate::error::{ErrorKind, EtlResult};
 use crate::store::schema::SchemaStore;
 use crate::{bail, etl_error};
 
-/// Transaction begin event from PostgreSQL logical replication.
+/// Transaction begin event from Postgres logical replication.
 ///
 /// [`BeginEvent`] marks the start of a new transaction in the replication stream.
 /// It contains metadata about the transaction including LSN positions and timing
@@ -26,14 +26,14 @@ pub struct BeginEvent {
     pub start_lsn: PgLsn,
     /// LSN position where the transaction will commit.
     pub commit_lsn: PgLsn,
-    /// Transaction start timestamp in PostgreSQL format.
+    /// Transaction start timestamp in Postgres format.
     pub timestamp: i64,
     /// Transaction ID for tracking and coordination.
     pub xid: u32,
 }
 
 impl BeginEvent {
-    /// Creates a [`BeginEvent`] from PostgreSQL protocol data.
+    /// Creates a [`BeginEvent`] from Postgres protocol data.
     ///
     /// This method parses the replication protocol begin message and extracts
     /// transaction metadata for use in the ETL pipeline.
@@ -51,7 +51,7 @@ impl BeginEvent {
     }
 }
 
-/// Transaction commit event from PostgreSQL logical replication.
+/// Transaction commit event from Postgres logical replication.
 ///
 /// [`CommitEvent`] marks the successful completion of a transaction in the replication
 /// stream. It provides final metadata about the transaction including timing and
@@ -62,16 +62,16 @@ pub struct CommitEvent {
     pub start_lsn: PgLsn,
     /// LSN position where the transaction committed.
     pub commit_lsn: PgLsn,
-    /// Transaction commit flags from PostgreSQL.
+    /// Transaction commit flags from Postgres.
     pub flags: i8,
     /// Final LSN position after the transaction.
     pub end_lsn: u64,
-    /// Transaction commit timestamp in PostgreSQL format.
+    /// Transaction commit timestamp in Postgres format.
     pub timestamp: i64,
 }
 
 impl CommitEvent {
-    /// Creates a [`CommitEvent`] from PostgreSQL protocol data.
+    /// Creates a [`CommitEvent`] from Postgres protocol data.
     ///
     /// This method parses the replication protocol commit message and extracts
     /// transaction completion metadata for use in the ETL pipeline.
@@ -90,7 +90,7 @@ impl CommitEvent {
     }
 }
 
-/// Table schema definition event from PostgreSQL logical replication.
+/// Table schema definition event from Postgres logical replication.
 ///
 /// [`RelationEvent`] provides schema information for tables involved in replication.
 /// It contains complete column definitions and metadata needed to interpret
@@ -106,7 +106,7 @@ pub struct RelationEvent {
 }
 
 impl RelationEvent {
-    /// Creates a [`RelationEvent`] from PostgreSQL protocol data.
+    /// Creates a [`RelationEvent`] from Postgres protocol data.
     ///
     /// This method parses the replication protocol relation message and builds
     /// a complete table schema for use in interpreting subsequent data events.
@@ -137,7 +137,7 @@ impl RelationEvent {
         })
     }
 
-    /// Constructs a [`ColumnSchema`] from PostgreSQL protocol column data.
+    /// Constructs a [`ColumnSchema`] from Postgres protocol column data.
     ///
     /// This helper method extracts column metadata from the replication protocol
     /// and converts it into the internal column schema representation. Some fields
@@ -157,7 +157,7 @@ impl RelationEvent {
     }
 }
 
-/// Row insertion event from PostgreSQL logical replication.
+/// Row insertion event from Postgres logical replication.
 ///
 /// [`InsertEvent`] represents a new row being added to a table. It contains
 /// the complete row data for insertion into the destination system.
@@ -173,7 +173,7 @@ pub struct InsertEvent {
     pub table_row: TableRow,
 }
 
-/// Row update event from PostgreSQL logical replication.
+/// Row update event from Postgres logical replication.
 ///
 /// [`UpdateEvent`] represents an existing row being modified. It contains
 /// both the new row data and optionally the old row data for comparison
@@ -191,12 +191,12 @@ pub struct UpdateEvent {
     /// Previous row data before the update.
     ///
     /// The boolean indicates whether the row contains only key columns (`true`)
-    /// or the complete row data (`false`). This depends on the PostgreSQL
+    /// or the complete row data (`false`). This depends on the Postgres
     /// `REPLICA IDENTITY` setting for the table.
     pub old_table_row: Option<(bool, TableRow)>,
 }
 
-/// Row deletion event from PostgreSQL logical replication.
+/// Row deletion event from Postgres logical replication.
 ///
 /// [`DeleteEvent`] represents a row being removed from a table. It contains
 /// information about the deleted row for proper cleanup in the destination system.
@@ -211,12 +211,12 @@ pub struct DeleteEvent {
     /// Data from the deleted row.
     ///
     /// The boolean indicates whether the row contains only key columns (`true`)
-    /// or the complete row data (`false`). This depends on the PostgreSQL
+    /// or the complete row data (`false`). This depends on the Postgres
     /// `REPLICA IDENTITY` setting for the table.
     pub old_table_row: Option<(bool, TableRow)>,
 }
 
-/// Table truncation event from PostgreSQL logical replication.
+/// Table truncation event from Postgres logical replication.
 ///
 /// [`TruncateEvent`] represents one or more tables being truncated (all rows deleted).
 /// This is a bulk operation that clears entire tables and may affect multiple tables
@@ -227,14 +227,14 @@ pub struct TruncateEvent {
     pub start_lsn: PgLsn,
     /// LSN position where the event will commit.
     pub commit_lsn: PgLsn,
-    /// Truncate operation options from PostgreSQL.
+    /// Truncate operation options from Postgres.
     pub options: i8,
     /// List of table IDs that were truncated in this operation.
     pub rel_ids: Vec<u32>,
 }
 
 impl TruncateEvent {
-    /// Creates a [`TruncateEvent`] from PostgreSQL protocol data.
+    /// Creates a [`TruncateEvent`] from Postgres protocol data.
     ///
     /// This method parses the replication protocol truncate message and extracts
     /// information about which tables were truncated and with what options.
@@ -252,9 +252,9 @@ impl TruncateEvent {
     }
 }
 
-/// Represents a single replication event from PostgreSQL logical replication.
+/// Represents a single replication event from Postgres logical replication.
 ///
-/// [`Event`] encapsulates all possible events that can occur in a PostgreSQL replication
+/// [`Event`] encapsulates all possible events that can occur in a Postgres replication
 /// stream, including data modification events and transaction control events. Each event
 /// type corresponds to specific operations in the source database.
 #[derive(Debug, Clone, PartialEq)]
@@ -309,7 +309,7 @@ impl Event {
     }
 }
 
-/// Classification of PostgreSQL replication event types.
+/// Classification of Postgres replication event types.
 ///
 /// [`EventType`] provides a lightweight enumeration of possible replication events
 /// without carrying the associated data. This is useful for filtering, routing,
@@ -391,11 +391,11 @@ where
         })
 }
 
-/// Converts PostgreSQL tuple data into a [`TableRow`] using column schemas.
+/// Converts Postgres tuple data into a [`TableRow`] using column schemas.
 ///
 /// This function transforms raw tuple data from the replication protocol into
 /// a structured row representation. It handles null values, unchanged TOAST data,
-/// and binary data according to PostgreSQL semantics. For unchanged TOAST values,
+/// and binary data according to Postgres semantics. For unchanged TOAST values,
 /// it attempts to reuse data from the old row if available.
 ///
 /// # Panics
@@ -470,7 +470,7 @@ fn convert_tuple_to_row(
     Ok(TableRow { values })
 }
 
-/// Converts a PostgreSQL insert message into an [`InsertEvent`].
+/// Converts a Postgres insert message into an [`InsertEvent`].
 ///
 /// This function processes an insert operation from the replication stream,
 /// retrieves the table schema from the store, and constructs a complete
@@ -502,12 +502,12 @@ where
     })
 }
 
-/// Converts a PostgreSQL update message into an [`UpdateEvent`].
+/// Converts a Postgres update message into an [`UpdateEvent`].
 ///
 /// This function processes an update operation from the replication stream,
 /// handling both the old and new row data. The old row data may be either
 /// the complete row or just the key columns, depending on the table's
-/// `REPLICA IDENTITY` setting in PostgreSQL.
+/// `REPLICA IDENTITY` setting in Postgres.
 async fn convert_update_to_event<S>(
     schema_store: &S,
     start_lsn: PgLsn,
@@ -553,12 +553,12 @@ where
     })
 }
 
-/// Converts a PostgreSQL delete message into a [`DeleteEvent`].
+/// Converts a Postgres delete message into a [`DeleteEvent`].
 ///
 /// This function processes a delete operation from the replication stream,
 /// extracting the old row data that was deleted. The old row data may be
 /// either the complete row or just the key columns, depending on the table's
-/// `REPLICA IDENTITY` setting in PostgreSQL.
+/// `REPLICA IDENTITY` setting in Postgres.
 async fn convert_delete_to_event<S>(
     schema_store: &S,
     start_lsn: PgLsn,
@@ -594,7 +594,7 @@ where
     })
 }
 
-/// Converts a PostgreSQL logical replication message into an [`Event`].
+/// Converts a Postgres logical replication message into an [`Event`].
 ///
 /// This is the main entry point for converting raw replication protocol messages
 /// into strongly-typed events for ETL processing. It dispatches to specialized

@@ -52,7 +52,7 @@ fi
 
 # Check if psql is installed
 if ! [ -x "$(command -v psql)" ]; then
-  echo >&2 "❌ Error: PostgreSQL client (psql) is not installed."
+  echo >&2 "❌ Error: Postgres client (psql) is not installed."
   echo >&2 "Please install it using your system's package manager."
   exit 1
 fi

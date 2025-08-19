@@ -19,12 +19,12 @@ use crate::metrics::register_metrics;
 
 /// Delimiter separating schema from table name in BigQuery table identifiers.
 const BIGQUERY_TABLE_ID_DELIMITER: &str = "_";
-/// Replacement string for escaping underscores in PostgreSQL names.
+/// Replacement string for escaping underscores in Postgres names.
 const BIGQUERY_TABLE_ID_DELIMITER_ESCAPE_REPLACEMENT: &str = "__";
 /// Default maximum number of concurrent streams for BigQuery appends when not specified.
 const DEFAULT_MAX_CONCURRENT_STREAMS: usize = 10;
 
-/// Creates a hex-encoded sequence number from PostgreSQL LSNs to ensure correct event ordering.
+/// Creates a hex-encoded sequence number from Postgres LSNs to ensure correct event ordering.
 ///
 /// Creates a hex-encoded sequence number that ensures events are processed in the correct order
 /// even when they have the same system time. The format is compatible with BigQuery's
@@ -186,7 +186,7 @@ struct Inner<S> {
 
 /// A BigQuery destination that implements the ETL [`Destination`] trait.
 ///
-/// Provides PostgreSQL-to-BigQuery data pipeline functionality including streaming inserts
+/// Provides Postgres-to-BigQuery data pipeline functionality including streaming inserts
 /// and CDC operation handling.
 #[derive(Debug, Clone)]
 pub struct BigQueryDestination<S> {
@@ -433,7 +433,7 @@ where
         table_id: &SequencedBigQueryTableId,
         table_descriptor: &TableDescriptor,
         batches: Vec<Vec<TableRow>>,
-        max_concurrent_batches: usize,
+        max_concurrent_streams: usize,
         orig_table_id: &TableId,
         use_cdc_sequence_column: bool,
     ) -> EtlResult<()> {
@@ -445,7 +445,7 @@ where
                 &table_id.to_string(),
                 table_descriptor,
                 batches.clone(),
-                max_concurrent_batches,
+                max_concurrent_streams,
             )
             .await;
 
@@ -483,7 +483,7 @@ where
                             &new_table_id.to_string(),
                             &new_table_descriptor,
                             batches,
-                            max_concurrent_batches,
+                            max_concurrent_streams,
                         )
                         .await
                 } else {
@@ -523,7 +523,7 @@ where
             .map(|chunk| chunk.to_vec())
             .collect();
 
-        let max_concurrent_batches = batches.len();
+        let max_concurrent_streams_for_batches = batches.len();
 
         // Use the new concurrent streaming method
         Self::stream_rows_concurrent_with_fallback(
@@ -532,7 +532,7 @@ where
             &sequenced_bigquery_table_id,
             &table_descriptor,
             batches,
-            max_concurrent_batches,
+            max_concurrent_streams_for_batches,
             &table_id,
             false,
         )
@@ -634,7 +634,7 @@ where
                         .map(|chunk| chunk.to_vec())
                         .collect();
 
-                    let max_concurrent_batches = batches.len();
+                    let max_concurrent_streams_for_batches = batches.len();
 
                     Self::stream_rows_concurrent_with_fallback(
                         &mut inner,
@@ -642,7 +642,7 @@ where
                         &bq_table_id,
                         &table_descriptor,
                         batches,
-                        max_concurrent_batches,
+                        max_concurrent_streams_for_batches,
                         &table_id,
                         true,
                     )

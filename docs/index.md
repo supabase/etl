@@ -1,60 +1,94 @@
----
-hide:
-  - navigation
----
+# ETL Documentation
 
-# ETL
+**Build real-time Postgres replication applications in Rust**
 
-!!! info "Coming Soon"
-    ETL docs are coming soon!
+ETL is a Rust framework by [Supabase](https://supabase.com) that enables you to build high-performance, real-time data replication applications for Postgres. Whether you're creating ETL pipelines, implementing CDC (Change Data Capture), or building custom data synchronization solutions, ETL provides the building blocks you need.
 
-Welcome to the ETL project, a Rust-based collection of tooling designed to build efficient and reliable Postgres replication applications. This documentation page provides an overview of the ETL project, the benefits of using ETL, the advantages of implementing it in Rust, and an introduction to Postgres logical replication. It also outlines the resources available in this documentation to help you get started.
+## Getting Started
 
-## What is ETL
+Choose your path based on your needs:
 
-ETL is a collection of Rust crates which can be used to build replication data pipelines on top of [Postgres's logical replication protocol](https://www.postgresql.org/docs/current/protocol-logical-replication.html). It provides a high-level API to work with Postgres logical replication, allowing developers to focus on building their applications without worrying about the low-level details of the replication protocol. The ETL crate abstracts away the complexities of managing replication slots, publications, and subscriptions, enabling you to create robust data pipelines that can continually copy data from Postgres to various destinations like BigQuery and other OLAP databases.
+### New to ETL?
 
-## What is Postgres Logical Replication?
+Start with our **[Tutorials](tutorials/index.md)** to learn ETL through hands-on examples:
 
-Postgres logical replication is a method for replicating data between PostgreSQL databases at the logical (table or row) level, rather than the physical (block-level) level. It allows selective replication of specific tables or data subsets, making it ideal for scenarios like data warehousing, real-time analytics, or cross-database synchronization.
+- [Build your first ETL pipeline](tutorials/first-pipeline.md) - Complete beginner's guide (15 minutes)
+- [Build custom stores and destinations](tutorials/custom-implementations.md) - Advanced patterns (30 minutes)
 
-Logical replication uses a publish/subscribe model, where a source database (publisher) sends changes to a replication slot, and a destination system (subscriber) applies those changes to its own tables. This approach supports selective data replication and is compatible with different PostgreSQL versions or even external systems.
+### Ready to solve specific problems?
 
-### How Does Postgres Logical Replication Work?
+Jump to our **[How-To Guides](how-to/index.md)** for practical solutions:
 
-Postgres logical replication operates through the following steps:
+- [Configure Postgres for replication](how-to/configure-postgres.md)
+- More guides coming soon
 
-**Publication Creation**: A publication is created in the source database, specifying which tables or data to replicate. For example:
+### Want to understand the bigger picture?
 
-```sql
-create publication my_publication for table orders, customers;
+Read our **[Explanations](explanation/index.md)** for deeper insights:
+
+- [ETL architecture overview](explanation/architecture.md)
+- More explanations coming soon
+
+## Core Concepts
+
+**Postgres Logical Replication** streams data changes from Postgres databases in real-time using the Write-Ahead Log (WAL). ETL builds on this foundation to provide:
+
+- 🚀 **Real-time replication** - Stream changes as they happen
+- 🔄 **Multiple destinations** - BigQuery and more coming soon
+- 🛡️ **Fault tolerance** - Built-in error handling and recovery
+- ⚡ **High performance** - Efficient batching and parallel processing
+- 🔧 **Extensible** - Plugin architecture for custom destinations
+
+## Quick Example
+
+```rust
+use etl::{
+    config::{BatchConfig, PgConnectionConfig, PipelineConfig, TlsConfig},
+    destination::memory::MemoryDestination,
+    pipeline::Pipeline,
+    store::both::memory::MemoryStore,
+};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Configure Postgres connection
+    let pg_config = PgConnectionConfig {
+        host: "localhost".to_string(),
+        port: 5432,
+        name: "mydb".to_string(),
+        username: "postgres".to_string(),
+        password: Some("password".to_string().into()),
+        tls: TlsConfig { enabled: false, trusted_root_certs: String::new() },
+    };
+
+    // Create memory-based store and destination for testing
+    let store = MemoryStore::new();
+    let destination = MemoryDestination::new();
+
+    // Configure the pipeline
+    let config = PipelineConfig {
+        id: 1,
+        publication_name: "my_publication".to_string(),
+        pg_connection: pg_config,
+        batch: BatchConfig { max_size: 1000, max_fill_ms: 5000 },
+        table_error_retry_delay_ms: 10000,
+        max_table_sync_workers: 4,
+    };
+
+    // Create and start the pipeline
+    let mut pipeline = Pipeline::new(config, store, destination);
+    pipeline.start().await?;
+
+    // Pipeline will run until stopped
+    pipeline.wait().await?;
+
+    Ok(())
+}
 ```
 
-**Replication Slot**: A logical replication slot is created on the source database to track changes (inserts, updates, deletes) for the published tables. The slot ensures that changes are preserved until they are consumed by a subscriber.
+## Next Steps
 
-**Subscription Setup**: The destination system (subscriber) creates a subscription that connects to the publication, specifying the source database and replication slot. For example:
-
-```sql
-create subscription my_subscription
-connection 'host=localhost port=5432 dbname=postgres user=postgres password=password'
-publication my_publication;
-```
-
-**Change Data Capture (CDC)**: The source database streams changes (via the Write-Ahead Log, or WAL) to the replication slot. The subscriber receives these changes and applies them to its tables, maintaining data consistency.
-
-This process enables real-time data synchronization with minimal overhead, making it suitable for ETL workflows where data needs to be transformed and loaded into destinations like data warehouses or analytical databases.
-
-## Why Use ETL
-
-ETL provides a set of building blocks to construct data pipelines which can continually copy data from Postgres to other systems. It abstracts away the low-level details of the logical replication protocol and provides a high-level API to work with. This allows developers to focus on building their applications without worrying about the intricacies of the replication protocol.
-
-### Why is ETL Written in Rust?
-
-The ETL crate is written in Rust to leverage the language's unique strengths, making it an ideal choice for building robust data pipelines:
-
-- **Performance**: Rust's zero-cost abstractions and low-level control enable high-performance data processing, critical for handling large-scale ETL workloads.
-- **Safety**: Rust's strong type system and memory safety guarantees minimize bugs and ensure reliable data handling, reducing the risk of data corruption or crashes.
-- **Concurrency**: Rust’s ownership model and async capabilities allow efficient parallel processing, ideal for managing complex, high-throughput ETL pipelines.
-- **Ecosystem Integration**: Rust’s growing ecosystem and compatibility with modern cloud and database technologies make it a natural fit for Postgres-focused infrastructure.
-
-By using Rust, the ETL crate provides a fast, safe, and scalable solution for building Postgres replication applications.
+- **First time using ETL?** → Start with [Build your first pipeline](tutorials/first-pipeline.md)
+- **Need Postgres setup help?** → Check [Configure Postgres for Replication](how-to/configure-postgres.md)
+- **Need technical details?** → Check the [Reference](reference/index.md)
+- **Want to understand the architecture?** → Read [ETL Architecture](explanation/architecture.md)

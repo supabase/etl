@@ -7,7 +7,7 @@ use prost::bytes;
 ///
 /// Wraps a vector of [`CellNonOptional`] values and implements the [`prost::Message`]
 /// trait to enable Protocol Buffer serialization for BigQuery streaming inserts.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct BigQueryTableRow(Vec<CellNonOptional>);
 
 impl TryFrom<TableRow> for BigQueryTableRow {

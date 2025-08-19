@@ -1,6 +1,6 @@
 // This code is copied from the tokio-postgres-rustls library (https://github.com/jbg/tokio-postgres-rustls),
 // available under the MIT License, which provides Rustls-based TLS support for secure asynchronous
-// PostgreSQL connections using the tokio-postgres client.
+// Postgres connections using the tokio-postgres client.
 
 use const_oid::db::{
     rfc5912::{
@@ -24,7 +24,7 @@ use x509_cert::{TbsCertificate, der::Decode};
 
 /// A `MakeTlsConnect` implementation using `rustls`.
 ///
-/// That way you can connect to PostgreSQL using `rustls` as the TLS stack.
+/// That way you can connect to Postgres using `rustls` as the TLS stack.
 #[derive(Clone)]
 pub struct MakeRustlsConnect {
     config: Arc<ClientConfig>,

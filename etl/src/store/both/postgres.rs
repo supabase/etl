@@ -18,10 +18,10 @@ use crate::{bail, etl_error};
 
 const NUM_POOL_CONNECTIONS: u32 = 1;
 
-/// Converts ETL table replication phases to PostgreSQL database state format.
+/// Converts ETL table replication phases to Postgres database state format.
 ///
 /// This conversion transforms internal ETL replication states into the format
-/// used by the PostgreSQL state store for persistence. It handles all phase
+/// used by the Postgres state store for persistence. It handles all phase
 /// types except in-memory phases that cannot be persisted.
 impl TryFrom<TableReplicationPhase> for state::TableReplicationState {
     type Error = EtlError;
@@ -66,7 +66,7 @@ impl TryFrom<TableReplicationPhase> for state::TableReplicationState {
     }
 }
 
-/// Converts PostgreSQL state rows back to ETL table replication phases.
+/// Converts Postgres state rows back to ETL table replication phases.
 ///
 /// This conversion transforms persisted database state into internal ETL
 /// replication phase representations. It deserializes metadata from the
@@ -152,11 +152,11 @@ impl Inner {
     }
 }
 
-/// PostgreSQL-backed storage for ETL pipeline state and schema information.
+/// Postgres-backed storage for ETL pipeline state and schema information.
 ///
 /// [`PostgresStore`] implements both [`StateStore`] and [`SchemaStore`] traits,
 /// providing persistent storage of replication state and schema information
-/// directly in the source PostgreSQL database. This ensures durability and
+/// directly in the source Postgres database. This ensures durability and
 /// consistency of the pipeline state across restarts.
 ///
 /// The store maintains both in-memory cache and persistent database storage,
@@ -170,10 +170,10 @@ pub struct PostgresStore {
 }
 
 impl PostgresStore {
-    /// Creates a new PostgreSQL-backed store for the given pipeline.
+    /// Creates a new Postgres-backed store for the given pipeline.
     ///
     /// The store will use the provided connection configuration to access
-    /// the source PostgreSQL database for persistent storage operations.
+    /// the source Postgres database for persistent storage operations.
     /// The pipeline ID ensures isolation between different pipeline instances.
     pub fn new(pipeline_id: PipelineId, source_config: PgConnectionConfig) -> Self {
         let inner = Inner {
@@ -190,7 +190,7 @@ impl PostgresStore {
         }
     }
 
-    /// Establishes a connection to the source PostgreSQL database.
+    /// Establishes a connection to the source Postgres database.
     ///
     /// This method creates a new connection pool each time it's called rather
     /// than maintaining persistent connections. This approach trades connection
@@ -247,7 +247,7 @@ impl StateStore for PostgresStore {
         Ok(inner.table_states.clone())
     }
 
-    /// Loads table replication states from PostgreSQL into memory cache.
+    /// Loads table replication states from Postgres into memory cache.
     ///
     /// This method connects to the source database, retrieves all table
     /// replication state rows for this pipeline, deserializes the state
@@ -401,7 +401,7 @@ impl StateStore for PostgresStore {
         Ok(inner.table_mappings.clone())
     }
 
-    /// Loads table mappings from PostgreSQL into memory cache.
+    /// Loads table mappings from Postgres into memory cache.
     ///
     /// This method connects to the source database, retrieves all table mapping
     /// definitions for this pipeline, and populates the in-memory cache.
@@ -498,7 +498,7 @@ impl SchemaStore for PostgresStore {
         Ok(inner.table_schemas.values().cloned().collect())
     }
 
-    /// Loads table schemas from PostgreSQL into memory cache.
+    /// Loads table schemas from Postgres into memory cache.
     ///
     /// This method connects to the source database, retrieves schema information
     /// for all tables in this pipeline, and populates the in-memory cache.

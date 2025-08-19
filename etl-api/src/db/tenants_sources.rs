@@ -9,7 +9,7 @@ use crate::encryption::EncryptionKey;
 
 #[derive(Debug, Error)]
 pub enum TenantSourceDbError {
-    #[error("Error while interacting with PostgreSQL for tenants and/or sources: {0}")]
+    #[error("Error while interacting with Postgres for tenants and/or sources: {0}")]
     Database(#[from] sqlx::Error),
 
     #[error("Error while serializing tenant or source config: {0}")]

@@ -27,6 +27,7 @@ impl Encrypt<EncryptedDestinationConfig> for DestinationConfig {
                 dataset_id,
                 service_account_key,
                 max_staleness_mins,
+                max_concurrent_streams,
             } => {
                 let encrypted_service_account_key = encrypt_text(
                     service_account_key.expose_secret().to_owned(),
@@ -38,6 +39,7 @@ impl Encrypt<EncryptedDestinationConfig> for DestinationConfig {
                     dataset_id,
                     service_account_key: encrypted_service_account_key,
                     max_staleness_mins,
+                    max_concurrent_streams,
                 })
             }
         }
@@ -54,6 +56,8 @@ pub enum EncryptedDestinationConfig {
         service_account_key: EncryptedValue,
         #[serde(skip_serializing_if = "Option::is_none")]
         max_staleness_mins: Option<u16>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        max_concurrent_streams: Option<usize>,
     },
 }
 
@@ -66,6 +70,7 @@ impl Decrypt<DestinationConfig> for EncryptedDestinationConfig {
                 dataset_id,
                 service_account_key: encrypted_service_account_key,
                 max_staleness_mins,
+                max_concurrent_streams,
             } => {
                 let service_account_key = SerializableSecretString::from(decrypt_text(
                     encrypted_service_account_key,
@@ -77,6 +82,7 @@ impl Decrypt<DestinationConfig> for EncryptedDestinationConfig {
                     dataset_id,
                     service_account_key,
                     max_staleness_mins,
+                    max_concurrent_streams,
                 })
             }
         }
@@ -85,7 +91,7 @@ impl Decrypt<DestinationConfig> for EncryptedDestinationConfig {
 
 #[derive(Debug, Error)]
 pub enum DestinationsDbError {
-    #[error("Error while interacting with PostgreSQL for destinations: {0}")]
+    #[error("Error while interacting with Postgres for destinations: {0}")]
     Database(#[from] sqlx::Error),
 
     #[error("Error while serializing destination config: {0}")]

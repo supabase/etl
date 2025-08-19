@@ -1,6 +1,6 @@
 //! ETL replicator service binary.
 //!
-//! Initializes and runs the replicator pipeline that handles PostgreSQL logical replication
+//! Initializes and runs the replicator pipeline that handles Postgres logical replication
 //! and routes data to configured destinations. Includes telemetry, error handling, and
 //! graceful shutdown capabilities.
 

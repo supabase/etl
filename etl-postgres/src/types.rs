@@ -1,6 +1,6 @@
 use tokio_postgres::types::{Kind, Type};
 
-/// Converts a PostgreSQL type OID to a [`Type`] instance.
+/// Converts a Postgres type OID to a [`Type`] instance.
 ///
 /// Returns a properly constructed [`Type`] for the given OID, or creates an unnamed
 /// type as fallback if the OID lookup fails.

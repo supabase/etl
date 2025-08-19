@@ -1,9 +1,9 @@
 use etl_config::shared::{IntoConnectOptions, PgConnectionConfig};
 use sqlx::{Connection, Executor, PgConnection, PgPool};
 
-/// Creates a new PostgreSQL database and returns a connection pool.
+/// Creates a new Postgres database and returns a connection pool.
 ///
-/// Connects to PostgreSQL server, creates a new database, and returns a [`PgPool`]
+/// Connects to Postgres server, creates a new database, and returns a [`PgPool`]
 /// connected to the newly created database.
 ///
 /// # Panics
@@ -24,9 +24,9 @@ pub async fn create_pg_database(config: &PgConnectionConfig) -> PgPool {
         .expect("Failed to connect to Postgres")
 }
 
-/// Drops a PostgreSQL database and terminates all connections.
+/// Drops a Postgres database and terminates all connections.
 ///
-/// Connects to PostgreSQL server, forcefully terminates active connections
+/// Connects to Postgres server, forcefully terminates active connections
 /// to the target database, and drops it if it exists. Used for test cleanup.
 ///
 /// # Panics

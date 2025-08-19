@@ -87,7 +87,7 @@ pub trait ApplyLoopHook {
     fn worker_type(&self) -> WorkerType;
 }
 
-/// The status update that is sent to PostgreSQL to report progress.
+/// The status update that is sent to Postgres to report progress.
 ///
 /// The status update is a crucial part since it enables Postgres to know our replication process
 /// and is required for WAL pruning.
@@ -102,7 +102,7 @@ impl StatusUpdate {
     /// Updates the write LSN to a higher value if the new LSN is greater.
     ///
     /// This method ensures LSN values only advance forward, preventing
-    /// regression in replication progress reporting to PostgreSQL.
+    /// regression in replication progress reporting to Postgres.
     fn update_write_lsn(&mut self, new_write_lsn: PgLsn) {
         if new_write_lsn <= self.write_lsn {
             return;
@@ -114,7 +114,7 @@ impl StatusUpdate {
     /// Updates the flush LSN to a higher value if the new LSN is greater.
     ///
     /// This method tracks the highest LSN for data that has been durably
-    /// written to the destination, enabling PostgreSQL WAL cleanup.
+    /// written to the destination, enabling Postgres WAL cleanup.
     fn update_flush_lsn(&mut self, flush_lsn: PgLsn) {
         if flush_lsn <= self.flush_lsn {
             return;
@@ -259,13 +259,13 @@ impl ApplyLoopState {
 /// Starts the main apply loop for processing replication events.
 ///
 /// This function implements the core replication processing algorithm that maintains
-/// consistency between PostgreSQL and destination systems. It orchestrates multiple
+/// consistency between Postgres and destination systems. It orchestrates multiple
 /// concurrent operations while ensuring ACID properties are preserved.
 ///
 /// # Algorithm Overview
 ///
 /// The apply loop processes three types of events:
-/// 1. **Replication messages** - DDL/DML events from PostgreSQL logical replication
+/// 1. **Replication messages** - DDL/DML events from Postgres logical replication
 /// 2. **Table sync signals** - Coordination events from table synchronization workers  
 /// 3. **Shutdown signals** - Graceful termination requests from the pipeline
 ///
@@ -273,13 +273,13 @@ impl ApplyLoopState {
 ///
 /// ## 1. Initialization Phase
 /// - Validates hook requirements via `before_loop()` callback.
-/// - Establishes logical replication stream from PostgreSQL.
+/// - Establishes logical replication stream from Postgres.
 /// - Initializes batch processing state and status tracking.
 ///
 /// ## 2. Event Processing Phase
 /// - **Message handling**: Processes replication messages in transaction-aware batches.
 /// - **Batch management**: Accumulates events until batch size/time limits are reached.
-/// - **Status updates**: Periodically reports progress back to PostgreSQL.
+/// - **Status updates**: Periodically reports progress back to Postgres.
 /// - **Coordination**: Manages table sync worker lifecycle and state transitions.
 ///
 /// # Concurrency Model
@@ -369,7 +369,7 @@ where
                 return Ok(ApplyLoopResult::ApplyStopped);
             }
 
-            // PRIORITY 2: Process incoming replication messages from PostgreSQL
+            // PRIORITY 2: Process incoming replication messages from Postgres
             // This is the primary data flow - converts replication protocol messages
             // into typed events and accumulates them into batches for efficient processing
             Some(message) = logical_replication_stream.next() => {
@@ -413,11 +413,11 @@ where
                 }
             }
 
-            // PRIORITY 4: Periodic housekeeping and PostgreSQL status updates
-            // Every REFRESH_INTERVAL (1 second), send progress updates back to PostgreSQL
+            // PRIORITY 4: Periodic housekeeping and Postgres status updates
+            // Every REFRESH_INTERVAL (1 second), send progress updates back to Postgres
             // This serves multiple purposes:
-            // 1. Keeps PostgreSQL informed of our processing progress
-            // 2. Allows PostgreSQL to clean up old WAL files based on our progress
+            // 1. Keeps Postgres informed of our processing progress
+            // 2. Allows Postgres to clean up old WAL files based on our progress
             // 3. Provides a heartbeat mechanism to detect connection issues
             _ = tokio::time::sleep(REFRESH_INTERVAL) => {
                 logical_replication_stream.as_mut()
@@ -574,13 +574,13 @@ where
 
 /// Dispatches replication protocol messages to appropriate handlers.
 ///
-/// This function serves as the main routing mechanism for PostgreSQL replication
+/// This function serves as the main routing mechanism for Postgres replication
 /// messages, distinguishing between XLogData (containing actual logical replication
 /// events) and PrimaryKeepAlive (heartbeat and status) messages.
 ///
 /// For XLogData messages, it extracts LSN boundaries and delegates to logical
 /// replication processing. For keepalive messages, it responds with status updates
-/// to maintain the replication connection and inform PostgreSQL of progress.
+/// to maintain the replication connection and inform Postgres of progress.
 async fn handle_replication_message<S, T>(
     state: &mut ApplyLoopState,
     events_stream: Pin<&mut EventsStream>,
@@ -640,7 +640,7 @@ where
 
 /// Processes logical replication messages and converts them to typed events.
 ///
-/// This function handles the core logic of transforming PostgreSQL's logical
+/// This function handles the core logic of transforming Postgres's logical
 /// replication protocol messages into strongly-typed [`Event`] instances. It
 /// determines transaction boundaries, validates message ordering, and routes
 /// each message type to its specialized handler.
@@ -724,7 +724,7 @@ fn get_commit_lsn(state: &ApplyLoopState, message: &LogicalReplicationMessage) -
     }
 }
 
-/// Handles PostgreSQL BEGIN messages that mark transaction boundaries.
+/// Handles Postgres BEGIN messages that mark transaction boundaries.
 ///
 /// This function processes transaction start events by validating the event type
 /// and storing the final LSN for the transaction. The final LSN represents where
@@ -762,7 +762,7 @@ async fn handle_begin_message(
     })
 }
 
-/// Handles PostgreSQL COMMIT messages that complete transactions.
+/// Handles Postgres COMMIT messages that complete transactions.
 ///
 /// This function processes transaction completion events by validating LSN
 /// consistency, coordinating with table synchronization workers, and preparing
@@ -851,7 +851,7 @@ where
     Ok(result)
 }
 
-/// Handles PostgreSQL RELATION messages that describe table schemas.
+/// Handles Postgres RELATION messages that describe table schemas.
 ///
 /// This function processes schema definition messages by validating that table
 /// schemas haven't changed unexpectedly during replication. Schema stability
@@ -940,7 +940,7 @@ where
     })
 }
 
-/// Handles PostgreSQL INSERT messages for row insertion events.
+/// Handles Postgres INSERT messages for row insertion events.
 async fn handle_insert_message<T>(
     state: &mut ApplyLoopState,
     event: Event,
@@ -984,7 +984,7 @@ where
     })
 }
 
-/// Handles PostgreSQL UPDATE messages for row modification events.
+/// Handles Postgres UPDATE messages for row modification events.
 async fn handle_update_message<T>(
     state: &mut ApplyLoopState,
     event: Event,
@@ -1028,7 +1028,7 @@ where
     })
 }
 
-/// Handles PostgreSQL DELETE messages for row removal events.
+/// Handles Postgres DELETE messages for row removal events.
 async fn handle_delete_message<T>(
     state: &mut ApplyLoopState,
     event: Event,
@@ -1072,7 +1072,7 @@ where
     })
 }
 
-/// Handles PostgreSQL TRUNCATE messages for bulk table clearing operations.
+/// Handles Postgres TRUNCATE messages for bulk table clearing operations.
 ///
 /// This function processes table truncation events by validating the event type,
 /// ensuring transaction context, and filtering the affected table list based on

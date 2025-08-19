@@ -1,18 +1,18 @@
 use etl::error::{ErrorKind, EtlError, EtlResult};
 use etl::etl_error;
 use etl::types::{Cell, ColumnSchema, TableRow, Type};
-use futures::StreamExt;
 use gcp_bigquery_client::google::cloud::bigquery::storage::v1::RowError;
-use gcp_bigquery_client::storage::{ColumnMode, StorageApi};
+use gcp_bigquery_client::storage::ColumnMode;
 use gcp_bigquery_client::yup_oauth2::parse_service_account_key;
 use gcp_bigquery_client::{
     Client,
     error::BQError,
     model::{query_request::QueryRequest, query_response::ResultSet},
-    storage::{ColumnType, FieldDescriptor, StreamName, TableDescriptor},
+    storage::{ColumnType, FieldDescriptor, StreamName, TableBatch, TableDescriptor},
 };
 use metrics::gauge;
 use std::fmt;
+use std::sync::Arc;
 use std::time::Instant;
 use tracing::info;
 
@@ -287,7 +287,7 @@ impl BigQueryClient {
     /// Streams batches of rows to BigQuery using the concurrent Storage Write API.
     ///
     /// Processes multiple batches concurrently with controlled parallelism using the
-    /// new `append_rows_concurrent` method. Each batch is processed in parallel up to
+    /// new `append_table_batches_concurrent` method. Each batch is processed in parallel up to
     /// the specified concurrency limit.
     pub async fn stream_rows_concurrent(
         &mut self,
@@ -295,7 +295,7 @@ impl BigQueryClient {
         table_id: &BigQueryTableId,
         table_descriptor: &TableDescriptor,
         batches: Vec<Vec<TableRow>>,
-        max_concurrent_batches: usize,
+        max_concurrent_streams: usize,
     ) -> EtlResult<()> {
         if batches.is_empty() {
             return Ok(());
@@ -318,17 +318,22 @@ impl BigQueryClient {
             table_id.to_string(),
         );
 
+        // Create TableBatch objects for each batch since they all target the same table
+        let table_descriptor_arc = Arc::new(table_descriptor.clone());
+        let table_batches: Vec<TableBatch<BigQueryTableRow>> = validated_batches
+            .into_iter()
+            .map(|rows| TableBatch::new(stream_name.clone(), table_descriptor_arc.clone(), rows))
+            .collect();
+
         let before_sending = Instant::now();
 
-        // Use the new concurrent append_rows method
+        // Use the new concurrent append_table_batches method
         let results = self
             .client
             .storage_mut()
-            .append_rows_concurrent(
-                &stream_name,
-                table_descriptor,
-                validated_batches,
-                max_concurrent_batches,
+            .append_table_batches_concurrent(
+                table_batches,
+                max_concurrent_streams,
                 ETL_TRACE_ID,
             )
             .await

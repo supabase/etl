@@ -12,17 +12,17 @@ use crate::error::{ErrorKind, EtlError, EtlResult};
 
 use super::{ArrayCell, Cell, numeric::PgNumeric};
 
-/// Utilities for converting PostgreSQL text-format data to typed [`Cell`] values.
+/// Utilities for converting Postgres text-format data to typed [`Cell`] values.
 ///
-/// This helper struct provides methods for parsing PostgreSQL's text representation
-/// of various data types into strongly-typed [`Cell`] variants. It handles PostgreSQL's
+/// This helper struct provides methods for parsing Postgres's text representation
+/// of various data types into strongly-typed [`Cell`] variants. It handles Postgres's
 /// specific text formatting conventions and provides fallback behavior for unknown types.
 pub struct TextFormatConverter;
 
 impl TextFormatConverter {
-    /// Creates a default [`Cell`] value for the given PostgreSQL type.
+    /// Creates a default [`Cell`] value for the given Postgres type.
     ///
-    /// This helper method provides sensible default values for PostgreSQL types,
+    /// This helper method provides sensible default values for Postgres types,
     /// primarily used during cell initialization and error recovery scenarios.
     /// The defaults are chosen to be the zero/empty value for each type where possible.
     ///
@@ -91,13 +91,13 @@ impl TextFormatConverter {
         }
     }
 
-    /// Converts a PostgreSQL text-format string to a typed [`Cell`] value.
+    /// Converts a Postgres text-format string to a typed [`Cell`] value.
     ///
-    /// This method parses PostgreSQL's text representation of various data types
-    /// into strongly-typed [`Cell`] variants. It handles all major PostgreSQL types
+    /// This method parses Postgres's text representation of various data types
+    /// into strongly-typed [`Cell`] variants. It handles all major Postgres types
     /// including arrays, and provides comprehensive error handling for malformed input.
     ///
-    /// For array types, it delegates to [`parse_array`] which handles PostgreSQL's
+    /// For array types, it delegates to [`parse_array`] which handles Postgres's
     /// array literal syntax with proper escaping and null value support.
     pub fn try_from_str(typ: &Type, str: &str) -> EtlResult<Cell> {
         match *typ {
@@ -256,9 +256,9 @@ impl TextFormatConverter {
         }
     }
 
-    /// Parses PostgreSQL array literal syntax into a typed [`ArrayCell`].
+    /// Parses Postgres array literal syntax into a typed [`ArrayCell`].
     ///
-    /// This function handles PostgreSQL's array format with curly braces, comma
+    /// This function handles Postgres's array format with curly braces, comma
     /// separation, and proper quoting. It supports null values (unquoted "null"),
     /// escaped characters within quoted strings, and delegates element parsing
     /// to the provided closure.

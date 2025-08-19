@@ -5,13 +5,13 @@
 //! ⚠️ **Warning:** These docs are a work in progress, for this reason they may be incomplete.
 //!
 //! This crate provides a high-performance, streaming ETL (Extract, Transform, Load) system
-//! built on PostgreSQL logical replication. It enables real-time data synchronization
-//! from PostgreSQL databases to various destinations with configurable transformations
+//! built on Postgres logical replication. It enables real-time data synchronization
+//! from Postgres databases to various destinations with configurable transformations
 //! and robust error handling.
 //!
 //! # Key Features
 //!
-//! - **Real-time streaming**: Uses PostgreSQL logical replication for minimal latency
+//! - **Real-time streaming**: Uses Postgres logical replication for minimal latency
 //! - **Destination agnostic**: Implement your own custom destinations to which data will be sent
 //! - **Robust error handling**: Comprehensive error classification with retry strategies
 //! - **Concurrent processing**: Parallel table synchronization and event application for increased throughput
@@ -20,7 +20,7 @@
 //! # Core Concepts
 //!
 //! ## Pipeline
-//! A [`pipeline::Pipeline`] represents a complete ETL workflow that connects a PostgreSQL publication
+//! A [`pipeline::Pipeline`] represents a complete ETL workflow that connects a Postgres publication
 //! to a destination. It manages the replication stream, applies transformations,
 //! and handles failures gracefully.
 //!
@@ -38,7 +38,7 @@
 //!
 //! **Note:** To pause and resume a pipeline after the process is stopped, it must be able to
 //! persist data durably. The crate itself provides no durability guarantees as it only transfers
-//! data between PostgreSQL and the destination relying on the store traits to provide the required
+//! data between Postgres and the destination relying on the store traits to provide the required
 //! data when needed.
 //!
 //! ## Error Handling
@@ -57,7 +57,7 @@
 //!
 //! #[tokio::main]
 //! async fn main() -> Result<(), Box<dyn std::error::Error>> {
-//!     // Configure PostgreSQL connection
+//!     // Configure Postgres connection
 //!     let pg_config = PgConnectionConfig {
 //!         host: "localhost".to_string(),
 //!         port: 5432,
@@ -94,7 +94,7 @@
 //!
 //! # Feature Flags
 //!
-//! - `unknown-types-to-bytes`: Convert unknown PostgreSQL types to byte arrays (default)
+//! - `unknown-types-to-bytes`: Convert unknown Postgres types to byte arrays (default)
 //! - `test-utils`: Enable testing utilities and mock implementations  
 //! - `failpoints`: Enable fault injection for testing error scenarios
 

@@ -12,9 +12,9 @@ macro_rules! define_type_mappings {
             $pg_type:ident => $string_name:literal
         ),* $(,)?
     ) => {
-        /// Converts a PostgreSQL type name string to a [`PgType`].
+        /// Converts a Postgres type name string to a [`PgType`].
         ///
-        /// Maps string representations to their corresponding PostgreSQL types,
+        /// Maps string representations to their corresponding Postgres types,
         /// handling common types and falling back to `TEXT` for unknown types.
         pub fn string_to_postgres_type(type_str: &str) -> PgType {
             match type_str {
@@ -25,9 +25,9 @@ macro_rules! define_type_mappings {
             }
         }
 
-        /// Converts a PostgreSQL [`PgType`] to its string representation.
+        /// Converts a Postgres [`PgType`] to its string representation.
         ///
-        /// Maps PostgreSQL types to string equivalents for database storage,
+        /// Maps Postgres types to string equivalents for database storage,
         /// handling common types with fallback for unknown types.
         pub fn postgres_type_to_string(pg_type: &PgType) -> String {
             match *pg_type {

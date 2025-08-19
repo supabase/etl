@@ -52,7 +52,7 @@ pub enum TableSyncResult {
 /// Starts table synchronization for a specific table.
 ///
 /// This function performs the initial data copy for a table from the source
-/// PostgreSQL database to the destination. It handles the complete sync process
+/// Postgres database to the destination. It handles the complete sync process
 /// including data copying, state management, and coordination with the apply worker.
 #[expect(clippy::too_many_arguments)]
 pub async fn start_table_sync<S, D>(

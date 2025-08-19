@@ -19,7 +19,7 @@ use tokio_postgres::{
 };
 use tracing::{Instrument, error, info, warn};
 
-/// Spawns a background task to monitor a PostgreSQL connection until it terminates.
+/// Spawns a background task to monitor a Postgres connection until it terminates.
 ///
 /// The task will log when the connection terminates, either successfully or with an error.
 fn spawn_postgres_connection<T>(connection: Connection<Socket, T::Stream>)
@@ -156,7 +156,7 @@ impl PgReplicationSlotTransaction {
     }
 }
 
-/// A client for interacting with PostgreSQL's logical replication features.
+/// A client for interacting with Postgres's logical replication features.
 ///
 /// This client provides methods for creating replication slots, managing transactions,
 /// and streaming changes from the database.
@@ -166,7 +166,7 @@ pub struct PgReplicationClient {
 }
 
 impl PgReplicationClient {
-    /// Establishes a connection to PostgreSQL. The connection uses TLS if configured in the
+    /// Establishes a connection to Postgres. The connection uses TLS if configured in the
     /// supplied [`PgConnectionConfig`].
     ///
     /// The connection is configured for logical replication mode
@@ -177,7 +177,7 @@ impl PgReplicationClient {
         }
     }
 
-    /// Establishes a connection to PostgreSQL without TLS encryption.
+    /// Establishes a connection to Postgres without TLS encryption.
     ///
     /// The connection is configured for logical replication mode.
     async fn connect_no_tls(pg_connection_config: PgConnectionConfig) -> EtlResult<Self> {
@@ -194,7 +194,7 @@ impl PgReplicationClient {
         })
     }
 
-    /// Establishes a TLS-encrypted connection to PostgreSQL.
+    /// Establishes a TLS-encrypted connection to Postgres.
     ///
     /// The connection is configured for logical replication mode
     async fn connect_tls(pg_connection_config: PgConnectionConfig) -> EtlResult<Self> {

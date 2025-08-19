@@ -12,10 +12,10 @@ const NAN_SIGN: u16 = 0xC000;
 const POSITIVE_INFINITY_SIGN: u16 = 0xC000;
 const NEGATIVE_INFINITY_SIGN: u16 = 0xF000;
 
-/// Sign indicator for PostgreSQL numeric values.
+/// Sign indicator for Postgres numeric values.
 ///
 /// [`Sign`] represents whether a numeric value is positive or negative,
-/// used internally in the PostgreSQL numeric wire format representation.
+/// used internally in the Postgres numeric wire format representation.
 #[derive(Debug, Ord, PartialOrd, Eq, PartialEq, Clone)]
 pub enum Sign {
     /// Positive numeric value.
@@ -24,10 +24,10 @@ pub enum Sign {
     Negative,
 }
 
-/// Error indicating an invalid sign value in PostgreSQL numeric format.
+/// Error indicating an invalid sign value in Postgres numeric format.
 ///
 /// [`InvalidSign`] wraps the invalid sign value encountered when parsing
-/// numeric data from PostgreSQL's wire format.
+/// numeric data from Postgres's wire format.
 pub struct InvalidSign(u16);
 
 impl TryFrom<u16> for Sign {
@@ -51,10 +51,10 @@ impl From<Sign> for u16 {
     }
 }
 
-/// PostgreSQL NUMERIC/DECIMAL type with arbitrary precision.
+/// Postgres NUMERIC/DECIMAL type with arbitrary precision.
 ///
-/// [`PgNumeric`] represents PostgreSQL's NUMERIC and DECIMAL types, which support
-/// arbitrary precision arithmetic. This enum closely matches PostgreSQL's internal
+/// [`PgNumeric`] represents Postgres's NUMERIC and DECIMAL types, which support
+/// arbitrary precision arithmetic. This enum closely matches Postgres's internal
 /// wire format and can represent special values like NaN and infinity.
 ///
 /// The numeric format uses base-10000 digits internally for efficient storage
@@ -259,7 +259,7 @@ impl std::error::Error for ParseNumericError {}
 
 /// Parses special numeric values like NaN, Infinity, and -Infinity.
 ///
-/// This function handles PostgreSQL's special numeric values when they appear
+/// This function handles Postgres's special numeric values when they appear
 /// in string format. NaN cannot have a negative sign, while infinity values
 /// respect the sign parameter.
 fn parse_special_value(
@@ -408,9 +408,9 @@ fn parse_numeric_value(
     convert_to_base_10000(decimal_digits, dweight, dscale as u16, sign)
 }
 
-/// Converts decimal digits to PostgreSQL's base-10000 internal format.
+/// Converts decimal digits to Postgres's base-10000 internal format.
 ///
-/// This function transforms a sequence of decimal digits into PostgreSQL's
+/// This function transforms a sequence of decimal digits into Postgres's
 /// efficient base-10000 representation, where each internal digit represents
 /// up to 10000 in decimal. This format balances storage efficiency with
 /// calculation performance.

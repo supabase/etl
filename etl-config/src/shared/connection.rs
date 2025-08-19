@@ -8,10 +8,10 @@ use utoipa::ToSchema;
 use crate::SerializableSecretString;
 use crate::shared::ValidationError;
 
-/// PostgreSQL server options for ETL workloads.
+/// Postgres server options for ETL workloads.
 ///
 /// Configures session-specific settings that are applied during connection
-/// establishment to optimize PostgreSQL behavior for ETL operations.
+/// establishment to optimize Postgres behavior for ETL operations.
 #[derive(Debug, Clone)]
 pub struct PgConnectionOptions {
     /// Sets the display format for date values.
@@ -37,12 +37,12 @@ pub struct PgConnectionOptions {
 impl Default for PgConnectionOptions {
     /// Returns default configuration values optimized for ETL/replication workloads.
     ///
-    /// These defaults ensure consistent behavior across different PostgreSQL installations
+    /// These defaults ensure consistent behavior across different Postgres installations
     /// and are specifically tuned for ETL systems that perform logical replication and
     /// large data operations:
     ///
     /// - `datestyle = "ISO"`: Provides consistent date formatting for reliable parsing
-    /// - `intervalstyle = "postgres"`: Uses standard PostgreSQL interval format
+    /// - `intervalstyle = "postgres"`: Uses standard Postgres interval format
     /// - `extra_float_digits = 3`: Ensures sufficient precision for numeric replication
     /// - `client_encoding = "UTF8"`: Supports international character sets
     /// - `timezone = "UTC"`: Eliminates timezone ambiguity in distributed ETL systems
@@ -114,9 +114,9 @@ impl PgConnectionOptions {
     }
 }
 
-/// PostgreSQL database connection configuration.
+/// Postgres database connection configuration.
 ///
-/// Contains all parameters required to establish a connection to a PostgreSQL
+/// Contains all parameters required to establish a connection to a Postgres
 /// database, including authentication, TLS settings, and connection options.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(ToSchema))]
@@ -141,7 +141,7 @@ pub struct PgConnectionConfig {
     pub tls: TlsConfig,
 }
 
-/// TLS configuration for secure PostgreSQL connections.
+/// TLS configuration for secure Postgres connections.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(ToSchema))]
 #[serde(rename_all = "snake_case")]
@@ -175,13 +175,13 @@ impl TlsConfig {
 /// Trait for converting configuration to database client connection options.
 ///
 /// Provides a common interface for creating connection options for different
-/// PostgreSQL client libraries (sqlx and tokio-postgres) while centralizing
+/// Postgres client libraries (sqlx and tokio-postgres) while centralizing
 /// configuration in [`PgConnectionConfig`].
 pub trait IntoConnectOptions<Output> {
     /// Creates connection options without specifying a database.
     ///
     /// Used for administrative operations like database creation that require
-    /// connecting to the PostgreSQL server without targeting a specific database.
+    /// connecting to the Postgres server without targeting a specific database.
     fn without_db(&self) -> Output;
 
     /// Creates connection options for connecting to the configured database.
