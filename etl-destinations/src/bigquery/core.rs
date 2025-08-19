@@ -3,9 +3,8 @@ use etl::error::{ErrorKind, EtlError, EtlResult};
 use etl::store::schema::SchemaStore;
 use etl::store::state::StateStore;
 use etl::types::{Cell, Event, PgLsn, TableId, TableName, TableRow};
-use etl::{EGRESS_BYTES_TOTAL, bail, etl_error};
+use etl::{bail, etl_error};
 use gcp_bigquery_client::storage::TableDescriptor;
-use metrics::counter;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
 use std::iter;
@@ -16,7 +15,7 @@ use tracing::{debug, info, warn};
 
 use crate::bigquery::client::{BigQueryClient, BigQueryOperationType};
 use crate::bigquery::{BigQueryDatasetId, BigQueryTableId};
-use crate::metrics::{APPLY, BIG_QUERY, DESTINATION, SEND_PHASE, TABLE_COPY, register_metrics};
+use crate::metrics::register_metrics;
 
 /// Delimiter separating schema from table name in BigQuery table identifiers.
 const BIGQUERY_TABLE_ID_DELIMITER: &str = "_";
@@ -510,8 +509,16 @@ where
         )
         .await?;
 
-        counter!(EGRESS_BYTES_TOTAL, SEND_PHASE => TABLE_COPY, DESTINATION => BIG_QUERY)
-            .increment(sent_bytes as u64);
+        // Logs with egress_metric = true can be used to identify egress logs.
+        // This can e.g. be used to send egress logs to a location different
+        // than the other logs. These logs should also have sent_bytes set to
+        // the number of bytes sent to the destination.
+        info!(
+            sent_bytes,
+            phase = "table_copy",
+            egress_metric = true,
+            "Wrote table rows"
+        );
 
         Ok(())
     }
@@ -611,8 +618,16 @@ where
                     )
                     .await?;
 
-                    counter!(EGRESS_BYTES_TOTAL, SEND_PHASE => APPLY, DESTINATION => BIG_QUERY)
-                        .increment(sent_bytes as u64);
+                    // Logs with egress_metric = true can be used to identify egress logs.
+                    // This can e.g. be used to send egress logs to a location different
+                    // than the other logs. These logs should also have sent_bytes set to
+                    // the number of bytes sent to the destination.
+                    info!(
+                        sent_bytes,
+                        phase = "apply",
+                        egress_metric = true,
+                        "Wrote apply events"
+                    );
                 }
             }
 

@@ -7,12 +7,6 @@ static REGISTER_METRICS: Once = Once::new();
 pub const BQ_BATCH_SIZE: &str = "bq_batch_size";
 pub const BQ_BATCH_SEND_MILLISECONDS_TOTAL: &str = "bq_batch_send_milliseconds_total";
 
-pub const SEND_PHASE: &str = "send_phase";
-pub const TABLE_COPY: &str = "table_copy";
-pub const APPLY: &str = "apply";
-pub const DESTINATION: &str = "destination";
-pub const BIG_QUERY: &str = "big_query";
-
 /// Register metrics emitted by the destinations. It is safe to call
 /// this method multiple times. It is guaraneed to register the
 /// metrics only once.
