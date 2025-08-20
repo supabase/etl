@@ -24,6 +24,86 @@ services:
       timeout: 5s
       retries: 5
 
+  # Setup PostgreSQL database for Iceberg catalog
+  postgres-setup:
+    image: postgres:15
+    container_name: iceberg-postgres-setup
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PGHOST: postgres
+      PGPORT: 5432
+      PGUSER: ${POSTGRES_USER:-postgres}
+      PGPASSWORD: ${POSTGRES_PASSWORD:-postgres}
+    entrypoint: >
+      /bin/sh -c "
+      psql -c 'create database \"iceberg-catalog\";' || true;
+      exit 0;
+      "
+
+  # MinIO for S3-compatible object storage
+  minio:
+    image: minio/minio:latest
+    container_name: iceberg-minio
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    command: server /data --console-address ":9001"
+    ports:
+      - "9010:9000"
+      - "9011:9001"
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # Setup MinIO buckets
+  minio-setup:
+    image: minio/mc:latest
+    container_name: iceberg-minio-setup
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set myminio http://minio:9000 minioadmin minioadmin;
+      mc mb myminio/warehouse || true;
+      exit 0;
+      "
+  # Iceberg REST Catalog
+  iceberg-rest:
+    image: tabulario/iceberg-rest:0.10.0
+    container_name: iceberg-rest-catalog
+    depends_on:
+      postgres-setup:
+        condition: service_completed_successfully
+      minio-setup:
+        condition: service_completed_successfully
+    environment:
+      CATALOG_WAREHOUSE: s3://warehouse/
+      CATALOG_IO__IMPL: org.apache.iceberg.aws.s3.S3FileIO
+      CATALOG_S3_ENDPOINT: http://minio:9000
+      CATALOG_S3_ACCESS__KEY__ID: minioadmin
+      CATALOG_S3_SECRET__ACCESS__KEY: minioadmin
+      CATALOG_S3_PATH__STYLE__ACCESS: "true"
+      CATALOG_CATALOG__IMPL: org.apache.iceberg.jdbc.JdbcCatalog
+      CATALOG_URI: jdbc:postgresql://postgres:5432/iceberg-catalog
+      CATALOG_JDBC_USER: postgres
+      CATALOG_JDBC_PASSWORD: postgres
+    ports:
+      - "8182:8181"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8181/v1/config"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+
 volumes:
   postgres_data:
+    driver: local
+  minio_data:
     driver: local
