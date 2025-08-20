@@ -431,6 +431,7 @@ async fn start_pipeline(args: RunArgs) -> Result<(), Box<dyn Error>> {
 #[derive(Clone)]
 struct NullDestination;
 
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone)]
 enum BenchDestination {
     Null(NullDestination),
