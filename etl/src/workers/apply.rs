@@ -351,13 +351,18 @@ where
                 )
                 .await;
 
-            info!("the table sync worker {} has finished syncing", table_id);
-
             // If we are told to shut down while waiting for a phase change, we will signal this to
             // the caller which will result in the apply loop being cancelled.
             if result.should_shutdown() {
+                info!(
+                    "the table sync worker {} didn't manage to finish syncing because it was instructed to shutdown",
+                    table_id
+                );
+
                 return Ok(false);
             }
+
+            info!("the table sync worker {} has finished syncing", table_id);
         }
 
         Ok(true)
