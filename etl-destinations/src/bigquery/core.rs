@@ -365,14 +365,14 @@ where
         client: &BigQueryClient,
         table_batches: Vec<TableBatch<BigQueryTableRow>>,
         max_concurrent_streams: usize,
-    ) -> EtlResult<usize> {
+    ) -> EtlResult<(usize, usize)> {
         // First attempt - optimistically assume all tables exist
         let result = client
             .stream_table_batches_concurrent(table_batches, max_concurrent_streams)
             .await;
 
         match result {
-            Ok(bytes_sent) => Ok(bytes_sent),
+            Ok((bytes_sent, bytes_received)) => Ok((bytes_sent, bytes_received)),
             Err(err) => {
                 // From our testing, when trying to send data to a missing table, this is the error that is
                 // returned:
@@ -536,7 +536,7 @@ where
 
         // Stream all the batches concurrently.
         if !table_batches.is_empty() {
-            let bytes_sent = self
+            let (bytes_sent, bytes_received) = self
                 .stream_table_batches_concurrent_with_fallback(
                     &self.client,
                     table_batches,
@@ -550,6 +550,7 @@ where
             // the number of bytes sent to the destination.
             info!(
                 bytes_sent,
+                bytes_received,
                 phase = "table_copy",
                 egress_metric = true,
                 "Wrote table rows"
@@ -655,7 +656,7 @@ where
                 }
 
                 if !table_batches.is_empty() {
-                    let bytes_sent = self
+                    let (bytes_sent, bytes_received) = self
                         .stream_table_batches_concurrent_with_fallback(
                             &self.client,
                             table_batches,
@@ -669,6 +670,7 @@ where
                     // the number of bytes sent to the destination.
                     info!(
                         bytes_sent,
+                        bytes_received,
                         phase = "apply",
                         egress_metric = true,
                         "Wrote apply events"

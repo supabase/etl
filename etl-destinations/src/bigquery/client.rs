@@ -11,6 +11,7 @@ use gcp_bigquery_client::{
     storage::{ColumnType, FieldDescriptor, StreamName, TableBatch, TableDescriptor},
 };
 use metrics::gauge;
+use prost::Message;
 use std::fmt;
 use std::sync::Arc;
 use std::time::Instant;
@@ -290,9 +291,9 @@ impl BigQueryClient {
         &self,
         table_batches: Vec<TableBatch<BigQueryTableRow>>,
         max_concurrent_streams: usize,
-    ) -> EtlResult<usize> {
+    ) -> EtlResult<(usize, usize)> {
         if table_batches.is_empty() {
-            return Ok(0);
+            return Ok((0, 0));
         }
 
         // We track the number of rows in each table batch. Note that this is not the actual batch
@@ -324,6 +325,7 @@ impl BigQueryClient {
         // that low level access, hence will have to settle for something accessible
         // in the application.
         let mut total_bytes_sent = 0;
+        let mut total_bytes_received = 0;
 
         // Process results and accumulate all errors.
         let mut batches_responses_errors = Vec::new();
@@ -335,6 +337,8 @@ impl BigQueryClient {
                             "append rows response for batch {:?}: {:?} ",
                             batch_result.batch_index, response
                         );
+
+                        total_bytes_received += response.encoded_len();
 
                         for row_error in response.row_errors {
                             let row_error = row_error_to_etl_error(row_error);
@@ -354,7 +358,7 @@ impl BigQueryClient {
         gauge!(BQ_BATCH_SEND_MILLISECONDS_TOTAL).set(time_taken_to_send as f64);
 
         if batches_responses_errors.is_empty() {
-            return Ok(total_bytes_sent);
+            return Ok((total_bytes_sent, total_bytes_received));
         }
 
         Err(batches_responses_errors.into())
