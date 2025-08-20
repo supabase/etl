@@ -48,7 +48,8 @@ impl Default for PgConnectionOptions {
     /// - `timezone = "UTC"`: Eliminates timezone ambiguity in distributed ETL systems
     /// - `statement_timeout = 0`: Disables the timeout, which allows large COPY operations to continue without being interrupted
     /// - `lock_timeout = 30000` (30 seconds): Prevents indefinite blocking on table locks during replication
-    /// - `idle_in_transaction_session_timeout = 300000` (5 minutes): Cleans up abandoned transactions that could block VACUUM
+    /// - `idle_in_transaction_session_timeout = 0`: Disables the timeout, which allows large COPY operations to continue without being interrupted since
+    ///   they are ran in a transaction
     /// - `application_name = "etl"`: Enables easy identification in monitoring and pg_stat_activity
     fn default() -> Self {
         Self {
@@ -59,7 +60,7 @@ impl Default for PgConnectionOptions {
             timezone: "UTC".to_string(),
             statement_timeout: 0,
             lock_timeout: 30_000, // 30 seconds in milliseconds
-            idle_in_transaction_session_timeout: 300_000, // 5 minutes in milliseconds
+            idle_in_transaction_session_timeout: 0,
             application_name: "etl".to_string(),
         }
     }
@@ -273,7 +274,7 @@ mod tests {
 
         assert_eq!(
             options_string,
-            "-c datestyle=ISO -c intervalstyle=postgres -c extra_float_digits=3 -c client_encoding=UTF8 -c timezone=UTC -c statement_timeout=0 -c lock_timeout=30000 -c idle_in_transaction_session_timeout=300000 -c application_name=etl"
+            "-c datestyle=ISO -c intervalstyle=postgres -c extra_float_digits=3 -c client_encoding=UTF8 -c timezone=UTC -c statement_timeout=0 -c lock_timeout=30000 -c idle_in_transaction_session_timeout=0 -c application_name=etl"
         );
     }
 
@@ -292,7 +293,7 @@ mod tests {
         assert!(pairs.contains(&("lock_timeout".to_string(), "30000".to_string())));
         assert!(pairs.contains(&(
             "idle_in_transaction_session_timeout".to_string(),
-            "300000".to_string()
+            "0".to_string()
         )));
         assert!(pairs.contains(&("application_name".to_string(), "etl".to_string())));
     }
