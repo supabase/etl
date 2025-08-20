@@ -167,12 +167,7 @@ impl Display for SequencedBigQueryTableId {
 /// Contains the BigQuery client, dataset configuration, injected schema cache,
 /// and table creation state cache for performance optimization.
 #[derive(Debug)]
-struct Inner<S> {
-    client: BigQueryClient,
-    dataset_id: BigQueryDatasetId,
-    max_staleness_mins: Option<u16>,
-    max_concurrent_streams: usize,
-    store: S,
+struct Inner {
     /// Cache of table IDs that have been successfully created or verified to exist.
     /// This avoids redundant `create_table_if_missing` calls for known tables.
     created_tables: HashSet<SequencedBigQueryTableId>,
@@ -191,7 +186,12 @@ struct Inner<S> {
 /// and CDC operation handling.
 #[derive(Debug, Clone)]
 pub struct BigQueryDestination<S> {
-    inner: Arc<Mutex<Inner<S>>>,
+    client: BigQueryClient,
+    dataset_id: BigQueryDatasetId,
+    max_staleness_mins: Option<u16>,
+    max_concurrent_streams: usize,
+    store: S,
+    inner: Arc<Mutex<Inner>>,
 }
 
 impl<S> BigQueryDestination<S>
@@ -217,17 +217,17 @@ where
 
         let client = BigQueryClient::new_with_key_path(project_id, sa_key).await?;
         let inner = Inner {
+            created_tables: HashSet::new(),
+            created_views: HashMap::new(),
+        };
+
+        Ok(Self {
             client,
             dataset_id,
             max_staleness_mins,
             max_concurrent_streams: max_concurrent_streams
                 .unwrap_or(DEFAULT_MAX_CONCURRENT_STREAMS),
             store,
-            created_tables: HashSet::new(),
-            created_views: HashMap::new(),
-        };
-
-        Ok(Self {
             inner: Arc::new(Mutex::new(inner)),
         })
     }
@@ -251,17 +251,17 @@ where
 
         let client = BigQueryClient::new_with_key(project_id, sa_key).await?;
         let inner = Inner {
+            created_tables: HashSet::new(),
+            created_views: HashMap::new(),
+        };
+
+        Ok(Self {
             client,
             dataset_id,
             max_staleness_mins,
             max_concurrent_streams: max_concurrent_streams
                 .unwrap_or(DEFAULT_MAX_CONCURRENT_STREAMS),
             store,
-            created_tables: HashSet::new(),
-            created_views: HashMap::new(),
-        };
-
-        Ok(Self {
             inner: Arc::new(Mutex::new(inner)),
         })
     }
@@ -272,13 +272,17 @@ where
     /// and ensures the view points to the current versioned table. Uses caching to avoid
     /// redundant table creation checks.
     async fn prepare_table_for_streaming(
-        inner: &mut Inner<S>,
+        &self,
         table_id: &TableId,
         use_cdc_sequence_column: bool,
     ) -> EtlResult<(SequencedBigQueryTableId, Arc<TableDescriptor>)> {
+        // We hold the lock for the entire preparation to avoid race conditions since the consistency
+        // of this code path is critical.
+        let mut inner = self.inner.lock().await;
+
         // We load the schema of the table, if present. This is needed to create the table in BigQuery
         // and also prepare the table descriptor for CDC streaming.
-        let table_schema = inner
+        let table_schema = self
             .store
             .get_table_schema(table_id)
             .await?
@@ -294,25 +298,24 @@ where
 
         // We determine the BigQuery table ID for the table together with the current sequence number.
         let bigquery_table_id = table_name_to_bigquery_table_id(&table_schema.name);
-        let sequenced_bigquery_table_id =
-            Self::get_or_create_sequenced_bigquery_table_id(inner, table_id, &bigquery_table_id)
-                .await?;
+        let sequenced_bigquery_table_id = self
+            .get_or_create_sequenced_bigquery_table_id(table_id, &bigquery_table_id)
+            .await?;
 
         // Optimistically skip table creation if we've already seen this sequenced table.
         if !inner.created_tables.contains(&sequenced_bigquery_table_id) {
-            inner
-                .client
+            self.client
                 .create_table_if_missing(
-                    &inner.dataset_id,
+                    &self.dataset_id,
                     // TODO: down the line we might want to reduce an allocation here.
                     &sequenced_bigquery_table_id.to_string(),
                     &table_schema.column_schemas,
-                    inner.max_staleness_mins,
+                    self.max_staleness_mins,
                 )
                 .await?;
 
             // Add the sequenced table to the cache.
-            Self::add_to_created_tables_cache(inner, &sequenced_bigquery_table_id);
+            Self::add_to_created_tables_cache(&mut inner, &sequenced_bigquery_table_id);
 
             debug!("sequenced table {sequenced_bigquery_table_id} added to creation cache");
         } else {
@@ -322,8 +325,12 @@ where
         }
 
         // Ensure view points to this sequenced table (uses cache to avoid redundant operations)
-        Self::ensure_view_points_to_table(inner, &bigquery_table_id, &sequenced_bigquery_table_id)
-            .await?;
+        self.ensure_view_points_to_table(
+            &mut inner,
+            &bigquery_table_id,
+            &sequenced_bigquery_table_id,
+        )
+        .await?;
 
         let table_descriptor = BigQueryClient::column_schemas_to_table_descriptor(
             &table_schema.column_schemas,
@@ -333,111 +340,18 @@ where
         Ok((sequenced_bigquery_table_id, Arc::new(table_descriptor)))
     }
 
-    /// Adds a table to the creation cache to avoid redundant existence checks.
-    fn add_to_created_tables_cache(
-        inner: &mut Inner<impl SchemaStore>,
-        table_id: &SequencedBigQueryTableId,
-    ) {
-        if inner.created_tables.contains(table_id) {
-            return;
-        }
-
-        inner.created_tables.insert(table_id.clone());
-    }
-
-    /// Removes a table from the creation cache when it's found to not exist.
-    fn remove_from_created_tables_cache(
-        inner: &mut Inner<impl SchemaStore>,
-        table_id: &SequencedBigQueryTableId,
-    ) {
-        inner.created_tables.remove(table_id);
-    }
-
-    /// Retrieves the current sequenced table ID or creates a new one starting at version 0.
-    async fn get_or_create_sequenced_bigquery_table_id(
-        inner: &Inner<S>,
-        table_id: &TableId,
-        bigquery_table_id: &BigQueryTableId,
-    ) -> EtlResult<SequencedBigQueryTableId> {
-        let Some(sequenced_bigquery_table_id) =
-            Self::get_sequenced_bigquery_table_id(inner, table_id).await?
-        else {
-            let sequenced_bigquery_table_id =
-                SequencedBigQueryTableId::new(bigquery_table_id.clone());
-            inner
-                .store
-                .store_table_mapping(*table_id, sequenced_bigquery_table_id.to_string())
-                .await?;
-
-            return Ok(sequenced_bigquery_table_id);
-        };
-
-        Ok(sequenced_bigquery_table_id)
-    }
-
-    /// Retrieves the current sequenced table ID from the state store.
-    async fn get_sequenced_bigquery_table_id(
-        inner: &Inner<S>,
-        table_id: &TableId,
-    ) -> EtlResult<Option<SequencedBigQueryTableId>> {
-        let Some(current_table_id) = inner.store.get_table_mapping(table_id).await? else {
-            return Ok(None);
-        };
-
-        let sequenced_bigquery_table_id = current_table_id.parse()?;
-
-        Ok(Some(sequenced_bigquery_table_id))
-    }
-
-    /// Ensures a view points to the specified target table, creating or updating as needed.
+    /// Streams table batches to BigQuery without holding locks.
     ///
-    /// Returns `true` if the view was created or updated, `false` if already correct.
-    async fn ensure_view_points_to_table(
-        inner: &mut Inner<impl SchemaStore>,
-        view_name: &BigQueryTableId,
-        target_table_id: &SequencedBigQueryTableId,
-    ) -> EtlResult<bool> {
-        if let Some(current_target) = inner.created_views.get(view_name)
-            && current_target == target_table_id
-        {
-            debug!(
-                "view {} already points to {}, skipping creation",
-                view_name, target_table_id
-            );
-
-            return Ok(false);
-        }
-
-        inner
-            .client
-            .create_or_replace_view(&inner.dataset_id, view_name, &target_table_id.to_string())
-            .await?;
-
-        inner
-            .created_views
-            .insert(view_name.clone(), target_table_id.clone());
-
-        debug!(
-            "view {} created/updated to point to {}",
-            view_name, target_table_id
-        );
-
-        Ok(true)
-    }
-
-    /// Streams table batches to BigQuery with automatic retry on missing table errors.
-    ///
-    /// Accepts pre-constructed TableBatch objects and processes them concurrently.
-    /// First attempts optimistic streaming. If any table is missing, returns an error
-    /// since reconstructing batches after table recreation is complex.
-    async fn stream_table_batches_with_fallback(
-        inner: &mut Inner<S>,
+    /// This can be achieved because the client can be used without any locks since inside it uses
+    /// a buffer to queue up requests.
+    async fn stream_table_batches_concurrent_with_fallback(
+        &self,
+        client: &BigQueryClient,
         table_batches: Vec<TableBatch<BigQueryTableRow>>,
         max_concurrent_streams: usize,
     ) -> EtlResult<()> {
         // First attempt - optimistically assume all tables exist
-        let result = inner
-            .client
+        let result = client
             .stream_table_batches_concurrent(table_batches, max_concurrent_streams)
             .await;
 
@@ -463,24 +377,106 @@ where
         }
     }
 
+    /// Adds a table to the creation cache to avoid redundant existence checks.
+    fn add_to_created_tables_cache(inner: &mut Inner, table_id: &SequencedBigQueryTableId) {
+        if inner.created_tables.contains(table_id) {
+            return;
+        }
+
+        inner.created_tables.insert(table_id.clone());
+    }
+
+    /// Removes a table from the creation cache when it's found to not exist.
+    fn remove_from_created_tables_cache(inner: &mut Inner, table_id: &SequencedBigQueryTableId) {
+        inner.created_tables.remove(table_id);
+    }
+
+    /// Retrieves the current sequenced table ID or creates a new one starting at version 0.
+    async fn get_or_create_sequenced_bigquery_table_id(
+        &self,
+        table_id: &TableId,
+        bigquery_table_id: &BigQueryTableId,
+    ) -> EtlResult<SequencedBigQueryTableId> {
+        let Some(sequenced_bigquery_table_id) =
+            self.get_sequenced_bigquery_table_id(table_id).await?
+        else {
+            let sequenced_bigquery_table_id =
+                SequencedBigQueryTableId::new(bigquery_table_id.clone());
+            self.store
+                .store_table_mapping(*table_id, sequenced_bigquery_table_id.to_string())
+                .await?;
+
+            return Ok(sequenced_bigquery_table_id);
+        };
+
+        Ok(sequenced_bigquery_table_id)
+    }
+
+    /// Retrieves the current sequenced table ID from the state store.
+    async fn get_sequenced_bigquery_table_id(
+        &self,
+        table_id: &TableId,
+    ) -> EtlResult<Option<SequencedBigQueryTableId>> {
+        let Some(current_table_id) = self.store.get_table_mapping(table_id).await? else {
+            return Ok(None);
+        };
+
+        let sequenced_bigquery_table_id = current_table_id.parse()?;
+
+        Ok(Some(sequenced_bigquery_table_id))
+    }
+
+    /// Ensures a view points to the specified target table, creating or updating as needed.
+    ///
+    /// Returns `true` if the view was created or updated, `false` if already correct.
+    async fn ensure_view_points_to_table(
+        &self,
+        inner: &mut Inner,
+        view_name: &BigQueryTableId,
+        target_table_id: &SequencedBigQueryTableId,
+    ) -> EtlResult<bool> {
+        if let Some(current_target) = inner.created_views.get(view_name)
+            && current_target == target_table_id
+        {
+            debug!(
+                "view {} already points to {}, skipping creation",
+                view_name, target_table_id
+            );
+
+            return Ok(false);
+        }
+
+        self.client
+            .create_or_replace_view(&self.dataset_id, view_name, &target_table_id.to_string())
+            .await?;
+
+        inner
+            .created_views
+            .insert(view_name.clone(), target_table_id.clone());
+
+        debug!(
+            "view {} created/updated to point to {}",
+            view_name, target_table_id
+        );
+
+        Ok(true)
+    }
+
     /// Writes table rows with CDC metadata for non-event streaming operations.
     ///
     /// Adds an `Upsert` operation type to each row, creates batches based on the configured
     /// batch size, and streams to the appropriate BigQuery table using concurrent processing.
+    /// Uses minimal locking to allow concurrent operations.
     async fn write_table_rows(
         &self,
         table_id: TableId,
         mut table_rows: Vec<TableRow>,
     ) -> EtlResult<()> {
-        let mut inner = self.inner.lock().await;
-
+        // Prepare table for streaming.
         let (sequenced_bigquery_table_id, table_descriptor) =
-            Self::prepare_table_for_streaming(&mut inner, &table_id, false).await?;
+            self.prepare_table_for_streaming(&table_id, false).await?;
 
-        let dataset_id = inner.dataset_id.clone();
-        let max_concurrent_streams = inner.max_concurrent_streams;
-
-        // Add CDC operation type to all rows.
+        // Add CDC operation type to all rows (no lock needed).
         for table_row in table_rows.iter_mut() {
             table_row
                 .values
@@ -488,14 +484,14 @@ where
         }
 
         // Split table rows into optimal batches for parallel execution.
-        let row_batches = split_table_rows(table_rows, max_concurrent_streams);
+        let row_batches = split_table_rows(table_rows, self.max_concurrent_streams);
 
         // Create table batches from the split rows.
         let mut table_batches = Vec::with_capacity(row_batches.len());
         for rows in row_batches {
             if !rows.is_empty() {
-                let table_batch = inner.client.create_table_batch(
-                    &dataset_id,
+                let table_batch = self.client.create_table_batch(
+                    &self.dataset_id,
                     &sequenced_bigquery_table_id.to_string(),
                     table_descriptor.clone(),
                     rows,
@@ -504,11 +500,12 @@ where
             }
         }
 
+        // Stream all the batches concurrently.
         if !table_batches.is_empty() {
-            Self::stream_table_batches_with_fallback(
-                &mut inner,
+            self.stream_table_batches_concurrent_with_fallback(
+                &self.client,
                 table_batches,
-                max_concurrent_streams,
+                self.max_concurrent_streams,
             )
             .await?;
         }
@@ -520,18 +517,12 @@ where
     ///
     /// Groups streaming operations (insert/update/delete) by table and processes them together,
     /// then handles truncate events separately by creating new versioned tables.
+    /// Uses minimal locking to allow concurrent operations.
     async fn write_events(&self, events: Vec<Event>) -> EtlResult<()> {
         let mut event_iter = events.into_iter().peekable();
 
         while event_iter.peek().is_some() {
             let mut table_id_to_table_rows = HashMap::new();
-
-            // Collect and deduplicate all table IDs from all truncate events.
-            //
-            // This is done as an optimization since if we have multiple table ids being truncated in a
-            // row without applying other events in the meanwhile, it doesn't make any sense to create
-            // new empty tables for each of them.
-            let mut truncate_table_ids = HashSet::new();
 
             // Process events until we hit a truncate event or run out of events
             while let Some(event) = event_iter.peek() {
@@ -591,20 +582,16 @@ where
                 }
             }
 
-            // Process accumulated streaming operations with ordered batching by table
+            // Process accumulated events for each table.
             if !table_id_to_table_rows.is_empty() {
-                let mut inner = self.inner.lock().await;
-                let dataset_id = inner.dataset_id.clone();
-
-                // Collect all table batches from all tables
                 let mut table_batches = Vec::with_capacity(table_id_to_table_rows.len());
 
                 for (table_id, table_rows) in table_id_to_table_rows {
                     let (sequenced_bigquery_table_id, table_descriptor) =
-                        Self::prepare_table_for_streaming(&mut inner, &table_id, true).await?;
+                        self.prepare_table_for_streaming(&table_id, true).await?;
 
-                    let table_batch = inner.client.create_table_batch(
-                        &dataset_id,
+                    let table_batch = self.client.create_table_batch(
+                        &self.dataset_id,
                         &sequenced_bigquery_table_id.to_string(),
                         table_descriptor.clone(),
                         table_rows,
@@ -612,19 +599,23 @@ where
                     table_batches.push(table_batch);
                 }
 
-                // Stream all table batches in a single call
                 if !table_batches.is_empty() {
-                    let max_concurrent_streams = inner.max_concurrent_streams;
-                    Self::stream_table_batches_with_fallback(
-                        &mut inner,
+                    self.stream_table_batches_concurrent_with_fallback(
+                        &self.client,
                         table_batches,
-                        max_concurrent_streams,
+                        self.max_concurrent_streams,
                     )
                     .await?;
                 }
             }
 
-            // Collect all consecutive truncate events
+            // Collect and deduplicate all table IDs from all truncate events.
+            //
+            // This is done as an optimization since if we have multiple table ids being truncated in a
+            // row without applying other events in the meanwhile, it doesn't make any sense to create
+            // new empty tables for each of them.
+            let mut truncate_table_ids = HashSet::new();
+
             while let Some(Event::Truncate(_)) = event_iter.peek() {
                 if let Some(Event::Truncate(truncate_event)) = event_iter.next() {
                     for table_id in truncate_event.rel_ids {
@@ -633,7 +624,6 @@ where
                 }
             }
 
-            // Process truncate events
             if !truncate_table_ids.is_empty() {
                 self.process_truncate_for_table_ids(truncate_table_ids.into_iter())
                     .await?;
@@ -652,10 +642,11 @@ where
         &self,
         table_ids: impl IntoIterator<Item = TableId>,
     ) -> EtlResult<()> {
+        // We want to lock for the entire processing to ensure that we don't have any race conditions.
         let mut inner = self.inner.lock().await;
 
         for table_id in table_ids {
-            let table_schema = inner.store.get_table_schema(&table_id).await?.ok_or_else(|| etl_error!(
+            let table_schema = self.store.get_table_schema(&table_id).await?.ok_or_else(|| etl_error!(
                 ErrorKind::MissingTableSchema,
                     "Table not found in the schema store",
                     format!(
@@ -665,7 +656,7 @@ where
 
             // We need to determine the current sequenced table ID for this table.
             let sequenced_bigquery_table_id =
-                Self::get_sequenced_bigquery_table_id(&inner, &table_id)
+                self.get_sequenced_bigquery_table_id(&table_id)
                     .await?
                     .ok_or_else(|| etl_error!(
                         ErrorKind::MissingTableMapping,
@@ -687,19 +678,18 @@ where
             //
             // We unconditionally replace the table if it's there because here we know that
             // we need the table to be empty given the truncation.
-            inner
-                .client
+            self.client
                 .create_or_replace_table(
-                    &inner.dataset_id,
+                    &self.dataset_id,
                     &next_sequenced_bigquery_table_id.to_string(),
                     &table_schema.column_schemas,
-                    inner.max_staleness_mins,
+                    self.max_staleness_mins,
                 )
                 .await?;
             Self::add_to_created_tables_cache(&mut inner, &next_sequenced_bigquery_table_id);
 
             // Update the view to point to the new table.
-            Self::ensure_view_points_to_table(
+            self.ensure_view_points_to_table(
                 &mut inner,
                 // We convert the sequenced table ID to a BigQuery table ID since the view will have
                 // the name of the BigQuery table id (without the sequence number).
@@ -709,8 +699,7 @@ where
             .await?;
 
             // Update the store table mappings to point to the new table.
-            inner
-                .store
+            self.store
                 .store_table_mapping(table_id, next_sequenced_bigquery_table_id.to_string())
                 .await?;
 
@@ -737,8 +726,8 @@ where
             // Schedule cleanup of the previous table. We do not care to track this task since
             // if it fails, users can clean up the table on their own, but the view will still point
             // to the new data.
-            let client = inner.client.clone();
-            let dataset_id = inner.dataset_id.clone();
+            let client = self.client.clone();
+            let dataset_id = self.dataset_id.clone();
             tokio::spawn(async move {
                 if let Err(err) = client
                     .drop_table(&dataset_id, &sequenced_bigquery_table_id.to_string())
@@ -807,14 +796,14 @@ fn split_table_rows(
     }
 
     // Calculate optimal rows per batch to maximize parallelism.
-    let optimal_rows_per_batch = (total_rows + max_concurrent_streams - 1) / max_concurrent_streams;
+    let optimal_rows_per_batch = total_rows.div_ceil(max_concurrent_streams);
 
     if optimal_rows_per_batch == 0 {
         return vec![table_rows];
     }
 
     // Split the rows into smaller sub-batches.
-    let num_sub_batches = (total_rows + optimal_rows_per_batch - 1) / optimal_rows_per_batch;
+    let num_sub_batches = total_rows.div_ceil(optimal_rows_per_batch);
     let rows_per_sub_batch = total_rows / num_sub_batches;
     let extra_rows = total_rows % num_sub_batches;
 
