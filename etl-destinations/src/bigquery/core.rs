@@ -278,10 +278,6 @@ where
     /// Retrieves the table schema from the store, creates or verifies the BigQuery table exists,
     /// and ensures the view points to the current versioned table. Uses caching to avoid
     /// redundant table creation checks.
-    ///
-    /// **Locking Strategy**: Holds the inner lock for the entire operation to ensure atomicity
-    /// and consistency of table preparation. This is critical for correctness when multiple
-    /// concurrent operations might target the same table.
     async fn prepare_table_for_streaming(
         &self,
         table_id: &TableId,
@@ -357,9 +353,6 @@ where
     /// - The BigQuery client is thread-safe and uses internal buffering  
     /// - Table preparation is completed before calling this method
     /// - Multiple streaming operations can execute concurrently
-    ///
-    /// **Concurrency**: Safe to call concurrently with other streaming operations.
-    /// **Error Handling**: Provides optimistic streaming with fallback on table creation errors.
     async fn stream_table_batches_concurrent_with_fallback(
         &self,
         client: &BigQueryClient,
@@ -394,8 +387,6 @@ where
     }
 
     /// Adds a table to the creation cache to avoid redundant existence checks.
-    ///
-    /// **Thread Safety**: Must be called while holding the inner mutex.
     fn add_to_created_tables_cache(inner: &mut Inner, table_id: &SequencedBigQueryTableId) {
         if inner.created_tables.contains(table_id) {
             return;
@@ -405,15 +396,11 @@ where
     }
 
     /// Removes a table from the creation cache when it's found to not exist.
-    ///
-    /// **Thread Safety**: Must be called while holding the inner mutex.
     fn remove_from_created_tables_cache(inner: &mut Inner, table_id: &SequencedBigQueryTableId) {
         inner.created_tables.remove(table_id);
     }
 
     /// Retrieves the current sequenced table ID or creates a new one starting at version 0.
-    ///
-    /// **Thread Safety**: Uses the state store which handles its own synchronization.
     async fn get_or_create_sequenced_bigquery_table_id(
         &self,
         table_id: &TableId,
@@ -435,8 +422,6 @@ where
     }
 
     /// Retrieves the current sequenced table ID from the state store.
-    ///
-    /// **Thread Safety**: Uses the state store which handles its own synchronization.
     async fn get_sequenced_bigquery_table_id(
         &self,
         table_id: &TableId,
@@ -453,8 +438,6 @@ where
     /// Ensures a view points to the specified target table, creating or updating as needed.
     ///
     /// Returns `true` if the view was created or updated, `false` if already correct.
-    ///
-    /// **Thread Safety**: Must be called while holding the inner mutex due to cache access.
     async fn ensure_view_points_to_table(
         &self,
         inner: &mut Inner,
@@ -492,15 +475,6 @@ where
     ///
     /// Adds an `Upsert` operation type to each row, splits them into optimal batches based on
     /// `max_concurrent_streams`, and streams to BigQuery using concurrent processing.
-    ///
-    /// **Concurrency Design**:
-    /// - Table preparation: Uses full locking for consistency
-    /// - Row processing: Lock-free (client configuration accessed directly)
-    /// - Batch creation: Lock-free (BigQuery client is thread-safe)  
-    /// - Streaming: Lock-free concurrent execution
-    ///
-    /// **Performance**: Multiple `write_table_rows` calls can execute concurrently,
-    /// with only the table preparation phase requiring synchronization.
     async fn write_table_rows(
         &self,
         table_id: TableId,
@@ -553,7 +527,7 @@ where
                 bytes_received,
                 phase = "table_copy",
                 egress_metric = true,
-                "Wrote table rows"
+                "wrote table rows to bigquery"
             );
         }
 
@@ -564,16 +538,6 @@ where
     ///
     /// Groups streaming operations (insert/update/delete) by table and processes them together,
     /// then handles truncate events separately by creating new versioned tables.
-    ///
-    /// **Concurrency Design**:
-    /// - Event processing: Lock-free (events grouped by table)
-    /// - Table preparation: Uses full locking per table for consistency  
-    /// - Batch streaming: Lock-free concurrent execution
-    /// - Truncate operations: Uses full locking for atomicity
-    ///
-    /// **Ordering Invariant**: This method assumes that events for the same table are processed
-    /// in sequential order. Multiple calls with different tables can execute concurrently,
-    /// but events for any given table must maintain strict ordering.
     async fn write_events(&self, events: Vec<Event>) -> EtlResult<()> {
         let mut event_iter = events.into_iter().peekable();
 
@@ -673,7 +637,7 @@ where
                         bytes_received,
                         phase = "apply",
                         egress_metric = true,
-                        "Wrote apply events"
+                        "wrote cdc events to bigquery"
                     );
                 }
             }
@@ -707,10 +671,6 @@ where
     /// Creates fresh empty tables with incremented version numbers, updates views to point
     /// to new tables, and schedules cleanup of old table versions. Deduplicates table IDs
     /// to optimize multiple truncates of the same table.
-    ///
-    /// **Locking Strategy**: Holds the inner lock for the entire operation to ensure atomicity
-    /// across table creation, view updates, and mapping changes. This prevents race conditions
-    /// during the complex multi-step truncation process.
     async fn process_truncate_for_table_ids(
         &self,
         table_ids: impl IntoIterator<Item = TableId>,
@@ -855,15 +815,6 @@ where
 /// Calculates the optimal distribution of rows across batches to maximize
 /// utilization of available concurrent streams. Creates approximately equal-sized
 /// sub-batches when splitting is beneficial for parallelism.
-///
-/// **Algorithm**:
-/// - Returns empty vector if no rows provided
-/// - Returns single batch if rows ≤ max_concurrent_streams (no benefit from splitting)
-/// - Distributes rows evenly across batches with remainder distributed to first batches
-/// - Optimizes for balanced workload across concurrent streams
-///
-/// **Performance**: This is a lock-free operation that can be called safely from
-/// concurrent contexts without synchronization.
 fn split_table_rows(
     table_rows: Vec<TableRow>,
     max_concurrent_streams: usize,
