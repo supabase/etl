@@ -1,5 +1,5 @@
 ---
-source: api/tests/integration/destination_test.rs
+source: etl-api/tests/integration/destination_test.rs
 expression: response.config
 ---
 BigQuery {
@@ -9,4 +9,5 @@ BigQuery {
         SecretBox<str>([REDACTED]),
     ),
     max_staleness_mins: None,
+    max_concurrent_streams: None,
 }

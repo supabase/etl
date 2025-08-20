@@ -11,4 +11,5 @@ BigQuery {
     max_staleness_mins: Some(
         99,
     ),
+    max_concurrent_streams: None,
 }

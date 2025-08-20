@@ -1,5 +1,5 @@
 ---
-source: api/tests/integration/destination_test.rs
+source: etl-api/tests/integration/destination_test.rs
 expression: destination.config
 ---
 BigQuery {
@@ -11,4 +11,5 @@ BigQuery {
     max_staleness_mins: Some(
         10,
     ),
+    max_concurrent_streams: None,
 }

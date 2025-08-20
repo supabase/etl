@@ -1,5 +1,5 @@
 ---
-source: api/tests/integration/destinations_pipelines_test.rs
+source: etl-api/tests/integration/destinations_pipelines_test.rs
 expression: response.config
 ---
 BigQuery {
@@ -11,4 +11,5 @@ BigQuery {
     max_staleness_mins: Some(
         10,
     ),
+    max_concurrent_streams: None,
 }
