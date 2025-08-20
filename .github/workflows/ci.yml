@@ -80,7 +80,7 @@ jobs:
           POSTGRES_HOST: localhost
         run: |
           sudo apt-get install libpq-dev -y
-          ./scripts/run_migrations.sh
+          ./etl-api/scripts/run_migrations.sh
 
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
