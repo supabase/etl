@@ -631,7 +631,7 @@ mod tests {
         assert_eq!(CellToArrowConverter::cell_to_i64(&Cell::I32(42)), Some(42));
         assert_eq!(
             CellToArrowConverter::cell_to_f64(&Cell::F32(std::f32::consts::PI)),
-            Some(3.140000104904175) // F32 precision converted to F64
+            Some(3.1415927410125732) // F32 precision converted to F64
         );
     }
 

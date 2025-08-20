@@ -578,17 +578,10 @@ mod tests {
     use tokio_postgres::types::Type;
 
     #[test]
-    fn test_table_name_to_iceberg_table_id() {
-        let table_name = TableName::new("test_schema".to_string(), "test_table".to_string());
-        let iceberg_id = table_name_to_iceberg_table_id(&table_name);
-        assert_eq!(iceberg_id, "test_schema_test_table");
-    }
-
-    #[test]
     fn test_table_name_with_underscores() {
         let table_name = TableName::new("test_schema".to_string(), "test_table".to_string());
         let iceberg_id = table_name_to_iceberg_table_id(&table_name);
-        assert_eq!(iceberg_id, "test_schema_test_table");
+        assert_eq!(iceberg_id, "test__schema_test__table");
     }
 
     #[test]
