@@ -26,7 +26,7 @@ test-unit:
 test-integration:
 	@echo "Running Iceberg integration tests..."
 	@echo "Note: Start Docker first with 'make docker-up'"
-	cargo test --features iceberg iceberg_integration --nocapture
+	cargo test --features iceberg iceberg_integration
 
 # Start Docker test infrastructure
 docker-up:
