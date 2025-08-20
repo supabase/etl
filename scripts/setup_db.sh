@@ -7,6 +7,12 @@ if ! [ -x "$(command -v psql)" ]; then
   exit 1
 fi
 
+if ! [ -x "$(command -v docker-compose)" ]; then
+  echo >&2 "❌ Error: Docker Compose is not installed."
+  echo >&2 "Please install it using your system's package manager."
+  exit 1
+fi
+
 # Database configuration
 echo "🔧 Configuring database settings..."
 DB_USER="${POSTGRES_USER:=postgres}"
@@ -15,7 +21,7 @@ DB_NAME="${POSTGRES_DB:=postgres}"
 DB_PORT="${POSTGRES_PORT:=5430}"
 DB_HOST="${POSTGRES_HOST:=localhost}"
 
-# Docker container setup
+# Docker compose setup
 if [[ -z "${SKIP_DOCKER}" ]]
 then
   echo "🐳 Checking Docker container status..."
@@ -23,37 +29,25 @@ then
   if [[ -n $RUNNING_POSTGRES_CONTAINER_ID ]]; then
     echo "✅ Postgres container is already running"
   else
-    echo "🚀 Starting new Postgres container..."
-    
-    # Prepare docker run command
-    DOCKER_RUN_CMD="docker run \
-        -e POSTGRES_USER=${DB_USER} \
-        -e POSTGRES_PASSWORD=${DB_PASSWORD} \
-        -e POSTGRES_DB=${DB_NAME} \
-        -p "${DB_PORT}":5432 \
-        -d"
+    echo "🚀 Starting Postgres container with Docker Compose..."
+
+    # Export environment variables for docker-compose
+    export POSTGRES_USER="${DB_USER}"
+    export POSTGRES_PASSWORD="${DB_PASSWORD}"
+    export POSTGRES_DB="${DB_NAME}"
+    export POSTGRES_PORT="${DB_PORT}"
 
     # Handle persistent storage
     if [[ -n "${POSTGRES_DATA_VOLUME}" ]]; then
       echo "📁 Setting up persistent storage at ${POSTGRES_DATA_VOLUME}"
       mkdir -p "${POSTGRES_DATA_VOLUME}"
-      DOCKER_RUN_CMD="${DOCKER_RUN_CMD} \
-        -v "${POSTGRES_DATA_VOLUME}":/var/lib/Postgres/data"
+      export POSTGRES_DATA_VOLUME="${POSTGRES_DATA_VOLUME}"
     else
       echo "📁 No storage path specified, using default Docker volume"
     fi
 
-    # Complete the docker run command
-    # Increased Postgres settings for logical replication for tests to run smoothly
-    DOCKER_RUN_CMD="${DOCKER_RUN_CMD} \
-        --name "postgres_$(date '+%s')" \
-        postgres:15 -N 1000 \
-        -c wal_level=logical \
-        -c max_wal_senders=100 \
-        -c max_replication_slots=100"
-
-    # Start the container
-    eval "${DOCKER_RUN_CMD}"
+    # Start the container using docker-compose
+    docker-compose up -d postgres
     echo "✅ Postgres container started"
   fi
 fi
