@@ -24,40 +24,31 @@ DB_HOST="${POSTGRES_HOST:=localhost}"
 # Docker compose setup
 if [[ -z "${SKIP_DOCKER}" ]]
 then
-  echo "🐳 Checking Docker container status..."
-  RUNNING_POSTGRES_CONTAINER_ID=$(docker ps --filter 'name=postgres' --format '{{.ID}}')
-  if [[ -n $RUNNING_POSTGRES_CONTAINER_ID ]]; then
-    echo "✅ Postgres container is already running"
+  echo "🐳 Starting Postgres container with Docker Compose..."
+  
+  # Export environment variables for docker-compose
+  export POSTGRES_USER="${DB_USER}"
+  export POSTGRES_PASSWORD="${DB_PASSWORD}"
+  export POSTGRES_DB="${DB_NAME}"
+  export POSTGRES_PORT="${DB_PORT}"
+
+  # Handle persistent storage
+  if [[ -n "${POSTGRES_DATA_VOLUME}" ]]; then
+    echo "📁 Setting up persistent storage at ${POSTGRES_DATA_VOLUME}"
+    mkdir -p "${POSTGRES_DATA_VOLUME}"
+    export POSTGRES_DATA_VOLUME="${POSTGRES_DATA_VOLUME}"
   else
-    echo "🚀 Starting Postgres container with Docker Compose..."
-
-    # Export environment variables for docker-compose
-    export POSTGRES_USER="${DB_USER}"
-    export POSTGRES_PASSWORD="${DB_PASSWORD}"
-    export POSTGRES_DB="${DB_NAME}"
-    export POSTGRES_PORT="${DB_PORT}"
-
-    # Handle persistent storage
-    if [[ -n "${POSTGRES_DATA_VOLUME}" ]]; then
-      echo "📁 Setting up persistent storage at ${POSTGRES_DATA_VOLUME}"
-      mkdir -p "${POSTGRES_DATA_VOLUME}"
-      export POSTGRES_DATA_VOLUME="${POSTGRES_DATA_VOLUME}"
-    else
-      echo "📁 No storage path specified, using default Docker volume"
-    fi
-
-    # Start the container using docker-compose
-    docker-compose up -d postgres
-    echo "✅ Postgres container started"
+    echo "📁 No storage path specified, using default Docker volume"
   fi
+
+  # Start the container using docker-compose
+  docker-compose up -d postgres
+  echo "✅ Postgres container started"
 fi
 
 # Wait for Postgres to be ready
 echo "⏳ Waiting for Postgres to be ready..."
-until PGPASSWORD="${DB_PASSWORD}" psql -h "${DB_HOST}" -U "${DB_USER}" -p "${DB_PORT}" -d "postgres" -c '\q'; do
-  echo "⏳ Postgres is still starting up... waiting"
-  sleep 1
-done
+docker-compose exec -T postgres sh -c 'until pg_isready -U postgres; do echo "Waiting for Postgres..."; sleep 1; done'
 
 echo "✅ Postgres is up and running on port ${DB_PORT}"
 
