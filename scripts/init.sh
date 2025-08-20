@@ -24,7 +24,7 @@ DB_HOST="${POSTGRES_HOST:=localhost}"
 # Docker compose setup
 if [[ -z "${SKIP_DOCKER}" ]]
 then
-  echo "🐳 Starting Postgres container with Docker Compose..."
+  echo "🐳 Starting all services with Docker Compose..."
   
   # Export environment variables for docker-compose
   export POSTGRES_USER="${DB_USER}"
@@ -41,18 +41,21 @@ then
     echo "📁 No storage path specified, using default Docker volume"
   fi
 
-  # Start the container using docker-compose
-  docker-compose up -d postgres
-  echo "✅ Postgres container started"
+  # Start all services using docker-compose
+  docker-compose up -d
+  echo "✅ All services started"
 fi
 
 # Wait for Postgres to be ready
 echo "⏳ Waiting for Postgres to be ready..."
-docker-compose exec -T postgres sh -c 'until pg_isready -U postgres; do echo "Waiting for Postgres..."; sleep 1; done'
+until docker-compose exec -T postgres pg_isready -U postgres > /dev/null 2>&1; do 
+  echo "Waiting for Postgres..."
+  sleep 1
+done
 
 echo "✅ Postgres is up and running on port ${DB_PORT}"
 
 # Export DATABASE_URL for potential use by other scripts
 export DATABASE_URL=postgres://${DB_USER}:${DB_PASSWORD}@${DB_HOST}:${DB_PORT}/${DB_NAME}
 echo "🔗 Database URL: ${DATABASE_URL}"
-echo "✨ Database setup complete! Ready to go!"
+echo "✨ All services setup complete! Ready to go!"
