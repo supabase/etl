@@ -1,26 +1,10 @@
 #!/usr/bin/env bash
 set -eo pipefail
 
-if [ ! -d "etl-api/migrations" ]; then
-  echo >&2 "❌ Error: 'etl-api/migrations' folder not found."
-  echo >&2 "Please run this script from the 'etl' directory."
-  exit 1
-fi
-
 if ! [ -x "$(command -v psql)" ]; then
   echo >&2 "❌ Error: Postgres client (psql) is not installed."
   echo >&2 "Please install it using your system's package manager."
   exit 1
-fi
-
-# Only check for SQLx if we're not skipping migrations
-if [[ -z "${SKIP_MIGRATIONS}" ]]; then
-  if ! [ -x "$(command -v sqlx)" ]; then
-    echo >&2 "❌ Error: SQLx CLI is not installed."
-    echo >&2 "To install it, run:"
-    echo >&2 "    cargo install --version='~0.7' sqlx-cli --no-default-features --features rustls,postgres"
-    exit 1
-  fi
 fi
 
 # Database configuration
@@ -83,16 +67,7 @@ done
 
 echo "✅ Postgres is up and running on port ${DB_PORT}"
 
-# Set up the database
-echo "🔄 Setting up the database..."
+# Export DATABASE_URL for potential use by other scripts
 export DATABASE_URL=postgres://${DB_USER}:${DB_PASSWORD}@${DB_HOST}:${DB_PORT}/${DB_NAME}
-
-if [[ -z "${SKIP_MIGRATIONS}" ]]; then
-  echo "🔄 Running database migrations..."
-  sqlx database create
-  sqlx migrate run --source etl-api/migrations
-  echo "✨ Database setup complete with migrations! Ready to go!"
-else
-  echo "⏭️ Skipping migrations as requested."
-  echo "✨ Database setup complete! Ready to go!"
-fi
+echo "🔗 Database URL: ${DATABASE_URL}"
+echo "✨ Database setup complete! Ready to go!"
