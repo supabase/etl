@@ -129,7 +129,6 @@ impl IcebergDatabase {
         // For Phase 2, use simple schema_table format
         format!("{}_{}", table_name.schema, table_name.name)
     }
-
 }
 
 impl Drop for IcebergDatabase {
@@ -270,10 +269,6 @@ impl TryFrom<IcebergValue> for String {
         }
     }
 }
-
-/// Test data structures that mirror the BigQuery test types
-/// for consistent testing across destinations.
-
 
 #[cfg(test)]
 mod tests {

@@ -571,7 +571,9 @@ where
 mod tests {
     use super::*;
     use etl::store::both::memory::MemoryStore;
-    use etl::types::{DeleteEvent, InsertEvent, PgLsn, TableId, TableRow, TruncateEvent, UpdateEvent};
+    use etl::types::{
+        DeleteEvent, InsertEvent, PgLsn, TableId, TableRow, TableSchema, TruncateEvent, UpdateEvent,
+    };
     use etl_postgres::schema::{ColumnSchema, TableName};
     use tokio_postgres::types::Type;
 
@@ -671,12 +673,12 @@ mod tests {
     fn test_operation_type_into_cell() {
         let upsert_cell = IcebergOperationType::Upsert.into_cell();
         let delete_cell = IcebergOperationType::Delete.into_cell();
-        
+
         match upsert_cell {
             Cell::String(s) => assert_eq!(s, "UPSERT"),
             _ => panic!("Expected string cell"),
         }
-        
+
         match delete_cell {
             Cell::String(s) => assert_eq!(s, "DELETE"),
             _ => panic!("Expected string cell"),
@@ -713,18 +715,15 @@ mod tests {
     #[test]
     fn test_create_insert_event() {
         let table_id = TableId(123);
-        let table_row = TableRow::new(vec![
-            Cell::I32(1),
-            Cell::String("test".to_string()),
-        ]);
-        
+        let table_row = TableRow::new(vec![Cell::I32(1), Cell::String("test".to_string())]);
+
         let event = Event::Insert(InsertEvent {
             start_lsn: PgLsn::from(100u64),
             commit_lsn: PgLsn::from(100u64),
             table_id,
             table_row,
         });
-        
+
         match event {
             Event::Insert(insert) => {
                 assert_eq!(insert.table_id.0, 123);
@@ -737,11 +736,8 @@ mod tests {
     #[test]
     fn test_create_update_event() {
         let table_id = TableId(123);
-        let table_row = TableRow::new(vec![
-            Cell::I32(1),
-            Cell::String("updated".to_string()),
-        ]);
-        
+        let table_row = TableRow::new(vec![Cell::I32(1), Cell::String("updated".to_string())]);
+
         let event = Event::Update(UpdateEvent {
             start_lsn: PgLsn::from(101u64),
             commit_lsn: PgLsn::from(101u64),
@@ -749,7 +745,7 @@ mod tests {
             table_row,
             old_table_row: None,
         });
-        
+
         match event {
             Event::Update(update) => {
                 assert_eq!(update.table_id.0, 123);
@@ -762,18 +758,15 @@ mod tests {
     #[test]
     fn test_create_delete_event() {
         let table_id = TableId(123);
-        let old_row = TableRow::new(vec![
-            Cell::I32(1),
-            Cell::String("deleted".to_string()),
-        ]);
-        
+        let old_row = TableRow::new(vec![Cell::I32(1), Cell::String("deleted".to_string())]);
+
         let event = Event::Delete(DeleteEvent {
             start_lsn: PgLsn::from(102u64),
             commit_lsn: PgLsn::from(102u64),
             table_id,
             old_table_row: Some((false, old_row)),
         });
-        
+
         match event {
             Event::Delete(delete) => {
                 assert_eq!(delete.table_id.0, 123);
@@ -791,7 +784,7 @@ mod tests {
             rel_ids: vec![123, 456],
             options: 0,
         });
-        
+
         match event {
             Event::Truncate(truncate) => {
                 assert_eq!(truncate.rel_ids.len(), 2);

@@ -58,6 +58,7 @@ enum DestinationType {
     Iceberg,
 }
 
+#[expect(clippy::large_enum_variant)]
 #[derive(Subcommand, Debug)]
 enum Commands {
     /// Run the table copies benchmark

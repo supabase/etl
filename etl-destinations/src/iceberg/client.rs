@@ -79,7 +79,6 @@ fn iceberg_error_to_etl_error(err: IcebergError) -> EtlError {
     etl_error!(kind, description, err.to_string())
 }
 
-
 /// Maps Parquet errors to appropriate ETL error kinds.
 fn parquet_error_to_etl_error(err: parquet::errors::ParquetError) -> EtlError {
     let (kind, description) = match &err {
@@ -475,14 +474,14 @@ impl IcebergClient {
             );
 
             // Convert batch to Arrow RecordBatch
-            let record_batch =
-                match rows_to_record_batch(batch_rows, &arrow_schema, &schema_mapper) {
-                    Ok(batch) => batch,
-                    Err(err) => {
-                        operation_result = Err(err);
-                        break;
-                    }
-                };
+            let record_batch = match rows_to_record_batch(batch_rows, &arrow_schema, &schema_mapper)
+            {
+                Ok(batch) => batch,
+                Err(err) => {
+                    operation_result = Err(err);
+                    break;
+                }
+            };
 
             debug!(
                 table = %table_name,
@@ -1471,9 +1470,7 @@ impl IcebergClient {
         };
 
         // Create new schema with added field
-        let mut new_fields: Vec<_> = current_schema
-            .as_struct()
-            .fields().to_vec();
+        let mut new_fields: Vec<_> = current_schema.as_struct().fields().to_vec();
         new_fields.push(new_field);
 
         let _new_schema = iceberg::spec::Schema::builder()
@@ -1800,7 +1797,7 @@ mod tests {
         use etl::types::{Cell, TableRow};
 
         // Create test rows with CDC metadata
-        let rows = vec![
+        let rows = [
             TableRow {
                 values: vec![
                     Cell::I64(1),
@@ -1895,7 +1892,7 @@ mod tests {
     #[test]
     fn test_field_id_generation() {
         // Test field ID generation logic for add_column
-        let existing_field_ids = vec![1, 2, 5, 10];
+        let existing_field_ids = [1, 2, 5, 10];
         let next_field_id = existing_field_ids.iter().max().unwrap_or(&0) + 1;
         assert_eq!(next_field_id, 11);
 
