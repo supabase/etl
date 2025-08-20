@@ -58,4 +58,10 @@ echo "✅ Postgres is up and running on port ${DB_PORT}"
 # Export DATABASE_URL for potential use by other scripts
 export DATABASE_URL=postgres://${DB_USER}:${DB_PASSWORD}@${DB_HOST}:${DB_PORT}/${DB_NAME}
 echo "🔗 Database URL: ${DATABASE_URL}"
-echo "✨ All services setup complete! Ready to go!"
+
+# Run database migrations
+echo "🔄 Running database migrations..."
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+bash "${SCRIPT_DIR}/../etl-api/scripts/run_migrations.sh"
+
+echo "✨ Complete development environment setup finished! Ready to go!"
