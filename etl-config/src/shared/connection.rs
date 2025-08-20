@@ -49,7 +49,7 @@ impl Default for PgConnectionOptions {
     /// - `statement_timeout = 0`: Disables the timeout, which allows large COPY operations to continue without being interrupted
     /// - `lock_timeout = 30000` (30 seconds): Prevents indefinite blocking on table locks during replication
     /// - `idle_in_transaction_session_timeout = 0`: Disables the timeout, which allows large COPY operations to continue without being interrupted since
-    ///     they are ran in a transaction
+    ///   they are ran in a transaction
     /// - `application_name = "etl"`: Enables easy identification in monitoring and pg_stat_activity
     fn default() -> Self {
         Self {
