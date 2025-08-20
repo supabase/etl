@@ -290,9 +290,9 @@ impl BigQueryClient {
         &self,
         table_batches: Vec<TableBatch<BigQueryTableRow>>,
         max_concurrent_streams: usize,
-    ) -> EtlResult<()> {
+    ) -> EtlResult<usize> {
         if table_batches.is_empty() {
-            return Ok(());
+            return Ok(0);
         }
 
         // We track the number of rows in each table batch. Note that this is not the actual batch
@@ -311,22 +311,29 @@ impl BigQueryClient {
         let before_sending = Instant::now();
 
         // Use the new concurrent append_table_batches method
-        let batches_responses = self
+        let batch_results = self
             .client
             .storage()
             .append_table_batches_concurrent(table_batches, max_concurrent_streams, ETL_TRACE_ID)
             .await
             .map_err(bq_error_to_etl_error)?;
 
+        // We use the rows' encoded length to measure the egress metric. This does not
+        // count some bytes sent as overhead during the gRPC API calls. Ideally we
+        // would want to count the bytes leaving the TCP connection but we do not have
+        // that low level access, hence will have to settle for something accessible
+        // in the application.
+        let mut total_bytes_sent = 0;
+
         // Process results and accumulate all errors.
         let mut batches_responses_errors = Vec::new();
-        for (batch_index, batch_responses) in batches_responses {
-            for result in batch_responses {
-                match result {
+        for batch_result in batch_results {
+            for response in batch_result.responses {
+                match response {
                     Ok(response) => {
                         debug!(
                             "append rows response for batch {:?}: {:?} ",
-                            batch_index, response
+                            batch_result.batch_index, response
                         );
 
                         for row_error in response.row_errors {
@@ -339,13 +346,15 @@ impl BigQueryClient {
                     }
                 }
             }
+
+            total_bytes_sent += batch_result.bytes_sent;
         }
 
         let time_taken_to_send = before_sending.elapsed().as_millis();
         gauge!(BQ_BATCH_SEND_MILLISECONDS_TOTAL).set(time_taken_to_send as f64);
 
         if batches_responses_errors.is_empty() {
-            return Ok(());
+            return Ok(total_bytes_sent);
         }
 
         Err(batches_responses_errors.into())

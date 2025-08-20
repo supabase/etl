@@ -365,14 +365,14 @@ where
         client: &BigQueryClient,
         table_batches: Vec<TableBatch<BigQueryTableRow>>,
         max_concurrent_streams: usize,
-    ) -> EtlResult<()> {
+    ) -> EtlResult<usize> {
         // First attempt - optimistically assume all tables exist
         let result = client
             .stream_table_batches_concurrent(table_batches, max_concurrent_streams)
             .await;
 
         match result {
-            Ok(()) => Ok(()),
+            Ok(bytes_sent) => Ok(bytes_sent),
             Err(err) => {
                 // From our testing, when trying to send data to a missing table, this is the error that is
                 // returned:
@@ -536,12 +536,24 @@ where
 
         // Stream all the batches concurrently.
         if !table_batches.is_empty() {
-            self.stream_table_batches_concurrent_with_fallback(
-                &self.client,
-                table_batches,
-                self.max_concurrent_streams,
-            )
-            .await?;
+            let bytes_sent = self
+                .stream_table_batches_concurrent_with_fallback(
+                    &self.client,
+                    table_batches,
+                    self.max_concurrent_streams,
+                )
+                .await?;
+
+            // Logs with egress_metric = true can be used to identify egress logs.
+            // This can e.g. be used to send egress logs to a location different
+            // than the other logs. These logs should also have bytes_sent set to
+            // the number of bytes sent to the destination.
+            info!(
+                bytes_sent,
+                phase = "table_copy",
+                egress_metric = true,
+                "Wrote table rows"
+            );
         }
 
         Ok(())
@@ -643,12 +655,24 @@ where
                 }
 
                 if !table_batches.is_empty() {
-                    self.stream_table_batches_concurrent_with_fallback(
-                        &self.client,
-                        table_batches,
-                        self.max_concurrent_streams,
-                    )
-                    .await?;
+                    let bytes_sent = self
+                        .stream_table_batches_concurrent_with_fallback(
+                            &self.client,
+                            table_batches,
+                            self.max_concurrent_streams,
+                        )
+                        .await?;
+
+                    // Logs with egress_metric = true can be used to identify egress logs.
+                    // This can e.g. be used to send egress logs to a location different
+                    // than the other logs. These logs should also have bytes_sent set to
+                    // the number of bytes sent to the destination.
+                    info!(
+                        bytes_sent,
+                        phase = "apply",
+                        egress_metric = true,
+                        "Wrote apply events"
+                    );
                 }
             }
 
