@@ -27,20 +27,20 @@ set -eo pipefail
 #
 # Examples:
 #   # Run with null destination and terminal logs (default)
-#   ./scripts/benchmark.sh
+#   ./etl-benchmarks/scripts/benchmark.sh
 #
 #   # Run with file logging
-#   LOG_TARGET=file ./scripts/benchmark.sh
+#   LOG_TARGET=file ./etl-benchmarks/scripts/benchmark.sh
 #
 #   # Dry run to see commands that would be executed
-#   DRY_RUN=true ./scripts/benchmark.sh
+#   DRY_RUN=true ./etl-benchmarks/scripts/benchmark.sh
 #
 #   # Run with BigQuery destination
 #   DESTINATION=big-query \
 #   BQ_PROJECT_ID=my-project \
 #   BQ_DATASET_ID=my_dataset \
 #   BQ_SA_KEY_FILE=/path/to/sa-key.json \
-#   ./scripts/benchmark.sh
+#   ./etl-benchmarks/scripts/benchmark.sh
 
 # Check if hyperfine is installed
 if ! [ -x "$(command -v hyperfine)" ]; then
@@ -115,7 +115,7 @@ TPCC_TABLE_IDS=$(PGPASSWORD="${DB_PASSWORD}" psql -h "${DB_HOST}" -U "${DB_USER}
 
 if [[ -z "${TPCC_TABLE_IDS}" ]]; then
   echo "❌ Error: Could not retrieve table IDs from database. Make sure TPC-C tables exist."
-  echo "💡 Run './scripts/prepare_tpcc.sh' first to create the tables."
+  echo "💡 Run './etl-benchmarks/scripts/prepare_tpcc.sh' first to create the tables."
   exit 1
 fi
 
