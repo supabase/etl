@@ -57,7 +57,7 @@ pub enum EncryptedDestinationConfig {
         #[serde(skip_serializing_if = "Option::is_none")]
         max_staleness_mins: Option<u16>,
         #[serde(skip_serializing_if = "Option::is_none")]
-        max_concurrent_streams: Option<u16>,
+        max_concurrent_streams: Option<usize>,
     },
 }
 

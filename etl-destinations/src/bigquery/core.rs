@@ -23,7 +23,7 @@ const BIGQUERY_TABLE_ID_DELIMITER: &str = "_";
 /// Replacement string for escaping underscores in Postgres names.
 const BIGQUERY_TABLE_ID_DELIMITER_ESCAPE_REPLACEMENT: &str = "__";
 /// Default maximum number of concurrent streams for BigQuery appends when not specified.
-const DEFAULT_MAX_CONCURRENT_STREAMS: u16 = 1;
+const DEFAULT_MAX_CONCURRENT_STREAMS: usize = 1;
 
 /// Creates a hex-encoded sequence number from Postgres LSNs to ensure correct event ordering.
 ///
@@ -194,7 +194,7 @@ pub struct BigQueryDestination<S> {
     client: BigQueryClient,
     dataset_id: BigQueryDatasetId,
     max_staleness_mins: Option<u16>,
-    max_concurrent_streams: u16,
+    max_concurrent_streams: usize,
     store: S,
     inner: Arc<Mutex<Inner>>,
 }
@@ -214,7 +214,7 @@ where
         dataset_id: BigQueryDatasetId,
         sa_key: &str,
         max_staleness_mins: Option<u16>,
-        max_concurrent_streams: Option<u16>,
+        max_concurrent_streams: Option<usize>,
         store: S,
     ) -> EtlResult<Self> {
         // Registering metrics here to avoid the callers having to remember to call this before
@@ -249,7 +249,7 @@ where
         dataset_id: BigQueryDatasetId,
         sa_key: &str,
         max_staleness_mins: Option<u16>,
-        max_concurrent_streams: Option<u16>,
+        max_concurrent_streams: Option<usize>,
         store: S,
     ) -> EtlResult<Self> {
         // Registering metrics here to avoid the callers having to remember to call this before
@@ -357,7 +357,7 @@ where
         &self,
         client: &BigQueryClient,
         table_batches: Vec<TableBatch<BigQueryTableRow>>,
-        max_concurrent_streams: u16,
+        max_concurrent_streams: usize,
     ) -> EtlResult<(usize, usize)> {
         // First attempt - optimistically assume all tables exist
         let result = client
@@ -817,9 +817,8 @@ where
 /// sub-batches when splitting is beneficial for parallelism.
 fn split_table_rows(
     table_rows: Vec<TableRow>,
-    max_concurrent_streams: u16,
+    max_concurrent_streams: usize,
 ) -> Vec<Vec<TableRow>> {
-    let max_concurrent_streams = max_concurrent_streams as usize;
     let total_rows = table_rows.len();
 
     if total_rows == 0 {

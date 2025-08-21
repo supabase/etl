@@ -295,7 +295,7 @@ impl BigQueryClient {
     pub async fn stream_table_batches_concurrent(
         &self,
         table_batches: Vec<TableBatch<BigQueryTableRow>>,
-        max_concurrent_streams: u16,
+        max_concurrent_streams: usize,
     ) -> EtlResult<(usize, usize)> {
         if table_batches.is_empty() {
             return Ok((0, 0));
@@ -320,7 +320,7 @@ impl BigQueryClient {
         let batch_results = self
             .client
             .storage()
-            .append_table_batches_concurrent(table_batches, max_concurrent_streams as usize, ETL_TRACE_ID)
+            .append_table_batches_concurrent(table_batches, max_concurrent_streams, ETL_TRACE_ID)
             .await
             .map_err(bq_error_to_etl_error)?;
 
