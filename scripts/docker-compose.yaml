@@ -92,7 +92,7 @@ services:
     restart: "no"
     command: ["migrate"]
     depends_on:
-      postgres-setup:
+      create-catalog-db:
         condition: service_completed_successfully
 
   # Start lakekeeper, an iceberg REST catalog
@@ -102,7 +102,7 @@ services:
     depends_on:
       migrate-lakekeeper:
         condition: service_completed_successfully
-      minio-setup:
+      create-bucket:
         condition: service_completed_successfully
     <<: *lakekeeper-env
     command: ["serve"]
@@ -147,7 +147,7 @@ services:
         condition: service_healthy
       bootstrap-lakekeeper:
         condition: service_completed_successfully
-      minio-setup:
+      create-bucket:
         condition: service_completed_successfully
     restart: "no"
     command:
@@ -165,7 +165,7 @@ services:
       - "/dev/null"
       # - "--fail-with-body"
     volumes:
-      - ./scripts/warehouse.json:/home/curl_user/warehouse.json
+      - ./warehouse.json:/home/curl_user/warehouse.json
 
 volumes:
   postgres_data:
