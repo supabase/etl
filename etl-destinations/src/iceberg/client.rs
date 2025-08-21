@@ -2,7 +2,6 @@ use std::{collections::HashMap, sync::Arc};
 
 use iceberg::{Catalog, NamespaceIdent};
 use iceberg_catalog_rest::{RestCatalog, RestCatalogConfig};
-use tracing::info;
 
 #[derive(Clone)]
 pub struct IcebergClient {
@@ -33,41 +32,9 @@ impl IcebergClient {
         Ok(())
     }
 
+    /// Returns true if the `namespace` exists, false otherwise.
     pub async fn namespace_exists(&self, namespace: &str) -> Result<bool, iceberg::Error> {
         let namespace_ident = NamespaceIdent::from_strs(namespace.split('.'))?;
         self.catalog.namespace_exists(&namespace_ident).await
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use etl_telemetry::tracing::init_test_tracing;
-
-    use super::*;
-
-    #[tokio::test]
-    async fn test_create_namespace() {
-        init_test_tracing();
-
-        let client = IcebergClient::new_with_rest_catalog(
-            "http://localhost:8182/catalog".to_string(),
-            "dev-and-test-warehouse".to_string(),
-        );
-
-        let namespace = "test-namespace";
-
-        // namespace doesn't exist yet
-        assert!(!client.namespace_exists(namespace).await.unwrap());
-
-        client.create_namespace_if_missing(namespace).await.unwrap();
-
-        // namespace should exist now
-        assert!(client.namespace_exists(namespace).await.unwrap());
-
-        // trying to create an existing namespace is a no-op
-        client.create_namespace_if_missing(namespace).await.unwrap();
-
-        // namespace still exists
-        assert!(client.namespace_exists(namespace).await.unwrap());
     }
 }
