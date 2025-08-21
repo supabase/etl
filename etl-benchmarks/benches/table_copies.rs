@@ -376,7 +376,7 @@ async fn start_pipeline(args: RunArgs) -> Result<(), Box<dyn Error>> {
                 dataset_id,
                 &sa_key_file,
                 args.bq_max_staleness_mins,
-                None, // Use default max_concurrent_streams
+                None,
                 store.clone(),
             )
             .await?;

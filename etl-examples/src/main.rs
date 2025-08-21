@@ -166,8 +166,8 @@ async fn main_impl() -> Result<(), Box<dyn Error>> {
         args.bq_args.bq_project_id,
         args.bq_args.bq_dataset_id,
         &args.bq_args.bq_sa_key_file,
-        None, // Use default max_staleness_mins (5 minutes)
-        None, // Use default max_concurrent_streams (10)
+        None,
+        None,
         store.clone(),
     )
     .await?;
