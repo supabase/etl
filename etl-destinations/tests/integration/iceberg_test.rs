@@ -5,7 +5,7 @@ use crate::common::lakekeeper::LakekeeperClient;
 
 const LAKEKEEPER_URL: &str = "http://localhost:8182";
 
-#[tokio::test(flavor = "multi_thread")]
+#[tokio::test]
 async fn test_create_namespace() {
     init_test_tracing();
 
