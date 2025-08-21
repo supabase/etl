@@ -97,7 +97,8 @@ pub struct HttpK8sClient {
 const BQ_SECRET_NAME_SUFFIX: &str = "bq-service-account-key";
 const POSTGRES_SECRET_NAME_SUFFIX: &str = "postgres-password";
 const REPLICATOR_CONFIG_MAP_NAME_SUFFIX: &str = "replicator-config";
-const STATEFUL_SET_NAME_SUFFIX: &str = "replicator";
+const REPLICATOR_STATEFUL_SET_SUFFIX: &str = "replicator-stateful-set";
+const REPLICATOR_APP_SUFFIX: &str = "replicator-app";
 const REPLICATOR_CONTAINER_NAME_SUFFIX: &str = "replicator";
 const VECTOR_CONTAINER_NAME_SUFFIX: &str = "vector";
 const NAMESPACE_NAME: &str = "replicator-data-plane";
@@ -305,7 +306,8 @@ impl K8sClient for HttpK8sClient {
     ) -> Result<(), K8sError> {
         info!("patching stateful set");
 
-        let stateful_set_name = format!("{prefix}-{STATEFUL_SET_NAME_SUFFIX}");
+        let stateful_set_name = format!("{prefix}-{REPLICATOR_STATEFUL_SET_SUFFIX}");
+        let replicator_app_name = format!("{prefix}-{REPLICATOR_APP_SUFFIX}");
         let replicator_container_name = format!("{prefix}-{REPLICATOR_CONTAINER_NAME_SUFFIX}");
         let vector_container_name = format!("{prefix}-{VECTOR_CONTAINER_NAME_SUFFIX}");
         let postgres_secret_name = format!("{prefix}-{POSTGRES_SECRET_NAME_SUFFIX}");
@@ -323,13 +325,13 @@ impl K8sClient for HttpK8sClient {
             "replicas": 1,
             "selector": {
               "matchLabels": {
-                "app": stateful_set_name
+                "app": replicator_app_name
               }
             },
             "template": {
               "metadata": {
                 "labels": {
-                  "app": stateful_set_name
+                  "app": replicator_app_name
                 }
               },
               "spec": {
@@ -461,7 +463,7 @@ impl K8sClient for HttpK8sClient {
     async fn delete_stateful_set(&self, prefix: &str) -> Result<(), K8sError> {
         info!("deleting stateful set");
 
-        let stateful_set_name = format!("{prefix}-{STATEFUL_SET_NAME_SUFFIX}");
+        let stateful_set_name = format!("{prefix}-{REPLICATOR_STATEFUL_SET_SUFFIX}");
         let dp = DeleteParams::default();
         match self.stateful_sets_api.delete(&stateful_set_name, &dp).await {
             Ok(_) => {}
@@ -483,7 +485,7 @@ impl K8sClient for HttpK8sClient {
     async fn get_pod_phase(&self, prefix: &str) -> Result<PodPhase, K8sError> {
         info!("getting pod status");
 
-        let pod_name = format!("{prefix}-{STATEFUL_SET_NAME_SUFFIX}-0");
+        let pod_name = format!("{prefix}-{REPLICATOR_STATEFUL_SET_SUFFIX}-0");
         let pod = match self.pods_api.get(&pod_name).await {
             Ok(pod) => pod,
             Err(e) => {
@@ -520,7 +522,7 @@ impl K8sClient for HttpK8sClient {
     async fn has_replicator_container_error(&self, prefix: &str) -> Result<bool, K8sError> {
         info!("checking for replicator container error");
 
-        let pod_name = format!("{prefix}-{STATEFUL_SET_NAME_SUFFIX}-0");
+        let pod_name = format!("{prefix}-{REPLICATOR_STATEFUL_SET_SUFFIX}-0");
         let pod = match self.pods_api.get(&pod_name).await {
             Ok(pod) => pod,
             Err(e) => {
@@ -565,7 +567,7 @@ impl K8sClient for HttpK8sClient {
     async fn delete_pod(&self, prefix: &str) -> Result<(), K8sError> {
         info!("deleting pod");
 
-        let pod_name = format!("{prefix}-{STATEFUL_SET_NAME_SUFFIX}-0");
+        let pod_name = format!("{prefix}-{REPLICATOR_STATEFUL_SET_SUFFIX}-0");
         let dp = DeleteParams::default();
         match self.pods_api.delete(&pod_name, &dp).await {
             Ok(_) => {}
