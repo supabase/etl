@@ -32,7 +32,7 @@ impl IcebergClient {
         Ok(())
     }
 
-    /// Returns true if the `namespace` exists, false otherwise.
+    /// Returns true if the `namespace` exists, false otherwise. `namespace` must be a dot separated hierarchical namespace.
     pub async fn namespace_exists(&self, namespace: &str) -> Result<bool, iceberg::Error> {
         let namespace_ident = NamespaceIdent::from_strs(namespace.split('.'))?;
         self.catalog.namespace_exists(&namespace_ident).await
