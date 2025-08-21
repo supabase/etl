@@ -728,6 +728,10 @@ fn bq_error_to_etl_error(err: BQError) -> EtlError {
         BQError::TokioTaskError(_) => {
             (ErrorKind::DestinationError, "BigQuery task execution error")
         }
+        BQError::ConnectionPoolError(_) => (
+            ErrorKind::DestinationError,
+            "BigQuery connection pool error",
+        ),
     };
 
     etl_error!(kind, description, err.to_string())

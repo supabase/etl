@@ -492,17 +492,17 @@ where
         }
 
         // Split table rows into optimal batches for parallel execution.
-        let row_batches = split_table_rows(table_rows, self.max_concurrent_streams);
+        let table_rows_batches = split_table_rows(table_rows, self.max_concurrent_streams);
 
         // Create table batches from the split rows.
-        let mut table_batches = Vec::with_capacity(row_batches.len());
-        for rows in row_batches {
-            if !rows.is_empty() {
+        let mut table_batches = Vec::with_capacity(table_rows_batches.len());
+        for table_rows in table_rows_batches {
+            if !table_rows.is_empty() {
                 let table_batch = self.client.create_table_batch(
                     &self.dataset_id,
                     &sequenced_bigquery_table_id.to_string(),
                     table_descriptor.clone(),
-                    rows,
+                    table_rows,
                 )?;
                 table_batches.push(table_batch);
             }
