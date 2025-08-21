@@ -60,9 +60,9 @@ jobs:
 
       - name: Start Postgres with Docker Compose
         run: |
-          docker compose up -d postgres
+          docker compose -f ./scripts/docker-compose.yaml up -d postgres
           echo "Waiting for Postgres to be ready..."
-          docker compose exec -T postgres sh -c 'until pg_isready -U postgres; do echo "Waiting for Postgres..."; sleep 1; done'
+          docker compose -f ./scripts/docker-compose.yaml exec -T postgres sh -c 'until pg_isready -U postgres; do echo "Waiting for Postgres..."; sleep 1; done'
 
       - name: Install sqlx-cli
         run: |
