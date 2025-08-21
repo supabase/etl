@@ -39,10 +39,16 @@ pub enum DestinationConfig {
         #[serde(skip_serializing_if = "Option::is_none")]
         #[cfg_attr(feature = "utoipa", schema(example = 15))]
         max_staleness_mins: Option<u16>,
-        /// Maximum concurrent streams for BigQuery operations.
+        /// Maximum number of concurrent streams for BigQuery append operations.
         ///
-        /// Controls the maximum number of concurrent streams when appending data
-        /// to multiple BigQuery tables. If not set, a default value is used.
+        /// Defines the upper limit of concurrent streams used for a **single** append
+        /// request to BigQuery.
+        ///
+        /// This does not limit the total number of streams across the entire system.
+        /// The actual number of streams in use at any given time depends on:
+        /// - the number of tables being replicated,
+        /// - the volume of events processed by the ETL,
+        /// - and the configured batch size.
         #[serde(skip_serializing_if = "Option::is_none")]
         #[cfg_attr(feature = "utoipa", schema(example = 8))]
         max_concurrent_streams: Option<usize>,
