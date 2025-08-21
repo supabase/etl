@@ -1,0 +1,21 @@
+{
+    "warehouse-name": "dev-and-test-warehouse",
+    "project-id": "00000000-0000-0000-0000-000000000000",
+    "storage-profile": {
+        "type": "s3",
+        "bucket": "dev-and-test",
+        "key-prefix": "initial-warehouse",
+        "assume-role-arn": null,
+        "endpoint": "http://minio:9000",
+        "region": "local-01",
+        "path-style-access": true,
+        "flavor": "minio",
+        "sts-enabled": true
+    },
+    "storage-credential": {
+        "type": "s3",
+        "credential-type": "access-key",
+        "aws-access-key-id": "minio-admin",
+        "aws-secret-access-key": "minio-admin-password"
+    }
+}

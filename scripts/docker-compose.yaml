@@ -1,0 +1,174 @@
+x-lakekeeper-env: &lakekeeper-env
+  environment:
+    - LAKEKEEPER__PG_ENCRYPTION_KEY=insecure-encryption-key
+    - LAKEKEEPER__PG_DATABASE_URL_READ=postgresql://postgres:postgres@postgres:5432/iceberg-catalog
+    - LAKEKEEPER__PG_DATABASE_URL_WRITE=postgresql://postgres:postgres@postgres:5432/iceberg-catalog
+    - RUST_LOG=info
+
+name: etl
+
+services:
+  # Start Postgres
+  postgres:
+    image: postgres:17
+    container_name: postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-postgres}
+    ports:
+      - "${POSTGRES_PORT:-5430}:5432"
+    volumes:
+      - ${POSTGRES_DATA_VOLUME:-postgres_data}:/var/lib/postgresql/data
+    command: >
+      postgres
+      -N 1000
+      -c wal_level=logical
+      -c max_wal_senders=100
+      -c max_replication_slots=100
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # Create database for iceberg catalog
+  create-catalog-db:
+    image: postgres:17
+    container_name: create-catalog-db
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PGHOST: postgres
+      PGPORT: 5432
+      PGUSER: ${POSTGRES_USER:-postgres}
+      PGPASSWORD: ${POSTGRES_PASSWORD:-postgres}
+    entrypoint: >
+      /bin/sh -c "
+      psql -c 'create database \"iceberg-catalog\";';
+      exit 0;
+      "
+
+  # Start MinIO for S3-compatible object storage
+  minio:
+    image: minio/minio:latest
+    container_name: minio
+    environment:
+      MINIO_ROOT_USER: minio-admin
+      MINIO_ROOT_PASSWORD: minio-admin-password
+    command: server /data --console-address ":9001"
+    ports:
+      - "9010:9000"
+      - "9011:9001"
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # Create MinIO bucket
+  create-bucket:
+    image: minio/mc:latest
+    container_name: create-bucket
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set iceberg http://minio:9000 minio-admin minio-admin-password;
+      mc mb iceberg/dev-and-test;
+      exit 0;
+      "
+
+  # Migrate lakekeeper database
+  migrate-lakekeeper:
+    image: quay.io/lakekeeper/catalog:latest-main
+    container_name: migrate-lakekeeper
+    <<: *lakekeeper-env
+    restart: "no"
+    command: ["migrate"]
+    depends_on:
+      create-catalog-db:
+        condition: service_completed_successfully
+
+  # Start lakekeeper, an iceberg REST catalog
+  lakekeeper:
+    image: quay.io/lakekeeper/catalog:latest-main
+    container_name: lakekeeper
+    depends_on:
+      migrate-lakekeeper:
+        condition: service_completed_successfully
+      create-bucket:
+        condition: service_completed_successfully
+    <<: *lakekeeper-env
+    command: ["serve"]
+    healthcheck:
+      test: ["CMD", "/home/nonroot/lakekeeper", "healthcheck"]
+      interval: 1s
+      timeout: 10s
+      retries: 3
+      start_period: 3s
+    ports:
+      - "8182:8181"
+
+  # Bootstrap lakekeeper. After deployment, lakekeeper needs to be bootstrapped.
+  bootstrap-lakekeeper:
+    image: curlimages/curl
+    container_name: bootstrap-lakekeeper
+    depends_on:
+      lakekeeper:
+        condition: service_healthy
+    restart: "no"
+    command:
+      - -w
+      - "%{http_code}"
+      - "-X"
+      - "POST"
+      - "-v"
+      - "http://lakekeeper:8181/management/v1/bootstrap"
+      - "-H"
+      - "Content-Type: application/json"
+      - "--data"
+      - '{"accept-terms-of-use": true}'
+      - "-o"
+      - "/dev/null"
+      # - "--fail-with-body"
+
+  # Create a warehouse for development and testing
+  create-warehouse:
+    image: curlimages/curl
+    container_name: create-warehouse
+    depends_on:
+      lakekeeper:
+        condition: service_healthy
+      bootstrap-lakekeeper:
+        condition: service_completed_successfully
+      create-bucket:
+        condition: service_completed_successfully
+    restart: "no"
+    command:
+      - -w
+      - "%{http_code}"
+      - "-X"
+      - "POST"
+      - "-v"
+      - "http://lakekeeper:8181/management/v1/warehouse"
+      - "-H"
+      - "Content-Type: application/json"
+      - "--data"
+      - "@warehouse.json"
+      - "-o"
+      - "/dev/null"
+      # - "--fail-with-body"
+    volumes:
+      - ./warehouse.json:/home/curl_user/warehouse.json
+
+volumes:
+  postgres_data:
+    driver: local
+  minio_data:
+    driver: local

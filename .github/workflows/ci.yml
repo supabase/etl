@@ -46,15 +46,6 @@ jobs:
     permissions:
       contents: read
       id-token: write
-    services:
-      postgres:
-        image: postgres:15
-        env:
-          POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: postgres
-        ports:
-          - 5430:5432
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -67,27 +58,11 @@ jobs:
         with:
           key: test
 
-      - name: Wait for Postgres to be ready
+      - name: Start Postgres with Docker Compose
         run: |
-          until pg_isready -h localhost -p 5430; do
-            echo "Waiting for Postgres..."
-            sleep 1
-          done
-
-      - name: Update WAL Settings
-        # This step is necessary to enable logical replication for the tests
-        # wal_level = logical is needed because we use logical replication in tests
-        # max_wal_senders = 100 is needed because we use multiple connections
-        # to the database in tests, without which the tests would fail
-        run: |
-          PGPASSWORD=postgres psql -h localhost -p 5430 -U postgres \
-            -c "ALTER SYSTEM SET wal_level = 'logical';" \
-            -c "ALTER SYSTEM SET max_wal_senders = 100;" \
-            -c "ALTER SYSTEM SET max_replication_slots = 100;"
-
-      - name: Restart Postgres service container
-        run: |
-          docker restart ${{ job.services.postgres.id }}
+          docker compose -f ./scripts/docker-compose.yaml up -d postgres
+          echo "Waiting for Postgres to be ready..."
+          docker compose -f ./scripts/docker-compose.yaml exec -T postgres sh -c 'until pg_isready -U postgres; do echo "Waiting for Postgres..."; sleep 1; done'
 
       - name: Install sqlx-cli
         run: |
@@ -97,9 +72,15 @@ jobs:
             --locked
 
       - name: Migrate database
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+          POSTGRES_PORT: 5430
+          POSTGRES_HOST: localhost
         run: |
           sudo apt-get install libpq-dev -y
-          SKIP_DOCKER=true ./scripts/init_db.sh
+          ./etl-api/scripts/run_migrations.sh
 
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
