@@ -287,6 +287,11 @@ impl BigQueryClient {
     /// Accepts pre-constructed TableBatch objects and processes them concurrently with
     /// controlled parallelism. This allows streaming to multiple different tables efficiently
     /// in a single call.
+    ///
+    /// If ordering is not required, you may split a table's data into multiple batches,
+    /// which can be processed concurrently.
+    /// If ordering guarantees are needed, all data for a given table must be included
+    /// in a single batch.
     pub async fn stream_table_batches_concurrent(
         &self,
         table_batches: Vec<TableBatch<BigQueryTableRow>>,
@@ -380,6 +385,9 @@ impl BigQueryClient {
             .map(BigQueryTableRow::try_from)
             .collect::<EtlResult<Vec<_>>>()?;
 
+        // We want to use the default stream from BigQuery since it allows multiple connections to
+        // send data to it. In addition, it's available by default for every table, so it also reduces
+        // complexity.
         let stream_name = StreamName::new_default(
             self.project_id.clone(),
             dataset_id.to_string(),
@@ -458,7 +466,7 @@ impl BigQueryClient {
         format!("options (max_staleness = interval {max_staleness_mins} minute)")
     }
 
-    /// Converts PostgreSQL data types to BigQuery equivalent types.
+    /// Converts Postgres data types to BigQuery equivalent types.
     fn postgres_to_bigquery_type(typ: &Type) -> String {
         if Self::is_array_type(typ) {
             let element_type = match typ {
@@ -502,7 +510,7 @@ impl BigQueryClient {
         .to_string()
     }
 
-    /// Returns whether the PostgreSQL type is an array type.
+    /// Returns whether the Postgres type is an array type.
     fn is_array_type(typ: &Type) -> bool {
         matches!(
             typ,
@@ -530,7 +538,7 @@ impl BigQueryClient {
         )
     }
 
-    /// Converts PostgreSQL column schemas to a BigQuery [`TableDescriptor`].
+    /// Converts Postgres column schemas to a BigQuery [`TableDescriptor`].
     ///
     /// Maps data types and nullability to BigQuery column specifications, setting
     /// appropriate column modes and automatically adding CDC special columns.
