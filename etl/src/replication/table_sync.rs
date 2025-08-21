@@ -301,7 +301,7 @@ where
         // will be started even if no events are flowing in the main apply loop.
         if force_syncing_tables_tx.send(()).is_err() {
             error!(
-                "error while forcing syncing tables during '{:?}' phase of the table sync worker",
+                "error while forcing syncing tables during '{:?}' phase of the table sync worker, the apply worker was likely shutdown",
                 TableReplicationPhaseType::SyncWait
             );
         }
