@@ -25,7 +25,6 @@ struct Args {
         global = true
     )]
     log_target: LogTarget,
-
     #[command(subcommand)]
     command: Commands,
 }
@@ -62,97 +61,75 @@ enum Commands {
         /// Postgres host
         #[arg(long, default_value = "localhost")]
         host: String,
-
         /// Postgres port
         #[arg(long, default_value = "5432")]
         port: u16,
-
         /// Database name
         #[arg(long, default_value = "bench")]
         database: String,
-
         /// Postgres username
         #[arg(long, default_value = "postgres")]
         username: String,
-
         /// Postgres password (optional)
         #[arg(long)]
         password: Option<String>,
-
         /// Enable TLS
         #[arg(long, default_value = "false")]
         tls_enabled: bool,
-
         /// TLS trusted root certificates
         #[arg(long, default_value = "")]
         tls_certs: String,
-
         /// Publication name
         #[arg(long, default_value = "bench_pub")]
         publication_name: String,
-
         /// Maximum batch size
         #[arg(long, default_value = "100000")]
         batch_max_size: usize,
-
         /// Maximum batch fill time in milliseconds
         #[arg(long, default_value = "10000")]
         batch_max_fill_ms: u64,
-
         /// Maximum number of table sync workers
         #[arg(long, default_value = "8")]
         max_table_sync_workers: u16,
-
         /// Table IDs to replicate (comma-separated)
         #[arg(long, value_delimiter = ',')]
         table_ids: Vec<u32>,
-
         /// Destination type to use
         #[arg(long, value_enum, default_value = "null")]
         destination: DestinationType,
-
         /// BigQuery project ID (required when using BigQuery destination)
-
         #[arg(long)]
         bq_project_id: Option<String>,
-
         /// BigQuery dataset ID (required when using BigQuery destination)
-
         #[arg(long)]
         bq_dataset_id: Option<String>,
-
         /// BigQuery service account key file path (required when using BigQuery destination)
-
         #[arg(long)]
         bq_sa_key_file: Option<String>,
-
         /// BigQuery maximum staleness in minutes (optional)
-
         #[arg(long)]
         bq_max_staleness_mins: Option<u16>,
+        /// BigQuery maximum concurrent streams (optional)
+        #[arg(long)]
+        bq_max_concurrent_streams: Option<u16>,
     },
     /// Prepare the benchmark environment by cleaning up replication slots
     Prepare {
         /// Postgres host
         #[arg(long, default_value = "localhost")]
         host: String,
-
         /// Postgres port
         #[arg(long, default_value = "5432")]
         port: u16,
-
         /// Database name
         #[arg(long, default_value = "bench")]
         database: String,
-
         /// Postgres username
         #[arg(long, default_value = "postgres")]
         username: String,
-
         /// Postgres password (optional)
         #[arg(long)]
         password: Option<String>,
-
         /// Enable TLS
         #[arg(long, default_value = "false")]
         tls_enabled: bool,
@@ -188,14 +165,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
             max_table_sync_workers,
             table_ids,
             destination,
-
             bq_project_id,
-
             bq_dataset_id,
-
             bq_sa_key_file,
-
             bq_max_staleness_mins,
+            bq_max_concurrent_streams,
         } => {
             start_pipeline(RunArgs {
                 host,
@@ -211,14 +185,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 max_table_sync_workers,
                 table_ids,
                 destination,
-
                 bq_project_id,
-
                 bq_dataset_id,
-
                 bq_sa_key_file,
-
                 bq_max_staleness_mins,
+                bq_max_concurrent_streams,
             })
             .await
         }
@@ -258,14 +229,11 @@ struct RunArgs {
     max_table_sync_workers: u16,
     table_ids: Vec<u32>,
     destination: DestinationType,
-
     bq_project_id: Option<String>,
-
     bq_dataset_id: Option<String>,
-
     bq_sa_key_file: Option<String>,
-
     bq_max_staleness_mins: Option<u16>,
+    bq_max_concurrent_streams: Option<u16>,
 }
 
 #[derive(Debug)]
@@ -376,7 +344,7 @@ async fn start_pipeline(args: RunArgs) -> Result<(), Box<dyn Error>> {
                 dataset_id,
                 &sa_key_file,
                 args.bq_max_staleness_mins,
-                None,
+                args.bq_max_concurrent_streams,
                 store.clone(),
             )
             .await?;

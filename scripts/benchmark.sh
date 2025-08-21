@@ -80,6 +80,7 @@ BQ_PROJECT_ID="${BQ_PROJECT_ID:=}"
 BQ_DATASET_ID="${BQ_DATASET_ID:=}"
 BQ_SA_KEY_FILE="${BQ_SA_KEY_FILE:=}"
 BQ_MAX_STALENESS_MINS="${BQ_MAX_STALENESS_MINS:=}"
+BG_MAX_CONCURRENT_STREAMS="${BG_MAX_CONCURRENT_STREAMS:=}"
 
 # Optional dry-run mode
 DRY_RUN="${DRY_RUN:=false}"
@@ -101,6 +102,9 @@ if [[ "${DESTINATION}" == "big-query" ]]; then
   echo "   BigQuery SA Key: ${BQ_SA_KEY_FILE}"
   if [[ -n "${BQ_MAX_STALENESS_MINS}" ]]; then
     echo "   BigQuery Max Staleness: ${BQ_MAX_STALENESS_MINS} mins"
+  fi
+  if [[ -n "${BG_MAX_CONCURRENT_STREAMS}" ]]; then
+    echo "   BigQuery Max Concurrent Streams: ${BG_MAX_CONCURRENT_STREAMS}"
   fi
 fi
 
@@ -180,6 +184,9 @@ if [[ "${DESTINATION}" == "big-query" ]]; then
   RUN_CMD="${RUN_CMD} --bq-sa-key-file ${BQ_SA_KEY_FILE}"
   if [[ -n "${BQ_MAX_STALENESS_MINS}" ]]; then
     RUN_CMD="${RUN_CMD} --bq-max-staleness-mins ${BQ_MAX_STALENESS_MINS}"
+  fi
+  if [[ -n "${BG_MAX_CONCURRENT_STREAMS}" ]]; then
+    RUN_CMD="${RUN_CMD} --bq-max-concurrent-streams ${BG_MAX_CONCURRENT_STREAMS}"
   fi
 fi
 

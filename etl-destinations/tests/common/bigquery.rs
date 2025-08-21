@@ -111,7 +111,8 @@ impl BigQueryDatabase {
             // We set a `max_staleness_mins` to 0 since we want the changes to be applied at
             // query time.
             Some(0),
-            None,
+            // We want to test streams concurrency, so we set a `max_concurrent_streams` to 10.
+            Some(10),
             schema_store,
         )
         .await

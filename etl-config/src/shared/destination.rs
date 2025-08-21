@@ -51,7 +51,7 @@ pub enum DestinationConfig {
         /// - and the configured batch size.
         #[serde(skip_serializing_if = "Option::is_none")]
         #[cfg_attr(feature = "utoipa", schema(example = 8))]
-        max_concurrent_streams: Option<usize>,
+        max_concurrent_streams: Option<u16>,
     },
 }
 
