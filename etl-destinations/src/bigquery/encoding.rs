@@ -2,7 +2,7 @@ use etl::error::{EtlError, EtlResult};
 use etl::types::{ArrayCellNonOptional, CellNonOptional, TableRow};
 use prost::bytes;
 
-use super::range_validation::{
+use crate::bigquery::range_validation::{
     clamp_date_for_bigquery, clamp_datetime_for_bigquery, clamp_numeric_for_bigquery,
     clamp_time_for_bigquery, clamp_timestamptz_for_bigquery,
 };
