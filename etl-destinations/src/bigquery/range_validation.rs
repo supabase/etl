@@ -75,7 +75,7 @@ pub fn clamp_numeric_for_bigquery(numeric: &PgNumeric) -> String {
                 numeric_str
             } else {
                 // Determine if we should clamp to min or max
-                
+
                 if numeric_str.starts_with('-') {
                     warn!(
                         "clamping numeric value {} to BigQuery BIGNUMERIC minimum: {}",
