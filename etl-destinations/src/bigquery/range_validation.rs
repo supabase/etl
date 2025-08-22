@@ -1,4 +1,3 @@
-use etl::error::EtlResult;
 use etl::types::PgNumeric;
 use etl_postgres::time::{DATE_FORMAT, TIME_FORMAT, TIMESTAMP_FORMAT, TIMESTAMPTZ_FORMAT_HH_MM};
 use tracing::warn;
@@ -76,7 +75,8 @@ pub fn clamp_numeric_for_bigquery(numeric: &PgNumeric) -> String {
                 numeric_str
             } else {
                 // Determine if we should clamp to min or max
-                let clamped_value = if numeric_str.starts_with('-') {
+                
+                if numeric_str.starts_with('-') {
                     warn!(
                         "clamping numeric value {} to BigQuery BIGNUMERIC minimum: {}",
                         numeric_str, BIGQUERY_BIGNUMERIC_MIN_STR
@@ -88,8 +88,7 @@ pub fn clamp_numeric_for_bigquery(numeric: &PgNumeric) -> String {
                         numeric_str, BIGQUERY_BIGNUMERIC_MAX_STR
                     );
                     BIGQUERY_BIGNUMERIC_MAX_STR.to_string()
-                };
-                clamped_value
+                }
             }
         }
     }
@@ -358,15 +357,22 @@ mod tests {
     fn test_is_numeric_within_limits_edge_cases() {
         // Too many digits (>76)
         let very_long_number = "1234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890";
-        assert!(!is_numeric_within_bigquery_bignumeric_limits(very_long_number));
+        assert!(!is_numeric_within_bigquery_bignumeric_limits(
+            very_long_number
+        ));
 
         // Too many fractional digits (>38)
         let excessive_decimals = "123.123456789012345678901234567890123456789012345678901234567890";
-        assert!(!is_numeric_within_bigquery_bignumeric_limits(excessive_decimals));
+        assert!(!is_numeric_within_bigquery_bignumeric_limits(
+            excessive_decimals
+        ));
 
         // Reasonable large within limits (74 total digits)
-        let reasonable_large = "1234567890123456789012345678901234567.1234567890123456789012345678901234567";
-        assert!(is_numeric_within_bigquery_bignumeric_limits(reasonable_large));
+        let reasonable_large =
+            "1234567890123456789012345678901234567.1234567890123456789012345678901234567";
+        assert!(is_numeric_within_bigquery_bignumeric_limits(
+            reasonable_large
+        ));
     }
 
     #[test]
@@ -467,7 +473,10 @@ mod tests {
 
     #[test]
     fn test_clamp_datetime_before_min() {
-        let before_min_date = NaiveDate::from_ymd_opt(1, 1, 1).unwrap().pred_opt().unwrap();
+        let before_min_date = NaiveDate::from_ymd_opt(1, 1, 1)
+            .unwrap()
+            .pred_opt()
+            .unwrap();
         let dt = NaiveDateTime::new(before_min_date, NaiveTime::from_hms_opt(0, 0, 0).unwrap());
         let result = clamp_datetime_for_bigquery(&dt);
         assert_eq!(result, "0001-01-01 00:00:00");
@@ -483,7 +492,10 @@ mod tests {
 
     #[test]
     fn test_clamp_timestamptz_before_min() {
-        let before_min_date = NaiveDate::from_ymd_opt(1, 1, 1).unwrap().pred_opt().unwrap();
+        let before_min_date = NaiveDate::from_ymd_opt(1, 1, 1)
+            .unwrap()
+            .pred_opt()
+            .unwrap();
         let ts = Utc.from_utc_datetime(&NaiveDateTime::new(
             before_min_date,
             NaiveTime::from_hms_opt(0, 0, 0).unwrap(),
@@ -501,5 +513,5 @@ mod tests {
         ));
         let result = clamp_timestamptz_for_bigquery(&ts);
         assert_eq!(result, "9999-12-31 23:59:59.999999+00:00");
-    }   
+    }
 }
