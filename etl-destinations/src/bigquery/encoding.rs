@@ -1,7 +1,11 @@
 use etl::error::{EtlError, EtlResult};
 use etl::types::{ArrayCellNonOptional, CellNonOptional, TableRow};
-use etl_postgres::time::{DATE_FORMAT, TIME_FORMAT, TIMESTAMP_FORMAT, TIMESTAMPTZ_FORMAT_HH_MM};
 use prost::bytes;
+
+use super::range_validation::{
+    clamp_date_for_bigquery, clamp_datetime_for_bigquery, clamp_numeric_for_bigquery,
+    clamp_time_for_bigquery, clamp_timestamptz_for_bigquery,
+};
 
 /// Protocol buffer wrapper for a BigQuery table row containing non-optional cells.
 ///
@@ -115,23 +119,23 @@ pub fn cell_encode_prost(cell: &CellNonOptional, tag: u32, buf: &mut impl bytes:
             prost::encoding::double::encode(tag, i, buf);
         }
         CellNonOptional::Numeric(n) => {
-            let s = n.to_string();
+            let s = clamp_numeric_for_bigquery(n);
             prost::encoding::string::encode(tag, &s, buf);
         }
         CellNonOptional::Date(t) => {
-            let s = t.format(DATE_FORMAT).to_string();
+            let s = clamp_date_for_bigquery(t);
             prost::encoding::string::encode(tag, &s, buf);
         }
         CellNonOptional::Time(t) => {
-            let s = t.format(TIME_FORMAT).to_string();
+            let s = clamp_time_for_bigquery(t);
             prost::encoding::string::encode(tag, &s, buf);
         }
         CellNonOptional::TimeStamp(t) => {
-            let s = t.format(TIMESTAMP_FORMAT).to_string();
+            let s = clamp_datetime_for_bigquery(t);
             prost::encoding::string::encode(tag, &s, buf);
         }
         CellNonOptional::TimeStampTz(t) => {
-            let s = t.format(TIMESTAMPTZ_FORMAT_HH_MM).to_string();
+            let s = clamp_timestamptz_for_bigquery(t);
             prost::encoding::string::encode(tag, &s, buf);
         }
         CellNonOptional::Uuid(u) => {
@@ -173,23 +177,23 @@ pub fn cell_encode_len_prost(cell: &CellNonOptional, tag: u32) -> usize {
         CellNonOptional::F32(i) => prost::encoding::float::encoded_len(tag, i),
         CellNonOptional::F64(i) => prost::encoding::double::encoded_len(tag, i),
         CellNonOptional::Numeric(n) => {
-            let s = n.to_string();
+            let s = clamp_numeric_for_bigquery(n);
             prost::encoding::string::encoded_len(tag, &s)
         }
         CellNonOptional::Date(t) => {
-            let s = t.format(DATE_FORMAT).to_string();
+            let s = clamp_date_for_bigquery(t);
             prost::encoding::string::encoded_len(tag, &s)
         }
         CellNonOptional::Time(t) => {
-            let s = t.format(TIME_FORMAT).to_string();
+            let s = clamp_time_for_bigquery(t);
             prost::encoding::string::encoded_len(tag, &s)
         }
         CellNonOptional::TimeStamp(t) => {
-            let s = t.format(TIMESTAMP_FORMAT).to_string();
+            let s = clamp_datetime_for_bigquery(t);
             prost::encoding::string::encoded_len(tag, &s)
         }
         CellNonOptional::TimeStampTz(t) => {
-            let s = t.format(TIMESTAMPTZ_FORMAT_HH_MM).to_string();
+            let s = clamp_timestamptz_for_bigquery(t);
             prost::encoding::string::encoded_len(tag, &s)
         }
         CellNonOptional::Uuid(u) => {
@@ -244,34 +248,37 @@ pub fn array_cell_encode_prost(
             prost::encoding::double::encode_packed(tag, &vec, buf);
         }
         ArrayCellNonOptional::Numeric(vec) => {
-            let values: Vec<String> = vec.into_iter().map(|v| v.to_string()).collect();
+            let values: Vec<String> = vec
+                .into_iter()
+                .map(|v| clamp_numeric_for_bigquery(&v))
+                .collect();
             prost::encoding::string::encode_repeated(tag, &values, buf);
         }
         ArrayCellNonOptional::Date(vec) => {
             let values: Vec<String> = vec
                 .into_iter()
-                .map(|v| v.format(DATE_FORMAT).to_string())
+                .map(|v| clamp_date_for_bigquery(&v))
                 .collect();
             prost::encoding::string::encode_repeated(tag, &values, buf);
         }
         ArrayCellNonOptional::Time(vec) => {
             let values: Vec<String> = vec
                 .into_iter()
-                .map(|v| v.format(TIME_FORMAT).to_string())
+                .map(|v| clamp_time_for_bigquery(&v))
                 .collect();
             prost::encoding::string::encode_repeated(tag, &values, buf);
         }
         ArrayCellNonOptional::TimeStamp(vec) => {
             let values: Vec<String> = vec
                 .into_iter()
-                .map(|v| v.format(TIMESTAMP_FORMAT).to_string())
+                .map(|v| clamp_datetime_for_bigquery(&v))
                 .collect();
             prost::encoding::string::encode_repeated(tag, &values, buf);
         }
         ArrayCellNonOptional::TimeStampTz(vec) => {
             let values: Vec<String> = vec
                 .into_iter()
-                .map(|v| v.format(TIMESTAMPTZ_FORMAT_HH_MM).to_string())
+                .map(|v| clamp_timestamptz_for_bigquery(&v))
                 .collect();
             prost::encoding::string::encode_repeated(tag, &values, buf);
         }
@@ -314,34 +321,37 @@ pub fn array_cell_non_optional_encoded_len_prost(
         ArrayCellNonOptional::F32(vec) => prost::encoding::float::encoded_len_packed(tag, &vec),
         ArrayCellNonOptional::F64(vec) => prost::encoding::double::encoded_len_packed(tag, &vec),
         ArrayCellNonOptional::Numeric(vec) => {
-            let values: Vec<String> = vec.into_iter().map(|v| v.to_string()).collect();
+            let values: Vec<String> = vec
+                .into_iter()
+                .map(|v| clamp_numeric_for_bigquery(&v))
+                .collect();
             prost::encoding::string::encoded_len_repeated(tag, &values)
         }
         ArrayCellNonOptional::Date(vec) => {
             let values: Vec<String> = vec
                 .into_iter()
-                .map(|v| v.format(DATE_FORMAT).to_string())
+                .map(|v| clamp_date_for_bigquery(&v))
                 .collect();
             prost::encoding::string::encoded_len_repeated(tag, &values)
         }
         ArrayCellNonOptional::Time(vec) => {
             let values: Vec<String> = vec
                 .into_iter()
-                .map(|v| v.format(TIME_FORMAT).to_string())
+                .map(|v| clamp_time_for_bigquery(&v))
                 .collect();
             prost::encoding::string::encoded_len_repeated(tag, &values)
         }
         ArrayCellNonOptional::TimeStamp(vec) => {
             let values: Vec<String> = vec
                 .into_iter()
-                .map(|v| v.format(TIMESTAMP_FORMAT).to_string())
+                .map(|v| clamp_datetime_for_bigquery(&v))
                 .collect();
             prost::encoding::string::encoded_len_repeated(tag, &values)
         }
         ArrayCellNonOptional::TimeStampTz(vec) => {
             let values: Vec<String> = vec
                 .into_iter()
-                .map(|v| v.format(TIMESTAMPTZ_FORMAT_HH_MM).to_string())
+                .map(|v| clamp_timestamptz_for_bigquery(&v))
                 .collect();
             prost::encoding::string::encoded_len_repeated(tag, &values)
         }

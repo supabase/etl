@@ -16,6 +16,7 @@ bigquery = [
 [dependencies]
 etl = { workspace = true }
 etl-postgres = { workspace = true }
+chrono = { workspace = true }
 
 futures = { workspace = true, optional = true }
 gcp-bigquery-client = { workspace = true, optional = true, features = [
