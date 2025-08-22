@@ -420,7 +420,7 @@ mod tests {
 
     #[test]
     fn test_clamp_date_before_min() {
-        let date = NaiveDate::from_ymd_opt(0001, 1, 1)
+        let date = NaiveDate::from_ymd_opt(1, 1, 1)
             .unwrap()
             .pred_opt()
             .unwrap(); // Before year 1
