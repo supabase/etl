@@ -443,6 +443,13 @@ mod tests {
     }
 
     #[test]
+    fn test_clamp_time_outside_bounds() {
+        let time = NaiveTime::from_hms_nano_opt(23, 59, 59, 999999999).unwrap();
+        let result = clamp_time_for_bigquery(&time);
+        assert_eq!(result, "23:59:59.999999");
+    }
+
+    #[test]
     fn test_clamp_datetime_within_bounds() {
         let datetime = NaiveDateTime::new(
             NaiveDate::from_ymd_opt(2024, 6, 15).unwrap(),
