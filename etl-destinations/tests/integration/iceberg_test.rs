@@ -6,18 +6,25 @@ use crate::common::lakekeeper::LakekeeperClient;
 
 const LAKEKEEPER_URL: &str = "http://localhost:8182";
 
-#[tokio::test]
-async fn test_create_namespace() {
-    init_test_tracing();
+fn get_catalog_url() -> String {
+    format!("{LAKEKEEPER_URL}/catalog")
+}
 
+async fn get_client() -> IcebergClient {
     let lakekeeper_client = LakekeeperClient::new(LAKEKEEPER_URL);
 
     let warehouse_name = lakekeeper_client.create_warehouse().await.unwrap();
 
-    let client =
-        IcebergClient::new_with_rest_catalog(format!("{LAKEKEEPER_URL}/catalog"), warehouse_name);
+    IcebergClient::new_with_rest_catalog(get_catalog_url(), warehouse_name)
+}
 
-    let namespace = "test-namespace";
+#[tokio::test]
+async fn test_create_namespace() {
+    init_test_tracing();
+
+    let client = get_client().await;
+
+    let namespace = "test_namespace";
 
     // namespace doesn't exist yet
     assert!(!client.namespace_exists(namespace).await.unwrap());
@@ -39,20 +46,14 @@ async fn test_create_namespace() {
 async fn test_create_table_if_missing() {
     init_test_tracing();
 
-    let lakekeeper_client = LakekeeperClient::new(LAKEKEEPER_URL);
-
-    let warehouse_name = lakekeeper_client.create_warehouse().await.unwrap();
-
-    let client =
-        IcebergClient::new_with_rest_catalog(format!("{LAKEKEEPER_URL}/catalog"), warehouse_name);
-
-    let namespace = "test-namespace";
-    let table_name = "test_table".to_string();
+    let client = get_client().await;
 
     // Create namespace first
+    let namespace = "test_namespace";
     client.create_namespace_if_missing(namespace).await.unwrap();
 
     // Create a sample table schema
+    let table_name = "test_table".to_string();
     let table_id = TableId::new(12345);
     let table_name_struct = TableName::new("test_schema".to_string(), table_name.clone());
     let columns = vec![
