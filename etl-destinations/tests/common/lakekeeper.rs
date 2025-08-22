@@ -60,16 +60,16 @@ struct StorageProfile {
 
 #[derive(serde::Serialize)]
 #[serde(rename_all = "kebab-case")]
-struct Warehouse {
+struct CreateWarehouseRequest {
     delete_profile: DeleteProfile,
     storage_credential: StorageCredential,
     storage_profile: StorageProfile,
     warehouse_name: String,
 }
 
-impl Default for Warehouse {
+impl Default for CreateWarehouseRequest {
     fn default() -> Self {
-        Warehouse {
+        CreateWarehouseRequest {
             delete_profile: DeleteProfile {
                 r#type: DeleteProfileType::Hard,
             },
@@ -94,6 +94,12 @@ impl Default for Warehouse {
     }
 }
 
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+struct CreateWarehouseResponse {
+    warehouse_id: uuid::Uuid,
+}
+
 const PROJECT_ID_HEADER: &str = "x-project-id";
 const PROJECT_ID: &str = "00000000-0000-0000-0000-000000000000";
 
@@ -107,11 +113,10 @@ impl LakekeeperClient {
     }
 
     /// Creates a new warehouse with a random uuid as name
-    pub async fn create_warehouse(&self) -> Result<String, reqwest::Error> {
-        let warehouse = Warehouse::default();
-
+    pub async fn create_warehouse(&self) -> Result<(String, uuid::Uuid), reqwest::Error> {
         let url = format!("{}/warehouse", self.base_url);
 
+        let warehouse = CreateWarehouseRequest::default();
         let response = self
             .client
             .post(url)
@@ -120,8 +125,30 @@ impl LakekeeperClient {
             .send()
             .await?;
 
-        response.error_for_status()?;
+        let response: CreateWarehouseResponse = response.json().await?;
 
-        Ok(warehouse.warehouse_name)
+        Ok((warehouse.warehouse_name, response.warehouse_id))
+    }
+
+    /// Drops a warehouse
+    pub async fn drop_warehouse(&self, warehouse_id: uuid::Uuid) -> Result<(), reqwest::Error> {
+        let url = format!("{}/warehouse/{warehouse_id}", self.base_url);
+
+        // Even if a warehouse has no namespaces, it can still return an error from a delete
+        // request if the namespace was deleted very recently. So we make a best effort
+        // attempt to delete the warehouse with retries, but do not fail the test if it
+        // still doesn't get deleted. At worst we'll leave some warehouses around if
+        // that happens.
+        const MAX_RETRIES: u8 = 10;
+        for _ in 0..MAX_RETRIES {
+            let response = self.client.delete(url.clone()).send().await?;
+
+            if response.status().is_success() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        }
+
+        Ok(())
     }
 }

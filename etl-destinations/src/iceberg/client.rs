@@ -75,4 +75,21 @@ impl IcebergClient {
         let table_ident = TableIdent::new(namespace_ident, table_name);
         self.catalog.table_exists(&table_ident).await
     }
+
+    /// Drops a table
+    pub async fn drop_table(
+        &self,
+        namespace: &str,
+        table_name: String,
+    ) -> Result<(), iceberg::Error> {
+        let namespace_ident = NamespaceIdent::from_strs(namespace.split('.'))?;
+        let table_ident = TableIdent::new(namespace_ident, table_name);
+        self.catalog.drop_table(&table_ident).await
+    }
+
+    /// Drops a namespace
+    pub async fn drop_namespace(&self, namespace: &str) -> Result<(), iceberg::Error> {
+        let namespace_ident = NamespaceIdent::from_strs(namespace.split('.'))?;
+        self.catalog.drop_namespace(&namespace_ident).await
+    }
 }

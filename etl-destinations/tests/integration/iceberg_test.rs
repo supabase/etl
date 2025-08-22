@@ -10,19 +10,13 @@ fn get_catalog_url() -> String {
     format!("{LAKEKEEPER_URL}/catalog")
 }
 
-async fn get_client() -> IcebergClient {
-    let lakekeeper_client = LakekeeperClient::new(LAKEKEEPER_URL);
-
-    let warehouse_name = lakekeeper_client.create_warehouse().await.unwrap();
-
-    IcebergClient::new_with_rest_catalog(get_catalog_url(), warehouse_name)
-}
-
 #[tokio::test]
 async fn test_create_namespace() {
     init_test_tracing();
 
-    let client = get_client().await;
+    let lakekeeper_client = LakekeeperClient::new(LAKEKEEPER_URL);
+    let (warehouse_name, warehouse_id) = lakekeeper_client.create_warehouse().await.unwrap();
+    let client = IcebergClient::new_with_rest_catalog(get_catalog_url(), warehouse_name);
 
     let namespace = "test_namespace";
 
@@ -40,13 +34,25 @@ async fn test_create_namespace() {
 
     // namespace still exists
     assert!(client.namespace_exists(namespace).await.unwrap());
+
+    // Manual cleanup for now because lakekeeper doesn't allow cascade delete at the warehouse level
+    // This feature is planned for future releases when we'll start to use it clean up it one fell swoop.
+    // The cleanup is not in a Drop impl because each test has different number of object specitic to
+    // that test.
+    client.drop_namespace(namespace).await.unwrap();
+    lakekeeper_client
+        .drop_warehouse(warehouse_id)
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
 async fn test_create_table_if_missing() {
     init_test_tracing();
 
-    let client = get_client().await;
+    let lakekeeper_client = LakekeeperClient::new(LAKEKEEPER_URL);
+    let (warehouse_name, warehouse_id) = lakekeeper_client.create_warehouse().await.unwrap();
+    let client = IcebergClient::new_with_rest_catalog(get_catalog_url(), warehouse_name);
 
     // Create namespace first
     let namespace = "test_namespace";
@@ -288,4 +294,15 @@ async fn test_create_table_if_missing() {
             .await
             .unwrap()
     );
+
+    // Manual cleanup for now because lakekeeper doesn't allow cascade delete at the warehouse level
+    // This feature is planned for future releases when we'll start to use it clean up it one fell swoop.
+    // The cleanup is not in a Drop impl because each test has different number of object specitic to
+    // that test.
+    client.drop_table(namespace, table_name).await.unwrap();
+    client.drop_namespace(namespace).await.unwrap();
+    lakekeeper_client
+        .drop_warehouse(warehouse_id)
+        .await
+        .unwrap();
 }
