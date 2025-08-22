@@ -41,7 +41,6 @@ const BIGQUERY_TIME_MAX: (u32, u32, u32, u32) = (23, 59, 59, 999999);
 ///
 /// BigQuery BIGNUMERIC supports up to ~77 digits of precision with 38 digits after the decimal point.
 /// Values outside this range are clamped to the min/max bounds using saturating arithmetic.
-/// Special values (NaN, Infinity, -Infinity) throw InvalidData errors.
 pub fn clamp_numeric_for_bigquery(numeric: &PgNumeric) -> String {
     match numeric {
         PgNumeric::NaN => {
@@ -94,7 +93,6 @@ pub fn clamp_numeric_for_bigquery(numeric: &PgNumeric) -> String {
 /// Checks if a numeric string is within BigQuery's BIGNUMERIC limits.
 ///
 /// BIGNUMERIC supports up to ~77 digits of precision with up to 38 decimal places.
-/// This is extremely generous and should handle virtually all real-world numeric values.
 ///
 /// When parsing this, we are safely assuming that the number is correctly formatted since it's supplied
 /// by converting a `PgNumeric` into a `String`. This allows the parsing to be simpler and faster.
