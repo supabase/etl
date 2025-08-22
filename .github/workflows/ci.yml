@@ -58,11 +58,30 @@ jobs:
         with:
           key: test
 
-      - name: Start Postgres with Docker Compose
+      - name: Start Docker Compose Environment
         run: |
-          docker compose -f ./scripts/docker-compose.yaml up -d postgres
-          echo "Waiting for Postgres to be ready..."
+          docker compose -f ./scripts/docker-compose.yaml up -d
+          echo "Waiting for all services to be ready..."
           docker compose -f ./scripts/docker-compose.yaml exec -T postgres sh -c 'until pg_isready -U postgres; do echo "Waiting for Postgres..."; sleep 1; done'
+
+          # Wait for all services to be healthy
+          timeout=300
+          elapsed=0
+          while [ $elapsed -lt $timeout ]; do
+            if docker compose -f ./scripts/docker-compose.yaml ps --format json | jq -e 'all(.State == "running")' > /dev/null 2>&1; then
+              echo "All services are running and ready!"
+              break
+            fi
+            echo "Waiting for services to be ready... ($elapsed/$timeout seconds)"
+            sleep 5
+            elapsed=$((elapsed + 5))
+          done
+
+          if [ $elapsed -ge $timeout ]; then
+            echo "Timeout waiting for services to be ready"
+            docker compose -f ./scripts/docker-compose.yaml ps
+            exit 1
+          fi
 
       - name: Install sqlx-cli
         run: |
