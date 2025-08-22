@@ -19,6 +19,7 @@ use tracing::{debug, info};
 
 use crate::bigquery::encoding::BigQueryTableRow;
 use crate::metrics::{BQ_BATCH_SEND_MILLISECONDS_TOTAL, BQ_BATCH_SIZE};
+use crate::schema::is_array_type;
 
 /// Trace identifier for ETL operations in BigQuery client.
 const ETL_TRACE_ID: &str = "ETL BigQueryClient";
@@ -421,7 +422,7 @@ impl BigQueryClient {
             Self::postgres_to_bigquery_type(&column_schema.typ)
         );
 
-        if !column_schema.nullable && !Self::is_array_type(&column_schema.typ) {
+        if !column_schema.nullable && !is_array_type(&column_schema.typ) {
             column_spec.push_str(" not null");
         };
 
@@ -468,7 +469,7 @@ impl BigQueryClient {
 
     /// Converts Postgres data types to BigQuery equivalent types.
     fn postgres_to_bigquery_type(typ: &Type) -> String {
-        if Self::is_array_type(typ) {
+        if is_array_type(typ) {
             let element_type = match typ {
                 &Type::BOOL_ARRAY => "bool",
                 &Type::CHAR_ARRAY
@@ -508,34 +509,6 @@ impl BigQueryClient {
             _ => "string",
         }
         .to_string()
-    }
-
-    /// Returns whether the Postgres type is an array type.
-    fn is_array_type(typ: &Type) -> bool {
-        matches!(
-            typ,
-            &Type::BOOL_ARRAY
-                | &Type::CHAR_ARRAY
-                | &Type::BPCHAR_ARRAY
-                | &Type::VARCHAR_ARRAY
-                | &Type::NAME_ARRAY
-                | &Type::TEXT_ARRAY
-                | &Type::INT2_ARRAY
-                | &Type::INT4_ARRAY
-                | &Type::INT8_ARRAY
-                | &Type::FLOAT4_ARRAY
-                | &Type::FLOAT8_ARRAY
-                | &Type::NUMERIC_ARRAY
-                | &Type::DATE_ARRAY
-                | &Type::TIME_ARRAY
-                | &Type::TIMESTAMP_ARRAY
-                | &Type::TIMESTAMPTZ_ARRAY
-                | &Type::UUID_ARRAY
-                | &Type::JSON_ARRAY
-                | &Type::JSONB_ARRAY
-                | &Type::OID_ARRAY
-                | &Type::BYTEA_ARRAY
-        )
     }
 
     /// Converts Postgres column schemas to a BigQuery [`TableDescriptor`].
@@ -594,7 +567,7 @@ impl BigQueryClient {
                 _ => ColumnType::String,
             };
 
-            let mode = if Self::is_array_type(&column_schema.typ) {
+            let mode = if is_array_type(&column_schema.typ) {
                 ColumnMode::Repeated
             } else if column_schema.nullable {
                 ColumnMode::Nullable
@@ -812,21 +785,6 @@ mod tests {
             BigQueryClient::postgres_to_bigquery_type(&Type::TIMESTAMP_ARRAY),
             "array<timestamp>"
         );
-    }
-
-    #[test]
-    fn test_is_array_type() {
-        assert!(BigQueryClient::is_array_type(&Type::BOOL_ARRAY));
-        assert!(BigQueryClient::is_array_type(&Type::TEXT_ARRAY));
-        assert!(BigQueryClient::is_array_type(&Type::INT4_ARRAY));
-        assert!(BigQueryClient::is_array_type(&Type::FLOAT8_ARRAY));
-        assert!(BigQueryClient::is_array_type(&Type::TIMESTAMP_ARRAY));
-
-        assert!(!BigQueryClient::is_array_type(&Type::BOOL));
-        assert!(!BigQueryClient::is_array_type(&Type::TEXT));
-        assert!(!BigQueryClient::is_array_type(&Type::INT4));
-        assert!(!BigQueryClient::is_array_type(&Type::FLOAT8));
-        assert!(!BigQueryClient::is_array_type(&Type::TIMESTAMP));
     }
 
     #[test]
