@@ -61,17 +61,31 @@ jobs:
       - name: Start Docker Compose Environment
         run: |
           docker compose -f ./scripts/docker-compose.yaml up -d
-          echo "Waiting for all services to be ready..."
-          docker compose -f ./scripts/docker-compose.yaml exec -T postgres sh -c 'until pg_isready -U postgres; do echo "Waiting for Postgres..."; sleep 1; done'
+          echo "Waiting for lakekeeper, minio, and postgres services to be ready..."
 
-          # Wait for all services to be healthy
+          # Wait for specific services to be healthy
           timeout=300
           elapsed=0
+          services="lakekeeper minio postgres"
+
           while [ $elapsed -lt $timeout ]; do
-            if docker compose -f ./scripts/docker-compose.yaml ps --format json | jq -e 'all(.State == "running")' > /dev/null 2>&1; then
-              echo "All services are running and ready!"
+            all_healthy=true
+            for service in $services; do
+              health=$(docker compose -f ./scripts/docker-compose.yaml ps --format json | jq -r --arg service "$service" 'select(.Service == $service) | .Health')
+              state=$(docker compose -f ./scripts/docker-compose.yaml ps --format json | jq -r --arg service "$service" 'select(.Service == $service) | .State')
+              
+              if [ "$health" != "healthy" ] || [ "$state" != "running" ]; then
+                echo "Service $service is not ready yet (Health: $health, State: $state)"
+                all_healthy=false
+                break
+              fi
+            done
+            
+            if [ "$all_healthy" = true ]; then
+              echo "All required services (lakekeeper, minio, postgres) are healthy and running!"
               break
             fi
+            
             echo "Waiting for services to be ready... ($elapsed/$timeout seconds)"
             sleep 5
             elapsed=$((elapsed + 5))
