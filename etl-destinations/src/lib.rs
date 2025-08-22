@@ -8,4 +8,3 @@ pub mod bigquery;
 #[cfg(feature = "iceberg")]
 pub mod iceberg;
 mod metrics;
-mod schema;

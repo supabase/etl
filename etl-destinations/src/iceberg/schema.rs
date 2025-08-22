@@ -1,11 +1,10 @@
 use std::sync::Arc;
 
 use etl::types::{TableSchema, Type};
+use etl_postgres::types::is_array_type;
 use iceberg::spec::{
     ListType, NestedField, PrimitiveType, Schema as IcebergSchema, Type as IcebergType,
 };
-
-use crate::schema::is_array_type;
 
 /// Converts a Postgres array type to equivalent Iceberg type
 fn postgres_array_type_to_iceberg_type(typ: &Type, field_id: i32) -> IcebergType {
