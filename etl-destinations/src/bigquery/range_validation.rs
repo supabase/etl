@@ -40,15 +40,6 @@ const BIGQUERY_TIME_MIN: (u32, u32, u32) = (0, 0, 0);
 /// This represents the latest time that BigQuery can store.
 const BIGQUERY_TIME_MAX: (u32, u32, u32, u32) = (23, 59, 59, 999999);
 
-/// BigQuery STRING maximum size: 2MB per cell
-/// This represents the maximum size of a single STRING field in BigQuery.
-const BIGQUERY_STRING_MAX_BYTES: usize = 2 * 1024 * 1024; // 2MB
-
-/// BigQuery BYTES maximum size: ~1MB (constrained by row size limit)
-/// This represents the practical maximum size of a single BYTES field in BigQuery.
-/// Being conservative with 1MB limit due to row size constraints.
-const BIGQUERY_BYTES_MAX_SIZE: usize = 1 * 1024 * 1024; // 1MB
-
 /// Validates and clamps a [`PgNumeric`] value to BigQuery's BIGNUMERIC supported range.
 ///
 /// BigQuery BIGNUMERIC supports up to ~77 digits of precision with 38 digits after the decimal point.
@@ -64,7 +55,7 @@ pub fn clamp_numeric_for_bigquery(numeric: &PgNumeric) -> String {
         PgNumeric::PositiveInfinity => {
             // Saturate to maximum BIGNUMERIC bound
             warn!(
-                "Clamping NUMERIC +Infinity to BigQuery BIGNUMERIC maximum: {}",
+                "clamping NUMERIC +Infinity to BigQuery BIGNUMERIC maximum: {}",
                 BIGQUERY_BIGNUMERIC_MAX_STR
             );
             BIGQUERY_BIGNUMERIC_MAX_STR.to_string()
@@ -72,7 +63,7 @@ pub fn clamp_numeric_for_bigquery(numeric: &PgNumeric) -> String {
         PgNumeric::NegativeInfinity => {
             // Saturate to minimum BIGNUMERIC bound
             warn!(
-                "Clamping NUMERIC -Infinity to BigQuery BIGNUMERIC minimum: {}",
+                "clamping NUMERIC -Infinity to BigQuery BIGNUMERIC minimum: {}",
                 BIGQUERY_BIGNUMERIC_MIN_STR
             );
             BIGQUERY_BIGNUMERIC_MIN_STR.to_string()
@@ -87,13 +78,13 @@ pub fn clamp_numeric_for_bigquery(numeric: &PgNumeric) -> String {
                 // Determine if we should clamp to min or max
                 let clamped_value = if numeric_str.starts_with('-') {
                     warn!(
-                        "Clamping numeric value {} to BigQuery BIGNUMERIC minimum: {}",
+                        "clamping numeric value {} to BigQuery BIGNUMERIC minimum: {}",
                         numeric_str, BIGQUERY_BIGNUMERIC_MIN_STR
                     );
                     BIGQUERY_BIGNUMERIC_MIN_STR.to_string()
                 } else {
                     warn!(
-                        "Clamping numeric value {} to BigQuery BIGNUMERIC maximum: {}",
+                        "clamping numeric value {} to BigQuery BIGNUMERIC maximum: {}",
                         numeric_str, BIGQUERY_BIGNUMERIC_MAX_STR
                     );
                     BIGQUERY_BIGNUMERIC_MAX_STR.to_string()
@@ -161,14 +152,14 @@ pub fn clamp_date_for_bigquery(date: &NaiveDate) -> String {
 
     let clamped_date = if *date < min_date {
         warn!(
-            "Clamping date {} to BigQuery minimum: {}",
+            "clamping date {} to BigQuery minimum: {}",
             date.format(DATE_FORMAT),
             min_date.format(DATE_FORMAT)
         );
         min_date
     } else if *date > max_date {
         warn!(
-            "Clamping date {} to BigQuery maximum: {}",
+            "clamping date {} to BigQuery maximum: {}",
             date.format(DATE_FORMAT),
             max_date.format(DATE_FORMAT)
         );
@@ -205,14 +196,14 @@ pub fn clamp_time_for_bigquery(time: &NaiveTime) -> String {
 
     let clamped_time = if *time < min_time {
         warn!(
-            "Clamping time {} to BigQuery minimum: {}",
+            "clamping time {} to BigQuery minimum: {}",
             time.format(TIME_FORMAT),
             min_time.format(TIME_FORMAT)
         );
         min_time
     } else if *time > max_time {
         warn!(
-            "Clamping time {} to BigQuery maximum: {}",
+            "clamping time {} to BigQuery maximum: {}",
             time.format(TIME_FORMAT),
             max_time.format(TIME_FORMAT)
         );
@@ -267,14 +258,14 @@ pub fn clamp_datetime_for_bigquery(datetime: &NaiveDateTime) -> String {
 
     let clamped_datetime = if *datetime < min_datetime {
         warn!(
-            "Clamping datetime {} to BigQuery minimum: {}",
+            "clamping datetime {} to BigQuery minimum: {}",
             datetime.format(TIMESTAMP_FORMAT),
             min_datetime.format(TIMESTAMP_FORMAT)
         );
         min_datetime
     } else if *datetime > max_datetime {
         warn!(
-            "Clamping datetime {} to BigQuery maximum: {}",
+            "clamping datetime {} to BigQuery maximum: {}",
             datetime.format(TIMESTAMP_FORMAT),
             max_datetime.format(TIMESTAMP_FORMAT)
         );
@@ -329,14 +320,14 @@ pub fn clamp_timestamptz_for_bigquery(timestamptz: &DateTime<Utc>) -> String {
 
     let clamped_timestamp = if *timestamptz < min_timestamp {
         warn!(
-            "Clamping timestamptz {} to BigQuery minimum: {}",
+            "clamping timestamptz {} to BigQuery minimum: {}",
             timestamptz.format(TIMESTAMPTZ_FORMAT_HH_MM),
             min_timestamp.format(TIMESTAMPTZ_FORMAT_HH_MM)
         );
         min_timestamp
     } else if *timestamptz > max_timestamp {
         warn!(
-            "Clamping timestamptz {} to BigQuery maximum: {}",
+            "clamping timestamptz {} to BigQuery maximum: {}",
             timestamptz.format(TIMESTAMPTZ_FORMAT_HH_MM),
             max_timestamp.format(TIMESTAMPTZ_FORMAT_HH_MM)
         );
