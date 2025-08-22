@@ -348,6 +348,28 @@ mod tests {
     use std::str::FromStr;
 
     #[test]
+    fn test_is_numeric_within_limits_simple() {
+        assert!(is_numeric_within_bigquery_bignumeric_limits("123.45"));
+        assert!(is_numeric_within_bigquery_bignumeric_limits("-123.45"));
+        assert!(is_numeric_within_bigquery_bignumeric_limits("0"));
+    }
+
+    #[test]
+    fn test_is_numeric_within_limits_edge_cases() {
+        // Too many digits (>76)
+        let very_long_number = "1234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890";
+        assert!(!is_numeric_within_bigquery_bignumeric_limits(very_long_number));
+
+        // Too many fractional digits (>38)
+        let excessive_decimals = "123.123456789012345678901234567890123456789012345678901234567890";
+        assert!(!is_numeric_within_bigquery_bignumeric_limits(excessive_decimals));
+
+        // Reasonable large within limits (74 total digits)
+        let reasonable_large = "1234567890123456789012345678901234567.1234567890123456789012345678901234567";
+        assert!(is_numeric_within_bigquery_bignumeric_limits(reasonable_large));
+    }
+
+    #[test]
     fn test_clamp_numeric_within_bounds() {
         let numeric = PgNumeric::from_str("123.456").unwrap();
         let result = clamp_numeric_for_bigquery(&numeric);
@@ -370,6 +392,25 @@ mod tests {
     fn test_clamp_numeric_negative_infinity() {
         let result = clamp_numeric_for_bigquery(&PgNumeric::NegativeInfinity);
         assert!(result.starts_with("-5.7896044618"));
+    }
+
+    #[test]
+    fn test_numeric_exceeds_limits_positive_and_negative() {
+        // Excessive magnitude clamps to max/min
+        let too_big = PgNumeric::from_str("1e1000").unwrap();
+        let too_small = PgNumeric::from_str("-1e1000").unwrap();
+        let maxed = clamp_numeric_for_bigquery(&too_big);
+        let mined = clamp_numeric_for_bigquery(&too_small);
+        assert!(maxed.starts_with("5.7896044618"));
+        assert!(mined.starts_with("-5.7896044618"));
+    }
+
+    #[test]
+    fn test_numeric_too_many_fractional_digits() {
+        // 39 fractional digits -> clamp to extreme
+        let val = PgNumeric::from_str("1.123456789012345678901234567890123456789").unwrap();
+        let clamped = clamp_numeric_for_bigquery(&val);
+        assert!(clamped.starts_with("5.7896044618"));
     }
 
     #[test]
@@ -425,31 +466,40 @@ mod tests {
     }
 
     #[test]
-    fn test_is_numeric_within_limits_simple() {
-        assert!(is_numeric_within_bigquery_bignumeric_limits("123.45"));
-        assert!(is_numeric_within_bigquery_bignumeric_limits("-123.45"));
-        assert!(is_numeric_within_bigquery_bignumeric_limits("0"));
+    fn test_clamp_datetime_before_min() {
+        let before_min_date = NaiveDate::from_ymd_opt(1, 1, 1).unwrap().pred_opt().unwrap();
+        let dt = NaiveDateTime::new(before_min_date, NaiveTime::from_hms_opt(0, 0, 0).unwrap());
+        let result = clamp_datetime_for_bigquery(&dt);
+        assert_eq!(result, "0001-01-01 00:00:00");
     }
 
     #[test]
-    fn test_is_numeric_within_limits_edge_cases() {
-        // Test with a very long number that would exceed BigQuery BIGNUMERIC limits (>76 digits)
-        let very_long_number = "1234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890";
-        assert!(!is_numeric_within_bigquery_bignumeric_limits(
-            very_long_number
-        ));
-
-        // Test with excessive decimal places (>38 decimal places)
-        let excessive_decimals = "123.123456789012345678901234567890123456789012345678901234567890";
-        assert!(!is_numeric_within_bigquery_bignumeric_limits(
-            excessive_decimals
-        ));
-
-        // Test reasonable values that should pass (74 total digits: 37 before + 37 after decimal point)
-        let reasonable_large =
-            "1234567890123456789012345678901234567.1234567890123456789012345678901234567";
-        assert!(is_numeric_within_bigquery_bignumeric_limits(
-            reasonable_large
-        ));
+    fn test_clamp_datetime_after_max() {
+        let after_max_date = NaiveDate::from_ymd_opt(10000, 1, 1).unwrap();
+        let dt = NaiveDateTime::new(after_max_date, NaiveTime::from_hms_opt(0, 0, 0).unwrap());
+        let result = clamp_datetime_for_bigquery(&dt);
+        assert_eq!(result, "9999-12-31 23:59:59.999999");
     }
+
+    #[test]
+    fn test_clamp_timestamptz_before_min() {
+        let before_min_date = NaiveDate::from_ymd_opt(1, 1, 1).unwrap().pred_opt().unwrap();
+        let ts = Utc.from_utc_datetime(&NaiveDateTime::new(
+            before_min_date,
+            NaiveTime::from_hms_opt(0, 0, 0).unwrap(),
+        ));
+        let result = clamp_timestamptz_for_bigquery(&ts);
+        assert_eq!(result, "0001-01-01 00:00:00+00:00");
+    }
+
+    #[test]
+    fn test_clamp_timestamptz_after_max() {
+        let after_max_date = NaiveDate::from_ymd_opt(10000, 1, 1).unwrap();
+        let ts = Utc.from_utc_datetime(&NaiveDateTime::new(
+            after_max_date,
+            NaiveTime::from_hms_opt(0, 0, 0).unwrap(),
+        ));
+        let result = clamp_timestamptz_for_bigquery(&ts);
+        assert_eq!(result, "9999-12-31 23:59:59.999999+00:00");
+    }   
 }
