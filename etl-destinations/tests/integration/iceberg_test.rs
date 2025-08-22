@@ -11,7 +11,7 @@ fn get_catalog_url() -> String {
 }
 
 #[tokio::test]
-async fn test_create_namespace() {
+async fn create_namespace() {
     init_test_tracing();
 
     let lakekeeper_client = LakekeeperClient::new(LAKEKEEPER_URL);
@@ -25,18 +25,16 @@ async fn test_create_namespace() {
 
     // create namespace for the first time
     client.create_namespace_if_missing(namespace).await.unwrap();
-
     // namespace should exist now
     assert!(client.namespace_exists(namespace).await.unwrap());
 
     // trying to create an existing namespace is a no-op
     client.create_namespace_if_missing(namespace).await.unwrap();
-
     // namespace still exists
     assert!(client.namespace_exists(namespace).await.unwrap());
 
     // Manual cleanup for now because lakekeeper doesn't allow cascade delete at the warehouse level
-    // This feature is planned for future releases when we'll start to use it clean up it one fell swoop.
+    // This feature is planned for future releases. We'll start to use it when it becomes available.
     // The cleanup is not in a Drop impl because each test has different number of object specitic to
     // that test.
     client.drop_namespace(namespace).await.unwrap();
@@ -47,7 +45,46 @@ async fn test_create_namespace() {
 }
 
 #[tokio::test]
-async fn test_create_table_if_missing() {
+async fn create_hierarchical_namespace() {
+    init_test_tracing();
+
+    let lakekeeper_client = LakekeeperClient::new(LAKEKEEPER_URL);
+    let (warehouse_name, warehouse_id) = lakekeeper_client.create_warehouse().await.unwrap();
+    let client = IcebergClient::new_with_rest_catalog(get_catalog_url(), warehouse_name);
+
+    let root_namespace = "root_namespace";
+
+    // create namespace for the first time
+    client
+        .create_namespace_if_missing(root_namespace)
+        .await
+        .unwrap();
+    // root namespace should exist now
+    assert!(client.namespace_exists(root_namespace).await.unwrap());
+
+    let child_namespace = &format!("{root_namespace}.child_namespace");
+
+    client
+        .create_namespace_if_missing(child_namespace)
+        .await
+        .unwrap();
+    // child namespace should exist now
+    assert!(client.namespace_exists(child_namespace).await.unwrap());
+
+    // Manual cleanup for now because lakekeeper doesn't allow cascade delete at the warehouse level
+    // This feature is planned for future releases. We'll start to use it when it becomes available.
+    // The cleanup is not in a Drop impl because each test has different number of object specitic to
+    // that test.
+    client.drop_namespace(child_namespace).await.unwrap();
+    client.drop_namespace(root_namespace).await.unwrap();
+    lakekeeper_client
+        .drop_warehouse(warehouse_id)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn create_table_if_missing() {
     init_test_tracing();
 
     let lakekeeper_client = LakekeeperClient::new(LAKEKEEPER_URL);
@@ -296,7 +333,7 @@ async fn test_create_table_if_missing() {
     );
 
     // Manual cleanup for now because lakekeeper doesn't allow cascade delete at the warehouse level
-    // This feature is planned for future releases when we'll start to use it clean up it one fell swoop.
+    // This feature is planned for future releases. We'll start to use it when it becomes available.
     // The cleanup is not in a Drop impl because each test has different number of object specitic to
     // that test.
     client.drop_table(namespace, table_name).await.unwrap();
