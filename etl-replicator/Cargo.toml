@@ -6,7 +6,7 @@ edition = "2024"
 [dependencies]
 etl = { workspace = true, features = ["unknown-types-to-bytes"] }
 etl-config = { workspace = true }
-etl-destinations = { workspace = true, features = ["bigquery"] }
+etl-destinations = { workspace = true, features = ["bigquery", "iceberg"] }
 etl-telemetry = { workspace = true }
 
 anyhow = { workspace = true, features = ["std"] }
