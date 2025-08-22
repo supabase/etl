@@ -101,7 +101,7 @@ const REPLICATOR_STATEFUL_SET_SUFFIX: &str = "replicator-stateful-set";
 const REPLICATOR_APP_SUFFIX: &str = "replicator-app";
 const REPLICATOR_CONTAINER_NAME_SUFFIX: &str = "replicator";
 const VECTOR_CONTAINER_NAME_SUFFIX: &str = "vector";
-const NAMESPACE_NAME: &str = "replicator-data-plane";
+const DATA_PLANE_NAMESPACE: &str = "etl-data-plane";
 const LOGFLARE_SECRET_NAME: &str = "replicator-logflare-api-key";
 const VECTOR_IMAGE_NAME: &str = "timberio/vector:0.46.1-distroless-libc";
 const VECTOR_CONFIG_MAP_NAME: &str = "replicator-vector-config";
@@ -118,10 +118,11 @@ impl HttpK8sClient {
     pub async fn new() -> Result<HttpK8sClient, K8sError> {
         let client = Client::try_default().await?;
 
-        let secrets_api: Api<Secret> = Api::namespaced(client.clone(), NAMESPACE_NAME);
-        let config_maps_api: Api<ConfigMap> = Api::namespaced(client.clone(), NAMESPACE_NAME);
-        let stateful_sets_api: Api<StatefulSet> = Api::namespaced(client.clone(), NAMESPACE_NAME);
-        let pods_api: Api<Pod> = Api::namespaced(client, NAMESPACE_NAME);
+        let secrets_api: Api<Secret> = Api::namespaced(client.clone(), DATA_PLANE_NAMESPACE);
+        let config_maps_api: Api<ConfigMap> = Api::namespaced(client.clone(), DATA_PLANE_NAMESPACE);
+        let stateful_sets_api: Api<StatefulSet> =
+            Api::namespaced(client.clone(), DATA_PLANE_NAMESPACE);
+        let pods_api: Api<Pod> = Api::namespaced(client, DATA_PLANE_NAMESPACE);
 
         Ok(HttpK8sClient {
             secrets_api,
@@ -148,7 +149,7 @@ impl K8sClient for HttpK8sClient {
           "kind": "Secret",
           "metadata": {
             "name": secret_name,
-            "namespace": NAMESPACE_NAME,
+            "namespace": DATA_PLANE_NAMESPACE,
           },
           "type": "Opaque",
           "data": {
@@ -180,7 +181,7 @@ impl K8sClient for HttpK8sClient {
           "kind": "Secret",
           "metadata": {
             "name": secret_name,
-            "namespace": NAMESPACE_NAME,
+            "namespace": DATA_PLANE_NAMESPACE,
           },
           "type": "Opaque",
           "data": {
@@ -262,7 +263,7 @@ impl K8sClient for HttpK8sClient {
           "apiVersion": "v1",
           "metadata": {
             "name": config_map_name,
-            "namespace": NAMESPACE_NAME,
+            "namespace": DATA_PLANE_NAMESPACE,
           },
           "data": {
             "base.yaml": base_config,
@@ -319,7 +320,7 @@ impl K8sClient for HttpK8sClient {
           "kind": "StatefulSet",
           "metadata": {
             "name": stateful_set_name,
-            "namespace": NAMESPACE_NAME,
+            "namespace": DATA_PLANE_NAMESPACE,
           },
           "spec": {
             "replicas": 1,
