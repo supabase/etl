@@ -7,40 +7,35 @@ use iceberg::spec::{
 
 use crate::schema::is_array_type;
 
-/// Converts Postgres types to equivalent Iceberg types
-pub fn postgres_to_iceberg_type(typ: &Type) -> IcebergType {
-    if is_array_type(typ) {
-        postgres_array_type_to_iceberg_type(typ)
-    } else {
-        postgres_scalar_type_to_iceberg_type(typ)
-    }
-}
-
 /// Converts a Postgres array type to equivalent Iceberg type
-fn postgres_array_type_to_iceberg_type(typ: &Type) -> IcebergType {
+fn postgres_array_type_to_iceberg_type(typ: &Type, field_id: i32) -> IcebergType {
     match typ {
-        &Type::BOOL_ARRAY => create_iceberg_list_type(PrimitiveType::Boolean),
+        &Type::BOOL_ARRAY => create_iceberg_list_type(PrimitiveType::Boolean, field_id),
         &Type::CHAR_ARRAY
         | &Type::BPCHAR_ARRAY
         | &Type::VARCHAR_ARRAY
         | &Type::NAME_ARRAY
-        | &Type::TEXT_ARRAY => create_iceberg_list_type(PrimitiveType::String),
-        &Type::INT2_ARRAY | &Type::INT4_ARRAY => create_iceberg_list_type(PrimitiveType::Int),
-        &Type::INT8_ARRAY => create_iceberg_list_type(PrimitiveType::Long),
-        &Type::FLOAT4_ARRAY => create_iceberg_list_type(PrimitiveType::Float),
-        &Type::FLOAT8_ARRAY => create_iceberg_list_type(PrimitiveType::Double),
+        | &Type::TEXT_ARRAY => create_iceberg_list_type(PrimitiveType::String, field_id),
+        &Type::INT2_ARRAY | &Type::INT4_ARRAY => {
+            create_iceberg_list_type(PrimitiveType::Int, field_id)
+        }
+        &Type::INT8_ARRAY => create_iceberg_list_type(PrimitiveType::Long, field_id),
+        &Type::FLOAT4_ARRAY => create_iceberg_list_type(PrimitiveType::Float, field_id),
+        &Type::FLOAT8_ARRAY => create_iceberg_list_type(PrimitiveType::Double, field_id),
         // numeric is mapped to string for now because decimal type in Iceberg needs scale and precision
         // which we don't have in the Type
-        &Type::NUMERIC_ARRAY => create_iceberg_list_type(PrimitiveType::String),
-        &Type::DATE_ARRAY => create_iceberg_list_type(PrimitiveType::Date),
-        &Type::TIME_ARRAY => create_iceberg_list_type(PrimitiveType::Time),
-        &Type::TIMESTAMP_ARRAY => create_iceberg_list_type(PrimitiveType::Timestamp),
-        &Type::TIMESTAMPTZ_ARRAY => create_iceberg_list_type(PrimitiveType::Timestamptz),
-        &Type::UUID_ARRAY => create_iceberg_list_type(PrimitiveType::Uuid),
-        &Type::JSON_ARRAY | &Type::JSONB_ARRAY => create_iceberg_list_type(PrimitiveType::String),
-        &Type::OID_ARRAY => create_iceberg_list_type(PrimitiveType::Int),
-        &Type::BYTEA_ARRAY => create_iceberg_list_type(PrimitiveType::Binary),
-        _ => create_iceberg_list_type(PrimitiveType::String),
+        &Type::NUMERIC_ARRAY => create_iceberg_list_type(PrimitiveType::String, field_id),
+        &Type::DATE_ARRAY => create_iceberg_list_type(PrimitiveType::Date, field_id),
+        &Type::TIME_ARRAY => create_iceberg_list_type(PrimitiveType::Time, field_id),
+        &Type::TIMESTAMP_ARRAY => create_iceberg_list_type(PrimitiveType::Timestamp, field_id),
+        &Type::TIMESTAMPTZ_ARRAY => create_iceberg_list_type(PrimitiveType::Timestamptz, field_id),
+        &Type::UUID_ARRAY => create_iceberg_list_type(PrimitiveType::Uuid, field_id),
+        &Type::JSON_ARRAY | &Type::JSONB_ARRAY => {
+            create_iceberg_list_type(PrimitiveType::String, field_id)
+        }
+        &Type::OID_ARRAY => create_iceberg_list_type(PrimitiveType::Int, field_id),
+        &Type::BYTEA_ARRAY => create_iceberg_list_type(PrimitiveType::Binary, field_id),
+        _ => create_iceberg_list_type(PrimitiveType::String, field_id),
     }
 }
 
@@ -70,16 +65,14 @@ fn postgres_scalar_type_to_iceberg_type(typ: &Type) -> IcebergType {
     }
 }
 
-const LIST_FIELD_ID: i32 = 0;
-
 /// Creates an Iceberg list type with the specified element type.
-fn create_iceberg_list_type(element_type: PrimitiveType) -> IcebergType {
+fn create_iceberg_list_type(element_type: PrimitiveType, field_id: i32) -> IcebergType {
     // Create the element field with a standard name
-    // Use the Iceberg convention of field id 0 and name 'element' for name
+    // Use the provided field_id for the element field to ensure uniqueness
     let element_field = Arc::new(NestedField::list_element(
-        LIST_FIELD_ID,
+        field_id,
         IcebergType::Primitive(element_type),
-        true,
+        false,
     ));
 
     let list_type = ListType { element_field };
@@ -94,7 +87,15 @@ pub fn postgres_to_iceberg_schema(schema: &TableSchema) -> Result<IcebergSchema,
 
     // Convert each column to Iceberg field
     for column in &schema.column_schemas {
-        let field_type = postgres_to_iceberg_type(&column.typ);
+        let field_type = if is_array_type(&column.typ) {
+            // For array types, we need to assign a unique field ID to the list element
+            // We increment field_id and use it for the element field
+            field_id += 1;
+            postgres_array_type_to_iceberg_type(&column.typ, field_id - 1)
+        } else {
+            postgres_scalar_type_to_iceberg_type(&column.typ)
+        };
+
         let field = if column.nullable {
             NestedField::optional(field_id, &column.name, field_type)
         } else {
@@ -114,6 +115,15 @@ mod tests {
     use iceberg::spec::LIST_FIELD_NAME;
 
     use super::*;
+
+    /// Converts Postgres types to equivalent Iceberg types
+    fn postgres_to_iceberg_type(typ: &Type) -> IcebergType {
+        if is_array_type(typ) {
+            postgres_array_type_to_iceberg_type(typ, 0) // Use 0 as placeholder for tests
+        } else {
+            postgres_scalar_type_to_iceberg_type(typ)
+        }
+    }
 
     #[test]
     fn test_postgres_to_iceberg_scalar_types() {
@@ -309,17 +319,17 @@ mod tests {
 
     #[test]
     fn test_create_iceberg_list_type() {
-        let list_type = create_iceberg_list_type(PrimitiveType::String);
+        let list_type = create_iceberg_list_type(PrimitiveType::String, 1);
 
         assert!(matches!(list_type, IcebergType::List(_)));
         if let IcebergType::List(list) = list_type {
-            assert_eq!(list.element_field.id, LIST_FIELD_ID);
+            assert_eq!(list.element_field.id, 1);
             assert_eq!(list.element_field.name, LIST_FIELD_NAME);
             assert_eq!(
                 *list.element_field.field_type,
                 IcebergType::Primitive(PrimitiveType::String)
             );
-            assert!(list.element_field.required);
+            assert!(!list.element_field.required);
         }
     }
 
@@ -335,21 +345,21 @@ mod tests {
     fn test_postgres_array_type_fallback() {
         // Test that non-array types passed to array function still get handled
         // This tests the fallback case in the array function
-        let array_type = postgres_array_type_to_iceberg_type(&Type::BOOL); // Not an array type
+        let array_type = postgres_array_type_to_iceberg_type(&Type::BOOL, 1); // Not an array type
         assert!(matches!(array_type, IcebergType::List(_)));
         assert_list_type(array_type, PrimitiveType::String);
     }
 
     #[test]
     fn test_list_type_element_field_properties() {
-        let list_type = create_iceberg_list_type(PrimitiveType::Boolean);
+        let list_type = create_iceberg_list_type(PrimitiveType::Boolean, 2);
         assert!(matches!(list_type, IcebergType::List(_)));
 
         if let IcebergType::List(list) = list_type {
             // Test that the element field has the correct properties
-            assert_eq!(list.element_field.id, LIST_FIELD_ID);
+            assert_eq!(list.element_field.id, 2);
             assert_eq!(list.element_field.name, LIST_FIELD_NAME);
-            assert!(list.element_field.required);
+            assert!(!list.element_field.required);
             assert_eq!(
                 *list.element_field.field_type,
                 IcebergType::Primitive(PrimitiveType::Boolean)
