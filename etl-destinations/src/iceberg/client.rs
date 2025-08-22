@@ -13,7 +13,7 @@ pub struct IcebergClient {
 }
 
 impl IcebergClient {
-    /// Creates a new `[IcebergClient]` from a REST catalog URI and a warehouse name.
+    /// Creates a new [IcebergClient] from a REST catalog URI and a warehouse name.
     pub fn new_with_rest_catalog(catalog_uri: String, warehouse_name: String) -> Self {
         let catalog_config = RestCatalogConfig::builder()
             .uri(catalog_uri)
