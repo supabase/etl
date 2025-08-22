@@ -75,7 +75,6 @@ pub fn clamp_numeric_for_bigquery(numeric: &PgNumeric) -> String {
                 numeric_str
             } else {
                 // Determine if we should clamp to min or max
-
                 if numeric_str.starts_with('-') {
                     warn!(
                         "clamping numeric value {} to BigQuery BIGNUMERIC minimum: {}",
@@ -98,12 +97,10 @@ pub fn clamp_numeric_for_bigquery(numeric: &PgNumeric) -> String {
 ///
 /// BIGNUMERIC supports up to ~77 digits of precision with up to 38 decimal places.
 /// This is extremely generous and should handle virtually all real-world numeric values.
+///
+/// When parsing this, we are safely assuming that the number is correctly formatted since it's supplied
+/// by converting a `PgNumeric` into a `String`. This allows the parsing to be simpler and faster.
 fn is_numeric_within_bigquery_bignumeric_limits(numeric_str: &str) -> bool {
-    // Length-based safety check - if the string is extremely long, it might exceed limits
-    if numeric_str.len() > 100 {
-        return false;
-    }
-
     // Count actual digits (excluding sign, decimal point)
     let digit_count: usize = numeric_str.chars().filter(|c| c.is_ascii_digit()).count();
 
@@ -123,7 +120,6 @@ fn is_numeric_within_bigquery_bignumeric_limits(numeric_str: &str) -> bool {
         }
     }
 
-    // BIGNUMERIC limits are so generous that most values will pass
     true
 }
 
