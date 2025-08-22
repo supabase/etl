@@ -1,9 +1,7 @@
+use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Utc};
 use etl::types::PgNumeric;
 use etl_postgres::time::{DATE_FORMAT, TIME_FORMAT, TIMESTAMP_FORMAT, TIMESTAMPTZ_FORMAT_HH_MM};
 use tracing::warn;
-
-// Import chrono types from where they're re-exported by dependencies
-use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Utc};
 
 /// BigQuery BIGNUMERIC minimum value (simplified representation)
 /// BIGNUMERIC supports up to ~77 digits with 38 decimal places, which is much larger than most practical needs.
