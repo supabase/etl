@@ -1,7 +1,8 @@
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Utc};
+use etl::bail;
 use etl::error::{ErrorKind, EtlError, EtlResult};
 use etl::types::{ArrayCellNonOptional, CellNonOptional, PgNumeric};
-use etl::{bail, etl_error};
+use std::sync::LazyLock;
 
 /// BigQuery BIGNUMERIC maximum practical digits for validation
 const BIGQUERY_BIGNUMERIC_MAX_PRACTICAL_DIGITS: usize = 76;
@@ -20,6 +21,63 @@ const BIGQUERY_TIME_MIN: (u32, u32, u32) = (0, 0, 0);
 
 /// BigQuery TIME maximum value: 23:59:59.999999
 const BIGQUERY_TIME_MAX: (u32, u32, u32, u32) = (23, 59, 59, 999999);
+
+/// Static minimum BigQuery date value (0001-01-01)
+static BIGQUERY_MIN_DATE: LazyLock<NaiveDate> = LazyLock::new(|| {
+    NaiveDate::from_ymd_opt(
+        BIGQUERY_DATE_MIN.0,
+        BIGQUERY_DATE_MIN.1,
+        BIGQUERY_DATE_MIN.2,
+    )
+    .expect("BigQuery minimum date should be valid")
+});
+
+/// Static maximum BigQuery date value (9999-12-31)
+static BIGQUERY_MAX_DATE: LazyLock<NaiveDate> = LazyLock::new(|| {
+    NaiveDate::from_ymd_opt(
+        BIGQUERY_DATE_MAX.0,
+        BIGQUERY_DATE_MAX.1,
+        BIGQUERY_DATE_MAX.2,
+    )
+    .expect("BigQuery maximum date should be valid")
+});
+
+/// Static minimum BigQuery time value (00:00:00)
+static BIGQUERY_MIN_TIME: LazyLock<NaiveTime> = LazyLock::new(|| {
+    NaiveTime::from_hms_opt(
+        BIGQUERY_TIME_MIN.0,
+        BIGQUERY_TIME_MIN.1,
+        BIGQUERY_TIME_MIN.2,
+    )
+    .expect("BigQuery minimum time should be valid")
+});
+
+/// Static maximum BigQuery time value (23:59:59.999999)
+static BIGQUERY_MAX_TIME: LazyLock<NaiveTime> = LazyLock::new(|| {
+    NaiveTime::from_hms_micro_opt(
+        BIGQUERY_TIME_MAX.0,
+        BIGQUERY_TIME_MAX.1,
+        BIGQUERY_TIME_MAX.2,
+        BIGQUERY_TIME_MAX.3,
+    )
+    .expect("BigQuery maximum time should be valid")
+});
+
+/// Static minimum BigQuery datetime value (0001-01-01 00:00:00)
+static BIGQUERY_MIN_DATETIME: LazyLock<NaiveDateTime> =
+    LazyLock::new(|| NaiveDateTime::new(*BIGQUERY_MIN_DATE, *BIGQUERY_MIN_TIME));
+
+/// Static maximum BigQuery datetime value (9999-12-31 23:59:59.999999)
+static BIGQUERY_MAX_DATETIME: LazyLock<NaiveDateTime> =
+    LazyLock::new(|| NaiveDateTime::new(*BIGQUERY_MAX_DATE, *BIGQUERY_MAX_TIME));
+
+/// Static minimum BigQuery timestamp value (0001-01-01 00:00:00 UTC)
+static BIGQUERY_MIN_TIMESTAMP: LazyLock<DateTime<Utc>> =
+    LazyLock::new(|| Utc.from_utc_datetime(&BIGQUERY_MIN_DATETIME));
+
+/// Static maximum BigQuery timestamp value (9999-12-31 23:59:59.999999 UTC)
+static BIGQUERY_MAX_TIMESTAMP: LazyLock<DateTime<Utc>> =
+    LazyLock::new(|| Utc.from_utc_datetime(&BIGQUERY_MAX_DATETIME));
 
 /// Validates that a [`PgNumeric`] value is within BigQuery's BIGNUMERIC supported range.
 ///
@@ -74,50 +132,26 @@ pub fn validate_numeric_for_bigquery(numeric: &PgNumeric) -> EtlResult<()> {
 /// Returns an error if the date is outside BigQuery's supported range instead of clamping.
 /// BigQuery DATE supports values from 0001-01-01 to 9999-12-31.
 pub fn validate_date_for_bigquery(date: &NaiveDate) -> EtlResult<()> {
-    let min_date = NaiveDate::from_ymd_opt(
-        BIGQUERY_DATE_MIN.0,
-        BIGQUERY_DATE_MIN.1,
-        BIGQUERY_DATE_MIN.2,
-    )
-    .ok_or_else(|| {
-        etl_error!(
-            ErrorKind::UnsupportedValue,
-            "Invalid minimum BigQuery date bounds"
-        )
-    })?;
-
-    let max_date = NaiveDate::from_ymd_opt(
-        BIGQUERY_DATE_MAX.0,
-        BIGQUERY_DATE_MAX.1,
-        BIGQUERY_DATE_MAX.2,
-    )
-    .ok_or_else(|| {
-        etl_error!(
-            ErrorKind::UnsupportedValue,
-            "Invalid maximum BigQuery date bounds"
-        )
-    })?;
-
-    if *date < min_date {
+    if *date < *BIGQUERY_MIN_DATE {
         bail!(
             ErrorKind::UnsupportedValue,
             "Date value is before BigQuery's minimum supported date",
             format!(
                 "The date '{}' is before BigQuery's minimum supported date '{}'. BigQuery DATE supports values from 0001-01-01 to 9999-12-31",
                 date.format("%Y-%m-%d"),
-                min_date.format("%Y-%m-%d")
+                BIGQUERY_MIN_DATE.format("%Y-%m-%d")
             )
         );
     }
 
-    if *date > max_date {
+    if *date > *BIGQUERY_MAX_DATE {
         bail!(
             ErrorKind::UnsupportedValue,
             "Date value is after BigQuery's maximum supported date",
             format!(
                 "The date '{}' is after BigQuery's maximum supported date '{}'. BigQuery DATE supports values from 0001-01-01 to 9999-12-31",
                 date.format("%Y-%m-%d"),
-                max_date.format("%Y-%m-%d")
+                BIGQUERY_MAX_DATE.format("%Y-%m-%d")
             )
         );
     }
@@ -130,51 +164,26 @@ pub fn validate_date_for_bigquery(date: &NaiveDate) -> EtlResult<()> {
 /// Returns an error if the time is outside BigQuery's supported range instead of clamping.
 /// BigQuery TIME supports values from 00:00:00 to 23:59:59.999999.
 pub fn validate_time_for_bigquery(time: &NaiveTime) -> EtlResult<()> {
-    let min_time = NaiveTime::from_hms_opt(
-        BIGQUERY_TIME_MIN.0,
-        BIGQUERY_TIME_MIN.1,
-        BIGQUERY_TIME_MIN.2,
-    )
-    .ok_or_else(|| {
-        etl_error!(
-            ErrorKind::UnsupportedValue,
-            "Invalid minimum BigQuery time bounds"
-        )
-    })?;
-
-    let max_time = NaiveTime::from_hms_micro_opt(
-        BIGQUERY_TIME_MAX.0,
-        BIGQUERY_TIME_MAX.1,
-        BIGQUERY_TIME_MAX.2,
-        BIGQUERY_TIME_MAX.3,
-    )
-    .ok_or_else(|| {
-        etl_error!(
-            ErrorKind::UnsupportedValue,
-            "Invalid maximum BigQuery time bounds"
-        )
-    })?;
-
-    if *time < min_time {
+    if *time < *BIGQUERY_MIN_TIME {
         bail!(
             ErrorKind::UnsupportedValue,
             "Time value is before BigQuery's minimum supported time",
             format!(
                 "The time '{}' is before BigQuery's minimum supported time '{}'. BigQuery TIME supports values from 00:00:00 to 23:59:59.999999",
                 time.format("%H:%M:%S"),
-                min_time.format("%H:%M:%S")
+                BIGQUERY_MIN_TIME.format("%H:%M:%S")
             )
         );
     }
 
-    if *time > max_time {
+    if *time > *BIGQUERY_MAX_TIME {
         bail!(
             ErrorKind::UnsupportedValue,
             "Time value is after BigQuery's maximum supported time",
             format!(
                 "The time '{}' is after BigQuery's maximum supported time '{}'. BigQuery TIME supports values from 00:00:00 to 23:59:59.999999",
                 time.format("%H:%M:%S%.6f"),
-                max_time.format("%H:%M:%S%.6f")
+                BIGQUERY_MAX_TIME.format("%H:%M:%S%.6f")
             )
         );
     }
@@ -187,78 +196,26 @@ pub fn validate_time_for_bigquery(time: &NaiveTime) -> EtlResult<()> {
 /// Returns an error if the datetime is outside BigQuery's supported range instead of clamping.
 /// BigQuery DATETIME supports values from 0001-01-01 00:00:00 to 9999-12-31 23:59:59.999999.
 pub fn validate_datetime_for_bigquery(datetime: &NaiveDateTime) -> EtlResult<()> {
-    let min_date = NaiveDate::from_ymd_opt(
-        BIGQUERY_DATE_MIN.0,
-        BIGQUERY_DATE_MIN.1,
-        BIGQUERY_DATE_MIN.2,
-    )
-    .ok_or_else(|| {
-        etl_error!(
-            ErrorKind::UnsupportedValue,
-            "Invalid minimum BigQuery date bounds"
-        )
-    })?;
-
-    let min_time = NaiveTime::from_hms_opt(
-        BIGQUERY_TIME_MIN.0,
-        BIGQUERY_TIME_MIN.1,
-        BIGQUERY_TIME_MIN.2,
-    )
-    .ok_or_else(|| {
-        etl_error!(
-            ErrorKind::UnsupportedValue,
-            "Invalid minimum BigQuery time bounds"
-        )
-    })?;
-
-    let max_date = NaiveDate::from_ymd_opt(
-        BIGQUERY_DATE_MAX.0,
-        BIGQUERY_DATE_MAX.1,
-        BIGQUERY_DATE_MAX.2,
-    )
-    .ok_or_else(|| {
-        etl_error!(
-            ErrorKind::UnsupportedValue,
-            "Invalid maximum BigQuery date bounds"
-        )
-    })?;
-
-    let max_time = NaiveTime::from_hms_micro_opt(
-        BIGQUERY_TIME_MAX.0,
-        BIGQUERY_TIME_MAX.1,
-        BIGQUERY_TIME_MAX.2,
-        BIGQUERY_TIME_MAX.3,
-    )
-    .ok_or_else(|| {
-        etl_error!(
-            ErrorKind::UnsupportedValue,
-            "Invalid maximum BigQuery time bounds"
-        )
-    })?;
-
-    let min_datetime = NaiveDateTime::new(min_date, min_time);
-    let max_datetime = NaiveDateTime::new(max_date, max_time);
-
-    if *datetime < min_datetime {
+    if *datetime < *BIGQUERY_MIN_DATETIME {
         bail!(
             ErrorKind::UnsupportedValue,
             "DateTime value is before BigQuery's minimum supported datetime",
             format!(
                 "The datetime '{}' is before BigQuery's minimum supported datetime '{}'. BigQuery DATETIME supports values from 0001-01-01 00:00:00 to 9999-12-31 23:59:59.999999",
                 datetime.format("%Y-%m-%d %H:%M:%S"),
-                min_datetime.format("%Y-%m-%d %H:%M:%S")
+                BIGQUERY_MIN_DATETIME.format("%Y-%m-%d %H:%M:%S")
             )
         );
     }
 
-    if *datetime > max_datetime {
+    if *datetime > *BIGQUERY_MAX_DATETIME {
         bail!(
             ErrorKind::UnsupportedValue,
             "DateTime value is after BigQuery's maximum supported datetime",
             format!(
                 "The datetime '{}' is after BigQuery's maximum supported datetime '{}'. BigQuery DATETIME supports values from 0001-01-01 00:00:00 to 9999-12-31 23:59:59.999999",
                 datetime.format("%Y-%m-%d %H:%M:%S%.6f"),
-                max_datetime.format("%Y-%m-%d %H:%M:%S%.6f")
+                BIGQUERY_MAX_DATETIME.format("%Y-%m-%d %H:%M:%S%.6f")
             )
         );
     }
@@ -271,78 +228,26 @@ pub fn validate_datetime_for_bigquery(datetime: &NaiveDateTime) -> EtlResult<()>
 /// Returns an error if the timestamp is outside BigQuery's supported range instead of clamping.
 /// BigQuery TIMESTAMP supports values from 0001-01-01 00:00:00 UTC to 9999-12-31 23:59:59.999999 UTC.
 pub fn validate_timestamptz_for_bigquery(timestamptz: &DateTime<Utc>) -> EtlResult<()> {
-    let min_date = NaiveDate::from_ymd_opt(
-        BIGQUERY_DATE_MIN.0,
-        BIGQUERY_DATE_MIN.1,
-        BIGQUERY_DATE_MIN.2,
-    )
-    .ok_or_else(|| {
-        etl_error!(
-            ErrorKind::UnsupportedValue,
-            "Invalid minimum BigQuery date bounds"
-        )
-    })?;
-
-    let min_time = NaiveTime::from_hms_opt(
-        BIGQUERY_TIME_MIN.0,
-        BIGQUERY_TIME_MIN.1,
-        BIGQUERY_TIME_MIN.2,
-    )
-    .ok_or_else(|| {
-        etl_error!(
-            ErrorKind::UnsupportedValue,
-            "Invalid minimum BigQuery time bounds"
-        )
-    })?;
-
-    let max_date = NaiveDate::from_ymd_opt(
-        BIGQUERY_DATE_MAX.0,
-        BIGQUERY_DATE_MAX.1,
-        BIGQUERY_DATE_MAX.2,
-    )
-    .ok_or_else(|| {
-        etl_error!(
-            ErrorKind::UnsupportedValue,
-            "Invalid maximum BigQuery date bounds"
-        )
-    })?;
-
-    let max_time = NaiveTime::from_hms_micro_opt(
-        BIGQUERY_TIME_MAX.0,
-        BIGQUERY_TIME_MAX.1,
-        BIGQUERY_TIME_MAX.2,
-        BIGQUERY_TIME_MAX.3,
-    )
-    .ok_or_else(|| {
-        etl_error!(
-            ErrorKind::UnsupportedValue,
-            "Invalid maximum BigQuery time bounds"
-        )
-    })?;
-
-    let min_timestamp = Utc.from_utc_datetime(&NaiveDateTime::new(min_date, min_time));
-    let max_timestamp = Utc.from_utc_datetime(&NaiveDateTime::new(max_date, max_time));
-
-    if *timestamptz < min_timestamp {
+    if *timestamptz < *BIGQUERY_MIN_TIMESTAMP {
         bail!(
             ErrorKind::UnsupportedValue,
             "Timestamp value is before BigQuery's minimum supported timestamp",
             format!(
                 "The timestamp '{}' is before BigQuery's minimum supported timestamp '{}'. BigQuery TIMESTAMP supports values from 0001-01-01 00:00:00 UTC to 9999-12-31 23:59:59.999999 UTC",
                 timestamptz.format("%Y-%m-%d %H:%M:%S%z"),
-                min_timestamp.format("%Y-%m-%d %H:%M:%S%z")
+                BIGQUERY_MIN_TIMESTAMP.format("%Y-%m-%d %H:%M:%S%z")
             )
         );
     }
 
-    if *timestamptz > max_timestamp {
+    if *timestamptz > *BIGQUERY_MAX_TIMESTAMP {
         bail!(
             ErrorKind::UnsupportedValue,
             "Timestamp value is after BigQuery's maximum supported timestamp",
             format!(
                 "The timestamp '{}' is after BigQuery's maximum supported timestamp '{}'. BigQuery TIMESTAMP supports values from 0001-01-01 00:00:00 UTC to 9999-12-31 23:59:59.999999 UTC",
                 timestamptz.format("%Y-%m-%d %H:%M:%S%.6f%z"),
-                max_timestamp.format("%Y-%m-%d %H:%M:%S%.6f%z")
+                BIGQUERY_MAX_TIMESTAMP.format("%Y-%m-%d %H:%M:%S%.6f%z")
             )
         );
     }
