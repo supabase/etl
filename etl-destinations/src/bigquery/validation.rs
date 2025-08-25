@@ -1,28 +1,30 @@
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Utc};
-use etl::bail;
 use etl::error::{ErrorKind, EtlError, EtlResult};
 use etl::types::{ArrayCellNonOptional, CellNonOptional, PgNumeric};
+use etl::{bail, etl_error};
 use std::sync::LazyLock;
 
-/// BigQuery BIGNUMERIC maximum practical digits for validation
+/// BigQuery BIGNUMERIC maximum practical digits for validation.
+///
+/// The actual number of digits is 77, but the 77th digit is partial as per BigQuery docs.
 const BIGQUERY_BIGNUMERIC_MAX_PRACTICAL_DIGITS: usize = 76;
 
-/// BigQuery BIGNUMERIC maximum decimal places
+/// BigQuery BIGNUMERIC maximum decimal places.
 const BIGQUERY_BIGNUMERIC_MAX_SCALE: usize = 38;
 
-/// BigQuery DATE minimum value: 0001-01-01
+/// BigQuery DATE minimum value: 0001-01-01.
 const BIGQUERY_DATE_MIN: (i32, u32, u32) = (1, 1, 1);
 
-/// BigQuery DATE maximum value: 9999-12-31
+/// BigQuery DATE maximum value: 9999-12-31.
 const BIGQUERY_DATE_MAX: (i32, u32, u32) = (9999, 12, 31);
 
-/// BigQuery TIME minimum value: 00:00:00
+/// BigQuery TIME minimum value: 00:00:00.
 const BIGQUERY_TIME_MIN: (u32, u32, u32) = (0, 0, 0);
 
-/// BigQuery TIME maximum value: 23:59:59.999999
+/// BigQuery TIME maximum value: 23:59:59.999999.
 const BIGQUERY_TIME_MAX: (u32, u32, u32, u32) = (23, 59, 59, 999999);
 
-/// Static minimum BigQuery date value (0001-01-01)
+/// Static minimum BigQuery date value (0001-01-01).
 static BIGQUERY_MIN_DATE: LazyLock<NaiveDate> = LazyLock::new(|| {
     NaiveDate::from_ymd_opt(
         BIGQUERY_DATE_MIN.0,
@@ -32,7 +34,7 @@ static BIGQUERY_MIN_DATE: LazyLock<NaiveDate> = LazyLock::new(|| {
     .expect("BigQuery minimum date should be valid")
 });
 
-/// Static maximum BigQuery date value (9999-12-31)
+/// Static maximum BigQuery date value (9999-12-31).
 static BIGQUERY_MAX_DATE: LazyLock<NaiveDate> = LazyLock::new(|| {
     NaiveDate::from_ymd_opt(
         BIGQUERY_DATE_MAX.0,
@@ -42,7 +44,7 @@ static BIGQUERY_MAX_DATE: LazyLock<NaiveDate> = LazyLock::new(|| {
     .expect("BigQuery maximum date should be valid")
 });
 
-/// Static minimum BigQuery time value (00:00:00)
+/// Static minimum BigQuery time value (00:00:00).
 static BIGQUERY_MIN_TIME: LazyLock<NaiveTime> = LazyLock::new(|| {
     NaiveTime::from_hms_opt(
         BIGQUERY_TIME_MIN.0,
@@ -52,7 +54,7 @@ static BIGQUERY_MIN_TIME: LazyLock<NaiveTime> = LazyLock::new(|| {
     .expect("BigQuery minimum time should be valid")
 });
 
-/// Static maximum BigQuery time value (23:59:59.999999)
+/// Static maximum BigQuery time value (23:59:59.999999).
 static BIGQUERY_MAX_TIME: LazyLock<NaiveTime> = LazyLock::new(|| {
     NaiveTime::from_hms_micro_opt(
         BIGQUERY_TIME_MAX.0,
@@ -63,19 +65,19 @@ static BIGQUERY_MAX_TIME: LazyLock<NaiveTime> = LazyLock::new(|| {
     .expect("BigQuery maximum time should be valid")
 });
 
-/// Static minimum BigQuery datetime value (0001-01-01 00:00:00)
+/// Static minimum BigQuery datetime value (0001-01-01 00:00:00).
 static BIGQUERY_MIN_DATETIME: LazyLock<NaiveDateTime> =
     LazyLock::new(|| NaiveDateTime::new(*BIGQUERY_MIN_DATE, *BIGQUERY_MIN_TIME));
 
-/// Static maximum BigQuery datetime value (9999-12-31 23:59:59.999999)
+/// Static maximum BigQuery datetime value (9999-12-31 23:59:59.999999).
 static BIGQUERY_MAX_DATETIME: LazyLock<NaiveDateTime> =
     LazyLock::new(|| NaiveDateTime::new(*BIGQUERY_MAX_DATE, *BIGQUERY_MAX_TIME));
 
-/// Static minimum BigQuery timestamp value (0001-01-01 00:00:00 UTC)
+/// Static minimum BigQuery timestamp value (0001-01-01 00:00:00 UTC).
 static BIGQUERY_MIN_TIMESTAMP: LazyLock<DateTime<Utc>> =
     LazyLock::new(|| Utc.from_utc_datetime(&BIGQUERY_MIN_DATETIME));
 
-/// Static maximum BigQuery timestamp value (9999-12-31 23:59:59.999999 UTC)
+/// Static maximum BigQuery timestamp value (9999-12-31 23:59:59.999999 UTC).
 static BIGQUERY_MAX_TIMESTAMP: LazyLock<DateTime<Utc>> =
     LazyLock::new(|| Utc.from_utc_datetime(&BIGQUERY_MAX_DATETIME));
 
@@ -114,7 +116,7 @@ pub fn validate_numeric_for_bigquery(numeric: &PgNumeric) -> EtlResult<()> {
                     ErrorKind::UnsupportedValue,
                     "Numeric value exceeds BigQuery BIGNUMERIC limits",
                     format!(
-                        "The numeric value '{}' exceeds BigQuery's BIGNUMERIC limits (max {} digits, {} decimal places)",
+                        "The numeric value '{}' exceeds BigQuery's BIGNUMERIC limits (max ~{} digits, {} decimal places)",
                         numeric_str,
                         BIGQUERY_BIGNUMERIC_MAX_PRACTICAL_DIGITS,
                         BIGQUERY_BIGNUMERIC_MAX_SCALE
@@ -299,15 +301,11 @@ pub fn validate_array_cell_for_bigquery(array_cell: &ArrayCellNonOptional) -> Et
         ArrayCellNonOptional::Numeric(numerics) => {
             for (index, numeric) in numerics.iter().enumerate() {
                 validate_numeric_for_bigquery(numeric).map_err(|err| {
-                    if let Some(detail) = err.detail() {
-                        EtlError::from((
-                            ErrorKind::UnsupportedValue,
-                            "Array element validation failed",
-                            format!("Element at index {}: {}", index, detail),
-                        ))
-                    } else {
-                        err
-                    }
+                    etl_error!(
+                        err.kind(),
+                        "Array element validation failed",
+                        format!("Element at index {}: {}", index, err)
+                    )
                 })?;
             }
             Ok(())
@@ -315,15 +313,11 @@ pub fn validate_array_cell_for_bigquery(array_cell: &ArrayCellNonOptional) -> Et
         ArrayCellNonOptional::Date(dates) => {
             for (index, date) in dates.iter().enumerate() {
                 validate_date_for_bigquery(date).map_err(|err| {
-                    if let Some(detail) = err.detail() {
-                        EtlError::from((
-                            ErrorKind::UnsupportedValue,
-                            "Array element validation failed",
-                            format!("Element at index {}: {}", index, detail),
-                        ))
-                    } else {
-                        err
-                    }
+                    etl_error!(
+                        err.kind(),
+                        "Array element validation failed",
+                        format!("Element at index {}: {}", index, err)
+                    )
                 })?;
             }
             Ok(())
@@ -331,15 +325,11 @@ pub fn validate_array_cell_for_bigquery(array_cell: &ArrayCellNonOptional) -> Et
         ArrayCellNonOptional::Time(times) => {
             for (index, time) in times.iter().enumerate() {
                 validate_time_for_bigquery(time).map_err(|err| {
-                    if let Some(detail) = err.detail() {
-                        EtlError::from((
-                            ErrorKind::UnsupportedValue,
-                            "Array element validation failed",
-                            format!("Element at index {}: {}", index, detail),
-                        ))
-                    } else {
-                        err
-                    }
+                    etl_error!(
+                        err.kind(),
+                        "Array element validation failed",
+                        format!("Element at index {}: {}", index, err)
+                    )
                 })?;
             }
             Ok(())
@@ -347,15 +337,11 @@ pub fn validate_array_cell_for_bigquery(array_cell: &ArrayCellNonOptional) -> Et
         ArrayCellNonOptional::TimeStamp(datetimes) => {
             for (index, datetime) in datetimes.iter().enumerate() {
                 validate_datetime_for_bigquery(datetime).map_err(|err| {
-                    if let Some(detail) = err.detail() {
-                        EtlError::from((
-                            ErrorKind::UnsupportedValue,
-                            "Array element validation failed",
-                            format!("Element at index {}: {}", index, detail),
-                        ))
-                    } else {
-                        err
-                    }
+                    etl_error!(
+                        err.kind(),
+                        "Array element validation failed",
+                        format!("Element at index {}: {}", index, err)
+                    )
                 })?;
             }
             Ok(())
@@ -363,15 +349,11 @@ pub fn validate_array_cell_for_bigquery(array_cell: &ArrayCellNonOptional) -> Et
         ArrayCellNonOptional::TimeStampTz(timestamptzs) => {
             for (index, timestamptz) in timestamptzs.iter().enumerate() {
                 validate_timestamptz_for_bigquery(timestamptz).map_err(|err| {
-                    if let Some(detail) = err.detail() {
-                        EtlError::from((
-                            ErrorKind::UnsupportedValue,
-                            "Array element validation failed",
-                            format!("Element at index {}: {}", index, detail),
-                        ))
-                    } else {
-                        err
-                    }
+                    etl_error!(
+                        err.kind(),
+                        "Array element validation failed",
+                        format!("Element at index {}: {}", index, err)
+                    )
                 })?;
             }
             Ok(())
