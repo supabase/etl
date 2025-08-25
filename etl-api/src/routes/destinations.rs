@@ -12,7 +12,7 @@ use utoipa::ToSchema;
 
 use crate::db;
 use crate::db::destinations::DestinationsDbError;
-use crate::encryption::EncryptionKey;
+use crate::configs::encryption::EncryptionKey;
 use crate::routes::{ErrorMessage, TenantIdError, extract_tenant_id};
 
 #[derive(Debug, Error)]

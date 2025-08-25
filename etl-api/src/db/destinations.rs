@@ -6,11 +6,11 @@ use sqlx::PgExecutor;
 use std::fmt::Debug;
 use thiserror::Error;
 
-use crate::db::serde::{
+use crate::configs::serde::{
     DbDeserializationError, DbSerializationError, decrypt_and_deserialize_from_value,
     encrypt_and_serialize,
 };
-use crate::encryption::{
+use crate::configs::encryption::{
     Decrypt, DecryptionError, Encrypt, EncryptedValue, EncryptionError, EncryptionKey,
     decrypt_text, encrypt_text,
 };
@@ -300,8 +300,8 @@ mod tests {
     use etl_config::shared::DestinationConfig;
 
     use crate::db::destinations::EncryptedDestinationConfig;
-    use crate::db::serde::{decrypt_and_deserialize_from_value, encrypt_and_serialize};
-    use crate::encryption::EncryptionKey;
+    use crate::configs::serde::{decrypt_and_deserialize_from_value, encrypt_and_serialize};
+    use crate::configs::encryption::EncryptionKey;
 
     #[test]
     pub fn destination_config_json_deserialization() {

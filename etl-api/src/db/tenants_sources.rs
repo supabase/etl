@@ -2,10 +2,10 @@ use sqlx::PgTransaction;
 use std::ops::DerefMut;
 use thiserror::Error;
 
-use crate::db::serde::DbSerializationError;
+use crate::configs::serde::DbSerializationError;
 use crate::db::sources::{SourceConfig, SourcesDbError, create_source};
 use crate::db::tenants::{TenantsDbError, create_tenant};
-use crate::encryption::EncryptionKey;
+use crate::configs::encryption::EncryptionKey;
 
 #[derive(Debug, Error)]
 pub enum TenantSourceDbError {

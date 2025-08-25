@@ -9,7 +9,7 @@ use utoipa::ToSchema;
 use crate::db;
 use crate::db::destinations::{Destination, DestinationsDbError};
 use crate::db::replicators::{ReplicatorsDbError, create_replicator};
-use crate::db::serde::{
+use crate::configs::serde::{
     DbDeserializationError, DbSerializationError, deserialize_from_value, serialize,
 };
 use crate::db::sources::Source;

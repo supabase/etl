@@ -17,7 +17,7 @@ use crate::{
     authentication::auth_validator,
     config::ApiConfig,
     db::publications::Publication,
-    encryption,
+    configs::encryption,
     k8s_client::{HttpK8sClient, K8sClient},
     routes::{
         destinations::{

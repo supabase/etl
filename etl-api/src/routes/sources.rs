@@ -1,6 +1,6 @@
 use crate::db;
 use crate::db::sources::{SourceConfig, SourcesDbError};
-use crate::encryption::EncryptionKey;
+use crate::configs::encryption::EncryptionKey;
 use crate::routes::{ErrorMessage, TenantIdError, extract_tenant_id};
 use actix_web::{
     HttpRequest, HttpResponse, Responder, ResponseError, delete, get,

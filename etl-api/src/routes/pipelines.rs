@@ -23,7 +23,7 @@ use crate::db::pipelines::{Pipeline, PipelineConfig, PipelinesDbError};
 use crate::db::replicators::{Replicator, ReplicatorsDbError};
 use crate::db::sources::{Source, SourceConfig, SourcesDbError, source_exists};
 use crate::db::{self, pipelines::OptionalPipelineConfig};
-use crate::encryption::EncryptionKey;
+use crate::configs::encryption::EncryptionKey;
 use crate::k8s_client::TRUSTED_ROOT_CERT_KEY_NAME;
 use crate::k8s_client::{K8sClient, K8sError, PodPhase, TRUSTED_ROOT_CERT_CONFIG_MAP_NAME};
 use crate::routes::{

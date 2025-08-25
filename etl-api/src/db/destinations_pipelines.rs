@@ -5,8 +5,8 @@ use thiserror::Error;
 
 use crate::db::destinations::{DestinationsDbError, create_destination, update_destination};
 use crate::db::pipelines::{PipelineConfig, PipelinesDbError, create_pipeline, update_pipeline};
-use crate::db::serde::{DbDeserializationError, DbSerializationError};
-use crate::encryption::EncryptionKey;
+use crate::configs::serde::{DbDeserializationError, DbSerializationError};
+use crate::configs::encryption::EncryptionKey;
 
 #[derive(Debug, Error)]
 pub enum DestinationPipelinesDbError {

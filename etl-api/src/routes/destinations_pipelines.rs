@@ -17,7 +17,7 @@ use crate::db::destinations_pipelines::DestinationPipelinesDbError;
 use crate::db::images::ImagesDbError;
 use crate::db::pipelines::{PipelineConfig, PipelinesDbError, read_pipeline};
 use crate::db::sources::{SourcesDbError, source_exists};
-use crate::encryption::EncryptionKey;
+use crate::configs::encryption::EncryptionKey;
 
 use super::{ErrorMessage, TenantIdError, destinations::DestinationError, extract_tenant_id};
 

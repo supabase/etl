@@ -13,7 +13,7 @@ use crate::db::publications::PublicationsDbError;
 use crate::routes::connect_to_source_database_with_defaults;
 use crate::{
     db::{self, publications::Publication, sources::SourcesDbError, tables::Table},
-    encryption::EncryptionKey,
+    configs::encryption::EncryptionKey,
     routes::{ErrorMessage, TenantIdError, extract_tenant_id},
 };
 
