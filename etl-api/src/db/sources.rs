@@ -1,106 +1,15 @@
-use etl_config::SerializableSecretString;
-use etl_config::shared::{PgConnectionConfig, TlsConfig};
-use secrecy::ExposeSecret;
-use serde::{Deserialize, Serialize};
 use sqlx::PgExecutor;
 use std::fmt::Debug;
 use thiserror::Error;
-use utoipa::ToSchema;
 
-use crate::configs::encryption::{
-    Decrypt, DecryptionError, Encrypt, EncryptedValue, EncryptionError, EncryptionKey,
-    decrypt_text, encrypt_text,
-};
+use crate::configs::encryption::EncryptionKey;
 use crate::configs::serde::{
     DbDeserializationError, DbSerializationError, decrypt_and_deserialize_from_value,
     encrypt_and_serialize,
 };
-
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-#[serde(rename_all = "snake_case")]
-pub struct StoredSourceConfig {
-    #[schema(example = "localhost")]
-    pub host: String,
-    #[schema(example = 5432)]
-    pub port: u16,
-    #[schema(example = "mydb")]
-    pub name: String,
-    #[schema(example = "postgres")]
-    pub username: String,
-    #[schema(example = "secret123")]
-    pub password: Option<SerializableSecretString>,
-}
-
-impl StoredSourceConfig {
-    pub fn into_connection_config(self) -> PgConnectionConfig {
-        PgConnectionConfig {
-            host: self.host,
-            port: self.port,
-            name: self.name,
-            username: self.username,
-            password: self.password,
-            // TODO: enable TLS
-            tls: TlsConfig {
-                trusted_root_certs: String::new(),
-                enabled: false,
-            },
-        }
-    }
-}
-
-impl Encrypt<EncryptedStoredSourceConfig> for StoredSourceConfig {
-    fn encrypt(
-        self,
-        encryption_key: &EncryptionKey,
-    ) -> Result<EncryptedStoredSourceConfig, EncryptionError> {
-        let mut encrypted_password = None;
-        if let Some(password) = self.password {
-            encrypted_password = Some(encrypt_text(
-                password.expose_secret().to_owned(),
-                encryption_key,
-            )?);
-        }
-
-        Ok(EncryptedStoredSourceConfig {
-            host: self.host,
-            port: self.port,
-            name: self.name,
-            username: self.username,
-            password: encrypted_password,
-        })
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub struct EncryptedStoredSourceConfig {
-    host: String,
-    port: u16,
-    name: String,
-    username: String,
-    password: Option<EncryptedValue>,
-}
-
-impl Decrypt<StoredSourceConfig> for EncryptedStoredSourceConfig {
-    fn decrypt(
-        self,
-        encryption_key: &EncryptionKey,
-    ) -> Result<StoredSourceConfig, DecryptionError> {
-        let mut decrypted_password = None;
-        if let Some(password) = self.password {
-            let pwd = decrypt_text(password, encryption_key)?;
-            decrypted_password = Some(SerializableSecretString::from(pwd));
-        }
-
-        Ok(StoredSourceConfig {
-            host: self.host,
-            port: self.port,
-            name: self.name,
-            username: self.username,
-            password: decrypted_password,
-        })
-    }
-}
+use crate::configs::source::{
+    EncryptedStoredSourceConfig, FullApiSourceConfig, StoredSourceConfig,
+};
 
 #[derive(Debug)]
 pub struct Source {
@@ -126,14 +35,14 @@ pub async fn create_source<'c, E>(
     executor: E,
     tenant_id: &str,
     name: &str,
-    config: StoredSourceConfig,
+    config: FullApiSourceConfig,
     encryption_key: &EncryptionKey,
 ) -> Result<i64, SourcesDbError>
 where
     E: PgExecutor<'c>,
 {
     let config = encrypt_and_serialize::<StoredSourceConfig, EncryptedStoredSourceConfig>(
-        config,
+        StoredSourceConfig::from(config),
         encryption_key,
     )?;
 
@@ -199,14 +108,14 @@ pub async fn update_source<'c, E>(
     tenant_id: &str,
     name: &str,
     source_id: i64,
-    config: StoredSourceConfig,
+    config: FullApiSourceConfig,
     encryption_key: &EncryptionKey,
 ) -> Result<Option<i64>, SourcesDbError>
 where
     E: PgExecutor<'c>,
 {
     let config = encrypt_and_serialize::<StoredSourceConfig, EncryptedStoredSourceConfig>(
-        config,
+        StoredSourceConfig::from(config),
         encryption_key,
     )?;
 

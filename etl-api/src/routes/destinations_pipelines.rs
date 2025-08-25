@@ -1,3 +1,15 @@
+use actix_web::{
+    HttpRequest, HttpResponse, Responder, ResponseError, delete,
+    http::{StatusCode, header::ContentType},
+    post,
+    web::{Data, Json, Path},
+};
+use serde::{Deserialize, Serialize};
+use sqlx::PgPool;
+use std::ops::DerefMut;
+use thiserror::Error;
+use utoipa::ToSchema;
+
 use super::{ErrorMessage, TenantIdError, destinations::DestinationError, extract_tenant_id};
 use crate::configs::destination::FullApiDestinationConfig;
 use crate::configs::encryption::EncryptionKey;
@@ -8,18 +20,6 @@ use crate::db::destinations_pipelines::DestinationPipelinesDbError;
 use crate::db::images::ImagesDbError;
 use crate::db::pipelines::{PipelinesDbError, read_pipeline};
 use crate::db::sources::{SourcesDbError, source_exists};
-use actix_web::{
-    HttpRequest, HttpResponse, Responder, ResponseError, delete,
-    http::{StatusCode, header::ContentType},
-    post,
-    web::{Data, Json, Path},
-};
-use etl_config::shared::DestinationConfig;
-use serde::{Deserialize, Serialize};
-use sqlx::PgPool;
-use std::ops::DerefMut;
-use thiserror::Error;
-use utoipa::ToSchema;
 
 #[derive(Debug, Error)]
 enum DestinationPipelineError {

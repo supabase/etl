@@ -2,6 +2,10 @@ use etl_config::shared::{BatchConfig, PgConnectionConfig, PipelineConfig};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
+const DEFAULT_BATCH_MAX_SIZE: usize = 1000000;
+const DEFAULT_BATCH_MAX_FILL_MS: u64 = 10000;
+const DEFAULT_TABLE_ERROR_RETRY_DELAY_MS: u64 = 10000;
+
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct FullApiPipelineConfig {
     #[schema(example = "my_publication")]
@@ -79,10 +83,12 @@ impl From<FullApiPipelineConfig> for StoredPipelineConfig {
         Self {
             publication_name: value.publication_name,
             batch: value.batch.unwrap_or(BatchConfig {
-                max_size: 1000000,
-                max_fill_ms: 10000,
+                max_size: DEFAULT_BATCH_MAX_SIZE,
+                max_fill_ms: DEFAULT_BATCH_MAX_FILL_MS,
             }),
-            table_error_retry_delay_ms: value.table_error_retry_delay_ms.unwrap_or(10000),
+            table_error_retry_delay_ms: value
+                .table_error_retry_delay_ms
+                .unwrap_or(DEFAULT_TABLE_ERROR_RETRY_DELAY_MS),
             max_table_sync_workers: value.max_table_sync_workers.unwrap_or_default(),
         }
     }

@@ -8,6 +8,8 @@ use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
+const DEFAULT_MAX_CONCURRENT_STREAMS: usize = 8;
+
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub enum FullApiDestinationConfig {
     Memory,
@@ -94,7 +96,8 @@ impl From<FullApiDestinationConfig> for StoredDestinationConfig {
                 dataset_id,
                 service_account_key,
                 max_staleness_mins,
-                max_concurrent_streams: max_concurrent_streams.unwrap_or(8),
+                max_concurrent_streams: max_concurrent_streams
+                    .unwrap_or(DEFAULT_MAX_CONCURRENT_STREAMS),
             },
         }
     }

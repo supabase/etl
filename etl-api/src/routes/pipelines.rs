@@ -17,12 +17,13 @@ use utoipa::ToSchema;
 use crate::configs::destination::StoredDestinationConfig;
 use crate::configs::encryption::EncryptionKey;
 use crate::configs::pipeline::{FullApiPipelineConfig, PartialApiPipelineConfig};
+use crate::configs::source::StoredSourceConfig;
 use crate::db;
 use crate::db::destinations::{Destination, DestinationsDbError, destination_exists};
 use crate::db::images::{Image, ImagesDbError};
 use crate::db::pipelines::{Pipeline, PipelinesDbError};
 use crate::db::replicators::{Replicator, ReplicatorsDbError};
-use crate::db::sources::{Source, SourcesDbError, StoredSourceConfig, source_exists};
+use crate::db::sources::{Source, SourcesDbError, source_exists};
 use crate::k8s_client::TRUSTED_ROOT_CERT_KEY_NAME;
 use crate::k8s_client::{K8sClient, K8sError, PodPhase, TRUSTED_ROOT_CERT_CONFIG_MAP_NAME};
 use crate::routes::{

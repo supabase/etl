@@ -11,8 +11,8 @@ use tracing_actix_web::RootSpan;
 use utoipa::ToSchema;
 
 use crate::configs::encryption::EncryptionKey;
+use crate::configs::source::FullApiSourceConfig;
 use crate::db;
-use crate::db::sources::StoredSourceConfig;
 use crate::db::tenants_sources::TenantSourceDbError;
 use crate::routes::ErrorMessage;
 
@@ -67,7 +67,7 @@ pub struct CreateTenantSourceRequest {
     #[schema(example = "My Postgres Source", required = true)]
     pub source_name: String,
     #[schema(required = true)]
-    pub source_config: StoredSourceConfig,
+    pub source_config: FullApiSourceConfig,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
