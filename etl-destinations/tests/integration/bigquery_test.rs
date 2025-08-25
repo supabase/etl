@@ -1537,7 +1537,7 @@ async fn table_array_with_null_values() {
         .unwrap()
         .execute(
             &format!(
-                "INSERT INTO {} (int_array) VALUES (ARRAY[1, NULL])",
+                "insert into {} (int_array) values (array[1, null])",
                 table_name.as_quoted_identifier()
             ),
             &[],
@@ -1565,7 +1565,7 @@ async fn table_array_with_null_values() {
         .unwrap()
         .execute(
             &format!(
-                "DELETE FROM {} WHERE true",
+                "delete from {} where true",
                 table_name.as_quoted_identifier()
             ),
             &[],
@@ -1608,7 +1608,7 @@ async fn table_array_with_null_values() {
         .unwrap()
         .execute(
             &format!(
-                "INSERT INTO {} (int_array) VALUES (ARRAY[1, 2, 3])",
+                "insert into {} (int_array) values (array[1, 2, 3])",
                 table_name.as_quoted_identifier()
             ),
             &[],
@@ -1683,7 +1683,7 @@ async fn table_validation_out_of_bounds_values() {
         .unwrap()
         .execute(
             &format!(
-                "INSERT INTO {} (huge_numeric) VALUES ({})",
+                "insert into {} (huge_numeric) values ({})",
                 huge_numeric_table.as_quoted_identifier(),
                 "'123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890'"
             ),
@@ -1698,7 +1698,7 @@ async fn table_validation_out_of_bounds_values() {
         .unwrap()
         .execute(
             &format!(
-                "INSERT INTO {} (test_date) VALUES ('0001-01-01'::date - INTERVAL '1 day')",
+                "insert into {} (test_date) values ('0001-01-01'::date - interval '1 day')",
                 old_date_table.as_quoted_identifier()
             ),
             &[],
@@ -1712,7 +1712,7 @@ async fn table_validation_out_of_bounds_values() {
         .unwrap()
         .execute(
             &format!(
-                "INSERT INTO {} (numeric_array) VALUES (ARRAY['NaN'::numeric, '123.45'::numeric])",
+                "insert into {} (numeric_array) values (array['NaN'::numeric, '123.45'::numeric])",
                 nan_array_table.as_quoted_identifier()
             ),
             &[],
