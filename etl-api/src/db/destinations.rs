@@ -56,8 +56,7 @@ pub enum EncryptedDestinationConfig {
         service_account_key: EncryptedValue,
         #[serde(skip_serializing_if = "Option::is_none")]
         max_staleness_mins: Option<u16>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        max_concurrent_streams: Option<usize>,
+        max_concurrent_streams: usize,
     },
 }
 
@@ -326,7 +325,7 @@ mod tests {
             dataset_id: "dataset-id".to_string(),
             service_account_key: SerializableSecretString::from("service-account-key".to_string()),
             max_staleness_mins: Some(42),
-            max_concurrent_streams: None,
+            max_concurrent_streams: 1,
         };
 
         insta::assert_json_snapshot!(config);
@@ -343,7 +342,7 @@ mod tests {
             dataset_id: "dataset-id".to_string(),
             service_account_key: SerializableSecretString::from("supersecretkey".to_string()),
             max_staleness_mins: Some(99),
-            max_concurrent_streams: None,
+            max_concurrent_streams: 1,
         };
 
         let config_in_db = encrypt_and_serialize::<DestinationConfig, EncryptedDestinationConfig>(

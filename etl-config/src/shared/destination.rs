@@ -49,9 +49,8 @@ pub enum DestinationConfig {
         /// - the number of tables being replicated,
         /// - the volume of events processed by the ETL,
         /// - and the configured batch size.
-        #[serde(skip_serializing_if = "Option::is_none")]
         #[cfg_attr(feature = "utoipa", schema(example = 8))]
-        max_concurrent_streams: Option<usize>,
+        max_concurrent_streams: usize,
     },
 }
 

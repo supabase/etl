@@ -22,8 +22,6 @@ use crate::metrics::register_metrics;
 const BIGQUERY_TABLE_ID_DELIMITER: &str = "_";
 /// Replacement string for escaping underscores in Postgres names.
 const BIGQUERY_TABLE_ID_DELIMITER_ESCAPE_REPLACEMENT: &str = "__";
-/// Default maximum number of concurrent streams for BigQuery appends when not specified.
-const DEFAULT_MAX_CONCURRENT_STREAMS: usize = 1;
 
 /// Creates a hex-encoded sequence number from Postgres LSNs to ensure correct event ordering.
 ///
@@ -214,7 +212,7 @@ where
         dataset_id: BigQueryDatasetId,
         sa_key: &str,
         max_staleness_mins: Option<u16>,
-        max_concurrent_streams: Option<usize>,
+        max_concurrent_streams: usize,
         store: S,
     ) -> EtlResult<Self> {
         // Registering metrics here to avoid the callers having to remember to call this before
@@ -231,8 +229,7 @@ where
             client,
             dataset_id,
             max_staleness_mins,
-            max_concurrent_streams: max_concurrent_streams
-                .unwrap_or(DEFAULT_MAX_CONCURRENT_STREAMS),
+            max_concurrent_streams,
             store,
             inner: Arc::new(Mutex::new(inner)),
         })
@@ -249,7 +246,7 @@ where
         dataset_id: BigQueryDatasetId,
         sa_key: &str,
         max_staleness_mins: Option<u16>,
-        max_concurrent_streams: Option<usize>,
+        max_concurrent_streams: usize,
         store: S,
     ) -> EtlResult<Self> {
         // Registering metrics here to avoid the callers having to remember to call this before
@@ -266,8 +263,7 @@ where
             client,
             dataset_id,
             max_staleness_mins,
-            max_concurrent_streams: max_concurrent_streams
-                .unwrap_or(DEFAULT_MAX_CONCURRENT_STREAMS),
+            max_concurrent_streams,
             store,
             inner: Arc::new(Mutex::new(inner)),
         })

@@ -112,7 +112,7 @@ impl BigQueryDatabase {
             // query time.
             Some(0),
             // We want to test streams concurrency, so we set a `max_concurrent_streams` to 10.
-            Some(10),
+            10,
             schema_store,
         )
         .await
