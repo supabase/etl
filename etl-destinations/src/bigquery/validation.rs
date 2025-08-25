@@ -109,7 +109,7 @@ pub fn validate_numeric_for_bigquery(numeric: &PgNumeric) -> EtlResult<()> {
             );
         }
         PgNumeric::Value { .. } => {
-            if !is_numeric_within_bigquery_bignumeric_limits(&numeric) {
+            if !is_numeric_within_bigquery_bignumeric_limits(numeric) {
                 bail!(
                     ErrorKind::UnsupportedValueInDestination,
                     "Numeric value exceeds BigQuery BIGNUMERIC limits",
