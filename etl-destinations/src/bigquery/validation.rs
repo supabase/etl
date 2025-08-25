@@ -109,15 +109,13 @@ pub fn validate_numeric_for_bigquery(numeric: &PgNumeric) -> EtlResult<()> {
             );
         }
         PgNumeric::Value { .. } => {
-            let numeric_str = numeric.to_string();
-
-            if !is_numeric_within_bigquery_bignumeric_limits(&numeric_str) {
+            if !is_numeric_within_bigquery_bignumeric_limits(&numeric) {
                 bail!(
                     ErrorKind::UnsupportedValueInDestination,
                     "Numeric value exceeds BigQuery BIGNUMERIC limits",
                     format!(
                         "The numeric value '{}' exceeds BigQuery's BIGNUMERIC limits (max ~{} digits, {} decimal places)",
-                        numeric_str,
+                        numeric,
                         BIGQUERY_BIGNUMERIC_MAX_PRACTICAL_DIGITS,
                         BIGQUERY_BIGNUMERIC_MAX_SCALE
                     )
@@ -364,10 +362,12 @@ pub fn validate_array_cell_for_bigquery(array_cell: &ArrayCellNonOptional) -> Et
     }
 }
 
-/// Checks if a numeric string is within BigQuery's BIGNUMERIC limits.
+/// Checks if a [`PgNumeric`] as string is within BigQuery's BIGNUMERIC limits.
 ///
 /// BIGNUMERIC supports up to ~77 digits of precision with up to 38 decimal places.
-fn is_numeric_within_bigquery_bignumeric_limits(numeric_str: &str) -> bool {
+fn is_numeric_within_bigquery_bignumeric_limits(pg_numeric: &PgNumeric) -> bool {
+    let numeric_str = pg_numeric.to_string();
+
     // Count actual digits (excluding sign, decimal point)
     let digit_count: usize = numeric_str.chars().filter(|c| c.is_ascii_digit()).count();
 
