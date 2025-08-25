@@ -87,6 +87,17 @@ impl StoredSourceConfig {
             },
         }
     }
+
+    pub fn into_connection_config_with_tls(self, tls: TlsConfig) -> PgConnectionConfig {
+        PgConnectionConfig {
+            host: self.host,
+            port: self.port,
+            name: self.name,
+            username: self.username,
+            password: self.password,
+            tls,
+        }
+    }
 }
 
 impl From<FullApiSourceConfig> for StoredSourceConfig {

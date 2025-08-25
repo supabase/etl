@@ -42,9 +42,3 @@ pub enum DestinationConfig {
         max_concurrent_streams: usize,
     },
 }
-
-impl Default for DestinationConfig {
-    fn default() -> Self {
-        Self::Memory
-    }
-}

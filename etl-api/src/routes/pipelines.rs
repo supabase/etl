@@ -4,7 +4,7 @@ use actix_web::{
     post,
     web::{Data, Json, Path},
 };
-use etl_config::shared::{PgConnectionConfig, ReplicatorConfig, SupabaseConfig, TlsConfig};
+use etl_config::shared::{ReplicatorConfig, SupabaseConfig, TlsConfig};
 use etl_postgres::replication::{TableLookupError, get_table_name_from_oid, state};
 use etl_postgres::schema::TableId;
 use secrecy::ExposeSecret;
@@ -1205,18 +1205,11 @@ async fn build_replicator_config(
         .get(TRUSTED_ROOT_CERT_KEY_NAME)
         .ok_or(PipelineError::TrustedRootCertsConfigMissing)?
         .clone();
-
-    let pg_connection = PgConnectionConfig {
-        host: source_config.host,
-        port: source_config.port,
-        name: source_config.name,
-        username: source_config.username,
-        password: source_config.password,
-        tls: TlsConfig {
-            trusted_root_certs,
-            enabled: true,
-        },
+    let tls_config = TlsConfig {
+        trusted_root_certs,
+        enabled: true,
     };
+    let pg_connection = source_config.into_connection_config_with_tls(tls_config);
 
     let config = ReplicatorConfig {
         destination: destination_config.into_etl_config(),
