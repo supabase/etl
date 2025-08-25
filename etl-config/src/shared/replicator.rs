@@ -8,7 +8,6 @@ use serde::{Deserialize, Serialize};
 /// settings, destination configuration, and optional service integrations like
 /// Sentry and Supabase. Typically loaded from configuration files at startup.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
 pub struct ReplicatorConfig {
     /// Configuration for the replication destination.
     pub destination: DestinationConfig,

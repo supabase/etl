@@ -5,6 +5,7 @@ expression: config_in_db
 {
   "big_query": {
     "dataset_id": "dataset-id",
+    "max_concurrent_streams": 1,
     "max_staleness_mins": 99,
     "project_id": "project-id",
     "service_account_key": "[key]"

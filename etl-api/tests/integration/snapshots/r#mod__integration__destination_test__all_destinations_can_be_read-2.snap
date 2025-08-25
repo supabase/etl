@@ -11,5 +11,7 @@ BigQuery {
     max_staleness_mins: Some(
         10,
     ),
-    max_concurrent_streams: None,
+    max_concurrent_streams: Some(
+        1,
+    ),
 }

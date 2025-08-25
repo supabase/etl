@@ -1,10 +1,10 @@
+use etl_api::configs::destination::FullApiDestinationConfig;
 use etl_api::routes::destinations::{
     CreateDestinationRequest, CreateDestinationResponse, ReadDestinationResponse,
     ReadDestinationsResponse, UpdateDestinationRequest,
 };
 use etl_api::routes::pipelines::{CreatePipelineRequest, CreatePipelineResponse};
 use etl_config::SerializableSecretString;
-use etl_config::shared::DestinationConfig;
 use etl_telemetry::tracing::init_test_tracing;
 use reqwest::StatusCode;
 
@@ -20,13 +20,13 @@ pub fn new_name() -> String {
     "BigQuery Destination".to_string()
 }
 
-pub fn new_destination_config() -> DestinationConfig {
-    DestinationConfig::BigQuery {
+pub fn new_destination_config() -> FullApiDestinationConfig {
+    FullApiDestinationConfig::BigQuery {
         project_id: "project-id".to_string(),
         dataset_id: "dataset-id".to_string(),
         service_account_key: SerializableSecretString::from("service-account-key".to_string()),
         max_staleness_mins: None,
-        max_concurrent_streams: None,
+        max_concurrent_streams: Some(1),
     }
 }
 
@@ -34,15 +34,15 @@ pub fn updated_name() -> String {
     "BigQuery Destination (Updated)".to_string()
 }
 
-pub fn updated_destination_config() -> DestinationConfig {
-    DestinationConfig::BigQuery {
+pub fn updated_destination_config() -> FullApiDestinationConfig {
+    FullApiDestinationConfig::BigQuery {
         project_id: "project-id-updated".to_string(),
         dataset_id: "dataset-id-updated".to_string(),
         service_account_key: SerializableSecretString::from(
             "service-account-key-updated".to_string(),
         ),
         max_staleness_mins: Some(10),
-        max_concurrent_streams: None,
+        max_concurrent_streams: Some(1),
     }
 }
 
@@ -50,7 +50,7 @@ pub async fn create_destination_with_config(
     app: &TestApp,
     tenant_id: &str,
     name: String,
-    config: DestinationConfig,
+    config: FullApiDestinationConfig,
 ) -> i64 {
     let destination = CreateDestinationRequest { name, config };
     let response = app.create_destination(tenant_id, &destination).await;

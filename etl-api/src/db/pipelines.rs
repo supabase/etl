@@ -1,72 +1,19 @@
-use etl_config::shared::BatchConfig;
 use etl_postgres::replication::{schema, slots, state, table_mappings};
-use serde::{Deserialize, Serialize};
 use sqlx::{PgExecutor, PgTransaction};
 use std::ops::DerefMut;
 use thiserror::Error;
-use utoipa::ToSchema;
 
+use crate::configs::pipeline::{
+    FullApiPipelineConfig, PartialApiPipelineConfig, StoredPipelineConfig,
+};
+use crate::configs::serde::{
+    DbDeserializationError, DbSerializationError, deserialize_from_value, serialize,
+};
 use crate::db;
 use crate::db::destinations::{Destination, DestinationsDbError};
 use crate::db::replicators::{ReplicatorsDbError, create_replicator};
-use crate::db::serde::{
-    DbDeserializationError, DbSerializationError, deserialize_from_value, serialize,
-};
 use crate::db::sources::Source;
 use crate::routes::connect_to_source_database_with_defaults;
-
-/// Pipeline configuration used during replication. This struct's fields
-/// should be kept in sync with [`OptionalPipelineConfig`]. If a new optional
-/// field is added, it should also be included in the pipeline config merge
-/// implementation.
-///
-/// A separate struct was created because `publication_name` is not optional and
-/// when updating config we do not want the user to pass publication
-/// name.
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-pub struct PipelineConfig {
-    #[schema(example = "my_publication")]
-    pub publication_name: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub batch: Option<BatchConfig>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub table_error_retry_delay_ms: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[schema(example = 4)]
-    pub max_table_sync_workers: Option<u16>,
-}
-
-/// Has the same fields as [`PipelineConfig`] except from
-/// the required fields. These two structs should be kept
-/// in sync.
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-pub struct OptionalPipelineConfig {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub batch: Option<BatchConfig>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub table_error_retry_delay_ms: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub max_table_sync_workers: Option<u16>,
-}
-
-impl PipelineConfig {
-    /// Merges an [`OptionalPipelineConfig`] into this one by overwriting the optional
-    /// fields in self if they are set in the other config. There is currently no
-    /// way to unset fields in self, but should be good enough for now.
-    fn merge(&mut self, other: OptionalPipelineConfig) {
-        if let Some(batch) = other.batch {
-            self.batch = Some(batch);
-        }
-
-        if let Some(table_error_retry_delay_ms) = other.table_error_retry_delay_ms {
-            self.table_error_retry_delay_ms = Some(table_error_retry_delay_ms);
-        }
-
-        if let Some(max_table_sync_workers) = other.max_table_sync_workers {
-            self.max_table_sync_workers = Some(max_table_sync_workers);
-        }
-    }
-}
 
 pub struct Pipeline {
     pub id: i64,
@@ -76,7 +23,7 @@ pub struct Pipeline {
     pub destination_id: i64,
     pub destination_name: String,
     pub replicator_id: i64,
-    pub config: PipelineConfig,
+    pub config: StoredPipelineConfig,
 }
 
 #[derive(Debug, Error)]
@@ -106,7 +53,7 @@ pub async fn create_pipeline(
     source_id: i64,
     destination_id: i64,
     image_id: i64,
-    config: PipelineConfig,
+    config: FullApiPipelineConfig,
 ) -> Result<i64, PipelinesDbError> {
     let config = serialize(&config)?;
 
@@ -160,7 +107,7 @@ where
 
     let pipeline = match record {
         Some(record) => {
-            let config = deserialize_from_value::<PipelineConfig>(record.config)?;
+            let config = deserialize_from_value::<StoredPipelineConfig>(record.config)?;
 
             let pipeline = Pipeline {
                 id: record.id,
@@ -187,7 +134,7 @@ pub async fn update_pipeline<'c, E>(
     pipeline_id: i64,
     source_id: i64,
     destination_id: i64,
-    config: &PipelineConfig,
+    config: &FullApiPipelineConfig,
 ) -> Result<Option<i64>, PipelinesDbError>
 where
     E: PgExecutor<'c>,
@@ -312,7 +259,7 @@ where
 
     let mut pipelines = Vec::with_capacity(records.len());
     for record in records {
-        let config = deserialize_from_value::<PipelineConfig>(record.config.clone())?;
+        let config = deserialize_from_value::<StoredPipelineConfig>(record.config.clone())?;
 
         pipelines.push(Pipeline {
             id: record.id,
@@ -333,8 +280,8 @@ pub async fn update_pipeline_config(
     txn: &mut PgTransaction<'_>,
     tenant_id: &str,
     pipeline_id: i64,
-    request_config: OptionalPipelineConfig,
-) -> Result<Option<PipelineConfig>, PipelinesDbError> {
+    config: PartialApiPipelineConfig,
+) -> Result<Option<StoredPipelineConfig>, PipelinesDbError> {
     // We use `select ... for update` to lock the pipeline row being updated
     // to avoid concurrent requests clobbering data from each other
     let record = sqlx::query!(
@@ -353,8 +300,9 @@ pub async fn update_pipeline_config(
 
     match record {
         Some(record) => {
-            let mut config_in_db = deserialize_from_value::<PipelineConfig>(record.config)?;
-            config_in_db.merge(request_config);
+            let mut config_in_db = deserialize_from_value::<StoredPipelineConfig>(record.config)?;
+            config_in_db.merge(config);
+
             let updated_config = serialize(config_in_db)?;
 
             let record = sqlx::query!(
@@ -373,7 +321,7 @@ pub async fn update_pipeline_config(
 
             match record {
                 Some(record) => {
-                    let config = deserialize_from_value::<PipelineConfig>(record.config)?;
+                    let config = deserialize_from_value::<StoredPipelineConfig>(record.config)?;
                     Ok(Some(config))
                 }
                 None => Ok(None),

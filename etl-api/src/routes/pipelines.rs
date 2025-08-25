@@ -4,10 +4,7 @@ use actix_web::{
     post,
     web::{Data, Json, Path},
 };
-use etl_config::shared::{
-    DestinationConfig, PgConnectionConfig, PipelineConfig as SharedPipelineConfig,
-    ReplicatorConfig, SupabaseConfig, TlsConfig,
-};
+use etl_config::shared::{ReplicatorConfig, SupabaseConfig, TlsConfig};
 use etl_postgres::replication::{TableLookupError, get_table_name_from_oid, state};
 use etl_postgres::schema::TableId;
 use secrecy::ExposeSecret;
@@ -17,13 +14,16 @@ use std::ops::DerefMut;
 use thiserror::Error;
 use utoipa::ToSchema;
 
+use crate::configs::destination::StoredDestinationConfig;
+use crate::configs::encryption::EncryptionKey;
+use crate::configs::pipeline::{FullApiPipelineConfig, PartialApiPipelineConfig};
+use crate::configs::source::StoredSourceConfig;
+use crate::db;
 use crate::db::destinations::{Destination, DestinationsDbError, destination_exists};
 use crate::db::images::{Image, ImagesDbError};
-use crate::db::pipelines::{Pipeline, PipelineConfig, PipelinesDbError};
+use crate::db::pipelines::{Pipeline, PipelinesDbError};
 use crate::db::replicators::{Replicator, ReplicatorsDbError};
-use crate::db::sources::{Source, SourceConfig, SourcesDbError, source_exists};
-use crate::db::{self, pipelines::OptionalPipelineConfig};
-use crate::encryption::EncryptionKey;
+use crate::db::sources::{Source, SourcesDbError, source_exists};
 use crate::k8s_client::TRUSTED_ROOT_CERT_KEY_NAME;
 use crate::k8s_client::{K8sClient, K8sError, PodPhase, TRUSTED_ROOT_CERT_CONFIG_MAP_NAME};
 use crate::routes::{
@@ -174,7 +174,7 @@ pub struct CreatePipelineRequest {
     #[schema(example = 1, required = true)]
     pub destination_id: i64,
     #[schema(required = true)]
-    pub config: PipelineConfig,
+    pub config: FullApiPipelineConfig,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
@@ -190,18 +190,18 @@ pub struct UpdatePipelineRequest {
     #[schema(example = 1, required = true)]
     pub destination_id: i64,
     #[schema(required = true)]
-    pub config: PipelineConfig,
+    pub config: FullApiPipelineConfig,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct UpdatePipelineConfigRequest {
     #[schema(required = true)]
-    pub config: OptionalPipelineConfig,
+    pub config: PartialApiPipelineConfig,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct UpdatePipelineConfigResponse {
-    pub config: PipelineConfig,
+    pub config: FullApiPipelineConfig,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
@@ -220,7 +220,7 @@ pub struct ReadPipelineResponse {
     pub destination_name: String,
     #[schema(example = 1)]
     pub replicator_id: i64,
-    pub config: PipelineConfig,
+    pub config: FullApiPipelineConfig,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
@@ -439,16 +439,16 @@ pub async fn read_pipeline(
 
     let response = db::pipelines::read_pipeline(&**pool, tenant_id, pipeline_id)
         .await?
-        .map(|s| {
+        .map(|pipeline| {
             Ok::<ReadPipelineResponse, serde_json::Error>(ReadPipelineResponse {
-                id: s.id,
-                tenant_id: s.tenant_id,
-                source_id: s.source_id,
-                source_name: s.source_name,
-                destination_id: s.destination_id,
-                destination_name: s.destination_name,
-                replicator_id: s.replicator_id,
-                config: s.config,
+                id: pipeline.id,
+                tenant_id: pipeline.tenant_id,
+                source_id: pipeline.source_id,
+                source_name: pipeline.source_name,
+                destination_id: pipeline.destination_id,
+                destination_name: pipeline.destination_name,
+                replicator_id: pipeline.replicator_id,
+                config: pipeline.config.into(),
             })
         })
         .transpose()?
@@ -582,7 +582,7 @@ pub async fn read_all_pipelines(
             destination_id: pipeline.destination_id,
             destination_name: pipeline.destination_name,
             replicator_id: pipeline.replicator_id,
-            config: pipeline.config,
+            config: pipeline.config.into(),
         };
         pipelines.push(pipeline);
     }
@@ -1068,7 +1068,9 @@ pub async fn update_pipeline_config(
 
     txn.commit().await?;
 
-    let response = UpdatePipelineConfigResponse { config };
+    let response = UpdatePipelineConfigResponse {
+        config: config.into(),
+    };
 
     Ok(Json(response))
 }
@@ -1164,14 +1166,17 @@ async fn read_all_required_data(
     Ok((pipeline, replicator, image, source, destination))
 }
 
-fn build_secrets(source_config: &SourceConfig, destination_config: &DestinationConfig) -> Secrets {
+fn build_secrets(
+    source_config: &StoredSourceConfig,
+    destination_config: &StoredDestinationConfig,
+) -> Secrets {
     let postgres_password = source_config
         .password
         .as_ref()
         .map(|p| p.expose_secret().to_owned())
         .unwrap_or_default();
     let mut big_query_service_account_key = None;
-    if let DestinationConfig::BigQuery {
+    if let StoredDestinationConfig::BigQuery {
         service_account_key,
         ..
     } = destination_config
@@ -1187,12 +1192,11 @@ fn build_secrets(source_config: &SourceConfig, destination_config: &DestinationC
 
 async fn build_replicator_config(
     k8s_client: &dyn K8sClient,
-    source_config: SourceConfig,
-    destination_config: DestinationConfig,
+    source_config: StoredSourceConfig,
+    destination_config: StoredDestinationConfig,
     pipeline: Pipeline,
     supabase_config: SupabaseConfig,
 ) -> Result<ReplicatorConfig, PipelineError> {
-    // We load the trusted root certificates from the config map.
     let trusted_root_certs = k8s_client
         .get_config_map(TRUSTED_ROOT_CERT_CONFIG_MAP_NAME)
         .await?
@@ -1201,41 +1205,20 @@ async fn build_replicator_config(
         .get(TRUSTED_ROOT_CERT_KEY_NAME)
         .ok_or(PipelineError::TrustedRootCertsConfigMissing)?
         .clone();
-
-    let pg_connection = PgConnectionConfig {
-        host: source_config.host,
-        port: source_config.port,
-        name: source_config.name,
-        username: source_config.username,
-        password: source_config.password,
-        tls: TlsConfig {
-            trusted_root_certs,
-            enabled: true,
-        },
+    let tls_config = TlsConfig {
+        trusted_root_certs,
+        enabled: true,
     };
+    let pg_connection = source_config.into_connection_config_with_tls(tls_config);
 
-    let pipeline_config = SharedPipelineConfig {
+    let config = ReplicatorConfig {
+        destination: destination_config.into_etl_config(),
         // We are safe to perform this conversion, since the i64 -> u64 conversion performs wrap
         // around, and we won't have two different values map to the same u64, since the domain size
         // is the same.
-        id: pipeline.id as u64,
-        publication_name: pipeline.config.publication_name,
-        pg_connection,
-        // If these configs are not set, we default to the most recent default values.
-        //
-        // The reason for using `Option` fields in the config instead of automatically applying defaults
-        // is that we want to persist a config in storage with some unset values, allowing us to interpret
-        // them differently after deserialization without needing to run database migrations.
-        batch: pipeline.config.batch.unwrap_or_default(),
-        // Hardcoding 10s for now
-        table_error_retry_delay_ms: pipeline.config.table_error_retry_delay_ms.unwrap_or(10000),
-        // Hardcoding a value of 4 for now for maximum number of parallel table sync workers
-        max_table_sync_workers: pipeline.config.max_table_sync_workers.unwrap_or(4),
-    };
-
-    let config = ReplicatorConfig {
-        destination: destination_config,
-        pipeline: pipeline_config,
+        pipeline: pipeline
+            .config
+            .into_etl_config(pipeline.id as u64, pg_connection),
         // The Sentry config will be injected via env variables for security purposes.
         sentry: None,
         supabase: Some(supabase_config),

@@ -1,8 +1,8 @@
 ---
-source: api/tests/integration/pipelines_test.rs
+source: etl-api/tests/integration/pipelines_test.rs
 expression: pipeline.config
 ---
-PipelineConfig {
+FullApiPipelineConfig {
     publication_name: "updated_publication",
     batch: Some(
         BatchConfig {

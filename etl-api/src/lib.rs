@@ -6,8 +6,8 @@
 
 pub mod authentication;
 pub mod config;
+pub mod configs;
 pub mod db;
-pub mod encryption;
 pub mod k8s_client;
 pub mod routes;
 pub mod span_builder;

@@ -4,15 +4,15 @@ use actix_web::{
     post,
     web::{Data, Json, Path},
 };
-use etl_config::shared::DestinationConfig;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use thiserror::Error;
 use utoipa::ToSchema;
 
+use crate::configs::destination::FullApiDestinationConfig;
+use crate::configs::encryption::EncryptionKey;
 use crate::db;
 use crate::db::destinations::DestinationsDbError;
-use crate::encryption::EncryptionKey;
 use crate::routes::{ErrorMessage, TenantIdError, extract_tenant_id};
 
 #[derive(Debug, Error)]
@@ -66,7 +66,7 @@ pub struct CreateDestinationRequest {
     #[schema(example = "My BigQuery Destination", required = true)]
     pub name: String,
     #[schema(required = true)]
-    pub config: DestinationConfig,
+    pub config: FullApiDestinationConfig,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
@@ -80,7 +80,7 @@ pub struct UpdateDestinationRequest {
     #[schema(example = "My Updated BigQuery Destination", required = true)]
     pub name: String,
     #[schema(required = true)]
-    pub config: DestinationConfig,
+    pub config: FullApiDestinationConfig,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
@@ -91,7 +91,7 @@ pub struct ReadDestinationResponse {
     pub tenant_id: String,
     #[schema(example = "My BigQuery Destination")]
     pub name: String,
-    pub config: DestinationConfig,
+    pub config: FullApiDestinationConfig,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
@@ -164,11 +164,11 @@ pub async fn read_destination(
     let response =
         db::destinations::read_destination(&**pool, tenant_id, destination_id, &encryption_key)
             .await?
-            .map(|s| ReadDestinationResponse {
-                id: s.id,
-                tenant_id: s.tenant_id,
-                name: s.name,
-                config: s.config,
+            .map(|destination| ReadDestinationResponse {
+                id: destination.id,
+                tenant_id: destination.tenant_id,
+                name: destination.name,
+                config: destination.config.into(),
             })
             .ok_or(DestinationError::DestinationNotFound(destination_id))?;
 
@@ -274,7 +274,7 @@ pub async fn read_all_destinations(
             id: destination.id,
             tenant_id: destination.tenant_id,
             name: destination.name,
-            config: destination.config,
+            config: destination.config.into(),
         };
         destinations.push(destination);
     }

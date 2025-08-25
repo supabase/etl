@@ -2,7 +2,7 @@
 source: etl-api/src/db/sources.rs
 expression: deserialized_config
 ---
-SourceConfig {
+StoredSourceConfig {
     host: "localhost",
     port: 5432,
     name: "postgres",

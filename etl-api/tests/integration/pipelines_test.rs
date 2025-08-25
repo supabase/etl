@@ -1,4 +1,13 @@
-use etl_api::db::pipelines::{OptionalPipelineConfig, PipelineConfig};
+use crate::common::database::{create_test_source_database, run_etl_migrations_on_source_database};
+use crate::{
+    common::test_app::{TestApp, spawn_test_app},
+    integration::destination_test::create_destination,
+    integration::images_test::create_default_image,
+    integration::sources_test::create_source,
+    integration::tenants_test::create_tenant,
+    integration::tenants_test::create_tenant_with_id_and_name,
+};
+use etl_api::configs::pipeline::{FullApiPipelineConfig, PartialApiPipelineConfig};
 use etl_api::routes::pipelines::{
     CreatePipelineRequest, CreatePipelineResponse, GetPipelineReplicationStatusResponse,
     ReadPipelineResponse, ReadPipelinesResponse, RollbackTableStateRequest,
@@ -13,18 +22,8 @@ use reqwest::StatusCode;
 use sqlx::PgPool;
 use sqlx::postgres::types::Oid;
 
-use crate::common::database::{create_test_source_database, run_etl_migrations_on_source_database};
-use crate::{
-    common::test_app::{TestApp, spawn_test_app},
-    integration::destination_test::create_destination,
-    integration::images_test::create_default_image,
-    integration::sources_test::create_source,
-    integration::tenants_test::create_tenant,
-    integration::tenants_test::create_tenant_with_id_and_name,
-};
-
-pub fn new_pipeline_config() -> PipelineConfig {
-    PipelineConfig {
+pub fn new_pipeline_config() -> FullApiPipelineConfig {
+    FullApiPipelineConfig {
         publication_name: "publication".to_owned(),
         batch: Some(BatchConfig {
             max_size: 1000,
@@ -35,8 +34,8 @@ pub fn new_pipeline_config() -> PipelineConfig {
     }
 }
 
-pub fn updated_pipeline_config() -> PipelineConfig {
-    PipelineConfig {
+pub fn updated_pipeline_config() -> FullApiPipelineConfig {
+    FullApiPipelineConfig {
         publication_name: "updated_publication".to_owned(),
         batch: Some(BatchConfig {
             max_size: 2000,
@@ -55,21 +54,24 @@ pub enum ConfigUpdateType {
 
 pub fn partially_updated_optional_pipeline_config(
     update: ConfigUpdateType,
-) -> OptionalPipelineConfig {
+) -> PartialApiPipelineConfig {
     match update {
-        ConfigUpdateType::Batch(batch_config) => OptionalPipelineConfig {
+        ConfigUpdateType::Batch(batch_config) => PartialApiPipelineConfig {
+            publication_name: None,
             batch: Some(batch_config),
             table_error_retry_delay_ms: None,
             max_table_sync_workers: None,
         },
         ConfigUpdateType::TableErrorRetryDelayMs(table_error_retry_delay_ms) => {
-            OptionalPipelineConfig {
+            PartialApiPipelineConfig {
+                publication_name: None,
                 batch: None,
                 table_error_retry_delay_ms: Some(table_error_retry_delay_ms),
                 max_table_sync_workers: None,
             }
         }
-        ConfigUpdateType::MaxTableSyncWorkers(n) => OptionalPipelineConfig {
+        ConfigUpdateType::MaxTableSyncWorkers(n) => PartialApiPipelineConfig {
+            publication_name: None,
             batch: None,
             table_error_retry_delay_ms: None,
             max_table_sync_workers: Some(n),
@@ -77,8 +79,9 @@ pub fn partially_updated_optional_pipeline_config(
     }
 }
 
-pub fn updated_optional_pipeline_config() -> OptionalPipelineConfig {
-    OptionalPipelineConfig {
+pub fn updated_optional_pipeline_config() -> PartialApiPipelineConfig {
+    PartialApiPipelineConfig {
+        publication_name: None,
         batch: Some(BatchConfig {
             max_size: 1_000_000,
             max_fill_ms: 100,
@@ -93,7 +96,7 @@ pub async fn create_pipeline_with_config(
     tenant_id: &str,
     source_id: i64,
     destination_id: i64,
-    config: PipelineConfig,
+    config: FullApiPipelineConfig,
 ) -> i64 {
     create_default_image(app).await;
     let pipeline = CreatePipelineRequest {

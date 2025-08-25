@@ -4,22 +4,22 @@ use actix_web::{
     post,
     web::{Data, Json, Path},
 };
-use etl_config::shared::DestinationConfig;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use std::ops::DerefMut;
 use thiserror::Error;
 use utoipa::ToSchema;
 
+use super::{ErrorMessage, TenantIdError, destinations::DestinationError, extract_tenant_id};
+use crate::configs::destination::FullApiDestinationConfig;
+use crate::configs::encryption::EncryptionKey;
+use crate::configs::pipeline::FullApiPipelineConfig;
 use crate::db;
 use crate::db::destinations::{DestinationsDbError, destination_exists};
 use crate::db::destinations_pipelines::DestinationPipelinesDbError;
 use crate::db::images::ImagesDbError;
-use crate::db::pipelines::{PipelineConfig, PipelinesDbError, read_pipeline};
+use crate::db::pipelines::{PipelinesDbError, read_pipeline};
 use crate::db::sources::{SourcesDbError, source_exists};
-use crate::encryption::EncryptionKey;
-
-use super::{ErrorMessage, TenantIdError, destinations::DestinationError, extract_tenant_id};
 
 #[derive(Debug, Error)]
 enum DestinationPipelineError {
@@ -136,11 +136,11 @@ pub struct CreateDestinationPipelineRequest {
     #[schema(example = "My New Destination", required = true)]
     pub destination_name: String,
     #[schema(required = true)]
-    pub destination_config: DestinationConfig,
+    pub destination_config: FullApiDestinationConfig,
     #[schema(required = true, example = 1)]
     pub source_id: i64,
     #[schema(required = true)]
-    pub pipeline_config: PipelineConfig,
+    pub pipeline_config: FullApiPipelineConfig,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
@@ -156,11 +156,11 @@ pub struct UpdateDestinationPipelineRequest {
     #[schema(example = "My Updated Destination", required = true)]
     pub destination_name: String,
     #[schema(required = true)]
-    pub destination_config: DestinationConfig,
+    pub destination_config: FullApiDestinationConfig,
     #[schema(required = true, example = 1)]
     pub source_id: i64,
     #[schema(required = true)]
-    pub pipeline_config: PipelineConfig,
+    pub pipeline_config: FullApiPipelineConfig,
 }
 
 #[utoipa::path(

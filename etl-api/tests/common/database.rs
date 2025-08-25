@@ -1,4 +1,5 @@
-use etl_api::db::sources::SourceConfig;
+use crate::common::test_app::TestApp;
+use etl_api::configs::source::FullApiSourceConfig;
 use etl_api::routes::sources::{CreateSourceRequest, CreateSourceResponse};
 use etl_config::SerializableSecretString;
 use etl_config::shared::PgConnectionConfig;
@@ -7,8 +8,6 @@ use etl_postgres::sqlx::test_utils::create_pg_database;
 use secrecy::ExposeSecret;
 use sqlx::PgPool;
 use uuid::Uuid;
-
-use crate::common::test_app::TestApp;
 
 /// Creates and configures a new Postgres database for the API.
 ///
@@ -36,7 +35,7 @@ pub async fn create_test_source_database(
 
     let source_pool = create_pg_database(&source_db_config).await;
 
-    let source_config = SourceConfig {
+    let source_config = FullApiSourceConfig {
         host: source_db_config.host.clone(),
         port: source_db_config.port,
         name: source_db_config.name.clone(),

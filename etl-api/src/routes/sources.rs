@@ -1,6 +1,7 @@
+use crate::configs::encryption::EncryptionKey;
+use crate::configs::source::{FullApiSourceConfig, StrippedApiSourceConfig};
 use crate::db;
-use crate::db::sources::{SourceConfig, SourcesDbError};
-use crate::encryption::EncryptionKey;
+use crate::db::sources::SourcesDbError;
 use crate::routes::{ErrorMessage, TenantIdError, extract_tenant_id};
 use actix_web::{
     HttpRequest, HttpResponse, Responder, ResponseError, delete, get,
@@ -62,36 +63,12 @@ impl ResponseError for SourceError {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-#[serde(rename_all = "snake_case")]
-pub struct StrippedSourceConfig {
-    #[schema(example = "localhost")]
-    pub host: String,
-    #[schema(example = 5432)]
-    pub port: u16,
-    #[schema(example = "mydb")]
-    pub name: String,
-    #[schema(example = "postgres")]
-    pub username: String,
-}
-
-impl From<SourceConfig> for StrippedSourceConfig {
-    fn from(source: SourceConfig) -> Self {
-        Self {
-            host: source.host,
-            port: source.port,
-            name: source.name,
-            username: source.username,
-        }
-    }
-}
-
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct CreateSourceRequest {
     #[schema(example = "My Postgres Source", required = true)]
     pub name: String,
     #[schema(required = true)]
-    pub config: SourceConfig,
+    pub config: FullApiSourceConfig,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
@@ -105,7 +82,7 @@ pub struct UpdateSourceRequest {
     #[schema(example = "My Updated Postgres Source", required = true)]
     pub name: String,
     #[schema(required = true)]
-    pub config: SourceConfig,
+    pub config: FullApiSourceConfig,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
@@ -116,7 +93,7 @@ pub struct ReadSourceResponse {
     pub tenant_id: String,
     #[schema(example = "My Postgres Source")]
     pub name: String,
-    pub config: StrippedSourceConfig,
+    pub config: StrippedApiSourceConfig,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]

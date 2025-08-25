@@ -9,5 +9,7 @@ BigQuery {
         SecretBox<str>([REDACTED]),
     ),
     max_staleness_mins: None,
-    max_concurrent_streams: None,
+    max_concurrent_streams: Some(
+        1,
+    ),
 }

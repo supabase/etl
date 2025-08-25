@@ -2,7 +2,9 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use thiserror::Error;
 
-use crate::encryption::{Decrypt, DecryptionError, Encrypt, EncryptionError, EncryptionKey};
+use crate::configs::encryption::{
+    Decrypt, DecryptionError, Encrypt, EncryptionError, EncryptionKey,
+};
 
 /// Errors that can occur during serialization or encryption for database storage.
 #[derive(Debug, Error)]

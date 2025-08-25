@@ -110,8 +110,8 @@ enum Commands {
         #[arg(long)]
         bq_max_staleness_mins: Option<u16>,
         /// BigQuery maximum concurrent streams (optional)
-        #[arg(long)]
-        bq_max_concurrent_streams: Option<usize>,
+        #[arg(long, default_value = "1")]
+        bq_max_concurrent_streams: usize,
     },
     /// Prepare the benchmark environment by cleaning up replication slots
     Prepare {
@@ -233,7 +233,7 @@ struct RunArgs {
     bq_dataset_id: Option<String>,
     bq_sa_key_file: Option<String>,
     bq_max_staleness_mins: Option<u16>,
-    bq_max_concurrent_streams: Option<usize>,
+    bq_max_concurrent_streams: usize,
 }
 
 #[derive(Debug)]

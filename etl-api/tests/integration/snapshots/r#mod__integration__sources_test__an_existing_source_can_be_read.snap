@@ -1,8 +1,8 @@
 ---
-source: api/tests/integration/sources_test.rs
+source: etl-api/tests/integration/sources_test.rs
 expression: response.config
 ---
-StrippedSourceConfig {
+StrippedApiSourceConfig {
     host: "localhost",
     port: 5432,
     name: "postgres",
