@@ -7,7 +7,6 @@ use crate::shared::{PgConnectionConfig, ValidationError, batch::BatchConfig};
 /// Contains all settings required to run a replication pipeline including
 /// source database connection, batching parameters, and worker limits.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
 pub struct PipelineConfig {
     /// The unique identifier for this pipeline.
     ///

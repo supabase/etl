@@ -75,6 +75,10 @@ impl StoredPipelineConfig {
         if let Some(value) = partial.table_error_retry_delay_ms {
             self.table_error_retry_delay_ms = value;
         }
+
+        if let Some(value) = partial.max_table_sync_workers {
+            self.max_table_sync_workers = value;
+        }
     }
 }
 

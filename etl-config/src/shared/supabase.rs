@@ -6,7 +6,6 @@ use std::fmt;
 /// Contains Supabase-specific settings for ETL applications that
 /// integrate with Supabase services.
 #[derive(Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
 pub struct SupabaseConfig {
     /// Supabase project reference identifier.
     pub project_ref: String,
