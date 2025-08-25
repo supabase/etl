@@ -63,10 +63,10 @@ impl TextFormatConverter {
             Type::DATE_ARRAY => Ok(Cell::Array(ArrayCell::Date(Vec::default()))),
             Type::TIME => Ok(Cell::Time(NaiveTime::MIN)),
             Type::TIME_ARRAY => Ok(Cell::Array(ArrayCell::Time(Vec::default()))),
-            Type::TIMESTAMP => Ok(Cell::TimeStamp(DEFAULT_TIMESTAMP)),
-            Type::TIMESTAMP_ARRAY => Ok(Cell::Array(ArrayCell::TimeStamp(Vec::default()))),
-            Type::TIMESTAMPTZ => Ok(Cell::TimeStampTz(DEFAULT_TIMESTAMPTZ)),
-            Type::TIMESTAMPTZ_ARRAY => Ok(Cell::Array(ArrayCell::TimeStampTz(Vec::default()))),
+            Type::TIMESTAMP => Ok(Cell::Timestamp(DEFAULT_TIMESTAMP)),
+            Type::TIMESTAMP_ARRAY => Ok(Cell::Array(ArrayCell::Timestamp(Vec::default()))),
+            Type::TIMESTAMPTZ => Ok(Cell::TimestampTz(DEFAULT_TIMESTAMPTZ)),
+            Type::TIMESTAMPTZ_ARRAY => Ok(Cell::Array(ArrayCell::TimestampTz(Vec::default()))),
             Type::UUID => Ok(Cell::Uuid(Uuid::default())),
             Type::UUID_ARRAY => Ok(Cell::Array(ArrayCell::Uuid(Vec::default()))),
             Type::JSON | Type::JSONB => Ok(Cell::Json(serde_json::Value::default())),
@@ -171,12 +171,12 @@ impl TextFormatConverter {
             ),
             Type::TIMESTAMP => {
                 let val = NaiveDateTime::parse_from_str(str, TIMESTAMP_FORMAT)?;
-                Ok(Cell::TimeStamp(val))
+                Ok(Cell::Timestamp(val))
             }
             Type::TIMESTAMP_ARRAY => TextFormatConverter::parse_array(
                 str,
                 |str| Ok(Some(NaiveDateTime::parse_from_str(str, TIMESTAMP_FORMAT)?)),
-                ArrayCell::TimeStamp,
+                ArrayCell::Timestamp,
             ),
             Type::TIMESTAMPTZ => {
                 let val =
@@ -186,7 +186,7 @@ impl TextFormatConverter {
                             DateTime::<FixedOffset>::parse_from_str(str, TIMESTAMPTZ_FORMAT_HH_MM)?
                         }
                     };
-                Ok(Cell::TimeStampTz(val.into()))
+                Ok(Cell::TimestampTz(val.into()))
             }
             Type::TIMESTAMPTZ_ARRAY => {
                 match TextFormatConverter::parse_array(
@@ -197,7 +197,7 @@ impl TextFormatConverter {
                                 .into(),
                         ))
                     },
-                    ArrayCell::TimeStampTz,
+                    ArrayCell::TimestampTz,
                 ) {
                     Ok(val) => Ok(val),
                     Err(_) => TextFormatConverter::parse_array(
@@ -211,7 +211,7 @@ impl TextFormatConverter {
                                 .into(),
                             ))
                         },
-                        ArrayCell::TimeStampTz,
+                        ArrayCell::TimestampTz,
                     ),
                 }
             }
@@ -487,7 +487,7 @@ mod tests {
     fn try_from_str_timestamp() {
         let cell =
             TextFormatConverter::try_from_str(&Type::TIMESTAMP, "2023-12-25 14:30:45.123").unwrap();
-        if let Cell::TimeStamp(ts) = cell {
+        if let Cell::Timestamp(ts) = cell {
             assert_eq!(ts.date().year(), 2023);
             assert_eq!(ts.time().hour(), 14);
         } else {
@@ -500,7 +500,7 @@ mod tests {
         let cell =
             TextFormatConverter::try_from_str(&Type::TIMESTAMPTZ, "2023-12-25 14:30:45.123+00:00")
                 .unwrap();
-        if let Cell::TimeStampTz(ts) = cell {
+        if let Cell::TimestampTz(ts) = cell {
             assert_eq!(ts.year(), 2023);
         } else {
             panic!("Expected TimeStampTz cell");
@@ -510,7 +510,7 @@ mod tests {
         let cell =
             TextFormatConverter::try_from_str(&Type::TIMESTAMPTZ, "2023-12-25 14:30:45.123+00")
                 .unwrap();
-        assert!(matches!(cell, Cell::TimeStampTz(_)));
+        assert!(matches!(cell, Cell::TimestampTz(_)));
     }
 
     #[test]
@@ -656,7 +656,7 @@ mod tests {
         )
         .unwrap();
         match cell {
-            Cell::Array(ArrayCell::TimeStampTz(v)) => {
+            Cell::Array(ArrayCell::TimestampTz(v)) => {
                 assert_eq!(v.len(), 1);
                 assert!(v[0].is_some());
             }

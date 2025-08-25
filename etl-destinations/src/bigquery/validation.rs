@@ -275,8 +275,8 @@ pub fn validate_cell_for_bigquery(cell: &CellNonOptional) -> EtlResult<()> {
         CellNonOptional::Numeric(numeric) => validate_numeric_for_bigquery(numeric),
         CellNonOptional::Date(date) => validate_date_for_bigquery(date),
         CellNonOptional::Time(time) => validate_time_for_bigquery(time),
-        CellNonOptional::TimeStamp(datetime) => validate_datetime_for_bigquery(datetime),
-        CellNonOptional::TimeStampTz(timestamptz) => validate_timestamptz_for_bigquery(timestamptz),
+        CellNonOptional::Timestamp(datetime) => validate_datetime_for_bigquery(datetime),
+        CellNonOptional::TimestampTz(timestamptz) => validate_timestamptz_for_bigquery(timestamptz),
         CellNonOptional::Uuid(_) => Ok(()),
         CellNonOptional::Json(_) => Ok(()),
         CellNonOptional::Bytes(_) => Ok(()),
@@ -334,7 +334,7 @@ pub fn validate_array_cell_for_bigquery(array_cell: &ArrayCellNonOptional) -> Et
             }
             Ok(())
         }
-        ArrayCellNonOptional::TimeStamp(datetimes) => {
+        ArrayCellNonOptional::Timestamp(datetimes) => {
             for (index, datetime) in datetimes.iter().enumerate() {
                 validate_datetime_for_bigquery(datetime).map_err(|err| {
                     etl_error!(
@@ -346,7 +346,7 @@ pub fn validate_array_cell_for_bigquery(array_cell: &ArrayCellNonOptional) -> Et
             }
             Ok(())
         }
-        ArrayCellNonOptional::TimeStampTz(timestamptzs) => {
+        ArrayCellNonOptional::TimestampTz(timestamptzs) => {
             for (index, timestamptz) in timestamptzs.iter().enumerate() {
                 validate_timestamptz_for_bigquery(timestamptz).map_err(|err| {
                     etl_error!(

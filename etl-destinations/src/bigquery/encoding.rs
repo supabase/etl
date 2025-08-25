@@ -157,11 +157,11 @@ pub fn cell_encode_prost(cell: &CellNonOptional, tag: u32, buf: &mut impl bytes:
             let s = t.format(TIME_FORMAT).to_string();
             prost::encoding::string::encode(tag, &s, buf);
         }
-        CellNonOptional::TimeStamp(t) => {
+        CellNonOptional::Timestamp(t) => {
             let s = t.format(TIMESTAMP_FORMAT).to_string();
             prost::encoding::string::encode(tag, &s, buf);
         }
-        CellNonOptional::TimeStampTz(t) => {
+        CellNonOptional::TimestampTz(t) => {
             let s = t.format(TIMESTAMPTZ_FORMAT_HH_MM).to_string();
             prost::encoding::string::encode(tag, &s, buf);
         }
@@ -215,11 +215,11 @@ pub fn cell_encode_len_prost(cell: &CellNonOptional, tag: u32) -> usize {
             let s = t.format(TIME_FORMAT).to_string();
             prost::encoding::string::encoded_len(tag, &s)
         }
-        CellNonOptional::TimeStamp(t) => {
+        CellNonOptional::Timestamp(t) => {
             let s = t.format(TIMESTAMP_FORMAT).to_string();
             prost::encoding::string::encoded_len(tag, &s)
         }
-        CellNonOptional::TimeStampTz(t) => {
+        CellNonOptional::TimestampTz(t) => {
             let s = t.format(TIMESTAMPTZ_FORMAT_HH_MM).to_string();
             prost::encoding::string::encoded_len(tag, &s)
         }
@@ -292,14 +292,14 @@ pub fn array_cell_encode_prost(
                 .collect();
             prost::encoding::string::encode_repeated(tag, &values, buf);
         }
-        ArrayCellNonOptional::TimeStamp(vec) => {
+        ArrayCellNonOptional::Timestamp(vec) => {
             let values: Vec<String> = vec
                 .into_iter()
                 .map(|v| v.format(TIMESTAMP_FORMAT).to_string())
                 .collect();
             prost::encoding::string::encode_repeated(tag, &values, buf);
         }
-        ArrayCellNonOptional::TimeStampTz(vec) => {
+        ArrayCellNonOptional::TimestampTz(vec) => {
             let values: Vec<String> = vec
                 .into_iter()
                 .map(|v| v.format(TIMESTAMPTZ_FORMAT_HH_MM).to_string())
@@ -362,14 +362,14 @@ pub fn array_cell_non_optional_encoded_len_prost(
                 .collect();
             prost::encoding::string::encoded_len_repeated(tag, &values)
         }
-        ArrayCellNonOptional::TimeStamp(vec) => {
+        ArrayCellNonOptional::Timestamp(vec) => {
             let values: Vec<String> = vec
                 .into_iter()
                 .map(|v| v.format(TIMESTAMP_FORMAT).to_string())
                 .collect();
             prost::encoding::string::encoded_len_repeated(tag, &values)
         }
-        ArrayCellNonOptional::TimeStampTz(vec) => {
+        ArrayCellNonOptional::TimestampTz(vec) => {
             let values: Vec<String> = vec
                 .into_iter()
                 .map(|v| v.format(TIMESTAMPTZ_FORMAT_HH_MM).to_string())
@@ -532,7 +532,7 @@ mod tests {
         let table_row = TableRow::new(vec![
             Cell::Date(valid_date),
             Cell::Time(valid_time),
-            Cell::TimeStamp(valid_datetime),
+            Cell::Timestamp(valid_datetime),
         ]);
 
         let result = BigQueryTableRow::try_from(table_row);
