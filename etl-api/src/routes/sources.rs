@@ -1,6 +1,6 @@
-use crate::db;
-use crate::db::sources::{SourceConfig, SourcesDbError};
 use crate::configs::encryption::EncryptionKey;
+use crate::db;
+use crate::db::sources::{SourcesDbError, StoredSourceConfig};
 use crate::routes::{ErrorMessage, TenantIdError, extract_tenant_id};
 use actix_web::{
     HttpRequest, HttpResponse, Responder, ResponseError, delete, get,
@@ -75,8 +75,8 @@ pub struct StrippedSourceConfig {
     pub username: String,
 }
 
-impl From<SourceConfig> for StrippedSourceConfig {
-    fn from(source: SourceConfig) -> Self {
+impl From<StoredSourceConfig> for StrippedSourceConfig {
+    fn from(source: StoredSourceConfig) -> Self {
         Self {
             host: source.host,
             port: source.port,
@@ -91,7 +91,7 @@ pub struct CreateSourceRequest {
     #[schema(example = "My Postgres Source", required = true)]
     pub name: String,
     #[schema(required = true)]
-    pub config: SourceConfig,
+    pub config: StoredSourceConfig,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
@@ -105,7 +105,7 @@ pub struct UpdateSourceRequest {
     #[schema(example = "My Updated Postgres Source", required = true)]
     pub name: String,
     #[schema(required = true)]
-    pub config: SourceConfig,
+    pub config: StoredSourceConfig,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]

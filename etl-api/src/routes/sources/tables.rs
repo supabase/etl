@@ -11,8 +11,8 @@ use utoipa::ToSchema;
 use crate::db::tables::TablesDbError;
 use crate::routes::connect_to_source_database_with_defaults;
 use crate::{
-    db::{self, sources::SourcesDbError, tables::Table},
     configs::encryption::EncryptionKey,
+    db::{self, sources::SourcesDbError, tables::Table},
     routes::{ErrorMessage, TenantIdError, extract_tenant_id},
 };
 

@@ -1,4 +1,4 @@
-use etl_api::db::sources::SourceConfig;
+use etl_api::db::sources::StoredSourceConfig;
 use etl_api::routes::sources::{CreateSourceRequest, CreateSourceResponse};
 use etl_config::SerializableSecretString;
 use etl_config::shared::PgConnectionConfig;
@@ -36,7 +36,7 @@ pub async fn create_test_source_database(
 
     let source_pool = create_pg_database(&source_db_config).await;
 
-    let source_config = SourceConfig {
+    let source_config = StoredSourceConfig {
         host: source_db_config.host.clone(),
         port: source_db_config.port,
         name: source_db_config.name.clone(),

@@ -1,3 +1,4 @@
+pub mod destination;
 pub mod encryption;
 pub mod serde;
-mod destination;
+mod pipeline;

@@ -16,8 +16,8 @@ use utoipa_swagger_ui::SwaggerUi;
 use crate::{
     authentication::auth_validator,
     config::ApiConfig,
-    db::publications::Publication,
     configs::encryption,
+    db::publications::Publication,
     k8s_client::{HttpK8sClient, K8sClient},
     routes::{
         destinations::{

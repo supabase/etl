@@ -1,12 +1,14 @@
+use crate::configs::destination::FullApiDestinationConfig;
+use crate::configs::encryption::EncryptionKey;
+use crate::configs::serde::{DbDeserializationError, DbSerializationError};
+use crate::db::destinations::{DestinationsDbError, create_destination, update_destination};
+use crate::db::pipelines::{
+    PipelinesDbError, StoredPipelineConfig, create_pipeline, update_pipeline,
+};
 use etl_config::shared::DestinationConfig;
 use sqlx::PgTransaction;
 use std::ops::DerefMut;
 use thiserror::Error;
-
-use crate::db::destinations::{DestinationsDbError, create_destination, update_destination};
-use crate::db::pipelines::{PipelineConfig, PipelinesDbError, create_pipeline, update_pipeline};
-use crate::configs::serde::{DbDeserializationError, DbSerializationError};
-use crate::configs::encryption::EncryptionKey;
 
 #[derive(Debug, Error)]
 pub enum DestinationPipelinesDbError {
@@ -38,9 +40,9 @@ pub async fn create_destination_and_pipeline(
     tenant_id: &str,
     source_id: i64,
     destination_name: &str,
-    destination_config: DestinationConfig,
+    destination_config: FullApiDestinationConfig,
     image_id: i64,
-    pipeline_config: PipelineConfig,
+    pipeline_config: StoredPipelineConfig,
     encryption_key: &EncryptionKey,
 ) -> Result<(i64, i64), DestinationPipelinesDbError> {
     let destination_id = create_destination(
@@ -73,8 +75,8 @@ pub async fn update_destination_and_pipeline(
     pipeline_id: i64,
     source_id: i64,
     destination_name: &str,
-    destination_config: DestinationConfig,
-    pipeline_config: PipelineConfig,
+    destination_config: FullApiDestinationConfig,
+    pipeline_config: StoredPipelineConfig,
     encryption_key: &EncryptionKey,
 ) -> Result<(), DestinationPipelinesDbError> {
     let destination_id_res = update_destination(

@@ -1,4 +1,4 @@
-use etl_api::db::pipelines::{OptionalPipelineConfig, PipelineConfig};
+use etl_api::db::pipelines::{OptionalPipelineConfig, StoredPipelineConfig};
 use etl_api::routes::pipelines::{
     CreatePipelineRequest, CreatePipelineResponse, GetPipelineReplicationStatusResponse,
     ReadPipelineResponse, ReadPipelinesResponse, RollbackTableStateRequest,
@@ -23,8 +23,8 @@ use crate::{
     integration::tenants_test::create_tenant_with_id_and_name,
 };
 
-pub fn new_pipeline_config() -> PipelineConfig {
-    PipelineConfig {
+pub fn new_pipeline_config() -> StoredPipelineConfig {
+    StoredPipelineConfig {
         publication_name: "publication".to_owned(),
         batch: Some(BatchConfig {
             max_size: 1000,
@@ -35,8 +35,8 @@ pub fn new_pipeline_config() -> PipelineConfig {
     }
 }
 
-pub fn updated_pipeline_config() -> PipelineConfig {
-    PipelineConfig {
+pub fn updated_pipeline_config() -> StoredPipelineConfig {
+    StoredPipelineConfig {
         publication_name: "updated_publication".to_owned(),
         batch: Some(BatchConfig {
             max_size: 2000,
@@ -93,7 +93,7 @@ pub async fn create_pipeline_with_config(
     tenant_id: &str,
     source_id: i64,
     destination_id: i64,
-    config: PipelineConfig,
+    config: StoredPipelineConfig,
 ) -> i64 {
     create_default_image(app).await;
     let pipeline = CreatePipelineRequest {

@@ -1,4 +1,4 @@
-use etl_api::db::sources::SourceConfig;
+use etl_api::db::sources::StoredSourceConfig;
 use etl_api::routes::pipelines::{CreatePipelineRequest, CreatePipelineResponse};
 use etl_api::routes::sources::{
     CreateSourceRequest, CreateSourceResponse, ReadSourceResponse, ReadSourcesResponse,
@@ -20,8 +20,8 @@ pub fn new_name() -> String {
     "Postgres Source".to_string()
 }
 
-pub fn new_source_config() -> SourceConfig {
-    SourceConfig {
+pub fn new_source_config() -> StoredSourceConfig {
+    StoredSourceConfig {
         host: "localhost".to_string(),
         port: 5432,
         name: "postgres".to_string(),
@@ -34,8 +34,8 @@ fn updated_name() -> String {
     "Postgres Source (Updated)".to_string()
 }
 
-fn updated_source_config() -> SourceConfig {
-    SourceConfig {
+fn updated_source_config() -> StoredSourceConfig {
+    StoredSourceConfig {
         host: "example.com".to_string(),
         port: 2345,
         name: "sergtsop".to_string(),
@@ -52,7 +52,7 @@ pub async fn create_source_with_config(
     app: &TestApp,
     tenant_id: &str,
     name: String,
-    config: SourceConfig,
+    config: StoredSourceConfig,
 ) -> i64 {
     let source = CreateSourceRequest { name, config };
     let response = app.create_source(tenant_id, &source).await;
