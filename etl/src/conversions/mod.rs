@@ -265,10 +265,10 @@ macro_rules! convert_array_variant {
     ($variant:ident, $vec:expr) => {
         if $vec.iter().any(|v| v.is_none()) {
             bail!(
-                ErrorKind::NullValuesNotSupportedInArray,
-                "NULL values in arrays are not supported",
+                ErrorKind::NullValuesNotSupportedInArrayInDestination,
+                "NULL values in arrays are not supported in the destination",
                 format!(
-                    "Remove the NULL values from the array {:?} and try again",
+                    "The array {:?} contains NULL values which are not supported in the destination",
                     $vec
                 )
             )

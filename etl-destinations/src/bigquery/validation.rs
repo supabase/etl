@@ -89,21 +89,21 @@ pub fn validate_numeric_for_bigquery(numeric: &PgNumeric) -> EtlResult<()> {
     match numeric {
         PgNumeric::NaN => {
             bail!(
-                ErrorKind::UnsupportedValue,
+                ErrorKind::UnsupportedValueInDestination,
                 "BigQuery NUMERIC/BIGNUMERIC does not support NaN values",
                 "The numeric value NaN cannot be stored in BigQuery. Please provide a finite numeric value"
             );
         }
         PgNumeric::PositiveInfinity => {
             bail!(
-                ErrorKind::UnsupportedValue,
+                ErrorKind::UnsupportedValueInDestination,
                 "BigQuery NUMERIC/BIGNUMERIC does not support infinity values",
                 "The numeric value +Infinity cannot be stored in BigQuery. Please provide a finite numeric value"
             );
         }
         PgNumeric::NegativeInfinity => {
             bail!(
-                ErrorKind::UnsupportedValue,
+                ErrorKind::UnsupportedValueInDestination,
                 "BigQuery NUMERIC/BIGNUMERIC does not support infinity values",
                 "The numeric value -Infinity cannot be stored in BigQuery. Please provide a finite numeric value"
             );
@@ -113,7 +113,7 @@ pub fn validate_numeric_for_bigquery(numeric: &PgNumeric) -> EtlResult<()> {
 
             if !is_numeric_within_bigquery_bignumeric_limits(&numeric_str) {
                 bail!(
-                    ErrorKind::UnsupportedValue,
+                    ErrorKind::UnsupportedValueInDestination,
                     "Numeric value exceeds BigQuery BIGNUMERIC limits",
                     format!(
                         "The numeric value '{}' exceeds BigQuery's BIGNUMERIC limits (max ~{} digits, {} decimal places)",
@@ -136,7 +136,7 @@ pub fn validate_numeric_for_bigquery(numeric: &PgNumeric) -> EtlResult<()> {
 pub fn validate_date_for_bigquery(date: &NaiveDate) -> EtlResult<()> {
     if *date < *BIGQUERY_MIN_DATE {
         bail!(
-            ErrorKind::UnsupportedValue,
+            ErrorKind::UnsupportedValueInDestination,
             "Date value is before BigQuery's minimum supported date",
             format!(
                 "The date '{}' is before BigQuery's minimum supported date '{}'. BigQuery DATE supports values from 0001-01-01 to 9999-12-31",
@@ -148,7 +148,7 @@ pub fn validate_date_for_bigquery(date: &NaiveDate) -> EtlResult<()> {
 
     if *date > *BIGQUERY_MAX_DATE {
         bail!(
-            ErrorKind::UnsupportedValue,
+            ErrorKind::UnsupportedValueInDestination,
             "Date value is after BigQuery's maximum supported date",
             format!(
                 "The date '{}' is after BigQuery's maximum supported date '{}'. BigQuery DATE supports values from 0001-01-01 to 9999-12-31",
@@ -168,7 +168,7 @@ pub fn validate_date_for_bigquery(date: &NaiveDate) -> EtlResult<()> {
 pub fn validate_time_for_bigquery(time: &NaiveTime) -> EtlResult<()> {
     if *time < *BIGQUERY_MIN_TIME {
         bail!(
-            ErrorKind::UnsupportedValue,
+            ErrorKind::UnsupportedValueInDestination,
             "Time value is before BigQuery's minimum supported time",
             format!(
                 "The time '{}' is before BigQuery's minimum supported time '{}'. BigQuery TIME supports values from 00:00:00 to 23:59:59.999999",
@@ -180,7 +180,7 @@ pub fn validate_time_for_bigquery(time: &NaiveTime) -> EtlResult<()> {
 
     if *time > *BIGQUERY_MAX_TIME {
         bail!(
-            ErrorKind::UnsupportedValue,
+            ErrorKind::UnsupportedValueInDestination,
             "Time value is after BigQuery's maximum supported time",
             format!(
                 "The time '{}' is after BigQuery's maximum supported time '{}'. BigQuery TIME supports values from 00:00:00 to 23:59:59.999999",
@@ -200,7 +200,7 @@ pub fn validate_time_for_bigquery(time: &NaiveTime) -> EtlResult<()> {
 pub fn validate_datetime_for_bigquery(datetime: &NaiveDateTime) -> EtlResult<()> {
     if *datetime < *BIGQUERY_MIN_DATETIME {
         bail!(
-            ErrorKind::UnsupportedValue,
+            ErrorKind::UnsupportedValueInDestination,
             "DateTime value is before BigQuery's minimum supported datetime",
             format!(
                 "The datetime '{}' is before BigQuery's minimum supported datetime '{}'. BigQuery DATETIME supports values from 0001-01-01 00:00:00 to 9999-12-31 23:59:59.999999",
@@ -212,7 +212,7 @@ pub fn validate_datetime_for_bigquery(datetime: &NaiveDateTime) -> EtlResult<()>
 
     if *datetime > *BIGQUERY_MAX_DATETIME {
         bail!(
-            ErrorKind::UnsupportedValue,
+            ErrorKind::UnsupportedValueInDestination,
             "DateTime value is after BigQuery's maximum supported datetime",
             format!(
                 "The datetime '{}' is after BigQuery's maximum supported datetime '{}'. BigQuery DATETIME supports values from 0001-01-01 00:00:00 to 9999-12-31 23:59:59.999999",
@@ -232,7 +232,7 @@ pub fn validate_datetime_for_bigquery(datetime: &NaiveDateTime) -> EtlResult<()>
 pub fn validate_timestamptz_for_bigquery(timestamptz: &DateTime<Utc>) -> EtlResult<()> {
     if *timestamptz < *BIGQUERY_MIN_TIMESTAMP {
         bail!(
-            ErrorKind::UnsupportedValue,
+            ErrorKind::UnsupportedValueInDestination,
             "Timestamp value is before BigQuery's minimum supported timestamp",
             format!(
                 "The timestamp '{}' is before BigQuery's minimum supported timestamp '{}'. BigQuery TIMESTAMP supports values from 0001-01-01 00:00:00 UTC to 9999-12-31 23:59:59.999999 UTC",
@@ -244,7 +244,7 @@ pub fn validate_timestamptz_for_bigquery(timestamptz: &DateTime<Utc>) -> EtlResu
 
     if *timestamptz > *BIGQUERY_MAX_TIMESTAMP {
         bail!(
-            ErrorKind::UnsupportedValue,
+            ErrorKind::UnsupportedValueInDestination,
             "Timestamp value is after BigQuery's maximum supported timestamp",
             format!(
                 "The timestamp '{}' is after BigQuery's maximum supported timestamp '{}'. BigQuery TIMESTAMP supports values from 0001-01-01 00:00:00 UTC to 9999-12-31 23:59:59.999999 UTC",
@@ -406,7 +406,7 @@ mod tests {
         let result = validate_numeric_for_bigquery(&PgNumeric::NaN);
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert_eq!(err.kind(), ErrorKind::UnsupportedValue);
+        assert_eq!(err.kind(), ErrorKind::UnsupportedValueInDestination);
         assert!(
             err.detail()
                 .unwrap()
@@ -419,7 +419,7 @@ mod tests {
         let result = validate_numeric_for_bigquery(&PgNumeric::PositiveInfinity);
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert_eq!(err.kind(), ErrorKind::UnsupportedValue);
+        assert_eq!(err.kind(), ErrorKind::UnsupportedValueInDestination);
         assert!(
             err.detail()
                 .unwrap()
@@ -432,7 +432,7 @@ mod tests {
         let result = validate_numeric_for_bigquery(&PgNumeric::NegativeInfinity);
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert_eq!(err.kind(), ErrorKind::UnsupportedValue);
+        assert_eq!(err.kind(), ErrorKind::UnsupportedValueInDestination);
         assert!(
             err.detail()
                 .unwrap()
@@ -455,7 +455,7 @@ mod tests {
         let result = validate_date_for_bigquery(&date);
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert_eq!(err.kind(), ErrorKind::UnsupportedValue);
+        assert_eq!(err.kind(), ErrorKind::UnsupportedValueInDestination);
         assert!(err.detail().unwrap().contains("before BigQuery's minimum"));
     }
 
@@ -465,7 +465,7 @@ mod tests {
         let result = validate_date_for_bigquery(&date);
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert_eq!(err.kind(), ErrorKind::UnsupportedValue);
+        assert_eq!(err.kind(), ErrorKind::UnsupportedValueInDestination);
         assert!(err.detail().unwrap().contains("after BigQuery's maximum"));
     }
 
@@ -482,7 +482,10 @@ mod tests {
         let cell = CellNonOptional::Numeric(PgNumeric::NaN);
         let result = validate_cell_for_bigquery(&cell);
         assert!(result.is_err());
-        assert_eq!(result.unwrap_err().kind(), ErrorKind::UnsupportedValue);
+        assert_eq!(
+            result.unwrap_err().kind(),
+            ErrorKind::UnsupportedValueInDestination
+        );
     }
 
     #[test]
@@ -496,7 +499,7 @@ mod tests {
         let result = validate_array_cell_for_bigquery(&array_cell);
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert_eq!(err.kind(), ErrorKind::UnsupportedValue);
+        assert_eq!(err.kind(), ErrorKind::UnsupportedValueInDestination);
         assert!(err.detail().unwrap().contains("Element at index 1"));
     }
 }

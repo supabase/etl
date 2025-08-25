@@ -1553,7 +1553,10 @@ async fn table_array_with_null_values() {
     // Wait for the pipeline expecting an error to be returned.
     let err = pipeline.shutdown_and_wait().await.err().unwrap();
     assert_eq!(err.kinds().len(), 1);
-    assert_eq!(err.kinds()[0], ErrorKind::NullValuesNotSupportedInArray);
+    assert_eq!(
+        err.kinds()[0],
+        ErrorKind::NullValuesNotSupportedInArrayInDestination
+    );
 
     // Reset and try with valid array (no nulls)
     database

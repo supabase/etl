@@ -67,9 +67,9 @@ pub enum ErrorKind {
     // Data & Transformation Errors
     ConversionError,
     InvalidData,
-    NullValuesNotSupportedInArray,
     ValidationError,
-    UnsupportedValue,
+    NullValuesNotSupportedInArrayInDestination,
+    UnsupportedValueInDestination,
 
     // Configuration & Limit Errors
     ConfigError,

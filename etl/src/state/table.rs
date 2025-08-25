@@ -124,10 +124,16 @@ impl TableReplicationError {
                 "Verify the configured limits for Postgres, for example, the maximum number of replication slots.",
                 RetryPolicy::ManualRetry,
             ),
-            ErrorKind::NullValuesNotSupportedInArray => Self::with_solution(
+            ErrorKind::NullValuesNotSupportedInArrayInDestination => Self::with_solution(
                 table_id,
                 error,
                 "Remove NULL values from array columns in the Postgres tables.",
+                RetryPolicy::ManualRetry,
+            ),
+            ErrorKind::UnsupportedValueInDestination => Self::with_solution(
+                table_id,
+                error,
+                "Update the value in the Postgres table.",
                 RetryPolicy::ManualRetry,
             ),
             ErrorKind::SourceSnapshotTooOld => Self::with_solution(

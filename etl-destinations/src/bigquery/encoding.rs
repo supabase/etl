@@ -416,7 +416,7 @@ mod tests {
         let result = BigQueryTableRow::try_from(table_row);
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert_eq!(err.kind(), ErrorKind::UnsupportedValue);
+        assert_eq!(err.kind(), ErrorKind::UnsupportedValueInDestination);
         assert!(err.detail().unwrap().contains("Cell at index 1"));
         assert!(
             err.detail()
@@ -435,7 +435,7 @@ mod tests {
         let result = BigQueryTableRow::try_from(table_row);
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert_eq!(err.kind(), ErrorKind::UnsupportedValue);
+        assert_eq!(err.kind(), ErrorKind::UnsupportedValueInDestination);
         assert!(err.detail().unwrap().contains("Cell at index 1"));
         assert!(
             err.detail()
@@ -456,7 +456,7 @@ mod tests {
         let result = BigQueryTableRow::try_from(table_row);
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert_eq!(err.kind(), ErrorKind::UnsupportedValue);
+        assert_eq!(err.kind(), ErrorKind::UnsupportedValueInDestination);
         assert!(err.detail().unwrap().contains("Cell at index 0"));
         assert!(err.detail().unwrap().contains("before BigQuery's minimum"));
     }
@@ -469,7 +469,10 @@ mod tests {
         let result = BigQueryTableRow::try_from(table_row);
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert_eq!(err.kind(), ErrorKind::NullValuesNotSupportedInArray);
+        assert_eq!(
+            err.kind(),
+            ErrorKind::NullValuesNotSupportedInArrayInDestination
+        );
         assert!(
             err.detail()
                 .unwrap()
@@ -490,7 +493,7 @@ mod tests {
         let result = BigQueryTableRow::try_from(table_row);
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert_eq!(err.kind(), ErrorKind::UnsupportedValue);
+        assert_eq!(err.kind(), ErrorKind::UnsupportedValueInDestination);
         assert!(err.detail().unwrap().contains("Cell at index 0"));
         assert!(err.detail().unwrap().contains("Element at index 1"));
     }
@@ -518,7 +521,7 @@ mod tests {
         let result = BigQueryTableRow::try_from(table_row);
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert_eq!(err.kind(), ErrorKind::UnsupportedValue);
+        assert_eq!(err.kind(), ErrorKind::UnsupportedValueInDestination);
         assert!(err.detail().unwrap().contains("Cell at index 0")); // Should fail on first cell
         assert!(err.detail().unwrap().contains("NaN"));
     }
@@ -551,7 +554,7 @@ mod tests {
         let result = BigQueryTableRow::try_from(table_row);
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert_eq!(err.kind(), ErrorKind::UnsupportedValue);
+        assert_eq!(err.kind(), ErrorKind::UnsupportedValueInDestination);
         assert!(
             err.detail()
                 .unwrap()
