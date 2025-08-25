@@ -365,6 +365,9 @@ pub fn validate_array_cell_for_bigquery(array_cell: &ArrayCellNonOptional) -> Et
 /// Checks if a [`PgNumeric`] as string is within BigQuery's BIGNUMERIC limits.
 ///
 /// BIGNUMERIC supports up to ~77 digits of precision with up to 38 decimal places.
+///
+/// The rationale for checking only for BIGNUMERIC is that this is the type conversion that we perform
+/// in `postgres_to_bigquery_type`.
 fn is_numeric_within_bigquery_bignumeric_limits(pg_numeric: &PgNumeric) -> bool {
     let numeric_str = pg_numeric.to_string();
 
