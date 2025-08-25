@@ -32,6 +32,7 @@ impl From<StoredPipelineConfig> for FullApiPipelineConfig {
 pub struct PartialApiPipelineConfig {
     #[schema(example = "my_publication")]
     pub publication_name: Option<String>,
+    #[schema(example = r#"{"max_size": 1000000, "max_fill_ms": 10000}"#)]
     pub batch: Option<BatchConfig>,
     #[schema(example = 1000)]
     pub table_error_retry_delay_ms: Option<u64>,

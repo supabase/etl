@@ -200,6 +200,15 @@ mod tests {
         assert_eq!(config.port, decrypted.port);
         assert_eq!(config.name, decrypted.name);
         assert_eq!(config.username, decrypted.username);
+
+        // Assert that password was encrypted and decrypted correctly
+        match (config.password, decrypted.password) {
+            (Some(original), Some(decrypted_pwd)) => {
+                assert_eq!(original.expose_secret(), decrypted_pwd.expose_secret());
+            }
+            (None, None) => {}
+            _ => panic!("Password encryption/decryption failed"),
+        }
     }
 
     #[test]

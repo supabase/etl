@@ -232,16 +232,24 @@ mod tests {
                 StoredDestinationConfig::BigQuery {
                     project_id: p1,
                     dataset_id: d1,
-                    ..
+                    service_account_key: key1,
+                    max_staleness_mins: staleness1,
+                    max_concurrent_streams: streams1,
                 },
                 StoredDestinationConfig::BigQuery {
                     project_id: p2,
                     dataset_id: d2,
-                    ..
+                    service_account_key: key2,
+                    max_staleness_mins: staleness2,
+                    max_concurrent_streams: streams2,
                 },
             ) => {
                 assert_eq!(p1, p2);
                 assert_eq!(d1, d2);
+                assert_eq!(staleness1, staleness2);
+                assert_eq!(streams1, streams2);
+                // Assert that service account key was encrypted and decrypted correctly
+                assert_eq!(key1.expose_secret(), key2.expose_secret());
             }
             _ => panic!("Config types don't match"),
         }
