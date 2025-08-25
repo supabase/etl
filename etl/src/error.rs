@@ -69,6 +69,7 @@ pub enum ErrorKind {
     InvalidData,
     NullValuesNotSupportedInArray,
     ValidationError,
+    UnsupportedValue,
 
     // Configuration & Limit Errors
     ConfigError,
