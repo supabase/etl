@@ -11,6 +11,7 @@ use utoipa::ToSchema;
 const DEFAULT_MAX_CONCURRENT_STREAMS: usize = 8;
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
 pub enum FullApiDestinationConfig {
     Memory,
     BigQuery {
@@ -48,7 +49,8 @@ impl From<StoredDestinationConfig> for FullApiDestinationConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum StoredDestinationConfig {
     Memory,
     BigQuery {
@@ -135,6 +137,7 @@ impl Encrypt<EncryptedStoredDestinationConfig> for StoredDestinationConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum EncryptedStoredDestinationConfig {
     Memory,
     BigQuery {
@@ -173,6 +176,98 @@ impl Decrypt<StoredDestinationConfig> for EncryptedStoredDestinationConfig {
                     max_concurrent_streams,
                 })
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::configs::encryption::{EncryptionKey, generate_random_key};
+
+    #[test]
+    fn test_stored_destination_config_serialization() {
+        let config = StoredDestinationConfig::BigQuery {
+            project_id: "test-project".to_string(),
+            dataset_id: "test_dataset".to_string(),
+            service_account_key: SerializableSecretString::from("{\"test\": \"key\"}".to_string()),
+            max_staleness_mins: Some(15),
+            max_concurrent_streams: 8,
+        };
+
+        let json = serde_json::to_string(&config).unwrap();
+        let deserialized: StoredDestinationConfig = serde_json::from_str(&json).unwrap();
+
+        match (config, deserialized) {
+            (
+                StoredDestinationConfig::BigQuery { project_id: p1, .. },
+                StoredDestinationConfig::BigQuery { project_id: p2, .. },
+            ) => {
+                assert_eq!(p1, p2);
+            }
+            _ => panic!("Config types don't match"),
+        }
+    }
+
+    #[test]
+    fn test_stored_destination_config_encryption_decryption() {
+        let config = StoredDestinationConfig::BigQuery {
+            project_id: "test-project".to_string(),
+            dataset_id: "test_dataset".to_string(),
+            service_account_key: SerializableSecretString::from("{\"test\": \"key\"}".to_string()),
+            max_staleness_mins: Some(15),
+            max_concurrent_streams: 8,
+        };
+
+        let key = EncryptionKey {
+            id: 1,
+            key: generate_random_key::<32>().unwrap(),
+        };
+
+        let encrypted = config.clone().encrypt(&key).unwrap();
+        let decrypted = encrypted.decrypt(&key).unwrap();
+
+        match (config, decrypted) {
+            (
+                StoredDestinationConfig::BigQuery {
+                    project_id: p1,
+                    dataset_id: d1,
+                    ..
+                },
+                StoredDestinationConfig::BigQuery {
+                    project_id: p2,
+                    dataset_id: d2,
+                    ..
+                },
+            ) => {
+                assert_eq!(p1, p2);
+                assert_eq!(d1, d2);
+            }
+            _ => panic!("Config types don't match"),
+        }
+    }
+
+    #[test]
+    fn test_full_api_destination_config_conversion() {
+        let full_config = FullApiDestinationConfig::BigQuery {
+            project_id: "test-project".to_string(),
+            dataset_id: "test_dataset".to_string(),
+            service_account_key: SerializableSecretString::from("{\"test\": \"key\"}".to_string()),
+            max_staleness_mins: Some(15),
+            max_concurrent_streams: None,
+        };
+
+        let stored: StoredDestinationConfig = full_config.clone().into();
+        let back_to_full: FullApiDestinationConfig = stored.into();
+
+        match (full_config, back_to_full) {
+            (
+                FullApiDestinationConfig::BigQuery { project_id: p1, .. },
+                FullApiDestinationConfig::BigQuery { project_id: p2, .. },
+            ) => {
+                assert_eq!(p1, p2);
+            }
+            _ => panic!("Config types don't match"),
         }
     }
 }

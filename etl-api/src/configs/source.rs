@@ -9,6 +9,9 @@ use crate::configs::encryption::{
     decrypt_text, encrypt_text,
 };
 
+const DEFAULT_TLS_TRUSTED_ROOT_CERTS: &str = "";
+const DEFAULT_TLS_ENABLED: bool = false;
+
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub struct FullApiSourceConfig {
@@ -79,8 +82,8 @@ impl StoredSourceConfig {
             password: self.password,
             // TODO: enable TLS
             tls: TlsConfig {
-                trusted_root_certs: String::new(),
-                enabled: false,
+                trusted_root_certs: DEFAULT_TLS_TRUSTED_ROOT_CERTS.to_string(),
+                enabled: DEFAULT_TLS_ENABLED,
             },
         }
     }
@@ -148,5 +151,73 @@ impl Decrypt<StoredSourceConfig> for EncryptedStoredSourceConfig {
             username: self.username,
             password: decrypted_password,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::configs::encryption::{EncryptionKey, generate_random_key};
+
+    #[test]
+    fn test_stored_source_config_serialization() {
+        let config = StoredSourceConfig {
+            host: "localhost".to_string(),
+            port: 5432,
+            name: "testdb".to_string(),
+            username: "user".to_string(),
+            password: Some(SerializableSecretString::from("password".to_string())),
+        };
+
+        let json = serde_json::to_string(&config).unwrap();
+        let deserialized: StoredSourceConfig = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(config.host, deserialized.host);
+        assert_eq!(config.port, deserialized.port);
+        assert_eq!(config.name, deserialized.name);
+        assert_eq!(config.username, deserialized.username);
+    }
+
+    #[test]
+    fn test_stored_source_config_encryption_decryption() {
+        let config = StoredSourceConfig {
+            host: "localhost".to_string(),
+            port: 5432,
+            name: "testdb".to_string(),
+            username: "user".to_string(),
+            password: Some(SerializableSecretString::from("password".to_string())),
+        };
+
+        let key = EncryptionKey {
+            id: 1,
+            key: generate_random_key::<32>().unwrap(),
+        };
+
+        let encrypted = config.clone().encrypt(&key).unwrap();
+        let decrypted = encrypted.decrypt(&key).unwrap();
+
+        assert_eq!(config.host, decrypted.host);
+        assert_eq!(config.port, decrypted.port);
+        assert_eq!(config.name, decrypted.name);
+        assert_eq!(config.username, decrypted.username);
+    }
+
+    #[test]
+    fn test_full_api_source_config_conversion() {
+        let full_config = FullApiSourceConfig {
+            host: "localhost".to_string(),
+            port: 5432,
+            name: "testdb".to_string(),
+            username: "user".to_string(),
+            password: Some(SerializableSecretString::from("password".to_string())),
+        };
+
+        let stored: StoredSourceConfig = full_config.clone().into();
+        let back_to_full: FullApiSourceConfig = stored.into();
+
+        assert_eq!(full_config.host, back_to_full.host);
+        assert_eq!(full_config.port, back_to_full.port);
+        assert_eq!(full_config.name, back_to_full.name);
+        assert_eq!(full_config.username, back_to_full.username);
     }
 }

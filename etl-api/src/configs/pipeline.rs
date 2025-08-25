@@ -93,3 +93,102 @@ impl From<FullApiPipelineConfig> for StoredPipelineConfig {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use etl_config::shared::BatchConfig;
+
+    #[test]
+    fn test_stored_pipeline_config_serialization() {
+        let config = StoredPipelineConfig {
+            publication_name: "test_publication".to_string(),
+            batch: BatchConfig {
+                max_size: 1000,
+                max_fill_ms: 5000,
+            },
+            table_error_retry_delay_ms: 2000,
+            max_table_sync_workers: 4,
+        };
+
+        let json = serde_json::to_string(&config).unwrap();
+        let deserialized: StoredPipelineConfig = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(config.publication_name, deserialized.publication_name);
+        assert_eq!(config.batch.max_size, deserialized.batch.max_size);
+        assert_eq!(
+            config.table_error_retry_delay_ms,
+            deserialized.table_error_retry_delay_ms
+        );
+        assert_eq!(
+            config.max_table_sync_workers,
+            deserialized.max_table_sync_workers
+        );
+    }
+
+    #[test]
+    fn test_full_api_pipeline_config_conversion() {
+        let full_config = FullApiPipelineConfig {
+            publication_name: "test_publication".to_string(),
+            batch: None,
+            table_error_retry_delay_ms: None,
+            max_table_sync_workers: None,
+        };
+
+        let stored: StoredPipelineConfig = full_config.clone().into();
+        let back_to_full: FullApiPipelineConfig = stored.into();
+
+        assert_eq!(full_config.publication_name, back_to_full.publication_name);
+    }
+
+    #[test]
+    fn test_full_api_pipeline_config_defaults() {
+        let full_config = FullApiPipelineConfig {
+            publication_name: "test_publication".to_string(),
+            batch: None,
+            table_error_retry_delay_ms: None,
+            max_table_sync_workers: None,
+        };
+
+        let stored: StoredPipelineConfig = full_config.into();
+
+        assert_eq!(stored.batch.max_size, DEFAULT_BATCH_MAX_SIZE);
+        assert_eq!(stored.batch.max_fill_ms, DEFAULT_BATCH_MAX_FILL_MS);
+        assert_eq!(
+            stored.table_error_retry_delay_ms,
+            DEFAULT_TABLE_ERROR_RETRY_DELAY_MS
+        );
+        assert_eq!(stored.max_table_sync_workers, 0);
+    }
+
+    #[test]
+    fn test_partial_api_pipeline_config_merge() {
+        let mut stored = StoredPipelineConfig {
+            publication_name: "old_publication".to_string(),
+            batch: BatchConfig {
+                max_size: 500,
+                max_fill_ms: 2000,
+            },
+            table_error_retry_delay_ms: 1000,
+            max_table_sync_workers: 2,
+        };
+
+        let partial = PartialApiPipelineConfig {
+            publication_name: Some("new_publication".to_string()),
+            batch: Some(BatchConfig {
+                max_size: 2000,
+                max_fill_ms: 8000,
+            }),
+            table_error_retry_delay_ms: Some(5000),
+            max_table_sync_workers: None,
+        };
+
+        stored.merge(partial);
+
+        assert_eq!(stored.publication_name, "new_publication");
+        assert_eq!(stored.batch.max_size, 2000);
+        assert_eq!(stored.batch.max_fill_ms, 8000);
+        assert_eq!(stored.table_error_retry_delay_ms, 5000);
+        assert_eq!(stored.max_table_sync_workers, 2);
+    }
+}

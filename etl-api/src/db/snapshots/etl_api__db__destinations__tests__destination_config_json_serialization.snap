@@ -7,6 +7,7 @@ expression: config
     "project_id": "project-id",
     "dataset_id": "dataset-id",
     "service_account_key": "service-account-key",
-    "max_staleness_mins": 42
+    "max_staleness_mins": 42,
+    "max_concurrent_streams": 1
   }
 }
