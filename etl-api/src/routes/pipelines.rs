@@ -1,26 +1,10 @@
-use crate::configs::destination::StoredDestinationConfig;
-use crate::configs::encryption::EncryptionKey;
-use crate::db::destinations::{Destination, DestinationsDbError, destination_exists};
-use crate::db::images::{Image, ImagesDbError};
-use crate::db::pipelines::{Pipeline, PipelinesDbError, StoredPipelineConfig};
-use crate::db::replicators::{Replicator, ReplicatorsDbError};
-use crate::db::sources::{Source, SourcesDbError, StoredSourceConfig, source_exists};
-use crate::db::{self, pipelines::OptionalPipelineConfig};
-use crate::k8s_client::TRUSTED_ROOT_CERT_KEY_NAME;
-use crate::k8s_client::{K8sClient, K8sError, PodPhase, TRUSTED_ROOT_CERT_CONFIG_MAP_NAME};
-use crate::routes::{
-    ErrorMessage, TenantIdError, connect_to_source_database_with_defaults, extract_tenant_id,
-};
 use actix_web::{
     HttpRequest, HttpResponse, Responder, ResponseError, delete, get,
     http::{StatusCode, header::ContentType},
     post,
     web::{Data, Json, Path},
 };
-use etl_config::shared::{
-    PgConnectionConfig, PipelineConfig,
-    ReplicatorConfig, SupabaseConfig, TlsConfig,
-};
+use etl_config::shared::{PgConnectionConfig, ReplicatorConfig, SupabaseConfig, TlsConfig};
 use etl_postgres::replication::{TableLookupError, get_table_name_from_oid, state};
 use etl_postgres::schema::TableId;
 use secrecy::ExposeSecret;
@@ -29,6 +13,21 @@ use sqlx::{PgPool, PgTransaction};
 use std::ops::DerefMut;
 use thiserror::Error;
 use utoipa::ToSchema;
+
+use crate::configs::destination::StoredDestinationConfig;
+use crate::configs::encryption::EncryptionKey;
+use crate::configs::pipeline::{FullApiPipelineConfig, PartialApiPipelineConfig};
+use crate::db;
+use crate::db::destinations::{Destination, DestinationsDbError, destination_exists};
+use crate::db::images::{Image, ImagesDbError};
+use crate::db::pipelines::{Pipeline, PipelinesDbError};
+use crate::db::replicators::{Replicator, ReplicatorsDbError};
+use crate::db::sources::{Source, SourcesDbError, StoredSourceConfig, source_exists};
+use crate::k8s_client::TRUSTED_ROOT_CERT_KEY_NAME;
+use crate::k8s_client::{K8sClient, K8sError, PodPhase, TRUSTED_ROOT_CERT_CONFIG_MAP_NAME};
+use crate::routes::{
+    ErrorMessage, TenantIdError, connect_to_source_database_with_defaults, extract_tenant_id,
+};
 
 #[derive(Debug, Error)]
 pub enum PipelineError {
@@ -174,7 +173,7 @@ pub struct CreatePipelineRequest {
     #[schema(example = 1, required = true)]
     pub destination_id: i64,
     #[schema(required = true)]
-    pub config: StoredPipelineConfig,
+    pub config: FullApiPipelineConfig,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
@@ -190,18 +189,18 @@ pub struct UpdatePipelineRequest {
     #[schema(example = 1, required = true)]
     pub destination_id: i64,
     #[schema(required = true)]
-    pub config: StoredPipelineConfig,
+    pub config: FullApiPipelineConfig,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct UpdatePipelineConfigRequest {
     #[schema(required = true)]
-    pub config: OptionalPipelineConfig,
+    pub config: PartialApiPipelineConfig,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct UpdatePipelineConfigResponse {
-    pub config: StoredPipelineConfig,
+    pub config: FullApiPipelineConfig,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
@@ -220,7 +219,7 @@ pub struct ReadPipelineResponse {
     pub destination_name: String,
     #[schema(example = 1)]
     pub replicator_id: i64,
-    pub config: StoredPipelineConfig,
+    pub config: FullApiPipelineConfig,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
@@ -439,16 +438,16 @@ pub async fn read_pipeline(
 
     let response = db::pipelines::read_pipeline(&**pool, tenant_id, pipeline_id)
         .await?
-        .map(|s| {
+        .map(|pipeline| {
             Ok::<ReadPipelineResponse, serde_json::Error>(ReadPipelineResponse {
-                id: s.id,
-                tenant_id: s.tenant_id,
-                source_id: s.source_id,
-                source_name: s.source_name,
-                destination_id: s.destination_id,
-                destination_name: s.destination_name,
-                replicator_id: s.replicator_id,
-                config: s.config,
+                id: pipeline.id,
+                tenant_id: pipeline.tenant_id,
+                source_id: pipeline.source_id,
+                source_name: pipeline.source_name,
+                destination_id: pipeline.destination_id,
+                destination_name: pipeline.destination_name,
+                replicator_id: pipeline.replicator_id,
+                config: pipeline.config.into(),
             })
         })
         .transpose()?
@@ -582,7 +581,7 @@ pub async fn read_all_pipelines(
             destination_id: pipeline.destination_id,
             destination_name: pipeline.destination_name,
             replicator_id: pipeline.replicator_id,
-            config: pipeline.config,
+            config: pipeline.config.into(),
         };
         pipelines.push(pipeline);
     }
@@ -1068,7 +1067,9 @@ pub async fn update_pipeline_config(
 
     txn.commit().await?;
 
-    let response = UpdatePipelineConfigResponse { config };
+    let response = UpdatePipelineConfigResponse {
+        config: config.into(),
+    };
 
     Ok(Json(response))
 }
@@ -1195,7 +1196,6 @@ async fn build_replicator_config(
     pipeline: Pipeline,
     supabase_config: SupabaseConfig,
 ) -> Result<ReplicatorConfig, PipelineError> {
-    // We load the trusted root certificates from the config map.
     let trusted_root_certs = k8s_client
         .get_config_map(TRUSTED_ROOT_CERT_CONFIG_MAP_NAME)
         .await?
@@ -1217,28 +1217,14 @@ async fn build_replicator_config(
         },
     };
 
-    let pipeline_config = PipelineConfig {
+    let config = ReplicatorConfig {
+        destination: destination_config.into_etl_config(),
         // We are safe to perform this conversion, since the i64 -> u64 conversion performs wrap
         // around, and we won't have two different values map to the same u64, since the domain size
         // is the same.
-        id: pipeline.id as u64,
-        publication_name: pipeline.config.publication_name,
-        pg_connection,
-        // If these configs are not set, we default to the most recent default values.
-        //
-        // The reason for using `Option` fields in the config instead of automatically applying defaults
-        // is that we want to persist a config in storage with some unset values, allowing us to interpret
-        // them differently after deserialization without needing to run database migrations.
-        batch: pipeline.config.batch.unwrap_or_default(),
-        // Hardcoding 10s for now
-        table_error_retry_delay_ms: pipeline.config.table_error_retry_delay_ms.unwrap_or(10000),
-        // Hardcoding a value of 4 for now for maximum number of parallel table sync workers
-        max_table_sync_workers: pipeline.config.max_table_sync_workers.unwrap_or(4),
-    };
-
-    let config = ReplicatorConfig {
-        destination: destination_config.into_etl_config(),
-        pipeline: pipeline_config,
+        pipeline: pipeline
+            .config
+            .into_etl_config(pipeline.id as u64, pg_connection),
         // The Sentry config will be injected via env variables for security purposes.
         sentry: None,
         supabase: Some(supabase_config),

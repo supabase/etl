@@ -1,5 +1,3 @@
-use crate::common::database::create_etl_api_database;
-use crate::common::k8s_client::MockK8sClient;
 use etl_api::k8s_client::K8sClient;
 use etl_api::routes::destinations::{CreateDestinationRequest, UpdateDestinationRequest};
 use etl_api::routes::destinations_pipelines::{
@@ -17,7 +15,7 @@ use etl_api::routes::tenants::{
 use etl_api::routes::tenants_sources::CreateTenantSourceRequest;
 use etl_api::{
     config::ApiConfig,
-    encryption::{self, generate_random_key},
+    configs::encryption::{self, generate_random_key},
     startup::run,
 };
 use etl_config::shared::PgConnectionConfig;
@@ -29,6 +27,9 @@ use std::net::TcpListener;
 use std::sync::Arc;
 use tokio::runtime::Handle;
 use uuid::Uuid;
+
+use crate::common::database::create_etl_api_database;
+use crate::common::k8s_client::MockK8sClient;
 
 pub struct TestApp {
     pub address: String,

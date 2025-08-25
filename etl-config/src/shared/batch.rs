@@ -14,12 +14,3 @@ pub struct BatchConfig {
     #[cfg_attr(feature = "utoipa", schema(example = 1000))]
     pub max_fill_ms: u64,
 }
-
-impl Default for BatchConfig {
-    fn default() -> Self {
-        Self {
-            max_size: 1000,
-            max_fill_ms: 1000,
-        }
-    }
-}

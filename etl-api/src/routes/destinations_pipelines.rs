@@ -1,10 +1,12 @@
+use super::{ErrorMessage, TenantIdError, destinations::DestinationError, extract_tenant_id};
 use crate::configs::destination::FullApiDestinationConfig;
 use crate::configs::encryption::EncryptionKey;
+use crate::configs::pipeline::FullApiPipelineConfig;
 use crate::db;
 use crate::db::destinations::{DestinationsDbError, destination_exists};
 use crate::db::destinations_pipelines::DestinationPipelinesDbError;
 use crate::db::images::ImagesDbError;
-use crate::db::pipelines::{PipelinesDbError, StoredPipelineConfig, read_pipeline};
+use crate::db::pipelines::{PipelinesDbError, read_pipeline};
 use crate::db::sources::{SourcesDbError, source_exists};
 use actix_web::{
     HttpRequest, HttpResponse, Responder, ResponseError, delete,
@@ -18,8 +20,6 @@ use sqlx::PgPool;
 use std::ops::DerefMut;
 use thiserror::Error;
 use utoipa::ToSchema;
-
-use super::{ErrorMessage, TenantIdError, destinations::DestinationError, extract_tenant_id};
 
 #[derive(Debug, Error)]
 enum DestinationPipelineError {
@@ -140,7 +140,7 @@ pub struct CreateDestinationPipelineRequest {
     #[schema(required = true, example = 1)]
     pub source_id: i64,
     #[schema(required = true)]
-    pub pipeline_config: StoredPipelineConfig,
+    pub pipeline_config: FullApiPipelineConfig,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
@@ -160,7 +160,7 @@ pub struct UpdateDestinationPipelineRequest {
     #[schema(required = true, example = 1)]
     pub source_id: i64,
     #[schema(required = true)]
-    pub pipeline_config: StoredPipelineConfig,
+    pub pipeline_config: FullApiPipelineConfig,
 }
 
 #[utoipa::path(
