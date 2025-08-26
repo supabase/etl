@@ -1,3 +1,4 @@
+use crate::configs::store::Store;
 use etl_config::shared::{BatchConfig, PgConnectionConfig, PipelineConfig};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
@@ -82,6 +83,8 @@ impl StoredPipelineConfig {
         }
     }
 }
+
+impl Store for StoredPipelineConfig {}
 
 impl From<FullApiPipelineConfig> for StoredPipelineConfig {
     fn from(value: FullApiPipelineConfig) -> Self {

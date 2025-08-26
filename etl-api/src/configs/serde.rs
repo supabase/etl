@@ -1,10 +1,10 @@
 use serde::Serialize;
-use serde::de::DeserializeOwned;
 use thiserror::Error;
 
 use crate::configs::encryption::{
     Decrypt, DecryptionError, Encrypt, EncryptionError, EncryptionKey,
 };
+use crate::configs::store::Store;
 
 /// Errors that can occur during serialization or encryption for database storage.
 #[derive(Debug, Error)]
@@ -35,7 +35,7 @@ pub enum DbDeserializationError {
 /// Returns an error if serialization fails.
 pub fn serialize<S>(value: S) -> Result<serde_json::Value, DbSerializationError>
 where
-    S: Serialize,
+    S: Store,
 {
     let serialized_value = serde_json::to_value(value)?;
 
@@ -65,7 +65,7 @@ where
 /// Returns an error if deserialization fails.
 pub fn deserialize_from_value<S>(value: serde_json::Value) -> Result<S, DbDeserializationError>
 where
-    S: DeserializeOwned,
+    S: Store,
 {
     let deserialized_value = serde_json::from_value(value)?;
 
@@ -84,7 +84,7 @@ pub fn decrypt_and_deserialize_from_value<T, S>(
 ) -> Result<S, DbDeserializationError>
 where
     T: Decrypt<S>,
-    T: DeserializeOwned,
+    T: Store,
 {
     let deserialized_value: T = serde_json::from_value(value)?;
     let value = deserialized_value.decrypt(encryption_key)?;

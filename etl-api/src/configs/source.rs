@@ -8,6 +8,7 @@ use crate::configs::encryption::{
     Decrypt, DecryptionError, Encrypt, EncryptedValue, EncryptionError, EncryptionKey,
     decrypt_text, encrypt_text,
 };
+use crate::configs::store::Store;
 
 const DEFAULT_TLS_TRUSTED_ROOT_CERTS: &str = "";
 const DEFAULT_TLS_ENABLED: bool = false;
@@ -143,6 +144,8 @@ pub struct EncryptedStoredSourceConfig {
     username: String,
     password: Option<EncryptedValue>,
 }
+
+impl Store for EncryptedStoredSourceConfig {}
 
 impl Decrypt<StoredSourceConfig> for EncryptedStoredSourceConfig {
     fn decrypt(
