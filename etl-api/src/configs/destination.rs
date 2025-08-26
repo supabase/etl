@@ -1,12 +1,14 @@
-use crate::configs::encryption::{
-    Decrypt, DecryptionError, Encrypt, EncryptedValue, EncryptionError, EncryptionKey,
-    decrypt_text, encrypt_text,
-};
 use etl_config::SerializableSecretString;
 use etl_config::shared::DestinationConfig;
 use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
+
+use crate::configs::encryption::{
+    Decrypt, DecryptionError, Encrypt, EncryptedValue, EncryptionError, EncryptionKey,
+    decrypt_text, encrypt_text,
+};
+use crate::configs::store::Store;
 
 const DEFAULT_MAX_CONCURRENT_STREAMS: usize = 8;
 
@@ -148,6 +150,8 @@ pub enum EncryptedStoredDestinationConfig {
         max_concurrent_streams: usize,
     },
 }
+
+impl Store for EncryptedStoredDestinationConfig {}
 
 impl Decrypt<StoredDestinationConfig> for EncryptedStoredDestinationConfig {
     fn decrypt(
