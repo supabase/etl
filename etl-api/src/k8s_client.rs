@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use async_trait::async_trait;
 use base64::{Engine, prelude::BASE64_STANDARD};
 use k8s_openapi::api::{
@@ -75,6 +76,7 @@ pub trait K8sClient: Send + Sync {
         &self,
         prefix: &str,
         replicator_image: &str,
+        template_annotations: Option<BTreeMap<String, String>>,
     ) -> Result<(), K8sError>;
 
     async fn delete_stateful_set(&self, prefix: &str) -> Result<(), K8sError>;
@@ -113,6 +115,7 @@ pub const TRUSTED_ROOT_CERT_CONFIG_MAP_NAME: &str = "trusted-root-certs-config";
 pub const TRUSTED_ROOT_CERT_KEY_NAME: &str = "trusted_root_certs";
 const PG_PASSWORD_ENV_VAR_NAME: &str = "APP_PIPELINE__PG_CONNECTION__PASSWORD";
 const BIG_QUERY_SA_KEY_ENV_VAR_NAME: &str = "APP_DESTINATION__BIG_QUERY__SERVICE_ACCOUNT_KEY";
+pub const RESTART_ANNOTATION_KEY: &str = "etl.supabase.com/restart-checksum";
 
 impl HttpK8sClient {
     pub async fn new() -> Result<HttpK8sClient, K8sError> {
@@ -304,6 +307,7 @@ impl K8sClient for HttpK8sClient {
         &self,
         prefix: &str,
         replicator_image: &str,
+        template_annotations: Option<BTreeMap<String, String>>,
     ) -> Result<(), K8sError> {
         info!("patching stateful set");
 
@@ -315,7 +319,7 @@ impl K8sClient for HttpK8sClient {
         let bq_secret_name = format!("{prefix}-{BQ_SECRET_NAME_SUFFIX}");
         let replicator_config_map_name = format!("{prefix}-{REPLICATOR_CONFIG_MAP_NAME_SUFFIX}");
 
-        let stateful_set_json = json!({
+        let mut stateful_set_json = json!({
           "apiVersion": "apps/v1",
           "kind": "StatefulSet",
           "metadata": {
@@ -447,14 +451,27 @@ impl K8sClient for HttpK8sClient {
           }
         });
 
+        // Attach template annotations (e.g., restart checksum) to trigger a rolling restart
+        if let Some(annotations) = template_annotations {
+            if let Some(template) = stateful_set_json
+                .get_mut("spec")
+                .and_then(|s| s.get_mut("template"))
+                .and_then(|t| t.get_mut("metadata"))
+            {
+                // Insert annotations map
+                let annotations_value = serde_json::to_value(annotations)?;
+                if let Some(obj) = template.as_object_mut() {
+                    obj.insert("annotations".to_string(), annotations_value);
+                }
+            }
+        }
+
         let stateful_set: StatefulSet = serde_json::from_value(stateful_set_json)?;
 
         let pp = PatchParams::apply(&stateful_set_name);
         self.stateful_sets_api
             .patch(&stateful_set_name, &pp, &Patch::Apply(stateful_set))
             .await?;
-
-        self.delete_pod(prefix).await?;
 
         info!("patched stateful set");
 
@@ -477,7 +494,7 @@ impl K8sClient for HttpK8sClient {
                 e => return Err(e.into()),
             },
         }
-        self.delete_pod(prefix).await?;
+
         info!("deleted stateful set");
 
         Ok(())
