@@ -6,6 +6,7 @@ use utoipa::ToSchema;
 const DEFAULT_BATCH_MAX_SIZE: usize = 1000000;
 const DEFAULT_BATCH_MAX_FILL_MS: u64 = 10000;
 const DEFAULT_TABLE_ERROR_RETRY_DELAY_MS: u64 = 10000;
+const DEFAULT_MAX_TABLE_SYNC_WORKERS: u16 = 4;
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct FullApiPipelineConfig {
@@ -104,7 +105,7 @@ impl From<FullApiPipelineConfig> for StoredPipelineConfig {
             table_error_retry_delay_ms: value
                 .table_error_retry_delay_ms
                 .unwrap_or(DEFAULT_TABLE_ERROR_RETRY_DELAY_MS),
-            max_table_sync_workers: value.max_table_sync_workers.unwrap_or_default(),
+            max_table_sync_workers: value.max_table_sync_workers.unwrap_or(DEFAULT_MAX_TABLE_SYNC_WORKERS),
         }
     }
 }
