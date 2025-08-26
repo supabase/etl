@@ -11,10 +11,13 @@ const DEFAULT_TABLE_ERROR_RETRY_DELAY_MS: u64 = 10000;
 pub struct FullApiPipelineConfig {
     #[schema(example = "my_publication")]
     pub publication_name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub batch: Option<BatchConfig>,
     #[schema(example = 1000)]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub table_error_retry_delay_ms: Option<u64>,
     #[schema(example = 4)]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub max_table_sync_workers: Option<u16>,
 }
 
@@ -32,12 +35,16 @@ impl From<StoredPipelineConfig> for FullApiPipelineConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct PartialApiPipelineConfig {
     #[schema(example = "my_publication")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub publication_name: Option<String>,
     #[schema(example = r#"{"max_size": 1000000, "max_fill_ms": 10000}"#)]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub batch: Option<BatchConfig>,
     #[schema(example = 1000)]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub table_error_retry_delay_ms: Option<u64>,
     #[schema(example = 4)]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub max_table_sync_workers: Option<u16>,
 }
 

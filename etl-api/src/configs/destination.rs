@@ -24,8 +24,10 @@ pub enum FullApiDestinationConfig {
         #[schema(example = "{\"type\": \"service_account\", \"project_id\": \"my-project\"}")]
         service_account_key: SerializableSecretString,
         #[schema(example = 15)]
+        #[serde(skip_serializing_if = "Option::is_none")]
         max_staleness_mins: Option<u16>,
         #[schema(example = 8)]
+        #[serde(skip_serializing_if = "Option::is_none")]
         max_concurrent_streams: Option<usize>,
     },
 }
