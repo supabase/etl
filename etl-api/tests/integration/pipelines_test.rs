@@ -1358,7 +1358,7 @@ async fn deleting_pipeline_removes_table_schemas_from_source_database() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn deleting_a_pipeline_is_rolled_back_if_state_deletion_fails() {
+async fn deleting_a_pipeline_succeeds_if_etl_tables_missing() {
     init_test_tracing();
     let (app, tenant_id, pipeline_id, source_pool, source_db_config) =
         setup_pipeline_with_source_db().await;
@@ -1370,19 +1370,19 @@ async fn deleting_a_pipeline_is_rolled_back_if_state_deletion_fails() {
     )
     .await;
 
-    // We drop the `etl.replication_state` table to make the state deletion fail
+    // We drop the `etl.replication_state` table to simulate missing ETL tables
     sqlx::query("drop table etl.replication_state")
         .execute(&source_pool)
         .await
         .unwrap();
 
-    // The deletion should fail.
+    // The deletion should succeed (skips ETL cleanup gracefully)
     let response = app.delete_pipeline(&tenant_id, pipeline_id).await;
-    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
-
-    // The pipeline should still be there.
-    let response = app.read_pipeline(&tenant_id, pipeline_id).await;
     assert_eq!(response.status(), StatusCode::OK);
+
+    // The pipeline should be gone.
+    let response = app.read_pipeline(&tenant_id, pipeline_id).await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
 
     drop_pg_database(&source_db_config).await;
 }
