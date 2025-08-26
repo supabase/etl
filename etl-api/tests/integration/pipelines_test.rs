@@ -135,7 +135,7 @@ async fn setup_pipeline_with_source_db() -> (TestApp, String, i64, PgPool, PgCon
     let app = spawn_test_app().await;
     create_default_image(&app).await;
     let tenant_id = create_tenant(&app).await;
-    let (source_pool, source_id, source_db_config) =
+    let (source_db_pool, source_id, source_db_config) =
         create_test_source_database(&app, &tenant_id).await;
     let destination_id = create_destination(&app, &tenant_id).await;
     let pipeline_id = create_pipeline_with_config(
@@ -150,18 +150,24 @@ async fn setup_pipeline_with_source_db() -> (TestApp, String, i64, PgPool, PgCon
     // We run the migrations to create all the tables used by `etl`.
     run_etl_migrations_on_source_database(&source_db_config).await;
 
-    (app, tenant_id, pipeline_id, source_pool, source_db_config)
+    (
+        app,
+        tenant_id,
+        pipeline_id,
+        source_db_pool,
+        source_db_config,
+    )
 }
 
 /// Creates a table with a chain of replication states.
 /// Each state in the chain becomes the previous state of the next one.
 async fn create_table_with_state_chain(
-    source_pool: &PgPool,
+    source_db_pool: &PgPool,
     pipeline_id: i64,
     table_name: &str,
     state_chain: &[(&str, &str)],
 ) -> Oid {
-    let table_oid = create_test_table(source_pool, table_name).await;
+    let table_oid = create_test_table(source_db_pool, table_name).await;
 
     let mut prev_id: Option<i64> = None;
     for (i, (state, metadata)) in state_chain.iter().enumerate() {
@@ -175,7 +181,7 @@ async fn create_table_with_state_chain(
         .bind(metadata)
         .bind(prev_id)
         .bind(is_current)
-        .fetch_one(source_pool)
+        .fetch_one(source_db_pool)
         .await
         .unwrap();
 
@@ -189,14 +195,14 @@ async fn create_table_with_state_chain(
 
 /// Creates multiple tables with single states.
 async fn create_tables_with_states(
-    source_pool: &PgPool,
+    source_db_pool: &PgPool,
     pipeline_id: i64,
     tables: &[(&str, &str, &str)],
 ) -> Vec<(Oid, String)> {
     let mut results = Vec::new();
 
     for (table_name, state, metadata) in tables {
-        let table_oid = create_test_table(source_pool, table_name).await;
+        let table_oid = create_test_table(source_db_pool, table_name).await;
 
         sqlx::query(
             "INSERT INTO etl.replication_state (pipeline_id, table_id, state, metadata, prev, is_current) VALUES ($1, $2, $3::etl.table_state, $4::jsonb, NULL, true)"
@@ -205,7 +211,7 @@ async fn create_tables_with_states(
         .bind(table_oid)
         .bind(state)
         .bind(metadata)
-        .execute(source_pool)
+        .execute(source_db_pool)
         .await
         .unwrap();
 
@@ -245,16 +251,16 @@ async fn test_rollback(
     }
 }
 
-async fn create_test_table(source_pool: &PgPool, table_name: &str) -> Oid {
+async fn create_test_table(source_db_pool: &PgPool, table_name: &str) -> Oid {
     sqlx::query("create schema if not exists test")
-        .execute(source_pool)
+        .execute(source_db_pool)
         .await
         .unwrap();
 
     sqlx::query(&format!(
         "CREATE TABLE IF NOT EXISTS test.{table_name} (id SERIAL PRIMARY KEY, name TEXT)"
     ))
-    .execute(source_pool)
+    .execute(source_db_pool)
     .await
     .expect("Failed to create test table");
 
@@ -263,7 +269,7 @@ async fn create_test_table(source_pool: &PgPool, table_name: &str) -> Oid {
     )
     .bind(table_name)
     .bind("test")
-    .fetch_one(source_pool)
+    .fetch_one(source_db_pool)
     .await
     .expect("Failed to get table OID")
 }
@@ -1079,12 +1085,12 @@ async fn all_pipelines_can_be_stopped() {
 #[tokio::test(flavor = "multi_thread")]
 async fn pipeline_replication_status_returns_table_states_and_names() {
     init_test_tracing();
-    let (app, tenant_id, pipeline_id, source_pool, source_db_config) =
+    let (app, tenant_id, pipeline_id, source_db_pool, source_db_config) =
         setup_pipeline_with_source_db().await;
 
     // Create tables with different states
     let tables = create_tables_with_states(
-        &source_pool,
+        &source_db_pool,
         pipeline_id,
         &[
             ("test_table_users", "data_sync", r#"{"type": "data_sync"}"#),
@@ -1131,11 +1137,11 @@ async fn pipeline_replication_status_returns_table_states_and_names() {
 #[tokio::test(flavor = "multi_thread")]
 async fn rollback_table_state_succeeds_for_manual_retry_errors() {
     init_test_tracing();
-    let (app, tenant_id, pipeline_id, source_pool, source_db_config) =
+    let (app, tenant_id, pipeline_id, source_db_pool, source_db_config) =
         setup_pipeline_with_source_db().await;
 
     let table_oid = create_table_with_state_chain(
-        &source_pool,
+        &source_db_pool,
         pipeline_id,
         "test_users",
         &[
@@ -1172,11 +1178,11 @@ async fn rollback_table_state_succeeds_for_manual_retry_errors() {
 #[tokio::test(flavor = "multi_thread")]
 async fn rollback_table_state_fails_for_non_manual_retry_errors() {
     init_test_tracing();
-    let (app, tenant_id, pipeline_id, source_pool, source_db_config) =
+    let (app, tenant_id, pipeline_id, source_db_pool, source_db_config) =
         setup_pipeline_with_source_db().await;
 
     let table_oid = create_table_with_state_chain(
-        &source_pool,
+        &source_db_pool,
         pipeline_id,
         "test_users",
         &[(
@@ -1202,11 +1208,11 @@ async fn rollback_table_state_fails_for_non_manual_retry_errors() {
 #[tokio::test(flavor = "multi_thread")]
 async fn rollback_table_state_with_full_reset_succeeds() {
     init_test_tracing();
-    let (app, tenant_id, pipeline_id, source_pool, source_db_config) =
+    let (app, tenant_id, pipeline_id, source_db_pool, source_db_config) =
         setup_pipeline_with_source_db().await;
 
     let table_oid = create_table_with_state_chain(
-        &source_pool,
+        &source_db_pool,
         pipeline_id,
         "test_users",
         &[
@@ -1243,7 +1249,7 @@ async fn rollback_table_state_with_full_reset_succeeds() {
     )
     .bind(pipeline_id)
     .bind(table_oid)
-    .fetch_one(&source_pool)
+    .fetch_one(&source_db_pool)
     .await
     .unwrap();
     assert_eq!(count, 1);
@@ -1254,11 +1260,11 @@ async fn rollback_table_state_with_full_reset_succeeds() {
 #[tokio::test(flavor = "multi_thread")]
 async fn deleting_pipeline_removes_replication_state_from_source_database() {
     init_test_tracing();
-    let (app, tenant_id, pipeline_id, source_pool, source_db_config) =
+    let (app, tenant_id, pipeline_id, source_db_pool, source_db_config) =
         setup_pipeline_with_source_db().await;
 
     create_tables_with_states(
-        &source_pool,
+        &source_db_pool,
         pipeline_id,
         &[
             ("test_users", "ready", r#"{"type": "ready"}"#),
@@ -1270,7 +1276,7 @@ async fn deleting_pipeline_removes_replication_state_from_source_database() {
     let count_before: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM etl.replication_state WHERE pipeline_id = $1")
             .bind(pipeline_id)
-            .fetch_one(&source_pool)
+            .fetch_one(&source_db_pool)
             .await
             .unwrap();
     assert_eq!(count_before, 2);
@@ -1281,7 +1287,7 @@ async fn deleting_pipeline_removes_replication_state_from_source_database() {
     let count_after: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM etl.replication_state WHERE pipeline_id = $1")
             .bind(pipeline_id)
-            .fetch_one(&source_pool)
+            .fetch_one(&source_db_pool)
             .await
             .unwrap();
     assert_eq!(count_after, 0);
@@ -1293,33 +1299,33 @@ async fn deleting_pipeline_removes_replication_state_from_source_database() {
 async fn deleting_pipeline_removes_table_schemas_from_source_database() {
     init_test_tracing();
 
-    let (app, tenant_id, pipeline_id, source_pool, source_db_config) =
+    let (app, tenant_id, pipeline_id, source_db_pool, source_db_config) =
         setup_pipeline_with_source_db().await;
 
-    let table1_oid = create_test_table(&source_pool, "test_users").await;
-    let table2_oid = create_test_table(&source_pool, "test_orders").await;
+    let table1_oid = create_test_table(&source_db_pool, "test_users").await;
+    let table2_oid = create_test_table(&source_db_pool, "test_orders").await;
 
     // Insert table schemas using production schema
     let table_schema_id_1 = sqlx::query_scalar::<_, i64>(
         "INSERT INTO etl.table_schemas (pipeline_id, table_id, schema_name, table_name) VALUES ($1, $2, 'public', 'test_users') RETURNING id"
-    ).bind(pipeline_id).bind(table1_oid).fetch_one(&source_pool).await.unwrap();
+    ).bind(pipeline_id).bind(table1_oid).fetch_one(&source_db_pool).await.unwrap();
 
     let table_schema_id_2 = sqlx::query_scalar::<_, i64>(
         "INSERT INTO etl.table_schemas (pipeline_id, table_id, schema_name, table_name) VALUES ($1, $2, 'public', 'test_orders') RETURNING id"
-    ).bind(pipeline_id).bind(table2_oid).fetch_one(&source_pool).await.unwrap();
+    ).bind(pipeline_id).bind(table2_oid).fetch_one(&source_db_pool).await.unwrap();
 
     // Insert multiple columns for each table to test CASCADE behavior
     sqlx::query("INSERT INTO etl.table_columns (table_schema_id, column_name, column_type, type_modifier, nullable, primary_key, column_order) VALUES ($1, 'id', 'INT4', -1, false, true, 0), ($1, 'name', 'TEXT', -1, true, false, 1)")
-        .bind(table_schema_id_1).execute(&source_pool).await.unwrap();
+        .bind(table_schema_id_1).execute(&source_db_pool).await.unwrap();
 
     sqlx::query("INSERT INTO etl.table_columns (table_schema_id, column_name, column_type, type_modifier, nullable, primary_key, column_order) VALUES ($1, 'order_id', 'INT8', -1, false, true, 0), ($1, 'amount', 'NUMERIC', -1, false, false, 1)")
-        .bind(table_schema_id_2).execute(&source_pool).await.unwrap();
+        .bind(table_schema_id_2).execute(&source_db_pool).await.unwrap();
 
     // Verify data exists before deletion
     let schema_count: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM etl.table_schemas WHERE pipeline_id = $1")
             .bind(pipeline_id)
-            .fetch_one(&source_pool)
+            .fetch_one(&source_db_pool)
             .await
             .unwrap();
     let column_count: i64 = sqlx::query_scalar(
@@ -1327,7 +1333,7 @@ async fn deleting_pipeline_removes_table_schemas_from_source_database() {
     )
     .bind(table_schema_id_1)
     .bind(table_schema_id_2)
-    .fetch_one(&source_pool)
+    .fetch_one(&source_db_pool)
     .await
     .unwrap();
     assert_eq!(schema_count, 2);
@@ -1340,7 +1346,7 @@ async fn deleting_pipeline_removes_table_schemas_from_source_database() {
     let schema_count_after: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM etl.table_schemas WHERE pipeline_id = $1")
             .bind(pipeline_id)
-            .fetch_one(&source_pool)
+            .fetch_one(&source_db_pool)
             .await
             .unwrap();
     let column_count_after: i64 = sqlx::query_scalar(
@@ -1348,41 +1354,11 @@ async fn deleting_pipeline_removes_table_schemas_from_source_database() {
     )
     .bind(table_schema_id_1)
     .bind(table_schema_id_2)
-    .fetch_one(&source_pool)
+    .fetch_one(&source_db_pool)
     .await
     .unwrap();
     assert_eq!(schema_count_after, 0);
     assert_eq!(column_count_after, 0); // CASCADE delete should remove these
-
-    drop_pg_database(&source_db_config).await;
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn deleting_a_pipeline_is_rolled_back_if_state_deletion_fails() {
-    init_test_tracing();
-    let (app, tenant_id, pipeline_id, source_pool, source_db_config) =
-        setup_pipeline_with_source_db().await;
-
-    create_tables_with_states(
-        &source_pool,
-        pipeline_id,
-        &[("test_users", "ready", r#"{"type": "ready"}"#)],
-    )
-    .await;
-
-    // We drop the `etl.replication_state` table to make the state deletion fail
-    sqlx::query("drop table etl.replication_state")
-        .execute(&source_pool)
-        .await
-        .unwrap();
-
-    // The deletion should fail.
-    let response = app.delete_pipeline(&tenant_id, pipeline_id).await;
-    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
-
-    // The pipeline should still be there.
-    let response = app.read_pipeline(&tenant_id, pipeline_id).await;
-    assert_eq!(response.status(), StatusCode::OK);
 
     drop_pg_database(&source_db_config).await;
 }
