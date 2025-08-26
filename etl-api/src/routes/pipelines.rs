@@ -5,8 +5,7 @@ use actix_web::{
     web::{Data, Json, Path},
 };
 use etl_config::shared::{ReplicatorConfig, SupabaseConfig, TlsConfig};
-use etl_postgres::replication::{TableLookupError, get_table_name_from_oid, state};
-use etl_postgres::replication::health::etl_tables_present;
+use etl_postgres::replication::{TableLookupError, get_table_name_from_oid, health, state};
 use etl_postgres::schema::TableId;
 use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
@@ -817,7 +816,7 @@ pub async fn get_pipeline_replication_status(
         connect_to_source_database_with_defaults(&source.config.into_connection_config()).await?;
 
     // Ensure ETL tables exist in the source DB
-    if !etl_tables_present(&source_pool).await? {
+    if !health::etl_tables_present(&source_pool).await? {
         return Err(PipelineError::EtlStateNotInitialized);
     }
 
@@ -905,7 +904,7 @@ pub async fn rollback_table_state(
         connect_to_source_database_with_defaults(&source.config.into_connection_config()).await?;
 
     // Ensure ETL tables exist in the source DB
-    if !etl_tables_present(&source_pool).await? {
+    if !health::etl_tables_present(&source_pool).await? {
         return Err(PipelineError::EtlStateNotInitialized);
     }
 
