@@ -146,12 +146,11 @@ impl ResponseError for PipelineError {
             | PipelineError::Database(_)
             | PipelineError::TableLookup(_)
             | PipelineError::InvalidTableReplicationState(_)
-            | PipelineError::MissingTableReplicationState
-            | PipelineError::EtlStateNotInitialized => StatusCode::INTERNAL_SERVER_ERROR,
+            | PipelineError::MissingTableReplicationState => StatusCode::INTERNAL_SERVER_ERROR,
             PipelineError::NotRollbackable(_) => StatusCode::BAD_REQUEST,
-            PipelineError::PipelineNotFound(_) | PipelineError::ImageNotFoundById(_) => {
-                StatusCode::NOT_FOUND
-            }
+            PipelineError::PipelineNotFound(_)
+            | PipelineError::ImageNotFoundById(_)
+            | PipelineError::EtlStateNotInitialized => StatusCode::NOT_FOUND,
             PipelineError::TenantId(_)
             | PipelineError::SourceNotFound(_)
             | PipelineError::DestinationNotFound(_) => StatusCode::BAD_REQUEST,

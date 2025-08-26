@@ -49,7 +49,7 @@ async fn replication_status_fails_when_etl_tables_missing() {
     let response = app
         .get_pipeline_replication_status(&tenant_id, pipeline_id)
         .await;
-    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
     assert!(
         response
             .text()
@@ -77,7 +77,7 @@ async fn rollback_fails_when_etl_tables_missing() {
     let response = app
         .rollback_table_state(&tenant_id, pipeline_id, &req)
         .await;
-    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
     assert!(
         response
             .text()
