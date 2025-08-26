@@ -500,7 +500,7 @@ pub async fn update_pipeline(
         pipeline_id,
         pipeline.source_id,
         pipeline.destination_id,
-        &pipeline.config,
+        pipeline.config,
     )
     .await?
     .ok_or(PipelineError::PipelineNotFound(pipeline_id))?;

@@ -55,7 +55,7 @@ pub async fn create_pipeline(
     image_id: i64,
     config: FullApiPipelineConfig,
 ) -> Result<i64, PipelinesDbError> {
-    let config = serialize(&config)?;
+    let config = serialize(StoredPipelineConfig::from(config))?;
 
     let replicator_id = create_replicator(txn.deref_mut(), tenant_id, image_id).await?;
     let record = sqlx::query!(
@@ -134,12 +134,12 @@ pub async fn update_pipeline<'c, E>(
     pipeline_id: i64,
     source_id: i64,
     destination_id: i64,
-    config: &FullApiPipelineConfig,
+    config: FullApiPipelineConfig,
 ) -> Result<Option<i64>, PipelinesDbError>
 where
     E: PgExecutor<'c>,
 {
-    let pipeline_config = serialize(config)?;
+    let pipeline_config = serialize(StoredPipelineConfig::from(config))?;
 
     let record = sqlx::query!(
         r#"
