@@ -213,9 +213,9 @@ pub async fn delete_pipeline_cascading(
     // Get all table IDs for this pipeline before deleting state (only if all ETL tables exist).
     let etl_present = health::etl_tables_present(source_txn.deref_mut()).await?;
     let table_ids = if etl_present {
-        state::get_pipeline_table_ids(source_txn.deref_mut(), pipeline.id).await?
+        Some(state::get_pipeline_table_ids(source_txn.deref_mut(), pipeline.id).await?)
     } else {
-        Vec::new()
+        None
     };
 
     // Delete state, schema, and table mappings from the source database, only if ETL tables exist
@@ -232,9 +232,12 @@ pub async fn delete_pipeline_cascading(
     txn.commit().await?;
     source_txn.commit().await?;
 
-    // If we succeeded to commit both transactions, we are safe to delete the slots. The reason for
-    // not deleting slots in the transaction is that `pg_drop_replication_slot(...)` is not transactional.
-    slots::delete_pipeline_replication_slots(&source_pool, pipeline.id as u64, &table_ids).await?;
+    if let Some(table_ids) = table_ids {
+        // If we succeeded to commit both transactions, we are safe to delete the slots. The reason for
+        // not deleting slots in the transaction is that `pg_drop_replication_slot(...)` is not transactional.
+        slots::delete_pipeline_replication_slots(&source_pool, pipeline.id as u64, &table_ids)
+            .await?;
+    }
 
     Ok(())
 }
