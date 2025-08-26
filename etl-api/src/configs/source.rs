@@ -25,6 +25,7 @@ pub struct FullApiSourceConfig {
     #[schema(example = "postgres")]
     pub username: String,
     #[schema(example = "secret123")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub password: Option<SerializableSecretString>,
 }
 
