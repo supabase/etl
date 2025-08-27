@@ -4,6 +4,7 @@ use actix_web::{
     post,
     web::{Data, Json, Path},
 };
+use chrono::Utc;
 use etl_config::shared::{ReplicatorConfig, SupabaseConfig, TlsConfig};
 use etl_postgres::replication::{TableLookupError, get_table_name_from_oid, health, state};
 use etl_postgres::schema::TableId;
@@ -27,7 +28,7 @@ use crate::db::pipelines::{Pipeline, PipelinesDbError};
 use crate::db::replicators::{Replicator, ReplicatorsDbError};
 use crate::db::sources::{Source, SourcesDbError, source_exists};
 use crate::k8s_client::{K8sClient, K8sError, PodPhase, TRUSTED_ROOT_CERT_CONFIG_MAP_NAME};
-use crate::k8s_client::{RESTART_ANNOTATION_KEY, TRUSTED_ROOT_CERT_KEY_NAME};
+use crate::k8s_client::{RESTARTED_AT_ANNOTATION_KEY, TRUSTED_ROOT_CERT_KEY_NAME};
 use crate::routes::{
     ErrorMessage, TenantIdError, connect_to_source_database_with_defaults, extract_tenant_id,
 };
@@ -1124,20 +1125,25 @@ async fn create_or_update_pipeline_in_k8s(
     .await?;
     create_or_update_config(k8s_client, &prefix, replicator_config.clone()).await?;
 
-    // To force restart everytime, we want to annotate the stateful set with a new UUID for every
+    // To force restart everytime, we want to annotate the stateful set with the current UTC time for every
     // start call. Technically we can optimally perform a restart by calculating a checksum on a deterministic
     // set of inputs like the configs, states in the database, etc... however we deemed that too cumbersome
     // and risky, since forgetting a component will lead to the pipeline not restarting.
     let mut annotations = BTreeMap::new();
     annotations.insert(
-        RESTART_ANNOTATION_KEY.to_string(),
-        Uuid::new_v4().simple().to_string(),
+        RESTARTED_AT_ANNOTATION_KEY.to_string(),
+        get_restarted_at_annotation_value(),
     );
 
     // We create the replicator stateful set.
     create_or_update_replicator(k8s_client, &prefix, image.name, Some(annotations)).await?;
 
     Ok(())
+}
+
+fn get_restarted_at_annotation_value() -> String {
+    let now = Utc::now();
+    now.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true)
 }
 
 async fn delete_pipeline_in_k8s(

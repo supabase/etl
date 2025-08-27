@@ -23,6 +23,7 @@ async-trait = { workspace = true }
 aws-lc-rs = { workspace = true, features = ["alloc", "aws-lc-sys"] }
 base64 = { workspace = true, features = ["std"] }
 constant_time_eq = { workspace = true }
+chrono = { workspace = true }
 k8s-openapi = { workspace = true, features = ["latest"] }
 kube = { workspace = true, features = [
     "runtime",
