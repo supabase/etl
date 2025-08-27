@@ -28,12 +28,6 @@ create table etl.replication_state (
 );
 
 -- Indexes and uniqueness
-create index idx_replication_state_is_current
-    on etl.replication_state (pipeline_id, table_id, is_current);
-
-create index idx_replication_state_prev
-    on etl.replication_state (prev);
-
 create unique index uq_replication_state_current_true
     on etl.replication_state (pipeline_id, table_id)
     where is_current = true;

@@ -54,3 +54,8 @@ create table app.pipelines (
     config jsonb not null,
     unique (tenant_id, source_id, destination_id)
 );
+
+-- Tenant-scoped access optimizations
+create index idx_sources_tenant_id_id on app.sources (tenant_id, id);
+create index idx_destinations_tenant_id_id on app.destinations (tenant_id, id);
+create index idx_pipelines_tenant_id_id on app.pipelines (tenant_id, id);
