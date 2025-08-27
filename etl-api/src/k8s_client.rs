@@ -457,13 +457,13 @@ impl K8sClient for HttpK8sClient {
                 .get_mut("spec")
                 .and_then(|s| s.get_mut("template"))
                 .and_then(|t| t.get_mut("metadata"))
-            {
-                // Insert annotations map
-                let annotations_value = serde_json::to_value(annotations)?;
-                if let Some(obj) = template.as_object_mut() {
-                    obj.insert("annotations".to_string(), annotations_value);
-                }
+        {
+            // Insert annotations map
+            let annotations_value = serde_json::to_value(annotations)?;
+            if let Some(obj) = template.as_object_mut() {
+                obj.insert("annotations".to_string(), annotations_value);
             }
+        }
 
         let stateful_set: StatefulSet = serde_json::from_value(stateful_set_json)?;
 
