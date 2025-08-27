@@ -452,8 +452,8 @@ impl K8sClient for HttpK8sClient {
         });
 
         // Attach template annotations (e.g., restart checksum) to trigger a rolling restart
-        if let Some(annotations) = template_annotations {
-            if let Some(template) = stateful_set_json
+        if let Some(annotations) = template_annotations
+            && let Some(template) = stateful_set_json
                 .get_mut("spec")
                 .and_then(|s| s.get_mut("template"))
                 .and_then(|t| t.get_mut("metadata"))
@@ -464,7 +464,6 @@ impl K8sClient for HttpK8sClient {
                     obj.insert("annotations".to_string(), annotations_value);
                 }
             }
-        }
 
         let stateful_set: StatefulSet = serde_json::from_value(stateful_set_json)?;
 
