@@ -13,7 +13,7 @@ create type etl.table_state as enum (
     'errored'
 );
 
--- Replication state with history
+-- Replication state
 create table etl.replication_state (
     id bigint generated always as identity primary key,
     pipeline_id bigint not null,
@@ -26,6 +26,7 @@ create table etl.replication_state (
     updated_at timestamptz not null default now(),
 );
 
+-- Ensures that there is only one current state per pipeline/table
 create unique index uq_replication_state_current_true
     on etl.replication_state (pipeline_id, table_id)
     where is_current = true;
