@@ -1,3 +1,18 @@
+use crate::configs::destination::StoredDestinationConfig;
+use crate::configs::encryption::EncryptionKey;
+use crate::configs::pipeline::{FullApiPipelineConfig, PartialApiPipelineConfig};
+use crate::configs::source::StoredSourceConfig;
+use crate::db;
+use crate::db::destinations::{Destination, DestinationsDbError, destination_exists};
+use crate::db::images::{Image, ImagesDbError};
+use crate::db::pipelines::{Pipeline, PipelinesDbError};
+use crate::db::replicators::{Replicator, ReplicatorsDbError};
+use crate::db::sources::{Source, SourcesDbError, source_exists};
+use crate::k8s_client::{K8sClient, K8sError, PodPhase, TRUSTED_ROOT_CERT_CONFIG_MAP_NAME};
+use crate::k8s_client::{RESTART_ANNOTATION_KEY, TRUSTED_ROOT_CERT_KEY_NAME};
+use crate::routes::{
+    ErrorMessage, TenantIdError, connect_to_source_database_with_defaults, extract_tenant_id,
+};
 use actix_web::{
     HttpRequest, HttpResponse, Responder, ResponseError, delete, get,
     http::{StatusCode, header::ContentType},
@@ -14,22 +29,7 @@ use std::collections::BTreeMap;
 use std::ops::DerefMut;
 use thiserror::Error;
 use utoipa::ToSchema;
-
-use crate::configs::destination::StoredDestinationConfig;
-use crate::configs::encryption::EncryptionKey;
-use crate::configs::pipeline::{FullApiPipelineConfig, PartialApiPipelineConfig};
-use crate::configs::source::StoredSourceConfig;
-use crate::db;
-use crate::db::destinations::{Destination, DestinationsDbError, destination_exists};
-use crate::db::images::{Image, ImagesDbError};
-use crate::db::pipelines::{Pipeline, PipelinesDbError};
-use crate::db::replicators::{Replicator, ReplicatorsDbError};
-use crate::db::sources::{Source, SourcesDbError, source_exists};
-use crate::k8s_client::{RESTART_ANNOTATION_KEY, TRUSTED_ROOT_CERT_KEY_NAME};
-use crate::k8s_client::{K8sClient, K8sError, PodPhase, TRUSTED_ROOT_CERT_CONFIG_MAP_NAME};
-use crate::routes::{
-    ErrorMessage, TenantIdError, connect_to_source_database_with_defaults, extract_tenant_id,
-};
+use uuid::Uuid;
 
 #[derive(Debug, Error)]
 pub enum PipelineError {
@@ -1123,23 +1123,18 @@ async fn create_or_update_pipeline_in_k8s(
     .await?;
     create_or_update_config(k8s_client, &prefix, replicator_config.clone()).await?;
 
-    // Compute a restart checksum from relevant inputs to trigger a rolling restart only when
-    // something actually changed (config, secrets, or image).
-    let restart_checksum = compute_restart_checksum(&secrets, &replicator_config, &image.name);
+    // To force restart everytime, we want to annotate the stateful set with a new UUID for every
+    // start call. Technically we can optimally perform a restart by calculating a checksum on a deterministic
+    // set of inputs like the configs, states in the database, etc... however we deemed that too cumbersome
+    // and risky, since forgetting a component will lead to the pipeline not restarting.
     let mut annotations = BTreeMap::new();
     annotations.insert(
         RESTART_ANNOTATION_KEY.to_string(),
-        restart_checksum,
+        Uuid::new_v4().simple().to_string(),
     );
 
     // We create the replicator stateful set.
-    create_or_update_replicator(
-        k8s_client,
-        &prefix,
-        image.name,
-        Some(annotations),
-    )
-    .await?;
+    create_or_update_replicator(k8s_client, &prefix, image.name, Some(annotations)).await?;
 
     Ok(())
 }
@@ -1304,38 +1299,6 @@ async fn create_or_update_replicator(
         .await?;
 
     Ok(())
-}
-
-fn compute_restart_checksum(
-    secrets: &Secrets,
-    replicator_config: &ReplicatorConfig,
-    image: &str,
-) -> String {
-    use ring::digest::{Context, SHA256};
-
-    let mut ctx = Context::new(&SHA256);
-
-    // Include serialized config (stable content)
-    if let Ok(config_str) = serde_json::to_string(replicator_config) {
-        ctx.update(config_str.as_bytes());
-    }
-
-    // Include secrets in the hash WITHOUT exposing them (only the checksum is stored)
-    ctx.update(secrets.postgres_password.as_bytes());
-    if let Some(bq) = &secrets.big_query_service_account_key {
-        ctx.update(bq.as_bytes());
-    }
-
-    // Include image name to ensure rollout when image changes (harmless redundancy)
-    ctx.update(image.as_bytes());
-
-    let digest = ctx.finish();
-    // Hex-encode digest
-    digest
-        .as_ref()
-        .iter()
-        .map(|b| format!("{:02x}", b))
-        .collect::<String>()
 }
 
 async fn delete_secrets(k8s_client: &dyn K8sClient, prefix: &str) -> Result<(), PipelineError> {
