@@ -20,14 +20,12 @@ create table etl.replication_state (
     table_id oid not null,
     state etl.table_state not null,
     metadata jsonb,
-    prev bigint,
+    prev bigint references etl.replication_state(id),
     is_current boolean not null default true,
     created_at timestamptz not null default now(),
     updated_at timestamptz not null default now(),
-    constraint fk_replication_state_prev foreign key (prev) references etl.replication_state(id)
 );
 
--- Indexes and uniqueness
 create unique index uq_replication_state_current_true
     on etl.replication_state (pipeline_id, table_id)
     where is_current = true;
