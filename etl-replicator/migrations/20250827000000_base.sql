@@ -23,7 +23,7 @@ create table etl.replication_state (
     prev bigint references etl.replication_state(id),
     is_current boolean not null default true,
     created_at timestamptz not null default now(),
-    updated_at timestamptz not null default now(),
+    updated_at timestamptz not null default now()
 );
 
 -- Ensures that there is only one current state per pipeline/table
