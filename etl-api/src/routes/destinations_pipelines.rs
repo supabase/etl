@@ -69,8 +69,8 @@ enum DestinationPipelineError {
 impl From<DestinationPipelinesDbError> for DestinationPipelineError {
     fn from(e: DestinationPipelinesDbError) -> Self {
         match e {
-            DestinationPipelinesDbError::Database(e)
-                if db::pipelines::is_duplicate_pipeline_error(&e) =>
+            DestinationPipelinesDbError::Database(err)
+                if db::utils::is_unique_constraint_violation_error(&err) =>
             {
                 DestinationPipelineError::DuplicatePipeline
             }

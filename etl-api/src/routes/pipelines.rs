@@ -105,7 +105,7 @@ pub enum PipelineError {
 impl From<PipelinesDbError> for PipelineError {
     fn from(e: PipelinesDbError) -> Self {
         match e {
-            PipelinesDbError::Database(e) if db::pipelines::is_duplicate_pipeline_error(&e) => {
+            PipelinesDbError::Database(err) if db::utils::is_unique_constraint_violation_error(&err) => {
                 Self::DuplicatePipeline
             }
             e => Self::PipelinesDb(e),
