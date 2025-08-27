@@ -1,0 +1,90 @@
+-- Base schema for etl-replicator state store (in source DB)
+
+-- Ensure etl schema exists (also set by runtime, but safe here)
+create schema if not exists etl;
+
+-- Enum for table replication state
+create type etl.table_state as enum (
+    'init',
+    'data_sync',
+    'finished_copy',
+    'sync_done',
+    'ready',
+    'errored'
+);
+
+-- Replication state with history
+create table etl.replication_state (
+    id bigserial primary key,
+    pipeline_id bigint not null,
+    table_id oid not null,
+    state etl.table_state not null,
+    metadata jsonb,
+    prev bigint,
+    is_current boolean not null default true,
+    created_at timestamptz not null default now(),
+    updated_at timestamptz not null default now(),
+    constraint fk_replication_state_prev foreign key (prev) references etl.replication_state(id)
+);
+
+-- Indexes and uniqueness
+create index idx_replication_state_is_current
+    on etl.replication_state (pipeline_id, table_id, is_current);
+
+create index idx_replication_state_prev
+    on etl.replication_state (prev);
+
+create unique index uq_replication_state_current_true
+    on etl.replication_state (pipeline_id, table_id)
+    where is_current = true;
+
+-- Table schemas (per pipeline, per table)
+create table etl.table_schemas (
+    id bigserial primary key,
+    pipeline_id bigint not null,
+    table_id oid not null,
+    schema_name text not null,
+    table_name text not null,
+    created_at timestamptz not null default now(),
+    updated_at timestamptz not null default now(),
+    unique (pipeline_id, table_id)
+);
+
+create index idx_table_schemas_pipeline_table
+    on etl.table_schemas (pipeline_id, table_id);
+
+-- Columns for stored schemas
+create table etl.table_columns (
+    id bigserial primary key,
+    table_schema_id bigint not null references etl.table_schemas(id) on delete cascade,
+    column_name text not null,
+    column_type text not null,
+    type_modifier integer not null,
+    nullable boolean not null,
+    primary_key boolean not null,
+    column_order integer not null,
+    created_at timestamptz not null default now(),
+    unique (table_schema_id, column_name),
+    unique (table_schema_id, column_order)
+);
+
+create index idx_table_columns_order
+    on etl.table_columns (table_schema_id);
+
+-- Source-to-destination table id mappings
+create table etl.table_mappings (
+    id bigserial primary key,
+    pipeline_id bigint not null,
+    source_table_id oid not null,
+    destination_table_id text not null,
+    created_at timestamptz not null default now(),
+    updated_at timestamptz not null default now(),
+    unique (pipeline_id, source_table_id)
+);
+
+create index idx_table_mappings_pipeline
+    on etl.table_mappings (pipeline_id);
+
+create index idx_table_mappings_pipeline_source
+    on etl.table_mappings (pipeline_id, source_table_id);
+

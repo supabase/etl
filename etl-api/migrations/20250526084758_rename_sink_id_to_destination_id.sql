@@ -1,1 +1,0 @@
-alter table app.pipelines rename column sink_id to destination_id;
