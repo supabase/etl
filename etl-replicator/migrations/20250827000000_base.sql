@@ -1,4 +1,4 @@
--- Base schema for etl-replicator state store (in source DB)
+-- Base schema for etl-replicator store (applied on the source DB)
 
 -- Ensure etl schema exists (also set by runtime, but safe here)
 create schema if not exists etl;
