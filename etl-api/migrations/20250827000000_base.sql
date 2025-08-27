@@ -52,11 +52,9 @@ create table app.pipelines (
     source_id bigint not null references app.sources (id),
     destination_id bigint not null references app.destinations (id),
     replicator_id bigint not null references app.replicators (id),
-    config jsonb not null
+    config jsonb not null,
+    unique (tenant_id, source_id, destination_id)
 );
 
 -- Only one pipeline per (tenant, source, destination)
-alter table app.pipelines
-    add constraint pipelines_tenant_source_destination_unique
-    unique (tenant_id, source_id, destination_id);
-
+-- (enforced above as a table-level unique constraint)

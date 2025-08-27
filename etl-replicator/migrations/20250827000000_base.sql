@@ -82,9 +82,5 @@ create table etl.table_mappings (
     unique (pipeline_id, source_table_id)
 );
 
-create index idx_table_mappings_pipeline
-    on etl.table_mappings (pipeline_id);
-
-create index idx_table_mappings_pipeline_source
-    on etl.table_mappings (pipeline_id, source_table_id);
-
+-- Unique constraint on (pipeline_id, source_table_id) already provides an index
+-- that serves both exact and prefix lookups by pipeline_id; no extra indexes needed.
