@@ -15,7 +15,6 @@ use std::collections::BTreeMap;
 use std::ops::DerefMut;
 use thiserror::Error;
 use utoipa::ToSchema;
-use uuid::Uuid;
 
 use crate::configs::destination::StoredDestinationConfig;
 use crate::configs::encryption::EncryptionKey;
@@ -363,7 +362,6 @@ pub enum PipelineStatus {
     Stopped,
     Starting,
     Started,
-    Stopping,
     Unknown,
     Failed,
 }
@@ -1143,6 +1141,8 @@ async fn create_or_update_pipeline_in_k8s(
 
 fn get_restarted_at_annotation_value() -> String {
     let now = Utc::now();
+    // We use nanoseconds to decrease the likelihood of generating the same annotation in sequence,
+    // which would not result in a restart.
     now.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true)
 }
 
