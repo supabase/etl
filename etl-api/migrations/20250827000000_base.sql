@@ -1,5 +1,4 @@
 -- Base schema for etl-api
--- This baseline reflects the current, stable data model used by the API.
 
 -- Create application schema
 create schema if not exists app;
@@ -10,7 +9,7 @@ create table app.tenants (
     name text not null
 );
 
--- Images (container images for replicators)
+-- Images
 create table app.images (
     id bigint generated always as identity primary key,
     name text not null,
@@ -22,7 +21,7 @@ create unique index images_one_default_idx
     on app.images (is_default)
     where is_default = true;
 
--- Destinations (formerly sinks)
+-- Destinations
 create table app.destinations (
     id bigint generated always as identity primary key,
     tenant_id text not null references app.tenants (id) on delete cascade,
@@ -38,14 +37,14 @@ create table app.sources (
     config jsonb not null
 );
 
--- Replicators (per-pipeline runtime, references image)
+-- Replicators
 create table app.replicators (
     id bigint generated always as identity primary key,
     tenant_id text not null references app.tenants (id) on delete cascade,
     image_id bigint not null references app.images (id)
 );
 
--- Pipelines (joins source, destination, replicator)
+-- Pipelines
 create table app.pipelines (
     id bigint generated always as identity primary key,
     tenant_id text not null references app.tenants (id) on delete cascade,
@@ -55,6 +54,3 @@ create table app.pipelines (
     config jsonb not null,
     unique (tenant_id, source_id, destination_id)
 );
-
--- Only one pipeline per (tenant, source, destination)
--- (enforced above as a table-level unique constraint)
