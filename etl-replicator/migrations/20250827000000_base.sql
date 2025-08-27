@@ -15,7 +15,7 @@ create type etl.table_state as enum (
 
 -- Replication state with history
 create table etl.replication_state (
-    id bigserial primary key,
+    id bigint generated always as identity primary key,
     pipeline_id bigint not null,
     table_id oid not null,
     state etl.table_state not null,
@@ -40,7 +40,7 @@ create unique index uq_replication_state_current_true
 
 -- Table schemas (per pipeline, per table)
 create table etl.table_schemas (
-    id bigserial primary key,
+    id bigint generated always as identity primary key,
     pipeline_id bigint not null,
     table_id oid not null,
     schema_name text not null,
@@ -55,7 +55,7 @@ create index idx_table_schemas_pipeline_table
 
 -- Columns for stored schemas
 create table etl.table_columns (
-    id bigserial primary key,
+    id bigint generated always as identity primary key,
     table_schema_id bigint not null references etl.table_schemas(id) on delete cascade,
     column_name text not null,
     column_type text not null,
@@ -73,7 +73,7 @@ create index idx_table_columns_order
 
 -- Source-to-destination table id mappings
 create table etl.table_mappings (
-    id bigserial primary key,
+    id bigint generated always as identity primary key,
     pipeline_id bigint not null,
     source_table_id oid not null,
     destination_table_id text not null,
