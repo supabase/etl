@@ -6,15 +6,19 @@ use utoipa::ToSchema;
 const DEFAULT_BATCH_MAX_SIZE: usize = 1000000;
 const DEFAULT_BATCH_MAX_FILL_MS: u64 = 10000;
 const DEFAULT_TABLE_ERROR_RETRY_DELAY_MS: u64 = 10000;
+const DEFAULT_MAX_TABLE_SYNC_WORKERS: u16 = 4;
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct FullApiPipelineConfig {
     #[schema(example = "my_publication")]
     pub publication_name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub batch: Option<BatchConfig>,
     #[schema(example = 1000)]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub table_error_retry_delay_ms: Option<u64>,
     #[schema(example = 4)]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub max_table_sync_workers: Option<u16>,
 }
 
@@ -32,12 +36,16 @@ impl From<StoredPipelineConfig> for FullApiPipelineConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct PartialApiPipelineConfig {
     #[schema(example = "my_publication")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub publication_name: Option<String>,
     #[schema(example = r#"{"max_size": 1000000, "max_fill_ms": 10000}"#)]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub batch: Option<BatchConfig>,
     #[schema(example = 1000)]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub table_error_retry_delay_ms: Option<u64>,
     #[schema(example = 4)]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub max_table_sync_workers: Option<u16>,
 }
 
@@ -97,7 +105,9 @@ impl From<FullApiPipelineConfig> for StoredPipelineConfig {
             table_error_retry_delay_ms: value
                 .table_error_retry_delay_ms
                 .unwrap_or(DEFAULT_TABLE_ERROR_RETRY_DELAY_MS),
-            max_table_sync_workers: value.max_table_sync_workers.unwrap_or_default(),
+            max_table_sync_workers: value
+                .max_table_sync_workers
+                .unwrap_or(DEFAULT_MAX_TABLE_SYNC_WORKERS),
         }
     }
 }
@@ -166,7 +176,10 @@ mod tests {
             stored.table_error_retry_delay_ms,
             DEFAULT_TABLE_ERROR_RETRY_DELAY_MS
         );
-        assert_eq!(stored.max_table_sync_workers, 0);
+        assert_eq!(
+            stored.max_table_sync_workers,
+            DEFAULT_MAX_TABLE_SYNC_WORKERS
+        );
     }
 
     #[test]

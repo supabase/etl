@@ -1,4 +1,4 @@
-use etl_postgres::replication::{schema, slots, state, table_mappings};
+use etl_postgres::replication::{health, schema, slots, state, table_mappings};
 use sqlx::{PgExecutor, PgTransaction};
 use std::ops::DerefMut;
 use thiserror::Error;
@@ -210,22 +210,34 @@ pub async fn delete_pipeline_cascading(
         db::destinations::delete_destination(txn.deref_mut(), tenant_id, destination.id).await?;
     }
 
-    // Get all table IDs for this pipeline before deleting state.
-    let table_ids = state::get_pipeline_table_ids(source_txn.deref_mut(), pipeline.id).await?;
+    // Get all table IDs for this pipeline before deleting state (only if all ETL tables exist).
+    let etl_present = health::etl_tables_present(source_txn.deref_mut()).await?;
+    let table_ids = if etl_present {
+        Some(state::get_pipeline_table_ids(source_txn.deref_mut(), pipeline.id).await?)
+    } else {
+        None
+    };
 
-    // Delete state, schema, and table mappings from the source database
-    state::delete_pipeline_replication_state(source_txn.deref_mut(), pipeline.id).await?;
-    schema::delete_pipeline_table_schemas(source_txn.deref_mut(), pipeline.id).await?;
-    table_mappings::delete_pipeline_table_mappings(source_txn.deref_mut(), pipeline.id).await?;
+    // Delete state, schema, and table mappings from the source database, only if ETL tables exist.
+    if etl_present {
+        let _ =
+            state::delete_pipeline_replication_state(source_txn.deref_mut(), pipeline.id).await?;
+        let _ = schema::delete_pipeline_table_schemas(source_txn.deref_mut(), pipeline.id).await?;
+        let _ = table_mappings::delete_pipeline_table_mappings(source_txn.deref_mut(), pipeline.id)
+            .await?;
+    }
 
     // Here we finish `txn` before `source_txn` since we want the guarantee that the pipeline has
     // been deleted before committing the state and slots deletions.
     txn.commit().await?;
     source_txn.commit().await?;
 
-    // If we succeeded to commit both transactions, we are safe to delete the slots. The reason for
-    // not deleting slots in the transaction is that `pg_drop_replication_slot(...)` is not transactional.
-    slots::delete_pipeline_replication_slots(&source_pool, pipeline.id as u64, &table_ids).await?;
+    if let Some(table_ids) = table_ids {
+        // If we succeeded to commit both transactions, we are safe to delete the slots. The reason for
+        // not deleting slots in the transaction is that `pg_drop_replication_slot(...)` is not transactional.
+        slots::delete_pipeline_replication_slots(&source_pool, pipeline.id as u64, &table_ids)
+            .await?;
+    }
 
     Ok(())
 }

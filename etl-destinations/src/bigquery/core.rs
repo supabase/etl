@@ -654,7 +654,7 @@ where
             }
 
             if !truncate_table_ids.is_empty() {
-                self.process_truncate_for_table_ids(truncate_table_ids.into_iter())
+                self.process_truncate_for_table_ids(truncate_table_ids.into_iter(), true)
                     .await?;
             }
         }
@@ -670,13 +670,28 @@ where
     async fn process_truncate_for_table_ids(
         &self,
         table_ids: impl IntoIterator<Item = TableId>,
+        is_cdc_truncate: bool,
     ) -> EtlResult<()> {
         // We want to lock for the entire processing to ensure that we don't have any race conditions
         // and possible errors are easier to reason about.
         let mut inner = self.inner.lock().await;
 
         for table_id in table_ids {
-            let table_schema = self.store.get_table_schema(&table_id).await?.ok_or_else(|| etl_error!(
+            let table_schema = self.store.get_table_schema(&table_id).await?;
+            // If we are not doing CDC, it means that this truncation has been issued while recovering
+            // from a failed data sync operation. In that case, we could have failed before table schemas
+            // were stored in the schema store, so we just continue and emit a warning. If we are doing
+            // CDC, it's a problem if the schema disappears while streaming, so we error out.
+            if !is_cdc_truncate {
+                warn!(
+                    "the table schema for table {table_id} was not found in the schema store while processing truncate events for BigQuery",
+                    table_id = table_id.to_string()
+                );
+
+                continue;
+            }
+
+            let table_schema = table_schema.ok_or_else(|| etl_error!(
                 ErrorKind::MissingTableSchema,
                     "Table not found in the schema store",
                     format!(
@@ -785,7 +800,7 @@ where
     S: StateStore + SchemaStore + Send + Sync,
 {
     async fn truncate_table(&self, table_id: TableId) -> EtlResult<()> {
-        self.process_truncate_for_table_ids(iter::once(table_id))
+        self.process_truncate_for_table_ids(iter::once(table_id), false)
             .await
     }
 

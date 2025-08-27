@@ -18,7 +18,8 @@ use crate::destination::Destination;
 use crate::error::{ErrorKind, EtlError, EtlResult};
 #[cfg(feature = "failpoints")]
 use crate::failpoints::{
-    START_TABLE_SYNC__AFTER_DATA_SYNC, START_TABLE_SYNC__DURING_DATA_SYNC, etl_fail_point,
+    START_TABLE_SYNC__BEFORE_DATA_SYNC_SLOT_CREATION, START_TABLE_SYNC__DURING_DATA_SYNC,
+    etl_fail_point,
 };
 use crate::metrics::{
     ETL_BATCH_SEND_MILLISECONDS_TOTAL, ETL_BATCH_SIZE, ETL_TABLE_SYNC_ROWS_COPIED_TOTAL,
@@ -165,7 +166,7 @@ where
 
             // Fail point to test when the table sync fails before copying data.
             #[cfg(feature = "failpoints")]
-            etl_fail_point(START_TABLE_SYNC__AFTER_DATA_SYNC)?;
+            etl_fail_point(START_TABLE_SYNC__BEFORE_DATA_SYNC_SLOT_CREATION)?;
 
             // We create the slot with a transaction, since we need to have a consistent snapshot of the database
             // before copying the schema and tables.

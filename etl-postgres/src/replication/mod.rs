@@ -1,4 +1,5 @@
 mod db;
+pub mod health;
 pub mod schema;
 pub mod slots;
 pub mod state;

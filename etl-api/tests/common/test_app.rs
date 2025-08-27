@@ -505,7 +505,7 @@ pub async fn spawn_test_app() -> TestApp {
     // We use a random database name.
     config.database.name = Uuid::new_v4().to_string();
 
-    let connection_pool = create_etl_api_database(&config.database).await;
+    let api_db_pool = create_etl_api_database(&config.database).await;
 
     let key = generate_random_key::<32>().expect("failed to generate random key");
     let encryption_key = encryption::EncryptionKey { id: 0, key };
@@ -515,7 +515,7 @@ pub async fn spawn_test_app() -> TestApp {
     let server = run(
         config.clone(),
         listener,
-        connection_pool,
+        api_db_pool,
         encryption_key,
         k8s_client,
     )
