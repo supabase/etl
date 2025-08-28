@@ -41,11 +41,14 @@ jobs:
         run: cargo clippy --all-targets --all-features --no-deps -- -D warnings
 
   test:
-    name: Test
+    name: Test (Postgres ${{ matrix.postgres_version }})
     runs-on: ubuntu-latest
     permissions:
       contents: read
       id-token: write
+    strategy:
+      matrix:
+        postgres_version: [17, 16, 15, 14]
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -60,7 +63,7 @@ jobs:
 
       - name: Start Docker Compose Environment
         run: |
-          docker compose -f ./scripts/docker-compose.yaml up -d
+          POSTGRES_VERSION=${{ matrix.postgres_version }} docker compose -f ./scripts/docker-compose.yaml up -d
 
       - name: Install sqlx-cli
         run: |
