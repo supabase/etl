@@ -524,6 +524,13 @@ where
             None => {
                 let Some(state) = self.store.get_table_replication_state(table_id).await? else {
                     // If we don't even find the state for this table, we skip the event entirely.
+                    debug!(
+                        "table {} should apply changes in {:?}: {}",
+                        table_id,
+                        self.worker_type(),
+                        false
+                    );
+
                     return Ok(false);
                 };
 
