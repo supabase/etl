@@ -183,16 +183,16 @@ async fn publication_for_all_tables_in_schema_ignores_new_tables_until_restart()
     // Create a new table in the same schema and insert a row.
     let table_2 = test_table_name("table_2");
     let table_2_id = database
-        .create_table(table_2.clone(), true, &[("v", "int4 not null")])
+        .create_table(table_2.clone(), true, &[("value", "int4 not null")])
         .await
         .unwrap();
     database
-        .insert_values(table_2.clone(), &["v"], &[&1_i32])
+        .insert_values(table_2.clone(), &["value"], &[&1_i32])
         .await
         .unwrap();
 
     // Wait for the events to come in from the new table.
-    sleep(Duration::from_secs(10)).await;
+    sleep(Duration::from_secs(2)).await;
 
     // Shutdown and verify no errors occurred.
     pipeline.shutdown_and_wait().await.unwrap();
@@ -202,6 +202,32 @@ async fn publication_for_all_tables_in_schema_ignores_new_tables_until_restart()
     assert_eq!(table_schemas.len(), 1);
     assert!(table_schemas.contains_key(&table_1_id));
     assert!(!table_schemas.contains_key(&table_2_id));
+
+    // We restart the pipeline and verify that the new table is now processed.
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        publication_name.to_string(),
+        store.clone(),
+        destination.clone(),
+    );
+
+    let sync_done = store
+        .notify_on_table_state(table_2_id, TableReplicationPhaseType::SyncDone)
+        .await;
+
+    pipeline.start().await.unwrap();
+
+    sync_done.notified().await;
+
+    // Shutdown and verify no errors occurred.
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    // Check that both schemas exist.
+    let table_schemas = store.get_table_schemas().await;
+    assert_eq!(table_schemas.len(), 2);
+    assert!(table_schemas.contains_key(&table_1_id));
+    assert!(table_schemas.contains_key(&table_2_id));
 }
 
 #[tokio::test(flavor = "multi_thread")]
