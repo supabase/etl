@@ -10,7 +10,7 @@ name: etl
 services:
   # Start Postgres
   postgres:
-    image: postgres:17
+    image: postgres:${POSTGRES_VERSION:-17}
     container_name: postgres
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-postgres}

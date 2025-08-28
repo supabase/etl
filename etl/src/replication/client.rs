@@ -626,24 +626,43 @@ impl PgReplicationClient {
         publication: Option<&str>,
     ) -> EtlResult<Vec<ColumnSchema>> {
         let (pub_cte, pub_pred) = if let Some(publication) = publication {
-            (
-                format!(
-                    "with pub_attrs as (
-                        select unnest(r.prattrs)
-                        from pg_publication_rel r
-                        left join pg_publication p on r.prpubid = p.oid
-                        where p.pubname = {publication}
-                        and r.prrelid = {table_id}
+            let is_pg14_or_earlier = self.is_postgres_14_or_earlier().await?;
+
+            if !is_pg14_or_earlier {
+                (
+                    format!(
+                        "with pub_attrs as (
+                            select unnest(r.prattrs)
+                            from pg_publication_rel r
+                            left join pg_publication p on r.prpubid = p.oid
+                            where p.pubname = {publication}
+                            and r.prrelid = {table_id}
+                        )",
+                        publication = quote_literal(publication),
+                    ),
+                    "and (
+                        case (select count(*) from pub_attrs)
+                        when 0 then true
+                        else (a.attnum in (select * from pub_attrs))
+                        end
                     )",
-                    publication = quote_literal(publication),
-                ),
-                "and (
-                    case (select count(*) from pub_attrs)
-                    when 0 then true
-                    else (a.attnum in (select * from pub_attrs))
-                    end
-                )",
-            )
+                )
+            } else {
+                // No column-level filtering, check if table is in publication
+                (
+                    format!(
+                        "with pub_table as (
+                            select 1 as exists_in_pub
+                            from pg_publication_rel r
+                            left join pg_publication p on r.prpubid = p.oid
+                            where p.pubname = {publication}
+                            and r.prrelid = {table_id}
+                        )",
+                        publication = quote_literal(publication),
+                    ),
+                    "and (select count(*) from pub_table) > 0",
+                )
+            }
         } else {
             ("".into(), "")
         };
@@ -695,6 +714,26 @@ impl PgReplicationClient {
         }
 
         Ok(column_schemas)
+    }
+
+    async fn is_postgres_14_or_earlier(&self) -> EtlResult<bool> {
+        let version_query = "SHOW server_version_num";
+
+        for message in self.client.simple_query(version_query).await? {
+            if let SimpleQueryMessage::Row(row) = message {
+                let version_str =
+                    Self::get_row_value::<String>(&row, "server_version_num", "server_version_num")
+                        .await?;
+                let server_version: i32 = version_str.parse().unwrap_or(0);
+
+                // PostgreSQL version format is typically: MAJOR * 10000 + MINOR * 100 + PATCH
+                // For version 14.x.x, this would be 140000 + minor * 100 + patch
+                // For version 15.x.x, this would be 150000 + minor * 100 + patch
+                return Ok(server_version < 150000);
+            }
+        }
+
+        Ok(false)
     }
 
     /// Creates a COPY stream for reading data from a table using its OID.
