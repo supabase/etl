@@ -6,6 +6,7 @@ use postgres_replication::protocol::LogicalReplicationMessage;
 use std::sync::Arc;
 use tokio_postgres::types::PgLsn;
 
+use crate::conversions::text::{default_value_for_type, parse_cell_from_postgres_text};
 use crate::error::EtlError;
 use crate::error::{ErrorKind, EtlResult};
 use crate::store::schema::SchemaStore;
@@ -14,7 +15,6 @@ use crate::types::{
     TruncateEvent, UpdateEvent,
 };
 use crate::{bail, etl_error};
-use crate::conversions::text::{default_value_for_type, parse_cell_from_postgres_text};
 
 /// Retrieves a table schema from the schema store by table ID.
 ///

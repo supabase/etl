@@ -16,7 +16,6 @@ iceberg = ["dep:iceberg", "dep:iceberg-catalog-rest"]
 
 [dependencies]
 etl = { workspace = true }
-etl-postgres = { workspace = true }
 chrono = { workspace = true }
 
 futures = { workspace = true, optional = true }

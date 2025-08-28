@@ -1,8 +1,10 @@
 use crate::bigquery::validation::validate_cell_for_bigquery;
 use etl::error::EtlError;
 use etl::etl_error;
-use etl::types::{ArrayCellNonOptional, CellNonOptional, TableRow};
-use etl_postgres::time::{DATE_FORMAT, TIME_FORMAT, TIMESTAMP_FORMAT, TIMESTAMPTZ_FORMAT_HH_MM};
+use etl::types::{
+    ArrayCellNonOptional, CellNonOptional, DATE_FORMAT, TIME_FORMAT, TIMESTAMP_FORMAT,
+    TIMESTAMPTZ_FORMAT_HH_MM, TableRow,
+};
 use prost::bytes;
 
 /// Protocol buffer wrapper for a BigQuery table row containing non-optional cells.

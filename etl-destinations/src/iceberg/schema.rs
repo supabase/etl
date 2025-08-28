@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
-use etl::types::{TableSchema, Type};
-use etl_postgres::types::is_array_type;
+use etl::types::{TableSchema, Type, is_array_type};
 use iceberg::spec::{
     ListType, NestedField, PrimitiveType, Schema as IcebergSchema, Type as IcebergType,
 };

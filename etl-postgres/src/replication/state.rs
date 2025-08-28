@@ -365,11 +365,11 @@ where
         select distinct table_id
         from etl.replication_state
         where pipeline_id = $1 and is_current = true
-        "#
+        "#,
     )
-        .bind(pipeline_id)
-        .fetch_all(executor)
-        .await?;
+    .bind(pipeline_id)
+    .fetch_all(executor)
+    .await?;
 
     Ok(ids.into_iter().map(|oid| TableId::new(oid.0)).collect())
 }

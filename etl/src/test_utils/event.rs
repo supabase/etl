@@ -1,6 +1,6 @@
+use crate::types::{Event, EventType};
 use etl_postgres::schema::TableId;
 use std::collections::HashMap;
-use crate::types::{Event, EventType};
 
 pub fn group_events_by_type(events: &[Event]) -> HashMap<EventType, Vec<Event>> {
     let mut grouped = HashMap::new();

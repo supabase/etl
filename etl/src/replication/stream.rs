@@ -11,7 +11,7 @@ use tokio_postgres::CopyOutStream;
 use tokio_postgres::types::PgLsn;
 use tracing::debug;
 
-use crate::conversions::table_row::{parse_table_row_from_postgres_copy_bytes};
+use crate::conversions::table_row::parse_table_row_from_postgres_copy_bytes;
 use crate::error::EtlError;
 use crate::error::{ErrorKind, EtlResult};
 use crate::etl_error;

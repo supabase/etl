@@ -16,7 +16,7 @@ use tracing::{debug, info};
 
 use crate::concurrency::shutdown::ShutdownRx;
 use crate::concurrency::signal::SignalRx;
-use crate::conversions::event::{convert_message_to_event};
+use crate::conversions::event::convert_message_to_event;
 use crate::destination::Destination;
 use crate::error::{ErrorKind, EtlError, EtlResult};
 use crate::metrics::{
