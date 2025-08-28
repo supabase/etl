@@ -20,6 +20,10 @@ services:
       - "${POSTGRES_PORT:-5430}:5432"
     volumes:
       - ${POSTGRES_DATA_VOLUME:-postgres_data}:/var/lib/postgresql/data
+    configs:
+      - source: postgres_init
+        target: /docker-entrypoint-initdb.d/01-create-iceberg-catalog.sh
+        mode: 0755
     command: >
       postgres
       -N 1000
@@ -32,24 +36,6 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
-
-  # Create database for iceberg catalog
-  create-catalog-db:
-    image: postgres:17
-    container_name: create-catalog-db
-    depends_on:
-      postgres:
-        condition: service_healthy
-    environment:
-      PGHOST: postgres
-      PGPORT: 5432
-      PGUSER: ${POSTGRES_USER:-postgres}
-      PGPASSWORD: ${POSTGRES_PASSWORD:-postgres}
-    entrypoint: >
-      /bin/sh -c "
-      psql -c 'create database \"iceberg-catalog\";';
-      exit 0;
-      "
 
   # Start MinIO for S3-compatible object storage
   minio:
@@ -92,8 +78,8 @@ services:
     restart: "no"
     command: ["migrate"]
     depends_on:
-      create-catalog-db:
-        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
 
   # Start lakekeeper, an iceberg REST catalog
   lakekeeper:
@@ -166,6 +152,16 @@ services:
       # - "--fail-with-body"
     volumes:
       - ./warehouse.json:/home/curl_user/warehouse.json
+
+configs:
+  postgres_init:
+    content: |
+      #!/bin/bash
+      set -e
+      
+      psql -v ON_ERROR_STOP=1 --username "${POSTGRES_USER:-postgres}" --dbname "${POSTGRES_DB:-postgres}" <<-EOSQL
+        CREATE DATABASE "iceberg-catalog";
+      EOSQL
 
 volumes:
   postgres_data:
