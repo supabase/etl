@@ -135,10 +135,10 @@ pub fn parse_cell_from_postgres_text(typ: &Type, str: &str) -> EtlResult<Cell> {
             |str| Ok(Some(str.parse()?)),
             ArrayCell::Numeric,
         ),
-        Type::BYTEA => Ok(Cell::Bytes(hex::parse_bytea_hex(str)?)),
+        Type::BYTEA => Ok(Cell::Bytes(hex::parse_bytea_hex_string(str)?)),
         Type::BYTEA_ARRAY => parse_cell_from_postgres_text_array(
             str,
-            |str| Ok(Some(hex::parse_bytea_hex(str)?)),
+            |str| Ok(Some(hex::parse_bytea_hex_string(str)?)),
             ArrayCell::Bytes,
         ),
         Type::DATE => {
