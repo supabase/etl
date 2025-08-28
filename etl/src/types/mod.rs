@@ -3,17 +3,19 @@
 //! Re-exports core data types, event types, and schema definitions used across the ETL pipeline.
 //! Includes Postgres-specific types, replication events, and table structures.
 
+mod cell;
+mod event;
 mod pipeline;
+mod table_row;
 
-// TODO: properly implement types in this module and export them.
-pub use crate::conversions::{
-    ArrayCell, ArrayCellNonOptional, Cell, CellNonOptional, event::BeginEvent, event::CommitEvent,
-    event::DeleteEvent, event::Event, event::EventType, event::InsertEvent, event::TruncateEvent,
-    event::UpdateEvent, numeric::ParseNumericError, numeric::PgNumeric, table_row::TableRow,
-};
+pub use cell::*;
+pub use event::*;
 pub use pipeline::*;
+pub use table_row::*;
 
 // Re-exports.
-pub use etl_postgres::schema::{ColumnSchema, Oid, TableId, TableName, TableSchema};
-pub use tokio_postgres::types::PgLsn;
-pub use tokio_postgres::types::Type;
+// TODO: we might want to restructure `etl_postgres` to have better modules.
+pub use etl_postgres::schema::*;
+pub use etl_postgres::time::*;
+pub use etl_postgres::types::*;
+pub use tokio_postgres::types::*;

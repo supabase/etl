@@ -145,10 +145,10 @@ impl TextFormatConverter {
                 |str| Ok(Some(str.parse()?)),
                 ArrayCell::Numeric,
             ),
-            Type::BYTEA => Ok(Cell::Bytes(hex::from_bytea_hex(str)?)),
+            Type::BYTEA => Ok(Cell::Bytes(hex::parse_bytea_hex(str)?)),
             Type::BYTEA_ARRAY => TextFormatConverter::parse_array(
                 str,
-                |str| Ok(Some(hex::from_bytea_hex(str)?)),
+                |str| Ok(Some(hex::parse_bytea_hex(str)?)),
                 ArrayCell::Bytes,
             ),
             Type::DATE => {

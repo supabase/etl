@@ -6,7 +6,7 @@ use pg_escape::quote_identifier;
 use tokio_postgres::types::{FromSql, ToSql, Type};
 
 /// An object identifier in Postgres.
-pub type Oid = u32;
+type Oid = u32;
 
 /// A fully qualified Postgres table name consisting of a schema and table name.
 ///

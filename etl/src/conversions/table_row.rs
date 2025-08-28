@@ -1,184 +1,156 @@
-use super::Cell;
-use crate::bail;
-use crate::conversions::text::TextFormatConverter;
-use crate::error::EtlError;
-use crate::error::{ErrorKind, EtlResult};
 use core::str;
 use etl_postgres::schema::ColumnSchema;
 use tracing::error;
 
-/// Represents a complete row of data from a database table.
+use crate::bail;
+use crate::conversions::text::TextFormatConverter;
+use crate::error::EtlError;
+use crate::error::{ErrorKind, EtlResult};
+use crate::types::{Cell, TableRow};
+
+/// Converts raw Postgres COPY format data into a typed table row.
 ///
-/// [`TableRow`] contains a vector of [`Cell`] values corresponding to the columns
-/// of a database table. The values are ordered to match the table's column order
-/// and include proper type information for each cell.
-#[derive(Debug, Clone, PartialEq)]
-pub struct TableRow {
-    /// Column values in table column order
-    pub values: Vec<Cell>,
-}
-
-impl TableRow {
-    /// Creates a new table row with the given cell values.
-    ///
-    /// The values should be ordered to match the target table's column schema.
-    /// Each [`Cell`] should contain properly typed data for its corresponding column.
-    pub fn new(values: Vec<Cell>) -> Self {
-        Self { values }
-    }
-}
-
-/// Utility for converting raw data into typed [`TableRow`] instances.
+/// This method parses the text format data produced by Postgres's COPY command
+/// and converts it into strongly-typed [`Cell`] values according to the provided
+/// column schemas. It handles Postgres's specific escaping rules and type formats.
 ///
-/// [`TableRowConverter`] handles parsing of Postgres's text format data
-/// into strongly-typed table rows with proper error handling and type conversion.
-pub struct TableRowConverter;
+/// # Panics
+///
+/// Panics if the number of parsed values doesn't match the number of column schemas.
+fn parse_table_row_from_bytes(row: &[u8], column_schemas: &[ColumnSchema]) -> EtlResult<TableRow> {
+    let mut values = Vec::with_capacity(column_schemas.len());
 
-impl TableRowConverter {
-    /// Converts raw Postgres COPY format data into a typed table row.
-    ///
-    /// This method parses the text format data produced by Postgres's COPY command
-    /// and converts it into strongly-typed [`Cell`] values according to the provided
-    /// column schemas. It handles Postgres's specific escaping rules and type formats.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the number of parsed values doesn't match the number of column schemas.
-    pub fn try_from(row: &[u8], column_schemas: &[ColumnSchema]) -> EtlResult<TableRow> {
-        let mut values = Vec::with_capacity(column_schemas.len());
+    let row_str = str::from_utf8(row)?;
+    let mut column_schemas_iter = column_schemas.iter();
+    let mut chars = row_str.chars();
+    let mut val_str = String::with_capacity(10);
+    let mut in_escape = false;
+    let mut row_terminated = false;
+    let mut done = false;
 
-        let row_str = str::from_utf8(row)?;
-        let mut column_schemas_iter = column_schemas.iter();
-        let mut chars = row_str.chars();
-        let mut val_str = String::with_capacity(10);
-        let mut in_escape = false;
-        let mut row_terminated = false;
-        let mut done = false;
-
-        // Main parsing loop - continues until all characters are processed
-        while !done {
-            // Inner loop parses a single field value until tab, newline, or end of input
-            loop {
-                match chars.next() {
-                    Some(c) => match c {
-                        // Handle escaped characters - previous character was backslash
-                        c if in_escape => {
-                            // Special case: \N when escaped becomes literal \N (not NULL)
-                            if c == 'N' {
-                                val_str.push('\\');
-                                val_str.push(c);
-                            }
-                            // Standard Postgres escape sequences
-                            else if c == 'b' {
-                                val_str.push(8 as char); // backspace
-                            } else if c == 'f' {
-                                val_str.push(12 as char); // form feed
-                            } else if c == 'n' {
-                                val_str.push('\n'); // newline
-                            } else if c == 'r' {
-                                val_str.push('\r'); // carriage return
-                            } else if c == 't' {
-                                val_str.push('\t'); // tab
-                            } else if c == 'v' {
-                                val_str.push(11 as char); // vertical tab
-                            }
-                            // Any other character: strip backslash, keep character
-                            else {
-                                val_str.push(c);
-                            }
-
-                            in_escape = false;
-                        }
-                        // Field separator - end current field parsing
-                        '\t' => {
-                            break;
-                        }
-                        // Row terminator - end current field and mark row complete
-                        '\n' => {
-                            row_terminated = true;
-                            break;
-                        }
-                        // Escape character - next character will be escaped
-                        '\\' => in_escape = true,
-                        // Regular character - add to current field value
-                        c => {
+    // Main parsing loop - continues until all characters are processed
+    while !done {
+        // Inner loop parses a single field value until tab, newline, or end of input
+        loop {
+            match chars.next() {
+                Some(c) => match c {
+                    // Handle escaped characters - previous character was backslash
+                    c if in_escape => {
+                        // Special case: \N when escaped becomes literal \N (not NULL)
+                        if c == 'N' {
+                            val_str.push('\\');
                             val_str.push(c);
                         }
-                    },
-                    // End of input reached
-                    None => {
-                        // Validate that row was properly terminated with newline
-                        if !row_terminated {
-                            bail!(ErrorKind::ConversionError, "The row is not terminated");
+                        // Standard Postgres escape sequences
+                        else if c == 'b' {
+                            val_str.push(8 as char); // backspace
+                        } else if c == 'f' {
+                            val_str.push(12 as char); // form feed
+                        } else if c == 'n' {
+                            val_str.push('\n'); // newline
+                        } else if c == 'r' {
+                            val_str.push('\r'); // carriage return
+                        } else if c == 't' {
+                            val_str.push('\t'); // tab
+                        } else if c == 'v' {
+                            val_str.push(11 as char); // vertical tab
                         }
-                        done = true;
+                        // Any other character: strip backslash, keep character
+                        else {
+                            val_str.push(c);
+                        }
 
+                        in_escape = false;
+                    }
+                    // Field separator - end current field parsing
+                    '\t' => {
                         break;
                     }
+                    // Row terminator - end current field and mark row complete
+                    '\n' => {
+                        row_terminated = true;
+                        break;
+                    }
+                    // Escape character - next character will be escaped
+                    '\\' => in_escape = true,
+                    // Regular character - add to current field value
+                    c => {
+                        val_str.push(c);
+                    }
+                },
+                // End of input reached
+                None => {
+                    // Validate that row was properly terminated with newline
+                    if !row_terminated {
+                        bail!(ErrorKind::ConversionError, "The row is not terminated");
+                    }
+                    done = true;
+
+                    break;
                 }
             }
+        }
 
-            // Process the parsed field value if we're not done with the entire row
-            if !done {
-                // Get the next column schema - error if we have more fields than expected
-                let Some(column_schema) = column_schemas_iter.next() else {
-                    bail!(
-                        ErrorKind::ConversionError,
-                        "The number of columns in the schema and row is mismatched",
-                        format!(
-                            "The number of columns is the schema [{}] does not match the columns in the row [{}]",
-                            column_schemas.len(),
-                            values.len()
-                        )
-                    );
-                };
+        // Process the parsed field value if we're not done with the entire row
+        if !done {
+            // Get the next column schema - error if we have more fields than expected
+            let Some(column_schema) = column_schemas_iter.next() else {
+                bail!(
+                    ErrorKind::ConversionError,
+                    "The number of columns in the schema and row is mismatched",
+                    format!(
+                        "The number of columns is the schema [{}] does not match the columns in the row [{}]",
+                        column_schemas.len(),
+                        values.len()
+                    )
+                );
+            };
 
-                // Convert the parsed string value to appropriate Cell type
-                let value = if val_str == "\\N" {
-                    // Postgres NULL marker: \N represents a NULL value
-                    // We preserve this as Cell::Null rather than converting to a typed null
-                    // so that downstream code can handle null semantics appropriately
-                    Cell::Null
-                } else {
-                    // Convert non-null field value to appropriate Cell type based on column schema
-                    // This delegates to TextFormatConverter which handles Postgres text format
-                    // parsing for all supported data types (integers, floats, strings, booleans, etc.)
-                    match TextFormatConverter::try_from_str(&column_schema.typ, &val_str) {
-                        Ok(value) => value,
-                        Err(e) => {
-                            // Log parsing error with context for debugging
-                            error!(
-                                "error parsing column `{}` of type `{}` from text `{val_str}`",
-                                column_schema.name, column_schema.typ
-                            );
-                            return Err(e);
-                        }
+            // Convert the parsed string value to appropriate Cell type
+            let value = if val_str == "\\N" {
+                // Postgres NULL marker: \N represents a NULL value
+                // We preserve this as Cell::Null rather than converting to a typed null
+                // so that downstream code can handle null semantics appropriately
+                Cell::Null
+            } else {
+                // Convert non-null field value to appropriate Cell type based on column schema
+                // This delegates to TextFormatConverter which handles Postgres text format
+                // parsing for all supported data types (integers, floats, strings, booleans, etc.)
+                match TextFormatConverter::try_from_str(&column_schema.typ, &val_str) {
+                    Ok(value) => value,
+                    Err(e) => {
+                        // Log parsing error with context for debugging
+                        error!(
+                            "error parsing column `{}` of type `{}` from text `{val_str}`",
+                            column_schema.name, column_schema.typ
+                        );
+                        return Err(e);
                     }
-                };
+                }
+            };
 
-                // Add the converted value to the row and prepare for next field
-                values.push(value);
-                val_str.clear(); // Reset string buffer for next field
-            }
+            // Add the converted value to the row and prepare for next field
+            values.push(value);
+            val_str.clear(); // Reset string buffer for next field
         }
-
-        // Validate that all expected columns were present in the row
-        // If there are still columns left in the schema iterator, it means the row
-        // had fewer fields than expected, which is an error
-        if column_schemas_iter.next().is_some() {
-            bail!(
-                ErrorKind::ConversionError,
-                "The number of columns in the schema and row is mismatched",
-                format!(
-                    "The number of columns is the schema [{}] does not match the columns in the row [{}]",
-                    column_schemas.len(),
-                    values.len()
-                )
-            );
-        }
-
-        Ok(TableRow { values })
     }
+
+    // Validate that all expected columns were present in the row
+    // If there are still columns left in the schema iterator, it means the row
+    // had fewer fields than expected, which is an error
+    if column_schemas_iter.next().is_some() {
+        bail!(
+            ErrorKind::ConversionError,
+            "The number of columns in the schema and row is mismatched",
+            format!(
+                "The number of columns is the schema [{}] does not match the columns in the row [{}]",
+                column_schemas.len(),
+                values.len()
+            )
+        );
+    }
+
+    Ok(TableRow { values })
 }
 
 #[cfg(test)]
@@ -205,7 +177,7 @@ mod tests {
         let schema = create_test_schema();
         let row_data = b"123\tJohn Doe\tt\n";
 
-        let result = TableRowConverter::try_from(row_data, &schema).unwrap();
+        let result = parse_table_row_from_bytes(row_data, &schema).unwrap();
 
         assert_eq!(result.values.len(), 3);
         assert_eq!(result.values[0], Cell::I32(123));
@@ -218,7 +190,7 @@ mod tests {
         let schema = create_test_schema();
         let row_data = b"456\t\\N\tf\n";
 
-        let result = TableRowConverter::try_from(row_data, &schema).unwrap();
+        let result = parse_table_row_from_bytes(row_data, &schema).unwrap();
 
         assert_eq!(result.values.len(), 3);
         assert_eq!(result.values[0], Cell::I32(456));
@@ -231,7 +203,7 @@ mod tests {
         let schema = create_test_schema();
         let row_data = b"0\t\tf\n";
 
-        let result = TableRowConverter::try_from(row_data, &schema).unwrap();
+        let result = parse_table_row_from_bytes(row_data, &schema).unwrap();
 
         assert_eq!(result.values.len(), 3);
         assert_eq!(result.values[0], Cell::I32(0));
@@ -244,7 +216,7 @@ mod tests {
         let schema = create_single_column_schema("value", Type::INT4);
         let row_data = b"42\n";
 
-        let result = TableRowConverter::try_from(row_data, &schema).unwrap();
+        let result = parse_table_row_from_bytes(row_data, &schema).unwrap();
 
         assert_eq!(result.values.len(), 1);
         assert_eq!(result.values[0], Cell::I32(42));
@@ -261,7 +233,7 @@ mod tests {
 
         let row_data = b"123\t3.15\tHello World\tt\n";
 
-        let result = TableRowConverter::try_from(row_data, &schema).unwrap();
+        let result = parse_table_row_from_bytes(row_data, &schema).unwrap();
 
         assert_eq!(result.values.len(), 4);
         assert_eq!(result.values[0], Cell::I32(123));
@@ -275,7 +247,7 @@ mod tests {
         let schema = create_single_column_schema("value", Type::INT4);
         let row_data = b"42"; // Missing newline
 
-        let result = TableRowConverter::try_from(row_data, &schema);
+        let result = parse_table_row_from_bytes(row_data, &schema);
 
         assert!(result.is_err());
         let err = result.unwrap_err();
@@ -288,7 +260,7 @@ mod tests {
         let schema = create_test_schema(); // Expects 3 columns
         let row_data = b"123\tJohn\n"; // Only 2 values - this should actually fail at parsing the bool because there's no third column
 
-        let result_empty = TableRowConverter::try_from(row_data, &schema);
+        let result_empty = parse_table_row_from_bytes(row_data, &schema);
         assert!(result_empty.is_err());
     }
 
@@ -297,7 +269,7 @@ mod tests {
         let schema = create_single_column_schema("value", Type::TEXT);
         let row_data = &[0xFF, 0xFE, 0xFD, b'\n']; // Invalid UTF-8
 
-        let result = TableRowConverter::try_from(row_data, &schema);
+        let result = parse_table_row_from_bytes(row_data, &schema);
 
         assert!(result.is_err());
     }
@@ -307,7 +279,7 @@ mod tests {
         let schema = create_single_column_schema("number", Type::INT4);
         let row_data = b"not_a_number\n";
 
-        let result = TableRowConverter::try_from(row_data, &schema);
+        let result = parse_table_row_from_bytes(row_data, &schema);
 
         assert!(result.is_err());
     }
@@ -317,7 +289,7 @@ mod tests {
         let schema = create_single_column_schema("data", Type::TEXT);
 
         let row_data = b"Text\\\\\n";
-        let result = TableRowConverter::try_from(row_data, &schema).unwrap();
+        let result = parse_table_row_from_bytes(row_data, &schema).unwrap();
 
         assert_eq!(result.values.len(), 1);
         assert_eq!(result.values[0], Cell::String("Text\\".to_string()));
@@ -328,15 +300,15 @@ mod tests {
         let schema = create_single_column_schema("value", Type::TEXT);
 
         let row_data = b"\\N\n";
-        let result = TableRowConverter::try_from(row_data, &schema).unwrap();
+        let result = parse_table_row_from_bytes(row_data, &schema).unwrap();
         assert_eq!(result.values[0], Cell::Null);
 
         let row_data = b"\\\\N\n";
-        let result_test = TableRowConverter::try_from(row_data, &schema).unwrap();
+        let result_test = parse_table_row_from_bytes(row_data, &schema).unwrap();
         assert_eq!(result_test.values[0], Cell::Null);
 
         let row_data = b"\\\\A\n";
-        let result_test = TableRowConverter::try_from(row_data, &schema).unwrap();
+        let result_test = parse_table_row_from_bytes(row_data, &schema).unwrap();
         assert_eq!(result_test.values[0], Cell::String("\\A".to_string()));
     }
 
@@ -345,7 +317,7 @@ mod tests {
         let schema = create_test_schema();
 
         let row_data = b"123\t John Doe \tt\n";
-        let result = TableRowConverter::try_from(row_data, &schema).unwrap();
+        let result = parse_table_row_from_bytes(row_data, &schema).unwrap();
 
         assert_eq!(result.values.len(), 3);
         assert_eq!(result.values[0], Cell::I32(123));
@@ -373,7 +345,7 @@ mod tests {
         }
         expected_row.push('\n');
 
-        let result = TableRowConverter::try_from(expected_row.as_bytes(), &schema).unwrap();
+        let result = parse_table_row_from_bytes(expected_row.as_bytes(), &schema).unwrap();
 
         assert_eq!(result.values.len(), 50);
         for i in 0..50 {
@@ -386,7 +358,7 @@ mod tests {
         let schema = create_test_schema();
         let row_data = b"\t\t\n"; // Empty values but correct number of tabs
 
-        let result = TableRowConverter::try_from(row_data, &schema);
+        let result = parse_table_row_from_bytes(row_data, &schema);
 
         assert!(result.is_err());
     }
@@ -400,7 +372,7 @@ mod tests {
 
         // Postgres escapes tab characters in data with \\t
         let row_data = b"value\\twith\\ttabs\tnormal\\tvalue\n";
-        let result = TableRowConverter::try_from(row_data, &schema).unwrap();
+        let result = parse_table_row_from_bytes(row_data, &schema).unwrap();
 
         assert_eq!(
             result.values[0],
@@ -419,7 +391,7 @@ mod tests {
 
         // Escapes at the beginning, middle, and end of fields
         let row_data = b"\\tstart\tmiddle\\nvalue\tend\\r\n";
-        let result = TableRowConverter::try_from(row_data, &schema).unwrap();
+        let result = parse_table_row_from_bytes(row_data, &schema).unwrap();
 
         assert_eq!(result.values[0], Cell::String("\tstart".to_string()));
         assert_eq!(result.values[1], Cell::String("middle\nvalue".to_string()));
@@ -435,7 +407,7 @@ mod tests {
         let mut row_with_newline = row_data.to_vec();
         row_with_newline.push(b'\n');
 
-        let result = TableRowConverter::try_from(&row_with_newline, &schema).unwrap();
+        let result = parse_table_row_from_bytes(&row_with_newline, &schema).unwrap();
 
         assert_eq!(
             result.values[0],
@@ -486,7 +458,7 @@ mod tests {
         ];
 
         for (input, expected) in test_cases {
-            let result = TableRowConverter::try_from(input, &schema).unwrap();
+            let result = parse_table_row_from_bytes(input, &schema).unwrap();
             assert_eq!(
                 result.values[0],
                 Cell::String(expected.to_string()),
@@ -508,7 +480,7 @@ mod tests {
         ];
 
         for (input, expected) in test_cases {
-            let result = TableRowConverter::try_from(input, &schema).unwrap();
+            let result = parse_table_row_from_bytes(input, &schema).unwrap();
             assert_eq!(
                 result.values[0],
                 expected,
