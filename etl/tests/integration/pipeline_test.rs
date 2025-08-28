@@ -17,6 +17,7 @@ use etl_postgres::replication::worker::WorkerType;
 use etl_postgres::tokio::test_utils::TableModification;
 use etl_telemetry::tracing::init_test_tracing;
 use rand::random;
+use std::time::Duration;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn table_schema_copy_survives_pipeline_restarts() {
@@ -136,6 +137,69 @@ async fn table_schema_copy_survives_pipeline_restarts() {
 
     assert_eq!(users_inserts.len(), 1);
     assert_eq!(orders_inserts.len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn publication_for_all_tables_in_schema_ignores_new_tables_until_restart() {
+    init_test_tracing();
+
+    // Create isolated test database and initial table in the test schema.
+    let database = spawn_source_database().await;
+    let initial_table = etl::test_utils::database::test_table_name("initial_table");
+    let initial_table_id = database
+        .create_table(initial_table.clone(), true, &[("name", "text not null")])
+        .await
+        .expect("Failed to create initial table");
+
+    // Create a publication for all tables in the test schema.
+    let publication_name = "test_pub_all_schema".to_string();
+    let schema_name = initial_table.schema.clone();
+    database
+        .run_sql(&format!(
+            "create publication {} for all tables in schema {}",
+            publication_name, schema_name
+        ))
+        .await
+        .expect("Failed to create publication for schema");
+
+    // Wiring: in-memory state store and destination.
+    let store = NotifyingStore::new();
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
+
+    // Start pipeline.
+    let pipeline_id: PipelineId = random();
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        publication_name,
+        store.clone(),
+        destination.clone(),
+    );
+
+    // Wait for initial table to reach SyncDone.
+    let sync_done = store
+        .notify_on_table_state(initial_table_id, TableReplicationPhaseType::SyncDone)
+        .await;
+
+    pipeline.start().await.unwrap();
+    sync_done.notified().await;
+
+    // Create a new table in the same schema and insert a row.
+    let new_table = etl::test_utils::database::test_table_name("new_table_after_start");
+    database
+        .create_table(new_table.clone(), true, &[("v", "int4 not null")])
+        .await
+        .expect("Failed to create new table");
+    database
+        .insert_values(new_table.clone(), &["v"], &[&1_i32])
+        .await
+        .expect("Failed to insert into new table");
+
+    // Allow time for potential events; they should be ignored without errors.
+    tokio::time::sleep(Duration::from_secs(10)).await;
+
+    // Shutdown and verify no errors occurred.
+    pipeline.shutdown_and_wait().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread")]
