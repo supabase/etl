@@ -661,7 +661,8 @@ impl PgReplicationClient {
                         when 0 then true
                         else (a.attnum in (select * from pub_attrs))
                         end
-                    )",
+                    )"
+                    .to_string(),
                 )
             } else {
                 // Postgres 14 or earlier or unknown, fallback to no column-level filtering
@@ -676,20 +677,90 @@ impl PgReplicationClient {
                         )",
                         publication = quote_literal(publication),
                     ),
-                    "and (select count(*) from pub_table) > 0",
+                    format!(
+                        "and ((select count(*) from pub_table) > 0 or exists(
+                            -- Also allow if parent table is in publication (for partitioned tables)
+                            select 1 from pg_inherits i
+                            join pg_publication_rel r on r.prrelid = i.inhparent
+                            join pg_publication p on p.oid = r.prpubid
+                            where i.inhrelid = {table_id} and p.pubname = {publication}
+                        ))",
+                        publication = quote_literal(publication),
+                    ),
                 )
             }
         } else {
-            ("".into(), "")
+            ("".to_string(), "".to_string())
+        };
+
+        let has_pub_cte = !pub_cte.is_empty();
+
+        let cte_prefix = if has_pub_cte {
+            // If there's already a pub_cte WITH clause, add our CTEs to it with a comma
+            format!("{pub_cte},")
+        } else {
+            // If no pub_cte, start our own WITH clause (no need for RECURSIVE)
+            "with ".to_string()
         };
 
         let column_info_query = format!(
-            "{pub_cte}
-            select a.attname,
+            "{cte_prefix}
+            -- Find direct parent of current table (if it's a partition)
+            direct_parent as (
+                select i.inhparent as parent_oid
+                from pg_inherits i 
+                where i.inhrelid = {table_id}::oid
+                limit 1
+            ),
+            -- Get parent table's primary key columns
+            parent_pk_cols as (
+                select array_agg(a.attname order by x.n) as pk_column_names
+                from pg_constraint con
+                join unnest(con.conkey) with ordinality as x(attnum, n) on true
+                join pg_attribute a on a.attrelid = con.conrelid and a.attnum = x.attnum
+                join direct_parent dp on con.conrelid = dp.parent_oid
+                where con.contype = 'p'
+                group by con.conname
+            ),
+            -- Check if current table has a unique index on the parent PK columns
+            partition_has_pk_index as (
+                select case 
+                    when exists (select 1 from direct_parent) 
+                         and exists (select 1 from parent_pk_cols)
+                         and exists (
+                            -- Check if there's a unique, valid index on the parent PK columns
+                            select 1
+                            from pg_index ix
+                            cross join parent_pk_cols pk
+                            where ix.indrelid = {table_id}::oid
+                            and ix.indisunique = true
+                            and ix.indisvalid = true
+                            and array(
+                                select a.attname
+                                from unnest(ix.indkey) with ordinality k(attnum, ord)
+                                join pg_attribute a on a.attrelid = ix.indrelid and a.attnum = k.attnum
+                                where ord <= ix.indnkeyatts  -- exclude INCLUDE columns
+                                order by ord
+                            ) = pk.pk_column_names
+                        ) then true
+                    else false
+                end as has_inherited_pk
+            )
+            SELECT a.attname,
                 a.atttypid,
                 a.atttypmod,
                 a.attnotnull,
-                coalesce(i.indisprimary, false) as primary
+                case 
+                    -- First check for direct primary key
+                    when coalesce(i.indisprimary, false) = true then true
+                    -- Then check for inherited primary key from partitioned table parent
+                    when (select has_inherited_pk from partition_has_pk_index) = true 
+                         and exists (
+                            select 1 from parent_pk_cols pk 
+                            where a.attname = any(pk.pk_column_names)
+                         ) then true
+                    else false
+                end as primary
             from pg_attribute a
             left join pg_index i
                 on a.attrelid = i.indrelid
