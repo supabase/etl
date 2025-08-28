@@ -178,7 +178,6 @@ impl PgReplicationClient {
         }
     }
 
-
     // Convenience method to avoid having to access the client directly.
     async fn simple_query(
         &self,
