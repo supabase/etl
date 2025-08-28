@@ -92,7 +92,7 @@ async fn partitioned_table_sync_succeeds_with_inherited_primary_keys() {
     for &partition_id in &partition_table_ids {
         let state = table_states
             .get(&partition_id)
-            .expect(&format!("Partition {} should have a state", partition_id));
+            .unwrap_or_else(|| panic!("Partition {} should have a state", partition_id));
         assert!(
             matches!(
                 state.as_type(),
