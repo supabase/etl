@@ -411,24 +411,52 @@ impl PgReplicationClient {
         &self,
         publication_name: &str,
     ) -> EtlResult<Vec<TableId>> {
-        let publication_query = format!(
-            "select c.oid from pg_publication_tables pt 
-         join pg_class c on c.relname = pt.tablename 
-         join pg_namespace n on n.oid = c.relnamespace AND n.nspname = pt.schemaname 
-         where pt.pubname = {};",
-            quote_literal(publication_name)
+        let query = format!(
+            r#"
+            with recursive has_rel as (
+                select exists(
+                    select 1
+                    from pg_publication_rel r
+                    join pg_publication p on p.oid = r.prpubid
+                    where p.pubname = {pub}
+                ) as has
+            ),
+            pub_tables as (
+                select r.prrelid as oid
+                from pg_publication_rel r
+                join pg_publication p on p.oid = r.prpubid
+                where p.pubname = {pub} and (select has from has_rel)
+                union all
+                select c.oid
+                from pg_publication_tables pt
+                join pg_class c on c.relname = pt.tablename
+                where pt.pubname = {pub} and not (select has from has_rel)
+            ),
+            recurse(relid) as (
+                select oid from pub_tables
+                union all
+                select i.inhparent
+                from pg_inherits i
+                join recurse r on r.relid = i.inhrelid
+            )
+            select distinct relid as oid
+            from recurse r
+            where not exists (
+                select 1 from pg_inherits i where i.inhrelid = r.relid
+            );
+            "#,
+            pub = quote_literal(publication_name)
         );
 
-        let mut table_ids = vec![];
-        for msg in self.client.simple_query(&publication_query).await? {
+        let mut roots = vec![];
+        for msg in self.client.simple_query(&query).await? {
             if let SimpleQueryMessage::Row(row) = msg {
-                // For the sake of simplicity, we refer to the table oid as table id.
                 let table_id = Self::get_row_value::<TableId>(&row, "oid", "pg_class").await?;
-                table_ids.push(table_id);
+                roots.push(table_id);
             }
         }
 
-        Ok(table_ids)
+        Ok(roots)
     }
 
     /// Starts a logical replication stream from the specified publication and slot.
@@ -662,7 +690,8 @@ impl PgReplicationClient {
                         when 0 then true
                         else (a.attnum in (select * from pub_attrs))
                         end
-                    )",
+                    )"
+                    .to_string(),
                 )
             } else {
                 // Postgres 14 or earlier or unknown, fallback to no column-level filtering
@@ -677,20 +706,65 @@ impl PgReplicationClient {
                         )",
                         publication = quote_literal(publication),
                     ),
-                    "and (select count(*) from pub_table) > 0",
+                    format!(
+                        "and ((select count(*) from pub_table) > 0 or exists(
+                            -- Also allow if parent table is in publication (for partitioned tables)
+                            select 1 from pg_inherits i
+                            join pg_publication_rel r on r.prrelid = i.inhparent
+                            join pg_publication p on p.oid = r.prpubid
+                            where i.inhrelid = {table_id} and p.pubname = {publication}
+                        ))",
+                        publication = quote_literal(publication),
+                    ),
                 )
             }
         } else {
-            ("".into(), "")
+            ("".to_string(), "".to_string())
+        };
+
+        let has_pub_cte = !pub_cte.is_empty();
+
+        let cte_prefix = if has_pub_cte {
+            // If there's already a pub_cte WITH clause, add our CTEs to it with a comma
+            format!("{pub_cte},")
+        } else {
+            // If no pub_cte, start our own WITH clause (no need for RECURSIVE)
+            "with ".to_string()
         };
 
         let column_info_query = format!(
-            "{pub_cte}
-            select a.attname,
+            "{cte_prefix}
+            -- Find direct parent of current table (if it's a partition)
+            direct_parent as (
+                select i.inhparent as parent_oid
+                from pg_inherits i 
+                where i.inhrelid = {table_id}::oid
+                limit 1
+            ),
+            -- Get parent table's primary key columns
+            parent_pk_cols as (
+                select array_agg(a.attname order by x.n) as pk_column_names
+                from pg_constraint con
+                join unnest(con.conkey) with ordinality as x(attnum, n) on true
+                join pg_attribute a on a.attrelid = con.conrelid and a.attnum = x.attnum
+                join direct_parent dp on con.conrelid = dp.parent_oid
+                where con.contype = 'p'
+                group by con.conname
+            )
+            SELECT a.attname,
                 a.atttypid,
                 a.atttypmod,
                 a.attnotnull,
-                coalesce(i.indisprimary, false) as primary
+                case 
+                    -- Direct primary key on this relation
+                    when coalesce(i.indisprimary, false) = true then true
+                    -- Inherit primary key from parent partitioned table if column name matches
+                    when exists (
+                        select 1 from parent_pk_cols pk 
+                        where a.attname = any(pk.pk_column_names)
+                    ) then true
+                    else false
+                end as primary
             from pg_attribute a
             left join pg_index i
                 on a.attrelid = i.indrelid
@@ -807,9 +881,9 @@ impl PgReplicationClient {
             )
         } else {
             format!(
-                r#"copy {} ({}) to stdout with (format text);"#,
-                table_name.as_quoted_identifier(),
+                r#"copy (select {} from {}) to stdout with (format text);"#,
                 column_list,
+                table_name.as_quoted_identifier(),
             )
         };
 

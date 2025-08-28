@@ -127,6 +127,77 @@ pub async fn setup_test_database_schema<G: GenericClient>(
     }
 }
 
+/// Creates a partitioned table with the given name and partitions.
+///
+/// This function creates:
+/// 1. A parent partitioned table with a primary key
+/// 2. Several child partitions based on the provided partition specifications
+///
+/// Returns the table ID of the parent table and a list of partition table IDs.
+pub async fn create_partitioned_table<G: GenericClient>(
+    database: &PgDatabase<G>,
+    table_name: TableName,
+    partition_specs: &[(&str, &str)], // (partition_name, partition_constraint)
+) -> Result<(TableId, Vec<TableId>), tokio_postgres::Error> {
+    let create_parent_query = format!(
+        "create table {} (
+            id bigserial,
+            data text NOT NULL,
+            partition_key integer NOT NULL,
+            primary key (id, partition_key)
+        ) partition by range (partition_key)",
+        table_name.as_quoted_identifier()
+    );
+
+    database.run_sql(&create_parent_query).await?;
+
+    let parent_row = database
+        .client
+        .as_ref()
+        .unwrap()
+        .query_one(
+            "select c.oid from pg_class c join pg_namespace n on n.oid = c.relnamespace 
+             where n.nspname = $1 and c.relname = $2",
+            &[&table_name.schema, &table_name.name],
+        )
+        .await?;
+
+    let parent_table_id: TableId = parent_row.get(0);
+    let mut partition_table_ids = Vec::new();
+
+    for (partition_name, partition_constraint) in partition_specs {
+        let partition_table_name = TableName::new(
+            table_name.schema.clone(),
+            format!("{}_{}", table_name.name, partition_name),
+        );
+
+        let create_partition_query = format!(
+            "create table {} partition of {} for values {}",
+            partition_table_name.as_quoted_identifier(),
+            table_name.as_quoted_identifier(),
+            partition_constraint
+        );
+
+        database.run_sql(&create_partition_query).await?;
+
+        let partition_row = database
+            .client
+            .as_ref()
+            .unwrap()
+            .query_one(
+                "select c.oid from pg_class c join pg_namespace n on n.oid = c.relnamespace 
+                 where n.nspname = $1 and c.relname = $2",
+                &[&partition_table_name.schema, &partition_table_name.name],
+            )
+            .await?;
+
+        let partition_table_id: TableId = partition_row.get(0);
+        partition_table_ids.push(partition_table_id);
+    }
+
+    Ok((parent_table_id, partition_table_ids))
+}
+
 /// Inserts users data into the database for testing purposes.
 pub async fn insert_users_data<G: GenericClient>(
     client: &mut PgDatabase<G>,

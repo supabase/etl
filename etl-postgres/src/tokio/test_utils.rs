@@ -61,7 +61,7 @@ impl<G: GenericClient> PgDatabase<G> {
             .collect::<Vec<_>>();
 
         let create_publication_query = format!(
-            "create publication {} for table {}",
+            "create publication {} for table {} with (publish_via_partition_root = true)",
             publication_name,
             table_names.join(", ")
         );

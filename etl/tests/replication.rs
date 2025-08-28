@@ -1,10 +1,13 @@
 #![cfg(feature = "test-utils")]
 
+use std::collections::HashSet;
+
 use etl::error::ErrorKind;
 use etl::replication::client::PgReplicationClient;
 use etl::test_utils::database::{spawn_source_database, test_table_name};
 use etl::test_utils::pipeline::test_slot_name;
 use etl::test_utils::table::assert_table_schema;
+use etl::test_utils::test_schema::create_partitioned_table;
 use etl_postgres::tokio::test_utils::{TableModification, id_column_schema};
 use etl_postgres::types::ColumnSchema;
 use etl_telemetry::tracing::init_test_tracing;
@@ -550,11 +553,47 @@ async fn test_publication_creation_and_check() {
     );
 
     // We check the table ids of the tables in the publication.
-    let table_ids = parent_client
+    let table_ids: HashSet<_> = parent_client
         .get_publication_table_ids("my_publication")
         .await
+        .unwrap()
+        .into_iter()
+        .collect();
+    assert_eq!(table_ids, HashSet::from([table_1_id, table_2_id]));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_publication_table_ids_collapse_partitioned_root() {
+    init_test_tracing();
+    let database = spawn_source_database().await;
+
+    let client = PgReplicationClient::connect(database.config.clone())
+        .await
         .unwrap();
-    assert_eq!(table_ids, vec![table_1_id, table_2_id]);
+
+    // We create a partitioned parent with two child partitions.
+    let table_name = test_table_name("part_parent");
+    let (parent_table_id, _children) = create_partitioned_table(
+        &database,
+        table_name.clone(),
+        &[("p1", "from (1) to (100)"), ("p2", "from (100) to (200)")],
+    )
+    .await
+    .unwrap();
+
+    let publication_name = "pub_part_root";
+    database
+        .create_publication(publication_name, std::slice::from_ref(&table_name))
+        .await
+        .unwrap();
+
+    let id = client
+        .get_publication_table_ids(publication_name)
+        .await
+        .unwrap();
+
+    // We expect to get only the parent table id.
+    assert_eq!(id, vec![parent_table_id]);
 }
 
 #[tokio::test(flavor = "multi_thread")]
