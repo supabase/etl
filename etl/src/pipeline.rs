@@ -285,6 +285,12 @@ where
             .get_publication_table_ids(&self.config.publication_name)
             .await?;
 
+        info!(
+            "the publication '{}' contains {} tables",
+            self.config.publication_name,
+            table_ids.len()
+        );
+
         self.store.load_table_replication_states().await?;
         let states = self.store.get_table_replication_states().await?;
         for table_id in table_ids {

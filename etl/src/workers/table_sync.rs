@@ -852,6 +852,13 @@ where
 
         let should_apply_changes = !is_errored && self.table_id == table_id;
 
+        debug!(
+            "table {} should apply changes in {:?}: {}",
+            table_id,
+            self.worker_type(),
+            should_apply_changes
+        );
+
         Ok(should_apply_changes)
     }
 

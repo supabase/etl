@@ -537,6 +537,13 @@ where
             _ => false,
         };
 
+        debug!(
+            "table {} should apply changes in {:?}: {}",
+            table_id,
+            self.worker_type(),
+            should_apply_changes
+        );
+
         Ok(should_apply_changes)
     }
 
