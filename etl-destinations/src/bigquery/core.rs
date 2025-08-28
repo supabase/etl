@@ -352,11 +352,6 @@ where
         inner.created_tables.insert(table_id.clone());
     }
 
-    /// Removes a table from the creation cache when it's found to not exist.
-    fn remove_from_created_tables_cache(inner: &mut Inner, table_id: &SequencedBigQueryTableId) {
-        inner.created_tables.remove(table_id);
-    }
-
     /// Retrieves the current sequenced table ID or creates a new one starting at version 0.
     async fn get_or_create_sequenced_bigquery_table_id(
         &self,
@@ -416,6 +411,7 @@ where
             .create_or_replace_view(&self.dataset_id, view_name, &target_table_id.to_string())
             .await?;
 
+        // We insert/overwrite the new (view -> sequenced bigquery table id) mapping
         inner
             .created_views
             .insert(view_name.clone(), target_table_id.clone());
@@ -505,7 +501,6 @@ where
                 }
 
                 let event = event_iter.next().unwrap();
-
                 match event {
                     Event::Insert(mut insert) => {
                         let sequence_number =
@@ -552,6 +547,7 @@ where
                     }
                     _ => {
                         // Every other event type is currently not supported.
+                        debug!("skipping unsupported event in BigQuery");
                     }
                 }
             }
@@ -721,7 +717,7 @@ where
             );
 
             // We remove the old table from the cache since it's no longer necessary.
-            Self::remove_from_created_tables_cache(&mut inner, &sequenced_bigquery_table_id);
+            inner.created_tables.remove(&sequenced_bigquery_table_id);
 
             // Schedule cleanup of the previous table. We do not care to track this task since
             // if it fails, users can clean up the table on their own, but the view will still point
