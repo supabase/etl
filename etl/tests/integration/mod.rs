@@ -1,3 +1,4 @@
+mod partitioned_table_test;
 mod pipeline_test;
 mod postgres_store;
 mod replica_identity;
