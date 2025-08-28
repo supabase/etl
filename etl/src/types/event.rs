@@ -1,4 +1,4 @@
-use etl_postgres::schema::{TableId, TableSchema};
+use etl_postgres::types::{TableId, TableSchema};
 use std::fmt;
 use tokio_postgres::types::PgLsn;
 

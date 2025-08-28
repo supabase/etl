@@ -2,7 +2,7 @@ use std::{collections::HashMap, sync::Arc};
 
 use etl_config::shared::PgConnectionConfig;
 use etl_postgres::replication::{connect_to_source_database, schema, state, table_mappings};
-use etl_postgres::schema::{TableId, TableSchema};
+use etl_postgres::types::{TableId, TableSchema};
 use metrics::gauge;
 use sqlx::PgPool;
 use tokio::sync::Mutex;

@@ -1,7 +1,7 @@
 use sqlx::PgPool;
 
 use crate::replication::worker::WorkerType;
-use crate::schema::TableId;
+use crate::types::TableId;
 
 /// Maximum length for a Postgres replication slot name in bytes.
 const MAX_SLOT_NAME_LENGTH: usize = 63;

@@ -7,7 +7,7 @@ use actix_web::{
 use chrono::Utc;
 use etl_config::shared::{ReplicatorConfig, SupabaseConfig, TlsConfig};
 use etl_postgres::replication::{TableLookupError, get_table_name_from_oid, health, state};
-use etl_postgres::schema::TableId;
+use etl_postgres::types::TableId;
 use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 use sqlx::{PgPool, PgTransaction};

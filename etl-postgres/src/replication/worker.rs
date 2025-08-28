@@ -1,4 +1,4 @@
-use crate::schema::TableId;
+use crate::types::TableId;
 
 /// Enum representing the types of workers that can be involved with a replication task.
 #[derive(Debug, Copy, Clone)]

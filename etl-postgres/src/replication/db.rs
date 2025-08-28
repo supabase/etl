@@ -2,7 +2,7 @@ use etl_config::shared::{IntoConnectOptions, PgConnectionConfig};
 use sqlx::{PgPool, Row, postgres::PgPoolOptions};
 use thiserror::Error;
 
-use crate::schema::{TableId, TableName};
+use crate::types::{TableId, TableName};
 
 /// Errors that can occur during table lookups.
 #[derive(Debug, Error)]

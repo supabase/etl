@@ -4,7 +4,7 @@ use sqlx::{PgExecutor, PgPool, Row};
 use std::collections::HashMap;
 use tokio_postgres::types::Type as PgType;
 
-use crate::schema::{ColumnSchema, TableId, TableName, TableSchema};
+use crate::types::{ColumnSchema, TableId, TableName, TableSchema};
 
 macro_rules! define_type_mappings {
     (

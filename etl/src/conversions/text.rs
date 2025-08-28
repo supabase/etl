@@ -1,6 +1,6 @@
 use chrono::{DateTime, FixedOffset, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use core::str;
-use etl_postgres::time::{
+use etl_postgres::types::{
     DATE_FORMAT, TIME_FORMAT, TIMESTAMP_FORMAT, TIMESTAMPTZ_FORMAT_HH_MM, TIMESTAMPTZ_FORMAT_HHMM,
 };
 use tokio_postgres::types::Type;

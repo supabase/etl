@@ -1,5 +1,5 @@
-use etl_postgres::schema::ColumnSchema;
-use etl_postgres::time::POSTGRES_EPOCH;
+use etl_postgres::types::ColumnSchema;
+use etl_postgres::types::POSTGRES_EPOCH;
 use futures::{Stream, ready};
 use pin_project_lite::pin_project;
 use postgres_replication::LogicalReplicationStream;

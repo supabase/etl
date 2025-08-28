@@ -1,8 +1,7 @@
+use pg_escape::quote_identifier;
 use std::cmp::Ordering;
 use std::fmt;
 use std::str::FromStr;
-
-use pg_escape::quote_identifier;
 use tokio_postgres::types::{FromSql, ToSql, Type};
 
 /// An object identifier in Postgres.

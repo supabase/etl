@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::{PgExecutor, PgPool, Type, postgres::types::Oid as SqlxTableId, prelude::FromRow};
 use tokio_postgres::types::PgLsn;
 
-use crate::schema::TableId;
+use crate::types::TableId;
 
 /// Replication state of a table during the ETL process.
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]

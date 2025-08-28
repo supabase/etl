@@ -1,5 +1,5 @@
 use etl_config::shared::PipelineConfig;
-use etl_postgres::schema::TableId;
+use etl_postgres::types::TableId;
 use std::sync::Arc;
 use tokio::sync::Semaphore;
 use tokio::task::JoinHandle;

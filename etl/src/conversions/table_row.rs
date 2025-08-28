@@ -1,5 +1,5 @@
 use core::str;
-use etl_postgres::schema::ColumnSchema;
+use etl_postgres::types::ColumnSchema;
 use tracing::error;
 
 use crate::bail;
@@ -160,7 +160,7 @@ pub fn parse_table_row_from_postgres_copy_bytes(
 mod tests {
     use super::*;
     use crate::error::ErrorKind;
-    use etl_postgres::schema::ColumnSchema;
+    use etl_postgres::types::ColumnSchema;
     use tokio_postgres::types::Type;
 
     fn create_test_schema() -> Vec<ColumnSchema> {

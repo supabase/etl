@@ -2,7 +2,7 @@ use chrono::Utc;
 use etl_config::shared::PipelineConfig;
 use etl_postgres::replication::slots::get_slot_name;
 use etl_postgres::replication::worker::WorkerType;
-use etl_postgres::schema::TableId;
+use etl_postgres::types::TableId;
 use std::ops::Deref;
 use std::sync::Arc;
 use std::time::Duration;

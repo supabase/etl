@@ -1,7 +1,7 @@
 use etl_config::shared::{PgConnectionConfig, TlsConfig};
 use etl_postgres::replication::connect_to_source_database;
-use etl_postgres::schema::TableName;
 use etl_postgres::tokio::test_utils::PgDatabase;
+use etl_postgres::types::TableName;
 use tokio_postgres::Client;
 use uuid::Uuid;
 

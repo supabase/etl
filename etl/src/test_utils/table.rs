@@ -1,4 +1,4 @@
-use etl_postgres::schema::{ColumnSchema, TableId, TableName, TableSchema};
+use etl_postgres::types::{ColumnSchema, TableId, TableName, TableSchema};
 use std::collections::HashMap;
 
 /// Asserts that a table schema matches the expected schema.

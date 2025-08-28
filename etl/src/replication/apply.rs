@@ -1,7 +1,7 @@
 use etl_config::shared::PipelineConfig;
 use etl_postgres::replication::slots::get_slot_name;
 use etl_postgres::replication::worker::WorkerType;
-use etl_postgres::schema::TableId;
+use etl_postgres::types::TableId;
 use futures::{FutureExt, StreamExt};
 use metrics::{counter, gauge};
 use postgres_replication::protocol;

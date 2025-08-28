@@ -5,10 +5,8 @@
 
 #[cfg(feature = "replication")]
 pub mod replication;
-pub mod schema;
 #[cfg(feature = "sqlx")]
 pub mod sqlx;
-pub mod time;
 #[cfg(feature = "tokio")]
 pub mod tokio;
 pub mod types;

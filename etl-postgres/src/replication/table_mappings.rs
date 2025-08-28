@@ -1,7 +1,7 @@
 use sqlx::{PgExecutor, PgPool, Row, postgres::types::Oid as SqlxTableId};
 use std::collections::HashMap;
 
-use crate::schema::TableId;
+use crate::types::TableId;
 
 /// Stores a table mapping in the database.
 ///

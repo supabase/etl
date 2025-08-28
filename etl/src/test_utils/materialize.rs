@@ -1,4 +1,4 @@
-use etl_postgres::schema::TableId;
+use etl_postgres::types::TableId;
 
 use crate::types::{Event, TableRow};
 
