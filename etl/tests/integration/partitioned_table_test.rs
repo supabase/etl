@@ -22,7 +22,7 @@ async fn partitioned_table_sync_succeeds_with_inherited_primary_keys() {
         ("p3", "FROM (200) TO (300)"),
     ];
 
-    let (_parent_table_id, partition_table_ids) =
+    let (parent_table_id, partition_table_ids) =
         create_partitioned_table(&database, table_name.clone(), &partition_specs)
             .await
             .expect("Failed to create partitioned table");
@@ -80,17 +80,44 @@ async fn partitioned_table_sync_succeeds_with_inherited_primary_keys() {
     );
 
     let table_states = state_store.get_table_replication_states().await;
-    for (table_id, state) in &table_states {
-        if partition_table_ids.contains(table_id) {
-            assert!(
-                matches!(
-                    state.as_type(),
-                    TableReplicationPhaseType::SyncDone | TableReplicationPhaseType::Ready
-                ),
-                "Partition {} should be in SyncDone or Ready state, but was in {:?}",
-                table_id,
-                state.as_type()
-            );
-        }
+
+    assert_eq!(
+        table_states.len(),
+        partition_table_ids.len(),
+        "Expected {} partition states, but found {}",
+        partition_table_ids.len(),
+        table_states.len()
+    );
+
+    for &partition_id in &partition_table_ids {
+        let state = table_states
+            .get(&partition_id)
+            .expect(&format!("Partition {} should have a state", partition_id));
+        assert!(
+            matches!(
+                state.as_type(),
+                TableReplicationPhaseType::SyncDone | TableReplicationPhaseType::Ready
+            ),
+            "Partition {} should be in SyncDone or Ready state, but was in {:?}",
+            partition_id,
+            state.as_type()
+        );
     }
+
+    assert!(
+        !table_states.contains_key(&parent_table_id),
+        "Parent table {} should not be tracked since parent partitioned tables are excluded from processing",
+        parent_table_id
+    );
+
+    let parent_table_rows = table_rows
+        .iter()
+        .filter(|(table_id, _)| **table_id == parent_table_id)
+        .map(|(_, rows)| rows.len())
+        .sum::<usize>();
+    assert_eq!(
+        parent_table_rows, 0,
+        "Parent table {} should have no data since it's excluded from processing and all data goes to partitions, but found {} rows",
+        parent_table_id, parent_table_rows
+    );
 }

@@ -379,12 +379,19 @@ impl PgReplicationClient {
     }
 
     /// Retrieves the names of all tables included in a publication.
+    ///
+    /// Note: This excludes parent partitioned tables since they contain no data
+    /// and should not be processed. Only child partitions and regular tables are returned.
     pub async fn get_publication_table_names(
         &self,
         publication_name: &str,
     ) -> EtlResult<Vec<TableName>> {
         let publication_query = format!(
-            "select schemaname, tablename from pg_publication_tables where pubname = {};",
+            "select pt.schemaname, pt.tablename from pg_publication_tables pt
+         join pg_class c on c.relname = pt.tablename
+         join pg_namespace n on n.oid = c.relnamespace AND n.nspname = pt.schemaname
+         where pt.pubname = {}
+         and c.relkind != 'p'", /* Exclude parent partitioned tables */
             quote_literal(publication_name)
         );
 
@@ -406,6 +413,10 @@ impl PgReplicationClient {
     }
 
     /// Retrieves the OIDs of all tables included in a publication.
+    ///
+    /// Note: This excludes parent partitioned tables (relkind = 'p') since they
+    /// contain no data and should not be processed. Only child partitions and
+    /// regular tables are returned.
     pub async fn get_publication_table_ids(
         &self,
         publication_name: &str,
@@ -414,7 +425,8 @@ impl PgReplicationClient {
             "select c.oid from pg_publication_tables pt 
          join pg_class c on c.relname = pt.tablename 
          join pg_namespace n on n.oid = c.relnamespace AND n.nspname = pt.schemaname 
-         where pt.pubname = {};",
+         where pt.pubname = {}
+         and c.relkind != 'p'", /* Exclude parent partitioned tables */
             quote_literal(publication_name)
         );
 
