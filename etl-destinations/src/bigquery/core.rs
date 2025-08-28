@@ -308,7 +308,7 @@ where
         // Optimistically skip table creation if we've already seen this sequenced table.
         //
         // Note that if the table is deleted outside ETL and the cache marks it as created, the
-        // inserts will fail because the table will be missing.
+        // inserts will fail because the table will be missing and won't be created.
         if !inner.created_tables.contains(&sequenced_bigquery_table_id) {
             self.client
                 .create_table_if_missing(
