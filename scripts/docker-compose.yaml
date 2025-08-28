@@ -1,17 +1,16 @@
 x-lakekeeper-env: &lakekeeper-env
   environment:
     - LAKEKEEPER__PG_ENCRYPTION_KEY=insecure-encryption-key
-    - LAKEKEEPER__PG_DATABASE_URL_READ=postgresql://postgres:postgres@postgres:5432/iceberg-catalog
-    - LAKEKEEPER__PG_DATABASE_URL_WRITE=postgresql://postgres:postgres@postgres:5432/iceberg-catalog
+    - LAKEKEEPER__PG_DATABASE_URL_READ=postgresql://lakekeeper-postgres:lakekeeper-postgres@lakekeeper-postgres:5432/iceberg-catalog
+    - LAKEKEEPER__PG_DATABASE_URL_WRITE=postgresql://lakekeeper-postgres:lakekeeper-postgres@lakekeeper-postgres:5432/iceberg-catalog
     - RUST_LOG=info
 
-name: etl
+name: etl-pg-${POSTGRES_VERSION:-17}
 
 services:
   # Start Postgres
   postgres:
     image: postgres:${POSTGRES_VERSION:-17}
-    container_name: postgres
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
@@ -20,10 +19,6 @@ services:
       - "${POSTGRES_PORT:-5430}:5432"
     volumes:
       - ${POSTGRES_DATA_VOLUME:-postgres_data}:/var/lib/postgresql/data
-    configs:
-      - source: postgres_init
-        target: /docker-entrypoint-initdb.d/01-create-iceberg-catalog.sh
-        mode: 0755
     command: >
       postgres
       -N 1000
@@ -37,10 +32,24 @@ services:
       timeout: 5s
       retries: 5
 
+  lakekeeper-postgres:
+      image: postgres:17
+      environment:
+        POSTGRES_USER: ${LAKEKEEPER_POSTGRES_USER:-lakekeeper-postgres}
+        POSTGRES_PASSWORD: ${LAKEKEEPER_POSTGRES_PASSWORD:-lakekeeper-postgres}
+        POSTGRES_DB: ${LAKEKEEPER_POSTGRES_DB:-iceberg-catalog}
+      volumes:
+        - ${LAKEKEEPER_POSTGRES_DATA_VOLUME:-lakekeeper_postgres_data}:/var/lib/postgresql/data
+      restart: unless-stopped
+      healthcheck:
+        test: ["CMD-SHELL", "pg_isready -U ${LAKEKEEPER_POSTGRES_USER:-lakekeeper-postgres} -d ${LAKEKEEPER_POSTGRES_DB:-iceberg-catalog}"]
+        interval: 5s
+        timeout: 5s
+        retries: 5
+
   # Start MinIO for S3-compatible object storage
   minio:
     image: minio/minio:latest
-    container_name: minio
     environment:
       MINIO_ROOT_USER: minio-admin
       MINIO_ROOT_PASSWORD: minio-admin-password
@@ -59,7 +68,6 @@ services:
   # Create MinIO bucket
   create-bucket:
     image: minio/mc:latest
-    container_name: create-bucket
     depends_on:
       minio:
         condition: service_healthy
@@ -73,18 +81,16 @@ services:
   # Migrate lakekeeper database
   migrate-lakekeeper:
     image: quay.io/lakekeeper/catalog:latest-main
-    container_name: migrate-lakekeeper
     <<: *lakekeeper-env
     restart: "no"
     command: ["migrate"]
     depends_on:
-      postgres:
+      lakekeeper-postgres:
         condition: service_healthy
 
   # Start lakekeeper, an iceberg REST catalog
   lakekeeper:
     image: quay.io/lakekeeper/catalog:latest-main
-    container_name: lakekeeper
     depends_on:
       migrate-lakekeeper:
         condition: service_completed_successfully
@@ -104,7 +110,6 @@ services:
   # Bootstrap lakekeeper. After deployment, lakekeeper needs to be bootstrapped.
   bootstrap-lakekeeper:
     image: curlimages/curl
-    container_name: bootstrap-lakekeeper
     depends_on:
       lakekeeper:
         condition: service_healthy
@@ -127,7 +132,6 @@ services:
   # Create a warehouse for development and testing
   create-warehouse:
     image: curlimages/curl
-    container_name: create-warehouse
     depends_on:
       lakekeeper:
         condition: service_healthy
@@ -153,18 +157,10 @@ services:
     volumes:
       - ./warehouse.json:/home/curl_user/warehouse.json
 
-configs:
-  postgres_init:
-    content: |
-      #!/bin/bash
-      set -e
-      
-      psql -v ON_ERROR_STOP=1 --username "${POSTGRES_USER:-postgres}" --dbname "${POSTGRES_DB:-postgres}" <<-EOSQL
-        CREATE DATABASE "iceberg-catalog";
-      EOSQL
-
 volumes:
   postgres_data:
+    driver: local
+  lakekeeper_postgres_data:
     driver: local
   minio_data:
     driver: local
