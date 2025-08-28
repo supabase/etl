@@ -66,6 +66,32 @@ impl<G: GenericClient> PgDatabase<G> {
         Ok(())
     }
 
+    pub async fn create_publication_for_all(
+        &self,
+        publication_name: &str,
+        schema: Option<&str>,
+    ) -> Result<(), tokio_postgres::Error> {
+        let create_publication_query = match schema {
+            Some(schema_name) => format!(
+                "create publication {} for tables in schema {}",
+                publication_name,
+                schema_name
+            ),
+            None => format!(
+                "create publication {} for all tables",
+                publication_name
+            ),
+        };
+
+        self.client
+            .as_ref()
+            .unwrap()
+            .execute(&create_publication_query, &[])
+            .await?;
+
+        Ok(())
+    }
+
     /// Creates a new table with the given name and column definitions.
     ///
     /// Optionally adds a primary key column named `id` of type `bigserial`.

@@ -150,19 +150,11 @@ async fn publication_for_all_tables_in_schema_ignores_new_tables_until_restart()
     let table_1 = test_table_name("table_1");
     let table_1_id = database
         .create_table(table_1.clone(), true, &[("name", "text not null")])
-        .await
-        .expect("Failed to create initial table");
+        .await.unwrap();
 
     // Create a publication for all tables in the test schema.
-    let publication_name = "test_pub_all_schema".to_string();
-    database
-        .run_sql(&format!(
-            "create publication {} for all tables in schema {}",
-            publication_name,
-            table_1.schema.clone()
-        ))
-        .await
-        .expect("Failed to create publication for schema");
+    let publication_name = "test_pub_all_schema";
+    database.create_publication_for_all(publication_name, Some(&table_1.schema)).await.unwrap();
 
     let store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
@@ -171,7 +163,7 @@ async fn publication_for_all_tables_in_schema_ignores_new_tables_until_restart()
     let mut pipeline = create_pipeline(
         &database.config,
         pipeline_id,
-        publication_name,
+        publication_name.to_string(),
         store.clone(),
         destination.clone(),
     );
@@ -189,11 +181,11 @@ async fn publication_for_all_tables_in_schema_ignores_new_tables_until_restart()
     database
         .create_table(table_2.clone(), true, &[("v", "int4 not null")])
         .await
-        .expect("Failed to create new table");
+        .unwrap();
     database
         .insert_values(table_2.clone(), &["v"], &[&1_i32])
         .await
-        .expect("Failed to insert into new table");
+        .unwrap();
 
     // Wait for the events to come in from the new table.
     sleep(Duration::from_secs(5)).await;
