@@ -4,7 +4,7 @@ use etl::store::schema::SchemaStore;
 use etl::store::state::StateStore;
 use etl::types::{Cell, Event, PgLsn, TableId, TableName, TableRow};
 use etl::{bail, etl_error};
-use gcp_bigquery_client::storage::{TableBatch, TableDescriptor};
+use gcp_bigquery_client::storage::TableDescriptor;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
 use std::iter;
@@ -14,7 +14,6 @@ use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
 
 use crate::bigquery::client::{BigQueryClient, BigQueryOperationType};
-use crate::bigquery::encoding::BigQueryTableRow;
 use crate::bigquery::{BigQueryDatasetId, BigQueryTableId};
 use crate::metrics::register_metrics;
 
