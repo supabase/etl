@@ -17,9 +17,10 @@ use tracing::{debug, info};
 use crate::concurrency::shutdown::ShutdownRx;
 use crate::concurrency::signal::SignalRx;
 use crate::conversions::event::{
-    begin_event_from_protocol, commit_event_from_protocol, delete_event_from_protocol,
-    insert_event_from_protocol, relation_event_from_protocol, truncate_event_from_protocol,
-    update_event_from_protocol,
+    parse_event_from_begin_message, parse_event_from_commit_message,
+    parse_event_from_delete_message, parse_event_from_insert_message,
+    parse_event_from_relation_message, parse_event_from_truncate_message,
+    parse_event_from_update_message,
 };
 use crate::destination::Destination;
 use crate::error::{ErrorKind, EtlError, EtlResult};
@@ -769,7 +770,7 @@ async fn handle_begin_message(
     state.remote_final_lsn = Some(final_lsn);
 
     // Convert event from the protocol message.
-    let event = begin_event_from_protocol(start_lsn, commit_lsn, message);
+    let event = parse_event_from_begin_message(start_lsn, commit_lsn, message);
 
     Ok(HandleMessageResult {
         event: Some(Event::Begin(event)),
@@ -835,7 +836,7 @@ where
     let continue_loop = hook.process_syncing_tables(end_lsn, false).await?;
 
     // Convert event from the protocol message.
-    let event = commit_event_from_protocol(start_lsn, commit_lsn, message);
+    let event = parse_event_from_commit_message(start_lsn, commit_lsn, message);
 
     let mut result = HandleMessageResult {
         event: Some(Event::Commit(event)),
@@ -915,7 +916,7 @@ where
             })?;
 
     // Convert event from the protocol message.
-    let event = relation_event_from_protocol(start_lsn, commit_lsn, message)?;
+    let event = parse_event_from_relation_message(start_lsn, commit_lsn, message)?;
 
     // We compare the table schema from the relation message with the existing schema (if any).
     // The purpose of this comparison is that we want to throw an error and stop the processing
@@ -972,7 +973,8 @@ where
     }
 
     // Convert event from the protocol message.
-    let event = insert_event_from_protocol(schema_store, start_lsn, commit_lsn, message).await?;
+    let event =
+        parse_event_from_insert_message(schema_store, start_lsn, commit_lsn, message).await?;
 
     Ok(HandleMessageResult {
         event: Some(Event::Insert(event)),
@@ -1011,7 +1013,8 @@ where
     }
 
     // Convert event from the protocol message.
-    let event = update_event_from_protocol(schema_store, start_lsn, commit_lsn, message).await?;
+    let event =
+        parse_event_from_update_message(schema_store, start_lsn, commit_lsn, message).await?;
 
     Ok(HandleMessageResult {
         event: Some(Event::Update(event)),
@@ -1050,7 +1053,8 @@ where
     }
 
     // Convert event from the protocol message.
-    let event = delete_event_from_protocol(schema_store, start_lsn, commit_lsn, message).await?;
+    let event =
+        parse_event_from_delete_message(schema_store, start_lsn, commit_lsn, message).await?;
 
     Ok(HandleMessageResult {
         event: Some(Event::Delete(event)),
@@ -1101,7 +1105,7 @@ where
     }
 
     // Convert event from the protocol message.
-    let event = truncate_event_from_protocol(start_lsn, commit_lsn, message, rel_ids);
+    let event = parse_event_from_truncate_message(start_lsn, commit_lsn, message, rel_ids);
 
     Ok(HandleMessageResult {
         event: Some(Event::Truncate(event)),

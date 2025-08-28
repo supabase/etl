@@ -20,7 +20,7 @@ use crate::{bail, etl_error};
 ///
 /// This method parses the replication protocol begin message and extracts
 /// transaction metadata for use in the ETL pipeline.
-pub fn begin_event_from_protocol(
+pub fn parse_event_from_begin_message(
     start_lsn: PgLsn,
     commit_lsn: PgLsn,
     begin_body: &protocol::BeginBody,
@@ -37,7 +37,7 @@ pub fn begin_event_from_protocol(
 ///
 /// This method parses the replication protocol commit message and extracts
 /// transaction completion metadata for use in the ETL pipeline.
-pub fn commit_event_from_protocol(
+pub fn parse_event_from_commit_message(
     start_lsn: PgLsn,
     commit_lsn: PgLsn,
     commit_body: &protocol::CommitBody,
@@ -55,7 +55,7 @@ pub fn commit_event_from_protocol(
 ///
 /// This method parses the replication protocol relation message and builds
 /// a complete table schema for use in interpreting subsequent data events.
-pub fn relation_event_from_protocol(
+pub fn parse_event_from_relation_message(
     start_lsn: PgLsn,
     commit_lsn: PgLsn,
     relation_body: &protocol::RelationBody,
@@ -82,30 +82,12 @@ pub fn relation_event_from_protocol(
     })
 }
 
-/// Creates a [`TruncateEvent`] from Postgres protocol data.
-///
-/// This method parses the replication protocol truncate message and extracts
-/// information about which tables were truncated and with what options.
-pub fn truncate_event_from_protocol(
-    start_lsn: PgLsn,
-    commit_lsn: PgLsn,
-    truncate_body: &protocol::TruncateBody,
-    overridden_rel_ids: Vec<u32>,
-) -> TruncateEvent {
-    TruncateEvent {
-        start_lsn,
-        commit_lsn,
-        options: truncate_body.options(),
-        rel_ids: overridden_rel_ids,
-    }
-}
-
 /// Converts a Postgres insert message into an [`InsertEvent`].
 ///
 /// This function processes an insert operation from the replication stream,
 /// retrieves the table schema from the store, and constructs a complete
 /// insert event with the new row data ready for ETL processing.
-pub async fn insert_event_from_protocol<S>(
+pub async fn parse_event_from_insert_message<S>(
     schema_store: &S,
     start_lsn: PgLsn,
     commit_lsn: PgLsn,
@@ -138,7 +120,7 @@ where
 /// handling both the old and new row data. The old row data may be either
 /// the complete row or just the key columns, depending on the table's
 /// `REPLICA IDENTITY` setting in Postgres.
-pub async fn update_event_from_protocol<S>(
+pub async fn parse_event_from_update_message<S>(
     schema_store: &S,
     start_lsn: PgLsn,
     commit_lsn: PgLsn,
@@ -189,7 +171,7 @@ where
 /// extracting the old row data that was deleted. The old row data may be
 /// either the complete row or just the key columns, depending on the table's
 /// `REPLICA IDENTITY` setting in Postgres.
-pub async fn delete_event_from_protocol<S>(
+pub async fn parse_event_from_delete_message<S>(
     schema_store: &S,
     start_lsn: PgLsn,
     commit_lsn: PgLsn,
@@ -222,6 +204,24 @@ where
         table_id: TableId::new(table_id),
         old_table_row,
     })
+}
+
+/// Creates a [`TruncateEvent`] from Postgres protocol data.
+///
+/// This method parses the replication protocol truncate message and extracts
+/// information about which tables were truncated and with what options.
+pub fn parse_event_from_truncate_message(
+    start_lsn: PgLsn,
+    commit_lsn: PgLsn,
+    truncate_body: &protocol::TruncateBody,
+    overridden_rel_ids: Vec<u32>,
+) -> TruncateEvent {
+    TruncateEvent {
+        start_lsn,
+        commit_lsn,
+        options: truncate_body.options(),
+        rel_ids: overridden_rel_ids,
+    }
 }
 
 /// Retrieves a table schema from the schema store by table ID.
