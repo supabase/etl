@@ -343,45 +343,6 @@ where
         Ok((sequenced_bigquery_table_id, Arc::new(table_descriptor)))
     }
 
-    /// Streams table batches to BigQuery concurrently without holding locks.
-    ///
-    /// This method can operate without locking because:
-    /// - The BigQuery client is thread-safe and uses internal buffering  
-    /// - Table preparation is completed before calling this method
-    /// - Multiple streaming operations can execute concurrently
-    async fn stream_table_batches_concurrent_with_fallback(
-        &self,
-        client: &BigQueryClient,
-        table_batches: Vec<TableBatch<BigQueryTableRow>>,
-        max_concurrent_streams: usize,
-    ) -> EtlResult<(usize, usize)> {
-        // First attempt - optimistically assume all tables exist
-        let result = client
-            .stream_table_batches_concurrent(table_batches, max_concurrent_streams)
-            .await;
-
-        match result {
-            Ok((bytes_sent, bytes_received)) => Ok((bytes_sent, bytes_received)),
-            Err(err) => {
-                // From our testing, when trying to send data to a missing table, this is the error that is
-                // returned:
-                // `Status { code: PermissionDenied, message: "Permission 'TABLES_UPDATE_DATA' denied on
-                // resource 'x' (or it may not exist).", source: None }`
-                //
-                // If we get permission denied, we assume that a table doesn't exist.
-                // For now, we'll return the error since reconstructing batches is complex
-                if err.kind() == ErrorKind::PermissionDenied {
-                    warn!("one or more tables not found during concurrent streaming");
-                    // TODO: figure out how we could get per-table errors here and try to recreate the
-                    //  tables.
-                    Err(err)
-                } else {
-                    Err(err)
-                }
-            }
-        }
-    }
-
     /// Adds a table to the creation cache to avoid redundant existence checks.
     fn add_to_created_tables_cache(inner: &mut Inner, table_id: &SequencedBigQueryTableId) {
         if inner.created_tables.contains(table_id) {
@@ -507,11 +468,8 @@ where
         // Stream all the batches concurrently.
         if !table_batches.is_empty() {
             let (bytes_sent, bytes_received) = self
-                .stream_table_batches_concurrent_with_fallback(
-                    &self.client,
-                    table_batches,
-                    self.max_concurrent_streams,
-                )
+                .client
+                .stream_table_batches_concurrent(table_batches, self.max_concurrent_streams)
                 .await?;
 
             // Logs with egress_metric = true can be used to identify egress logs.
@@ -617,11 +575,8 @@ where
 
                 if !table_batches.is_empty() {
                     let (bytes_sent, bytes_received) = self
-                        .stream_table_batches_concurrent_with_fallback(
-                            &self.client,
-                            table_batches,
-                            self.max_concurrent_streams,
-                        )
+                        .client
+                        .stream_table_batches_concurrent(table_batches, self.max_concurrent_streams)
                         .await?;
 
                     // Logs with egress_metric = true can be used to identify egress logs.
