@@ -1,6 +1,6 @@
 use etl::destination::memory::MemoryDestination;
 use etl::state::table::TableReplicationPhaseType;
-use etl::test_utils::database::spawn_source_database;
+use etl::test_utils::database::{spawn_source_database, test_table_name};
 use etl::test_utils::event::group_events_by_type_and_table_id;
 use etl::test_utils::notify::NotifyingStore;
 use etl::test_utils::pipeline::{create_pipeline, create_pipeline_with};
@@ -18,6 +18,7 @@ use etl_postgres::tokio::test_utils::TableModification;
 use etl_telemetry::tracing::init_test_tracing;
 use rand::random;
 use std::time::Duration;
+use tokio::time::sleep;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn table_schema_copy_survives_pipeline_restarts() {
@@ -25,7 +26,7 @@ async fn table_schema_copy_survives_pipeline_restarts() {
     let mut database = spawn_source_database().await;
     let database_schema = setup_test_database_schema(&database, TableSelection::Both).await;
 
-    let state_store = NotifyingStore::new();
+    let store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
 
     // We start the pipeline from scratch.
@@ -34,18 +35,18 @@ async fn table_schema_copy_survives_pipeline_restarts() {
         &database.config,
         pipeline_id,
         database_schema.publication_name(),
-        state_store.clone(),
+        store.clone(),
         destination.clone(),
     );
 
     // We wait for both table states to be in sync done.
-    let users_state_notify = state_store
+    let users_state_notify = store
         .notify_on_table_state(
             database_schema.users_schema().id,
             TableReplicationPhaseType::SyncDone,
         )
         .await;
-    let orders_state_notify = state_store
+    let orders_state_notify = store
         .notify_on_table_state(
             database_schema.orders_schema().id,
             TableReplicationPhaseType::SyncDone,
@@ -60,7 +61,7 @@ async fn table_schema_copy_survives_pipeline_restarts() {
     pipeline.shutdown_and_wait().await.unwrap();
 
     // We check that the states are correctly set.
-    let table_replication_states = state_store.get_table_replication_states().await;
+    let table_replication_states = store.get_table_replication_states().await;
     assert_eq!(table_replication_states.len(), 2);
     assert_eq!(
         table_replication_states
@@ -78,7 +79,7 @@ async fn table_schema_copy_survives_pipeline_restarts() {
     );
 
     // We check that the table schemas have been stored.
-    let table_schemas = state_store.get_table_schemas().await;
+    let table_schemas = store.get_table_schemas().await;
     assert_eq!(table_schemas.len(), 2);
     assert_eq!(
         *table_schemas
@@ -98,7 +99,7 @@ async fn table_schema_copy_survives_pipeline_restarts() {
         &database.config,
         pipeline_id,
         database_schema.publication_name(),
-        state_store.clone(),
+        store.clone(),
         destination.clone(),
     );
 
@@ -143,30 +144,29 @@ async fn table_schema_copy_survives_pipeline_restarts() {
 async fn publication_for_all_tables_in_schema_ignores_new_tables_until_restart() {
     init_test_tracing();
 
-    // Create isolated test database and initial table in the test schema.
     let database = spawn_source_database().await;
-    let initial_table = etl::test_utils::database::test_table_name("initial_table");
-    let initial_table_id = database
-        .create_table(initial_table.clone(), true, &[("name", "text not null")])
+
+    // Create first table.
+    let table_1 = test_table_name("table_1");
+    let table_1_id = database
+        .create_table(table_1.clone(), true, &[("name", "text not null")])
         .await
         .expect("Failed to create initial table");
 
     // Create a publication for all tables in the test schema.
     let publication_name = "test_pub_all_schema".to_string();
-    let schema_name = initial_table.schema.clone();
     database
         .run_sql(&format!(
             "create publication {} for all tables in schema {}",
-            publication_name, schema_name
+            publication_name,
+            table_1.schema.clone()
         ))
         .await
         .expect("Failed to create publication for schema");
 
-    // Wiring: in-memory state store and destination.
     let store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
 
-    // Start pipeline.
     let pipeline_id: PipelineId = random();
     let mut pipeline = create_pipeline(
         &database.config,
@@ -176,30 +176,35 @@ async fn publication_for_all_tables_in_schema_ignores_new_tables_until_restart()
         destination.clone(),
     );
 
-    // Wait for initial table to reach SyncDone.
     let sync_done = store
-        .notify_on_table_state(initial_table_id, TableReplicationPhaseType::SyncDone)
+        .notify_on_table_state(table_1_id, TableReplicationPhaseType::SyncDone)
         .await;
 
     pipeline.start().await.unwrap();
+
     sync_done.notified().await;
 
     // Create a new table in the same schema and insert a row.
-    let new_table = etl::test_utils::database::test_table_name("new_table_after_start");
+    let table_2 = test_table_name("table_2");
     database
-        .create_table(new_table.clone(), true, &[("v", "int4 not null")])
+        .create_table(table_2.clone(), true, &[("v", "int4 not null")])
         .await
         .expect("Failed to create new table");
     database
-        .insert_values(new_table.clone(), &["v"], &[&1_i32])
+        .insert_values(table_2.clone(), &["v"], &[&1_i32])
         .await
         .expect("Failed to insert into new table");
 
-    // Allow time for potential events; they should be ignored without errors.
-    tokio::time::sleep(Duration::from_secs(10)).await;
+    // Wait for the events to come in from the new table.
+    sleep(Duration::from_secs(5)).await;
 
     // Shutdown and verify no errors occurred.
     pipeline.shutdown_and_wait().await.unwrap();
+
+    // Check that only the schemas of the first table were stored.
+    let table_schemas = store.get_table_schemas().await;
+    assert_eq!(table_schemas.len(), 1);
+    assert!(table_schemas.contains_key(&table_1_id));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -219,7 +224,7 @@ async fn table_copy_replicates_existing_data() {
     )
     .await;
 
-    let state_store = NotifyingStore::new();
+    let store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
 
     // Start pipeline from scratch.
@@ -228,18 +233,18 @@ async fn table_copy_replicates_existing_data() {
         &database.config,
         pipeline_id,
         database_schema.publication_name(),
-        state_store.clone(),
+        store.clone(),
         destination.clone(),
     );
 
     // Register notifications for table copy completion.
-    let users_state_notify = state_store
+    let users_state_notify = store
         .notify_on_table_state(
             database_schema.users_schema().id,
             TableReplicationPhaseType::SyncDone,
         )
         .await;
-    let orders_state_notify = state_store
+    let orders_state_notify = store
         .notify_on_table_state(
             database_schema.orders_schema().id,
             TableReplicationPhaseType::SyncDone,
@@ -312,7 +317,7 @@ async fn table_copy_and_sync_streams_new_data() {
     )
     .await;
 
-    let state_store = NotifyingStore::new();
+    let store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
 
     // Start pipeline from scratch.
@@ -321,18 +326,18 @@ async fn table_copy_and_sync_streams_new_data() {
         &database.config,
         pipeline_id,
         database_schema.publication_name(),
-        state_store.clone(),
+        store.clone(),
         destination.clone(),
     );
 
     // Register notifications for initial table copy completion.
-    let users_state_notify = state_store
+    let users_state_notify = store
         .notify_on_table_state(
             database_schema.users_schema().id,
             TableReplicationPhaseType::SyncDone,
         )
         .await;
-    let orders_state_notify = state_store
+    let orders_state_notify = store
         .notify_on_table_state(
             database_schema.orders_schema().id,
             TableReplicationPhaseType::SyncDone,
@@ -355,13 +360,13 @@ async fn table_copy_and_sync_streams_new_data() {
     .await;
 
     // Register notifications for ready state.
-    let users_state_notify = state_store
+    let users_state_notify = store
         .notify_on_table_state(
             database_schema.users_schema().id,
             TableReplicationPhaseType::Ready,
         )
         .await;
-    let orders_state_notify = state_store
+    let orders_state_notify = store
         .notify_on_table_state(
             database_schema.orders_schema().id,
             TableReplicationPhaseType::Ready,
@@ -475,7 +480,7 @@ async fn table_sync_streams_new_data_with_batch() {
     let mut database = spawn_source_database().await;
     let database_schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
 
-    let state_store = NotifyingStore::new();
+    let store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
 
     // Start pipeline from scratch.
@@ -490,13 +495,13 @@ async fn table_sync_streams_new_data_with_batch() {
         &database.config,
         pipeline_id,
         database_schema.publication_name(),
-        state_store.clone(),
+        store.clone(),
         destination.clone(),
         Some(batch_config),
     );
 
     // Register notifications for initial table copy completion.
-    let users_state_notify = state_store
+    let users_state_notify = store
         .notify_on_table_state(
             database_schema.users_schema().id,
             TableReplicationPhaseType::SyncDone,
@@ -517,7 +522,7 @@ async fn table_sync_streams_new_data_with_batch() {
     .await;
 
     // Register notifications for ready state.
-    let users_state_notify = state_store
+    let users_state_notify = store
         .notify_on_table_state(
             database_schema.users_schema().id,
             TableReplicationPhaseType::Ready,
@@ -560,7 +565,7 @@ async fn table_processing_converges_to_apply_loop_with_no_events_coming() {
     let mut database = spawn_source_database().await;
     let database_schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
 
-    let state_store = NotifyingStore::new();
+    let store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
 
     // Insert some data to test that the table copy is performed.
@@ -584,13 +589,13 @@ async fn table_processing_converges_to_apply_loop_with_no_events_coming() {
         &database.config,
         pipeline_id,
         database_schema.publication_name(),
-        state_store.clone(),
+        store.clone(),
         destination.clone(),
         Some(batch_config),
     );
 
     // Register notifications for initial table copy completion.
-    let users_state_notify = state_store
+    let users_state_notify = store
         .notify_on_table_state(
             database_schema.users_schema().id,
             TableReplicationPhaseType::SyncDone,
@@ -631,7 +636,7 @@ async fn table_processing_with_schema_change_errors_table() {
         .await
         .unwrap();
 
-    let state_store = NotifyingStore::new();
+    let store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
 
     // Start pipeline from scratch.
@@ -640,12 +645,12 @@ async fn table_processing_with_schema_change_errors_table() {
         &database.config,
         pipeline_id,
         database_schema.publication_name(),
-        state_store.clone(),
+        store.clone(),
         destination.clone(),
     );
 
     // Register notifications for initial table copy completion.
-    let orders_state_notify = state_store
+    let orders_state_notify = store
         .notify_on_table_state(
             database_schema.orders_schema().id,
             TableReplicationPhaseType::FinishedCopy,
@@ -657,7 +662,7 @@ async fn table_processing_with_schema_change_errors_table() {
     orders_state_notify.notified().await;
 
     // Register notification for the sync done state.
-    let orders_state_notify = state_store
+    let orders_state_notify = store
         .notify_on_table_state(
             database_schema.orders_schema().id,
             TableReplicationPhaseType::SyncDone,
@@ -677,7 +682,7 @@ async fn table_processing_with_schema_change_errors_table() {
     orders_state_notify.notified().await;
 
     // Register notification for the ready state.
-    let orders_state_notify = state_store
+    let orders_state_notify = store
         .notify_on_table_state(
             database_schema.orders_schema().id,
             TableReplicationPhaseType::Ready,
@@ -697,7 +702,7 @@ async fn table_processing_with_schema_change_errors_table() {
     orders_state_notify.notified().await;
 
     // Register notification for the errored state.
-    let orders_state_notify = state_store
+    let orders_state_notify = store
         .notify_on_table_state(
             database_schema.orders_schema().id,
             TableReplicationPhaseType::Errored,
@@ -731,7 +736,7 @@ async fn table_processing_with_schema_change_errors_table() {
     pipeline.shutdown_and_wait().await.unwrap();
 
     // We assert that the schema is the initial one.
-    let table_schemas = state_store.get_table_schemas().await;
+    let table_schemas = store.get_table_schemas().await;
     assert_eq!(table_schemas.len(), 1);
     assert_eq!(
         *table_schemas
