@@ -11,10 +11,11 @@ use tokio_postgres::CopyOutStream;
 use tokio_postgres::types::PgLsn;
 use tracing::debug;
 
-use crate::conversions::table_row::{TableRow, TableRowConverter};
+use crate::conversions::table_row::{parse_table_row_from_postgres_copy_bytes};
 use crate::error::EtlError;
 use crate::error::{ErrorKind, EtlResult};
 use crate::etl_error;
+use crate::types::TableRow;
 
 /// The amount of milliseconds between two consecutive status updates in case no forced update
 /// is requested.
@@ -60,7 +61,7 @@ impl<'a> Stream for TableCopyStream<'a> {
             Some(Ok(row)) => {
                 // CONVERSION PHASE: Transform raw bytes into structured TableRow
                 // This is where most errors occur due to data format or type issues
-                match TableRowConverter::try_from(&row, this.column_schemas) {
+                match parse_table_row_from_postgres_copy_bytes(&row, this.column_schemas) {
                     Ok(row) => Poll::Ready(Some(Ok(row))),
                     Err(err) => {
                         // CONVERSION ERROR: Preserve full error context for debugging

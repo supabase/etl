@@ -3,7 +3,7 @@ use etl_postgres::schema::ColumnSchema;
 use tracing::error;
 
 use crate::bail;
-use crate::conversions::text::TextFormatConverter;
+use crate::conversions::text::parse_cell_from_postgres_text;
 use crate::error::EtlError;
 use crate::error::{ErrorKind, EtlResult};
 use crate::types::{Cell, TableRow};
@@ -17,7 +17,10 @@ use crate::types::{Cell, TableRow};
 /// # Panics
 ///
 /// Panics if the number of parsed values doesn't match the number of column schemas.
-fn parse_table_row_from_bytes(row: &[u8], column_schemas: &[ColumnSchema]) -> EtlResult<TableRow> {
+pub fn parse_table_row_from_postgres_copy_bytes(
+    row: &[u8],
+    column_schemas: &[ColumnSchema],
+) -> EtlResult<TableRow> {
     let mut values = Vec::with_capacity(column_schemas.len());
 
     let row_str = str::from_utf8(row)?;
@@ -116,7 +119,7 @@ fn parse_table_row_from_bytes(row: &[u8], column_schemas: &[ColumnSchema]) -> Et
                 // Convert non-null field value to appropriate Cell type based on column schema
                 // This delegates to TextFormatConverter which handles Postgres text format
                 // parsing for all supported data types (integers, floats, strings, booleans, etc.)
-                match TextFormatConverter::try_from_str(&column_schema.typ, &val_str) {
+                match parse_cell_from_postgres_text(&column_schema.typ, &val_str) {
                     Ok(value) => value,
                     Err(e) => {
                         // Log parsing error with context for debugging
@@ -177,7 +180,7 @@ mod tests {
         let schema = create_test_schema();
         let row_data = b"123\tJohn Doe\tt\n";
 
-        let result = parse_table_row_from_bytes(row_data, &schema).unwrap();
+        let result = parse_table_row_from_postgres_copy_bytes(row_data, &schema).unwrap();
 
         assert_eq!(result.values.len(), 3);
         assert_eq!(result.values[0], Cell::I32(123));
@@ -190,7 +193,7 @@ mod tests {
         let schema = create_test_schema();
         let row_data = b"456\t\\N\tf\n";
 
-        let result = parse_table_row_from_bytes(row_data, &schema).unwrap();
+        let result = parse_table_row_from_postgres_copy_bytes(row_data, &schema).unwrap();
 
         assert_eq!(result.values.len(), 3);
         assert_eq!(result.values[0], Cell::I32(456));
@@ -203,7 +206,7 @@ mod tests {
         let schema = create_test_schema();
         let row_data = b"0\t\tf\n";
 
-        let result = parse_table_row_from_bytes(row_data, &schema).unwrap();
+        let result = parse_table_row_from_postgres_copy_bytes(row_data, &schema).unwrap();
 
         assert_eq!(result.values.len(), 3);
         assert_eq!(result.values[0], Cell::I32(0));
@@ -216,7 +219,7 @@ mod tests {
         let schema = create_single_column_schema("value", Type::INT4);
         let row_data = b"42\n";
 
-        let result = parse_table_row_from_bytes(row_data, &schema).unwrap();
+        let result = parse_table_row_from_postgres_copy_bytes(row_data, &schema).unwrap();
 
         assert_eq!(result.values.len(), 1);
         assert_eq!(result.values[0], Cell::I32(42));
@@ -233,7 +236,7 @@ mod tests {
 
         let row_data = b"123\t3.15\tHello World\tt\n";
 
-        let result = parse_table_row_from_bytes(row_data, &schema).unwrap();
+        let result = parse_table_row_from_postgres_copy_bytes(row_data, &schema).unwrap();
 
         assert_eq!(result.values.len(), 4);
         assert_eq!(result.values[0], Cell::I32(123));
@@ -247,7 +250,7 @@ mod tests {
         let schema = create_single_column_schema("value", Type::INT4);
         let row_data = b"42"; // Missing newline
 
-        let result = parse_table_row_from_bytes(row_data, &schema);
+        let result = parse_table_row_from_postgres_copy_bytes(row_data, &schema);
 
         assert!(result.is_err());
         let err = result.unwrap_err();
@@ -260,7 +263,7 @@ mod tests {
         let schema = create_test_schema(); // Expects 3 columns
         let row_data = b"123\tJohn\n"; // Only 2 values - this should actually fail at parsing the bool because there's no third column
 
-        let result_empty = parse_table_row_from_bytes(row_data, &schema);
+        let result_empty = parse_table_row_from_postgres_copy_bytes(row_data, &schema);
         assert!(result_empty.is_err());
     }
 
@@ -269,7 +272,7 @@ mod tests {
         let schema = create_single_column_schema("value", Type::TEXT);
         let row_data = &[0xFF, 0xFE, 0xFD, b'\n']; // Invalid UTF-8
 
-        let result = parse_table_row_from_bytes(row_data, &schema);
+        let result = parse_table_row_from_postgres_copy_bytes(row_data, &schema);
 
         assert!(result.is_err());
     }
@@ -279,7 +282,7 @@ mod tests {
         let schema = create_single_column_schema("number", Type::INT4);
         let row_data = b"not_a_number\n";
 
-        let result = parse_table_row_from_bytes(row_data, &schema);
+        let result = parse_table_row_from_postgres_copy_bytes(row_data, &schema);
 
         assert!(result.is_err());
     }
@@ -289,7 +292,7 @@ mod tests {
         let schema = create_single_column_schema("data", Type::TEXT);
 
         let row_data = b"Text\\\\\n";
-        let result = parse_table_row_from_bytes(row_data, &schema).unwrap();
+        let result = parse_table_row_from_postgres_copy_bytes(row_data, &schema).unwrap();
 
         assert_eq!(result.values.len(), 1);
         assert_eq!(result.values[0], Cell::String("Text\\".to_string()));
@@ -300,15 +303,15 @@ mod tests {
         let schema = create_single_column_schema("value", Type::TEXT);
 
         let row_data = b"\\N\n";
-        let result = parse_table_row_from_bytes(row_data, &schema).unwrap();
+        let result = parse_table_row_from_postgres_copy_bytes(row_data, &schema).unwrap();
         assert_eq!(result.values[0], Cell::Null);
 
         let row_data = b"\\\\N\n";
-        let result_test = parse_table_row_from_bytes(row_data, &schema).unwrap();
+        let result_test = parse_table_row_from_postgres_copy_bytes(row_data, &schema).unwrap();
         assert_eq!(result_test.values[0], Cell::Null);
 
         let row_data = b"\\\\A\n";
-        let result_test = parse_table_row_from_bytes(row_data, &schema).unwrap();
+        let result_test = parse_table_row_from_postgres_copy_bytes(row_data, &schema).unwrap();
         assert_eq!(result_test.values[0], Cell::String("\\A".to_string()));
     }
 
@@ -317,7 +320,7 @@ mod tests {
         let schema = create_test_schema();
 
         let row_data = b"123\t John Doe \tt\n";
-        let result = parse_table_row_from_bytes(row_data, &schema).unwrap();
+        let result = parse_table_row_from_postgres_copy_bytes(row_data, &schema).unwrap();
 
         assert_eq!(result.values.len(), 3);
         assert_eq!(result.values[0], Cell::I32(123));
@@ -345,7 +348,8 @@ mod tests {
         }
         expected_row.push('\n');
 
-        let result = parse_table_row_from_bytes(expected_row.as_bytes(), &schema).unwrap();
+        let result =
+            parse_table_row_from_postgres_copy_bytes(expected_row.as_bytes(), &schema).unwrap();
 
         assert_eq!(result.values.len(), 50);
         for i in 0..50 {
@@ -358,7 +362,7 @@ mod tests {
         let schema = create_test_schema();
         let row_data = b"\t\t\n"; // Empty values but correct number of tabs
 
-        let result = parse_table_row_from_bytes(row_data, &schema);
+        let result = parse_table_row_from_postgres_copy_bytes(row_data, &schema);
 
         assert!(result.is_err());
     }
@@ -372,7 +376,7 @@ mod tests {
 
         // Postgres escapes tab characters in data with \\t
         let row_data = b"value\\twith\\ttabs\tnormal\\tvalue\n";
-        let result = parse_table_row_from_bytes(row_data, &schema).unwrap();
+        let result = parse_table_row_from_postgres_copy_bytes(row_data, &schema).unwrap();
 
         assert_eq!(
             result.values[0],
@@ -391,7 +395,7 @@ mod tests {
 
         // Escapes at the beginning, middle, and end of fields
         let row_data = b"\\tstart\tmiddle\\nvalue\tend\\r\n";
-        let result = parse_table_row_from_bytes(row_data, &schema).unwrap();
+        let result = parse_table_row_from_postgres_copy_bytes(row_data, &schema).unwrap();
 
         assert_eq!(result.values[0], Cell::String("\tstart".to_string()));
         assert_eq!(result.values[1], Cell::String("middle\nvalue".to_string()));
@@ -407,7 +411,7 @@ mod tests {
         let mut row_with_newline = row_data.to_vec();
         row_with_newline.push(b'\n');
 
-        let result = parse_table_row_from_bytes(&row_with_newline, &schema).unwrap();
+        let result = parse_table_row_from_postgres_copy_bytes(&row_with_newline, &schema).unwrap();
 
         assert_eq!(
             result.values[0],
@@ -458,7 +462,7 @@ mod tests {
         ];
 
         for (input, expected) in test_cases {
-            let result = parse_table_row_from_bytes(input, &schema).unwrap();
+            let result = parse_table_row_from_postgres_copy_bytes(input, &schema).unwrap();
             assert_eq!(
                 result.values[0],
                 Cell::String(expected.to_string()),
@@ -480,7 +484,7 @@ mod tests {
         ];
 
         for (input, expected) in test_cases {
-            let result = parse_table_row_from_bytes(input, &schema).unwrap();
+            let result = parse_table_row_from_postgres_copy_bytes(input, &schema).unwrap();
             assert_eq!(
                 result.values[0],
                 expected,

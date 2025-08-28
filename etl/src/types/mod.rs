@@ -13,6 +13,8 @@ pub use event::*;
 pub use pipeline::*;
 pub use table_row::*;
 
+pub use crate::conversions::numeric::PgNumeric;
+
 // Re-exports.
 // TODO: we might want to restructure `etl_postgres` to have better modules.
 pub use etl_postgres::schema::*;

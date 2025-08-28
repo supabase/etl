@@ -5,11 +5,10 @@ use std::sync::Arc;
 use tokio::runtime::Handle;
 use tokio::sync::{Notify, RwLock};
 
-use crate::conversions::event::{Event, EventType};
-use crate::conversions::table_row::TableRow;
 use crate::destination::Destination;
 use crate::error::EtlResult;
 use crate::test_utils::event::check_events_count;
+use crate::types::{Event, EventType, TableRow};
 
 type EventCondition = Box<dyn Fn(&[Event]) -> bool + Send + Sync>;
 type TableRowCondition = Box<dyn Fn(&HashMap<TableId, Vec<TableRow>>) -> bool + Send + Sync>;

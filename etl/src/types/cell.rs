@@ -2,8 +2,8 @@ use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use uuid::Uuid;
 
 use crate::bail;
+use crate::conversions::numeric::PgNumeric;
 use crate::error::{ErrorKind, EtlError};
-use crate::types::PgNumeric;
 
 macro_rules! convert_array_variant {
     ($variant:ident, $vec:expr) => {

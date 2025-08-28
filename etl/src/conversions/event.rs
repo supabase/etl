@@ -6,7 +6,6 @@ use postgres_replication::protocol::LogicalReplicationMessage;
 use std::sync::Arc;
 use tokio_postgres::types::PgLsn;
 
-use crate::conversions::text::TextFormatConverter;
 use crate::error::EtlError;
 use crate::error::{ErrorKind, EtlResult};
 use crate::store::schema::SchemaStore;
@@ -15,6 +14,7 @@ use crate::types::{
     TruncateEvent, UpdateEvent,
 };
 use crate::{bail, etl_error};
+use crate::conversions::text::{default_value_for_type, parse_cell_from_postgres_text};
 
 /// Retrieves a table schema from the schema store by table ID.
 ///
@@ -174,7 +174,7 @@ fn convert_tuple_to_row(
                 if column_schema.nullable {
                     Cell::Null
                 } else if use_default_for_missing_cols {
-                    TextFormatConverter::default_value(&column_schema.typ)?
+                    default_value_for_type(&column_schema.typ)?
                 } else {
                     // This is protocol level error, so we panic instead of carrying on
                     // with incorrect data to avoid corruption downstream.
@@ -192,12 +192,12 @@ fn convert_tuple_to_row(
                 if let Some(row) = old_table_row {
                     let old_row_value = std::mem::replace(&mut row.values[i], Cell::Null);
                     if old_row_value == Cell::Null {
-                        TextFormatConverter::default_value(&column_schema.typ)?
+                        default_value_for_type(&column_schema.typ)?
                     } else {
                         old_row_value
                     }
                 } else {
-                    TextFormatConverter::default_value(&column_schema.typ)?
+                    default_value_for_type(&column_schema.typ)?
                 }
             }
             protocol::TupleData::Binary(_) => {
@@ -208,7 +208,7 @@ fn convert_tuple_to_row(
             }
             protocol::TupleData::Text(bytes) => {
                 let str = str::from_utf8(&bytes[..])?;
-                TextFormatConverter::try_from_str(&column_schema.typ, str)?
+                parse_cell_from_postgres_text(&column_schema.typ, str)?
             }
         };
 

@@ -1,9 +1,8 @@
 use etl_postgres::schema::TableId;
 use std::future::Future;
 
-use crate::conversions::event::Event;
-use crate::conversions::table_row::TableRow;
 use crate::error::EtlResult;
+use crate::types::{Event, TableRow};
 
 /// Trait for systems that can receive replicated data from ETL pipelines.
 ///

@@ -119,7 +119,7 @@ pub async fn get_table_replication_state_rows(
     pool: &PgPool,
     pipeline_id: i64,
 ) -> sqlx::Result<Vec<TableReplicationStateRow>> {
-    let states = sqlx::query_as::<_, TableReplicationStateRow>(
+    let states: Vec<TableReplicationStateRow> = sqlx::query_as(
         r#"
         select id, pipeline_id, table_id, state, metadata, prev, is_current
         from etl.replication_state
@@ -257,7 +257,7 @@ pub async fn rollback_replication_state(
         .await?;
 
         // Fetch the restored row
-        let restored_row = sqlx::query_as::<_, TableReplicationStateRow>(
+        let restored_row: TableReplicationStateRow = sqlx::query_as(
             r#"
             select id, pipeline_id, table_id, state, metadata, prev, is_current
             from etl.replication_state
@@ -305,7 +305,7 @@ pub async fn reset_replication_state(
     let (state_type, metadata) = TableReplicationState::Init
         .to_storage_format()
         .map_err(|e| sqlx::Error::Encode(Box::new(e)))?;
-    let row = sqlx::query_as::<_, TableReplicationStateRow>(
+    let row: TableReplicationStateRow = sqlx::query_as(
         r#"
         insert into etl.replication_state (pipeline_id, table_id, state, metadata, prev, is_current)
         values ($1, $2, $3, $4, null, true)
@@ -360,21 +360,18 @@ pub async fn get_pipeline_table_ids<'c, E>(
 where
     E: PgExecutor<'c>,
 {
-    let rows = sqlx::query!(
+    let ids: Vec<SqlxTableId> = sqlx::query_scalar(
         r#"
         select distinct table_id
         from etl.replication_state
         where pipeline_id = $1 and is_current = true
-        "#,
-        pipeline_id
+        "#
     )
-    .fetch_all(executor)
-    .await?;
+        .bind(pipeline_id)
+        .fetch_all(executor)
+        .await?;
 
-    Ok(rows
-        .into_iter()
-        .map(|row| TableId::new(row.table_id.0))
-        .collect())
+    Ok(ids.into_iter().map(|oid| TableId::new(oid.0)).collect())
 }
 
 /// Serde serialization helpers for Postgres LSN values.

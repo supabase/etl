@@ -16,7 +16,7 @@ use tracing::{debug, info};
 
 use crate::concurrency::shutdown::ShutdownRx;
 use crate::concurrency::signal::SignalRx;
-use crate::conversions::event::{Event, EventType, convert_message_to_event};
+use crate::conversions::event::{convert_message_to_event};
 use crate::destination::Destination;
 use crate::error::{ErrorKind, EtlError, EtlResult};
 use crate::metrics::{
@@ -26,7 +26,7 @@ use crate::replication::client::PgReplicationClient;
 use crate::replication::stream::EventsStream;
 use crate::state::table::{RetryPolicy, TableReplicationError};
 use crate::store::schema::SchemaStore;
-use crate::types::PipelineId;
+use crate::types::{Event, EventType, PipelineId};
 use crate::{bail, etl_error};
 
 /// The amount of milliseconds that pass between one refresh and the other of the system, in case no
