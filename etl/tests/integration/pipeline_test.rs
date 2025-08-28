@@ -150,11 +150,15 @@ async fn publication_for_all_tables_in_schema_ignores_new_tables_until_restart()
     let table_1 = test_table_name("table_1");
     let table_1_id = database
         .create_table(table_1.clone(), true, &[("name", "text not null")])
-        .await.unwrap();
+        .await
+        .unwrap();
 
     // Create a publication for all tables in the test schema.
     let publication_name = "test_pub_all_schema";
-    database.create_publication_for_all(publication_name, Some(&table_1.schema)).await.unwrap();
+    database
+        .create_publication_for_all(publication_name, Some(&table_1.schema))
+        .await
+        .unwrap();
 
     let store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
@@ -178,7 +182,7 @@ async fn publication_for_all_tables_in_schema_ignores_new_tables_until_restart()
 
     // Create a new table in the same schema and insert a row.
     let table_2 = test_table_name("table_2");
-    database
+    let table_2_id = database
         .create_table(table_2.clone(), true, &[("v", "int4 not null")])
         .await
         .unwrap();
@@ -188,7 +192,7 @@ async fn publication_for_all_tables_in_schema_ignores_new_tables_until_restart()
         .unwrap();
 
     // Wait for the events to come in from the new table.
-    sleep(Duration::from_secs(5)).await;
+    sleep(Duration::from_secs(10)).await;
 
     // Shutdown and verify no errors occurred.
     pipeline.shutdown_and_wait().await.unwrap();
@@ -197,6 +201,7 @@ async fn publication_for_all_tables_in_schema_ignores_new_tables_until_restart()
     let table_schemas = store.get_table_schemas().await;
     assert_eq!(table_schemas.len(), 1);
     assert!(table_schemas.contains_key(&table_1_id));
+    assert!(!table_schemas.contains_key(&table_2_id));
 }
 
 #[tokio::test(flavor = "multi_thread")]

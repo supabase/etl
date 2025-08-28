@@ -105,9 +105,6 @@ struct StatusUpdate {
 
 impl StatusUpdate {
     /// Updates the write LSN to a higher value if the new LSN is greater.
-    ///
-    /// This method ensures LSN values only advance forward, preventing
-    /// regression in replication progress reporting to Postgres.
     fn update_write_lsn(&mut self, new_write_lsn: PgLsn) {
         if new_write_lsn <= self.write_lsn {
             return;
@@ -117,9 +114,6 @@ impl StatusUpdate {
     }
 
     /// Updates the flush LSN to a higher value if the new LSN is greater.
-    ///
-    /// This method tracks the highest LSN for data that has been durably
-    /// written to the destination, enabling Postgres WAL cleanup.
     fn update_flush_lsn(&mut self, flush_lsn: PgLsn) {
         if flush_lsn <= self.flush_lsn {
             return;
@@ -129,9 +123,6 @@ impl StatusUpdate {
     }
 
     /// Updates the apply LSN to a higher value if the new LSN is greater.
-    ///
-    /// This method tracks the highest LSN for data that has been successfully
-    /// applied to the destination system with all constraints satisfied.
     fn update_apply_lsn(&mut self, apply_lsn: PgLsn) {
         if apply_lsn <= self.apply_lsn {
             return;
@@ -602,6 +593,8 @@ where
             let start_lsn = PgLsn::from(message.wal_start());
             state.next_status_update.update_write_lsn(start_lsn);
 
+            // The `end_lsn` here is the LSN of the last byte in the WAL that was processed by the
+            // server, and it's different from the `end_lsn` found in the `Commit` message.
             let end_lsn = PgLsn::from(message.wal_end());
             state.next_status_update.update_write_lsn(end_lsn);
 

@@ -74,13 +74,9 @@ impl<G: GenericClient> PgDatabase<G> {
         let create_publication_query = match schema {
             Some(schema_name) => format!(
                 "create publication {} for tables in schema {}",
-                publication_name,
-                schema_name
+                publication_name, schema_name
             ),
-            None => format!(
-                "create publication {} for all tables",
-                publication_name
-            ),
+            None => format!("create publication {} for all tables", publication_name),
         };
 
         self.client
