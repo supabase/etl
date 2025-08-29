@@ -2,6 +2,7 @@ use crate::error::{ErrorKind, EtlError, EtlResult};
 use crate::utils::tokio::MakeRustlsConnect;
 use crate::{bail, etl_error};
 use etl_config::shared::{IntoConnectOptions, PgConnectionConfig};
+use etl_postgres::replication::extract_server_version;
 use etl_postgres::types::convert_type_oid_to_type;
 use etl_postgres::types::{ColumnSchema, TableId, TableName, TableSchema};
 use pg_escape::{quote_identifier, quote_literal};
@@ -13,7 +14,6 @@ use std::io::BufReader;
 use std::num::NonZeroI32;
 use std::sync::Arc;
 
-use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_postgres::error::SqlState;
 use tokio_postgres::tls::MakeTlsConnect;
 use tokio_postgres::{
@@ -190,7 +190,9 @@ impl PgReplicationClient {
 
         let (client, connection) = config.connect(NoTls).await?;
 
-        let server_version = Self::extract_server_version(&connection);
+        let server_version = connection
+            .parameter("server_version")
+            .and_then(extract_server_version);
 
         spawn_postgres_connection::<NoTls>(connection);
 
@@ -225,7 +227,9 @@ impl PgReplicationClient {
 
         let (client, connection) = config.connect(MakeRustlsConnect::new(tls_config)).await?;
 
-        let server_version = Self::extract_server_version(&connection);
+        let server_version = connection
+            .parameter("server_version")
+            .and_then(extract_server_version);
 
         spawn_postgres_connection::<MakeRustlsConnect>(connection);
 
@@ -732,49 +736,6 @@ impl PgReplicationClient {
 
         Ok(column_schemas)
     }
-
-    /// Extracts the PostgreSQL server version from connection parameters.
-    ///
-    /// This method should be called during connection establishment to extract
-    /// the server version from the parameter status messages sent by the server.
-    ///
-    /// Returns the version in the format: MAJOR * 10000 + MINOR * 100 + PATCH
-    /// This matches the format used by `SELECT version()`.
-    /// For example: PostgreSQL 14.2 = 140200, PostgreSQL 15.1 = 150100
-    fn extract_server_version<S>(connection: &Connection<Socket, S>) -> Option<NonZeroI32>
-    where
-        S: AsyncRead + AsyncWrite + Unpin + Send,
-    {
-        if let Some(server_version_str) = connection.parameter("server_version") {
-            // Parse version string like "15.5 (Homebrew)" or "14.2"
-            let version_part = server_version_str
-                .split_whitespace()
-                .next()
-                .unwrap_or("0.0");
-
-            let version_components: Vec<&str> = version_part.split('.').collect();
-
-            let major = version_components
-                .first()
-                .and_then(|v| v.parse::<i32>().ok())
-                .unwrap_or(0);
-            let minor = version_components
-                .get(1)
-                .and_then(|v| v.parse::<i32>().ok())
-                .unwrap_or(0);
-            let patch = version_components
-                .get(2)
-                .and_then(|v| v.parse::<i32>().ok())
-                .unwrap_or(0);
-
-            let version = major * 10000 + minor * 100 + patch;
-
-            NonZeroI32::new(version)
-        } else {
-            None
-        }
-    }
-
     /// Creates a COPY stream for reading data from a table using its OID.
     ///
     /// The stream will include only the specified columns and use text format.
