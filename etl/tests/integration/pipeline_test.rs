@@ -141,7 +141,7 @@ async fn table_schema_copy_survives_pipeline_restarts() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn removed_tables_cleanup_keeps_destination_data() {
+async fn publication_changes_are_correctly_handled() {
     init_test_tracing();
 
     let database = spawn_source_database().await;
