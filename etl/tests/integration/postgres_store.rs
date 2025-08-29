@@ -647,74 +647,92 @@ async fn test_cleanup_deletes_state_schema_and_mapping_for_table() {
     let store = PostgresStore::new(pipeline_id, database.config.clone());
 
     // Prepare two tables: one we will delete, one we will keep
-    let table_schema1 = create_sample_table_schema();
-    let table_id1 = table_schema1.id;
-    let table_schema2 = create_another_table_schema();
-    let table_id2 = table_schema2.id;
+    let table_1_schema = create_sample_table_schema();
+    let table_1_id = table_1_schema.id;
+    let table_2_schema = create_another_table_schema();
+    let table_2_id = table_2_schema.id;
 
     // Populate state, schema, and mapping for both tables
     store
-        .update_table_replication_state(table_id1, TableReplicationPhase::Ready)
+        .update_table_replication_state(table_1_id, TableReplicationPhase::Ready)
         .await
         .unwrap();
     store
-        .update_table_replication_state(table_id2, TableReplicationPhase::DataSync)
-        .await
-        .unwrap();
-
-    store
-        .store_table_schema(table_schema1.clone())
-        .await
-        .unwrap();
-    store
-        .store_table_schema(table_schema2.clone())
+        .update_table_replication_state(table_2_id, TableReplicationPhase::DataSync)
         .await
         .unwrap();
 
     store
-        .store_table_mapping(table_id1, "dest_table_1".to_string())
+        .store_table_schema(table_1_schema.clone())
         .await
         .unwrap();
     store
-        .store_table_mapping(table_id2, "dest_table_2".to_string())
+        .store_table_schema(table_2_schema.clone())
+        .await
+        .unwrap();
+
+    store
+        .store_table_mapping(table_1_id, "dest_table_1".to_string())
+        .await
+        .unwrap();
+    store
+        .store_table_mapping(table_2_id, "dest_table_2".to_string())
         .await
         .unwrap();
 
     // Sanity check before cleanup
     assert!(
         store
-            .get_table_replication_state(table_id1)
+            .get_table_replication_state(table_1_id)
             .await
             .unwrap()
             .is_some()
     );
-    assert!(store.get_table_schema(&table_id1).await.unwrap().is_some());
-    assert!(store.get_table_mapping(&table_id1).await.unwrap().is_some());
+    assert!(store.get_table_schema(&table_1_id).await.unwrap().is_some());
+    assert!(
+        store
+            .get_table_mapping(&table_1_id)
+            .await
+            .unwrap()
+            .is_some()
+    );
 
     // Execute cleanup for table 1
-    store.cleanup_table_state(table_id1).await.unwrap();
+    store.cleanup_table_state(table_1_id).await.unwrap();
 
     // Verify in-memory cache for table 1 has been cleaned
     assert!(
         store
-            .get_table_replication_state(table_id1)
+            .get_table_replication_state(table_1_id)
             .await
             .unwrap()
             .is_none()
     );
-    assert!(store.get_table_schema(&table_id1).await.unwrap().is_none());
-    assert!(store.get_table_mapping(&table_id1).await.unwrap().is_none());
+    assert!(store.get_table_schema(&table_1_id).await.unwrap().is_none());
+    assert!(
+        store
+            .get_table_mapping(&table_1_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
 
     // Verify other table is unaffected
     assert!(
         store
-            .get_table_replication_state(table_id2)
+            .get_table_replication_state(table_2_id)
             .await
             .unwrap()
             .is_some()
     );
-    assert!(store.get_table_schema(&table_id2).await.unwrap().is_some());
-    assert!(store.get_table_mapping(&table_id2).await.unwrap().is_some());
+    assert!(store.get_table_schema(&table_2_id).await.unwrap().is_some());
+    assert!(
+        store
+            .get_table_mapping(&table_2_id)
+            .await
+            .unwrap()
+            .is_some()
+    );
 
     // Create a new store instance and load from DB to ensure persistence
     let new_store = PostgresStore::new(pipeline_id, database.config.clone());
@@ -725,21 +743,21 @@ async fn test_cleanup_deletes_state_schema_and_mapping_for_table() {
     // Table 1 should not be present after reload
     assert!(
         new_store
-            .get_table_replication_state(table_id1)
+            .get_table_replication_state(table_1_id)
             .await
             .unwrap()
             .is_none()
     );
     assert!(
         new_store
-            .get_table_schema(&table_id1)
+            .get_table_schema(&table_1_id)
             .await
             .unwrap()
             .is_none()
     );
     assert!(
         new_store
-            .get_table_mapping(&table_id1)
+            .get_table_mapping(&table_1_id)
             .await
             .unwrap()
             .is_none()
@@ -748,21 +766,21 @@ async fn test_cleanup_deletes_state_schema_and_mapping_for_table() {
     // Table 2 should still be present
     assert!(
         new_store
-            .get_table_replication_state(table_id2)
+            .get_table_replication_state(table_2_id)
             .await
             .unwrap()
             .is_some()
     );
     assert!(
         new_store
-            .get_table_schema(&table_id2)
+            .get_table_schema(&table_2_id)
             .await
             .unwrap()
             .is_some()
     );
     assert!(
         new_store
-            .get_table_mapping(&table_id2)
+            .get_table_mapping(&table_2_id)
             .await
             .unwrap()
             .is_some()
