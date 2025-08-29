@@ -283,10 +283,12 @@ impl SchemaStore for NotifyingStore {
 impl CleanupStore for NotifyingStore {
     async fn cleanup_table_state(&self, table_id: TableId) -> EtlResult<()> {
         let mut inner = self.inner.write().await;
+
         inner.table_replication_states.remove(&table_id);
         inner.table_state_history.remove(&table_id);
         inner.table_schemas.remove(&table_id);
         inner.table_mappings.remove(&table_id);
+
         Ok(())
     }
 }
