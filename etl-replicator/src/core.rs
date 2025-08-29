@@ -1,7 +1,9 @@
+use crate::migrations::migrate_state_store;
 use etl::destination::Destination;
 use etl::destination::memory::MemoryDestination;
 use etl::pipeline::Pipeline;
 use etl::store::both::postgres::PostgresStore;
+use etl::store::cleanup::CleanupStore;
 use etl::store::schema::SchemaStore;
 use etl::store::state::StateStore;
 use etl::types::PipelineId;
@@ -12,8 +14,6 @@ use etl_destinations::bigquery::{BigQueryDestination, install_crypto_provider_fo
 use secrecy::ExposeSecret;
 use tokio::signal::unix::{SignalKind, signal};
 use tracing::{debug, info, warn};
-
-use crate::migrations::migrate_state_store;
 
 /// Starts the replicator service with the provided configuration.
 ///
@@ -138,7 +138,7 @@ fn log_batch_config(config: &BatchConfig) {
 async fn init_store(
     pipeline_id: PipelineId,
     pg_connection_config: PgConnectionConfig,
-) -> anyhow::Result<impl StateStore + SchemaStore + etl::store::cleanup::CleanupStore + Clone> {
+) -> anyhow::Result<impl StateStore + SchemaStore + CleanupStore + Clone> {
     migrate_state_store(&pg_connection_config).await?;
 
     Ok(PostgresStore::new(pipeline_id, pg_connection_config))
@@ -152,7 +152,7 @@ async fn init_store(
 #[tracing::instrument(skip(pipeline), fields(pipeline_id = pipeline.id()))]
 async fn start_pipeline<S, D>(mut pipeline: Pipeline<S, D>) -> anyhow::Result<()>
 where
-    S: StateStore + SchemaStore + etl::store::cleanup::CleanupStore + Clone + Send + Sync + 'static,
+    S: StateStore + SchemaStore + CleanupStore + Clone + Send + Sync + 'static,
     D: Destination + Clone + Send + Sync + 'static,
 {
     // Start the pipeline.

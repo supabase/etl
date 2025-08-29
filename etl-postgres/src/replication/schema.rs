@@ -1,5 +1,5 @@
 use sqlx::postgres::PgRow;
-use sqlx::postgres::types::Oid;
+use sqlx::postgres::types::Oid as SqlxTableId;
 use sqlx::{PgExecutor, PgPool, Row};
 use std::collections::HashMap;
 use tokio_postgres::types::Type as PgType;
@@ -232,7 +232,7 @@ pub async fn load_table_schemas(
     let mut table_schemas = HashMap::new();
 
     for row in rows {
-        let table_oid: Oid = row.get("table_id");
+        let table_oid: SqlxTableId = row.get("table_id");
         let table_id = TableId::new(table_oid.0);
         let schema_name: String = row.get("schema_name");
         let table_name: String = row.get("table_name");
@@ -289,7 +289,7 @@ where
         "#,
     )
     .bind(pipeline_id)
-    .bind(Oid(table_id.into_inner()))
+    .bind(SqlxTableId(table_id.into_inner()))
     .execute(executor)
     .await?;
 
