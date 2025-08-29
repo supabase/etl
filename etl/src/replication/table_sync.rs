@@ -26,7 +26,6 @@ use crate::metrics::{
 };
 use crate::replication::client::PgReplicationClient;
 use crate::replication::stream::TableCopyStream;
-use crate::state::table::RetryPolicy;
 use crate::state::table::{TableReplicationPhase, TableReplicationPhaseType};
 use crate::store::schema::SchemaStore;
 use crate::store::state::StateStore;
@@ -192,19 +191,6 @@ where
                 .await?;
 
             if !table_schema.has_primary_keys() {
-                store
-                    .update_table_replication_state(
-                        table_id,
-                        TableReplicationPhase::Errored {
-                            reason: "The table has no primary keys".to_string(),
-                            solution: Some(format!(
-                                "You should set at least one primary key on the table {table_id}"
-                            )),
-                            retry_policy: RetryPolicy::ManualRetry,
-                        },
-                    )
-                    .await?;
-
                 bail!(
                     ErrorKind::SourceSchemaError,
                     "Missing primary key",

@@ -406,7 +406,7 @@ where
         let store = self.store.clone();
         let config = self.config.clone();
 
-        // Clone all the fields we need for retries
+        // Clone all the fields we need for retries.
         let pipeline_id = self.pipeline_id;
         let destination = self.destination.clone();
         let shutdown_rx = self.shutdown_rx.clone();
@@ -414,7 +414,7 @@ where
         let run_permit = self.run_permit.clone();
 
         loop {
-            // Recreate the worker for each attempt
+            // Recreate the worker for each attempt.
             let worker = TableSyncWorker {
                 pipeline_id,
                 config: config.clone(),
@@ -431,7 +431,7 @@ where
 
             match result {
                 Ok(_) => {
-                    // Worker completed successfully, mark as finished
+                    // Worker completed successfully, mark as finished.
                     let mut pool = pool.lock().await;
                     pool.mark_worker_finished(table_id);
 
@@ -440,16 +440,16 @@ where
                 Err(err) => {
                     error!("table sync worker failed for table {}: {}", table_id, err);
 
-                    // Convert error to table replication error to determine retry policy
+                    // Convert error to table replication error to determine retry policy.
                     let table_error =
                         TableReplicationError::from_etl_error(&config, table_id, &err);
                     let retry_policy = table_error.retry_policy().clone();
 
-                    // We lock both the pool and the table sync worker state to be consistent
+                    // We lock both the pool and the table sync worker state to be consistent.
                     let mut pool_guard = pool.lock().await;
                     let mut state_guard = state.lock().await;
 
-                    // Update the state and store with the error
+                    // Update the state and store with the error.
                     if let Err(err) = state_guard.set_and_store(table_error.into(), &store).await {
                         error!(
                             "failed to update table sync worker state for table {}: {}",
@@ -488,7 +488,7 @@ where
                                 );
                             }
 
-                            // Before rolling back, we acquire the pool lock again for consistency
+                            // Before rolling back, we acquire the pool lock again for consistency.
                             let mut pool_guard = pool.lock().await;
 
                             // After sleeping, we rollback to the previous state and retry.

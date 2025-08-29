@@ -1,4 +1,5 @@
 use etl::destination::memory::MemoryDestination;
+use etl::error::ErrorKind;
 use etl::state::table::TableReplicationPhaseType;
 use etl::test_utils::database::{spawn_source_database, test_table_name};
 use etl::test_utils::event::group_events_by_type_and_table_id;
@@ -781,4 +782,64 @@ async fn table_processing_with_schema_change_errors_table() {
         vec!["description_2", "description_3"],
     );
     assert_events_equal(orders_inserts, &expected_orders_inserts);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn table_without_primary_key_is_errored() {
+    init_test_tracing();
+    let database = spawn_source_database().await;
+
+    let table_name = test_table_name("no_primary_key_table");
+    let table_id = database
+        .create_table(table_name.clone(), false, &[("name", "text")])
+        .await
+        .unwrap();
+
+    let publication_name = "test_pub".to_string();
+    database
+        .create_publication(&publication_name, std::slice::from_ref(&table_name))
+        .await
+        .expect("Failed to create publication");
+
+    // Insert a row to later check that this doesn't appear in destination's table rows.
+    database
+        .insert_values(table_name.clone(), &["name"], &[&"abc"])
+        .await
+        .unwrap();
+
+    let state_store = NotifyingStore::new();
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
+
+    let pipeline_id: PipelineId = random();
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        publication_name,
+        state_store.clone(),
+        destination.clone(),
+    );
+
+    // We wait for the table to be errored.
+    let errored_state = state_store
+        .notify_on_table_state(table_id, TableReplicationPhaseType::Errored)
+        .await;
+
+    pipeline.start().await.unwrap();
+
+    // Insert a row to later check that it is not processed by the apply worker.
+    database
+        .insert_values(table_name.clone(), &["name"], &[&"abc1"])
+        .await
+        .unwrap();
+
+    errored_state.notified().await;
+
+    // Wait for the pipeline expecting an error to be returned.
+    let err = pipeline.shutdown_and_wait().await.err().unwrap();
+    assert_eq!(err.kinds().len(), 1);
+    assert_eq!(err.kinds()[0], ErrorKind::SourceSchemaError);
+
+    // We expect no events to be saved.
+    let events = destination.get_events().await;
+    assert!(events.is_empty());
 }
