@@ -268,7 +268,8 @@ async fn removed_tables_cleanup_keeps_destination_data() {
     assert!(!states.contains_key(&table_2_id));
     assert!(states.contains_key(&table_3_id));
 
-    // Destination should still have the previously ingested insert event for the dropped table
+    // The destination should have the 2 events of the first table, the 1 event of the removed table
+    // and the 1 event of the new table.
     let events = destination.get_events().await;
     let grouped = group_events_by_type_and_table_id(&events);
     let table_1_inserts = grouped
