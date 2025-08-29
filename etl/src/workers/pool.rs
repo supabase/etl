@@ -21,7 +21,7 @@ pub struct TableSyncWorkerPoolInner {
     /// Completed or failed table sync workers, preserving history for inspection.
     finished: HashMap<TableId, Vec<TableSyncWorkerHandle>>,
     /// Notification mechanism for pool state changes.
-    pool_update: Option<Arc<Notify>>,
+    pool_update: Arc<Notify>,
 }
 
 impl TableSyncWorkerPoolInner {
@@ -33,7 +33,7 @@ impl TableSyncWorkerPoolInner {
         Self {
             active: HashMap::new(),
             finished: HashMap::new(),
-            pool_update: None,
+            pool_update: Arc::new(Notify::new()),
         }
     }
 
@@ -75,9 +75,7 @@ impl TableSyncWorkerPoolInner {
     pub fn mark_worker_finished(&mut self, table_id: TableId) {
         let removed_worker = self.active.remove(&table_id);
 
-        if let Some(waiting) = self.pool_update.take() {
-            waiting.notify_one();
-        }
+        self.pool_update.notify_waiters();
 
         if let Some(removed_worker) = removed_worker {
             self.finished
@@ -117,10 +115,7 @@ impl TableSyncWorkerPoolInner {
         // worker within the `ReactiveFuture` will not be able to hold the lock onto the pool to
         // mark itself as finished.
         if !self.active.is_empty() {
-            let notify = Arc::new(Notify::new());
-            self.pool_update = Some(notify.clone());
-
-            return Ok(Some(notify));
+            return Ok(Some(self.pool_update.clone()));
         }
 
         let mut errors = Vec::new();
