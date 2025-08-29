@@ -4,8 +4,10 @@ use etl::store::cleanup::CleanupStore;
 use etl::store::schema::SchemaStore;
 use etl::store::state::StateStore;
 use etl::test_utils::database::spawn_source_database_for_store;
+use etl_postgres::replication::connect_to_source_database;
 use etl_postgres::types::{ColumnSchema, TableId, TableName, TableSchema};
 use etl_telemetry::tracing::init_test_tracing;
+use sqlx::postgres::types::Oid as SqlxTableId;
 use tokio_postgres::types::{PgLsn, Type as PgType};
 
 fn create_sample_table_schema() -> TableSchema {
@@ -128,6 +130,20 @@ async fn test_state_store_rollback() {
         .await
         .unwrap();
 
+    // Verify two rows exist before rollback (init + data_sync)
+    let pool = connect_to_source_database(&database.config, 1, 1)
+        .await
+        .expect("Failed to connect to source database with sqlx");
+    let count_before: i64 = sqlx::query_scalar(
+        "select count(*) from etl.replication_state where pipeline_id = $1 and table_id = $2",
+    )
+    .bind(pipeline_id as i64)
+    .bind(SqlxTableId(table_id.into_inner()))
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(count_before, 2);
+
     // Verify current state
     let state = store.get_table_replication_state(table_id).await.unwrap();
     assert_eq!(state, Some(data_sync_phase));
@@ -142,6 +158,17 @@ async fn test_state_store_rollback() {
     // Verify state was rolled back
     let state = store.get_table_replication_state(table_id).await.unwrap();
     assert_eq!(state, Some(init_phase));
+
+    // Verify the rolled-from row was deleted to avoid buildup
+    let count_after: i64 = sqlx::query_scalar(
+        "select count(*) from etl.replication_state where pipeline_id = $1 and table_id = $2",
+    )
+    .bind(pipeline_id as i64)
+    .bind(SqlxTableId(table_id.into_inner()))
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(count_after, 1);
 
     // Test rollback when there's no previous state
     let result = store.rollback_table_replication_state(table_id).await;

@@ -232,11 +232,12 @@ pub async fn rollback_replication_state(
     .await?;
 
     if let Some((current_id, Some(prev_id))) = current_row {
-        // Set current row to not current
+        // Delete the row we are rolling back from to avoid buildup. Technically, we could keep the
+        // previous row for tracking purposes, but especially during timed retries, we might end up
+        // with an infinite growth of the database.
         sqlx::query(
             r#"
-            update etl.replication_state
-            set is_current = false, updated_at = now()
+            delete from etl.replication_state
             where id = $1
             "#,
         )
