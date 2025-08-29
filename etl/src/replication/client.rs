@@ -755,7 +755,7 @@ impl PgReplicationClient {
             let version_components: Vec<&str> = version_part.split('.').collect();
 
             let major = version_components
-                .get(0)
+                .first()
                 .and_then(|v| v.parse::<i32>().ok())
                 .unwrap_or(0);
             let minor = version_components
