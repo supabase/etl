@@ -271,6 +271,31 @@ where
     Ok(result.rows_affected())
 }
 
+/// Deletes the table schema for a specific table in a pipeline.
+///
+/// Also cascades to `etl.table_columns` via FK.
+pub async fn delete_table_schema_for_table<'c, E>(
+    executor: E,
+    pipeline_id: i64,
+    table_id: TableId,
+) -> Result<u64, sqlx::Error>
+where
+    E: PgExecutor<'c>,
+{
+    let result = sqlx::query(
+        r#"
+        delete from etl.table_schemas
+        where pipeline_id = $1 and table_id = $2
+        "#,
+    )
+    .bind(pipeline_id)
+    .bind(Oid(table_id.into_inner()))
+    .execute(executor)
+    .await?;
+
+    Ok(result.rows_affected())
+}
+
 /// Builds a [`ColumnSchema`] from a database row.
 ///
 /// Assumes all required fields are present in the row after appropriate joins.

@@ -3,11 +3,12 @@
 //! Contains the main [`Pipeline`] struct that coordinates Postgres logical replication
 //! with destination systems. Manages worker lifecycles, shutdown coordination, and error handling.
 
+use std::collections::HashSet;
 use etl_config::shared::PipelineConfig;
 use std::sync::Arc;
 use tokio::sync::Semaphore;
 use tracing::{error, info};
-
+use etl_postgres::types::TableId;
 use crate::bail;
 use crate::concurrency::shutdown::{ShutdownTx, create_shutdown_channel};
 use crate::destination::Destination;
@@ -15,6 +16,7 @@ use crate::error::{ErrorKind, EtlError, EtlResult};
 use crate::metrics::register_metrics;
 use crate::replication::client::PgReplicationClient;
 use crate::state::table::TableReplicationPhase;
+use crate::store::cleanup::CleanupStore;
 use crate::store::schema::SchemaStore;
 use crate::store::state::StateStore;
 use crate::types::PipelineId;
@@ -62,7 +64,7 @@ pub struct Pipeline<S, D> {
 
 impl<S, D> Pipeline<S, D>
 where
-    S: StateStore + SchemaStore + Clone + Send + Sync + 'static,
+    S: StateStore + SchemaStore + CleanupStore + Clone + Send + Sync + 'static,
     D: Destination + Clone + Send + Sync + 'static,
 {
     /// Creates a new pipeline with the given configuration.
@@ -252,11 +254,17 @@ where
         self.wait().await
     }
 
-    /// Initializes table replication states for all tables in the publication.
+    /// Initializes table replication states for tables in the publication and
+    /// purges state for tables removed from it.
     ///
-    /// This private method ensures that each table in the Postgres publication has
-    /// a corresponding replication state record. Tables without existing states are
-    /// initialized to the [`TableReplicationPhase::Init`] phase.
+    /// Ensures each table currently in the Postgres publication has a
+    /// corresponding replication state; tables without existing states are
+    /// initialized to [`TableReplicationPhase::Init`].
+    ///
+    /// Also detects tables for which we have stored state but are no longer
+    /// part of the publication, and deletes their stored state (replication
+    /// state, table mappings, and table schemas) without touching the actual
+    /// destination tables.
     async fn initialize_table_states(
         &self,
         replication_client: &PgReplicationClient,
@@ -281,23 +289,40 @@ where
             );
         }
 
-        let table_ids = replication_client
+        let publication_table_ids = replication_client
             .get_publication_table_ids(&self.config.publication_name)
             .await?;
 
         info!(
             "the publication '{}' contains {} tables",
             self.config.publication_name,
-            table_ids.len()
+            publication_table_ids.len()
         );
 
         self.store.load_table_replication_states().await?;
-        let states = self.store.get_table_replication_states().await?;
-        for table_id in table_ids {
-            if !states.contains_key(&table_id) {
+        let table_replication_states = self.store.get_table_replication_states().await?;
+
+        // Initialize states for newly added tables in the publication
+        for table_id in &publication_table_ids {
+            if !table_replication_states.contains_key(table_id) {
                 self.store
-                    .update_table_replication_state(table_id, TableReplicationPhase::Init)
+                    .update_table_replication_state(*table_id, TableReplicationPhase::Init)
                     .await?;
+            }
+        }
+
+        // Detect and purge tables that have been removed from the publication.
+        //
+        // We must not delete the destination table, only internal state.
+        let publication_set: HashSet<TableId> = publication_table_ids.iter().copied().collect();
+        for (table_id, _) in table_replication_states {
+            if !publication_set.contains(&table_id) {
+                info!(
+                    "table {} removed from publication, purging stored state",
+                    table_id
+                );
+                
+                self.store.cleanup_table_state(table_id).await?;
             }
         }
 

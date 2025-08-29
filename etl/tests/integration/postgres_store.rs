@@ -2,6 +2,7 @@ use etl::state::table::{RetryPolicy, TableReplicationPhase};
 use etl::store::both::postgres::PostgresStore;
 use etl::store::schema::SchemaStore;
 use etl::store::state::StateStore;
+use etl::store::cleanup::CleanupStore;
 use etl::test_utils::database::spawn_source_database_for_store;
 use etl_postgres::types::{ColumnSchema, TableId, TableName, TableSchema};
 use etl_telemetry::tracing::init_test_tracing;
@@ -634,4 +635,114 @@ async fn test_table_mappings_pipeline_isolation() {
 
     let loaded_mapping1 = new_store1.get_table_mapping(&table_id).await.unwrap();
     assert_eq!(loaded_mapping1, Some("pipeline1_table".to_string()));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_cleanup_deletes_state_schema_and_mapping_for_table() {
+    init_test_tracing();
+
+    let database = spawn_source_database_for_store().await;
+    let pipeline_id = 1;
+
+    let store = PostgresStore::new(pipeline_id, database.config.clone());
+
+    // Prepare two tables: one we will delete, one we will keep
+    let table_schema1 = create_sample_table_schema();
+    let table_id1 = table_schema1.id;
+    let table_schema2 = create_another_table_schema();
+    let table_id2 = table_schema2.id;
+
+    // Populate state, schema, and mapping for both tables
+    store
+        .update_table_replication_state(table_id1, TableReplicationPhase::Ready)
+        .await
+        .unwrap();
+    store
+        .update_table_replication_state(table_id2, TableReplicationPhase::DataSync)
+        .await
+        .unwrap();
+
+    store.store_table_schema(table_schema1.clone()).await.unwrap();
+    store.store_table_schema(table_schema2.clone()).await.unwrap();
+
+    store
+        .store_table_mapping(table_id1, "dest_table_1".to_string())
+        .await
+        .unwrap();
+    store
+        .store_table_mapping(table_id2, "dest_table_2".to_string())
+        .await
+        .unwrap();
+
+    // Sanity check before cleanup
+    assert!(store.get_table_replication_state(table_id1).await.unwrap().is_some());
+    assert!(store.get_table_schema(&table_id1).await.unwrap().is_some());
+    assert!(store.get_table_mapping(&table_id1).await.unwrap().is_some());
+
+    // Execute cleanup for table 1
+    store.cleanup_table_state(table_id1).await.unwrap();
+
+    // Verify in-memory cache for table 1 has been cleaned
+    assert!(store.get_table_replication_state(table_id1).await.unwrap().is_none());
+    assert!(store.get_table_schema(&table_id1).await.unwrap().is_none());
+    assert!(store.get_table_mapping(&table_id1).await.unwrap().is_none());
+
+    // Verify other table is unaffected
+    assert!(store.get_table_replication_state(table_id2).await.unwrap().is_some());
+    assert!(store.get_table_schema(&table_id2).await.unwrap().is_some());
+    assert!(store.get_table_mapping(&table_id2).await.unwrap().is_some());
+
+    // Create a new store instance and load from DB to ensure persistence
+    let new_store = PostgresStore::new(pipeline_id, database.config.clone());
+    new_store.load_table_replication_states().await.unwrap();
+    new_store.load_table_schemas().await.unwrap();
+    new_store.load_table_mappings().await.unwrap();
+
+    // Table 1 should not be present after reload
+    assert!(new_store.get_table_replication_state(table_id1).await.unwrap().is_none());
+    assert!(new_store.get_table_schema(&table_id1).await.unwrap().is_none());
+    assert!(new_store.get_table_mapping(&table_id1).await.unwrap().is_none());
+
+    // Table 2 should still be present
+    assert!(new_store.get_table_replication_state(table_id2).await.unwrap().is_some());
+    assert!(new_store.get_table_schema(&table_id2).await.unwrap().is_some());
+    assert!(new_store.get_table_mapping(&table_id2).await.unwrap().is_some());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_cleanup_idempotent_when_no_state_present() {
+    init_test_tracing();
+
+    let database = spawn_source_database_for_store().await;
+    let pipeline_id = 1;
+    let store = PostgresStore::new(pipeline_id, database.config.clone());
+
+    let table_schema = create_sample_table_schema();
+    let table_id = table_schema.id;
+
+    // Ensure no state exists yet
+    assert!(store.get_table_replication_state(table_id).await.unwrap().is_none());
+    assert!(store.get_table_schema(&table_id).await.unwrap().is_none());
+    assert!(store.get_table_mapping(&table_id).await.unwrap().is_none());
+
+    // Calling cleanup should succeed even if nothing exists
+    store.cleanup_table_state(table_id).await.unwrap();
+
+    // Add state and clean up again
+    store
+        .update_table_replication_state(table_id, TableReplicationPhase::Init)
+        .await
+        .unwrap();
+    store.store_table_schema(table_schema).await.unwrap();
+    store
+        .store_table_mapping(table_id, "dest_table".to_string())
+        .await
+        .unwrap();
+
+    store.cleanup_table_state(table_id).await.unwrap();
+
+    // Verify everything is gone
+    assert!(store.get_table_replication_state(table_id).await.unwrap().is_none());
+    assert!(store.get_table_schema(&table_id).await.unwrap().is_none());
+    assert!(store.get_table_mapping(&table_id).await.unwrap().is_none());
 }

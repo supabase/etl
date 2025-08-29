@@ -84,3 +84,26 @@ where
 
     Ok(result.rows_affected())
 }
+
+/// Deletes a single table mapping for a given pipeline and source table id.
+pub async fn delete_table_mapping_for_source<'c, E>(
+    executor: E,
+    pipeline_id: i64,
+    source_table_id: &TableId,
+) -> Result<u64, sqlx::Error>
+where
+    E: PgExecutor<'c>,
+{
+    let result = sqlx::query(
+        r#"
+        delete from etl.table_mappings
+        where pipeline_id = $1 and source_table_id = $2
+        "#,
+    )
+    .bind(pipeline_id)
+    .bind(SqlxTableId(source_table_id.into_inner()))
+    .execute(executor)
+    .await?;
+
+    Ok(result.rows_affected())
+}

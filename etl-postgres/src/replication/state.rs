@@ -348,6 +348,29 @@ where
     Ok(result.rows_affected())
 }
 
+/// Deletes all replication state entries for a specific table in a pipeline.
+pub async fn delete_table_replication_state<'c, E>(
+    executor: E,
+    pipeline_id: i64,
+    table_id: TableId,
+) -> sqlx::Result<u64>
+where
+    E: PgExecutor<'c>,
+{
+    let result = sqlx::query(
+        r#"
+        delete from etl.replication_state
+        where pipeline_id = $1 and table_id = $2
+        "#,
+    )
+    .bind(pipeline_id)
+    .bind(SqlxTableId(table_id.into_inner()))
+    .execute(executor)
+    .await?;
+
+    Ok(result.rows_affected())
+}
+
 /// Gets all table IDs that have replication state for a given pipeline.
 ///
 /// Returns a vector of table IDs that are currently being replicated for the specified pipeline.

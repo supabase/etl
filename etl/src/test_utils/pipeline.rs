@@ -3,6 +3,7 @@ use uuid::Uuid;
 
 use crate::destination::Destination;
 use crate::pipeline::Pipeline;
+use crate::store::cleanup::CleanupStore;
 use crate::store::schema::SchemaStore;
 use crate::store::state::StateStore;
 use crate::types::PipelineId;
@@ -24,7 +25,7 @@ pub fn create_pipeline<S, D>(
     destination: D,
 ) -> Pipeline<S, D>
 where
-    S: StateStore + SchemaStore + Clone + Send + Sync + 'static,
+    S: StateStore + SchemaStore + CleanupStore + Clone + Send + Sync + 'static,
     D: Destination + Clone + Send + Sync + 'static,
 {
     let config = PipelineConfig {
@@ -51,7 +52,7 @@ pub fn create_pipeline_with<S, D>(
     batch_config: Option<BatchConfig>,
 ) -> Pipeline<S, D>
 where
-    S: StateStore + SchemaStore + Clone + Send + Sync + 'static,
+    S: StateStore + SchemaStore + CleanupStore + Clone + Send + Sync + 'static,
     D: Destination + Clone + Send + Sync + 'static,
 {
     let batch = batch_config.unwrap_or(BatchConfig {

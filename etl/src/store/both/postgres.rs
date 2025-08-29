@@ -11,6 +11,7 @@ use tracing::{debug, info};
 use crate::error::{ErrorKind, EtlError, EtlResult};
 use crate::metrics::ETL_TABLES_TOTAL;
 use crate::state::table::{RetryPolicy, TableReplicationPhase};
+use crate::store::cleanup::CleanupStore;
 use crate::store::schema::SchemaStore;
 use crate::store::state::StateStore;
 use crate::types::PipelineId;
@@ -562,6 +563,54 @@ impl SchemaStore for PostgresStore {
         inner
             .table_schemas
             .insert(table_schema.id, Arc::new(table_schema));
+
+        Ok(())
+    }
+}
+
+impl CleanupStore for PostgresStore {
+    async fn cleanup_table_state(&self, table_id: TableId) -> EtlResult<()> {
+        let pool = self.connect_to_source().await?;
+
+        // Use a single DB transaction to keep persistent state consistent.
+        let mut tx = pool.begin().await?;
+        
+        table_mappings::delete_table_mapping_for_source(
+            &mut *tx,
+            self.pipeline_id as i64,
+            &table_id,
+        )
+        .await
+        .map_err(|err| {
+            etl_error!(
+                ErrorKind::SourceQueryFailed,
+                "Failed to delete table mapping",
+                format!("Failed to delete table mapping in postgres: {err}")
+            )
+        })?;
+
+        schema::delete_table_schema_for_table(&mut *tx, self.pipeline_id as i64, table_id)
+            .await
+            .map_err(|err| {
+                etl_error!(
+                    ErrorKind::SourceQueryFailed,
+                    "Failed to delete table schema",
+                    format!("Failed to delete table schema in postgres: {err}")
+                )
+            })?;
+
+        state::delete_table_replication_state(&mut *tx, self.pipeline_id as i64, table_id).await?;
+
+        tx.commit().await?;
+
+        // Update in-memory caches and metrics.
+        let mut inner = self.inner.lock().await;
+
+        inner.table_states.remove(&table_id);
+        inner.table_schemas.remove(&table_id);
+        inner.table_mappings.remove(&table_id);
+
+        emit_table_metrics(inner.table_states.keys().len(), &inner.phase_counts);
 
         Ok(())
     }

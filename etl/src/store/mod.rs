@@ -7,10 +7,12 @@
 //! Storage is divided into two main categories:
 //! - [`state`] - Replication progress and table synchronization states
 //! - [`schema`] - Database schema information and table mappings
+//! - [`cleanup`] - Cleanup methods that span both stores
 //!
 //! The [`both`] module provides combined implementations that handle both
 //! state and schema storage in unified systems.
 
 pub mod both;
+pub mod cleanup;
 pub mod schema;
 pub mod state;

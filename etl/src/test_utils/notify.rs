@@ -9,6 +9,7 @@ use tokio::{
 use crate::error::{ErrorKind, EtlError, EtlResult};
 use crate::etl_error;
 use crate::state::table::{TableReplicationPhase, TableReplicationPhaseType};
+use crate::store::cleanup::CleanupStore;
 use crate::store::schema::SchemaStore;
 use crate::store::state::StateStore;
 
@@ -278,6 +279,17 @@ impl SchemaStore for NotifyingStore {
             .table_schemas
             .insert(table_schema.id, Arc::new(table_schema));
 
+        Ok(())
+    }
+}
+
+impl CleanupStore for NotifyingStore {
+    async fn cleanup_table_state(&self, table_id: TableId) -> EtlResult<()> {
+        let mut inner = self.inner.write().await;
+        inner.table_replication_states.remove(&table_id);
+        inner.table_state_history.remove(&table_id);
+        inner.table_schemas.remove(&table_id);
+        inner.table_mappings.remove(&table_id);
         Ok(())
     }
 }
