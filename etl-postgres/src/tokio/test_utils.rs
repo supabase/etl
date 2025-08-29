@@ -1,9 +1,12 @@
+use std::num::NonZeroI32;
+
 use etl_config::shared::{IntoConnectOptions, PgConnectionConfig};
 use tokio::runtime::Handle;
 use tokio_postgres::types::{ToSql, Type};
 use tokio_postgres::{Client, GenericClient, NoTls, Transaction};
 use tracing::info;
 
+use crate::replication::extract_server_version;
 use crate::types::{ColumnSchema, TableId, TableName};
 
 /// Table modification operations for ALTER TABLE statements.
@@ -34,10 +37,15 @@ pub enum TableModification<'a> {
 pub struct PgDatabase<G> {
     pub config: PgConnectionConfig,
     pub client: Option<G>,
+    server_version: Option<NonZeroI32>,
     destroy_on_drop: bool,
 }
 
 impl<G: GenericClient> PgDatabase<G> {
+    pub fn server_version(&self) -> Option<NonZeroI32> {
+        self.server_version
+    }
+
     /// Creates a Postgres publication for the specified tables.
     ///
     /// Sets up logical replication by creating a publication that includes
@@ -71,19 +79,51 @@ impl<G: GenericClient> PgDatabase<G> {
         publication_name: &str,
         schema: Option<&str>,
     ) -> Result<(), tokio_postgres::Error> {
-        let create_publication_query = match schema {
-            Some(schema_name) => format!(
-                "create publication {} for tables in schema {}",
-                publication_name, schema_name
-            ),
-            None => format!("create publication {} for all tables", publication_name),
-        };
+        let client = self.client.as_ref().unwrap();
 
-        self.client
-            .as_ref()
-            .unwrap()
-            .execute(&create_publication_query, &[])
-            .await?;
+        if let Some(server_version) = self.server_version
+            && server_version.get() >= 150000
+        {
+            // PostgreSQL 15+ supports FOR ALL TABLES IN SCHEMA syntax
+            let create_publication_query = match schema {
+                Some(schema_name) => format!(
+                    "create publication {} for tables in schema {}",
+                    publication_name, schema_name
+                ),
+                None => format!("create publication {} for all tables", publication_name),
+            };
+
+            client.execute(&create_publication_query, &[]).await?;
+        } else {
+            // PostgreSQL 14 and earlier: create publication and add tables individually
+            match schema {
+                Some(schema_name) => {
+                    let create_pub_query = format!("create publication {}", publication_name);
+                    client.execute(&create_pub_query, &[]).await?;
+
+                    let tables_query = format!(
+                        "select schemaname, tablename from pg_tables where schemaname = '{}'",
+                        schema_name
+                    );
+                    let rows = client.query(&tables_query, &[]).await?;
+
+                    for row in rows {
+                        let schema: String = row.get(0);
+                        let table: String = row.get(1);
+                        let add_table_query = format!(
+                            "alter publication {} add table {}.{}",
+                            publication_name, schema, table
+                        );
+                        client.execute(&add_table_query, &[]).await?;
+                    }
+                }
+                None => {
+                    let create_publication_query =
+                        format!("create publication {} for all tables", publication_name);
+                    client.execute(&create_publication_query, &[]).await?;
+                }
+            }
+        }
 
         Ok(())
     }
@@ -369,7 +409,8 @@ impl PgDatabase<Client> {
 
         Self {
             config,
-            client: Some(client),
+            client: Some(client.0),
+            server_version: client.1,
             destroy_on_drop: true,
         }
     }
@@ -386,7 +427,8 @@ impl PgDatabase<Client> {
 
         Self {
             config,
-            client: Some(client),
+            client: Some(client.0),
+            server_version: client.1,
             destroy_on_drop: true,
         }
     }
@@ -401,6 +443,7 @@ impl PgDatabase<Client> {
         PgDatabase {
             config: self.config.clone(),
             client: Some(transaction),
+            server_version: self.server_version,
             destroy_on_drop: false,
         }
     }
@@ -450,7 +493,7 @@ pub fn id_column_schema() -> ColumnSchema {
 ///
 /// # Panics
 /// Panics if connection or database creation fails.
-pub async fn create_pg_database(config: &PgConnectionConfig) -> Client {
+pub async fn create_pg_database(config: &PgConnectionConfig) -> (Client, Option<NonZeroI32>) {
     // Create the database via a single connection
     let (client, connection) = {
         let config: tokio_postgres::Config = config.without_db();
@@ -474,14 +517,16 @@ pub async fn create_pg_database(config: &PgConnectionConfig) -> Client {
         .expect("Failed to create database");
 
     // Connects to the actual Postgres database
-    connect_to_pg_database(config).await
+    let (client, server_version) = connect_to_pg_database(config).await;
+
+    (client, server_version)
 }
 
 /// Connects to an existing Postgres database.
 ///
 /// Establishes a client connection to the database specified in the configuration.
 /// Assumes the database already exists.
-pub async fn connect_to_pg_database(config: &PgConnectionConfig) -> Client {
+pub async fn connect_to_pg_database(config: &PgConnectionConfig) -> (Client, Option<NonZeroI32>) {
     // Create a new client connected to the created database
     let (client, connection) = {
         let config: tokio_postgres::Config = config.with_db();
@@ -490,6 +535,9 @@ pub async fn connect_to_pg_database(config: &PgConnectionConfig) -> Client {
             .await
             .expect("Failed to connect to Postgres")
     };
+    let server_version = connection
+        .parameter("server_version")
+        .and_then(extract_server_version);
 
     // Spawn the connection on a new task
     tokio::spawn(async move {
@@ -498,7 +546,7 @@ pub async fn connect_to_pg_database(config: &PgConnectionConfig) -> Client {
         }
     });
 
-    client
+    (client, server_version)
 }
 
 /// Drops a Postgres database and cleans up all resources.
