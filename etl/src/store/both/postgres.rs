@@ -575,7 +575,7 @@ impl CleanupStore for PostgresStore {
         // Use a single DB transaction to keep persistent state consistent.
         let mut tx = pool.begin().await?;
 
-        table_mappings::delete_table_mapping_for_source(
+        table_mappings::delete_table_mappings_for_table(
             &mut *tx,
             self.pipeline_id as i64,
             &table_id,

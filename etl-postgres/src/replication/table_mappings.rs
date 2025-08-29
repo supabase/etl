@@ -65,7 +65,7 @@ pub async fn load_table_mappings(
 ///
 /// Removes all table mapping records for the specified pipeline.
 /// Used during pipeline cleanup.
-pub async fn delete_pipeline_table_mappings<'c, E>(
+pub async fn delete_table_mappings_for_all_tables<'c, E>(
     executor: E,
     pipeline_id: i64,
 ) -> Result<u64, sqlx::Error>
@@ -86,7 +86,7 @@ where
 }
 
 /// Deletes a single table mapping for a given pipeline and source table id.
-pub async fn delete_table_mapping_for_source<'c, E>(
+pub async fn delete_table_mappings_for_table<'c, E>(
     executor: E,
     pipeline_id: i64,
     source_table_id: &TableId,

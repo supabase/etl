@@ -224,8 +224,11 @@ pub async fn delete_pipeline_cascading(
             .await?;
         let _ = schema::delete_table_schemas_for_all_tables(source_txn.deref_mut(), pipeline.id)
             .await?;
-        let _ = table_mappings::delete_pipeline_table_mappings(source_txn.deref_mut(), pipeline.id)
-            .await?;
+        let _ = table_mappings::delete_table_mappings_for_all_tables(
+            source_txn.deref_mut(),
+            pipeline.id,
+        )
+        .await?;
     }
 
     // Here we finish `txn` before `source_txn` since we want the guarantee that the pipeline has
