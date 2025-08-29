@@ -313,7 +313,7 @@ where
 
         // Detect and purge tables that have been removed from the publication.
         //
-        // We must not delete the destination table, only internal state.
+        // We must not delete the destination table, only the internal state.
         let publication_set: HashSet<TableId> = publication_table_ids.iter().copied().collect();
         for (table_id, _) in table_replication_states {
             if !publication_set.contains(&table_id) {
