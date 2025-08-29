@@ -642,7 +642,9 @@ impl PgReplicationClient {
         publication: Option<&str>,
     ) -> EtlResult<Vec<ColumnSchema>> {
         let (pub_cte, pub_pred) = if let Some(publication) = publication {
-            if let Some(server_version) = self.server_version && server_version.get() >= 150000 {
+            if let Some(server_version) = self.server_version
+                && server_version.get() >= 150000
+            {
                 (
                     format!(
                         "with pub_attrs as (
