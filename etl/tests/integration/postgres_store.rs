@@ -1,8 +1,8 @@
 use etl::state::table::{RetryPolicy, TableReplicationPhase};
 use etl::store::both::postgres::PostgresStore;
+use etl::store::cleanup::CleanupStore;
 use etl::store::schema::SchemaStore;
 use etl::store::state::StateStore;
-use etl::store::cleanup::CleanupStore;
 use etl::test_utils::database::spawn_source_database_for_store;
 use etl_postgres::types::{ColumnSchema, TableId, TableName, TableSchema};
 use etl_telemetry::tracing::init_test_tracing;
@@ -662,8 +662,14 @@ async fn test_cleanup_deletes_state_schema_and_mapping_for_table() {
         .await
         .unwrap();
 
-    store.store_table_schema(table_schema1.clone()).await.unwrap();
-    store.store_table_schema(table_schema2.clone()).await.unwrap();
+    store
+        .store_table_schema(table_schema1.clone())
+        .await
+        .unwrap();
+    store
+        .store_table_schema(table_schema2.clone())
+        .await
+        .unwrap();
 
     store
         .store_table_mapping(table_id1, "dest_table_1".to_string())
@@ -675,7 +681,13 @@ async fn test_cleanup_deletes_state_schema_and_mapping_for_table() {
         .unwrap();
 
     // Sanity check before cleanup
-    assert!(store.get_table_replication_state(table_id1).await.unwrap().is_some());
+    assert!(
+        store
+            .get_table_replication_state(table_id1)
+            .await
+            .unwrap()
+            .is_some()
+    );
     assert!(store.get_table_schema(&table_id1).await.unwrap().is_some());
     assert!(store.get_table_mapping(&table_id1).await.unwrap().is_some());
 
@@ -683,12 +695,24 @@ async fn test_cleanup_deletes_state_schema_and_mapping_for_table() {
     store.cleanup_table_state(table_id1).await.unwrap();
 
     // Verify in-memory cache for table 1 has been cleaned
-    assert!(store.get_table_replication_state(table_id1).await.unwrap().is_none());
+    assert!(
+        store
+            .get_table_replication_state(table_id1)
+            .await
+            .unwrap()
+            .is_none()
+    );
     assert!(store.get_table_schema(&table_id1).await.unwrap().is_none());
     assert!(store.get_table_mapping(&table_id1).await.unwrap().is_none());
 
     // Verify other table is unaffected
-    assert!(store.get_table_replication_state(table_id2).await.unwrap().is_some());
+    assert!(
+        store
+            .get_table_replication_state(table_id2)
+            .await
+            .unwrap()
+            .is_some()
+    );
     assert!(store.get_table_schema(&table_id2).await.unwrap().is_some());
     assert!(store.get_table_mapping(&table_id2).await.unwrap().is_some());
 
@@ -699,14 +723,50 @@ async fn test_cleanup_deletes_state_schema_and_mapping_for_table() {
     new_store.load_table_mappings().await.unwrap();
 
     // Table 1 should not be present after reload
-    assert!(new_store.get_table_replication_state(table_id1).await.unwrap().is_none());
-    assert!(new_store.get_table_schema(&table_id1).await.unwrap().is_none());
-    assert!(new_store.get_table_mapping(&table_id1).await.unwrap().is_none());
+    assert!(
+        new_store
+            .get_table_replication_state(table_id1)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        new_store
+            .get_table_schema(&table_id1)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        new_store
+            .get_table_mapping(&table_id1)
+            .await
+            .unwrap()
+            .is_none()
+    );
 
     // Table 2 should still be present
-    assert!(new_store.get_table_replication_state(table_id2).await.unwrap().is_some());
-    assert!(new_store.get_table_schema(&table_id2).await.unwrap().is_some());
-    assert!(new_store.get_table_mapping(&table_id2).await.unwrap().is_some());
+    assert!(
+        new_store
+            .get_table_replication_state(table_id2)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        new_store
+            .get_table_schema(&table_id2)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        new_store
+            .get_table_mapping(&table_id2)
+            .await
+            .unwrap()
+            .is_some()
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -721,7 +781,13 @@ async fn test_cleanup_idempotent_when_no_state_present() {
     let table_id = table_schema.id;
 
     // Ensure no state exists yet
-    assert!(store.get_table_replication_state(table_id).await.unwrap().is_none());
+    assert!(
+        store
+            .get_table_replication_state(table_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
     assert!(store.get_table_schema(&table_id).await.unwrap().is_none());
     assert!(store.get_table_mapping(&table_id).await.unwrap().is_none());
 
@@ -742,7 +808,13 @@ async fn test_cleanup_idempotent_when_no_state_present() {
     store.cleanup_table_state(table_id).await.unwrap();
 
     // Verify everything is gone
-    assert!(store.get_table_replication_state(table_id).await.unwrap().is_none());
+    assert!(
+        store
+            .get_table_replication_state(table_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
     assert!(store.get_table_schema(&table_id).await.unwrap().is_none());
     assert!(store.get_table_mapping(&table_id).await.unwrap().is_none());
 }

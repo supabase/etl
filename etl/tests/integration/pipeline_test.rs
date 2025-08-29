@@ -144,17 +144,17 @@ async fn table_schema_copy_survives_pipeline_restarts() {
 async fn removed_tables_cleanup_keeps_destination_data() {
     init_test_tracing();
 
-    let mut database = spawn_source_database().await;
+    let database = spawn_source_database().await;
 
     // Create two tables in the test schema and a publication for that schema
-    let table_1 = test_table_name("pub_table_1");
+    let table_1 = test_table_name("table_1");
     let table_1_id = database
-        .create_table(table_1.clone(), true, &[ ("value", "int4 not null") ])
+        .create_table(table_1.clone(), true, &[("value", "int4 not null")])
         .await
         .unwrap();
-    let table_2 = test_table_name("pub_table_2");
+    let table_2 = test_table_name("table_2");
     let table_2_id = database
-        .create_table(table_2.clone(), true, &[ ("value", "int4 not null") ])
+        .create_table(table_2.clone(), true, &[("value", "int4 not null")])
         .await
         .unwrap();
 
@@ -237,10 +237,14 @@ async fn removed_tables_cleanup_keeps_destination_data() {
     assert!(states.get(&table_2_id).is_none());
     assert!(states.get(&table_1_id).is_some());
 
-    let rows = destination.get_table_rows().await;
-    // Destination should still have the previously ingested row for the dropped table
-    assert!(rows.get(&table_2_id).is_some());
-    assert_eq!(rows.get(&table_2_id).unwrap().len(), 1);
+    // Destination should still have the previously ingested insert event for the dropped table
+    let events = destination.get_events().await;
+    let grouped = group_events_by_type_and_table_id(&events);
+    let table2_inserts = grouped
+        .get(&(EventType::Insert, table_2_id))
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(table2_inserts.len(), 1);
 
     // Cleanup
     pipeline.shutdown_and_wait().await.unwrap();

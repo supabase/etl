@@ -3,12 +3,6 @@
 //! Contains the main [`Pipeline`] struct that coordinates Postgres logical replication
 //! with destination systems. Manages worker lifecycles, shutdown coordination, and error handling.
 
-use std::collections::HashSet;
-use etl_config::shared::PipelineConfig;
-use std::sync::Arc;
-use tokio::sync::Semaphore;
-use tracing::{error, info};
-use etl_postgres::types::TableId;
 use crate::bail;
 use crate::concurrency::shutdown::{ShutdownTx, create_shutdown_channel};
 use crate::destination::Destination;
@@ -23,6 +17,12 @@ use crate::types::PipelineId;
 use crate::workers::apply::{ApplyWorker, ApplyWorkerHandle};
 use crate::workers::base::{Worker, WorkerHandle};
 use crate::workers::pool::TableSyncWorkerPool;
+use etl_config::shared::PipelineConfig;
+use etl_postgres::types::TableId;
+use std::collections::HashSet;
+use std::sync::Arc;
+use tokio::sync::Semaphore;
+use tracing::{error, info};
 
 /// Internal state tracking for pipeline lifecycle.
 ///
@@ -321,7 +321,7 @@ where
                     "table {} removed from publication, purging stored state",
                     table_id
                 );
-                
+
                 self.store.cleanup_table_state(table_id).await?;
             }
         }
