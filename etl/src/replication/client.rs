@@ -642,14 +642,7 @@ impl PgReplicationClient {
         publication: Option<&str>,
     ) -> EtlResult<Vec<ColumnSchema>> {
         let (pub_cte, pub_pred) = if let Some(publication) = publication {
-            let is_pg14_or_earlier = if let Some(server_version) = self.server_version {
-                server_version.get() < 150000
-            } else {
-                // be conservative by default
-                true
-            };
-
-            if !is_pg14_or_earlier {
+            if let Some(server_version) = self.server_version && server_version.get() >= 150000 {
                 (
                     format!(
                         "with pub_attrs as (
@@ -669,7 +662,7 @@ impl PgReplicationClient {
                     )",
                 )
             } else {
-                // No column-level filtering, check if table is in publication
+                // Postgres 14 or earlier or unknown, fallback to no column-level filtering
                 (
                     format!(
                         "with pub_table as (
