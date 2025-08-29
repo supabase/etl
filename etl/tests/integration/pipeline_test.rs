@@ -190,6 +190,13 @@ async fn publication_changes_are_correctly_handled() {
     table_1_done.notified().await;
     table_2_done.notified().await;
 
+    if let Some(server_version) = database.server_version()
+        && server_version.get() <= 150000
+    {
+        println!("Skipping test for PostgreSQL version <= 15");
+        return;
+    }
+
     // Insert one row in each table and wait for two insert events.
     let inserts_notify = destination
         .wait_for_events_count(vec![(EventType::Insert, 2)])
@@ -352,6 +359,13 @@ async fn publication_for_all_tables_in_schema_ignores_new_tables_until_restart()
     assert_eq!(table_schemas.len(), 1);
     assert!(table_schemas.contains_key(&table_1_id));
     assert!(!table_schemas.contains_key(&table_2_id));
+
+    if let Some(server_version) = database.server_version()
+        && server_version.get() <= 150000
+    {
+        println!("Skipping test for PostgreSQL version <= 15");
+        return;
+    }
 
     // We restart the pipeline and verify that the new table is now processed.
     let mut pipeline = create_pipeline(
