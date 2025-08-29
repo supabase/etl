@@ -10,8 +10,10 @@ use rustls::ClientConfig;
 use std::collections::HashMap;
 use std::fmt;
 use std::io::BufReader;
+use std::num::NonZeroI32;
 use std::sync::Arc;
-use tokio::sync::OnceCell;
+
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_postgres::error::SqlState;
 use tokio_postgres::tls::MakeTlsConnect;
 use tokio_postgres::{
@@ -163,7 +165,8 @@ impl PgReplicationSlotTransaction {
 /// and streaming changes from the database.
 #[derive(Debug, Clone)]
 pub struct PgReplicationClient {
-    client: Arc<(Client, OnceCell<i32>)>,
+    client: Arc<Client>,
+    server_version: Option<NonZeroI32>,
 }
 
 impl PgReplicationClient {
@@ -178,14 +181,6 @@ impl PgReplicationClient {
         }
     }
 
-    // Convenience method to avoid having to access the client directly.
-    async fn simple_query(
-        &self,
-        query: &str,
-    ) -> Result<Vec<SimpleQueryMessage>, tokio_postgres::Error> {
-        self.client.0.simple_query(query).await
-    }
-
     /// Establishes a connection to Postgres without TLS encryption.
     ///
     /// The connection is configured for logical replication mode.
@@ -194,12 +189,16 @@ impl PgReplicationClient {
         config.replication_mode(ReplicationMode::Logical);
 
         let (client, connection) = config.connect(NoTls).await?;
+
+        let server_version = Self::extract_server_version(&connection);
+
         spawn_postgres_connection::<NoTls>(connection);
 
         info!("successfully connected to postgres without tls");
 
         Ok(PgReplicationClient {
-            client: Arc::new((client, OnceCell::new())),
+            client: Arc::new(client),
+            server_version,
         })
     }
 
@@ -225,12 +224,16 @@ impl PgReplicationClient {
             .with_no_client_auth();
 
         let (client, connection) = config.connect(MakeRustlsConnect::new(tls_config)).await?;
+
+        let server_version = Self::extract_server_version(&connection);
+
         spawn_postgres_connection::<MakeRustlsConnect>(connection);
 
         info!("successfully connected to postgres with tls");
 
         Ok(PgReplicationClient {
-            client: Arc::new((client, OnceCell::new())),
+            client: Arc::new(client),
+            server_version,
         })
     }
 
@@ -262,7 +265,7 @@ impl PgReplicationClient {
             quote_literal(slot_name)
         );
 
-        let results = self.simple_query(&query).await?;
+        let results = self.client.simple_query(&query).await?;
         for result in results {
             if let SimpleQueryMessage::Row(row) = result {
                 let confirmed_flush_lsn = Self::get_row_value::<PgLsn>(
@@ -324,7 +327,7 @@ impl PgReplicationClient {
             quote_identifier(slot_name)
         );
 
-        match self.simple_query(&query).await {
+        match self.client.simple_query(&query).await {
             Ok(_) => {
                 info!("successfully deleted replication slot '{}'", slot_name);
 
@@ -362,7 +365,7 @@ impl PgReplicationClient {
             "select 1 as exists from pg_publication where pubname = {};",
             quote_literal(publication)
         );
-        for msg in self.simple_query(&publication_exists_query).await? {
+        for msg in self.client.simple_query(&publication_exists_query).await? {
             if let SimpleQueryMessage::Row(_) = msg {
                 return Ok(true);
             }
@@ -382,7 +385,7 @@ impl PgReplicationClient {
         );
 
         let mut table_names = vec![];
-        for msg in self.simple_query(&publication_query).await? {
+        for msg in self.client.simple_query(&publication_query).await? {
             if let SimpleQueryMessage::Row(row) = msg {
                 let schema =
                     Self::get_row_value::<String>(&row, "schemaname", "pg_publication_tables")
@@ -412,7 +415,7 @@ impl PgReplicationClient {
         );
 
         let mut table_ids = vec![];
-        for msg in self.simple_query(&publication_query).await? {
+        for msg in self.client.simple_query(&publication_query).await? {
             if let SimpleQueryMessage::Row(row) = msg {
                 // For the sake of simplicity, we refer to the table oid as table id.
                 let table_id = Self::get_row_value::<TableId>(&row, "oid", "pg_class").await?;
@@ -450,11 +453,7 @@ impl PgReplicationClient {
             options
         );
 
-        let copy_stream = self
-            .client
-            .0
-            .copy_both_simple::<bytes::Bytes>(&query)
-            .await?;
+        let copy_stream = self.client.copy_both_simple::<bytes::Bytes>(&query).await?;
         let stream = LogicalReplicationStream::new(copy_stream);
 
         Ok(stream)
@@ -465,7 +464,8 @@ impl PgReplicationClient {
     /// The transaction doesn't make any assumptions about the snapshot in use, since this is a
     /// concern of the statements issued within the transaction.
     async fn begin_tx(&self) -> EtlResult<()> {
-        self.simple_query("begin read only isolation level repeatable read;")
+        self.client
+            .simple_query("begin read only isolation level repeatable read;")
             .await?;
 
         Ok(())
@@ -473,14 +473,14 @@ impl PgReplicationClient {
 
     /// Commits the current transaction.
     async fn commit_tx(&self) -> EtlResult<()> {
-        self.simple_query("commit;").await?;
+        self.client.simple_query("commit;").await?;
 
         Ok(())
     }
 
     /// Rolls back the current transaction.
     async fn rollback_tx(&self) -> EtlResult<()> {
-        self.simple_query("rollback;").await?;
+        self.client.simple_query("rollback;").await?;
 
         Ok(())
     }
@@ -507,7 +507,7 @@ impl PgReplicationClient {
             quote_identifier(slot_name),
             snapshot_option
         );
-        match self.simple_query(&query).await {
+        match self.client.simple_query(&query).await {
             Ok(results) => {
                 for result in results {
                     if let SimpleQueryMessage::Row(row) = result {
@@ -607,7 +607,7 @@ impl PgReplicationClient {
             where c.oid = {table_id}",
         );
 
-        for message in self.simple_query(&table_info_query).await? {
+        for message in self.client.simple_query(&table_info_query).await? {
             if let SimpleQueryMessage::Row(row) = message {
                 let schema_name =
                     Self::get_row_value::<String>(&row, "schema_name", "pg_namespace").await?;
@@ -638,7 +638,12 @@ impl PgReplicationClient {
         publication: Option<&str>,
     ) -> EtlResult<Vec<ColumnSchema>> {
         let (pub_cte, pub_pred) = if let Some(publication) = publication {
-            let is_pg14_or_earlier = self.get_server_version().await.unwrap_or(0) < 150000;
+            let is_pg14_or_earlier = if let Some(server_version) = self.server_version {
+                server_version.get() < 150000
+            } else {
+                // be conservative by default
+                true
+            };
 
             if !is_pg14_or_earlier {
                 (
@@ -702,7 +707,7 @@ impl PgReplicationClient {
 
         let mut column_schemas = vec![];
 
-        for message in self.simple_query(&column_info_query).await? {
+        for message in self.client.simple_query(&column_info_query).await? {
             if let SimpleQueryMessage::Row(row) = message {
                 let name = Self::get_row_value::<String>(&row, "attname", "pg_attribute").await?;
                 let type_oid = Self::get_row_value::<u32>(&row, "atttypid", "pg_attribute").await?;
@@ -728,36 +733,46 @@ impl PgReplicationClient {
         Ok(column_schemas)
     }
 
-    /// Gets the PostgreSQL server version.
+    /// Extracts the PostgreSQL server version from connection parameters.
+    ///
+    /// This method should be called during connection establishment to extract
+    /// the server version from the parameter status messages sent by the server.
     ///
     /// Returns the version in the format: MAJOR * 10000 + MINOR * 100 + PATCH
+    /// This matches the format used by `SELECT version()`.
     /// For example: PostgreSQL 14.2 = 140200, PostgreSQL 15.1 = 150100
-    async fn get_server_version(&self) -> EtlResult<i32> {
-        let version = self
-            .client
-            .1
-            .get_or_try_init(|| async {
-                let version_query = "SHOW server_version_num";
+    fn extract_server_version<S>(connection: &Connection<Socket, S>) -> Option<NonZeroI32>
+    where
+        S: AsyncRead + AsyncWrite + Unpin + Send,
+    {
+        if let Some(server_version_str) = connection.parameter("server_version") {
+            // Parse version string like "15.5 (Homebrew)" or "14.2"
+            let version_part = server_version_str
+                .split_whitespace()
+                .next()
+                .unwrap_or("0.0");
 
-                for message in self.simple_query(version_query).await? {
-                    if let SimpleQueryMessage::Row(row) = message {
-                        let version_str = Self::get_row_value::<String>(
-                            &row,
-                            "server_version_num",
-                            "server_version_num",
-                        )
-                        .await?;
-                        let version: i32 = version_str.parse().unwrap_or(0);
-                        return Ok::<_, EtlError>(version);
-                    }
-                }
+            let version_components: Vec<&str> = version_part.split('.').collect();
 
-                // If we can't determine, return 0 (which will be treated as very old version)
-                Ok(0)
-            })
-            .await?;
+            let major = version_components
+                .get(0)
+                .and_then(|v| v.parse::<i32>().ok())
+                .unwrap_or(0);
+            let minor = version_components
+                .get(1)
+                .and_then(|v| v.parse::<i32>().ok())
+                .unwrap_or(0);
+            let patch = version_components
+                .get(2)
+                .and_then(|v| v.parse::<i32>().ok())
+                .unwrap_or(0);
 
-        Ok(*version)
+            let version = major * 10000 + minor * 100 + patch;
+
+            NonZeroI32::new(version)
+        } else {
+            None
+        }
     }
 
     /// Creates a COPY stream for reading data from a table using its OID.
@@ -783,7 +798,7 @@ impl PgReplicationClient {
             column_list
         );
 
-        let stream = self.client.0.copy_out_simple(&copy_query).await?;
+        let stream = self.client.copy_out_simple(&copy_query).await?;
 
         Ok(stream)
     }
