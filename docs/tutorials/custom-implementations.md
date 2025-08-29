@@ -51,7 +51,7 @@ tracing-subscriber = "0.3"
 
 ## Step 3: Create Custom Store Implementation
 
-Create `src/custom_store.rs` with a dual-storage implementation:
+Create `src/custom_store.rs` with a dual-storage implementation and cleanup primitives:
 
 ```rust
 use std::collections::HashMap;
@@ -63,6 +63,7 @@ use etl::error::EtlResult;
 use etl::state::table::TableReplicationPhase;
 use etl::store::schema::SchemaStore;
 use etl::store::state::StateStore;
+use etl::store::cleanup::CleanupStore;
 use etl::types::{TableId, TableSchema};
 
 // Represents data stored in our in-memory cache for fast access
@@ -325,6 +326,26 @@ impl StateStore for CustomStore {
             let c = Self::ensure_cache_slot(&mut cache, source_table_id);
             c.mapping = Some(destination_table_id);
         }
+        Ok(())
+    }
+}
+
+// Cleanup primitives spanning both schema and state storage
+impl CleanupStore for CustomStore {
+    // Delete everything ETL tracks for a specific table in a consistent, idempotent way
+    async fn cleanup_table_state(&self, table_id: TableId) -> EtlResult<()> {
+        {
+            // Remove from persistent storage first
+            let mut persistent = self.persistent.lock().await;
+            persistent.remove(&table_id);
+        }
+
+        {
+            // Then clear the cache to maintain consistency
+            let mut cache = self.cache.lock().await;
+            cache.remove(&table_id);
+        }
+
         Ok(())
     }
 }

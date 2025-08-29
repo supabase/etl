@@ -23,6 +23,7 @@ The ETL core implements a pipeline architecture that replicates data from Postgr
   to the apply worker
 - **State Store**: Stores the state of the pipeline
 - **Schema Store**: Stores the table schemas of the tables involved in the replication
+- **Cleanup Store**: Provides atomic cleanup primitives that delete stored state, schema, and mappings for tables removed from a publication (does not touch destination data)
 
 ### Information Flow
 
@@ -69,3 +70,7 @@ graph TB
     TSWorker2 <--> StateStore
     TSWorker2 <--> SchemaStore
 ```
+
+The same concrete store type implements all store traits. In addition to `StateStore` and `SchemaStore`, stores also implement `CleanupStore`, 
+which the pipeline uses to purge internal state when a table is removed from the publication. This cleanup does not drop or modify any destination tables; 
+it only deletes ETL's internal state, schemas, and table mappings for the removed table.

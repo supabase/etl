@@ -81,6 +81,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 For tutorials and deeper guidance, see the [Documentation](https://supabase.github.io/etl) or jump into the [examples](etl-examples/README.md).
 
+Stores implement cleanup primitives used by the pipeline to safely purge ETL-managed state (schemas, mappings, replication progress) when a table is removed from a publication. Cleanup never drops or modifies destination tables.
+
 ## Destinations
 
 ETL is designed to be extensible. You can implement your own destinations to send data to any destination you like, however it comes with a few built in destinations:
