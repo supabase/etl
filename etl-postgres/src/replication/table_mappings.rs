@@ -19,7 +19,7 @@ pub async fn store_table_mapping(
         values ($1, $2, $3)
         on conflict (pipeline_id, source_table_id)
         do update set 
-            destination_table_id = EXCLUDED.destination_table_id,
+            destination_table_id = excluded.destination_table_id,
             updated_at = now()
         "#,
     )

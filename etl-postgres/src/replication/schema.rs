@@ -148,14 +148,14 @@ pub async fn store_table_schema(
     // Insert or update table schema record
     let table_schema_id: i64 = sqlx::query(
         r#"
-        INSERT INTO etl.table_schemas (pipeline_id, table_id, schema_name, table_name)
-        VALUES ($1, $2, $3, $4)
-        ON CONFLICT (pipeline_id, table_id)
-        DO UPDATE SET 
-            schema_name = EXCLUDED.schema_name,
-            table_name = EXCLUDED.table_name,
+        insert into etl.table_schemas (pipeline_id, table_id, schema_name, table_name)
+        values ($1, $2, $3, $4)
+        on conflict (pipeline_id, table_id)
+        do update set 
+            schema_name = excluded.schema_name,
+            table_name = excluded.table_name,
             updated_at = now()
-        RETURNING id
+        returning id
         "#,
     )
     .bind(pipeline_id)
@@ -167,7 +167,7 @@ pub async fn store_table_schema(
     .get(0);
 
     // Delete existing columns for this table schema to handle schema changes
-    sqlx::query("DELETE FROM etl.table_columns WHERE table_schema_id = $1")
+    sqlx::query("delete from etl.table_columns where table_schema_id = $1")
         .bind(table_schema_id)
         .execute(&mut *tx)
         .await?;
@@ -178,9 +178,9 @@ pub async fn store_table_schema(
 
         sqlx::query(
             r#"
-            INSERT INTO etl.table_columns 
+            insert into etl.table_columns 
             (table_schema_id, column_name, column_type, type_modifier, nullable, primary_key, column_order)
-            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            values ($1, $2, $3, $4, $5, $6, $7)
             "#,
         )
         .bind(table_schema_id)
@@ -209,7 +209,7 @@ pub async fn load_table_schemas(
 ) -> Result<Vec<TableSchema>, sqlx::Error> {
     let rows = sqlx::query(
         r#"
-        SELECT
+        select
             ts.table_id,
             ts.schema_name,
             ts.table_name,
@@ -219,10 +219,10 @@ pub async fn load_table_schemas(
             tc.nullable,
             tc.primary_key,
             tc.column_order
-        FROM etl.table_schemas ts
-        INNER JOIN etl.table_columns tc ON ts.id = tc.table_schema_id
-        WHERE ts.pipeline_id = $1
-        ORDER BY ts.table_id, tc.column_order
+        from etl.table_schemas ts
+        inner join etl.table_columns tc on ts.id = tc.table_schema_id
+        where ts.pipeline_id = $1
+        order by ts.table_id, tc.column_order
         "#,
     )
     .bind(pipeline_id)

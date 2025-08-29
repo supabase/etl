@@ -46,7 +46,7 @@ pub async fn get_table_name_from_oid(
     let query = "
         select n.nspname as schema_name, c.relname as table_name
         from pg_class c
-        join pg_namespace n ON c.relnamespace = n.oid
+        join pg_namespace n on c.relnamespace = n.oid
         where c.oid = $1
     ";
 
