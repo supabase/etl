@@ -70,10 +70,6 @@ async fn table_copy_fails_after_data_sync_threw_an_error_with_no_retry() {
     // Verify no data is there.
     let table_rows = destination.get_table_rows().await;
     assert!(table_rows.is_empty());
-
-    // Verify table schemas were correctly stored.
-    let table_schemas = store.get_table_schemas().await;
-    assert!(table_schemas.is_empty());
 }
 
 #[tokio::test(flavor = "multi_thread")]

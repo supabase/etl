@@ -2,6 +2,7 @@ use crate::error::{ErrorKind, EtlError, EtlResult};
 use crate::utils::tokio::MakeRustlsConnect;
 use crate::{bail, etl_error};
 use etl_config::shared::{IntoConnectOptions, PgConnectionConfig};
+use etl_postgres::replication::extract_server_version;
 use etl_postgres::types::convert_type_oid_to_type;
 use etl_postgres::types::{ColumnSchema, TableId, TableName, TableSchema};
 use pg_escape::{quote_identifier, quote_literal};
@@ -10,7 +11,9 @@ use rustls::ClientConfig;
 use std::collections::HashMap;
 use std::fmt;
 use std::io::BufReader;
+use std::num::NonZeroI32;
 use std::sync::Arc;
+
 use tokio_postgres::error::SqlState;
 use tokio_postgres::tls::MakeTlsConnect;
 use tokio_postgres::{
@@ -163,6 +166,7 @@ impl PgReplicationSlotTransaction {
 #[derive(Debug, Clone)]
 pub struct PgReplicationClient {
     client: Arc<Client>,
+    server_version: Option<NonZeroI32>,
 }
 
 impl PgReplicationClient {
@@ -185,12 +189,18 @@ impl PgReplicationClient {
         config.replication_mode(ReplicationMode::Logical);
 
         let (client, connection) = config.connect(NoTls).await?;
+
+        let server_version = connection
+            .parameter("server_version")
+            .and_then(extract_server_version);
+
         spawn_postgres_connection::<NoTls>(connection);
 
         info!("successfully connected to postgres without tls");
 
         Ok(PgReplicationClient {
             client: Arc::new(client),
+            server_version,
         })
     }
 
@@ -216,12 +226,18 @@ impl PgReplicationClient {
             .with_no_client_auth();
 
         let (client, connection) = config.connect(MakeRustlsConnect::new(tls_config)).await?;
+
+        let server_version = connection
+            .parameter("server_version")
+            .and_then(extract_server_version);
+
         spawn_postgres_connection::<MakeRustlsConnect>(connection);
 
         info!("successfully connected to postgres with tls");
 
         Ok(PgReplicationClient {
             client: Arc::new(client),
+            server_version,
         })
     }
 
@@ -363,12 +379,19 @@ impl PgReplicationClient {
     }
 
     /// Retrieves the names of all tables included in a publication.
+    ///
+    /// Note: This excludes parent partitioned tables since they contain no data
+    /// and should not be processed. Only child partitions and regular tables are returned.
     pub async fn get_publication_table_names(
         &self,
         publication_name: &str,
     ) -> EtlResult<Vec<TableName>> {
         let publication_query = format!(
-            "select schemaname, tablename from pg_publication_tables where pubname = {};",
+            "select pt.schemaname, pt.tablename from pg_publication_tables pt
+         join pg_class c on c.relname = pt.tablename
+         join pg_namespace n on n.oid = c.relnamespace AND n.nspname = pt.schemaname
+         where pt.pubname = {}
+         and c.relkind != 'p'", /* Exclude parent partitioned tables */
             quote_literal(publication_name)
         );
 
@@ -390,6 +413,10 @@ impl PgReplicationClient {
     }
 
     /// Retrieves the OIDs of all tables included in a publication.
+    ///
+    /// Note: This excludes parent partitioned tables (relkind = 'p') since they
+    /// contain no data and should not be processed. Only child partitions and
+    /// regular tables are returned.
     pub async fn get_publication_table_ids(
         &self,
         publication_name: &str,
@@ -398,7 +425,8 @@ impl PgReplicationClient {
             "select c.oid from pg_publication_tables pt 
          join pg_class c on c.relname = pt.tablename 
          join pg_namespace n on n.oid = c.relnamespace AND n.nspname = pt.schemaname 
-         where pt.pubname = {};",
+         where pt.pubname = {}
+         and c.relkind != 'p'", /* Exclude parent partitioned tables */
             quote_literal(publication_name)
         );
 
@@ -626,35 +654,125 @@ impl PgReplicationClient {
         publication: Option<&str>,
     ) -> EtlResult<Vec<ColumnSchema>> {
         let (pub_cte, pub_pred) = if let Some(publication) = publication {
-            (
-                format!(
-                    "with pub_attrs as (
-                        select unnest(r.prattrs)
-                        from pg_publication_rel r
-                        left join pg_publication p on r.prpubid = p.oid
-                        where p.pubname = {publication}
-                        and r.prrelid = {table_id}
-                    )",
-                    publication = quote_literal(publication),
-                ),
-                "and (
-                    case (select count(*) from pub_attrs)
-                    when 0 then true
-                    else (a.attnum in (select * from pub_attrs))
-                    end
-                )",
-            )
+            if let Some(server_version) = self.server_version
+                && server_version.get() >= 150000
+            {
+                (
+                    format!(
+                        "with pub_attrs as (
+                            select unnest(r.prattrs)
+                            from pg_publication_rel r
+                            left join pg_publication p on r.prpubid = p.oid
+                            where p.pubname = {publication}
+                            and r.prrelid = {table_id}
+                        )",
+                        publication = quote_literal(publication),
+                    ),
+                    "and (
+                        case (select count(*) from pub_attrs)
+                        when 0 then true
+                        else (a.attnum in (select * from pub_attrs))
+                        end
+                    )"
+                    .to_string(),
+                )
+            } else {
+                // Postgres 14 or earlier or unknown, fallback to no column-level filtering
+                (
+                    format!(
+                        "with pub_table as (
+                            select 1 as exists_in_pub
+                            from pg_publication_rel r
+                            left join pg_publication p on r.prpubid = p.oid
+                            where p.pubname = {publication}
+                            and r.prrelid = {table_id}
+                        )",
+                        publication = quote_literal(publication),
+                    ),
+                    format!(
+                        "and ((select count(*) from pub_table) > 0 or exists(
+                            -- Also allow if parent table is in publication (for partitioned tables)
+                            select 1 from pg_inherits i
+                            join pg_publication_rel r on r.prrelid = i.inhparent
+                            join pg_publication p on p.oid = r.prpubid
+                            where i.inhrelid = {table_id} and p.pubname = {publication}
+                        ))",
+                        publication = quote_literal(publication),
+                    ),
+                )
+            }
         } else {
-            ("".into(), "")
+            ("".to_string(), "".to_string())
+        };
+
+        let has_pub_cte = !pub_cte.is_empty();
+
+        let cte_prefix = if has_pub_cte {
+            // If there's already a pub_cte WITH clause, add our CTEs to it with a comma
+            format!("{pub_cte},")
+        } else {
+            // If no pub_cte, start our own WITH clause (no need for RECURSIVE)
+            "with ".to_string()
         };
 
         let column_info_query = format!(
-            "{pub_cte}
-            select a.attname,
+            "{cte_prefix}
+            -- Find direct parent of current table (if it's a partition)
+            direct_parent as (
+                select i.inhparent as parent_oid
+                from pg_inherits i 
+                where i.inhrelid = {table_id}::oid
+                limit 1
+            ),
+            -- Get parent table's primary key columns
+            parent_pk_cols as (
+                select array_agg(a.attname order by x.n) as pk_column_names
+                from pg_constraint con
+                join unnest(con.conkey) with ordinality as x(attnum, n) on true
+                join pg_attribute a on a.attrelid = con.conrelid and a.attnum = x.attnum
+                join direct_parent dp on con.conrelid = dp.parent_oid
+                where con.contype = 'p'
+                group by con.conname
+            ),
+            -- Check if current table has a unique index on the parent PK columns
+            partition_has_pk_index as (
+                select case 
+                    when exists (select 1 from direct_parent) 
+                         and exists (select 1 from parent_pk_cols)
+                         and exists (
+                            -- Check if there's a unique, valid index on the parent PK columns
+                            select 1
+                            from pg_index ix
+                            cross join parent_pk_cols pk
+                            where ix.indrelid = {table_id}::oid
+                            and ix.indisunique = true
+                            and ix.indisvalid = true
+                            and array(
+                                select a.attname
+                                from unnest(ix.indkey) with ordinality k(attnum, ord)
+                                join pg_attribute a on a.attrelid = ix.indrelid and a.attnum = k.attnum
+                                where ord <= ix.indnkeyatts  -- exclude INCLUDE columns
+                                order by ord
+                            ) = pk.pk_column_names
+                        ) then true
+                    else false
+                end as has_inherited_pk
+            )
+            SELECT a.attname,
                 a.atttypid,
                 a.atttypmod,
                 a.attnotnull,
-                coalesce(i.indisprimary, false) as primary
+                case 
+                    -- First check for direct primary key
+                    when coalesce(i.indisprimary, false) = true then true
+                    -- Then check for inherited primary key from partitioned table parent
+                    when (select has_inherited_pk from partition_has_pk_index) = true 
+                         and exists (
+                            select 1 from parent_pk_cols pk 
+                            where a.attname = any(pk.pk_column_names)
+                         ) then true
+                    else false
+                end as primary
             from pg_attribute a
             left join pg_index i
                 on a.attrelid = i.indrelid
@@ -696,7 +814,6 @@ impl PgReplicationClient {
 
         Ok(column_schemas)
     }
-
     /// Creates a COPY stream for reading data from a table using its OID.
     ///
     /// The stream will include only the specified columns and use text format.
