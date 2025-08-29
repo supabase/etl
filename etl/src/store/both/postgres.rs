@@ -599,7 +599,8 @@ impl CleanupStore for PostgresStore {
                 )
             })?;
 
-        state::delete_table_replication_state(&mut *tx, self.pipeline_id as i64, table_id).await?;
+        state::delete_replication_state_for_table(&mut *tx, self.pipeline_id as i64, table_id)
+            .await?;
 
         tx.commit().await?;
 

@@ -328,7 +328,7 @@ pub async fn reset_replication_state(
 ///
 /// Removes all replication state records including historical entries
 /// for the specified pipeline. Used during pipeline cleanup.
-pub async fn delete_pipeline_replication_state<'c, E>(
+pub async fn delete_replication_state_for_all_tables<'c, E>(
     executor: E,
     pipeline_id: i64,
 ) -> sqlx::Result<u64>
@@ -349,7 +349,7 @@ where
 }
 
 /// Deletes all replication state entries for a specific table in a pipeline.
-pub async fn delete_table_replication_state<'c, E>(
+pub async fn delete_replication_state_for_table<'c, E>(
     executor: E,
     pipeline_id: i64,
     table_id: TableId,

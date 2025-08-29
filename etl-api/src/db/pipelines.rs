@@ -220,9 +220,10 @@ pub async fn delete_pipeline_cascading(
 
     // Delete state, schema, and table mappings from the source database, only if ETL tables exist.
     if etl_present {
-        let _ =
-            state::delete_pipeline_replication_state(source_txn.deref_mut(), pipeline.id).await?;
-        let _ = schema::delete_pipeline_table_schemas(source_txn.deref_mut(), pipeline.id).await?;
+        let _ = state::delete_replication_state_for_all_tables(source_txn.deref_mut(), pipeline.id)
+            .await?;
+        let _ = schema::delete_table_schemas_for_all_tables(source_txn.deref_mut(), pipeline.id)
+            .await?;
         let _ = table_mappings::delete_pipeline_table_mappings(source_txn.deref_mut(), pipeline.id)
             .await?;
     }

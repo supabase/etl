@@ -251,7 +251,7 @@ pub async fn load_table_schemas(
 ///
 /// Removes all table schema records and associated columns for the specified
 /// pipeline, using CASCADE delete for automatic cleanup of related column records.
-pub async fn delete_pipeline_table_schemas<'c, E>(
+pub async fn delete_table_schemas_for_all_tables<'c, E>(
     executor: E,
     pipeline_id: i64,
 ) -> Result<u64, sqlx::Error>

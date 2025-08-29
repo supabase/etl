@@ -1,9 +1,7 @@
 use std::{collections::HashMap, fmt, sync::Arc};
 
 use etl_postgres::types::{TableId, TableSchema};
-use tokio::{
-    sync::{Notify, RwLock},
-};
+use tokio::sync::{Notify, RwLock};
 
 use crate::error::{ErrorKind, EtlError, EtlResult};
 use crate::etl_error;
