@@ -2,7 +2,6 @@ use std::{collections::HashMap, fmt, sync::Arc};
 
 use etl_postgres::types::{TableId, TableSchema};
 use tokio::{
-    runtime::Handle,
     sync::{Notify, RwLock},
 };
 
@@ -296,12 +295,6 @@ impl CleanupStore for NotifyingStore {
 
 impl fmt::Debug for NotifyingStore {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let inner = tokio::task::block_in_place(move || {
-            Handle::current().block_on(async move { self.inner.read().await })
-        });
-        f.debug_struct("NotifyingStateStore")
-            .field("table_replication_states", &inner.table_replication_states)
-            .field("table_schemas", &inner.table_schemas)
-            .finish()
+        f.debug_struct("NotifyingStore").finish()
     }
 }
