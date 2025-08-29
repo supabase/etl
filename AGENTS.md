@@ -19,6 +19,7 @@
 - Link types and methods as [`Type`], [`Type::method`].
 - Keep wording concise, correct, and punctuated; reword for clarity while preserving intent.
 - No code examples; include private helpers for maintainers; apply to modules, types, traits, impls, and functions.
+- Normal comments, should always finish with `.`.
 
 ## Rust Tests Execution
 - If output shows "0 passed; 0 failed; 0 ignored; n filtered out", tests did not run; treat as failure.

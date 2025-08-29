@@ -146,7 +146,7 @@ async fn removed_tables_cleanup_keeps_destination_data() {
 
     let database = spawn_source_database().await;
 
-    // Create two tables in the test schema and a publication for that schema
+    // Create two tables in the test schema and a publication for that schema.
     let table_1 = test_table_name("table_1");
     let table_1_id = database
         .create_table(table_1.clone(), true, &[("value", "int4 not null")])
@@ -176,7 +176,7 @@ async fn removed_tables_cleanup_keeps_destination_data() {
         destination.clone(),
     );
 
-    // Wait for initial copy completion (SyncDone) for both tables
+    // Wait for initial copy completion (SyncDone) for both tables.
     let t1_done = store
         .notify_on_table_state(table_1_id, TableReplicationPhaseType::SyncDone)
         .await;
@@ -189,16 +189,16 @@ async fn removed_tables_cleanup_keeps_destination_data() {
     t1_done.notified().await;
     t2_done.notified().await;
 
-    // Insert one row in each table and wait for two insert events
+    // Insert one row in each table and wait for two insert events.
     let inserts_notify = destination
         .wait_for_events_count(vec![(EventType::Insert, 2)])
         .await;
     database
-        .insert_values(table_1.clone(), &["value"], &[&1_i32])
+        .insert_values(table_1.clone(), &["value"], &[&1])
         .await
         .unwrap();
     database
-        .insert_values(table_2.clone(), &["value"], &[&2_i32])
+        .insert_values(table_2.clone(), &["value"], &[&1])
         .await
         .unwrap();
     inserts_notify.notified().await;
@@ -229,25 +229,39 @@ async fn removed_tables_cleanup_keeps_destination_data() {
 
     pipeline.start().await.unwrap();
 
-    // Give the pipeline a brief moment to initialize and cleanup
-    sleep(Duration::from_millis(300)).await;
+    // Insert one row in table_1 and wait for it. (We wait for 3 inserts since it keeps the previous
+    // ones).
+    let inserts_notify = destination
+        .wait_for_events_count(vec![(EventType::Insert, 3)])
+        .await;
+
+    database
+        .insert_values(table_1.clone(), &["value"], &[&2])
+        .await
+        .unwrap();
+
+    inserts_notify.notified().await;
+
+    pipeline.shutdown_and_wait().await.unwrap();
 
     // Assert that table_2 state is gone but destination data remains
     let states = store.get_table_replication_states().await;
-    assert!(states.get(&table_2_id).is_none());
-    assert!(states.get(&table_1_id).is_some());
+    assert!(states.contains_key(&table_1_id));
+    assert!(!states.contains_key(&table_2_id));
 
     // Destination should still have the previously ingested insert event for the dropped table
     let events = destination.get_events().await;
     let grouped = group_events_by_type_and_table_id(&events);
-    let table2_inserts = grouped
+    let table_1_inserts = grouped
+        .get(&(EventType::Insert, table_1_id))
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(table_1_inserts.len(), 2);
+    let table_2_inserts = grouped
         .get(&(EventType::Insert, table_2_id))
         .cloned()
         .unwrap_or_default();
-    assert_eq!(table2_inserts.len(), 1);
-
-    // Cleanup
-    pipeline.shutdown_and_wait().await.unwrap();
+    assert_eq!(table_2_inserts.len(), 1);
 }
 
 #[tokio::test(flavor = "multi_thread")]
