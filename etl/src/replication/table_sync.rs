@@ -133,27 +133,29 @@ where
     // In case the phase is any other phase, we will return an error.
     let start_lsn = match phase_type {
         TableReplicationPhaseType::Init | TableReplicationPhaseType::DataSync => {
-            if phase_type == TableReplicationPhaseType::DataSync {
-                // If we are in `DataSync` it means we failed during table copying, so we want to delete the
-                // existing slot before continuing.
-                if let Err(err) = replication_client.delete_slot(&slot_name).await {
-                    // If the slot is not found, we are safe to continue, for any other error, we bail.
-                    if err.kind() != ErrorKind::ReplicationSlotNotFound {
-                        return Err(err);
-                    }
+            // When we are in these states, it could be for the following reasons:
+            // - `Init` -> we can be in this state because we just started replicating the table or the state
+            //  was reset. In this case we don't want to make assumptions about the previous state, so we
+            //  just try to delete the slot and truncate the table.
+            // - `DataSync` -> we can be in this state because we failed during data sync, meaning that table
+            //  copy failed. In this case, we want to delete the slot and truncate the table.
+            if let Err(err) = replication_client.delete_slot(&slot_name).await {
+                // If the slot is not found, we are safe to continue, for any other error, we bail.
+                if err.kind() != ErrorKind::ReplicationSlotNotFound {
+                    return Err(err);
                 }
-
-                // We must truncate the destination table before starting a copy to avoid data inconsistencies.
-                // Example scenario:
-                // 1. The source table has a single row (id = 1) that is copied to the destination during the initial copy.
-                // 2. Before the table’s phase is set to `FinishedCopy`, the process crashes.
-                // 3. While down, the source deletes row id = 1 and inserts row id = 2.
-                // 4. When restarted, the process sees the table in the ` DataSync ` state, deletes the slot, and copies again.
-                // 5. This time, only row id = 2 is copied, but row id = 1 still exists in the destination.
-                // Result: the destination has two rows (id = 1 and id = 2) instead of only one (id = 2).
-                // Fix: Always truncate the destination table before starting a copy.
-                destination.truncate_table(table_id).await?;
             }
+
+            // We must truncate the destination table before starting a copy to avoid data inconsistencies.
+            // Example scenario:
+            // 1. The source table has a single row (id = 1) that is copied to the destination during the initial copy.
+            // 2. Before the table’s phase is set to `FinishedCopy`, the process crashes.
+            // 3. While down, the source deletes row id = 1 and inserts row id = 2.
+            // 4. When restarted, the process sees the table in the ` DataSync ` state, deletes the slot, and copies again.
+            // 5. This time, only row id = 2 is copied, but row id = 1 still exists in the destination.
+            // Result: the destination has two rows (id = 1 and id = 2) instead of only one (id = 2).
+            // Fix: Always truncate the destination table before starting a copy.
+            destination.truncate_table(table_id).await?;
 
             // We are ready to start copying table data, and we update the state accordingly.
             info!("starting data copy for table {}", table_id);
