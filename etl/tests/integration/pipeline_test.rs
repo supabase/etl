@@ -177,17 +177,17 @@ async fn removed_tables_cleanup_keeps_destination_data() {
     );
 
     // Wait for initial copy completion (SyncDone) for both tables.
-    let t1_done = store
+    let table_1_done = store
         .notify_on_table_state(table_1_id, TableReplicationPhaseType::SyncDone)
         .await;
-    let t2_done = store
+    let table_2_done = store
         .notify_on_table_state(table_2_id, TableReplicationPhaseType::SyncDone)
         .await;
 
     pipeline.start().await.unwrap();
 
-    t1_done.notified().await;
-    t2_done.notified().await;
+    table_1_done.notified().await;
+    table_2_done.notified().await;
 
     // Insert one row in each table and wait for two insert events.
     let inserts_notify = destination
@@ -218,6 +218,13 @@ async fn removed_tables_cleanup_keeps_destination_data() {
         .await
         .unwrap();
 
+    // Create table_3 which is going to be added to the publication.
+    let table_3 = test_table_name("table_3");
+    let table_3_id = database
+        .create_table(table_3.clone(), true, &[("value", "int4 not null")])
+        .await
+        .unwrap();
+
     // Restart pipeline; it should detect table_2 is gone and purge its state
     let mut pipeline = create_pipeline(
         &database.config,
@@ -227,16 +234,27 @@ async fn removed_tables_cleanup_keeps_destination_data() {
         destination.clone(),
     );
 
+    // Wait for the table_3 to be done.
+    let table_3_done = store
+        .notify_on_table_state(table_3_id, TableReplicationPhaseType::SyncDone)
+        .await;
+
     pipeline.start().await.unwrap();
 
-    // Insert one row in table_1 and wait for it. (We wait for 3 inserts since it keeps the previous
+    table_3_done.notified().await;
+
+    // Insert one row in table_1 and wait for it. (We wait for 4 inserts since it keeps the previous
     // ones).
     let inserts_notify = destination
-        .wait_for_events_count(vec![(EventType::Insert, 3)])
+        .wait_for_events_count(vec![(EventType::Insert, 4)])
         .await;
 
     database
         .insert_values(table_1.clone(), &["value"], &[&2])
+        .await
+        .unwrap();
+    database
+        .insert_values(table_3.clone(), &["value"], &[&1])
         .await
         .unwrap();
 
@@ -248,6 +266,7 @@ async fn removed_tables_cleanup_keeps_destination_data() {
     let states = store.get_table_replication_states().await;
     assert!(states.contains_key(&table_1_id));
     assert!(!states.contains_key(&table_2_id));
+    assert!(states.contains_key(&table_3_id));
 
     // Destination should still have the previously ingested insert event for the dropped table
     let events = destination.get_events().await;
@@ -262,6 +281,11 @@ async fn removed_tables_cleanup_keeps_destination_data() {
         .cloned()
         .unwrap_or_default();
     assert_eq!(table_2_inserts.len(), 1);
+    let table_3_inserts = grouped
+        .get(&(EventType::Insert, table_3_id))
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(table_3_inserts.len(), 1);
 }
 
 #[tokio::test(flavor = "multi_thread")]
