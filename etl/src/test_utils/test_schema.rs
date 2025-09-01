@@ -140,12 +140,12 @@ pub async fn create_partitioned_table<G: GenericClient>(
     partition_specs: &[(&str, &str)], // (partition_name, partition_constraint)
 ) -> Result<(TableId, Vec<TableId>), tokio_postgres::Error> {
     let create_parent_query = format!(
-        "CREATE TABLE {} (
+        "create table {} (
             id bigserial,
             data text NOT NULL,
             partition_key integer NOT NULL,
-            PRIMARY KEY (id, partition_key)
-        ) PARTITION BY RANGE (partition_key)",
+            primary key (id, partition_key)
+        ) partition by range (partition_key)",
         table_name.as_quoted_identifier()
     );
 
@@ -156,8 +156,8 @@ pub async fn create_partitioned_table<G: GenericClient>(
         .as_ref()
         .unwrap()
         .query_one(
-            "SELECT c.oid FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace 
-             WHERE n.nspname = $1 AND c.relname = $2",
+            "select c.oid from pg_class c join pg_namespace n on n.oid = c.relnamespace 
+             where n.nspname = $1 and c.relname = $2",
             &[&table_name.schema, &table_name.name],
         )
         .await?;
@@ -172,7 +172,7 @@ pub async fn create_partitioned_table<G: GenericClient>(
         );
 
         let create_partition_query = format!(
-            "CREATE TABLE {} PARTITION OF {} FOR VALUES {}",
+            "create table {} partition of {} for values {}",
             partition_table_name.as_quoted_identifier(),
             table_name.as_quoted_identifier(),
             partition_constraint
@@ -185,8 +185,8 @@ pub async fn create_partitioned_table<G: GenericClient>(
             .as_ref()
             .unwrap()
             .query_one(
-                "SELECT c.oid FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace 
-                 WHERE n.nspname = $1 AND c.relname = $2",
+                "select c.oid from pg_class c join pg_namespace n on n.oid = c.relnamespace 
+                 where n.nspname = $1 and c.relname = $2",
                 &[&partition_table_name.schema, &partition_table_name.name],
             )
             .await?;
