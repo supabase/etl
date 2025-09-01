@@ -2,7 +2,6 @@
 name = "etl-destinations"
 version = "0.1.0"
 edition = "2024"
-autotests = false
 
 [features]
 bigquery = [
@@ -46,13 +45,3 @@ reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 uuid = { workspace = true, features = ["v4"] }
-
-[[test]]
-name = "bigquery_pipeline"
-path = "tests/bigquery_pipeline.rs"
-required-features = ["bigquery"]
-
-[[test]]
-name = "iceberg_pipeline"
-path = "tests/iceberg_pipeline.rs"
-required-features = ["iceberg"]

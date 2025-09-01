@@ -5,6 +5,7 @@ use etl_destinations::iceberg::IcebergClient;
 use etl_telemetry::tracing::init_test_tracing;
 
 use crate::support::lakekeeper::LakekeeperClient;
+
 mod support;
 
 const LAKEKEEPER_URL: &str = "http://localhost:8182";
