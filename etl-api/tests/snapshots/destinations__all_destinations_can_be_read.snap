@@ -1,0 +1,15 @@
+---
+source: etl-api/tests/destinations.rs
+expression: destination.config
+---
+BigQuery {
+    project_id: "project-id",
+    dataset_id: "dataset-id",
+    service_account_key: SerializableSecretString(
+        SecretBox<str>([REDACTED]),
+    ),
+    max_staleness_mins: None,
+    max_concurrent_streams: Some(
+        1,
+    ),
+}

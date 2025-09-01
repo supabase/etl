@@ -22,16 +22,13 @@ use reqwest::StatusCode;
 use sqlx::PgPool;
 use sqlx::postgres::types::Oid;
 
-mod support;
-
-// Pipeline config helpers moved to `support::mocks::pipelines`.
 use crate::support::mocks::pipelines::{
     ConfigUpdateType, create_pipeline_with_config, new_pipeline_config,
     partially_updated_optional_pipeline_config, updated_optional_pipeline_config,
     updated_pipeline_config,
 };
 
-// Pipeline creation helper is provided by `support::mocks::pipelines::create_pipeline_with_config`.
+mod support;
 
 /// Creates a basic pipeline setup for tests that don't need source databases.
 async fn setup_basic_pipeline() -> (TestApp, String, i64, i64, i64) {

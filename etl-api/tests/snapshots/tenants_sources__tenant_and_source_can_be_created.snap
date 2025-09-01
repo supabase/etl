@@ -1,0 +1,10 @@
+---
+source: etl-api/tests/tenants_sources.rs
+expression: response.config
+---
+StrippedApiSourceConfig {
+    host: "localhost",
+    port: 5432,
+    name: "postgres",
+    username: "postgres",
+}

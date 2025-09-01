@@ -20,10 +20,6 @@ use crate::{
 
 mod support;
 
-// Destination helpers are provided by `support::mocks::destinations`.
-
-// Creation helpers moved to `support::mocks::destinations` to avoid cross-test deps.
-
 #[tokio::test(flavor = "multi_thread")]
 async fn destination_can_be_created() {
     init_test_tracing();

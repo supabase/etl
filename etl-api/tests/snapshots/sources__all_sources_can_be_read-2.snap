@@ -1,0 +1,10 @@
+---
+source: etl-api/tests/sources.rs
+expression: source.config
+---
+StrippedApiSourceConfig {
+    host: "example.com",
+    port: 2345,
+    name: "sergtsop",
+    username: "sergtsop",
+}

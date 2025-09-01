@@ -1,3 +1,11 @@
+use etl_api::routes::pipelines::{CreatePipelineRequest, CreatePipelineResponse};
+use etl_api::routes::sources::{
+    CreateSourceRequest, CreateSourceResponse, ReadSourceResponse, ReadSourcesResponse,
+    UpdateSourceRequest,
+};
+use etl_telemetry::tracing::init_test_tracing;
+use reqwest::StatusCode;
+
 use crate::support::mocks::create_default_image;
 use crate::support::mocks::destinations::create_destination;
 use crate::support::mocks::pipelines::new_pipeline_config;
@@ -8,19 +16,7 @@ use crate::support::mocks::sources::{
 use crate::support::mocks::tenants::create_tenant;
 use crate::support::test_app::spawn_test_app;
 
-use etl_api::routes::pipelines::{CreatePipelineRequest, CreatePipelineResponse};
-use etl_api::routes::sources::{
-    CreateSourceRequest, CreateSourceResponse, ReadSourceResponse, ReadSourcesResponse,
-    UpdateSourceRequest,
-};
-use etl_telemetry::tracing::init_test_tracing;
-use reqwest::StatusCode;
-
 mod support;
-
-// Source helpers are provided by `support::mocks::sources`.
-
-// Creation helpers moved to `support::mocks::sources` to avoid cross-test deps.
 
 #[tokio::test(flavor = "multi_thread")]
 async fn source_can_be_created() {
