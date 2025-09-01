@@ -85,7 +85,7 @@ jobs:
       - name: Run tests
         run: |
           cargo test --workspace --no-fail-fast \
-            --all-features --exclude etl-destinations
+            --all-features -- --skip integration::bigquery_test
 
   test-full:
     name: Test Full
