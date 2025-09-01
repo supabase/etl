@@ -1,3 +1,5 @@
+#![cfg(feature = "test-utils")]
+
 use etl::destination::memory::MemoryDestination;
 use etl::error::ErrorKind;
 use etl::state::table::TableReplicationPhaseType;

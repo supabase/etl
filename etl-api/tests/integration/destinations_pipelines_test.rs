@@ -10,14 +10,14 @@ use reqwest::StatusCode;
 use crate::common::database::{create_test_source_database, run_etl_migrations_on_source_database};
 use crate::{
     common::test_app::spawn_test_app,
-    integration::destination_test::{
+    common::mocks::create_default_image,
+    common::mocks::destinations::{
         create_destination, new_destination_config, new_name, updated_destination_config,
         updated_name,
     },
-    integration::images_test::create_default_image,
-    integration::pipelines_test::{new_pipeline_config, updated_pipeline_config},
-    integration::sources_test::create_source,
-    integration::tenants_test::{create_tenant, create_tenant_with_id_and_name},
+    common::mocks::pipelines::{new_pipeline_config, updated_pipeline_config},
+    common::mocks::sources::create_source,
+    common::mocks::tenants::{create_tenant, create_tenant_with_id_and_name},
 };
 
 #[tokio::test(flavor = "multi_thread")]

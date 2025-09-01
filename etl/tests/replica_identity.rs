@@ -1,3 +1,5 @@
+#![cfg(feature = "test-utils")]
+
 use etl::destination::memory::MemoryDestination;
 use etl::state::table::TableReplicationPhaseType;
 use etl::test_utils::database::{spawn_source_database, test_table_name};

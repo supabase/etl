@@ -52,11 +52,26 @@ etl-telemetry = { workspace = true }
 rand = { workspace = true, features = ["thread_rng"] }
 
 [[test]]
-name = "integration"
-path = "tests/integration/mod.rs"
+name = "pipeline"
+path = "tests/pipeline.rs"
 required-features = ["test-utils"]
 
 [[test]]
-name = "failpoints"
-path = "tests/failpoints/mod.rs"
+name = "pipeline_with_failures"
+path = "tests/pipeline_with_failures.rs"
 required-features = ["failpoints", "test-utils"]
+
+[[test]]
+name = "postgres_store"
+path = "tests/postgres_store.rs"
+required-features = ["test-utils"]
+
+[[test]]
+name = "replica_identity"
+path = "tests/replica_identity.rs"
+required-features = ["test-utils"]
+
+[[test]]
+name = "replication"
+path = "tests/replication.rs"
+required-features = ["test-utils"]

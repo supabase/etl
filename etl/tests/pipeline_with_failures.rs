@@ -1,3 +1,5 @@
+#![cfg(all(feature = "test-utils", feature = "failpoints"))]
+
 use etl::destination::memory::MemoryDestination;
 use etl::error::ErrorKind;
 use etl::failpoints::{

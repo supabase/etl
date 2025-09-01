@@ -1,10 +1,9 @@
-use crate::{
-    common::test_app::{TestApp, spawn_test_app},
-    integration::{
-        destination_test::create_destination, images_test::create_default_image,
-        pipelines_test::new_pipeline_config, tenants_test::create_tenant,
-    },
-};
+use crate::common::mocks::create_default_image;
+use crate::common::mocks::destinations::create_destination;
+use crate::common::mocks::pipelines::new_pipeline_config;
+use crate::common::mocks::sources::{create_source, create_source_with_config};
+use crate::common::mocks::tenants::create_tenant;
+use crate::common::test_app::{TestApp, spawn_test_app};
 use etl_api::configs::source::FullApiSourceConfig;
 use etl_api::routes::pipelines::{CreatePipelineRequest, CreatePipelineResponse};
 use etl_api::routes::sources::{
@@ -43,24 +42,7 @@ fn updated_source_config() -> FullApiSourceConfig {
     }
 }
 
-pub async fn create_source(app: &TestApp, tenant_id: &str) -> i64 {
-    create_source_with_config(app, tenant_id, new_name(), new_source_config()).await
-}
-
-pub async fn create_source_with_config(
-    app: &TestApp,
-    tenant_id: &str,
-    name: String,
-    config: FullApiSourceConfig,
-) -> i64 {
-    let source = CreateSourceRequest { name, config };
-    let response = app.create_source(tenant_id, &source).await;
-    let response: CreateSourceResponse = response
-        .json()
-        .await
-        .expect("failed to deserialize response");
-    response.id
-}
+// Creation helpers moved to `common::mocks::sources` to avoid cross-test deps.
 
 #[tokio::test(flavor = "multi_thread")]
 async fn source_can_be_created() {

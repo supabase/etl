@@ -1,3 +1,5 @@
+#![cfg(feature = "bigquery")]
+
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use etl::config::BatchConfig;
 use etl::error::ErrorKind;

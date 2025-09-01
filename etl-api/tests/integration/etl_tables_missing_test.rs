@@ -9,9 +9,9 @@ use sqlx::PgPool;
 
 use crate::common::database::create_test_source_database;
 use crate::common::test_app::{TestApp, spawn_test_app};
-use crate::integration::destination_test::create_destination;
-use crate::integration::images_test::create_default_image;
-use crate::integration::tenants_test::create_tenant;
+use crate::common::mocks::destinations::create_destination;
+use crate::common::mocks::create_default_image;
+use crate::common::mocks::tenants::create_tenant;
 
 async fn create_pipeline_with_unmigrated_source_db(
     app: &TestApp,
@@ -25,7 +25,7 @@ async fn create_pipeline_with_unmigrated_source_db(
     let req = CreatePipelineRequest {
         source_id,
         destination_id,
-        config: crate::integration::pipelines_test::new_pipeline_config(),
+        config: crate::common::mocks::pipelines::new_pipeline_config(),
     };
 
     let response = app.create_pipeline(tenant_id, &req).await;

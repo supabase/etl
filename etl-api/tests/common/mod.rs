@@ -17,3 +17,4 @@
 pub mod database;
 pub mod k8s_client;
 pub mod test_app;
+pub mod mocks;

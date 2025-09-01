@@ -1,3 +1,5 @@
+#![cfg(feature = "iceberg")]
+
 use etl::types::{ColumnSchema, TableId, TableName, TableSchema, Type};
 use etl_destinations::iceberg::IcebergClient;
 use etl_telemetry::tracing::init_test_tracing;

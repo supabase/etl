@@ -1,11 +1,10 @@
 use crate::common::database::{create_test_source_database, run_etl_migrations_on_source_database};
 use crate::{
     common::test_app::{TestApp, spawn_test_app},
-    integration::destination_test::create_destination,
-    integration::images_test::create_default_image,
-    integration::sources_test::create_source,
-    integration::tenants_test::create_tenant,
-    integration::tenants_test::create_tenant_with_id_and_name,
+    common::mocks::create_default_image,
+    common::mocks::destinations::create_destination,
+    common::mocks::sources::create_source,
+    common::mocks::tenants::{create_tenant, create_tenant_with_id_and_name},
 };
 use etl_api::configs::pipeline::{FullApiPipelineConfig, PartialApiPipelineConfig};
 use etl_api::routes::pipelines::{
@@ -22,74 +21,11 @@ use reqwest::StatusCode;
 use sqlx::PgPool;
 use sqlx::postgres::types::Oid;
 
-pub fn new_pipeline_config() -> FullApiPipelineConfig {
-    FullApiPipelineConfig {
-        publication_name: "publication".to_owned(),
-        batch: Some(BatchConfig {
-            max_size: 1000,
-            max_fill_ms: 5,
-        }),
-        table_error_retry_delay_ms: Some(10000),
-        max_table_sync_workers: Some(2),
-    }
-}
-
-pub fn updated_pipeline_config() -> FullApiPipelineConfig {
-    FullApiPipelineConfig {
-        publication_name: "updated_publication".to_owned(),
-        batch: Some(BatchConfig {
-            max_size: 2000,
-            max_fill_ms: 10,
-        }),
-        table_error_retry_delay_ms: Some(20000),
-        max_table_sync_workers: Some(4),
-    }
-}
-
-pub enum ConfigUpdateType {
-    Batch(BatchConfig),
-    TableErrorRetryDelayMs(u64),
-    MaxTableSyncWorkers(u16),
-}
-
-pub fn partially_updated_optional_pipeline_config(
-    update: ConfigUpdateType,
-) -> PartialApiPipelineConfig {
-    match update {
-        ConfigUpdateType::Batch(batch_config) => PartialApiPipelineConfig {
-            publication_name: None,
-            batch: Some(batch_config),
-            table_error_retry_delay_ms: None,
-            max_table_sync_workers: None,
-        },
-        ConfigUpdateType::TableErrorRetryDelayMs(table_error_retry_delay_ms) => {
-            PartialApiPipelineConfig {
-                publication_name: None,
-                batch: None,
-                table_error_retry_delay_ms: Some(table_error_retry_delay_ms),
-                max_table_sync_workers: None,
-            }
-        }
-        ConfigUpdateType::MaxTableSyncWorkers(n) => PartialApiPipelineConfig {
-            publication_name: None,
-            batch: None,
-            table_error_retry_delay_ms: None,
-            max_table_sync_workers: Some(n),
-        },
-    }
-}
-
-pub fn updated_optional_pipeline_config() -> PartialApiPipelineConfig {
-    PartialApiPipelineConfig {
-        publication_name: None,
-        batch: Some(BatchConfig {
-            max_size: 1_000_000,
-            max_fill_ms: 100,
-        }),
-        table_error_retry_delay_ms: Some(10000),
-        max_table_sync_workers: Some(8),
-    }
-}
+// Pipeline config helpers moved to `common::mocks::pipelines`.
+use crate::common::mocks::pipelines::{
+    new_pipeline_config, partially_updated_optional_pipeline_config, updated_optional_pipeline_config,
+    updated_pipeline_config, ConfigUpdateType,
+};
 
 pub async fn create_pipeline_with_config(
     app: &TestApp,

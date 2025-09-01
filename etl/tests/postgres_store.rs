@@ -1,3 +1,5 @@
+#![cfg(feature = "test-utils")]
+
 use etl::state::table::{RetryPolicy, TableReplicationPhase};
 use etl::store::both::postgres::PostgresStore;
 use etl::store::cleanup::CleanupStore;

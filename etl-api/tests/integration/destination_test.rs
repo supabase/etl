@@ -10,10 +10,11 @@ use reqwest::StatusCode;
 
 use crate::{
     common::test_app::{TestApp, spawn_test_app},
-    integration::{
-        images_test::create_default_image, pipelines_test::new_pipeline_config,
-        sources_test::create_source, tenants_test::create_tenant,
-    },
+    common::mocks::create_default_image,
+    common::mocks::destinations::{create_destination, create_destination_with_config},
+    common::mocks::pipelines::new_pipeline_config,
+    common::mocks::sources::create_source,
+    common::mocks::tenants::create_tenant,
 };
 
 pub fn new_name() -> String {
@@ -46,24 +47,7 @@ pub fn updated_destination_config() -> FullApiDestinationConfig {
     }
 }
 
-pub async fn create_destination_with_config(
-    app: &TestApp,
-    tenant_id: &str,
-    name: String,
-    config: FullApiDestinationConfig,
-) -> i64 {
-    let destination = CreateDestinationRequest { name, config };
-    let response = app.create_destination(tenant_id, &destination).await;
-    let response: CreateDestinationResponse = response
-        .json()
-        .await
-        .expect("failed to deserialize response");
-    response.id
-}
-
-pub async fn create_destination(app: &TestApp, tenant_id: &str) -> i64 {
-    create_destination_with_config(app, tenant_id, new_name(), new_destination_config()).await
-}
+// Creation helpers moved to `common::mocks::destinations` to avoid cross-test deps.
 
 #[tokio::test(flavor = "multi_thread")]
 async fn destination_can_be_created() {

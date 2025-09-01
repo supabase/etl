@@ -1,3 +1,5 @@
+#![cfg(feature = "test-utils")]
+
 use etl::error::ErrorKind;
 use etl::replication::client::PgReplicationClient;
 use etl::test_utils::database::{spawn_source_database, test_table_name};
