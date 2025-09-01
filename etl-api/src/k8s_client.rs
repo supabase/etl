@@ -116,6 +116,7 @@ pub const TRUSTED_ROOT_CERT_KEY_NAME: &str = "trusted_root_certs";
 const PG_PASSWORD_ENV_VAR_NAME: &str = "APP_PIPELINE__PG_CONNECTION__PASSWORD";
 const BIG_QUERY_SA_KEY_ENV_VAR_NAME: &str = "APP_DESTINATION__BIG_QUERY__SERVICE_ACCOUNT_KEY";
 pub const RESTARTED_AT_ANNOTATION_KEY: &str = "etl.supabase.com/restarted-at";
+const REPLICATOR_APP_LABEL: &str = "etl-replicator-app";
 
 impl HttpK8sClient {
     pub async fn new() -> Result<HttpK8sClient, K8sError> {
@@ -330,13 +331,14 @@ impl K8sClient for HttpK8sClient {
             "replicas": 1,
             "selector": {
               "matchLabels": {
-                "app": replicator_app_name
+                "app-name": replicator_app_name,
               }
             },
             "template": {
               "metadata": {
                 "labels": {
-                  "app": replicator_app_name
+                  "app-name": replicator_app_name,
+                  "app": REPLICATOR_APP_LABEL
                 }
               },
               "spec": {
