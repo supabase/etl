@@ -45,7 +45,8 @@ jobs:
   test-partial:
     name: Test Partial
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork == true
+    # Run on forks.
+    if: github.event.pull_request.head.repo.fork == true
     permissions:
       contents: read
     steps:
@@ -90,8 +91,8 @@ jobs:
   test-full:
     name: Test Full
     runs-on: ubuntu-latest
-    # Run on push, and on internal PRs (non-fork) where secrets are available.
-    if: github.event_name != 'pull_request' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork == false)
+    # Run on non forks.
+    if: github.event.pull_request.head.repo.fork == false
     permissions:
       contents: read
       id-token: write
