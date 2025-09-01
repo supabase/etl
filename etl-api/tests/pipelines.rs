@@ -8,7 +8,6 @@ use crate::{
     support::mocks::tenants::{create_tenant, create_tenant_with_id_and_name},
     support::test_app::{TestApp, spawn_test_app},
 };
-use etl_api::configs::pipeline::FullApiPipelineConfig;
 use etl_api::routes::pipelines::{
     CreatePipelineRequest, CreatePipelineResponse, GetPipelineReplicationStatusResponse,
     ReadPipelineResponse, ReadPipelinesResponse, RollbackTableStateRequest,
@@ -27,30 +26,12 @@ mod support;
 
 // Pipeline config helpers moved to `support::mocks::pipelines`.
 use crate::support::mocks::pipelines::{
-    ConfigUpdateType, new_pipeline_config, partially_updated_optional_pipeline_config,
-    updated_optional_pipeline_config, updated_pipeline_config,
+    ConfigUpdateType, create_pipeline_with_config, new_pipeline_config,
+    partially_updated_optional_pipeline_config, updated_optional_pipeline_config,
+    updated_pipeline_config,
 };
 
-pub async fn create_pipeline_with_config(
-    app: &TestApp,
-    tenant_id: &str,
-    source_id: i64,
-    destination_id: i64,
-    config: FullApiPipelineConfig,
-) -> i64 {
-    create_default_image(app).await;
-    let pipeline = CreatePipelineRequest {
-        source_id,
-        destination_id,
-        config,
-    };
-    let response = app.create_pipeline(tenant_id, &pipeline).await;
-    let response: CreatePipelineResponse = response
-        .json()
-        .await
-        .expect("failed to deserialize response");
-    response.id
-}
+// Pipeline creation helper is provided by `support::mocks::pipelines::create_pipeline_with_config`.
 
 /// Creates a basic pipeline setup for tests that don't need source databases.
 async fn setup_basic_pipeline() -> (TestApp, String, i64, i64, i64) {
@@ -242,7 +223,7 @@ async fn pipeline_can_be_created() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn pipeline_with_another_tenants_source_cant_be_created() {
+async fn pipeline_with_another_tenants_source_cannot_be_created() {
     init_test_tracing();
     // Arrange
     let app = spawn_test_app().await;
@@ -275,7 +256,7 @@ async fn pipeline_with_another_tenants_source_cant_be_created() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn pipeline_with_another_tenants_destination_cant_be_created() {
+async fn pipeline_with_another_tenants_destination_cannot_be_created() {
     init_test_tracing();
     // Arrange
     let app = spawn_test_app().await;
@@ -347,7 +328,7 @@ async fn an_existing_pipeline_can_be_read() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_non_existing_pipeline_cant_be_read() {
+async fn a_non_existing_pipeline_cannot_be_read() {
     init_test_tracing();
     // Arrange
     let app = spawn_test_app().await;
@@ -409,7 +390,7 @@ async fn an_existing_pipeline_can_be_updated() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn pipeline_with_another_tenants_source_cant_be_updated() {
+async fn pipeline_with_another_tenants_source_cannot_be_updated() {
     init_test_tracing();
     // Arrange
     let app = spawn_test_app().await;
@@ -457,7 +438,7 @@ async fn pipeline_with_another_tenants_source_cant_be_updated() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn pipeline_with_another_tenants_destination_cant_be_updated() {
+async fn pipeline_with_another_tenants_destination_cannot_be_updated() {
     init_test_tracing();
     // Arrange
     let app = spawn_test_app().await;
@@ -505,7 +486,7 @@ async fn pipeline_with_another_tenants_destination_cant_be_updated() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_non_existing_pipeline_cant_be_updated() {
+async fn a_non_existing_pipeline_cannot_be_updated() {
     init_test_tracing();
     // Arrange
     let app = spawn_test_app().await;
@@ -526,7 +507,7 @@ async fn a_non_existing_pipeline_cant_be_updated() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_non_existing_pipeline_cant_be_deleted() {
+async fn a_non_existing_pipeline_cannot_be_deleted() {
     init_test_tracing();
     // Arrange
     let app = spawn_test_app().await;
@@ -609,7 +590,7 @@ async fn all_pipelines_can_be_read() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn duplicate_pipeline_with_same_source_and_destination_cant_be_created() {
+async fn duplicate_pipeline_with_same_source_and_destination_cannot_be_created() {
     init_test_tracing();
     // Arrange
     let app = spawn_test_app().await;

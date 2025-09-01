@@ -5,27 +5,11 @@ use etl_api::routes::tenants::{
 use etl_telemetry::tracing::init_test_tracing;
 use reqwest::StatusCode;
 
-use crate::support::test_app::{TestApp, spawn_test_app};
+use crate::support::mocks::tenants::create_tenant_with_id_and_name;
+use crate::support::test_app::spawn_test_app;
 mod support;
 
-pub async fn create_tenant(app: &TestApp) -> String {
-    create_tenant_with_id_and_name(
-        app,
-        "abcdefghijklmnopqrst".to_string(),
-        "NewTenant".to_string(),
-    )
-    .await
-}
-
-pub async fn create_tenant_with_id_and_name(app: &TestApp, id: String, name: String) -> String {
-    let tenant = CreateTenantRequest { id, name };
-    let response = app.create_tenant(&tenant).await;
-    let response: CreateTenantResponse = response
-        .json()
-        .await
-        .expect("failed to deserialize response");
-    response.id
-}
+// Tenant helpers are provided by `support::mocks::tenants`.
 
 #[tokio::test(flavor = "multi_thread")]
 async fn tenant_can_be_created() {
@@ -158,7 +142,7 @@ async fn an_existing_tenant_can_be_read() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_non_existing_tenant_cant_be_read() {
+async fn a_non_existing_tenant_cannot_be_read() {
     init_test_tracing();
     // Arrange
     let app = spawn_test_app().await;
@@ -204,7 +188,7 @@ async fn an_existing_tenant_can_be_updated() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_non_existing_tenant_cant_be_updated() {
+async fn a_non_existing_tenant_cannot_be_updated() {
     init_test_tracing();
     // Arrange
     let app = spawn_test_app().await;

@@ -1,49 +1,24 @@
 use crate::support::mocks::create_default_image;
 use crate::support::mocks::destinations::create_destination;
 use crate::support::mocks::pipelines::new_pipeline_config;
-use crate::support::mocks::sources::{create_source, create_source_with_config};
+use crate::support::mocks::sources::{
+    create_source, create_source_with_config, new_name, new_source_config, updated_name,
+    updated_source_config,
+};
 use crate::support::mocks::tenants::create_tenant;
 use crate::support::test_app::spawn_test_app;
 
-use etl_api::configs::source::FullApiSourceConfig;
 use etl_api::routes::pipelines::{CreatePipelineRequest, CreatePipelineResponse};
 use etl_api::routes::sources::{
     CreateSourceRequest, CreateSourceResponse, ReadSourceResponse, ReadSourcesResponse,
     UpdateSourceRequest,
 };
-use etl_config::SerializableSecretString;
 use etl_telemetry::tracing::init_test_tracing;
 use reqwest::StatusCode;
 
 mod support;
 
-pub fn new_name() -> String {
-    "Postgres Source".to_string()
-}
-
-pub fn new_source_config() -> FullApiSourceConfig {
-    FullApiSourceConfig {
-        host: "localhost".to_string(),
-        port: 5432,
-        name: "postgres".to_string(),
-        username: "postgres".to_string(),
-        password: Some(SerializableSecretString::from("postgres".to_string())),
-    }
-}
-
-fn updated_name() -> String {
-    "Postgres Source (Updated)".to_string()
-}
-
-fn updated_source_config() -> FullApiSourceConfig {
-    FullApiSourceConfig {
-        host: "example.com".to_string(),
-        port: 2345,
-        name: "sergtsop".to_string(),
-        username: "sergtsop".to_string(),
-        password: Some(SerializableSecretString::from("sergtsop".to_string())),
-    }
-}
+// Source helpers are provided by `support::mocks::sources`.
 
 // Creation helpers moved to `support::mocks::sources` to avoid cross-test deps.
 
@@ -104,7 +79,7 @@ async fn an_existing_source_can_be_read() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_non_existing_source_cant_be_read() {
+async fn a_non_existing_source_cannot_be_read() {
     init_test_tracing();
     // Arrange
     let app = spawn_test_app().await;
@@ -158,7 +133,7 @@ async fn an_existing_source_can_be_updated() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_non_existing_source_cant_be_updated() {
+async fn a_non_existing_source_cannot_be_updated() {
     init_test_tracing();
     // Arrange
     let app = spawn_test_app().await;
@@ -203,7 +178,7 @@ async fn an_existing_source_can_be_deleted() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_non_existing_source_cant_be_deleted() {
+async fn a_non_existing_source_cannot_be_deleted() {
     init_test_tracing();
     // Arrange
     let app = spawn_test_app().await;

@@ -1,16 +1,17 @@
-use etl_api::configs::destination::FullApiDestinationConfig;
 use etl_api::routes::destinations::{
     CreateDestinationRequest, CreateDestinationResponse, ReadDestinationResponse,
     ReadDestinationsResponse, UpdateDestinationRequest,
 };
 use etl_api::routes::pipelines::{CreatePipelineRequest, CreatePipelineResponse};
-use etl_config::SerializableSecretString;
 use etl_telemetry::tracing::init_test_tracing;
 use reqwest::StatusCode;
 
 use crate::{
     support::mocks::create_default_image,
-    support::mocks::destinations::{create_destination, create_destination_with_config},
+    support::mocks::destinations::{
+        create_destination, create_destination_with_config, new_destination_config, new_name,
+        updated_destination_config, updated_name,
+    },
     support::mocks::pipelines::new_pipeline_config,
     support::mocks::sources::create_source,
     support::mocks::tenants::create_tenant,
@@ -19,35 +20,7 @@ use crate::{
 
 mod support;
 
-pub fn new_name() -> String {
-    "BigQuery Destination".to_string()
-}
-
-pub fn new_destination_config() -> FullApiDestinationConfig {
-    FullApiDestinationConfig::BigQuery {
-        project_id: "project-id".to_string(),
-        dataset_id: "dataset-id".to_string(),
-        service_account_key: SerializableSecretString::from("service-account-key".to_string()),
-        max_staleness_mins: None,
-        max_concurrent_streams: Some(1),
-    }
-}
-
-pub fn updated_name() -> String {
-    "BigQuery Destination (Updated)".to_string()
-}
-
-pub fn updated_destination_config() -> FullApiDestinationConfig {
-    FullApiDestinationConfig::BigQuery {
-        project_id: "project-id-updated".to_string(),
-        dataset_id: "dataset-id-updated".to_string(),
-        service_account_key: SerializableSecretString::from(
-            "service-account-key-updated".to_string(),
-        ),
-        max_staleness_mins: Some(10),
-        max_concurrent_streams: Some(1),
-    }
-}
+// Destination helpers are provided by `support::mocks::destinations`.
 
 // Creation helpers moved to `support::mocks::destinations` to avoid cross-test deps.
 
@@ -108,7 +81,7 @@ async fn an_existing_destination_can_be_read() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_non_existing_destination_cant_be_read() {
+async fn a_non_existing_destination_cannot_be_read() {
     init_test_tracing();
     // Arrange
     let app = spawn_test_app().await;
@@ -162,7 +135,7 @@ async fn an_existing_destination_can_be_updated() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_non_existing_destination_cant_be_updated() {
+async fn a_non_existing_destination_cannot_be_updated() {
     init_test_tracing();
     // Arrange
     let app = spawn_test_app().await;
@@ -207,7 +180,7 @@ async fn an_existing_destination_can_be_deleted() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_non_existing_destination_cant_be_deleted() {
+async fn a_non_existing_destination_cannot_be_deleted() {
     init_test_tracing();
     // Arrange
     let app = spawn_test_app().await;

@@ -107,6 +107,22 @@ pub mod sources {
         }
     }
 
+    /// Returns an updated source name.
+    pub fn updated_name() -> String {
+        "Postgres Source (Updated)".to_string()
+    }
+
+    /// Returns an updated Postgres source config.
+    pub fn updated_source_config() -> FullApiSourceConfig {
+        FullApiSourceConfig {
+            host: "example.com".to_string(),
+            port: 2345,
+            name: "sergtsop".to_string(),
+            username: "sergtsop".to_string(),
+            password: Some(SerializableSecretString::from("sergtsop".to_string())),
+        }
+    }
+
     /// Creates a default source and returns its id.
     pub async fn create_source(app: &TestApp, tenant_id: &str) -> i64 {
         create_source_with_config(app, tenant_id, new_name(), new_source_config()).await
