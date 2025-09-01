@@ -42,9 +42,56 @@ jobs:
         if: matrix.check == 'clippy'
         run: cargo clippy --all-targets --all-features --no-deps -- -D warnings
 
-  test:
-    name: Test
+  test-partial:
+    name: Test Partial
     runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork == true
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Setup Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: test-partial
+
+      - name: Start Docker Compose Environment
+        run: |
+          docker compose -f ./scripts/docker-compose.yaml up -d
+
+      - name: Install sqlx-cli
+        run: |
+          cargo install sqlx-cli \
+            --features native-tls,postgres \
+            --no-default-features \
+            --locked
+
+      - name: Migrate database
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+          POSTGRES_PORT: 5430
+          POSTGRES_HOST: localhost
+        run: |
+          sudo apt-get install libpq-dev -y
+          ./etl-api/scripts/run_migrations.sh
+
+      - name: Run tests
+        run: |
+          cargo test --workspace --no-fail-fast \
+            --all-features --exclude etl-destinations
+
+  test-full:
+    name: Test Full
+    runs-on: ubuntu-latest
+    # Run on push, and on internal PRs (non-fork) where secrets are available.
+    if: github.event_name != 'pull_request' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork == false)
     permissions:
       contents: read
       id-token: write
@@ -58,7 +105,7 @@ jobs:
       - name: Setup Rust cache
         uses: Swatinem/rust-cache@v2
         with:
-          key: test
+          key: test-coverage
 
       - name: Start Docker Compose Environment
         run: |
