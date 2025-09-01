@@ -68,8 +68,8 @@ name = "destinations_pipelines"
 path = "tests/destinations_pipelines.rs"
 
 [[test]]
-name = "etl_tables_missing"
-path = "tests/etl_tables_missing.rs"
+name = "missing_etl_tables"
+path = "tests/missing_etl_tables.rs"
 
 [[test]]
 name = "health_check"

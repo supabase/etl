@@ -328,7 +328,7 @@ async fn an_existing_pipeline_can_be_read() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_non_existing_pipeline_cannot_be_read() {
+async fn non_existing_pipeline_cannot_be_read() {
     init_test_tracing();
     // Arrange
     let app = spawn_test_app().await;
@@ -486,7 +486,7 @@ async fn pipeline_with_another_tenants_destination_cannot_be_updated() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_non_existing_pipeline_cannot_be_updated() {
+async fn non_existing_pipeline_cannot_be_updated() {
     init_test_tracing();
     // Arrange
     let app = spawn_test_app().await;
@@ -507,7 +507,7 @@ async fn a_non_existing_pipeline_cannot_be_updated() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_non_existing_pipeline_cannot_be_deleted() {
+async fn non_existing_pipeline_cannot_be_deleted() {
     init_test_tracing();
     // Arrange
     let app = spawn_test_app().await;

@@ -11,7 +11,7 @@ use crate::support::database::create_test_source_database;
 use crate::support::mocks::create_default_image;
 use crate::support::mocks::destinations::create_destination;
 use crate::support::mocks::tenants::create_tenant;
-use crate::support::test_app::{TestApp, spawn_test_app};
+use crate::support::test_app::{spawn_test_app, TestApp};
 mod support;
 
 async fn create_pipeline_with_unmigrated_source_db(
@@ -107,3 +107,4 @@ async fn deleting_pipeline_succeeds_when_etl_tables_missing() {
 
     drop_pg_database(&source_db_config).await;
 }
+
