@@ -9,13 +9,20 @@ use etl_telemetry::tracing::init_test_tracing;
 use reqwest::StatusCode;
 
 use crate::{
-    support::test_app::{TestApp, spawn_test_app},
     support::mocks::create_default_image,
     support::mocks::destinations::{create_destination, create_destination_with_config},
     support::mocks::pipelines::new_pipeline_config,
     support::mocks::sources::create_source,
     support::mocks::tenants::create_tenant,
+    support::test_app::spawn_test_app,
 };
+
+mod support {
+    pub(crate) mod database;
+    pub(crate) mod k8s_client;
+    pub(crate) mod mocks;
+    pub(crate) mod test_app;
+}
 
 pub fn new_name() -> String {
     "BigQuery Destination".to_string()

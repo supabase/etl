@@ -58,3 +58,43 @@ uuid = { workspace = true, features = ["v4"] }
 etl-postgres = { workspace = true, features = ["test-utils", "sqlx"] }
 
 insta = { workspace = true, features = ["json", "redactions"] }
+
+[[test]]
+name = "destinations"
+path = "tests/destinations.rs"
+
+[[test]]
+name = "destinations_pipelines"
+path = "tests/destinations_pipelines.rs"
+
+[[test]]
+name = "etl_tables_missing"
+path = "tests/etl_tables_missing.rs"
+
+[[test]]
+name = "health_check"
+path = "tests/health_check.rs"
+
+[[test]]
+name = "images"
+path = "tests/images.rs"
+
+[[test]]
+name = "metrics"
+path = "tests/metrics.rs"
+
+[[test]]
+name = "pipelines"
+path = "tests/pipelines.rs"
+
+[[test]]
+name = "sources"
+path = "tests/sources.rs"
+
+[[test]]
+name = "tenants"
+path = "tests/tenants.rs"
+
+[[test]]
+name = "tenants_sources"
+path = "tests/tenants_sources.rs"

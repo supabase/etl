@@ -4,9 +4,16 @@ use etl_api::routes::tenants_sources::{CreateTenantSourceRequest, CreateTenantSo
 use etl_telemetry::tracing::init_test_tracing;
 
 use crate::{
-    support::test_app::spawn_test_app,
     support::mocks::sources::{new_name, new_source_config},
+    support::test_app::spawn_test_app,
 };
+
+mod support {
+    pub(crate) mod database;
+    pub(crate) mod k8s_client;
+    pub(crate) mod mocks;
+    pub(crate) mod test_app;
+}
 
 #[tokio::test(flavor = "multi_thread")]
 async fn tenant_and_source_can_be_created() {

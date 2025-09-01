@@ -7,6 +7,13 @@ use reqwest::StatusCode;
 
 use crate::support::test_app::{TestApp, spawn_test_app};
 
+mod support {
+    pub(crate) mod database;
+    pub(crate) mod k8s_client;
+    pub(crate) mod mocks;
+    pub(crate) mod test_app;
+}
+
 pub async fn create_tenant(app: &TestApp) -> String {
     create_tenant_with_id_and_name(
         app,

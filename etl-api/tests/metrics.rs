@@ -2,6 +2,13 @@ use etl_telemetry::tracing::init_test_tracing;
 
 use crate::support::test_app::spawn_test_app;
 
+mod support {
+    pub(crate) mod database;
+    pub(crate) mod k8s_client;
+    pub(crate) mod mocks;
+    pub(crate) mod test_app;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn metrics_endpoint_works() {
     init_test_tracing();

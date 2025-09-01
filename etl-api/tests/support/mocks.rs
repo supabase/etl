@@ -4,13 +4,13 @@
 //! individual integration test files (e.g., `images_test`). This avoids
 //! cross‑test dependencies and keeps helpers discoverable.
 
-use etl_api::routes::images::{CreateImageRequest, CreateImageResponse};
 use etl_api::configs::destination::FullApiDestinationConfig;
+use etl_api::configs::pipeline::{FullApiPipelineConfig, PartialApiPipelineConfig};
 use etl_api::configs::source::FullApiSourceConfig;
 use etl_api::routes::destinations::{CreateDestinationRequest, CreateDestinationResponse};
-use etl_api::routes::sources::{CreateSourceRequest, CreateSourceResponse};
-use etl_api::configs::pipeline::{FullApiPipelineConfig, PartialApiPipelineConfig};
+use etl_api::routes::images::{CreateImageRequest, CreateImageResponse};
 use etl_api::routes::pipelines::{CreatePipelineRequest, CreatePipelineResponse};
+use etl_api::routes::sources::{CreateSourceRequest, CreateSourceResponse};
 use etl_config::{SerializableSecretString, shared::BatchConfig};
 
 use crate::support::test_app::TestApp;
@@ -63,9 +63,7 @@ pub mod destinations {
         FullApiDestinationConfig::BigQuery {
             project_id: "project-id".to_string(),
             dataset_id: "dataset-id".to_string(),
-            service_account_key: SerializableSecretString::from(
-                "service-account-key".to_string(),
-            ),
+            service_account_key: SerializableSecretString::from("service-account-key".to_string()),
             max_staleness_mins: None,
             max_concurrent_streams: Some(1),
         }
@@ -89,13 +87,7 @@ pub mod destinations {
 
     /// Creates a default destination and returns its id.
     pub async fn create_destination(app: &TestApp, tenant_id: &str) -> i64 {
-        create_destination_with_config(
-            app,
-            tenant_id,
-            new_name(),
-            new_destination_config(),
-        )
-        .await
+        create_destination_with_config(app, tenant_id, new_name(), new_destination_config()).await
     }
 }
 
@@ -157,11 +149,7 @@ pub mod tenants {
     }
 
     /// Creates a tenant with a given id and name and returns its id.
-    pub async fn create_tenant_with_id_and_name(
-        app: &TestApp,
-        id: String,
-        name: String,
-    ) -> String {
+    pub async fn create_tenant_with_id_and_name(app: &TestApp, id: String, name: String) -> String {
         let tenant = CreateTenantRequest { id, name };
         let response = app.create_tenant(&tenant).await;
         let response: CreateTenantResponse = response
