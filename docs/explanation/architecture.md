@@ -2,7 +2,7 @@
 
 **Understanding how ETL components work together to replicate data from Postgres**
 
-ETL's architecture centers around four core abstractions that work together to provide reliable, high-performance data replication: `Pipeline`, `Destination`, `SchemaStore`, and `StateStore`. This document explains how these components interact and coordinate data flow from Postgres logical replication to target systems.
+ETL's architecture centers around five core abstractions that work together to provide reliable, high-performance data replication: `Pipeline`, `Destination`, `SchemaStore`, `StateStore`, and `CleanupStore`. This document explains how these components interact and coordinate data flow from Postgres logical replication to target systems.
 
 A diagram of the overall architecture is shown below:
 
@@ -35,6 +35,10 @@ flowchart LR
 
         subgraph SchemaStore[Schema Store]
             D2["Memory<br>Postgres"]
+        end
+
+        subgraph CleanupStore[Cleanup Store]
+            D3["Memory<br>Postgres"]
         end
     end
 
@@ -159,6 +163,24 @@ pub trait StateStore {
 Like `SchemaStore`, `StateStore` uses cache-first reads with `load_*` methods for startup population and dual-write patterns for updates.
 
 The store tracks both replication progress through `TableReplicationPhase` and source-to-destination table name mappings.
+
+### CleanupStore
+
+The `CleanupStore` trait provides atomic, table-scoped maintenance operations that affect both schema and state storage. The pipeline calls these primitives when tables are removed from a publication.
+
+```rust
+pub trait CleanupStore {
+    /// Deletes all stored state for `table_id` for the current pipeline.
+    ///
+    /// Removes replication state (including history), table schemas, and
+    /// table mappings. This must NOT drop or modify the actual destination table.
+    ///
+    /// Intended for use when a table is removed from the publication.
+    fn cleanup_table_state(&self, table_id: TableId) -> impl Future<Output = EtlResult<()>> + Send;
+}
+```
+
+Implementations must ensure the operation is consistent across in-memory caches and persistent storage, and must be idempotent. Cleanup only removes ETL-maintained metadata and state; it never touches destination tables.
 
 ## Data Flow Architecture
 
