@@ -86,8 +86,6 @@ impl Application {
     pub async fn build(config: ApiConfig) -> Result<Self, anyhow::Error> {
         let connection_pool = get_connection_pool(&config.database);
 
-        println!("CONFIG {:?}", config);
-
         let address = format!("{}:{}", config.application.host, config.application.port);
         let listener = TcpListener::bind(address)?;
         let port = listener.local_addr()?.port();
