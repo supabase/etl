@@ -20,8 +20,10 @@ pub struct ApiConfig {
     pub application: ApplicationSettings,
     /// Encryption key configuration.
     pub encryption_key: EncryptionKey,
-    /// Base64-encoded API key string.
-    pub api_key: String,
+    /// List of base64-encoded API keys.
+    ///
+    /// All keys in this list are considered valid for authentication.
+    pub api_keys: Vec<String>,
     /// Optional Sentry configuration for error tracking.
     pub sentry: Option<SentryConfig>,
 }

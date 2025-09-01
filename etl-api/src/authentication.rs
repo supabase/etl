@@ -21,21 +21,11 @@ pub async fn auth_validator(
         .unwrap_or_default()
         .scope("v1");
 
-    let api_key = req
+    let api_config = req
         .app_data::<Data<ApiConfig>>()
-        .expect("missing api configuration")
-        .api_key
-        .as_str();
+        .expect("Missing API configuration while doing authentication");
 
     let token = credentials.token();
-
-    let api_key: ApiKey = match api_key.try_into() {
-        Ok(api_key) => api_key,
-        Err(_) => {
-            return Err((AuthenticationError::from(config).into(), req));
-        }
-    };
-
     let token: ApiKey = match token.try_into() {
         Ok(token) => token,
         Err(_) => {
@@ -43,7 +33,31 @@ pub async fn auth_validator(
         }
     };
 
-    if !constant_time_eq_n(&api_key.key, &token.key) {
+    // Decode all configured API keys (rotation supported via multiple entries).
+    let configured_keys: Vec<ApiKey> = {
+        let keys = &api_config.api_keys;
+        if keys.is_empty() {
+            return Err((AuthenticationError::from(config).into(), req));
+        }
+
+        let mut configured_keys = Vec::with_capacity(keys.len());
+        for key in keys {
+            match key.as_str().try_into() {
+                Ok(k) => configured_keys.push(k),
+                Err(_) => return Err((AuthenticationError::from(config).into(), req)),
+            }
+        }
+
+        configured_keys
+    };
+
+    // Compare against all configured keys without an early exit to avoid timing leaks.
+    let mut valid = false;
+    for key in &configured_keys {
+        valid |= constant_time_eq_n(&key.key, &token.key);
+    }
+
+    if !valid {
         return Err((AuthenticationError::from(config).into(), req));
     }
 

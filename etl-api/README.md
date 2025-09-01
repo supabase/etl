@@ -23,6 +23,7 @@ This API service provides a RESTful interface for managing Postgres replication 
 - [Prerequisites](#prerequisites)
 - [Development](#development)
 - [Environment Variables](#environment-variables)
+- [Authentication](#authentication)
 
 ## Prerequisites
 
@@ -79,4 +80,17 @@ After making changes to the database schema, update the SQLx metadata:
 
 ```bash
 cargo sqlx prepare
+```
+
+## Authentication
+
+- The API uses Bearer token auth via the `Authorization` header.
+- Configure authentication with `api_keys` (each is base64 of 32 random bytes). All listed keys are accepted, enabling seamless key rotation.
+
+Config example (YAML):
+
+```yaml
+api_keys:
+  - XOUbHmWbt9h7nWl15wWwyWQnctmFGNjpawMc3lT5CFs=
+  - h1QqT7u+8t4q0t3m8rjOa2qK7F8w6h9C1xYzPqL7pmc=
 ```
