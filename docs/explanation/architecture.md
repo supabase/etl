@@ -36,6 +36,10 @@ flowchart LR
         subgraph SchemaStore[Schema Store]
             D2["Memory<br>Postgres"]
         end
+
+        subgraph CleanupStore[Cleanup Store]
+            D3["Memory<br>Postgres"]
+        end
     end
 
     A --> ApplyWorker
