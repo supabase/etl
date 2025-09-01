@@ -60,14 +60,18 @@ where
     // We build the environment configuration source.
     let mut environment_source = config::Environment::with_prefix(ENV_PREFIX)
         .prefix_separator(ENV_PREFIX_SEPARATOR)
-        .separator(ENV_SEPARATOR)
-        .try_parsing(true)
-        .list_separator(LIST_SEPARATOR);
+        .separator(ENV_SEPARATOR);
 
-    // For all the list parse keys, we add them to the environment source. These are used to define
-    // which keys should be parsed as lists.
-    for key in <T as Config>::LIST_PARSE_KEYS {
-        environment_source = environment_source.with_list_parse_key(key);
+    // If there is a list of keys to parse, we add them to the source and enable parsing with the
+    // separator.
+    if !<T as Config>::LIST_PARSE_KEYS.is_empty() {
+        environment_source = environment_source
+            .try_parsing(true)
+            .list_separator(LIST_SEPARATOR);
+
+        for key in <T as Config>::LIST_PARSE_KEYS {
+            environment_source = environment_source.with_list_parse_key(key);
+        }
     }
 
     let settings = config::Config::builder()
