@@ -57,8 +57,8 @@ path = "tests/pipeline.rs"
 required-features = ["test-utils"]
 
 [[test]]
-name = "pipeline_with_failures"
-path = "tests/pipeline_with_failures.rs"
+name = "failpoints_pipeline"
+path = "tests/failpoints_pipeline.rs"
 required-features = ["failpoints", "test-utils"]
 
 [[test]]
