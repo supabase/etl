@@ -24,6 +24,9 @@
     <a href="https://github.com/supabase/etl/actions/workflows/audit.yml">
       <img alt="Security Audit" src="https://github.com/supabase/etl/actions/workflows/audit.yml/badge.svg?branch=main">
     </a>
+    <a href="LICENSE">
+      <img alt="License" src="https://img.shields.io/badge/License-Apache_2.0-blue.svg">
+    </a>
     <br />
     Build real-time Postgres replication applications in Rust
     <br />
