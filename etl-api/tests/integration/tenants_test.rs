@@ -5,7 +5,7 @@ use etl_api::routes::tenants::{
 use etl_telemetry::tracing::init_test_tracing;
 use reqwest::StatusCode;
 
-use crate::common::test_app::{TestApp, spawn_test_app};
+use crate::support::test_app::{TestApp, spawn_test_app};
 
 pub async fn create_tenant(app: &TestApp) -> String {
     create_tenant_with_id_and_name(

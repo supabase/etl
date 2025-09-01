@@ -7,17 +7,17 @@ use etl_api::routes::pipelines::{CreatePipelineRequest, ReadPipelineResponse};
 use etl_telemetry::tracing::init_test_tracing;
 use reqwest::StatusCode;
 
-use crate::common::database::{create_test_source_database, run_etl_migrations_on_source_database};
+use crate::support::database::{create_test_source_database, run_etl_migrations_on_source_database};
 use crate::{
-    common::test_app::spawn_test_app,
-    common::mocks::create_default_image,
-    common::mocks::destinations::{
+    support::test_app::spawn_test_app,
+    support::mocks::create_default_image,
+    support::mocks::destinations::{
         create_destination, new_destination_config, new_name, updated_destination_config,
         updated_name,
     },
-    common::mocks::pipelines::{new_pipeline_config, updated_pipeline_config},
-    common::mocks::sources::create_source,
-    common::mocks::tenants::{create_tenant, create_tenant_with_id_and_name},
+    support::mocks::pipelines::{new_pipeline_config, updated_pipeline_config},
+    support::mocks::sources::create_source,
+    support::mocks::tenants::{create_tenant, create_tenant_with_id_and_name},
 };
 
 #[tokio::test(flavor = "multi_thread")]

@@ -1,4 +1,4 @@
-use crate::common::test_app::TestApp;
+use crate::support::test_app::TestApp;
 use etl_api::configs::source::FullApiSourceConfig;
 use etl_api::routes::sources::{CreateSourceRequest, CreateSourceResponse};
 use etl_config::SerializableSecretString;

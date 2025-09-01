@@ -1,10 +1,10 @@
-use crate::common::database::{create_test_source_database, run_etl_migrations_on_source_database};
+use crate::support::database::{create_test_source_database, run_etl_migrations_on_source_database};
 use crate::{
-    common::test_app::{TestApp, spawn_test_app},
-    common::mocks::create_default_image,
-    common::mocks::destinations::create_destination,
-    common::mocks::sources::create_source,
-    common::mocks::tenants::{create_tenant, create_tenant_with_id_and_name},
+    support::test_app::{TestApp, spawn_test_app},
+    support::mocks::create_default_image,
+    support::mocks::destinations::create_destination,
+    support::mocks::sources::create_source,
+    support::mocks::tenants::{create_tenant, create_tenant_with_id_and_name},
 };
 use etl_api::configs::pipeline::{FullApiPipelineConfig, PartialApiPipelineConfig};
 use etl_api::routes::pipelines::{
@@ -21,8 +21,8 @@ use reqwest::StatusCode;
 use sqlx::PgPool;
 use sqlx::postgres::types::Oid;
 
-// Pipeline config helpers moved to `common::mocks::pipelines`.
-use crate::common::mocks::pipelines::{
+// Pipeline config helpers moved to `support::mocks::pipelines`.
+use crate::support::mocks::pipelines::{
     new_pipeline_config, partially_updated_optional_pipeline_config, updated_optional_pipeline_config,
     updated_pipeline_config, ConfigUpdateType,
 };

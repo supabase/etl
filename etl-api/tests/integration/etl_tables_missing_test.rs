@@ -7,11 +7,11 @@ use etl_telemetry::tracing::init_test_tracing;
 use reqwest::StatusCode;
 use sqlx::PgPool;
 
-use crate::common::database::create_test_source_database;
-use crate::common::test_app::{TestApp, spawn_test_app};
-use crate::common::mocks::destinations::create_destination;
-use crate::common::mocks::create_default_image;
-use crate::common::mocks::tenants::create_tenant;
+use crate::support::database::create_test_source_database;
+use crate::support::test_app::{TestApp, spawn_test_app};
+use crate::support::mocks::destinations::create_destination;
+use crate::support::mocks::create_default_image;
+use crate::support::mocks::tenants::create_tenant;
 
 async fn create_pipeline_with_unmigrated_source_db(
     app: &TestApp,
@@ -25,7 +25,7 @@ async fn create_pipeline_with_unmigrated_source_db(
     let req = CreatePipelineRequest {
         source_id,
         destination_id,
-        config: crate::common::mocks::pipelines::new_pipeline_config(),
+        config: crate::support::mocks::pipelines::new_pipeline_config(),
     };
 
     let response = app.create_pipeline(tenant_id, &req).await;

@@ -17,10 +17,14 @@ use std::str::FromStr;
 use std::time::Duration;
 use tokio::time::sleep;
 
-use crate::common::bigquery::{
+use crate::support::bigquery::{
     BigQueryOrder, BigQueryUser, NonNullableColsScalar, NullableColsArray, NullableColsScalar,
     parse_bigquery_table_rows, setup_bigquery_connection,
 };
+
+mod support {
+    pub(crate) mod bigquery;
+}
 
 #[tokio::test(flavor = "multi_thread")]
 async fn table_copy_and_streaming_with_restart() {

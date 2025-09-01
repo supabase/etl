@@ -29,8 +29,8 @@ use std::sync::Arc;
 use tokio::runtime::Handle;
 use uuid::Uuid;
 
-use crate::common::database::create_etl_api_database;
-use crate::common::k8s_client::MockK8sClient;
+use crate::support::database::create_etl_api_database;
+use crate::support::k8s_client::MockK8sClient;
 
 pub struct TestApp {
     pub address: String,

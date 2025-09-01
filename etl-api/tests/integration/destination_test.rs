@@ -9,12 +9,12 @@ use etl_telemetry::tracing::init_test_tracing;
 use reqwest::StatusCode;
 
 use crate::{
-    common::test_app::{TestApp, spawn_test_app},
-    common::mocks::create_default_image,
-    common::mocks::destinations::{create_destination, create_destination_with_config},
-    common::mocks::pipelines::new_pipeline_config,
-    common::mocks::sources::create_source,
-    common::mocks::tenants::create_tenant,
+    support::test_app::{TestApp, spawn_test_app},
+    support::mocks::create_default_image,
+    support::mocks::destinations::{create_destination, create_destination_with_config},
+    support::mocks::pipelines::new_pipeline_config,
+    support::mocks::sources::create_source,
+    support::mocks::tenants::create_tenant,
 };
 
 pub fn new_name() -> String {
@@ -47,7 +47,7 @@ pub fn updated_destination_config() -> FullApiDestinationConfig {
     }
 }
 
-// Creation helpers moved to `common::mocks::destinations` to avoid cross-test deps.
+// Creation helpers moved to `support::mocks::destinations` to avoid cross-test deps.
 
 #[tokio::test(flavor = "multi_thread")]
 async fn destination_can_be_created() {

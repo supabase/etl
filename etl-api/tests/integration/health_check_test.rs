@@ -1,6 +1,6 @@
 use etl_telemetry::tracing::init_test_tracing;
 
-use crate::common::test_app::spawn_test_app;
+use crate::support::test_app::spawn_test_app;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn health_check_works() {

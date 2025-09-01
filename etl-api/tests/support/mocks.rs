@@ -1,4 +1,4 @@
-//! Test helpers for creating common resources.
+//! Test helpers for creating support resources.
 //!
 //! Centralizes small creation helpers that were previously defined in
 //! individual integration test files (e.g., `images_test`). This avoids
@@ -13,7 +13,7 @@ use etl_api::configs::pipeline::{FullApiPipelineConfig, PartialApiPipelineConfig
 use etl_api::routes::pipelines::{CreatePipelineRequest, CreatePipelineResponse};
 use etl_config::{SerializableSecretString, shared::BatchConfig};
 
-use crate::common::test_app::TestApp;
+use crate::support::test_app::TestApp;
 
 /// Creates a default image and returns its id.
 pub async fn create_default_image(app: &TestApp) -> i64 {

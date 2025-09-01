@@ -4,7 +4,11 @@ use etl::types::{ColumnSchema, TableId, TableName, TableSchema, Type};
 use etl_destinations::iceberg::IcebergClient;
 use etl_telemetry::tracing::init_test_tracing;
 
-use crate::common::lakekeeper::LakekeeperClient;
+use crate::support::lakekeeper::LakekeeperClient;
+
+mod support {
+    pub(crate) mod lakekeeper;
+}
 
 const LAKEKEEPER_URL: &str = "http://localhost:8182";
 

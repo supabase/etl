@@ -5,8 +5,8 @@ use etl_api::routes::images::{
 use etl_telemetry::tracing::init_test_tracing;
 use reqwest::StatusCode;
 
-use crate::common::mocks::create_image_with_name;
-use crate::common::test_app::spawn_test_app;
+use crate::support::mocks::create_image_with_name;
+use crate::support::test_app::spawn_test_app;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn image_can_be_created() {
