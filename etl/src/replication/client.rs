@@ -2,6 +2,7 @@ use crate::error::{ErrorKind, EtlError, EtlResult};
 use crate::utils::tokio::MakeRustlsConnect;
 use crate::{bail, etl_error};
 use etl_config::shared::{IntoConnectOptions, PgConnectionConfig};
+use etl_postgres::replication::extract_server_version;
 use etl_postgres::types::convert_type_oid_to_type;
 use etl_postgres::types::{ColumnSchema, TableId, TableName, TableSchema};
 use pg_escape::{quote_identifier, quote_literal};
@@ -10,7 +11,9 @@ use rustls::ClientConfig;
 use std::collections::HashMap;
 use std::fmt;
 use std::io::BufReader;
+use std::num::NonZeroI32;
 use std::sync::Arc;
+
 use tokio_postgres::error::SqlState;
 use tokio_postgres::tls::MakeTlsConnect;
 use tokio_postgres::{
@@ -163,6 +166,7 @@ impl PgReplicationSlotTransaction {
 #[derive(Debug, Clone)]
 pub struct PgReplicationClient {
     client: Arc<Client>,
+    server_version: Option<NonZeroI32>,
 }
 
 impl PgReplicationClient {
@@ -185,12 +189,18 @@ impl PgReplicationClient {
         config.replication_mode(ReplicationMode::Logical);
 
         let (client, connection) = config.connect(NoTls).await?;
+
+        let server_version = connection
+            .parameter("server_version")
+            .and_then(extract_server_version);
+
         spawn_postgres_connection::<NoTls>(connection);
 
         info!("successfully connected to postgres without tls");
 
         Ok(PgReplicationClient {
             client: Arc::new(client),
+            server_version,
         })
     }
 
@@ -216,12 +226,18 @@ impl PgReplicationClient {
             .with_no_client_auth();
 
         let (client, connection) = config.connect(MakeRustlsConnect::new(tls_config)).await?;
+
+        let server_version = connection
+            .parameter("server_version")
+            .and_then(extract_server_version);
+
         spawn_postgres_connection::<MakeRustlsConnect>(connection);
 
         info!("successfully connected to postgres with tls");
 
         Ok(PgReplicationClient {
             client: Arc::new(client),
+            server_version,
         })
     }
 
@@ -626,24 +642,43 @@ impl PgReplicationClient {
         publication: Option<&str>,
     ) -> EtlResult<Vec<ColumnSchema>> {
         let (pub_cte, pub_pred) = if let Some(publication) = publication {
-            (
-                format!(
-                    "with pub_attrs as (
-                        select unnest(r.prattrs)
-                        from pg_publication_rel r
-                        left join pg_publication p on r.prpubid = p.oid
-                        where p.pubname = {publication}
-                        and r.prrelid = {table_id}
+            if let Some(server_version) = self.server_version
+                && server_version.get() >= 150000
+            {
+                (
+                    format!(
+                        "with pub_attrs as (
+                            select unnest(r.prattrs)
+                            from pg_publication_rel r
+                            left join pg_publication p on r.prpubid = p.oid
+                            where p.pubname = {publication}
+                            and r.prrelid = {table_id}
+                        )",
+                        publication = quote_literal(publication),
+                    ),
+                    "and (
+                        case (select count(*) from pub_attrs)
+                        when 0 then true
+                        else (a.attnum in (select * from pub_attrs))
+                        end
                     )",
-                    publication = quote_literal(publication),
-                ),
-                "and (
-                    case (select count(*) from pub_attrs)
-                    when 0 then true
-                    else (a.attnum in (select * from pub_attrs))
-                    end
-                )",
-            )
+                )
+            } else {
+                // Postgres 14 or earlier or unknown, fallback to no column-level filtering
+                (
+                    format!(
+                        "with pub_table as (
+                            select 1 as exists_in_pub
+                            from pg_publication_rel r
+                            left join pg_publication p on r.prpubid = p.oid
+                            where p.pubname = {publication}
+                            and r.prrelid = {table_id}
+                        )",
+                        publication = quote_literal(publication),
+                    ),
+                    "and (select count(*) from pub_table) > 0",
+                )
+            }
         } else {
             ("".into(), "")
         };
@@ -696,7 +731,6 @@ impl PgReplicationClient {
 
         Ok(column_schemas)
     }
-
     /// Creates a COPY stream for reading data from a table using its OID.
     ///
     /// The stream will include only the specified columns and use text format.

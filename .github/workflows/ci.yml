@@ -42,12 +42,16 @@ jobs:
         if: matrix.check == 'clippy'
         run: cargo clippy --all-targets --all-features --no-deps -- -D warnings
 
-  test:
-    name: Test
+  test-partial:
+    name: Test Partial
     runs-on: ubuntu-latest
+    # Run on forks.
+    if: github.event.pull_request.head.repo.fork == true
     permissions:
       contents: read
-      id-token: write
+    strategy:
+      matrix:
+        postgres_version: [17, 16, 15, 14]
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -58,11 +62,61 @@ jobs:
       - name: Setup Rust cache
         uses: Swatinem/rust-cache@v2
         with:
-          key: test
+          key: test-partial
 
-      - name: Start Docker Compose Environment
+      - name: Start Docker Compose Environment (Postgres ${{ matrix.postgres_version }})
         run: |
-          docker compose -f ./scripts/docker-compose.yaml up -d
+          POSTGRES_VERSION=${{ matrix.postgres_version }} docker compose -f ./scripts/docker-compose.yaml up -d
+
+      - name: Install sqlx-cli
+        run: |
+          cargo install sqlx-cli \
+            --features native-tls,postgres \
+            --no-default-features \
+            --locked
+
+      - name: Migrate database
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+          POSTGRES_PORT: 5430
+          POSTGRES_HOST: localhost
+        run: |
+          sudo apt-get install libpq-dev -y
+          ./etl-api/scripts/run_migrations.sh
+
+      - name: Run tests
+        run: |
+          cargo test --workspace --no-fail-fast \
+            --all-features -- --skip integration::bigquery_test
+
+  test-full:
+    name: Test Full
+    runs-on: ubuntu-latest
+    # Run on non forks.
+    if: github.event.pull_request.head.repo.fork == false
+    permissions:
+      contents: read
+      id-token: write
+    strategy:
+      matrix:
+        postgres_version: [17, 16, 15, 14]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Setup Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: test-full
+
+      - name: Start Docker Compose Environment (Postgres ${{ matrix.postgres_version }})
+        run: |
+          POSTGRES_VERSION=${{ matrix.postgres_version }} docker compose -f ./scripts/docker-compose.yaml up -d
 
       - name: Install sqlx-cli
         run: |
