@@ -199,10 +199,10 @@ pub fn init_tracing(app_name: &str) -> Result<LogFlusher, TracingError> {
     init_tracing_with_top_level_fields(app_name, None, None)
 }
 
-/// Initializes tracing with optional project identification.
+/// Initializes tracing with optional top-level fields.
 ///
-/// Like [`init_tracing`] but allows specifying a project reference that will
-/// be injected into all structured log entries for identification.
+/// Like [`init_tracing`] but allows specifying multiple top-level fields that will be added to each
+/// log entry.
 pub fn init_tracing_with_top_level_fields(
     app_name: &str,
     project_ref: Option<String>,
