@@ -193,7 +193,9 @@ async fn publication_changes_are_correctly_handled() {
     if let Some(server_version) = database.server_version()
         && server_version.get() <= 150000
     {
-        println!("Skipping test for PostgreSQL version <= 15");
+        println!(
+            "Skipping test for PostgreSQL version <= 15, CREATE PUBLICATION FOR TABLES IN SCHEMA is not supported"
+        );
         return;
     }
 
@@ -363,7 +365,9 @@ async fn publication_for_all_tables_in_schema_ignores_new_tables_until_restart()
     if let Some(server_version) = database.server_version()
         && server_version.get() <= 150000
     {
-        println!("Skipping test for PostgreSQL version <= 15");
+        println!(
+            "Skipping test for PostgreSQL version <= 15, CREATE PUBLICATION FOR TABLES IN SCHEMA is not supported"
+        );
         return;
     }
 
