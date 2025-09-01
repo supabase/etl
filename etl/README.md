@@ -70,7 +70,3 @@ graph TB
     TSWorker2 <--> StateStore
     TSWorker2 <--> SchemaStore
 ```
-
-The same concrete store type implements all store traits. In addition to `StateStore` and `SchemaStore`, stores also implement `CleanupStore`, 
-which the pipeline uses to purge internal state when a table is removed from the publication. This cleanup does not drop or modify any destination tables; 
-it only deletes ETL's internal state, schemas, and table mappings for the removed table.

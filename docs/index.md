@@ -86,8 +86,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-Note: Store implementations include `CleanupStore` primitives used by the pipeline to purge ETL-maintained state (schemas, mappings, replication progress) when tables are removed from the source publication. Destination data is never dropped by cleanup.
-
 ## Next Steps
 
 - **First time using ETL?** → Start with [Build your first pipeline](tutorials/first-pipeline.md)
