@@ -19,6 +19,8 @@ use tracing_subscriber::{EnvFilter, FmtSubscriber, Registry, fmt, layer::Subscri
 
 /// JSON field name for project identification in logs.
 const PROJECT_KEY_IN_LOG: &str = "project";
+/// JSON field name for pipeline identification in logs.
+const PIPELINE_KEY_IN_LOG: &str = "pipeline_id";
 
 /// Errors that can occur during tracing initialization.
 #[derive(Debug, Error)]
@@ -70,6 +72,8 @@ pub fn init_test_tracing() {
 
 /// Global project reference storage
 static PROJECT_REF: OnceLock<String> = OnceLock::new();
+/// Global pipeline id storage.
+static PIPELINE_ID: OnceLock<u64> = OnceLock::new();
 
 /// Sets the global project reference for all tracing events.
 ///
@@ -84,6 +88,21 @@ pub fn set_global_project_ref(project_ref: String) {
 /// Returns `None` if no project reference has been set.
 pub fn get_global_project_ref() -> Option<&'static str> {
     PROJECT_REF.get().map(|s| s.as_str())
+}
+
+/// Sets the global pipeline id for all tracing events.
+///
+/// The pipeline id will be injected into all structured log entries
+/// as a top-level field named "pipeline_id" for identification and filtering.
+pub fn set_global_pipeline_id(pipeline_id: u64) {
+    let _ = PIPELINE_ID.set(pipeline_id);
+}
+
+/// Returns the current global pipeline id.
+///
+/// Returns `None` if no pipeline id has been set.
+pub fn get_global_pipeline_id() -> Option<u64> {
+    PIPELINE_ID.get().copied()
 }
 
 /// Writer wrapper that injects project field into JSON log entries.
@@ -105,31 +124,47 @@ impl<W> Write for ProjectInjectingWriter<W>
 where
     W: Write,
 {
-    /// Writes log data, injecting project field into JSON entries.
+    /// Writes log data, injecting project and pipeline fields into JSON entries.
     ///
     /// Attempts to parse the buffer as JSON and inject a project field if:
     /// - A global project reference is set
     /// - The content is valid JSON
     /// - No project field already exists
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        // Only try to inject project field if we have one and the content looks like JSON
-        if let Some(project_ref) = get_global_project_ref()
-            && let Ok(json_str) = std::str::from_utf8(buf)
-        {
+        // Only try to inject fields if the content looks like JSON
+        if let Ok(json_str) = std::str::from_utf8(buf) {
             // Try to parse as JSON
             if let Ok(serde_json::Value::Object(mut map)) =
                 serde_json::from_str::<serde_json::Value>(json_str)
             {
-                // Only inject if "project" field doesn't already exist
-                if !map.contains_key(PROJECT_KEY_IN_LOG) {
+                let mut modified = false;
+
+                // Inject project if available and not present
+                if let Some(project_ref) = get_global_project_ref()
+                    && !map.contains_key(PROJECT_KEY_IN_LOG)
+                {
                     map.insert(
                         PROJECT_KEY_IN_LOG.to_string(),
                         serde_json::Value::String(project_ref.to_string()),
                     );
+                    modified = true;
+                }
 
+                // Inject pipeline_id if available and not present
+                if let Some(pipeline_id) = get_global_pipeline_id()
+                    && !map.contains_key(PIPELINE_KEY_IN_LOG)
+                {
+                    map.insert(
+                        PIPELINE_KEY_IN_LOG.to_string(),
+                        serde_json::Value::Number(serde_json::Number::from(pipeline_id)),
+                    );
+                    modified = true;
+                }
+
+                if modified {
                     // Try to serialize back to JSON
                     if let Ok(modified) = serde_json::to_string(&map) {
-                        // Add new line if it was there
+                        // Preserve trailing newline if present
                         let output = if json_str.ends_with('\n') {
                             format!("{modified}\n")
                         } else {
@@ -161,20 +196,26 @@ where
 /// Sets up structured logging with environment-appropriate configuration.
 /// Production environments log to rotating files, development to console.
 pub fn init_tracing(app_name: &str) -> Result<LogFlusher, TracingError> {
-    init_tracing_with_project(app_name, None)
+    init_tracing_with_top_level_fields(app_name, None, None)
 }
 
-/// Initializes tracing with optional project identification.
+/// Initializes tracing with optional top-level fields.
 ///
-/// Like [`init_tracing`] but allows specifying a project reference that will
-/// be injected into all structured log entries for identification.
-pub fn init_tracing_with_project(
+/// Like [`init_tracing`] but allows specifying multiple top-level fields that will be added to each
+/// log entry.
+pub fn init_tracing_with_top_level_fields(
     app_name: &str,
     project_ref: Option<String>,
+    pipeline_id: Option<u64>,
 ) -> Result<LogFlusher, TracingError> {
-    // Set global project reference if provided
+    // Set global project reference if provided.
     if let Some(ref project) = project_ref {
         set_global_project_ref(project.clone());
+    }
+
+    // Set global pipeline id if provided.
+    if let Some(pipeline_id) = pipeline_id {
+        set_global_pipeline_id(pipeline_id);
     }
 
     // Initialize the log tracer to capture logs from the `log` crate

@@ -149,7 +149,7 @@ async fn init_store(
 /// Launches the pipeline, sets up signal handlers for SIGTERM and SIGINT,
 /// and ensures proper cleanup on shutdown. The pipeline will attempt to
 /// finish processing current batches before terminating.
-#[tracing::instrument(skip(pipeline), fields(pipeline_id = pipeline.id()))]
+#[tracing::instrument(skip(pipeline))]
 async fn start_pipeline<S, D>(mut pipeline: Pipeline<S, D>) -> anyhow::Result<()>
 where
     S: StateStore + SchemaStore + CleanupStore + Clone + Send + Sync + 'static,

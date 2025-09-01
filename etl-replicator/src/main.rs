@@ -9,7 +9,7 @@ use crate::core::start_replicator_with_config;
 use etl_config::Environment;
 use etl_config::shared::ReplicatorConfig;
 use etl_telemetry::metrics::init_metrics;
-use etl_telemetry::tracing::init_tracing_with_project;
+use etl_telemetry::tracing::init_tracing_with_top_level_fields;
 use std::sync::Arc;
 use thiserror::__private::AsDynError;
 use tracing::{error, info};
@@ -34,7 +34,11 @@ fn main() -> anyhow::Result<()> {
         .map(|s| s.project_ref.clone());
 
     // Initialize tracing with project reference
-    let _log_flusher = init_tracing_with_project(env!("CARGO_BIN_NAME"), project_ref.clone())?;
+    let _log_flusher = init_tracing_with_top_level_fields(
+        env!("CARGO_BIN_NAME"),
+        project_ref.clone(),
+        Some(replicator_config.pipeline.id),
+    )?;
 
     // Initialize Sentry before the async runtime starts
     let _sentry_guard = init_sentry()?;
