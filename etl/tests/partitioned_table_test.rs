@@ -22,7 +22,7 @@ async fn partitioned_table_sync_succeeds_with_inherited_primary_keys() {
         ("p3", "FROM (200) TO (300)"),
     ];
 
-    let (_parent_table_id, partition_table_ids) =
+    let (parent_table_id, partition_table_ids) =
         create_partitioned_table(&database, table_name.clone(), &partition_specs)
             .await
             .expect("Failed to create partitioned table");
