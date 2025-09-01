@@ -20,9 +20,9 @@ _What you'll build:_ A working pipeline that streams changes from a sample Postg
 
 **45 minutes** • **Advanced**
 
-Implement production-ready custom stores and destinations. Learn ETL's design patterns, build persistent SQLite storage, and create HTTP-based destinations with retry logic.
+Implement production-ready custom stores and destinations. Learn ETL's design patterns, build persistent storage, implement cleanup primitives for safe table removal, and create HTTP-based destinations with retry logic.
 
-_What you'll build:_ Custom in-memory store for state/schema storage and HTTP destination.
+_What you'll build:_ Custom in-memory store for state/schema storage with cleanup, and an HTTP destination.
 
 ## Before You Start
 
