@@ -21,6 +21,7 @@ use etl_api::{
 use etl_config::shared::PgConnectionConfig;
 use etl_config::{Environment, load_config};
 use etl_postgres::sqlx::test_utils::drop_pg_database;
+use rand::random_range;
 use reqwest::{IntoUrl, RequestBuilder};
 use std::io;
 use std::net::TcpListener;
@@ -509,7 +510,11 @@ pub async fn spawn_test_app() -> TestApp {
 
     let key = generate_random_key::<32>().expect("failed to generate random key");
     let encryption_key = encryption::EncryptionKey { id: 0, key };
-    let api_key = "XOUbHmWbt9h7nWl15wWwyWQnctmFGNjpawMc3lT5CFs=".to_string();
+
+    // We choose a random API key from the ones configured to show that rotation works.
+    let api_key_index = random_range(0..config.api_keys.len());
+    let api_key = config.api_keys[api_key_index].clone();
+
     let k8s_client = Some(Arc::new(MockK8sClient) as Arc<dyn K8sClient>);
 
     let server = run(
