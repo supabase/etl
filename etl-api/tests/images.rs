@@ -7,13 +7,7 @@ use reqwest::StatusCode;
 
 use crate::support::mocks::create_image_with_name;
 use crate::support::test_app::spawn_test_app;
-
-mod support {
-    pub(crate) mod database;
-    pub(crate) mod k8s_client;
-    pub(crate) mod mocks;
-    pub(crate) mod test_app;
-}
+mod support;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn image_can_be_created() {

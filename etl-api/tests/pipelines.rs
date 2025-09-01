@@ -23,12 +23,7 @@ use reqwest::StatusCode;
 use sqlx::PgPool;
 use sqlx::postgres::types::Oid;
 
-mod support {
-    pub(crate) mod database;
-    pub(crate) mod k8s_client;
-    pub(crate) mod mocks;
-    pub(crate) mod test_app;
-}
+mod support;
 
 // Pipeline config helpers moved to `support::mocks::pipelines`.
 use crate::support::mocks::pipelines::{

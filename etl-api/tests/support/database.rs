@@ -1,4 +1,5 @@
-use crate::support::test_app::TestApp;
+#![allow(dead_code)]
+
 use etl_api::configs::source::FullApiSourceConfig;
 use etl_api::routes::sources::{CreateSourceRequest, CreateSourceResponse};
 use etl_config::SerializableSecretString;
@@ -8,6 +9,8 @@ use etl_postgres::sqlx::test_utils::create_pg_database;
 use secrecy::ExposeSecret;
 use sqlx::PgPool;
 use uuid::Uuid;
+
+use crate::support::test_app::TestApp;
 
 /// Creates and configures a new Postgres database for the API.
 ///

@@ -22,9 +22,7 @@ use crate::support::bigquery::{
     parse_bigquery_table_rows, setup_bigquery_connection,
 };
 
-mod support {
-    pub(crate) mod bigquery;
-}
+mod support;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn table_copy_and_streaming_with_restart() {

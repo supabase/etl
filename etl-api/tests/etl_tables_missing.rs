@@ -12,13 +12,7 @@ use crate::support::mocks::create_default_image;
 use crate::support::mocks::destinations::create_destination;
 use crate::support::mocks::tenants::create_tenant;
 use crate::support::test_app::{TestApp, spawn_test_app};
-
-mod support {
-    pub(crate) mod database;
-    pub(crate) mod k8s_client;
-    pub(crate) mod mocks;
-    pub(crate) mod test_app;
-}
+mod support;
 
 async fn create_pipeline_with_unmigrated_source_db(
     app: &TestApp,

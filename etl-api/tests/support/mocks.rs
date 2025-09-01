@@ -1,8 +1,4 @@
-//! Test helpers for creating support resources.
-//!
-//! Centralizes small creation helpers that were previously defined in
-//! individual integration test files (e.g., `images_test`). This avoids
-//! cross‑test dependencies and keeps helpers discoverable.
+#![allow(dead_code)]
 
 use etl_api::configs::destination::FullApiDestinationConfig;
 use etl_api::configs::pipeline::{FullApiPipelineConfig, PartialApiPipelineConfig};
