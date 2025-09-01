@@ -1,4 +1,5 @@
 use base64::{Engine, prelude::BASE64_STANDARD};
+use etl_config::Config;
 use etl_config::shared::{PgConnectionConfig, SentryConfig};
 use serde::de::{MapAccess, Visitor};
 use serde::{Deserialize, Deserializer, de};
@@ -26,6 +27,10 @@ pub struct ApiConfig {
     pub api_keys: Vec<String>,
     /// Optional Sentry configuration for error tracking.
     pub sentry: Option<SentryConfig>,
+}
+
+impl Config for ApiConfig {
+    const LIST_PARSE_KEYS: &'static [&'static str] = &["api_keys"];
 }
 
 /// HTTP server configuration settings.

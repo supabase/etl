@@ -3,8 +3,8 @@ use serde::{Deserialize, Serialize};
 use sqlx::postgres::{PgConnectOptions as SqlxConnectOptions, PgSslMode as SqlxSslMode};
 use tokio_postgres::{Config as TokioPgConnectOptions, config::SslMode as TokioPgSslMode};
 
-use crate::SerializableSecretString;
 use crate::shared::ValidationError;
+use crate::{Config, SerializableSecretString};
 
 /// Postgres server options for ETL workloads.
 ///
@@ -131,6 +131,10 @@ pub struct PgConnectionConfig {
     pub password: Option<SerializableSecretString>,
     /// TLS configuration for secure connections.
     pub tls: TlsConfig,
+}
+
+impl Config for PgConnectionConfig {
+    const LIST_PARSE_KEYS: &'static [&'static str] = &[];
 }
 
 /// TLS configuration for secure Postgres connections.

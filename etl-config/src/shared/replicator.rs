@@ -1,3 +1,4 @@
+use crate::Config;
 use crate::shared::pipeline::PipelineConfig;
 use crate::shared::{DestinationConfig, SentryConfig, SupabaseConfig, ValidationError};
 use serde::{Deserialize, Serialize};
@@ -32,4 +33,8 @@ impl ReplicatorConfig {
     pub fn validate(&self) -> Result<(), ValidationError> {
         self.pipeline.validate()
     }
+}
+
+impl Config for ReplicatorConfig {
+    const LIST_PARSE_KEYS: &'static [&'static str] = &[];
 }
