@@ -17,9 +17,9 @@ async fn partitioned_table_sync_succeeds_with_inherited_primary_keys() {
 
     let table_name = test_table_name("partitioned_events");
     let partition_specs = [
-        ("p1", "FROM (1) TO (100)"),
-        ("p2", "FROM (100) TO (200)"),
-        ("p3", "FROM (200) TO (300)"),
+        ("p1", "from (1) to (100)"),
+        ("p2", "from (100) to (200)"),
+        ("p3", "from (200) to (300)"),
     ];
 
     let (parent_table_id, partition_table_ids) =
@@ -29,7 +29,7 @@ async fn partitioned_table_sync_succeeds_with_inherited_primary_keys() {
 
     database
         .run_sql(&format!(
-            "INSERT INTO {} (data, partition_key) VALUES 
+            "insert into {} (data, partition_key) values 
              ('event1', 50), ('event2', 150), ('event3', 250)",
             table_name.as_quoted_identifier()
         ))
