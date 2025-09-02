@@ -120,9 +120,9 @@ impl<D> TestDestinationWrapper<D> {
         notify
     }
 
-    /// Wait until all the supplied conditions are met.
+    /// Wait for a specific number of events of given types.
     pub async fn wait_for_events_count(&self, conditions: Vec<(EventType, u64)>) -> Arc<Notify> {
-        self.notify_on_events(move |events| check_events_count(events, conditions.clone(), true))
+        self.notify_on_events(move |events| check_events_count(events, conditions.clone()))
             .await
     }
 
@@ -133,7 +133,7 @@ impl<D> TestDestinationWrapper<D> {
     ) -> Arc<Notify> {
         self.notify_on_events(move |events| {
             let deduped = deduplicate_events(events);
-            check_events_count(&deduped, conditions.clone(), true)
+            check_events_count(&deduped, conditions.clone())
         })
         .await
     }

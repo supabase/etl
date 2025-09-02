@@ -39,30 +39,15 @@ pub fn group_events_by_type_and_table_id(
     grouped
 }
 
-pub fn check_events_count(
-    events: &[Event],
-    conditions: Vec<(EventType, u64)>,
-    is_and: bool,
-) -> bool {
+pub fn check_events_count(events: &[Event], conditions: Vec<(EventType, u64)>) -> bool {
     let grouped_events = group_events_by_type(events);
 
-    if is_and {
-        // All conditions must match.
-        conditions.into_iter().all(|(event_type, count)| {
-            grouped_events
-                .get(&event_type)
-                .map(|inner| inner.len() == count as usize)
-                .unwrap_or(false)
-        })
-    } else {
-        // At least one condition must match.
-        conditions.into_iter().any(|(event_type, count)| {
-            grouped_events
-                .get(&event_type)
-                .map(|inner| inner.len() == count as usize)
-                .unwrap_or(false)
-        })
-    }
+    conditions.into_iter().all(|(event_type, count)| {
+        grouped_events
+            .get(&event_type)
+            .map(|inner| inner.len() == count as usize)
+            .unwrap_or(false)
+    })
 }
 
 /// Returns a new Vec of events with duplicates removed.
