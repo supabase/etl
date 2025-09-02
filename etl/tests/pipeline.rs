@@ -215,10 +215,7 @@ async fn publication_changes_are_correctly_handled() {
         .unwrap();
     inserts_notify.notified().await;
 
-    // Shutdown pipeline before altering publication (by dropping one table)
-    pipeline.shutdown_and_wait().await.unwrap();
-
-    // Drop table_2 so it's no longer part of the publication
+    // Drop table_2 so it's no longer part of the publication.
     database
         .client
         .as_ref()
@@ -229,6 +226,10 @@ async fn publication_changes_are_correctly_handled() {
         )
         .await
         .unwrap();
+
+    // Shutdown pipeline after the table was dropped. We do this to show that the dropping of a table
+    // doesn't cause issues with the pipeline since the change is picked up on pipeline restart.
+    pipeline.shutdown_and_wait().await.unwrap();
 
     // Create table_3 which is going to be added to the publication.
     let table_3 = test_table_name("table_3");
@@ -287,17 +288,17 @@ async fn publication_changes_are_correctly_handled() {
     let table_1_inserts = grouped
         .get(&(EventType::Insert, table_1_id))
         .cloned()
-        .unwrap_or_default();
+        .unwrap();
     assert_eq!(table_1_inserts.len(), 2);
     let table_2_inserts = grouped
         .get(&(EventType::Insert, table_2_id))
         .cloned()
-        .unwrap_or_default();
+        .unwrap();
     assert_eq!(table_2_inserts.len(), 1);
     let table_3_inserts = grouped
         .get(&(EventType::Insert, table_3_id))
         .cloned()
-        .unwrap_or_default();
+        .unwrap();
     assert_eq!(table_3_inserts.len(), 1);
 }
 
