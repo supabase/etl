@@ -7,7 +7,7 @@ use tokio::sync::{Notify, RwLock};
 
 use crate::destination::Destination;
 use crate::error::EtlResult;
-use crate::test_utils::event::check_events_count;
+use crate::test_utils::event::{check_events_count, deduplicate_events};
 use crate::types::{Event, EventType, TableRow};
 
 type EventCondition = Box<dyn Fn(&[Event]) -> bool + Send + Sync>;
@@ -100,6 +100,12 @@ impl<D> TestDestinationWrapper<D> {
         self.inner.read().await.events.clone()
     }
 
+    /// Get all events that have been written, de-duplicated by full event equality.
+    pub async fn get_events_deduped(&self) -> Vec<Event> {
+        let events = self.inner.read().await.events.clone();
+        deduplicate_events(&events)
+    }
+
     /// Wait for a specific condition on events
     pub async fn notify_on_events<F>(&self, condition: F) -> Arc<Notify>
     where
@@ -114,10 +120,22 @@ impl<D> TestDestinationWrapper<D> {
         notify
     }
 
-    /// Wait for a specific number of events of given types
+    /// Wait until all the supplied conditions are met.
     pub async fn wait_for_events_count(&self, conditions: Vec<(EventType, u64)>) -> Arc<Notify> {
-        self.notify_on_events(move |events| check_events_count(events, conditions.clone()))
+        self.notify_on_events(move |events| check_events_count(events, conditions.clone(), true))
             .await
+    }
+
+    /// Wait for a specific number of events of given types after de-duplicating by full event equality.
+    pub async fn wait_for_events_count_deduped(
+        &self,
+        conditions: Vec<(EventType, u64)>,
+    ) -> Arc<Notify> {
+        self.notify_on_events(move |events| {
+            let deduped = deduplicate_events(events);
+            check_events_count(&deduped, conditions.clone(), true)
+        })
+        .await
     }
 
     pub async fn clear_events(&self) {

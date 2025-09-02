@@ -39,17 +39,49 @@ pub fn group_events_by_type_and_table_id(
     grouped
 }
 
-pub fn check_events_count(events: &[Event], conditions: Vec<(EventType, u64)>) -> bool {
+pub fn check_events_count(
+    events: &[Event],
+    conditions: Vec<(EventType, u64)>,
+    is_and: bool,
+) -> bool {
     let grouped_events = group_events_by_type(events);
-    for (event_type, count) in conditions {
-        let Some(inner_events) = grouped_events.get(&event_type) else {
-            return false;
-        };
 
-        if inner_events.len() != count as usize {
-            return false;
+    if is_and {
+        // All conditions must match.
+        conditions.into_iter().all(|(event_type, count)| {
+            grouped_events
+                .get(&event_type)
+                .map(|inner| inner.len() == count as usize)
+                .unwrap_or(false)
+        })
+    } else {
+        // At least one condition must match.
+        conditions.into_iter().any(|(event_type, count)| {
+            grouped_events
+                .get(&event_type)
+                .map(|inner| inner.len() == count as usize)
+                .unwrap_or(false)
+        })
+    }
+}
+
+/// Returns a new Vec of events with duplicates removed.
+///
+/// Events that are not tied to a specific row (Begin/Commit/Relation/Truncate/Unsupported)
+/// are not de-duplicated and are preserved in order.
+/// Returns a new Vec of events with duplicates removed based on full equality of events.
+///
+/// Two events are considered the same if all their fields are equal. The first
+/// occurrence is kept and subsequent duplicates are dropped.
+///
+/// The rationale for having this method is that the pipeline doesn't guarantee exactly once delivery
+/// thus in some tests we might have to exclude duplicates while performing assertions.
+pub fn deduplicate_events(events: &[Event]) -> Vec<Event> {
+    let mut result: Vec<Event> = Vec::with_capacity(events.len());
+    for e in events.iter().cloned() {
+        if !result.contains(&e) {
+            result.push(e);
         }
     }
-
-    true
+    result
 }

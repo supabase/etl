@@ -259,7 +259,7 @@ async fn publication_changes_are_correctly_handled() {
     // Insert one row in table_1 and wait for it. (We wait for 4 inserts since it keeps the previous
     // ones).
     let inserts_notify = destination
-        .wait_for_events_count(vec![(EventType::Insert, 4)])
+        .wait_for_events_count_deduped(vec![(EventType::Insert, 4)])
         .await;
 
     database
@@ -283,7 +283,9 @@ async fn publication_changes_are_correctly_handled() {
 
     // The destination should have the 2 events of the first table, the 1 event of the removed table
     // and the 1 event of the new table.
-    let events = destination.get_events().await;
+    // Use de-duplicated events for assertions to be robust to potential duplicates
+    // on restart where confirmed_flush_lsn may not have been stored.
+    let events = destination.get_events_deduped().await;
     let grouped = group_events_by_type_and_table_id(&events);
     let table_1_inserts = grouped
         .get(&(EventType::Insert, table_1_id))
