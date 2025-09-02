@@ -49,7 +49,7 @@ pub struct CommitEvent {
 pub struct RelationEvent {
     /// LSN position where the event started.
     pub start_lsn: PgLsn,
-    /// LSN position where the event will commit.
+    /// LSN position where the transaction of this event will commit.
     pub commit_lsn: PgLsn,
     /// Complete table schema including columns and types.
     pub table_schema: TableSchema,
@@ -63,7 +63,7 @@ pub struct RelationEvent {
 pub struct InsertEvent {
     /// LSN position where the event started.
     pub start_lsn: PgLsn,
-    /// LSN position where the event will commit.
+    /// LSN position where the transaction of this event will commit.
     pub commit_lsn: PgLsn,
     /// ID of the table where the row was inserted.
     pub table_id: TableId,
@@ -80,7 +80,7 @@ pub struct InsertEvent {
 pub struct UpdateEvent {
     /// LSN position where the event started.
     pub start_lsn: PgLsn,
-    /// LSN position where the event will commit.
+    /// LSN position where the transaction of this event will commit.
     pub commit_lsn: PgLsn,
     /// ID of the table where the row was updated.
     pub table_id: TableId,
@@ -100,11 +100,11 @@ pub struct UpdateEvent {
 /// information about the deleted row for proper cleanup in the destination system.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DeleteEvent {
-    /// LSN position where the event started
+    /// LSN position where the event started.
     pub start_lsn: PgLsn,
-    /// LSN position where the event will commit
+    /// LSN position where the transaction of this event will commit.
     pub commit_lsn: PgLsn,
-    /// ID of the table where the row was deleted
+    /// ID of the table where the row was deleted.
     pub table_id: TableId,
     /// Data from the deleted row.
     ///
@@ -123,7 +123,7 @@ pub struct DeleteEvent {
 pub struct TruncateEvent {
     /// LSN position where the event started.
     pub start_lsn: PgLsn,
-    /// LSN position where the event will commit.
+    /// LSN position where the transaction of this event will commit.
     pub commit_lsn: PgLsn,
     /// Truncate operation options from Postgres.
     pub options: i8,
