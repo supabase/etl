@@ -61,7 +61,7 @@ impl<G: GenericClient> PgDatabase<G> {
             .collect::<Vec<_>>();
 
         let create_publication_query = format!(
-            "create publication {} for table {}",
+            "create publication {} for table {} with (publish_via_partition_root = true)",
             publication_name,
             table_names.join(", ")
         );
@@ -87,10 +87,13 @@ impl<G: GenericClient> PgDatabase<G> {
             // PostgreSQL 15+ supports FOR ALL TABLES IN SCHEMA syntax
             let create_publication_query = match schema {
                 Some(schema_name) => format!(
-                    "create publication {} for tables in schema {}",
+                    "create publication {} for tables in schema {} with (publish_via_partition_root = true)",
                     publication_name, schema_name
                 ),
-                None => format!("create publication {} for all tables", publication_name),
+                None => format!(
+                    "create publication {} for all tables with (publish_via_partition_root = true)",
+                    publication_name
+                ),
             };
 
             client.execute(&create_publication_query, &[]).await?;
@@ -98,7 +101,10 @@ impl<G: GenericClient> PgDatabase<G> {
             // PostgreSQL 14 and earlier: create publication and add tables individually
             match schema {
                 Some(schema_name) => {
-                    let create_pub_query = format!("create publication {}", publication_name);
+                    let create_pub_query = format!(
+                        "create publication {} with (publish_via_partition_root = true)",
+                        publication_name
+                    );
                     client.execute(&create_pub_query, &[]).await?;
 
                     let tables_query = format!(
@@ -118,8 +124,10 @@ impl<G: GenericClient> PgDatabase<G> {
                     }
                 }
                 None => {
-                    let create_publication_query =
-                        format!("create publication {} for all tables", publication_name);
+                    let create_publication_query = format!(
+                        "create publication {} for all tables with (publish_via_partition_root = true)",
+                        publication_name
+                    );
                     client.execute(&create_publication_query, &[]).await?;
                 }
             }

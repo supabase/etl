@@ -3,17 +3,19 @@
 use etl::destination::memory::MemoryDestination;
 use etl::state::table::TableReplicationPhaseType;
 use etl::test_utils::database::{spawn_source_database, test_table_name};
+use etl::test_utils::event::group_events_by_type_and_table_id;
 use etl::test_utils::notify::NotifyingStore;
 use etl::test_utils::pipeline::create_pipeline;
 use etl::test_utils::test_destination_wrapper::TestDestinationWrapper;
 use etl::test_utils::test_schema::create_partitioned_table;
+use etl::types::EventType;
 use etl::types::PipelineId;
 use etl_telemetry::tracing::init_test_tracing;
 use rand::random;
 
-/// Test that verifies partitioned tables with inherited primary keys work correctly.
+/// Initial copy for a partitioned table (published via root) copies all existing rows.
 #[tokio::test(flavor = "multi_thread")]
-async fn partitioned_table_sync_succeeds_with_inherited_primary_keys() {
+async fn partitioned_table_copy_replicates_existing_data() {
     init_test_tracing();
     let database = spawn_source_database().await;
 
@@ -24,7 +26,7 @@ async fn partitioned_table_sync_succeeds_with_inherited_primary_keys() {
         ("p3", "from (200) to (300)"),
     ];
 
-    let (parent_table_id, partition_table_ids) =
+    let (parent_table_id, _partition_table_ids) =
         create_partitioned_table(&database, table_name.clone(), &partition_specs)
             .await
             .expect("Failed to create partitioned table");
@@ -47,13 +49,10 @@ async fn partitioned_table_sync_succeeds_with_inherited_primary_keys() {
     let state_store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
 
-    let mut partition_notifications = Vec::new();
-    for &partition_id in &partition_table_ids {
-        let notification = state_store
-            .notify_on_table_state(partition_id, TableReplicationPhaseType::SyncDone)
-            .await;
-        partition_notifications.push(notification);
-    }
+    // Register notification for initial copy completion.
+    let parent_sync_done = state_store
+        .notify_on_table_state(parent_table_id, TableReplicationPhaseType::SyncDone)
+        .await;
 
     let pipeline_id: PipelineId = random();
     let mut pipeline = create_pipeline(
@@ -66,9 +65,7 @@ async fn partitioned_table_sync_succeeds_with_inherited_primary_keys() {
 
     pipeline.start().await.unwrap();
 
-    for notification in partition_notifications {
-        notification.notified().await;
-    }
+    parent_sync_done.notified().await;
 
     let _ = pipeline.shutdown_and_wait().await;
 
@@ -83,33 +80,14 @@ async fn partitioned_table_sync_succeeds_with_inherited_primary_keys() {
 
     let table_states = state_store.get_table_replication_states().await;
 
+    assert!(
+        table_states.contains_key(&parent_table_id),
+        "Parent table should be tracked in state"
+    );
     assert_eq!(
         table_states.len(),
-        partition_table_ids.len(),
-        "Expected {} partition states, but found {}",
-        partition_table_ids.len(),
-        table_states.len()
-    );
-
-    for &partition_id in &partition_table_ids {
-        let state = table_states
-            .get(&partition_id)
-            .unwrap_or_else(|| panic!("Partition {} should have a state", partition_id));
-        assert!(
-            matches!(
-                state.as_type(),
-                TableReplicationPhaseType::SyncDone | TableReplicationPhaseType::Ready
-            ),
-            "Partition {} should be in SyncDone or Ready state, but was in {:?}",
-            partition_id,
-            state.as_type()
-        );
-    }
-
-    assert!(
-        !table_states.contains_key(&parent_table_id),
-        "Parent table {} should not be tracked since parent partitioned tables are excluded from processing",
-        parent_table_id
+        1,
+        "Only the parent table should be tracked in state"
     );
 
     let parent_table_rows = table_rows
@@ -118,8 +96,112 @@ async fn partitioned_table_sync_succeeds_with_inherited_primary_keys() {
         .map(|(_, rows)| rows.len())
         .sum::<usize>();
     assert_eq!(
-        parent_table_rows, 0,
-        "Parent table {} should have no data since it's excluded from processing and all data goes to partitions, but found {} rows",
-        parent_table_id, parent_table_rows
+        parent_table_rows, 3,
+        "Parent table should contain all rows when publishing via root"
     );
+}
+
+/// Initial copy completes and CDC streams new rows from newly added partitions.
+#[tokio::test(flavor = "multi_thread")]
+async fn partitioned_table_copy_and_streams_new_data_from_new_partition() {
+    init_test_tracing();
+    let database = spawn_source_database().await;
+
+    let table_name = test_table_name("partitioned_events_late");
+    let initial_partition_specs = [("p1", "from (1) to (100)"), ("p2", "from (100) to (200)")];
+
+    let (parent_table_id, _initial_partition_table_ids) =
+        create_partitioned_table(&database, table_name.clone(), &initial_partition_specs)
+            .await
+            .expect("Failed to create initial partitioned table");
+
+    database
+        .run_sql(&format!(
+            "insert into {} (data, partition_key) values \
+             ('event1', 50), ('event2', 150)",
+            table_name.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+
+    let publication_name = "test_partitioned_pub_late".to_string();
+    database
+        .create_publication(&publication_name, std::slice::from_ref(&table_name))
+        .await
+        .expect("Failed to create publication");
+
+    let state_store = NotifyingStore::new();
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
+
+    // Register notification for initial copy completion.
+    let parent_sync_done = state_store
+        .notify_on_table_state(parent_table_id, TableReplicationPhaseType::SyncDone)
+        .await;
+
+    let pipeline_id: PipelineId = random();
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        publication_name,
+        state_store.clone(),
+        destination.clone(),
+    );
+
+    pipeline.start().await.unwrap();
+
+    parent_sync_done.notified().await;
+
+    let new_partition_name = format!("{}_{}", table_name.name, "p3");
+    let new_partition_qualified_name = format!("{}.{}", table_name.schema, new_partition_name);
+    database
+        .run_sql(&format!(
+            "create table {} partition of {} for values from (200) to (300)",
+            new_partition_qualified_name,
+            table_name.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+
+    database
+        .run_sql(&format!(
+            "insert into {} (data, partition_key) values ('event3', 250)",
+            table_name.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+
+    // Wait for CDC to deliver the new row.
+    let inserts_notify = destination
+        .wait_for_events_count(vec![(EventType::Insert, 1)])
+        .await;
+    inserts_notify.notified().await;
+
+    let _ = pipeline.shutdown_and_wait().await;
+
+    let table_rows = destination.get_table_rows().await;
+    let total_rows: usize = table_rows.values().map(|rows| rows.len()).sum();
+    assert_eq!(
+        total_rows, 2,
+        "Expected 2 rows synced from initial copy, got {}",
+        total_rows
+    );
+
+    let table_states = state_store.get_table_replication_states().await;
+    assert!(table_states.contains_key(&parent_table_id));
+    assert_eq!(table_states.len(), 1);
+
+    let parent_table_rows = table_rows
+        .iter()
+        .filter(|(table_id, _)| **table_id == parent_table_id)
+        .map(|(_, rows)| rows.len())
+        .sum::<usize>();
+    assert_eq!(parent_table_rows, 2);
+
+    let events = destination.get_events().await;
+    let grouped = group_events_by_type_and_table_id(&events);
+    let parent_inserts = grouped
+        .get(&(EventType::Insert, parent_table_id))
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(parent_inserts.len(), 1);
 }
