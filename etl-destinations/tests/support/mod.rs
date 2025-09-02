@@ -1,2 +1,2 @@
-pub(crate) mod bigquery;
-pub(crate) mod lakekeeper;
+pub mod bigquery;
+pub mod lakekeeper;
