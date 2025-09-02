@@ -410,6 +410,31 @@ impl PgReplicationClient {
         &self,
         publication_name: &str,
     ) -> EtlResult<Vec<TableId>> {
+        // Prefer pg_publication_rel (explicit tables in the publication, including partition roots)
+        let rel_query = format!(
+            r#"select r.prrelid as oid
+               from pg_publication_rel r
+               join pg_publication p on p.oid = r.prpubid
+              where p.pubname = {}"#,
+            quote_literal(publication_name)
+        );
+
+        let mut table_ids = vec![];
+        let mut has_rows = false;
+        for msg in self.client.simple_query(&rel_query).await? {
+            if let SimpleQueryMessage::Row(row) = msg {
+                has_rows = true;
+                let table_id =
+                    Self::get_row_value::<TableId>(&row, "oid", "pg_publication_rel").await?;
+                table_ids.push(table_id);
+            }
+        }
+
+        if has_rows {
+            return Ok(table_ids);
+        }
+
+        // Fallback to pg_publication_tables (expanded view), used for publications like FOR ALL TABLES
         let publication_query = format!(
             "select c.oid from pg_publication_tables pt 
          join pg_class c on c.relname = pt.tablename 
@@ -418,10 +443,8 @@ impl PgReplicationClient {
             quote_literal(publication_name)
         );
 
-        let mut table_ids = vec![];
         for msg in self.client.simple_query(&publication_query).await? {
             if let SimpleQueryMessage::Row(row) = msg {
-                // For the sake of simplicity, we refer to the table oid as table id.
                 let table_id = Self::get_row_value::<TableId>(&row, "oid", "pg_class").await?;
                 table_ids.push(table_id);
             }
@@ -721,44 +744,19 @@ impl PgReplicationClient {
                 join direct_parent dp on con.conrelid = dp.parent_oid
                 where con.contype = 'p'
                 group by con.conname
-            ),
-            -- Check if current table has a unique index on the parent PK columns
-            partition_has_pk_index as (
-                select case 
-                    when exists (select 1 from direct_parent) 
-                         and exists (select 1 from parent_pk_cols)
-                         and exists (
-                            -- Check if there's a unique, valid index on the parent PK columns
-                            select 1
-                            from pg_index ix
-                            cross join parent_pk_cols pk
-                            where ix.indrelid = {table_id}::oid
-                            and ix.indisunique = true
-                            and ix.indisvalid = true
-                            and array(
-                                select a.attname
-                                from unnest(ix.indkey) with ordinality k(attnum, ord)
-                                join pg_attribute a on a.attrelid = ix.indrelid and a.attnum = k.attnum
-                                where ord <= ix.indnkeyatts  -- exclude INCLUDE columns
-                                order by ord
-                            ) = pk.pk_column_names
-                        ) then true
-                    else false
-                end as has_inherited_pk
             )
             SELECT a.attname,
                 a.atttypid,
                 a.atttypmod,
                 a.attnotnull,
                 case 
-                    -- First check for direct primary key
+                    -- Direct primary key on this relation
                     when coalesce(i.indisprimary, false) = true then true
-                    -- Then check for inherited primary key from partitioned table parent
-                    when (select has_inherited_pk from partition_has_pk_index) = true 
-                         and exists (
-                            select 1 from parent_pk_cols pk 
-                            where a.attname = any(pk.pk_column_names)
-                         ) then true
+                    -- Inherit primary key from parent partitioned table if column name matches
+                    when exists (
+                        select 1 from parent_pk_cols pk 
+                        where a.attname = any(pk.pk_column_names)
+                    ) then true
                     else false
                 end as primary
             from pg_attribute a
@@ -816,17 +814,34 @@ impl PgReplicationClient {
             .collect::<Vec<_>>()
             .join(", ");
 
-        let table_name = self.get_table_name(table_id).await?;
+        let copy_query = if self.is_partitioned_table(table_id).await?
+            && let leaf_partitions = self.get_leaf_partition_ids(table_id).await?
+            && !leaf_partitions.is_empty()
+        {
+            let mut selects = Vec::with_capacity(leaf_partitions.len());
+            for child_id in leaf_partitions {
+                let child_name = self.get_table_name(child_id).await?;
+                let select = format!(
+                    "select {} from {}",
+                    column_list,
+                    child_name.as_quoted_identifier()
+                );
+                selects.push(select);
+            }
+
+            let union_query = selects.join(" union all ");
+            format!(r#"copy ({}) to stdout with (format text);"#, union_query)
+        } else {
+            let table_name = self.get_table_name(table_id).await?;
+            format!(
+                r#"copy {} ({}) to stdout with (format text);"#,
+                table_name.as_quoted_identifier(),
+                column_list
+            )
+        };
 
         // TODO: allow passing in format binary or text
-        let copy_query = format!(
-            r#"copy {} ({}) to stdout with (format text);"#,
-            table_name.as_quoted_identifier(),
-            column_list
-        );
-
         let stream = self.client.copy_out_simple(&copy_query).await?;
-
         Ok(stream)
     }
 
@@ -860,5 +875,58 @@ impl PgReplicationClient {
                 )
             )
         })
+    }
+
+    /// Returns true if the given table id refers to a partitioned table (relkind = 'p').
+    async fn is_partitioned_table(&self, table_id: TableId) -> EtlResult<bool> {
+        let query = format!(
+            "select c.relkind from pg_class c where c.oid = {}",
+            table_id
+        );
+
+        for msg in self.client.simple_query(&query).await? {
+            if let SimpleQueryMessage::Row(row) = msg {
+                let relkind = Self::get_row_value::<String>(&row, "relkind", "pg_class").await?;
+                return Ok(relkind == "p");
+            }
+        }
+
+        bail!(
+            ErrorKind::SourceSchemaError,
+            "Table not found",
+            format!("Table not found in database (table id: {})", table_id)
+        );
+    }
+
+    /// Returns all leaf partition OIDs for a partitioned table.
+    async fn get_leaf_partition_ids(&self, parent_id: TableId) -> EtlResult<Vec<TableId>> {
+        let query = format!(
+            r#"
+            with recursive parts(relid) as (
+                select i.inhrelid
+                from pg_inherits i
+                where i.inhparent = {parent}
+                union all
+                select i.inhrelid
+                from pg_inherits i
+                join parts p on p.relid = i.inhparent
+            )
+            select p.relid as oid
+            from parts p
+            left join pg_inherits i on i.inhparent = p.relid
+            where i.inhrelid is null
+            "#,
+            parent = parent_id
+        );
+
+        let mut ids = Vec::new();
+        for msg in self.client.simple_query(&query).await? {
+            if let SimpleQueryMessage::Row(row) = msg {
+                let id = Self::get_row_value::<TableId>(&row, "oid", "pg_inherits").await?;
+                ids.push(id);
+            }
+        }
+
+        Ok(ids)
     }
 }
