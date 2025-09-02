@@ -88,8 +88,17 @@ jobs:
 
       - name: Run tests
         run: |
-          cargo test --workspace --no-fail-fast \
-            --all-features -- --skip integration::bigquery_test
+          cargo test \
+            --workspace \
+            --all-features \
+            --no-fail-fast \
+            --exclude etl-destinations \
+          && \
+          cargo test \
+            -p etl-destinations \
+            --no-default-features \
+            --no-fail-fast \
+            --features iceberg
 
   test-full:
     name: Test Full
