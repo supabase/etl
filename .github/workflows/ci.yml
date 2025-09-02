@@ -92,13 +92,7 @@ jobs:
             --workspace \
             --all-features \
             --no-fail-fast \
-            --exclude etl-destinations \
-          && \
-          cargo test \
-            -p etl-destinations \
-            --no-default-features \
-            --no-fail-fast \
-            --features iceberg
+            --exclude etl-destinations-bigquery
 
   test-full:
     name: Test Full

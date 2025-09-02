@@ -4,44 +4,9 @@ version = "0.1.0"
 edition = "2024"
 
 [features]
-bigquery = [
-    "dep:futures",
-    "dep:gcp-bigquery-client",
-    "dep:prost",
-    "dep:rustls",
-    "dep:tracing",
-    "dep:tokio",
-]
-iceberg = ["dep:iceberg", "dep:iceberg-catalog-rest"]
+bigquery = ["dep:etl-destinations-bigquery"]
+iceberg = ["dep:etl-destinations-iceberg"]
 
 [dependencies]
-etl = { workspace = true }
-chrono = { workspace = true }
-
-futures = { workspace = true, optional = true }
-gcp-bigquery-client = { workspace = true, optional = true, features = [
-    "rust-tls",
-    "aws-lc-rs",
-] }
-iceberg = { workspace = true, optional = true }
-iceberg-catalog-rest = { workspace = true, optional = true }
-metrics = { workspace = true }
-prost = { workspace = true, optional = true }
-rustls = { workspace = true, optional = true, features = [
-    "aws-lc-rs",
-    "logging",
-] }
-tokio = { workspace = true, optional = true, features = ["sync"] }
-tracing = { workspace = true, optional = true, default-features = true }
-
-[dev-dependencies]
-etl = { workspace = true, features = ["test-utils"] }
-etl-telemetry = { workspace = true }
-
-base64 = { workspace = true }
-chrono = { workspace = true }
-rand = { workspace = true, features = ["thread_rng"] }
-reqwest = { workspace = true }
-serde = { workspace = true }
-serde_json = { workspace = true }
-uuid = { workspace = true, features = ["v4"] }
+etl-destinations-bigquery = { path = "bigquery", optional = true }
+etl-destinations-iceberg = { path = "iceberg", optional = true }

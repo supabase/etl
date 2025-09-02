@@ -1,0 +1,31 @@
+[package]
+name = "etl-destinations-bigquery"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "etl_destinations_bigquery"
+path = "src/lib.rs"
+
+[dependencies]
+etl = { workspace = true }
+chrono = { workspace = true }
+futures = { workspace = true }
+gcp-bigquery-client = { workspace = true, features = ["rust-tls", "aws-lc-rs"] }
+metrics = { workspace = true }
+prost = { workspace = true }
+rustls = { workspace = true, features = ["aws-lc-rs", "logging"] }
+tokio = { workspace = true, features = ["sync"] }
+tracing = { workspace = true, default-features = true }
+
+[dev-dependencies]
+etl = { workspace = true, features = ["test-utils"] }
+etl-telemetry = { workspace = true }
+base64 = { workspace = true }
+chrono = { workspace = true }
+rand = { workspace = true, features = ["thread_rng"] }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true, features = ["v4"] }
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "time", "sync"] }

@@ -1,0 +1,21 @@
+[package]
+name = "etl-destinations-iceberg"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "etl_destinations_iceberg"
+path = "src/lib.rs"
+
+[dependencies]
+etl = { workspace = true }
+iceberg = { workspace = true }
+iceberg-catalog-rest = { workspace = true }
+
+[dev-dependencies]
+etl-telemetry = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true, features = ["v4"] }
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "time"] }

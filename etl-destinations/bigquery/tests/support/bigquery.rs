@@ -1,12 +1,10 @@
-#![allow(dead_code)]
-
 use base64::Engine;
 use base64::prelude::BASE64_STANDARD;
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use etl::store::schema::SchemaStore;
 use etl::store::state::StateStore;
 use etl::types::{PgNumeric, TableName};
-use etl_destinations::bigquery::{BigQueryDestination, table_name_to_bigquery_table_id};
+use etl_destinations_bigquery::{BigQueryDestination, table_name_to_bigquery_table_id};
 use gcp_bigquery_client::Client;
 use gcp_bigquery_client::client_builder::ClientBuilder;
 use gcp_bigquery_client::model::dataset::Dataset;

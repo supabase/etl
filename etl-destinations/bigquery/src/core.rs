@@ -13,9 +13,9 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
 
-use crate::bigquery::client::{BigQueryClient, BigQueryOperationType};
-use crate::bigquery::{BigQueryDatasetId, BigQueryTableId};
+use crate::client::{BigQueryClient, BigQueryOperationType};
 use crate::metrics::register_metrics;
+use crate::{BigQueryDatasetId, BigQueryTableId};
 
 /// Delimiter separating schema from table name in BigQuery table identifiers.
 const BIGQUERY_TABLE_ID_DELIMITER: &str = "_";

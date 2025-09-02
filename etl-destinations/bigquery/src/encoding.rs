@@ -1,4 +1,4 @@
-use crate::bigquery::validation::validate_cell_for_bigquery;
+use crate::validation::validate_cell_for_bigquery;
 use etl::error::EtlError;
 use etl::etl_error;
 use etl::types::{

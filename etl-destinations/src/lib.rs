@@ -4,7 +4,11 @@
 //! and analytics platforms, enabling data replication from Postgres to cloud services.
 
 #[cfg(feature = "bigquery")]
-pub mod bigquery;
+pub mod bigquery {
+    pub use etl_destinations_bigquery::*;
+}
+
 #[cfg(feature = "iceberg")]
-pub mod iceberg;
-mod metrics;
+pub mod iceberg {
+    pub use etl_destinations_iceberg::*;
+}

@@ -17,7 +17,7 @@ use std::sync::Arc;
 use std::time::Instant;
 use tracing::{debug, info};
 
-use crate::bigquery::encoding::BigQueryTableRow;
+use crate::encoding::BigQueryTableRow;
 use crate::metrics::{BQ_BATCH_SEND_MILLISECONDS_TOTAL, BQ_BATCH_SIZE};
 
 /// Trace identifier for ETL operations in BigQuery client.

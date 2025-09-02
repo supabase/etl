@@ -4,7 +4,7 @@ use etl::types::TableSchema;
 use iceberg::{Catalog, NamespaceIdent, TableCreation, TableIdent};
 use iceberg_catalog_rest::{RestCatalog, RestCatalogConfig};
 
-use crate::iceberg::schema::postgres_to_iceberg_schema;
+use crate::schema::postgres_to_iceberg_schema;
 
 /// Client for connecting to Iceberg data lakes.
 #[derive(Clone)]
