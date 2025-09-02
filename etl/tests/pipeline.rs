@@ -275,7 +275,7 @@ async fn publication_changes_are_correctly_handled() {
 
     pipeline.shutdown_and_wait().await.unwrap();
 
-    // Assert that table_2 state is gone but destination data remains
+    // Assert that table_2 state is gone but destination data remains.
     let states = store.get_table_replication_states().await;
     assert!(states.contains_key(&table_1_id));
     assert!(!states.contains_key(&table_2_id));

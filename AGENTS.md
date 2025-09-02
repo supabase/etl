@@ -8,6 +8,8 @@
 ## Build and Test
 - Build: `cargo build --workspace --all-targets --all-features`.
 - Lint/format: `cargo fmt`; `cargo clippy --all-targets --all-features -- -D warnings`.
+- Use `ENABLE_TRACING=1` when running integration tests to see the logs.
+- Use `RUST_LOG=[log-level]` if you need to see the logs with a specific log level.
 
 ## Coding Style & Naming
 - Rust 2024 edition; keep formatter clean and warnings denied.
