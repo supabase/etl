@@ -78,5 +78,3 @@ jobs:
           # Push to main and tags; assume release is performed from main.
           git push origin HEAD:main
           git push origin --tags
-
-      # No Docker push here. Images are published by the Release workflow.
