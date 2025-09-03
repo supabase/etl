@@ -9,14 +9,9 @@ conventional_commits = true
 filter_unconventional = false
 commit_parsers = [
     { message = "^feat", group = "Features" },
+    { message = "^(refactor|ref)", group = "Refactors" },
     { message = "^fix", group = "Bug Fixes" },
-    { message = "^perf", group = "Performance" },
-    { message = "^refactor", group = "Refactor" },
-    { message = "^docs", group = "Documentation" },
-    { message = "^test", group = "Tests" },
-    { message = "^ci", group = "CI" },
-    { message = "^chore", group = "Chore" },
-    { message = ".*", group = "Others" },
+    { message = ".*", group = "Miscellaneous" },
 ]
 protect_breaking_commits = true
 filter_commits = true
