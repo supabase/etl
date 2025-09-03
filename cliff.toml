@@ -1,6 +1,42 @@
 [changelog]
-header = "# Changelog\n\nAll notable changes to this project will be documented in this file.\n\n## [Unreleased]\n\n"
-body = "\n{% if releases is defined %}\n{% for release in releases %}\n## [{{ release.version }}] - {{ release.timestamp | date(format=\"%Y-%m-%d\") }}\n\n{% if release.commits | length == 0 %}No changes.{% endif %}\n{% for group, commits in release.commits | group_by(attribute=\"group\") %}\n### {{ group | upper_first }}\n{% for commit in commits %}- {{ commit.message }}\n{% endfor %}\n\n{% endfor %}\n{% endfor %}\n{% else %}\n## [{{ version }}] - {{ timestamp | date(format=\"%Y-%m-%d\") }}\n\n{% if commits | length == 0 %}No changes.{% endif %}\n{% for group, commits in commits | group_by(attribute=\"group\") %}\n### {{ group | upper_first }}\n{% for commit in commits %}- {{ commit.message }}\n{% endfor %}\n\n{% endfor %}\n{% endif %}"
+header = """
+# Changelog
+
+All notable changes to this project will be documented in this file.
+"""
+body = """
+{% if releases is defined %}
+{% for release in releases %}
+## [{{ release.version }}] - {{ release.timestamp | date(format="%Y-%m-%d") }}
+
+{% if release.commits | length == 0 %}
+No changes.
+{% endif %}
+
+{% for group, commits in release.commits | group_by(attribute="group") %}
+### {{ group | upper_first }}
+{% for commit in commits %}
+- {{ commit.message }}
+{% endfor %}
+
+{% endfor %}
+{% endfor %}
+{% else %}
+## [{{ version }}] - {{ timestamp | date(format="%Y-%m-%d") }}
+
+{% if commits | length == 0 %}
+No changes.
+{% endif %}
+
+{% for group, commits in commits | group_by(attribute="group") %}
+### {{ group | upper_first }}
+{% for commit in commits %}
+- {{ commit.message }}
+{% endfor %}
+
+{% endfor %}
+{% endif %}
+"""
 trim = true
 footer = ""
 
@@ -19,4 +55,3 @@ tag_pattern = "v*"
 skip_tags = false
 topo_order = false
 sort_commits = "newest"
-
