@@ -1,6 +1,6 @@
 [changelog]
 header = "# Changelog\n\nAll notable changes to this project will be documented in this file.\n\n## [Unreleased]\n\n"
-body = "\n## [v{{ version }}] - {{ date | date(\"%Y-%m-%d\") }}\n\n{% if commits | length == 0 %}No changes.{% endif %}\n{% for group, commits in commits | group_by(attribute=\"group\") %}\n### {{ group | upper_first }}\n{% for commit in commits %}- {{ commit.message | upper_first }}\n{% endfor %}\n\n{% endfor %}"
+body = "\n{% for release in releases %}\n## [v{{ release.version }}] - {{ release.timestamp | date(\"%Y-%m-%d\") }}\n\n{% if release.commits | length == 0 %}No changes.{% endif %}\n{% for group, commits in release.commits | group_by(attribute=\"group\") %}\n### {{ group | upper_first }}\n{% for commit in commits %}- {{ commit.message | upper_first }}\n{% endfor %}\n\n{% endfor %}\n{% endfor %}"
 trim = true
 footer = ""
 
@@ -24,4 +24,3 @@ tag_pattern = "v*"
 skip_tags = false
 topo_order = false
 sort_commits = "newest"
-
