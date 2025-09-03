@@ -70,19 +70,13 @@ jobs:
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
           echo "version=${VERSION#v}" >> "$GITHUB_OUTPUT"
 
-      - name: Generate Release Notes + Asset
+      - name: Generate Release Notes
         id: notes
         shell: bash
         run: |
           set -euo pipefail
           USER="${{ vars.DOCKERHUB_USERNAME }}"
           TAG="${{ steps.tag.outputs.tag }}"
-          cat > DOCKER-IMAGES.txt <<EOF
-docker.io/${USER}/etl-api:latest
-docker.io/${USER}/etl-api:${TAG}
-docker.io/${USER}/etl-replicator:latest
-docker.io/${USER}/etl-replicator:${TAG}
-EOF
           {
             echo "body<<'MARKER'"
             echo "Release ${TAG}"
@@ -111,13 +105,4 @@ EOF
           draft: false
           prerelease: false
 
-      - name: Upload Docker Images Asset
-        uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: DOCKER-IMAGES.txt
-          asset_name: DOCKER-IMAGES.txt
-          asset_content_type: text/plain
-
+      # No assets uploaded; links included in release body.
