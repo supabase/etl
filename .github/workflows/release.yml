@@ -98,4 +98,3 @@ jobs:
           body: ${{ steps.notes.outputs.body }}
           draft: false
           prerelease: false
-          
