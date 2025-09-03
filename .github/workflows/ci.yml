@@ -15,35 +15,35 @@ permissions:
 
 jobs:
   check:
-    name: Check
+    name: Lint
     runs-on: ubuntu-latest
     strategy:
       matrix:
         check: [fmt, clippy]
     steps:
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install Rust toolchain
+      - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           components: ${{ matrix.check == 'fmt' && 'rustfmt' || 'clippy' }}
 
-      - name: Setup Rust cache
+      - name: Cache Cargo
         uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.check }}
 
-      - name: Run cargo fmt
+      - name: Run Cargo Fmt
         if: matrix.check == 'fmt'
         run: cargo fmt --check
 
-      - name: Run cargo clippy
+      - name: Run Cargo Clippy
         if: matrix.check == 'clippy'
         run: cargo clippy --all-targets --all-features --no-deps -- -D warnings
 
   test-partial:
-    name: Test Partial
+    name: Tests (Partial)
     runs-on: ubuntu-latest
     # Run on forks.
     if: github.event.pull_request.head.repo.fork == true
@@ -53,18 +53,18 @@ jobs:
       matrix:
         postgres_version: [17, 16, 15, 14]
     steps:
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install Rust toolchain
+      - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Setup Rust cache
+      - name: Cache Cargo
         uses: Swatinem/rust-cache@v2
         with:
           key: test-partial
 
-      - name: Start Docker Compose Environment (Postgres ${{ matrix.postgres_version }})
+      - name: Start Docker Compose (Postgres ${{ matrix.postgres_version }})
         run: |
           POSTGRES_VERSION=${{ matrix.postgres_version }} docker compose -f ./scripts/docker-compose.yaml up -d
 
@@ -75,7 +75,7 @@ jobs:
             --no-default-features \
             --locked
 
-      - name: Migrate database
+      - name: Migrate Database
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
@@ -86,7 +86,7 @@ jobs:
           sudo apt-get install libpq-dev -y
           ./etl-api/scripts/run_migrations.sh
 
-      - name: Run tests
+      - name: Run Tests
         run: |
           cargo test \
             --workspace \
@@ -101,7 +101,7 @@ jobs:
             --features iceberg
 
   test-full:
-    name: Test Full
+    name: Tests (Full)
     runs-on: ubuntu-latest
     # Run on non-forks.
     if: github.event.pull_request.head.repo.fork == false
@@ -112,18 +112,18 @@ jobs:
       matrix:
         postgres_version: [17, 16, 15, 14]
     steps:
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install Rust toolchain
+      - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Setup Rust cache
+      - name: Cache Cargo
         uses: Swatinem/rust-cache@v2
         with:
           key: test-full
 
-      - name: Start Docker Compose Environment (Postgres ${{ matrix.postgres_version }})
+      - name: Start Docker Compose (Postgres ${{ matrix.postgres_version }})
         run: |
           POSTGRES_VERSION=${{ matrix.postgres_version }} docker compose -f ./scripts/docker-compose.yaml up -d
 
@@ -134,7 +134,7 @@ jobs:
             --no-default-features \
             --locked
 
-      - name: Migrate database
+      - name: Migrate Database
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
@@ -148,13 +148,13 @@ jobs:
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
 
-      - name: Set up BigQuery environment variables and credentials
+      - name: Set up BigQuery Credentials
         run: |
           printf '%s' '${{ secrets.TESTS_BIGQUERY_SA_KEY_JSON }}' > /tmp/bigquery-sa-key.json
           echo "TESTS_BIGQUERY_PROJECT_ID=${{ secrets.TESTS_BIGQUERY_PROJECT_ID }}" >> $GITHUB_ENV
           echo "TESTS_BIGQUERY_SA_KEY_PATH=/tmp/bigquery-sa-key.json" >> $GITHUB_ENV
 
-      - name: Generate code coverage
+      - name: Generate Code Coverage
         id: coverage
         run: |
           cargo llvm-cov test \
@@ -162,7 +162,7 @@ jobs:
             --all-features \
             --lcov --output-path lcov.info
 
-      - name: Upload coverage to Coveralls
+      - name: Upload Coverage to Coveralls
         uses: coverallsapp/github-action@v2
         with:
           fail-on-error: false

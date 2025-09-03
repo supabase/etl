@@ -34,18 +34,18 @@ jobs:
     env:
       CARGO_TERM_COLOR: always
     steps:
-      - name: Checkout repository (full history)
+      - name: Checkout (Full History)
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Install Rust toolchain
+      - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
 
       - name: Install cargo-edit
         run: cargo install cargo-edit --locked
 
-      - name: Compute next version
+      - name: Compute Next Version
         id: ver
         shell: bash
         run: |
@@ -69,7 +69,7 @@ jobs:
           echo "NEXT_VERSION=${NEXT_VERSION}" >> "$GITHUB_ENV"
           echo "Next version: ${NEXT_VERSION}"
 
-      - name: Bump workspace crate versions
+      - name: Bump Workspace Versions
         run: |
           cargo set-version --workspace "${NEXT_VERSION}"
 
@@ -84,7 +84,7 @@ jobs:
           # and prepend it to the existing changelog.
           git cliff --config cliff.toml --tag "v${NEXT_VERSION}" --unreleased --prepend CHANGELOG.md
 
-      - name: Commit and tag release
+      - name: Commit and Tag Release
         env:
           NEXT_VERSION: ${{ steps.ver.outputs.next }}
         run: |
@@ -98,7 +98,7 @@ jobs:
           git push origin HEAD:main
           git push origin --tags
 
-      - name: Determine Docker context
+      - name: Determine Docker Context
         id: ctx
         shell: bash
         run: |
@@ -111,7 +111,7 @@ jobs:
             echo "context=." >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Build and push Docker image
+      - name: Build and Push Docker Image
         if: ${{ inputs.push_docker }}
         uses: ./.github/workflows/docker-build.yml
         secrets: inherit

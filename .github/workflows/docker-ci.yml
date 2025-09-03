@@ -1,4 +1,4 @@
-name: Docker CI Build
+name: Docker CI
 
 on:
   push:
@@ -21,4 +21,3 @@ jobs:
       context: ./${{ matrix.image }}
       push: true
       tag_with_version: false
-
