@@ -5,37 +5,33 @@ header = """
 All notable changes to this project will be documented in this file.
 """
 body = """
-{% if releases is defined %}
-{% for release in releases %}
+{% if releases is defined -%}
+{%- for release in releases %}
 ## [{{ release.version }}] - {{ release.timestamp | date(format="%Y-%m-%d") }}
 
-{% if release.commits | length == 0 %}
+{%- if release.commits | length == 0 %}
 No changes.
-{% endif %}
-
-{% for group, commits in release.commits | group_by(attribute="group") %}
+{%- endif %}
+{%- for group, commits in release.commits | group_by(attribute="group") %}
 ### {{ group | upper_first }}
-{% for commit in commits %}
+{%- for commit in commits %}
 - {{ commit.message }}
-{% endfor %}
-
-{% endfor %}
-{% endfor %}
-{% else %}
+{%- endfor %}
+{%- endfor %}
+{%- endfor %}
+{%- else %}
 ## [{{ version }}] - {{ timestamp | date(format="%Y-%m-%d") }}
 
-{% if commits | length == 0 %}
+{%- if commits | length == 0 %}
 No changes.
-{% endif %}
-
-{% for group, commits in commits | group_by(attribute="group") %}
+{%- endif %}
+{%- for group, commits in commits | group_by(attribute="group") %}
 ### {{ group | upper_first }}
-{% for commit in commits %}
+{%- for commit in commits %}
 - {{ commit.message }}
-{% endfor %}
-
-{% endfor %}
-{% endif %}
+{%- endfor %}
+{%- endfor %}
+{%- endif %}
 """
 trim = true
 footer = ""
