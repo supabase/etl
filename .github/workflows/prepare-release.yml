@@ -80,7 +80,9 @@ jobs:
         env:
           NEXT_VERSION: ${{ steps.ver.outputs.next }}
         run: |
-          git cliff --config cliff.toml --tag "v${NEXT_VERSION}" --prepend CHANGELOG.md
+          # Generate changelog with the new tag, containing only unreleased changes (difference from last tag)
+          # and prepend it to the existing changelog.
+          git cliff --config cliff.toml --tag "v${NEXT_VERSION}" --unreleased --prepend CHANGELOG.md
 
       - name: Commit and tag release
         env:
