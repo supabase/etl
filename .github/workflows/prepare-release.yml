@@ -11,10 +11,6 @@ on:
           - minor
           - major
         default: patch
-      version:
-        description: "Explicit version (overrides bump)"
-        type: string
-        required: false
       image:
         description: "Docker image (e.g. docker.io/<org>/<repo>)"
         type: string
@@ -45,34 +41,22 @@ jobs:
       - name: Install cargo-edit
         run: cargo install cargo-edit --locked
 
-      - name: Compute Next Version
+      - name: Bump Workspace Versions
+        run: |
+          cargo set-version --workspace --bump "${{ inputs.bump }}"
+
+      - name: Read New Version
         id: ver
         shell: bash
         run: |
           set -euo pipefail
-          INPUT_VERSION="${{ inputs.version }}"
-          INPUT_BUMP="${{ inputs.bump }}"
-
-          if [[ -n "${INPUT_VERSION}" ]]; then
-            NEXT_VERSION="${INPUT_VERSION}"
-          else
-            # Read current version from a workspace crate (etl as canonical root member).
-            CURR=$(grep -m1 '^version = "' etl/Cargo.toml | sed -E 's/version = "([0-9]+\.[0-9]+\.[0-9]+)"/\1/')
-            if [[ -z "${CURR}" ]]; then
-              echo "Failed to parse current version from etl/Cargo.toml" >&2
-              exit 1
-            fi
-            NEXT_VERSION=$(bash scripts/semver_bump.sh "${CURR}" "${INPUT_BUMP}")
+          NEXT_VERSION=$(grep -m1 '^version = "' etl/Cargo.toml | sed -E 's/version = "([0-9]+\.[0-9]+\.[0-9]+)"/\1/')
+          if [[ -z "${NEXT_VERSION}" ]]; then
+            echo "Failed to parse bumped version from etl/Cargo.toml" >&2
+            exit 1
           fi
-
           echo "next=${NEXT_VERSION}" >> "$GITHUB_OUTPUT"
           echo "Next version: ${NEXT_VERSION}"
-
-      - name: Bump Workspace Versions
-        env:
-          NEXT_VERSION: ${{ steps.ver.outputs.next }}
-        run: |
-          cargo set-version --workspace "${NEXT_VERSION}"
 
       - name: Install git-cliff
         run: cargo install git-cliff --locked
