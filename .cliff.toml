@@ -1,0 +1,27 @@
+[changelog]
+header = "# Changelog\n\nAll notable changes to this project will be documented in this file.\n\n## [Unreleased]\n\n"
+body = "\n## [v{{ version }}] - {{ date | date(\"%Y-%m-%d\") }}\n\n{% if commits | length == 0 %}No changes.{% endif %}\n{% for group, commits in commits | group_by(attribute=\"group\") %}\n### {{ group | upper_first }}\n{% for commit in commits %}- {{ commit.message | upper_first }}\n{% endfor %}\n\n{% endfor %}"
+trim = true
+footer = ""
+
+[git]
+conventional_commits = true
+filter_unconventional = false
+commit_parsers = [
+    { message = "^feat", group = "Features" },
+    { message = "^fix", group = "Bug Fixes" },
+    { message = "^perf", group = "Performance" },
+    { message = "^refactor", group = "Refactor" },
+    { message = "^docs", group = "Documentation" },
+    { message = "^test", group = "Tests" },
+    { message = "^ci", group = "CI" },
+    { message = "^chore", group = "Chore" },
+    { message = ".*", group = "Others" },
+]
+protect_breaking_commits = true
+filter_commits = true
+tag_pattern = "v*"
+skip_tags = false
+topo_order = false
+sort_commits = "newest"
+

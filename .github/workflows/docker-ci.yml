@@ -1,0 +1,24 @@
+name: Docker CI Build
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build and Push Images
+    strategy:
+      matrix:
+        image: [etl-api, etl-replicator]
+    uses: ./.github/workflows/docker-build.yml
+    secrets: inherit
+    with:
+      image: docker.io/${{ vars.DOCKERHUB_USERNAME }}/${{ matrix.image }}
+      context: ./${{ matrix.image }}
+      push: true
+      tag_with_version: false
+

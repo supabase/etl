@@ -1,0 +1,121 @@
+name: Prepare Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: "Semantic version bump"
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+        default: patch
+      version:
+        description: "Explicit version (overrides bump)"
+        type: string
+        required: false
+      image:
+        description: "Docker image (e.g. docker.io/<org>/<repo>)"
+        type: string
+        required: true
+      push_docker:
+        description: "Push Docker image"
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+jobs:
+  prepare-release:
+    name: Prepare Release
+    runs-on: ubuntu-latest
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - name: Checkout repository (full history)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-edit
+        run: cargo install cargo-edit --locked
+
+      - name: Compute next version
+        id: ver
+        shell: bash
+        run: |
+          set -euo pipefail
+          INPUT_VERSION="${{ inputs.version }}"
+          INPUT_BUMP="${{ inputs.bump }}"
+
+          if [[ -n "${INPUT_VERSION}" ]]; then
+            NEXT_VERSION="${INPUT_VERSION}"
+          else
+            # Read current version from a workspace crate (etl as canonical root member).
+            CURR=$(grep -m1 '^version = "' etl/Cargo.toml | sed -E 's/version = "([0-9]+\.[0-9]+\.[0-9]+)"/\1/')
+            if [[ -z "${CURR}" ]]; then
+              echo "Failed to parse current version from etl/Cargo.toml" >&2
+              exit 1
+            fi
+            NEXT_VERSION=$(bash scripts/semver_bump.sh "${CURR}" "${INPUT_BUMP}")
+          fi
+
+          echo "next=${NEXT_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "NEXT_VERSION=${NEXT_VERSION}" >> "$GITHUB_ENV"
+          echo "Next version: ${NEXT_VERSION}"
+
+      - name: Bump workspace crate versions
+        run: |
+          cargo set-version --workspace "${NEXT_VERSION}"
+
+      - name: Install git-cliff
+        run: cargo install git-cliff --locked
+
+      - name: Generate CHANGELOG.md
+        env:
+          NEXT_VERSION: ${{ steps.ver.outputs.next }}
+        run: |
+          git cliff -o CHANGELOG.md --tag "v${NEXT_VERSION}"
+
+      - name: Commit and tag release
+        env:
+          NEXT_VERSION: ${{ steps.ver.outputs.next }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add .
+          git commit -m "chore(release): v${NEXT_VERSION}"
+          git tag -a "v${NEXT_VERSION}" -m "Release v${NEXT_VERSION}"
+          # Push to main and tags; assume release is performed from main.
+          git push origin HEAD:main
+          git push origin --tags
+
+      - name: Determine Docker context
+        id: ctx
+        shell: bash
+        run: |
+          set -euo pipefail
+          IMAGE="${{ inputs.image }}"
+          base_name="${IMAGE##*/}"
+          if [[ -d "${base_name}" ]]; then
+            echo "context=./${base_name}" >> "$GITHUB_OUTPUT"
+          else
+            echo "context=." >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build and push Docker image
+        if: ${{ inputs.push_docker }}
+        uses: ./.github/workflows/docker-build.yml
+        secrets: inherit
+        with:
+          image: ${{ inputs.image }}
+          context: ${{ steps.ctx.outputs.context }}
+          version: ${{ steps.ver.outputs.next }}
+          tag_with_version: true
+          push: true
