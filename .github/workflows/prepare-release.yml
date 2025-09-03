@@ -18,6 +18,7 @@ on:
 
 permissions:
   contents: write
+  pull-requests: write
 
 jobs:
   prepare-release:
@@ -65,16 +66,20 @@ jobs:
           # and prepend it to the existing changelog.
           git cliff --config cliff.toml --tag "v${NEXT_VERSION}" --unreleased --prepend CHANGELOG.md
 
-      - name: Commit and Tag Release
-        env:
-          NEXT_VERSION: ${{ steps.ver.outputs.next }}
-        run: |
-          set -euo pipefail
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add .
-          git commit -m "chore(release): v${NEXT_VERSION}"
-          git tag -a "v${NEXT_VERSION}" -m "Release v${NEXT_VERSION}"
-          # Push to main and tags; assume release is performed from main.
-          git push origin HEAD:main
-          git push origin --tags
+      - name: Create Release Pull Request
+        uses: peter-evans/create-pull-request@v6
+        with:
+          commit-message: chore(release): v${{ steps.ver.outputs.next }}
+          title: chore(release): v${{ steps.ver.outputs.next }}
+          body: |
+            This PR prepares release v${{ steps.ver.outputs.next }}.
+
+            - Bumps workspace versions.
+            - Updates CHANGELOG.md with unreleased changes.
+
+            Merging this PR into `main` will trigger the release workflow which tags the commit, publishes Docker images, and creates the GitHub Release.
+          branch: release/v${{ steps.ver.outputs.next }}
+          base: main
+          labels: |
+            release
+            automated

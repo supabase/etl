@@ -5,9 +5,9 @@ concurrency:
   cancel-in-progress: false
 
 on:
-  push:
-    tags:
-      - 'v*'
+  pull_request:
+    types: [closed]
+    branches: [main]
   workflow_dispatch:
     inputs:
       version:
@@ -25,6 +25,7 @@ jobs:
     outputs:
       tag: ${{ steps.ver.outputs.tag }}
       version: ${{ steps.ver.outputs.version }}
+      is_pr_merge: ${{ steps.ver.outputs.is_pr_merge }}
     steps:
       - name: Extract Tag and Version
         id: ver
@@ -34,9 +35,18 @@ jobs:
           if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
             RAW="${{ inputs.version }}"
             TAG="v${RAW#v}"
+            PR_MERGE=false
           else
-            TAG="${GITHUB_REF_NAME}"
-            RAW="${TAG#v}"
+            # pull_request closed event (merged into main)
+            TITLE="${{ github.event.pull_request.title }}"
+            if [[ "$TITLE" =~ v([0-9]+\.[0-9]+\.[0-9]+) ]]; then
+              RAW="${BASH_REMATCH[1]}"
+              TAG="v${RAW}"
+            else
+              echo "Failed to extract version from PR title: $TITLE" >&2
+              exit 1
+            fi
+            PR_MERGE="${{ github.event.pull_request.merged }}"
           fi
           CLEANED="${RAW#v}"
           if [[ ! "$CLEANED" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
@@ -45,10 +55,45 @@ jobs:
           fi
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
           echo "version=${CLEANED}" >> "$GITHUB_OUTPUT"
+          echo "is_pr_merge=${PR_MERGE}" >> "$GITHUB_OUTPUT"
+
+  create-tag:
+    name: Create Tag
+    needs: version
+    if: needs.version.outputs.is_pr_merge == 'true' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout merge commit (PR merge)
+        if: github.event_name == 'pull_request'
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
+
+      - name: Checkout main (manual dispatch)
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/checkout@v4
+
+      - name: Create and Push Tag
+        shell: bash
+        env:
+          TAG: ${{ needs.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+          git fetch --tags
+          if git rev-parse "$TAG" >/dev/null 2>&1; then
+            echo "Tag $TAG already exists; skipping creation."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "$TAG" -m "Release $TAG"
+          git push origin "$TAG"
 
   build-and-push:
     name: Build and Push Docker Images
-    needs: version
+    needs: [version, create-tag]
     strategy:
       matrix:
         image: [etl-api, etl-replicator]
@@ -60,11 +105,12 @@ jobs:
       push: true
       tag_with_version: true
       version: ${{ needs.version.outputs.version }}
+      checkout_ref: refs/tags/${{ needs.version.outputs.tag }}
     secrets: inherit
 
   github-release:
     name: Create GitHub Release
-    needs: [version, build-and-push]
+    needs: [version, create-tag, build-and-push]
     runs-on: ubuntu-latest
     steps:
       - name: Generate Release Notes
