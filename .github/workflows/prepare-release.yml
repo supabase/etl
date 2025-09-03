@@ -80,7 +80,7 @@ jobs:
         env:
           NEXT_VERSION: ${{ steps.ver.outputs.next }}
         run: |
-          git cliff -o CHANGELOG.md --tag "v${NEXT_VERSION}"
+          git cliff --config cliff.toml --tag "v${NEXT_VERSION}" --prepend CHANGELOG.md
 
       - name: Commit and tag release
         env:
