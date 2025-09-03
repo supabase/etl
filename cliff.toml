@@ -13,13 +13,13 @@ body = """
 No changes.
 {%- endif %}
 {%- for group, commits in release.commits | group_by(attribute="group") %}
-{% if not loop.first %}
-
-{% endif %}
 ### {{ group | upper_first }}
-{%- for commit in commits %}
+{% for commit in commits %}
 - {{ commit.message }}
 {% endfor %}
+{% if not loop.last %}
+
+{% endif %}
 {%- endfor %}
 {%- endfor %}
 {%- else %}
@@ -29,13 +29,13 @@ No changes.
 No changes.
 {%- endif %}
 {%- for group, commits in commits | group_by(attribute="group") %}
-{% if not loop.first %}
-
-{% endif %}
 ### {{ group | upper_first }}
-{%- for commit in commits %}
+{% for commit in commits %}
 - {{ commit.message }}
 {% endfor %}
+{% if not loop.last %}
+
+{% endif %}
 {%- endfor %}
 {%- endif %}
 """
