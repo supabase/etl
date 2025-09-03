@@ -13,9 +13,9 @@ body = """
 No changes.
 {%- endif %}
 {%- for group, commits in release.commits | group_by(attribute="group") %}
-{%- if not loop.first %}
+{% if not loop.first %}
 
-{%- endif %}
+{% endif %}
 ### {{ group | upper_first }}
 {%- for commit in commits %}
 - {{ commit.message }}
@@ -29,9 +29,9 @@ No changes.
 No changes.
 {%- endif %}
 {%- for group, commits in commits | group_by(attribute="group") %}
-{%- if not loop.first %}
+{% if not loop.first %}
 
-{%- endif %}
+{% endif %}
 ### {{ group | upper_first }}
 {%- for commit in commits %}
 - {{ commit.message }}
