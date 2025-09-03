@@ -1,0 +1,123 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to release (e.g. 1.2.3)"
+        type: string
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-push:
+    name: Build and Push Docker Images
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        image: [etl-api, etl-replicator]
+    steps:
+      - name: Extract Version
+        id: ver
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            RAW="${{ inputs.version }}"
+          else
+            RAW="${GITHUB_REF_NAME}"
+          fi
+          CLEANED="${RAW#v}"
+          if [[ ! "$CLEANED" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Invalid version: $CLEANED" >&2
+            exit 1
+          fi
+          echo "val=${CLEANED}" >> "$GITHUB_OUTPUT"
+
+      - name: Build and Push via Reusable Workflow
+        uses: ./.github/workflows/docker-build.yml
+        secrets: inherit
+        with:
+          image: docker.io/${{ vars.DOCKERHUB_USERNAME }}/${{ matrix.image }}
+          context: ./${{ matrix.image }}
+          push: true
+          tag_with_version: true
+          version: ${{ steps.ver.outputs.val }}
+
+  github-release:
+    name: Create GitHub Release
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    steps:
+      - name: Determine Tag and Version
+        id: tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            VERSION="${{ inputs.version }}"
+            TAG="v${VERSION#v}"
+          else
+            TAG="${GITHUB_REF_NAME}"
+            VERSION="${TAG#v}"
+          fi
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "version=${VERSION#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Generate Release Notes + Asset
+        id: notes
+        shell: bash
+        run: |
+          set -euo pipefail
+          USER="${{ vars.DOCKERHUB_USERNAME }}"
+          TAG="${{ steps.tag.outputs.tag }}"
+          cat > DOCKER-IMAGES.txt <<EOF
+docker.io/${USER}/etl-api:latest
+docker.io/${USER}/etl-api:${TAG}
+docker.io/${USER}/etl-replicator:latest
+docker.io/${USER}/etl-replicator:${TAG}
+EOF
+          {
+            echo "body<<'MARKER'"
+            echo "Release ${TAG}"
+            echo
+            echo "Docker images published:"
+            echo "- docker.io/${USER}/etl-api:latest"
+            echo "- docker.io/${USER}/etl-api:${TAG}"
+            echo "- docker.io/${USER}/etl-replicator:latest"
+            echo "- docker.io/${USER}/etl-replicator:${TAG}"
+            echo
+            echo "View on Docker Hub:"
+            echo "- https://hub.docker.com/r/${USER}/etl-api"
+            echo "- https://hub.docker.com/r/${USER}/etl-replicator"
+            echo "MARKER"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Create Release
+        id: create_release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          release_name: Release ${{ steps.tag.outputs.tag }}
+          body: ${{ steps.notes.outputs.body }}
+          draft: false
+          prerelease: false
+
+      - name: Upload Docker Images Asset
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: DOCKER-IMAGES.txt
+          asset_name: DOCKER-IMAGES.txt
+          asset_content_type: text/plain
+
