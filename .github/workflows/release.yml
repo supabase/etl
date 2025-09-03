@@ -22,6 +22,13 @@ jobs:
   version:
     name: Determine Version
     runs-on: ubuntu-latest
+    # Gate: manual dispatch OR merged PRs labeled 'release'.
+    if: |
+      github.event_name == 'workflow_dispatch' || (
+        github.event_name == 'pull_request' &&
+        github.event.pull_request.merged == true &&
+        contains(github.event.pull_request.labels.*.name, 'release')
+      )
     outputs:
       tag: ${{ steps.ver.outputs.tag }}
       version: ${{ steps.ver.outputs.version }}
@@ -38,14 +45,14 @@ jobs:
             PR_MERGE=false
           else
             # pull_request closed event (merged into main)
-            TITLE="${{ github.event.pull_request.title }}"
-            if [[ "$TITLE" =~ v([0-9]+\.[0-9]+\.[0-9]+) ]]; then
+            HEAD_REF="${{ github.event.pull_request.head.ref }}"
+            if [[ "$HEAD_REF" =~ ^release/v([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
               RAW="${BASH_REMATCH[1]}"
-              TAG="v${RAW}"
             else
-              echo "Failed to extract version from PR title: $TITLE" >&2
+              echo "Failed to extract version from PR branch name: $HEAD_REF (expected release/vX.Y.Z)" >&2
               exit 1
             fi
+            TAG="v${RAW}"
             PR_MERGE="${{ github.event.pull_request.merged }}"
           fi
           CLEANED="${RAW#v}"

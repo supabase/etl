@@ -83,3 +83,4 @@ jobs:
           labels: |
             release
             automated
+          delete-branch: true
