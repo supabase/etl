@@ -11,6 +11,11 @@ permissions:
 jobs:
   build:
     name: Build and Push Images
+    # Skip for release PRs to avoid double building with release workflow.
+    if: |
+      github.event_name == 'workflow_dispatch' || (
+        github.event_name == 'pull_request' && !contains(github.event.pull_request.labels.*.name, 'release')
+      )
     strategy:
       matrix:
         image: [etl-api, etl-replicator]
