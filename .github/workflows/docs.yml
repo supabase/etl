@@ -1,14 +1,14 @@
 name: Docs
 
+concurrency:
+  group: docs
+  cancel-in-progress: false
+
 on:
   push:
     branches: [main]
   pull_request:
     branches: [main]
-
-concurrency:
-  group: docs
-  cancel-in-progress: false
 
 permissions:
   contents: write
