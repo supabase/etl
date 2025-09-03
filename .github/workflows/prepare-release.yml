@@ -66,10 +66,11 @@ jobs:
           fi
 
           echo "next=${NEXT_VERSION}" >> "$GITHUB_OUTPUT"
-          echo "NEXT_VERSION=${NEXT_VERSION}" >> "$GITHUB_ENV"
           echo "Next version: ${NEXT_VERSION}"
 
       - name: Bump Workspace Versions
+        env:
+          NEXT_VERSION: ${{ steps.ver.outputs.next }}
         run: |
           cargo set-version --workspace "${NEXT_VERSION}"
 
