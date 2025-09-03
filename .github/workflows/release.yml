@@ -128,7 +128,7 @@ jobs:
           USER="${{ vars.DOCKERHUB_USERNAME }}"
           TAG="${{ needs.version.outputs.tag }}"
           {
-            echo "body<<'MARKER'"
+            echo "body<<MARKER"
             echo "Release ${TAG}"
             echo
             echo "Docker images published:"
