@@ -69,8 +69,8 @@ jobs:
       - name: Create Release Pull Request
         uses: peter-evans/create-pull-request@v6
         with:
-          commit-message: chore(release): v${{ steps.ver.outputs.next }}
-          title: chore(release): v${{ steps.ver.outputs.next }}
+          commit-message: "chore(release): v${{ steps.ver.outputs.next }}"
+          title: "chore(release): v${{ steps.ver.outputs.next }}"
           body: |
             This PR prepares release v${{ steps.ver.outputs.next }}.
 
