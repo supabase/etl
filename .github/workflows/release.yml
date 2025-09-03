@@ -55,7 +55,8 @@ jobs:
     uses: ./.github/workflows/docker-build.yml
     with:
       image: docker.io/${{ vars.DOCKERHUB_USERNAME }}/${{ matrix.image }}
-      context: ./${{ matrix.image }}
+      context: .
+      file: ./${{ matrix.image }}/Dockerfile
       push: true
       tag_with_version: true
       version: ${{ needs.version.outputs.version }}

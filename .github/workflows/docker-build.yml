@@ -7,6 +7,10 @@ on:
         description: "Docker image (e.g. docker.io/<org>/<repo>)"
         type: string
         required: true
+      file:
+        description: "Path to Dockerfile relative to the repository root"
+        type: string
+        default: "Dockerfile"
       context:
         description: "Docker build context"
         type: string
@@ -60,6 +64,7 @@ jobs:
         uses: docker/build-push-action@v5
         with:
           context: ${{ inputs.context }}
+          file: ${{ inputs.file }}
           push: ${{ inputs.push }}
           tags: ${{ steps.meta.outputs.tags }}
           cache-from: type=gha

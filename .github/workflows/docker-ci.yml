@@ -18,6 +18,7 @@ jobs:
     secrets: inherit
     with:
       image: docker.io/${{ vars.DOCKERHUB_USERNAME }}/${{ matrix.image }}
-      context: ./${{ matrix.image }}
+      context: .
+      file: ./${{ matrix.image }}/Dockerfile
       push: true
       tag_with_version: false
