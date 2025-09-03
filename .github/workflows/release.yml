@@ -1,5 +1,9 @@
 name: Release
 
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 on:
   push:
     tags:
@@ -87,12 +91,10 @@ jobs:
 
       - name: Create Release
         id: create_release
-        uses: actions/create-release@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ needs.version.outputs.tag }}
-          release_name: Release ${{ needs.version.outputs.tag }}
+          name: Release ${{ needs.version.outputs.tag }}
           body: ${{ steps.notes.outputs.body }}
           draft: false
           prerelease: false
