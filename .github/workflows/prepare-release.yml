@@ -11,14 +11,6 @@ on:
           - minor
           - major
         default: patch
-      image:
-        description: "Docker image (e.g. docker.io/<org>/<repo>)"
-        type: string
-        required: true
-      push_docker:
-        description: "Push Docker image"
-        type: boolean
-        default: false
 
 permissions:
   contents: write
@@ -83,26 +75,4 @@ jobs:
           git push origin HEAD:main
           git push origin --tags
 
-      - name: Determine Docker Context
-        id: ctx
-        shell: bash
-        run: |
-          set -euo pipefail
-          IMAGE="${{ inputs.image }}"
-          base_name="${IMAGE##*/}"
-          if [[ -d "${base_name}" ]]; then
-            echo "context=./${base_name}" >> "$GITHUB_OUTPUT"
-          else
-            echo "context=." >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Build and Push Docker Image
-        if: ${{ inputs.push_docker }}
-        uses: ./.github/workflows/docker-build.yml
-        secrets: inherit
-        with:
-          image: ${{ inputs.image }}
-          context: ${{ steps.ctx.outputs.context }}
-          version: ${{ steps.ver.outputs.next }}
-          tag_with_version: true
-          push: true
+      # No Docker push here. Images are published by the Release workflow.
