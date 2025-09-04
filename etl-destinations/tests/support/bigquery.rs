@@ -1,4 +1,5 @@
 #![allow(dead_code)]
+#![cfg(feature = "bigquery")]
 
 use base64::Engine;
 use base64::prelude::BASE64_STANDARD;

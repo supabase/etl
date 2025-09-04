@@ -5,7 +5,6 @@ edition = "2024"
 
 [features]
 bigquery = [
-    "dep:futures",
     "dep:gcp-bigquery-client",
     "dep:prost",
     "dep:rustls",
@@ -18,7 +17,6 @@ iceberg = ["dep:iceberg", "dep:iceberg-catalog-rest"]
 etl = { workspace = true }
 chrono = { workspace = true }
 
-futures = { workspace = true, optional = true }
 gcp-bigquery-client = { workspace = true, optional = true, features = [
     "rust-tls",
     "aws-lc-rs",
@@ -44,4 +42,5 @@ rand = { workspace = true, features = ["thread_rng"] }
 reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
 uuid = { workspace = true, features = ["v4"] }
