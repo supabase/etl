@@ -211,9 +211,8 @@ impl<B, S: Stream<Item = B>> Stream for TimeoutStream<B, S> {
 
         // If the timer should be reset, it means that we want to start counting down again.
         if *this.reset_timer {
-            this.deadline.set(Some(tokio::time::sleep(
-                *this.max_batch_fill_duration,
-            )));
+            this.deadline
+                .set(Some(tokio::time::sleep(*this.max_batch_fill_duration)));
             *this.reset_timer = false;
         }
 
