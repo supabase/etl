@@ -559,15 +559,17 @@ where
 
             let mut continue_loop = true;
 
-            // We handle the action related to a table error. This is done after the batch is written
-            // to the destination to make sure that the data is durable before assuming things about a
-            // table.
+            // If we have a table error, we want to mark the table as errored.
             if let Some(error) = result.table_replication_error {
                 continue_loop &= hook.mark_table_errored(error).await?;
             }
 
             // Once the batch is sent, we have the guarantee that all events up to this point have
             // been durably persisted, so we do synchronization.
+            //
+            // If we were to synchronize for every event, we would risk data loss since we would notify
+            // Postgres about our progress of events processing without having those events durably
+            // persisted in the destination.
             if batch_sent {
                 continue_loop &= synchronize(state, hook).await?;
             }
