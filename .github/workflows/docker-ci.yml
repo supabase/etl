@@ -28,13 +28,16 @@ jobs:
           EVENT_NAME="${GITHUB_EVENT_NAME}"
           MERGE_SHA=$(jq -r '.pull_request.merge_commit_sha // empty' "$GITHUB_EVENT_PATH")
           INPUT_REF=$(jq -r '.inputs.ref // empty' "$GITHUB_EVENT_PATH")
+          
           if [[ "$EVENT_NAME" == "pull_request" && -n "$MERGE_SHA" ]]; then
             REF="$MERGE_SHA"
           elif [[ -n "$INPUT_REF" ]]; then
             REF="$INPUT_REF"
           else
-            REF="$GITHUB_SHA"
+            echo "Error: no merge commit or input ref provided" >&2
+            exit 1
           fi
+          
           echo "ref=$REF" >> "$GITHUB_OUTPUT"
 
   build:
