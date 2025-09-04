@@ -1,3 +1,11 @@
+use etl_api::routes::pipelines::{CreatePipelineRequest, CreatePipelineResponse, GetPipelineImageDetailsResponse, GetPipelineReplicationStatusResponse, ReadPipelineResponse, ReadPipelinesResponse, RollbackTableStateRequest, RollbackTableStateResponse, RollbackType, SimpleTableReplicationState, UpdatePipelineConfigRequest, UpdatePipelineConfigResponse, UpdatePipelineImageRequest, UpdatePipelineRequest};
+use etl_config::shared::{BatchConfig, PgConnectionConfig};
+use etl_postgres::sqlx::test_utils::drop_pg_database;
+use etl_telemetry::tracing::init_test_tracing;
+use reqwest::StatusCode;
+use sqlx::PgPool;
+use sqlx::postgres::types::Oid;
+
 use crate::support::database::{
     create_test_source_database, run_etl_migrations_on_source_database,
 };
@@ -8,20 +16,7 @@ use crate::{
     support::mocks::tenants::{create_tenant, create_tenant_with_id_and_name},
     support::test_app::{TestApp, spawn_test_app},
 };
-use etl_api::routes::pipelines::{
-    CreatePipelineRequest, CreatePipelineResponse, GetPipelineReplicationStatusResponse,
-    ReadPipelineResponse, ReadPipelinesResponse, RollbackTableStateRequest,
-    RollbackTableStateResponse, RollbackType, SimpleTableReplicationState,
-    UpdatePipelineConfigRequest, UpdatePipelineConfigResponse, UpdatePipelineImageRequest,
-    UpdatePipelineRequest,
-};
-use etl_config::shared::{BatchConfig, PgConnectionConfig};
-use etl_postgres::sqlx::test_utils::drop_pg_database;
-use etl_telemetry::tracing::init_test_tracing;
-use reqwest::StatusCode;
-use sqlx::PgPool;
-use sqlx::postgres::types::Oid;
-
+use crate::support::mocks::create_image_with_name;
 use crate::support::mocks::pipelines::{
     ConfigUpdateType, create_pipeline_with_config, new_pipeline_config,
     partially_updated_optional_pipeline_config, updated_optional_pipeline_config,
@@ -1279,4 +1274,92 @@ async fn deleting_pipeline_removes_table_schemas_from_source_database() {
     assert_eq!(column_count_after, 0); // CASCADE delete should remove these
 
     drop_pg_database(&source_db_config).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn image_details_returns_current_version_and_no_new_version_when_default_matches() {
+    init_test_tracing();
+    // Arrange
+    let app = spawn_test_app().await;
+    let tenant_id = create_tenant(&app).await;
+    let source_id = create_source(&app, &tenant_id).await;
+    let destination_id = create_destination(&app, &tenant_id).await;
+
+    // Create a default image without a tag -> should parse to "latest".
+    let _image_id = create_image_with_name(&app, "some/image".to_string(), true).await;
+
+    let pipeline_id = {
+        let req = CreatePipelineRequest {
+            source_id,
+            destination_id,
+            config: new_pipeline_config(),
+        };
+        let resp = app.create_pipeline(&tenant_id, &req).await;
+        let resp: CreatePipelineResponse =
+            resp.json().await.expect("failed to deserialize response");
+        resp.id
+    };
+
+    // Act
+    let response = app
+        .get_pipeline_image_details(&tenant_id, pipeline_id)
+        .await;
+
+    // Assert
+    assert!(response.status().is_success());
+    let details: GetPipelineImageDetailsResponse = response
+        .json()
+        .await
+        .expect("failed to deserialize response");
+    assert_eq!(details.version.name, "latest");
+    assert!(details.new_version.is_none());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn image_details_includes_new_default_version_when_available() {
+    init_test_tracing();
+    // Arrange
+    let app = spawn_test_app().await;
+    let tenant_id = create_tenant(&app).await;
+    let source_id = create_source(&app, &tenant_id).await;
+    let destination_id = create_destination(&app, &tenant_id).await;
+
+    // Initial default image for pipeline creation
+    let _img_current =
+        create_image_with_name(&app, "supabase/replicator:1.2.3".to_string(), true).await;
+
+    let pipeline_id = {
+        let req = CreatePipelineRequest {
+            source_id,
+            destination_id,
+            config: new_pipeline_config(),
+        };
+        let resp = app.create_pipeline(&tenant_id, &req).await;
+        let resp: CreatePipelineResponse =
+            resp.json().await.expect("failed to deserialize response");
+        resp.id
+    };
+
+    // Create a new default image (should flip default)
+    let img_new_id =
+        create_image_with_name(&app, "supabase/replicator:1.3.0".to_string(), true).await;
+
+    // Act
+    let response = app
+        .get_pipeline_image_details(&tenant_id, pipeline_id)
+        .await;
+
+    // Assert
+    assert!(response.status().is_success());
+    let details: GetPipelineImageDetailsResponse = response
+        .json()
+        .await
+        .expect("failed to deserialize response");
+    assert_eq!(details.version.name, "1.2.3");
+
+    let new_version = details
+        .new_version
+        .expect("expected new_version to be present");
+    assert_eq!(new_version.id, img_new_id);
+    assert_eq!(new_version.name, "1.3.0");
 }
