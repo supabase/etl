@@ -15,6 +15,11 @@ on:
           - minor
           - major
         default: patch
+      release:
+        description: "Manual release version (e.g. 1.2.3). Overrides bump."
+        type: string
+        required: false
+        default: ""
 
 permissions:
   contents: write
@@ -38,9 +43,23 @@ jobs:
       - name: Install cargo-edit
         run: cargo install cargo-edit --locked
 
-      - name: Bump Workspace Versions
+      - name: Set Workspace Version (manual or bump)
+        shell: bash
         run: |
-          cargo set-version --workspace --bump "${{ inputs.bump }}"
+          set -euo pipefail
+          MANUAL_RELEASE="${{ inputs.release }}"
+          if [[ -n "${MANUAL_RELEASE}" ]]; then
+            # Validate SemVer (strict X.Y.Z numeric to align with repo conventions).
+            if [[ ! "${MANUAL_RELEASE}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "Provided release '${MANUAL_RELEASE}' is not a valid SemVer (expected X.Y.Z)." >&2
+              exit 1
+            fi
+            echo "Setting workspace version to ${MANUAL_RELEASE} (manual)."
+            cargo set-version --workspace "${MANUAL_RELEASE}"
+          else
+            echo "Bumping workspace version by '${{ inputs.bump }}'."
+            cargo set-version --workspace --bump "${{ inputs.bump }}"
+          fi
 
       - name: Read New Version
         id: ver
