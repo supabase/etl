@@ -38,11 +38,11 @@ use crate::{
         },
         metrics::metrics,
         pipelines::{
-            CreatePipelineRequest, CreatePipelineResponse, GetPipelineImageDetailsResponse,
-            GetPipelineReplicationStatusResponse, GetPipelineStatusResponse, ReadPipelineResponse,
+            CreatePipelineRequest, CreatePipelineResponse, GetPipelineReplicationStatusResponse,
+            GetPipelineStatusResponse, GetPipelineVersionResponse, ReadPipelineResponse,
             ReadPipelinesResponse, SimpleTableReplicationState, TableReplicationStatus,
             UpdatePipelineImageRequest, UpdatePipelineRequest, create_pipeline, delete_pipeline,
-            get_pipeline_image_details, get_pipeline_replication_status, get_pipeline_status,
+            get_pipeline_replication_status, get_pipeline_status, get_pipeline_version,
             read_all_pipelines, read_pipeline, rollback_table_state, start_pipeline,
             stop_all_pipelines, stop_pipeline, update_pipeline, update_pipeline_config,
             update_pipeline_image,
@@ -233,7 +233,7 @@ pub async fn run(
         crate::routes::pipelines::delete_pipeline,
         crate::routes::pipelines::read_all_pipelines,
         crate::routes::pipelines::get_pipeline_status,
-        crate::routes::pipelines::get_pipeline_image_details,
+        crate::routes::pipelines::get_pipeline_version,
         crate::routes::pipelines::get_pipeline_replication_status,
         crate::routes::pipelines::rollback_table_state,
         crate::routes::pipelines::update_pipeline_image,
@@ -318,7 +318,7 @@ pub async fn run(
                     .service(stop_pipeline)
                     .service(stop_all_pipelines)
                     .service(get_pipeline_status)
-                    .service(get_pipeline_image_details)
+                    .service(get_pipeline_version)
                     .service(get_pipeline_replication_status)
                     .service(rollback_table_state)
                     .service(update_pipeline_image)

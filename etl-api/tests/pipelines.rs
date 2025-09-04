@@ -1,6 +1,6 @@
 use etl_api::routes::pipelines::{
-    CreatePipelineRequest, CreatePipelineResponse, GetPipelineImageDetailsResponse,
-    GetPipelineReplicationStatusResponse, ReadPipelineResponse, ReadPipelinesResponse,
+    CreatePipelineRequest, CreatePipelineResponse, GetPipelineReplicationStatusResponse,
+    GetPipelineVersionResponse, ReadPipelineResponse, ReadPipelinesResponse,
     RollbackTableStateRequest, RollbackTableStateResponse, RollbackType,
     SimpleTableReplicationState, UpdatePipelineConfigRequest, UpdatePipelineConfigResponse,
     UpdatePipelineImageRequest, UpdatePipelineRequest,
@@ -1283,7 +1283,7 @@ async fn deleting_pipeline_removes_table_schemas_from_source_database() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn image_details_returns_current_version_and_no_new_version_when_default_matches() {
+async fn pipeline_version_returns_current_version_and_no_new_version_when_default_matches() {
     init_test_tracing();
     // Arrange
     let app = spawn_test_app().await;
@@ -1307,22 +1307,20 @@ async fn image_details_returns_current_version_and_no_new_version_when_default_m
     };
 
     // Act
-    let response = app
-        .get_pipeline_image_details(&tenant_id, pipeline_id)
-        .await;
+    let response = app.get_pipeline_version(&tenant_id, pipeline_id).await;
 
     // Assert
     assert!(response.status().is_success());
-    let image_details: GetPipelineImageDetailsResponse = response
+    let version: GetPipelineVersionResponse = response
         .json()
         .await
         .expect("failed to deserialize response");
-    assert_eq!(image_details.version.name, "latest");
-    assert!(image_details.new_version.is_none());
+    assert_eq!(version.version.name, "latest");
+    assert!(version.new_version.is_none());
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn image_details_includes_new_default_version_when_available() {
+async fn pipeline_version_includes_new_default_version_when_available() {
     init_test_tracing();
     // Arrange
     let app = spawn_test_app().await;
@@ -1351,22 +1349,20 @@ async fn image_details_includes_new_default_version_when_available() {
         create_image_with_name(&app, "supabase/replicator:1.3.0".to_string(), true).await;
 
     // Act
-    let response = app
-        .get_pipeline_image_details(&tenant_id, pipeline_id)
-        .await;
+    let response = app.get_pipeline_version(&tenant_id, pipeline_id).await;
 
     // Assert
     assert!(response.status().is_success());
-    let image_details: GetPipelineImageDetailsResponse = response
+    let version: GetPipelineVersionResponse = response
         .json()
         .await
         .expect("failed to deserialize response");
 
-    let current_version = image_details.version;
+    let current_version = version.version;
     assert_eq!(current_version.id, old_default_image_id);
     assert_eq!(current_version.name, "1.2.3");
 
-    let new_version = image_details
+    let new_version = version
         .new_version
         .expect("expected new_version to be present");
     assert_eq!(new_version.id, default_image_id);

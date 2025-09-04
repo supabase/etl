@@ -463,13 +463,13 @@ impl TestApp {
         .expect("failed to execute request")
     }
 
-    pub async fn get_pipeline_image_details(
+    pub async fn get_pipeline_version(
         &self,
         tenant_id: &str,
         pipeline_id: i64,
     ) -> reqwest::Response {
         self.get_authenticated(format!(
-            "{}/v1/pipelines/{}/image-details",
+            "{}/v1/pipelines/{}/version-details",
             &self.address, pipeline_id
         ))
         .header("tenant_id", tenant_id)

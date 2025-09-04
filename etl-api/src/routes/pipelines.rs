@@ -370,7 +370,7 @@ pub enum PipelineStatus {
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
-pub struct PipelineImageVersionInfo {
+pub struct PipelineVersion {
     #[schema(example = 1)]
     pub id: i64,
     #[schema(example = "1.2.3")]
@@ -378,10 +378,10 @@ pub struct PipelineImageVersionInfo {
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
-pub struct GetPipelineImageDetailsResponse {
-    pub version: PipelineImageVersionInfo,
+pub struct GetPipelineVersionResponse {
+    pub version: PipelineVersion,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub new_version: Option<PipelineImageVersionInfo>,
+    pub new_version: Option<PipelineVersion>,
 }
 
 #[utoipa::path(
@@ -480,21 +480,21 @@ pub async fn read_pipeline(
 }
 
 #[utoipa::path(
-    summary = "Get pipeline image details",
-    description = "Returns the current image version for the pipeline and an optional new default version.",
+    summary = "Get pipeline version",
+    description = "Returns the current version for the pipeline and an optional new default version.",
     params(
         ("pipeline_id" = i64, Path, description = "Unique ID of the pipeline"),
         ("tenant_id" = String, Header, description = "Tenant ID used to scope the request")
     ),
     responses(
-        (status = 200, description = "Image details retrieved successfully", body = GetPipelineImageDetailsResponse),
+        (status = 200, description = "Pipeline version retrieved successfully", body = GetPipelineVersionResponse),
         (status = 404, description = "Pipeline not found", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage)
     ),
     tag = "Pipelines"
 )]
-#[get("/pipelines/{pipeline_id}/image-details")]
-pub async fn get_pipeline_image_details(
+#[get("/pipelines/{pipeline_id}/version")]
+pub async fn get_pipeline_version(
     req: HttpRequest,
     pool: Data<PgPool>,
     pipeline_id: Path<i64>,
@@ -517,22 +517,20 @@ pub async fn get_pipeline_image_details(
 
     txn.commit().await?;
 
-    let current_version = PipelineImageVersionInfo {
+    let current_version = PipelineVersion {
         id: current_image.id,
         name: parse_docker_image_tag(&current_image.name),
     };
 
     let new_version = match default_image {
-        Some(default_image) if default_image.id != current_image.id => {
-            Some(PipelineImageVersionInfo {
-                id: default_image.id,
-                name: parse_docker_image_tag(&default_image.name),
-            })
-        }
+        Some(default_image) if default_image.id != current_image.id => Some(PipelineVersion {
+            id: default_image.id,
+            name: parse_docker_image_tag(&default_image.name),
+        }),
         _ => None,
     };
 
-    let response = GetPipelineImageDetailsResponse {
+    let response = GetPipelineVersionResponse {
         version: current_version,
         new_version,
     };
