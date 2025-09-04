@@ -190,6 +190,44 @@ struct HandleMessageResult {
     table_replication_error: Option<TableReplicationError>,
 }
 
+impl HandleMessageResult {
+    fn no_event() -> Self {
+        Self::default()
+    }
+
+    fn return_event(event: Event) -> Self {
+        Self {
+            event: Some(event),
+            ..Default::default()
+        }
+    }
+
+    fn return_boundary_event(event: Event, end_lsn: PgLsn) -> Self {
+        Self {
+            event: Some(event),
+            end_lsn: Some(end_lsn),
+            ..Default::default()
+        }
+    }
+
+    fn finish_batch_and_return_boundary_event(event: Event, end_lsn: PgLsn) -> Self {
+        Self {
+            event: Some(event),
+            end_lsn: Some(end_lsn),
+            end_batch: Some(EndBatch::Inclusive),
+            ..Default::default()
+        }
+    }
+
+    fn finish_batch_and_exclude_event(error: TableReplicationError) -> Self {
+        Self {
+            end_batch: Some(EndBatch::Exclusive),
+            table_replication_error: Some(error),
+            ..Default::default()
+        }
+    }
+}
+
 /// A shared state that is used throughout the apply loop to track progress.
 #[derive(Debug, Clone)]
 struct ApplyLoopState {
@@ -452,7 +490,7 @@ where
 /// force flush of the current events in the batch.
 ///
 /// This function performs synchronization under the assumption that transaction boundary events are
-/// always processed.
+/// always processed and never skipped.
 async fn handle_replication_message_with_timeout<S, D, T>(
     state: &mut ApplyLoopState,
     mut events_stream: Pin<&mut TimeoutEventsStream>,
@@ -480,9 +518,9 @@ where
 
             // If we have an event, and we want to keep it, we add it to the batch and update the last
             // commit lsn (if any).
-            let batch_should_end = matches!(result.end_batch, None | Some(EndBatch::Inclusive));
+            let should_push_event = matches!(result.end_batch, None | Some(EndBatch::Inclusive));
             if let Some(event) = result.event
-                && batch_should_end
+                && should_push_event
             {
                 state.events_batch.push(event);
                 state.update_last_commit_end_lsn(result.end_lsn);
@@ -674,9 +712,9 @@ where
                 )
                 .await?;
 
-            Ok(HandleMessageResult::default())
+            Ok(HandleMessageResult::no_event())
         }
-        _ => Ok(HandleMessageResult::default()),
+        _ => Ok(HandleMessageResult::no_event()),
     }
 }
 
@@ -809,12 +847,7 @@ async fn handle_begin_message(
     // Convert event from the protocol message.
     let event = parse_event_from_begin_message(start_lsn, commit_lsn, message);
 
-    Ok(HandleMessageResult {
-        event: Some(Event::Begin(event)),
-        end_lsn: None,
-        end_batch: None,
-        table_replication_error: None,
-    })
+    Ok(HandleMessageResult::return_event(Event::Begin(event)))
 }
 
 /// Handles Postgres COMMIT messages that complete transactions.
@@ -875,28 +908,28 @@ where
     // Convert event from the protocol message.
     let event = parse_event_from_commit_message(start_lsn, commit_lsn, message);
 
-    let mut result = HandleMessageResult {
-        event: Some(Event::Commit(event)),
-        // We mark this as the last commit end LSN since we want to be able to track from the outside
-        // what was the biggest transaction boundary LSN which was successfully applied.
-        //
-        // The rationale for using only the `end_lsn` of the `Commit` message is that once we found a
-        // commit and successfully processed it, we can say that the next byte we want is the next transaction
-        // since if we were to store an intermediate `end_lsn` (from a dml operation within a transaction)
-        // the replication will still start from a transaction boundary, that is, a `Begin` statement in
-        // our case.
-        end_lsn: Some(end_lsn),
-        ..Default::default()
-    };
-
-    // If we are told to stop the loop, it means we reached the end of processing for this specific
-    // worker, so we gracefully stop processing the batch, but we include in the batch the last processed
-    // element, in this case the `Commit` message.
-    if !continue_loop {
-        result.end_batch = Some(EndBatch::Inclusive);
+    // We mark this as the last commit end LSN since we want to be able to track from the outside
+    // what was the biggest transaction boundary LSN which was successfully applied.
+    //
+    // The rationale for using only the `end_lsn` of the `Commit` message is that once we found a
+    // commit and successfully processed it, we can say that the next byte we want is the next transaction
+    // since if we were to store an intermediate `end_lsn` (from a dml operation within a transaction)
+    // the replication will still start from a transaction boundary, that is, a `Begin` statement in
+    // our case.
+    if continue_loop {
+        Ok(HandleMessageResult::return_boundary_event(
+            Event::Commit(event),
+            end_lsn,
+        ))
+    } else {
+        // If we are told to stop the loop, it means we reached the end of processing for this specific
+        // worker, so we gracefully stop processing the batch, but we include in the batch the last processed
+        // element, in this case the `Commit` message.
+        Ok(HandleMessageResult::finish_batch_and_return_boundary_event(
+            Event::Commit(event),
+            end_lsn,
+        ))
     }
-
-    Ok(result)
 }
 
 /// Handles Postgres RELATION messages that describe table schemas.
@@ -935,7 +968,7 @@ where
         .should_apply_changes(table_id, remote_final_lsn)
         .await?
     {
-        return Ok(HandleMessageResult::default());
+        return Ok(HandleMessageResult::no_event());
     }
 
     // If no table schema is found, it means that something went wrong since we should have schemas
@@ -959,26 +992,17 @@ where
     // The purpose of this comparison is that we want to throw an error and stop the processing
     // of any table that incurs in a schema change after the initial table sync is performed.
     if !existing_table_schema.partial_eq(&event.table_schema) {
-        let table_error = TableReplicationError::with_solution(
+        let error = TableReplicationError::with_solution(
             table_id,
             format!("The schema for table {table_id} has changed during streaming"),
             "ETL doesn't support schema changes at this point in time, rollback the schema",
             RetryPolicy::ManualRetry,
         );
 
-        return Ok(HandleMessageResult {
-            end_batch: Some(EndBatch::Exclusive),
-            table_replication_error: Some(table_error),
-            ..Default::default()
-        });
+        return Ok(HandleMessageResult::finish_batch_and_exclude_event(error));
     }
 
-    Ok(HandleMessageResult {
-        event: Some(Event::Relation(event)),
-        end_lsn: None,
-        end_batch: None,
-        table_replication_error: None,
-    })
+    Ok(HandleMessageResult::return_event(Event::Relation(event)))
 }
 
 /// Handles Postgres INSERT messages for row insertion events.
@@ -1006,19 +1030,14 @@ where
         .should_apply_changes(TableId::new(message.rel_id()), remote_final_lsn)
         .await?
     {
-        return Ok(HandleMessageResult::default());
+        return Ok(HandleMessageResult::no_event());
     }
 
     // Convert event from the protocol message.
     let event =
         parse_event_from_insert_message(schema_store, start_lsn, commit_lsn, message).await?;
 
-    Ok(HandleMessageResult {
-        event: Some(Event::Insert(event)),
-        end_lsn: None,
-        end_batch: None,
-        table_replication_error: None,
-    })
+    Ok(HandleMessageResult::return_event(Event::Insert(event)))
 }
 
 /// Handles Postgres UPDATE messages for row modification events.
@@ -1046,19 +1065,14 @@ where
         .should_apply_changes(TableId::new(message.rel_id()), remote_final_lsn)
         .await?
     {
-        return Ok(HandleMessageResult::default());
+        return Ok(HandleMessageResult::no_event());
     }
 
     // Convert event from the protocol message.
     let event =
         parse_event_from_update_message(schema_store, start_lsn, commit_lsn, message).await?;
 
-    Ok(HandleMessageResult {
-        event: Some(Event::Update(event)),
-        end_lsn: None,
-        end_batch: None,
-        table_replication_error: None,
-    })
+    Ok(HandleMessageResult::return_event(Event::Update(event)))
 }
 
 /// Handles Postgres DELETE messages for row removal events.
@@ -1086,19 +1100,14 @@ where
         .should_apply_changes(TableId::new(message.rel_id()), remote_final_lsn)
         .await?
     {
-        return Ok(HandleMessageResult::default());
+        return Ok(HandleMessageResult::no_event());
     }
 
     // Convert event from the protocol message.
     let event =
         parse_event_from_delete_message(schema_store, start_lsn, commit_lsn, message).await?;
 
-    Ok(HandleMessageResult {
-        event: Some(Event::Delete(event)),
-        end_lsn: None,
-        end_batch: None,
-        table_replication_error: None,
-    })
+    Ok(HandleMessageResult::return_event(Event::Delete(event)))
 }
 
 /// Handles Postgres TRUNCATE messages for bulk table clearing operations.
@@ -1138,16 +1147,11 @@ where
     }
     // If nothing to apply, skip conversion entirely
     if rel_ids.is_empty() {
-        return Ok(HandleMessageResult::default());
+        return Ok(HandleMessageResult::no_event());
     }
 
     // Convert event from the protocol message.
     let event = parse_event_from_truncate_message(start_lsn, commit_lsn, message, rel_ids);
 
-    Ok(HandleMessageResult {
-        event: Some(Event::Truncate(event)),
-        end_lsn: None,
-        end_batch: None,
-        table_replication_error: None,
-    })
+    Ok(HandleMessageResult::return_event(Event::Truncate(event)))
 }
