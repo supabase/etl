@@ -191,10 +191,17 @@ struct HandleMessageResult {
 }
 
 impl HandleMessageResult {
+    /// Creates a result with no event and no side effects.
+    ///
+    /// Use this when a replication message should be ignored or has been
+    /// fully handled without producing an [`Event`].
     fn no_event() -> Self {
         Self::default()
     }
 
+    /// Creates a result that returns an event without affecting batch state.
+    ///
+    /// The returned event will be appended to the current batch by the caller.
     fn return_event(event: Event) -> Self {
         Self {
             event: Some(event),
@@ -202,6 +209,10 @@ impl HandleMessageResult {
         }
     }
 
+    /// Creates a result that returns an event and marks a transaction boundary.
+    ///
+    /// Sets `end_lsn` to the provided value so the caller can update
+    /// [`ApplyLoopState`] progress at the end of a transaction.
     fn return_boundary_event(event: Event, end_lsn: PgLsn) -> Self {
         Self {
             event: Some(event),
@@ -210,6 +221,10 @@ impl HandleMessageResult {
         }
     }
 
+    /// Creates a result that returns an event and requests batch termination.
+    ///
+    /// The event is included in the batch (`Inclusive`) and `end_lsn` is set
+    /// to signal a transaction boundary.
     fn finish_batch_and_return_boundary_event(event: Event, end_lsn: PgLsn) -> Self {
         Self {
             event: Some(event),
@@ -219,6 +234,10 @@ impl HandleMessageResult {
         }
     }
 
+    /// Creates a result that excludes the current event and requests batch termination.
+    ///
+    /// Used when the current message triggers a recoverable table-level error.
+    /// The error is propagated to be handled by the apply loop hook.
     fn finish_batch_and_exclude_event(error: TableReplicationError) -> Self {
         Self {
             end_batch: Some(EndBatch::Exclusive),
@@ -295,6 +314,10 @@ impl ApplyLoopState {
 type TimeoutEventsStream =
     TimeoutStream<EtlResult<ReplicationMessage<LogicalReplicationMessage>>, EventsStream>;
 
+/// Result type for reading from [`TimeoutEventsStream`].
+///
+/// Wraps either a replication message value or a timeout marker used to
+/// trigger batch flushes when no new events arrive within the deadline.
 type TimeoutEventsStreamResult =
     TimeoutStreamResult<EtlResult<ReplicationMessage<LogicalReplicationMessage>>>;
 
@@ -327,7 +350,7 @@ type TimeoutEventsStreamResult =
 /// # Concurrency Model
 ///
 /// The loop uses `tokio::select!` to handle multiple asynchronous operations:
-/// - **Priority handling**: Shutdown signals have highest priority (biased select)
+/// - **Priority handling**: Shutdown signals have the highest priority (biased select)
 /// - **Message streaming**: Continuously processes replication stream
 /// - **Periodic operations**: Status updates and housekeeping every 1 second
 /// - **External coordination**: Responds to table sync worker signals
@@ -518,9 +541,9 @@ where
 
             // If we have an event, and we want to keep it, we add it to the batch and update the last
             // commit lsn (if any).
-            let should_push_event = matches!(result.end_batch, None | Some(EndBatch::Inclusive));
+            let should_include_event = matches!(result.end_batch, None | Some(EndBatch::Inclusive));
             if let Some(event) = result.event
-                && should_push_event
+                && should_include_event
             {
                 state.events_batch.push(event);
                 state.update_last_commit_end_lsn(result.end_lsn);
@@ -567,6 +590,11 @@ where
     }
 }
 
+/// Sends the current batch of events to the destination and updates metrics.
+///
+/// Swaps out the in-memory batch to avoid reallocations, persists the events
+/// via [`Destination::write_events`], records counters and timings, and resets
+/// the stream timeout to continue batching.
 async fn send_batch<D>(
     state: &mut ApplyLoopState,
     events_stream: Pin<&mut TimeoutEventsStream>,
@@ -600,6 +628,12 @@ where
     Ok(())
 }
 
+/// Performs post-batch synchronization and progress reporting.
+///
+/// Updates the next status update LSNs (flush and apply) after a batch has
+/// been durably written, and calls [`ApplyLoopHook::process_syncing_tables`]
+/// to advance table synchronization state. Returns `true` if the caller
+/// should terminate the loop based on hook feedback.
 async fn synchronize<T>(state: &mut ApplyLoopState, hook: &T) -> EtlResult<bool>
 where
     T: ApplyLoopHook,
