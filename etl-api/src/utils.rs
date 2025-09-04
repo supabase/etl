@@ -39,9 +39,11 @@ pub fn parse_docker_image_tag(image: &str) -> String {
             Some(at_idx) => &segment[col_idx + 1..at_idx],
             None => after_colon,
         };
+
         if tag.is_empty() {
             return "unavailable".to_string();
         }
+
         return tag.to_string();
     }
 
