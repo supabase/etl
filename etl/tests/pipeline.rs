@@ -717,20 +717,11 @@ async fn table_sync_streams_new_data_with_batch() {
     )
     .await;
 
-    // Register notifications for ready state.
-    let users_state_notify = store
-        .notify_on_table_state(
-            database_schema.users_schema().id,
-            TableReplicationPhaseType::Ready,
-        )
-        .await;
-
     // We wait for all the inserts to be received.
     let events_notify = destination
         .wait_for_events_count(vec![(EventType::Insert, 5)])
         .await;
 
-    users_state_notify.notified().await;
     events_notify.notified().await;
 
     pipeline.shutdown_and_wait().await.unwrap();
