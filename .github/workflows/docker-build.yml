@@ -67,7 +67,7 @@ jobs:
           images: ${{ inputs.image }}
           tags: |
             type=raw,value=latest
-            type=sha,format=short,prefix=
+            type=sha,format=long,prefix=
             ${{ inputs.tag_with_version && format('type=raw,value=v{0}', inputs.version) || '' }}
 
       - name: Build and Push Image
@@ -85,8 +85,9 @@ jobs:
         run: |
           IMAGE="${{ inputs.image }}"
           NAME="${IMAGE##*/}"
-          SHORT_SHA="${GITHUB_SHA::7}"
-          TAGS="latest, ${SHORT_SHA}"
+          # Derive SHA from the checked-out ref to ensure correctness.
+          FULL_SHA=$(git rev-parse HEAD)
+          TAGS="latest, ${FULL_SHA}"
           if [ "${{ inputs.tag_with_version }}" = "true" ] && [ -n "${{ inputs.version }}" ]; then
             TAGS="${TAGS}, v${{ inputs.version }}"
           fi
