@@ -403,6 +403,13 @@ impl K8sClient for HttpK8sClient {
                   {
                     "name": replicator_container_name,
                     "image": replicator_image,
+                    "ports": [
+                      {
+                        "name": "metrics",
+                        "containerPort": 9000,
+                        "protocol": "TCP"
+                      }
+                    ],
                     "env": [
                       {
                         "name": "APP_ENVIRONMENT",
