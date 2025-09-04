@@ -469,7 +469,7 @@ impl TestApp {
         pipeline_id: i64,
     ) -> reqwest::Response {
         self.get_authenticated(format!(
-            "{}/v1/pipelines/{}/version-details",
+            "{}/v1/pipelines/{}/version",
             &self.address, pipeline_id
         ))
         .header("tenant_id", tenant_id)

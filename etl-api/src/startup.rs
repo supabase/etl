@@ -182,7 +182,7 @@ pub async fn run(
             UpdatePipelineRequest,
             ReadPipelineResponse,
             ReadPipelinesResponse,
-            GetPipelineImageDetailsResponse,
+            GetPipelineVersionResponse,
             UpdatePipelineImageRequest,
             GetPipelineStatusResponse,
             GetPipelineReplicationStatusResponse,
