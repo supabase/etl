@@ -54,11 +54,14 @@ pub fn init_metrics_handle() -> Result<PrometheusHandle, BuildError> {
 }
 
 /// This method initialized metrics by installing a global metrics recorder.
-/// It also starts listening on an http endpoint at `0.0.0.0:9000/metrics`
-/// for scrapers to collect metrics from. If the passed project_ref
-/// is not none, it is set as a global label named "project".
+/// It also starts listening on an http endpoint at `[::]:9000/metrics`
+/// for scrapers to collect metrics from. This listens on all IPv4 and IPv6 interfaces.
+/// If the passed project_ref is not none, it is set as a global label named "project".
 pub fn init_metrics(project_ref: Option<String>) -> Result<(), BuildError> {
-    let mut builder = PrometheusBuilder::new();
+    let mut builder = PrometheusBuilder::new().with_http_listener(std::net::SocketAddr::new(
+        std::net::IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED),
+        9000,
+    ));
 
     if let Some(project_ref) = project_ref {
         builder = builder.add_global_label("project", project_ref);
