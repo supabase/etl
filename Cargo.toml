@@ -1,5 +1,5 @@
 [workspace]
-resolver = "2"
+resolver = "3"
 members = [
     "etl",
     "etl-api",
@@ -11,6 +11,13 @@ members = [
     "etl-replicator",
     "etl-telemetry",
 ]
+
+[workspace.package]
+license = "Apache-2.0"
+edition = "2024"
+rust-version = "1.88.0"
+repository = "https://github.com/supabase/etl"
+homepage = "https://supabase.github.io/etl/"
 
 [workspace.dependencies]
 etl = { path = "etl", default-features = false }
