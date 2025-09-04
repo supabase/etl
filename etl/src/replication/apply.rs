@@ -257,7 +257,8 @@ impl ApplyLoopState {
 type TimeoutEventsStream =
     TimeoutStream<EtlResult<ReplicationMessage<LogicalReplicationMessage>>, EventsStream>;
 
-type TimeoutEventsStreamResult = TimeoutStreamResult<EtlResult<ReplicationMessage<LogicalReplicationMessage>>>;
+type TimeoutEventsStreamResult =
+    TimeoutStreamResult<EtlResult<ReplicationMessage<LogicalReplicationMessage>>>;
 
 /// Starts the main apply loop for processing replication events.
 ///
@@ -442,6 +443,27 @@ where
     }
 }
 
+/*
+
+Logic:
+
+If we have a message:
+- Batch is empty -> could be that an event was skipped, in this case
+- Batch is less max size -> batch is not being built, we skip sending and sync
+- Batch is bigger max size -> batch needs to be sent and we synchronize
+
+AN edge case could be where we keep on having elements that are skipped, in this case we want to trigger
+sync after a while, otherwise the system will stall (however the whole system relies on the fact that
+a begin and commit messages exist within reasonable time bounds).
+
+If the batch is empty, we can assume that no valid events were processed, so there is no need to perform
+sync. The only downside is that if we keep on getting for example relation messages, we will never end up in
+a situation where we kickstart table syncs. The thing is that we can design the system under the assumption
+that table sync happeens only on startup, thus we don't need to constantly attempt syncing and we can just
+do that at commit boundaries.
+
+ */
+
 async fn handle_replication_message_with_timeout<S, D, T>(
     state: &mut ApplyLoopState,
     events_stream: Pin<&mut TimeoutEventsStream>,
@@ -471,81 +493,80 @@ where
                 state.update_last_commit_end_lsn(result.end_lsn);
             }
 
-            // If the bach has surpassed the max size, or we are told to end it, we want to send it.
-            if state.events_batch.len() >= max_batch_size || result.end_batch.is_some() {
-                return send_batch_and_synchronize(
-                    state,
-                    events_stream,
-                    result.table_replication_error,
-                    destination,
-                    hook,
-                    max_batch_size,
-                )
-                .await;
+            // If there are no events in the batch, we skip this loop iteration.
+            if state.events_batch.is_empty() {
+                return Ok(false);
             }
 
-            Ok(false)
+            // If the events are below the batch size and we are not instructed to prematurely end a
+            // batch, we skip this loop iteration.
+            if state.events_batch.len() < max_batch_size && result.end_batch.is_none() {
+                return Ok(false);
+            }
+
+            // We send the batch to the destination.
+            send_batch(state, events_stream, destination, max_batch_size).await?;
+
+            // We perform synchronization, to make sure that tables are synced.
+            synchronize(state, result.table_replication_error, hook).await
         }
         TimeoutStreamResult::Timeout => {
-            // When there is a timeout, we unconditionally perform batch sending and synchronization.
-            send_batch_and_synchronize(
-                state,
-                events_stream,
-                None,
-                destination,
-                hook,
-                max_batch_size,
-            )
-                .await
+            // If there are no events in the batch, we skip this loop iteration.
+            if state.events_batch.is_empty() {
+                return Ok(false);
+            }
+
+            // We send the batch to the destination.
+            send_batch(state, events_stream, destination, max_batch_size).await?;
+
+            // We perform synchronization, to make sure that tables are synced.
+            synchronize(state, None, hook).await
         }
     }
 }
 
-/// Evaluates whether to send the current event batch and executes the send operation.
-///
-/// This function implements the batching strategy by checking multiple conditions:
-/// size limits, timing constraints, and forced batch completion signals. When any
-/// condition is met, it sends the accumulated events to the destination and updates
-/// the replication state accordingly.
-///
-/// After confirming that events are durably persisted in the destination, it performs synchronization
-/// between all workers and notifies Postgres about the progress.
-async fn send_batch_and_synchronize<D, T>(
+async fn send_batch<D>(
     state: &mut ApplyLoopState,
     events_stream: Pin<&mut TimeoutEventsStream>,
-    table_replication_error: Option<TableReplicationError>,
     destination: &D,
-    hook: &T,
     max_batch_size: usize,
+) -> EtlResult<()>
+where
+    D: Destination + Clone + Send + 'static,
+{
+    // TODO: figure out if we can send a slice to the destination instead of a vec
+    //  that would allow use to avoid new allocations of the `events_batch` vec and
+    //  we could just call clear() on it.
+    let events_batch =
+        std::mem::replace(&mut state.events_batch, Vec::with_capacity(max_batch_size));
+
+    let num_events = events_batch.len();
+    info!("sending batch of {} events to destination", num_events);
+    let before_sending = Instant::now();
+
+    destination.write_events(events_batch).await?;
+
+    counter!(ETL_APPLY_EVENTS_COPIED_TOTAL).increment(num_events as u64);
+    gauge!(ETL_BATCH_SIZE).set(num_events as f64);
+    let time_taken_to_send = before_sending.elapsed().as_millis();
+    gauge!(ETL_BATCH_SEND_MILLISECONDS_TOTAL).set(time_taken_to_send as f64);
+
+    // We tell the stream to reset the timer when it is polled the next time, this way the deadline
+    // is restarted.
+    events_stream.mark_reset_timer();
+
+    Ok(())
+}
+
+async fn synchronize<D, T>(
+    state: &mut ApplyLoopState,
+    table_replication_error: Option<TableReplicationError>,
+    hook: &T,
 ) -> EtlResult<bool>
 where
     D: Destination + Clone + Send + 'static,
     T: ApplyLoopHook,
 {
-    if state.events_batch.is_empty() {
-        // TODO: figure out if we can send a slice to the destination instead of a vec
-        //  that would allow use to avoid new allocations of the `events_batch` vec and
-        //  we could just call clear() on it.
-        let events_batch =
-            std::mem::replace(&mut state.events_batch, Vec::with_capacity(max_batch_size));
-
-        let num_events = events_batch.len();
-        info!("sending batch of {} events to destination", num_events);
-        let before_sending = Instant::now();
-
-        destination.write_events(events_batch).await?;
-
-        counter!(ETL_APPLY_EVENTS_COPIED_TOTAL).increment(num_events as u64);
-        gauge!(ETL_BATCH_SIZE).set(num_events as f64);
-        let time_taken_to_send = before_sending.elapsed().as_millis();
-        gauge!(ETL_BATCH_SEND_MILLISECONDS_TOTAL).set(time_taken_to_send as f64);
-
-        // We tell the stream to reset the timer when it is polled the next time, this way the deadline
-        // is restarted.
-        events_stream.mark_reset_timer();
-    }
-
-    // Variable which signals whether we want to stop the apply loop.
     let mut end_loop = false;
 
     // We handle the action related to a table error. This is done after the batch is written
