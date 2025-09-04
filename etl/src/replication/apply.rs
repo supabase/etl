@@ -430,7 +430,9 @@ where
             // 2. Allows Postgres to clean up old WAL files based on our progress
             // 3. Provides a heartbeat mechanism to detect connection issues
             _ = tokio::time::sleep(REFRESH_INTERVAL) => {
-                logical_replication_stream.as_mut()
+                logical_replication_stream
+                    .as_mut()
+                    .get_pin_mut()
                     .send_status_update(
                         state.next_status_update.write_lsn,
                         state.next_status_update.flush_lsn,
@@ -466,7 +468,7 @@ do that at commit boundaries.
 
 async fn handle_replication_message_with_timeout<S, D, T>(
     state: &mut ApplyLoopState,
-    events_stream: Pin<&mut TimeoutEventsStream>,
+    mut events_stream: Pin<&mut TimeoutEventsStream>,
     result: TimeoutEventsStreamResult,
     schema_store: &S,
     destination: &D,
@@ -481,7 +483,7 @@ where
     match result {
         TimeoutStreamResult::Value(message) => {
             let result =
-                handle_replication_message(state, events_stream, message?, schema_store, hook)
+                handle_replication_message(state, events_stream.as_mut(), message?, schema_store, hook)
                     .await?;
 
             // If we have an event, and we want to keep it, we add it to the batch and update the last
@@ -505,7 +507,7 @@ where
             }
 
             // We send the batch to the destination.
-            send_batch(state, events_stream, destination, max_batch_size).await?;
+            send_batch(state, events_stream.as_mut(), destination, max_batch_size).await?;
 
             // We perform synchronization, to make sure that tables are synced.
             synchronize(state, result.table_replication_error, hook).await
@@ -517,7 +519,7 @@ where
             }
 
             // We send the batch to the destination.
-            send_batch(state, events_stream, destination, max_batch_size).await?;
+            send_batch(state, events_stream.as_mut(), destination, max_batch_size).await?;
 
             // We perform synchronization, to make sure that tables are synced.
             synchronize(state, None, hook).await
@@ -558,13 +560,12 @@ where
     Ok(())
 }
 
-async fn synchronize<D, T>(
+async fn synchronize<T>(
     state: &mut ApplyLoopState,
     table_replication_error: Option<TableReplicationError>,
     hook: &T,
 ) -> EtlResult<bool>
 where
-    D: Destination + Clone + Send + 'static,
     T: ApplyLoopHook,
 {
     let mut end_loop = false;
@@ -669,6 +670,7 @@ where
             );
 
             events_stream
+                .get_pin_mut()
                 .send_status_update(
                     state.next_status_update.write_lsn,
                     state.next_status_update.flush_lsn,

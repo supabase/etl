@@ -4,7 +4,6 @@ use core::task::{Context, Poll};
 use etl_config::shared::BatchConfig;
 use futures::{Future, Stream, ready};
 use pin_project_lite::pin_project;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tracing::info;
 
@@ -190,6 +189,14 @@ impl<B, S: Stream<Item = B>> TimeoutStream<B, S> {
         }
     }
 
+    /// Returns a pinned mutable reference to the inner stream.
+    ///
+    /// Use this to interact with the wrapped stream when a mutable reference is required
+    /// while preserving pinning guarantees.
+    pub fn get_pin_mut(self: Pin<&mut Self>) -> Pin<&mut S> {
+        self.project().stream
+    }
+
     pub fn mark_reset_timer(self: Pin<&mut Self>) {
         let this = self.project();
         *this.reset_timer = true;
@@ -205,7 +212,7 @@ impl<B, S: Stream<Item = B>> Stream for TimeoutStream<B, S> {
         // If the timer should be reset, it means that we want to start counting down again.
         if *this.reset_timer {
             this.deadline.set(Some(tokio::time::sleep(
-                this.max_batch_fill_duration.clone(),
+                *this.max_batch_fill_duration,
             )));
             *this.reset_timer = false;
         }
