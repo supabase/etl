@@ -1,6 +1,6 @@
 [package]
 name = "etl-benchmarks"
-version = "0.1.2"
+version = "0.1.0"
 edition = "2024"
 
 [dev-dependencies]
