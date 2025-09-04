@@ -547,30 +547,30 @@ where
                 state.update_last_commit_end_lsn(result.end_lsn);
             }
 
-            // If we have elements in the batch ,and we have reached the max batch size, or we are told
-            // to end the batch, we send the batch.
-            let mut batch_sent = false;
-            if !state.events_batch.is_empty()
-                && (state.events_batch.len() >= max_batch_size || result.end_batch.is_some())
-            {
-                send_batch(state, events_stream.as_mut(), destination, max_batch_size).await?;
-                batch_sent = true;
-            }
-
             let mut continue_loop = true;
 
-            // If we have a table error, we want to mark the table as errored.
-            if let Some(error) = result.table_replication_error {
-                continue_loop &= hook.mark_table_errored(error).await?;
-            }
+            // If we have elements in the batch ,and we have reached the max batch size, or we are told
+            // to end the batch, we send the batch.
+            if state.events_batch.len() >= max_batch_size || result.end_batch.is_some() {
+                // We check if the batch has elements. It can be that a batch has no elements when
+                // the batch is ended prematurely, and it contains only skipped events. In this case,
+                // we don't produce any events to the destination but downstream code treats it as if
+                // those evets are "persisted".
+                if !state.events_batch.is_empty() {
+                    send_batch(state, events_stream.as_mut(), destination, max_batch_size).await?;
+                }
 
-            // Once the batch is sent, we have the guarantee that all events up to this point have
-            // been durably persisted, so we do synchronization.
-            //
-            // If we were to synchronize for every event, we would risk data loss since we would notify
-            // Postgres about our progress of events processing without having those events durably
-            // persisted in the destination.
-            if batch_sent {
+                // If we have a table error, we want to mark the table as errored.
+                if let Some(error) = result.table_replication_error {
+                    continue_loop &= hook.mark_table_errored(error).await?;
+                }
+
+                // Once the batch is sent, we have the guarantee that all events up to this point have
+                // been durably persisted, so we do synchronization.
+                //
+                // If we were to synchronize for every event, we would risk data loss since we would notify
+                // Postgres about our progress of events processing without having those events durably
+                // persisted in the destination.
                 continue_loop &= synchronize(state, hook).await?;
             }
 
