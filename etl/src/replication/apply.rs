@@ -455,8 +455,6 @@ where
                     config.batch.max_size,
                 )
                 .await?;
-
-                // If the message handler indicates we should terminate (e.g., due to hook decision)/
                 if !continue_loop {
                     return Ok(ApplyLoopResult::ApplyStopped);
                 }
