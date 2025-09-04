@@ -523,10 +523,12 @@ pub async fn get_pipeline_image_details(
     };
 
     let new_version = match default_image {
-        Some(default_image) if default_image.id != current_image.id => Some(PipelineImageVersionInfo {
-            id: default_image.id,
-            name: parse_docker_image_tag(&default_image.name),
-        }),
+        Some(default_image) if default_image.id != current_image.id => {
+            Some(PipelineImageVersionInfo {
+                id: default_image.id,
+                name: parse_docker_image_tag(&default_image.name),
+            })
+        }
         _ => None,
     };
 

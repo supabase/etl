@@ -1331,7 +1331,8 @@ async fn image_details_includes_new_default_version_when_available() {
     let destination_id = create_destination(&app, &tenant_id).await;
 
     // Initial default image for pipeline creation
-    let old_default_image_id = create_image_with_name(&app, "supabase/replicator:1.2.3".to_string(), true).await;
+    let old_default_image_id =
+        create_image_with_name(&app, "supabase/replicator:1.2.3".to_string(), true).await;
 
     let pipeline_id = {
         let req = CreatePipelineRequest {
