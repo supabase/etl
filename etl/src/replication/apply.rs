@@ -445,27 +445,14 @@ where
     }
 }
 
-/*
-
-Logic:
-
-If we have a message:
-- Batch is empty -> could be that an event was skipped, in this case
-- Batch is less max size -> batch is not being built, we skip sending and sync
-- Batch is bigger max size -> batch needs to be sent and we synchronize
-
-AN edge case could be where we keep on having elements that are skipped, in this case we want to trigger
-sync after a while, otherwise the system will stall (however the whole system relies on the fact that
-a begin and commit messages exist within reasonable time bounds).
-
-If the batch is empty, we can assume that no valid events were processed, so there is no need to perform
-sync. The only downside is that if we keep on getting for example relation messages, we will never end up in
-a situation where we kickstart table syncs. The thing is that we can design the system under the assumption
-that table sync happeens only on startup, thus we don't need to constantly attempt syncing and we can just
-do that at commit boundaries.
-
- */
-
+/// Handles a replication message or a timeout.
+///
+/// The rationale for having a value or timeout is to handle for the cases where a batch can't
+/// be filled within a reasonable time bound. In that case, the stream will timeout, signaling a
+/// force flush of the current events in the batch.
+///
+/// This function performs synchronization under the assumption that transaction boundary events are
+/// always processed.
 async fn handle_replication_message_with_timeout<S, D, T>(
     state: &mut ApplyLoopState,
     mut events_stream: Pin<&mut TimeoutEventsStream>,
@@ -505,7 +492,7 @@ where
             // is requested, we want to send it.
             let mut batch_sent = false;
             if !state.events_batch.is_empty()
-                && (state.events_batch.len() >= max_batch_size || result.end_batch.is_none())
+                && (state.events_batch.len() >= max_batch_size || result.end_batch.is_some())
             {
                 send_batch(state, events_stream.as_mut(), destination, max_batch_size).await?;
                 batch_sent = true;
@@ -596,7 +583,7 @@ where
     // we are guaranteed that data has been safely persisted. In all the other cases, we just update
     // the `write_lsn` which is used by Postgres to get an acknowledgement of how far we have processed
     // messages but not flushed them.
-    // TODO: check if we want to send `apply_lsn` as a different value.
+    // TODO: maybe we want to send `apply_lsn` as a different value.
     debug!(
         "updating lsn for next status update to {}",
         last_commit_end_lsn
