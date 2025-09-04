@@ -370,7 +370,7 @@ pub enum PipelineStatus {
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
-pub struct VersionInfo {
+pub struct PipelineImageVersionInfo {
     #[schema(example = 1)]
     pub id: i64,
     #[schema(example = "1.2.3")]
@@ -379,9 +379,9 @@ pub struct VersionInfo {
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct GetPipelineImageDetailsResponse {
-    pub version: VersionInfo,
+    pub version: PipelineImageVersionInfo,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub new_version: Option<VersionInfo>,
+    pub new_version: Option<PipelineImageVersionInfo>,
 }
 
 #[utoipa::path(
@@ -504,11 +504,6 @@ pub async fn get_pipeline_image_details(
 
     let mut txn = pool.begin().await?;
 
-    // Ensure pipeline exists and get its replicator
-    let _pipeline = db::pipelines::read_pipeline(txn.deref_mut(), tenant_id, pipeline_id)
-        .await?
-        .ok_or(PipelineError::PipelineNotFound(pipeline_id))?;
-
     let replicator =
         db::replicators::read_replicator_by_pipeline_id(txn.deref_mut(), tenant_id, pipeline_id)
             .await?
@@ -522,15 +517,15 @@ pub async fn get_pipeline_image_details(
 
     txn.commit().await?;
 
-    let current_version = VersionInfo {
+    let current_version = PipelineImageVersionInfo {
         id: current_image.id,
         name: parse_docker_image_tag(&current_image.name),
     };
 
     let new_version = match default_image {
-        Some(img) if img.id != current_image.id => Some(VersionInfo {
-            id: img.id,
-            name: parse_docker_image_tag(&img.name),
+        Some(default_image) if default_image.id != current_image.id => Some(PipelineImageVersionInfo {
+            id: default_image.id,
+            name: parse_docker_image_tag(&default_image.name),
         }),
         _ => None,
     };

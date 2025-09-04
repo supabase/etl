@@ -1292,7 +1292,7 @@ async fn image_details_returns_current_version_and_no_new_version_when_default_m
     let destination_id = create_destination(&app, &tenant_id).await;
 
     // Create a default image without a tag -> should parse to "latest".
-    let _image_id = create_image_with_name(&app, "some/image".to_string(), true).await;
+    create_image_with_name(&app, "some/image".to_string(), true).await;
 
     let pipeline_id = {
         let req = CreatePipelineRequest {
@@ -1313,12 +1313,12 @@ async fn image_details_returns_current_version_and_no_new_version_when_default_m
 
     // Assert
     assert!(response.status().is_success());
-    let details: GetPipelineImageDetailsResponse = response
+    let image_details: GetPipelineImageDetailsResponse = response
         .json()
         .await
         .expect("failed to deserialize response");
-    assert_eq!(details.version.name, "latest");
-    assert!(details.new_version.is_none());
+    assert_eq!(image_details.version.name, "latest");
+    assert!(image_details.new_version.is_none());
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1331,8 +1331,7 @@ async fn image_details_includes_new_default_version_when_available() {
     let destination_id = create_destination(&app, &tenant_id).await;
 
     // Initial default image for pipeline creation
-    let _img_current =
-        create_image_with_name(&app, "supabase/replicator:1.2.3".to_string(), true).await;
+    let old_default_image_id = create_image_with_name(&app, "supabase/replicator:1.2.3".to_string(), true).await;
 
     let pipeline_id = {
         let req = CreatePipelineRequest {
@@ -1347,7 +1346,7 @@ async fn image_details_includes_new_default_version_when_available() {
     };
 
     // Create a new default image (should flip default)
-    let img_new_id =
+    let default_image_id =
         create_image_with_name(&app, "supabase/replicator:1.3.0".to_string(), true).await;
 
     // Act
@@ -1357,15 +1356,18 @@ async fn image_details_includes_new_default_version_when_available() {
 
     // Assert
     assert!(response.status().is_success());
-    let details: GetPipelineImageDetailsResponse = response
+    let image_details: GetPipelineImageDetailsResponse = response
         .json()
         .await
         .expect("failed to deserialize response");
-    assert_eq!(details.version.name, "1.2.3");
 
-    let new_version = details
+    let current_version = image_details.version;
+    assert_eq!(current_version.id, old_default_image_id);
+    assert_eq!(current_version.name, "1.2.3");
+
+    let new_version = image_details
         .new_version
         .expect("expected new_version to be present");
-    assert_eq!(new_version.id, img_new_id);
+    assert_eq!(new_version.id, default_image_id);
     assert_eq!(new_version.name, "1.3.0");
 }
