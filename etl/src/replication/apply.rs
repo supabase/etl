@@ -547,8 +547,8 @@ where
                 state.update_last_commit_end_lsn(result.end_lsn);
             }
 
-            // If we have elements in the batch, and we have reached max size of the end of a batch
-            // is requested, we want to send it.
+            // If we have elements in the batch ,and we have reached the max batch size, or we are told
+            // to end the batch, we send the batch.
             let mut batch_sent = false;
             if !state.events_batch.is_empty()
                 && (state.events_batch.len() >= max_batch_size || result.end_batch.is_some())
