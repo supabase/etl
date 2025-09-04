@@ -612,14 +612,16 @@ where
     let events_batch =
         std::mem::replace(&mut state.events_batch, Vec::with_capacity(max_batch_size));
 
-    let num_events = events_batch.len();
-    info!("sending batch of {} events to destination", num_events);
+    let batch_size = events_batch.len();
+    info!("sending batch of {} events to destination", batch_size);
+
     let before_sending = Instant::now();
 
     destination.write_events(events_batch).await?;
 
-    counter!(ETL_APPLY_EVENTS_COPIED_TOTAL).increment(num_events as u64);
-    gauge!(ETL_BATCH_SIZE).set(num_events as f64);
+    counter!(ETL_APPLY_EVENTS_COPIED_TOTAL).increment(batch_size as u64);
+    gauge!(ETL_BATCH_SIZE).set(batch_size as f64);
+
     let time_taken_to_send = before_sending.elapsed().as_millis();
     gauge!(ETL_BATCH_SEND_MILLISECONDS_TOTAL).set(time_taken_to_send as f64);
 

@@ -197,6 +197,10 @@ impl<B, S: Stream<Item = B>> TimeoutStream<B, S> {
         self.project().stream
     }
 
+    /// Marks the timer to be reset in the next poll.
+    ///
+    /// This method should be called when you want to tell the stream to restart the timer in the
+    /// next poll.
     pub fn mark_reset_timer(self: Pin<&mut Self>) {
         let this = self.project();
         *this.reset_timer = true;
