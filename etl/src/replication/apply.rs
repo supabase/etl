@@ -503,10 +503,12 @@ where
 
             // If we have elements in the batch, and we have reached max size of the end of a batch
             // is requested, we want to send it.
+            let mut batch_sent = false;
             if !state.events_batch.is_empty()
                 && (state.events_batch.len() >= max_batch_size || result.end_batch.is_none())
             {
                 send_batch(state, events_stream.as_mut(), destination, max_batch_size).await?;
+                batch_sent = true;
             }
 
             let mut end_loop = false;
@@ -520,15 +522,19 @@ where
 
             // Once the batch is sent, we have the guarantee that all events up to this point have
             // been durably persisted, so we do synchronization.
-            end_loop |= synchronize(state, hook).await?;
+            if batch_sent {
+                end_loop |= synchronize(state, hook).await?;
+            }
 
             Ok(end_loop)
         }
         TimeoutStreamResult::Timeout => {
-            // If we have batched events, we do send them to the destination.
-            if !state.events_batch.is_empty() {
-                send_batch(state, events_stream.as_mut(), destination, max_batch_size).await?;
+            if state.events_batch.is_empty() {
+                return Ok(false);
             }
+
+            // We send the non-empty batch.
+            send_batch(state, events_stream.as_mut(), destination, max_batch_size).await?;
 
             // We perform synchronization, to make sure that tables are synced.
             synchronize(state, hook).await
