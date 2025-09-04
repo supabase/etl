@@ -208,8 +208,11 @@ where
                 .await?;
             let table_copy_stream =
                 TableCopyStream::wrap(table_copy_stream, &table_schema.column_schemas);
-            let table_copy_stream =
-                TimeoutBatchStream::wrap(table_copy_stream, config.batch.clone(), shutdown_rx.clone());
+            let table_copy_stream = TimeoutBatchStream::wrap(
+                table_copy_stream,
+                config.batch.clone(),
+                shutdown_rx.clone(),
+            );
             pin!(table_copy_stream);
 
             info!("starting table copy stream for table {}", table_id);

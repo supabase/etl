@@ -155,6 +155,9 @@ struct HandleMessageResult {
     /// * When the message is a primary keepalive message.
     event: Option<Event>,
     /// Set to a commit message's end_lsn value, `None` otherwise.
+    ///
+    /// This value is used to update the last commit end lsn in the [`ApplyLoopState`] which is
+    /// helpful to track progress at transaction boundaries.
     end_lsn: Option<PgLsn>,
     /// Set when a batch should be ended earlier than the normal batching parameters of
     /// max size and max fill duration. Currently, this will be set in the following
@@ -203,8 +206,6 @@ struct ApplyLoopState {
     remote_final_lsn: Option<PgLsn>,
     /// The LSNs of the status update that we want to send to Postgres.
     next_status_update: StatusUpdate,
-    /// Last time when the batch was sent (or since when the apply loop started).
-    last_batch_send_time: Instant,
     /// A batch of events to send to the destination.
     events_batch: Vec<Event>,
 }
@@ -219,7 +220,6 @@ impl ApplyLoopState {
             last_commit_end_lsn: None,
             remote_final_lsn: None,
             next_status_update,
-            last_batch_send_time: Instant::now(),
             events_batch,
         }
     }
@@ -254,9 +254,10 @@ impl ApplyLoopState {
 }
 
 /// An [`EventsStream`] which is wrapped inside a [`TimeoutStream`] for timing purposes.
-type TimeoutEventsStream = TimeoutStream<EtlResult<ReplicationMessage<LogicalReplicationMessage>>, EventsStream>;
+type TimeoutEventsStream =
+    TimeoutStream<EtlResult<ReplicationMessage<LogicalReplicationMessage>>, EventsStream>;
 
-type TimeoutEventsStreamResult = TimeoutStreamResult<ReplicationMessage<LogicalReplicationMessage>>;
+type TimeoutEventsStreamResult = TimeoutStreamResult<EtlResult<ReplicationMessage<LogicalReplicationMessage>>>;
 
 /// Starts the main apply loop for processing replication events.
 ///
@@ -268,7 +269,7 @@ type TimeoutEventsStreamResult = TimeoutStreamResult<ReplicationMessage<LogicalR
 ///
 /// The apply loop processes three types of events:
 /// 1. **Replication messages** - DDL/DML events from Postgres logical replication
-/// 2. **Table sync signals** - Coordination events from table synchronization workers  
+/// 2. **Table sync signals** - Coordination events from table synchronization workers
 /// 3. **Shutdown signals** - Graceful termination requests from the pipeline
 ///
 /// # Processing Phases
@@ -382,10 +383,10 @@ where
             // This is the primary data flow - converts replication protocol messages
             // into typed events and accumulates them into batches for efficient processing
             Some(message) = logical_replication_stream.next() => {
-                let end_loop = handle_timeout_stream_message(
+                let end_loop = handle_replication_message_with_timeout(
                     &mut state,
                     logical_replication_stream.as_mut(),
-                    message?,
+                    message,
                     &schema_store,
                     &destination,
                     &hook,
@@ -441,31 +442,10 @@ where
     }
 }
 
-async fn handle_timeout_stream_message<S, D, T>(
+async fn handle_replication_message_with_timeout<S, D, T>(
     state: &mut ApplyLoopState,
     events_stream: Pin<&mut TimeoutEventsStream>,
     result: TimeoutEventsStreamResult,
-    schema_store: &S,
-    destination: &D,
-    hook: &T,
-    max_batch_size: usize,
-) -> EtlResult<bool> {
-    match result {
-        TimeoutStreamResult::Value(message) => {
-            // TODO: handle message and try to send batch.
-        },
-        TimeoutStreamResult::Timeout => {
-            // TODO: force sending a batch.
-        }
-    }
-}
-
-/// Processes a replication message and manages batch accumulation and sending.
-#[expect(clippy::too_many_arguments)]
-async fn handle_replication_message_and_try_send_batch<S, D, T>(
-    state: &mut ApplyLoopState,
-    events_stream: Pin<&mut TimeoutEventsStream>,
-    message: ReplicationMessage<LogicalReplicationMessage>,
     schema_store: &S,
     destination: &D,
     hook: &T,
@@ -476,26 +456,48 @@ where
     D: Destination + Clone + Send + 'static,
     T: ApplyLoopHook,
 {
-    let result =
-        handle_replication_message(state, events_stream, message, schema_store, hook).await?;
+    match result {
+        TimeoutStreamResult::Value(message) => {
+            let result =
+                handle_replication_message(state, events_stream, message?, schema_store, hook)
+                    .await?;
 
-    // If we have an event, and we are told to keep it in case we end the batch or
-    if let Some(event) = result.event
-        && matches!(result.end_batch, None | Some(EndBatch::Inclusive))
-    {
-        state.events_batch.push(event);
-        state.update_last_commit_end_lsn(result.end_lsn);
-    }
+            // If we have an event, and we want to keep it, we add it to the batch and update the last
+            // commit lsn (if any).
+            if let Some(event) = result.event
+                && matches!(result.end_batch, None | Some(EndBatch::Inclusive))
+            {
+                state.events_batch.push(event);
+                state.update_last_commit_end_lsn(result.end_lsn);
+            }
 
-    if state.events_batch.len() >= max_batch_size || result.end_batch.is_some() {
-        send_batch_and_synchronize(
-            state,
-            result.table_replication_error,
-            destination,
-            hook,
-            max_batch_size,
-        )
-            .await
+            // If the bach has surpassed the max size, or we are told to end it, we want to send it.
+            if state.events_batch.len() >= max_batch_size || result.end_batch.is_some() {
+                return send_batch_and_synchronize(
+                    state,
+                    events_stream,
+                    result.table_replication_error,
+                    destination,
+                    hook,
+                    max_batch_size,
+                )
+                .await;
+            }
+
+            Ok(false)
+        }
+        TimeoutStreamResult::Timeout => {
+            // When there is a timeout, we unconditionally perform batch sending and synchronization.
+            send_batch_and_synchronize(
+                state,
+                events_stream,
+                None,
+                destination,
+                hook,
+                max_batch_size,
+            )
+                .await
+        }
     }
 }
 
@@ -510,6 +512,7 @@ where
 /// between all workers and notifies Postgres about the progress.
 async fn send_batch_and_synchronize<D, T>(
     state: &mut ApplyLoopState,
+    events_stream: Pin<&mut TimeoutEventsStream>,
     table_replication_error: Option<TableReplicationError>,
     destination: &D,
     hook: &T,
@@ -519,7 +522,7 @@ where
     D: Destination + Clone + Send + 'static,
     T: ApplyLoopHook,
 {
-    if !state.events_batch.is_empty() {
+    if state.events_batch.is_empty() {
         // TODO: figure out if we can send a slice to the destination instead of a vec
         //  that would allow use to avoid new allocations of the `events_batch` vec and
         //  we could just call clear() on it.
@@ -537,9 +540,12 @@ where
         let time_taken_to_send = before_sending.elapsed().as_millis();
         gauge!(ETL_BATCH_SEND_MILLISECONDS_TOTAL).set(time_taken_to_send as f64);
 
-        state.last_batch_send_time = Instant::now();
+        // We tell the stream to reset the timer when it is polled the next time, this way the deadline
+        // is restarted.
+        events_stream.mark_reset_timer();
     }
 
+    // Variable which signals whether we want to stop the apply loop.
     let mut end_loop = false;
 
     // We handle the action related to a table error. This is done after the batch is written
@@ -561,9 +567,9 @@ where
         // messages but not flushed them.
         // TODO: check if we want to send `apply_lsn` as a different value.
         debug!(
-                "updating lsn for next status update to {}",
-                last_commit_end_lsn
-            );
+            "updating lsn for next status update to {}",
+            last_commit_end_lsn
+        );
         state
             .next_status_update
             .update_flush_lsn(last_commit_end_lsn);
@@ -599,7 +605,7 @@ where
 /// to maintain the replication connection and inform Postgres of progress.
 async fn handle_replication_message<S, T>(
     state: &mut ApplyLoopState,
-    events_stream: Pin<&mut EventsStream>,
+    events_stream: Pin<&mut TimeoutEventsStream>,
     message: ReplicationMessage<LogicalReplicationMessage>,
     schema_store: &S,
     hook: &T,

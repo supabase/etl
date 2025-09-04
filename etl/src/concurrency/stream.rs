@@ -176,7 +176,6 @@ pin_project! {
         #[pin]
         deadline: Option<tokio::time::Sleep>,
         reset_timer: bool,
-        is_first_value: bool,
         max_batch_fill_duration: Duration,
     }
 }
@@ -186,22 +185,14 @@ impl<B, S: Stream<Item = B>> TimeoutStream<B, S> {
         Self {
             stream,
             deadline: None,
-            // By default, we start without setting a timer since it will be set on
-            // the first element.
-            reset_timer: false,
-            is_first_value: true,
+            reset_timer: true,
             max_batch_fill_duration,
         }
     }
 
-    pub fn reset_timer(self: Pin<&mut Self>) {
-        let mut this = self.project();
+    pub fn mark_reset_timer(self: Pin<&mut Self>) {
+        let this = self.project();
         *this.reset_timer = true;
-    }
-
-    pub fn get_inner(self: Pin<&mut Self>) -> Pin<&mut S> {
-        let mut this = self.project();
-        this.stream.as_pin_mut()
     }
 }
 
@@ -212,7 +203,7 @@ impl<B, S: Stream<Item = B>> Stream for TimeoutStream<B, S> {
         let mut this = self.project();
 
         // If the timer should be reset, it means that we want to start counting down again.
-        if this.reset_timer {
+        if *this.reset_timer {
             this.deadline.set(Some(tokio::time::sleep(
                 this.max_batch_fill_duration.clone(),
             )));
@@ -220,21 +211,7 @@ impl<B, S: Stream<Item = B>> Stream for TimeoutStream<B, S> {
         }
 
         match this.stream.poll_next(cx) {
-            Poll::Ready(Some(value)) => {
-                // If this is the first value the deadline is not there, we want to start it. This
-                // is an optimization that enables the stream to not emit timeouts until the first
-                // value has been received.
-                if *this.is_first_value && this.deadline.is_none() {
-                    *this.is_first_value = false;
-                    *this.reset_timer = true;
-                    this.deadline.set(Some(tokio::time::sleep(
-                        this.max_batch_fill_duration.clone(),
-                    )));
-                    *this.reset_timer = false;
-                }
-
-                Poll::Ready(Some(TimeoutStreamResult::Value(value)))
-            },
+            Poll::Ready(Some(value)) => Poll::Ready(Some(TimeoutStreamResult::Value(value))),
             Poll::Ready(None) => Poll::Ready(None),
             Poll::Pending => {
                 // If we have no elements, we want to check whether the timer expired. If it did
