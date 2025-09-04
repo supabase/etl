@@ -445,7 +445,7 @@ where
             // This is the primary data flow - converts replication protocol messages
             // into typed events and accumulates them into batches for efficient processing
             Some(message) = logical_replication_stream.next() => {
-                let end_loop = handle_replication_message_with_timeout(
+                let continue_loop = handle_replication_message_with_timeout(
                     &mut state,
                     logical_replication_stream.as_mut(),
                     message,
@@ -457,7 +457,7 @@ where
                 .await?;
 
                 // If the message handler indicates we should terminate (e.g., due to hook decision)/
-                if end_loop {
+                if !continue_loop {
                     return Ok(ApplyLoopResult::ApplyStopped);
                 }
             }
@@ -559,28 +559,32 @@ where
                 batch_sent = true;
             }
 
-            let mut end_loop = false;
+            let mut continue_loop = true;
 
             // We handle the action related to a table error. This is done after the batch is written
             // to the destination to make sure that the data is durable before assuming things about a
             // table.
             if let Some(error) = result.table_replication_error {
-                end_loop |= !hook.mark_table_errored(error).await?;
+                continue_loop &= hook.mark_table_errored(error).await?;
             }
 
             // Once the batch is sent, we have the guarantee that all events up to this point have
             // been durably persisted, so we do synchronization.
             if batch_sent {
-                end_loop |= synchronize(state, hook).await?;
+                continue_loop &= synchronize(state, hook).await?;
             }
 
-            Ok(end_loop)
+            Ok(continue_loop)
         }
         TimeoutStreamResult::Timeout => {
-            debug!("the events stream timed out before reaching batch size of {}, ready to flush batch of {} events", max_batch_size, state.events_batch.len());
+            debug!(
+                "the events stream timed out before reaching batch size of {}, ready to flush batch of {} events",
+                max_batch_size,
+                state.events_batch.len()
+            );
 
             if state.events_batch.is_empty() {
-                return Ok(false);
+                return Ok(true);
             }
 
             // We send the non-empty batch.
@@ -680,11 +684,8 @@ where
     // because we want to semantically process syncing tables with the same LSN that we tell
     // Postgres that we flushed durably to disk. In practice, `flush_lsn` and `last_commit_end_lsn`
     // will be always equal, since LSNs are guaranteed to be monotonically increasing.
-    let continue_loop = hook
-        .process_syncing_tables(state.next_status_update.flush_lsn, true)
-        .await?;
-
-    Ok(!continue_loop)
+    hook.process_syncing_tables(state.next_status_update.flush_lsn, true)
+        .await
 }
 
 /// Dispatches replication protocol messages to appropriate handlers.
