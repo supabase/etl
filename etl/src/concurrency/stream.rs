@@ -4,6 +4,7 @@ use core::task::{Context, Poll};
 use etl_config::shared::BatchConfig;
 use futures::{Future, Stream, ready};
 use pin_project_lite::pin_project;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tracing::info;
 
@@ -17,7 +18,7 @@ pin_project! {
     /// - A timeout occurs
     #[must_use = "streams do nothing unless polled"]
     #[derive(Debug)]
-    pub struct BatchStream<B, S: Stream<Item = B>> {
+    pub struct TimeoutBatchStream<B, S: Stream<Item = B>> {
         #[pin]
         stream: S,
         #[pin]
@@ -31,13 +32,13 @@ pin_project! {
     }
 }
 
-impl<B, S: Stream<Item = B>> BatchStream<B, S> {
-    /// Creates a new [`BatchStream`] with the given configuration.
+impl<B, S: Stream<Item = B>> TimeoutBatchStream<B, S> {
+    /// Creates a new [`TimeoutBatchStream`] with the given configuration.
     ///
     /// The stream will batch items according to the provided `batch_config` and can be
     /// stopped using the `shutdown_rx` watch channel.
     pub fn wrap(stream: S, batch_config: BatchConfig, shutdown_rx: ShutdownRx) -> Self {
-        BatchStream {
+        TimeoutBatchStream {
             stream,
             deadline: None,
             shutdown_rx,
@@ -50,7 +51,7 @@ impl<B, S: Stream<Item = B>> BatchStream<B, S> {
     }
 }
 
-impl<B, S: Stream<Item = B>> Stream for BatchStream<B, S> {
+impl<B, S: Stream<Item = B>> Stream for TimeoutBatchStream<B, S> {
     type Item = ShutdownResult<Vec<S::Item>, Vec<S::Item>>;
 
     /// Polls the stream for the next batch of items using a complex state machine.
@@ -148,15 +149,107 @@ impl<B, S: Stream<Item = B>> Stream for BatchStream<B, S> {
         if !this.items.is_empty()
             && let Some(deadline) = this.deadline.as_pin_mut()
         {
-            // Check if timeout has elapsed (this will register waker if not ready)
+            // Check if timeout has elapsed (this will register waker if not ready).
             ready!(deadline.poll(cx));
-
-            *this.reset_timer = true; // Schedule timer reset for next batch
+            // Schedule timer reset for next batch.
+            *this.reset_timer = true;
 
             return Poll::Ready(Some(ShutdownResult::Ok(std::mem::take(this.items))));
         }
 
         // No conditions met for batch emission - wait for more items or timeout
         Poll::Pending
+    }
+}
+
+pub enum TimeoutStreamResult<T> {
+    Value(T),
+    Timeout,
+}
+
+pin_project! {
+    #[must_use = "streams do nothing unless polled"]
+    #[derive(Debug)]
+    pub struct TimeoutStream<B, S: Stream<Item = B>> {
+        #[pin]
+        stream: S,
+        #[pin]
+        deadline: Option<tokio::time::Sleep>,
+        reset_timer: bool,
+        is_first_value: bool,
+        max_batch_fill_duration: Duration,
+    }
+}
+
+impl<B, S: Stream<Item = B>> TimeoutStream<B, S> {
+    pub fn wrap(stream: S, max_batch_fill_duration: Duration) -> Self {
+        Self {
+            stream,
+            deadline: None,
+            // By default, we start without setting a timer since it will be set on
+            // the first element.
+            reset_timer: false,
+            is_first_value: true,
+            max_batch_fill_duration,
+        }
+    }
+
+    pub fn reset_timer(self: Pin<&mut Self>) {
+        let mut this = self.project();
+        *this.reset_timer = true;
+    }
+
+    pub fn get_inner(self: Pin<&mut Self>) -> Pin<&mut S> {
+        let mut this = self.project();
+        this.stream.as_pin_mut()
+    }
+}
+
+impl<B, S: Stream<Item = B>> Stream for TimeoutStream<B, S> {
+    type Item = TimeoutStreamResult<B>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let mut this = self.project();
+
+        // If the timer should be reset, it means that we want to start counting down again.
+        if this.reset_timer {
+            this.deadline.set(Some(tokio::time::sleep(
+                this.max_batch_fill_duration.clone(),
+            )));
+            *this.reset_timer = false;
+        }
+
+        match this.stream.poll_next(cx) {
+            Poll::Ready(Some(value)) => {
+                // If this is the first value the deadline is not there, we want to start it. This
+                // is an optimization that enables the stream to not emit timeouts until the first
+                // value has been received.
+                if *this.is_first_value && this.deadline.is_none() {
+                    *this.is_first_value = false;
+                    *this.reset_timer = true;
+                    this.deadline.set(Some(tokio::time::sleep(
+                        this.max_batch_fill_duration.clone(),
+                    )));
+                    *this.reset_timer = false;
+                }
+
+                Poll::Ready(Some(TimeoutStreamResult::Value(value)))
+            },
+            Poll::Ready(None) => Poll::Ready(None),
+            Poll::Pending => {
+                // If we have no elements, we want to check whether the timer expired. If it did
+                // expire, we return timeout element and request the timer reset.
+                if let Some(deadline) = this.deadline.as_pin_mut() {
+                    // Check if timeout has elapsed (this will register waker if not ready).
+                    ready!(deadline.poll(cx));
+                    // Schedule timer reset for next batch.
+                    *this.reset_timer = true;
+
+                    return Poll::Ready(Some(TimeoutStreamResult::Timeout));
+                }
+
+                Poll::Pending
+            }
+        }
     }
 }

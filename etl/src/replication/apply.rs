@@ -16,6 +16,7 @@ use tracing::{debug, info};
 
 use crate::concurrency::shutdown::ShutdownRx;
 use crate::concurrency::signal::SignalRx;
+use crate::concurrency::stream::{TimeoutStream, TimeoutStreamResult};
 use crate::conversions::event::{
     parse_event_from_begin_message, parse_event_from_commit_message,
     parse_event_from_delete_message, parse_event_from_insert_message,
@@ -252,6 +253,11 @@ impl ApplyLoopState {
     }
 }
 
+/// An [`EventsStream`] which is wrapped inside a [`TimeoutStream`] for timing purposes.
+type TimeoutEventsStream = TimeoutStream<EtlResult<ReplicationMessage<LogicalReplicationMessage>>, EventsStream>;
+
+type TimeoutEventsStreamResult = TimeoutStreamResult<ReplicationMessage<LogicalReplicationMessage>>;
+
 /// Starts the main apply loop for processing replication events.
 ///
 /// This function implements the core replication processing algorithm that maintains
@@ -336,7 +342,17 @@ where
     let logical_replication_stream = replication_client
         .start_logical_replication(&config.publication_name, &slot_name, start_lsn)
         .await?;
+
+    // Maximum time to wait for additional events when batching (prevents indefinite delays)
+    let max_batch_fill_duration = Duration::from_millis(config.batch.max_fill_ms);
+
+    // We wrap the logical replication stream with multiple streams:
+    // - EventsStream -> used to expose special status updates methods on the stream.
+    // - TimeoutStream -> adds a timeout mechanism that detects when no data has been going through
+    //   the stream for a while, and returns a special marker to signal that.
     let logical_replication_stream = EventsStream::wrap(logical_replication_stream);
+    let logical_replication_stream =
+        TimeoutStream::wrap(logical_replication_stream, max_batch_fill_duration);
 
     pin!(logical_replication_stream);
 
@@ -345,9 +361,6 @@ where
         first_status_update,
         Vec::with_capacity(config.batch.max_size),
     );
-
-    // Maximum time to wait for additional events when batching (prevents indefinite delays)
-    let max_batch_fill_duration = Duration::from_millis(config.batch.max_fill_ms);
 
     // Main event processing loop - continues until shutdown or fatal error
     loop {
@@ -369,7 +382,7 @@ where
             // This is the primary data flow - converts replication protocol messages
             // into typed events and accumulates them into batches for efficient processing
             Some(message) = logical_replication_stream.next() => {
-                let end_loop = handle_replication_message_batch(
+                let end_loop = handle_timeout_stream_message(
                     &mut state,
                     logical_replication_stream.as_mut(),
                     message?,
@@ -377,7 +390,6 @@ where
                     &destination,
                     &hook,
                     config.batch.max_size,
-                    max_batch_fill_duration,
                 )
                 .await?;
 
@@ -429,17 +441,35 @@ where
     }
 }
 
+async fn handle_timeout_stream_message<S, D, T>(
+    state: &mut ApplyLoopState,
+    events_stream: Pin<&mut TimeoutEventsStream>,
+    result: TimeoutEventsStreamResult,
+    schema_store: &S,
+    destination: &D,
+    hook: &T,
+    max_batch_size: usize,
+) -> EtlResult<bool> {
+    match result {
+        TimeoutStreamResult::Value(message) => {
+            // TODO: handle message and try to send batch.
+        },
+        TimeoutStreamResult::Timeout => {
+            // TODO: force sending a batch.
+        }
+    }
+}
+
 /// Processes a replication message and manages batch accumulation and sending.
 #[expect(clippy::too_many_arguments)]
-async fn handle_replication_message_batch<S, D, T>(
+async fn handle_replication_message_and_try_send_batch<S, D, T>(
     state: &mut ApplyLoopState,
-    events_stream: Pin<&mut EventsStream>,
+    events_stream: Pin<&mut TimeoutEventsStream>,
     message: ReplicationMessage<LogicalReplicationMessage>,
     schema_store: &S,
     destination: &D,
     hook: &T,
     max_batch_size: usize,
-    max_batch_fill_duration: Duration,
 ) -> EtlResult<bool>
 where
     S: SchemaStore + Clone + Send + 'static,
@@ -449,6 +479,7 @@ where
     let result =
         handle_replication_message(state, events_stream, message, schema_store, hook).await?;
 
+    // If we have an event, and we are told to keep it in case we end the batch or
     if let Some(event) = result.event
         && matches!(result.end_batch, None | Some(EndBatch::Inclusive))
     {
@@ -456,16 +487,16 @@ where
         state.update_last_commit_end_lsn(result.end_lsn);
     }
 
-    try_send_batch(
-        state,
-        result.end_batch,
-        result.table_replication_error,
-        destination,
-        hook,
-        max_batch_size,
-        max_batch_fill_duration,
-    )
-    .await
+    if state.events_batch.len() >= max_batch_size || result.end_batch.is_some() {
+        send_batch_and_synchronize(
+            state,
+            result.table_replication_error,
+            destination,
+            hook,
+            max_batch_size,
+        )
+            .await
+    }
 }
 
 /// Evaluates whether to send the current event batch and executes the send operation.
@@ -477,95 +508,84 @@ where
 ///
 /// After confirming that events are durably persisted in the destination, it performs synchronization
 /// between all workers and notifies Postgres about the progress.
-async fn try_send_batch<D, T>(
+async fn send_batch_and_synchronize<D, T>(
     state: &mut ApplyLoopState,
-    end_batch: Option<EndBatch>,
     table_replication_error: Option<TableReplicationError>,
     destination: &D,
     hook: &T,
     max_batch_size: usize,
-    max_batch_fill_duration: Duration,
 ) -> EtlResult<bool>
 where
     D: Destination + Clone + Send + 'static,
     T: ApplyLoopHook,
 {
-    let elapsed = state.last_batch_send_time.elapsed();
-    // `elapsed` could be zero in case current time is earlier than `last_batch_send_time`.
-    // We send the batch even in this case to make sure `last_batch_send_time` is reset to
-    // a new value and to avoid getting stuck with some events in the batch.
-    let time_to_send_batch = elapsed.is_zero() || elapsed > max_batch_fill_duration;
+    if !state.events_batch.is_empty() {
+        // TODO: figure out if we can send a slice to the destination instead of a vec
+        //  that would allow use to avoid new allocations of the `events_batch` vec and
+        //  we could just call clear() on it.
+        let events_batch =
+            std::mem::replace(&mut state.events_batch, Vec::with_capacity(max_batch_size));
 
-    if time_to_send_batch || state.events_batch.len() >= max_batch_size || end_batch.is_some() {
-        if !state.events_batch.is_empty() {
-            // TODO: figure out if we can send a slice to the destination instead of a vec
-            // that would allow use to avoid new allocations of the `events_batch` vec and
-            // we could just call clear() on it.
-            let events_batch =
-                std::mem::replace(&mut state.events_batch, Vec::with_capacity(max_batch_size));
+        let num_events = events_batch.len();
+        info!("sending batch of {} events to destination", num_events);
+        let before_sending = Instant::now();
 
-            let num_events = events_batch.len();
-            info!("sending batch of {} events to destination", num_events);
-            let before_sending = Instant::now();
+        destination.write_events(events_batch).await?;
 
-            destination.write_events(events_batch).await?;
+        counter!(ETL_APPLY_EVENTS_COPIED_TOTAL).increment(num_events as u64);
+        gauge!(ETL_BATCH_SIZE).set(num_events as f64);
+        let time_taken_to_send = before_sending.elapsed().as_millis();
+        gauge!(ETL_BATCH_SEND_MILLISECONDS_TOTAL).set(time_taken_to_send as f64);
 
-            counter!(ETL_APPLY_EVENTS_COPIED_TOTAL).increment(num_events as u64);
-            gauge!(ETL_BATCH_SIZE).set(num_events as f64);
-            let time_taken_to_send = before_sending.elapsed().as_millis();
-            gauge!(ETL_BATCH_SEND_MILLISECONDS_TOTAL).set(time_taken_to_send as f64);
+        state.last_batch_send_time = Instant::now();
+    }
 
-            state.last_batch_send_time = Instant::now();
-        }
+    let mut end_loop = false;
 
-        let mut end_loop = false;
-        // We handle the action related to a table error. This is done after the batch is written
-        // to the destination to make sure that the data is durable before assuming things about a
-        // table.
-        if let Some(table_replication_error) = table_replication_error {
-            end_loop |= !hook.mark_table_errored(table_replication_error).await?;
-        }
+    // We handle the action related to a table error. This is done after the batch is written
+    // to the destination to make sure that the data is durable before assuming things about a
+    // table.
+    if let Some(table_replication_error) = table_replication_error {
+        end_loop |= !hook.mark_table_errored(table_replication_error).await?;
+    }
 
-        // At this point, the `last_commit_end_lsn` will contain the LSN of the next byte in the WAL after
-        // the last `Commit` message that was processed in this batch or in the previous ones.
-        if let Some(last_commit_end_lsn) = state.last_commit_end_lsn.take() {
-            // We also prepare the next status update for Postgres, where we will confirm that we flushed
-            // data up to this LSN to allow for WAL pruning on the database side.
-            //
-            // Note that we do this ONLY once a batch is fully saved, since that is the only place where
-            // we are guaranteed that data has been safely persisted. In all the other cases, we just update
-            // the `write_lsn` which is used by Postgres to get an acknowledgement of how far we have processed
-            // messages but not flushed them.
-            // TODO: check if we want to send `apply_lsn` as a different value.
-            debug!(
+    // At this point, the `last_commit_end_lsn` will contain the LSN of the next byte in the WAL after
+    // the last `Commit` message that was processed in this batch or in the previous ones.
+    if let Some(last_commit_end_lsn) = state.last_commit_end_lsn.take() {
+        // We also prepare the next status update for Postgres, where we will confirm that we flushed
+        // data up to this LSN to allow for WAL pruning on the database side.
+        //
+        // Note that we do this ONLY once a batch is fully saved, since that is the only place where
+        // we are guaranteed that data has been safely persisted. In all the other cases, we just update
+        // the `write_lsn` which is used by Postgres to get an acknowledgement of how far we have processed
+        // messages but not flushed them.
+        // TODO: check if we want to send `apply_lsn` as a different value.
+        debug!(
                 "updating lsn for next status update to {}",
                 last_commit_end_lsn
             );
-            state
-                .next_status_update
-                .update_flush_lsn(last_commit_end_lsn);
-            state
-                .next_status_update
-                .update_apply_lsn(last_commit_end_lsn);
+        state
+            .next_status_update
+            .update_flush_lsn(last_commit_end_lsn);
+        state
+            .next_status_update
+            .update_apply_lsn(last_commit_end_lsn);
 
-            // We call `process_syncing_tables` with `update_state` set to true here *after* we've received
-            // and ack for the batch from the destination. This is important to keep a consistent state.
-            // Without this order it could happen that the table's state was updated but sending the batch
-            // to the destination failed.
-            //
-            // For this loop, we use the `flush_lsn` as LSN instead of the `last_commit_end_lsn` just
-            // because we want to semantically process syncing tables with the same LSN that we tell
-            // Postgres that we flushed durably to disk. In practice, `flush_lsn` and `last_commit_end_lsn`
-            // will be always equal, since LSNs are guaranteed to be monotonically increasing.
-            end_loop |= !hook
-                .process_syncing_tables(state.next_status_update.flush_lsn, true)
-                .await?;
-        }
-
-        return Ok(end_loop);
+        // We call `process_syncing_tables` with `update_state` set to true here *after* we've received
+        // and ack for the batch from the destination. This is important to keep a consistent state.
+        // Without this order it could happen that the table's state was updated but sending the batch
+        // to the destination failed.
+        //
+        // For this loop, we use the `flush_lsn` as LSN instead of the `last_commit_end_lsn` just
+        // because we want to semantically process syncing tables with the same LSN that we tell
+        // Postgres that we flushed durably to disk. In practice, `flush_lsn` and `last_commit_end_lsn`
+        // will be always equal, since LSNs are guaranteed to be monotonically increasing.
+        end_loop |= !hook
+            .process_syncing_tables(state.next_status_update.flush_lsn, true)
+            .await?;
     }
 
-    Ok(false)
+    Ok(end_loop)
 }
 
 /// Dispatches replication protocol messages to appropriate handlers.

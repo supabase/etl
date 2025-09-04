@@ -13,7 +13,7 @@ use tracing::{error, info, warn};
 use crate::bail;
 use crate::concurrency::shutdown::{ShutdownResult, ShutdownRx};
 use crate::concurrency::signal::SignalTx;
-use crate::concurrency::stream::BatchStream;
+use crate::concurrency::stream::TimeoutBatchStream;
 use crate::destination::Destination;
 use crate::error::{ErrorKind, EtlError, EtlResult};
 #[cfg(feature = "failpoints")]
@@ -209,7 +209,7 @@ where
             let table_copy_stream =
                 TableCopyStream::wrap(table_copy_stream, &table_schema.column_schemas);
             let table_copy_stream =
-                BatchStream::wrap(table_copy_stream, config.batch.clone(), shutdown_rx.clone());
+                TimeoutBatchStream::wrap(table_copy_stream, config.batch.clone(), shutdown_rx.clone());
             pin!(table_copy_stream);
 
             info!("starting table copy stream for table {}", table_id);
