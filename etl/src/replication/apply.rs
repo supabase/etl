@@ -549,8 +549,8 @@ where
 
             let mut continue_loop = true;
 
-            // If we have elements in the batch ,and we have reached the max batch size, or we are told
-            // to end the batch, we send the batch.
+            // If we have elements in the batch, and we have reached the max batch size, or we are told
+            // to end the batch, we send it.
             if state.events_batch.len() >= max_batch_size || result.end_batch.is_some() {
                 // We check if the batch has elements. It can be that a batch has no elements when
                 // the batch is ended prematurely, and it contains only skipped events. In this case,
