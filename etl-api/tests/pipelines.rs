@@ -1,4 +1,10 @@
-use etl_api::routes::pipelines::{CreatePipelineRequest, CreatePipelineResponse, GetPipelineImageDetailsResponse, GetPipelineReplicationStatusResponse, ReadPipelineResponse, ReadPipelinesResponse, RollbackTableStateRequest, RollbackTableStateResponse, RollbackType, SimpleTableReplicationState, UpdatePipelineConfigRequest, UpdatePipelineConfigResponse, UpdatePipelineImageRequest, UpdatePipelineRequest};
+use etl_api::routes::pipelines::{
+    CreatePipelineRequest, CreatePipelineResponse, GetPipelineImageDetailsResponse,
+    GetPipelineReplicationStatusResponse, ReadPipelineResponse, ReadPipelinesResponse,
+    RollbackTableStateRequest, RollbackTableStateResponse, RollbackType,
+    SimpleTableReplicationState, UpdatePipelineConfigRequest, UpdatePipelineConfigResponse,
+    UpdatePipelineImageRequest, UpdatePipelineRequest,
+};
 use etl_config::shared::{BatchConfig, PgConnectionConfig};
 use etl_postgres::sqlx::test_utils::drop_pg_database;
 use etl_telemetry::tracing::init_test_tracing;
@@ -9,18 +15,18 @@ use sqlx::postgres::types::Oid;
 use crate::support::database::{
     create_test_source_database, run_etl_migrations_on_source_database,
 };
+use crate::support::mocks::create_image_with_name;
+use crate::support::mocks::pipelines::{
+    ConfigUpdateType, create_pipeline_with_config, new_pipeline_config,
+    partially_updated_optional_pipeline_config, updated_optional_pipeline_config,
+    updated_pipeline_config,
+};
 use crate::{
     support::mocks::create_default_image,
     support::mocks::destinations::create_destination,
     support::mocks::sources::create_source,
     support::mocks::tenants::{create_tenant, create_tenant_with_id_and_name},
     support::test_app::{TestApp, spawn_test_app},
-};
-use crate::support::mocks::create_image_with_name;
-use crate::support::mocks::pipelines::{
-    ConfigUpdateType, create_pipeline_with_config, new_pipeline_config,
-    partially_updated_optional_pipeline_config, updated_optional_pipeline_config,
-    updated_pipeline_config,
 };
 
 mod support;
