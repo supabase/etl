@@ -651,7 +651,7 @@ where
     // with the same LSN, with `take` this can't happen under the assumption that the next LSN will be
     // strictly greater.
     let Some(last_commit_end_lsn) = state.last_commit_end_lsn.take() else {
-        return Ok(false);
+        return Ok(true);
     };
 
     // We also prepare the next status update for Postgres, where we will confirm that we flushed
