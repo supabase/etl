@@ -577,6 +577,8 @@ where
             Ok(end_loop)
         }
         TimeoutStreamResult::Timeout => {
+            debug!("the events stream timed out before reaching batch size of {}, ready to flush batch of {} events", max_batch_size, state.events_batch.len());
+            
             if state.events_batch.is_empty() {
                 return Ok(false);
             }
