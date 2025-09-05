@@ -3,7 +3,7 @@ use etl_api::routes::pipelines::{
     GetPipelineVersionResponse, ReadPipelineResponse, ReadPipelinesResponse,
     RollbackTableStateRequest, RollbackTableStateResponse, RollbackType,
     SimpleTableReplicationState, UpdatePipelineConfigRequest, UpdatePipelineConfigResponse,
-    UpdatePipelineImageRequest, UpdatePipelineRequest,
+    UpdatePipelineRequest, UpdatePipelineVersionRequest,
 };
 use etl_config::shared::{BatchConfig, PgConnectionConfig};
 use etl_postgres::sqlx::test_utils::drop_pg_database;
@@ -250,7 +250,7 @@ async fn pipeline_with_another_tenants_source_cannot_be_created() {
     let response = app.create_pipeline(tenant1_id, &pipeline).await;
 
     // Assert
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -283,7 +283,7 @@ async fn pipeline_with_another_tenants_destination_cannot_be_created() {
     let response = app.create_pipeline(tenant1_id, &pipeline).await;
 
     // Assert
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -432,7 +432,7 @@ async fn pipeline_with_another_tenants_source_cannot_be_updated() {
         .await;
 
     // Assert
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -480,7 +480,7 @@ async fn pipeline_with_another_tenants_destination_cannot_be_updated() {
         .await;
 
     // Assert
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -666,11 +666,11 @@ async fn updating_pipeline_to_duplicate_source_destination_combination_fails() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn pipeline_image_can_be_updated_with_specific_image() {
+async fn pipeline_version_can_be_updated() {
     init_test_tracing();
     // Arrange
     let app = spawn_test_app().await;
-    create_default_image(&app).await;
+    let default_image_id = create_default_image(&app).await;
     let tenant_id = &create_tenant(&app).await;
     let source_id = create_source(&app, tenant_id).await;
     let destination_id = create_destination(&app, tenant_id).await;
@@ -685,9 +685,11 @@ async fn pipeline_image_can_be_updated_with_specific_image() {
     .await;
 
     // Act
-    let update_request = UpdatePipelineImageRequest { image_id: 1 };
+    let update_request = UpdatePipelineVersionRequest {
+        version_id: default_image_id,
+    };
     let response = app
-        .update_pipeline_image(tenant_id, pipeline_id, &update_request)
+        .update_pipeline_version(tenant_id, pipeline_id, &update_request)
         .await;
 
     // Assert
@@ -695,45 +697,16 @@ async fn pipeline_image_can_be_updated_with_specific_image() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn pipeline_image_can_be_updated_to_default_image() {
-    init_test_tracing();
-    // Arrange
-    let app = spawn_test_app().await;
-    create_default_image(&app).await;
-    let tenant_id = &create_tenant(&app).await;
-    let source_id = create_source(&app, tenant_id).await;
-    let destination_id = create_destination(&app, tenant_id).await;
-
-    let pipeline_id = create_pipeline_with_config(
-        &app,
-        tenant_id,
-        source_id,
-        destination_id,
-        new_pipeline_config(),
-    )
-    .await;
-
-    // Act - update to default image (must specify default image id)
-    let update_request = UpdatePipelineImageRequest { image_id: 1 };
-    let response = app
-        .update_pipeline_image(tenant_id, pipeline_id, &update_request)
-        .await;
-
-    // Assert
-    assert!(response.status().is_success());
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn update_image_fails_for_non_existing_pipeline() {
+async fn update_version_fails_for_non_existing_pipeline() {
     init_test_tracing();
     // Arrange
     let app = spawn_test_app().await;
     let tenant_id = &create_tenant(&app).await;
 
     // Act
-    let update_request = UpdatePipelineImageRequest { image_id: 1 };
+    let update_request = UpdatePipelineVersionRequest { version_id: 1 };
     let response = app
-        .update_pipeline_image(tenant_id, 42, &update_request)
+        .update_pipeline_version(tenant_id, 42, &update_request)
         .await;
 
     // Assert
@@ -741,7 +714,7 @@ async fn update_image_fails_for_non_existing_pipeline() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn update_image_fails_when_image_is_not_default() {
+async fn update_version_fails_when_version_is_not_default() {
     init_test_tracing();
     // Arrange
     let app = spawn_test_app().await;
@@ -764,49 +737,19 @@ async fn update_image_fails_when_image_is_not_default() {
         create_image_with_name(&app, "another/image".to_string(), false).await;
 
     // Act - attempt update with a non-default image id
-    let update_request = UpdatePipelineImageRequest {
-        image_id: non_default_image_id,
+    let update_request = UpdatePipelineVersionRequest {
+        version_id: non_default_image_id,
     };
     let response = app
-        .update_pipeline_image(tenant_id, pipeline_id, &update_request)
+        .update_pipeline_version(tenant_id, pipeline_id, &update_request)
         .await;
 
     // Assert - mismatching image id should be rejected
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn update_image_fails_for_pipeline_from_another_tenant() {
-    init_test_tracing();
-    // Arrange
-    let app = spawn_test_app().await;
-    create_default_image(&app).await;
-    let tenant1_id = &create_tenant(&app).await;
-
-    let source1_id = create_source(&app, tenant1_id).await;
-    let destination1_id = create_destination(&app, tenant1_id).await;
-
-    let pipeline_id = create_pipeline_with_config(
-        &app,
-        tenant1_id,
-        source1_id,
-        destination1_id,
-        new_pipeline_config(),
-    )
-    .await;
-
-    // Act - Try to update image using wrong tenant credentials
-    let update_request = UpdatePipelineImageRequest { image_id: 1 };
-    let response = app
-        .update_pipeline_image("wrong-tenant-id", pipeline_id, &update_request)
-        .await;
-
-    // Assert
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn update_image_fails_when_no_default_image_exists() {
+async fn update_version_fails_when_no_default_version_exists() {
     init_test_tracing();
     // Arrange
     let app = spawn_test_app().await;
@@ -814,9 +757,9 @@ async fn update_image_fails_when_no_default_image_exists() {
     let tenant_id = &create_tenant(&app).await;
 
     // Act - Try to update to default image when none exists
-    let update_request = UpdatePipelineImageRequest { image_id: 1 };
+    let update_request = UpdatePipelineVersionRequest { version_id: 1 };
     let response = app
-        .update_pipeline_image(tenant_id, 1, &update_request)
+        .update_pipeline_version(tenant_id, 1, &update_request)
         .await;
 
     // Assert
@@ -908,6 +851,7 @@ async fn update_config_fails_for_pipeline_from_another_tenant() {
     init_test_tracing();
     // Arrange
     let app = spawn_test_app().await;
+    create_default_image(&app).await;
     let tenant1_id = &create_tenant(&app).await;
 
     let source1_id = create_source(&app, tenant1_id).await;

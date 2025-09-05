@@ -152,14 +152,14 @@ impl ResponseError for PipelineError {
             | PipelineError::TableLookup(_)
             | PipelineError::InvalidTableReplicationState(_)
             | PipelineError::MissingTableReplicationState => StatusCode::INTERNAL_SERVER_ERROR,
-            PipelineError::PipelineNotFound(_) | PipelineError::EtlStateNotInitialized => {
-                StatusCode::NOT_FOUND
-            }
-            PipelineError::TenantId(_)
-            | PipelineError::SourceNotFound(_)
-            | PipelineError::NotRollbackable(_)
+            PipelineError::PipelineNotFound(_)
+            | PipelineError::EtlStateNotInitialized
             | PipelineError::ImageIdNotDefault(_)
-            | PipelineError::DestinationNotFound(_) => StatusCode::BAD_REQUEST,
+            | PipelineError::DestinationNotFound(_)
+            | PipelineError::SourceNotFound(_) => StatusCode::NOT_FOUND,
+            PipelineError::TenantId(_) | PipelineError::NotRollbackable(_) => {
+                StatusCode::BAD_REQUEST
+            }
             PipelineError::DuplicatePipeline => StatusCode::CONFLICT,
         }
     }
@@ -238,9 +238,9 @@ pub struct ReadPipelinesResponse {
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
-pub struct UpdatePipelineImageRequest {
+pub struct UpdatePipelineVersionRequest {
     #[schema(example = 1, required = true)]
-    pub image_id: i64,
+    pub version_id: i64,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
@@ -1045,29 +1045,29 @@ pub async fn rollback_table_state(
 }
 
 #[utoipa::path(
-    summary = "Update pipeline image",
-    description = "Updates the pipeline's container image while preserving its state.",
-    request_body = UpdatePipelineImageRequest,
+    summary = "Update pipeline version",
+    description = "Updates the pipeline's version while preserving its state.",
+    request_body = UpdatePipelineVersionRequest,
     params(
         ("pipeline_id" = i64, Path, description = "Unique ID of the pipeline"),
         ("tenant_id" = String, Header, description = "Tenant ID used to scope the request")
     ),
     responses(
-        (status = 200, description = "Pipeline image updated successfully"),
+        (status = 200, description = "Pipeline version updated successfully"),
         (status = 400, description = "Bad request or pipeline not running", body = ErrorMessage),
-        (status = 404, description = "Pipeline or image not found", body = ErrorMessage),
+        (status = 404, description = "Pipeline or version not found", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage)
     ),
     tag = "Pipelines"
 )]
-#[post("/pipelines/{pipeline_id}/update-image")]
-pub async fn update_pipeline_image(
+#[post("/pipelines/{pipeline_id}/update-version")]
+pub async fn update_pipeline_version(
     req: HttpRequest,
     pool: Data<PgPool>,
     encryption_key: Data<EncryptionKey>,
     k8s_client: Data<dyn K8sClient>,
     pipeline_id: Path<i64>,
-    update_request: Json<UpdatePipelineImageRequest>,
+    update_request: Json<UpdatePipelineVersionRequest>,
 ) -> Result<impl Responder, PipelineError> {
     let tenant_id = extract_tenant_id(&req)?;
     let pipeline_id = pipeline_id.into_inner();
@@ -1085,8 +1085,8 @@ pub async fn update_pipeline_image(
         .await?
         .ok_or(PipelineError::NoDefaultImageFound)?;
 
-    if update_request.image_id != default_image.id {
-        return Err(PipelineError::ImageIdNotDefault(update_request.image_id));
+    if update_request.version_id != default_image.id {
+        return Err(PipelineError::ImageIdNotDefault(update_request.version_id));
     }
 
     let target_image = default_image;

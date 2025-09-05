@@ -8,7 +8,7 @@ use etl_api::routes::destinations_pipelines::{
 use etl_api::routes::images::{CreateImageRequest, UpdateImageRequest};
 use etl_api::routes::pipelines::{
     CreatePipelineRequest, RollbackTableStateRequest, UpdatePipelineConfigRequest,
-    UpdatePipelineImageRequest, UpdatePipelineRequest,
+    UpdatePipelineRequest, UpdatePipelineVersionRequest,
 };
 use etl_api::routes::sources::{CreateSourceRequest, UpdateSourceRequest};
 use etl_api::routes::tenants::{
@@ -414,14 +414,14 @@ impl TestApp {
             .expect("failed to execute request")
     }
 
-    pub async fn update_pipeline_image(
+    pub async fn update_pipeline_version(
         &self,
         tenant_id: &str,
         pipeline_id: i64,
-        update_request: &UpdatePipelineImageRequest,
+        update_request: &UpdatePipelineVersionRequest,
     ) -> reqwest::Response {
         self.post_authenticated(format!(
-            "{}/v1/pipelines/{pipeline_id}/update-image",
+            "{}/v1/pipelines/{pipeline_id}/update-version",
             &self.address
         ))
         .header("tenant_id", tenant_id)

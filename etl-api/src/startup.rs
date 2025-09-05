@@ -41,11 +41,11 @@ use crate::{
             CreatePipelineRequest, CreatePipelineResponse, GetPipelineReplicationStatusResponse,
             GetPipelineStatusResponse, GetPipelineVersionResponse, ReadPipelineResponse,
             ReadPipelinesResponse, SimpleTableReplicationState, TableReplicationStatus,
-            UpdatePipelineImageRequest, UpdatePipelineRequest, create_pipeline, delete_pipeline,
+            UpdatePipelineRequest, UpdatePipelineVersionRequest, create_pipeline, delete_pipeline,
             get_pipeline_replication_status, get_pipeline_status, get_pipeline_version,
             read_all_pipelines, read_pipeline, rollback_table_state, start_pipeline,
             stop_all_pipelines, stop_pipeline, update_pipeline, update_pipeline_config,
-            update_pipeline_image,
+            update_pipeline_version,
         },
         sources::{
             CreateSourceRequest, CreateSourceResponse, ReadSourceResponse, ReadSourcesResponse,
@@ -183,7 +183,7 @@ pub async fn run(
             ReadPipelineResponse,
             ReadPipelinesResponse,
             GetPipelineVersionResponse,
-            UpdatePipelineImageRequest,
+            UpdatePipelineVersionRequest,
             GetPipelineStatusResponse,
             GetPipelineReplicationStatusResponse,
             TableReplicationStatus,
@@ -236,7 +236,7 @@ pub async fn run(
         crate::routes::pipelines::get_pipeline_version,
         crate::routes::pipelines::get_pipeline_replication_status,
         crate::routes::pipelines::rollback_table_state,
-        crate::routes::pipelines::update_pipeline_image,
+        crate::routes::pipelines::update_pipeline_version,
         crate::routes::tenants::create_tenant,
         crate::routes::tenants::create_or_update_tenant,
         crate::routes::tenants::read_tenant,
@@ -321,7 +321,7 @@ pub async fn run(
                     .service(get_pipeline_version)
                     .service(get_pipeline_replication_status)
                     .service(rollback_table_state)
-                    .service(update_pipeline_image)
+                    .service(update_pipeline_version)
                     .service(update_pipeline_config)
                     //tables
                     .service(read_table_names)
