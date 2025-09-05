@@ -9,7 +9,7 @@ use tokio::sync::Mutex;
 use tracing::{debug, info};
 
 use crate::error::{ErrorKind, EtlError, EtlResult};
-use crate::metrics::ETL_TABLES_TOTAL;
+use crate::metrics::{ETL_TABLES_TOTAL, PHASE};
 use crate::state::table::{RetryPolicy, TableReplicationPhase};
 use crate::store::cleanup::CleanupStore;
 use crate::store::schema::SchemaStore;
@@ -216,7 +216,7 @@ fn emit_table_metrics(total_tables: usize, phase_counts: &HashMap<&'static str, 
     gauge!(ETL_TABLES_TOTAL).set(total_tables as f64);
 
     for (phase, count) in phase_counts {
-        gauge!(ETL_TABLES_TOTAL, "phase" => *phase).set(*count as f64);
+        gauge!(ETL_TABLES_TOTAL, PHASE => *phase).set(*count as f64);
     }
 }
 

@@ -1,5 +1,6 @@
 use etl::error::{ErrorKind, EtlError, EtlResult};
 use etl::etl_error;
+use etl::metrics::{DESTINATION, ETL_BATCH_SEND_DURATION_SECONDS, ETL_BATCH_SIZE, MILLIS_PER_SEC};
 use etl::types::{Cell, ColumnSchema, TableRow, Type, is_array_type};
 use gcp_bigquery_client::google::cloud::bigquery::storage::v1::RowError;
 use gcp_bigquery_client::storage::ColumnMode;
@@ -10,7 +11,7 @@ use gcp_bigquery_client::{
     model::{query_request::QueryRequest, query_response::ResultSet},
     storage::{ColumnType, FieldDescriptor, StreamName, TableBatch, TableDescriptor},
 };
-use metrics::gauge;
+use metrics::{gauge, histogram};
 use prost::Message;
 use std::fmt;
 use std::sync::Arc;
@@ -18,7 +19,6 @@ use std::time::Instant;
 use tracing::{debug, info};
 
 use crate::bigquery::encoding::BigQueryTableRow;
-use crate::metrics::{BQ_BATCH_SEND_MILLISECONDS_TOTAL, BQ_BATCH_SIZE};
 
 /// Trace identifier for ETL operations in BigQuery client.
 const ETL_TRACE_ID: &str = "ETL BigQueryClient";
@@ -28,6 +28,9 @@ const BIGQUERY_CDC_SPECIAL_COLUMN: &str = "_CHANGE_TYPE";
 
 /// Special column name for Change Data Capture sequence ordering in BigQuery.
 const BIGQUERY_CDC_SEQUENCE_COLUMN: &str = "_CHANGE_SEQUENCE_NUMBER";
+
+/// Destination label used in metrics
+const BIG_QUERY: &str = "big_query";
 
 /// BigQuery project identifier.
 pub type BigQueryProjectId = String;
@@ -305,7 +308,7 @@ impl BigQueryClient {
         // being sent to BigQuery, since there might be optimizations performed by the append table
         // batches method.
         for table_batch in &table_batches {
-            gauge!(BQ_BATCH_SIZE).set(table_batch.rows.len() as f64);
+            gauge!(ETL_BATCH_SIZE, DESTINATION => BIG_QUERY).set(table_batch.rows.len() as f64);
         }
 
         debug!(
@@ -359,8 +362,9 @@ impl BigQueryClient {
             total_bytes_sent += batch_result.bytes_sent;
         }
 
-        let time_taken_to_send = before_sending.elapsed().as_millis();
-        gauge!(BQ_BATCH_SEND_MILLISECONDS_TOTAL).set(time_taken_to_send as f64);
+        let send_duration_secs = before_sending.elapsed().as_millis() as f64 / MILLIS_PER_SEC;
+        histogram!(ETL_BATCH_SEND_DURATION_SECONDS, DESTINATION => BIG_QUERY)
+            .record(send_duration_secs);
 
         if batches_responses_errors.is_empty() {
             return Ok((total_bytes_sent, total_bytes_received));

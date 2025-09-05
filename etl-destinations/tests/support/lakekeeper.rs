@@ -1,4 +1,5 @@
 #![allow(dead_code)]
+#![cfg(feature = "iceberg")]
 
 use uuid::Uuid;
 
