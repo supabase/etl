@@ -421,7 +421,7 @@ impl TestApp {
         update_request: &UpdatePipelineVersionRequest,
     ) -> reqwest::Response {
         self.post_authenticated(format!(
-            "{}/v1/pipelines/{pipeline_id}/update-version",
+            "{}/v1/pipelines/{pipeline_id}/version",
             &self.address
         ))
         .header("tenant_id", tenant_id)
