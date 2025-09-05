@@ -491,7 +491,7 @@ where
             _ = tokio::time::sleep(REFRESH_INTERVAL) => {
                 logical_replication_stream
                     .as_mut()
-                    .get_pin_mut()
+                    .get_inner()
                     .send_status_update(
                         state.next_status_update.write_lsn,
                         state.next_status_update.flush_lsn,
@@ -753,7 +753,7 @@ where
             );
 
             events_stream
-                .get_pin_mut()
+                .get_inner()
                 .send_status_update(
                     state.next_status_update.write_lsn,
                     state.next_status_update.flush_lsn,

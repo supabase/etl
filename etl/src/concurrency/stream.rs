@@ -193,7 +193,7 @@ impl<B, S: Stream<Item = B>> TimeoutStream<B, S> {
     ///
     /// Use this to interact with the wrapped stream when a mutable reference is required
     /// while preserving pinning guarantees.
-    pub fn get_pin_mut(self: Pin<&mut Self>) -> Pin<&mut S> {
+    pub fn get_inner(self: Pin<&mut Self>) -> Pin<&mut S> {
         self.project().stream
     }
 
