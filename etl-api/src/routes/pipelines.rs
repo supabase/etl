@@ -1060,7 +1060,7 @@ pub async fn rollback_table_state(
     ),
     tag = "Pipelines"
 )]
-#[post("/pipelines/{pipeline_id}/update-version")]
+#[post("/pipelines/{pipeline_id}/version")]
 pub async fn update_pipeline_version(
     req: HttpRequest,
     pool: Data<PgPool>,
