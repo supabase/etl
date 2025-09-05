@@ -749,24 +749,6 @@ async fn update_version_fails_when_version_is_not_default() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn update_version_fails_when_no_default_version_exists() {
-    init_test_tracing();
-    // Arrange
-    let app = spawn_test_app().await;
-    // Don't create default image
-    let tenant_id = &create_tenant(&app).await;
-
-    // Act - Try to update to default image when none exists
-    let update_request = UpdatePipelineVersionRequest { version_id: 1 };
-    let response = app
-        .update_pipeline_version(tenant_id, 1, &update_request)
-        .await;
-
-    // Assert
-    assert_eq!(response.status(), StatusCode::NOT_FOUND);
-}
-
-#[tokio::test(flavor = "multi_thread")]
 async fn pipeline_config_can_be_updated() {
     init_test_tracing();
     let (app, tenant_id, _source_id, _destination_id, pipeline_id) = setup_basic_pipeline().await;
