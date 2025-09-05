@@ -685,9 +685,7 @@ async fn pipeline_image_can_be_updated_with_specific_image() {
     .await;
 
     // Act
-    let update_request = UpdatePipelineImageRequest {
-        image_id: Some(1), // Use the default image ID
-    };
+    let update_request = UpdatePipelineImageRequest { image_id: 1 };
     let response = app
         .update_pipeline_image(tenant_id, pipeline_id, &update_request)
         .await;
@@ -715,8 +713,8 @@ async fn pipeline_image_can_be_updated_to_default_image() {
     )
     .await;
 
-    // Act - update to default image (no image_id specified)
-    let update_request = UpdatePipelineImageRequest { image_id: None };
+    // Act - update to default image (must specify default image id)
+    let update_request = UpdatePipelineImageRequest { image_id: 1 };
     let response = app
         .update_pipeline_image(tenant_id, pipeline_id, &update_request)
         .await;
@@ -733,7 +731,7 @@ async fn update_image_fails_for_non_existing_pipeline() {
     let tenant_id = &create_tenant(&app).await;
 
     // Act
-    let update_request = UpdatePipelineImageRequest { image_id: None };
+    let update_request = UpdatePipelineImageRequest { image_id: 1 };
     let response = app
         .update_pipeline_image(tenant_id, 42, &update_request)
         .await;
@@ -743,7 +741,7 @@ async fn update_image_fails_for_non_existing_pipeline() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn update_image_fails_for_non_existing_image() {
+async fn update_image_fails_when_image_is_not_default() {
     init_test_tracing();
     // Arrange
     let app = spawn_test_app().await;
@@ -761,16 +759,20 @@ async fn update_image_fails_for_non_existing_image() {
     )
     .await;
 
-    // Act
+    // Create a non-default image
+    let non_default_image_id =
+        create_image_with_name(&app, "another/image".to_string(), false).await;
+
+    // Act - attempt update with a non-default image id
     let update_request = UpdatePipelineImageRequest {
-        image_id: Some(999), // Non-existing image ID
+        image_id: non_default_image_id,
     };
     let response = app
         .update_pipeline_image(tenant_id, pipeline_id, &update_request)
         .await;
 
-    // Assert
-    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    // Assert - mismatching image id should be rejected
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -794,7 +796,7 @@ async fn update_image_fails_for_pipeline_from_another_tenant() {
     .await;
 
     // Act - Try to update image using wrong tenant credentials
-    let update_request = UpdatePipelineImageRequest { image_id: None };
+    let update_request = UpdatePipelineImageRequest { image_id: 1 };
     let response = app
         .update_pipeline_image("wrong-tenant-id", pipeline_id, &update_request)
         .await;
@@ -812,7 +814,7 @@ async fn update_image_fails_when_no_default_image_exists() {
     let tenant_id = &create_tenant(&app).await;
 
     // Act - Try to update to default image when none exists
-    let update_request = UpdatePipelineImageRequest { image_id: None };
+    let update_request = UpdatePipelineImageRequest { image_id: 1 };
     let response = app
         .update_pipeline_image(tenant_id, 1, &update_request)
         .await;
