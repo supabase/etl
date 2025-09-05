@@ -10,7 +10,7 @@ use gcp_bigquery_client::{
     model::{query_request::QueryRequest, query_response::ResultSet},
     storage::{ColumnType, FieldDescriptor, StreamName, TableBatch, TableDescriptor},
 };
-use metrics::gauge;
+use metrics::{gauge, histogram};
 use prost::Message;
 use std::fmt;
 use std::sync::Arc;
@@ -18,7 +18,7 @@ use std::time::Instant;
 use tracing::{debug, info};
 
 use crate::bigquery::encoding::BigQueryTableRow;
-use crate::metrics::{BQ_BATCH_SEND_MILLISECONDS_TOTAL, BQ_BATCH_SIZE};
+use crate::metrics::{BQ_BATCH_SEND_DURATION_SECONDS, BQ_BATCH_SIZE, MILLIS_PER_SEC};
 
 /// Trace identifier for ETL operations in BigQuery client.
 const ETL_TRACE_ID: &str = "ETL BigQueryClient";
@@ -359,8 +359,8 @@ impl BigQueryClient {
             total_bytes_sent += batch_result.bytes_sent;
         }
 
-        let time_taken_to_send = before_sending.elapsed().as_millis();
-        gauge!(BQ_BATCH_SEND_MILLISECONDS_TOTAL).set(time_taken_to_send as f64);
+        let send_duration_secs = before_sending.elapsed().as_millis() as f64 / MILLIS_PER_SEC;
+        histogram!(BQ_BATCH_SEND_DURATION_SECONDS).record(send_duration_secs);
 
         if batches_responses_errors.is_empty() {
             return Ok((total_bytes_sent, total_bytes_received));
