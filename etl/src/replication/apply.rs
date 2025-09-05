@@ -560,7 +560,20 @@ where
                     send_batch(state, events_stream.as_mut(), destination, max_batch_size).await?;
                 }
 
-                // If we have a table error, we want to mark the table as errored.
+                // If we have a caught table error, we want to mark the table as errored.
+                //
+                // Note that if we have a failure after marking a table as errored and events will
+                // be reprocessed, even the events before the failure will be skipped.
+                //
+                // Usually in the apply loop, errors are propagated upstream and handled based on if
+                // we are in a table sync worker or apply worker, however we have an edge case (for
+                // relation messages that change the schema) where we want to mark a table as errored
+                // manually, not propagating the error outside the loop, which is going to be handled
+                // differently based on the worker:
+                // - Apply worker -> will continue the loop skipping the table.
+                // - Table sync worker -> will stop the work (as if it had a normal uncaught error).
+                // Ideally we would get rid of this since it's an anomalous case which adds unnecessary
+                // complexity.
                 if let Some(error) = result.table_replication_error {
                     continue_loop &= hook.mark_table_errored(error).await?;
                 }
@@ -583,12 +596,10 @@ where
                 state.events_batch.len()
             );
 
-            if state.events_batch.is_empty() {
-                return Ok(true);
+            if !state.events_batch.is_empty() {
+                // We send the non-empty batch.
+                send_batch(state, events_stream.as_mut(), destination, max_batch_size).await?;
             }
-
-            // We send the non-empty batch.
-            send_batch(state, events_stream.as_mut(), destination, max_batch_size).await?;
 
             // We perform synchronization, to make sure that tables are synced.
             synchronize(state, hook).await
