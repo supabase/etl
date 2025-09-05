@@ -1,6 +1,6 @@
 use std::sync::Once;
 
-use metrics::{Unit, describe_counter, describe_gauge};
+use metrics::{Unit, describe_counter, describe_gauge, describe_histogram};
 
 static REGISTER_METRICS: Once = Once::new();
 
@@ -8,7 +8,7 @@ pub const ETL_TABLES_TOTAL: &str = "etl_tables_total";
 pub const ETL_TABLE_SYNC_ROWS_COPIED_TOTAL: &str = "etl_table_sync_rows_copied_total";
 pub const ETL_APPLY_EVENTS_COPIED_TOTAL: &str = "etl_apply_events_copied_total";
 pub const ETL_BATCH_SIZE: &str = "etl_batch_size";
-pub const ETL_BATCH_SEND_MILLISECONDS_TOTAL: &str = "etl_batch_send_milliseconds_total";
+pub const ETL_BATCH_SEND_DURATION_SECONDS: &str = "etl_batch_send_duration_seconds";
 
 /// Register metrics emitted by etl. This should be called before starting a pipeline.
 /// It is safe to call this method multiple times. It is guaraneed to register the
@@ -39,10 +39,10 @@ pub(crate) fn register_metrics() {
             "Batch size of events sent to the destination"
         );
 
-        describe_gauge!(
-            ETL_BATCH_SEND_MILLISECONDS_TOTAL,
-            Unit::Milliseconds,
-            "Time taken in milliseconds to send a batch of events to the destination"
+        describe_histogram!(
+            ETL_BATCH_SEND_DURATION_SECONDS,
+            Unit::Seconds,
+            "Time taken in seconds to send a batch of events to the destination"
         );
     });
 }

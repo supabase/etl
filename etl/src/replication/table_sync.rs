@@ -3,7 +3,7 @@ use etl_postgres::replication::slots::get_slot_name;
 use etl_postgres::replication::worker::WorkerType;
 use etl_postgres::types::TableId;
 use futures::StreamExt;
-use metrics::{counter, gauge};
+use metrics::{counter, gauge, histogram};
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::pin;
@@ -22,7 +22,7 @@ use crate::failpoints::{
     etl_fail_point,
 };
 use crate::metrics::{
-    ETL_BATCH_SEND_MILLISECONDS_TOTAL, ETL_BATCH_SIZE, ETL_TABLE_SYNC_ROWS_COPIED_TOTAL,
+    ETL_BATCH_SEND_DURATION_SECONDS, ETL_BATCH_SIZE, ETL_TABLE_SYNC_ROWS_COPIED_TOTAL,
 };
 use crate::replication::client::PgReplicationClient;
 use crate::replication::stream::TableCopyStream;
@@ -31,6 +31,8 @@ use crate::store::schema::SchemaStore;
 use crate::store::state::StateStore;
 use crate::types::PipelineId;
 use crate::workers::table_sync::TableSyncWorkerState;
+
+pub const MILLIS_PER_SEC: f64 = 1_000.0;
 
 /// Result type for table synchronization operations.
 ///
@@ -227,8 +229,9 @@ where
 
                         counter!(ETL_TABLE_SYNC_ROWS_COPIED_TOTAL).increment(rows_copied as u64);
                         gauge!(ETL_BATCH_SIZE).set(rows_copied as f64);
-                        let time_taken_to_send = before_sending.elapsed().as_millis();
-                        gauge!(ETL_BATCH_SEND_MILLISECONDS_TOTAL).set(time_taken_to_send as f64);
+                        let send_duration_secs =
+                            before_sending.elapsed().as_millis() as f64 / MILLIS_PER_SEC;
+                        histogram!(ETL_BATCH_SEND_DURATION_SECONDS).record(send_duration_secs);
                         // Fail point to test when the table sync fails after copying one batch.
                         #[cfg(feature = "failpoints")]
                         etl_fail_point(START_TABLE_SYNC__DURING_DATA_SYNC)?;
