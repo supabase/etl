@@ -46,11 +46,13 @@ async fn table_copy_and_streaming_with_restart() {
     .await;
 
     let store = NotifyingStore::new();
-    let raw_destination = bigquery_database.build_destination(store.clone()).await;
+    let pipeline_id: PipelineId = random();
+    let raw_destination = bigquery_database
+        .build_destination(pipeline_id, store.clone())
+        .await;
     let destination = TestDestinationWrapper::wrap(raw_destination);
 
     // Start pipeline from scratch.
-    let pipeline_id: PipelineId = random();
     let mut pipeline = create_pipeline(
         &database.config,
         pipeline_id,
@@ -179,11 +181,13 @@ async fn table_insert_update_delete() {
     let bigquery_database = setup_bigquery_connection().await;
 
     let store = NotifyingStore::new();
-    let raw_destination = bigquery_database.build_destination(store.clone()).await;
+    let pipeline_id: PipelineId = random();
+    let raw_destination = bigquery_database
+        .build_destination(pipeline_id, store.clone())
+        .await;
     let destination = TestDestinationWrapper::wrap(raw_destination);
 
     // Start pipeline from scratch.
-    let pipeline_id: PipelineId = random();
     let mut pipeline = create_pipeline(
         &database.config,
         pipeline_id,
@@ -296,11 +300,13 @@ async fn table_subsequent_updates() {
     let bigquery_database = setup_bigquery_connection().await;
 
     let store = NotifyingStore::new();
-    let raw_destination = bigquery_database.build_destination(store.clone()).await;
+    let pipeline_id: PipelineId = random();
+    let raw_destination = bigquery_database
+        .build_destination(pipeline_id, store.clone())
+        .await;
     let destination = TestDestinationWrapper::wrap(raw_destination);
 
     // Start pipeline from scratch.
-    let pipeline_id: PipelineId = random();
     let mut pipeline = create_pipeline(
         &database_1.config,
         pipeline_id,
@@ -389,11 +395,13 @@ async fn table_truncate_with_batching() {
         .await;
 
     let store = NotifyingStore::new();
-    let raw_destination = bigquery_database.build_destination(store.clone()).await;
+    let pipeline_id: PipelineId = random();
+    let raw_destination = bigquery_database
+        .build_destination(pipeline_id, store.clone())
+        .await;
     let destination = TestDestinationWrapper::wrap(raw_destination);
 
     // Start pipeline from scratch.
-    let pipeline_id: PipelineId = random();
     let mut pipeline = create_pipeline_with(
         &database.config,
         pipeline_id,
@@ -530,7 +538,10 @@ async fn table_nullable_scalar_columns() {
         .unwrap();
 
     let store = NotifyingStore::new();
-    let raw_destination = bigquery_database.build_destination(store.clone()).await;
+    let pipeline_id: PipelineId = random();
+    let raw_destination = bigquery_database
+        .build_destination(pipeline_id, store.clone())
+        .await;
     let destination = TestDestinationWrapper::wrap(raw_destination);
 
     let publication_name = "test_pub".to_string();
@@ -539,7 +550,6 @@ async fn table_nullable_scalar_columns() {
         .await
         .expect("Failed to create publication");
 
-    let pipeline_id: PipelineId = random();
     let mut pipeline = create_pipeline(
         &database.config,
         pipeline_id,
@@ -739,7 +749,10 @@ async fn table_nullable_array_columns() {
         .unwrap();
 
     let store = NotifyingStore::new();
-    let raw_destination = bigquery_database.build_destination(store.clone()).await;
+    let pipeline_id: PipelineId = random();
+    let raw_destination = bigquery_database
+        .build_destination(pipeline_id, store.clone())
+        .await;
     let destination = TestDestinationWrapper::wrap(raw_destination);
 
     let publication_name = "test_pub_array".to_string();
@@ -748,7 +761,6 @@ async fn table_nullable_array_columns() {
         .await
         .expect("Failed to create publication");
 
-    let pipeline_id: PipelineId = random();
     let mut pipeline = create_pipeline(
         &database.config,
         pipeline_id,
@@ -974,7 +986,10 @@ async fn table_non_nullable_scalar_columns() {
         .unwrap();
 
     let store = NotifyingStore::new();
-    let raw_destination = bigquery_database.build_destination(store.clone()).await;
+    let pipeline_id: PipelineId = random();
+    let raw_destination = bigquery_database
+        .build_destination(pipeline_id, store.clone())
+        .await;
     let destination = TestDestinationWrapper::wrap(raw_destination);
 
     let publication_name = "test_pub_non_null".to_string();
@@ -983,7 +998,6 @@ async fn table_non_nullable_scalar_columns() {
         .await
         .expect("Failed to create publication");
 
-    let pipeline_id: PipelineId = random();
     let mut pipeline = create_pipeline(
         &database.config,
         pipeline_id,
@@ -1224,7 +1238,10 @@ async fn table_non_nullable_array_columns() {
         .unwrap();
 
     let store = NotifyingStore::new();
-    let raw_destination = bigquery_database.build_destination(store.clone()).await;
+    let pipeline_id: PipelineId = random();
+    let raw_destination = bigquery_database
+        .build_destination(pipeline_id, store.clone())
+        .await;
     let destination = TestDestinationWrapper::wrap(raw_destination);
 
     let publication_name = "test_pub_non_null_array".to_string();
@@ -1233,7 +1250,6 @@ async fn table_non_nullable_array_columns() {
         .await
         .expect("Failed to create publication");
 
-    let pipeline_id: PipelineId = random();
     let mut pipeline = create_pipeline(
         &database.config,
         pipeline_id,
@@ -1508,7 +1524,10 @@ async fn table_array_with_null_values() {
         .unwrap();
 
     let store = NotifyingStore::new();
-    let raw_destination = bigquery_database.build_destination(store.clone()).await;
+    let pipeline_id: PipelineId = random();
+    let raw_destination = bigquery_database
+        .build_destination(pipeline_id, store.clone())
+        .await;
     let destination = TestDestinationWrapper::wrap(raw_destination);
 
     let publication_name = "test_pub_array_nulls".to_string();
@@ -1517,7 +1536,6 @@ async fn table_array_with_null_values() {
         .await
         .expect("Failed to create publication");
 
-    let pipeline_id: PipelineId = random();
     let mut pipeline = create_pipeline(
         &database.config,
         pipeline_id,
@@ -1725,7 +1743,10 @@ async fn table_validation_out_of_bounds_values() {
         .unwrap();
 
     let store = NotifyingStore::new();
-    let raw_destination = bigquery_database.build_destination(store.clone()).await;
+    let pipeline_id: PipelineId = random();
+    let raw_destination = bigquery_database
+        .build_destination(pipeline_id, store.clone())
+        .await;
     let destination = TestDestinationWrapper::wrap(raw_destination);
 
     let publication_name = "test_pub_validation".to_string();
@@ -1737,7 +1758,6 @@ async fn table_validation_out_of_bounds_values() {
         .await
         .expect("Failed to create publication");
 
-    let pipeline_id: PipelineId = random();
     let mut pipeline = create_pipeline(
         &database.config,
         pipeline_id,

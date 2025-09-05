@@ -160,18 +160,6 @@ async fn main_impl() -> Result<(), Box<dyn Error>> {
     // In production, you might want to use a persistent store like PostgresStore
     let store = MemoryStore::new();
 
-    // Initialize BigQuery destination with service account authentication
-    // Tables will be automatically created to match Postgres schema
-    let bigquery_destination = BigQueryDestination::new_with_key_path(
-        args.bq_args.bq_project_id,
-        args.bq_args.bq_dataset_id,
-        &args.bq_args.bq_sa_key_file,
-        None,
-        1,
-        store.clone(),
-    )
-    .await?;
-
     // Create pipeline configuration with batching and retry settings
     let pipeline_config = PipelineConfig {
         id: 1, // Using a simple ID for the example
@@ -184,6 +172,19 @@ async fn main_impl() -> Result<(), Box<dyn Error>> {
         table_error_retry_delay_ms: 10000,
         max_table_sync_workers: args.bq_args.max_table_sync_workers,
     };
+
+    // Initialize BigQuery destination with service account authentication
+    // Tables will be automatically created to match Postgres schema
+    let bigquery_destination = BigQueryDestination::new_with_key_path(
+        pipeline_config.id,
+        args.bq_args.bq_project_id,
+        args.bq_args.bq_dataset_id,
+        &args.bq_args.bq_sa_key_file,
+        None,
+        1,
+        store.clone(),
+    )
+    .await?;
 
     // Create the pipeline instance with all components
     let mut pipeline = Pipeline::new(pipeline_config, store, bigquery_destination);

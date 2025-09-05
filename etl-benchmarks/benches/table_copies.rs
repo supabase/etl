@@ -322,6 +322,18 @@ async fn start_pipeline(args: RunArgs) -> Result<(), Box<dyn Error>> {
 
     let store = NotifyingStore::new();
 
+    let pipeline_config = PipelineConfig {
+        id: 1,
+        publication_name: args.publication_name,
+        pg_connection: pg_connection_config,
+        batch: BatchConfig {
+            max_size: args.batch_max_size,
+            max_fill_ms: args.batch_max_fill_ms,
+        },
+        table_error_retry_delay_ms: 10000,
+        max_table_sync_workers: args.max_table_sync_workers,
+    };
+
     // Create the appropriate destination based on the argument
     let destination = match args.destination {
         DestinationType::Null => BenchDestination::Null(NullDestination),
@@ -340,6 +352,7 @@ async fn start_pipeline(args: RunArgs) -> Result<(), Box<dyn Error>> {
             )?;
 
             let bigquery_dest = BigQueryDestination::new_with_key_path(
+                pipeline_config.id,
                 project_id,
                 dataset_id,
                 &sa_key_file,
@@ -363,18 +376,6 @@ async fn start_pipeline(args: RunArgs) -> Result<(), Box<dyn Error>> {
             .await;
         table_copied_notifications.push(table_copied);
     }
-
-    let pipeline_config = PipelineConfig {
-        id: 1,
-        publication_name: args.publication_name,
-        pg_connection: pg_connection_config,
-        batch: BatchConfig {
-            max_size: args.batch_max_size,
-            max_fill_ms: args.batch_max_fill_ms,
-        },
-        table_error_retry_delay_ms: 10000,
-        max_table_sync_workers: args.max_table_sync_workers,
-    };
 
     let mut pipeline = Pipeline::new(pipeline_config, store, destination);
     info!("Starting pipeline...");

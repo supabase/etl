@@ -1,7 +1,9 @@
 use etl::error::{ErrorKind, EtlError, EtlResult};
 use etl::etl_error;
-use etl::metrics::{DESTINATION, ETL_BATCH_SEND_DURATION_SECONDS, ETL_BATCH_SIZE, MILLIS_PER_SEC};
-use etl::types::{Cell, ColumnSchema, TableRow, Type, is_array_type};
+use etl::metrics::{
+    DESTINATION, ETL_BATCH_SEND_DURATION_SECONDS, ETL_BATCH_SIZE, MILLIS_PER_SEC, PIPELINE_ID,
+};
+use etl::types::{Cell, ColumnSchema, PipelineId, TableRow, Type, is_array_type};
 use gcp_bigquery_client::google::cloud::bigquery::storage::v1::RowError;
 use gcp_bigquery_client::storage::ColumnMode;
 use gcp_bigquery_client::yup_oauth2::parse_service_account_key;
@@ -68,6 +70,7 @@ impl fmt::Display for BigQueryOperationType {
 /// against BigQuery datasets with authentication and error handling.
 #[derive(Clone)]
 pub struct BigQueryClient {
+    pipeline_id: PipelineId,
     project_id: BigQueryProjectId,
     client: Client,
 }
@@ -77,6 +80,7 @@ impl BigQueryClient {
     ///
     /// Authenticates with BigQuery using the service account key at the specified file path.
     pub async fn new_with_key_path(
+        pipeline_id: PipelineId,
         project_id: BigQueryProjectId,
         sa_key_path: &str,
     ) -> EtlResult<BigQueryClient> {
@@ -84,13 +88,18 @@ impl BigQueryClient {
             .await
             .map_err(bq_error_to_etl_error)?;
 
-        Ok(BigQueryClient { project_id, client })
+        Ok(BigQueryClient {
+            pipeline_id,
+            project_id,
+            client,
+        })
     }
 
     /// Creates a new [`BigQueryClient`] from a service account key JSON string.
     ///
     /// Parses and uses the provided service account key to authenticate with BigQuery.
     pub async fn new_with_key(
+        pipeline_id: PipelineId,
         project_id: BigQueryProjectId,
         sa_key: &str,
     ) -> EtlResult<BigQueryClient> {
@@ -101,7 +110,11 @@ impl BigQueryClient {
             .await
             .map_err(bq_error_to_etl_error)?;
 
-        Ok(BigQueryClient { project_id, client })
+        Ok(BigQueryClient {
+            pipeline_id,
+            project_id,
+            client,
+        })
     }
 
     /// Returns the fully qualified BigQuery table name.
@@ -308,7 +321,7 @@ impl BigQueryClient {
         // being sent to BigQuery, since there might be optimizations performed by the append table
         // batches method.
         for table_batch in &table_batches {
-            gauge!(ETL_BATCH_SIZE, DESTINATION => BIG_QUERY).set(table_batch.rows.len() as f64);
+            gauge!(ETL_BATCH_SIZE, PIPELINE_ID => self.pipeline_id.to_string(), DESTINATION => BIG_QUERY).set(table_batch.rows.len() as f64);
         }
 
         debug!(
@@ -363,7 +376,7 @@ impl BigQueryClient {
         }
 
         let send_duration_secs = before_sending.elapsed().as_millis() as f64 / MILLIS_PER_SEC;
-        histogram!(ETL_BATCH_SEND_DURATION_SECONDS, DESTINATION => BIG_QUERY)
+        histogram!(ETL_BATCH_SEND_DURATION_SECONDS, PIPELINE_ID => self.pipeline_id.to_string(), DESTINATION => BIG_QUERY)
             .record(send_duration_secs);
 
         if batches_responses_errors.is_empty() {

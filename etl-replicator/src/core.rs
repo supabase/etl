@@ -53,6 +53,7 @@ pub async fn start_replicator_with_config(
             install_crypto_provider_for_bigquery();
 
             let destination = BigQueryDestination::new_with_key(
+                replicator_config.pipeline.id,
                 project_id.clone(),
                 dataset_id.clone(),
                 service_account_key.expose_secret(),

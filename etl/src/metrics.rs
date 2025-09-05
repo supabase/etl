@@ -13,6 +13,7 @@ pub const PHASE: &str = "phase";
 pub const TABLE_SYNC: &str = "table_sync";
 pub const APPLY: &str = "apply";
 pub const DESTINATION: &str = "destination";
+pub const PIPELINE_ID: &str = "pipeline_id";
 
 /// Register metrics emitted by etl. This should be called before starting a pipeline.
 /// It is safe to call this method multiple times. It is guaraneed to register the

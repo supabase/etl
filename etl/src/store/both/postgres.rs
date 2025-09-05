@@ -9,7 +9,7 @@ use tokio::sync::Mutex;
 use tracing::{debug, info};
 
 use crate::error::{ErrorKind, EtlError, EtlResult};
-use crate::metrics::{ETL_TABLES_TOTAL, PHASE};
+use crate::metrics::{ETL_TABLES_TOTAL, PHASE, PIPELINE_ID};
 use crate::state::table::{RetryPolicy, TableReplicationPhase};
 use crate::store::cleanup::CleanupStore;
 use crate::store::schema::SchemaStore;
@@ -212,11 +212,16 @@ impl PostgresStore {
     }
 }
 
-fn emit_table_metrics(total_tables: usize, phase_counts: &HashMap<&'static str, u64>) {
-    gauge!(ETL_TABLES_TOTAL).set(total_tables as f64);
+fn emit_table_metrics(
+    pipeline_id: PipelineId,
+    total_tables: usize,
+    phase_counts: &HashMap<&'static str, u64>,
+) {
+    gauge!(ETL_TABLES_TOTAL, PIPELINE_ID => pipeline_id.to_string()).set(total_tables as f64);
 
     for (phase, count) in phase_counts {
-        gauge!(ETL_TABLES_TOTAL, PHASE => *phase).set(*count as f64);
+        gauge!(ETL_TABLES_TOTAL, PIPELINE_ID => pipeline_id.to_string(), PHASE => *phase)
+            .set(*count as f64);
     }
 }
 
@@ -283,7 +288,11 @@ impl StateStore for PostgresStore {
         inner.table_states = table_states.clone();
         inner.phase_counts = phase_counts;
 
-        emit_table_metrics(inner.table_states.keys().len(), &inner.phase_counts);
+        emit_table_metrics(
+            self.pipeline_id,
+            inner.table_states.keys().len(),
+            &inner.phase_counts,
+        );
 
         info!(
             "loaded {} table replication states from postgres state store",
@@ -329,7 +338,11 @@ impl StateStore for PostgresStore {
             inner.decrement_phase_count(phase_to_decrement);
         }
         inner.increment_phase_count(phase_to_increment);
-        emit_table_metrics(inner.table_states.keys().len(), &inner.phase_counts);
+        emit_table_metrics(
+            self.pipeline_id,
+            inner.table_states.keys().len(),
+            &inner.phase_counts,
+        );
 
         Ok(())
     }
@@ -368,7 +381,11 @@ impl StateStore for PostgresStore {
                     inner.decrement_phase_count(phase_to_decrement);
                 }
                 inner.increment_phase_count(phase_to_increment);
-                emit_table_metrics(inner.table_states.keys().len(), &inner.phase_counts);
+                emit_table_metrics(
+                    self.pipeline_id,
+                    inner.table_states.keys().len(),
+                    &inner.phase_counts,
+                );
 
                 Ok(restored_phase)
             }
@@ -611,7 +628,11 @@ impl CleanupStore for PostgresStore {
         inner.table_schemas.remove(&table_id);
         inner.table_mappings.remove(&table_id);
 
-        emit_table_metrics(inner.table_states.keys().len(), &inner.phase_counts);
+        emit_table_metrics(
+            self.pipeline_id,
+            inner.table_states.keys().len(),
+            &inner.phase_counts,
+        );
 
         Ok(())
     }

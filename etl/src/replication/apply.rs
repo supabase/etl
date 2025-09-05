@@ -26,7 +26,7 @@ use crate::destination::Destination;
 use crate::error::{ErrorKind, EtlError, EtlResult};
 use crate::metrics::{
     APPLY, ETL_BATCH_SEND_DURATION_SECONDS, ETL_BATCH_SIZE, ETL_ITEMS_COPIED_TOTAL, MILLIS_PER_SEC,
-    PHASE,
+    PHASE, PIPELINE_ID,
 };
 use crate::replication::client::PgReplicationClient;
 use crate::replication::stream::EventsStream;
@@ -379,6 +379,7 @@ where
                     &hook,
                     config.batch.max_size,
                     max_batch_fill_duration,
+                    pipeline_id
                 )
                 .await?;
 
@@ -441,6 +442,7 @@ async fn handle_replication_message_batch<S, D, T>(
     hook: &T,
     max_batch_size: usize,
     max_batch_fill_duration: Duration,
+    pipeline_id: PipelineId,
 ) -> EtlResult<bool>
 where
     S: SchemaStore + Clone + Send + 'static,
@@ -465,6 +467,7 @@ where
         hook,
         max_batch_size,
         max_batch_fill_duration,
+        pipeline_id,
     )
     .await
 }
@@ -478,6 +481,7 @@ where
 ///
 /// After confirming that events are durably persisted in the destination, it performs synchronization
 /// between all workers and notifies Postgres about the progress.
+#[expect(clippy::too_many_arguments)]
 async fn try_send_batch<D, T>(
     state: &mut ApplyLoopState,
     end_batch: Option<EndBatch>,
@@ -486,6 +490,7 @@ async fn try_send_batch<D, T>(
     hook: &T,
     max_batch_size: usize,
     max_batch_fill_duration: Duration,
+    pipeline_id: PipelineId,
 ) -> EtlResult<bool>
 where
     D: Destination + Clone + Send + 'static,
@@ -511,10 +516,10 @@ where
 
             destination.write_events(events_batch).await?;
 
-            counter!(ETL_ITEMS_COPIED_TOTAL, PHASE => APPLY).increment(num_events as u64);
-            gauge!(ETL_BATCH_SIZE).set(num_events as f64);
+            counter!(ETL_ITEMS_COPIED_TOTAL, PIPELINE_ID => pipeline_id.to_string(), PHASE => APPLY).increment(num_events as u64);
+            gauge!(ETL_BATCH_SIZE, PIPELINE_ID => pipeline_id.to_string()).set(num_events as f64);
             let send_duration_secs = before_sending.elapsed().as_millis() as f64 / MILLIS_PER_SEC;
-            histogram!(ETL_BATCH_SEND_DURATION_SECONDS, PHASE => APPLY).record(send_duration_secs);
+            histogram!(ETL_BATCH_SEND_DURATION_SECONDS, PIPELINE_ID => pipeline_id.to_string(), PHASE => APPLY).record(send_duration_secs);
 
             state.last_batch_send_time = Instant::now();
         }
