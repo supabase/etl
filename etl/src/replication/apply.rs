@@ -25,8 +25,8 @@ use crate::conversions::event::{
 use crate::destination::Destination;
 use crate::error::{ErrorKind, EtlError, EtlResult};
 use crate::metrics::{
-    APPLY, ETL_APPLY_EVENTS_COPIED_TOTAL, ETL_BATCH_SEND_DURATION_SECONDS, ETL_BATCH_SIZE,
-    MILLIS_PER_SEC, PHASE,
+    APPLY, ETL_BATCH_SEND_DURATION_SECONDS, ETL_BATCH_SIZE, ETL_ITEMS_COPIED_TOTAL, MILLIS_PER_SEC,
+    PHASE,
 };
 use crate::replication::client::PgReplicationClient;
 use crate::replication::stream::EventsStream;
@@ -511,7 +511,7 @@ where
 
             destination.write_events(events_batch).await?;
 
-            counter!(ETL_APPLY_EVENTS_COPIED_TOTAL).increment(num_events as u64);
+            counter!(ETL_ITEMS_COPIED_TOTAL, PHASE => APPLY).increment(num_events as u64);
             gauge!(ETL_BATCH_SIZE).set(num_events as f64);
             let send_duration_secs = before_sending.elapsed().as_millis() as f64 / MILLIS_PER_SEC;
             histogram!(ETL_BATCH_SEND_DURATION_SECONDS, PHASE => APPLY).record(send_duration_secs);

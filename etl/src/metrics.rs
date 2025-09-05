@@ -5,8 +5,7 @@ use metrics::{Unit, describe_counter, describe_gauge, describe_histogram};
 static REGISTER_METRICS: Once = Once::new();
 
 pub const ETL_TABLES_TOTAL: &str = "etl_tables_total";
-pub const ETL_TABLE_SYNC_ROWS_COPIED_TOTAL: &str = "etl_table_sync_rows_copied_total";
-pub const ETL_APPLY_EVENTS_COPIED_TOTAL: &str = "etl_apply_events_copied_total";
+pub const ETL_ITEMS_COPIED_TOTAL: &str = "etl_items_copied_total";
 pub const ETL_BATCH_SIZE: &str = "etl_batch_size";
 pub const ETL_BATCH_SEND_DURATION_SECONDS: &str = "etl_batch_send_duration_seconds";
 pub const MILLIS_PER_SEC: f64 = 1_000.0;
@@ -26,15 +25,9 @@ pub(crate) fn register_metrics() {
         );
 
         describe_counter!(
-            ETL_TABLE_SYNC_ROWS_COPIED_TOTAL,
+            ETL_ITEMS_COPIED_TOTAL,
             Unit::Count,
-            "Total number of rows copied to destination during table sync"
-        );
-
-        describe_counter!(
-            ETL_APPLY_EVENTS_COPIED_TOTAL,
-            Unit::Count,
-            "Total number of events copied to destination in apply loop"
+            "Total number of rows or events copied to destination in table sync or apply phase"
         );
 
         describe_gauge!(

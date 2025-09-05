@@ -22,8 +22,8 @@ use crate::failpoints::{
     etl_fail_point,
 };
 use crate::metrics::{
-    ETL_BATCH_SEND_DURATION_SECONDS, ETL_BATCH_SIZE, ETL_TABLE_SYNC_ROWS_COPIED_TOTAL,
-    MILLIS_PER_SEC, PHASE, TABLE_SYNC,
+    ETL_BATCH_SEND_DURATION_SECONDS, ETL_BATCH_SIZE, ETL_ITEMS_COPIED_TOTAL, MILLIS_PER_SEC, PHASE,
+    TABLE_SYNC,
 };
 use crate::replication::client::PgReplicationClient;
 use crate::replication::stream::TableCopyStream;
@@ -226,7 +226,8 @@ where
 
                         destination.write_table_rows(table_id, table_rows).await?;
 
-                        counter!(ETL_TABLE_SYNC_ROWS_COPIED_TOTAL).increment(rows_copied as u64);
+                        counter!(ETL_ITEMS_COPIED_TOTAL, PHASE => TABLE_SYNC)
+                            .increment(rows_copied as u64);
                         gauge!(ETL_BATCH_SIZE).set(rows_copied as f64);
                         let send_duration_secs =
                             before_sending.elapsed().as_millis() as f64 / MILLIS_PER_SEC;
