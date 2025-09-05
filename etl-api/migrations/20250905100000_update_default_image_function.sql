@@ -9,7 +9,7 @@ declare
   new_image_id bigint;
 begin
   -- Serialize concurrent default switches using an advisory transaction lock.
-  perform pg_advisory_xact_lock('app.images'::regclass::oid, 1);
+  perform pg_advisory_xact_lock('app.images'::regclass::oid::int, 1);
 
   -- Insert if missing; don't set default yet to respect the partial unique index.
   insert into app.images(name, is_default)
