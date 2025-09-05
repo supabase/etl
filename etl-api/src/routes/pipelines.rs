@@ -1078,8 +1078,8 @@ pub async fn update_pipeline_version(
     let (pipeline, replicator, current_image, source, destination) =
         read_all_required_data(&mut txn, tenant_id, pipeline_id, &encryption_key).await?;
 
-    // Only allow updating to the current default image. The client must provide the image_id and
-    // it must match the default image id. If it does not, we consider this a race condition and we
+    // Only allow updating to the current default image. The client must provide the version id and
+    // it must match the default version id. If it does not, we consider this a race condition and we
     // fail the update.
     let default_image = db::images::read_default_image(txn.deref_mut())
         .await?
