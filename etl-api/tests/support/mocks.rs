@@ -265,6 +265,8 @@ pub mod pipelines {
             config,
         };
         let response = app.create_pipeline(tenant_id, &pipeline).await;
+        assert!(response.status().is_success(), "failed to created pipeline");
+
         let response: CreatePipelineResponse = response
             .json()
             .await
