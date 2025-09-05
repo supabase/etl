@@ -671,7 +671,7 @@ async fn table_copy_and_sync_streams_new_data() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn table_sync_streams_new_data_with_batch() {
+async fn table_sync_streams_new_data_with_batch_timeout_expired() {
     init_test_tracing();
     let mut database = spawn_source_database().await;
     let database_schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
@@ -681,8 +681,8 @@ async fn table_sync_streams_new_data_with_batch() {
 
     // Start pipeline from scratch.
     let pipeline_id: PipelineId = random();
-    // We set a batch of 1000 elements to still check that even with batching we are getting all the
-    // data.
+    // We set a batch of 1000 elements to check if after 1000ms we still get the batch which is <
+    // 1000 elements.
     let batch_config = BatchConfig {
         max_size: 1000,
         max_fill_ms: 1000,
@@ -717,20 +717,11 @@ async fn table_sync_streams_new_data_with_batch() {
     )
     .await;
 
-    // Register notifications for ready state.
-    let users_state_notify = store
-        .notify_on_table_state(
-            database_schema.users_schema().id,
-            TableReplicationPhaseType::Ready,
-        )
-        .await;
-
     // We wait for all the inserts to be received.
     let events_notify = destination
         .wait_for_events_count(vec![(EventType::Insert, 5)])
         .await;
 
-    users_state_notify.notified().await;
     events_notify.notified().await;
 
     pipeline.shutdown_and_wait().await.unwrap();

@@ -493,9 +493,18 @@ where
 
                             // After sleeping, we rollback to the previous state and retry.
                             //
-                            // Note that this rollback is one state before, so for this to work properly
-                            // we have to make sure that the error kinds that have a timed retry, could
-                            // be solved with a simple rollback instead of a full reset.
+                            // Note that this rollback is one state before which works only if we are
+                            // in a table sync worker, this is why it's not in the apply worker:
+                            // - Errored -> Init: okay since it will restart from scratch.
+                            // - Errored -> DataSync: okay since it will restart the copy from a new slot.
+                            // - Errored -> FinishedCopy: okay since the table was already copied, so it resumes
+                            //   streaming from the `confirmed_flush_lsn`.
+                            // - Errored -> SyncDone: okay since the table sync will immediately stop.
+                            // - Errored -> Ready: same as SyncDone.
+                            //
+                            // The in-memory states like SyncWait and Catchup won't ever be in a rollback
+                            // since they are just states used for synchronization and never saved in the
+                            // state store.
                             if let Err(err) = state_guard.rollback(&store).await {
                                 error!(
                                     "failed to rollback table sync worker state for table {}: {}",
