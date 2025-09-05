@@ -8,7 +8,7 @@ use std::time::Duration;
 use tracing::info;
 
 // Implementation adapted from:
-//  https://github.com/tokio-rs/tokio/blob/master/tokio-stream/src/stream_ext/chunks_timeout.rs
+//  https://github.com/tokio-rs/tokio/blob/master/tokio-stream/src/stream_ext/chunks_timeout.rs.
 pin_project! {
     /// A stream adapter that batches items based on size limits and timeouts.
     ///
@@ -62,13 +62,13 @@ impl<B, S: Stream<Item = B>> Stream for TimeoutBatchStream<B, S> {
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let mut this = self.as_mut().project();
 
-        // Fast path: if the inner stream has already ended, we're done
+        // Fast path: if the inner stream has already ended, we're done.
         if *this.inner_stream_ended {
             return Poll::Ready(None);
         }
 
         loop {
-            // Fast path: if we've been marked as stopped, terminate immediately
+            // Fast path: if we've been marked as stopped, terminate immediately.
             if *this.stream_stopped {
                 return Poll::Ready(None);
             }
@@ -79,14 +79,14 @@ impl<B, S: Stream<Item = B>> Stream for TimeoutBatchStream<B, S> {
             if this.shutdown_rx.has_changed().unwrap_or(false) {
                 info!("the stream has been forcefully stopped");
 
-                // Mark stream as permanently stopped to prevent further polling
+                // Mark stream as permanently stopped to prevent further polling.
                 *this.stream_stopped = true;
 
-                // Acknowledge that we've seen the shutdown signal to maintain watch semantics
+                // Acknowledge that we've seen the shutdown signal to maintain watch semantics.
                 this.shutdown_rx.mark_unchanged();
 
-                // Return accumulated items (if any) with shutdown indication
-                // Even empty batches are returned to signal shutdown occurred
+                // Return accumulated items (if any) with shutdown indication.
+                // Even empty batches are returned to signal shutdown occurred.
                 return Poll::Ready(Some(ShutdownResult::Shutdown(std::mem::take(this.items))));
             }
 
@@ -102,7 +102,7 @@ impl<B, S: Stream<Item = B>> Stream for TimeoutBatchStream<B, S> {
 
             // PRIORITY 3: Memory optimization
             // Pre-allocate batch capacity when starting to collect items
-            // This avoids reallocations during batch collection
+            // This avoids reallocations during batch collection.
             if this.items.is_empty() {
                 this.items.reserve_exact(this.batch_config.max_size);
             }
@@ -110,32 +110,32 @@ impl<B, S: Stream<Item = B>> Stream for TimeoutBatchStream<B, S> {
             // PRIORITY 4: Poll underlying stream for new items
             match this.stream.as_mut().poll_next(cx) {
                 Poll::Pending => {
-                    // No more items available right now, check if we should emit due to timeout
+                    // No more items available right now, check if we should emit due to timeout.
                     break;
                 }
                 Poll::Ready(Some(item)) => {
-                    // New item available - add to current batch
+                    // New item available - add to current batch.
                     this.items.push(item);
 
-                    // SIZE-BASED EMISSION: If batch is full, emit immediately
-                    // This provides throughput optimization for high-volume streams
+                    // SIZE-BASED EMISSION: If batch is full, emit immediately.
+                    // This provides throughput optimization for high-volume streams.
                     if this.items.len() >= this.batch_config.max_size {
-                        *this.reset_timer = true; // Schedule timer reset for next batch
+                        *this.reset_timer = true; // Schedule timer reset for next batch.
                         return Poll::Ready(Some(ShutdownResult::Ok(std::mem::take(this.items))));
                     }
-                    // Continue loop to collect more items or check other conditions
+                    // Continue loop to collect more items or check other conditions.
                 }
                 Poll::Ready(None) => {
-                    // STREAM END: Underlying stream finished
-                    // Return final batch if we have items, otherwise signal completion
+                    // STREAM END: Underlying stream finished.
+                    // Return final batch if we have items, otherwise signal completion.
                     let last = if this.items.is_empty() {
-                        None // No final batch needed
+                        None // No final batch needed.
                     } else {
-                        *this.reset_timer = true; // Clean up timer state
+                        *this.reset_timer = true; // Clean up timer state.
                         Some(ShutdownResult::Ok(std::mem::take(this.items)))
                     };
 
-                    *this.inner_stream_ended = true; // Mark stream as permanently ended
+                    *this.inner_stream_ended = true; // Mark stream as permanently ended.
 
                     return Poll::Ready(last);
                 }
@@ -144,7 +144,7 @@ impl<B, S: Stream<Item = B>> Stream for TimeoutBatchStream<B, S> {
 
         // PRIORITY 5: Time-based emission check
         // If we have items and the timeout has expired, emit the current batch
-        // This provides latency bounds to prevent indefinite delays in low-volume scenarios
+        // This provides latency bounds to prevent indefinite delays in low-volume scenarios.
         if !this.items.is_empty()
             && let Some(deadline) = this.deadline.as_pin_mut()
         {
@@ -156,17 +156,28 @@ impl<B, S: Stream<Item = B>> Stream for TimeoutBatchStream<B, S> {
             return Poll::Ready(Some(ShutdownResult::Ok(std::mem::take(this.items))));
         }
 
-        // No conditions met for batch emission - wait for more items or timeout
+        // No conditions met for batch emission - wait for more items or timeout.
         Poll::Pending
     }
 }
 
+/// Result of polling a [`TimeoutStream`].
+///
+/// This enum indicates whether the inner stream produced a value or a
+/// timeout occurred because no item arrived within the configured duration.
 pub enum TimeoutStreamResult<T> {
+    /// A value produced by the inner stream.
     Value(T),
+    /// A timeout occurred before the inner stream yielded a new item.
     Timeout,
 }
 
 pin_project! {
+    /// A stream adapter that yields timeout markers when idle.
+    ///
+    /// This wrapper polls the inner stream and returns either produced values
+    /// or [`TimeoutStreamResult::Timeout`] when no value arrives within
+    /// `max_batch_fill_duration`.
     #[must_use = "streams do nothing unless polled"]
     #[derive(Debug)]
     pub struct TimeoutStream<B, S: Stream<Item = B>> {
@@ -180,6 +191,11 @@ pin_project! {
 }
 
 impl<B, S: Stream<Item = B>> TimeoutStream<B, S> {
+    /// Wraps a stream to emit timeouts when idle.
+    ///
+    /// The returned stream yields [`TimeoutStreamResult::Value`] for items from
+    /// the inner stream or [`TimeoutStreamResult::Timeout`] when the configured
+    /// `max_batch_fill_duration` elapses without a new item.
     pub fn wrap(stream: S, max_batch_fill_duration: Duration) -> Self {
         Self {
             stream,
