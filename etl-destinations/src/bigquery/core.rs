@@ -15,7 +15,6 @@ use tracing::{debug, info, warn};
 
 use crate::bigquery::client::{BigQueryClient, BigQueryOperationType};
 use crate::bigquery::{BigQueryDatasetId, BigQueryTableId};
-use crate::metrics::register_metrics;
 
 /// Delimiter separating schema from table name in BigQuery table identifiers.
 const BIGQUERY_TABLE_ID_DELIMITER: &str = "_";
@@ -214,10 +213,6 @@ where
         max_concurrent_streams: usize,
         store: S,
     ) -> EtlResult<Self> {
-        // Registering metrics here to avoid the callers having to remember to call this before
-        // creating a destination.
-        register_metrics();
-
         let client = BigQueryClient::new_with_key_path(project_id, sa_key).await?;
         let inner = Inner {
             created_tables: HashSet::new(),
@@ -248,10 +243,6 @@ where
         max_concurrent_streams: usize,
         store: S,
     ) -> EtlResult<Self> {
-        // Registering metrics here to avoid the callers having to remember to call this before
-        // creating a destination.
-        register_metrics();
-
         let client = BigQueryClient::new_with_key(project_id, sa_key).await?;
         let inner = Inner {
             created_tables: HashSet::new(),
