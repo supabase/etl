@@ -1,7 +1,11 @@
 [package]
 name = "etl-replicator"
 version = "0.1.0"
-edition = "2024"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
 
 [dependencies]
 etl = { workspace = true, features = ["unknown-types-to-bytes"] }
