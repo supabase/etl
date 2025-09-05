@@ -47,7 +47,7 @@ where
         r#"
         insert into app.tenants (id, name)
         values ($1, $2)
-        on conflict (id) do update set name = $2
+        on conflict (id) do update set name = $2, updated_at = now()
         returning id
         "#,
         tenant_id,
@@ -94,7 +94,7 @@ where
     let record = sqlx::query!(
         r#"
         update app.tenants
-        set name = $1
+        set name = $1, updated_at = now()
         where id = $2
         returning id
         "#,

@@ -122,7 +122,7 @@ where
     let record = sqlx::query!(
         r#"
         update app.sources
-        set config = $1, name = $2
+        set config = $1, name = $2, updated_at = now()
         where tenant_id = $3 and id = $4
         returning id
         "#,

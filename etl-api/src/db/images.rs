@@ -28,7 +28,7 @@ pub async fn create_image(
         sqlx::query!(
             r#"
             update app.images
-            set is_default = false
+            set is_default = false, updated_at = now()
             where is_default = true
             "#
         )
@@ -109,7 +109,7 @@ pub async fn update_image(
         sqlx::query!(
             r#"
             update app.images
-            set is_default = false
+            set is_default = false, updated_at = now()
             where is_default = true and id != $1
             "#,
             image_id
@@ -121,7 +121,7 @@ pub async fn update_image(
     let record = sqlx::query!(
         r#"
         update app.images
-        set name = $1, is_default = $2
+        set name = $1, is_default = $2, updated_at = now()
         where id = $3
         returning id
         "#,

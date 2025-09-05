@@ -6,14 +6,19 @@ create schema if not exists app;
 -- Tenants
 create table app.tenants (
     id text primary key,
-    name text not null
+    name text not null,
+    created_at timestamptz not null default now(),
+    updated_at timestamptz not null default now()
 );
 
 -- Images
 create table app.images (
     id bigint generated always as identity primary key,
     name text not null,
-    is_default boolean not null
+    is_default boolean not null,
+    created_at timestamptz not null default now(),
+    updated_at timestamptz not null default now(),
+    unique (name)
 );
 
 -- Ensure at most one default image exists
@@ -26,7 +31,9 @@ create table app.destinations (
     id bigint generated always as identity primary key,
     tenant_id text not null references app.tenants (id) on delete cascade,
     name text not null,
-    config jsonb not null
+    config jsonb not null,
+    created_at timestamptz not null default now(),
+    updated_at timestamptz not null default now()
 );
 
 create index idx_destinations_tenant_id_id on app.destinations (tenant_id, id);
@@ -36,7 +43,9 @@ create table app.sources (
     id bigint generated always as identity primary key,
     tenant_id text not null references app.tenants (id) on delete cascade,
     name text not null,
-    config jsonb not null
+    config jsonb not null,
+    created_at timestamptz not null default now(),
+    updated_at timestamptz not null default now()
 );
 
 create index idx_sources_tenant_id_id on app.sources (tenant_id, id);
@@ -45,7 +54,9 @@ create index idx_sources_tenant_id_id on app.sources (tenant_id, id);
 create table app.replicators (
     id bigint generated always as identity primary key,
     tenant_id text not null references app.tenants (id) on delete cascade,
-    image_id bigint not null references app.images (id)
+    image_id bigint not null references app.images (id),
+    created_at timestamptz not null default now(),
+    updated_at timestamptz not null default now()
 );
 
 create index idx_replicators_tenant_id_id on app.replicators (tenant_id, id);
@@ -58,6 +69,8 @@ create table app.pipelines (
     destination_id bigint not null references app.destinations (id),
     replicator_id bigint not null references app.replicators (id),
     config jsonb not null,
+    created_at timestamptz not null default now(),
+    updated_at timestamptz not null default now(),
     unique (tenant_id, source_id, destination_id)
 );
 

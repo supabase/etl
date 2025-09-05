@@ -144,7 +144,7 @@ where
     let record = sqlx::query!(
         r#"
         update app.pipelines
-        set source_id = $1, destination_id = $2, config = $3
+        set source_id = $1, destination_id = $2, config = $3, updated_at = now()
         where tenant_id = $4 and id = $5
         returning id
         "#,
@@ -324,7 +324,7 @@ pub async fn update_pipeline_config(
             let record = sqlx::query!(
                 r#"
                 update app.pipelines
-                set config = $1
+                set config = $1, updated_at = now()
                 where tenant_id = $2 and id = $3
                 returning config
                 "#,

@@ -105,7 +105,7 @@ where
     let record = sqlx::query!(
         r#"
         update app.replicators
-        set image_id = $1
+        set image_id = $1, updated_at = now()
         where id = $2 and tenant_id = $3
         returning id
         "#,
