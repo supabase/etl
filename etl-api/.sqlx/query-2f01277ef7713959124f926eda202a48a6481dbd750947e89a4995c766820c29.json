@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        update app.destinations\n        set config = $1, name = $2\n        where tenant_id = $3 and id = $4\n        returning id\n        ",
+  "query": "\n        update app.images\n        set name = $1, is_default = $2, updated_at = now()\n        where id = $3\n        returning id\n        ",
   "describe": {
     "columns": [
       {
@@ -11,9 +11,8 @@
     ],
     "parameters": {
       "Left": [
-        "Jsonb",
         "Text",
-        "Text",
+        "Bool",
         "Int8"
       ]
     },
@@ -21,5 +20,5 @@
       false
     ]
   },
-  "hash": "96a26fc4caf7b072bd3d3ff4705cdd3a5de0034143b9a53c7859d72fe35efff7"
+  "hash": "2f01277ef7713959124f926eda202a48a6481dbd750947e89a4995c766820c29"
 }

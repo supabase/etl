@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        update app.replicators\n        set image_id = $1\n        where id = $2 and tenant_id = $3\n        returning id\n        ",
+  "query": "\n        update app.replicators\n        set image_id = $1, updated_at = now()\n        where id = $2 and tenant_id = $3\n        returning id\n        ",
   "describe": {
     "columns": [
       {
@@ -20,5 +20,5 @@
       false
     ]
   },
-  "hash": "08dea6839964cbc84386c8a46923a0bbce45638cc647ca3154f8c1e7360c8adf"
+  "hash": "b08170bc382bb68f04b8f7d834a3f6939ec4cce53f22b85fdde8627a925747a4"
 }

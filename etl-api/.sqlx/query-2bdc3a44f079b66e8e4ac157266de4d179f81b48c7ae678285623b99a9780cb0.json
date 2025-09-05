@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            update app.images\n            set is_default = false, updated_at = now()\n            where is_default = true and id != $1\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "2bdc3a44f079b66e8e4ac157266de4d179f81b48c7ae678285623b99a9780cb0"
+}

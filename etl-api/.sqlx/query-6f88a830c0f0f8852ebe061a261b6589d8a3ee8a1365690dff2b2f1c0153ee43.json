@@ -1,0 +1,25 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        update app.destinations\n        set config = $1, name = $2, updated_at = now()\n        where tenant_id = $3 and id = $4\n        returning id\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Jsonb",
+        "Text",
+        "Text",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "6f88a830c0f0f8852ebe061a261b6589d8a3ee8a1365690dff2b2f1c0153ee43"
+}

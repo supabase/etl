@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        update app.tenants\n        set name = $1\n        where id = $2\n        returning id\n        ",
+  "query": "\n        insert into app.tenants (id, name)\n        values ($1, $2)\n        on conflict (id) do update set name = $2, updated_at = now()\n        returning id\n        ",
   "describe": {
     "columns": [
       {
@@ -19,5 +19,5 @@
       false
     ]
   },
-  "hash": "0bd3a776b8c3a795eb4a7df13da9f7a10a9fa258c223a41c9008b80da60ade63"
+  "hash": "5c9e875ddc859a3176d783df47d7fdc52760a1d3313ffb1b2c0247a5c6f75e54"
 }
