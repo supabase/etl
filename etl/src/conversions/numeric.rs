@@ -613,8 +613,8 @@ fn format_numeric_value(
 
 #[cfg(test)]
 mod tests {
-    use bytes::BytesMut;
     use super::*;
+    use bytes::BytesMut;
 
     #[test]
     fn parse_simple_integer() {
