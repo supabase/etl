@@ -465,10 +465,8 @@ fn convert_to_base_10000(
     // Strip leading zeros first and record how many we removed so we can
     // adjust the weight correctly. Trailing zeros should NOT influence
     // the weight because they are fractional groups after the decimal point.
-    let leading_zeros_before_strip = base_10000_digits
-        .iter()
-        .take_while(|&&d| d == 0)
-        .count() as i32;
+    let leading_zeros_before_strip =
+        base_10000_digits.iter().take_while(|&&d| d == 0).count() as i32;
 
     strip_leading_zeros(&mut base_10000_digits);
     strip_trailing_zeros(&mut base_10000_digits);
@@ -830,7 +828,11 @@ mod tests {
             assert_eq!(sign, Sign::Positive);
             assert_eq!(weight, -1, "weight should remain -1");
             assert_eq!(scale, 7, "scale preserved for display");
-            assert_eq!(digits.as_slice(), &[12], "trailing base-10000 zero group stripped");
+            assert_eq!(
+                digits.as_slice(),
+                &[12],
+                "trailing base-10000 zero group stripped"
+            );
         } else {
             panic!("Expected Value variant");
         }
@@ -934,7 +936,7 @@ mod tests {
         // We expect trailing zero group to be stripped, weight stays 1.
         let n = PgNumeric::from_str("1200000").unwrap();
         assert_eq!(n.to_string(), "1200000");
-        
+
         if let PgNumeric::Value {
             sign,
             weight,
