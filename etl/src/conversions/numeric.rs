@@ -781,6 +781,8 @@ mod tests {
     fn zero_canonicalization_basic() {
         for s in ["0", "0.0", "000", "000.000"] {
             let num = PgNumeric::from_str(s).unwrap();
+            assert_eq!(num.to_string(), "0");
+
             if let PgNumeric::Value {
                 sign,
                 weight,
@@ -801,6 +803,8 @@ mod tests {
     fn zero_canonicalization_negative_zero() {
         for s in ["-0", "-0.00"] {
             let num = PgNumeric::from_str(s).unwrap();
+            assert_eq!(num.to_string(), "0");
+
             if let PgNumeric::Value {
                 sign,
                 weight,
