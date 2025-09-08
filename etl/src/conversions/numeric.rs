@@ -462,13 +462,19 @@ fn convert_to_base_10000(
         base_10000_digits.push(digit);
     }
 
-    // Strip leading and trailing zeros
+    // Strip leading zeros first and record how many we removed so we can
+    // adjust the weight correctly. Trailing zeros should NOT influence
+    // the weight because they are fractional groups after the decimal point.
+    let leading_zeros_before_strip = base_10000_digits
+        .iter()
+        .take_while(|&&d| d == 0)
+        .count() as i32;
+
     strip_leading_zeros(&mut base_10000_digits);
     strip_trailing_zeros(&mut base_10000_digits);
 
-    // Adjust weight if we stripped leading zeros
-    let leading_zeros_stripped = ndigits - base_10000_digits.len() as i32;
-    let final_weight = weight - leading_zeros_stripped;
+    // Adjust weight only by the number of leading zeros that were removed.
+    let final_weight = weight - leading_zeros_before_strip;
 
     Ok(PgNumeric::Value {
         sign,
@@ -805,5 +811,138 @@ mod tests {
         let output = format!("{num}");
         // Should display trailing zeros according to scale
         assert!(output.ends_with("0000"));
+    }
+
+    /// Ensures weight is unaffected by trailing zero base-10000 groups.
+    #[test]
+    fn weight_ignores_trailing_fraction_groups() {
+        // 0.0012000 → groups: [12, 0], weight must stay at -1 after stripping
+        let parsed = PgNumeric::from_str("0.0012000").unwrap();
+        if let PgNumeric::Value {
+            sign: ref sign,
+            weight,
+            scale,
+            ref digits,
+        } = parsed
+        {
+            assert_eq!(*sign, Sign::Positive);
+            assert_eq!(weight, -1, "weight should remain -1");
+            assert_eq!(scale, 7, "scale preserved for display");
+            assert_eq!(digits.as_slice(), &[12], "trailing base-10000 zero group stripped");
+            assert_eq!(parsed.to_string(), "0.0012000");
+        } else {
+            panic!("Expected Value variant");
+        }
+    }
+
+    /// Validates that numbers with two groups around the decimal keep correct weight.
+    #[test]
+    fn weight_and_groups_boundary_cases() {
+        // 9999.9999 is exactly two full groups: [9999, 9999], weight 0
+        let n1 = PgNumeric::from_str("9999.9999").unwrap();
+        if let PgNumeric::Value {
+            sign: ref sign,
+            weight,
+            scale,
+            ref digits,
+        } = n1
+        {
+            assert_eq!(*sign, Sign::Positive);
+            assert_eq!(weight, 0);
+            assert_eq!(scale, 4);
+            assert_eq!(digits.as_slice(), &[9999, 9999]);
+            assert_eq!(n1.to_string(), "9999.9999");
+        } else {
+            panic!("Expected Value variant");
+        }
+
+        // 10000.0001 crosses the 10^4 boundary
+        let n2 = PgNumeric::from_str("10000.0001").unwrap();
+        if let PgNumeric::Value {
+            sign: ref sign,
+            weight,
+            scale,
+            ref digits,
+        } = n2
+        {
+            assert_eq!(*sign, Sign::Positive);
+            assert_eq!(weight, 1);
+            assert_eq!(scale, 4);
+            // Two integer groups [1, 0] and one fractional group [1]
+            assert_eq!(digits.as_slice(), &[1, 0, 1]);
+            assert_eq!(n2.to_string(), "10000.0001");
+        } else {
+            panic!("Expected Value variant");
+        }
+    }
+
+    /// Confirms that superfluous leading zeros in input do not affect value.
+    #[test]
+    fn ignores_input_leading_zeros() {
+        let n = PgNumeric::from_str("0000120.00").unwrap();
+        if let PgNumeric::Value {
+            sign: ref sign,
+            weight,
+            scale,
+            ref digits,
+        } = n
+        {
+            assert_eq!(*sign, Sign::Positive);
+            assert_eq!(weight, 0);
+            assert_eq!(scale, 2);
+            assert_eq!(digits.as_slice(), &[120]);
+            assert_eq!(n.to_string(), "120.00");
+        } else {
+            panic!("Expected Value variant");
+        }
+    }
+
+    /// Confirms round-trip stability for a set of representative values.
+    #[test]
+    fn roundtrip_stability() {
+        let cases = [
+            "120.00",
+            "1.2000",
+            "0.0120",
+            "9999.9999",
+            "10000.0001",
+            "-120.00",
+            "1200000",
+        ];
+
+        for &s in &cases {
+            let parsed = PgNumeric::from_str(s).unwrap();
+            let printed = parsed.to_string();
+            let reparsed = PgNumeric::from_str(&printed).unwrap();
+
+            // String should be stable across two parses
+            assert_eq!(printed, reparsed.to_string(), "unstable print for {s}");
+
+            // Value representation should be equal across parse/print/parse
+            assert_eq!(parsed, reparsed, "unstable internal value for {s}");
+        }
+    }
+
+    /// Verifies weight for integers that span multiple base-10000 groups.
+    #[test]
+    fn large_integer_weight() {
+        // 1,200,000 = 120*10000 + 0 → digits [120, 0] before strip trailing zero
+        // We expect trailing zero group to be stripped, weight stays 1.
+        let n = PgNumeric::from_str("1200000").unwrap();
+        if let PgNumeric::Value {
+            sign: ref sign,
+            weight,
+            scale,
+            ref digits,
+        } = n
+        {
+            assert_eq!(*sign, Sign::Positive);
+            assert_eq!(weight, 1);
+            assert_eq!(scale, 0);
+            assert_eq!(digits.as_slice(), &[120]);
+            assert_eq!(n.to_string(), "1200000");
+        } else {
+            panic!("Expected Value variant");
+        }
     }
 }
