@@ -361,8 +361,6 @@ impl K8sClient for HttpK8sClient {
                   }
                 ],
                 // Allow scheduling onto nodes tainted with `nodeType=workloads`.
-                // This toleration matches a common taint shape used to reserve
-                // nodes for background/ETL workloads.
                 "tolerations": [
                   {
                     "key": "nodeType",
