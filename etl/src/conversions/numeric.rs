@@ -8,9 +8,9 @@ use tokio_postgres::types::{FromSql, IsNull, ToSql, Type};
 
 const POSITIVE_SIGN: u16 = 0x0000;
 const NEGATIVE_SIGN: u16 = 0x4000;
-const NAN_SIGN: u16 = 0xC000;
-const POSITIVE_INFINITY_SIGN: u16 = 0xC000;
-const NEGATIVE_INFINITY_SIGN: u16 = 0xF000;
+const NAN_SIGN: u16 = 0xC000; // NUMERIC_NAN
+const POSITIVE_INFINITY_SIGN: u16 = 0xD000; // NUMERIC_PINF
+const NEGATIVE_INFINITY_SIGN: u16 = 0xF000; // NUMERIC_NINF
 
 /// Sign indicator for Postgres numeric values.
 ///
@@ -613,6 +613,7 @@ fn format_numeric_value(
 
 #[cfg(test)]
 mod tests {
+    use bytes::BytesMut;
     use super::*;
 
     #[test]
@@ -945,6 +946,23 @@ mod tests {
             assert_eq!(digits.as_slice(), &[120]);
         } else {
             panic!("Expected Value variant");
+        }
+    }
+
+    #[test]
+    fn tosql_fromsql_special_values() {
+        let cases = [
+            PgNumeric::NaN,
+            PgNumeric::PositiveInfinity,
+            PgNumeric::NegativeInfinity,
+        ];
+
+        for case in cases {
+            let mut buf = BytesMut::new();
+            ToSql::to_sql(&case, &Type::NUMERIC, &mut buf).unwrap();
+            let round = PgNumeric::from_sql(&Type::NUMERIC, &buf).unwrap();
+            assert_eq!(format!("{}", case), format!("{}", round));
+            assert_eq!(case, round);
         }
     }
 }
