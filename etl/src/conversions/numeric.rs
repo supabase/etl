@@ -811,19 +811,18 @@ mod tests {
         assert!(output.ends_with("0000"));
     }
 
-    /// Ensures weight is unaffected by trailing zero base-10000 groups.
     #[test]
     fn weight_ignores_trailing_fraction_groups() {
         // 0.0012000 → groups: [12, 0], weight must stay at -1 after stripping
-        let parsed = PgNumeric::from_str("0.0012000").unwrap();
-        assert_eq!(parsed.to_string(), "0.0012000");
+        let num = PgNumeric::from_str("0.0012000").unwrap();
+        assert_eq!(num.to_string(), "0.0012000");
 
         if let PgNumeric::Value {
             sign,
             weight,
             scale,
             ref digits,
-        } = parsed
+        } = num
         {
             assert_eq!(sign, Sign::Positive);
             assert_eq!(weight, -1, "weight should remain -1");
@@ -838,19 +837,18 @@ mod tests {
         }
     }
 
-    /// Validates that numbers with two groups around the decimal keep correct weight.
     #[test]
     fn weight_and_groups_boundary_cases() {
         // 9999.9999 is exactly two full groups: [9999, 9999], weight 0
-        let n1 = PgNumeric::from_str("9999.9999").unwrap();
-        assert_eq!(n1.to_string(), "9999.9999");
+        let num_1 = PgNumeric::from_str("9999.9999").unwrap();
+        assert_eq!(num_1.to_string(), "9999.9999");
 
         if let PgNumeric::Value {
             sign,
             weight,
             scale,
             ref digits,
-        } = n1
+        } = num_1
         {
             assert_eq!(sign, Sign::Positive);
             assert_eq!(weight, 0);
@@ -861,15 +859,15 @@ mod tests {
         }
 
         // 10000.0001 crosses the 10^4 boundary
-        let n2 = PgNumeric::from_str("10000.0001").unwrap();
-        assert_eq!(n2.to_string(), "10000.0001");
+        let num_2 = PgNumeric::from_str("10000.0001").unwrap();
+        assert_eq!(num_2.to_string(), "10000.0001");
 
         if let PgNumeric::Value {
             sign,
             weight,
             scale,
             ref digits,
-        } = n2
+        } = num_2
         {
             assert_eq!(sign, Sign::Positive);
             assert_eq!(weight, 1);
@@ -881,18 +879,17 @@ mod tests {
         }
     }
 
-    /// Confirms that superfluous leading zeros in input do not affect value.
     #[test]
     fn ignores_input_leading_zeros() {
-        let n = PgNumeric::from_str("0000120.00").unwrap();
-        assert_eq!(n.to_string(), "120.00");
+        let num = PgNumeric::from_str("0000120.00").unwrap();
+        assert_eq!(num.to_string(), "120.00");
 
         if let PgNumeric::Value {
             sign,
             weight,
             scale,
             ref digits,
-        } = n
+        } = num
         {
             assert_eq!(sign, Sign::Positive);
             assert_eq!(weight, 0);
@@ -903,7 +900,6 @@ mod tests {
         }
     }
 
-    /// Confirms round-trip stability for a set of representative values.
     #[test]
     fn roundtrip_stability() {
         let cases = [
@@ -916,33 +912,32 @@ mod tests {
             "1200000",
         ];
 
-        for &s in &cases {
-            let parsed = PgNumeric::from_str(s).unwrap();
+        for case in &cases {
+            let parsed = PgNumeric::from_str(case).unwrap();
             let printed = parsed.to_string();
             let reparsed = PgNumeric::from_str(&printed).unwrap();
 
             // String should be stable across two parses
-            assert_eq!(printed, reparsed.to_string(), "unstable print for {s}");
+            assert_eq!(printed, reparsed.to_string(), "unstable print for {case}");
 
             // Value representation should be equal across parse/print/parse
-            assert_eq!(parsed, reparsed, "unstable internal value for {s}");
+            assert_eq!(parsed, reparsed, "unstable internal value for {case}");
         }
     }
 
-    /// Verifies weight for integers that span multiple base-10000 groups.
     #[test]
     fn large_integer_weight() {
         // 1,200,000 = 120*10000 + 0 → digits [120, 0] before strip trailing zero
         // We expect trailing zero group to be stripped, weight stays 1.
-        let n = PgNumeric::from_str("1200000").unwrap();
-        assert_eq!(n.to_string(), "1200000");
+        let num = PgNumeric::from_str("1200000").unwrap();
+        assert_eq!(num.to_string(), "1200000");
 
         if let PgNumeric::Value {
             sign,
             weight,
             scale,
             ref digits,
-        } = n
+        } = num
         {
             assert_eq!(sign, Sign::Positive);
             assert_eq!(weight, 1);
