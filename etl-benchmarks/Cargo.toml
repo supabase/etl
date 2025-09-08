@@ -26,3 +26,6 @@ tracing = { workspace = true, default-features = true }
 [[bench]]
 name = "table_copies"
 harness = false
+
+[profile.bench]
+debug = true
