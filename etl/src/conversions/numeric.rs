@@ -462,6 +462,17 @@ fn convert_to_base_10000(
         base_10000_digits.push(digit);
     }
 
+    // If all groups are zero, normalize to PostgreSQL canonical zero:
+    // weight = 0, digits = [], positive sign; preserve scale.
+    if base_10000_digits.iter().all(|&d| d == 0) {
+        return Ok(PgNumeric::Value {
+            sign: Sign::Positive,
+            weight: 0,
+            scale: dscale,
+            digits: vec![],
+        });
+    }
+
     // Strip leading zeros first and record how many we removed so we can
     // adjust the weight correctly. Trailing zeros should NOT influence
     // the weight because they are fractional groups after the decimal point.
@@ -764,6 +775,72 @@ mod tests {
             digits: vec![],
         };
         assert_eq!(format!("{num}"), "0");
+    }
+
+    #[test]
+    fn zero_canonicalization_basic() {
+        for s in ["0", "0.0", "000", "000.000"] {
+            let num = PgNumeric::from_str(s).unwrap();
+            if let PgNumeric::Value {
+                sign,
+                weight,
+                scale: _,
+                digits,
+            } = num
+            {
+                assert_eq!(sign, Sign::Positive);
+                assert_eq!(weight, 0);
+                assert!(digits.is_empty());
+            } else {
+                panic!("Expected Value variant");
+            }
+        }
+    }
+
+    #[test]
+    fn zero_canonicalization_negative_zero() {
+        for s in ["-0", "-0.00"] {
+            let num = PgNumeric::from_str(s).unwrap();
+            if let PgNumeric::Value {
+                sign,
+                weight,
+                scale: _,
+                digits,
+            } = num
+            {
+                // Normalize to positive zero
+                assert_eq!(sign, Sign::Positive);
+                assert_eq!(weight, 0);
+                assert!(digits.is_empty());
+            } else {
+                panic!("Expected Value variant");
+            }
+        }
+    }
+
+    #[test]
+    fn zero_roundtrip_sql() {
+        for s in ["0", "0.000"] {
+            let num = PgNumeric::from_str(s).unwrap();
+            let mut buf = BytesMut::new();
+            ToSql::to_sql(&num, &Type::NUMERIC, &mut buf).unwrap();
+            let round = PgNumeric::from_sql(&Type::NUMERIC, &buf).unwrap();
+            // Internal representation should be canonical-zero with same scale
+            assert_eq!(num, round);
+            if let PgNumeric::Value {
+                sign,
+                weight,
+                digits,
+                ..
+            } = round
+            {
+                assert_eq!(sign, Sign::Positive);
+                assert_eq!(weight, 0);
+                assert!(digits.is_empty());
+            } else {
+                panic!("Expected Value variant");
+            }
+        }
     }
 
     #[test]
