@@ -818,18 +818,19 @@ mod tests {
     fn weight_ignores_trailing_fraction_groups() {
         // 0.0012000 → groups: [12, 0], weight must stay at -1 after stripping
         let parsed = PgNumeric::from_str("0.0012000").unwrap();
+        assert_eq!(parsed.to_string(), "0.0012000");
+
         if let PgNumeric::Value {
-            sign: ref sign,
+            sign,
             weight,
             scale,
             ref digits,
         } = parsed
         {
-            assert_eq!(*sign, Sign::Positive);
+            assert_eq!(sign, Sign::Positive);
             assert_eq!(weight, -1, "weight should remain -1");
             assert_eq!(scale, 7, "scale preserved for display");
             assert_eq!(digits.as_slice(), &[12], "trailing base-10000 zero group stripped");
-            assert_eq!(parsed.to_string(), "0.0012000");
         } else {
             panic!("Expected Value variant");
         }
@@ -840,37 +841,39 @@ mod tests {
     fn weight_and_groups_boundary_cases() {
         // 9999.9999 is exactly two full groups: [9999, 9999], weight 0
         let n1 = PgNumeric::from_str("9999.9999").unwrap();
+        assert_eq!(n1.to_string(), "9999.9999");
+
         if let PgNumeric::Value {
-            sign: ref sign,
+            sign,
             weight,
             scale,
             ref digits,
         } = n1
         {
-            assert_eq!(*sign, Sign::Positive);
+            assert_eq!(sign, Sign::Positive);
             assert_eq!(weight, 0);
             assert_eq!(scale, 4);
             assert_eq!(digits.as_slice(), &[9999, 9999]);
-            assert_eq!(n1.to_string(), "9999.9999");
         } else {
             panic!("Expected Value variant");
         }
 
         // 10000.0001 crosses the 10^4 boundary
         let n2 = PgNumeric::from_str("10000.0001").unwrap();
+        assert_eq!(n2.to_string(), "10000.0001");
+
         if let PgNumeric::Value {
-            sign: ref sign,
+            sign,
             weight,
             scale,
             ref digits,
         } = n2
         {
-            assert_eq!(*sign, Sign::Positive);
+            assert_eq!(sign, Sign::Positive);
             assert_eq!(weight, 1);
             assert_eq!(scale, 4);
             // Two integer groups [1, 0] and one fractional group [1]
             assert_eq!(digits.as_slice(), &[1, 0, 1]);
-            assert_eq!(n2.to_string(), "10000.0001");
         } else {
             panic!("Expected Value variant");
         }
@@ -880,18 +883,19 @@ mod tests {
     #[test]
     fn ignores_input_leading_zeros() {
         let n = PgNumeric::from_str("0000120.00").unwrap();
+        assert_eq!(n.to_string(), "120.00");
+
         if let PgNumeric::Value {
-            sign: ref sign,
+            sign,
             weight,
             scale,
             ref digits,
         } = n
         {
-            assert_eq!(*sign, Sign::Positive);
+            assert_eq!(sign, Sign::Positive);
             assert_eq!(weight, 0);
             assert_eq!(scale, 2);
             assert_eq!(digits.as_slice(), &[120]);
-            assert_eq!(n.to_string(), "120.00");
         } else {
             panic!("Expected Value variant");
         }
@@ -929,18 +933,19 @@ mod tests {
         // 1,200,000 = 120*10000 + 0 → digits [120, 0] before strip trailing zero
         // We expect trailing zero group to be stripped, weight stays 1.
         let n = PgNumeric::from_str("1200000").unwrap();
+        assert_eq!(n.to_string(), "1200000");
+        
         if let PgNumeric::Value {
-            sign: ref sign,
+            sign,
             weight,
             scale,
             ref digits,
         } = n
         {
-            assert_eq!(*sign, Sign::Positive);
+            assert_eq!(sign, Sign::Positive);
             assert_eq!(weight, 1);
             assert_eq!(scale, 0);
             assert_eq!(digits.as_slice(), &[120]);
-            assert_eq!(n.to_string(), "1200000");
         } else {
             panic!("Expected Value variant");
         }
