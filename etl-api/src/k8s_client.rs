@@ -360,6 +360,17 @@ impl K8sClient for HttpK8sClient {
                     "emptyDir": {}
                   }
                 ],
+                // Allow scheduling onto nodes tainted with `nodeType=workloads`.
+                // This toleration matches a common taint shape used to reserve
+                // nodes for background/ETL workloads.
+                "tolerations": [
+                  {
+                    "key": "nodeType",
+                    "operator": "Equal",
+                    "value": "workloads",
+                    "effect": "NoSchedule"
+                  }
+                ],
                 // We want to wait at most 60 seconds before K8S sends a `SIGKILL` to the containers.
                 "terminationGracePeriodSeconds": 60,
                 "initContainers": [
