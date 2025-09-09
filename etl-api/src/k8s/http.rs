@@ -599,7 +599,7 @@ impl K8sClient for HttpK8sClient {
 
         Ok(false)
     }
-    
+
     async fn delete_pod(&self, prefix: &str) -> Result<(), K8sError> {
         info!("deleting pod");
 
