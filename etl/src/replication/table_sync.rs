@@ -15,10 +15,10 @@ use crate::concurrency::shutdown::{ShutdownResult, ShutdownRx};
 use crate::concurrency::signal::SignalTx;
 use crate::concurrency::stream::TimeoutBatchStream;
 use crate::destination::Destination;
-use crate::error::{ErrorKind, EtlError, EtlResult};
+use crate::error::{ErrorKind, EtlResult};
 #[cfg(feature = "failpoints")]
 use crate::failpoints::{
-    START_TABLE_SYNC__BEFORE_DATA_SYNC_SLOT_CREATION, START_TABLE_SYNC__DURING_DATA_SYNC,
+    START_TABLE_SYNC_BEFORE_DATA_SYNC_SLOT_CREATION, START_TABLE_SYNC_DURING_DATA_SYNC,
     etl_fail_point,
 };
 use crate::metrics::{
@@ -168,7 +168,7 @@ where
 
             // Fail point to test when the table sync fails before copying data.
             #[cfg(feature = "failpoints")]
-            etl_fail_point(START_TABLE_SYNC__BEFORE_DATA_SYNC_SLOT_CREATION)?;
+            etl_fail_point(START_TABLE_SYNC_BEFORE_DATA_SYNC_SLOT_CREATION)?;
 
             // We create the slot with a transaction, since we need to have a consistent snapshot of the database
             // before copying the schema and tables.
@@ -239,7 +239,7 @@ where
                             .record(send_duration_secs);
                         // Fail point to test when the table sync fails after copying one batch.
                         #[cfg(feature = "failpoints")]
-                        etl_fail_point(START_TABLE_SYNC__DURING_DATA_SYNC)?;
+                        etl_fail_point(START_TABLE_SYNC_DURING_DATA_SYNC)?;
                     }
                     ShutdownResult::Shutdown(_) => {
                         // If we received a shutdown in the middle of a table copy, we bail knowing

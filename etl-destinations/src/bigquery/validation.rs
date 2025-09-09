@@ -1,5 +1,5 @@
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Utc};
-use etl::error::{ErrorKind, EtlError, EtlResult};
+use etl::error::{ErrorKind, EtlResult};
 use etl::types::{ArrayCellNonOptional, CellNonOptional, PgNumeric};
 use etl::{bail, etl_error};
 use std::sync::LazyLock;

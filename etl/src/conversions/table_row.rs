@@ -4,7 +4,6 @@ use tracing::error;
 
 use crate::bail;
 use crate::conversions::text::parse_cell_from_postgres_text;
-use crate::error::EtlError;
 use crate::error::{ErrorKind, EtlResult};
 use crate::types::{Cell, TableRow};
 

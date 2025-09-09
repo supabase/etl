@@ -24,7 +24,7 @@ use crate::conversions::event::{
     parse_event_from_update_message,
 };
 use crate::destination::Destination;
-use crate::error::{ErrorKind, EtlError, EtlResult};
+use crate::error::{ErrorKind, EtlResult};
 use crate::metrics::{
     APPLY, ETL_BATCH_SEND_DURATION_SECONDS, ETL_BATCH_SIZE, ETL_ITEMS_COPIED_TOTAL, MILLIS_PER_SEC,
     PHASE, PIPELINE_ID,

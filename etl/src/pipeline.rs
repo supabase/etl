@@ -6,7 +6,7 @@
 use crate::bail;
 use crate::concurrency::shutdown::{ShutdownTx, create_shutdown_channel};
 use crate::destination::Destination;
-use crate::error::{ErrorKind, EtlError, EtlResult};
+use crate::error::{ErrorKind, EtlResult};
 use crate::metrics::register_metrics;
 use crate::replication::client::PgReplicationClient;
 use crate::state::table::TableReplicationPhase;
