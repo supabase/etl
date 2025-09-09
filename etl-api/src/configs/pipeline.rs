@@ -37,7 +37,7 @@ impl From<StoredPipelineConfig> for FullApiPipelineConfig {
         Self {
             publication_name: value.publication_name,
             batch: Some(ApiBatchConfig {
-                max_fill_ms: value.batch.max_fill_ms
+                max_fill_ms: value.batch.max_fill_ms,
             }),
             table_error_retry_delay_ms: Some(value.table_error_retry_delay_ms),
             max_table_sync_workers: Some(value.max_table_sync_workers),
@@ -115,7 +115,10 @@ impl From<FullApiPipelineConfig> for StoredPipelineConfig {
             publication_name: value.publication_name,
             batch: BatchConfig {
                 max_size: DEFAULT_BATCH_MAX_SIZE,
-                max_fill_ms: value.batch.map(|b| b.max_fill_ms).unwrap_or(DEFAULT_BATCH_MAX_FILL_MS),
+                max_fill_ms: value
+                    .batch
+                    .map(|b| b.max_fill_ms)
+                    .unwrap_or(DEFAULT_BATCH_MAX_FILL_MS),
             },
             table_error_retry_delay_ms: value
                 .table_error_retry_delay_ms
@@ -211,9 +214,7 @@ mod tests {
 
         let partial = PartialApiPipelineConfig {
             publication_name: Some("new_publication".to_string()),
-            batch: Some(ApiBatchConfig {
-                max_fill_ms: 8000,
-            }),
+            batch: Some(ApiBatchConfig { max_fill_ms: 8000 }),
             table_error_retry_delay_ms: Some(5000),
             max_table_sync_workers: None,
         };

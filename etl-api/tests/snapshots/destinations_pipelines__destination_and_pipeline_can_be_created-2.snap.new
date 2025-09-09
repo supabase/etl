@@ -1,0 +1,19 @@
+---
+source: etl-api/tests/destinations_pipelines.rs
+assertion_line: 78
+expression: response.config
+---
+FullApiPipelineConfig {
+    publication_name: "publication",
+    batch: Some(
+        ApiBatchConfig {
+            max_fill_ms: 5,
+        },
+    ),
+    table_error_retry_delay_ms: Some(
+        10000,
+    ),
+    max_table_sync_workers: Some(
+        2,
+    ),
+}
