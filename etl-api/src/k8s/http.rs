@@ -1,57 +1,86 @@
+//! HTTP-backed Kubernetes client implementation.
+//!
+//! This module provides [`HttpK8sClient`], a concrete implementation of
+//! [`crate::k8s::base::K8sClient`] built on top of the [`kube`] crate.
+
+use crate::k8s::base::{K8sClient, K8sError, PodPhase};
 use async_trait::async_trait;
 use base64::{Engine, prelude::BASE64_STANDARD};
+use etl_config::Environment;
 use k8s_openapi::api::{
     apps::v1::StatefulSet,
     core::v1::{ConfigMap, Pod, Secret},
 };
-use serde_json::json;
-use std::collections::BTreeMap;
-use thiserror::Error;
-use tracing::info;
 use kube::{
     Client,
     api::{Api, DeleteParams, Patch, PatchParams},
 };
-use etl_config::Environment;
-use crate::k8s::base::{K8sClient, K8sError, PodPhase};
-use crate::routes::pipelines::PipelineError::K8s;
+use serde_json::json;
+use std::collections::BTreeMap;
+use tracing::info;
 
+/// Secret name suffix for the BigQuery service account key.
 const BQ_SECRET_NAME_SUFFIX: &str = "bq-service-account-key";
+/// Secret name suffix for the Postgres password.
 const POSTGRES_SECRET_NAME_SUFFIX: &str = "postgres-password";
+/// ConfigMap name suffix for the replicator configuration files.
 const REPLICATOR_CONFIG_MAP_NAME_SUFFIX: &str = "replicator-config";
+/// StatefulSet name suffix for the replicator workload.
 const REPLICATOR_STATEFUL_SET_SUFFIX: &str = "replicator-stateful-set";
+/// Application label suffix used to group resources.
 const REPLICATOR_APP_SUFFIX: &str = "replicator-app";
+/// Container name suffix for the replicator container.
 const REPLICATOR_CONTAINER_NAME_SUFFIX: &str = "replicator";
+/// Container name suffix for the Vector sidecar.
 const VECTOR_CONTAINER_NAME_SUFFIX: &str = "vector";
+/// Namespace where data-plane resources are created.
 const DATA_PLANE_NAMESPACE: &str = "etl-data-plane";
+/// Secret storing the Logflare API key.
 const LOGFLARE_SECRET_NAME: &str = "replicator-logflare-api-key";
+/// Docker image used for the Vector sidecar.
 const VECTOR_IMAGE_NAME: &str = "timberio/vector:0.46.1-distroless-libc";
+/// ConfigMap name containing the Vector configuration.
 const VECTOR_CONFIG_MAP_NAME: &str = "replicator-vector-config";
+/// Volume name for the replicator config file.
 const REPLICATOR_CONFIG_FILE_VOLUME_NAME: &str = "replicator-config-file";
+/// Volume name for the Vector config file.
 const VECTOR_CONFIG_FILE_VOLUME_NAME: &str = "vector-config-file";
+/// Secret storing the Sentry DSN.
 const SENTRY_DSN_SECRET_NAME: &str = "replicator-sentry-dsn";
+/// EmptyDir volume name used to share logs.
 const LOGS_VOLUME_NAME: &str = "logs";
+/// ConfigMap name providing trusted root certificates.
 pub const TRUSTED_ROOT_CERT_CONFIG_MAP_NAME: &str = "trusted-root-certs-config";
+/// Key inside the trusted root certificates ConfigMap.
 pub const TRUSTED_ROOT_CERT_KEY_NAME: &str = "trusted_root_certs";
+/// Environment variable for the Postgres password.
 const PG_PASSWORD_ENV_VAR_NAME: &str = "APP_PIPELINE__PG_CONNECTION__PASSWORD";
+/// Environment variable for the BigQuery service account key.
 const BIG_QUERY_SA_KEY_ENV_VAR_NAME: &str = "APP_DESTINATION__BIG_QUERY__SERVICE_ACCOUNT_KEY";
+/// Pod template annotation used to trigger rolling restarts.
 pub const RESTARTED_AT_ANNOTATION_KEY: &str = "etl.supabase.com/restarted-at";
+/// Label used to identify replicator pods.
 const REPLICATOR_APP_LABEL: &str = "etl-replicator-app";
 
-// These numbers were optimized for `c6in.4xlarge` instances.
+/// Replicator limits tuned for `c6in.4xlarge` instances.
 const REPLICATOR_MAX_MEMORY_PROD: &str = "500Mi";
 const REPLICATOR_MAX_CPU_PROD: &str = "100m";
-// These numbers were optimized for `t3.small` instances.
+/// Replicator limits tuned for `t3.small` instances.
 const REPLICATOR_MAX_MEMORY_STAGING: &str = "100Mi";
 const REPLICATOR_MAX_CPU_STAGING: &str = "100m";
 
+/// Runtime limits derived from the current environment.
 struct DynamicReplicatorConfig {
     max_memory: &'static str,
     max_cpu: &'static str,
 }
 
 impl DynamicReplicatorConfig {
-
+    /// Loads the runtime limits for the current environment.
+    ///
+    /// # Errors
+    /// Returns [`K8sError::ReplicatorConfiguration`] when the environment cannot
+    /// be determined.
     fn load() -> Result<Self, K8sError> {
         let environment = Environment::load().map_err(|_| K8sError::ReplicatorConfiguration)?;
 
@@ -63,7 +92,7 @@ impl DynamicReplicatorConfig {
             _ => Self {
                 max_memory: REPLICATOR_MAX_MEMORY_STAGING,
                 max_cpu: REPLICATOR_MAX_CPU_STAGING,
-            }
+            },
         };
 
         Ok(config)
@@ -71,6 +100,10 @@ impl DynamicReplicatorConfig {
 }
 
 #[derive(Debug)]
+/// HTTP-based implementation of [`K8sClient`].
+///
+/// The client is namespaced to the data-plane namespace and uses server-side
+/// apply to keep resources in sync.
 pub struct HttpK8sClient {
     secrets_api: Api<Secret>,
     config_maps_api: Api<ConfigMap>,
@@ -79,6 +112,13 @@ pub struct HttpK8sClient {
 }
 
 impl HttpK8sClient {
+    /// Creates a new [`HttpK8sClient`] using the ambient Kubernetes config.
+    ///
+    /// Prefers in-cluster configuration and falls back to the local kubeconfig
+    /// when running outside the cluster.
+    ///
+    /// # Errors
+    /// Returns [`K8sError::Kube`] if a Kubernetes client cannot be created.
     pub async fn new() -> Result<HttpK8sClient, K8sError> {
         let client = Client::try_default().await?;
 
@@ -99,6 +139,7 @@ impl HttpK8sClient {
 
 #[async_trait]
 impl K8sClient for HttpK8sClient {
+    /// See [`K8sClient::create_or_update_postgres_secret`].
     async fn create_or_update_postgres_secret(
         &self,
         prefix: &str,
@@ -131,6 +172,7 @@ impl K8sClient for HttpK8sClient {
         Ok(())
     }
 
+    /// See [`K8sClient::create_or_update_bq_secret`].
     async fn create_or_update_bq_secret(
         &self,
         prefix: &str,
@@ -163,6 +205,7 @@ impl K8sClient for HttpK8sClient {
         Ok(())
     }
 
+    /// See [`K8sClient::delete_postgres_secret`].
     async fn delete_postgres_secret(&self, prefix: &str) -> Result<(), K8sError> {
         info!("deleting postgres secret");
         let secret_name = format!("{prefix}-{POSTGRES_SECRET_NAME_SUFFIX}");
@@ -182,6 +225,7 @@ impl K8sClient for HttpK8sClient {
         Ok(())
     }
 
+    /// See [`K8sClient::delete_bq_secret`].
     async fn delete_bq_secret(&self, prefix: &str) -> Result<(), K8sError> {
         info!("deleting bq secret");
         let secret_name = format!("{prefix}-{BQ_SECRET_NAME_SUFFIX}");
@@ -201,6 +245,7 @@ impl K8sClient for HttpK8sClient {
         Ok(())
     }
 
+    /// See [`K8sClient::get_config_map`].
     async fn get_config_map(&self, config_map_name: &str) -> Result<ConfigMap, K8sError> {
         info!("getting config map");
         let config_map = match self.config_maps_api.get(config_map_name).await {
@@ -213,6 +258,7 @@ impl K8sClient for HttpK8sClient {
         Ok(config_map)
     }
 
+    /// See [`K8sClient::create_or_update_config_map`].
     async fn create_or_update_config_map(
         &self,
         prefix: &str,
@@ -245,6 +291,7 @@ impl K8sClient for HttpK8sClient {
         Ok(())
     }
 
+    /// See [`K8sClient::delete_config_map`].
     async fn delete_config_map(&self, prefix: &str) -> Result<(), K8sError> {
         info!("deleting config map");
         let config_map_name = format!("{prefix}-{REPLICATOR_CONFIG_MAP_NAME_SUFFIX}");
@@ -264,6 +311,7 @@ impl K8sClient for HttpK8sClient {
         Ok(())
     }
 
+    /// See [`K8sClient::create_or_update_stateful_set`].
     async fn create_or_update_stateful_set(
         &self,
         prefix: &str,
@@ -279,6 +327,8 @@ impl K8sClient for HttpK8sClient {
         let postgres_secret_name = format!("{prefix}-{POSTGRES_SECRET_NAME_SUFFIX}");
         let bq_secret_name = format!("{prefix}-{BQ_SECRET_NAME_SUFFIX}");
         let replicator_config_map_name = format!("{prefix}-{REPLICATOR_CONFIG_MAP_NAME_SUFFIX}");
+
+        let config = DynamicReplicatorConfig::load()?;
 
         let mut stateful_set_json = json!({
           "apiVersion": "apps/v1",
@@ -353,11 +403,12 @@ impl K8sClient for HttpK8sClient {
                     ],
                     "resources": {
                       "limits": {
-                        "memory": "200Mi",
+                        "memory": config.max_memory,
+                        "cpu": config.max_cpu,
                       },
                       "requests": {
-                        "memory": "200Mi",
-                        "cpu": "100m"
+                        "memory": config.max_memory,
+                        "cpu": config.max_cpu,
                       }
                     },
                     "volumeMounts": [
@@ -436,9 +487,9 @@ impl K8sClient for HttpK8sClient {
         // Attach template annotations (e.g., restart checksum) to trigger a rolling restart
         if let Some(annotations) = template_annotations
             && let Some(template) = stateful_set_json
-            .get_mut("spec")
-            .and_then(|s| s.get_mut("template"))
-            .and_then(|t| t.get_mut("metadata"))
+                .get_mut("spec")
+                .and_then(|s| s.get_mut("template"))
+                .and_then(|t| t.get_mut("metadata"))
         {
             // Insert annotations map
             let annotations_value = serde_json::to_value(annotations)?;
@@ -459,6 +510,7 @@ impl K8sClient for HttpK8sClient {
         Ok(())
     }
 
+    /// See [`K8sClient::delete_stateful_set`].
     async fn delete_stateful_set(&self, prefix: &str) -> Result<(), K8sError> {
         info!("deleting stateful set");
 
@@ -481,6 +533,7 @@ impl K8sClient for HttpK8sClient {
         Ok(())
     }
 
+    /// See [`K8sClient::get_pod_phase`].
     async fn get_pod_phase(&self, prefix: &str) -> Result<PodPhase, K8sError> {
         info!("getting pod status");
 
@@ -518,6 +571,7 @@ impl K8sClient for HttpK8sClient {
         Ok(phase)
     }
 
+    /// See [`K8sClient::has_replicator_container_error`].
     async fn has_replicator_container_error(&self, prefix: &str) -> Result<bool, K8sError> {
         info!("checking for replicator container error");
 
@@ -563,6 +617,7 @@ impl K8sClient for HttpK8sClient {
         Ok(false)
     }
 
+    /// See [`K8sClient::delete_pod`].
     async fn delete_pod(&self, prefix: &str) -> Result<(), K8sError> {
         info!("deleting pod");
 
