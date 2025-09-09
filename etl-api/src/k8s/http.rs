@@ -57,11 +57,13 @@ pub const RESTARTED_AT_ANNOTATION_KEY: &str = "etl.supabase.com/restarted-at";
 /// Label used to identify replicator pods.
 const REPLICATOR_APP_LABEL: &str = "etl-replicator-app";
 
-/// Replicator limits tuned for `c6in.4xlarge` instances.
+/// Replicator memory limit tuned for `c6in.4xlarge` instances.
 const REPLICATOR_MAX_MEMORY_PROD: &str = "500Mi";
+/// Replicator CPU limit tuned for `c6in.4xlarge` instances.
 const REPLICATOR_MAX_CPU_PROD: &str = "100m";
-/// Replicator limits tuned for `t3.small` instances.
+/// Replicator memory limit tuned for `t3.small` instances.
 const REPLICATOR_MAX_MEMORY_STAGING: &str = "100Mi";
+/// Replicator CPU limit tuned for `t3.small` instances.
 const REPLICATOR_MAX_CPU_STAGING: &str = "100m";
 
 /// Runtime limits derived from the current environment.
