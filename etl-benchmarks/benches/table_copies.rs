@@ -110,7 +110,7 @@ enum Commands {
         #[arg(long)]
         bq_max_staleness_mins: Option<u16>,
         /// BigQuery maximum concurrent streams (optional)
-        #[arg(long, default_value = "1")]
+        #[arg(long, default_value = "32")]
         bq_max_concurrent_streams: usize,
     },
     /// Prepare the benchmark environment by cleaning up replication slots
