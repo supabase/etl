@@ -63,6 +63,10 @@ pub enum ErrorKind {
     MissingTableSchema,
     MissingTableMapping,
     DestinationTableNameInvalid,
+    DestinationNamespaceAlreadyExists,
+    DestinationTableAlreadyExists,
+    DestinationNamespaceMissing,
+    DestinationTableMissing,
 
     // Data & Transformation Errors
     ConversionError,
