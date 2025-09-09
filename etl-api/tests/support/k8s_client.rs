@@ -3,9 +3,8 @@
 use std::collections::BTreeMap;
 
 use async_trait::async_trait;
-use etl_api::k8s_client::{
-    K8sClient, K8sError, PodPhase, TRUSTED_ROOT_CERT_CONFIG_MAP_NAME, TRUSTED_ROOT_CERT_KEY_NAME,
-};
+use etl_api::k8s::http::{TRUSTED_ROOT_CERT_CONFIG_MAP_NAME, TRUSTED_ROOT_CERT_KEY_NAME};
+use etl_api::k8s::{K8sClient, K8sError, PodPhase};
 use k8s_openapi::api::core::v1::ConfigMap;
 
 pub struct MockK8sClient;

@@ -13,12 +13,13 @@ use tracing_actix_web::TracingLogger;
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
 
+use crate::k8s::K8sClient;
+use crate::k8s::http::HttpK8sClient;
 use crate::{
     authentication::auth_validator,
     config::ApiConfig,
     configs::encryption,
     db::publications::Publication,
-    k8s_client::{HttpK8sClient, K8sClient},
     routes::{
         destinations::{
             CreateDestinationRequest, CreateDestinationResponse, ReadDestinationResponse,

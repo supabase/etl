@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use etl_api::k8s_client::K8sClient;
+use etl_api::k8s::K8sClient;
 use etl_api::routes::destinations::{CreateDestinationRequest, UpdateDestinationRequest};
 use etl_api::routes::destinations_pipelines::{
     CreateDestinationPipelineRequest, UpdateDestinationPipelineRequest,

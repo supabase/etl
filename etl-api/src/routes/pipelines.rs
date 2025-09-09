@@ -26,8 +26,10 @@ use crate::db::images::{Image, ImagesDbError};
 use crate::db::pipelines::{Pipeline, PipelinesDbError};
 use crate::db::replicators::{Replicator, ReplicatorsDbError};
 use crate::db::sources::{Source, SourcesDbError, source_exists};
-use crate::k8s_client::{K8sClient, K8sError, PodPhase, TRUSTED_ROOT_CERT_CONFIG_MAP_NAME};
-use crate::k8s_client::{RESTARTED_AT_ANNOTATION_KEY, TRUSTED_ROOT_CERT_KEY_NAME};
+use crate::k8s::http::{
+    RESTARTED_AT_ANNOTATION_KEY, TRUSTED_ROOT_CERT_CONFIG_MAP_NAME, TRUSTED_ROOT_CERT_KEY_NAME,
+};
+use crate::k8s::{K8sClient, K8sError, PodPhase};
 use crate::routes::{
     ErrorMessage, TenantIdError, connect_to_source_database_with_defaults, extract_tenant_id,
 };

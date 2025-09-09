@@ -1,9 +1,9 @@
 //! HTTP-backed Kubernetes client implementation.
 //!
 //! This module provides [`HttpK8sClient`], a concrete implementation of
-//! [`crate::k8s::base::K8sClient`] built on top of the [`kube`] crate.
+//! [`crate::k8s::K8sClient`] built on top of the [`kube`] crate.
 
-use crate::k8s::base::{K8sClient, K8sError, PodPhase};
+use crate::k8s::{K8sClient, K8sError, PodPhase};
 use async_trait::async_trait;
 use base64::{Engine, prelude::BASE64_STANDARD};
 use etl_config::Environment;
