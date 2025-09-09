@@ -7,7 +7,7 @@ use iceberg_catalog_rest::{RestCatalog, RestCatalogConfig};
 use crate::iceberg::schema::postgres_to_iceberg_schema;
 
 /// Client for connecting to Iceberg data lakes.
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct IcebergClient {
     catalog: Arc<dyn Catalog>,
 }

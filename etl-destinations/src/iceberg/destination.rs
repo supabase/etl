@@ -19,7 +19,7 @@ const ICEBERG_TABLE_ID_DELIMITER_ESCAPE_REPLACEMENT: &str = "__";
 /// Returns the Iceberg table identifier for a supplied [`TableName`].
 ///
 /// Escapes underscores in schema/table names to create valid Iceberg table identifiers.
-pub fn table_name_to_iceberg_table_id(table_name: &TableName) -> IcebergTableName {
+pub fn table_name_to_iceberg_table_name(table_name: &TableName) -> IcebergTableName {
     let escaped_schema = table_name.schema.replace(
         ICEBERG_TABLE_ID_DELIMITER,
         ICEBERG_TABLE_ID_DELIMITER_ESCAPE_REPLACEMENT,
@@ -35,11 +35,22 @@ pub fn table_name_to_iceberg_table_id(table_name: &TableName) -> IcebergTableNam
 /// Iceberg table identifier.
 pub type IcebergTableName = String;
 
+#[derive(Debug, Clone)]
 struct Inner {
     /// Cache of table IDs that have been successfully created or verified to exist.
     created_tables: HashSet<IcebergTableName>,
 }
 
+/// An iceberg destination that implements the ETL [`Destination`] trait.
+///
+/// Provides Postgres-to-Iceberg data pipeline functionality including streaming inserts
+/// and CDC operation handling.
+///
+/// Designed for high concurrency with minimal locking:
+/// - Client is accessible without locks
+/// - Only caches require synchronization
+/// - Multiple write operations can execute concurrently
+#[derive(Debug, Clone)]
 pub struct IcebergDestination<S> {
     client: IcebergClient,
     namespace: String,
@@ -61,6 +72,10 @@ where
         Ok(())
     }
 
+    /// Prepares a table for CDC streaming operations with schema-aware table creation.
+    ///
+    /// Retrieves the table schema from the store, creates or verifies the iceberg table exists.
+    /// Uses caching to avoid redundant table creation checks.
     async fn prepare_table_for_streaming(&self, table_id: TableId) -> EtlResult<IcebergTableName> {
         // We hold the lock for the entire preparation to avoid race conditions since the consistency
         // of this code path is critical.
@@ -78,7 +93,7 @@ where
                 )
             })?;
 
-        let iceberg_table_name = table_name_to_iceberg_table_id(&table_schema.name);
+        let iceberg_table_name = table_name_to_iceberg_table_name(&table_schema.name);
         let iceberg_table_name = self
             .get_or_create_iceberg_table_name(&table_id, iceberg_table_name)
             .await?;
