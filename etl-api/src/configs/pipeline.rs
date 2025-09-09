@@ -95,12 +95,13 @@ impl StoredPipelineConfig {
         }
 
         if let Some(value) = partial.batch
-            && let (Some(max_size), Some(max_fill_ms)) = (value.max_size, value.max_fill_ms) {
-                self.batch = BatchConfig {
-                    max_size,
-                    max_fill_ms,
-                };
-            }
+            && let (Some(max_size), Some(max_fill_ms)) = (value.max_size, value.max_fill_ms)
+        {
+            self.batch = BatchConfig {
+                max_size,
+                max_fill_ms,
+            };
+        }
 
         if let Some(value) = partial.table_error_retry_delay_ms {
             self.table_error_retry_delay_ms = value;
