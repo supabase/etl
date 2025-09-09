@@ -1,6 +1,6 @@
 use crate::bail;
+use crate::error::ErrorKind;
 use crate::error::EtlResult;
-use crate::error::{ErrorKind, EtlError};
 
 /// Parses a Postgres boolean value from its text format representation.
 ///

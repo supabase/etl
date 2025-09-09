@@ -3,7 +3,7 @@ use std::{collections::HashMap, fmt, sync::Arc};
 use etl_postgres::types::{TableId, TableSchema};
 use tokio::sync::{Notify, RwLock};
 
-use crate::error::{ErrorKind, EtlError, EtlResult};
+use crate::error::{ErrorKind, EtlResult};
 use crate::etl_error;
 use crate::state::table::{TableReplicationPhase, TableReplicationPhaseType};
 use crate::store::cleanup::CleanupStore;

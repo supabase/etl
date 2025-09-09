@@ -6,11 +6,11 @@
 use fail::fail_point;
 
 use crate::bail;
-use crate::error::{ErrorKind, EtlError, EtlResult};
+use crate::error::{ErrorKind, EtlResult};
 
-pub const START_TABLE_SYNC__BEFORE_DATA_SYNC_SLOT_CREATION: &str =
+pub const START_TABLE_SYNC_BEFORE_DATA_SYNC_SLOT_CREATION: &str =
     "start_table_sync.before_data_sync_slot_creation";
-pub const START_TABLE_SYNC__DURING_DATA_SYNC: &str = "start_table_sync.during_data_sync";
+pub const START_TABLE_SYNC_DURING_DATA_SYNC: &str = "start_table_sync.during_data_sync";
 
 /// Executes a configurable failpoint for testing error scenarios.
 ///

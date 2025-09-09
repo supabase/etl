@@ -3,7 +3,7 @@
 use etl::destination::memory::MemoryDestination;
 use etl::error::ErrorKind;
 use etl::failpoints::{
-    START_TABLE_SYNC__BEFORE_DATA_SYNC_SLOT_CREATION, START_TABLE_SYNC__DURING_DATA_SYNC,
+    START_TABLE_SYNC_BEFORE_DATA_SYNC_SLOT_CREATION, START_TABLE_SYNC_DURING_DATA_SYNC,
 };
 use etl::state::table::TableReplicationPhaseType;
 use etl::test_utils::database::spawn_source_database;
@@ -20,7 +20,7 @@ use rand::random;
 async fn table_copy_fails_after_data_sync_threw_an_error_with_no_retry() {
     let _scenario = FailScenario::setup();
     fail::cfg(
-        START_TABLE_SYNC__BEFORE_DATA_SYNC_SLOT_CREATION,
+        START_TABLE_SYNC_BEFORE_DATA_SYNC_SLOT_CREATION,
         "1*return(no_retry)",
     )
     .unwrap();
@@ -82,7 +82,7 @@ async fn table_copy_fails_after_data_sync_threw_an_error_with_no_retry() {
 async fn table_copy_is_consistent_after_data_sync_threw_an_error_with_timed_retry() {
     let _scenario = FailScenario::setup();
     fail::cfg(
-        START_TABLE_SYNC__BEFORE_DATA_SYNC_SLOT_CREATION,
+        START_TABLE_SYNC_BEFORE_DATA_SYNC_SLOT_CREATION,
         "1*return(timed_retry)",
     )
     .unwrap();
@@ -148,7 +148,7 @@ async fn table_copy_is_consistent_after_data_sync_threw_an_error_with_timed_retr
 #[tokio::test(flavor = "multi_thread")]
 async fn table_copy_is_consistent_during_data_sync_threw_an_error_with_timed_retry() {
     let _scenario = FailScenario::setup();
-    fail::cfg(START_TABLE_SYNC__DURING_DATA_SYNC, "1*return(timed_retry)").unwrap();
+    fail::cfg(START_TABLE_SYNC_DURING_DATA_SYNC, "1*return(timed_retry)").unwrap();
 
     init_test_tracing();
 

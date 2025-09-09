@@ -9,7 +9,7 @@ use uuid::Uuid;
 use crate::bail;
 use crate::conversions::numeric::PgNumeric;
 use crate::conversions::{bool::parse_bool, hex};
-use crate::error::{ErrorKind, EtlError, EtlResult};
+use crate::error::{ErrorKind, EtlResult};
 use crate::types::{ArrayCell, Cell};
 
 /// Creates a default [`Cell`] value for the given Postgres type.

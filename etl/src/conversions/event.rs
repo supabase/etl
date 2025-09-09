@@ -7,7 +7,6 @@ use std::sync::Arc;
 use tokio_postgres::types::PgLsn;
 
 use crate::conversions::text::{default_value_for_type, parse_cell_from_postgres_text};
-use crate::error::EtlError;
 use crate::error::{ErrorKind, EtlResult};
 use crate::store::schema::SchemaStore;
 use crate::types::{
