@@ -8,93 +8,13 @@ use serde_json::json;
 use std::collections::BTreeMap;
 use thiserror::Error;
 use tracing::info;
-
 use kube::{
     Client,
     api::{Api, DeleteParams, Patch, PatchParams},
 };
-
-#[derive(Debug, Error)]
-pub enum K8sError {
-    #[error("serde_json error: {0}")]
-    Serde(#[from] serde_json::error::Error),
-
-    #[error("kube error: {0}")]
-    Kube(#[from] kube::Error),
-}
-
-pub enum PodPhase {
-    Pending,
-    Running,
-    Succeeded,
-    Failed,
-    Unknown,
-}
-
-impl From<&str> for PodPhase {
-    fn from(value: &str) -> Self {
-        match value {
-            "Pending" => PodPhase::Pending,
-            "Running" => PodPhase::Running,
-            "Succeeded" => PodPhase::Succeeded,
-            "Failed" => PodPhase::Failed,
-            _ => PodPhase::Unknown,
-        }
-    }
-}
-
-#[async_trait]
-pub trait K8sClient: Send + Sync {
-    async fn create_or_update_postgres_secret(
-        &self,
-        prefix: &str,
-        postgres_password: &str,
-    ) -> Result<(), K8sError>;
-
-    async fn create_or_update_bq_secret(
-        &self,
-        prefix: &str,
-        bq_service_account_key: &str,
-    ) -> Result<(), K8sError>;
-
-    async fn delete_postgres_secret(&self, prefix: &str) -> Result<(), K8sError>;
-
-    async fn delete_bq_secret(&self, prefix: &str) -> Result<(), K8sError>;
-
-    async fn get_config_map(&self, config_map_name: &str) -> Result<ConfigMap, K8sError>;
-
-    async fn create_or_update_config_map(
-        &self,
-        prefix: &str,
-        base_config: &str,
-        prod_config: &str,
-    ) -> Result<(), K8sError>;
-
-    async fn delete_config_map(&self, prefix: &str) -> Result<(), K8sError>;
-
-    async fn create_or_update_stateful_set(
-        &self,
-        prefix: &str,
-        replicator_image: &str,
-        template_annotations: Option<BTreeMap<String, String>>,
-    ) -> Result<(), K8sError>;
-
-    async fn delete_stateful_set(&self, prefix: &str) -> Result<(), K8sError>;
-
-    async fn get_pod_phase(&self, prefix: &str) -> Result<PodPhase, K8sError>;
-
-    async fn has_replicator_container_error(&self, prefix: &str) -> Result<bool, K8sError>;
-
-    async fn delete_pod(&self, prefix: &str) -> Result<(), K8sError>;
-}
-
-#[derive(Debug)]
-pub struct HttpK8sClient {
-    secrets_api: Api<Secret>,
-    config_maps_api: Api<ConfigMap>,
-    stateful_sets_api: Api<StatefulSet>,
-    pods_api: Api<Pod>,
-}
+use etl_config::Environment;
+use crate::k8s::base::{K8sClient, K8sError, PodPhase};
+use crate::routes::pipelines::PipelineError::K8s;
 
 const BQ_SECRET_NAME_SUFFIX: &str = "bq-service-account-key";
 const POSTGRES_SECRET_NAME_SUFFIX: &str = "postgres-password";
@@ -117,6 +37,46 @@ const PG_PASSWORD_ENV_VAR_NAME: &str = "APP_PIPELINE__PG_CONNECTION__PASSWORD";
 const BIG_QUERY_SA_KEY_ENV_VAR_NAME: &str = "APP_DESTINATION__BIG_QUERY__SERVICE_ACCOUNT_KEY";
 pub const RESTARTED_AT_ANNOTATION_KEY: &str = "etl.supabase.com/restarted-at";
 const REPLICATOR_APP_LABEL: &str = "etl-replicator-app";
+
+// These numbers were optimized for `c6in.4xlarge` instances.
+const REPLICATOR_MAX_MEMORY_PROD: &str = "500Mi";
+const REPLICATOR_MAX_CPU_PROD: &str = "100m";
+// These numbers were optimized for `t3.small` instances.
+const REPLICATOR_MAX_MEMORY_STAGING: &str = "100Mi";
+const REPLICATOR_MAX_CPU_STAGING: &str = "100m";
+
+struct DynamicReplicatorConfig {
+    max_memory: &'static str,
+    max_cpu: &'static str,
+}
+
+impl DynamicReplicatorConfig {
+
+    fn load() -> Result<Self, K8sError> {
+        let environment = Environment::load().map_err(|_| K8sError::ReplicatorConfiguration)?;
+
+        let config = match environment {
+            Environment::Prod => Self {
+                max_memory: REPLICATOR_MAX_MEMORY_PROD,
+                max_cpu: REPLICATOR_MAX_CPU_PROD,
+            },
+            _ => Self {
+                max_memory: REPLICATOR_MAX_MEMORY_STAGING,
+                max_cpu: REPLICATOR_MAX_CPU_STAGING,
+            }
+        };
+
+        Ok(config)
+    }
+}
+
+#[derive(Debug)]
+pub struct HttpK8sClient {
+    secrets_api: Api<Secret>,
+    config_maps_api: Api<ConfigMap>,
+    stateful_sets_api: Api<StatefulSet>,
+    pods_api: Api<Pod>,
+}
 
 impl HttpK8sClient {
     pub async fn new() -> Result<HttpK8sClient, K8sError> {
@@ -476,9 +436,9 @@ impl K8sClient for HttpK8sClient {
         // Attach template annotations (e.g., restart checksum) to trigger a rolling restart
         if let Some(annotations) = template_annotations
             && let Some(template) = stateful_set_json
-                .get_mut("spec")
-                .and_then(|s| s.get_mut("template"))
-                .and_then(|t| t.get_mut("metadata"))
+            .get_mut("spec")
+            .and_then(|s| s.get_mut("template"))
+            .and_then(|t| t.get_mut("metadata"))
         {
             // Insert annotations map
             let annotations_value = serde_json::to_value(annotations)?;
