@@ -7,7 +7,7 @@ use etl_api::routes::destinations::{CreateDestinationRequest, CreateDestinationR
 use etl_api::routes::images::{CreateImageRequest, CreateImageResponse};
 use etl_api::routes::pipelines::{CreatePipelineRequest, CreatePipelineResponse};
 use etl_api::routes::sources::{CreateSourceRequest, CreateSourceResponse};
-use etl_config::{SerializableSecretString, shared::BatchConfig};
+use etl_config::SerializableSecretString;
 
 use crate::support::test_app::TestApp;
 
@@ -176,14 +176,15 @@ pub mod tenants {
 /// Pipeline config helpers.
 pub mod pipelines {
     use super::*;
+    use etl_api::configs::pipeline::ApiBatchConfig;
 
     /// Returns a default pipeline config.
     pub fn new_pipeline_config() -> FullApiPipelineConfig {
         FullApiPipelineConfig {
             publication_name: "publication".to_owned(),
-            batch: Some(BatchConfig {
-                max_size: 1000,
-                max_fill_ms: 5,
+            batch: Some(ApiBatchConfig {
+                max_size: Some(1000),
+                max_fill_ms: Some(5),
             }),
             table_error_retry_delay_ms: Some(10000),
             max_table_sync_workers: Some(2),
@@ -194,9 +195,9 @@ pub mod pipelines {
     pub fn updated_pipeline_config() -> FullApiPipelineConfig {
         FullApiPipelineConfig {
             publication_name: "updated_publication".to_owned(),
-            batch: Some(BatchConfig {
-                max_size: 2000,
-                max_fill_ms: 10,
+            batch: Some(ApiBatchConfig {
+                max_size: Some(2000),
+                max_fill_ms: Some(10),
             }),
             table_error_retry_delay_ms: Some(20000),
             max_table_sync_workers: Some(4),
@@ -205,7 +206,7 @@ pub mod pipelines {
 
     /// Partial config update variants used in tests.
     pub enum ConfigUpdateType {
-        Batch(BatchConfig),
+        Batch(ApiBatchConfig),
         TableErrorRetryDelayMs(u64),
         MaxTableSyncWorkers(u16),
     }
@@ -242,9 +243,9 @@ pub mod pipelines {
     pub fn updated_optional_pipeline_config() -> PartialApiPipelineConfig {
         PartialApiPipelineConfig {
             publication_name: None,
-            batch: Some(BatchConfig {
-                max_size: 1_000_000,
-                max_fill_ms: 100,
+            batch: Some(ApiBatchConfig {
+                max_size: Some(1_000_000),
+                max_fill_ms: Some(100),
             }),
             table_error_retry_delay_ms: Some(10000),
             max_table_sync_workers: Some(8),

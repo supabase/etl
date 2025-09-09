@@ -1,19 +1,32 @@
-use crate::configs::store::Store;
 use etl_config::shared::{BatchConfig, PgConnectionConfig, PipelineConfig};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
-const DEFAULT_BATCH_MAX_SIZE: usize = 1000000;
+use crate::configs::store::Store;
+
+const DEFAULT_BATCH_MAX_SIZE: usize = 100000;
 const DEFAULT_BATCH_MAX_FILL_MS: u64 = 10000;
 const DEFAULT_TABLE_ERROR_RETRY_DELAY_MS: u64 = 10000;
 const DEFAULT_MAX_TABLE_SYNC_WORKERS: u16 = 4;
+
+/// Batch processing configuration for pipelines.
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub struct ApiBatchConfig {
+    /// Maximum number of items in a batch for table copy and event streaming.
+    #[schema(example = 1000)]
+    pub max_size: Option<usize>,
+    /// Maximum time, in milliseconds, to wait for a batch to fill before processing.
+    #[schema(example = 1000)]
+    pub max_fill_ms: Option<u64>,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct FullApiPipelineConfig {
     #[schema(example = "my_publication")]
     pub publication_name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub batch: Option<BatchConfig>,
+    pub batch: Option<ApiBatchConfig>,
     #[schema(example = 1000)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub table_error_retry_delay_ms: Option<u64>,
@@ -26,7 +39,10 @@ impl From<StoredPipelineConfig> for FullApiPipelineConfig {
     fn from(value: StoredPipelineConfig) -> Self {
         Self {
             publication_name: value.publication_name,
-            batch: Some(value.batch),
+            batch: Some(ApiBatchConfig {
+                max_size: Some(value.batch.max_size),
+                max_fill_ms: Some(value.batch.max_fill_ms),
+            }),
             table_error_retry_delay_ms: Some(value.table_error_retry_delay_ms),
             max_table_sync_workers: Some(value.max_table_sync_workers),
         }
@@ -40,7 +56,7 @@ pub struct PartialApiPipelineConfig {
     pub publication_name: Option<String>,
     #[schema(example = r#"{"max_size": 1000000, "max_fill_ms": 10000}"#)]
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub batch: Option<BatchConfig>,
+    pub batch: Option<ApiBatchConfig>,
     #[schema(example = 1000)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub table_error_retry_delay_ms: Option<u64>,
@@ -78,8 +94,13 @@ impl StoredPipelineConfig {
             self.publication_name = value;
         }
 
-        if let Some(value) = partial.batch {
-            self.batch = value;
+        if let Some(value) = partial.batch
+            && let (Some(max_size), Some(max_fill_ms)) = (value.max_size, value.max_fill_ms)
+        {
+            self.batch = BatchConfig {
+                max_size,
+                max_fill_ms,
+            };
         }
 
         if let Some(value) = partial.table_error_retry_delay_ms {
@@ -96,12 +117,20 @@ impl Store for StoredPipelineConfig {}
 
 impl From<FullApiPipelineConfig> for StoredPipelineConfig {
     fn from(value: FullApiPipelineConfig) -> Self {
-        Self {
-            publication_name: value.publication_name,
-            batch: value.batch.unwrap_or(BatchConfig {
+        let batch = value
+            .batch
+            .map(|b| BatchConfig {
+                max_size: b.max_size.unwrap_or(DEFAULT_BATCH_MAX_SIZE),
+                max_fill_ms: b.max_fill_ms.unwrap_or(DEFAULT_BATCH_MAX_FILL_MS),
+            })
+            .unwrap_or(BatchConfig {
                 max_size: DEFAULT_BATCH_MAX_SIZE,
                 max_fill_ms: DEFAULT_BATCH_MAX_FILL_MS,
-            }),
+            });
+
+        Self {
+            publication_name: value.publication_name,
+            batch,
             table_error_retry_delay_ms: value
                 .table_error_retry_delay_ms
                 .unwrap_or(DEFAULT_TABLE_ERROR_RETRY_DELAY_MS),
@@ -196,9 +225,9 @@ mod tests {
 
         let partial = PartialApiPipelineConfig {
             publication_name: Some("new_publication".to_string()),
-            batch: Some(BatchConfig {
-                max_size: 2000,
-                max_fill_ms: 8000,
+            batch: Some(ApiBatchConfig {
+                max_size: Some(1000),
+                max_fill_ms: Some(8000),
             }),
             table_error_retry_delay_ms: Some(5000),
             max_table_sync_workers: None,
@@ -207,7 +236,7 @@ mod tests {
         stored.merge(partial);
 
         assert_eq!(stored.publication_name, "new_publication");
-        assert_eq!(stored.batch.max_size, 2000);
+        assert_eq!(stored.batch.max_size, 1000);
         assert_eq!(stored.batch.max_fill_ms, 8000);
         assert_eq!(stored.table_error_retry_delay_ms, 5000);
         assert_eq!(stored.max_table_sync_workers, 2);

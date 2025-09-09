@@ -72,3 +72,6 @@ utoipa = { version = "5.4.0", default-features = false }
 utoipa-swagger-ui = { version = "9.0.2", default-features = false }
 uuid = { version = "1.17.0", default-features = false }
 x509-cert = { version = "0.2.2", default-features = false }
+
+[profile.bench]
+debug = true

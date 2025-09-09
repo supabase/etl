@@ -1,3 +1,4 @@
+use etl_api::configs::pipeline::ApiBatchConfig;
 use etl_api::routes::pipelines::{
     CreatePipelineRequest, CreatePipelineResponse, GetPipelineReplicationStatusResponse,
     GetPipelineVersionResponse, ReadPipelineResponse, ReadPipelinesResponse,
@@ -5,7 +6,7 @@ use etl_api::routes::pipelines::{
     SimpleTableReplicationState, UpdatePipelineConfigRequest, UpdatePipelineConfigResponse,
     UpdatePipelineRequest, UpdatePipelineVersionRequest,
 };
-use etl_config::shared::{BatchConfig, PgConnectionConfig};
+use etl_config::shared::PgConnectionConfig;
 use etl_postgres::sqlx::test_utils::drop_pg_database;
 use etl_telemetry::tracing::init_test_tracing;
 use reqwest::StatusCode;
@@ -755,10 +756,12 @@ async fn pipeline_config_can_be_updated() {
 
     // Act
     let update_request = UpdatePipelineConfigRequest {
-        config: partially_updated_optional_pipeline_config(ConfigUpdateType::Batch(BatchConfig {
-            max_size: 10_000,
-            max_fill_ms: 100,
-        })),
+        config: partially_updated_optional_pipeline_config(ConfigUpdateType::Batch(
+            ApiBatchConfig {
+                max_size: Some(10_000),
+                max_fill_ms: Some(100),
+            },
+        )),
     };
     let response = app
         .update_pipeline_config(&tenant_id, pipeline_id, &update_request)

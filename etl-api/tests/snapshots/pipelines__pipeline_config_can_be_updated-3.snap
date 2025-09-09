@@ -5,9 +5,13 @@ expression: response.config
 FullApiPipelineConfig {
     publication_name: "publication",
     batch: Some(
-        BatchConfig {
-            max_size: 10000,
-            max_fill_ms: 100,
+        ApiBatchConfig {
+            max_size: Some(
+                10000,
+            ),
+            max_fill_ms: Some(
+                100,
+            ),
         },
     ),
     table_error_retry_delay_ms: Some(
