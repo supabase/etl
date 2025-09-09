@@ -5,8 +5,7 @@ expression: pipeline.config
 FullApiPipelineConfig {
     publication_name: "publication",
     batch: Some(
-        BatchConfig {
-            max_size: 1000,
+        ApiBatchConfig {
             max_fill_ms: 5,
         },
     ),
