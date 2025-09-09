@@ -182,7 +182,7 @@ pub mod pipelines {
     pub fn new_pipeline_config() -> FullApiPipelineConfig {
         FullApiPipelineConfig {
             publication_name: "publication".to_owned(),
-            batch: Some(ApiBatchConfig { max_fill_ms: 5 }),
+            batch: Some(ApiBatchConfig { max_size: Some(1000), max_fill_ms: Some(5) }),
             table_error_retry_delay_ms: Some(10000),
             max_table_sync_workers: Some(2),
         }
@@ -192,7 +192,7 @@ pub mod pipelines {
     pub fn updated_pipeline_config() -> FullApiPipelineConfig {
         FullApiPipelineConfig {
             publication_name: "updated_publication".to_owned(),
-            batch: Some(ApiBatchConfig { max_fill_ms: 10 }),
+            batch: Some(ApiBatchConfig { max_size: Some(2000), max_fill_ms: Some(10) }),
             table_error_retry_delay_ms: Some(20000),
             max_table_sync_workers: Some(4),
         }
@@ -237,7 +237,7 @@ pub mod pipelines {
     pub fn updated_optional_pipeline_config() -> PartialApiPipelineConfig {
         PartialApiPipelineConfig {
             publication_name: None,
-            batch: Some(ApiBatchConfig { max_fill_ms: 100 }),
+            batch: Some(ApiBatchConfig { max_size: Some(1_000_000), max_fill_ms: Some(100) }),
             table_error_retry_delay_ms: Some(10000),
             max_table_sync_workers: Some(8),
         }

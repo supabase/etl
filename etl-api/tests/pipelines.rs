@@ -757,7 +757,7 @@ async fn pipeline_config_can_be_updated() {
     // Act
     let update_request = UpdatePipelineConfigRequest {
         config: partially_updated_optional_pipeline_config(ConfigUpdateType::Batch(
-            ApiBatchConfig { max_fill_ms: 100 },
+            ApiBatchConfig { max_size: Some(10_000), max_fill_ms: Some(100) },
         )),
     };
     let response = app

@@ -6,7 +6,12 @@ FullApiPipelineConfig {
     publication_name: "publication",
     batch: Some(
         ApiBatchConfig {
-            max_fill_ms: 100,
+            max_size: Some(
+                10000,
+            ),
+            max_fill_ms: Some(
+                100,
+            ),
         },
     ),
     table_error_retry_delay_ms: Some(

@@ -13,9 +13,12 @@ const DEFAULT_MAX_TABLE_SYNC_WORKERS: u16 = 4;
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub struct ApiBatchConfig {
+    /// Maximum number of items in a batch for table copy and event streaming.
+    #[schema(example = 1000)]
+    pub max_size: Option<usize>,
     /// Maximum time, in milliseconds, to wait for a batch to fill before processing.
     #[schema(example = 1000)]
-    pub max_fill_ms: u64,
+    pub max_fill_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -37,7 +40,8 @@ impl From<StoredPipelineConfig> for FullApiPipelineConfig {
         Self {
             publication_name: value.publication_name,
             batch: Some(ApiBatchConfig {
-                max_fill_ms: value.batch.max_fill_ms,
+                max_size: Some(value.batch.max_size),
+                max_fill_ms: Some(value.batch.max_fill_ms),
             }),
             table_error_retry_delay_ms: Some(value.table_error_retry_delay_ms),
             max_table_sync_workers: Some(value.max_table_sync_workers),
@@ -90,12 +94,13 @@ impl StoredPipelineConfig {
             self.publication_name = value;
         }
 
-        if let Some(value) = partial.batch {
-            self.batch = BatchConfig {
-                max_size: self.batch.max_size,
-                max_fill_ms: value.max_fill_ms,
-            };
-        }
+        if let Some(value) = partial.batch
+            && let (Some(max_size), Some(max_fill_ms)) = (value.max_size, value.max_fill_ms) {
+                self.batch = BatchConfig {
+                    max_size,
+                    max_fill_ms,
+                };
+            }
 
         if let Some(value) = partial.table_error_retry_delay_ms {
             self.table_error_retry_delay_ms = value;
@@ -111,15 +116,20 @@ impl Store for StoredPipelineConfig {}
 
 impl From<FullApiPipelineConfig> for StoredPipelineConfig {
     fn from(value: FullApiPipelineConfig) -> Self {
+        let batch = value
+            .batch
+            .map(|b| BatchConfig {
+                max_size: b.max_size.unwrap_or(DEFAULT_BATCH_MAX_SIZE),
+                max_fill_ms: b.max_fill_ms.unwrap_or(DEFAULT_BATCH_MAX_FILL_MS),
+            })
+            .unwrap_or(BatchConfig {
+                max_size: DEFAULT_BATCH_MAX_SIZE,
+                max_fill_ms: DEFAULT_BATCH_MAX_FILL_MS,
+            });
+
         Self {
             publication_name: value.publication_name,
-            batch: BatchConfig {
-                max_size: DEFAULT_BATCH_MAX_SIZE,
-                max_fill_ms: value
-                    .batch
-                    .map(|b| b.max_fill_ms)
-                    .unwrap_or(DEFAULT_BATCH_MAX_FILL_MS),
-            },
+            batch,
             table_error_retry_delay_ms: value
                 .table_error_retry_delay_ms
                 .unwrap_or(DEFAULT_TABLE_ERROR_RETRY_DELAY_MS),
@@ -214,7 +224,10 @@ mod tests {
 
         let partial = PartialApiPipelineConfig {
             publication_name: Some("new_publication".to_string()),
-            batch: Some(ApiBatchConfig { max_fill_ms: 8000 }),
+            batch: Some(ApiBatchConfig {
+                max_size: Some(1000),
+                max_fill_ms: Some(8000),
+            }),
             table_error_retry_delay_ms: Some(5000),
             max_table_sync_workers: None,
         };
@@ -222,6 +235,7 @@ mod tests {
         stored.merge(partial);
 
         assert_eq!(stored.publication_name, "new_publication");
+        assert_eq!(stored.batch.max_size, 1000);
         assert_eq!(stored.batch.max_fill_ms, 8000);
         assert_eq!(stored.table_error_retry_delay_ms, 5000);
         assert_eq!(stored.max_table_sync_workers, 2);
