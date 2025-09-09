@@ -96,11 +96,11 @@ impl DynamicReplicatorConfig {
     }
 }
 
-#[derive(Debug)]
 /// HTTP-based implementation of [`K8sClient`].
 ///
 /// The client is namespaced to the data-plane namespace and uses server-side
 /// apply to keep resources in sync.
+#[derive(Debug)]
 pub struct HttpK8sClient {
     secrets_api: Api<Secret>,
     config_maps_api: Api<ConfigMap>,
@@ -113,9 +113,6 @@ impl HttpK8sClient {
     ///
     /// Prefers in-cluster configuration and falls back to the local kubeconfig
     /// when running outside the cluster.
-    ///
-    /// # Errors
-    /// Returns [`K8sError::Kube`] if a Kubernetes client cannot be created.
     pub async fn new() -> Result<HttpK8sClient, K8sError> {
         let client = Client::try_default().await?;
 
@@ -136,7 +133,6 @@ impl HttpK8sClient {
 
 #[async_trait]
 impl K8sClient for HttpK8sClient {
-    /// See [`K8sClient::create_or_update_postgres_secret`].
     async fn create_or_update_postgres_secret(
         &self,
         prefix: &str,
@@ -169,7 +165,6 @@ impl K8sClient for HttpK8sClient {
         Ok(())
     }
 
-    /// See [`K8sClient::create_or_update_bq_secret`].
     async fn create_or_update_bq_secret(
         &self,
         prefix: &str,
@@ -202,7 +197,6 @@ impl K8sClient for HttpK8sClient {
         Ok(())
     }
 
-    /// See [`K8sClient::delete_postgres_secret`].
     async fn delete_postgres_secret(&self, prefix: &str) -> Result<(), K8sError> {
         info!("deleting postgres secret");
         let secret_name = format!("{prefix}-{POSTGRES_SECRET_NAME_SUFFIX}");
@@ -222,7 +216,6 @@ impl K8sClient for HttpK8sClient {
         Ok(())
     }
 
-    /// See [`K8sClient::delete_bq_secret`].
     async fn delete_bq_secret(&self, prefix: &str) -> Result<(), K8sError> {
         info!("deleting bq secret");
         let secret_name = format!("{prefix}-{BQ_SECRET_NAME_SUFFIX}");
@@ -242,7 +235,6 @@ impl K8sClient for HttpK8sClient {
         Ok(())
     }
 
-    /// See [`K8sClient::get_config_map`].
     async fn get_config_map(&self, config_map_name: &str) -> Result<ConfigMap, K8sError> {
         info!("getting config map");
         let config_map = match self.config_maps_api.get(config_map_name).await {
@@ -255,7 +247,6 @@ impl K8sClient for HttpK8sClient {
         Ok(config_map)
     }
 
-    /// See [`K8sClient::create_or_update_config_map`].
     async fn create_or_update_config_map(
         &self,
         prefix: &str,
@@ -288,7 +279,6 @@ impl K8sClient for HttpK8sClient {
         Ok(())
     }
 
-    /// See [`K8sClient::delete_config_map`].
     async fn delete_config_map(&self, prefix: &str) -> Result<(), K8sError> {
         info!("deleting config map");
         let config_map_name = format!("{prefix}-{REPLICATOR_CONFIG_MAP_NAME_SUFFIX}");
@@ -308,7 +298,6 @@ impl K8sClient for HttpK8sClient {
         Ok(())
     }
 
-    /// See [`K8sClient::create_or_update_stateful_set`].
     async fn create_or_update_stateful_set(
         &self,
         prefix: &str,
@@ -507,7 +496,6 @@ impl K8sClient for HttpK8sClient {
         Ok(())
     }
 
-    /// See [`K8sClient::delete_stateful_set`].
     async fn delete_stateful_set(&self, prefix: &str) -> Result<(), K8sError> {
         info!("deleting stateful set");
 
@@ -530,7 +518,6 @@ impl K8sClient for HttpK8sClient {
         Ok(())
     }
 
-    /// See [`K8sClient::get_pod_phase`].
     async fn get_pod_phase(&self, prefix: &str) -> Result<PodPhase, K8sError> {
         info!("getting pod status");
 
@@ -568,7 +555,6 @@ impl K8sClient for HttpK8sClient {
         Ok(phase)
     }
 
-    /// See [`K8sClient::has_replicator_container_error`].
     async fn has_replicator_container_error(&self, prefix: &str) -> Result<bool, K8sError> {
         info!("checking for replicator container error");
 
@@ -613,8 +599,7 @@ impl K8sClient for HttpK8sClient {
 
         Ok(false)
     }
-
-    /// See [`K8sClient::delete_pod`].
+    
     async fn delete_pod(&self, prefix: &str) -> Result<(), K8sError> {
         info!("deleting pod");
 
