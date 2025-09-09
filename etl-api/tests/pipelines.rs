@@ -1,3 +1,18 @@
+use etl_api::configs::pipeline::ApiBatchConfig;
+use etl_api::routes::pipelines::{
+    CreatePipelineRequest, CreatePipelineResponse, GetPipelineReplicationStatusResponse,
+    GetPipelineVersionResponse, ReadPipelineResponse, ReadPipelinesResponse,
+    RollbackTableStateRequest, RollbackTableStateResponse, RollbackType,
+    SimpleTableReplicationState, UpdatePipelineConfigRequest, UpdatePipelineConfigResponse,
+    UpdatePipelineRequest, UpdatePipelineVersionRequest,
+};
+use etl_config::shared::PgConnectionConfig;
+use etl_postgres::sqlx::test_utils::drop_pg_database;
+use etl_telemetry::tracing::init_test_tracing;
+use reqwest::StatusCode;
+use sqlx::PgPool;
+use sqlx::postgres::types::Oid;
+
 use crate::support::database::{
     create_test_source_database, run_etl_migrations_on_source_database,
 };
@@ -14,20 +29,6 @@ use crate::{
     support::mocks::tenants::{create_tenant, create_tenant_with_id_and_name},
     support::test_app::{TestApp, spawn_test_app},
 };
-use etl_api::configs::pipeline::ApiBatchConfig;
-use etl_api::routes::pipelines::{
-    CreatePipelineRequest, CreatePipelineResponse, GetPipelineReplicationStatusResponse,
-    GetPipelineVersionResponse, ReadPipelineResponse, ReadPipelinesResponse,
-    RollbackTableStateRequest, RollbackTableStateResponse, RollbackType,
-    SimpleTableReplicationState, UpdatePipelineConfigRequest, UpdatePipelineConfigResponse,
-    UpdatePipelineRequest, UpdatePipelineVersionRequest,
-};
-use etl_config::shared::PgConnectionConfig;
-use etl_postgres::sqlx::test_utils::drop_pg_database;
-use etl_telemetry::tracing::init_test_tracing;
-use reqwest::StatusCode;
-use sqlx::PgPool;
-use sqlx::postgres::types::Oid;
 
 mod support;
 
