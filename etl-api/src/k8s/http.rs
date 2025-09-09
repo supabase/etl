@@ -74,10 +74,6 @@ struct DynamicReplicatorConfig {
 
 impl DynamicReplicatorConfig {
     /// Loads the runtime limits for the current environment.
-    ///
-    /// # Errors
-    /// Returns [`K8sError::ReplicatorConfiguration`] when the environment cannot
-    /// be determined.
     fn load() -> Result<Self, K8sError> {
         let environment = Environment::load().map_err(|_| K8sError::ReplicatorConfiguration)?;
 
