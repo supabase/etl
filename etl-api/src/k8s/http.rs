@@ -74,9 +74,7 @@ struct DynamicReplicatorConfig {
 
 impl DynamicReplicatorConfig {
     /// Loads the runtime limits for the current environment.
-    fn load() -> Result<Self, K8sError> {
-        let environment = Environment::load().map_err(|_| K8sError::ReplicatorConfiguration)?;
-
+    fn load(environment: &Environment) -> Result<Self, K8sError> {
         let config = match environment {
             Environment::Prod => Self {
                 max_memory: REPLICATOR_MAX_MEMORY_PROD,
@@ -302,6 +300,9 @@ impl K8sClient for HttpK8sClient {
     ) -> Result<(), K8sError> {
         info!("patching stateful set");
 
+        let environment = Environment::load().map_err(|_| K8sError::MissingEnvironment)?;
+        let config = DynamicReplicatorConfig::load(&environment)?;
+
         let stateful_set_name = format!("{prefix}-{REPLICATOR_STATEFUL_SET_SUFFIX}");
         let replicator_app_name = format!("{prefix}-{REPLICATOR_APP_SUFFIX}");
         let replicator_container_name = format!("{prefix}-{REPLICATOR_CONTAINER_NAME_SUFFIX}");
@@ -309,8 +310,6 @@ impl K8sClient for HttpK8sClient {
         let postgres_secret_name = format!("{prefix}-{POSTGRES_SECRET_NAME_SUFFIX}");
         let bq_secret_name = format!("{prefix}-{BQ_SECRET_NAME_SUFFIX}");
         let replicator_config_map_name = format!("{prefix}-{REPLICATOR_CONFIG_MAP_NAME_SUFFIX}");
-
-        let config = DynamicReplicatorConfig::load()?;
 
         let mut stateful_set_json = json!({
           "apiVersion": "apps/v1",
@@ -419,7 +418,7 @@ impl K8sClient for HttpK8sClient {
                     "env": [
                       {
                         "name": "APP_ENVIRONMENT",
-                        "value": "prod"
+                        "value": environment.to_string()
                       },
                       {
                         "name": "APP_SENTRY__DSN",

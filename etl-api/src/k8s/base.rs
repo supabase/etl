@@ -10,16 +10,15 @@ use thiserror::Error;
 pub enum K8sError {
     /// A serialization or deserialization error while building or parsing
     /// Kubernetes resources.
-    #[error("An error occurred in serde: {0}")]
+    #[error("An error occurred in serde when dealing with K8s: {0}")]
     Serde(#[from] serde_json::error::Error),
     /// An error returned by the [`kube`] client when talking to the API
     /// server.
-    #[error("An error occurred with kube: {0}")]
+    #[error("An error occurred with kube when dealing with K8s: {0}")]
     Kube(#[from] kube::Error),
-    /// The environment-dependent replicator configuration could not be
-    /// determined.
-    #[error("An error occurred while configuring the replicator")]
-    ReplicatorConfiguration,
+    /// The environment was not found while configuring K8s.
+    #[error("Could not get environment when dealing with K8s")]
+    MissingEnvironment,
 }
 
 /// A simplified view of a pod phase.
