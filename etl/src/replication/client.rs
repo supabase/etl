@@ -830,7 +830,7 @@ impl PgReplicationClient {
             }
 
             let union_query = selects.join(" union all ");
-            format!(r#"copy ({}) to stdout with (format text);"#, union_query)
+            format!(r#"copy ({union_query}) to stdout with (format text);"#)
         } else {
             let table_name = self.get_table_name(table_id).await?;
             format!(
@@ -879,10 +879,7 @@ impl PgReplicationClient {
 
     /// Returns true if the given table id refers to a partitioned table (relkind = 'p').
     async fn is_partitioned_table(&self, table_id: TableId) -> EtlResult<bool> {
-        let query = format!(
-            "select c.relkind from pg_class c where c.oid = {}",
-            table_id
-        );
+        let query = format!("select c.relkind from pg_class c where c.oid = {table_id}");
 
         for msg in self.client.simple_query(&query).await? {
             if let SimpleQueryMessage::Row(row) = msg {
@@ -905,7 +902,7 @@ impl PgReplicationClient {
             with recursive parts(relid) as (
                 select i.inhrelid
                 from pg_inherits i
-                where i.inhparent = {parent}
+                where i.inhparent = {parent_id}
                 union all
                 select i.inhrelid
                 from pg_inherits i
@@ -915,8 +912,7 @@ impl PgReplicationClient {
             from parts p
             left join pg_inherits i on i.inhparent = p.relid
             where i.inhrelid is null
-            "#,
-            parent = parent_id
+            "#
         );
 
         let mut ids = Vec::new();
