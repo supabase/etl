@@ -14,6 +14,7 @@ use tokio::pin;
 use tokio_postgres::types::PgLsn;
 use tracing::{debug, info};
 
+use crate::concurrency::pause::PauseRx;
 use crate::concurrency::shutdown::ShutdownRx;
 use crate::concurrency::signal::SignalRx;
 use crate::concurrency::stream::{TimeoutStream, TimeoutStreamResult};
@@ -365,6 +366,7 @@ pub async fn start_apply_loop<S, D, T>(
     destination: D,
     hook: T,
     mut shutdown_rx: ShutdownRx,
+    mut pause_rx: PauseRx,
     mut force_syncing_tables_rx: Option<SignalRx>,
 ) -> EtlResult<ApplyLoopResult>
 where
@@ -433,6 +435,15 @@ where
             // This ensures graceful shutdown takes precedence over event processing
             biased;
 
+            // PRIORITY 0: Pause/unpause notifications
+            _ = pause_rx.changed() => {
+                    if *pause_rx.borrow() {
+                        info!("apply loop paused - replication stream consumption suspended");
+                    } else {
+                        info!("apply loop resumed - replication stream consumption resumed");
+                }
+            }
+
             // PRIORITY 1: Handle shutdown signals immediately
             // When shutdown is requested, we stop processing new events and terminate gracefully
             // This allows current transactions to complete but prevents new ones from starting
@@ -442,10 +453,10 @@ where
                 return Ok(ApplyLoopResult::ApplyStopped);
             }
 
-            // PRIORITY 2: Process incoming replication messages from Postgres
+            // PRIORITY 2: Process incoming replication messages from Postgres (skipped when paused)
             // This is the primary data flow - converts replication protocol messages
             // into typed events and accumulates them into batches for efficient processing
-            Some(message) = logical_replication_stream.next() => {
+            Some(message) = logical_replication_stream.next(), if !*pause_rx.borrow() => {
                 let continue_loop = handle_replication_message_with_timeout(
                     &mut state,
                     logical_replication_stream.as_mut(),

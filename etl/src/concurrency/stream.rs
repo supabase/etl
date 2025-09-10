@@ -1,9 +1,12 @@
+use crate::concurrency::pause::PauseRx;
 use crate::concurrency::shutdown::{ShutdownResult, ShutdownRx};
 use core::pin::Pin;
 use core::task::{Context, Poll};
 use etl_config::shared::BatchConfig;
-use futures::{Future, Stream, ready};
+use futures::task::AtomicWaker;
+use futures::{Stream, ready};
 use pin_project_lite::pin_project;
+use std::sync::Arc;
 use std::time::Duration;
 use tracing::info;
 
@@ -23,6 +26,8 @@ pin_project! {
         #[pin]
         deadline: Option<tokio::time::Sleep>,
         shutdown_rx: ShutdownRx,
+        pause_rx: PauseRx,
+        pause_waker: Arc<AtomicWaker>,
         items: Vec<S::Item>,
         batch_config: BatchConfig,
         reset_timer: bool,
@@ -36,11 +41,31 @@ impl<B, S: Stream<Item = B>> TimeoutBatchStream<B, S> {
     ///
     /// The stream will batch items according to the provided `batch_config` and can be
     /// stopped using the `shutdown_rx` watch channel.
-    pub fn wrap(stream: S, batch_config: BatchConfig, shutdown_rx: ShutdownRx) -> Self {
+    pub fn wrap(
+        stream: S,
+        batch_config: BatchConfig,
+        shutdown_rx: ShutdownRx,
+        pause_rx: PauseRx,
+    ) -> Self {
+        let waker = Arc::new(AtomicWaker::new());
+        // Spawn a notifier that wakes the registered waker whenever pause state changes.
+        let mut pause_rx_clone = pause_rx.clone();
+        let waker_clone = Arc::clone(&waker);
+        tokio::spawn(async move {
+            loop {
+                if pause_rx_clone.changed().await.is_err() {
+                    break;
+                }
+                waker_clone.wake();
+            }
+        });
+
         TimeoutBatchStream {
             stream,
             deadline: None,
             shutdown_rx,
+            pause_rx,
+            pause_waker: waker,
             items: Vec::with_capacity(batch_config.max_size),
             batch_config,
             reset_timer: true,
@@ -90,7 +115,14 @@ impl<B, S: Stream<Item = B>> Stream for TimeoutBatchStream<B, S> {
                 return Poll::Ready(Some(ShutdownResult::Shutdown(std::mem::take(this.items))));
             }
 
-            // PRIORITY 2: Timer management
+            // PRIORITY 2: Check for pause signal
+            // If paused, do not poll the inner stream. Register waker to resume on change.
+            if *this.pause_rx.borrow() {
+                this.pause_waker.register(cx.waker());
+                return Poll::Pending;
+            }
+
+            // PRIORITY 3: Timer management
             // Reset the timeout timer when starting a new batch or after emitting a batch
             if *this.reset_timer {
                 this.deadline
@@ -100,14 +132,14 @@ impl<B, S: Stream<Item = B>> Stream for TimeoutBatchStream<B, S> {
                 *this.reset_timer = false;
             }
 
-            // PRIORITY 3: Memory optimization
+            // PRIORITY 4: Memory optimization
             // Pre-allocate batch capacity when starting to collect items
             // This avoids reallocations during batch collection.
             if this.items.is_empty() {
                 this.items.reserve_exact(this.batch_config.max_size);
             }
 
-            // PRIORITY 4: Poll underlying stream for new items
+            // PRIORITY 5: Poll underlying stream for new items
             match this.stream.as_mut().poll_next(cx) {
                 Poll::Pending => {
                     // No more items available right now, check if we should emit due to timeout.
@@ -142,7 +174,7 @@ impl<B, S: Stream<Item = B>> Stream for TimeoutBatchStream<B, S> {
             }
         }
 
-        // PRIORITY 5: Time-based emission check
+        // PRIORITY 6: Time-based emission check
         // If we have items and the timeout has expired, emit the current batch
         // This provides latency bounds to prevent indefinite delays in low-volume scenarios.
         if !this.items.is_empty()

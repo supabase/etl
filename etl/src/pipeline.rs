@@ -4,6 +4,7 @@
 //! with destination systems. Manages worker lifecycles, shutdown coordination, and error handling.
 
 use crate::bail;
+use crate::concurrency::pause::{PauseTx, create_pause_channel};
 use crate::concurrency::shutdown::{ShutdownTx, create_shutdown_channel};
 use crate::destination::Destination;
 use crate::error::{ErrorKind, EtlResult};
@@ -60,6 +61,7 @@ pub struct Pipeline<S, D> {
     destination: D,
     state: PipelineState,
     shutdown_tx: ShutdownTx,
+    pause_tx: PauseTx,
 }
 
 impl<S, D> Pipeline<S, D>
@@ -85,6 +87,7 @@ where
         // Here we are not taking the `shutdown_rx` since we will just extract it from the `shutdown_tx`
         // via the `subscribe` method. This is done to make the code cleaner.
         let (shutdown_tx, _) = create_shutdown_channel();
+        let (pause_tx, _) = create_pause_channel();
 
         Self {
             config: Arc::new(config),
@@ -92,6 +95,7 @@ where
             destination,
             state: PipelineState::NotStarted,
             shutdown_tx,
+            pause_tx,
         }
     }
 
@@ -107,6 +111,11 @@ where
     /// and terminate cleanly.
     pub fn shutdown_tx(&self) -> ShutdownTx {
         self.shutdown_tx.clone()
+    }
+
+    /// Returns a handle for sending pause/resume signals to this pipeline.
+    pub fn pause_tx(&self) -> PauseTx {
+        self.pause_tx.clone()
     }
 
     /// Starts the pipeline and begins replication processing.
@@ -155,6 +164,7 @@ where
             self.store.clone(),
             self.destination.clone(),
             self.shutdown_tx.subscribe(),
+            self.pause_tx.subscribe(),
             table_sync_worker_permits,
         )
         .start()
