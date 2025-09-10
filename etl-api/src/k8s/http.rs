@@ -48,10 +48,6 @@ const LOGS_VOLUME_NAME: &str = "logs";
 pub const TRUSTED_ROOT_CERT_CONFIG_MAP_NAME: &str = "trusted-root-certs-config";
 /// Key inside the trusted root certificates ConfigMap.
 pub const TRUSTED_ROOT_CERT_KEY_NAME: &str = "trusted_root_certs";
-/// Environment variable for the Postgres password.
-const PG_PASSWORD_ENV_VAR_NAME: &str = "APP_PIPELINE__PG_CONNECTION__PASSWORD";
-/// Environment variable for the BigQuery service account key.
-const BIG_QUERY_SA_KEY_ENV_VAR_NAME: &str = "APP_DESTINATION__BIG_QUERY__SERVICE_ACCOUNT_KEY";
 /// Pod template annotation used to trigger rolling restarts.
 pub const RESTARTED_AT_ANNOTATION_KEY: &str = "etl.supabase.com/restarted-at";
 /// Label used to identify replicator pods.
@@ -421,6 +417,10 @@ impl K8sClient for HttpK8sClient {
                         "value": environment.to_string()
                       },
                       {
+                          "name": "APP_VERSION",
+                          "value": replicator_image
+                      },
+                      {
                         "name": "APP_SENTRY__DSN",
                         "valueFrom": {
                           "secretKeyRef": {
@@ -430,7 +430,7 @@ impl K8sClient for HttpK8sClient {
                         }
                       },
                       {
-                        "name": PG_PASSWORD_ENV_VAR_NAME,
+                        "name": "APP_PIPELINE__PG_CONNECTION__PASSWORD",
                         "valueFrom": {
                           "secretKeyRef": {
                             "name": postgres_secret_name,
@@ -439,7 +439,7 @@ impl K8sClient for HttpK8sClient {
                         }
                       },
                       {
-                        "name": BIG_QUERY_SA_KEY_ENV_VAR_NAME,
+                        "name": "APP_DESTINATION__BIG_QUERY__SERVICE_ACCOUNT_KEY",
                         "valueFrom": {
                           "secretKeyRef": {
                             "name": bq_secret_name,
