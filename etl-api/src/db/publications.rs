@@ -43,6 +43,9 @@ pub async fn create_publication(
         }
     }
 
+    // Ensure partitioned tables publish via ancestor/root schema for logical replication
+    query.push_str(" with (publish_via_partition_root = true)");
+
     pool.execute(query.as_str()).await?;
     Ok(())
 }

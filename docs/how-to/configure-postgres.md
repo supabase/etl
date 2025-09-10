@@ -107,14 +107,16 @@ Publications define which tables and operations to replicate.
 
 ```sql
 -- Create publication for specific tables
-CREATE PUBLICATION my_publication FOR TABLE users, orders;
+CREATE PUBLICATION my_publication FOR TABLE users, orders WITH (publish_via_partition_root = true);
 
 -- Create publication for all tables (use with caution)
-CREATE PUBLICATION all_tables FOR ALL TABLES;
+CREATE PUBLICATION all_tables FOR ALL TABLES WITH (publish_via_partition_root = true);
 
 -- Include only specific operations
-CREATE PUBLICATION inserts_only FOR TABLE users WITH (publish = 'insert');
+CREATE PUBLICATION inserts_only FOR TABLE users WITH (publish = 'insert') WITH (publish_via_partition_root = true);
 ```
+
+`publish_via_partition_root` allows Postgres to treat [partitioned tables](https://www.postgresql.org/docs/current/sql-createpublication.html#SQL-CREATEPUBLICATION-PARAMS-WITH-PUBLISH-VIA-PARTITION-ROOT) as one table in the eyes of logical replication.
 
 ### Managing Publications
 
