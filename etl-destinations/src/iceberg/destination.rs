@@ -1,11 +1,11 @@
-use std::{collections::HashSet, sync::Arc};
+use std::{collections::HashSet, fmt, sync::Arc};
 
 use etl::{
     destination::Destination,
     error::{ErrorKind, EtlResult},
     etl_error,
     store::{schema::SchemaStore, state::StateStore},
-    types::{Event, TableId, TableName, TableRow},
+    types::{Cell, Event, TableId, TableName, TableRow},
 };
 use tokio::sync::Mutex;
 
@@ -30,6 +30,29 @@ pub fn table_name_to_iceberg_table_name(table_name: &TableName) -> IcebergTableN
     );
 
     format!("{escaped_schema}_{escaped_table}")
+}
+
+/// Change Data Capture operation types for iceberg streaming.
+#[derive(Debug)]
+pub enum IcebergOperationType {
+    Upsert,
+    Delete,
+}
+
+impl IcebergOperationType {
+    /// Converts the operation type into a [`Cell`] for streaming.
+    pub fn into_cell(self) -> Cell {
+        Cell::String(self.to_string())
+    }
+}
+
+impl fmt::Display for IcebergOperationType {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            IcebergOperationType::Upsert => write!(f, "UPSERT"),
+            IcebergOperationType::Delete => write!(f, "DELETE"),
+        }
+    }
 }
 
 /// Iceberg table identifier.
@@ -65,9 +88,16 @@ where
     async fn write_table_rows(
         &self,
         table_id: TableId,
-        _table_rows: Vec<TableRow>,
+        mut table_rows: Vec<TableRow>,
     ) -> EtlResult<()> {
-        self.prepare_table_for_streaming(table_id).await?;
+        let _iceberg_table_name = self.prepare_table_for_streaming(table_id).await?;
+
+        // Add CDC operation type to all rows (no lock needed).
+        for table_row in table_rows.iter_mut() {
+            table_row
+                .values
+                .push(IcebergOperationType::Upsert.into_cell());
+        }
 
         Ok(())
     }
