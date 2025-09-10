@@ -160,7 +160,7 @@ impl BigQueryDatabase {
 
         let column_definitions: Vec<String> = columns
             .iter()
-            .map(|(name, data_type)| format!("{} {}", name, data_type))
+            .map(|(name, data_type)| format!("{name} {data_type}"))
             .collect();
 
         let ddl = format!(
