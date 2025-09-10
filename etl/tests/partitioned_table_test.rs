@@ -74,8 +74,7 @@ async fn partitioned_table_copy_replicates_existing_data() {
 
     assert_eq!(
         total_rows, 3,
-        "Expected 3 rows synced (one per partition), but got {}",
-        total_rows
+        "Expected 3 rows synced (one per partition), but got {total_rows}"
     );
 
     let table_states = state_store.get_table_replication_states().await;
@@ -182,8 +181,7 @@ async fn partitioned_table_copy_and_streams_new_data_from_new_partition() {
     let total_rows: usize = table_rows.values().map(|rows| rows.len()).sum();
     assert_eq!(
         total_rows, 2,
-        "Expected 2 rows synced from initial copy, got {}",
-        total_rows
+        "Expected 2 rows synced from initial copy, got {total_rows}"
     );
 
     let table_states = state_store.get_table_replication_states().await;
