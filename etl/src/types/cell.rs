@@ -98,6 +98,41 @@ impl Cell {
             }
         }
     }
+
+    /// Returns an approximate size in bytes for this cell's payload.
+    ///
+    /// The size is computed based on in-memory representations of values and does not
+    /// include container or protocol overhead. It is intended for relative sizing only.
+    pub fn approximate_size_bytes(&self) -> usize {
+        match self {
+            Cell::Null => 0,
+            Cell::Bool(_) => 1,
+            Cell::String(s) => s.len(),
+            Cell::I16(_) => std::mem::size_of::<i16>(),
+            Cell::I32(_) => std::mem::size_of::<i32>(),
+            Cell::U32(_) => std::mem::size_of::<u32>(),
+            Cell::I64(_) => std::mem::size_of::<i64>(),
+            Cell::F32(_) => std::mem::size_of::<f32>(),
+            Cell::F64(_) => std::mem::size_of::<f64>(),
+            Cell::Numeric(num) => match num {
+                PgNumeric::NaN | PgNumeric::PositiveInfinity | PgNumeric::NegativeInfinity => 0,
+                PgNumeric::Value { digits, .. } => {
+                    digits.len() * std::mem::size_of::<i16>()
+                    + std::mem::size_of::<i16>() /* weight */
+                    + std::mem::size_of::<u16>() /* scale */
+                    + std::mem::size_of::<u16>()
+                } /* sign */,
+            },
+            Cell::Date(_) => std::mem::size_of::<i32>(),
+            Cell::Time(_) => std::mem::size_of::<i64>(),
+            Cell::Timestamp(_) => std::mem::size_of::<i64>(),
+            Cell::TimestampTz(_) => std::mem::size_of::<i64>(),
+            Cell::Uuid(_) => 16,
+            Cell::Json(v) => v.to_string().len(),
+            Cell::Bytes(b) => b.len(),
+            Cell::Array(arr) => arr.approximate_size_bytes(),
+        }
+    }
 }
 
 /// Represents array data from Postgres with nullable elements.
@@ -167,6 +202,41 @@ impl ArrayCell {
             ArrayCell::Uuid(vec) => vec.clear(),
             ArrayCell::Json(vec) => vec.clear(),
             ArrayCell::Bytes(vec) => vec.clear(),
+        }
+    }
+
+    /// Returns an approximate size in bytes for this array's payload (excluding Nones).
+    pub fn approximate_size_bytes(&self) -> usize {
+        match self {
+            ArrayCell::Null => 0,
+            ArrayCell::Bool(v) => v.iter().flatten().count() * std::mem::size_of::<bool>(),
+            ArrayCell::String(v) => v.iter().flatten().map(|s| s.len()).sum(),
+            ArrayCell::I16(v) => v.iter().flatten().count() * std::mem::size_of::<i16>(),
+            ArrayCell::I32(v) => v.iter().flatten().count() * std::mem::size_of::<i32>(),
+            ArrayCell::U32(v) => v.iter().flatten().count() * std::mem::size_of::<u32>(),
+            ArrayCell::I64(v) => v.iter().flatten().count() * std::mem::size_of::<i64>(),
+            ArrayCell::F32(v) => v.iter().flatten().count() * std::mem::size_of::<f32>(),
+            ArrayCell::F64(v) => v.iter().flatten().count() * std::mem::size_of::<f64>(),
+            ArrayCell::Numeric(v) => v
+                .iter()
+                .flatten()
+                .map(|n| match n {
+                    PgNumeric::NaN | PgNumeric::PositiveInfinity | PgNumeric::NegativeInfinity => 0,
+                    PgNumeric::Value { digits, .. } => {
+                        digits.len() * std::mem::size_of::<i16>()
+                            + std::mem::size_of::<i16>()
+                            + std::mem::size_of::<u16>()
+                            + std::mem::size_of::<u16>()
+                    }
+                })
+                .sum(),
+            ArrayCell::Date(v) => v.iter().flatten().count() * std::mem::size_of::<i32>(),
+            ArrayCell::Time(v) => v.iter().flatten().count() * std::mem::size_of::<i64>(),
+            ArrayCell::Timestamp(v) => v.iter().flatten().count() * std::mem::size_of::<i64>(),
+            ArrayCell::TimestampTz(v) => v.iter().flatten().count() * std::mem::size_of::<i64>(),
+            ArrayCell::Uuid(v) => v.iter().flatten().count() * 16,
+            ArrayCell::Json(v) => v.iter().flatten().map(|j| j.to_string().len()).sum(),
+            ArrayCell::Bytes(v) => v.iter().flatten().map(|b| b.len()).sum(),
         }
     }
 }

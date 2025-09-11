@@ -16,6 +16,7 @@ bigquery = [
     "dep:tokio",
 ]
 iceberg = ["dep:iceberg", "dep:iceberg-catalog-rest"]
+metrics = []
 
 [dependencies]
 etl = { workspace = true }

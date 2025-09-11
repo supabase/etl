@@ -1,4 +1,5 @@
 use etl_postgres::types::TableId;
+use metrics::gauge;
 use std::collections::HashMap;
 use std::mem;
 use std::ops::Deref;
@@ -8,8 +9,10 @@ use tracing::{debug, warn};
 
 use crate::destination::Destination;
 use crate::error::EtlResult;
+use crate::metrics::{ETL_TABLE_SYNC_WORKERS_ACTIVE, PIPELINE_ID_LABEL};
 use crate::store::schema::SchemaStore;
 use crate::store::state::StateStore;
+use crate::types::PipelineId;
 use crate::workers::base::{Worker, WorkerHandle};
 use crate::workers::table_sync::{TableSyncWorker, TableSyncWorkerHandle, TableSyncWorkerState};
 
@@ -22,6 +25,8 @@ pub struct TableSyncWorkerPoolInner {
     finished: HashMap<TableId, Vec<TableSyncWorkerHandle>>,
     /// Notification mechanism for pool state changes.
     pool_update: Arc<Notify>,
+    /// Pipeline identifier used for metrics labeling.
+    pipeline_id: PipelineId,
 }
 
 impl TableSyncWorkerPoolInner {
@@ -29,11 +34,12 @@ impl TableSyncWorkerPoolInner {
     ///
     /// This constructor initializes the pool with empty collections for active
     /// and finished workers, with no notification mechanism initially configured.
-    fn new() -> Self {
+    fn new(pipeline_id: PipelineId) -> Self {
         Self {
             active: HashMap::new(),
             finished: HashMap::new(),
             pool_update: Arc::new(Notify::new()),
+            pipeline_id,
         }
     }
 
@@ -59,6 +65,13 @@ impl TableSyncWorkerPoolInner {
         let handle = worker.start().await?;
         self.active.insert(table_id, handle);
 
+        // Update gauge with the current number of active workers.
+        gauge!(
+            ETL_TABLE_SYNC_WORKERS_ACTIVE,
+            PIPELINE_ID_LABEL => self.pipeline_id.to_string()
+        )
+        .set(self.active.len() as f64);
+
         debug!(
             "successfully added worker for table {} to the pool",
             table_id
@@ -83,6 +96,12 @@ impl TableSyncWorkerPoolInner {
                 .or_default()
                 .push(removed_worker);
         }
+
+        gauge!(
+            ETL_TABLE_SYNC_WORKERS_ACTIVE,
+            PIPELINE_ID_LABEL => self.pipeline_id.to_string()
+        )
+        .set(self.active.len() as f64);
     }
 
     /// Retrieves the state handle for an active worker by table ID.
@@ -153,9 +172,9 @@ impl TableSyncWorkerPool {
     ///
     /// The pool starts with no active workers and can accept new workers
     /// as tables need to be synchronized.
-    pub fn new() -> Self {
+    pub fn new(pipeline_id: PipelineId) -> Self {
         Self {
-            inner: Arc::new(Mutex::new(TableSyncWorkerPoolInner::new())),
+            inner: Arc::new(Mutex::new(TableSyncWorkerPoolInner::new(pipeline_id))),
         }
     }
 
@@ -183,11 +202,7 @@ impl TableSyncWorkerPool {
     }
 }
 
-impl Default for TableSyncWorkerPool {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+// Intentionally no Default: pool requires a pipeline id for metrics.
 
 impl Deref for TableSyncWorkerPool {
     type Target = Mutex<TableSyncWorkerPoolInner>;

@@ -8,6 +8,7 @@ use crate::concurrency::shutdown::{ShutdownTx, create_shutdown_channel};
 use crate::destination::Destination;
 use crate::error::{ErrorKind, EtlResult};
 use crate::metrics::register_metrics;
+use crate::metrics::{ETL_PUBLICATION_TABLES_TOTAL, PIPELINE_ID_LABEL, PUBLICATION_LABEL};
 use crate::replication::client::PgReplicationClient;
 use crate::state::table::TableReplicationPhase;
 use crate::store::cleanup::CleanupStore;
@@ -19,6 +20,7 @@ use crate::workers::base::{Worker, WorkerHandle};
 use crate::workers::pool::TableSyncWorkerPool;
 use etl_config::shared::PipelineConfig;
 use etl_postgres::types::TableId;
+use metrics::gauge;
 use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::Semaphore;
@@ -76,9 +78,10 @@ where
     /// pipeline identity and configuration settings.
     pub fn new(config: PipelineConfig, state_store: S, destination: D) -> Self {
         // Register metrics here during pipeline creation to avoid burdening the
-        // users of etl crate to explicity calling it. Since this method is safe to
-        // call mutltiple time, it is ok even if there are multiple pipelines created.
+        // users of etl crate to explicitly calling it. Since this method is safe to
+        // call multiple time, it is ok even if there are multiple pipelines created.
         register_metrics();
+
         // We create a watch channel of unit types since this is just used to notify all subscribers
         // that shutdown is needed.
         //
@@ -138,7 +141,7 @@ where
         self.initialize_table_states(&replication_client).await?;
 
         // We create the table sync workers pool to manage all table sync workers in a central place.
-        let pool = TableSyncWorkerPool::new();
+        let pool = TableSyncWorkerPool::new(self.id());
 
         // We create the permits semaphore which is used to control how many table sync workers can
         // be running at the same time.
@@ -298,6 +301,14 @@ where
             self.config.publication_name,
             publication_table_ids.len()
         );
+
+        // Emit publication tables count metric.
+        gauge!(
+            ETL_PUBLICATION_TABLES_TOTAL,
+            PIPELINE_ID_LABEL => self.config.id.to_string(),
+            PUBLICATION_LABEL => self.config.publication_name.clone()
+        )
+        .set(publication_table_ids.len() as f64);
 
         self.store.load_table_replication_states().await?;
         let table_replication_states = self.store.get_table_replication_states().await?;

@@ -214,6 +214,10 @@ where
         max_concurrent_streams: usize,
         store: S,
     ) -> EtlResult<Self> {
+        #[cfg(feature = "metrics")]
+        {
+            crate::bigquery::metrics::register_metrics();
+        }
         let client = BigQueryClient::new_with_key_path(pipeline_id, project_id, sa_key).await?;
         let inner = Inner {
             created_tables: HashSet::new(),
@@ -245,6 +249,10 @@ where
         max_concurrent_streams: usize,
         store: S,
     ) -> EtlResult<Self> {
+        #[cfg(feature = "metrics")]
+        {
+            crate::bigquery::metrics::register_metrics();
+        }
         let client = BigQueryClient::new_with_key(pipeline_id, project_id, sa_key).await?;
         let inner = Inner {
             created_tables: HashSet::new(),

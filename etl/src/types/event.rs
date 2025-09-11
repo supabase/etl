@@ -186,6 +186,35 @@ impl Event {
             _ => false,
         }
     }
+
+    /// Returns an approximate size in bytes for the event payload.
+    ///
+    /// For row-carrying events, the size is based on row content. For control
+    /// events (Begin/Commit/Unsupported) the value is 0.
+    pub fn approximate_size_bytes(&self) -> usize {
+        match self {
+            Event::Insert(e) => e.table_row.approximate_size_bytes(),
+            Event::Update(e) => {
+                let mut size = e.table_row.approximate_size_bytes();
+                if let Some((_, old_row)) = &e.old_table_row {
+                    size += old_row.approximate_size_bytes();
+                }
+                size
+            }
+            Event::Delete(e) => {
+                if let Some((_, old_row)) = &e.old_table_row {
+                    old_row.approximate_size_bytes()
+                } else {
+                    0
+                }
+            }
+            Event::Relation(_)
+            | Event::Truncate(_)
+            | Event::Begin(_)
+            | Event::Commit(_)
+            | Event::Unsupported => 0,
+        }
+    }
 }
 
 /// Classification of Postgres replication event types.
