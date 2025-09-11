@@ -241,10 +241,12 @@ impl K8sClient for HttpK8sClient {
         &self,
         prefix: &str,
         base_config: &str,
-        prod_config: &str,
+        env_config: &str,
+        environment: Environment,
     ) -> Result<(), K8sError> {
         info!("patching config map");
 
+        let env_config_file = format!("{environment}.yaml");
         let config_map_name = format!("{prefix}-{REPLICATOR_CONFIG_MAP_NAME_SUFFIX}");
         let config_map_json = json!({
           "kind": "ConfigMap",
@@ -255,7 +257,7 @@ impl K8sClient for HttpK8sClient {
           },
           "data": {
             "base.yaml": base_config,
-            "prod.yaml": prod_config,
+            env_config_file: env_config,
           }
         });
         // TODO: for consistency we might want to use `serde_yaml` since writing a `.yaml` as JSON.
@@ -293,10 +295,10 @@ impl K8sClient for HttpK8sClient {
         prefix: &str,
         replicator_image: &str,
         template_annotations: Option<BTreeMap<String, String>>,
+        environment: Environment,
     ) -> Result<(), K8sError> {
         info!("patching stateful set");
 
-        let environment = Environment::load().map_err(|_| K8sError::MissingEnvironment)?;
         let config = DynamicReplicatorConfig::load(&environment)?;
 
         let stateful_set_name = format!("{prefix}-{REPLICATOR_STATEFUL_SET_SUFFIX}");

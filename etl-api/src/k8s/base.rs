@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use etl_config::Environment;
 use k8s_openapi::api::core::v1::ConfigMap;
 use std::collections::BTreeMap;
 use thiserror::Error;
@@ -87,13 +88,14 @@ pub trait K8sClient: Send + Sync {
 
     /// Creates or updates the replicator configuration [`ConfigMap`].
     ///
-    /// The config map stores two YAML documents: a base and a production
+    /// The config map stores two YAML documents: a base and a environment specific
     /// override.
     async fn create_or_update_config_map(
         &self,
         prefix: &str,
         base_config: &str,
-        prod_config: &str,
+        env_config: &str,
+        environment: Environment,
     ) -> Result<(), K8sError>;
 
     /// Deletes the replicator configuration [`ConfigMap`] if it exists.
@@ -108,6 +110,7 @@ pub trait K8sClient: Send + Sync {
         prefix: &str,
         replicator_image: &str,
         template_annotations: Option<BTreeMap<String, String>>,
+        environment: Environment,
     ) -> Result<(), K8sError>;
 
     /// Deletes the replicator [`StatefulSet`] if it exists.
