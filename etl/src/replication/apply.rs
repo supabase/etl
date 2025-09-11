@@ -814,7 +814,7 @@ where
     T: ApplyLoopHook,
 {
     let commit_lsn = get_commit_lsn(state, &message)?;
-    
+
     state.current_tx_events += 1;
 
     match &message {
