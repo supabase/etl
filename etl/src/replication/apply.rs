@@ -922,8 +922,7 @@ async fn handle_begin_message(
 
     // Track begin instant and reset tx event count.
     state.current_tx_begin_ts = Some(Instant::now());
-    // We include the BEGIN in the events count.
-    state.current_tx_events = 1;
+    state.current_tx_events = 0;
 
     // Convert event from the protocol message.
     let event = parse_event_from_begin_message(start_lsn, commit_lsn, message);
@@ -985,7 +984,8 @@ where
         let now = Instant::now();
         let duration_ms = (now - begin_ts).as_millis();
         histogram!(ETL_TRANSACTION_DURATION_MS).record(duration_ms as f64);
-        histogram!(ETL_TRANSACTION_SIZE).record(state.current_tx_events as f64);
+        // We do - 1 since we exclude this COMMIT event from the count.
+        histogram!(ETL_TRANSACTION_SIZE).record((state.current_tx_events - 1) as f64);
         state.current_tx_events = 0;
     }
 
