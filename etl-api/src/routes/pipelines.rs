@@ -108,6 +108,9 @@ pub enum PipelineError {
 
     #[error("Database error: {0}")]
     Database(#[from] sqlx::Error),
+
+    #[error("Could not load app environment")]
+    MissingEnvironment,
 }
 
 impl From<PipelinesDbError> for PipelineError {
@@ -156,6 +159,7 @@ impl ResponseError for PipelineError {
             | PipelineError::Database(_)
             | PipelineError::TableLookup(_)
             | PipelineError::InvalidTableReplicationState(_)
+            | PipelineError::MissingEnvironment
             | PipelineError::MissingTableReplicationState => StatusCode::INTERNAL_SERVER_ERROR,
             PipelineError::PipelineNotFound(_)
             | PipelineError::EtlStateNotInitialized
@@ -1200,7 +1204,7 @@ async fn create_or_update_pipeline_in_k8s(
     let secrets = build_secrets(&source.config, &destination.config);
     create_or_update_secrets(k8s_client, &prefix, secrets.clone()).await?;
 
-    let environment = Environment::load().map_err(|_| K8sError::MissingEnvironment)?;
+    let environment = Environment::load().map_err(|_| PipelineError::MissingEnvironment)?;
 
     // We create the replicator configuration.
     let replicator_config = build_replicator_config(

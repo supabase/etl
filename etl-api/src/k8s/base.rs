@@ -17,9 +17,6 @@ pub enum K8sError {
     /// server.
     #[error("An error occurred with kube when dealing with K8s: {0}")]
     Kube(#[from] kube::Error),
-    /// The environment was not found while configuring K8s.
-    #[error("Could not get environment when dealing with K8s")]
-    MissingEnvironment,
 }
 
 /// A simplified view of a pod phase.
