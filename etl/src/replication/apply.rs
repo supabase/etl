@@ -814,8 +814,7 @@ where
     T: ApplyLoopHook,
 {
     let commit_lsn = get_commit_lsn(state, &message)?;
-
-    // For each message we track it. This counter will be reset within the function.
+    
     state.current_tx_events += 1;
 
     match &message {
