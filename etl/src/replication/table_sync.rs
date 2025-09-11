@@ -3,7 +3,7 @@ use etl_postgres::replication::slots::get_slot_name;
 use etl_postgres::replication::worker::WorkerType;
 use etl_postgres::types::TableId;
 use futures::StreamExt;
-use metrics::{counter, gauge, histogram};
+use metrics::{gauge, histogram};
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::pin;
@@ -21,10 +21,7 @@ use crate::failpoints::{
     START_TABLE_SYNC_BEFORE_DATA_SYNC_SLOT_CREATION, START_TABLE_SYNC_DURING_DATA_SYNC,
     etl_fail_point,
 };
-use crate::metrics::{
-    ETL_BATCH_SEND_DURATION_MILLISECONDS, ETL_BATCH_SIZE, ETL_ITEMS_COPIED_TOTAL,
-    ETL_TABLE_ROWS_BATCH_SEND_DURATION_MS, ETL_TABLE_ROWS_BATCH_WRITTEN, WORKER_TYPE_LABEL,
-};
+use crate::metrics::{ETL_TABLE_ROWS_BATCH_SEND_DURATION_MS, ETL_TABLE_ROWS_BATCH_WRITTEN};
 use crate::replication::client::PgReplicationClient;
 use crate::replication::stream::TableCopyStream;
 use crate::state::table::{TableReplicationPhase, TableReplicationPhaseType};

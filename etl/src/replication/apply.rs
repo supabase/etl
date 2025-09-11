@@ -3,7 +3,7 @@ use etl_postgres::replication::slots::get_slot_name;
 use etl_postgres::replication::worker::WorkerType;
 use etl_postgres::types::TableId;
 use futures::{FutureExt, StreamExt};
-use metrics::{counter, gauge, histogram};
+use metrics::{gauge, histogram};
 use postgres_replication::protocol;
 use postgres_replication::protocol::{LogicalReplicationMessage, ReplicationMessage};
 use std::future::{Future, pending};
@@ -26,9 +26,8 @@ use crate::conversions::event::{
 use crate::destination::Destination;
 use crate::error::{ErrorKind, EtlResult};
 use crate::metrics::{
-    ETL_BATCH_SEND_DURATION_MILLISECONDS, ETL_BATCH_SIZE, ETL_EVENTS_BATCH_SEND_DURATION_MS,
-    ETL_EVENTS_BATCH_WRITTEN, ETL_ITEMS_COPIED_TOTAL, ETL_TRANSACTION_DURATION_MS,
-    ETL_TRANSACTION_SIZE, ETL_TRANSACTION_SIZE_EVENTS, WORKER_TYPE_LABEL,
+    ETL_EVENTS_BATCH_SEND_DURATION_MS, ETL_EVENTS_BATCH_WRITTEN, ETL_TRANSACTION_DURATION_MS,
+    ETL_TRANSACTION_SIZE,
 };
 use crate::replication::client::PgReplicationClient;
 use crate::replication::stream::EventsStream;

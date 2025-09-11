@@ -1,6 +1,6 @@
 use std::sync::Once;
 
-use metrics::{Unit, describe_counter, describe_gauge, describe_histogram};
+use metrics::{Unit, describe_gauge, describe_histogram};
 
 static REGISTER_METRICS: Once = Once::new();
 
@@ -44,13 +44,13 @@ pub(crate) fn register_metrics() {
         describe_gauge!(
             ETL_EVENTS_BATCH_WRITTEN,
             Unit::Count,
-            "Total number of rows or events copied to destination in table sync or apply phase"
+            "Total number of events written to the destination across apply batches"
         );
 
         describe_gauge!(
             ETL_TABLE_ROWS_BATCH_WRITTEN,
             Unit::Count,
-            "Total number of rows or events copied to destination in table sync or apply phase"
+            "Total number of table rows copied during table sync (cumulative)"
         );
 
         describe_histogram!(
@@ -84,9 +84,9 @@ pub(crate) fn register_metrics() {
         );
 
         describe_histogram!(
-            ETL_TRANSACTION_SIZE_EVENTS,
+            ETL_TRANSACTION_SIZE,
             Unit::Count,
-            "Number of logical replication events contained in a transaction"
+            "Number of events contained in a single transaction"
         );
 
         describe_histogram!(
