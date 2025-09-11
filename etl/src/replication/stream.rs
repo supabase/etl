@@ -1,5 +1,5 @@
-use etl_postgres::types::ColumnSchema;
 use etl_postgres::types::POSTGRES_EPOCH;
+use etl_postgres::types::{ColumnSchema, TableId};
 use futures::{Stream, ready};
 use pin_project_lite::pin_project;
 use postgres_replication::LogicalReplicationStream;
@@ -14,7 +14,10 @@ use tracing::debug;
 use crate::conversions::table_row::parse_table_row_from_postgres_copy_bytes;
 use crate::error::{ErrorKind, EtlResult};
 use crate::etl_error;
+use crate::metrics::{ETL_COPIED_ROW_SIZE_BYTES, PIPELINE_ID_LABEL, TABLE_ID_LABEL};
+use crate::types::PipelineId;
 use crate::types::TableRow;
+use metrics::histogram;
 
 /// The amount of milliseconds between two consecutive status updates in case no forced update
 /// is requested.
@@ -31,6 +34,8 @@ pin_project! {
         #[pin]
         stream: CopyOutStream,
         column_schemas: &'a [ColumnSchema],
+        pipeline_id: PipelineId,
+        table_id: TableId,
     }
 }
 
@@ -38,10 +43,17 @@ impl<'a> TableCopyStream<'a> {
     /// Creates a new [`TableCopyStream`] from a [`CopyOutStream`] and column schemas.
     ///
     /// The column schemas are used to convert the raw Postgres data into [`TableRow`]s.
-    pub fn wrap(stream: CopyOutStream, column_schemas: &'a [ColumnSchema]) -> Self {
+    pub fn wrap(
+        stream: CopyOutStream,
+        column_schemas: &'a [ColumnSchema],
+        pipeline_id: PipelineId,
+        table_id: TableId,
+    ) -> Self {
         Self {
             stream,
             column_schemas,
+            pipeline_id,
+            table_id,
         }
     }
 }
@@ -58,6 +70,13 @@ impl<'a> Stream for TableCopyStream<'a> {
         match ready!(this.stream.poll_next(cx)) {
             // TODO: allow pluggable table row conversion based on if the data is in text or binary format.
             Some(Ok(row)) => {
+                // Emit raw row size in bytes prior to parsing.
+                histogram!(
+                    ETL_COPIED_ROW_SIZE_BYTES,
+                    PIPELINE_ID_LABEL => this.pipeline_id.to_string(),
+                    TABLE_ID_LABEL => this.table_id.to_string()
+                )
+                .record(row.len() as f64);
                 // CONVERSION PHASE: Transform raw bytes into structured TableRow
                 // This is where most errors occur due to data format or type issues
                 match parse_table_row_from_postgres_copy_bytes(&row, this.column_schemas) {

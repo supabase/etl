@@ -1,5 +1,3 @@
-#![cfg(feature = "metrics")]
-
 use metrics::{Unit, describe_histogram};
 use std::sync::Once;
 

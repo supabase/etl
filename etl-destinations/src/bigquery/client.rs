@@ -1,5 +1,4 @@
 use crate::bigquery::encoding::BigQueryTableRow;
-#[cfg(feature = "metrics")]
 use crate::bigquery::metrics::BQ_APPEND_DURATION_SECONDS;
 use etl::error::{ErrorKind, EtlError, EtlResult};
 use etl::etl_error;
@@ -14,13 +13,10 @@ use gcp_bigquery_client::{
     model::{query_request::QueryRequest, query_response::ResultSet},
     storage::{ColumnType, FieldDescriptor, StreamName, TableBatch, TableDescriptor},
 };
-use metrics::gauge;
-#[cfg(feature = "metrics")]
 use metrics::histogram;
 use prost::Message;
 use std::fmt;
 use std::sync::Arc;
-#[cfg(feature = "metrics")]
 use std::time::Instant;
 use tracing::{debug, info};
 
@@ -32,9 +28,6 @@ const BIGQUERY_CDC_SPECIAL_COLUMN: &str = "_CHANGE_TYPE";
 
 /// Special column name for Change Data Capture sequence ordering in BigQuery.
 const BIGQUERY_CDC_SEQUENCE_COLUMN: &str = "_CHANGE_SEQUENCE_NUMBER";
-
-/// Destination label used in metrics
-const BIG_QUERY: &str = "big_query";
 
 /// BigQuery project identifier.
 pub type BigQueryProjectId = String;
@@ -325,7 +318,6 @@ impl BigQueryClient {
             max_concurrent_streams
         );
 
-        #[cfg(feature = "metrics")]
         let before_sending = Instant::now();
 
         // Use the new concurrent append_table_batches method
@@ -371,15 +363,12 @@ impl BigQueryClient {
             total_bytes_sent += batch_result.bytes_sent;
         }
 
-        #[cfg(feature = "metrics")]
-        {
-            let send_duration_secs = before_sending.elapsed().as_secs_f64();
-            histogram!(
-                BQ_APPEND_DURATION_SECONDS,
-                PIPELINE_ID_LABEL => self.pipeline_id.to_string()
-            )
-            .record(send_duration_secs);
-        }
+        let send_duration_secs = before_sending.elapsed().as_secs_f64();
+        histogram!(
+            BQ_APPEND_DURATION_SECONDS,
+            PIPELINE_ID_LABEL => self.pipeline_id.to_string()
+        )
+        .record(send_duration_secs);
 
         if batches_responses_errors.is_empty() {
             return Ok((total_bytes_sent, total_bytes_received));

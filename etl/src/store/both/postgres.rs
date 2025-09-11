@@ -9,7 +9,7 @@ use tokio::sync::Mutex;
 use tracing::{debug, info};
 
 use crate::error::{ErrorKind, EtlError, EtlResult};
-use crate::metrics::{ETL_TABLES_TOTAL, PIPELINE_ID_LABEL, WORKER_TYPE_LABEL};
+use crate::metrics::{ETL_TABLES_TOTAL, PHASE_LABEL, PIPELINE_ID_LABEL};
 use crate::state::table::{RetryPolicy, TableReplicationPhase};
 use crate::store::cleanup::CleanupStore;
 use crate::store::schema::SchemaStore;
@@ -220,7 +220,7 @@ fn emit_table_metrics(
     gauge!(ETL_TABLES_TOTAL, PIPELINE_ID_LABEL => pipeline_id.to_string()).set(total_tables as f64);
 
     for (phase, count) in phase_counts {
-        gauge!(ETL_TABLES_TOTAL, PIPELINE_ID_LABEL => pipeline_id.to_string(), WORKER_TYPE_LABEL => *phase)
+        gauge!(ETL_TABLES_TOTAL, PIPELINE_ID_LABEL => pipeline_id.to_string(), PHASE_LABEL => *phase)
             .set(*count as f64);
     }
 }

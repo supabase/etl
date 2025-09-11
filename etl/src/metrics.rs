@@ -15,12 +15,11 @@ pub const ETL_TRANSACTION_SIZE_EVENTS: &str = "etl_transaction_size_events";
 pub const ETL_COPIED_ROW_SIZE_BYTES: &str = "etl_copied_row_size_bytes";
 pub const ETL_STREAMED_EVENT_SIZE_BYTES: &str = "etl_streamed_event_size_bytes";
 
-pub const MILLIS_PER_SEC: f64 = 1_000.0;
-
-pub const TABLE_SYNC: &str = "table_sync";
-pub const APPLY: &str = "apply";
-
-/// Label key for worker type (e.g., "table_sync" | "apply").
+/// Label key for table id.
+pub const TABLE_ID_LABEL: &str = "table_id";
+/// Label key for replication phase (used by table state metrics).
+pub const PHASE_LABEL: &str = "phase";
+/// Label key for the ETL worker type ("table_sync" or "apply").
 pub const WORKER_TYPE_LABEL: &str = "worker_type";
 /// Label key used to tag metrics by destination implementation (e.g., "big_query").
 pub const DESTINATION_LABEL: &str = "destination";

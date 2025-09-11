@@ -2,7 +2,6 @@ mod client;
 mod core;
 mod encoding;
 mod encryption;
-#[cfg(feature = "metrics")]
 pub mod metrics;
 mod validation;
 

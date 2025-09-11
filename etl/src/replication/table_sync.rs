@@ -22,8 +22,8 @@ use crate::failpoints::{
     etl_fail_point,
 };
 use crate::metrics::{
-    ETL_BATCH_SEND_DURATION_SECONDS, ETL_BATCH_SIZE, ETL_COPIED_ROW_SIZE_BYTES,
-    ETL_ITEMS_COPIED_TOTAL, MILLIS_PER_SEC, PIPELINE_ID_LABEL, TABLE_SYNC, WORKER_TYPE_LABEL,
+    ETL_BATCH_SEND_DURATION_SECONDS, ETL_BATCH_SIZE, ETL_ITEMS_COPIED_TOTAL, PIPELINE_ID_LABEL,
+    WORKER_TYPE_LABEL,
 };
 use crate::replication::client::PgReplicationClient;
 use crate::replication::stream::TableCopyStream;
@@ -207,8 +207,12 @@ where
             let table_copy_stream = transaction
                 .get_table_copy_stream(table_id, &table_schema.column_schemas)
                 .await?;
-            let table_copy_stream =
-                TableCopyStream::wrap(table_copy_stream, &table_schema.column_schemas);
+            let table_copy_stream = TableCopyStream::wrap(
+                table_copy_stream,
+                &table_schema.column_schemas,
+                pipeline_id,
+                table_id,
+            );
             let table_copy_stream = TimeoutBatchStream::wrap(
                 table_copy_stream,
                 config.batch.clone(),
@@ -224,25 +228,17 @@ where
                 match result {
                     ShutdownResult::Ok(table_rows) => {
                         let table_rows = table_rows.into_iter().collect::<Result<Vec<_>, _>>()?;
-                        // Emit per-row approximate sizes before sending.
-                        for row in &table_rows {
-                            histogram!(
-                                ETL_COPIED_ROW_SIZE_BYTES,
-                                PIPELINE_ID_LABEL => pipeline_id.to_string()
-                            )
-                            .record(row.approximate_size_bytes() as f64);
-                        }
                         rows_copied += table_rows.len();
                         let before_sending = Instant::now();
 
                         destination.write_table_rows(table_id, table_rows).await?;
 
-                        counter!(ETL_ITEMS_COPIED_TOTAL, PIPELINE_ID_LABEL => pipeline_id.to_string(), WORKER_TYPE_LABEL => TABLE_SYNC)
+                        counter!(ETL_ITEMS_COPIED_TOTAL, PIPELINE_ID_LABEL => pipeline_id.to_string(), WORKER_TYPE_LABEL => "table_sync")
                             .increment(rows_copied as u64);
                         gauge!(ETL_BATCH_SIZE, PIPELINE_ID_LABEL => pipeline_id.to_string())
                             .set(rows_copied as f64);
                         let send_duration_secs = before_sending.elapsed().as_secs_f64();
-                        histogram!(ETL_BATCH_SEND_DURATION_SECONDS, PIPELINE_ID_LABEL => pipeline_id.to_string(), WORKER_TYPE_LABEL => TABLE_SYNC)
+                        histogram!(ETL_BATCH_SEND_DURATION_SECONDS, PIPELINE_ID_LABEL => pipeline_id.to_string(), WORKER_TYPE_LABEL => "table_sync")
                             .record(send_duration_secs);
 
                         // Fail point to test when the table sync fails after copying one batch.
