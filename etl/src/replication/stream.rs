@@ -14,7 +14,7 @@ use tracing::debug;
 use crate::conversions::table_row::parse_table_row_from_postgres_copy_bytes;
 use crate::error::{ErrorKind, EtlResult};
 use crate::etl_error;
-use crate::metrics::ETL_COPIED_ROW_SIZE_BYTES;
+use crate::metrics::ETL_COPIED_TABLE_ROW_SIZE_BYTES;
 use crate::types::TableRow;
 use metrics::histogram;
 
@@ -60,8 +60,9 @@ impl<'a> Stream for TableCopyStream<'a> {
         match ready!(this.stream.poll_next(cx)) {
             // TODO: allow pluggable table row conversion based on if the data is in text or binary format.
             Some(Ok(row)) => {
-                // Emit raw row size in bytes prior to parsing (no high-cardinality labels).
-                histogram!(ETL_COPIED_ROW_SIZE_BYTES).record(row.len() as f64);
+                // Emit raw row size in bytes. This is a low effort way to estimate table rows size.
+                histogram!(ETL_COPIED_TABLE_ROW_SIZE_BYTES).record(row.len() as f64);
+
                 // CONVERSION PHASE: Transform raw bytes into structured TableRow
                 // This is where most errors occur due to data format or type issues
                 match parse_table_row_from_postgres_copy_bytes(&row, this.column_schemas) {

@@ -22,7 +22,8 @@ use crate::failpoints::{
     etl_fail_point,
 };
 use crate::metrics::{
-    ETL_BATCH_SEND_DURATION_MILLISECONDS, ETL_BATCH_SIZE, ETL_ITEMS_COPIED_TOTAL, WORKER_TYPE_LABEL,
+    ETL_BATCH_SEND_DURATION_MILLISECONDS, ETL_BATCH_SIZE, ETL_ITEMS_COPIED_TOTAL,
+    ETL_TABLE_ROWS_BATCH_SEND_DURATION_MS, ETL_TABLE_ROWS_BATCH_WRITTEN, WORKER_TYPE_LABEL,
 };
 use crate::replication::client::PgReplicationClient;
 use crate::replication::stream::TableCopyStream;
@@ -228,12 +229,10 @@ where
 
                         destination.write_table_rows(table_id, table_rows).await?;
 
-                        counter!(ETL_ITEMS_COPIED_TOTAL, WORKER_TYPE_LABEL => "table_sync")
-                            .increment(rows_copied as u64);
-                        gauge!(ETL_BATCH_SIZE).set(rows_copied as f64);
+                        gauge!(ETL_TABLE_ROWS_BATCH_WRITTEN).set(rows_copied as f64);
+
                         let send_duration_ms = before_sending.elapsed().as_millis() as f64;
-                        histogram!(ETL_BATCH_SEND_DURATION_MILLISECONDS, WORKER_TYPE_LABEL => "table_sync")
-                            .record(send_duration_ms);
+                        histogram!(ETL_TABLE_ROWS_BATCH_SEND_DURATION_MS).record(send_duration_ms);
 
                         // Fail point to test when the table sync fails after copying one batch.
                         #[cfg(feature = "failpoints")]

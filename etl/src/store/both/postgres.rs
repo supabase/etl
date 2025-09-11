@@ -212,6 +212,7 @@ impl PostgresStore {
     }
 }
 
+/// Emits table related metrics.
 fn emit_table_metrics(total_tables: usize, phase_counts: &HashMap<&'static str, u64>) {
     gauge!(ETL_TABLES_TOTAL).set(total_tables as f64);
 
@@ -329,6 +330,7 @@ impl StateStore for PostgresStore {
             inner.decrement_phase_count(phase_to_decrement);
         }
         inner.increment_phase_count(phase_to_increment);
+
         emit_table_metrics(inner.table_states.keys().len(), &inner.phase_counts);
 
         Ok(())
@@ -368,6 +370,7 @@ impl StateStore for PostgresStore {
                     inner.decrement_phase_count(phase_to_decrement);
                 }
                 inner.increment_phase_count(phase_to_increment);
+
                 emit_table_metrics(inner.table_states.keys().len(), &inner.phase_counts);
 
                 Ok(restored_phase)

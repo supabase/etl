@@ -26,8 +26,9 @@ use crate::conversions::event::{
 use crate::destination::Destination;
 use crate::error::{ErrorKind, EtlResult};
 use crate::metrics::{
-    ETL_BATCH_SEND_DURATION_MILLISECONDS, ETL_BATCH_SIZE, ETL_ITEMS_COPIED_TOTAL,
-    ETL_TRANSACTION_DURATION_MILLISECONDS, ETL_TRANSACTION_SIZE_EVENTS, WORKER_TYPE_LABEL,
+    ETL_BATCH_SEND_DURATION_MILLISECONDS, ETL_BATCH_SIZE, ETL_EVENTS_BATCH_SEND_DURATION_MS,
+    ETL_EVENTS_BATCH_WRITTEN, ETL_ITEMS_COPIED_TOTAL, ETL_TRANSACTION_DURATION_MS,
+    ETL_TRANSACTION_SIZE, ETL_TRANSACTION_SIZE_EVENTS, WORKER_TYPE_LABEL,
 };
 use crate::replication::client::PgReplicationClient;
 use crate::replication::stream::EventsStream;
@@ -266,8 +267,8 @@ struct ApplyLoopState {
     next_status_update: StatusUpdate,
     /// A batch of events to send to the destination.
     events_batch: Vec<Event>,
-    /// Timestamp from BEGIN message (microseconds since PostgreSQL epoch) if a transaction is open.
-    current_tx_begin_ts: Option<i64>,
+    /// Instant from BEGIN message (microseconds since PostgreSQL epoch) if a transaction is open.
+    current_tx_begin_ts: Option<Instant>,
     /// Number of events observed in the current transaction (excluding BEGIN/COMMIT).
     current_tx_events: u64,
 }
@@ -553,26 +554,6 @@ where
             if let Some(event) = result.event
                 && should_include_event
             {
-                // Increment current transaction events (exclude BEGIN/COMMIT).
-                if state.handling_transaction() {
-                    match event {
-                        Event::Begin(_) | Event::Commit(_) => {}
-                        _ => state.current_tx_events = state.current_tx_events.saturating_add(1),
-                    }
-                }
-
-                // If this is a COMMIT, compute transaction duration and size.
-                if let Event::Commit(ref commit_ev) = event {
-                    if let Some(begin_ts) = state.current_tx_begin_ts.take() {
-                        let commit_ts = commit_ev.timestamp;
-                        let duration_ms = (commit_ts - begin_ts) as f64 / 1_000f64;
-                        histogram!(ETL_TRANSACTION_DURATION_MILLISECONDS).record(duration_ms);
-                        histogram!(ETL_TRANSACTION_SIZE_EVENTS)
-                            .record(state.current_tx_events as f64);
-                        state.current_tx_events = 0;
-                    }
-                }
-
                 state.events_batch.push(event);
                 state.update_last_commit_end_lsn(result.end_lsn);
             }
@@ -679,12 +660,10 @@ where
 
     destination.write_events(events_batch).await?;
 
-    counter!(ETL_ITEMS_COPIED_TOTAL, WORKER_TYPE_LABEL => "apply").increment(batch_size as u64);
-    gauge!(ETL_BATCH_SIZE).set(batch_size as f64);
+    gauge!(ETL_EVENTS_BATCH_WRITTEN).increment(batch_size as f64);
 
     let send_duration_ms = before_sending.elapsed().as_millis() as f64;
-    histogram!(ETL_BATCH_SEND_DURATION_MILLISECONDS, WORKER_TYPE_LABEL => "apply")
-        .record(send_duration_ms);
+    histogram!(ETL_EVENTS_BATCH_SEND_DURATION_MS).record(send_duration_ms);
 
     // We tell the stream to reset the timer when it is polled the next time, this way the deadline
     // is restarted.
@@ -939,8 +918,9 @@ async fn handle_begin_message(
     // `Commit` message.
     let final_lsn = PgLsn::from(message.final_lsn());
     state.remote_final_lsn = Some(final_lsn);
-    // Track begin timestamp and reset tx event count.
-    state.current_tx_begin_ts = Some(message.timestamp());
+
+    // Track begin instant and reset tx event count.
+    state.current_tx_begin_ts = Some(Instant::now());
     state.current_tx_events = 0;
 
     // Convert event from the protocol message.
@@ -997,7 +977,15 @@ where
 
     let end_lsn = PgLsn::from(message.end_lsn());
 
-    // Tx metrics are emitted after event routing, when the COMMIT event is enqueued.
+    // Track metrics after the end of the transaction. If we arrive here, we assume that the begin
+    // ts was active.
+    if let Some(begin_ts) = state.current_tx_begin_ts.take() {
+        let now = Instant::now();
+        let duration_ms = (now - begin_ts).as_millis();
+        histogram!(ETL_TRANSACTION_DURATION_MS).record(duration_ms as f64);
+        histogram!(ETL_TRANSACTION_SIZE).record(state.current_tx_events as f64);
+        state.current_tx_events = 0;
+    }
 
     // We call `process_syncing_tables` with `update_state` set to false here because we do not yet want
     // to update the table state. This function will be called again in `handle_replication_message_batch`

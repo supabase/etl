@@ -5,15 +5,15 @@ use metrics::{Unit, describe_counter, describe_gauge, describe_histogram};
 static REGISTER_METRICS: Once = Once::new();
 
 pub const ETL_TABLES_TOTAL: &str = "etl_tables_total";
-pub const ETL_ITEMS_COPIED_TOTAL: &str = "etl_items_copied_total";
-pub const ETL_BATCH_SIZE: &str = "etl_batch_size";
-pub const ETL_BATCH_SEND_DURATION_MILLISECONDS: &str = "etl_batch_send_duration_milliseconds";
+pub const ETL_EVENTS_BATCH_WRITTEN: &str = "etl_events_batch_written";
+pub const ETL_TABLE_ROWS_BATCH_WRITTEN: &str = "etl_table_rows_batch_written";
+pub const ETL_EVENTS_BATCH_SEND_DURATION_MS: &str = "etl_events_batch_send_duration_ms";
+pub const ETL_TABLE_ROWS_BATCH_SEND_DURATION_MS: &str = "etl_table_rows_batch_send_duration_ms";
 pub const ETL_TABLE_SYNC_WORKERS_ACTIVE: &str = "etl_table_sync_workers_active";
 pub const ETL_PUBLICATION_TABLES_TOTAL: &str = "etl_publication_tables_total";
-pub const ETL_TRANSACTION_DURATION_MILLISECONDS: &str = "etl_transaction_duration_milliseconds";
-pub const ETL_TRANSACTION_SIZE_EVENTS: &str = "etl_transaction_size_events";
-pub const ETL_COPIED_ROW_SIZE_BYTES: &str = "etl_copied_row_size_bytes";
-pub const ETL_STREAMED_EVENT_SIZE_BYTES: &str = "etl_streamed_event_size_bytes";
+pub const ETL_TRANSACTION_DURATION_MS: &str = "etl_transaction_duration_ms";
+pub const ETL_TRANSACTION_SIZE: &str = "etl_transaction_size";
+pub const ETL_COPIED_TABLE_ROW_SIZE_BYTES: &str = "etl_copied_table_row_size_bytes";
 
 /// Label key for table id.
 pub const TABLE_ID_LABEL: &str = "table_id";
@@ -41,20 +41,26 @@ pub(crate) fn register_metrics() {
             "Total number of tables being copied"
         );
 
-        describe_counter!(
-            ETL_ITEMS_COPIED_TOTAL,
+        describe_gauge!(
+            ETL_EVENTS_BATCH_WRITTEN,
             Unit::Count,
             "Total number of rows or events copied to destination in table sync or apply phase"
         );
 
         describe_gauge!(
-            ETL_BATCH_SIZE,
+            ETL_TABLE_ROWS_BATCH_WRITTEN,
             Unit::Count,
-            "Batch size of events sent to the destination"
+            "Total number of rows or events copied to destination in table sync or apply phase"
         );
 
         describe_histogram!(
-            ETL_BATCH_SEND_DURATION_MILLISECONDS,
+            ETL_EVENTS_BATCH_SEND_DURATION_MS,
+            Unit::Milliseconds,
+            "Time taken in milliseconds to send a batch of events to the destination"
+        );
+
+        describe_histogram!(
+            ETL_TABLE_ROWS_BATCH_SEND_DURATION_MS,
             Unit::Milliseconds,
             "Time taken in milliseconds to send a batch of events to the destination"
         );
@@ -72,7 +78,7 @@ pub(crate) fn register_metrics() {
         );
 
         describe_histogram!(
-            ETL_TRANSACTION_DURATION_MILLISECONDS,
+            ETL_TRANSACTION_DURATION_MS,
             Unit::Milliseconds,
             "Duration in milliseconds between BEGIN and COMMIT for a transaction"
         );
@@ -84,15 +90,9 @@ pub(crate) fn register_metrics() {
         );
 
         describe_histogram!(
-            ETL_COPIED_ROW_SIZE_BYTES,
+            ETL_COPIED_TABLE_ROW_SIZE_BYTES,
             Unit::Bytes,
             "Approximate size in bytes of a row copied during table sync"
-        );
-
-        describe_histogram!(
-            ETL_STREAMED_EVENT_SIZE_BYTES,
-            Unit::Bytes,
-            "Approximate size in bytes of a streamed logical replication event"
         );
     });
 }
