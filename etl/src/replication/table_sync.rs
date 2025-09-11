@@ -21,7 +21,10 @@ use crate::failpoints::{
     START_TABLE_SYNC_BEFORE_DATA_SYNC_SLOT_CREATION, START_TABLE_SYNC_DURING_DATA_SYNC,
     etl_fail_point,
 };
-use crate::metrics::{ETL_TABLE_ROWS_BATCH_SEND_DURATION_MS, ETL_TABLE_ROWS_BATCH_WRITTEN};
+use crate::metrics::{
+    ETL_TABLE_ROWS_BATCH_SEND_DURATION_MS, ETL_TABLE_ROWS_BATCH_WRITTEN,
+    ETL_TABLE_ROWS_TOTAL_WRITTEN,
+};
 use crate::replication::client::PgReplicationClient;
 use crate::replication::stream::TableCopyStream;
 use crate::state::table::{TableReplicationPhase, TableReplicationPhaseType};
@@ -214,19 +217,22 @@ where
             pin!(table_copy_stream);
 
             info!("starting table copy stream for table {}", table_id);
+
+            let mut total_rows_copied = 0;
+
             // We start consuming the table stream. If any error occurs, we will bail the entire copy since
             // we want to be fully consistent.
-            let mut rows_copied = 0;
             while let Some(result) = table_copy_stream.next().await {
                 match result {
                     ShutdownResult::Ok(table_rows) => {
                         let table_rows = table_rows.into_iter().collect::<Result<Vec<_>, _>>()?;
-                        rows_copied += table_rows.len();
+                        total_rows_copied += table_rows.len();
+
                         let before_sending = Instant::now();
 
                         destination.write_table_rows(table_id, table_rows).await?;
 
-                        gauge!(ETL_TABLE_ROWS_BATCH_WRITTEN).set(rows_copied as f64);
+                        gauge!(ETL_TABLE_ROWS_BATCH_WRITTEN).set(table_rows.len() as f64);
 
                         let send_duration_ms = before_sending.elapsed().as_millis() as f64;
                         histogram!(ETL_TABLE_ROWS_BATCH_SEND_DURATION_MS).record(send_duration_ms);
@@ -249,13 +255,15 @@ where
                 }
             }
 
+            gauge!(ETL_TABLE_ROWS_TOTAL_WRITTEN).set(total_rows_copied as f64);
+
             // We commit the transaction before starting the apply loop, otherwise it will fail
             // since no transactions can be running while replication is started.
             transaction.commit().await?;
 
             info!(
                 "completed table copy for table {} ({} rows copied)",
-                table_id, rows_copied
+                table_id, total_rows_copied
             );
 
             // We mark that we finished the copy of the table schema and data.

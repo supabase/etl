@@ -7,6 +7,7 @@ static REGISTER_METRICS: Once = Once::new();
 pub const ETL_TABLES_TOTAL: &str = "etl_tables_total";
 pub const ETL_EVENTS_BATCH_WRITTEN: &str = "etl_events_batch_written";
 pub const ETL_TABLE_ROWS_BATCH_WRITTEN: &str = "etl_table_rows_batch_written";
+pub const ETL_TABLE_ROWS_TOTAL_WRITTEN: &str = "etl_table_rows_total_written";
 pub const ETL_EVENTS_BATCH_SEND_DURATION_MS: &str = "etl_events_batch_send_duration_ms";
 pub const ETL_TABLE_ROWS_BATCH_SEND_DURATION_MS: &str = "etl_table_rows_batch_send_duration_ms";
 pub const ETL_TABLE_SYNC_WORKERS_ACTIVE: &str = "etl_table_sync_workers_active";
@@ -50,7 +51,13 @@ pub(crate) fn register_metrics() {
         describe_gauge!(
             ETL_TABLE_ROWS_BATCH_WRITTEN,
             Unit::Count,
-            "Total number of table rows copied during table sync (cumulative)"
+            "Total number of table rows copied in a single batch during table sync"
+        );
+
+        describe_gauge!(
+            ETL_TABLE_ROWS_TOTAL_WRITTEN,
+            Unit::Count,
+            "Total number of table rows copied during table sync"
         );
 
         describe_histogram!(
