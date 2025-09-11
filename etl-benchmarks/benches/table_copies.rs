@@ -352,7 +352,6 @@ async fn start_pipeline(args: RunArgs) -> Result<(), Box<dyn Error>> {
             )?;
 
             let bigquery_dest = BigQueryDestination::new_with_key_path(
-                pipeline_config.id,
                 project_id,
                 dataset_id,
                 &sa_key_file,

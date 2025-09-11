@@ -26,9 +26,8 @@ use crate::conversions::event::{
 use crate::destination::Destination;
 use crate::error::{ErrorKind, EtlResult};
 use crate::metrics::{
-    ETL_BATCH_SEND_DURATION_SECONDS, ETL_BATCH_SIZE, ETL_ITEMS_COPIED_TOTAL,
-    ETL_TRANSACTION_DURATION_SECONDS, ETL_TRANSACTION_SIZE_EVENTS, PIPELINE_ID_LABEL,
-    WORKER_TYPE_LABEL,
+    ETL_BATCH_SEND_DURATION_MILLISECONDS, ETL_BATCH_SIZE, ETL_ITEMS_COPIED_TOTAL,
+    ETL_TRANSACTION_DURATION_MILLISECONDS, ETL_TRANSACTION_SIZE_EVENTS, WORKER_TYPE_LABEL,
 };
 use crate::replication::client::PgReplicationClient;
 use crate::replication::stream::EventsStream;
@@ -566,17 +565,10 @@ where
                 if let Event::Commit(ref commit_ev) = event {
                     if let Some(begin_ts) = state.current_tx_begin_ts.take() {
                         let commit_ts = commit_ev.timestamp;
-                        let duration_secs = ((commit_ts - begin_ts) as f64) / 1_000_000f64;
-                        histogram!(
-                            ETL_TRANSACTION_DURATION_SECONDS,
-                            PIPELINE_ID_LABEL => pipeline_id.to_string()
-                        )
-                        .record(duration_secs);
-                        histogram!(
-                            ETL_TRANSACTION_SIZE_EVENTS,
-                            PIPELINE_ID_LABEL => pipeline_id.to_string()
-                        )
-                        .record(state.current_tx_events as f64);
+                        let duration_ms = (commit_ts - begin_ts) as f64 / 1_000f64;
+                        histogram!(ETL_TRANSACTION_DURATION_MILLISECONDS).record(duration_ms);
+                        histogram!(ETL_TRANSACTION_SIZE_EVENTS)
+                            .record(state.current_tx_events as f64);
                         state.current_tx_events = 0;
                     }
                 }
@@ -669,7 +661,7 @@ async fn send_batch<D>(
     events_stream: Pin<&mut TimeoutEventsStream>,
     destination: &D,
     max_batch_size: usize,
-    pipeline_id: PipelineId,
+    _pipeline_id: PipelineId,
 ) -> EtlResult<()>
 where
     D: Destination + Clone + Send + 'static,
@@ -687,13 +679,12 @@ where
 
     destination.write_events(events_batch).await?;
 
-    counter!(ETL_ITEMS_COPIED_TOTAL, PIPELINE_ID_LABEL => pipeline_id.to_string(), WORKER_TYPE_LABEL => "apply")
-        .increment(batch_size as u64);
-    gauge!(ETL_BATCH_SIZE, PIPELINE_ID_LABEL => pipeline_id.to_string()).set(batch_size as f64);
+    counter!(ETL_ITEMS_COPIED_TOTAL, WORKER_TYPE_LABEL => "apply").increment(batch_size as u64);
+    gauge!(ETL_BATCH_SIZE).set(batch_size as f64);
 
-    let send_duration_secs = before_sending.elapsed().as_secs_f64();
-    histogram!(ETL_BATCH_SEND_DURATION_SECONDS, PIPELINE_ID_LABEL => pipeline_id.to_string(), WORKER_TYPE_LABEL => "apply")
-        .record(send_duration_secs);
+    let send_duration_ms = before_sending.elapsed().as_millis() as f64;
+    histogram!(ETL_BATCH_SEND_DURATION_MILLISECONDS, WORKER_TYPE_LABEL => "apply")
+        .record(send_duration_ms);
 
     // We tell the stream to reset the timer when it is polled the next time, this way the deadline
     // is restarted.

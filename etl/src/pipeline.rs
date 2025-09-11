@@ -8,7 +8,7 @@ use crate::concurrency::shutdown::{ShutdownTx, create_shutdown_channel};
 use crate::destination::Destination;
 use crate::error::{ErrorKind, EtlResult};
 use crate::metrics::register_metrics;
-use crate::metrics::{ETL_PUBLICATION_TABLES_TOTAL, PIPELINE_ID_LABEL, PUBLICATION_LABEL};
+use crate::metrics::{ETL_PUBLICATION_TABLES_TOTAL, PUBLICATION_LABEL};
 use crate::replication::client::PgReplicationClient;
 use crate::state::table::TableReplicationPhase;
 use crate::store::cleanup::CleanupStore;
@@ -141,7 +141,7 @@ where
         self.initialize_table_states(&replication_client).await?;
 
         // We create the table sync workers pool to manage all table sync workers in a central place.
-        let pool = TableSyncWorkerPool::new(self.id());
+        let pool = TableSyncWorkerPool::new();
 
         // We create the permits semaphore which is used to control how many table sync workers can
         // be running at the same time.
@@ -303,11 +303,7 @@ where
         );
 
         // Emit publication tables count metric.
-        gauge!(
-            ETL_PUBLICATION_TABLES_TOTAL,
-            PIPELINE_ID_LABEL => self.config.id.to_string(),
-            PUBLICATION_LABEL => self.config.publication_name.clone()
-        )
+        gauge!(ETL_PUBLICATION_TABLES_TOTAL, PUBLICATION_LABEL => self.config.publication_name.clone())
         .set(publication_table_ids.len() as f64);
 
         self.store.load_table_replication_states().await?;

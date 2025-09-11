@@ -7,10 +7,10 @@ static REGISTER_METRICS: Once = Once::new();
 pub const ETL_TABLES_TOTAL: &str = "etl_tables_total";
 pub const ETL_ITEMS_COPIED_TOTAL: &str = "etl_items_copied_total";
 pub const ETL_BATCH_SIZE: &str = "etl_batch_size";
-pub const ETL_BATCH_SEND_DURATION_SECONDS: &str = "etl_batch_send_duration_seconds";
+pub const ETL_BATCH_SEND_DURATION_MILLISECONDS: &str = "etl_batch_send_duration_milliseconds";
 pub const ETL_TABLE_SYNC_WORKERS_ACTIVE: &str = "etl_table_sync_workers_active";
 pub const ETL_PUBLICATION_TABLES_TOTAL: &str = "etl_publication_tables_total";
-pub const ETL_TRANSACTION_DURATION_SECONDS: &str = "etl_transaction_duration_seconds";
+pub const ETL_TRANSACTION_DURATION_MILLISECONDS: &str = "etl_transaction_duration_milliseconds";
 pub const ETL_TRANSACTION_SIZE_EVENTS: &str = "etl_transaction_size_events";
 pub const ETL_COPIED_ROW_SIZE_BYTES: &str = "etl_copied_row_size_bytes";
 pub const ETL_STREAMED_EVENT_SIZE_BYTES: &str = "etl_streamed_event_size_bytes";
@@ -54,9 +54,9 @@ pub(crate) fn register_metrics() {
         );
 
         describe_histogram!(
-            ETL_BATCH_SEND_DURATION_SECONDS,
-            Unit::Seconds,
-            "Time taken in seconds to send a batch of events to the destination"
+            ETL_BATCH_SEND_DURATION_MILLISECONDS,
+            Unit::Milliseconds,
+            "Time taken in milliseconds to send a batch of events to the destination"
         );
 
         describe_gauge!(
@@ -72,9 +72,9 @@ pub(crate) fn register_metrics() {
         );
 
         describe_histogram!(
-            ETL_TRANSACTION_DURATION_SECONDS,
-            Unit::Seconds,
-            "Duration in seconds between BEGIN and COMMIT for a transaction"
+            ETL_TRANSACTION_DURATION_MILLISECONDS,
+            Unit::Milliseconds,
+            "Duration in milliseconds between BEGIN and COMMIT for a transaction"
         );
 
         describe_histogram!(

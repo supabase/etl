@@ -1,9 +1,9 @@
 use crate::bigquery::encoding::BigQueryTableRow;
-use crate::bigquery::metrics::BQ_APPEND_DURATION_SECONDS;
+use crate::bigquery::metrics::ETL_BIGQUERY_APPEND_DURATION_MILLISECONDS;
 use etl::error::{ErrorKind, EtlError, EtlResult};
 use etl::etl_error;
-use etl::metrics::PIPELINE_ID_LABEL;
-use etl::types::{Cell, ColumnSchema, PipelineId, TableRow, Type, is_array_type};
+// no high-cardinality labels for BQ metrics
+use etl::types::{Cell, ColumnSchema, TableRow, Type, is_array_type};
 use gcp_bigquery_client::google::cloud::bigquery::storage::v1::RowError;
 use gcp_bigquery_client::storage::ColumnMode;
 use gcp_bigquery_client::yup_oauth2::parse_service_account_key;
@@ -65,7 +65,6 @@ impl fmt::Display for BigQueryOperationType {
 /// against BigQuery datasets with authentication and error handling.
 #[derive(Clone)]
 pub struct BigQueryClient {
-    pipeline_id: PipelineId,
     project_id: BigQueryProjectId,
     client: Client,
 }
@@ -75,7 +74,6 @@ impl BigQueryClient {
     ///
     /// Authenticates with BigQuery using the service account key at the specified file path.
     pub async fn new_with_key_path(
-        pipeline_id: PipelineId,
         project_id: BigQueryProjectId,
         sa_key_path: &str,
     ) -> EtlResult<BigQueryClient> {
@@ -83,18 +81,13 @@ impl BigQueryClient {
             .await
             .map_err(bq_error_to_etl_error)?;
 
-        Ok(BigQueryClient {
-            pipeline_id,
-            project_id,
-            client,
-        })
+        Ok(BigQueryClient { project_id, client })
     }
 
     /// Creates a new [`BigQueryClient`] from a service account key JSON string.
     ///
     /// Parses and uses the provided service account key to authenticate with BigQuery.
     pub async fn new_with_key(
-        pipeline_id: PipelineId,
         project_id: BigQueryProjectId,
         sa_key: &str,
     ) -> EtlResult<BigQueryClient> {
@@ -105,11 +98,7 @@ impl BigQueryClient {
             .await
             .map_err(bq_error_to_etl_error)?;
 
-        Ok(BigQueryClient {
-            pipeline_id,
-            project_id,
-            client,
-        })
+        Ok(BigQueryClient { project_id, client })
     }
 
     /// Returns the fully qualified BigQuery table name.
@@ -363,12 +352,8 @@ impl BigQueryClient {
             total_bytes_sent += batch_result.bytes_sent;
         }
 
-        let send_duration_secs = before_sending.elapsed().as_secs_f64();
-        histogram!(
-            BQ_APPEND_DURATION_SECONDS,
-            PIPELINE_ID_LABEL => self.pipeline_id.to_string()
-        )
-        .record(send_duration_secs);
+        let send_duration_ms = before_sending.elapsed().as_millis() as f64;
+        histogram!(ETL_BIGQUERY_APPEND_DURATION_MILLISECONDS).record(send_duration_ms);
 
         if batches_responses_errors.is_empty() {
             return Ok((total_bytes_sent, total_bytes_received));

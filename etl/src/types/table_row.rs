@@ -19,9 +19,4 @@ impl TableRow {
     pub fn new(values: Vec<Cell>) -> Self {
         Self { values }
     }
-
-    /// Returns an approximate size in bytes for this row's payload.
-    pub fn approximate_size_bytes(&self) -> usize {
-        self.values.iter().map(|c| c.approximate_size_bytes()).sum()
-    }
 }

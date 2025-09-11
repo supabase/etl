@@ -22,8 +22,7 @@ use crate::failpoints::{
     etl_fail_point,
 };
 use crate::metrics::{
-    ETL_BATCH_SEND_DURATION_SECONDS, ETL_BATCH_SIZE, ETL_ITEMS_COPIED_TOTAL, PIPELINE_ID_LABEL,
-    WORKER_TYPE_LABEL,
+    ETL_BATCH_SEND_DURATION_MILLISECONDS, ETL_BATCH_SIZE, ETL_ITEMS_COPIED_TOTAL, WORKER_TYPE_LABEL,
 };
 use crate::replication::client::PgReplicationClient;
 use crate::replication::stream::TableCopyStream;
@@ -207,12 +206,8 @@ where
             let table_copy_stream = transaction
                 .get_table_copy_stream(table_id, &table_schema.column_schemas)
                 .await?;
-            let table_copy_stream = TableCopyStream::wrap(
-                table_copy_stream,
-                &table_schema.column_schemas,
-                pipeline_id,
-                table_id,
-            );
+            let table_copy_stream =
+                TableCopyStream::wrap(table_copy_stream, &table_schema.column_schemas);
             let table_copy_stream = TimeoutBatchStream::wrap(
                 table_copy_stream,
                 config.batch.clone(),
@@ -233,13 +228,12 @@ where
 
                         destination.write_table_rows(table_id, table_rows).await?;
 
-                        counter!(ETL_ITEMS_COPIED_TOTAL, PIPELINE_ID_LABEL => pipeline_id.to_string(), WORKER_TYPE_LABEL => "table_sync")
+                        counter!(ETL_ITEMS_COPIED_TOTAL, WORKER_TYPE_LABEL => "table_sync")
                             .increment(rows_copied as u64);
-                        gauge!(ETL_BATCH_SIZE, PIPELINE_ID_LABEL => pipeline_id.to_string())
-                            .set(rows_copied as f64);
-                        let send_duration_secs = before_sending.elapsed().as_secs_f64();
-                        histogram!(ETL_BATCH_SEND_DURATION_SECONDS, PIPELINE_ID_LABEL => pipeline_id.to_string(), WORKER_TYPE_LABEL => "table_sync")
-                            .record(send_duration_secs);
+                        gauge!(ETL_BATCH_SIZE).set(rows_copied as f64);
+                        let send_duration_ms = before_sending.elapsed().as_millis() as f64;
+                        histogram!(ETL_BATCH_SEND_DURATION_MILLISECONDS, WORKER_TYPE_LABEL => "table_sync")
+                            .record(send_duration_ms);
 
                         // Fail point to test when the table sync fails after copying one batch.
                         #[cfg(feature = "failpoints")]
