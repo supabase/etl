@@ -226,13 +226,14 @@ where
                 match result {
                     ShutdownResult::Ok(table_rows) => {
                         let table_rows = table_rows.into_iter().collect::<Result<Vec<_>, _>>()?;
-                        total_rows_copied += table_rows.len();
+                        let table_rows_copied_batch = table_rows.len();
+                        total_rows_copied += table_rows_copied_batch;
 
                         let before_sending = Instant::now();
 
                         destination.write_table_rows(table_id, table_rows).await?;
 
-                        gauge!(ETL_TABLE_ROWS_BATCH_WRITTEN).set(table_rows.len() as f64);
+                        gauge!(ETL_TABLE_ROWS_BATCH_WRITTEN).set(table_rows_copied_batch as f64);
 
                         let send_duration_ms = before_sending.elapsed().as_millis() as f64;
                         histogram!(ETL_TABLE_ROWS_BATCH_SEND_DURATION_MS).record(send_duration_ms);
