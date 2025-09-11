@@ -266,7 +266,7 @@ struct ApplyLoopState {
     next_status_update: StatusUpdate,
     /// A batch of events to send to the destination.
     events_batch: Vec<Event>,
-    /// Instant from BEGIN message (microseconds since PostgreSQL epoch) if a transaction is open.
+    /// Instant from when a transaction began.
     current_tx_begin_ts: Option<Instant>,
     /// Number of events observed in the current transaction (excluding BEGIN/COMMIT).
     current_tx_events: u64,
@@ -815,6 +815,9 @@ where
 {
     let commit_lsn = get_commit_lsn(state, &message)?;
 
+    // For each message we track it. This counter will be reset within the function.
+    state.current_tx_events += 1;
+
     match &message {
         LogicalReplicationMessage::Begin(begin_body) => {
             handle_begin_message(state, start_lsn, commit_lsn, begin_body).await
@@ -920,7 +923,8 @@ async fn handle_begin_message(
 
     // Track begin instant and reset tx event count.
     state.current_tx_begin_ts = Some(Instant::now());
-    state.current_tx_events = 0;
+    // We include the BEGIN in the events count.
+    state.current_tx_events = 1;
 
     // Convert event from the protocol message.
     let event = parse_event_from_begin_message(start_lsn, commit_lsn, message);

@@ -1,8 +1,5 @@
-use crate::bigquery::encoding::BigQueryTableRow;
-use crate::bigquery::metrics::ETL_BIGQUERY_APPEND_DURATION_MILLISECONDS;
 use etl::error::{ErrorKind, EtlError, EtlResult};
 use etl::etl_error;
-// no high-cardinality labels for BQ metrics
 use etl::types::{Cell, ColumnSchema, TableRow, Type, is_array_type};
 use gcp_bigquery_client::google::cloud::bigquery::storage::v1::RowError;
 use gcp_bigquery_client::storage::ColumnMode;
@@ -19,6 +16,9 @@ use std::fmt;
 use std::sync::Arc;
 use std::time::Instant;
 use tracing::{debug, info};
+
+use crate::bigquery::encoding::BigQueryTableRow;
+use crate::bigquery::metrics::ETL_BIGQUERY_APPEND_DURATION_MS;
 
 /// Trace identifier for ETL operations in BigQuery client.
 const ETL_TRACE_ID: &str = "ETL BigQueryClient";
@@ -353,7 +353,7 @@ impl BigQueryClient {
         }
 
         let send_duration_ms = before_sending.elapsed().as_millis() as f64;
-        histogram!(ETL_BIGQUERY_APPEND_DURATION_MILLISECONDS).record(send_duration_ms);
+        histogram!(ETL_BIGQUERY_APPEND_DURATION_MS).record(send_duration_ms);
 
         if batches_responses_errors.is_empty() {
             return Ok((total_bytes_sent, total_bytes_received));
