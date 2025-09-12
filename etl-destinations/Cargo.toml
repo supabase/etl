@@ -17,6 +17,7 @@ iceberg = [
     "dep:arrow",
     "dep:base64",
     "dep:parquet",
+    "dep:tokio",
 ]
 
 [dependencies]
