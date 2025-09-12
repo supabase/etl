@@ -11,7 +11,13 @@ bigquery = [
     "dep:tracing",
     "dep:tokio",
 ]
-iceberg = ["dep:iceberg", "dep:iceberg-catalog-rest", "dep:arrow", "dep:base64"]
+iceberg = [
+    "dep:iceberg",
+    "dep:iceberg-catalog-rest",
+    "dep:arrow",
+    "dep:base64",
+    "dep:parquet",
+]
 
 [dependencies]
 etl = { workspace = true }
@@ -26,6 +32,7 @@ gcp-bigquery-client = { workspace = true, optional = true, features = [
 iceberg = { workspace = true, optional = true }
 iceberg-catalog-rest = { workspace = true, optional = true }
 metrics = { workspace = true }
+parquet = { workspace = true, optional = true, features = ["async", "arrow"] }
 prost = { workspace = true, optional = true }
 rustls = { workspace = true, optional = true, features = [
     "aws-lc-rs",
@@ -33,6 +40,7 @@ rustls = { workspace = true, optional = true, features = [
 ] }
 tokio = { workspace = true, optional = true, features = ["sync"] }
 tracing = { workspace = true, optional = true, default-features = true }
+uuid = { workspace = true, features = ["v4"] }
 
 [dev-dependencies]
 etl = { workspace = true, features = ["test-utils"] }

@@ -1,11 +1,25 @@
 use std::{collections::HashMap, sync::Arc};
 
+use arrow::array::RecordBatch;
 use etl::{
     error::EtlResult,
     types::{TableRow, TableSchema},
 };
-use iceberg::{Catalog, NamespaceIdent, TableCreation, TableIdent};
+use iceberg::{
+    Catalog, NamespaceIdent, TableCreation, TableIdent,
+    table::Table,
+    transaction::{ApplyTransactionAction, Transaction},
+    writer::{
+        IcebergWriter, IcebergWriterBuilder,
+        base_writer::data_file_writer::DataFileWriterBuilder,
+        file_writer::{
+            ParquetWriterBuilder,
+            location_generator::{DefaultFileNameGenerator, DefaultLocationGenerator},
+        },
+    },
+};
 use iceberg_catalog_rest::{RestCatalog, RestCatalogConfig};
+use parquet::{basic::Compression, file::properties::WriterProperties};
 
 use crate::iceberg::{
     encoding::rows_to_record_batch, error::iceberg_error_to_etl_error,
@@ -121,7 +135,70 @@ impl IcebergClient {
         // This preserves field IDs properly for transaction-based writes
         let arrow_schema = iceberg::arrow::schema_to_arrow_schema(iceberg_schema)
             .map_err(iceberg_error_to_etl_error)?;
-        let _record_batch = rows_to_record_batch(table_rows, &arrow_schema)?;
+        let record_batch = rows_to_record_batch(table_rows, &arrow_schema)?;
+
+        self.write_record_batch(&table, record_batch)
+            .await
+            .map_err(iceberg_error_to_etl_error)?;
+
+        Ok(())
+    }
+
+    async fn write_record_batch(
+        &self,
+        table: &Table,
+        record_batch: RecordBatch,
+    ) -> Result<(), iceberg::Error> {
+        // Create Parquet writer properties
+        let writer_props = WriterProperties::builder()
+            .set_compression(Compression::SNAPPY)
+            .build();
+
+        // Create location and file name generators
+        let location_gen = DefaultLocationGenerator::new(table.metadata().clone())?;
+        let file_name_gen = DefaultFileNameGenerator::new(
+            "data".to_string(),
+            Some(uuid::Uuid::new_v4().to_string()), // Add unique UUID for each file
+            iceberg::spec::DataFileFormat::Parquet,
+        );
+
+        // Create Parquet writer builder
+        let parquet_writer_builder = ParquetWriterBuilder::new(
+            writer_props,
+            table.metadata().current_schema().clone(),
+            table.file_io().clone(),
+            location_gen,
+            file_name_gen,
+        );
+
+        // Create data file writer with empty partition (unpartitioned table)
+        let data_file_writer_builder = DataFileWriterBuilder::new(
+            parquet_writer_builder,
+            None, // No partition value for unpartitioned tables
+            table.metadata().default_partition_spec_id(),
+        );
+
+        // Build the writer
+        let mut data_file_writer = data_file_writer_builder.build().await?;
+
+        // Write the record batch using Iceberg writer
+        data_file_writer.write(record_batch.clone()).await?;
+
+        // Close writer and get data files
+        let data_files = data_file_writer.close().await?;
+
+        // Create transaction and fast append action
+        let transaction = Transaction::new(table);
+        let append_action = transaction
+            .fast_append()
+            .with_check_duplicate(false) // Don't check duplicates for performance
+            .add_data_files(data_files);
+
+        // Apply the append action to create updated transaction
+        let updated_transaction = append_action.apply(transaction)?;
+
+        // Commit the transaction to the catalog
+        let _updated_table = updated_transaction.commit(&*self.catalog).await?;
 
         Ok(())
     }
