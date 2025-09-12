@@ -64,7 +64,7 @@ where
 
     // If there is a list of keys to parse, we add them to the source and enable parsing with the
     // separator.
-    if !<T as Config>::LIST_PARSE_KEYS.is_empty() {
+    if !T::LIST_PARSE_KEYS.is_empty() {
         environment_source = environment_source
             .try_parsing(true)
             .list_separator(LIST_SEPARATOR);

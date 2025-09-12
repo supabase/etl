@@ -77,6 +77,9 @@ impl Default for MemoryDestination {
 }
 
 impl Destination for MemoryDestination {
+    fn name() -> &'static str {
+        "memory"
+    }
     async fn truncate_table(&self, table_id: TableId) -> EtlResult<()> {
         // For truncation, we simulate removing all table rows for a specific table and also the events
         // of that table.

@@ -407,6 +407,10 @@ enum BenchDestination {
 }
 
 impl Destination for BenchDestination {
+    fn name() -> &'static str {
+        "bench_destination"
+    }
+
     async fn truncate_table(&self, table_id: TableId) -> EtlResult<()> {
         match self {
             BenchDestination::Null(dest) => dest.truncate_table(table_id).await,
@@ -434,6 +438,10 @@ impl Destination for BenchDestination {
 }
 
 impl Destination for NullDestination {
+    fn name() -> &'static str {
+        "null"
+    }
+
     async fn truncate_table(&self, _table_id: TableId) -> EtlResult<()> {
         Ok(())
     }

@@ -22,8 +22,9 @@ use crate::failpoints::{
     etl_fail_point,
 };
 use crate::metrics::{
-    ACTION_LABEL, ETL_BATCH_ITEMS_WRITTEN_TOTAL, ETL_ITEMS_SEND_DURATION_SECONDS,
-    ETL_TABLE_ROWS_TOTAL_WRITTEN, PIPELINE_ID_LABEL, WORKER_TYPE_LABEL,
+    ACTION_LABEL, DESTINATION_LABEL, ETL_BATCH_ITEMS_WRITTEN_TOTAL,
+    ETL_ITEMS_SEND_DURATION_SECONDS, ETL_TABLE_ROWS_TOTAL_WRITTEN, PIPELINE_ID_LABEL,
+    WORKER_TYPE_LABEL,
 };
 use crate::replication::client::PgReplicationClient;
 use crate::replication::stream::TableCopyStream;
@@ -237,7 +238,8 @@ where
                             ETL_BATCH_ITEMS_WRITTEN_TOTAL,
                             WORKER_TYPE_LABEL => "table_sync",
                             ACTION_LABEL => "table_copy",
-                            PIPELINE_ID_LABEL => pipeline_id.to_string()
+                            PIPELINE_ID_LABEL => pipeline_id.to_string(),
+                            DESTINATION_LABEL => D::name(),
                         )
                         .increment(table_rows_copied_batch as u64);
 
@@ -246,7 +248,8 @@ where
                             ETL_ITEMS_SEND_DURATION_SECONDS,
                             WORKER_TYPE_LABEL => "table_sync",
                             ACTION_LABEL => "table_copy",
-                            PIPELINE_ID_LABEL => pipeline_id.to_string()
+                            PIPELINE_ID_LABEL => pipeline_id.to_string(),
+                            DESTINATION_LABEL => D::name(),
                         )
                         .record(send_duration_seconds);
 
@@ -268,7 +271,7 @@ where
                 }
             }
 
-            gauge!(ETL_TABLE_ROWS_TOTAL_WRITTEN, PIPELINE_ID_LABEL => pipeline_id.to_string())
+            gauge!(ETL_TABLE_ROWS_TOTAL_WRITTEN, PIPELINE_ID_LABEL => pipeline_id.to_string(), DESTINATION_LABEL => D::name())
                 .set(total_rows_copied as f64);
 
             // We commit the transaction before starting the apply loop, otherwise it will fail

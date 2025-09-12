@@ -14,6 +14,9 @@ use crate::types::{Event, TableRow};
 /// may retry failed operations. The destination should handle concurrent writes safely
 /// when multiple table sync workers are active.
 pub trait Destination {
+    /// Returns the name of the destination.
+    fn name() -> &'static str;
+
     /// Truncates all data in the specified table.
     ///
     /// This operation is called during initial table synchronization to ensure the

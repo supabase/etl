@@ -743,6 +743,10 @@ impl<S> Destination for BigQueryDestination<S>
 where
     S: StateStore + SchemaStore + Send + Sync,
 {
+    fn name() -> &'static str {
+        "bigquery"
+    }
+
     async fn truncate_table(&self, table_id: TableId) -> EtlResult<()> {
         self.process_truncate_for_table_ids(iter::once(table_id), false)
             .await

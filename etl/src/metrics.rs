@@ -12,8 +12,6 @@ pub const ETL_TRANSACTION_DURATION_SECONDS: &str = "etl_transaction_duration_sec
 pub const ETL_TRANSACTION_SIZE: &str = "etl_transaction_size";
 pub const ETL_COPIED_TABLE_ROW_SIZE_BYTES: &str = "etl_copied_table_row_size_bytes";
 
-/// Label key for table id.
-pub const TABLE_ID_LABEL: &str = "table_id";
 /// Label key for replication phase (used by table state metrics).
 pub const PHASE_LABEL: &str = "phase";
 /// Label key for the ETL worker type ("table_sync" or "apply").
@@ -24,10 +22,6 @@ pub const ACTION_LABEL: &str = "action";
 pub const DESTINATION_LABEL: &str = "destination";
 /// Label key for pipeline id.
 pub const PIPELINE_ID_LABEL: &str = "pipeline_id";
-/// Label key for publication name.
-pub const PUBLICATION_LABEL: &str = "publication";
-/// Label key for logical event type.
-pub const EVENT_TYPE_LABEL: &str = "event_type";
 
 /// Register metrics emitted by etl. This should be called before starting a pipeline.
 /// It is safe to call this method multiple times. It is guaranteed to register the

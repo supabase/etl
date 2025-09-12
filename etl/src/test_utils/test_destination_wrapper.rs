@@ -148,6 +148,10 @@ impl<D> Destination for TestDestinationWrapper<D>
 where
     D: Destination + Send + Sync + Clone,
 {
+    fn name() -> &'static str {
+        "wrapper"
+    }
+
     async fn truncate_table(&self, table_id: TableId) -> EtlResult<()> {
         let mut inner = self.inner.write().await;
 

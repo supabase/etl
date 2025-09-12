@@ -26,8 +26,9 @@ use crate::conversions::event::{
 use crate::destination::Destination;
 use crate::error::{ErrorKind, EtlResult};
 use crate::metrics::{
-    ACTION_LABEL, ETL_BATCH_ITEMS_WRITTEN_TOTAL, ETL_ITEMS_SEND_DURATION_SECONDS,
-    ETL_TRANSACTION_DURATION_SECONDS, ETL_TRANSACTION_SIZE, PIPELINE_ID_LABEL, WORKER_TYPE_LABEL,
+    ACTION_LABEL, DESTINATION_LABEL, ETL_BATCH_ITEMS_WRITTEN_TOTAL,
+    ETL_ITEMS_SEND_DURATION_SECONDS, ETL_TRANSACTION_DURATION_SECONDS, ETL_TRANSACTION_SIZE,
+    PIPELINE_ID_LABEL, WORKER_TYPE_LABEL,
 };
 use crate::replication::client::PgReplicationClient;
 use crate::replication::stream::EventsStream;
@@ -664,7 +665,8 @@ where
         ETL_BATCH_ITEMS_WRITTEN_TOTAL,
         WORKER_TYPE_LABEL => "apply",
         ACTION_LABEL => "table_streaming",
-        PIPELINE_ID_LABEL => pipeline_id.to_string()
+        PIPELINE_ID_LABEL => pipeline_id.to_string(),
+        DESTINATION_LABEL => D::name(),
     )
     .increment(batch_size as u64);
 
@@ -673,7 +675,8 @@ where
         ETL_ITEMS_SEND_DURATION_SECONDS,
         WORKER_TYPE_LABEL => "apply",
         ACTION_LABEL => "table_streaming",
-        PIPELINE_ID_LABEL => pipeline_id.to_string()
+        PIPELINE_ID_LABEL => pipeline_id.to_string(),
+        DESTINATION_LABEL => D::name(),
     )
     .record(send_duration_seconds);
 
