@@ -18,7 +18,7 @@ use std::time::Instant;
 use tracing::{debug, info};
 
 use crate::bigquery::encoding::BigQueryTableRow;
-use crate::bigquery::metrics::ETL_BIGQUERY_APPEND_DURATION_MS;
+use crate::bigquery::metrics::ETL_BIGQUERY_APPEND_DURATION_SECONDS;
 
 /// Trace identifier for ETL operations in BigQuery client.
 const ETL_TRACE_ID: &str = "ETL BigQueryClient";
@@ -352,8 +352,8 @@ impl BigQueryClient {
             total_bytes_sent += batch_result.bytes_sent;
         }
 
-        let send_duration_ms = before_sending.elapsed().as_millis() as f64;
-        histogram!(ETL_BIGQUERY_APPEND_DURATION_MS).record(send_duration_ms);
+        let send_duration_seconds = before_sending.elapsed().as_secs_f64();
+        histogram!(ETL_BIGQUERY_APPEND_DURATION_SECONDS).record(send_duration_seconds);
 
         if batches_responses_errors.is_empty() {
             return Ok((total_bytes_sent, total_bytes_received));

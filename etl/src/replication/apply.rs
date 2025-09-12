@@ -3,7 +3,7 @@ use etl_postgres::replication::slots::get_slot_name;
 use etl_postgres::replication::worker::WorkerType;
 use etl_postgres::types::TableId;
 use futures::{FutureExt, StreamExt};
-use metrics::{gauge, histogram};
+use metrics::histogram;
 use postgres_replication::protocol;
 use postgres_replication::protocol::{LogicalReplicationMessage, ReplicationMessage};
 use std::future::{Future, pending};
@@ -26,8 +26,8 @@ use crate::conversions::event::{
 use crate::destination::Destination;
 use crate::error::{ErrorKind, EtlResult};
 use crate::metrics::{
-    ETL_EVENTS_BATCH_SEND_DURATION_MS, ETL_EVENTS_BATCH_WRITTEN, ETL_TRANSACTION_DURATION_MS,
-    ETL_TRANSACTION_SIZE,
+    ACTION_LABEL, ETL_BATCH_ITEMS_WRITTEN_TOTAL, ETL_ITEMS_SEND_DURATION_SECONDS,
+    ETL_TRANSACTION_DURATION_SECONDS, ETL_TRANSACTION_SIZE, WORKER_TYPE_LABEL,
 };
 use crate::replication::client::PgReplicationClient;
 use crate::replication::stream::EventsStream;
@@ -659,10 +659,20 @@ where
 
     destination.write_events(events_batch).await?;
 
-    gauge!(ETL_EVENTS_BATCH_WRITTEN).increment(batch_size as f64);
+    metrics::counter!(
+        ETL_BATCH_ITEMS_WRITTEN_TOTAL,
+        WORKER_TYPE_LABEL => "apply",
+        ACTION_LABEL => "table_streaming"
+    )
+        .increment(batch_size as u64);
 
-    let send_duration_ms = before_sending.elapsed().as_millis() as f64;
-    histogram!(ETL_EVENTS_BATCH_SEND_DURATION_MS).record(send_duration_ms);
+    let send_duration_seconds = before_sending.elapsed().as_secs_f64();
+    histogram!(
+        ETL_ITEMS_SEND_DURATION_SECONDS,
+        WORKER_TYPE_LABEL => "apply",
+        ACTION_LABEL => "table_streaming"
+    )
+    .record(send_duration_seconds);
 
     // We tell the stream to reset the timer when it is polled the next time, this way the deadline
     // is restarted.
@@ -982,8 +992,8 @@ where
     // ts was active.
     if let Some(begin_ts) = state.current_tx_begin_ts.take() {
         let now = Instant::now();
-        let duration_ms = (now - begin_ts).as_millis();
-        histogram!(ETL_TRANSACTION_DURATION_MS).record(duration_ms as f64);
+        let duration_seconds = (now - begin_ts).as_secs_f64();
+        histogram!(ETL_TRANSACTION_DURATION_SECONDS).record(duration_seconds);
         // We do - 1 since we exclude this COMMIT event from the count.
         histogram!(ETL_TRANSACTION_SIZE).record((state.current_tx_events - 1) as f64);
         state.current_tx_events = 0;

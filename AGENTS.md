@@ -14,6 +14,7 @@
 ## Coding Style & Naming
 - Rust 2024 edition; keep formatter clean and warnings denied.
 - Naming: crates `kebab-case`; files/modules `snake_case`; types/traits `CamelCase`; fns/vars `snake_case`.
+- Do not leave comments when you remove things.
 
 ## Rust Docs Style
 - Document all items, public and private, using stdlib tone and precision.

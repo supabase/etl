@@ -1,5 +1,4 @@
 use etl_postgres::types::TableId;
-use metrics::gauge;
 use std::collections::HashMap;
 use std::mem;
 use std::ops::Deref;
@@ -9,7 +8,6 @@ use tracing::{debug, warn};
 
 use crate::destination::Destination;
 use crate::error::EtlResult;
-use crate::metrics::ETL_TABLE_SYNC_WORKERS_ACTIVE;
 use crate::store::schema::SchemaStore;
 use crate::store::state::StateStore;
 use crate::workers::base::{Worker, WorkerHandle};
@@ -61,8 +59,7 @@ impl TableSyncWorkerPoolInner {
         let handle = worker.start().await?;
         self.active.insert(table_id, handle);
 
-        // Update gauge with the current number of active workers.
-        gauge!(ETL_TABLE_SYNC_WORKERS_ACTIVE).set(self.active.len() as f64);
+        // Metric removed: active workers gauge is omitted.
 
         debug!(
             "successfully added worker for table {} to the pool",
@@ -88,8 +85,6 @@ impl TableSyncWorkerPoolInner {
                 .or_default()
                 .push(removed_worker);
         }
-
-        gauge!(ETL_TABLE_SYNC_WORKERS_ACTIVE).set(self.active.len() as f64);
     }
 
     /// Retrieves the state handle for an active worker by table ID.
@@ -195,8 +190,6 @@ impl TableSyncWorkerPool {
         }
     }
 }
-
-// Intentionally no Default: pool requires a pipeline id for metrics.
 
 impl Deref for TableSyncWorkerPool {
     type Target = Mutex<TableSyncWorkerPoolInner>;
