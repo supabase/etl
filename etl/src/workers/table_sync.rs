@@ -11,6 +11,7 @@ use tokio::task::JoinHandle;
 use tokio_postgres::types::PgLsn;
 use tracing::{Instrument, debug, error, info, warn};
 
+use crate::concurrency::pause::PauseRx;
 use crate::concurrency::shutdown::{ShutdownResult, ShutdownRx};
 use crate::concurrency::signal::SignalTx;
 use crate::destination::Destination;
@@ -344,6 +345,7 @@ pub struct TableSyncWorker<S, D> {
     store: S,
     destination: D,
     shutdown_rx: ShutdownRx,
+    pause_rx: PauseRx,
     force_syncing_tables_tx: SignalTx,
     run_permit: Arc<Semaphore>,
 }
@@ -363,6 +365,7 @@ impl<S, D> TableSyncWorker<S, D> {
         store: S,
         destination: D,
         shutdown_rx: ShutdownRx,
+        pause_rx: PauseRx,
         force_syncing_tables_tx: SignalTx,
         run_permit: Arc<Semaphore>,
     ) -> Self {
@@ -374,6 +377,7 @@ impl<S, D> TableSyncWorker<S, D> {
             store,
             destination,
             shutdown_rx,
+            pause_rx,
             force_syncing_tables_tx,
             run_permit,
         }
@@ -410,6 +414,7 @@ where
         let pipeline_id = self.pipeline_id;
         let destination = self.destination.clone();
         let shutdown_rx = self.shutdown_rx.clone();
+        let pause_rx = self.pause_rx.clone();
         let force_syncing_tables_tx = self.force_syncing_tables_tx.clone();
         let run_permit = self.run_permit.clone();
 
@@ -423,6 +428,7 @@ where
                 store: store.clone(),
                 destination: destination.clone(),
                 shutdown_rx: shutdown_rx.clone(),
+                pause_rx: pause_rx.clone(),
                 force_syncing_tables_tx: force_syncing_tables_tx.clone(),
                 run_permit: run_permit.clone(),
             };
@@ -576,6 +582,7 @@ where
             self.store.clone(),
             self.destination.clone(),
             self.shutdown_rx.clone(),
+            self.pause_rx.clone(),
             self.force_syncing_tables_tx,
         )
         .await;
@@ -600,6 +607,7 @@ where
             self.destination,
             TableSyncWorkerHook::new(self.table_id, state, self.store),
             self.shutdown_rx,
+            self.pause_rx,
             None,
         )
         .await?;

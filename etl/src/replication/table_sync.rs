@@ -11,6 +11,7 @@ use tokio_postgres::types::PgLsn;
 use tracing::{error, info, warn};
 
 use crate::bail;
+use crate::concurrency::pause::PauseRx;
 use crate::concurrency::shutdown::{ShutdownResult, ShutdownRx};
 use crate::concurrency::signal::SignalTx;
 use crate::concurrency::stream::TimeoutBatchStream;
@@ -66,6 +67,7 @@ pub async fn start_table_sync<S, D>(
     store: S,
     destination: D,
     shutdown_rx: ShutdownRx,
+    pause_rx: PauseRx,
     force_syncing_tables_tx: SignalTx,
 ) -> EtlResult<TableSyncResult>
 where
@@ -214,6 +216,7 @@ where
                 table_copy_stream,
                 config.batch.clone(),
                 shutdown_rx.clone(),
+                pause_rx.clone(),
             );
             pin!(table_copy_stream);
 
