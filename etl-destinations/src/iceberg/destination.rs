@@ -36,7 +36,7 @@ pub fn table_name_to_iceberg_table_name(table_name: &TableName) -> IcebergTableN
 #[derive(Debug)]
 pub enum IcebergOperationType {
     Upsert,
-    Delete,
+    // Delete,
 }
 
 impl IcebergOperationType {
@@ -50,7 +50,7 @@ impl fmt::Display for IcebergOperationType {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             IcebergOperationType::Upsert => write!(f, "UPSERT"),
-            IcebergOperationType::Delete => write!(f, "DELETE"),
+            // IcebergOperationType::Delete => write!(f, "DELETE"),
         }
     }
 }
@@ -90,7 +90,7 @@ where
         table_id: TableId,
         mut table_rows: Vec<TableRow>,
     ) -> EtlResult<()> {
-        let _iceberg_table_name = self.prepare_table_for_streaming(table_id).await?;
+        let iceberg_table_name = self.prepare_table_for_streaming(table_id).await?;
 
         // Add CDC operation type to all rows (no lock needed).
         for table_row in table_rows.iter_mut() {
@@ -98,6 +98,10 @@ where
                 .values
                 .push(IcebergOperationType::Upsert.into_cell());
         }
+
+        self.client
+            .stream_rows(self.namespace.clone(), iceberg_table_name, &table_rows)
+            .await?;
 
         Ok(())
     }

@@ -1,5 +1,6 @@
 mod client;
 mod destination;
+mod encoding;
 mod error;
 mod schema;
 

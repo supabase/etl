@@ -1,10 +1,16 @@
 use std::{collections::HashMap, sync::Arc};
 
-use etl::types::TableSchema;
+use etl::{
+    error::EtlResult,
+    types::{TableRow, TableSchema},
+};
 use iceberg::{Catalog, NamespaceIdent, TableCreation, TableIdent};
 use iceberg_catalog_rest::{RestCatalog, RestCatalogConfig};
 
-use crate::iceberg::schema::postgres_to_iceberg_schema;
+use crate::iceberg::{
+    encoding::rows_to_record_batch, error::iceberg_error_to_etl_error,
+    schema::postgres_to_iceberg_schema,
+};
 
 /// Client for connecting to Iceberg data lakes.
 #[derive(Debug, Clone)]
@@ -91,5 +97,32 @@ impl IcebergClient {
     pub async fn drop_namespace(&self, namespace: &str) -> Result<(), iceberg::Error> {
         let namespace_ident = NamespaceIdent::from_strs(namespace.split('.'))?;
         self.catalog.drop_namespace(&namespace_ident).await
+    }
+
+    /// Send rows to the destination
+    pub async fn stream_rows(
+        &self,
+        namespace: String,
+        table_name: String,
+        table_rows: &[TableRow],
+    ) -> EtlResult<()> {
+        let namespace_ident = NamespaceIdent::new(namespace);
+        let table_ident = TableIdent::new(namespace_ident, table_name);
+
+        let table = self
+            .catalog
+            .load_table(&table_ident)
+            .await
+            .map_err(iceberg_error_to_etl_error)?;
+        let table_metadata = table.metadata();
+        let iceberg_schema = table_metadata.current_schema();
+
+        // Convert the actual Iceberg schema to Arrow schema using iceberg-rust's built-in converter
+        // This preserves field IDs properly for transaction-based writes
+        let arrow_schema = iceberg::arrow::schema_to_arrow_schema(iceberg_schema)
+            .map_err(iceberg_error_to_etl_error)?;
+        let _record_batch = rows_to_record_batch(table_rows, &arrow_schema)?;
+
+        Ok(())
     }
 }
