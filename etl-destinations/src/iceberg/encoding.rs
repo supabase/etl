@@ -300,7 +300,7 @@ impl CellToArrowConverter {
             Cell::Uuid(u) => Some(u.to_string()),
             Cell::Json(j) => Some(j.to_string()),
             Cell::Bytes(b) => Some(BASE64_STANDARD.encode(b)),
-            Cell::Array(arr) => Some(format!("{:?}", arr)), // Simple debug representation
+            Cell::Array(arr) => Some(format!("{arr:?}")), // Simple debug representation
         }
     }
 
