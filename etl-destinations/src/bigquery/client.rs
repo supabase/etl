@@ -10,15 +10,12 @@ use gcp_bigquery_client::{
     model::{query_request::QueryRequest, query_response::ResultSet},
     storage::{ColumnType, FieldDescriptor, StreamName, TableBatch, TableDescriptor},
 };
-use metrics::histogram;
 use prost::Message;
 use std::fmt;
 use std::sync::Arc;
-use std::time::Instant;
 use tracing::{debug, info};
 
 use crate::bigquery::encoding::BigQueryTableRow;
-use crate::bigquery::metrics::ETL_BIGQUERY_APPEND_DURATION_SECONDS;
 
 /// Trace identifier for ETL operations in BigQuery client.
 const ETL_TRACE_ID: &str = "ETL BigQueryClient";
@@ -307,8 +304,6 @@ impl BigQueryClient {
             max_concurrent_streams
         );
 
-        let before_sending = Instant::now();
-
         // Use the new concurrent append_table_batches method
         let batch_results = self
             .client
@@ -351,9 +346,6 @@ impl BigQueryClient {
 
             total_bytes_sent += batch_result.bytes_sent;
         }
-
-        let send_duration_seconds = before_sending.elapsed().as_secs_f64();
-        histogram!(ETL_BIGQUERY_APPEND_DURATION_SECONDS).record(send_duration_seconds);
 
         if batches_responses_errors.is_empty() {
             return Ok((total_bytes_sent, total_bytes_received));

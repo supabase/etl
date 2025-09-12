@@ -2,7 +2,6 @@ mod client;
 mod core;
 mod encoding;
 mod encryption;
-pub mod metrics;
 mod validation;
 
 pub use client::{BigQueryDatasetId, BigQueryProjectId, BigQueryTableId};

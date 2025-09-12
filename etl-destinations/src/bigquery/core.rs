@@ -14,7 +14,6 @@ use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
 
 use crate::bigquery::client::{BigQueryClient, BigQueryOperationType};
-use crate::bigquery::metrics::register_metrics;
 use crate::bigquery::{BigQueryDatasetId, BigQueryTableId};
 
 /// Delimiter separating schema from table name in BigQuery table identifiers.
@@ -214,8 +213,6 @@ where
         max_concurrent_streams: usize,
         store: S,
     ) -> EtlResult<Self> {
-        register_metrics();
-
         let client = BigQueryClient::new_with_key_path(project_id, sa_key).await?;
         let inner = Inner {
             created_tables: HashSet::new(),
@@ -246,8 +243,6 @@ where
         max_concurrent_streams: usize,
         store: S,
     ) -> EtlResult<Self> {
-        register_metrics();
-
         let client = BigQueryClient::new_with_key(project_id, sa_key).await?;
         let inner = Inner {
             created_tables: HashSet::new(),

@@ -27,7 +27,6 @@ gcp-bigquery-client = { workspace = true, optional = true, features = [
 ] }
 iceberg = { workspace = true, optional = true }
 iceberg-catalog-rest = { workspace = true, optional = true }
-metrics = { workspace = true }
 prost = { workspace = true, optional = true }
 rustls = { workspace = true, optional = true, features = [
     "aws-lc-rs",
