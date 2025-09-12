@@ -113,8 +113,8 @@ impl IcebergClient {
         self.catalog.drop_namespace(&namespace_ident).await
     }
 
-    /// Send rows to the destination
-    pub async fn stream_rows(
+    /// Write table rows to the table in the destination
+    pub async fn write_table_rows(
         &self,
         namespace: String,
         table_name: String,
