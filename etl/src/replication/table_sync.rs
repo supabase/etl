@@ -23,7 +23,7 @@ use crate::failpoints::{
 };
 use crate::metrics::{
     ACTION_LABEL, ETL_BATCH_ITEMS_WRITTEN_TOTAL, ETL_ITEMS_SEND_DURATION_SECONDS,
-    ETL_TABLE_ROWS_TOTAL_WRITTEN, WORKER_TYPE_LABEL,
+    ETL_TABLE_ROWS_TOTAL_WRITTEN, PIPELINE_ID_LABEL, WORKER_TYPE_LABEL,
 };
 use crate::replication::client::PgReplicationClient;
 use crate::replication::stream::TableCopyStream;
@@ -208,7 +208,7 @@ where
                 .get_table_copy_stream(table_id, &table_schema.column_schemas)
                 .await?;
             let table_copy_stream =
-                TableCopyStream::wrap(table_copy_stream, &table_schema.column_schemas);
+                TableCopyStream::wrap(table_copy_stream, &table_schema.column_schemas, pipeline_id);
             let table_copy_stream = TimeoutBatchStream::wrap(
                 table_copy_stream,
                 config.batch.clone(),
@@ -236,7 +236,8 @@ where
                         metrics::counter!(
                             ETL_BATCH_ITEMS_WRITTEN_TOTAL,
                             WORKER_TYPE_LABEL => "table_sync",
-                            ACTION_LABEL => "table_copy"
+                            ACTION_LABEL => "table_copy",
+                            PIPELINE_ID_LABEL => pipeline_id.to_string()
                         )
                         .increment(table_rows_copied_batch as u64);
 
@@ -244,7 +245,8 @@ where
                         histogram!(
                             ETL_ITEMS_SEND_DURATION_SECONDS,
                             WORKER_TYPE_LABEL => "table_sync",
-                            ACTION_LABEL => "table_copy"
+                            ACTION_LABEL => "table_copy",
+                            PIPELINE_ID_LABEL => pipeline_id.to_string()
                         )
                         .record(send_duration_seconds);
 
@@ -266,7 +268,8 @@ where
                 }
             }
 
-            gauge!(ETL_TABLE_ROWS_TOTAL_WRITTEN).set(total_rows_copied as f64);
+            gauge!(ETL_TABLE_ROWS_TOTAL_WRITTEN, PIPELINE_ID_LABEL => pipeline_id.to_string())
+                .set(total_rows_copied as f64);
 
             // We commit the transaction before starting the apply loop, otherwise it will fail
             // since no transactions can be running while replication is started.

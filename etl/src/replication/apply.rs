@@ -27,7 +27,7 @@ use crate::destination::Destination;
 use crate::error::{ErrorKind, EtlResult};
 use crate::metrics::{
     ACTION_LABEL, ETL_BATCH_ITEMS_WRITTEN_TOTAL, ETL_ITEMS_SEND_DURATION_SECONDS,
-    ETL_TRANSACTION_DURATION_SECONDS, ETL_TRANSACTION_SIZE, WORKER_TYPE_LABEL,
+    ETL_TRANSACTION_DURATION_SECONDS, ETL_TRANSACTION_SIZE, PIPELINE_ID_LABEL, WORKER_TYPE_LABEL,
 };
 use crate::replication::client::PgReplicationClient;
 use crate::replication::stream::EventsStream;
@@ -544,6 +544,7 @@ where
                 message?,
                 schema_store,
                 hook,
+                pipeline_id,
             )
             .await?;
 
@@ -641,7 +642,7 @@ async fn send_batch<D>(
     events_stream: Pin<&mut TimeoutEventsStream>,
     destination: &D,
     max_batch_size: usize,
-    _pipeline_id: PipelineId,
+    pipeline_id: PipelineId,
 ) -> EtlResult<()>
 where
     D: Destination + Clone + Send + 'static,
@@ -662,15 +663,17 @@ where
     metrics::counter!(
         ETL_BATCH_ITEMS_WRITTEN_TOTAL,
         WORKER_TYPE_LABEL => "apply",
-        ACTION_LABEL => "table_streaming"
+        ACTION_LABEL => "table_streaming",
+        PIPELINE_ID_LABEL => pipeline_id.to_string()
     )
-        .increment(batch_size as u64);
+    .increment(batch_size as u64);
 
     let send_duration_seconds = before_sending.elapsed().as_secs_f64();
     histogram!(
         ETL_ITEMS_SEND_DURATION_SECONDS,
         WORKER_TYPE_LABEL => "apply",
-        ACTION_LABEL => "table_streaming"
+        ACTION_LABEL => "table_streaming",
+        PIPELINE_ID_LABEL => pipeline_id.to_string()
     )
     .record(send_duration_seconds);
 
@@ -748,6 +751,7 @@ async fn handle_replication_message<S, T>(
     message: ReplicationMessage<LogicalReplicationMessage>,
     schema_store: &S,
     hook: &T,
+    pipeline_id: PipelineId,
 ) -> EtlResult<HandleMessageResult>
 where
     S: SchemaStore + Clone + Send + 'static,
@@ -774,6 +778,7 @@ where
                 message.into_data(),
                 schema_store,
                 hook,
+                pipeline_id,
             )
             .await
         }
@@ -818,6 +823,7 @@ async fn handle_logical_replication_message<S, T>(
     message: LogicalReplicationMessage,
     schema_store: &S,
     hook: &T,
+    pipeline_id: PipelineId,
 ) -> EtlResult<HandleMessageResult>
 where
     S: SchemaStore + Clone + Send + 'static,
@@ -832,7 +838,8 @@ where
             handle_begin_message(state, start_lsn, commit_lsn, begin_body).await
         }
         LogicalReplicationMessage::Commit(commit_body) => {
-            handle_commit_message(state, start_lsn, commit_lsn, commit_body, hook).await
+            handle_commit_message(state, start_lsn, commit_lsn, commit_body, hook, pipeline_id)
+                .await
         }
         LogicalReplicationMessage::Relation(relation_body) => {
             handle_relation_message(
@@ -956,6 +963,7 @@ async fn handle_commit_message<T>(
     commit_lsn: PgLsn,
     message: &protocol::CommitBody,
     hook: &T,
+    pipeline_id: PipelineId,
 ) -> EtlResult<HandleMessageResult>
 where
     T: ApplyLoopHook,
@@ -993,9 +1001,17 @@ where
     if let Some(begin_ts) = state.current_tx_begin_ts.take() {
         let now = Instant::now();
         let duration_seconds = (now - begin_ts).as_secs_f64();
-        histogram!(ETL_TRANSACTION_DURATION_SECONDS).record(duration_seconds);
+        histogram!(
+            ETL_TRANSACTION_DURATION_SECONDS,
+            PIPELINE_ID_LABEL => pipeline_id.to_string()
+        )
+        .record(duration_seconds);
         // We do - 1 since we exclude this COMMIT event from the count.
-        histogram!(ETL_TRANSACTION_SIZE).record((state.current_tx_events - 1) as f64);
+        histogram!(
+            ETL_TRANSACTION_SIZE,
+            PIPELINE_ID_LABEL => pipeline_id.to_string()
+        )
+        .record((state.current_tx_events - 1) as f64);
         state.current_tx_events = 0;
     }
 
