@@ -150,12 +150,6 @@ pub struct TableSyncWorkerPool {
     inner: Arc<Mutex<TableSyncWorkerPoolInner>>,
 }
 
-impl Default for TableSyncWorkerPool {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl TableSyncWorkerPool {
     /// Creates a new empty table sync worker pool.
     ///
@@ -188,6 +182,12 @@ impl TableSyncWorkerPool {
 
             notify.notified().await;
         }
+    }
+}
+
+impl Default for TableSyncWorkerPool {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
