@@ -7,6 +7,7 @@ use arrow::{
         StringBuilder, Time64MicrosecondBuilder, TimestampMicrosecondBuilder, UInt32Builder,
     },
     datatypes::{DataType, Schema, TimeUnit},
+    error::ArrowError,
 };
 use base64::{Engine, prelude::BASE64_STANDARD};
 use chrono::{NaiveDate, NaiveTime};
@@ -17,36 +18,22 @@ use etl::{
 };
 
 /// Converts a vector of table rows to an Arrow RecordBatch.
-pub fn rows_to_record_batch(rows: &[TableRow], schema: &Schema) -> EtlResult<RecordBatch> {
-    if rows.is_empty() {
-        return Ok(RecordBatch::new_empty(Arc::new(schema.clone())));
-    }
-
+pub fn rows_to_record_batch(rows: &[TableRow], schema: Schema) -> Result<RecordBatch, ArrowError> {
     let mut arrays: Vec<ArrayRef> = Vec::new();
 
     // Build arrays for each column
     for (field_idx, field) in schema.fields().iter().enumerate() {
-        let array = build_array_for_field(rows, field_idx, field.data_type())?;
+        let array = build_array_for_field(rows, field_idx, field.data_type());
         arrays.push(array);
     }
 
-    let batch = RecordBatch::try_new(Arc::new(schema.clone()), arrays).map_err(|e| {
-        etl_error!(
-            ErrorKind::DestinationError,
-            "Failed to create Arrow RecordBatch",
-            e.to_string()
-        )
-    })?;
+    let batch = RecordBatch::try_new(Arc::new(schema), arrays)?;
 
     Ok(batch)
 }
 
 /// Builds an Arrow array for a specific field from the table rows.
-fn build_array_for_field(
-    rows: &[TableRow],
-    field_idx: usize,
-    data_type: &DataType,
-) -> EtlResult<ArrayRef> {
+fn build_array_for_field(rows: &[TableRow], field_idx: usize, data_type: &DataType) -> ArrayRef {
     match data_type {
         DataType::Boolean => build_boolean_array(rows, field_idx),
         DataType::Int16 => build_int16_array(rows, field_idx),
@@ -67,7 +54,7 @@ fn build_array_for_field(
 }
 
 /// Builds a boolean array from cell values.
-fn build_boolean_array(rows: &[TableRow], field_idx: usize) -> EtlResult<ArrayRef> {
+fn build_boolean_array(rows: &[TableRow], field_idx: usize) -> ArrayRef {
     let mut builder = BooleanBuilder::new();
 
     for row in rows {
@@ -79,11 +66,11 @@ fn build_boolean_array(rows: &[TableRow], field_idx: usize) -> EtlResult<ArrayRe
         }
     }
 
-    Ok(Arc::new(builder.finish()))
+    Arc::new(builder.finish())
 }
 
 /// Builds an int16 array from cell values.
-fn build_int16_array(rows: &[TableRow], field_idx: usize) -> EtlResult<ArrayRef> {
+fn build_int16_array(rows: &[TableRow], field_idx: usize) -> ArrayRef {
     let mut builder = Int16Builder::new();
 
     for row in rows {
@@ -95,11 +82,11 @@ fn build_int16_array(rows: &[TableRow], field_idx: usize) -> EtlResult<ArrayRef>
         }
     }
 
-    Ok(Arc::new(builder.finish()))
+    Arc::new(builder.finish())
 }
 
 /// Builds an int32 array from cell values.
-fn build_int32_array(rows: &[TableRow], field_idx: usize) -> EtlResult<ArrayRef> {
+fn build_int32_array(rows: &[TableRow], field_idx: usize) -> ArrayRef {
     let mut builder = Int32Builder::new();
 
     for row in rows {
@@ -111,11 +98,11 @@ fn build_int32_array(rows: &[TableRow], field_idx: usize) -> EtlResult<ArrayRef>
         }
     }
 
-    Ok(Arc::new(builder.finish()))
+    Arc::new(builder.finish())
 }
 
 /// Builds an int64 array from cell values.
-fn build_int64_array(rows: &[TableRow], field_idx: usize) -> EtlResult<ArrayRef> {
+fn build_int64_array(rows: &[TableRow], field_idx: usize) -> ArrayRef {
     let mut builder = Int64Builder::new();
 
     for row in rows {
@@ -127,11 +114,11 @@ fn build_int64_array(rows: &[TableRow], field_idx: usize) -> EtlResult<ArrayRef>
         }
     }
 
-    Ok(Arc::new(builder.finish()))
+    Arc::new(builder.finish())
 }
 
 /// Builds a uint32 array from cell values.
-fn build_uint32_array(rows: &[TableRow], field_idx: usize) -> EtlResult<ArrayRef> {
+fn build_uint32_array(rows: &[TableRow], field_idx: usize) -> ArrayRef {
     let mut builder = UInt32Builder::new();
 
     for row in rows {
@@ -143,11 +130,11 @@ fn build_uint32_array(rows: &[TableRow], field_idx: usize) -> EtlResult<ArrayRef
         }
     }
 
-    Ok(Arc::new(builder.finish()))
+    Arc::new(builder.finish())
 }
 
 /// Builds a float32 array from cell values.
-fn build_float32_array(rows: &[TableRow], field_idx: usize) -> EtlResult<ArrayRef> {
+fn build_float32_array(rows: &[TableRow], field_idx: usize) -> ArrayRef {
     let mut builder = Float32Builder::new();
 
     for row in rows {
@@ -159,11 +146,11 @@ fn build_float32_array(rows: &[TableRow], field_idx: usize) -> EtlResult<ArrayRe
         }
     }
 
-    Ok(Arc::new(builder.finish()))
+    Arc::new(builder.finish())
 }
 
 /// Builds a float64 array from cell values.
-fn build_float64_array(rows: &[TableRow], field_idx: usize) -> EtlResult<ArrayRef> {
+fn build_float64_array(rows: &[TableRow], field_idx: usize) -> ArrayRef {
     let mut builder = Float64Builder::new();
 
     for row in rows {
@@ -175,12 +162,13 @@ fn build_float64_array(rows: &[TableRow], field_idx: usize) -> EtlResult<ArrayRe
         }
     }
 
-    Ok(Arc::new(builder.finish()))
+    Arc::new(builder.finish())
 }
 
 /// Builds a UTF8 array from cell values.
-fn build_utf8_array(rows: &[TableRow], field_idx: usize) -> EtlResult<ArrayRef> {
+fn build_utf8_array(rows: &[TableRow], field_idx: usize) -> ArrayRef {
     let mut builder = StringBuilder::new();
+
     for row in rows {
         if field_idx < row.values.len() {
             let value = CellToArrowConverter::cell_to_string(&row.values[field_idx]);
@@ -189,11 +177,12 @@ fn build_utf8_array(rows: &[TableRow], field_idx: usize) -> EtlResult<ArrayRef> 
             builder.append_null();
         }
     }
-    Ok(Arc::new(builder.finish()))
+
+    Arc::new(builder.finish())
 }
 
 /// Builds a string array from cell values.
-fn build_string_array(rows: &[TableRow], field_idx: usize) -> EtlResult<ArrayRef> {
+fn build_string_array(rows: &[TableRow], field_idx: usize) -> ArrayRef {
     let mut builder = LargeStringBuilder::new();
 
     for row in rows {
@@ -205,11 +194,11 @@ fn build_string_array(rows: &[TableRow], field_idx: usize) -> EtlResult<ArrayRef
         }
     }
 
-    Ok(Arc::new(builder.finish()))
+    Arc::new(builder.finish())
 }
 
 /// Builds a binary array from cell values.
-fn build_binary_array(rows: &[TableRow], field_idx: usize) -> EtlResult<ArrayRef> {
+fn build_binary_array(rows: &[TableRow], field_idx: usize) -> ArrayRef {
     // For now, always use LargeBinaryBuilder as it can handle any size
     let mut builder = LargeBinaryBuilder::new();
 
@@ -222,11 +211,11 @@ fn build_binary_array(rows: &[TableRow], field_idx: usize) -> EtlResult<ArrayRef
         }
     }
 
-    Ok(Arc::new(builder.finish()))
+    Arc::new(builder.finish())
 }
 
 /// Builds a date32 array from cell values.
-fn build_date32_array(rows: &[TableRow], field_idx: usize) -> EtlResult<ArrayRef> {
+fn build_date32_array(rows: &[TableRow], field_idx: usize) -> ArrayRef {
     let mut builder = Date32Builder::new();
 
     for row in rows {
@@ -238,11 +227,11 @@ fn build_date32_array(rows: &[TableRow], field_idx: usize) -> EtlResult<ArrayRef
         }
     }
 
-    Ok(Arc::new(builder.finish()))
+    Arc::new(builder.finish())
 }
 
 /// Builds a time64 array from cell values.
-fn build_time64_array(rows: &[TableRow], field_idx: usize) -> EtlResult<ArrayRef> {
+fn build_time64_array(rows: &[TableRow], field_idx: usize) -> ArrayRef {
     let mut builder = Time64MicrosecondBuilder::new();
 
     for row in rows {
@@ -254,11 +243,11 @@ fn build_time64_array(rows: &[TableRow], field_idx: usize) -> EtlResult<ArrayRef
         }
     }
 
-    Ok(Arc::new(builder.finish()))
+    Arc::new(builder.finish())
 }
 
 /// Builds a timestamp array from cell values.
-fn build_timestamp_array(rows: &[TableRow], field_idx: usize) -> EtlResult<ArrayRef> {
+fn build_timestamp_array(rows: &[TableRow], field_idx: usize) -> ArrayRef {
     // Create timestamp array with +00:00 timezone to match schema
     let mut builder = TimestampMicrosecondBuilder::new().with_timezone("+00:00");
 
@@ -271,7 +260,7 @@ fn build_timestamp_array(rows: &[TableRow], field_idx: usize) -> EtlResult<Array
         }
     }
 
-    Ok(Arc::new(builder.finish()))
+    Arc::new(builder.finish())
 }
 
 /// Converts Cell values to Arrow array builders.

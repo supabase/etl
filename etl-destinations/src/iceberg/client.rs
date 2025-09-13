@@ -24,7 +24,7 @@ use parquet::{basic::Compression, file::properties::WriterProperties};
 
 use crate::iceberg::{
     encoding::{record_batch_to_table_rows, rows_to_record_batch},
-    error::iceberg_error_to_etl_error,
+    error::{arrow_error_to_etl_error, iceberg_error_to_etl_error},
     schema::postgres_to_iceberg_schema,
 };
 
@@ -142,7 +142,8 @@ impl IcebergClient {
         // This preserves field IDs properly for transaction-based writes
         let arrow_schema = iceberg::arrow::schema_to_arrow_schema(iceberg_schema)
             .map_err(iceberg_error_to_etl_error)?;
-        let record_batch = rows_to_record_batch(table_rows, &arrow_schema)?;
+        let record_batch =
+            rows_to_record_batch(table_rows, arrow_schema).map_err(arrow_error_to_etl_error)?;
 
         self.write_record_batch(&table, record_batch)
             .await
