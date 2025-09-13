@@ -16,41 +16,21 @@ pub struct Image {
     pub is_default: bool,
 }
 
-pub async fn create_image(
-    pool: &PgPool,
-    name: &str,
-    is_default: bool,
-) -> Result<i64, ImagesDbError> {
-    let mut txn = pool.begin().await?;
-
-    // If this is to be the new default image, first unset any existing default
-    if is_default {
-        sqlx::query!(
-            r#"
-            update app.images
-            set is_default = false, updated_at = now()
-            where is_default = true
-            "#
-        )
-        .execute(&mut *txn)
-        .await?;
-    }
-
-    let record = sqlx::query!(
+/// Sets the default image to the one identified by `name`.
+///
+/// Delegates to the Postgres function `app.update_default_image(name text)`,
+/// which ensures atomicity and creates the image if missing.
+pub async fn update_default_image_by_name(pool: &PgPool, name: &str) -> Result<(), ImagesDbError> {
+    sqlx::query(
         r#"
-        insert into app.images (name, is_default)
-        values ($1, $2)
-        returning id
+        select app.update_default_image($1)
         "#,
-        name,
-        is_default
     )
-    .fetch_one(&mut *txn)
+    .bind(name)
+    .execute(pool)
     .await?;
 
-    txn.commit().await?;
-
-    Ok(record.id)
+    Ok(())
 }
 
 pub async fn read_default_image<'c, E>(executor: E) -> Result<Option<Image>, ImagesDbError>
