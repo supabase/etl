@@ -57,6 +57,7 @@ fn build_array_for_field(
         DataType::Float64 => build_float64_array(rows, field_idx),
         DataType::Utf8 => build_utf8_array(rows, field_idx),
         DataType::LargeUtf8 => build_string_array(rows, field_idx),
+        DataType::Binary => build_binary_array(rows, field_idx),
         DataType::LargeBinary => build_binary_array(rows, field_idx),
         DataType::Date32 => build_date32_array(rows, field_idx),
         DataType::Time64(TimeUnit::Microsecond) => build_time64_array(rows, field_idx),
@@ -135,11 +136,7 @@ fn build_uint32_array(rows: &[TableRow], field_idx: usize) -> EtlResult<ArrayRef
 
     for row in rows {
         if field_idx < row.values.len() {
-            let value = match &row.values[field_idx] {
-                Cell::U32(u) => Some(*u),
-                Cell::I32(i) if *i >= 0 => Some(*i as u32),
-                _ => None,
-            };
+            let value = CellToArrowConverter::cell_to_u32(&row.values[field_idx]);
             builder.append_option(value);
         } else {
             builder.append_null();
@@ -213,6 +210,7 @@ fn build_string_array(rows: &[TableRow], field_idx: usize) -> EtlResult<ArrayRef
 
 /// Builds a binary array from cell values.
 fn build_binary_array(rows: &[TableRow], field_idx: usize) -> EtlResult<ArrayRef> {
+    // For now, always use LargeBinaryBuilder as it can handle any size
     let mut builder = LargeBinaryBuilder::new();
 
     for row in rows {
@@ -394,6 +392,15 @@ impl CellToArrowConverter {
             _ => None,
         }
     }
+
+    /// Extracts u32 value from Cell.
+    pub fn cell_to_u32(cell: &Cell) -> Option<u32> {
+        match cell {
+            Cell::U32(u) => Some(*u),
+            Cell::I32(i) if *i >= 0 => Some(*i as u32),
+            _ => None,
+        }
+    }
 }
 
 /// Converts a RecordBatch back to a vector of TableRows.
@@ -536,6 +543,18 @@ fn arrow_value_to_cell(array: &ArrayRef, row_idx: usize) -> EtlResult<Cell> {
                 })?;
             Ok(Cell::Bytes(arr.value(row_idx).to_vec()))
         }
+        DataType::Binary => {
+            let arr = array
+                .as_any()
+                .downcast_ref::<BinaryArray>()
+                .ok_or_else(|| {
+                    etl_error!(
+                        ErrorKind::DestinationError,
+                        "Failed to downcast to BinaryArray"
+                    )
+                })?;
+            Ok(Cell::Bytes(arr.value(row_idx).to_vec()))
+        }
         DataType::Date32 => {
             let arr = array
                 .as_any()
@@ -547,8 +566,19 @@ fn arrow_value_to_cell(array: &ArrayRef, row_idx: usize) -> EtlResult<Cell> {
                     )
                 })?;
             let days = arr.value(row_idx);
-            let date = chrono::NaiveDate::from_num_days_from_ce_opt(days + 719163) // Unix epoch offset
-                .ok_or_else(|| etl_error!(ErrorKind::DestinationError, "Invalid date value"))?;
+            // Convert days since Unix epoch (1970-01-01) to NaiveDate
+            let epoch = chrono::NaiveDate::from_ymd_opt(1970, 1, 1)
+                .ok_or_else(|| etl_error!(ErrorKind::DestinationError, "Invalid epoch date"))?;
+
+            let date = if days >= 0 {
+                epoch
+                    .checked_add_days(chrono::Days::new(days as u64))
+                    .ok_or_else(|| etl_error!(ErrorKind::DestinationError, "Invalid date value"))?
+            } else {
+                epoch
+                    .checked_sub_days(chrono::Days::new((-days) as u64))
+                    .ok_or_else(|| etl_error!(ErrorKind::DestinationError, "Invalid date value"))?
+            };
             Ok(Cell::Date(date))
         }
         DataType::Time64(TimeUnit::Microsecond) => {
