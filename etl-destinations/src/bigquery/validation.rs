@@ -1,6 +1,9 @@
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Utc};
 use etl::error::{ErrorKind, EtlResult};
-use etl::types::{ArrayCellNonOptional, CellNonOptional, PgNumeric};
+use etl::types::{
+    ArrayCellNonOptional, CellNonOptional, DATE_FORMAT, PgNumeric, TIMESTAMP_FORMAT,
+    TIMESTAMPTZ_FORMAT_HH_MM,
+};
 use etl::{bail, etl_error};
 use std::sync::LazyLock;
 
@@ -138,8 +141,8 @@ pub fn validate_date_for_bigquery(date: &NaiveDate) -> EtlResult<()> {
             "Date value is before BigQuery's minimum supported date",
             format!(
                 "The date '{}' is before BigQuery's minimum supported date '{}'. BigQuery DATE supports values from 0001-01-01 to 9999-12-31",
-                date.format("%Y-%m-%d"),
-                BIGQUERY_MIN_DATE.format("%Y-%m-%d")
+                date.format(DATE_FORMAT),
+                BIGQUERY_MIN_DATE.format(DATE_FORMAT)
             )
         );
     }
@@ -150,8 +153,8 @@ pub fn validate_date_for_bigquery(date: &NaiveDate) -> EtlResult<()> {
             "Date value is after BigQuery's maximum supported date",
             format!(
                 "The date '{}' is after BigQuery's maximum supported date '{}'. BigQuery DATE supports values from 0001-01-01 to 9999-12-31",
-                date.format("%Y-%m-%d"),
-                BIGQUERY_MAX_DATE.format("%Y-%m-%d")
+                date.format(DATE_FORMAT),
+                BIGQUERY_MAX_DATE.format(DATE_FORMAT)
             )
         );
     }
@@ -202,8 +205,8 @@ pub fn validate_datetime_for_bigquery(datetime: &NaiveDateTime) -> EtlResult<()>
             "DateTime value is before BigQuery's minimum supported datetime",
             format!(
                 "The datetime '{}' is before BigQuery's minimum supported datetime '{}'. BigQuery DATETIME supports values from 0001-01-01 00:00:00 to 9999-12-31 23:59:59.999999",
-                datetime.format("%Y-%m-%d %H:%M:%S"),
-                BIGQUERY_MIN_DATETIME.format("%Y-%m-%d %H:%M:%S")
+                datetime.format(TIMESTAMP_FORMAT),
+                BIGQUERY_MIN_DATETIME.format(TIMESTAMP_FORMAT)
             )
         );
     }
@@ -214,8 +217,8 @@ pub fn validate_datetime_for_bigquery(datetime: &NaiveDateTime) -> EtlResult<()>
             "DateTime value is after BigQuery's maximum supported datetime",
             format!(
                 "The datetime '{}' is after BigQuery's maximum supported datetime '{}'. BigQuery DATETIME supports values from 0001-01-01 00:00:00 to 9999-12-31 23:59:59.999999",
-                datetime.format("%Y-%m-%d %H:%M:%S%.6f"),
-                BIGQUERY_MAX_DATETIME.format("%Y-%m-%d %H:%M:%S%.6f")
+                datetime.format(TIMESTAMP_FORMAT),
+                BIGQUERY_MAX_DATETIME.format(TIMESTAMP_FORMAT)
             )
         );
     }
@@ -234,8 +237,8 @@ pub fn validate_timestamptz_for_bigquery(timestamptz: &DateTime<Utc>) -> EtlResu
             "Timestamp value is before BigQuery's minimum supported timestamp",
             format!(
                 "The timestamp '{}' is before BigQuery's minimum supported timestamp '{}'. BigQuery TIMESTAMP supports values from 0001-01-01 00:00:00 UTC to 9999-12-31 23:59:59.999999 UTC",
-                timestamptz.format("%Y-%m-%d %H:%M:%S%z"),
-                BIGQUERY_MIN_TIMESTAMP.format("%Y-%m-%d %H:%M:%S%z")
+                timestamptz.format(TIMESTAMPTZ_FORMAT_HH_MM),
+                BIGQUERY_MIN_TIMESTAMP.format(TIMESTAMPTZ_FORMAT_HH_MM)
             )
         );
     }
@@ -246,8 +249,8 @@ pub fn validate_timestamptz_for_bigquery(timestamptz: &DateTime<Utc>) -> EtlResu
             "Timestamp value is after BigQuery's maximum supported timestamp",
             format!(
                 "The timestamp '{}' is after BigQuery's maximum supported timestamp '{}'. BigQuery TIMESTAMP supports values from 0001-01-01 00:00:00 UTC to 9999-12-31 23:59:59.999999 UTC",
-                timestamptz.format("%Y-%m-%d %H:%M:%S%.6f%z"),
-                BIGQUERY_MAX_TIMESTAMP.format("%Y-%m-%d %H:%M:%S%.6f%z")
+                timestamptz.format(TIMESTAMPTZ_FORMAT_HH_MM),
+                BIGQUERY_MAX_TIMESTAMP.format(TIMESTAMPTZ_FORMAT_HH_MM)
             )
         );
     }
