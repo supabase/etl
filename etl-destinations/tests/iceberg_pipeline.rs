@@ -391,15 +391,28 @@ async fn insert_table_rows() {
         // Boolean types
         ColumnSchema::new("bool_col".to_string(), Type::BOOL, -1, true, false),
         // String types
+        ColumnSchema::new("char_col".to_string(), Type::CHAR, -1, true, false),
+        ColumnSchema::new("bpchar_col".to_string(), Type::BPCHAR, -1, true, false),
+        ColumnSchema::new("varchar_col".to_string(), Type::VARCHAR, -1, true, false),
+        ColumnSchema::new("name_col".to_string(), Type::NAME, -1, true, false),
         ColumnSchema::new("text_col".to_string(), Type::TEXT, -1, true, false),
         // Integer types
         ColumnSchema::new("int2_col".to_string(), Type::INT2, -1, true, false),
+        ColumnSchema::new("int4_col".to_string(), Type::INT4, -1, true, false),
         ColumnSchema::new("int8_col".to_string(), Type::INT8, -1, true, false),
         // Float types
         ColumnSchema::new("float4_col".to_string(), Type::FLOAT4, -1, true, false),
         ColumnSchema::new("float8_col".to_string(), Type::FLOAT8, -1, true, false),
-        // Date type
+        // Numeric type
+        ColumnSchema::new("numeric_col".to_string(), Type::NUMERIC, -1, true, false),
+        // Date/Time types
         ColumnSchema::new("date_col".to_string(), Type::DATE, -1, true, false),
+        ColumnSchema::new("time_col".to_string(), Type::TIME, -1, true, false),
+        // JSON types
+        ColumnSchema::new("json_col".to_string(), Type::JSON, -1, true, false),
+        ColumnSchema::new("jsonb_col".to_string(), Type::JSONB, -1, true, false),
+        // OID type
+        ColumnSchema::new("oid_col".to_string(), Type::OID, -1, true, false),
         // Binary type
         ColumnSchema::new("bytea_col".to_string(), Type::BYTEA, -1, true, false),
     ];
@@ -414,12 +427,22 @@ async fn insert_table_rows() {
         values: vec![
             Cell::I32(42),                                              // id
             Cell::Bool(true),                                           // bool_col
+            Cell::String("A".to_string()),                              // char_col
+            Cell::String("fixed".to_string()),                          // bpchar_col
+            Cell::String("variable".to_string()),                       // varchar_col
+            Cell::String("name_value".to_string()),                     // name_col
             Cell::String("test string".to_string()),                    // text_col
             Cell::I32(123), // int2_col (maps to Int in Iceberg, comes back as I32)
+            Cell::I32(456), // int4_col
             Cell::I64(9876543210), // int8_col
             Cell::F32(std::f32::consts::PI), // float4_col
             Cell::F64(std::f64::consts::E), // float8_col
+            Cell::String("123.456".to_string()), // numeric_col (maps to String in Iceberg)
             Cell::Date(NaiveDate::from_ymd_opt(2023, 12, 25).unwrap()), // date_col
+            Cell::Null,     // time_col (comes back as Null in Iceberg)
+            Cell::String(r#"{"key": "value"}"#.to_string()), // json_col (maps to String in Iceberg)
+            Cell::String(r#"{"key": "value"}"#.to_string()), // jsonb_col (maps to String in Iceberg)
+            Cell::I32(12345),                                // oid_col (maps to Int in Iceberg)
             Cell::Bytes(vec![0x48, 0x65, 0x6c, 0x6c, 0x6f]), // bytea_col (Hello in bytes)
         ],
     }];
