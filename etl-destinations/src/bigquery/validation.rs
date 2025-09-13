@@ -173,7 +173,7 @@ pub fn validate_time_for_bigquery(time: &NaiveTime) -> EtlResult<()> {
             "Time value is before BigQuery's minimum supported time",
             format!(
                 "The time '{}' is before BigQuery's minimum supported time '{}'. BigQuery TIME supports values from 00:00:00 to 23:59:59.999999",
-                time.format("%H:%M:%S"),
+                time.format(TIME_FORMAT),
                 BIGQUERY_MIN_TIME.format(TIME_FORMAT)
             )
         );
@@ -185,7 +185,7 @@ pub fn validate_time_for_bigquery(time: &NaiveTime) -> EtlResult<()> {
             "Time value is after BigQuery's maximum supported time",
             format!(
                 "The time '{}' is after BigQuery's maximum supported time '{}'. BigQuery TIME supports values from 00:00:00 to 23:59:59.999999",
-                time.format("%H:%M:%S%.6f"),
+                time.format(TIME_FORMAT),
                 BIGQUERY_MAX_TIME.format(TIME_FORMAT)
             )
         );
