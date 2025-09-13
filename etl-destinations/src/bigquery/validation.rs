@@ -1,7 +1,7 @@
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Utc};
 use etl::error::{ErrorKind, EtlResult};
 use etl::types::{
-    ArrayCellNonOptional, CellNonOptional, DATE_FORMAT, PgNumeric, TIMESTAMP_FORMAT,
+    ArrayCellNonOptional, CellNonOptional, DATE_FORMAT, PgNumeric, TIME_FORMAT, TIMESTAMP_FORMAT,
     TIMESTAMPTZ_FORMAT_HH_MM,
 };
 use etl::{bail, etl_error};
@@ -174,7 +174,7 @@ pub fn validate_time_for_bigquery(time: &NaiveTime) -> EtlResult<()> {
             format!(
                 "The time '{}' is before BigQuery's minimum supported time '{}'. BigQuery TIME supports values from 00:00:00 to 23:59:59.999999",
                 time.format("%H:%M:%S"),
-                BIGQUERY_MIN_TIME.format("%H:%M:%S")
+                BIGQUERY_MIN_TIME.format(TIME_FORMAT)
             )
         );
     }
@@ -186,7 +186,7 @@ pub fn validate_time_for_bigquery(time: &NaiveTime) -> EtlResult<()> {
             format!(
                 "The time '{}' is after BigQuery's maximum supported time '{}'. BigQuery TIME supports values from 00:00:00 to 23:59:59.999999",
                 time.format("%H:%M:%S%.6f"),
-                BIGQUERY_MAX_TIME.format("%H:%M:%S%.6f")
+                BIGQUERY_MAX_TIME.format(TIME_FORMAT)
             )
         );
     }
