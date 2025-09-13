@@ -23,7 +23,8 @@ use iceberg_catalog_rest::{RestCatalog, RestCatalogConfig};
 use parquet::{basic::Compression, file::properties::WriterProperties};
 
 use crate::iceberg::{
-    encoding::{record_batch_to_table_rows, rows_to_record_batch},
+    decoding::record_batch_to_table_rows,
+    encoding::rows_to_record_batch,
     error::{arrow_error_to_etl_error, iceberg_error_to_etl_error},
     schema::postgres_to_iceberg_schema,
 };

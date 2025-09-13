@@ -2,26 +2,20 @@ use std::sync::Arc;
 
 use arrow::{
     array::{
-        ArrayRef, BooleanBuilder, Date32Builder, Float32Builder, Float64Builder, Int16Builder,
-        Int32Builder, Int64Builder, LargeBinaryBuilder, LargeStringBuilder, RecordBatch,
-        StringBuilder, Time64MicrosecondBuilder, TimestampMicrosecondBuilder, UInt32Builder,
+        ArrayRef, ArrowPrimitiveType, BooleanBuilder, PrimitiveBuilder, RecordBatch, StringBuilder,
     },
-    datatypes::{DataType, Schema, TimeUnit},
+    datatypes::{
+        DataType, Float32Type, Float64Type, Int16Type, Int32Type, Int64Type, Schema, UInt32Type,
+    },
     error::ArrowError,
 };
 use base64::{Engine, prelude::BASE64_STANDARD};
-use chrono::{NaiveDate, NaiveTime};
-use etl::{
-    error::{ErrorKind, EtlResult},
-    etl_error,
-    types::{Cell, TableRow},
-};
+use etl::types::{Cell, TableRow};
 
-/// Converts a vector of table rows to an Arrow RecordBatch.
+/// Converts a slice of [`TableRow`]s to an arrow [`RecordBatch`]`.
 pub fn rows_to_record_batch(rows: &[TableRow], schema: Schema) -> Result<RecordBatch, ArrowError> {
     let mut arrays: Vec<ArrayRef> = Vec::new();
 
-    // Build arrays for each column
     for (field_idx, field) in schema.fields().iter().enumerate() {
         let array = build_array_for_field(rows, field_idx, field.data_type());
         arrays.push(array);
@@ -32,150 +26,51 @@ pub fn rows_to_record_batch(rows: &[TableRow], schema: Schema) -> Result<RecordB
     Ok(batch)
 }
 
-/// Builds an Arrow array for a specific field from the table rows.
+/// Builds an [`ArrayRef`] from the [`TableRow`]s for a field specified by the `field_idx` .
 fn build_array_for_field(rows: &[TableRow], field_idx: usize, data_type: &DataType) -> ArrayRef {
     match data_type {
         DataType::Boolean => build_boolean_array(rows, field_idx),
-        DataType::Int16 => build_int16_array(rows, field_idx),
-        DataType::Int32 => build_int32_array(rows, field_idx),
-        DataType::Int64 => build_int64_array(rows, field_idx),
-        DataType::UInt32 => build_uint32_array(rows, field_idx),
-        DataType::Float32 => build_float32_array(rows, field_idx),
-        DataType::Float64 => build_float64_array(rows, field_idx),
-        DataType::Utf8 => build_utf8_array(rows, field_idx),
-        DataType::LargeUtf8 => build_string_array(rows, field_idx),
-        DataType::Binary => build_binary_array(rows, field_idx),
-        DataType::LargeBinary => build_binary_array(rows, field_idx),
-        DataType::Date32 => build_date32_array(rows, field_idx),
-        DataType::Time64(TimeUnit::Microsecond) => build_time64_array(rows, field_idx),
-        DataType::Timestamp(TimeUnit::Microsecond, _) => build_timestamp_array(rows, field_idx),
+        DataType::Int16 => build_primitive_array::<Int16Type, _>(rows, field_idx, cell_to_i16),
+        DataType::Int32 => build_primitive_array::<Int32Type, _>(rows, field_idx, cell_to_i32),
+        DataType::Int64 => build_primitive_array::<Int64Type, _>(rows, field_idx, cell_to_i64),
+        DataType::UInt32 => build_primitive_array::<UInt32Type, _>(rows, field_idx, cell_to_u32),
+        DataType::Float32 => build_primitive_array::<Float32Type, _>(rows, field_idx, cell_to_f32),
+        DataType::Float64 => build_primitive_array::<Float64Type, _>(rows, field_idx, cell_to_f64),
+        // DataType::Utf8 => build_utf8_array(rows, field_idx),
+        // DataType::LargeUtf8 => build_string_array(rows, field_idx),
+        // DataType::Binary => build_binary_array(rows, field_idx),
+        // DataType::LargeBinary => build_binary_array(rows, field_idx),
+        // DataType::Date32 => build_date32_array(rows, field_idx),
+        // DataType::Time64(TimeUnit::Microsecond) => build_time64_array(rows, field_idx),
+        // DataType::Timestamp(TimeUnit::Microsecond, _) => build_timestamp_array(rows, field_idx),
         _ => build_string_array(rows, field_idx),
     }
 }
 
-/// Builds a boolean array from cell values.
+/// Builds a boolean array from cell values. We need a separate function than
+/// `build_primitive_array` because it uses a special builder [`BooleanBuilder`]
+/// which is not a [`PrimitiveBuilder`].
 fn build_boolean_array(rows: &[TableRow], field_idx: usize) -> ArrayRef {
     let mut builder = BooleanBuilder::new();
 
     for row in rows {
-        if field_idx < row.values.len() {
-            let value = CellToArrowConverter::cell_to_bool(&row.values[field_idx]);
-            builder.append_option(value);
-        } else {
-            builder.append_null();
-        }
+        let arrow_value = cell_to_bool(&row.values[field_idx]);
+        builder.append_option(arrow_value);
     }
 
     Arc::new(builder.finish())
 }
 
-/// Builds an int16 array from cell values.
-fn build_int16_array(rows: &[TableRow], field_idx: usize) -> ArrayRef {
-    let mut builder = Int16Builder::new();
+fn build_primitive_array<T, F>(rows: &[TableRow], field_idx: usize, converter: F) -> ArrayRef
+where
+    T: ArrowPrimitiveType,
+    F: Fn(&Cell) -> Option<T::Native>,
+{
+    let mut builder = PrimitiveBuilder::<T>::with_capacity(rows.len());
 
     for row in rows {
-        if field_idx < row.values.len() {
-            let value = CellToArrowConverter::cell_to_i16(&row.values[field_idx]);
-            builder.append_option(value);
-        } else {
-            builder.append_null();
-        }
-    }
-
-    Arc::new(builder.finish())
-}
-
-/// Builds an int32 array from cell values.
-fn build_int32_array(rows: &[TableRow], field_idx: usize) -> ArrayRef {
-    let mut builder = Int32Builder::new();
-
-    for row in rows {
-        if field_idx < row.values.len() {
-            let value = CellToArrowConverter::cell_to_i32(&row.values[field_idx]);
-            builder.append_option(value);
-        } else {
-            builder.append_null();
-        }
-    }
-
-    Arc::new(builder.finish())
-}
-
-/// Builds an int64 array from cell values.
-fn build_int64_array(rows: &[TableRow], field_idx: usize) -> ArrayRef {
-    let mut builder = Int64Builder::new();
-
-    for row in rows {
-        if field_idx < row.values.len() {
-            let value = CellToArrowConverter::cell_to_i64(&row.values[field_idx]);
-            builder.append_option(value);
-        } else {
-            builder.append_null();
-        }
-    }
-
-    Arc::new(builder.finish())
-}
-
-/// Builds a uint32 array from cell values.
-fn build_uint32_array(rows: &[TableRow], field_idx: usize) -> ArrayRef {
-    let mut builder = UInt32Builder::new();
-
-    for row in rows {
-        if field_idx < row.values.len() {
-            let value = CellToArrowConverter::cell_to_u32(&row.values[field_idx]);
-            builder.append_option(value);
-        } else {
-            builder.append_null();
-        }
-    }
-
-    Arc::new(builder.finish())
-}
-
-/// Builds a float32 array from cell values.
-fn build_float32_array(rows: &[TableRow], field_idx: usize) -> ArrayRef {
-    let mut builder = Float32Builder::new();
-
-    for row in rows {
-        if field_idx < row.values.len() {
-            let value = CellToArrowConverter::cell_to_f32(&row.values[field_idx]);
-            builder.append_option(value);
-        } else {
-            builder.append_null();
-        }
-    }
-
-    Arc::new(builder.finish())
-}
-
-/// Builds a float64 array from cell values.
-fn build_float64_array(rows: &[TableRow], field_idx: usize) -> ArrayRef {
-    let mut builder = Float64Builder::new();
-
-    for row in rows {
-        if field_idx < row.values.len() {
-            let value = CellToArrowConverter::cell_to_f64(&row.values[field_idx]);
-            builder.append_option(value);
-        } else {
-            builder.append_null();
-        }
-    }
-
-    Arc::new(builder.finish())
-}
-
-/// Builds a UTF8 array from cell values.
-fn build_utf8_array(rows: &[TableRow], field_idx: usize) -> ArrayRef {
-    let mut builder = StringBuilder::new();
-
-    for row in rows {
-        if field_idx < row.values.len() {
-            let value = CellToArrowConverter::cell_to_string(&row.values[field_idx]);
-            builder.append_option(value.as_deref());
-        } else {
-            builder.append_null();
-        }
+        let arrow_value = converter(&row.values[field_idx]);
+        builder.append_option(arrow_value);
     }
 
     Arc::new(builder.finish())
@@ -183,442 +78,385 @@ fn build_utf8_array(rows: &[TableRow], field_idx: usize) -> ArrayRef {
 
 /// Builds a string array from cell values.
 fn build_string_array(rows: &[TableRow], field_idx: usize) -> ArrayRef {
-    let mut builder = LargeStringBuilder::new();
+    let mut builder = StringBuilder::new();
 
     for row in rows {
-        if field_idx < row.values.len() {
-            let value = CellToArrowConverter::cell_to_string(&row.values[field_idx]);
-            builder.append_option(value.as_deref());
-        } else {
-            builder.append_null();
-        }
+        let arrow_value = cell_to_string(&row.values[field_idx]);
+        builder.append_option(arrow_value);
     }
 
     Arc::new(builder.finish())
 }
 
-/// Builds a binary array from cell values.
-fn build_binary_array(rows: &[TableRow], field_idx: usize) -> ArrayRef {
-    // For now, always use LargeBinaryBuilder as it can handle any size
-    let mut builder = LargeBinaryBuilder::new();
-
-    for row in rows {
-        if field_idx < row.values.len() {
-            let value = CellToArrowConverter::cell_to_bytes(&row.values[field_idx]);
-            builder.append_option(value.as_deref());
-        } else {
-            builder.append_null();
-        }
-    }
-
-    Arc::new(builder.finish())
-}
-
-/// Builds a date32 array from cell values.
-fn build_date32_array(rows: &[TableRow], field_idx: usize) -> ArrayRef {
-    let mut builder = Date32Builder::new();
-
-    for row in rows {
-        if field_idx < row.values.len() {
-            let value = CellToArrowConverter::cell_to_date32(&row.values[field_idx]);
-            builder.append_option(value);
-        } else {
-            builder.append_null();
-        }
-    }
-
-    Arc::new(builder.finish())
-}
-
-/// Builds a time64 array from cell values.
-fn build_time64_array(rows: &[TableRow], field_idx: usize) -> ArrayRef {
-    let mut builder = Time64MicrosecondBuilder::new();
-
-    for row in rows {
-        if field_idx < row.values.len() {
-            let value = CellToArrowConverter::cell_to_time64_micros(&row.values[field_idx]);
-            builder.append_option(value);
-        } else {
-            builder.append_null();
-        }
-    }
-
-    Arc::new(builder.finish())
-}
-
-/// Builds a timestamp array from cell values.
-fn build_timestamp_array(rows: &[TableRow], field_idx: usize) -> ArrayRef {
-    // Create timestamp array with +00:00 timezone to match schema
-    let mut builder = TimestampMicrosecondBuilder::new().with_timezone("+00:00");
-
-    for row in rows {
-        if field_idx < row.values.len() {
-            let value = CellToArrowConverter::cell_to_timestamp_micros(&row.values[field_idx]);
-            builder.append_option(value);
-        } else {
-            builder.append_null();
-        }
-    }
-
-    Arc::new(builder.finish())
-}
-
-/// Converts Cell values to Arrow array builders.
-pub struct CellToArrowConverter;
-
-impl CellToArrowConverter {
-    /// Converts a Cell to its string representation for Arrow.
-    pub fn cell_to_string(cell: &Cell) -> Option<String> {
-        match cell {
-            Cell::Null => None,
-            Cell::Bool(b) => Some(b.to_string()),
-            Cell::String(s) => Some(s.clone()),
-            Cell::I16(i) => Some(i.to_string()),
-            Cell::I32(i) => Some(i.to_string()),
-            Cell::U32(u) => Some(u.to_string()),
-            Cell::I64(i) => Some(i.to_string()),
-            Cell::F32(f) => Some(f.to_string()),
-            Cell::F64(f) => Some(f.to_string()),
-            Cell::Numeric(n) => Some(n.to_string()),
-            Cell::Date(d) => Some(d.format("%Y-%m-%d").to_string()),
-            Cell::Time(t) => Some(t.format("%H:%M:%S%.6f").to_string()),
-            Cell::Timestamp(ts) => Some(ts.format("%Y-%m-%d %H:%M:%S%.6f").to_string()),
-            Cell::TimestampTz(ts) => Some(ts.to_rfc3339()),
-            Cell::Uuid(u) => Some(u.to_string()),
-            Cell::Json(j) => Some(j.to_string()),
-            Cell::Bytes(b) => Some(BASE64_STANDARD.encode(b)),
-            Cell::Array(arr) => Some(format!("{arr:?}")), // Simple debug representation
-        }
-    }
-
-    /// Extracts boolean value from Cell.
-    pub fn cell_to_bool(cell: &Cell) -> Option<bool> {
-        match cell {
-            Cell::Bool(b) => Some(*b),
-            _ => None,
-        }
-    }
-
-    /// Extracts i16 value from Cell.
-    pub fn cell_to_i16(cell: &Cell) -> Option<i16> {
-        match cell {
-            Cell::I16(i) => Some(*i),
-            _ => None,
-        }
-    }
-
-    /// Extracts i32 value from Cell.
-    pub fn cell_to_i32(cell: &Cell) -> Option<i32> {
-        match cell {
-            Cell::I32(i) => Some(*i),
-            Cell::I16(i) => Some(*i as i32),
-            _ => None,
-        }
-    }
-
-    /// Extracts i64 value from Cell.
-    pub fn cell_to_i64(cell: &Cell) -> Option<i64> {
-        match cell {
-            Cell::I64(i) => Some(*i),
-            Cell::I32(i) => Some(*i as i64),
-            Cell::I16(i) => Some(*i as i64),
-            _ => None,
-        }
-    }
-
-    /// Extracts f32 value from Cell.
-    pub fn cell_to_f32(cell: &Cell) -> Option<f32> {
-        match cell {
-            Cell::F32(f) => Some(*f),
-            _ => None,
-        }
-    }
-
-    /// Extracts f64 value from Cell.
-    pub fn cell_to_f64(cell: &Cell) -> Option<f64> {
-        match cell {
-            Cell::F64(f) => Some(*f),
-            Cell::F32(f) => Some(*f as f64),
-            _ => None,
-        }
-    }
-
-    /// Extracts date as days since epoch.
-    pub fn cell_to_date32(cell: &Cell) -> Option<i32> {
-        match cell {
-            Cell::Date(date) => {
-                let epoch = NaiveDate::from_ymd_opt(1970, 1, 1)?;
-                Some(date.signed_duration_since(epoch).num_days() as i32)
-            }
-            _ => None,
-        }
-    }
-
-    /// Extracts time as microseconds since midnight.
-    pub fn cell_to_time64_micros(cell: &Cell) -> Option<i64> {
-        match cell {
-            Cell::Time(time) => {
-                let midnight = NaiveTime::from_hms_opt(0, 0, 0)?;
-                Some(time.signed_duration_since(midnight).num_microseconds()?)
-            }
-            _ => None,
-        }
-    }
-
-    /// Extracts timestamp as microseconds since epoch.
-    pub fn cell_to_timestamp_micros(cell: &Cell) -> Option<i64> {
-        match cell {
-            Cell::Timestamp(ts) => Some(ts.and_utc().timestamp_micros()),
-            Cell::TimestampTz(ts) => Some(ts.timestamp_micros()),
-            _ => None,
-        }
-    }
-
-    /// Extracts bytes from Cell.
-    pub fn cell_to_bytes(cell: &Cell) -> Option<Vec<u8>> {
-        match cell {
-            Cell::Bytes(b) => Some(b.clone()),
-            _ => None,
-        }
-    }
-
-    /// Extracts u32 value from Cell.
-    pub fn cell_to_u32(cell: &Cell) -> Option<u32> {
-        match cell {
-            Cell::U32(u) => Some(*u),
-            Cell::I32(i) if *i >= 0 => Some(*i as u32),
-            _ => None,
-        }
-    }
-}
-
-/// Converts a RecordBatch back to a vector of TableRows.
-pub fn record_batch_to_table_rows(batch: &RecordBatch) -> EtlResult<Vec<TableRow>> {
-    let mut rows = Vec::with_capacity(batch.num_rows());
-
-    for row_idx in 0..batch.num_rows() {
-        let mut cells = Vec::with_capacity(batch.num_columns());
-
-        for col_idx in 0..batch.num_columns() {
-            let column = batch.column(col_idx);
-            let cell = arrow_value_to_cell(column, row_idx)?;
-            cells.push(cell);
-        }
-
-        rows.push(TableRow::new(cells));
-    }
-
-    Ok(rows)
-}
-
-/// Converts an Arrow array value at a specific index to a Cell.
-fn arrow_value_to_cell(array: &ArrayRef, row_idx: usize) -> EtlResult<Cell> {
-    use arrow::array::*;
-    use arrow::datatypes::DataType;
-
-    if array.is_null(row_idx) {
-        return Ok(Cell::Null);
-    }
-
-    match array.data_type() {
-        DataType::Boolean => {
-            let arr = array
-                .as_any()
-                .downcast_ref::<BooleanArray>()
-                .ok_or_else(|| {
-                    etl_error!(
-                        ErrorKind::DestinationError,
-                        "Failed to downcast to BooleanArray"
-                    )
-                })?;
-            Ok(Cell::Bool(arr.value(row_idx)))
-        }
-        DataType::Int16 => {
-            let arr = array.as_any().downcast_ref::<Int16Array>().ok_or_else(|| {
-                etl_error!(
-                    ErrorKind::DestinationError,
-                    "Failed to downcast to Int16Array"
-                )
-            })?;
-            Ok(Cell::I16(arr.value(row_idx)))
-        }
-        DataType::Int32 => {
-            let arr = array.as_any().downcast_ref::<Int32Array>().ok_or_else(|| {
-                etl_error!(
-                    ErrorKind::DestinationError,
-                    "Failed to downcast to Int32Array"
-                )
-            })?;
-            Ok(Cell::I32(arr.value(row_idx)))
-        }
-        DataType::Int64 => {
-            let arr = array.as_any().downcast_ref::<Int64Array>().ok_or_else(|| {
-                etl_error!(
-                    ErrorKind::DestinationError,
-                    "Failed to downcast to Int64Array"
-                )
-            })?;
-            Ok(Cell::I64(arr.value(row_idx)))
-        }
-        DataType::UInt32 => {
-            let arr = array
-                .as_any()
-                .downcast_ref::<UInt32Array>()
-                .ok_or_else(|| {
-                    etl_error!(
-                        ErrorKind::DestinationError,
-                        "Failed to downcast to UInt32Array"
-                    )
-                })?;
-            Ok(Cell::U32(arr.value(row_idx)))
-        }
-        DataType::Float32 => {
-            let arr = array
-                .as_any()
-                .downcast_ref::<Float32Array>()
-                .ok_or_else(|| {
-                    etl_error!(
-                        ErrorKind::DestinationError,
-                        "Failed to downcast to Float32Array"
-                    )
-                })?;
-            Ok(Cell::F32(arr.value(row_idx)))
-        }
-        DataType::Float64 => {
-            let arr = array
-                .as_any()
-                .downcast_ref::<Float64Array>()
-                .ok_or_else(|| {
-                    etl_error!(
-                        ErrorKind::DestinationError,
-                        "Failed to downcast to Float64Array"
-                    )
-                })?;
-            Ok(Cell::F64(arr.value(row_idx)))
-        }
-        DataType::Utf8 => {
-            let arr = array
-                .as_any()
-                .downcast_ref::<StringArray>()
-                .ok_or_else(|| {
-                    etl_error!(
-                        ErrorKind::DestinationError,
-                        "Failed to downcast to StringArray"
-                    )
-                })?;
-            Ok(Cell::String(arr.value(row_idx).to_string()))
-        }
-        DataType::LargeUtf8 => {
-            let arr = array
-                .as_any()
-                .downcast_ref::<LargeStringArray>()
-                .ok_or_else(|| {
-                    etl_error!(
-                        ErrorKind::DestinationError,
-                        "Failed to downcast to LargeStringArray"
-                    )
-                })?;
-            Ok(Cell::String(arr.value(row_idx).to_string()))
-        }
-        DataType::LargeBinary => {
-            let arr = array
-                .as_any()
-                .downcast_ref::<LargeBinaryArray>()
-                .ok_or_else(|| {
-                    etl_error!(
-                        ErrorKind::DestinationError,
-                        "Failed to downcast to LargeBinaryArray"
-                    )
-                })?;
-            Ok(Cell::Bytes(arr.value(row_idx).to_vec()))
-        }
-        DataType::Binary => {
-            let arr = array
-                .as_any()
-                .downcast_ref::<BinaryArray>()
-                .ok_or_else(|| {
-                    etl_error!(
-                        ErrorKind::DestinationError,
-                        "Failed to downcast to BinaryArray"
-                    )
-                })?;
-            Ok(Cell::Bytes(arr.value(row_idx).to_vec()))
-        }
-        DataType::Date32 => {
-            let arr = array
-                .as_any()
-                .downcast_ref::<Date32Array>()
-                .ok_or_else(|| {
-                    etl_error!(
-                        ErrorKind::DestinationError,
-                        "Failed to downcast to Date32Array"
-                    )
-                })?;
-            let days = arr.value(row_idx);
-            // Convert days since Unix epoch (1970-01-01) to NaiveDate
-            let epoch = chrono::NaiveDate::from_ymd_opt(1970, 1, 1)
-                .ok_or_else(|| etl_error!(ErrorKind::DestinationError, "Invalid epoch date"))?;
-
-            let date = if days >= 0 {
-                epoch
-                    .checked_add_days(chrono::Days::new(days as u64))
-                    .ok_or_else(|| etl_error!(ErrorKind::DestinationError, "Invalid date value"))?
-            } else {
-                epoch
-                    .checked_sub_days(chrono::Days::new((-days) as u64))
-                    .ok_or_else(|| etl_error!(ErrorKind::DestinationError, "Invalid date value"))?
-            };
-            Ok(Cell::Date(date))
-        }
-        DataType::Time64(TimeUnit::Microsecond) => {
-            let arr = array
-                .as_any()
-                .downcast_ref::<Time64MicrosecondArray>()
-                .ok_or_else(|| {
-                    etl_error!(
-                        ErrorKind::DestinationError,
-                        "Failed to downcast to Time64MicrosecondArray"
-                    )
-                })?;
-            let micros = arr.value(row_idx);
-            let time = chrono::NaiveTime::from_num_seconds_from_midnight_opt(
-                (micros / 1_000_000) as u32,
-                ((micros % 1_000_000) * 1000) as u32,
-            )
-            .ok_or_else(|| etl_error!(ErrorKind::DestinationError, "Invalid time value"))?;
-            Ok(Cell::Time(time))
-        }
-        DataType::Timestamp(TimeUnit::Microsecond, tz) => {
-            let arr = array
-                .as_any()
-                .downcast_ref::<TimestampMicrosecondArray>()
-                .ok_or_else(|| {
-                    etl_error!(
-                        ErrorKind::DestinationError,
-                        "Failed to downcast to TimestampMicrosecondArray"
-                    )
-                })?;
-            let micros = arr.value(row_idx);
-
-            if tz.is_some() {
-                // Timezone-aware timestamp
-                let dt = chrono::DateTime::from_timestamp_micros(micros).ok_or_else(|| {
-                    etl_error!(ErrorKind::DestinationError, "Invalid timestamp value")
-                })?;
-                Ok(Cell::TimestampTz(dt))
-            } else {
-                // Naive timestamp
-                let dt = chrono::DateTime::from_timestamp_micros(micros)
-                    .ok_or_else(|| {
-                        etl_error!(ErrorKind::DestinationError, "Invalid timestamp value")
-                    })?
-                    .naive_utc();
-                Ok(Cell::Timestamp(dt))
+macro_rules! impl_cell_converter {
+    ($fn_name:ident, $return_type:ty, $($pattern:pat => $expr:expr),*) => {
+        fn $fn_name(cell: &Cell) -> Option<$return_type> {
+            match cell {
+                $($pattern => Some($expr),)*
+                _ => None,
             }
         }
-        _ => {
-            // For unsupported types, convert to string representation
-            Ok(Cell::String(format!("{:?}", array)))
-        }
+    };
+}
+
+impl_cell_converter!(
+    cell_to_bool, bool,
+    Cell::Bool(v) => *v
+);
+
+impl_cell_converter!(
+    cell_to_i16, i16,
+    Cell::I16(v) => *v
+);
+
+impl_cell_converter!(
+    cell_to_i32, i32,
+    Cell::I32(v) => *v
+);
+
+impl_cell_converter!(
+    cell_to_i64, i64,
+    Cell::I64(v) => *v
+);
+
+impl_cell_converter!(
+    cell_to_u32, u32,
+    Cell::U32(v) => *v
+);
+
+impl_cell_converter!(
+    cell_to_f32, f32,
+    Cell::F32(v) => *v
+);
+
+impl_cell_converter!(
+    cell_to_f64, f64,
+    Cell::F64(v) => *v
+);
+
+/// Converts a Cell to its string representation for Arrow.
+pub fn cell_to_string(cell: &Cell) -> Option<String> {
+    match cell {
+        Cell::Null => None,
+        Cell::Bool(b) => Some(b.to_string()),
+        Cell::String(s) => Some(s.clone()),
+        Cell::I16(i) => Some(i.to_string()),
+        Cell::I32(i) => Some(i.to_string()),
+        Cell::U32(u) => Some(u.to_string()),
+        Cell::I64(i) => Some(i.to_string()),
+        Cell::F32(f) => Some(f.to_string()),
+        Cell::F64(f) => Some(f.to_string()),
+        Cell::Numeric(n) => Some(n.to_string()),
+        Cell::Date(d) => Some(d.format("%Y-%m-%d").to_string()),
+        Cell::Time(t) => Some(t.format("%H:%M:%S%.6f").to_string()),
+        Cell::Timestamp(ts) => Some(ts.format("%Y-%m-%d %H:%M:%S%.6f").to_string()),
+        Cell::TimestampTz(ts) => Some(ts.to_rfc3339()),
+        Cell::Uuid(u) => Some(u.to_string()),
+        Cell::Json(j) => Some(j.to_string()),
+        Cell::Bytes(b) => Some(BASE64_STANDARD.encode(b)),
+        Cell::Array(arr) => Some(format!("{arr:?}")), // Simple debug representation
     }
 }
+// pub fn cell_to_bool(cell: &Cell) -> Option<bool> {
+//     match cell {
+//         Cell::Bool(b) => Some(*b),
+//         _ => None,
+//     }
+// }
+
+// fn cell_to_i16(cell: &Cell) -> Option<i16> {
+//     match cell {
+//         Cell::I16(value) => Some(*value),
+//         _ => None,
+//     }
+// }
+
+// fn cell_to_i32(cell: &Cell) -> Option<i32> {
+//     match cell {
+//         Cell::I32(value) => Some(*value),
+//         _ => None,
+//     }
+// }
+
+// /// Builds an int16 array from cell values.
+// fn build_int16_array(rows: &[TableRow], field_idx: usize) -> ArrayRef {
+//     let mut builder = Int16Builder::new();
+
+//     for row in rows {
+//         if field_idx < row.values.len() {
+//             let value = CellToArrowConverter::cell_to_i16(&row.values[field_idx]);
+//             builder.append_option(value);
+//         } else {
+//             builder.append_null();
+//         }
+//     }
+
+//     Arc::new(builder.finish())
+// }
+
+// /// Builds an int32 array from cell values.
+// fn build_int32_array(rows: &[TableRow], field_idx: usize) -> ArrayRef {
+//     let mut builder = Int32Builder::new();
+
+//     for row in rows {
+//         if field_idx < row.values.len() {
+//             let value = CellToArrowConverter::cell_to_i32(&row.values[field_idx]);
+//             builder.append_option(value);
+//         } else {
+//             builder.append_null();
+//         }
+//     }
+
+//     Arc::new(builder.finish())
+// }
+
+// /// Builds an int64 array from cell values.
+// fn build_int64_array(rows: &[TableRow], field_idx: usize) -> ArrayRef {
+//     let mut builder = Int64Builder::new();
+
+//     for row in rows {
+//         if field_idx < row.values.len() {
+//             let value = CellToArrowConverter::cell_to_i64(&row.values[field_idx]);
+//             builder.append_option(value);
+//         } else {
+//             builder.append_null();
+//         }
+//     }
+
+//     Arc::new(builder.finish())
+// }
+
+// /// Builds a uint32 array from cell values.
+// fn build_uint32_array(rows: &[TableRow], field_idx: usize) -> ArrayRef {
+//     let mut builder = UInt32Builder::new();
+
+//     for row in rows {
+//         if field_idx < row.values.len() {
+//             let value = CellToArrowConverter::cell_to_u32(&row.values[field_idx]);
+//             builder.append_option(value);
+//         } else {
+//             builder.append_null();
+//         }
+//     }
+
+//     Arc::new(builder.finish())
+// }
+
+// /// Builds a float32 array from cell values.
+// fn build_float32_array(rows: &[TableRow], field_idx: usize) -> ArrayRef {
+//     let mut builder = Float32Builder::new();
+
+//     for row in rows {
+//         if field_idx < row.values.len() {
+//             let value = CellToArrowConverter::cell_to_f32(&row.values[field_idx]);
+//             builder.append_option(value);
+//         } else {
+//             builder.append_null();
+//         }
+//     }
+
+//     Arc::new(builder.finish())
+// }
+
+// /// Builds a float64 array from cell values.
+// fn build_float64_array(rows: &[TableRow], field_idx: usize) -> ArrayRef {
+//     let mut builder = Float64Builder::new();
+
+//     for row in rows {
+//         if field_idx < row.values.len() {
+//             let value = CellToArrowConverter::cell_to_f64(&row.values[field_idx]);
+//             builder.append_option(value);
+//         } else {
+//             builder.append_null();
+//         }
+//     }
+
+//     Arc::new(builder.finish())
+// }
+
+// /// Builds a UTF8 array from cell values.
+// fn build_utf8_array(rows: &[TableRow], field_idx: usize) -> ArrayRef {
+//     let mut builder = StringBuilder::new();
+
+//     for row in rows {
+//         if field_idx < row.values.len() {
+//             let value = CellToArrowConverter::cell_to_string(&row.values[field_idx]);
+//             builder.append_option(value.as_deref());
+//         } else {
+//             builder.append_null();
+//         }
+//     }
+
+//     Arc::new(builder.finish())
+// }
+
+// /// Builds a binary array from cell values.
+// fn build_binary_array(rows: &[TableRow], field_idx: usize) -> ArrayRef {
+//     // For now, always use LargeBinaryBuilder as it can handle any size
+//     let mut builder = LargeBinaryBuilder::new();
+
+//     for row in rows {
+//         if field_idx < row.values.len() {
+//             let value = CellToArrowConverter::cell_to_bytes(&row.values[field_idx]);
+//             builder.append_option(value.as_deref());
+//         } else {
+//             builder.append_null();
+//         }
+//     }
+
+//     Arc::new(builder.finish())
+// }
+
+// /// Builds a date32 array from cell values.
+// fn build_date32_array(rows: &[TableRow], field_idx: usize) -> ArrayRef {
+//     let mut builder = Date32Builder::new();
+
+//     for row in rows {
+//         if field_idx < row.values.len() {
+//             let value = CellToArrowConverter::cell_to_date32(&row.values[field_idx]);
+//             builder.append_option(value);
+//         } else {
+//             builder.append_null();
+//         }
+//     }
+
+//     Arc::new(builder.finish())
+// }
+
+// /// Builds a time64 array from cell values.
+// fn build_time64_array(rows: &[TableRow], field_idx: usize) -> ArrayRef {
+//     let mut builder = Time64MicrosecondBuilder::new();
+
+//     for row in rows {
+//         if field_idx < row.values.len() {
+//             let value = CellToArrowConverter::cell_to_time64_micros(&row.values[field_idx]);
+//             builder.append_option(value);
+//         } else {
+//             builder.append_null();
+//         }
+//     }
+
+//     Arc::new(builder.finish())
+// }
+
+// /// Builds a timestamp array from cell values.
+// fn build_timestamp_array(rows: &[TableRow], field_idx: usize) -> ArrayRef {
+//     // Create timestamp array with +00:00 timezone to match schema
+//     let mut builder = TimestampMicrosecondBuilder::new().with_timezone("+00:00");
+
+//     for row in rows {
+//         if field_idx < row.values.len() {
+//             let value = CellToArrowConverter::cell_to_timestamp_micros(&row.values[field_idx]);
+//             builder.append_option(value);
+//         } else {
+//             builder.append_null();
+//         }
+//     }
+
+//     Arc::new(builder.finish())
+// }
+
+// /// Converts Cell values to Arrow array builders.
+// pub struct CellToArrowConverter;
+
+// impl CellToArrowConverter {
+// /// Extracts boolean value from Cell.
+// pub fn cell_to_bool(cell: &Cell) -> Option<bool> {
+//     match cell {
+//         Cell::Bool(b) => Some(*b),
+//         _ => None,
+//     }
+// }
+
+// /// Extracts i16 value from Cell.
+// pub fn cell_to_i16(cell: &Cell) -> Option<i16> {
+//     match cell {
+//         Cell::I16(i) => Some(*i),
+//         _ => None,
+//     }
+// }
+
+// /// Extracts i32 value from Cell.
+// pub fn cell_to_i32(cell: &Cell) -> Option<i32> {
+//     match cell {
+//         Cell::I32(i) => Some(*i),
+//         Cell::I16(i) => Some(*i as i32),
+//         _ => None,
+//     }
+// }
+
+// /// Extracts i64 value from Cell.
+// pub fn cell_to_i64(cell: &Cell) -> Option<i64> {
+//     match cell {
+//         Cell::I64(i) => Some(*i),
+//         Cell::I32(i) => Some(*i as i64),
+//         Cell::I16(i) => Some(*i as i64),
+//         _ => None,
+//     }
+// }
+
+// /// Extracts f32 value from Cell.
+// pub fn cell_to_f32(cell: &Cell) -> Option<f32> {
+//     match cell {
+//         Cell::F32(f) => Some(*f),
+//         _ => None,
+//     }
+// }
+
+// /// Extracts f64 value from Cell.
+// pub fn cell_to_f64(cell: &Cell) -> Option<f64> {
+//     match cell {
+//         Cell::F64(f) => Some(*f),
+//         Cell::F32(f) => Some(*f as f64),
+//         _ => None,
+//     }
+// }
+
+// /// Extracts date as days since epoch.
+// pub fn cell_to_date32(cell: &Cell) -> Option<i32> {
+//     match cell {
+//         Cell::Date(date) => {
+//             let epoch = NaiveDate::from_ymd_opt(1970, 1, 1)?;
+//             Some(date.signed_duration_since(epoch).num_days() as i32)
+//         }
+//         _ => None,
+//     }
+// }
+
+// /// Extracts time as microseconds since midnight.
+// pub fn cell_to_time64_micros(cell: &Cell) -> Option<i64> {
+//     match cell {
+//         Cell::Time(time) => {
+//             let midnight = NaiveTime::from_hms_opt(0, 0, 0)?;
+//             Some(time.signed_duration_since(midnight).num_microseconds()?)
+//         }
+//         _ => None,
+//     }
+// }
+
+// /// Extracts timestamp as microseconds since epoch.
+// pub fn cell_to_timestamp_micros(cell: &Cell) -> Option<i64> {
+//     match cell {
+//         Cell::Timestamp(ts) => Some(ts.and_utc().timestamp_micros()),
+//         Cell::TimestampTz(ts) => Some(ts.timestamp_micros()),
+//         _ => None,
+//     }
+// }
+
+// /// Extracts bytes from Cell.
+// pub fn cell_to_bytes(cell: &Cell) -> Option<Vec<u8>> {
+//     match cell {
+//         Cell::Bytes(b) => Some(b.clone()),
+//         _ => None,
+//     }
+// }
+
+// /// Extracts u32 value from Cell.
+// pub fn cell_to_u32(cell: &Cell) -> Option<u32> {
+//     match cell {
+//         Cell::U32(u) => Some(*u),
+//         Cell::I32(i) if *i >= 0 => Some(*i as u32),
+//         _ => None,
+//     }
+// }
+// }
