@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 
+use chrono::NaiveDate;
 use etl::types::{Cell, ColumnSchema, TableId, TableName, TableRow, TableSchema, Type};
 use etl_destinations::iceberg::IcebergClient;
 use etl_telemetry::tracing::init_test_tracing;
@@ -389,6 +390,18 @@ async fn insert_table_rows() {
         ColumnSchema::new("id".to_string(), Type::INT4, -1, false, true),
         // Boolean types
         ColumnSchema::new("bool_col".to_string(), Type::BOOL, -1, true, false),
+        // String types
+        ColumnSchema::new("text_col".to_string(), Type::TEXT, -1, true, false),
+        // Integer types
+        ColumnSchema::new("int2_col".to_string(), Type::INT2, -1, true, false),
+        ColumnSchema::new("int8_col".to_string(), Type::INT8, -1, true, false),
+        // Float types
+        ColumnSchema::new("float4_col".to_string(), Type::FLOAT4, -1, true, false),
+        ColumnSchema::new("float8_col".to_string(), Type::FLOAT8, -1, true, false),
+        // Date type
+        ColumnSchema::new("date_col".to_string(), Type::DATE, -1, true, false),
+        // Binary type
+        ColumnSchema::new("bytea_col".to_string(), Type::BYTEA, -1, true, false),
     ];
     let table_schema = TableSchema::new(table_id, table_name_struct, columns);
 
@@ -398,7 +411,17 @@ async fn insert_table_rows() {
         .unwrap();
 
     let table_rows = vec![TableRow {
-        values: vec![Cell::I32(0), Cell::Bool(false)],
+        values: vec![
+            Cell::I32(42),                                              // id
+            Cell::Bool(true),                                           // bool_col
+            Cell::String("test string".to_string()),                    // text_col
+            Cell::I32(123), // int2_col (maps to Int in Iceberg, comes back as I32)
+            Cell::I64(9876543210), // int8_col
+            Cell::F32(std::f32::consts::PI), // float4_col
+            Cell::F64(std::f64::consts::E), // float8_col
+            Cell::Date(NaiveDate::from_ymd_opt(2023, 12, 25).unwrap()), // date_col
+            Cell::Bytes(vec![0x48, 0x65, 0x6c, 0x6c, 0x6f]), // bytea_col (Hello in bytes)
+        ],
     }];
     client
         .insert_rows(namespace.to_string(), table_name.clone(), &table_rows)
