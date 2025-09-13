@@ -59,6 +59,8 @@ impl TableSyncWorkerPoolInner {
         let handle = worker.start().await?;
         self.active.insert(table_id, handle);
 
+        // Metric removed: active workers gauge is omitted.
+
         debug!(
             "successfully added worker for table {} to the pool",
             table_id

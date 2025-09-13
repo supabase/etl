@@ -3,7 +3,7 @@ use etl_postgres::replication::slots::get_slot_name;
 use etl_postgres::replication::worker::WorkerType;
 use etl_postgres::types::TableId;
 use futures::StreamExt;
-use metrics::{counter, gauge, histogram};
+use metrics::{gauge, histogram};
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::pin;
@@ -22,8 +22,9 @@ use crate::failpoints::{
     etl_fail_point,
 };
 use crate::metrics::{
-    ETL_BATCH_SEND_DURATION_SECONDS, ETL_BATCH_SIZE, ETL_ITEMS_COPIED_TOTAL, MILLIS_PER_SEC, PHASE,
-    PIPELINE_ID, TABLE_SYNC,
+    ACTION_LABEL, DESTINATION_LABEL, ETL_BATCH_ITEMS_WRITTEN_TOTAL,
+    ETL_ITEMS_SEND_DURATION_SECONDS, ETL_TABLE_ROWS_TOTAL_WRITTEN, PIPELINE_ID_LABEL,
+    WORKER_TYPE_LABEL,
 };
 use crate::replication::client::PgReplicationClient;
 use crate::replication::stream::TableCopyStream;
@@ -208,7 +209,7 @@ where
                 .get_table_copy_stream(table_id, &table_schema.column_schemas)
                 .await?;
             let table_copy_stream =
-                TableCopyStream::wrap(table_copy_stream, &table_schema.column_schemas);
+                TableCopyStream::wrap(table_copy_stream, &table_schema.column_schemas, pipeline_id);
             let table_copy_stream = TimeoutBatchStream::wrap(
                 table_copy_stream,
                 config.batch.clone(),
@@ -217,26 +218,41 @@ where
             pin!(table_copy_stream);
 
             info!("starting table copy stream for table {}", table_id);
+
+            let mut total_rows_copied = 0;
+
             // We start consuming the table stream. If any error occurs, we will bail the entire copy since
             // we want to be fully consistent.
-            let mut rows_copied = 0;
             while let Some(result) = table_copy_stream.next().await {
                 match result {
                     ShutdownResult::Ok(table_rows) => {
                         let table_rows = table_rows.into_iter().collect::<Result<Vec<_>, _>>()?;
-                        rows_copied += table_rows.len();
+                        let table_rows_copied_batch = table_rows.len();
+                        total_rows_copied += table_rows_copied_batch;
+
                         let before_sending = Instant::now();
 
                         destination.write_table_rows(table_id, table_rows).await?;
 
-                        counter!(ETL_ITEMS_COPIED_TOTAL, PIPELINE_ID => pipeline_id.to_string(), PHASE => TABLE_SYNC)
-                            .increment(rows_copied as u64);
-                        gauge!(ETL_BATCH_SIZE, PIPELINE_ID => pipeline_id.to_string())
-                            .set(rows_copied as f64);
-                        let send_duration_secs =
-                            before_sending.elapsed().as_millis() as f64 / MILLIS_PER_SEC;
-                        histogram!(ETL_BATCH_SEND_DURATION_SECONDS, PIPELINE_ID => pipeline_id.to_string(), PHASE => TABLE_SYNC)
-                            .record(send_duration_secs);
+                        metrics::counter!(
+                            ETL_BATCH_ITEMS_WRITTEN_TOTAL,
+                            WORKER_TYPE_LABEL => "table_sync",
+                            ACTION_LABEL => "table_copy",
+                            PIPELINE_ID_LABEL => pipeline_id.to_string(),
+                            DESTINATION_LABEL => D::name(),
+                        )
+                        .increment(table_rows_copied_batch as u64);
+
+                        let send_duration_seconds = before_sending.elapsed().as_secs_f64();
+                        histogram!(
+                            ETL_ITEMS_SEND_DURATION_SECONDS,
+                            WORKER_TYPE_LABEL => "table_sync",
+                            ACTION_LABEL => "table_copy",
+                            PIPELINE_ID_LABEL => pipeline_id.to_string(),
+                            DESTINATION_LABEL => D::name(),
+                        )
+                        .record(send_duration_seconds);
+
                         // Fail point to test when the table sync fails after copying one batch.
                         #[cfg(feature = "failpoints")]
                         etl_fail_point(START_TABLE_SYNC_DURING_DATA_SYNC)?;
@@ -255,13 +271,16 @@ where
                 }
             }
 
+            gauge!(ETL_TABLE_ROWS_TOTAL_WRITTEN, PIPELINE_ID_LABEL => pipeline_id.to_string(), DESTINATION_LABEL => D::name())
+                .set(total_rows_copied as f64);
+
             // We commit the transaction before starting the apply loop, otherwise it will fail
             // since no transactions can be running while replication is started.
             transaction.commit().await?;
 
             info!(
                 "completed table copy for table {} ({} rows copied)",
-                table_id, rows_copied
+                table_id, total_rows_copied
             );
 
             // We mark that we finished the copy of the table schema and data.

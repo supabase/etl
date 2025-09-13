@@ -334,7 +334,7 @@ mod tests {
 
         for i in 0..50 {
             schema.push(ColumnSchema::new(
-                format!("col{}", i),
+                format!("col{i}"),
                 Type::INT4,
                 -1,
                 false,

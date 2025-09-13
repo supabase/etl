@@ -1,7 +1,11 @@
 [package]
 name = "etl-destinations"
 version = "0.1.0"
-edition = "2024"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
 
 [features]
 bigquery = [
@@ -32,7 +36,6 @@ gcp-bigquery-client = { workspace = true, optional = true, features = [
 ] }
 iceberg = { workspace = true, optional = true }
 iceberg-catalog-rest = { workspace = true, optional = true }
-metrics = { workspace = true }
 parquet = { workspace = true, optional = true, features = ["async", "arrow"] }
 prost = { workspace = true, optional = true }
 rustls = { workspace = true, optional = true, features = [

@@ -2,7 +2,7 @@ use etl::destination::Destination;
 use etl::error::{ErrorKind, EtlError, EtlResult};
 use etl::store::schema::SchemaStore;
 use etl::store::state::StateStore;
-use etl::types::{Cell, Event, PgLsn, PipelineId, TableId, TableName, TableRow};
+use etl::types::{Cell, Event, PgLsn, TableId, TableName, TableRow};
 use etl::{bail, etl_error};
 use gcp_bigquery_client::storage::TableDescriptor;
 use std::collections::{HashMap, HashSet};
@@ -206,7 +206,6 @@ where
     /// The `max_concurrent_streams` parameter controls parallelism for streaming operations
     /// and determines how table rows are split into batches for concurrent processing.
     pub async fn new_with_key_path(
-        pipeline_id: PipelineId,
         project_id: String,
         dataset_id: BigQueryDatasetId,
         sa_key: &str,
@@ -214,7 +213,7 @@ where
         max_concurrent_streams: usize,
         store: S,
     ) -> EtlResult<Self> {
-        let client = BigQueryClient::new_with_key_path(pipeline_id, project_id, sa_key).await?;
+        let client = BigQueryClient::new_with_key_path(project_id, sa_key).await?;
         let inner = Inner {
             created_tables: HashSet::new(),
             created_views: HashMap::new(),
@@ -237,7 +236,6 @@ where
     /// The `max_concurrent_streams` parameter controls parallelism for streaming operations
     /// and determines how table rows are split into batches for concurrent processing.
     pub async fn new_with_key(
-        pipeline_id: PipelineId,
         project_id: String,
         dataset_id: BigQueryDatasetId,
         sa_key: &str,
@@ -245,7 +243,7 @@ where
         max_concurrent_streams: usize,
         store: S,
     ) -> EtlResult<Self> {
-        let client = BigQueryClient::new_with_key(pipeline_id, project_id, sa_key).await?;
+        let client = BigQueryClient::new_with_key(project_id, sa_key).await?;
         let inner = Inner {
             created_tables: HashSet::new(),
             created_views: HashMap::new(),
@@ -745,6 +743,10 @@ impl<S> Destination for BigQueryDestination<S>
 where
     S: StateStore + SchemaStore + Send + Sync,
 {
+    fn name() -> &'static str {
+        "bigquery"
+    }
+
     async fn truncate_table(&self, table_id: TableId) -> EtlResult<()> {
         self.process_truncate_for_table_ids(iter::once(table_id), false)
             .await

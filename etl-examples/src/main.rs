@@ -176,7 +176,6 @@ async fn main_impl() -> Result<(), Box<dyn Error>> {
     // Initialize BigQuery destination with service account authentication
     // Tables will be automatically created to match Postgres schema
     let bigquery_destination = BigQueryDestination::new_with_key_path(
-        pipeline_config.id,
         args.bq_args.bq_project_id,
         args.bq_args.bq_dataset_id,
         &args.bq_args.bq_sa_key_file,

@@ -5,7 +5,10 @@ use actix_web::{
     web::{Data, Json, Path},
 };
 use chrono::Utc;
-use etl_config::shared::{ReplicatorConfig, SupabaseConfig, TlsConfig};
+use etl_config::{
+    Environment,
+    shared::{ReplicatorConfig, SupabaseConfig, TlsConfig},
+};
 use etl_postgres::replication::{TableLookupError, get_table_name_from_oid, health, state};
 use etl_postgres::types::TableId;
 use secrecy::ExposeSecret;
@@ -26,8 +29,10 @@ use crate::db::images::{Image, ImagesDbError};
 use crate::db::pipelines::{Pipeline, PipelinesDbError};
 use crate::db::replicators::{Replicator, ReplicatorsDbError};
 use crate::db::sources::{Source, SourcesDbError, source_exists};
-use crate::k8s_client::{K8sClient, K8sError, PodPhase, TRUSTED_ROOT_CERT_CONFIG_MAP_NAME};
-use crate::k8s_client::{RESTARTED_AT_ANNOTATION_KEY, TRUSTED_ROOT_CERT_KEY_NAME};
+use crate::k8s::http::{
+    RESTARTED_AT_ANNOTATION_KEY, TRUSTED_ROOT_CERT_CONFIG_MAP_NAME, TRUSTED_ROOT_CERT_KEY_NAME,
+};
+use crate::k8s::{K8sClient, K8sError, PodPhase};
 use crate::routes::{
     ErrorMessage, TenantIdError, connect_to_source_database_with_defaults, extract_tenant_id,
 };
@@ -103,6 +108,9 @@ pub enum PipelineError {
 
     #[error("Database error: {0}")]
     Database(#[from] sqlx::Error),
+
+    #[error("Could not load app environment")]
+    MissingEnvironment,
 }
 
 impl From<PipelinesDbError> for PipelineError {
@@ -151,6 +159,7 @@ impl ResponseError for PipelineError {
             | PipelineError::Database(_)
             | PipelineError::TableLookup(_)
             | PipelineError::InvalidTableReplicationState(_)
+            | PipelineError::MissingEnvironment
             | PipelineError::MissingTableReplicationState => StatusCode::INTERNAL_SERVER_ERROR,
             PipelineError::PipelineNotFound(_)
             | PipelineError::EtlStateNotInitialized
@@ -1195,6 +1204,8 @@ async fn create_or_update_pipeline_in_k8s(
     let secrets = build_secrets(&source.config, &destination.config);
     create_or_update_secrets(k8s_client, &prefix, secrets.clone()).await?;
 
+    let environment = Environment::load().map_err(|_| PipelineError::MissingEnvironment)?;
+
     // We create the replicator configuration.
     let replicator_config = build_replicator_config(
         k8s_client,
@@ -1206,7 +1217,13 @@ async fn create_or_update_pipeline_in_k8s(
         },
     )
     .await?;
-    create_or_update_config(k8s_client, &prefix, replicator_config.clone()).await?;
+    create_or_update_config(
+        k8s_client,
+        &prefix,
+        replicator_config.clone(),
+        environment.clone(),
+    )
+    .await?;
 
     // To force restart everytime, we want to annotate the stateful set with the current UTC time for every
     // start call. Technically we can optimally perform a restart by calculating a checksum on a deterministic
@@ -1219,7 +1236,14 @@ async fn create_or_update_pipeline_in_k8s(
     );
 
     // We create the replicator stateful set.
-    create_or_update_replicator(k8s_client, &prefix, image.name, Some(annotations)).await?;
+    create_or_update_replicator(
+        k8s_client,
+        &prefix,
+        image.name,
+        Some(annotations),
+        environment,
+    )
+    .await?;
 
     Ok(())
 }
@@ -1369,12 +1393,13 @@ async fn create_or_update_config(
     k8s_client: &dyn K8sClient,
     prefix: &str,
     config: ReplicatorConfig,
+    environment: Environment,
 ) -> Result<(), PipelineError> {
     // For now the base config is empty.
     let base_config = "";
     let prod_config = serde_json::to_string(&config)?;
     k8s_client
-        .create_or_update_config_map(prefix, base_config, &prod_config)
+        .create_or_update_config_map(prefix, base_config, &prod_config, environment)
         .await?;
 
     Ok(())
@@ -1385,9 +1410,10 @@ async fn create_or_update_replicator(
     prefix: &str,
     replicator_image: String,
     template_annotations: Option<BTreeMap<String, String>>,
+    environment: Environment,
 ) -> Result<(), PipelineError> {
     k8s_client
-        .create_or_update_stateful_set(prefix, &replicator_image, template_annotations)
+        .create_or_update_stateful_set(prefix, &replicator_image, template_annotations, environment)
         .await?;
 
     Ok(())

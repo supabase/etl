@@ -1042,7 +1042,7 @@ mod tests {
             let mut buf = BytesMut::new();
             ToSql::to_sql(&case, &Type::NUMERIC, &mut buf).unwrap();
             let round = PgNumeric::from_sql(&Type::NUMERIC, &buf).unwrap();
-            assert_eq!(format!("{}", case), format!("{}", round));
+            assert_eq!(format!("{case}"), format!("{}", round));
             assert_eq!(case, round);
         }
     }

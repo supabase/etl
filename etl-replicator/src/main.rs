@@ -18,6 +18,9 @@ mod config;
 mod core;
 mod migrations;
 
+/// The name of the environment variable which contains version information for this replicator.
+const APP_VERSION_ENV_NAME: &str = "APP_VERSION";
+
 /// Entry point for the replicator service.
 ///
 /// Loads configuration, initializes tracing and Sentry, starts the async runtime,
@@ -92,9 +95,15 @@ fn init_sentry() -> anyhow::Result<Option<sentry::ClientInitGuard>> {
             ..Default::default()
         });
 
+        // We load the version of the replicator which is specified via environment variable.
+        let version = std::env::var(APP_VERSION_ENV_NAME);
+
         // Set service tag to differentiate replicator from other services
         sentry::configure_scope(|scope| {
             scope.set_tag("service", "replicator");
+            if let Ok(version) = version {
+                scope.set_tag("version", version);
+            }
         });
 
         return Ok(Some(guard));

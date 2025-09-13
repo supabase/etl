@@ -76,9 +76,10 @@ where
     /// pipeline identity and configuration settings.
     pub fn new(config: PipelineConfig, state_store: S, destination: D) -> Self {
         // Register metrics here during pipeline creation to avoid burdening the
-        // users of etl crate to explicity calling it. Since this method is safe to
-        // call mutltiple time, it is ok even if there are multiple pipelines created.
+        // users of etl crate to explicitly calling it. Since this method is safe to
+        // call multiple time, it is ok even if there are multiple pipelines created.
         register_metrics();
+
         // We create a watch channel of unit types since this is just used to notify all subscribers
         // that shutdown is needed.
         //

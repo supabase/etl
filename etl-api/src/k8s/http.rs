@@ -1,93 +1,95 @@
+use crate::k8s::{K8sClient, K8sError, PodPhase};
 use async_trait::async_trait;
 use base64::{Engine, prelude::BASE64_STANDARD};
+use etl_config::Environment;
 use k8s_openapi::api::{
     apps::v1::StatefulSet,
     core::v1::{ConfigMap, Pod, Secret},
 };
-use serde_json::json;
-use std::collections::BTreeMap;
-use thiserror::Error;
-use tracing::info;
-
 use kube::{
     Client,
     api::{Api, DeleteParams, Patch, PatchParams},
 };
+use serde_json::json;
+use std::collections::BTreeMap;
+use tracing::info;
 
-#[derive(Debug, Error)]
-pub enum K8sError {
-    #[error("serde_json error: {0}")]
-    Serde(#[from] serde_json::error::Error),
+/// Secret name suffix for the BigQuery service account key.
+const BQ_SECRET_NAME_SUFFIX: &str = "bq-service-account-key";
+/// Secret name suffix for the Postgres password.
+const POSTGRES_SECRET_NAME_SUFFIX: &str = "postgres-password";
+/// ConfigMap name suffix for the replicator configuration files.
+const REPLICATOR_CONFIG_MAP_NAME_SUFFIX: &str = "replicator-config";
+/// StatefulSet name suffix for the replicator workload.
+const REPLICATOR_STATEFUL_SET_SUFFIX: &str = "replicator-stateful-set";
+/// Application label suffix used to group resources.
+const REPLICATOR_APP_SUFFIX: &str = "replicator-app";
+/// Container name suffix for the replicator container.
+const REPLICATOR_CONTAINER_NAME_SUFFIX: &str = "replicator";
+/// Container name suffix for the Vector sidecar.
+const VECTOR_CONTAINER_NAME_SUFFIX: &str = "vector";
+/// Namespace where data-plane resources are created.
+const DATA_PLANE_NAMESPACE: &str = "etl-data-plane";
+/// Secret storing the Logflare API key.
+const LOGFLARE_SECRET_NAME: &str = "replicator-logflare-api-key";
+/// Docker image used for the Vector sidecar.
+const VECTOR_IMAGE_NAME: &str = "timberio/vector:0.46.1-distroless-libc";
+/// ConfigMap name containing the Vector configuration.
+const VECTOR_CONFIG_MAP_NAME: &str = "replicator-vector-config";
+/// Volume name for the replicator config file.
+const REPLICATOR_CONFIG_FILE_VOLUME_NAME: &str = "replicator-config-file";
+/// Volume name for the Vector config file.
+const VECTOR_CONFIG_FILE_VOLUME_NAME: &str = "vector-config-file";
+/// Secret storing the Sentry DSN.
+const SENTRY_DSN_SECRET_NAME: &str = "replicator-sentry-dsn";
+/// EmptyDir volume name used to share logs.
+const LOGS_VOLUME_NAME: &str = "logs";
+/// ConfigMap name providing trusted root certificates.
+pub const TRUSTED_ROOT_CERT_CONFIG_MAP_NAME: &str = "trusted-root-certs-config";
+/// Key inside the trusted root certificates ConfigMap.
+pub const TRUSTED_ROOT_CERT_KEY_NAME: &str = "trusted_root_certs";
+/// Pod template annotation used to trigger rolling restarts.
+pub const RESTARTED_AT_ANNOTATION_KEY: &str = "etl.supabase.com/restarted-at";
+/// Label used to identify replicator pods.
+const REPLICATOR_APP_LABEL: &str = "etl-replicator-app";
 
-    #[error("kube error: {0}")]
-    Kube(#[from] kube::Error),
+/// Replicator memory limit tuned for `c6in.4xlarge` instances.
+const REPLICATOR_MAX_MEMORY_PROD: &str = "500Mi";
+/// Replicator CPU limit tuned for `c6in.4xlarge` instances.
+const REPLICATOR_MAX_CPU_PROD: &str = "100m";
+/// Replicator memory limit tuned for `t3.small` instances.
+const REPLICATOR_MAX_MEMORY_STAGING: &str = "100Mi";
+/// Replicator CPU limit tuned for `t3.small` instances.
+const REPLICATOR_MAX_CPU_STAGING: &str = "100m";
+
+/// Runtime limits derived from the current environment.
+struct DynamicReplicatorConfig {
+    max_memory: &'static str,
+    max_cpu: &'static str,
 }
 
-pub enum PodPhase {
-    Pending,
-    Running,
-    Succeeded,
-    Failed,
-    Unknown,
-}
+impl DynamicReplicatorConfig {
+    /// Loads the runtime limits for the current environment.
+    fn load(environment: &Environment) -> Result<Self, K8sError> {
+        let config = match environment {
+            Environment::Prod => Self {
+                max_memory: REPLICATOR_MAX_MEMORY_PROD,
+                max_cpu: REPLICATOR_MAX_CPU_PROD,
+            },
+            _ => Self {
+                max_memory: REPLICATOR_MAX_MEMORY_STAGING,
+                max_cpu: REPLICATOR_MAX_CPU_STAGING,
+            },
+        };
 
-impl From<&str> for PodPhase {
-    fn from(value: &str) -> Self {
-        match value {
-            "Pending" => PodPhase::Pending,
-            "Running" => PodPhase::Running,
-            "Succeeded" => PodPhase::Succeeded,
-            "Failed" => PodPhase::Failed,
-            _ => PodPhase::Unknown,
-        }
+        Ok(config)
     }
 }
 
-#[async_trait]
-pub trait K8sClient: Send + Sync {
-    async fn create_or_update_postgres_secret(
-        &self,
-        prefix: &str,
-        postgres_password: &str,
-    ) -> Result<(), K8sError>;
-
-    async fn create_or_update_bq_secret(
-        &self,
-        prefix: &str,
-        bq_service_account_key: &str,
-    ) -> Result<(), K8sError>;
-
-    async fn delete_postgres_secret(&self, prefix: &str) -> Result<(), K8sError>;
-
-    async fn delete_bq_secret(&self, prefix: &str) -> Result<(), K8sError>;
-
-    async fn get_config_map(&self, config_map_name: &str) -> Result<ConfigMap, K8sError>;
-
-    async fn create_or_update_config_map(
-        &self,
-        prefix: &str,
-        base_config: &str,
-        prod_config: &str,
-    ) -> Result<(), K8sError>;
-
-    async fn delete_config_map(&self, prefix: &str) -> Result<(), K8sError>;
-
-    async fn create_or_update_stateful_set(
-        &self,
-        prefix: &str,
-        replicator_image: &str,
-        template_annotations: Option<BTreeMap<String, String>>,
-    ) -> Result<(), K8sError>;
-
-    async fn delete_stateful_set(&self, prefix: &str) -> Result<(), K8sError>;
-
-    async fn get_pod_phase(&self, prefix: &str) -> Result<PodPhase, K8sError>;
-
-    async fn has_replicator_container_error(&self, prefix: &str) -> Result<bool, K8sError>;
-
-    async fn delete_pod(&self, prefix: &str) -> Result<(), K8sError>;
-}
-
+/// HTTP-based implementation of [`K8sClient`].
+///
+/// The client is namespaced to the data-plane namespace and uses server-side
+/// apply to keep resources in sync.
 #[derive(Debug)]
 pub struct HttpK8sClient {
     secrets_api: Api<Secret>,
@@ -96,29 +98,11 @@ pub struct HttpK8sClient {
     pods_api: Api<Pod>,
 }
 
-const BQ_SECRET_NAME_SUFFIX: &str = "bq-service-account-key";
-const POSTGRES_SECRET_NAME_SUFFIX: &str = "postgres-password";
-const REPLICATOR_CONFIG_MAP_NAME_SUFFIX: &str = "replicator-config";
-const REPLICATOR_STATEFUL_SET_SUFFIX: &str = "replicator-stateful-set";
-const REPLICATOR_APP_SUFFIX: &str = "replicator-app";
-const REPLICATOR_CONTAINER_NAME_SUFFIX: &str = "replicator";
-const VECTOR_CONTAINER_NAME_SUFFIX: &str = "vector";
-const DATA_PLANE_NAMESPACE: &str = "etl-data-plane";
-const LOGFLARE_SECRET_NAME: &str = "replicator-logflare-api-key";
-const VECTOR_IMAGE_NAME: &str = "timberio/vector:0.46.1-distroless-libc";
-const VECTOR_CONFIG_MAP_NAME: &str = "replicator-vector-config";
-const REPLICATOR_CONFIG_FILE_VOLUME_NAME: &str = "replicator-config-file";
-const VECTOR_CONFIG_FILE_VOLUME_NAME: &str = "vector-config-file";
-const SENTRY_DSN_SECRET_NAME: &str = "replicator-sentry-dsn";
-const LOGS_VOLUME_NAME: &str = "logs";
-pub const TRUSTED_ROOT_CERT_CONFIG_MAP_NAME: &str = "trusted-root-certs-config";
-pub const TRUSTED_ROOT_CERT_KEY_NAME: &str = "trusted_root_certs";
-const PG_PASSWORD_ENV_VAR_NAME: &str = "APP_PIPELINE__PG_CONNECTION__PASSWORD";
-const BIG_QUERY_SA_KEY_ENV_VAR_NAME: &str = "APP_DESTINATION__BIG_QUERY__SERVICE_ACCOUNT_KEY";
-pub const RESTARTED_AT_ANNOTATION_KEY: &str = "etl.supabase.com/restarted-at";
-const REPLICATOR_APP_LABEL: &str = "etl-replicator-app";
-
 impl HttpK8sClient {
+    /// Creates a new [`HttpK8sClient`] using the ambient Kubernetes config.
+    ///
+    /// Prefers in-cluster configuration and falls back to the local kubeconfig
+    /// when running outside the cluster.
     pub async fn new() -> Result<HttpK8sClient, K8sError> {
         let client = Client::try_default().await?;
 
@@ -257,10 +241,12 @@ impl K8sClient for HttpK8sClient {
         &self,
         prefix: &str,
         base_config: &str,
-        prod_config: &str,
+        env_config: &str,
+        environment: Environment,
     ) -> Result<(), K8sError> {
         info!("patching config map");
 
+        let env_config_file = format!("{environment}.yaml");
         let config_map_name = format!("{prefix}-{REPLICATOR_CONFIG_MAP_NAME_SUFFIX}");
         let config_map_json = json!({
           "kind": "ConfigMap",
@@ -271,7 +257,7 @@ impl K8sClient for HttpK8sClient {
           },
           "data": {
             "base.yaml": base_config,
-            "prod.yaml": prod_config,
+            env_config_file: env_config,
           }
         });
         // TODO: for consistency we might want to use `serde_yaml` since writing a `.yaml` as JSON.
@@ -309,8 +295,11 @@ impl K8sClient for HttpK8sClient {
         prefix: &str,
         replicator_image: &str,
         template_annotations: Option<BTreeMap<String, String>>,
+        environment: Environment,
     ) -> Result<(), K8sError> {
         info!("patching stateful set");
+
+        let config = DynamicReplicatorConfig::load(&environment)?;
 
         let stateful_set_name = format!("{prefix}-{REPLICATOR_STATEFUL_SET_SUFFIX}");
         let replicator_app_name = format!("{prefix}-{REPLICATOR_APP_SUFFIX}");
@@ -393,11 +382,12 @@ impl K8sClient for HttpK8sClient {
                     ],
                     "resources": {
                       "limits": {
-                        "memory": "200Mi",
+                        "memory": config.max_memory,
+                        "cpu": config.max_cpu,
                       },
                       "requests": {
-                        "memory": "200Mi",
-                        "cpu": "100m"
+                        "memory": config.max_memory,
+                        "cpu": config.max_cpu,
                       }
                     },
                     "volumeMounts": [
@@ -426,7 +416,11 @@ impl K8sClient for HttpK8sClient {
                     "env": [
                       {
                         "name": "APP_ENVIRONMENT",
-                        "value": "prod"
+                        "value": environment.to_string()
+                      },
+                      {
+                          "name": "APP_VERSION",
+                          "value": replicator_image
                       },
                       {
                         "name": "APP_SENTRY__DSN",
@@ -438,7 +432,7 @@ impl K8sClient for HttpK8sClient {
                         }
                       },
                       {
-                        "name": PG_PASSWORD_ENV_VAR_NAME,
+                        "name": "APP_PIPELINE__PG_CONNECTION__PASSWORD",
                         "valueFrom": {
                           "secretKeyRef": {
                             "name": postgres_secret_name,
@@ -447,7 +441,7 @@ impl K8sClient for HttpK8sClient {
                         }
                       },
                       {
-                        "name": BIG_QUERY_SA_KEY_ENV_VAR_NAME,
+                        "name": "APP_DESTINATION__BIG_QUERY__SERVICE_ACCOUNT_KEY",
                         "valueFrom": {
                           "secretKeyRef": {
                             "name": bq_secret_name,

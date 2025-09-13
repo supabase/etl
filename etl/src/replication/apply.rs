@@ -3,7 +3,7 @@ use etl_postgres::replication::slots::get_slot_name;
 use etl_postgres::replication::worker::WorkerType;
 use etl_postgres::types::TableId;
 use futures::{FutureExt, StreamExt};
-use metrics::{counter, gauge, histogram};
+use metrics::histogram;
 use postgres_replication::protocol;
 use postgres_replication::protocol::{LogicalReplicationMessage, ReplicationMessage};
 use std::future::{Future, pending};
@@ -26,8 +26,9 @@ use crate::conversions::event::{
 use crate::destination::Destination;
 use crate::error::{ErrorKind, EtlResult};
 use crate::metrics::{
-    APPLY, ETL_BATCH_SEND_DURATION_SECONDS, ETL_BATCH_SIZE, ETL_ITEMS_COPIED_TOTAL, MILLIS_PER_SEC,
-    PHASE, PIPELINE_ID,
+    ACTION_LABEL, DESTINATION_LABEL, ETL_BATCH_ITEMS_WRITTEN_TOTAL,
+    ETL_ITEMS_SEND_DURATION_SECONDS, ETL_TRANSACTION_DURATION_SECONDS, ETL_TRANSACTION_SIZE,
+    PIPELINE_ID_LABEL, WORKER_TYPE_LABEL,
 };
 use crate::replication::client::PgReplicationClient;
 use crate::replication::stream::EventsStream;
@@ -266,6 +267,10 @@ struct ApplyLoopState {
     next_status_update: StatusUpdate,
     /// A batch of events to send to the destination.
     events_batch: Vec<Event>,
+    /// Instant from when a transaction began.
+    current_tx_begin_ts: Option<Instant>,
+    /// Number of events observed in the current transaction (excluding BEGIN/COMMIT).
+    current_tx_events: u64,
 }
 
 impl ApplyLoopState {
@@ -279,6 +284,8 @@ impl ApplyLoopState {
             remote_final_lsn: None,
             next_status_update,
             events_batch,
+            current_tx_begin_ts: None,
+            current_tx_events: 0,
         }
     }
 
@@ -538,6 +545,7 @@ where
                 message?,
                 schema_store,
                 hook,
+                pipeline_id,
             )
             .await?;
 
@@ -653,12 +661,24 @@ where
 
     destination.write_events(events_batch).await?;
 
-    counter!(ETL_ITEMS_COPIED_TOTAL, PIPELINE_ID => pipeline_id.to_string(), PHASE => APPLY)
-        .increment(batch_size as u64);
-    gauge!(ETL_BATCH_SIZE, PIPELINE_ID => pipeline_id.to_string()).set(batch_size as f64);
+    metrics::counter!(
+        ETL_BATCH_ITEMS_WRITTEN_TOTAL,
+        WORKER_TYPE_LABEL => "apply",
+        ACTION_LABEL => "table_streaming",
+        PIPELINE_ID_LABEL => pipeline_id.to_string(),
+        DESTINATION_LABEL => D::name(),
+    )
+    .increment(batch_size as u64);
 
-    let send_duration_secs = before_sending.elapsed().as_millis() as f64 / MILLIS_PER_SEC;
-    histogram!(ETL_BATCH_SEND_DURATION_SECONDS, PIPELINE_ID => pipeline_id.to_string(), PHASE => APPLY).record(send_duration_secs);
+    let send_duration_seconds = before_sending.elapsed().as_secs_f64();
+    histogram!(
+        ETL_ITEMS_SEND_DURATION_SECONDS,
+        WORKER_TYPE_LABEL => "apply",
+        ACTION_LABEL => "table_streaming",
+        PIPELINE_ID_LABEL => pipeline_id.to_string(),
+        DESTINATION_LABEL => D::name(),
+    )
+    .record(send_duration_seconds);
 
     // We tell the stream to reset the timer when it is polled the next time, this way the deadline
     // is restarted.
@@ -734,6 +754,7 @@ async fn handle_replication_message<S, T>(
     message: ReplicationMessage<LogicalReplicationMessage>,
     schema_store: &S,
     hook: &T,
+    pipeline_id: PipelineId,
 ) -> EtlResult<HandleMessageResult>
 where
     S: SchemaStore + Clone + Send + 'static,
@@ -760,6 +781,7 @@ where
                 message.into_data(),
                 schema_store,
                 hook,
+                pipeline_id,
             )
             .await
         }
@@ -804,6 +826,7 @@ async fn handle_logical_replication_message<S, T>(
     message: LogicalReplicationMessage,
     schema_store: &S,
     hook: &T,
+    pipeline_id: PipelineId,
 ) -> EtlResult<HandleMessageResult>
 where
     S: SchemaStore + Clone + Send + 'static,
@@ -811,12 +834,15 @@ where
 {
     let commit_lsn = get_commit_lsn(state, &message)?;
 
+    state.current_tx_events += 1;
+
     match &message {
         LogicalReplicationMessage::Begin(begin_body) => {
             handle_begin_message(state, start_lsn, commit_lsn, begin_body).await
         }
         LogicalReplicationMessage::Commit(commit_body) => {
-            handle_commit_message(state, start_lsn, commit_lsn, commit_body, hook).await
+            handle_commit_message(state, start_lsn, commit_lsn, commit_body, hook, pipeline_id)
+                .await
         }
         LogicalReplicationMessage::Relation(relation_body) => {
             handle_relation_message(
@@ -914,6 +940,10 @@ async fn handle_begin_message(
     let final_lsn = PgLsn::from(message.final_lsn());
     state.remote_final_lsn = Some(final_lsn);
 
+    // Track begin instant and reset tx event count.
+    state.current_tx_begin_ts = Some(Instant::now());
+    state.current_tx_events = 0;
+
     // Convert event from the protocol message.
     let event = parse_event_from_begin_message(start_lsn, commit_lsn, message);
 
@@ -936,6 +966,7 @@ async fn handle_commit_message<T>(
     commit_lsn: PgLsn,
     message: &protocol::CommitBody,
     hook: &T,
+    pipeline_id: PipelineId,
 ) -> EtlResult<HandleMessageResult>
 where
     T: ApplyLoopHook,
@@ -967,6 +998,25 @@ where
     }
 
     let end_lsn = PgLsn::from(message.end_lsn());
+
+    // Track metrics after the end of the transaction. If we arrive here, we assume that the begin
+    // ts was active.
+    if let Some(begin_ts) = state.current_tx_begin_ts.take() {
+        let now = Instant::now();
+        let duration_seconds = (now - begin_ts).as_secs_f64();
+        histogram!(
+            ETL_TRANSACTION_DURATION_SECONDS,
+            PIPELINE_ID_LABEL => pipeline_id.to_string()
+        )
+        .record(duration_seconds);
+        // We do - 1 since we exclude this COMMIT event from the count.
+        histogram!(
+            ETL_TRANSACTION_SIZE,
+            PIPELINE_ID_LABEL => pipeline_id.to_string()
+        )
+        .record((state.current_tx_events - 1) as f64);
+        state.current_tx_events = 0;
+    }
 
     // We call `process_syncing_tables` with `update_state` set to false here because we do not yet want
     // to update the table state. This function will be called again in `handle_replication_message_batch`

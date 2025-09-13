@@ -87,10 +87,9 @@ impl<G: GenericClient> PgDatabase<G> {
             // PostgreSQL 15+ supports FOR ALL TABLES IN SCHEMA syntax
             let create_publication_query = match schema {
                 Some(schema_name) => format!(
-                    "create publication {} for tables in schema {}",
-                    publication_name, schema_name
+                    "create publication {publication_name} for tables in schema {schema_name}"
                 ),
-                None => format!("create publication {} for all tables", publication_name),
+                None => format!("create publication {publication_name} for all tables"),
             };
 
             client.execute(&create_publication_query, &[]).await?;
@@ -98,12 +97,11 @@ impl<G: GenericClient> PgDatabase<G> {
             // PostgreSQL 14 and earlier: create publication and add tables individually
             match schema {
                 Some(schema_name) => {
-                    let create_pub_query = format!("create publication {}", publication_name);
+                    let create_pub_query = format!("create publication {publication_name}");
                     client.execute(&create_pub_query, &[]).await?;
 
                     let tables_query = format!(
-                        "select schemaname, tablename from pg_tables where schemaname = '{}'",
-                        schema_name
+                        "select schemaname, tablename from pg_tables where schemaname = '{schema_name}'"
                     );
                     let rows = client.query(&tables_query, &[]).await?;
 
@@ -111,15 +109,14 @@ impl<G: GenericClient> PgDatabase<G> {
                         let schema: String = row.get(0);
                         let table: String = row.get(1);
                         let add_table_query = format!(
-                            "alter publication {} add table {}.{}",
-                            publication_name, schema, table
+                            "alter publication {publication_name} add table {schema}.{table}"
                         );
                         client.execute(&add_table_query, &[]).await?;
                     }
                 }
                 None => {
                     let create_publication_query =
-                        format!("create publication {} for all tables", publication_name);
+                        format!("create publication {publication_name} for all tables");
                     client.execute(&create_publication_query, &[]).await?;
                 }
             }
