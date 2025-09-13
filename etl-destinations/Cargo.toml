@@ -20,6 +20,7 @@ iceberg = [
     "dep:iceberg-catalog-rest",
     "dep:arrow",
     "dep:base64",
+    "dep:futures",
     "dep:parquet",
     "dep:tokio",
 ]
@@ -30,6 +31,7 @@ chrono = { workspace = true }
 
 arrow = { workspace = true, optional = true }
 base64 = { workspace = true, optional = true }
+futures = { workspace = true, optional = true }
 gcp-bigquery-client = { workspace = true, optional = true, features = [
     "rust-tls",
     "aws-lc-rs",

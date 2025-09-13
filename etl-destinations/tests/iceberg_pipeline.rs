@@ -405,6 +405,16 @@ async fn insert_table_rows() {
         .await
         .unwrap();
 
+    let read_rows = client
+        .read_all_rows(namespace.to_string(), table_name.clone())
+        .await
+        .unwrap();
+
+    assert_eq!(read_rows.len(), 1);
+
+    // Compare the actual values in the read_rows with inserted table_rows
+    assert_eq!(read_rows, table_rows);
+
     // Manual cleanup for now because lakekeeper doesn't allow cascade delete at the warehouse level
     // This feature is planned for future releases. We'll start to use it when it becomes available.
     // The cleanup is not in a Drop impl because each test has different number of object specitic to
