@@ -91,54 +91,30 @@ pub struct ReadImagesResponse {
     pub images: Vec<ReadImageResponse>,
 }
 
-#[utoipa::path(
-    summary = "Set default image",
-    description = "Sets the default image to the image identified by its ID.",
-    params(("image_id" = i64, Path, description = "Unique ID of the image")),
-    responses(
-        (status = 200, description = "Default image updated"),
-        (status = 404, description = "Image not found", body = ErrorMessage),
-        (status = 500, description = "Internal server error", body = ErrorMessage),
-    ),
-    tag = "Images"
-)]
-#[post("/images/{image_id}/default")]
-pub async fn set_default_image(
-    pool: Data<PgPool>,
-    image_id: Path<i64>,
-) -> Result<impl Responder, ImageError> {
-    let image_id = image_id.into_inner();
-
-    db::images::update_default_image_by_id(&pool, image_id)
-        .await?
-        .ok_or(ImageError::ImageNotFound(image_id))?;
-
-    Ok(HttpResponse::Ok().finish())
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct SetDefaultImageRequest {
+    #[schema(example = "supabase/replicator:1.2.3", required = true)]
+    pub name: String,
 }
 
 #[utoipa::path(
-    summary = "Create an image",
-    description = "Creates an image entry; can be marked as the default.",
-    request_body = CreateImageRequest,
+    summary = "Set default image",
+    description = "Sets the default image by name; creates it if missing.",
+    request_body = SetDefaultImageRequest,
     responses(
-        (status = 200, description = "Image created successfully", body = CreateImageResponse),
-        (status = 400, description = "Bad request", body = ErrorMessage),
+        (status = 200, description = "Default image updated"),
         (status = 500, description = "Internal server error", body = ErrorMessage),
     ),
     tag = "Images"
 )]
-#[post("/images")]
-pub async fn create_image(
+#[post("/images/default")]
+pub async fn set_default_image(
     pool: Data<PgPool>,
-    image: Json<CreateImageRequest>,
+    payload: Json<SetDefaultImageRequest>,
 ) -> Result<impl Responder, ImageError> {
-    let image = image.into_inner();
-
-    let id = db::images::create_image(&pool, &image.name, image.is_default).await?;
-
-    let response = CreateImageResponse { id };
-
-    Ok(Json(response))
+    let name = payload.into_inner().name;
+    db::images::update_default_image_by_name(&pool, &name).await?;
+    Ok(HttpResponse::Ok().finish())
 }
 
 #[utoipa::path(

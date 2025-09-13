@@ -10,11 +10,10 @@ async fn images_default_image_can_be_updated_via_endpoint() {
     let app = spawn_test_app().await;
 
     let _old_default = create_default_image(&app).await;
-    let new_default =
-        create_image_with_name(&app, "supabase/etl-replicator:2.0.0".to_string(), false).await;
-
-    // Act: set the new image as default
-    let response = app.set_default_image(new_default).await;
+    // Act: set the new image as default by name (creates if missing)
+    let response = app
+        .set_default_image_by_name("supabase/etl-replicator:2.0.0")
+        .await;
     assert!(response.status().is_success());
 
     // Assert: only the requested image is now default
@@ -24,16 +23,22 @@ async fn images_default_image_can_be_updated_via_endpoint() {
 
     let defaults: Vec<_> = body.images.iter().filter(|i| i.is_default).collect();
     assert_eq!(defaults.len(), 1, "exactly one default image must exist");
-    assert_eq!(defaults[0].id, new_default);
+    assert_eq!(defaults[0].name, "supabase/etl-replicator:2.0.0");
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn images_update_default_returns_404_for_missing_image() {
+async fn images_default_endpoint_creates_when_missing() {
     let app = spawn_test_app().await;
 
-    // No images created; pick a random id
-    let response = app.set_default_image(424242).await;
-    assert_eq!(response.status(), reqwest::StatusCode::NOT_FOUND);
+    // No images created; setting default by name should create it
+    let response = app.set_default_image_by_name("brand/new:1.0.0").await;
+    assert!(response.status().is_success());
+
+    let response = app.read_all_images().await;
+    let body: ReadImagesResponse = response.json().await.expect("deserialize images");
+    let defaults: Vec<_> = body.images.iter().filter(|i| i.is_default).collect();
+    assert_eq!(defaults.len(), 1);
+    assert_eq!(defaults[0].name, "brand/new:1.0.0");
 }
 
 #[tokio::test(flavor = "multi_thread")]

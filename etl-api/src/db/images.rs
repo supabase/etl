@@ -16,6 +16,23 @@ pub struct Image {
     pub is_default: bool,
 }
 
+/// Sets the default image to the one identified by `name`.
+///
+/// Delegates to the Postgres function `app.update_default_image(name text)`,
+/// which ensures atomicity and creates the image if missing.
+pub async fn update_default_image_by_name(pool: &PgPool, name: &str) -> Result<(), ImagesDbError> {
+    sqlx::query(
+        r#"
+        select app.update_default_image($1)
+        "#,
+    )
+    .bind(name)
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
+
 /// Sets the default image to the one identified by `image_id`.
 ///
 /// Looks up the image name for the provided ID and delegates the switch to the

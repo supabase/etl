@@ -33,9 +33,8 @@ use crate::{
         },
         health_check::health_check,
         images::{
-            CreateImageRequest, CreateImageResponse, ReadImageResponse, ReadImagesResponse,
-            UpdateImageRequest, create_image, delete_image, read_all_images, read_image,
-            set_default_image, update_image,
+            ReadImageResponse, ReadImagesResponse, SetDefaultImageRequest, UpdateImageRequest,
+            delete_image, read_all_images, read_image, set_default_image, update_image,
         },
         metrics::metrics,
         pipelines::{
@@ -173,8 +172,7 @@ pub async fn run(
             crate::routes::metrics::metrics,
         ),
         components(schemas(
-            CreateImageRequest,
-            CreateImageResponse,
+            SetDefaultImageRequest,
             UpdateImageRequest,
             ReadImageResponse,
             ReadImagesResponse,
@@ -223,7 +221,6 @@ pub async fn run(
 
     #[derive(OpenApi)]
     #[openapi(paths(
-        crate::routes::images::create_image,
         crate::routes::images::read_image,
         crate::routes::images::set_default_image,
         crate::routes::images::update_image,
@@ -334,7 +331,6 @@ pub async fn run(
                     .service(delete_publication)
                     .service(read_all_publications)
                     //images
-                    .service(create_image)
                     .service(read_image)
                     .service(set_default_image)
                     .service(update_image)
