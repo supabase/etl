@@ -34,10 +34,15 @@ pub struct IcebergClient {
 
 impl IcebergClient {
     /// Creates a new [IcebergClient] from a REST catalog URI and a warehouse name.
-    pub fn new_with_rest_catalog(catalog_uri: String, warehouse_name: String) -> Self {
+    pub fn new_with_rest_catalog(
+        catalog_uri: String,
+        warehouse_name: String,
+        props: HashMap<String, String>,
+    ) -> Self {
         let catalog_config = RestCatalogConfig::builder()
             .uri(catalog_uri)
             .warehouse(warehouse_name)
+            .props(props)
             .build();
         let catalog = RestCatalog::new(catalog_config);
         IcebergClient {
@@ -113,8 +118,8 @@ impl IcebergClient {
         self.catalog.drop_namespace(&namespace_ident).await
     }
 
-    /// Write table rows to the table in the destination
-    pub async fn write_table_rows(
+    /// Insert table rows into the table in the destination
+    pub async fn insert_rows(
         &self,
         namespace: String,
         table_name: String,

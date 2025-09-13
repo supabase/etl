@@ -100,7 +100,7 @@ where
         }
 
         self.client
-            .write_table_rows(self.namespace.clone(), iceberg_table_name, &table_rows)
+            .insert_rows(self.namespace.clone(), iceberg_table_name, &table_rows)
             .await?;
 
         Ok(())

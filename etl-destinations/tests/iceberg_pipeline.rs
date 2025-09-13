@@ -1,17 +1,33 @@
 #![cfg(feature = "iceberg")]
 
-use etl::types::{ColumnSchema, TableId, TableName, TableSchema, Type};
+use std::collections::HashMap;
+
+use etl::types::{Cell, ColumnSchema, TableId, TableName, TableRow, TableSchema, Type};
 use etl_destinations::iceberg::IcebergClient;
 use etl_telemetry::tracing::init_test_tracing;
+use iceberg::io::{S3_ACCESS_KEY_ID, S3_ENDPOINT, S3_SECRET_ACCESS_KEY};
 
 use crate::support::lakekeeper::LakekeeperClient;
 
 mod support;
 
 const LAKEKEEPER_URL: &str = "http://localhost:8182";
+const MINIO_URL: &str = "http://localhost:9010";
+const MINIO_USERNAME: &str = "minio-admin";
+const MINIO_PASSWORD: &str = "minio-admin-password";
 
 fn get_catalog_url() -> String {
     format!("{LAKEKEEPER_URL}/catalog")
+}
+
+fn create_props() -> HashMap<String, String> {
+    let mut props: HashMap<String, String> = HashMap::new();
+
+    props.insert(S3_ACCESS_KEY_ID.to_string(), MINIO_USERNAME.to_string());
+    props.insert(S3_SECRET_ACCESS_KEY.to_string(), MINIO_PASSWORD.to_string());
+    props.insert(S3_ENDPOINT.to_string(), MINIO_URL.to_string());
+
+    props
 }
 
 #[tokio::test]
@@ -20,7 +36,8 @@ async fn create_namespace() {
 
     let lakekeeper_client = LakekeeperClient::new(LAKEKEEPER_URL);
     let (warehouse_name, warehouse_id) = lakekeeper_client.create_warehouse().await.unwrap();
-    let client = IcebergClient::new_with_rest_catalog(get_catalog_url(), warehouse_name);
+    let client =
+        IcebergClient::new_with_rest_catalog(get_catalog_url(), warehouse_name, create_props());
 
     let namespace = "test_namespace";
 
@@ -54,7 +71,8 @@ async fn create_hierarchical_namespace() {
 
     let lakekeeper_client = LakekeeperClient::new(LAKEKEEPER_URL);
     let (warehouse_name, warehouse_id) = lakekeeper_client.create_warehouse().await.unwrap();
-    let client = IcebergClient::new_with_rest_catalog(get_catalog_url(), warehouse_name);
+    let client =
+        IcebergClient::new_with_rest_catalog(get_catalog_url(), warehouse_name, create_props());
 
     let root_namespace = "root_namespace";
 
@@ -93,7 +111,8 @@ async fn create_table_if_missing() {
 
     let lakekeeper_client = LakekeeperClient::new(LAKEKEEPER_URL);
     let (warehouse_name, warehouse_id) = lakekeeper_client.create_warehouse().await.unwrap();
-    let client = IcebergClient::new_with_rest_catalog(get_catalog_url(), warehouse_name);
+    let client =
+        IcebergClient::new_with_rest_catalog(get_catalog_url(), warehouse_name, create_props());
 
     // Create namespace first
     let namespace = "test_namespace";
@@ -335,6 +354,56 @@ async fn create_table_if_missing() {
             .await
             .unwrap()
     );
+
+    // Manual cleanup for now because lakekeeper doesn't allow cascade delete at the warehouse level
+    // This feature is planned for future releases. We'll start to use it when it becomes available.
+    // The cleanup is not in a Drop impl because each test has different number of object specitic to
+    // that test.
+    client.drop_table(namespace, table_name).await.unwrap();
+    client.drop_namespace(namespace).await.unwrap();
+    lakekeeper_client
+        .drop_warehouse(warehouse_id)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn insert_table_rows() {
+    init_test_tracing();
+
+    let lakekeeper_client = LakekeeperClient::new(LAKEKEEPER_URL);
+    let (warehouse_name, warehouse_id) = lakekeeper_client.create_warehouse().await.unwrap();
+    let client =
+        IcebergClient::new_with_rest_catalog(get_catalog_url(), warehouse_name, create_props());
+
+    // Create namespace first
+    let namespace = "test_namespace";
+    client.create_namespace_if_missing(namespace).await.unwrap();
+
+    // Create a sample table schema with all supported types
+    let table_name = "test_table".to_string();
+    let table_id = TableId::new(12345);
+    let table_name_struct = TableName::new("test_schema".to_string(), table_name.clone());
+    let columns = vec![
+        // Primary key
+        ColumnSchema::new("id".to_string(), Type::INT4, -1, false, true),
+        // Boolean types
+        ColumnSchema::new("bool_col".to_string(), Type::BOOL, -1, true, false),
+    ];
+    let table_schema = TableSchema::new(table_id, table_name_struct, columns);
+
+    client
+        .create_table_if_missing(namespace, table_name.clone(), &table_schema)
+        .await
+        .unwrap();
+
+    let table_rows = vec![TableRow {
+        values: vec![Cell::I32(0), Cell::Bool(false)],
+    }];
+    client
+        .insert_rows(namespace.to_string(), table_name.clone(), &table_rows)
+        .await
+        .unwrap();
 
     // Manual cleanup for now because lakekeeper doesn't allow cascade delete at the warehouse level
     // This feature is planned for future releases. We'll start to use it when it becomes available.
