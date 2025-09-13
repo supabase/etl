@@ -178,6 +178,10 @@ impl<S> Destination for IcebergDestination<S>
 where
     S: StateStore + SchemaStore + Send + Sync,
 {
+    fn name() -> &'static str {
+        "iceberg"
+    }
+
     async fn truncate_table(&self, _table_id: etl::types::TableId) -> EtlResult<()> {
         Ok(())
     }
