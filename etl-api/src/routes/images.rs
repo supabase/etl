@@ -92,6 +92,31 @@ pub struct ReadImagesResponse {
 }
 
 #[utoipa::path(
+    summary = "Set default image",
+    description = "Sets the default image to the image identified by its ID.",
+    params(("image_id" = i64, Path, description = "Unique ID of the image")),
+    responses(
+        (status = 200, description = "Default image updated"),
+        (status = 404, description = "Image not found", body = ErrorMessage),
+        (status = 500, description = "Internal server error", body = ErrorMessage),
+    ),
+    tag = "Images"
+)]
+#[post("/images/{image_id}/default")]
+pub async fn set_default_image(
+    pool: Data<PgPool>,
+    image_id: Path<i64>,
+) -> Result<impl Responder, ImageError> {
+    let image_id = image_id.into_inner();
+
+    db::images::update_default_image_by_id(&pool, image_id)
+        .await?
+        .ok_or(ImageError::ImageNotFound(image_id))?;
+
+    Ok(HttpResponse::Ok().finish())
+}
+
+#[utoipa::path(
     summary = "Create an image",
     description = "Creates an image entry; can be marked as the default.",
     request_body = CreateImageRequest,

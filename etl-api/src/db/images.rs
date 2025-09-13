@@ -16,6 +16,53 @@ pub struct Image {
     pub is_default: bool,
 }
 
+/// Sets the default image to the one identified by `image_id`.
+///
+/// Looks up the image name for the provided ID and delegates the switch to the
+/// Postgres function `app.update_default_image(name text)`, which ensures the
+/// operation is atomic and that at most one default exists at any time.
+///
+/// Returns `Ok(Some(image_id))` on success, `Ok(None)` if the image does not
+/// exist, or an error if the database interaction fails.
+pub async fn update_default_image_by_id(
+    pool: &PgPool,
+    image_id: i64,
+) -> Result<Option<i64>, ImagesDbError> {
+    let mut txn = pool.begin().await?;
+
+    // Find the image first; if it's not there, surface 404 at the API layer.
+    let image = sqlx::query!(
+        r#"
+        select name
+        from app.images
+        where id = $1
+        "#,
+        image_id
+    )
+    .fetch_optional(&mut *txn)
+    .await?;
+
+    let Some(image) = image else {
+        return Ok(None);
+    };
+
+    // Use the dedicated function to flip the default atomically. We use the
+    // dynamic query API here to avoid compile-time metadata for a void-returning
+    // function in SQLx offline builds.
+    sqlx::query(
+        r#"
+        select app.update_default_image($1)
+        "#,
+    )
+    .bind(image.name)
+    .execute(&mut *txn)
+    .await?;
+
+    txn.commit().await?;
+
+    Ok(Some(image_id))
+}
+
 pub async fn create_image(
     pool: &PgPool,
     name: &str,

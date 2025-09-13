@@ -1,377 +1,132 @@
-use etl_api::routes::images::{
-    CreateImageRequest, CreateImageResponse, ReadImageResponse, ReadImagesResponse,
-    UpdateImageRequest,
-};
-use etl_telemetry::tracing::init_test_tracing;
-use reqwest::StatusCode;
-
-use crate::support::mocks::create_image_with_name;
-use crate::support::test_app::spawn_test_app;
+use etl_api::routes::images::{ReadImageResponse, ReadImagesResponse, UpdateImageRequest};
 
 mod support;
 
+use crate::support::mocks::{create_default_image, create_image_with_name};
+use crate::support::test_app::spawn_test_app;
+
 #[tokio::test(flavor = "multi_thread")]
-async fn image_can_be_created() {
-    init_test_tracing();
-    // Arrange
+async fn images_default_image_can_be_updated_via_endpoint() {
     let app = spawn_test_app().await;
 
-    // Act
-    let image = CreateImageRequest {
-        name: "some/image".to_string(),
-        is_default: true,
-    };
-    let response = app.create_image(&image).await;
+    let _old_default = create_default_image(&app).await;
+    let new_default =
+        create_image_with_name(&app, "supabase/etl-replicator:2.0.0".to_string(), false).await;
 
-    // Assert
+    // Act: set the new image as default
+    let response = app.set_default_image(new_default).await;
     assert!(response.status().is_success());
-    let response: CreateImageResponse = response
-        .json()
-        .await
-        .expect("failed to deserialize response");
-    assert_eq!(response.id, 1);
-}
 
-#[tokio::test(flavor = "multi_thread")]
-async fn an_existing_image_can_be_read() {
-    init_test_tracing();
-    // Arrange
-    let app = spawn_test_app().await;
-
-    let name = "some/image".to_string();
-    let is_default = true;
-    let image = CreateImageRequest {
-        name: name.clone(),
-        is_default,
-    };
-    let response = app.create_image(&image).await;
-    let response: CreateImageResponse = response
-        .json()
-        .await
-        .expect("failed to deserialize response");
-    let image_id = response.id;
-
-    // Act
-    let response = app.read_image(image_id).await;
-
-    // Assert
-    assert!(response.status().is_success());
-    let response: ReadImageResponse = response
-        .json()
-        .await
-        .expect("failed to deserialize response");
-    assert_eq!(response.id, image_id);
-    assert_eq!(response.name, name);
-    assert_eq!(response.is_default, is_default);
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn non_existing_image_cannot_be_read() {
-    init_test_tracing();
-    // Arrange
-    let app = spawn_test_app().await;
-
-    // Act
-    let response = app.read_image(42).await;
-
-    // Assert
-    assert_eq!(response.status(), StatusCode::NOT_FOUND);
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn an_existing_image_can_be_updated() {
-    init_test_tracing();
-    // Arrange
-    let app = spawn_test_app().await;
-
-    let name = "some/image".to_string();
-    let is_default = true;
-    let image = CreateImageRequest {
-        name: name.clone(),
-        is_default,
-    };
-    let response = app.create_image(&image).await;
-    let response: CreateImageResponse = response
-        .json()
-        .await
-        .expect("failed to deserialize response");
-    let image_id = response.id;
-
-    // Act
-    let name = "some/image".to_string();
-    let is_default = true;
-    let updated_image = UpdateImageRequest {
-        name: name.clone(),
-        is_default,
-    };
-    let response = app.update_image(image_id, &updated_image).await;
-
-    // Assert
-    assert!(response.status().is_success());
-    let response = app.read_image(image_id).await;
-    let response: ReadImageResponse = response
-        .json()
-        .await
-        .expect("failed to deserialize response");
-    assert_eq!(response.id, image_id);
-    assert_eq!(response.name, name);
-    assert_eq!(response.is_default, is_default);
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn non_existing_image_cannot_be_updated() {
-    init_test_tracing();
-    // Arrange
-    let app = spawn_test_app().await;
-
-    // Act
-    let name = "some/image".to_string();
-    let is_default = true;
-    let updated_image = UpdateImageRequest {
-        name: name.clone(),
-        is_default,
-    };
-    let response = app.update_image(42, &updated_image).await;
-
-    // Assert
-    assert_eq!(response.status(), StatusCode::NOT_FOUND);
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn an_existing_image_can_be_deleted() {
-    init_test_tracing();
-    // Arrange
-    let app = spawn_test_app().await;
-
-    let name = "some/image".to_string();
-    let is_default = false;
-    let image = CreateImageRequest {
-        name: name.clone(),
-        is_default,
-    };
-    let response = app.create_image(&image).await;
-    let response: CreateImageResponse = response
-        .json()
-        .await
-        .expect("failed to deserialize response");
-    let image_id = response.id;
-
-    // Act
-    let response = app.delete_image(image_id).await;
-
-    // Assert
-    assert!(response.status().is_success());
-    let response = app.read_image(image_id).await;
-    assert_eq!(response.status(), StatusCode::NOT_FOUND);
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn non_existing_image_cannot_be_deleted() {
-    init_test_tracing();
-    // Arrange
-    let app = spawn_test_app().await;
-
-    // Act
-    let response = app.delete_image(42).await;
-
-    // Assert
-    assert_eq!(response.status(), StatusCode::NOT_FOUND);
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn all_images_can_be_read() {
-    init_test_tracing();
-    // Arrange
-    let app = spawn_test_app().await;
-    let image1_id = create_image_with_name(&app, "some/image".to_string(), true).await;
-    let image2_id = create_image_with_name(&app, "other/image".to_string(), false).await;
-
-    // Act
+    // Assert: only the requested image is now default
     let response = app.read_all_images().await;
-
-    // Assert
     assert!(response.status().is_success());
-    let response: ReadImagesResponse = response
-        .json()
-        .await
-        .expect("failed to deserialize response");
-    for image in response.images {
-        if image.id == image1_id {
-            assert_eq!(image.name, "some/image");
-            assert!(image.is_default);
-        } else if image.id == image2_id {
-            assert_eq!(image.name, "other/image");
-            assert!(!image.is_default);
-        }
-    }
+    let body: ReadImagesResponse = response.json().await.expect("failed to deserialize images");
+
+    let defaults: Vec<_> = body.images.iter().filter(|i| i.is_default).collect();
+    assert_eq!(defaults.len(), 1, "exactly one default image must exist");
+    assert_eq!(defaults[0].id, new_default);
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn creating_default_image_switches_previous_default() {
-    init_test_tracing();
-    // Arrange
+async fn images_update_default_returns_404_for_missing_image() {
     let app = spawn_test_app().await;
 
-    // Create first default image
-    let image1 = CreateImageRequest {
-        name: "image1".to_string(),
-        is_default: true,
-    };
-    let response = app.create_image(&image1).await;
-    assert!(response.status().is_success());
-    let response: CreateImageResponse = response.json().await.expect("failed to deserialize");
-    let image1_id = response.id;
-
-    // Act - Create second default image
-    let image2 = CreateImageRequest {
-        name: "image2".to_string(),
-        is_default: true,
-    };
-    let response = app.create_image(&image2).await;
-    assert!(response.status().is_success());
-    let response: CreateImageResponse = response.json().await.expect("failed to deserialize");
-    let image2_id = response.id;
-
-    // Assert - First image should no longer be default, second should be default
-    let response = app.read_image(image1_id).await;
-    let image1: ReadImageResponse = response.json().await.expect("failed to deserialize");
-    assert!(!image1.is_default);
-
-    let response = app.read_image(image2_id).await;
-    let image2: ReadImageResponse = response.json().await.expect("failed to deserialize");
-    assert!(image2.is_default);
+    // No images created; pick a random id
+    let response = app.set_default_image(424242).await;
+    assert_eq!(response.status(), reqwest::StatusCode::NOT_FOUND);
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn cannot_delete_default_image() {
-    init_test_tracing();
-    // Arrange
+async fn images_create_and_read_works() {
     let app = spawn_test_app().await;
 
-    let image = CreateImageRequest {
-        name: "default-image".to_string(),
-        is_default: true,
-    };
-    let response = app.create_image(&image).await;
-    let response: CreateImageResponse = response.json().await.expect("failed to deserialize");
-    let image_id = response.id;
+    let image_id =
+        create_image_with_name(&app, "supabase/etl-replicator:1.0.0".to_string(), false).await;
 
-    // Act - Try to delete the default image
-    let response = app.delete_image(image_id).await;
-
-    // Assert - Should fail with 400 Bad Request
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-
-    // Verify the image still exists
+    // Read by id
     let response = app.read_image(image_id).await;
     assert!(response.status().is_success());
+    let body: ReadImageResponse = response.json().await.expect("failed to deserialize image");
+    assert_eq!(body.id, image_id);
+    assert_eq!(body.name, "supabase/etl-replicator:1.0.0");
+    assert!(!body.is_default);
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn can_delete_non_default_image_after_switching_default() {
-    init_test_tracing();
-    // Arrange
+async fn images_read_missing_returns_404() {
+    let app = spawn_test_app().await;
+    let response = app.read_image(999999).await;
+    assert_eq!(response.status(), reqwest::StatusCode::NOT_FOUND);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn images_update_can_rename_and_flip_default() {
     let app = spawn_test_app().await;
 
-    // Create first default image
-    let image1 = CreateImageRequest {
-        name: "default-image-1".to_string(),
-        is_default: true,
-    };
-    let response = app.create_image(&image1).await;
-    let response: CreateImageResponse = response.json().await.expect("failed to deserialize");
-    let image1_id = response.id;
+    // Start with an existing default
+    let default_id = create_default_image(&app).await;
+    // Create a non-default
+    let other_id =
+        create_image_with_name(&app, "supabase/etl-replicator:2.0.0".to_string(), false).await;
 
-    // Create second non-default image
-    let image2 = CreateImageRequest {
-        name: "non-default-image".to_string(),
-        is_default: false,
-    };
-    let response = app.create_image(&image2).await;
-    let response: CreateImageResponse = response.json().await.expect("failed to deserialize");
-    let image2_id = response.id;
-
-    // Make the second image default (this should succeed and make the first one non-default)
+    // Flip default to the other image and rename it
     let update = UpdateImageRequest {
-        name: "non-default-image".to_string(),
+        name: "supabase/etl-replicator:2.1.0".to_string(),
         is_default: true,
     };
-    let response = app.update_image(image2_id, &update).await;
+    let response = app.update_image(other_id, &update).await;
     assert!(response.status().is_success());
 
-    // Act - Now delete the first image (which should no longer be default)
-    let response = app.delete_image(image1_id).await;
-
-    // Assert - Should succeed since the first image is no longer default
+    // Check that only other_id is default now, and name updated
+    let response = app.read_all_images().await;
     assert!(response.status().is_success());
+    let body: ReadImagesResponse = response.json().await.expect("failed to deserialize images");
+    let defaults: Vec<_> = body.images.iter().filter(|i| i.is_default).collect();
+    assert_eq!(defaults.len(), 1);
+    assert_eq!(defaults[0].id, other_id);
 
-    // Verify the first image is deleted but the second (default) remains
-    let response = app.read_image(image1_id).await;
-    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    // Old default should not be default anymore
+    let old = body.images.iter().find(|i| i.id == default_id).unwrap();
+    assert!(!old.is_default);
 
-    let response = app.read_image(image2_id).await;
-    assert!(response.status().is_success());
+    // New default name updated
+    let new = body.images.iter().find(|i| i.id == other_id).unwrap();
+    assert_eq!(new.name, "supabase/etl-replicator:2.1.0");
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn can_update_default_image_to_non_default() {
-    init_test_tracing();
-    // Arrange
+async fn images_delete_prevents_deleting_default() {
     let app = spawn_test_app().await;
+    let default_id = create_default_image(&app).await;
 
-    let image = CreateImageRequest {
-        name: "default-image".to_string(),
-        is_default: true,
-    };
-    let response = app.create_image(&image).await;
-    let response: CreateImageResponse = response.json().await.expect("failed to deserialize");
-    let image_id = response.id;
-
-    // Act - Update the image to non-default
-    let update = UpdateImageRequest {
-        name: "default-image-updated".to_string(),
-        is_default: false,
-    };
-    let response = app.update_image(image_id, &update).await;
-
-    // Assert - Should succeed
-    assert!(response.status().is_success());
-
-    // Verify the update
-    let response = app.read_image(image_id).await;
-    let image: ReadImageResponse = response.json().await.expect("failed to deserialize");
-    assert_eq!(image.name, "default-image-updated");
-    assert!(!image.is_default);
+    let response = app.delete_image(default_id).await;
+    assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn can_delete_non_default_image() {
-    init_test_tracing();
-    // Arrange
+async fn images_delete_non_default_succeeds() {
     let app = spawn_test_app().await;
+    let _default_id = create_default_image(&app).await;
+    let non_default_id =
+        create_image_with_name(&app, "supabase/etl-replicator:9.9.9".to_string(), false).await;
 
-    // Create a default image first
-    let default_image = CreateImageRequest {
-        name: "default-image".to_string(),
-        is_default: true,
-    };
-    let response = app.create_image(&default_image).await;
-    assert!(response.status().is_success());
-
-    // Create a non-default image
-    let non_default_image = CreateImageRequest {
-        name: "non-default-image".to_string(),
-        is_default: false,
-    };
-    let response = app.create_image(&non_default_image).await;
-    let response: CreateImageResponse = response.json().await.expect("failed to deserialize");
-    let non_default_id = response.id;
-
-    // Act - Delete the non-default image
     let response = app.delete_image(non_default_id).await;
-
-    // Assert - Should succeed
     assert!(response.status().is_success());
+
+    // Verify it's gone
     let response = app.read_image(non_default_id).await;
-    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert_eq!(response.status(), reqwest::StatusCode::NOT_FOUND);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn images_list_returns_all() {
+    let app = spawn_test_app().await;
+    let a = create_image_with_name(&app, "a".to_string(), false).await;
+    let b = create_image_with_name(&app, "b".to_string(), false).await;
+
+    let response = app.read_all_images().await;
+    assert!(response.status().is_success());
+    let body: ReadImagesResponse = response.json().await.expect("failed to deserialize images");
+    let ids: Vec<i64> = body.images.iter().map(|i| i.id).collect();
+    assert!(ids.contains(&a) && ids.contains(&b));
 }

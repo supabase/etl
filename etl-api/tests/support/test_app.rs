@@ -414,6 +414,13 @@ impl TestApp {
             .expect("failed to execute request")
     }
 
+    pub async fn set_default_image(&self, image_id: i64) -> reqwest::Response {
+        self.post_authenticated(format!("{}/v1/images/{image_id}/default", &self.address))
+            .send()
+            .await
+            .expect("failed to execute request")
+    }
+
     pub async fn update_pipeline_version(
         &self,
         tenant_id: &str,
