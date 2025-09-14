@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use arrow::{
     array::{
-        ArrayRef, ArrowPrimitiveType, BooleanBuilder, LargeBinaryBuilder, PrimitiveBuilder,
-        RecordBatch, StringBuilder,
+        ArrayRef, ArrowPrimitiveType, BooleanBuilder, Date32Builder, LargeBinaryBuilder,
+        PrimitiveBuilder, RecordBatch, StringBuilder,
     },
     datatypes::{
         DataType, Float32Type, Float64Type, Int16Type, Int32Type, Int64Type, Schema, UInt32Type,
@@ -11,7 +11,11 @@ use arrow::{
     error::ArrowError,
 };
 use base64::{Engine, prelude::BASE64_STANDARD};
+use chrono::NaiveDate;
 use etl::types::{Cell, DATE_FORMAT, TIME_FORMAT, TIMESTAMP_FORMAT, TableRow};
+
+pub const UNIX_EPOCH: NaiveDate =
+    NaiveDate::from_ymd_opt(1970, 1, 1).expect("unix epoch is a valid date");
 
 /// Converts a slice of [`TableRow`]s to an arrow [`RecordBatch`]`.
 pub fn rows_to_record_batch(rows: &[TableRow], schema: Schema) -> Result<RecordBatch, ArrowError> {
@@ -41,7 +45,7 @@ fn build_array_for_field(rows: &[TableRow], field_idx: usize, data_type: &DataTy
         // DataType::LargeUtf8 => build_string_array(rows, field_idx),
         // DataType::Binary => build_binary_array(rows, field_idx),
         DataType::LargeBinary => build_binary_array(rows, field_idx),
-        // DataType::Date32 => build_date32_array(rows, field_idx),
+        DataType::Date32 => build_date32_array(rows, field_idx),
         // DataType::Time64(TimeUnit::Microsecond) => build_time64_array(rows, field_idx),
         // DataType::Timestamp(TimeUnit::Microsecond, _) => build_timestamp_array(rows, field_idx),
         _ => build_string_array(rows, field_idx),
@@ -101,6 +105,18 @@ fn build_binary_array(rows: &[TableRow], field_idx: usize) -> ArrayRef {
     Arc::new(builder.finish())
 }
 
+/// Builds a date32 array from cell values.
+fn build_date32_array(rows: &[TableRow], field_idx: usize) -> ArrayRef {
+    let mut builder = Date32Builder::new();
+
+    for row in rows {
+        let arrow_value = cell_to_date32(&row.values[field_idx]);
+        builder.append_option(arrow_value);
+    }
+
+    Arc::new(builder.finish())
+}
+
 macro_rules! impl_cell_converter {
     ($fn_name:ident, $return_type:ty, $($pattern:pat => $expr:expr),*) => {
         fn $fn_name(cell: &Cell) -> Option<$return_type> {
@@ -151,13 +167,11 @@ impl_cell_converter!(
     cell_to_bytes, Vec<u8>,
     Cell::Bytes(v) => v.clone()
 );
-// /// Extracts bytes from Cell.
-// pub fn cell_to_bytes(cell: &Cell) -> Option<Vec<u8>> {
-//     match cell {
-//         Cell::Bytes(b) => Some(b.clone()),
-//         _ => None,
-//     }
-// }
+
+impl_cell_converter!(
+    cell_to_date32, i32,
+    Cell::Date(date) => date.signed_duration_since(UNIX_EPOCH).num_days() as i32
+);
 
 // TODO: reduce allocations in this method
 /// Converts a Cell to its string representation for Arrow.
@@ -183,6 +197,15 @@ pub fn cell_to_string(cell: &Cell) -> Option<String> {
         Cell::Array(arr) => Some(format!("{arr:?}")), // Simple debug representation
     }
 }
+
+// /// Extracts bytes from Cell.
+// pub fn cell_to_bytes(cell: &Cell) -> Option<Vec<u8>> {
+//     match cell {
+//         Cell::Bytes(b) => Some(b.clone()),
+//         _ => None,
+//     }
+// }
+
 // pub fn cell_to_bool(cell: &Cell) -> Option<bool> {
 //     match cell {
 //         Cell::Bool(b) => Some(*b),

@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 
+use chrono::NaiveDate;
 use etl::types::{Cell, ColumnSchema, TableId, TableName, TableRow, TableSchema, Type};
 use etl_destinations::iceberg::IcebergClient;
 use etl_telemetry::tracing::init_test_tracing;
@@ -404,8 +405,8 @@ async fn insert_table_rows() {
         ColumnSchema::new("float8_col".to_string(), Type::FLOAT8, -1, true, false),
         // Numeric type
         ColumnSchema::new("numeric_col".to_string(), Type::NUMERIC, -1, true, false),
-        // // Date/Time types
-        // ColumnSchema::new("date_col".to_string(), Type::DATE, -1, true, false),
+        // Date/Time types
+        ColumnSchema::new("date_col".to_string(), Type::DATE, -1, true, false),
         // ColumnSchema::new("time_col".to_string(), Type::TIME, -1, true, false),
         // // JSON types
         // ColumnSchema::new("json_col".to_string(), Type::JSON, -1, true, false),
@@ -424,20 +425,20 @@ async fn insert_table_rows() {
 
     let table_rows = vec![TableRow {
         values: vec![
-            Cell::I32(42),                           // id
-            Cell::Bool(true),                        // bool_col
-            Cell::String("A".to_string()),           // char_col
-            Cell::String("fixed".to_string()),       // bpchar_col
-            Cell::String("variable".to_string()),    // varchar_col
-            Cell::String("name_value".to_string()),  // name_col
-            Cell::String("test string".to_string()), // text_col
+            Cell::I32(42),                                              // id
+            Cell::Bool(true),                                           // bool_col
+            Cell::String("A".to_string()),                              // char_col
+            Cell::String("fixed".to_string()),                          // bpchar_col
+            Cell::String("variable".to_string()),                       // varchar_col
+            Cell::String("name_value".to_string()),                     // name_col
+            Cell::String("test string".to_string()),                    // text_col
             Cell::I32(123), // int2_col (maps to Int in Iceberg, comes back as I32)
             Cell::I32(456), // int4_col
             Cell::I64(9876543210), // int8_col
             Cell::F32(std::f32::consts::PI), // float4_col
             Cell::F64(std::f64::consts::E), // float8_col
             Cell::String("123.456".to_string()), // numeric_col (maps to String in Iceberg)
-            // Cell::Date(NaiveDate::from_ymd_opt(2023, 12, 25).unwrap()), // date_col
+            Cell::Date(NaiveDate::from_ymd_opt(2023, 12, 25).unwrap()), // date_col
             // Cell::Null,     // time_col (comes back as Null in Iceberg)
             // Cell::String(r#"{"key": "value"}"#.to_string()), // json_col (maps to String in Iceberg)
             // Cell::String(r#"{"key": "value"}"#.to_string()), // jsonb_col (maps to String in Iceberg)
