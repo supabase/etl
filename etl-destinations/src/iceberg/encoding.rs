@@ -2,7 +2,8 @@ use std::sync::Arc;
 
 use arrow::{
     array::{
-        ArrayRef, ArrowPrimitiveType, BooleanBuilder, PrimitiveBuilder, RecordBatch, StringBuilder,
+        ArrayRef, ArrowPrimitiveType, BooleanBuilder, LargeBinaryBuilder, PrimitiveBuilder,
+        RecordBatch, StringBuilder,
     },
     datatypes::{
         DataType, Float32Type, Float64Type, Int16Type, Int32Type, Int64Type, Schema, UInt32Type,
@@ -36,10 +37,10 @@ fn build_array_for_field(rows: &[TableRow], field_idx: usize, data_type: &DataTy
         DataType::UInt32 => build_primitive_array::<UInt32Type, _>(rows, field_idx, cell_to_u32),
         DataType::Float32 => build_primitive_array::<Float32Type, _>(rows, field_idx, cell_to_f32),
         DataType::Float64 => build_primitive_array::<Float64Type, _>(rows, field_idx, cell_to_f64),
-        // DataType::Utf8 => build_utf8_array(rows, field_idx),
+        DataType::Utf8 => build_string_array(rows, field_idx),
         // DataType::LargeUtf8 => build_string_array(rows, field_idx),
         // DataType::Binary => build_binary_array(rows, field_idx),
-        // DataType::LargeBinary => build_binary_array(rows, field_idx),
+        DataType::LargeBinary => build_binary_array(rows, field_idx),
         // DataType::Date32 => build_date32_array(rows, field_idx),
         // DataType::Time64(TimeUnit::Microsecond) => build_time64_array(rows, field_idx),
         // DataType::Timestamp(TimeUnit::Microsecond, _) => build_timestamp_array(rows, field_idx),
@@ -82,6 +83,18 @@ fn build_string_array(rows: &[TableRow], field_idx: usize) -> ArrayRef {
 
     for row in rows {
         let arrow_value = cell_to_string(&row.values[field_idx]);
+        builder.append_option(arrow_value);
+    }
+
+    Arc::new(builder.finish())
+}
+
+/// Builds a binary array from cell values.
+fn build_binary_array(rows: &[TableRow], field_idx: usize) -> ArrayRef {
+    let mut builder = LargeBinaryBuilder::new();
+
+    for row in rows {
+        let arrow_value = cell_to_bytes(&row.values[field_idx]);
         builder.append_option(arrow_value);
     }
 
@@ -134,6 +147,19 @@ impl_cell_converter!(
     Cell::F64(v) => *v
 );
 
+impl_cell_converter!(
+    cell_to_bytes, Vec<u8>,
+    Cell::Bytes(v) => v.clone()
+);
+// /// Extracts bytes from Cell.
+// pub fn cell_to_bytes(cell: &Cell) -> Option<Vec<u8>> {
+//     match cell {
+//         Cell::Bytes(b) => Some(b.clone()),
+//         _ => None,
+//     }
+// }
+
+// TODO: reduce allocations in this method
 /// Converts a Cell to its string representation for Arrow.
 pub fn cell_to_string(cell: &Cell) -> Option<String> {
     match cell {

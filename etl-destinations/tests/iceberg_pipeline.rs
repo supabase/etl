@@ -402,18 +402,18 @@ async fn insert_table_rows() {
         // Float types
         ColumnSchema::new("float4_col".to_string(), Type::FLOAT4, -1, true, false),
         ColumnSchema::new("float8_col".to_string(), Type::FLOAT8, -1, true, false),
-        // // Numeric type
-        // ColumnSchema::new("numeric_col".to_string(), Type::NUMERIC, -1, true, false),
+        // Numeric type
+        ColumnSchema::new("numeric_col".to_string(), Type::NUMERIC, -1, true, false),
         // // Date/Time types
         // ColumnSchema::new("date_col".to_string(), Type::DATE, -1, true, false),
         // ColumnSchema::new("time_col".to_string(), Type::TIME, -1, true, false),
         // // JSON types
         // ColumnSchema::new("json_col".to_string(), Type::JSON, -1, true, false),
         // ColumnSchema::new("jsonb_col".to_string(), Type::JSONB, -1, true, false),
-        // // OID type
-        // ColumnSchema::new("oid_col".to_string(), Type::OID, -1, true, false),
-        // // Binary type
-        // ColumnSchema::new("bytea_col".to_string(), Type::BYTEA, -1, true, false),
+        // OID type
+        ColumnSchema::new("oid_col".to_string(), Type::OID, -1, true, false),
+        // Binary type
+        ColumnSchema::new("bytea_col".to_string(), Type::BYTEA, -1, true, false),
     ];
     let table_schema = TableSchema::new(table_id, table_name_struct, columns);
 
@@ -436,13 +436,13 @@ async fn insert_table_rows() {
             Cell::I64(9876543210), // int8_col
             Cell::F32(std::f32::consts::PI), // float4_col
             Cell::F64(std::f64::consts::E), // float8_col
-                            // Cell::String("123.456".to_string()), // numeric_col (maps to String in Iceberg)
-                            // Cell::Date(NaiveDate::from_ymd_opt(2023, 12, 25).unwrap()), // date_col
-                            // Cell::Null,     // time_col (comes back as Null in Iceberg)
-                            // Cell::String(r#"{"key": "value"}"#.to_string()), // json_col (maps to String in Iceberg)
-                            // Cell::String(r#"{"key": "value"}"#.to_string()), // jsonb_col (maps to String in Iceberg)
-                            // Cell::I32(12345),                                // oid_col (maps to Int in Iceberg)
-                            // Cell::Bytes(vec![0x48, 0x65, 0x6c, 0x6c, 0x6f]), // bytea_col (Hello in bytes)
+            Cell::String("123.456".to_string()), // numeric_col (maps to String in Iceberg)
+            // Cell::Date(NaiveDate::from_ymd_opt(2023, 12, 25).unwrap()), // date_col
+            // Cell::Null,     // time_col (comes back as Null in Iceberg)
+            // Cell::String(r#"{"key": "value"}"#.to_string()), // json_col (maps to String in Iceberg)
+            // Cell::String(r#"{"key": "value"}"#.to_string()), // jsonb_col (maps to String in Iceberg)
+            Cell::I32(12345), // oid_col (maps to Int in Iceberg)
+            Cell::Bytes(vec![0x48, 0x65, 0x6c, 0x6c, 0x6f]), // bytea_col (Hello in bytes)
         ],
     }];
     client
