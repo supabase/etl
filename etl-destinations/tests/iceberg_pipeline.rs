@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use chrono::{NaiveDate, NaiveTime};
+use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
 use etl::types::{Cell, ColumnSchema, TableId, TableName, TableRow, TableSchema, Type};
 use etl_destinations::iceberg::IcebergClient;
 use etl_telemetry::tracing::init_test_tracing;
@@ -408,6 +408,13 @@ async fn insert_table_rows() {
         // Date/Time types
         ColumnSchema::new("date_col".to_string(), Type::DATE, -1, true, false),
         ColumnSchema::new("time_col".to_string(), Type::TIME, -1, true, false),
+        ColumnSchema::new(
+            "timestamp_col".to_string(),
+            Type::TIMESTAMP,
+            -1,
+            true,
+            false,
+        ),
         // // JSON types
         // ColumnSchema::new("json_col".to_string(), Type::JSON, -1, true, false),
         // ColumnSchema::new("jsonb_col".to_string(), Type::JSONB, -1, true, false),
@@ -440,8 +447,10 @@ async fn insert_table_rows() {
             Cell::String("123.456".to_string()), // numeric_col (maps to String in Iceberg)
             Cell::Date(NaiveDate::from_ymd_opt(2023, 12, 25).unwrap()), // date_col
             Cell::Time(NaiveTime::from_hms_micro_opt(1, 2, 3, 4).unwrap()),
-            // Cell::Time(NaiveTime::),
-            // Cell::Null,     // time_col (comes back as Null in Iceberg)
+            Cell::Timestamp(NaiveDateTime::new(
+                NaiveDate::from_ymd_opt(2023, 12, 25).unwrap(),
+                NaiveTime::from_hms_micro_opt(1, 2, 3, 4).unwrap(),
+            )),
             // Cell::String(r#"{"key": "value"}"#.to_string()), // json_col (maps to String in Iceberg)
             // Cell::String(r#"{"key": "value"}"#.to_string()), // jsonb_col (maps to String in Iceberg)
             Cell::I32(12345), // oid_col (maps to Int in Iceberg)

@@ -2,12 +2,12 @@ use std::sync::Arc;
 
 use arrow::{
     array::{
-        ArrayRef, ArrowPrimitiveType, BooleanBuilder, Date32Builder, LargeBinaryBuilder,
-        PrimitiveBuilder, RecordBatch, StringBuilder, Time64MicrosecondBuilder,
+        ArrayRef, ArrowPrimitiveType, BooleanBuilder, LargeBinaryBuilder, PrimitiveBuilder,
+        RecordBatch, StringBuilder,
     },
     datatypes::{
-        DataType, Float32Type, Float64Type, Int16Type, Int32Type, Int64Type, Schema, TimeUnit,
-        UInt32Type,
+        DataType, Date32Type, Float32Type, Float64Type, Int16Type, Int32Type, Int64Type, Schema,
+        Time64MicrosecondType, TimeUnit, TimestampMicrosecondType, UInt32Type,
     },
     error::ArrowError,
 };
@@ -48,9 +48,16 @@ fn build_array_for_field(rows: &[TableRow], field_idx: usize, data_type: &DataTy
         // DataType::LargeUtf8 => build_string_array(rows, field_idx),
         // DataType::Binary => build_binary_array(rows, field_idx),
         DataType::LargeBinary => build_binary_array(rows, field_idx),
-        DataType::Date32 => build_date32_array(rows, field_idx),
-        DataType::Time64(TimeUnit::Microsecond) => build_time64_array(rows, field_idx),
-        // DataType::Timestamp(TimeUnit::Microsecond, _) => build_timestamp_array(rows, field_idx),
+        // DataType::Date32 => build_date32_array(rows, field_idx),
+        DataType::Date32 => build_primitive_array::<Date32Type, _>(rows, field_idx, cell_to_date32),
+        // DataType::Time64(TimeUnit::Microsecond) => build_time64_array(rows, field_idx),
+        DataType::Time64(TimeUnit::Microsecond) => {
+            build_primitive_array::<Time64MicrosecondType, _>(rows, field_idx, cell_to_time64)
+        }
+        // DataType::Timestamp(TimeUnit::Microsecond, None) => build_timestamp_array(rows, field_idx),
+        DataType::Timestamp(TimeUnit::Microsecond, None) => {
+            build_primitive_array::<TimestampMicrosecondType, _>(rows, field_idx, cell_to_timestamp)
+        }
         _ => build_string_array(rows, field_idx),
     }
 }
@@ -88,8 +95,8 @@ macro_rules! impl_array_builder {
 impl_array_builder!(build_boolean_array, BooleanBuilder, cell_to_bool);
 impl_array_builder!(build_string_array, StringBuilder, cell_to_string);
 impl_array_builder!(build_binary_array, LargeBinaryBuilder, cell_to_bytes);
-impl_array_builder!(build_date32_array, Date32Builder, cell_to_date32);
-impl_array_builder!(build_time64_array, Time64MicrosecondBuilder, cell_to_time64);
+// impl_array_builder!(build_date32_array, Date32Builder, cell_to_date32);
+// impl_array_builder!(build_time64_array, Time64MicrosecondBuilder, cell_to_time64);
 
 macro_rules! impl_cell_converter {
     ($fn_name:ident, $return_type:ty, $($pattern:pat => $expr:expr),*) => {
@@ -150,6 +157,12 @@ impl_cell_converter!(
 impl_cell_converter!(
     cell_to_time64, i64,
     Cell::Time(time) => time.signed_duration_since(MIDNIGHT).num_microseconds()
+);
+
+impl_cell_converter!(
+    cell_to_timestamp, i64,
+    // Cell::Time(time) => time.signed_duration_since(MIDNIGHT).num_microseconds()
+    Cell::Timestamp(ts) => Some(ts.and_utc().timestamp_micros())
 );
 
 // /// Extracts time as microseconds since midnight.
