@@ -3,7 +3,7 @@ use std::sync::Arc;
 use arrow::{
     array::{
         ArrayRef, ArrowPrimitiveType, BooleanBuilder, LargeBinaryBuilder, PrimitiveBuilder,
-        RecordBatch, StringBuilder,
+        RecordBatch, StringBuilder, TimestampMicrosecondBuilder,
     },
     datatypes::{
         DataType, Date32Type, Float32Type, Float64Type, Int16Type, Int32Type, Int64Type, Schema,
@@ -54,7 +54,9 @@ fn build_array_for_field(rows: &[TableRow], field_idx: usize, data_type: &DataTy
         DataType::Time64(TimeUnit::Microsecond) => {
             build_primitive_array::<Time64MicrosecondType, _>(rows, field_idx, cell_to_time64)
         }
-        // DataType::Timestamp(TimeUnit::Microsecond, None) => build_timestamp_array(rows, field_idx),
+        DataType::Timestamp(TimeUnit::Microsecond, Some(tz)) => {
+            build_timestamptz_array(rows, field_idx, tz)
+        }
         DataType::Timestamp(TimeUnit::Microsecond, None) => {
             build_primitive_array::<TimestampMicrosecondType, _>(rows, field_idx, cell_to_timestamp)
         }
@@ -97,6 +99,17 @@ impl_array_builder!(build_string_array, StringBuilder, cell_to_string);
 impl_array_builder!(build_binary_array, LargeBinaryBuilder, cell_to_bytes);
 // impl_array_builder!(build_date32_array, Date32Builder, cell_to_date32);
 // impl_array_builder!(build_time64_array, Time64MicrosecondBuilder, cell_to_time64);
+
+fn build_timestamptz_array(rows: &[TableRow], field_idx: usize, tz: &str) -> ArrayRef {
+    let mut builder = TimestampMicrosecondBuilder::new().with_timezone(tz);
+
+    for row in rows {
+        let arrow_value = cell_to_timestamptz(&row.values[field_idx]);
+        builder.append_option(arrow_value);
+    }
+
+    Arc::new(builder.finish())
+}
 
 macro_rules! impl_cell_converter {
     ($fn_name:ident, $return_type:ty, $($pattern:pat => $expr:expr),*) => {
@@ -164,17 +177,12 @@ impl_cell_converter!(
     // Cell::Time(time) => time.signed_duration_since(MIDNIGHT).num_microseconds()
     Cell::Timestamp(ts) => Some(ts.and_utc().timestamp_micros())
 );
-
-// /// Extracts time as microseconds since midnight.
-// pub fn cell_to_time64_micros(cell: &Cell) -> Option<i64> {
-//     match cell {
-//         Cell::Time(time) => {
-//             let midnight = NaiveTime::from_hms_opt(0, 0, 0)?;
-//             Some(time.signed_duration_since(midnight).num_microseconds()?)
-//         }
-//         _ => None,
-//     }
-// }
+impl_cell_converter!(
+    cell_to_timestamptz, i64,
+    // Cell::Time(time) => time.signed_duration_since(MIDNIGHT).num_microseconds()
+    // Cell::Timestamp(ts) => Some(ts.and_utc().timestamp_micros())
+    Cell::TimestampTz(ts) => Some(ts.timestamp_micros())
+);
 
 // TODO: reduce allocations in this method
 /// Converts a Cell to its string representation for Arrow.
@@ -200,6 +208,17 @@ pub fn cell_to_string(cell: &Cell) -> Option<String> {
         Cell::Array(arr) => Some(format!("{arr:?}")), // Simple debug representation
     }
 }
+
+// /// Extracts time as microseconds since midnight.
+// pub fn cell_to_time64_micros(cell: &Cell) -> Option<i64> {
+//     match cell {
+//         Cell::Time(time) => {
+//             let midnight = NaiveTime::from_hms_opt(0, 0, 0)?;
+//             Some(time.signed_duration_since(midnight).num_microseconds()?)
+//         }
+//         _ => None,
+//     }
+// }
 
 // /// Extracts bytes from Cell.
 // pub fn cell_to_bytes(cell: &Cell) -> Option<Vec<u8>> {
