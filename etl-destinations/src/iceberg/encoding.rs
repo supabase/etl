@@ -3,19 +3,22 @@ use std::sync::Arc;
 use arrow::{
     array::{
         ArrayRef, ArrowPrimitiveType, BooleanBuilder, Date32Builder, LargeBinaryBuilder,
-        PrimitiveBuilder, RecordBatch, StringBuilder,
+        PrimitiveBuilder, RecordBatch, StringBuilder, Time64MicrosecondBuilder,
     },
     datatypes::{
-        DataType, Float32Type, Float64Type, Int16Type, Int32Type, Int64Type, Schema, UInt32Type,
+        DataType, Float32Type, Float64Type, Int16Type, Int32Type, Int64Type, Schema, TimeUnit,
+        UInt32Type,
     },
     error::ArrowError,
 };
 use base64::{Engine, prelude::BASE64_STANDARD};
-use chrono::NaiveDate;
+use chrono::{NaiveDate, NaiveTime};
 use etl::types::{Cell, DATE_FORMAT, TIME_FORMAT, TIMESTAMP_FORMAT, TableRow};
 
-pub const UNIX_EPOCH: NaiveDate =
+const UNIX_EPOCH: NaiveDate =
     NaiveDate::from_ymd_opt(1970, 1, 1).expect("unix epoch is a valid date");
+
+const MIDNIGHT: NaiveTime = NaiveTime::from_hms_opt(0, 0, 0).expect("midnight is a valid time");
 
 /// Converts a slice of [`TableRow`]s to an arrow [`RecordBatch`]`.
 pub fn rows_to_record_batch(rows: &[TableRow], schema: Schema) -> Result<RecordBatch, ArrowError> {
@@ -46,7 +49,7 @@ fn build_array_for_field(rows: &[TableRow], field_idx: usize, data_type: &DataTy
         // DataType::Binary => build_binary_array(rows, field_idx),
         DataType::LargeBinary => build_binary_array(rows, field_idx),
         DataType::Date32 => build_date32_array(rows, field_idx),
-        // DataType::Time64(TimeUnit::Microsecond) => build_time64_array(rows, field_idx),
+        DataType::Time64(TimeUnit::Microsecond) => build_time64_array(rows, field_idx),
         // DataType::Timestamp(TimeUnit::Microsecond, _) => build_timestamp_array(rows, field_idx),
         _ => build_string_array(rows, field_idx),
     }
@@ -86,12 +89,13 @@ impl_array_builder!(build_boolean_array, BooleanBuilder, cell_to_bool);
 impl_array_builder!(build_string_array, StringBuilder, cell_to_string);
 impl_array_builder!(build_binary_array, LargeBinaryBuilder, cell_to_bytes);
 impl_array_builder!(build_date32_array, Date32Builder, cell_to_date32);
+impl_array_builder!(build_time64_array, Time64MicrosecondBuilder, cell_to_time64);
 
 macro_rules! impl_cell_converter {
     ($fn_name:ident, $return_type:ty, $($pattern:pat => $expr:expr),*) => {
         fn $fn_name(cell: &Cell) -> Option<$return_type> {
             match cell {
-                $($pattern => Some($expr),)*
+                $($pattern => $expr,)*
                 _ => None,
             }
         }
@@ -100,48 +104,64 @@ macro_rules! impl_cell_converter {
 
 impl_cell_converter!(
     cell_to_bool, bool,
-    Cell::Bool(v) => *v
+    Cell::Bool(v) => Some(*v)
 );
 
 impl_cell_converter!(
     cell_to_i16, i16,
-    Cell::I16(v) => *v
+    Cell::I16(v) => Some(*v)
 );
 
 impl_cell_converter!(
     cell_to_i32, i32,
-    Cell::I32(v) => *v
+    Cell::I32(v) => Some(*v)
 );
 
 impl_cell_converter!(
     cell_to_i64, i64,
-    Cell::I64(v) => *v
+    Cell::I64(v) => Some(*v)
 );
 
 impl_cell_converter!(
     cell_to_u32, u32,
-    Cell::U32(v) => *v
+    Cell::U32(v) => Some(*v)
 );
 
 impl_cell_converter!(
     cell_to_f32, f32,
-    Cell::F32(v) => *v
+    Cell::F32(v) => Some(*v)
 );
 
 impl_cell_converter!(
     cell_to_f64, f64,
-    Cell::F64(v) => *v
+    Cell::F64(v) => Some(*v)
 );
 
 impl_cell_converter!(
     cell_to_bytes, Vec<u8>,
-    Cell::Bytes(v) => v.clone()
+    Cell::Bytes(v) => Some(v.clone())
 );
 
 impl_cell_converter!(
     cell_to_date32, i32,
-    Cell::Date(date) => date.signed_duration_since(UNIX_EPOCH).num_days() as i32
+    Cell::Date(date) => Some(date.signed_duration_since(UNIX_EPOCH).num_days() as i32)
 );
+
+impl_cell_converter!(
+    cell_to_time64, i64,
+    Cell::Time(time) => time.signed_duration_since(MIDNIGHT).num_microseconds()
+);
+
+// /// Extracts time as microseconds since midnight.
+// pub fn cell_to_time64_micros(cell: &Cell) -> Option<i64> {
+//     match cell {
+//         Cell::Time(time) => {
+//             let midnight = NaiveTime::from_hms_opt(0, 0, 0)?;
+//             Some(time.signed_duration_since(midnight).num_microseconds()?)
+//         }
+//         _ => None,
+//     }
+// }
 
 // TODO: reduce allocations in this method
 /// Converts a Cell to its string representation for Arrow.
