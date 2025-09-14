@@ -440,41 +440,69 @@ async fn insert_nullable_scalars() {
         .await
         .unwrap();
 
-    let mut table_rows = vec![TableRow {
-        values: vec![
-            Cell::I32(42),                                              // id
-            Cell::Bool(true),                                           // bool_col
-            Cell::String("A".to_string()),                              // char_col
-            Cell::String("fixed".to_string()),                          // bpchar_col
-            Cell::String("variable".to_string()),                       // varchar_col
-            Cell::String("name_value".to_string()),                     // name_col
-            Cell::String("test string".to_string()),                    // text_col
-            Cell::I16(123), // int2_col (maps to Int in Iceberg, comes back as I32) TODO:fix this
-            Cell::I32(456), // int4_col
-            Cell::I64(9876543210), // int8_col
-            Cell::F32(std::f32::consts::PI), // float4_col
-            Cell::F64(std::f64::consts::E), // float8_col
-            Cell::String("123.456".to_string()), // numeric_col (maps to String in Iceberg)
-            Cell::Date(NaiveDate::from_ymd_opt(2023, 12, 25).unwrap()), // date_col
-            Cell::Time(NaiveTime::from_hms_micro_opt(1, 2, 3, 4).unwrap()),
-            Cell::Timestamp(NaiveDateTime::new(
-                NaiveDate::from_ymd_opt(2023, 12, 25).unwrap(),
-                NaiveTime::from_hms_micro_opt(1, 2, 3, 4).unwrap(),
-            )),
-            Cell::TimestampTz(DateTime::<Utc>::from_naive_utc_and_offset(
-                NaiveDateTime::new(
+    let mut table_rows = vec![
+        TableRow {
+            values: vec![
+                Cell::I32(42),                                              // id
+                Cell::Bool(true),                                           // bool_col
+                Cell::String("A".to_string()),                              // char_col
+                Cell::String("fixed".to_string()),                          // bpchar_col
+                Cell::String("variable".to_string()),                       // varchar_col
+                Cell::String("name_value".to_string()),                     // name_col
+                Cell::String("test string".to_string()),                    // text_col
+                Cell::I16(123), // int2_col (maps to Int in Iceberg, comes back as I32) TODO:fix this
+                Cell::I32(456), // int4_col
+                Cell::I64(9876543210), // int8_col
+                Cell::F32(std::f32::consts::PI), // float4_col
+                Cell::F64(std::f64::consts::E), // float8_col
+                Cell::String("123.456".to_string()), // numeric_col (maps to String in Iceberg)
+                Cell::Date(NaiveDate::from_ymd_opt(2023, 12, 25).unwrap()), // date_col
+                Cell::Time(NaiveTime::from_hms_micro_opt(1, 2, 3, 4).unwrap()),
+                Cell::Timestamp(NaiveDateTime::new(
                     NaiveDate::from_ymd_opt(2023, 12, 25).unwrap(),
                     NaiveTime::from_hms_micro_opt(1, 2, 3, 4).unwrap(),
-                ),
-                Utc,
-            )),
-            Cell::Uuid(Uuid::new_v4()),
-            Cell::String(r#"{"key": "value"}"#.to_string()), // json_col (maps to String in Iceberg)
-            Cell::String(r#"{"key": "value"}"#.to_string()), // jsonb_col (maps to String in Iceberg)
-            Cell::U32(12345),                                // oid_col (maps to Int in Iceberg)
-            Cell::Bytes(vec![0x48, 0x65, 0x6c, 0x6c, 0x6f]), // bytea_col (Hello in bytes)
-        ],
-    }];
+                )),
+                Cell::TimestampTz(DateTime::<Utc>::from_naive_utc_and_offset(
+                    NaiveDateTime::new(
+                        NaiveDate::from_ymd_opt(2023, 12, 25).unwrap(),
+                        NaiveTime::from_hms_micro_opt(1, 2, 3, 4).unwrap(),
+                    ),
+                    Utc,
+                )),
+                Cell::Uuid(Uuid::new_v4()),
+                Cell::String(r#"{"key": "value"}"#.to_string()), // json_col (maps to String in Iceberg)
+                Cell::String(r#"{"key": "value"}"#.to_string()), // jsonb_col (maps to String in Iceberg)
+                Cell::U32(12345),                                // oid_col (maps to Int in Iceberg)
+                Cell::Bytes(vec![0x48, 0x65, 0x6c, 0x6c, 0x6f]), // bytea_col (Hello in bytes)
+            ],
+        },
+        TableRow {
+            values: vec![
+                Cell::I32(0),
+                Cell::Null,
+                Cell::Null,
+                Cell::Null,
+                Cell::Null,
+                Cell::Null,
+                Cell::Null,
+                Cell::Null,
+                Cell::Null,
+                Cell::Null,
+                Cell::Null,
+                Cell::Null,
+                Cell::Null,
+                Cell::Null,
+                Cell::Null,
+                Cell::Null,
+                Cell::Null,
+                Cell::Null,
+                Cell::Null,
+                Cell::Null,
+                Cell::Null,
+                Cell::Null,
+            ],
+        },
+    ];
     client
         .insert_rows(namespace.to_string(), table_name.clone(), &table_rows)
         .await
@@ -491,8 +519,6 @@ async fn insert_nullable_scalars() {
         .read_all_rows(namespace.to_string(), table_name.clone())
         .await
         .unwrap();
-
-    assert_eq!(read_rows.len(), 1);
 
     // Compare the actual values in the read_rows with inserted table_rows
     assert_eq!(read_rows, table_rows);
