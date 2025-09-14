@@ -5,17 +5,13 @@ use arrow::{
     array::{ArrayRef, RecordBatch},
     datatypes::TimeUnit,
 };
-use etl::{
-    error::{ErrorKind, EtlResult},
-    etl_error,
-    types::{Cell, TableRow},
-};
+use etl::types::{Cell, TableRow};
 use futures::StreamExt;
 
 use etl_destinations::iceberg::{IcebergClient, UNIX_EPOCH};
 
 /// Converts a RecordBatch back to a vector of TableRows.
-pub fn record_batch_to_table_rows(batch: &RecordBatch) -> EtlResult<Vec<TableRow>> {
+pub fn record_batch_to_table_rows(batch: &RecordBatch) -> Vec<TableRow> {
     let mut rows = Vec::with_capacity(batch.num_rows());
 
     for row_idx in 0..batch.num_rows() {
@@ -30,7 +26,7 @@ pub fn record_batch_to_table_rows(batch: &RecordBatch) -> EtlResult<Vec<TableRow
         rows.push(TableRow::new(cells));
     }
 
-    Ok(rows)
+    rows
 }
 
 /// Converts an Arrow array value at a specific index to a Cell.
@@ -78,12 +74,10 @@ fn arrow_value_to_cell(array: &ArrayRef, row_idx: usize) -> Cell {
             let date = if days >= 0 {
                 UNIX_EPOCH
                     .checked_add_days(chrono::Days::new(days as u64))
-                    .ok_or_else(|| etl_error!(ErrorKind::DestinationError, "Invalid date value"))
                     .unwrap()
             } else {
                 UNIX_EPOCH
                     .checked_sub_days(chrono::Days::new((-days) as u64))
-                    .ok_or_else(|| etl_error!(ErrorKind::DestinationError, "Invalid date value"))
                     .unwrap()
             };
             Cell::Date(date)
@@ -98,7 +92,6 @@ fn arrow_value_to_cell(array: &ArrayRef, row_idx: usize) -> Cell {
                 (micros / 1_000_000) as u32,
                 ((micros % 1_000_000) * 1000) as u32,
             )
-            .ok_or_else(|| etl_error!(ErrorKind::DestinationError, "Invalid time value"))
             .unwrap();
             Cell::Time(time)
         }
@@ -146,7 +139,7 @@ pub async fn read_all_rows(
     client: &IcebergClient,
     namespace: String,
     table_name: String,
-) -> EtlResult<Vec<TableRow>> {
+) -> Vec<TableRow> {
     let table = client
         .load_table_for_test(namespace, table_name)
         .await
@@ -165,9 +158,9 @@ pub async fn read_all_rows(
 
     // Iterate over the stream of RecordBatch results
     while let Some(batch_result) = table_rows_stream.next().await {
-        let rows = record_batch_to_table_rows(&batch_result.unwrap())?;
+        let rows = record_batch_to_table_rows(&batch_result.unwrap());
         all_rows.extend(rows);
     }
 
-    Ok(all_rows)
+    all_rows
 }

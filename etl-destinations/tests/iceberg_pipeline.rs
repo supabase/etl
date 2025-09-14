@@ -515,9 +515,7 @@ async fn insert_nullable_scalars() {
     row.values[7] = Cell::I32(123);
     row.values[20] = Cell::I32(12345);
 
-    let read_rows = read_all_rows(&client, namespace.to_string(), table_name.clone())
-        .await
-        .unwrap();
+    let read_rows = read_all_rows(&client, namespace.to_string(), table_name.clone()).await;
 
     // Compare the actual values in the read_rows with inserted table_rows
     assert_eq!(read_rows, table_rows);
@@ -652,9 +650,7 @@ async fn insert_non_nullable_scalars() {
     row.values[7] = Cell::I32(123);
     row.values[20] = Cell::I32(12345);
 
-    let read_rows = read_all_rows(&client, namespace.to_string(), table_name.clone())
-        .await
-        .unwrap();
+    let read_rows = read_all_rows(&client, namespace.to_string(), table_name.clone()).await;
 
     assert_eq!(read_rows.len(), 1);
 
