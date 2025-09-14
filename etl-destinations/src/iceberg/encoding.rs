@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use arrow::{
     array::{
-        ArrayRef, ArrowPrimitiveType, BooleanBuilder, LargeBinaryBuilder, PrimitiveBuilder,
-        RecordBatch, StringBuilder, TimestampMicrosecondBuilder,
+        ArrayRef, ArrowPrimitiveType, BooleanBuilder, FixedSizeBinaryBuilder, LargeBinaryBuilder,
+        PrimitiveBuilder, RecordBatch, StringBuilder, TimestampMicrosecondBuilder,
     },
     datatypes::{
         DataType, Date32Type, Float32Type, Float64Type, Int16Type, Int32Type, Int64Type, Schema,
@@ -19,6 +19,8 @@ const UNIX_EPOCH: NaiveDate =
     NaiveDate::from_ymd_opt(1970, 1, 1).expect("unix epoch is a valid date");
 
 const MIDNIGHT: NaiveTime = NaiveTime::from_hms_opt(0, 0, 0).expect("midnight is a valid time");
+
+const UUID_BYTE_WIDTH: i32 = 16;
 
 /// Converts a slice of [`TableRow`]s to an arrow [`RecordBatch`]`.
 pub fn rows_to_record_batch(rows: &[TableRow], schema: Schema) -> Result<RecordBatch, ArrowError> {
@@ -60,6 +62,7 @@ fn build_array_for_field(rows: &[TableRow], field_idx: usize, data_type: &DataTy
         DataType::Timestamp(TimeUnit::Microsecond, None) => {
             build_primitive_array::<TimestampMicrosecondType, _>(rows, field_idx, cell_to_timestamp)
         }
+        DataType::FixedSizeBinary(UUID_BYTE_WIDTH) => build_uuid_array(rows, field_idx),
         _ => build_string_array(rows, field_idx),
     }
 }
@@ -106,6 +109,25 @@ fn build_timestamptz_array(rows: &[TableRow], field_idx: usize, tz: &str) -> Arr
     for row in rows {
         let arrow_value = cell_to_timestamptz(&row.values[field_idx]);
         builder.append_option(arrow_value);
+    }
+
+    Arc::new(builder.finish())
+}
+
+fn build_uuid_array(rows: &[TableRow], field_idx: usize) -> ArrayRef {
+    let mut builder = FixedSizeBinaryBuilder::new(UUID_BYTE_WIDTH);
+
+    for row in rows {
+        match cell_to_uuid(&row.values[field_idx]) {
+            Some(value) => {
+                builder
+                    .append_value(value)
+                    .expect("array length and buider byte width are both 16");
+            }
+            None => {
+                builder.append_null();
+            }
+        }
     }
 
     Arc::new(builder.finish())
@@ -177,6 +199,7 @@ impl_cell_converter!(
     // Cell::Time(time) => time.signed_duration_since(MIDNIGHT).num_microseconds()
     Cell::Timestamp(ts) => Some(ts.and_utc().timestamp_micros())
 );
+
 impl_cell_converter!(
     cell_to_timestamptz, i64,
     // Cell::Time(time) => time.signed_duration_since(MIDNIGHT).num_microseconds()
@@ -184,9 +207,16 @@ impl_cell_converter!(
     Cell::TimestampTz(ts) => Some(ts.timestamp_micros())
 );
 
+fn cell_to_uuid(cell: &Cell) -> Option<&[u8; UUID_BYTE_WIDTH as usize]> {
+    match cell {
+        Cell::Uuid(value) => Some(value.as_bytes()),
+        _ => None,
+    }
+}
+
 // TODO: reduce allocations in this method
 /// Converts a Cell to its string representation for Arrow.
-pub fn cell_to_string(cell: &Cell) -> Option<String> {
+fn cell_to_string(cell: &Cell) -> Option<String> {
     match cell {
         Cell::Null => None,
         Cell::Bool(b) => Some(b.to_string()),

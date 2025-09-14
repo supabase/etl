@@ -7,6 +7,7 @@ use etl::types::{Cell, ColumnSchema, TableId, TableName, TableRow, TableSchema, 
 use etl_destinations::iceberg::IcebergClient;
 use etl_telemetry::tracing::init_test_tracing;
 use iceberg::io::{S3_ACCESS_KEY_ID, S3_ENDPOINT, S3_SECRET_ACCESS_KEY};
+use uuid::Uuid;
 
 use crate::support::lakekeeper::LakekeeperClient;
 
@@ -422,6 +423,8 @@ async fn insert_table_rows() {
             true,
             false,
         ),
+        // UUID type
+        ColumnSchema::new("uuid_col".to_string(), Type::UUID, -1, true, false),
         // // JSON types
         // ColumnSchema::new("json_col".to_string(), Type::JSON, -1, true, false),
         // ColumnSchema::new("jsonb_col".to_string(), Type::JSONB, -1, true, false),
@@ -465,6 +468,7 @@ async fn insert_table_rows() {
                 ),
                 Utc,
             )),
+            Cell::Uuid(Uuid::new_v4()),
             // Cell::String(r#"{"key": "value"}"#.to_string()), // json_col (maps to String in Iceberg)
             // Cell::String(r#"{"key": "value"}"#.to_string()), // jsonb_col (maps to String in Iceberg)
             Cell::I32(12345), // oid_col (maps to Int in Iceberg)

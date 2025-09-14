@@ -232,6 +232,29 @@ fn arrow_value_to_cell(array: &ArrayRef, row_idx: usize) -> EtlResult<Cell> {
                 Ok(Cell::Timestamp(dt))
             }
         }
+        DataType::FixedSizeBinary(16) => {
+            let arr = array
+                .as_any()
+                .downcast_ref::<FixedSizeBinaryArray>()
+                .ok_or_else(|| {
+                    etl_error!(
+                        ErrorKind::DestinationError,
+                        "Failed to downcast to FixedSizeBinaryArray"
+                    )
+                })?;
+            let bytes = arr.value(row_idx);
+
+            // Convert 16-byte array to UUID
+            let uuid_bytes: [u8; 16] = bytes.try_into().map_err(|_| {
+                etl_error!(
+                    ErrorKind::DestinationError,
+                    "Invalid UUID bytes length, expected 16 bytes"
+                )
+            })?;
+
+            let uuid = uuid::Uuid::from_bytes(uuid_bytes);
+            Ok(Cell::Uuid(uuid))
+        }
         _ => {
             // For unsupported types, convert to string representation
             Ok(Cell::String(format!("{:?}", array)))
