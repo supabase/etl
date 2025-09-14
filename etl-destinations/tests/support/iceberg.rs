@@ -5,7 +5,6 @@ use arrow::{
     array::{ArrayRef, RecordBatch},
     datatypes::TimeUnit,
 };
-use chrono::NaiveDate;
 use etl::{
     error::{ErrorKind, EtlResult},
     etl_error,
@@ -13,47 +12,7 @@ use etl::{
 };
 use futures::StreamExt;
 
-use etl_destinations::iceberg::IcebergClient;
-
-const UNIX_EPOCH: NaiveDate =
-    NaiveDate::from_ymd_opt(1970, 1, 1).expect("unix epoch is a valid date");
-
-// /// Converts iceberg errors to ETL errors for testing.
-// fn iceberg_error_to_etl_error(err: iceberg::Error) -> etl::error::EtlError {
-//     use etl::error::ErrorKind;
-//     let (kind, description) = match err.kind() {
-//         iceberg::ErrorKind::PreconditionFailed => {
-//             (ErrorKind::InvalidState, "Iceberg precondition failed")
-//         }
-//         iceberg::ErrorKind::Unexpected => (ErrorKind::Unknown, "An unexpected error occurred"),
-//         iceberg::ErrorKind::DataInvalid => (ErrorKind::InvalidData, "Invalid iceberg data"),
-//         iceberg::ErrorKind::NamespaceAlreadyExists => (
-//             ErrorKind::DestinationNamespaceAlreadyExists,
-//             "Iceberg namespace already exists",
-//         ),
-//         iceberg::ErrorKind::TableAlreadyExists => (
-//             ErrorKind::DestinationTableAlreadyExists,
-//             "Iceberg table already exists",
-//         ),
-//         iceberg::ErrorKind::NamespaceNotFound => (
-//             ErrorKind::DestinationNamespaceMissing,
-//             "Iceberg namespace missing",
-//         ),
-//         iceberg::ErrorKind::TableNotFound => {
-//             (ErrorKind::DestinationTableMissing, "Iceberg table missing")
-//         }
-//         iceberg::ErrorKind::FeatureUnsupported => {
-//             (ErrorKind::Unknown, "Unsupported iceberg feature was used")
-//         }
-//         iceberg::ErrorKind::CatalogCommitConflicts => (
-//             ErrorKind::DestinationError,
-//             "Iceberg commit conflicts occurred",
-//         ),
-//         _ => (ErrorKind::Unknown, "Unknown iceberg error"),
-//     };
-
-//     etl_error!(kind, description, err.to_string())
-// }
+use etl_destinations::iceberg::{IcebergClient, UNIX_EPOCH};
 
 /// Converts a RecordBatch back to a vector of TableRows.
 pub fn record_batch_to_table_rows(batch: &RecordBatch) -> EtlResult<Vec<TableRow>> {
@@ -85,99 +44,47 @@ fn arrow_value_to_cell(array: &ArrayRef, row_idx: usize) -> Cell {
 
     match array.data_type() {
         DataType::Boolean => {
-            let arr = array
-                .as_any()
-                .downcast_ref::<BooleanArray>()
-                .ok_or(Cell::Null)
-                .unwrap();
+            let arr = array.as_any().downcast_ref::<BooleanArray>().unwrap();
             Cell::Bool(arr.value(row_idx))
         }
-        DataType::Int16 => {
-            let arr = array
-                .as_any()
-                .downcast_ref::<Int16Array>()
-                .ok_or(Cell::Null)
-                .unwrap();
-            Cell::I16(arr.value(row_idx))
-        }
         DataType::Int32 => {
-            let arr = array
-                .as_any()
-                .downcast_ref::<Int32Array>()
-                .ok_or(Cell::Null)
-                .unwrap();
+            let arr = array.as_any().downcast_ref::<Int32Array>().unwrap();
             Cell::I32(arr.value(row_idx))
         }
         DataType::Int64 => {
-            let arr = array
-                .as_any()
-                .downcast_ref::<Int64Array>()
-                .ok_or(Cell::Null)
-                .unwrap();
+            let arr = array.as_any().downcast_ref::<Int64Array>().unwrap();
             Cell::I64(arr.value(row_idx))
         }
         DataType::UInt32 => {
-            let arr = array
-                .as_any()
-                .downcast_ref::<UInt32Array>()
-                .ok_or(Cell::Null)
-                .unwrap();
+            let arr = array.as_any().downcast_ref::<UInt32Array>().unwrap();
             Cell::U32(arr.value(row_idx))
         }
         DataType::Float32 => {
-            let arr = array
-                .as_any()
-                .downcast_ref::<Float32Array>()
-                .ok_or(Cell::Null)
-                .unwrap();
+            let arr = array.as_any().downcast_ref::<Float32Array>().unwrap();
             Cell::F32(arr.value(row_idx))
         }
         DataType::Float64 => {
-            let arr = array
-                .as_any()
-                .downcast_ref::<Float64Array>()
-                .ok_or(Cell::Null)
-                .unwrap();
+            let arr = array.as_any().downcast_ref::<Float64Array>().unwrap();
             Cell::F64(arr.value(row_idx))
         }
         DataType::Utf8 => {
-            let arr = array
-                .as_any()
-                .downcast_ref::<StringArray>()
-                .ok_or(Cell::Null)
-                .unwrap();
+            let arr = array.as_any().downcast_ref::<StringArray>().unwrap();
             Cell::String(arr.value(row_idx).to_string())
         }
         DataType::LargeUtf8 => {
-            let arr = array
-                .as_any()
-                .downcast_ref::<LargeStringArray>()
-                .ok_or(Cell::Null)
-                .unwrap();
+            let arr = array.as_any().downcast_ref::<LargeStringArray>().unwrap();
             Cell::String(arr.value(row_idx).to_string())
         }
         DataType::LargeBinary => {
-            let arr = array
-                .as_any()
-                .downcast_ref::<LargeBinaryArray>()
-                .ok_or(Cell::Null)
-                .unwrap();
+            let arr = array.as_any().downcast_ref::<LargeBinaryArray>().unwrap();
             Cell::Bytes(arr.value(row_idx).to_vec())
         }
         DataType::Binary => {
-            let arr = array
-                .as_any()
-                .downcast_ref::<BinaryArray>()
-                .ok_or(Cell::Null)
-                .unwrap();
+            let arr = array.as_any().downcast_ref::<BinaryArray>().unwrap();
             Cell::Bytes(arr.value(row_idx).to_vec())
         }
         DataType::Date32 => {
-            let arr = array
-                .as_any()
-                .downcast_ref::<Date32Array>()
-                .ok_or(Cell::Null)
-                .unwrap();
+            let arr = array.as_any().downcast_ref::<Date32Array>().unwrap();
             let days = arr.value(row_idx);
 
             let date = if days >= 0 {
@@ -197,7 +104,6 @@ fn arrow_value_to_cell(array: &ArrayRef, row_idx: usize) -> Cell {
             let arr = array
                 .as_any()
                 .downcast_ref::<Time64MicrosecondArray>()
-                .ok_or(Cell::Null)
                 .unwrap();
             let micros = arr.value(row_idx);
             let time = chrono::NaiveTime::from_num_seconds_from_midnight_opt(
@@ -212,7 +118,6 @@ fn arrow_value_to_cell(array: &ArrayRef, row_idx: usize) -> Cell {
             let arr = array
                 .as_any()
                 .downcast_ref::<TimestampMicrosecondArray>()
-                .ok_or(Cell::Null)
                 .unwrap();
             let micros = arr.value(row_idx);
 
@@ -235,7 +140,6 @@ fn arrow_value_to_cell(array: &ArrayRef, row_idx: usize) -> Cell {
             let arr = array
                 .as_any()
                 .downcast_ref::<FixedSizeBinaryArray>()
-                .ok_or(Cell::Null)
                 .unwrap();
             let bytes = arr.value(row_idx);
 
