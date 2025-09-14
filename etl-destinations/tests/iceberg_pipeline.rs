@@ -370,7 +370,7 @@ async fn create_table_if_missing() {
 }
 
 #[tokio::test]
-async fn insert_table_rows() {
+async fn insert_nullable_scalars() {
     init_test_tracing();
 
     let lakekeeper_client = LakekeeperClient::new(LAKEKEEPER_URL);
@@ -481,8 +481,148 @@ async fn insert_table_rows() {
         .unwrap();
 
     // Change the expected type due to roundtrip issues
-    // * Cell::I16 rountrips as Cell::I32, 
-    // * Cell::U32 rountrips as Cell::I32, 
+    // * Cell::I16 rountrips to Cell::I32,
+    // * Cell::U32 rountrips to Cell::I32,
+    let row = &mut table_rows[0];
+    row.values[7] = Cell::I32(123);
+    row.values[20] = Cell::I32(12345);
+
+    let read_rows = client
+        .read_all_rows(namespace.to_string(), table_name.clone())
+        .await
+        .unwrap();
+
+    assert_eq!(read_rows.len(), 1);
+
+    // Compare the actual values in the read_rows with inserted table_rows
+    assert_eq!(read_rows, table_rows);
+
+    // Manual cleanup for now because lakekeeper doesn't allow cascade delete at the warehouse level
+    // This feature is planned for future releases. We'll start to use it when it becomes available.
+    // The cleanup is not in a Drop impl because each test has different number of object specitic to
+    // that test.
+    client.drop_table(namespace, table_name).await.unwrap();
+    client.drop_namespace(namespace).await.unwrap();
+    lakekeeper_client
+        .drop_warehouse(warehouse_id)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn insert_non_nullable_scalars() {
+    init_test_tracing();
+
+    let lakekeeper_client = LakekeeperClient::new(LAKEKEEPER_URL);
+    let (warehouse_name, warehouse_id) = lakekeeper_client.create_warehouse().await.unwrap();
+    let client =
+        IcebergClient::new_with_rest_catalog(get_catalog_url(), warehouse_name, create_props());
+
+    // Create namespace first
+    let namespace = "test_namespace";
+    client.create_namespace_if_missing(namespace).await.unwrap();
+
+    // Create a sample table schema with all supported types as non-nullable
+    let table_name = "test_table".to_string();
+    let table_id = TableId::new(12345);
+    let table_name_struct = TableName::new("test_schema".to_string(), table_name.clone());
+    let columns = vec![
+        // Primary key
+        ColumnSchema::new("id".to_string(), Type::INT4, -1, false, true),
+        // Boolean types
+        ColumnSchema::new("bool_col".to_string(), Type::BOOL, -1, false, false),
+        // String types
+        ColumnSchema::new("char_col".to_string(), Type::CHAR, -1, false, false),
+        ColumnSchema::new("bpchar_col".to_string(), Type::BPCHAR, -1, false, false),
+        ColumnSchema::new("varchar_col".to_string(), Type::VARCHAR, -1, false, false),
+        ColumnSchema::new("name_col".to_string(), Type::NAME, -1, false, false),
+        ColumnSchema::new("text_col".to_string(), Type::TEXT, -1, false, false),
+        // Integer types
+        ColumnSchema::new("int2_col".to_string(), Type::INT2, -1, false, false),
+        ColumnSchema::new("int4_col".to_string(), Type::INT4, -1, false, false),
+        ColumnSchema::new("int8_col".to_string(), Type::INT8, -1, false, false),
+        // Float types
+        ColumnSchema::new("float4_col".to_string(), Type::FLOAT4, -1, false, false),
+        ColumnSchema::new("float8_col".to_string(), Type::FLOAT8, -1, false, false),
+        // Numeric type
+        ColumnSchema::new("numeric_col".to_string(), Type::NUMERIC, -1, false, false),
+        // Date/Time types
+        ColumnSchema::new("date_col".to_string(), Type::DATE, -1, false, false),
+        ColumnSchema::new("time_col".to_string(), Type::TIME, -1, false, false),
+        ColumnSchema::new(
+            "timestamp_col".to_string(),
+            Type::TIMESTAMP,
+            -1,
+            false,
+            false,
+        ),
+        ColumnSchema::new(
+            "timestamptz_col".to_string(),
+            Type::TIMESTAMPTZ,
+            -1,
+            false,
+            false,
+        ),
+        // UUID type
+        ColumnSchema::new("uuid_col".to_string(), Type::UUID, -1, false, false),
+        // JSON types
+        ColumnSchema::new("json_col".to_string(), Type::JSON, -1, false, false),
+        ColumnSchema::new("jsonb_col".to_string(), Type::JSONB, -1, false, false),
+        // OID type
+        ColumnSchema::new("oid_col".to_string(), Type::OID, -1, false, false),
+        // Binary type
+        ColumnSchema::new("bytea_col".to_string(), Type::BYTEA, -1, false, false),
+    ];
+    let table_schema = TableSchema::new(table_id, table_name_struct, columns);
+
+    client
+        .create_table_if_missing(namespace, table_name.clone(), &table_schema)
+        .await
+        .unwrap();
+
+    let mut table_rows = vec![TableRow {
+        values: vec![
+            Cell::I32(42),                                              // id
+            Cell::Bool(true),                                           // bool_col
+            Cell::String("A".to_string()),                              // char_col
+            Cell::String("fixed".to_string()),                          // bpchar_col
+            Cell::String("variable".to_string()),                       // varchar_col
+            Cell::String("name_value".to_string()),                     // name_col
+            Cell::String("test string".to_string()),                    // text_col
+            Cell::I16(123), // int2_col (maps to Int in Iceberg, comes back as I32) TODO:fix this
+            Cell::I32(456), // int4_col
+            Cell::I64(9876543210), // int8_col
+            Cell::F32(std::f32::consts::PI), // float4_col
+            Cell::F64(std::f64::consts::E), // float8_col
+            Cell::String("123.456".to_string()), // numeric_col (maps to String in Iceberg)
+            Cell::Date(NaiveDate::from_ymd_opt(2023, 12, 25).unwrap()), // date_col
+            Cell::Time(NaiveTime::from_hms_micro_opt(1, 2, 3, 4).unwrap()),
+            Cell::Timestamp(NaiveDateTime::new(
+                NaiveDate::from_ymd_opt(2023, 12, 25).unwrap(),
+                NaiveTime::from_hms_micro_opt(1, 2, 3, 4).unwrap(),
+            )),
+            Cell::TimestampTz(DateTime::<Utc>::from_naive_utc_and_offset(
+                NaiveDateTime::new(
+                    NaiveDate::from_ymd_opt(2023, 12, 25).unwrap(),
+                    NaiveTime::from_hms_micro_opt(1, 2, 3, 4).unwrap(),
+                ),
+                Utc,
+            )),
+            Cell::Uuid(Uuid::new_v4()),
+            Cell::String(r#"{"key": "value"}"#.to_string()), // json_col (maps to String in Iceberg)
+            Cell::String(r#"{"key": "value"}"#.to_string()), // jsonb_col (maps to String in Iceberg)
+            Cell::U32(12345),                                // oid_col (maps to Int in Iceberg)
+            Cell::Bytes(vec![0x48, 0x65, 0x6c, 0x6c, 0x6f]), // bytea_col (Hello in bytes)
+        ],
+    }];
+    client
+        .insert_rows(namespace.to_string(), table_name.clone(), &table_rows)
+        .await
+        .unwrap();
+
+    // Change the expected type due to roundtrip issues
+    // * Cell::I16 rountrips to Cell::I32,
+    // * Cell::U32 rountrips to Cell::I32,
     let row = &mut table_rows[0];
     row.values[7] = Cell::I32(123);
     row.values[20] = Cell::I32(12345);
