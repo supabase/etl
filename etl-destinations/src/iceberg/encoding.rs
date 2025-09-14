@@ -1155,7 +1155,10 @@ mod tests {
     #[test]
     fn test_cell_to_bytes() {
         let test_bytes = vec![1, 2, 3, 4];
-        assert_eq!(cell_to_bytes(&Cell::Bytes(test_bytes.clone())), Some(test_bytes));
+        assert_eq!(
+            cell_to_bytes(&Cell::Bytes(test_bytes.clone())),
+            Some(test_bytes)
+        );
         assert_eq!(cell_to_bytes(&Cell::Bytes(vec![])), Some(vec![]));
         assert_eq!(cell_to_bytes(&Cell::Null), None);
         assert_eq!(cell_to_bytes(&Cell::String("hello".to_string())), None);
@@ -1166,11 +1169,14 @@ mod tests {
         use chrono::NaiveDate;
         let test_date = NaiveDate::from_ymd_opt(2023, 5, 15).unwrap();
         let expected_days = test_date.signed_duration_since(UNIX_EPOCH).num_days() as i32;
-        
+
         assert_eq!(cell_to_date32(&Cell::Date(test_date)), Some(expected_days));
         assert_eq!(cell_to_date32(&Cell::Date(UNIX_EPOCH)), Some(0));
         assert_eq!(cell_to_date32(&Cell::Null), None);
-        assert_eq!(cell_to_date32(&Cell::String("2023-05-15".to_string())), None);
+        assert_eq!(
+            cell_to_date32(&Cell::String("2023-05-15".to_string())),
+            None
+        );
     }
 
     #[test]
@@ -1178,7 +1184,7 @@ mod tests {
         use chrono::NaiveTime;
         let test_time = NaiveTime::from_hms_opt(12, 30, 45).unwrap();
         let expected_micros = test_time.signed_duration_since(MIDNIGHT).num_microseconds();
-        
+
         assert_eq!(cell_to_time64(&Cell::Time(test_time)), expected_micros);
         assert_eq!(cell_to_time64(&Cell::Time(MIDNIGHT)), Some(0));
         assert_eq!(cell_to_time64(&Cell::Null), None);
@@ -1190,10 +1196,16 @@ mod tests {
         use chrono::DateTime;
         let test_ts = DateTime::from_timestamp(1000000000, 0).unwrap().naive_utc();
         let expected_micros = test_ts.and_utc().timestamp_micros();
-        
-        assert_eq!(cell_to_timestamp(&Cell::Timestamp(test_ts)), Some(expected_micros));
+
+        assert_eq!(
+            cell_to_timestamp(&Cell::Timestamp(test_ts)),
+            Some(expected_micros)
+        );
         assert_eq!(cell_to_timestamp(&Cell::Null), None);
-        assert_eq!(cell_to_timestamp(&Cell::String("2001-09-09 01:46:40".to_string())), None);
+        assert_eq!(
+            cell_to_timestamp(&Cell::String("2001-09-09 01:46:40".to_string())),
+            None
+        );
     }
 
     #[test]
@@ -1201,10 +1213,16 @@ mod tests {
         use chrono::DateTime;
         let test_ts = DateTime::from_timestamp(1000000000, 0).unwrap();
         let expected_micros = test_ts.timestamp_micros();
-        
-        assert_eq!(cell_to_timestamptz(&Cell::TimestampTz(test_ts)), Some(expected_micros));
+
+        assert_eq!(
+            cell_to_timestamptz(&Cell::TimestampTz(test_ts)),
+            Some(expected_micros)
+        );
         assert_eq!(cell_to_timestamptz(&Cell::Null), None);
-        assert_eq!(cell_to_timestamptz(&Cell::String("2001-09-09T01:46:40Z".to_string())), None);
+        assert_eq!(
+            cell_to_timestamptz(&Cell::String("2001-09-09T01:46:40Z".to_string())),
+            None
+        );
     }
 
     #[test]
@@ -1212,7 +1230,7 @@ mod tests {
         use uuid::Uuid;
         let test_uuid = Uuid::new_v4();
         let expected_bytes = test_uuid.as_bytes();
-        
+
         assert_eq!(cell_to_uuid(&Cell::Uuid(test_uuid)), Some(expected_bytes));
         assert_eq!(cell_to_uuid(&Cell::Null), None);
         assert_eq!(cell_to_uuid(&Cell::String(test_uuid.to_string())), None);
@@ -1221,7 +1239,10 @@ mod tests {
     #[test]
     fn test_cell_to_array_cell() {
         let test_array = ArrayCell::I32(vec![Some(1), Some(2), None]);
-        assert_eq!(cell_to_array_cell(&Cell::Array(test_array.clone())), Some(&test_array));
+        assert_eq!(
+            cell_to_array_cell(&Cell::Array(test_array.clone())),
+            Some(&test_array)
+        );
         assert_eq!(cell_to_array_cell(&Cell::Null), None);
         assert_eq!(cell_to_array_cell(&Cell::String("array".to_string())), None);
     }
@@ -1230,39 +1251,63 @@ mod tests {
     fn test_cell_to_string() {
         use chrono::{NaiveDate, NaiveTime};
         use uuid::Uuid;
-        
+
         // Test basic types
         assert_eq!(cell_to_string(&Cell::Null), None);
         assert_eq!(cell_to_string(&Cell::Bool(true)), Some("true".to_string()));
-        assert_eq!(cell_to_string(&Cell::Bool(false)), Some("false".to_string()));
-        assert_eq!(cell_to_string(&Cell::String("hello".to_string())), Some("hello".to_string()));
+        assert_eq!(
+            cell_to_string(&Cell::Bool(false)),
+            Some("false".to_string())
+        );
+        assert_eq!(
+            cell_to_string(&Cell::String("hello".to_string())),
+            Some("hello".to_string())
+        );
         assert_eq!(cell_to_string(&Cell::I16(42)), Some("42".to_string()));
         assert_eq!(cell_to_string(&Cell::I32(-42)), Some("-42".to_string()));
         assert_eq!(cell_to_string(&Cell::U32(42)), Some("42".to_string()));
         assert_eq!(cell_to_string(&Cell::I64(42)), Some("42".to_string()));
         assert_eq!(cell_to_string(&Cell::F32(2.5)), Some("2.5".to_string()));
-        assert_eq!(cell_to_string(&Cell::F64(1.234567)), Some("1.234567".to_string()));
-        
+        assert_eq!(
+            cell_to_string(&Cell::F64(1.234567)),
+            Some("1.234567".to_string())
+        );
+
         // Test temporal types with known formats
         let test_date = NaiveDate::from_ymd_opt(2023, 5, 15).unwrap();
-        assert_eq!(cell_to_string(&Cell::Date(test_date)), Some("2023-05-15".to_string()));
-        
+        assert_eq!(
+            cell_to_string(&Cell::Date(test_date)),
+            Some("2023-05-15".to_string())
+        );
+
         let test_time = NaiveTime::from_hms_opt(12, 30, 45).unwrap();
-        assert_eq!(cell_to_string(&Cell::Time(test_time)), Some("12:30:45".to_string()));
-        
+        assert_eq!(
+            cell_to_string(&Cell::Time(test_time)),
+            Some("12:30:45".to_string())
+        );
+
         // Test UUID
         let test_uuid = Uuid::new_v4();
-        assert_eq!(cell_to_string(&Cell::Uuid(test_uuid)), Some(test_uuid.to_string()));
-        
+        assert_eq!(
+            cell_to_string(&Cell::Uuid(test_uuid)),
+            Some(test_uuid.to_string())
+        );
+
         // Test JSON
         let json_val = serde_json::json!({"key": "value"});
-        assert_eq!(cell_to_string(&Cell::Json(json_val.clone())), Some(json_val.to_string()));
-        
+        assert_eq!(
+            cell_to_string(&Cell::Json(json_val.clone())),
+            Some(json_val.to_string())
+        );
+
         // Test bytes (Base64 encoded)
         let test_bytes = vec![72, 101, 108, 108, 111]; // "Hello" in ASCII
         let expected_base64 = BASE64_STANDARD.encode(&test_bytes);
-        assert_eq!(cell_to_string(&Cell::Bytes(test_bytes)), Some(expected_base64));
-        
+        assert_eq!(
+            cell_to_string(&Cell::Bytes(test_bytes)),
+            Some(expected_base64)
+        );
+
         // Test array (debug format)
         let test_array = ArrayCell::I32(vec![Some(1), Some(2)]);
         assert!(cell_to_string(&Cell::Array(test_array)).is_some());
@@ -1271,14 +1316,25 @@ mod tests {
     #[test]
     fn test_build_boolean_array() {
         let rows = vec![
-            TableRow { values: vec![Cell::Bool(true)] },
-            TableRow { values: vec![Cell::Bool(false)] },
-            TableRow { values: vec![Cell::Null] },
-            TableRow { values: vec![Cell::String("not bool".to_string())] },
+            TableRow {
+                values: vec![Cell::Bool(true)],
+            },
+            TableRow {
+                values: vec![Cell::Bool(false)],
+            },
+            TableRow {
+                values: vec![Cell::Null],
+            },
+            TableRow {
+                values: vec![Cell::String("not bool".to_string())],
+            },
         ];
 
         let array_ref = build_array_for_field(&rows, 0, &DataType::Boolean);
-        let bool_array = array_ref.as_any().downcast_ref::<arrow::array::BooleanArray>().unwrap();
+        let bool_array = array_ref
+            .as_any()
+            .downcast_ref::<arrow::array::BooleanArray>()
+            .unwrap();
 
         assert_eq!(bool_array.len(), 4);
         assert!(bool_array.value(0));
@@ -1290,15 +1346,28 @@ mod tests {
     #[test]
     fn test_build_i32_array() {
         let rows = vec![
-            TableRow { values: vec![Cell::I16(42)] },
-            TableRow { values: vec![Cell::I32(-123)] },
-            TableRow { values: vec![Cell::U32(456)] },
-            TableRow { values: vec![Cell::Null] },
-            TableRow { values: vec![Cell::String("not int".to_string())] },
+            TableRow {
+                values: vec![Cell::I16(42)],
+            },
+            TableRow {
+                values: vec![Cell::I32(-123)],
+            },
+            TableRow {
+                values: vec![Cell::U32(456)],
+            },
+            TableRow {
+                values: vec![Cell::Null],
+            },
+            TableRow {
+                values: vec![Cell::String("not int".to_string())],
+            },
         ];
 
         let array_ref = build_array_for_field(&rows, 0, &DataType::Int32);
-        let int_array = array_ref.as_any().downcast_ref::<arrow::array::Int32Array>().unwrap();
+        let int_array = array_ref
+            .as_any()
+            .downcast_ref::<arrow::array::Int32Array>()
+            .unwrap();
 
         assert_eq!(int_array.len(), 5);
         assert_eq!(int_array.value(0), 42);
@@ -1311,14 +1380,25 @@ mod tests {
     #[test]
     fn test_build_i64_array() {
         let rows = vec![
-            TableRow { values: vec![Cell::I64(123456789)] },
-            TableRow { values: vec![Cell::I64(-987654321)] },
-            TableRow { values: vec![Cell::Null] },
-            TableRow { values: vec![Cell::I32(42)] }, // Non-I64 becomes null
+            TableRow {
+                values: vec![Cell::I64(123456789)],
+            },
+            TableRow {
+                values: vec![Cell::I64(-987654321)],
+            },
+            TableRow {
+                values: vec![Cell::Null],
+            },
+            TableRow {
+                values: vec![Cell::I32(42)],
+            }, // Non-I64 becomes null
         ];
 
         let array_ref = build_array_for_field(&rows, 0, &DataType::Int64);
-        let int_array = array_ref.as_any().downcast_ref::<arrow::array::Int64Array>().unwrap();
+        let int_array = array_ref
+            .as_any()
+            .downcast_ref::<arrow::array::Int64Array>()
+            .unwrap();
 
         assert_eq!(int_array.len(), 4);
         assert_eq!(int_array.value(0), 123456789);
@@ -1330,14 +1410,25 @@ mod tests {
     #[test]
     fn test_build_f32_array() {
         let rows = vec![
-            TableRow { values: vec![Cell::F32(2.5)] },
-            TableRow { values: vec![Cell::F32(-1.25)] },
-            TableRow { values: vec![Cell::Null] },
-            TableRow { values: vec![Cell::F64(3.0)] }, // Non-F32 becomes null
+            TableRow {
+                values: vec![Cell::F32(2.5)],
+            },
+            TableRow {
+                values: vec![Cell::F32(-1.25)],
+            },
+            TableRow {
+                values: vec![Cell::Null],
+            },
+            TableRow {
+                values: vec![Cell::F64(3.0)],
+            }, // Non-F32 becomes null
         ];
 
         let array_ref = build_array_for_field(&rows, 0, &DataType::Float32);
-        let float_array = array_ref.as_any().downcast_ref::<arrow::array::Float32Array>().unwrap();
+        let float_array = array_ref
+            .as_any()
+            .downcast_ref::<arrow::array::Float32Array>()
+            .unwrap();
 
         assert_eq!(float_array.len(), 4);
         assert_eq!(float_array.value(0), 2.5);
@@ -1349,14 +1440,25 @@ mod tests {
     #[test]
     fn test_build_f64_array() {
         let rows = vec![
-            TableRow { values: vec![Cell::F64(1.23456789)] },
-            TableRow { values: vec![Cell::F64(-9.87654321)] },
-            TableRow { values: vec![Cell::Null] },
-            TableRow { values: vec![Cell::F32(2.5)] }, // Non-F64 becomes null
+            TableRow {
+                values: vec![Cell::F64(1.23456789)],
+            },
+            TableRow {
+                values: vec![Cell::F64(-9.87654321)],
+            },
+            TableRow {
+                values: vec![Cell::Null],
+            },
+            TableRow {
+                values: vec![Cell::F32(2.5)],
+            }, // Non-F64 becomes null
         ];
 
         let array_ref = build_array_for_field(&rows, 0, &DataType::Float64);
-        let float_array = array_ref.as_any().downcast_ref::<arrow::array::Float64Array>().unwrap();
+        let float_array = array_ref
+            .as_any()
+            .downcast_ref::<arrow::array::Float64Array>()
+            .unwrap();
 
         assert_eq!(float_array.len(), 4);
         assert_eq!(float_array.value(0), 1.23456789);
@@ -1368,14 +1470,25 @@ mod tests {
     #[test]
     fn test_build_string_array() {
         let rows = vec![
-            TableRow { values: vec![Cell::String("hello".to_string())] },
-            TableRow { values: vec![Cell::Bool(true)] }, // Converted to string
-            TableRow { values: vec![Cell::I32(42)] }, // Converted to string
-            TableRow { values: vec![Cell::Null] },
+            TableRow {
+                values: vec![Cell::String("hello".to_string())],
+            },
+            TableRow {
+                values: vec![Cell::Bool(true)],
+            }, // Converted to string
+            TableRow {
+                values: vec![Cell::I32(42)],
+            }, // Converted to string
+            TableRow {
+                values: vec![Cell::Null],
+            },
         ];
 
         let array_ref = build_array_for_field(&rows, 0, &DataType::Utf8);
-        let string_array = array_ref.as_any().downcast_ref::<arrow::array::StringArray>().unwrap();
+        let string_array = array_ref
+            .as_any()
+            .downcast_ref::<arrow::array::StringArray>()
+            .unwrap();
 
         assert_eq!(string_array.len(), 4);
         assert_eq!(string_array.value(0), "hello");
@@ -1388,14 +1501,25 @@ mod tests {
     fn test_build_binary_array() {
         let test_bytes = vec![1, 2, 3, 4, 5];
         let rows = vec![
-            TableRow { values: vec![Cell::Bytes(test_bytes.clone())] },
-            TableRow { values: vec![Cell::Bytes(vec![])] },
-            TableRow { values: vec![Cell::Null] },
-            TableRow { values: vec![Cell::String("not bytes".to_string())] },
+            TableRow {
+                values: vec![Cell::Bytes(test_bytes.clone())],
+            },
+            TableRow {
+                values: vec![Cell::Bytes(vec![])],
+            },
+            TableRow {
+                values: vec![Cell::Null],
+            },
+            TableRow {
+                values: vec![Cell::String("not bytes".to_string())],
+            },
         ];
 
         let array_ref = build_array_for_field(&rows, 0, &DataType::LargeBinary);
-        let binary_array = array_ref.as_any().downcast_ref::<arrow::array::LargeBinaryArray>().unwrap();
+        let binary_array = array_ref
+            .as_any()
+            .downcast_ref::<arrow::array::LargeBinaryArray>()
+            .unwrap();
 
         assert_eq!(binary_array.len(), 4);
         assert_eq!(binary_array.value(0), test_bytes);
@@ -1409,16 +1533,27 @@ mod tests {
         use chrono::NaiveDate;
         let test_date = NaiveDate::from_ymd_opt(2023, 5, 15).unwrap();
         let expected_days = test_date.signed_duration_since(UNIX_EPOCH).num_days() as i32;
-        
+
         let rows = vec![
-            TableRow { values: vec![Cell::Date(test_date)] },
-            TableRow { values: vec![Cell::Date(UNIX_EPOCH)] },
-            TableRow { values: vec![Cell::Null] },
-            TableRow { values: vec![Cell::String("2023-05-15".to_string())] },
+            TableRow {
+                values: vec![Cell::Date(test_date)],
+            },
+            TableRow {
+                values: vec![Cell::Date(UNIX_EPOCH)],
+            },
+            TableRow {
+                values: vec![Cell::Null],
+            },
+            TableRow {
+                values: vec![Cell::String("2023-05-15".to_string())],
+            },
         ];
 
         let array_ref = build_array_for_field(&rows, 0, &DataType::Date32);
-        let date_array = array_ref.as_any().downcast_ref::<arrow::array::Date32Array>().unwrap();
+        let date_array = array_ref
+            .as_any()
+            .downcast_ref::<arrow::array::Date32Array>()
+            .unwrap();
 
         assert_eq!(date_array.len(), 4);
         assert_eq!(date_array.value(0), expected_days);
@@ -1431,17 +1566,31 @@ mod tests {
     fn test_build_time64_array() {
         use chrono::NaiveTime;
         let test_time = NaiveTime::from_hms_opt(12, 30, 45).unwrap();
-        let expected_micros = test_time.signed_duration_since(MIDNIGHT).num_microseconds().unwrap();
-        
+        let expected_micros = test_time
+            .signed_duration_since(MIDNIGHT)
+            .num_microseconds()
+            .unwrap();
+
         let rows = vec![
-            TableRow { values: vec![Cell::Time(test_time)] },
-            TableRow { values: vec![Cell::Time(MIDNIGHT)] },
-            TableRow { values: vec![Cell::Null] },
-            TableRow { values: vec![Cell::String("12:30:45".to_string())] },
+            TableRow {
+                values: vec![Cell::Time(test_time)],
+            },
+            TableRow {
+                values: vec![Cell::Time(MIDNIGHT)],
+            },
+            TableRow {
+                values: vec![Cell::Null],
+            },
+            TableRow {
+                values: vec![Cell::String("12:30:45".to_string())],
+            },
         ];
 
         let array_ref = build_array_for_field(&rows, 0, &DataType::Time64(TimeUnit::Microsecond));
-        let time_array = array_ref.as_any().downcast_ref::<arrow::array::Time64MicrosecondArray>().unwrap();
+        let time_array = array_ref
+            .as_any()
+            .downcast_ref::<arrow::array::Time64MicrosecondArray>()
+            .unwrap();
 
         assert_eq!(time_array.len(), 4);
         assert_eq!(time_array.value(0), expected_micros);
@@ -1455,15 +1604,25 @@ mod tests {
         use chrono::DateTime;
         let test_ts = DateTime::from_timestamp(1000000000, 0).unwrap().naive_utc();
         let expected_micros = test_ts.and_utc().timestamp_micros();
-        
+
         let rows = vec![
-            TableRow { values: vec![Cell::Timestamp(test_ts)] },
-            TableRow { values: vec![Cell::Null] },
-            TableRow { values: vec![Cell::String("2001-09-09 01:46:40".to_string())] },
+            TableRow {
+                values: vec![Cell::Timestamp(test_ts)],
+            },
+            TableRow {
+                values: vec![Cell::Null],
+            },
+            TableRow {
+                values: vec![Cell::String("2001-09-09 01:46:40".to_string())],
+            },
         ];
 
-        let array_ref = build_array_for_field(&rows, 0, &DataType::Timestamp(TimeUnit::Microsecond, None));
-        let ts_array = array_ref.as_any().downcast_ref::<arrow::array::TimestampMicrosecondArray>().unwrap();
+        let array_ref =
+            build_array_for_field(&rows, 0, &DataType::Timestamp(TimeUnit::Microsecond, None));
+        let ts_array = array_ref
+            .as_any()
+            .downcast_ref::<arrow::array::TimestampMicrosecondArray>()
+            .unwrap();
 
         assert_eq!(ts_array.len(), 3);
         assert_eq!(ts_array.value(0), expected_micros);
@@ -1476,15 +1635,28 @@ mod tests {
         use chrono::DateTime;
         let test_ts = DateTime::from_timestamp(1000000000, 0).unwrap();
         let expected_micros = test_ts.timestamp_micros();
-        
+
         let rows = vec![
-            TableRow { values: vec![Cell::TimestampTz(test_ts)] },
-            TableRow { values: vec![Cell::Null] },
-            TableRow { values: vec![Cell::String("2001-09-09T01:46:40Z".to_string())] },
+            TableRow {
+                values: vec![Cell::TimestampTz(test_ts)],
+            },
+            TableRow {
+                values: vec![Cell::Null],
+            },
+            TableRow {
+                values: vec![Cell::String("2001-09-09T01:46:40Z".to_string())],
+            },
         ];
 
-        let array_ref = build_array_for_field(&rows, 0, &DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())));
-        let ts_array = array_ref.as_any().downcast_ref::<arrow::array::TimestampMicrosecondArray>().unwrap();
+        let array_ref = build_array_for_field(
+            &rows,
+            0,
+            &DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
+        );
+        let ts_array = array_ref
+            .as_any()
+            .downcast_ref::<arrow::array::TimestampMicrosecondArray>()
+            .unwrap();
 
         assert_eq!(ts_array.len(), 3);
         assert_eq!(ts_array.value(0), expected_micros);
@@ -1498,15 +1670,25 @@ mod tests {
         use uuid::Uuid;
         let test_uuid = Uuid::new_v4();
         let expected_bytes = test_uuid.as_bytes();
-        
+
         let rows = vec![
-            TableRow { values: vec![Cell::Uuid(test_uuid)] },
-            TableRow { values: vec![Cell::Null] },
-            TableRow { values: vec![Cell::String(test_uuid.to_string())] },
+            TableRow {
+                values: vec![Cell::Uuid(test_uuid)],
+            },
+            TableRow {
+                values: vec![Cell::Null],
+            },
+            TableRow {
+                values: vec![Cell::String(test_uuid.to_string())],
+            },
         ];
 
-        let array_ref = build_array_for_field(&rows, 0, &DataType::FixedSizeBinary(UUID_BYTE_WIDTH));
-        let uuid_array = array_ref.as_any().downcast_ref::<arrow::array::FixedSizeBinaryArray>().unwrap();
+        let array_ref =
+            build_array_for_field(&rows, 0, &DataType::FixedSizeBinary(UUID_BYTE_WIDTH));
+        let uuid_array = array_ref
+            .as_any()
+            .downcast_ref::<arrow::array::FixedSizeBinaryArray>()
+            .unwrap();
 
         assert_eq!(uuid_array.len(), 3);
         assert_eq!(uuid_array.value(0), expected_bytes);
@@ -1518,7 +1700,10 @@ mod tests {
     fn test_build_list_array_with_i64_elements() {
         let rows = vec![
             TableRow {
-                values: vec![Cell::Array(ArrayCell::I64(vec![Some(1234567890), Some(-987654321)]))],
+                values: vec![Cell::Array(ArrayCell::I64(vec![
+                    Some(1234567890),
+                    Some(-987654321),
+                ]))],
             },
             TableRow {
                 values: vec![Cell::Array(ArrayCell::I64(vec![Some(42), None, Some(100)]))],
@@ -1536,7 +1721,10 @@ mod tests {
         // First row: [1234567890, -987654321]
         assert!(!list_array.is_null(0));
         let first_list = list_array.value(0);
-        let first_list_i64 = first_list.as_any().downcast_ref::<arrow::array::Int64Array>().unwrap();
+        let first_list_i64 = first_list
+            .as_any()
+            .downcast_ref::<arrow::array::Int64Array>()
+            .unwrap();
         assert_eq!(first_list_i64.len(), 2);
         assert_eq!(first_list_i64.value(0), 1234567890);
         assert_eq!(first_list_i64.value(1), -987654321);
@@ -1544,7 +1732,10 @@ mod tests {
         // Second row: [42, null, 100]
         assert!(!list_array.is_null(1));
         let second_list = list_array.value(1);
-        let second_list_i64 = second_list.as_any().downcast_ref::<arrow::array::Int64Array>().unwrap();
+        let second_list_i64 = second_list
+            .as_any()
+            .downcast_ref::<arrow::array::Int64Array>()
+            .unwrap();
         assert_eq!(second_list_i64.len(), 3);
         assert_eq!(second_list_i64.value(0), 42);
         assert!(second_list_i64.is_null(1));
@@ -1558,7 +1749,11 @@ mod tests {
     fn test_build_list_array_with_f32_elements() {
         let rows = vec![
             TableRow {
-                values: vec![Cell::Array(ArrayCell::F32(vec![Some(1.5), Some(2.25), Some(-3.75)]))],
+                values: vec![Cell::Array(ArrayCell::F32(vec![
+                    Some(1.5),
+                    Some(2.25),
+                    Some(-3.75),
+                ]))],
             },
             TableRow {
                 values: vec![Cell::Array(ArrayCell::F32(vec![Some(0.0), None]))],
@@ -1576,7 +1771,10 @@ mod tests {
         // First row: [1.5, 2.25, -3.75]
         assert!(!list_array.is_null(0));
         let first_list = list_array.value(0);
-        let first_list_f32 = first_list.as_any().downcast_ref::<arrow::array::Float32Array>().unwrap();
+        let first_list_f32 = first_list
+            .as_any()
+            .downcast_ref::<arrow::array::Float32Array>()
+            .unwrap();
         assert_eq!(first_list_f32.len(), 3);
         assert_eq!(first_list_f32.value(0), 1.5);
         assert_eq!(first_list_f32.value(1), 2.25);
@@ -1585,7 +1783,10 @@ mod tests {
         // Second row: [0.0, null]
         assert!(!list_array.is_null(1));
         let second_list = list_array.value(1);
-        let second_list_f32 = second_list.as_any().downcast_ref::<arrow::array::Float32Array>().unwrap();
+        let second_list_f32 = second_list
+            .as_any()
+            .downcast_ref::<arrow::array::Float32Array>()
+            .unwrap();
         assert_eq!(second_list_f32.len(), 2);
         assert_eq!(second_list_f32.value(0), 0.0);
         assert!(second_list_f32.is_null(1));
@@ -1598,7 +1799,10 @@ mod tests {
     fn test_build_list_array_with_f64_elements() {
         let rows = vec![
             TableRow {
-                values: vec![Cell::Array(ArrayCell::F64(vec![Some(1.23456789), Some(-9.87654321)]))],
+                values: vec![Cell::Array(ArrayCell::F64(vec![
+                    Some(1.23456789),
+                    Some(-9.87654321),
+                ]))],
             },
             TableRow {
                 values: vec![Cell::Array(ArrayCell::F64(vec![None, Some(0.0)]))],
@@ -1613,7 +1817,10 @@ mod tests {
         // First row: [1.23456789, -9.87654321]
         assert!(!list_array.is_null(0));
         let first_list = list_array.value(0);
-        let first_list_f64 = first_list.as_any().downcast_ref::<arrow::array::Float64Array>().unwrap();
+        let first_list_f64 = first_list
+            .as_any()
+            .downcast_ref::<arrow::array::Float64Array>()
+            .unwrap();
         assert_eq!(first_list_f64.len(), 2);
         assert_eq!(first_list_f64.value(0), 1.23456789);
         assert_eq!(first_list_f64.value(1), -9.87654321);
@@ -1621,7 +1828,10 @@ mod tests {
         // Second row: [null, 0.0]
         assert!(!list_array.is_null(1));
         let second_list = list_array.value(1);
-        let second_list_f64 = second_list.as_any().downcast_ref::<arrow::array::Float64Array>().unwrap();
+        let second_list_f64 = second_list
+            .as_any()
+            .downcast_ref::<arrow::array::Float64Array>()
+            .unwrap();
         assert_eq!(second_list_f64.len(), 2);
         assert!(second_list_f64.is_null(0));
         assert_eq!(second_list_f64.value(1), 0.0);
@@ -1632,7 +1842,7 @@ mod tests {
         use chrono::NaiveDate;
         let date1 = NaiveDate::from_ymd_opt(2023, 5, 15).unwrap();
         let date2 = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
-        
+
         let rows = vec![
             TableRow {
                 values: vec![Cell::Array(ArrayCell::Date(vec![Some(date1), Some(date2)]))],
@@ -1650,15 +1860,27 @@ mod tests {
         // First row: [date1, date2]
         assert!(!list_array.is_null(0));
         let first_list = list_array.value(0);
-        let first_list_date = first_list.as_any().downcast_ref::<arrow::array::Date32Array>().unwrap();
+        let first_list_date = first_list
+            .as_any()
+            .downcast_ref::<arrow::array::Date32Array>()
+            .unwrap();
         assert_eq!(first_list_date.len(), 2);
-        assert_eq!(first_list_date.value(0), date1.signed_duration_since(UNIX_EPOCH).num_days() as i32);
-        assert_eq!(first_list_date.value(1), date2.signed_duration_since(UNIX_EPOCH).num_days() as i32);
+        assert_eq!(
+            first_list_date.value(0),
+            date1.signed_duration_since(UNIX_EPOCH).num_days() as i32
+        );
+        assert_eq!(
+            first_list_date.value(1),
+            date2.signed_duration_since(UNIX_EPOCH).num_days() as i32
+        );
 
         // Second row: [epoch, null]
         assert!(!list_array.is_null(1));
         let second_list = list_array.value(1);
-        let second_list_date = second_list.as_any().downcast_ref::<arrow::array::Date32Array>().unwrap();
+        let second_list_date = second_list
+            .as_any()
+            .downcast_ref::<arrow::array::Date32Array>()
+            .unwrap();
         assert_eq!(second_list_date.len(), 2);
         assert_eq!(second_list_date.value(0), 0);
         assert!(second_list_date.is_null(1));
@@ -1669,7 +1891,7 @@ mod tests {
         use chrono::NaiveTime;
         let time1 = NaiveTime::from_hms_opt(12, 30, 45).unwrap();
         let time2 = NaiveTime::from_hms_opt(23, 59, 59).unwrap();
-        
+
         let rows = vec![
             TableRow {
                 values: vec![Cell::Array(ArrayCell::Time(vec![Some(time1), Some(time2)]))],
@@ -1687,15 +1909,33 @@ mod tests {
         // First row: [time1, time2]
         assert!(!list_array.is_null(0));
         let first_list = list_array.value(0);
-        let first_list_time = first_list.as_any().downcast_ref::<arrow::array::Time64MicrosecondArray>().unwrap();
+        let first_list_time = first_list
+            .as_any()
+            .downcast_ref::<arrow::array::Time64MicrosecondArray>()
+            .unwrap();
         assert_eq!(first_list_time.len(), 2);
-        assert_eq!(first_list_time.value(0), time1.signed_duration_since(MIDNIGHT).num_microseconds().unwrap());
-        assert_eq!(first_list_time.value(1), time2.signed_duration_since(MIDNIGHT).num_microseconds().unwrap());
+        assert_eq!(
+            first_list_time.value(0),
+            time1
+                .signed_duration_since(MIDNIGHT)
+                .num_microseconds()
+                .unwrap()
+        );
+        assert_eq!(
+            first_list_time.value(1),
+            time2
+                .signed_duration_since(MIDNIGHT)
+                .num_microseconds()
+                .unwrap()
+        );
 
         // Second row: [midnight, null]
         assert!(!list_array.is_null(1));
         let second_list = list_array.value(1);
-        let second_list_time = second_list.as_any().downcast_ref::<arrow::array::Time64MicrosecondArray>().unwrap();
+        let second_list_time = second_list
+            .as_any()
+            .downcast_ref::<arrow::array::Time64MicrosecondArray>()
+            .unwrap();
         assert_eq!(second_list_time.len(), 2);
         assert_eq!(second_list_time.value(0), 0);
         assert!(second_list_time.is_null(1));
@@ -1706,17 +1946,21 @@ mod tests {
         use chrono::DateTime;
         let ts1 = DateTime::from_timestamp(1000000000, 0).unwrap().naive_utc();
         let ts2 = DateTime::from_timestamp(1500000000, 0).unwrap().naive_utc();
-        
+
         let rows = vec![
             TableRow {
-                values: vec![Cell::Array(ArrayCell::Timestamp(vec![Some(ts1), Some(ts2)]))],
+                values: vec![Cell::Array(ArrayCell::Timestamp(vec![
+                    Some(ts1),
+                    Some(ts2),
+                ]))],
             },
             TableRow {
                 values: vec![Cell::Array(ArrayCell::Timestamp(vec![None]))],
             },
         ];
 
-        let array_ref = build_list_array(&rows, 0, &DataType::Timestamp(TimeUnit::Microsecond, None));
+        let array_ref =
+            build_list_array(&rows, 0, &DataType::Timestamp(TimeUnit::Microsecond, None));
         let list_array = array_ref.as_any().downcast_ref::<ListArray>().unwrap();
 
         assert_eq!(list_array.len(), 2);
@@ -1724,7 +1968,10 @@ mod tests {
         // First row: [ts1, ts2]
         assert!(!list_array.is_null(0));
         let first_list = list_array.value(0);
-        let first_list_ts = first_list.as_any().downcast_ref::<arrow::array::TimestampMicrosecondArray>().unwrap();
+        let first_list_ts = first_list
+            .as_any()
+            .downcast_ref::<arrow::array::TimestampMicrosecondArray>()
+            .unwrap();
         assert_eq!(first_list_ts.len(), 2);
         assert_eq!(first_list_ts.value(0), ts1.and_utc().timestamp_micros());
         assert_eq!(first_list_ts.value(1), ts2.and_utc().timestamp_micros());
@@ -1732,7 +1979,10 @@ mod tests {
         // Second row: [null]
         assert!(!list_array.is_null(1));
         let second_list = list_array.value(1);
-        let second_list_ts = second_list.as_any().downcast_ref::<arrow::array::TimestampMicrosecondArray>().unwrap();
+        let second_list_ts = second_list
+            .as_any()
+            .downcast_ref::<arrow::array::TimestampMicrosecondArray>()
+            .unwrap();
         assert_eq!(second_list_ts.len(), 1);
         assert!(second_list_ts.is_null(0));
     }
@@ -1742,11 +1992,19 @@ mod tests {
         let rows = vec![
             // Test i16 to i32 conversion
             TableRow {
-                values: vec![Cell::Array(ArrayCell::I16(vec![Some(42), Some(-100), None]))],
+                values: vec![Cell::Array(ArrayCell::I16(vec![
+                    Some(42),
+                    Some(-100),
+                    None,
+                ]))],
             },
             // Test u32 to i32 conversion
             TableRow {
-                values: vec![Cell::Array(ArrayCell::U32(vec![Some(123), Some(u32::MAX), None]))],
+                values: vec![Cell::Array(ArrayCell::U32(vec![
+                    Some(123),
+                    Some(u32::MAX),
+                    None,
+                ]))],
             },
             // Test mixed with direct i32
             TableRow {
@@ -1761,7 +2019,10 @@ mod tests {
 
         // First row: i16 to i32 [42, -100, null]
         let first_list = list_array.value(0);
-        let first_list_i32 = first_list.as_any().downcast_ref::<arrow::array::Int32Array>().unwrap();
+        let first_list_i32 = first_list
+            .as_any()
+            .downcast_ref::<arrow::array::Int32Array>()
+            .unwrap();
         assert_eq!(first_list_i32.len(), 3);
         assert_eq!(first_list_i32.value(0), 42);
         assert_eq!(first_list_i32.value(1), -100);
@@ -1769,7 +2030,10 @@ mod tests {
 
         // Second row: u32 to i32 [123, -1 (overflow), null]
         let second_list = list_array.value(1);
-        let second_list_i32 = second_list.as_any().downcast_ref::<arrow::array::Int32Array>().unwrap();
+        let second_list_i32 = second_list
+            .as_any()
+            .downcast_ref::<arrow::array::Int32Array>()
+            .unwrap();
         assert_eq!(second_list_i32.len(), 3);
         assert_eq!(second_list_i32.value(0), 123);
         assert_eq!(second_list_i32.value(1), -1); // u32::MAX as i32
@@ -1777,7 +2041,10 @@ mod tests {
 
         // Third row: direct i32 [999]
         let third_list = list_array.value(2);
-        let third_list_i32 = third_list.as_any().downcast_ref::<arrow::array::Int32Array>().unwrap();
+        let third_list_i32 = third_list
+            .as_any()
+            .downcast_ref::<arrow::array::Int32Array>()
+            .unwrap();
         assert_eq!(third_list_i32.len(), 1);
         assert_eq!(third_list_i32.value(0), 999);
     }
@@ -1785,45 +2052,54 @@ mod tests {
     #[test]
     fn test_list_array_fallback_to_string() {
         // Test boolean array fallback in i32 context
-        let boolean_rows = vec![
-            TableRow {
-                values: vec![Cell::Array(ArrayCell::Bool(vec![Some(true), Some(false)]))],
-            },
-        ];
+        let boolean_rows = vec![TableRow {
+            values: vec![Cell::Array(ArrayCell::Bool(vec![Some(true), Some(false)]))],
+        }];
 
         let array_ref = build_list_array(&boolean_rows, 0, &DataType::Int32);
         let list_array = array_ref.as_any().downcast_ref::<ListArray>().unwrap();
-        
+
         // Should fall back to string representation
-        let string_array = list_array.values().as_any().downcast_ref::<arrow::array::StringArray>().unwrap();
+        let string_array = list_array
+            .values()
+            .as_any()
+            .downcast_ref::<arrow::array::StringArray>()
+            .unwrap();
         assert!(string_array.len() > 0);
 
         // Test f64 array fallback in i32 context
-        let f64_rows = vec![
-            TableRow {
-                values: vec![Cell::Array(ArrayCell::F64(vec![Some(1.23), Some(4.56)]))],
-            },
-        ];
+        let f64_rows = vec![TableRow {
+            values: vec![Cell::Array(ArrayCell::F64(vec![Some(1.23), Some(4.56)]))],
+        }];
 
         let array_ref = build_list_array(&f64_rows, 0, &DataType::Int32);
         let list_array = array_ref.as_any().downcast_ref::<ListArray>().unwrap();
-        
+
         // Should fall back to string representation
-        let string_array = list_array.values().as_any().downcast_ref::<arrow::array::StringArray>().unwrap();
+        let string_array = list_array
+            .values()
+            .as_any()
+            .downcast_ref::<arrow::array::StringArray>()
+            .unwrap();
         assert!(string_array.len() > 0);
 
         // Test string array fallback in boolean context
-        let string_rows = vec![
-            TableRow {
-                values: vec![Cell::Array(ArrayCell::String(vec![Some("hello".to_string()), Some("world".to_string())]))],
-            },
-        ];
+        let string_rows = vec![TableRow {
+            values: vec![Cell::Array(ArrayCell::String(vec![
+                Some("hello".to_string()),
+                Some("world".to_string()),
+            ]))],
+        }];
 
         let array_ref = build_list_array(&string_rows, 0, &DataType::Boolean);
         let list_array = array_ref.as_any().downcast_ref::<ListArray>().unwrap();
-        
+
         // Should fall back to string representation
-        let string_array = list_array.values().as_any().downcast_ref::<arrow::array::StringArray>().unwrap();
+        let string_array = list_array
+            .values()
+            .as_any()
+            .downcast_ref::<arrow::array::StringArray>()
+            .unwrap();
         assert!(string_array.len() > 0);
     }
 
@@ -1852,7 +2128,10 @@ mod tests {
         // First row: valid array [1, 2]
         assert!(!list_array.is_null(0));
         let first_list = list_array.value(0);
-        let first_list_i32 = first_list.as_any().downcast_ref::<arrow::array::Int32Array>().unwrap();
+        let first_list_i32 = first_list
+            .as_any()
+            .downcast_ref::<arrow::array::Int32Array>()
+            .unwrap();
         assert_eq!(first_list_i32.len(), 2);
 
         // Second row: non-array cell becomes null
@@ -1890,7 +2169,10 @@ mod tests {
         // Second row: valid array [42]
         assert!(!list_array.is_null(1));
         let second_list = list_array.value(1);
-        let second_list_i32 = second_list.as_any().downcast_ref::<arrow::array::Int32Array>().unwrap();
+        let second_list_i32 = second_list
+            .as_any()
+            .downcast_ref::<arrow::array::Int32Array>()
+            .unwrap();
         assert_eq!(second_list_i32.len(), 1);
         assert_eq!(second_list_i32.value(0), 42);
 
@@ -1900,112 +2182,121 @@ mod tests {
 
     #[test]
     fn test_append_array_cell_as_strings_comprehensive() {
-        use chrono::{NaiveDate, NaiveTime, DateTime};
+        use chrono::{DateTime, NaiveDate, NaiveTime};
         use uuid::Uuid;
-        
+
         // Test that the append function works with all ArrayCell variants
         // by creating a complete list array and verifying the final results
-        
+
         let mut list_builder = ListBuilder::new(StringBuilder::new());
-        
+
         // Test different array cell types by building complete arrays
         // and checking that they can be processed without panicking
-        
+
         // Boolean array
         let bool_array = ArrayCell::Bool(vec![Some(true), Some(false), None]);
         append_array_cell_as_strings(&mut list_builder, &bool_array);
         list_builder.append(true);
-        
+
         // Integer arrays
         let i16_array = ArrayCell::I16(vec![Some(42), None]);
         append_array_cell_as_strings(&mut list_builder, &i16_array);
         list_builder.append(true);
-        
+
         let i32_array = ArrayCell::I32(vec![Some(123)]);
         append_array_cell_as_strings(&mut list_builder, &i32_array);
         list_builder.append(true);
-        
+
         let i64_array = ArrayCell::I64(vec![Some(1234567890)]);
         append_array_cell_as_strings(&mut list_builder, &i64_array);
         list_builder.append(true);
-        
+
         let u32_array = ArrayCell::U32(vec![Some(789)]);
         append_array_cell_as_strings(&mut list_builder, &u32_array);
         list_builder.append(true);
-        
+
         // Float arrays
         let f32_array = ArrayCell::F32(vec![Some(1.5)]);
         append_array_cell_as_strings(&mut list_builder, &f32_array);
         list_builder.append(true);
-        
+
         let f64_array = ArrayCell::F64(vec![Some(2.5)]);
         append_array_cell_as_strings(&mut list_builder, &f64_array);
         list_builder.append(true);
-        
+
         // String array
         let string_array = ArrayCell::String(vec![Some("hello".to_string())]);
         append_array_cell_as_strings(&mut list_builder, &string_array);
         list_builder.append(true);
-        
+
         // Temporal arrays
         let date_array = ArrayCell::Date(vec![Some(NaiveDate::from_ymd_opt(2023, 5, 15).unwrap())]);
         append_array_cell_as_strings(&mut list_builder, &date_array);
         list_builder.append(true);
-        
+
         let time_array = ArrayCell::Time(vec![Some(NaiveTime::from_hms_opt(12, 30, 45).unwrap())]);
         append_array_cell_as_strings(&mut list_builder, &time_array);
         list_builder.append(true);
-        
-        let ts_array = ArrayCell::Timestamp(vec![Some(DateTime::from_timestamp(1000000000, 0).unwrap().naive_utc())]);
+
+        let ts_array = ArrayCell::Timestamp(vec![Some(
+            DateTime::from_timestamp(1000000000, 0).unwrap().naive_utc(),
+        )]);
         append_array_cell_as_strings(&mut list_builder, &ts_array);
         list_builder.append(true);
-        
-        let ts_tz_array = ArrayCell::TimestampTz(vec![Some(DateTime::from_timestamp(1000000000, 0).unwrap())]);
+
+        let ts_tz_array =
+            ArrayCell::TimestampTz(vec![Some(DateTime::from_timestamp(1000000000, 0).unwrap())]);
         append_array_cell_as_strings(&mut list_builder, &ts_tz_array);
         list_builder.append(true);
-        
+
         // Other types
         let uuid_array = ArrayCell::Uuid(vec![Some(Uuid::new_v4())]);
         append_array_cell_as_strings(&mut list_builder, &uuid_array);
         list_builder.append(true);
-        
+
         let json_array = ArrayCell::Json(vec![Some(serde_json::json!({"key": "value"}))]);
         append_array_cell_as_strings(&mut list_builder, &json_array);
         list_builder.append(true);
-        
+
         let bytes_array = ArrayCell::Bytes(vec![Some(vec![72, 101, 108, 108, 111])]);
         append_array_cell_as_strings(&mut list_builder, &bytes_array);
         list_builder.append(true);
-        
+
         // Null array (should not add anything)
         let null_array = ArrayCell::Null;
         append_array_cell_as_strings(&mut list_builder, &null_array);
         list_builder.append(true);
-        
+
         // Build the final array
         let list_array = list_builder.finish();
-        
+
         // We should have one list entry for each append(true) call
         assert_eq!(list_array.len(), 16);
-        
+
         // Verify that we can access the string values in the first list (boolean)
         let first_list = list_array.value(0);
-        let string_values = first_list.as_any().downcast_ref::<arrow::array::StringArray>().unwrap();
+        let string_values = first_list
+            .as_any()
+            .downcast_ref::<arrow::array::StringArray>()
+            .unwrap();
         assert_eq!(string_values.len(), 3);
         assert_eq!(string_values.value(0), "true");
         assert_eq!(string_values.value(1), "false");
         assert!(string_values.is_null(2));
-        
+
         // Verify the null array case (last one) is empty
         let null_list = list_array.value(15);
-        let null_string_values = null_list.as_any().downcast_ref::<arrow::array::StringArray>().unwrap();
+        let null_string_values = null_list
+            .as_any()
+            .downcast_ref::<arrow::array::StringArray>()
+            .unwrap();
         assert_eq!(null_string_values.len(), 0);
     }
 
     #[test]
     fn test_rows_to_record_batch_simple() {
         use arrow::datatypes::{Field, Schema};
-        
+
         let rows = vec![
             TableRow {
                 values: vec![
@@ -2030,20 +2321,32 @@ mod tests {
         ]);
 
         let batch = rows_to_record_batch(&rows, schema).unwrap();
-        
+
         assert_eq!(batch.num_rows(), 2);
         assert_eq!(batch.num_columns(), 3);
-        
+
         // Verify column values
-        let id_array = batch.column(0).as_any().downcast_ref::<arrow::array::Int32Array>().unwrap();
+        let id_array = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<arrow::array::Int32Array>()
+            .unwrap();
         assert_eq!(id_array.value(0), 42);
         assert_eq!(id_array.value(1), 100);
-        
-        let name_array = batch.column(1).as_any().downcast_ref::<arrow::array::StringArray>().unwrap();
+
+        let name_array = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<arrow::array::StringArray>()
+            .unwrap();
         assert_eq!(name_array.value(0), "hello");
         assert_eq!(name_array.value(1), "world");
-        
-        let active_array = batch.column(2).as_any().downcast_ref::<arrow::array::BooleanArray>().unwrap();
+
+        let active_array = batch
+            .column(2)
+            .as_any()
+            .downcast_ref::<arrow::array::BooleanArray>()
+            .unwrap();
         assert!(active_array.value(0));
         assert!(!active_array.value(1));
     }
@@ -2051,19 +2354,13 @@ mod tests {
     #[test]
     fn test_rows_to_record_batch_with_nulls() {
         use arrow::datatypes::{Field, Schema};
-        
+
         let rows = vec![
             TableRow {
-                values: vec![
-                    Cell::I32(42),
-                    Cell::Null,
-                ],
+                values: vec![Cell::I32(42), Cell::Null],
             },
             TableRow {
-                values: vec![
-                    Cell::Null,
-                    Cell::String("test".to_string()),
-                ],
+                values: vec![Cell::Null, Cell::String("test".to_string())],
             },
         ];
 
@@ -2073,15 +2370,23 @@ mod tests {
         ]);
 
         let batch = rows_to_record_batch(&rows, schema).unwrap();
-        
+
         assert_eq!(batch.num_rows(), 2);
         assert_eq!(batch.num_columns(), 2);
-        
-        let id_array = batch.column(0).as_any().downcast_ref::<arrow::array::Int32Array>().unwrap();
+
+        let id_array = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<arrow::array::Int32Array>()
+            .unwrap();
         assert_eq!(id_array.value(0), 42);
         assert!(id_array.is_null(1));
-        
-        let name_array = batch.column(1).as_any().downcast_ref::<arrow::array::StringArray>().unwrap();
+
+        let name_array = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<arrow::array::StringArray>()
+            .unwrap();
         assert!(name_array.is_null(0));
         assert_eq!(name_array.value(1), "test");
     }
@@ -2089,59 +2394,93 @@ mod tests {
     #[test]
     fn test_rows_to_record_batch_temporal_types() {
         use arrow::datatypes::{Field, Schema};
-        use chrono::{NaiveDate, NaiveTime, DateTime};
-        
+        use chrono::{DateTime, NaiveDate, NaiveTime};
+
         let test_date = NaiveDate::from_ymd_opt(2023, 5, 15).unwrap();
         let test_time = NaiveTime::from_hms_opt(12, 30, 45).unwrap();
         let test_ts = DateTime::from_timestamp(1000000000, 0).unwrap().naive_utc();
         let test_ts_tz = DateTime::from_timestamp(1000000000, 0).unwrap();
-        
-        let rows = vec![
-            TableRow {
-                values: vec![
-                    Cell::Date(test_date),
-                    Cell::Time(test_time),
-                    Cell::Timestamp(test_ts),
-                    Cell::TimestampTz(test_ts_tz),
-                ],
-            },
-        ];
+
+        let rows = vec![TableRow {
+            values: vec![
+                Cell::Date(test_date),
+                Cell::Time(test_time),
+                Cell::Timestamp(test_ts),
+                Cell::TimestampTz(test_ts_tz),
+            ],
+        }];
 
         let schema = Schema::new(vec![
             Field::new("date_col", DataType::Date32, false),
             Field::new("time_col", DataType::Time64(TimeUnit::Microsecond), false),
-            Field::new("ts_col", DataType::Timestamp(TimeUnit::Microsecond, None), false),
-            Field::new("ts_tz_col", DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())), false),
+            Field::new(
+                "ts_col",
+                DataType::Timestamp(TimeUnit::Microsecond, None),
+                false,
+            ),
+            Field::new(
+                "ts_tz_col",
+                DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
+                false,
+            ),
         ]);
 
         let batch = rows_to_record_batch(&rows, schema).unwrap();
-        
+
         assert_eq!(batch.num_rows(), 1);
         assert_eq!(batch.num_columns(), 4);
-        
-        let date_array = batch.column(0).as_any().downcast_ref::<arrow::array::Date32Array>().unwrap();
-        assert_eq!(date_array.value(0), test_date.signed_duration_since(UNIX_EPOCH).num_days() as i32);
-        
-        let time_array = batch.column(1).as_any().downcast_ref::<arrow::array::Time64MicrosecondArray>().unwrap();
-        assert_eq!(time_array.value(0), test_time.signed_duration_since(MIDNIGHT).num_microseconds().unwrap());
-        
-        let ts_array = batch.column(2).as_any().downcast_ref::<arrow::array::TimestampMicrosecondArray>().unwrap();
+
+        let date_array = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<arrow::array::Date32Array>()
+            .unwrap();
+        assert_eq!(
+            date_array.value(0),
+            test_date.signed_duration_since(UNIX_EPOCH).num_days() as i32
+        );
+
+        let time_array = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<arrow::array::Time64MicrosecondArray>()
+            .unwrap();
+        assert_eq!(
+            time_array.value(0),
+            test_time
+                .signed_duration_since(MIDNIGHT)
+                .num_microseconds()
+                .unwrap()
+        );
+
+        let ts_array = batch
+            .column(2)
+            .as_any()
+            .downcast_ref::<arrow::array::TimestampMicrosecondArray>()
+            .unwrap();
         assert_eq!(ts_array.value(0), test_ts.and_utc().timestamp_micros());
-        
-        let ts_tz_array = batch.column(3).as_any().downcast_ref::<arrow::array::TimestampMicrosecondArray>().unwrap();
+
+        let ts_tz_array = batch
+            .column(3)
+            .as_any()
+            .downcast_ref::<arrow::array::TimestampMicrosecondArray>()
+            .unwrap();
         assert_eq!(ts_tz_array.value(0), test_ts_tz.timestamp_micros());
     }
 
     #[test]
     fn test_rows_to_record_batch_with_lists() {
         use arrow::datatypes::{Field, Schema};
-        
+
         let rows = vec![
             TableRow {
                 values: vec![
                     Cell::I32(1),
                     Cell::Array(ArrayCell::I32(vec![Some(10), Some(20), None])),
-                    Cell::Array(ArrayCell::String(vec![Some("a".to_string()), Some("b".to_string())])),
+                    Cell::Array(ArrayCell::String(vec![
+                        Some("a".to_string()),
+                        Some("b".to_string()),
+                    ])),
                 ],
             },
             TableRow {
@@ -2155,44 +2494,69 @@ mod tests {
 
         let schema = Schema::new(vec![
             Field::new("id", DataType::Int32, false),
-            Field::new("numbers", DataType::List(Arc::new(Field::new("item", DataType::Int32, true))), true),
-            Field::new("strings", DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))), true),
+            Field::new(
+                "numbers",
+                DataType::List(Arc::new(Field::new("item", DataType::Int32, true))),
+                true,
+            ),
+            Field::new(
+                "strings",
+                DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
+                true,
+            ),
         ]);
 
         let batch = rows_to_record_batch(&rows, schema).unwrap();
-        
+
         assert_eq!(batch.num_rows(), 2);
         assert_eq!(batch.num_columns(), 3);
-        
+
         // Verify the list arrays
-        let numbers_list = batch.column(1).as_any().downcast_ref::<ListArray>().unwrap();
+        let numbers_list = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<ListArray>()
+            .unwrap();
         assert_eq!(numbers_list.len(), 2);
-        
+
         // First row list: [10, 20, null]
         let first_numbers = numbers_list.value(0);
-        let first_numbers_i32 = first_numbers.as_any().downcast_ref::<arrow::array::Int32Array>().unwrap();
+        let first_numbers_i32 = first_numbers
+            .as_any()
+            .downcast_ref::<arrow::array::Int32Array>()
+            .unwrap();
         assert_eq!(first_numbers_i32.len(), 3);
         assert_eq!(first_numbers_i32.value(0), 10);
         assert_eq!(first_numbers_i32.value(1), 20);
         assert!(first_numbers_i32.is_null(2));
-        
+
         // Second row list: [30]
         let second_numbers = numbers_list.value(1);
-        let second_numbers_i32 = second_numbers.as_any().downcast_ref::<arrow::array::Int32Array>().unwrap();
+        let second_numbers_i32 = second_numbers
+            .as_any()
+            .downcast_ref::<arrow::array::Int32Array>()
+            .unwrap();
         assert_eq!(second_numbers_i32.len(), 1);
         assert_eq!(second_numbers_i32.value(0), 30);
-        
+
         // String list
-        let strings_list = batch.column(2).as_any().downcast_ref::<ListArray>().unwrap();
+        let strings_list = batch
+            .column(2)
+            .as_any()
+            .downcast_ref::<ListArray>()
+            .unwrap();
         assert_eq!(strings_list.len(), 2);
-        
+
         // First row strings: ["a", "b"]
         let first_strings = strings_list.value(0);
-        let first_strings_str = first_strings.as_any().downcast_ref::<arrow::array::StringArray>().unwrap();
+        let first_strings_str = first_strings
+            .as_any()
+            .downcast_ref::<arrow::array::StringArray>()
+            .unwrap();
         assert_eq!(first_strings_str.len(), 2);
         assert_eq!(first_strings_str.value(0), "a");
         assert_eq!(first_strings_str.value(1), "b");
-        
+
         // Second row strings: null list
         assert!(strings_list.is_null(1));
     }
@@ -2201,18 +2565,13 @@ mod tests {
     fn test_rows_to_record_batch_binary_and_uuid() {
         use arrow::datatypes::{Field, Schema};
         use uuid::Uuid;
-        
+
         let test_bytes = vec![1, 2, 3, 4, 5];
         let test_uuid = Uuid::new_v4();
-        
-        let rows = vec![
-            TableRow {
-                values: vec![
-                    Cell::Bytes(test_bytes.clone()),
-                    Cell::Uuid(test_uuid),
-                ],
-            },
-        ];
+
+        let rows = vec![TableRow {
+            values: vec![Cell::Bytes(test_bytes.clone()), Cell::Uuid(test_uuid)],
+        }];
 
         let schema = Schema::new(vec![
             Field::new("data", DataType::LargeBinary, false),
@@ -2220,21 +2579,29 @@ mod tests {
         ]);
 
         let batch = rows_to_record_batch(&rows, schema).unwrap();
-        
+
         assert_eq!(batch.num_rows(), 1);
         assert_eq!(batch.num_columns(), 2);
-        
-        let bytes_array = batch.column(0).as_any().downcast_ref::<arrow::array::LargeBinaryArray>().unwrap();
+
+        let bytes_array = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<arrow::array::LargeBinaryArray>()
+            .unwrap();
         assert_eq!(bytes_array.value(0), test_bytes);
-        
-        let uuid_array = batch.column(1).as_any().downcast_ref::<arrow::array::FixedSizeBinaryArray>().unwrap();
+
+        let uuid_array = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<arrow::array::FixedSizeBinaryArray>()
+            .unwrap();
         assert_eq!(uuid_array.value(0), test_uuid.as_bytes());
     }
 
     #[test]
     fn test_rows_to_record_batch_empty() {
         use arrow::datatypes::{Field, Schema};
-        
+
         let rows: Vec<TableRow> = vec![];
         let schema = Schema::new(vec![
             Field::new("id", DataType::Int32, false),
@@ -2242,7 +2609,7 @@ mod tests {
         ]);
 
         let batch = rows_to_record_batch(&rows, schema).unwrap();
-        
+
         assert_eq!(batch.num_rows(), 0);
         assert_eq!(batch.num_columns(), 2);
     }
@@ -2250,7 +2617,7 @@ mod tests {
     #[test]
     fn test_rows_to_record_batch_unsupported_fallback() {
         use arrow::datatypes::{Field, Schema};
-        
+
         // Test with a data type that doesn't have a direct converter
         // This will test the fallback to string conversion behavior
         let rows = vec![
@@ -2261,10 +2628,7 @@ mod tests {
                 ],
             },
             TableRow {
-                values: vec![
-                    Cell::I32(100),
-                    Cell::Null,
-                ],
+                values: vec![Cell::I32(100), Cell::Null],
             },
         ];
 
@@ -2276,15 +2640,23 @@ mod tests {
         ]);
 
         let batch = rows_to_record_batch(&rows, schema).unwrap();
-        
+
         assert_eq!(batch.num_rows(), 2);
         assert_eq!(batch.num_columns(), 2);
-        
-        let id_array = batch.column(0).as_any().downcast_ref::<arrow::array::Int32Array>().unwrap();
+
+        let id_array = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<arrow::array::Int32Array>()
+            .unwrap();
         assert_eq!(id_array.value(0), 42);
         assert_eq!(id_array.value(1), 100);
-        
-        let metadata_array = batch.column(1).as_any().downcast_ref::<arrow::array::StringArray>().unwrap();
+
+        let metadata_array = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<arrow::array::StringArray>()
+            .unwrap();
         // JSON should be converted to string representation
         assert_eq!(metadata_array.value(0), r#"{"key":"value","number":123}"#);
         assert!(metadata_array.is_null(1));
@@ -2293,17 +2665,15 @@ mod tests {
     #[test]
     fn test_rows_to_record_batch_type_mismatches() {
         use arrow::datatypes::{Field, Schema};
-        
+
         // Test various type conversions that should work
-        let rows = vec![
-            TableRow {
-                values: vec![
-                    Cell::I32(123),                  // Int32 in Int32 field (direct match)
-                    Cell::Bool(true),                // Bool in String field (conversion)
-                    Cell::F64(456.78),               // F64 in Float64 field (direct match)
-                ],
-            },
-        ];
+        let rows = vec![TableRow {
+            values: vec![
+                Cell::I32(123),    // Int32 in Int32 field (direct match)
+                Cell::Bool(true),  // Bool in String field (conversion)
+                Cell::F64(456.78), // F64 in Float64 field (direct match)
+            ],
+        }];
 
         let schema = Schema::new(vec![
             Field::new("number", DataType::Int32, false),
@@ -2312,33 +2682,40 @@ mod tests {
         ]);
 
         let batch = rows_to_record_batch(&rows, schema).unwrap();
-        
+
         assert_eq!(batch.num_rows(), 1);
         assert_eq!(batch.num_columns(), 3);
-        
-        let number_array = batch.column(0).as_any().downcast_ref::<arrow::array::Int32Array>().unwrap();
+
+        let number_array = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<arrow::array::Int32Array>()
+            .unwrap();
         assert_eq!(number_array.value(0), 123);
-        
-        let string_array = batch.column(1).as_any().downcast_ref::<arrow::array::StringArray>().unwrap();
+
+        let string_array = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<arrow::array::StringArray>()
+            .unwrap();
         assert_eq!(string_array.value(0), "true"); // Bool true converted to string
-        
-        let float_array = batch.column(2).as_any().downcast_ref::<arrow::array::Float64Array>().unwrap();
+
+        let float_array = batch
+            .column(2)
+            .as_any()
+            .downcast_ref::<arrow::array::Float64Array>()
+            .unwrap();
         assert_eq!(float_array.value(0), 456.78); // F64 in Float64 field
     }
 
     #[test]
     fn test_rows_to_record_batch_unsupported_schema_types() {
         use arrow::datatypes::{Field, Schema};
-        
+
         // Test with schema types that might not be directly supported
-        let rows = vec![
-            TableRow {
-                values: vec![
-                    Cell::I32(1),
-                    Cell::String("test".to_string()),
-                ],
-            },
-        ];
+        let rows = vec![TableRow {
+            values: vec![Cell::I32(1), Cell::String("test".to_string())],
+        }];
 
         // Use schema with more exotic Arrow types
         let schema = Schema::new(vec![
@@ -2348,30 +2725,34 @@ mod tests {
 
         // This should return an error for unsupported types rather than panicking
         let result = rows_to_record_batch(&rows, schema);
-        
+
         // For unsupported schema types, the function should return an error
-        assert!(result.is_err(), "Expected error for unsupported schema types");
-        
+        assert!(
+            result.is_err(),
+            "Expected error for unsupported schema types"
+        );
+
         // Verify the error message indicates type mismatch
         let error = result.unwrap_err();
-        assert!(error.to_string().contains("column types must match"), 
-               "Expected column type mismatch error, got: {}", error);
+        assert!(
+            error.to_string().contains("column types must match"),
+            "Expected column type mismatch error, got: {}",
+            error
+        );
     }
 
     #[test]
     fn test_rows_to_record_batch_schema_mismatch_length() {
         use arrow::datatypes::{Field, Schema};
-        
+
         // Test what happens when row has different number of columns than schema
-        let rows = vec![
-            TableRow {
-                values: vec![
-                    Cell::I32(1),
-                    Cell::String("test".to_string()),
-                    Cell::Bool(true), // Extra column not in schema
-                ],
-            },
-        ];
+        let rows = vec![TableRow {
+            values: vec![
+                Cell::I32(1),
+                Cell::String("test".to_string()),
+                Cell::Bool(true), // Extra column not in schema
+            ],
+        }];
 
         let schema = Schema::new(vec![
             Field::new("id", DataType::Int32, false),
@@ -2381,17 +2762,17 @@ mod tests {
 
         // This should either handle gracefully or return an error
         let result = rows_to_record_batch(&rows, schema);
-        
+
         // The function should handle this case - either by succeeding with partial data
         // or by returning an appropriate error
         match result {
             Ok(batch) => {
                 assert_eq!(batch.num_rows(), 1);
                 assert_eq!(batch.num_columns(), 2); // Only schema columns
-            },
+            }
             Err(_) => {
                 // Error is also acceptable for schema mismatch
-            },
+            }
         }
     }
 }
