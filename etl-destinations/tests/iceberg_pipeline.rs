@@ -440,7 +440,7 @@ async fn insert_table_rows() {
         .await
         .unwrap();
 
-    let table_rows = vec![TableRow {
+    let mut table_rows = vec![TableRow {
         values: vec![
             Cell::I32(42),                                              // id
             Cell::Bool(true),                                           // bool_col
@@ -449,7 +449,7 @@ async fn insert_table_rows() {
             Cell::String("variable".to_string()),                       // varchar_col
             Cell::String("name_value".to_string()),                     // name_col
             Cell::String("test string".to_string()),                    // text_col
-            Cell::I32(123), // int2_col (maps to Int in Iceberg, comes back as I32)
+            Cell::I16(123), // int2_col (maps to Int in Iceberg, comes back as I32) TODO:fix this
             Cell::I32(456), // int4_col
             Cell::I64(9876543210), // int8_col
             Cell::F32(std::f32::consts::PI), // float4_col
@@ -471,7 +471,7 @@ async fn insert_table_rows() {
             Cell::Uuid(Uuid::new_v4()),
             Cell::String(r#"{"key": "value"}"#.to_string()), // json_col (maps to String in Iceberg)
             Cell::String(r#"{"key": "value"}"#.to_string()), // jsonb_col (maps to String in Iceberg)
-            Cell::I32(12345),                                // oid_col (maps to Int in Iceberg)
+            Cell::U32(12345),                                // oid_col (maps to Int in Iceberg)
             Cell::Bytes(vec![0x48, 0x65, 0x6c, 0x6c, 0x6f]), // bytea_col (Hello in bytes)
         ],
     }];
@@ -479,6 +479,13 @@ async fn insert_table_rows() {
         .insert_rows(namespace.to_string(), table_name.clone(), &table_rows)
         .await
         .unwrap();
+
+    // Change the expected type due to roundtrip issues
+    // * Cell::I16 rountrips as Cell::I32, 
+    // * Cell::U32 rountrips as Cell::I32, 
+    let row = &mut table_rows[0];
+    row.values[7] = Cell::I32(123);
+    row.values[20] = Cell::I32(12345);
 
     let read_rows = client
         .read_all_rows(namespace.to_string(), table_name.clone())

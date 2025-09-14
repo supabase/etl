@@ -6,7 +6,7 @@ use arrow::{
         PrimitiveBuilder, RecordBatch, StringBuilder, TimestampMicrosecondBuilder,
     },
     datatypes::{
-        DataType, Date32Type, Float32Type, Float64Type, Int16Type, Int32Type, Int64Type, Schema,
+        DataType, Date32Type, Float32Type, Float64Type, Int32Type, Int64Type, Schema,
         Time64MicrosecondType, TimeUnit, TimestampMicrosecondType, UInt32Type,
     },
     error::ArrowError,
@@ -40,7 +40,7 @@ pub fn rows_to_record_batch(rows: &[TableRow], schema: Schema) -> Result<RecordB
 fn build_array_for_field(rows: &[TableRow], field_idx: usize, data_type: &DataType) -> ArrayRef {
     match data_type {
         DataType::Boolean => build_boolean_array(rows, field_idx),
-        DataType::Int16 => build_primitive_array::<Int16Type, _>(rows, field_idx, cell_to_i16),
+        // DataType::Int16 => build_primitive_array::<Int16Type, _>(rows, field_idx, cell_to_i16),
         DataType::Int32 => build_primitive_array::<Int32Type, _>(rows, field_idx, cell_to_i32),
         DataType::Int64 => build_primitive_array::<Int64Type, _>(rows, field_idx, cell_to_i64),
         DataType::UInt32 => build_primitive_array::<UInt32Type, _>(rows, field_idx, cell_to_u32),
@@ -149,14 +149,16 @@ impl_cell_converter!(
     Cell::Bool(v) => Some(*v)
 );
 
-impl_cell_converter!(
-    cell_to_i16, i16,
-    Cell::I16(v) => Some(*v)
-);
+// impl_cell_converter!(
+//     cell_to_i16, i16,
+//     Cell::I16(v) => Some(*v)
+// );
 
 impl_cell_converter!(
     cell_to_i32, i32,
-    Cell::I32(v) => Some(*v)
+    Cell::I16(v) => Some(*v as i32),
+    Cell::I32(v) => Some(*v),
+    Cell::U32(v) => Some(*v as i32)
 );
 
 impl_cell_converter!(
