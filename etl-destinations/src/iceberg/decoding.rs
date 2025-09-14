@@ -257,7 +257,7 @@ fn arrow_value_to_cell(array: &ArrayRef, row_idx: usize) -> EtlResult<Cell> {
         }
         _ => {
             // For unsupported types, convert to string representation
-            Ok(Cell::String(format!("{:?}", array)))
+            Ok(Cell::String(format!("{array:?}")))
         }
     }
 }
