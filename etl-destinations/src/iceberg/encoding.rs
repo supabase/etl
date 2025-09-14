@@ -15,7 +15,7 @@ use base64::{Engine, prelude::BASE64_STANDARD};
 use chrono::{NaiveDate, NaiveTime};
 use etl::types::{Cell, DATE_FORMAT, TIME_FORMAT, TIMESTAMP_FORMAT, TableRow};
 
-const UNIX_EPOCH: NaiveDate =
+pub(crate) const UNIX_EPOCH: NaiveDate =
     NaiveDate::from_ymd_opt(1970, 1, 1).expect("unix epoch is a valid date");
 
 const MIDNIGHT: NaiveTime = NaiveTime::from_hms_opt(0, 0, 0).expect("midnight is a valid time");

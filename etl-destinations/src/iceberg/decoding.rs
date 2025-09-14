@@ -8,6 +8,8 @@ use etl::{
     types::{Cell, TableRow},
 };
 
+use crate::iceberg::encoding::UNIX_EPOCH;
+
 /// Converts a RecordBatch back to a vector of TableRows.
 pub fn record_batch_to_table_rows(batch: &RecordBatch) -> EtlResult<Vec<TableRow>> {
     let mut rows = Vec::with_capacity(batch.num_rows());
@@ -171,16 +173,13 @@ fn arrow_value_to_cell(array: &ArrayRef, row_idx: usize) -> EtlResult<Cell> {
                     )
                 })?;
             let days = arr.value(row_idx);
-            // Convert days since Unix epoch (1970-01-01) to NaiveDate
-            let epoch = chrono::NaiveDate::from_ymd_opt(1970, 1, 1)
-                .ok_or_else(|| etl_error!(ErrorKind::DestinationError, "Invalid epoch date"))?;
 
             let date = if days >= 0 {
-                epoch
+                UNIX_EPOCH
                     .checked_add_days(chrono::Days::new(days as u64))
                     .ok_or_else(|| etl_error!(ErrorKind::DestinationError, "Invalid date value"))?
             } else {
-                epoch
+                UNIX_EPOCH
                     .checked_sub_days(chrono::Days::new((-days) as u64))
                     .ok_or_else(|| etl_error!(ErrorKind::DestinationError, "Invalid date value"))?
             };
@@ -255,9 +254,6 @@ fn arrow_value_to_cell(array: &ArrayRef, row_idx: usize) -> EtlResult<Cell> {
             let uuid = uuid::Uuid::from_bytes(uuid_bytes);
             Ok(Cell::Uuid(uuid))
         }
-        _ => {
-            // For unsupported types, convert to string representation
-            Ok(Cell::String(format!("{array:?}")))
-        }
+        _ => Ok(Cell::String(format!("{array:?}"))),
     }
 }
