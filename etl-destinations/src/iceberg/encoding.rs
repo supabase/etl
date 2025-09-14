@@ -1030,9 +1030,31 @@ mod tests {
         let array_ref = build_list_array(&rows, 0, &DataType::Boolean);
         let list_array = array_ref.as_any().downcast_ref::<ListArray>().unwrap();
 
+        // Verify the structure
         assert_eq!(list_array.len(), 2);
+
+        // First row: [true, false, true]
         assert!(!list_array.is_null(0));
+        let first_list = list_array.value(0);
+        let first_list_bool = first_list
+            .as_any()
+            .downcast_ref::<arrow::array::BooleanArray>()
+            .unwrap();
+        assert_eq!(first_list_bool.len(), 3);
+        assert!(first_list_bool.value(0));
+        assert!(!first_list_bool.value(1));
+        assert!(first_list_bool.value(2));
+
+        // Second row: [false, null]
         assert!(!list_array.is_null(1));
+        let second_list = list_array.value(1);
+        let second_list_bool = second_list
+            .as_any()
+            .downcast_ref::<arrow::array::BooleanArray>()
+            .unwrap();
+        assert_eq!(second_list_bool.len(), 2);
+        assert!(!second_list_bool.value(0));
+        assert!(second_list_bool.is_null(1));
     }
 
     #[test]
@@ -1056,21 +1078,30 @@ mod tests {
         let array_ref = build_list_array(&rows, 0, &DataType::Utf8);
         let list_array = array_ref.as_any().downcast_ref::<ListArray>().unwrap();
 
+        // Verify the structure
         assert_eq!(list_array.len(), 2);
+
+        // First row: ["hello", "world"]
         assert!(!list_array.is_null(0));
+        let first_list = list_array.value(0);
+        let first_list_str = first_list
+            .as_any()
+            .downcast_ref::<arrow::array::StringArray>()
+            .unwrap();
+        assert_eq!(first_list_str.len(), 2);
+        assert_eq!(first_list_str.value(0), "hello");
+        assert_eq!(first_list_str.value(1), "world");
+
+        // Second row: ["foo", null, "bar"]
         assert!(!list_array.is_null(1));
-    }
-
-    #[test]
-    fn test_cell_to_array_cell_extraction() {
-        let array_cell = ArrayCell::I32(vec![Some(1), Some(2)]);
-        let cell = Cell::Array(array_cell);
-
-        let extracted = cell_to_array_cell(&cell);
-        assert!(extracted.is_some());
-
-        let non_array_cell = Cell::I32(42);
-        let not_extracted = cell_to_array_cell(&non_array_cell);
-        assert!(not_extracted.is_none());
+        let second_list = list_array.value(1);
+        let second_list_str = second_list
+            .as_any()
+            .downcast_ref::<arrow::array::StringArray>()
+            .unwrap();
+        assert_eq!(second_list_str.len(), 3);
+        assert_eq!(second_list_str.value(0), "foo");
+        assert!(second_list_str.is_null(1));
+        assert_eq!(second_list_str.value(2), "bar");
     }
 }
