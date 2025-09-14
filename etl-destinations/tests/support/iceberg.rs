@@ -77,7 +77,7 @@ fn arrow_value_to_cell(array: &ArrayRef, row_idx: usize) -> Cell {
                     .unwrap()
             } else {
                 UNIX_EPOCH
-                    .checked_sub_days(chrono::Days::new((-days) as u64))
+                    .checked_sub_days(chrono::Days::new(-days as u64))
                     .unwrap()
             };
             Cell::Date(date)
@@ -104,14 +104,11 @@ fn arrow_value_to_cell(array: &ArrayRef, row_idx: usize) -> Cell {
 
             if tz.is_some() {
                 // Timezone-aware timestamp
-                let dt = chrono::DateTime::from_timestamp_micros(micros)
-                    .ok_or(Cell::Null)
-                    .unwrap();
+                let dt = chrono::DateTime::from_timestamp_micros(micros).unwrap();
                 Cell::TimestampTz(dt)
             } else {
                 // Naive timestamp
                 let dt = chrono::DateTime::from_timestamp_micros(micros)
-                    .ok_or(Cell::Null)
                     .unwrap()
                     .naive_utc();
                 Cell::Timestamp(dt)
@@ -122,12 +119,11 @@ fn arrow_value_to_cell(array: &ArrayRef, row_idx: usize) -> Cell {
                 .as_any()
                 .downcast_ref::<FixedSizeBinaryArray>()
                 .unwrap();
+
             let bytes = arr.value(row_idx);
-
-            // Convert 16-byte array to UUID
-            let uuid_bytes: [u8; 16] = bytes.try_into().map_err(|_| Cell::Null).unwrap();
-
+            let uuid_bytes: [u8; 16] = bytes.try_into().unwrap();
             let uuid = uuid::Uuid::from_bytes(uuid_bytes);
+
             Cell::Uuid(uuid)
         }
         _ => Cell::String(format!("{array:?}")),
