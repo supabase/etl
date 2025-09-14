@@ -10,7 +10,7 @@ use arrow::{
     error::ArrowError,
 };
 use base64::{Engine, prelude::BASE64_STANDARD};
-use etl::types::{Cell, TableRow};
+use etl::types::{Cell, DATE_FORMAT, TIME_FORMAT, TIMESTAMP_FORMAT, TableRow};
 
 /// Converts a slice of [`TableRow`]s to an arrow [`RecordBatch`]`.
 pub fn rows_to_record_batch(rows: &[TableRow], schema: Schema) -> Result<RecordBatch, ArrowError> {
@@ -147,9 +147,9 @@ pub fn cell_to_string(cell: &Cell) -> Option<String> {
         Cell::F32(f) => Some(f.to_string()),
         Cell::F64(f) => Some(f.to_string()),
         Cell::Numeric(n) => Some(n.to_string()),
-        Cell::Date(d) => Some(d.format("%Y-%m-%d").to_string()),
-        Cell::Time(t) => Some(t.format("%H:%M:%S%.6f").to_string()),
-        Cell::Timestamp(ts) => Some(ts.format("%Y-%m-%d %H:%M:%S%.6f").to_string()),
+        Cell::Date(d) => Some(d.format(DATE_FORMAT).to_string()),
+        Cell::Time(t) => Some(t.format(TIME_FORMAT).to_string()),
+        Cell::Timestamp(ts) => Some(ts.format(TIMESTAMP_FORMAT).to_string()),
         Cell::TimestampTz(ts) => Some(ts.to_rfc3339()),
         Cell::Uuid(u) => Some(u.to_string()),
         Cell::Json(j) => Some(j.to_string()),
