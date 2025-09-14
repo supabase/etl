@@ -7,7 +7,7 @@ use arrow::{
     },
     datatypes::{
         DataType, Date32Type, Float32Type, Float64Type, Int32Type, Int64Type, Schema,
-        Time64MicrosecondType, TimeUnit, TimestampMicrosecondType, UInt32Type,
+        Time64MicrosecondType, TimeUnit, TimestampMicrosecondType,
     },
     error::ArrowError,
 };
@@ -79,7 +79,6 @@ fn build_array_for_field(rows: &[TableRow], field_idx: usize, data_type: &DataTy
         DataType::Boolean => build_boolean_array(rows, field_idx),
         DataType::Int32 => build_primitive_array::<Int32Type, _>(rows, field_idx, cell_to_i32),
         DataType::Int64 => build_primitive_array::<Int64Type, _>(rows, field_idx, cell_to_i64),
-        DataType::UInt32 => build_primitive_array::<UInt32Type, _>(rows, field_idx, cell_to_u32),
         DataType::Float32 => build_primitive_array::<Float32Type, _>(rows, field_idx, cell_to_f32),
         DataType::Float64 => build_primitive_array::<Float64Type, _>(rows, field_idx, cell_to_f64),
         DataType::Utf8 => build_string_array(rows, field_idx),
@@ -258,17 +257,6 @@ fn cell_to_i32(cell: &Cell) -> Option<i32> {
 fn cell_to_i64(cell: &Cell) -> Option<i64> {
     match cell {
         Cell::I64(v) => Some(*v),
-        _ => None,
-    }
-}
-
-/// Converts a [`Cell`] to a 32-bit unsigned integer.
-///
-/// Extracts 32-bit unsigned integer values from [`Cell::U32`] variants,
-/// returning [`None`] for all other cell types.
-fn cell_to_u32(cell: &Cell) -> Option<u32> {
-    match cell {
-        Cell::U32(v) => Some(*v),
         _ => None,
     }
 }

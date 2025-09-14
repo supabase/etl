@@ -55,10 +55,6 @@ fn arrow_value_to_cell(array: &ArrayRef, row_idx: usize) -> Cell {
             let arr = array.as_any().downcast_ref::<Int64Array>().unwrap();
             Cell::I64(arr.value(row_idx))
         }
-        DataType::UInt32 => {
-            let arr = array.as_any().downcast_ref::<UInt32Array>().unwrap();
-            Cell::U32(arr.value(row_idx))
-        }
         DataType::Float32 => {
             let arr = array.as_any().downcast_ref::<Float32Array>().unwrap();
             Cell::F32(arr.value(row_idx))
@@ -71,16 +67,8 @@ fn arrow_value_to_cell(array: &ArrayRef, row_idx: usize) -> Cell {
             let arr = array.as_any().downcast_ref::<StringArray>().unwrap();
             Cell::String(arr.value(row_idx).to_string())
         }
-        DataType::LargeUtf8 => {
-            let arr = array.as_any().downcast_ref::<LargeStringArray>().unwrap();
-            Cell::String(arr.value(row_idx).to_string())
-        }
         DataType::LargeBinary => {
             let arr = array.as_any().downcast_ref::<LargeBinaryArray>().unwrap();
-            Cell::Bytes(arr.value(row_idx).to_vec())
-        }
-        DataType::Binary => {
-            let arr = array.as_any().downcast_ref::<BinaryArray>().unwrap();
             Cell::Bytes(arr.value(row_idx).to_vec())
         }
         DataType::Date32 => {
