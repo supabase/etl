@@ -9,7 +9,7 @@ use etl_telemetry::tracing::init_test_tracing;
 use iceberg::io::{S3_ACCESS_KEY_ID, S3_ENDPOINT, S3_SECRET_ACCESS_KEY};
 use uuid::Uuid;
 
-use crate::support::lakekeeper::LakekeeperClient;
+use crate::support::{iceberg::read_all_rows, lakekeeper::LakekeeperClient};
 
 mod support;
 
@@ -515,8 +515,7 @@ async fn insert_nullable_scalars() {
     row.values[7] = Cell::I32(123);
     row.values[20] = Cell::I32(12345);
 
-    let read_rows = client
-        .read_all_rows(namespace.to_string(), table_name.clone())
+    let read_rows = read_all_rows(&client, namespace.to_string(), table_name.clone())
         .await
         .unwrap();
 
@@ -653,8 +652,7 @@ async fn insert_non_nullable_scalars() {
     row.values[7] = Cell::I32(123);
     row.values[20] = Cell::I32(12345);
 
-    let read_rows = client
-        .read_all_rows(namespace.to_string(), table_name.clone())
+    let read_rows = read_all_rows(&client, namespace.to_string(), table_name.clone())
         .await
         .unwrap();
 

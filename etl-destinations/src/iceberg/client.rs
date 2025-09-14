@@ -5,7 +5,6 @@ use etl::{
     error::EtlResult,
     types::{TableRow, TableSchema},
 };
-use futures::StreamExt;
 use iceberg::{
     Catalog, NamespaceIdent, TableCreation, TableIdent,
     table::Table,
@@ -23,7 +22,6 @@ use iceberg_catalog_rest::{RestCatalog, RestCatalogConfig};
 use parquet::{basic::Compression, file::properties::WriterProperties};
 
 use crate::iceberg::{
-    decoding::record_batch_to_table_rows,
     encoding::rows_to_record_batch,
     error::{arrow_error_to_etl_error, iceberg_error_to_etl_error},
     schema::postgres_to_iceberg_schema,
@@ -153,6 +151,17 @@ impl IcebergClient {
         Ok(())
     }
 
+    /// Load a table
+    pub async fn load_table_for_test(
+        &self,
+        namespace: String,
+        table_name: String,
+    ) -> Result<iceberg::table::Table, iceberg::Error> {
+        let namespace_ident = NamespaceIdent::new(namespace);
+        let table_ident = TableIdent::new(namespace_ident, table_name);
+        self.catalog.load_table(&table_ident).await
+    }
+
     async fn write_record_batch(
         &self,
         table: &Table,
@@ -210,48 +219,5 @@ impl IcebergClient {
         let _updated_table = updated_transaction.commit(&*self.catalog).await?;
 
         Ok(())
-    }
-
-    /// Read all rows from the destination table
-    pub async fn read_all_rows(
-        &self,
-        namespace: String,
-        table_name: String,
-    ) -> EtlResult<Vec<TableRow>> {
-        let namespace_ident = NamespaceIdent::new(namespace);
-        let table_ident = TableIdent::new(namespace_ident, table_name);
-
-        let table = self
-            .catalog
-            .load_table(&table_ident)
-            .await
-            .map_err(iceberg_error_to_etl_error)?;
-
-        let mut table_rows_stream = table
-            .scan()
-            .select_all()
-            .build()
-            .map_err(iceberg_error_to_etl_error)?
-            .to_arrow()
-            .await
-            .map_err(iceberg_error_to_etl_error)?;
-
-        let mut all_rows = Vec::new();
-
-        // Iterate over the stream of RecordBatch results
-        while let Some(batch_result) = table_rows_stream.next().await {
-            match batch_result {
-                Ok(record_batch) => {
-                    // Convert RecordBatch to Vec<TableRow>
-                    let rows = record_batch_to_table_rows(&record_batch)?;
-                    all_rows.extend(rows);
-                }
-                Err(e) => {
-                    return Err(iceberg_error_to_etl_error(e));
-                }
-            }
-        }
-
-        Ok(all_rows)
     }
 }
