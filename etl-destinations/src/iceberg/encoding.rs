@@ -52,20 +52,6 @@ fn build_array_for_field(rows: &[TableRow], field_idx: usize, data_type: &DataTy
     }
 }
 
-/// Builds a boolean array from cell values. We need a separate function than
-/// `build_primitive_array` because it uses a special builder [`BooleanBuilder`]
-/// which is not a [`PrimitiveBuilder`].
-fn build_boolean_array(rows: &[TableRow], field_idx: usize) -> ArrayRef {
-    let mut builder = BooleanBuilder::new();
-
-    for row in rows {
-        let arrow_value = cell_to_bool(&row.values[field_idx]);
-        builder.append_option(arrow_value);
-    }
-
-    Arc::new(builder.finish())
-}
-
 fn build_primitive_array<T, F>(rows: &[TableRow], field_idx: usize, converter: F) -> ArrayRef
 where
     T: ArrowPrimitiveType,
@@ -81,41 +67,25 @@ where
     Arc::new(builder.finish())
 }
 
-/// Builds a string array from cell values.
-fn build_string_array(rows: &[TableRow], field_idx: usize) -> ArrayRef {
-    let mut builder = StringBuilder::new();
+macro_rules! impl_array_builder {
+    ($fn_name:ident, $builder_type:ty, $converter:ident) => {
+        fn $fn_name(rows: &[TableRow], field_idx: usize) -> ArrayRef {
+            let mut builder = <$builder_type>::new();
 
-    for row in rows {
-        let arrow_value = cell_to_string(&row.values[field_idx]);
-        builder.append_option(arrow_value);
-    }
+            for row in rows {
+                let arrow_value = $converter(&row.values[field_idx]);
+                builder.append_option(arrow_value);
+            }
 
-    Arc::new(builder.finish())
+            Arc::new(builder.finish())
+        }
+    };
 }
 
-/// Builds a binary array from cell values.
-fn build_binary_array(rows: &[TableRow], field_idx: usize) -> ArrayRef {
-    let mut builder = LargeBinaryBuilder::new();
-
-    for row in rows {
-        let arrow_value = cell_to_bytes(&row.values[field_idx]);
-        builder.append_option(arrow_value);
-    }
-
-    Arc::new(builder.finish())
-}
-
-/// Builds a date32 array from cell values.
-fn build_date32_array(rows: &[TableRow], field_idx: usize) -> ArrayRef {
-    let mut builder = Date32Builder::new();
-
-    for row in rows {
-        let arrow_value = cell_to_date32(&row.values[field_idx]);
-        builder.append_option(arrow_value);
-    }
-
-    Arc::new(builder.finish())
-}
+impl_array_builder!(build_boolean_array, BooleanBuilder, cell_to_bool);
+impl_array_builder!(build_string_array, StringBuilder, cell_to_string);
+impl_array_builder!(build_binary_array, LargeBinaryBuilder, cell_to_bytes);
+impl_array_builder!(build_date32_array, Date32Builder, cell_to_date32);
 
 macro_rules! impl_cell_converter {
     ($fn_name:ident, $return_type:ty, $($pattern:pat => $expr:expr),*) => {
