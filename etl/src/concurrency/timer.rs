@@ -1,20 +1,3 @@
-//! Lightweight timer utilities for cooperative shutdown and backoff.
-//!
-//! This module provides a minimal deferred timer implementation used in places
-//! where a timer must be armed conditionally and awaited inside a `tokio::select!`.
-//! The timer is inert until explicitly started via [`DeferredTimer::start`],
-//! making it a good fit for "arm-on-demand" flows such as delayed or forced
-//! shutdown paths.
-//!
-//! Design notes:
-//! - [`DeferredTimer`] is `Unpin`, so it can be moved freely and used directly
-//!   in `select!` statements without additional pinning.
-//! - The inner [`Sleep`] future is boxed to keep the outer type small and stable.
-//! - Re-arming is supported by calling [`DeferredTimer::start`] again after it
-//!   resolves, which replaces the inner sleep with a new one.
-//!
-//! No panics are expected from this module.
-
 use std::pin::Pin;
 use std::task::{Context, Poll, ready};
 use std::time::Duration;
