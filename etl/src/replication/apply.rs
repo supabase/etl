@@ -17,7 +17,7 @@ use tracing::{debug, info};
 use crate::concurrency::shutdown::ShutdownRx;
 use crate::concurrency::signal::SignalRx;
 use crate::concurrency::stream::{TimeoutStream, TimeoutStreamResult};
-use crate::concurrency::timer::Timer;
+use crate::concurrency::timer::DeferredTimer;
 use crate::conversions::event::{
     parse_event_from_begin_message, parse_event_from_commit_message,
     parse_event_from_delete_message, parse_event_from_insert_message,
@@ -278,7 +278,7 @@ struct ApplyLoopState {
     /// Boolean representing whether the shutdown was requested and it's not in delayed mode.
     delayed_shutdown: bool,
     /// Timer that resolves when the delayed shutdown should be converted into a forced shutdown.
-    force_shutdown: Timer,
+    force_shutdown: DeferredTimer,
 }
 
 impl ApplyLoopState {
@@ -295,7 +295,7 @@ impl ApplyLoopState {
             current_tx_begin_ts: None,
             current_tx_events: 0,
             delayed_shutdown: false,
-            force_shutdown: Timer::new(DELAYED_SHUTDOWN_DELAY),
+            force_shutdown: DeferredTimer::new(DELAYED_SHUTDOWN_DELAY),
         }
     }
 
@@ -459,6 +459,8 @@ where
             // PRIORITY 0: Handle the forced shutdown.
             // When a forced shutdown is triggered, the apply loop has to stop.
             _ = &mut state.force_shutdown => {
+                info!("forcing shutdown of the apply worker, if a transaction was active, it will be interrupted")
+
                 return Ok(ApplyLoopResult::ApplyStopped);
             }
 
@@ -479,6 +481,7 @@ where
                 }
 
                 info!("delaying shutdown for at most {:?} because we are in the middle of a transaction", DELAYED_SHUTDOWN_DELAY);
+
                 state.delay_shutdown();
             }
 
@@ -1056,7 +1059,13 @@ where
     // with `update_state` set to true *after* sending the batch to the destination. This order is needed
     // for consistency because otherwise we might update the table state before receiving an ack from the
     // destination.
-    let continue_loop = hook.process_syncing_tables(end_lsn, false).await?;
+    let mut continue_loop = hook.process_syncing_tables(end_lsn, false).await?;
+
+    // If we are in delayed shutdown, and we are processing a `COMMIT` event it means that the transaction
+    // was finished, so we want to end the apply loop.
+    if state.delayed_shutdown {
+        continue_loop = false;
+    }
 
     // Convert event from the protocol message.
     let event = parse_event_from_commit_message(start_lsn, commit_lsn, message);

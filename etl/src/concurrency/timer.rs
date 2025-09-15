@@ -5,18 +5,18 @@ use tokio::time::{Sleep, sleep};
 
 /// A simple timer future that resolves after a configured duration.
 ///
-/// `Timer` starts inactive; call [`Timer::start`] to arm it. Once started,
+/// `Timer` starts inactive; call [`DeferredTimer::start`] to arm it. Once started,
 /// polling waits until the inner `Sleep` completes, then resolves to `()`.
 ///
 /// Design note: the inner `Sleep` is stored as `Pin<Box<Sleep>>` so that
 /// `Timer` itself is `Unpin` and can be used directly in `tokio::select!`.
 #[derive(Debug)]
-pub struct Timer {
+pub struct DeferredTimer {
     deadline: Option<Pin<Box<Sleep>>>,
     duration: Duration,
 }
 
-impl Timer {
+impl DeferredTimer {
     /// Creates a new, inactive timer for the given `duration`.
     pub fn new(duration: Duration) -> Self {
         Self {
@@ -31,7 +31,7 @@ impl Timer {
     }
 }
 
-impl Future for Timer {
+impl Future for DeferredTimer {
     type Output = ();
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
