@@ -3150,7 +3150,7 @@ mod tests {
                 .downcast_ref::<arrow::array::ListArray>()
                 .unwrap();
 
-            assert_eq!(list_array.len(), 2, "Failed for {}", test_name);
+            assert_eq!(list_array.len(), 2, "Failed for {test_name}");
             assert!(list_array.is_null(1),);
         }
     }
