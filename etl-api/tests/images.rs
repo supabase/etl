@@ -1,3 +1,4 @@
+use etl_api::routes::images::{CreateImageRequest, CreateImageResponse};
 use etl_api::routes::images::{ReadImageResponse, ReadImagesResponse, UpdateImageRequest};
 
 mod support;
@@ -134,4 +135,55 @@ async fn images_list_returns_all() {
     let body: ReadImagesResponse = response.json().await.expect("failed to deserialize images");
     let ids: Vec<i64> = body.images.iter().map(|i| i.id).collect();
     assert!(ids.contains(&a) && ids.contains(&b));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn images_create_endpoint_can_create_non_default_and_read() {
+    let app = spawn_test_app().await;
+    // Ensure there is a default image already present
+    let _ = create_default_image(&app).await;
+
+    let req = CreateImageRequest {
+        name: "endpoint/create:1.0.0".to_string(),
+        is_default: false,
+    };
+    let resp = app.create_image(&req).await;
+    assert!(resp.status().is_success());
+    let CreateImageResponse { id } = resp
+        .json()
+        .await
+        .expect("failed to deserialize create response");
+
+    // Read it back and validate fields
+    let response = app.read_image(id).await;
+    assert!(response.status().is_success());
+    let body: ReadImageResponse = response.json().await.expect("deserialize image");
+    assert_eq!(body.id, id);
+    assert_eq!(body.name, "endpoint/create:1.0.0");
+    assert!(!body.is_default);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn images_create_endpoint_can_create_and_flip_default() {
+    let app = spawn_test_app().await;
+    let _old_default_id = create_default_image(&app).await;
+
+    let req = CreateImageRequest {
+        name: "endpoint/create:2.0.0".to_string(),
+        is_default: true,
+    };
+    let resp = app.create_image(&req).await;
+    assert!(resp.status().is_success());
+    let CreateImageResponse { id: new_id } = resp
+        .json()
+        .await
+        .expect("failed to deserialize create response");
+
+    // Assert exactly one default and it's the newly created image
+    let response = app.read_all_images().await;
+    assert!(response.status().is_success());
+    let body: ReadImagesResponse = response.json().await.expect("deserialize images");
+    let defaults: Vec<_> = body.images.iter().filter(|i| i.is_default).collect();
+    assert_eq!(defaults.len(), 1);
+    assert_eq!(defaults[0].id, new_id);
 }

@@ -34,8 +34,8 @@ use crate::{
         health_check::health_check,
         images::{
             CreateImageRequest, CreateImageResponse, ReadImageResponse, ReadImagesResponse,
-            SetDefaultImageRequest, UpdateImageRequest, create_image, delete_image, read_all_images,
-            read_image, set_default_image, update_image,
+            SetDefaultImageRequest, UpdateImageRequest, create_image, delete_image,
+            read_all_images, read_image, set_default_image, update_image,
         },
         metrics::metrics,
         pipelines::{
