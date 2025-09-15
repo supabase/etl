@@ -459,7 +459,7 @@ where
             // PRIORITY 0: Handle the forced shutdown.
             // When a forced shutdown is triggered, the apply loop has to stop.
             _ = &mut state.force_shutdown => {
-                info!("forcing shutdown of the apply worker, if a transaction was active, it will be interrupted")
+                info!("forcing shutdown of the apply worker, if a transaction was active, it will be interrupted");
 
                 return Ok(ApplyLoopResult::ApplyStopped);
             }
