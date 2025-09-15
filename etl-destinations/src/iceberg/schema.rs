@@ -31,7 +31,7 @@ fn postgres_array_type_to_iceberg_type(typ: &Type, field_id: i32) -> IcebergType
         &Type::JSON_ARRAY | &Type::JSONB_ARRAY => {
             create_iceberg_list_type(PrimitiveType::String, field_id)
         }
-        &Type::OID_ARRAY => create_iceberg_list_type(PrimitiveType::Int, field_id),
+        &Type::OID_ARRAY => create_iceberg_list_type(PrimitiveType::Long, field_id),
         &Type::BYTEA_ARRAY => create_iceberg_list_type(PrimitiveType::Binary, field_id),
         _ => create_iceberg_list_type(PrimitiveType::String, field_id),
     }
@@ -57,7 +57,7 @@ fn postgres_scalar_type_to_iceberg_type(typ: &Type) -> IcebergType {
         &Type::TIMESTAMPTZ => IcebergType::Primitive(PrimitiveType::Timestamptz),
         &Type::UUID => IcebergType::Primitive(PrimitiveType::Uuid),
         &Type::JSON | &Type::JSONB => IcebergType::Primitive(PrimitiveType::String),
-        &Type::OID => IcebergType::Primitive(PrimitiveType::Int),
+        &Type::OID => IcebergType::Primitive(PrimitiveType::Long),
         &Type::BYTEA => IcebergType::Primitive(PrimitiveType::Binary),
         _ => IcebergType::Primitive(PrimitiveType::String),
     }
@@ -220,7 +220,7 @@ mod tests {
         // OID type
         assert_eq!(
             postgres_to_iceberg_type(&Type::OID),
-            IcebergType::Primitive(PrimitiveType::Int)
+            IcebergType::Primitive(PrimitiveType::Long)
         );
 
         // Binary type
@@ -307,7 +307,7 @@ mod tests {
         // OID array
         let oid_array_type = postgres_to_iceberg_type(&Type::OID_ARRAY);
         assert!(matches!(oid_array_type, IcebergType::List(_)));
-        assert_list_type(oid_array_type, PrimitiveType::Int);
+        assert_list_type(oid_array_type, PrimitiveType::Long);
 
         // Binary array
         let bytea_array_type = postgres_to_iceberg_type(&Type::BYTEA_ARRAY);
