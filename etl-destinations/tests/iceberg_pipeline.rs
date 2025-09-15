@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
-use etl::types::{Cell, ColumnSchema, TableId, TableName, TableRow, TableSchema, Type};
+use etl::types::{ArrayCell, Cell, ColumnSchema, TableId, TableName, TableRow, TableSchema, Type};
 use etl_destinations::iceberg::IcebergClient;
 use etl_telemetry::tracing::init_test_tracing;
 use iceberg::io::{S3_ACCESS_KEY_ID, S3_ENDPOINT, S3_SECRET_ACCESS_KEY};
@@ -653,6 +653,70 @@ async fn insert_non_nullable_scalars() {
     let read_rows = read_all_rows(&client, namespace.to_string(), table_name.clone()).await;
 
     assert_eq!(read_rows.len(), 1);
+
+    // Compare the actual values in the read_rows with inserted table_rows
+    assert_eq!(read_rows, table_rows);
+
+    // Manual cleanup for now because lakekeeper doesn't allow cascade delete at the warehouse level
+    // This feature is planned for future releases. We'll start to use it when it becomes available.
+    // The cleanup is not in a Drop impl because each test has different number of object specitic to
+    // that test.
+    client.drop_table(namespace, table_name).await.unwrap();
+    client.drop_namespace(namespace).await.unwrap();
+    lakekeeper_client
+        .drop_warehouse(warehouse_id)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn insert_nullable_array() {
+    init_test_tracing();
+
+    let lakekeeper_client = LakekeeperClient::new(LAKEKEEPER_URL);
+    let (warehouse_name, warehouse_id) = lakekeeper_client.create_warehouse().await.unwrap();
+    let client =
+        IcebergClient::new_with_rest_catalog(get_catalog_url(), warehouse_name, create_props());
+
+    // Create namespace first
+    let namespace = "test_namespace";
+    client.create_namespace_if_missing(namespace).await.unwrap();
+
+    // Create a sample table schema with array types for boolean, integer, and string
+    let table_name = "test_array_table".to_string();
+    let table_id = TableId::new(12346);
+    let table_name_struct = TableName::new("test_schema".to_string(), table_name.clone());
+    let columns = vec![
+        // Primary key
+        ColumnSchema::new("id".to_string(), Type::INT4, -1, false, true),
+        // Boolean array type
+        ColumnSchema::new(
+            "bool_array_col".to_string(),
+            Type::BOOL_ARRAY,
+            -1,
+            true,
+            false,
+        ),
+    ];
+    let table_schema = TableSchema::new(table_id, table_name_struct, columns);
+
+    client
+        .create_table_if_missing(namespace, table_name.clone(), &table_schema)
+        .await
+        .unwrap();
+
+    let table_rows = vec![TableRow {
+        values: vec![
+            Cell::I32(1),                                                            // id
+            Cell::Array(ArrayCell::Bool(vec![Some(true), Some(false), Some(true)])), // bool_array_col
+        ],
+    }];
+    client
+        .insert_rows(namespace.to_string(), table_name.clone(), &table_rows)
+        .await
+        .unwrap();
+
+    let read_rows = read_all_rows(&client, namespace.to_string(), table_name.clone()).await;
 
     // Compare the actual values in the read_rows with inserted table_rows
     assert_eq!(read_rows, table_rows);

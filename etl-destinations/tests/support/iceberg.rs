@@ -5,7 +5,7 @@ use arrow::{
     array::{ArrayRef, RecordBatch},
     datatypes::TimeUnit,
 };
-use etl::types::{Cell, TableRow};
+use etl::types::{ArrayCell, Cell, TableRow};
 use futures::StreamExt;
 
 use etl_destinations::iceberg::{IcebergClient, UNIX_EPOCH};
@@ -125,6 +125,28 @@ fn arrow_value_to_cell(array: &ArrayRef, row_idx: usize) -> Cell {
             let uuid = uuid::Uuid::from_bytes(uuid_bytes);
 
             Cell::Uuid(uuid)
+        }
+        DataType::List(field) => {
+            let list_array = array.as_any().downcast_ref::<ListArray>().unwrap();
+            let list_value = list_array.value(row_idx);
+
+            match field.data_type() {
+                DataType::Boolean => {
+                    let bool_array = list_value.as_any().downcast_ref::<BooleanArray>().unwrap();
+                    let mut values = Vec::with_capacity(bool_array.len());
+
+                    for i in 0..bool_array.len() {
+                        if bool_array.is_null(i) {
+                            values.push(None);
+                        } else {
+                            values.push(Some(bool_array.value(i)));
+                        }
+                    }
+
+                    Cell::Array(ArrayCell::Bool(values))
+                }
+                _ => Cell::String(format!("{array:?}")),
+            }
         }
         _ => Cell::String(format!("{array:?}")),
     }

@@ -1,18 +1,19 @@
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use arrow::{
     array::{
         ArrayRef, ArrowPrimitiveType, BooleanBuilder, FixedSizeBinaryBuilder, LargeBinaryBuilder,
-        PrimitiveBuilder, RecordBatch, StringBuilder, TimestampMicrosecondBuilder,
+        ListBuilder, PrimitiveBuilder, RecordBatch, StringBuilder, TimestampMicrosecondBuilder,
     },
     datatypes::{
-        DataType, Date32Type, Float32Type, Float64Type, Int32Type, Int64Type, Schema,
+        DataType, Date32Type, Field, Float32Type, Float64Type, Int32Type, Int64Type, Schema,
         Time64MicrosecondType, TimeUnit, TimestampMicrosecondType,
     },
     error::ArrowError,
 };
 use chrono::{NaiveDate, NaiveTime};
-use etl::types::{Cell, TableRow};
+use etl::types::{ArrayCell, Cell, DATE_FORMAT, TIME_FORMAT, TIMESTAMP_FORMAT, TableRow};
+use iceberg::spec::LIST_FIELD_NAME;
 
 pub const UNIX_EPOCH: NaiveDate =
     NaiveDate::from_ymd_opt(1970, 1, 1).expect("unix epoch is a valid date");
@@ -73,6 +74,7 @@ fn build_array_for_field(rows: &[TableRow], field_idx: usize, data_type: &DataTy
             build_primitive_array::<TimestampMicrosecondType, _>(rows, field_idx, cell_to_timestamp)
         }
         DataType::FixedSizeBinary(UUID_BYTE_WIDTH) => build_uuid_array(rows, field_idx),
+        DataType::List(field) => build_list_array(rows, field_idx, field.data_type()),
         _ => build_string_array(rows, field_idx),
     }
 }
@@ -344,6 +346,245 @@ fn cell_to_string(cell: &Cell) -> Option<String> {
         Cell::Json(j) => Some(j.to_string()),
         Cell::Bytes(_) => None,
         Cell::Array(_) => None,
+    }
+}
+
+/// Extracts [`ArrayCell`] from a [`Cell::Array`] value.
+///
+/// This function safely extracts the array data from a [`Cell::Array`] variant,
+/// returning [`None`] for non-array cells. This is used when building Arrow list
+/// arrays to access the underlying array elements.
+///
+/// Returns [`Some`] with a reference to the [`ArrayCell`] if the cell contains
+/// an array, or [`None`] for all other cell types including [`Cell::Null`].
+fn cell_to_array_cell(cell: &Cell) -> Option<&ArrayCell> {
+    match cell {
+        Cell::Array(array_cell) => Some(array_cell),
+        _ => None,
+    }
+}
+
+/// Builds an Arrow list array from [`TableRow`]s for a specific field.
+///
+/// This function creates an Arrow [`ListArray`] by processing [`Cell::Array`] values
+/// from the specified field index. It delegates to type-specific builders based on
+/// the list element type, reusing the existing primitive and string array building
+/// infrastructure.
+///
+/// Returns an [`ArrayRef`] containing a list array with the appropriate element type.
+/// Rows with non-array cells become null entries in the resulting list array.
+fn build_list_array(rows: &[TableRow], field_idx: usize, element_type: &DataType) -> ArrayRef {
+    match element_type {
+        DataType::Boolean => build_boolean_list_array(rows, field_idx),
+        // For unsupported element types, fall back to string representation
+        _ => build_list_array_for_strings(rows, field_idx),
+    }
+}
+
+/// Builds a list array for boolean elements.
+fn build_boolean_list_array(rows: &[TableRow], field_idx: usize) -> ArrayRef {
+    let mut metadata = HashMap::new();
+    metadata.insert("PARQUET:field_id".to_string(), "3".to_string());
+    let mut field = Field::new(LIST_FIELD_NAME, DataType::Boolean, true);
+    field.set_metadata(metadata);
+    let mut list_builder = ListBuilder::new(BooleanBuilder::new()).with_field(field);
+
+    for row in rows {
+        if let Some(array_cell) = cell_to_array_cell(&row.values[field_idx]) {
+            match array_cell {
+                ArrayCell::Bool(vec) => {
+                    for item in vec {
+                        list_builder.values().append_option(*item);
+                    }
+                    list_builder.append(true);
+                }
+                // For non-boolean array types, fall back to string representation
+                _ => {
+                    return build_list_array_for_strings(rows, field_idx);
+                }
+            }
+        } else {
+            list_builder.append_null();
+        }
+    }
+
+    Arc::new(list_builder.finish())
+}
+
+/// Builds a list array for string elements.
+///
+/// This function creates an Arrow list array with string elements by processing
+/// [`ArrayCell::String`] variants from [`Cell::Array`] values.
+fn build_list_array_for_strings(rows: &[TableRow], field_idx: usize) -> ArrayRef {
+    let mut list_builder = ListBuilder::new(StringBuilder::new());
+
+    for row in rows {
+        if let Some(array_cell) = cell_to_array_cell(&row.values[field_idx]) {
+            match array_cell {
+                ArrayCell::String(vec) => {
+                    for item in vec {
+                        match item {
+                            Some(s) => list_builder.values().append_value(s),
+                            None => list_builder.values().append_null(),
+                        }
+                    }
+                    list_builder.append(true);
+                }
+                // For non-string array types, convert elements to strings
+                _ => {
+                    append_array_cell_as_strings(&mut list_builder, array_cell);
+                    list_builder.append(true);
+                }
+            }
+        } else {
+            // Non-array cell becomes null list entry
+            list_builder.append_null();
+        }
+    }
+
+    Arc::new(list_builder.finish())
+}
+
+/// Helper function to append any [`ArrayCell`] variant as string elements to a list builder.
+///
+/// This function converts array elements to their string representation and appends
+/// them to a string list builder. It's used as a fallback for unsupported array types.
+fn append_array_cell_as_strings(
+    list_builder: &mut ListBuilder<StringBuilder>,
+    array_cell: &ArrayCell,
+) {
+    match array_cell {
+        ArrayCell::Bool(vec) => {
+            for item in vec {
+                match item {
+                    Some(b) => list_builder.values().append_value(b.to_string()),
+                    None => list_builder.values().append_null(),
+                }
+            }
+        }
+        ArrayCell::String(vec) => {
+            for item in vec {
+                match item {
+                    Some(s) => list_builder.values().append_value(s),
+                    None => list_builder.values().append_null(),
+                }
+            }
+        }
+        ArrayCell::I16(vec) => {
+            for item in vec {
+                match item {
+                    Some(i) => list_builder.values().append_value(i.to_string()),
+                    None => list_builder.values().append_null(),
+                }
+            }
+        }
+        ArrayCell::I32(vec) => {
+            for item in vec {
+                match item {
+                    Some(i) => list_builder.values().append_value(i.to_string()),
+                    None => list_builder.values().append_null(),
+                }
+            }
+        }
+        ArrayCell::U32(vec) => {
+            for item in vec {
+                match item {
+                    Some(u) => list_builder.values().append_value(u.to_string()),
+                    None => list_builder.values().append_null(),
+                }
+            }
+        }
+        ArrayCell::I64(vec) => {
+            for item in vec {
+                match item {
+                    Some(i) => list_builder.values().append_value(i.to_string()),
+                    None => list_builder.values().append_null(),
+                }
+            }
+        }
+        ArrayCell::F32(vec) => {
+            for item in vec {
+                match item {
+                    Some(f) => list_builder.values().append_value(f.to_string()),
+                    None => list_builder.values().append_null(),
+                }
+            }
+        }
+        ArrayCell::F64(vec) => {
+            for item in vec {
+                match item {
+                    Some(f) => list_builder.values().append_value(f.to_string()),
+                    None => list_builder.values().append_null(),
+                }
+            }
+        }
+        ArrayCell::Numeric(vec) => {
+            for item in vec {
+                match item {
+                    Some(n) => list_builder.values().append_value(n.to_string()),
+                    None => list_builder.values().append_null(),
+                }
+            }
+        }
+        ArrayCell::Date(vec) => {
+            for item in vec {
+                match item {
+                    Some(d) => list_builder
+                        .values()
+                        .append_value(d.format(DATE_FORMAT).to_string()),
+                    None => list_builder.values().append_null(),
+                }
+            }
+        }
+        ArrayCell::Time(vec) => {
+            for item in vec {
+                match item {
+                    Some(t) => list_builder
+                        .values()
+                        .append_value(t.format(TIME_FORMAT).to_string()),
+                    None => list_builder.values().append_null(),
+                }
+            }
+        }
+        ArrayCell::Timestamp(vec) => {
+            for item in vec {
+                match item {
+                    Some(ts) => list_builder
+                        .values()
+                        .append_value(ts.format(TIMESTAMP_FORMAT).to_string()),
+                    None => list_builder.values().append_null(),
+                }
+            }
+        }
+        ArrayCell::TimestampTz(vec) => {
+            for item in vec {
+                match item {
+                    Some(ts) => list_builder.values().append_value(ts.to_rfc3339()),
+                    None => list_builder.values().append_null(),
+                }
+            }
+        }
+        ArrayCell::Uuid(vec) => {
+            for item in vec {
+                match item {
+                    Some(u) => list_builder.values().append_value(u.to_string()),
+                    None => list_builder.values().append_null(),
+                }
+            }
+        }
+        ArrayCell::Json(vec) => {
+            for item in vec {
+                match item {
+                    Some(j) => list_builder.values().append_value(j.to_string()),
+                    None => list_builder.values().append_null(),
+                }
+            }
+        }
+        ArrayCell::Bytes(vec) => {
+            for _ in vec {
+                list_builder.values().append_null();
+            }
+        }
     }
 }
 
