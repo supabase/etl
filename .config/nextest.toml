@@ -1,2 +1,5 @@
+[profile.default]
+retries = 2
+
 [profile.no-bigquery]
 default-filter = "not (package(etl-destinations) and binary(/bigquery_pipeline/))"
