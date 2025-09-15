@@ -78,7 +78,7 @@ pub(crate) fn register_metrics() {
         describe_counter!(
             ETL_APPLY_SHUTDOWNS_TOTAL,
             Unit::Count,
-            "Number of times the apply loop shut down, labeled by mode and pipeline_id"
+            "Number of times the apply loop shut down"
         );
     });
 }
