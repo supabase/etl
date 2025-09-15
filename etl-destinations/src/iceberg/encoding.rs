@@ -11,7 +11,6 @@ use arrow::{
     },
     error::ArrowError,
 };
-// use base64::{Engine, prelude::BASE64_STANDARD};
 use chrono::{NaiveDate, NaiveTime};
 use etl::types::{Cell, TableRow};
 
@@ -29,20 +28,8 @@ const UUID_BYTE_WIDTH: i32 = 16;
 /// Iceberg tables. Each field in the schema is processed sequentially to build
 /// the corresponding Arrow arrays.
 ///
-/// # Arguments
-///
-/// * `rows` - A slice of [`TableRow`] instances containing the data to convert
-/// * `schema` - The Arrow [`Schema`] defining the structure and types of the output batch
-///
-/// # Returns
-///
 /// Returns a [`RecordBatch`] containing the converted data, or an [`ArrowError`]
 /// if the conversion fails due to schema mismatches or other Arrow-related issues.
-///
-/// # Examples
-///
-/// The function is typically used in the Iceberg destination to prepare data
-/// for writing to Parquet files within Iceberg tables.
 pub fn rows_to_record_batch(rows: &[TableRow], schema: Schema) -> Result<RecordBatch, ArrowError> {
     let mut arrays: Vec<ArrayRef> = Vec::new();
 
@@ -62,14 +49,6 @@ pub fn rows_to_record_batch(rows: &[TableRow], schema: Schema) -> Result<RecordB
 /// [`DataType`]. It handles all supported data types including primitives, strings,
 /// binary data, dates, times, timestamps, and UUIDs. Unsupported types fall back
 /// to string representation.
-///
-/// # Arguments
-///
-/// * `rows` - A slice of [`TableRow`] instances to extract field values from
-/// * `field_idx` - The zero-based index of the field within each row to process
-/// * `data_type` - The Arrow [`DataType`] specifying how to interpret and encode the field
-///
-/// # Returns
 ///
 /// Returns an [`ArrayRef`] containing the encoded field values in the appropriate
 /// Arrow array type. For unsupported types, returns a string array with string
@@ -104,17 +83,6 @@ fn build_array_for_field(rows: &[TableRow], field_idx: usize, data_type: &DataTy
 /// dates, times, timestamps) by applying a converter function to each cell value.
 /// The converter handles type conversion and returns [`None`] for incompatible values,
 /// which become null entries in the resulting array.
-///
-/// # Type Parameters
-///
-/// * `T` - The Arrow primitive type implementing [`ArrowPrimitiveType`]
-/// * `F` - The converter function type taking a [`Cell`] reference and returning [`Option<T::Native>`]
-///
-/// # Arguments
-///
-/// * `rows` - A slice of [`TableRow`] instances to extract field values from
-/// * `field_idx` - The zero-based index of the field within each row to process
-/// * `converter` - A function that converts [`Cell`] values to the target primitive type
 ///
 /// # Returns
 ///
@@ -161,14 +129,6 @@ impl_array_builder!(build_binary_array, LargeBinaryBuilder, cell_to_bytes);
 /// converts them to microseconds since the Unix epoch while preserving
 /// timezone information in the array metadata.
 ///
-/// # Arguments
-///
-/// * `rows` - A slice of [`TableRow`] instances to extract timestamp values from
-/// * `field_idx` - The zero-based index of the timestamp field within each row
-/// * `tz` - The timezone string (e.g., "UTC", "America/New_York") for the array
-///
-/// # Returns
-///
 /// Returns an [`ArrayRef`] containing a timestamp array with timezone metadata.
 /// Non-timestamp cells become null entries in the resulting array.
 fn build_timestamptz_array(rows: &[TableRow], field_idx: usize, tz: &str) -> ArrayRef {
@@ -188,16 +148,6 @@ fn build_timestamptz_array(rows: &[TableRow], field_idx: usize, tz: &str) -> Arr
 /// UUID values, which are represented as 16-byte binary data. It extracts
 /// UUID bytes from [`Cell::Uuid`] values and creates null entries for
 /// non-UUID cells.
-///
-/// # Arguments
-///
-/// * `rows` - A slice of [`TableRow`] instances to extract UUID values from
-/// * `field_idx` - The zero-based index of the UUID field within each row
-///
-/// # Returns
-///
-/// Returns an [`ArrayRef`] containing a fixed-size binary array with 16-byte
-/// UUID values. Non-UUID cells become null entries in the resulting array.
 ///
 /// # Panics
 ///
@@ -238,7 +188,6 @@ fn cell_to_bool(cell: &Cell) -> Option<bool> {
 /// Handles conversion from multiple integer cell types to i32, including:
 /// - [`Cell::I16`] values (widened to i32)
 /// - [`Cell::I32`] values (direct conversion)
-/// - [`Cell::U32`] values (cast to i32, may overflow for large values)
 ///
 /// Returns [`None`] for incompatible cell types.
 fn cell_to_i32(cell: &Cell) -> Option<i32> {
@@ -252,6 +201,8 @@ fn cell_to_i32(cell: &Cell) -> Option<i32> {
 /// Converts a [`Cell`] to a 64-bit signed integer.
 ///
 /// Extracts 64-bit signed integer values from [`Cell::I64`] variants,
+/// [`Cell::U32`] values are cast to i64
+///
 /// returning [`None`] for all other cell types.
 fn cell_to_i64(cell: &Cell) -> Option<i64> {
     match cell {
@@ -347,12 +298,6 @@ fn cell_to_timestamptz(cell: &Cell) -> Option<i64> {
 /// This function attempts to extract the 16-byte representation of a UUID
 /// from a [`Cell::Uuid`] variant. For all other cell types, it returns [`None`].
 ///
-/// # Arguments
-///
-/// * `cell` - The [`Cell`] to extract UUID bytes from
-///
-/// # Returns
-///
 /// Returns [`Some`] with a reference to the 16-byte UUID array if the cell
 /// contains a UUID, or [`None`] for all other cell types.
 fn cell_to_uuid(cell: &Cell) -> Option<&[u8; UUID_BYTE_WIDTH as usize]> {
@@ -376,12 +321,6 @@ fn cell_to_uuid(cell: &Cell) -> Option<&[u8; UUID_BYTE_WIDTH as usize]> {
 /// - Binary data is Base64-encoded
 /// - JSON values use their serialized string form
 /// - Arrays use debug formatting
-///
-/// # Arguments
-///
-/// * `cell` - The [`Cell`] value to convert to a string
-///
-/// # Returns
 ///
 /// Returns [`Some`] with the string representation for non-null values,
 /// or [`None`] for [`Cell::Null`] which becomes a null entry in the Arrow array.
