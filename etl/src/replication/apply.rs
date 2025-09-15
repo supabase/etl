@@ -11,6 +11,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::pin;
+use tokio::time::{sleep, Sleep};
 use tokio_postgres::types::PgLsn;
 use tracing::{debug, info};
 
@@ -36,10 +37,14 @@ use crate::state::table::{RetryPolicy, TableReplicationError};
 use crate::store::schema::SchemaStore;
 use crate::types::{Event, PipelineId};
 use crate::{bail, etl_error};
+use crate::concurrency::timer::Timer;
 
 /// The amount of milliseconds that pass between one refresh and the other of the system, in case no
 /// events or shutdown signal are received.
 const REFRESH_INTERVAL: Duration = Duration::from_millis(1000);
+
+/// The amount of seconds for which a shutdown can be delayed before being forced.
+const DELAYED_SHUTDOWN_DELAY: Duration = Duration::from_secs(300);
 
 /// Result type for the apply loop execution.
 ///
@@ -250,7 +255,7 @@ impl HandleMessageResult {
 }
 
 /// A shared state that is used throughout the apply loop to track progress.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 struct ApplyLoopState {
     /// The highest LSN received from the `end_lsn` field of a `Commit` message.
     ///
@@ -271,6 +276,10 @@ struct ApplyLoopState {
     current_tx_begin_ts: Option<Instant>,
     /// Number of events observed in the current transaction (excluding BEGIN/COMMIT).
     current_tx_events: u64,
+    /// Boolean representing whether the shutdown was requested and it's not in delayed mode.
+    delayed_shutdown: bool,
+    /// Timer that resolves when the delayed shutdown should be converted into a forced shutdown.
+    force_shutdown: Timer
 }
 
 impl ApplyLoopState {
@@ -286,6 +295,8 @@ impl ApplyLoopState {
             events_batch,
             current_tx_begin_ts: None,
             current_tx_events: 0,
+            delayed_shutdown: false,
+            force_shutdown: Timer::new(DELAYED_SHUTDOWN_DELAY),
         }
     }
 
@@ -315,6 +326,12 @@ impl ApplyLoopState {
     /// but the corresponding `COMMIT` has not yet been handled.
     fn handling_transaction(&self) -> bool {
         self.remote_final_lsn.is_some()
+    }
+
+    /// Delays the shutdown of this apply loop.
+    fn delay_shutdown(&mut self) {
+        self.delayed_shutdown = true;
+        self.force_shutdown.start();
     }
 }
 
@@ -440,13 +457,30 @@ where
             // This ensures graceful shutdown takes precedence over event processing
             biased;
 
-            // PRIORITY 1: Handle shutdown signals immediately
-            // When shutdown is requested, we stop processing new events and terminate gracefully
-            // This allows current transactions to complete but prevents new ones from starting
-            _ = shutdown_rx.changed() => {
-                info!("shutting down apply worker while waiting for incoming events");
-
+            // PRIORITY 0: Handle the forced shutdown.
+            // When a forced shutdown is triggered, the apply loop has to stop.
+            _ = &mut state.force_shutdown => {
                 return Ok(ApplyLoopResult::ApplyStopped);
+            }
+
+            // PRIORITY 1: Handle shutdown signals.
+            // When shutdown is requested, we check if we are in a transaction, if we are, we delay
+            // the shutdown by a fixed amount, otherwise we immediately return.
+            _ = shutdown_rx.changed() => {
+                // If the shutdown is being delayed, we don't do anything.
+                if state.delayed_shutdown {
+                    info!("shutdown was already requested but it has been delayed because of a running transaction");
+                    continue;
+                }
+
+                // If we are not inside a transaction, we can cleanly stop streaming and return.
+                if !state.handling_transaction() {
+                    info!("shutting down apply worker while waiting for incoming events outside of a transaction");
+                    return Ok(ApplyLoopResult::ApplyStopped);
+                }
+
+                info!("delaying shutdown for at most {:?} because we are in the middle of a transaction", DELAYED_SHUTDOWN_DELAY);
+                state.delay_shutdown();
             }
 
             // PRIORITY 2: Process incoming replication messages from Postgres
