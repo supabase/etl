@@ -11,6 +11,7 @@ pub const ETL_ITEMS_SEND_DURATION_SECONDS: &str = "etl_items_send_duration_secon
 pub const ETL_TRANSACTION_DURATION_SECONDS: &str = "etl_transaction_duration_seconds";
 pub const ETL_TRANSACTION_SIZE: &str = "etl_transaction_size";
 pub const ETL_COPIED_TABLE_ROW_SIZE_BYTES: &str = "etl_copied_table_row_size_bytes";
+pub const ETL_APPLY_SHUTDOWNS_TOTAL: &str = "etl_apply_shutdowns_total";
 
 /// Label key for replication phase (used by table state metrics).
 pub const PHASE_LABEL: &str = "phase";
@@ -22,6 +23,10 @@ pub const ACTION_LABEL: &str = "action";
 pub const DESTINATION_LABEL: &str = "destination";
 /// Label key for pipeline id.
 pub const PIPELINE_ID_LABEL: &str = "pipeline_id";
+/// Label key for shutdown mode.
+pub const SHUTDOWN_MODE_LABEL: &str = "mode";
+/// Label key for the transaction status.
+pub const TRANSACTION_STATUS_LABEL: &str = "transaction_status";
 
 /// Register metrics emitted by etl. This should be called before starting a pipeline.
 /// It is safe to call this method multiple times. It is guaranteed to register the
@@ -68,6 +73,12 @@ pub(crate) fn register_metrics() {
             ETL_COPIED_TABLE_ROW_SIZE_BYTES,
             Unit::Bytes,
             "Approximate size in bytes of a row copied during table sync"
+        );
+
+        describe_counter!(
+            ETL_APPLY_SHUTDOWNS_TOTAL,
+            Unit::Count,
+            "Number of times the apply loop shut down, labeled by mode and pipeline_id"
         );
     });
 }
