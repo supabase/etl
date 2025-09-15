@@ -4,7 +4,7 @@ use etl_api::configs::destination::FullApiDestinationConfig;
 use etl_api::configs::pipeline::{FullApiPipelineConfig, PartialApiPipelineConfig};
 use etl_api::configs::source::FullApiSourceConfig;
 use etl_api::routes::destinations::{CreateDestinationRequest, CreateDestinationResponse};
-use etl_api::routes::images::ReadImagesResponse;
+use etl_api::routes::images::{CreateImageRequest, CreateImageResponse};
 use etl_api::routes::pipelines::{CreatePipelineRequest, CreatePipelineResponse};
 use etl_api::routes::sources::{CreateSourceRequest, CreateSourceResponse};
 use etl_config::SerializableSecretString;
@@ -18,25 +18,13 @@ pub async fn create_default_image(app: &TestApp) -> i64 {
 
 /// Creates an image with the provided name and default flag and returns its id.
 pub async fn create_image_with_name(app: &TestApp, name: String, is_default: bool) -> i64 {
-    // The only way to create an image is to set it as default by name.
-    // Call the endpoint to ensure the image exists.
-    let _ = app.set_default_image_by_name(&name).await;
-
-    // If we want it to end up as non-default, flip default to another image.
-    if !is_default {
-        let _ = app
-            .set_default_image_by_name("__temp_default_for_tests__")
-            .await;
-    }
-
-    // Fetch id by name from the list.
-    let all = app.read_all_images().await;
-    let body: ReadImagesResponse = all.json().await.expect("failed to deserialize images");
-    body.images
-        .iter()
-        .find(|i| i.name == name)
-        .map(|i| i.id)
-        .expect("created image not found")
+    let image = CreateImageRequest { name, is_default };
+    let response = app.create_image(&image).await;
+    let response: CreateImageResponse = response
+        .json()
+        .await
+        .expect("failed to deserialize response");
+    response.id
 }
 
 /// Destination helpers.

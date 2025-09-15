@@ -23,6 +23,7 @@ pub async fn create_image(
 ) -> Result<i64, ImagesDbError> {
     let mut txn = pool.begin().await?;
 
+    // If this is to be the new default image, first unset any existing default.
     if is_default {
         sqlx::query!(
             r#"
@@ -120,7 +121,7 @@ pub async fn update_image(
 ) -> Result<Option<i64>, ImagesDbError> {
     let mut txn = pool.begin().await?;
 
-    // If this is to be the new default image, first unset any existing default
+    // If this is to be the new default image, first unset any existing default.
     if is_default {
         sqlx::query!(
             r#"
