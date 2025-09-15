@@ -17,6 +17,7 @@ use tracing::{debug, info};
 use crate::concurrency::shutdown::ShutdownRx;
 use crate::concurrency::signal::SignalRx;
 use crate::concurrency::stream::{TimeoutStream, TimeoutStreamResult};
+use crate::concurrency::timer::Timer;
 use crate::conversions::event::{
     parse_event_from_begin_message, parse_event_from_commit_message,
     parse_event_from_delete_message, parse_event_from_insert_message,
@@ -36,7 +37,6 @@ use crate::state::table::{RetryPolicy, TableReplicationError};
 use crate::store::schema::SchemaStore;
 use crate::types::{Event, PipelineId};
 use crate::{bail, etl_error};
-use crate::concurrency::timer::Timer;
 
 /// The amount of milliseconds that pass between one refresh and the other of the system, in case no
 /// events or shutdown signal are received.
@@ -278,7 +278,7 @@ struct ApplyLoopState {
     /// Boolean representing whether the shutdown was requested and it's not in delayed mode.
     delayed_shutdown: bool,
     /// Timer that resolves when the delayed shutdown should be converted into a forced shutdown.
-    force_shutdown: Timer
+    force_shutdown: Timer,
 }
 
 impl ApplyLoopState {

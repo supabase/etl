@@ -1,7 +1,7 @@
 use std::pin::Pin;
-use std::task::{ready, Context, Poll};
+use std::task::{Context, Poll, ready};
 use std::time::Duration;
-use tokio::time::{sleep, Sleep};
+use tokio::time::{Sleep, sleep};
 
 /// A simple timer future that resolves after a configured duration.
 ///
