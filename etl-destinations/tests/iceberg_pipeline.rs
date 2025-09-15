@@ -510,10 +510,10 @@ async fn insert_nullable_scalars() {
 
     // Change the expected type due to roundtrip issues
     // * Cell::I16 rountrips to Cell::I32,
-    // * Cell::U32 rountrips to Cell::I32,
+    // * Cell::U32 rountrips to Cell::I64,
     let row = &mut table_rows[0];
     row.values[7] = Cell::I32(123);
-    row.values[20] = Cell::I32(12345);
+    row.values[20] = Cell::I64(12345);
 
     let read_rows = read_all_rows(&client, namespace.to_string(), table_name.clone()).await;
 
@@ -645,10 +645,10 @@ async fn insert_non_nullable_scalars() {
 
     // Change the expected type due to roundtrip issues
     // * Cell::I16 rountrips to Cell::I32,
-    // * Cell::U32 rountrips to Cell::I32,
+    // * Cell::U32 rountrips to Cell::I64,
     let row = &mut table_rows[0];
     row.values[7] = Cell::I32(123);
-    row.values[20] = Cell::I32(12345);
+    row.values[20] = Cell::I64(12345);
 
     let read_rows = read_all_rows(&client, namespace.to_string(), table_name.clone()).await;
 

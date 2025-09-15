@@ -245,7 +245,6 @@ fn cell_to_i32(cell: &Cell) -> Option<i32> {
     match cell {
         Cell::I16(v) => Some(*v as i32),
         Cell::I32(v) => Some(*v),
-        Cell::U32(v) => Some(*v as i32),
         _ => None,
     }
 }
@@ -257,6 +256,7 @@ fn cell_to_i32(cell: &Cell) -> Option<i32> {
 fn cell_to_i64(cell: &Cell) -> Option<i64> {
     match cell {
         Cell::I64(v) => Some(*v),
+        Cell::U32(v) => Some(*v as i64),
         _ => None,
     }
 }
@@ -427,8 +427,6 @@ mod tests {
     fn test_cell_to_i32() {
         assert_eq!(cell_to_i32(&Cell::I16(42)), Some(42));
         assert_eq!(cell_to_i32(&Cell::I32(42)), Some(42));
-        assert_eq!(cell_to_i32(&Cell::U32(42)), Some(42));
-        assert_eq!(cell_to_i32(&Cell::U32(u32::MAX)), Some(-1)); // Overflow case
         assert_eq!(cell_to_i32(&Cell::Null), None);
         assert_eq!(cell_to_i32(&Cell::I64(42)), None);
         assert_eq!(cell_to_i32(&Cell::String("42".to_string())), None);
@@ -438,6 +436,8 @@ mod tests {
     fn test_cell_to_i64() {
         assert_eq!(cell_to_i64(&Cell::I64(42)), Some(42));
         assert_eq!(cell_to_i64(&Cell::I64(-42)), Some(-42));
+        assert_eq!(cell_to_i64(&Cell::U32(42)), Some(42));
+        assert_eq!(cell_to_i64(&Cell::U32(u32::MAX)), Some(u32::MAX as i64)); // Overflow case
         assert_eq!(cell_to_i64(&Cell::Null), None);
         assert_eq!(cell_to_i64(&Cell::I32(42)), None);
         assert_eq!(cell_to_i64(&Cell::String("42".to_string())), None);
@@ -632,9 +632,6 @@ mod tests {
                 values: vec![Cell::I32(-123)],
             },
             TableRow {
-                values: vec![Cell::U32(456)],
-            },
-            TableRow {
                 values: vec![Cell::Null],
             },
             TableRow {
@@ -648,12 +645,11 @@ mod tests {
             .downcast_ref::<arrow::array::Int32Array>()
             .unwrap();
 
-        assert_eq!(int_array.len(), 5);
+        assert_eq!(int_array.len(), 4);
         assert_eq!(int_array.value(0), 42);
         assert_eq!(int_array.value(1), -123);
-        assert_eq!(int_array.value(2), 456);
-        assert!(int_array.is_null(3));
-        assert!(int_array.is_null(4)); // Non-int cell becomes null
+        assert!(int_array.is_null(2));
+        assert!(int_array.is_null(3)); // Non-int cell becomes null
     }
 
     #[test]
@@ -664,6 +660,9 @@ mod tests {
             },
             TableRow {
                 values: vec![Cell::I64(-987654321)],
+            },
+            TableRow {
+                values: vec![Cell::U32(456)],
             },
             TableRow {
                 values: vec![Cell::Null],
@@ -679,11 +678,12 @@ mod tests {
             .downcast_ref::<arrow::array::Int64Array>()
             .unwrap();
 
-        assert_eq!(int_array.len(), 4);
+        assert_eq!(int_array.len(), 5);
         assert_eq!(int_array.value(0), 123456789);
         assert_eq!(int_array.value(1), -987654321);
-        assert!(int_array.is_null(2));
+        assert_eq!(int_array.value(2), 456);
         assert!(int_array.is_null(3));
+        assert!(int_array.is_null(4));
     }
 
     #[test]
