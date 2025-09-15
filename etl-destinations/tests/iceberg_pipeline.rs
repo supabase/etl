@@ -705,12 +705,18 @@ async fn insert_nullable_array() {
         .await
         .unwrap();
 
-    let table_rows = vec![TableRow {
-        values: vec![
-            Cell::I32(1),                                                            // id
-            Cell::Array(ArrayCell::Bool(vec![Some(true), Some(false), Some(true)])), // bool_array_col
-        ],
-    }];
+    let table_rows = vec![
+        TableRow {
+            values: vec![
+                Cell::I32(1),                                                            // id
+                Cell::Array(ArrayCell::Bool(vec![Some(true), Some(false), Some(true)])), // bool_array_col
+            ],
+        },
+        TableRow {
+            values: vec![Cell::I32(2), Cell::Null],
+        },
+    ];
+
     client
         .insert_rows(namespace.to_string(), table_name.clone(), &table_rows)
         .await

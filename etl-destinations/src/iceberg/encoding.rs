@@ -1,4 +1,4 @@
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
 
 use arrow::{
     array::{
@@ -6,14 +6,13 @@ use arrow::{
         ListBuilder, PrimitiveBuilder, RecordBatch, StringBuilder, TimestampMicrosecondBuilder,
     },
     datatypes::{
-        DataType, Date32Type, Field, Float32Type, Float64Type, Int32Type, Int64Type, Schema,
+        DataType, Date32Type, FieldRef, Float32Type, Float64Type, Int32Type, Int64Type, Schema,
         Time64MicrosecondType, TimeUnit, TimestampMicrosecondType,
     },
     error::ArrowError,
 };
 use chrono::{NaiveDate, NaiveTime};
 use etl::types::{ArrayCell, Cell, DATE_FORMAT, TIME_FORMAT, TIMESTAMP_FORMAT, TableRow};
-use iceberg::spec::LIST_FIELD_NAME;
 
 pub const UNIX_EPOCH: NaiveDate =
     NaiveDate::from_ymd_opt(1970, 1, 1).expect("unix epoch is a valid date");
@@ -74,7 +73,7 @@ fn build_array_for_field(rows: &[TableRow], field_idx: usize, data_type: &DataTy
             build_primitive_array::<TimestampMicrosecondType, _>(rows, field_idx, cell_to_timestamp)
         }
         DataType::FixedSizeBinary(UUID_BYTE_WIDTH) => build_uuid_array(rows, field_idx),
-        DataType::List(field) => build_list_array(rows, field_idx, field.data_type()),
+        DataType::List(field) => build_list_array(rows, field_idx, field.clone()),
         _ => build_string_array(rows, field_idx),
     }
 }
@@ -373,21 +372,17 @@ fn cell_to_array_cell(cell: &Cell) -> Option<&ArrayCell> {
 ///
 /// Returns an [`ArrayRef`] containing a list array with the appropriate element type.
 /// Rows with non-array cells become null entries in the resulting list array.
-fn build_list_array(rows: &[TableRow], field_idx: usize, element_type: &DataType) -> ArrayRef {
-    match element_type {
-        DataType::Boolean => build_boolean_list_array(rows, field_idx),
+fn build_list_array(rows: &[TableRow], field_idx: usize, field: FieldRef) -> ArrayRef {
+    match field.data_type() {
+        DataType::Boolean => build_boolean_list_array(rows, field_idx, field),
         // For unsupported element types, fall back to string representation
         _ => build_list_array_for_strings(rows, field_idx),
     }
 }
 
 /// Builds a list array for boolean elements.
-fn build_boolean_list_array(rows: &[TableRow], field_idx: usize) -> ArrayRef {
-    let mut metadata = HashMap::new();
-    metadata.insert("PARQUET:field_id".to_string(), "3".to_string());
-    let mut field = Field::new(LIST_FIELD_NAME, DataType::Boolean, true);
-    field.set_metadata(metadata);
-    let mut list_builder = ListBuilder::new(BooleanBuilder::new()).with_field(field);
+fn build_boolean_list_array(rows: &[TableRow], field_idx: usize, field: FieldRef) -> ArrayRef {
+    let mut list_builder = ListBuilder::new(BooleanBuilder::new()).with_field(dbg!(field));
 
     for row in rows {
         if let Some(array_cell) = cell_to_array_cell(&row.values[field_idx]) {
