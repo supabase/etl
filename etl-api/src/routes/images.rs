@@ -91,6 +91,31 @@ pub struct ReadImagesResponse {
     pub images: Vec<ReadImageResponse>,
 }
 
+#[utoipa::path(
+    summary = "Create an image",
+    description = "Creates an image entry; can be marked as the default.",
+    request_body = CreateImageRequest,
+    responses(
+        (status = 200, description = "Image created successfully", body = CreateImageResponse),
+        (status = 400, description = "Bad request", body = ErrorMessage),
+        (status = 500, description = "Internal server error", body = ErrorMessage),
+    ),
+    tag = "Images"
+)]
+#[post("/images")]
+pub async fn create_image(
+    pool: Data<PgPool>,
+    image: Json<CreateImageRequest>,
+) -> Result<impl Responder, ImageError> {
+    let image = image.into_inner();
+
+    let id = db::images::create_image(&pool, &image.name, image.is_default).await?;
+
+    let response = CreateImageResponse { id };
+
+    Ok(Json(response))
+}
+
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct SetDefaultImageRequest {
     #[schema(example = "supabase/replicator:1.2.3", required = true)]

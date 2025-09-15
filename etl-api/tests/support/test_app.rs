@@ -5,7 +5,7 @@ use etl_api::routes::destinations::{CreateDestinationRequest, UpdateDestinationR
 use etl_api::routes::destinations_pipelines::{
     CreateDestinationPipelineRequest, UpdateDestinationPipelineRequest,
 };
-use etl_api::routes::images::{SetDefaultImageRequest, UpdateImageRequest};
+use etl_api::routes::images::{CreateImageRequest, SetDefaultImageRequest, UpdateImageRequest};
 use etl_api::routes::pipelines::{
     CreatePipelineRequest, RollbackTableStateRequest, UpdatePipelineConfigRequest,
     UpdatePipelineRequest, UpdatePipelineVersionRequest,
@@ -378,6 +378,14 @@ impl TestApp {
             .send()
             .await
             .expect("failed to execute request")
+    }
+
+    pub async fn create_image(&self, image: &CreateImageRequest) -> reqwest::Response {
+        self.post_authenticated(format!("{}/v1/images", &self.address))
+            .json(image)
+            .send()
+            .await
+            .expect("Failed to execute request.")
     }
 
     pub async fn update_image(
