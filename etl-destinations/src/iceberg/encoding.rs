@@ -375,6 +375,21 @@ fn cell_to_array_cell(cell: &Cell) -> Option<&ArrayCell> {
 fn build_list_array(rows: &[TableRow], field_idx: usize, field: FieldRef) -> ArrayRef {
     match field.data_type() {
         DataType::Boolean => build_boolean_list_array(rows, field_idx, field),
+        DataType::Int32 => build_int32_list_array(rows, field_idx, field),
+        DataType::Int64 => build_int64_list_array(rows, field_idx, field),
+        DataType::Float32 => build_float32_list_array(rows, field_idx, field),
+        DataType::Float64 => build_float64_list_array(rows, field_idx, field),
+        DataType::Utf8 => build_string_list_array(rows, field_idx, field),
+        DataType::LargeBinary => build_binary_list_array(rows, field_idx, field),
+        DataType::Date32 => build_date32_list_array(rows, field_idx, field),
+        DataType::Time64(TimeUnit::Microsecond) => build_time64_list_array(rows, field_idx, field),
+        DataType::Timestamp(TimeUnit::Microsecond, None) => {
+            build_timestamp_list_array(rows, field_idx, field)
+        }
+        DataType::Timestamp(TimeUnit::Microsecond, Some(_)) => {
+            build_timestamptz_list_array(rows, field_idx, field)
+        }
+        DataType::FixedSizeBinary(UUID_BYTE_WIDTH) => build_uuid_list_array(rows, field_idx, field),
         // For unsupported element types, fall back to string representation
         _ => build_list_array_for_strings(rows, field_idx),
     }
@@ -382,7 +397,7 @@ fn build_list_array(rows: &[TableRow], field_idx: usize, field: FieldRef) -> Arr
 
 /// Builds a list array for boolean elements.
 fn build_boolean_list_array(rows: &[TableRow], field_idx: usize, field: FieldRef) -> ArrayRef {
-    let mut list_builder = ListBuilder::new(BooleanBuilder::new()).with_field(dbg!(field));
+    let mut list_builder = ListBuilder::new(BooleanBuilder::new()).with_field(field);
 
     for row in rows {
         if let Some(array_cell) = cell_to_array_cell(&row.values[field_idx]) {
@@ -394,6 +409,346 @@ fn build_boolean_list_array(rows: &[TableRow], field_idx: usize, field: FieldRef
                     list_builder.append(true);
                 }
                 // For non-boolean array types, fall back to string representation
+                _ => {
+                    return build_list_array_for_strings(rows, field_idx);
+                }
+            }
+        } else {
+            list_builder.append_null();
+        }
+    }
+
+    Arc::new(list_builder.finish())
+}
+
+/// Builds a list array for 32-bit integer elements.
+fn build_int32_list_array(rows: &[TableRow], field_idx: usize, field: FieldRef) -> ArrayRef {
+    let mut list_builder = ListBuilder::new(PrimitiveBuilder::<Int32Type>::new()).with_field(field);
+
+    for row in rows {
+        if let Some(array_cell) = cell_to_array_cell(&row.values[field_idx]) {
+            match array_cell {
+                ArrayCell::I16(vec) => {
+                    for item in vec {
+                        list_builder.values().append_option(item.map(|v| v as i32));
+                    }
+                    list_builder.append(true);
+                }
+                ArrayCell::I32(vec) => {
+                    for item in vec {
+                        list_builder.values().append_option(*item);
+                    }
+                    list_builder.append(true);
+                }
+                _ => {
+                    return build_list_array_for_strings(rows, field_idx);
+                }
+            }
+        } else {
+            list_builder.append_null();
+        }
+    }
+
+    Arc::new(list_builder.finish())
+}
+
+/// Builds a list array for 64-bit integer elements.
+fn build_int64_list_array(rows: &[TableRow], field_idx: usize, field: FieldRef) -> ArrayRef {
+    let mut list_builder = ListBuilder::new(PrimitiveBuilder::<Int64Type>::new()).with_field(field);
+
+    for row in rows {
+        if let Some(array_cell) = cell_to_array_cell(&row.values[field_idx]) {
+            match array_cell {
+                ArrayCell::I64(vec) => {
+                    for item in vec {
+                        list_builder.values().append_option(*item);
+                    }
+                    list_builder.append(true);
+                }
+                ArrayCell::U32(vec) => {
+                    for item in vec {
+                        list_builder.values().append_option(item.map(|v| v as i64));
+                    }
+                    list_builder.append(true);
+                }
+                _ => {
+                    return build_list_array_for_strings(rows, field_idx);
+                }
+            }
+        } else {
+            list_builder.append_null();
+        }
+    }
+
+    Arc::new(list_builder.finish())
+}
+
+/// Builds a list array for 32-bit float elements.
+fn build_float32_list_array(rows: &[TableRow], field_idx: usize, field: FieldRef) -> ArrayRef {
+    let mut list_builder =
+        ListBuilder::new(PrimitiveBuilder::<Float32Type>::new()).with_field(field);
+
+    for row in rows {
+        if let Some(array_cell) = cell_to_array_cell(&row.values[field_idx]) {
+            match array_cell {
+                ArrayCell::F32(vec) => {
+                    for item in vec {
+                        list_builder.values().append_option(*item);
+                    }
+                    list_builder.append(true);
+                }
+                _ => {
+                    return build_list_array_for_strings(rows, field_idx);
+                }
+            }
+        } else {
+            list_builder.append_null();
+        }
+    }
+
+    Arc::new(list_builder.finish())
+}
+
+/// Builds a list array for 64-bit float elements.
+fn build_float64_list_array(rows: &[TableRow], field_idx: usize, field: FieldRef) -> ArrayRef {
+    let mut list_builder =
+        ListBuilder::new(PrimitiveBuilder::<Float64Type>::new()).with_field(field);
+
+    for row in rows {
+        if let Some(array_cell) = cell_to_array_cell(&row.values[field_idx]) {
+            match array_cell {
+                ArrayCell::F64(vec) => {
+                    for item in vec {
+                        list_builder.values().append_option(*item);
+                    }
+                    list_builder.append(true);
+                }
+                _ => {
+                    return build_list_array_for_strings(rows, field_idx);
+                }
+            }
+        } else {
+            list_builder.append_null();
+        }
+    }
+
+    Arc::new(list_builder.finish())
+}
+
+/// Builds a list array for string elements.
+fn build_string_list_array(rows: &[TableRow], field_idx: usize, field: FieldRef) -> ArrayRef {
+    let mut list_builder = ListBuilder::new(StringBuilder::new()).with_field(field);
+
+    for row in rows {
+        if let Some(array_cell) = cell_to_array_cell(&row.values[field_idx]) {
+            match array_cell {
+                ArrayCell::String(vec) => {
+                    for item in vec {
+                        match item {
+                            Some(s) => list_builder.values().append_value(s),
+                            None => list_builder.values().append_null(),
+                        }
+                    }
+                    list_builder.append(true);
+                }
+                ArrayCell::Numeric(vec) => {
+                    for item in vec {
+                        match item {
+                            Some(n) => list_builder.values().append_value(n.to_string()),
+                            None => list_builder.values().append_null(),
+                        }
+                    }
+                    list_builder.append(true);
+                }
+                ArrayCell::Json(vec) => {
+                    for item in vec {
+                        match item {
+                            Some(j) => list_builder.values().append_value(j.to_string()),
+                            None => list_builder.values().append_null(),
+                        }
+                    }
+                    list_builder.append(true);
+                }
+                _ => {
+                    return build_list_array_for_strings(rows, field_idx);
+                }
+            }
+        } else {
+            list_builder.append_null();
+        }
+    }
+
+    Arc::new(list_builder.finish())
+}
+
+/// Builds a list array for binary elements.
+fn build_binary_list_array(rows: &[TableRow], field_idx: usize, field: FieldRef) -> ArrayRef {
+    let mut list_builder = ListBuilder::new(LargeBinaryBuilder::new()).with_field(field);
+
+    for row in rows {
+        if let Some(array_cell) = cell_to_array_cell(&row.values[field_idx]) {
+            match array_cell {
+                ArrayCell::Bytes(vec) => {
+                    for item in vec {
+                        match item {
+                            Some(bytes) => list_builder.values().append_value(bytes),
+                            None => list_builder.values().append_null(),
+                        }
+                    }
+                    list_builder.append(true);
+                }
+                _ => {
+                    return build_list_array_for_strings(rows, field_idx);
+                }
+            }
+        } else {
+            list_builder.append_null();
+        }
+    }
+
+    Arc::new(list_builder.finish())
+}
+
+/// Builds a list array for Date32 elements.
+fn build_date32_list_array(rows: &[TableRow], field_idx: usize, field: FieldRef) -> ArrayRef {
+    let mut list_builder =
+        ListBuilder::new(PrimitiveBuilder::<Date32Type>::new()).with_field(field);
+
+    for row in rows {
+        if let Some(array_cell) = cell_to_array_cell(&row.values[field_idx]) {
+            match array_cell {
+                ArrayCell::Date(vec) => {
+                    for item in vec {
+                        let arrow_value = item
+                            .map(|date| date.signed_duration_since(UNIX_EPOCH).num_days() as i32);
+                        list_builder.values().append_option(arrow_value);
+                    }
+                    list_builder.append(true);
+                }
+                _ => {
+                    return build_list_array_for_strings(rows, field_idx);
+                }
+            }
+        } else {
+            list_builder.append_null();
+        }
+    }
+
+    Arc::new(list_builder.finish())
+}
+
+/// Builds a list array for Time64 elements.
+fn build_time64_list_array(rows: &[TableRow], field_idx: usize, field: FieldRef) -> ArrayRef {
+    let mut list_builder =
+        ListBuilder::new(PrimitiveBuilder::<Time64MicrosecondType>::new()).with_field(field);
+
+    for row in rows {
+        if let Some(array_cell) = cell_to_array_cell(&row.values[field_idx]) {
+            match array_cell {
+                ArrayCell::Time(vec) => {
+                    for item in vec {
+                        let arrow_value = item.and_then(|time| {
+                            time.signed_duration_since(MIDNIGHT).num_microseconds()
+                        });
+                        list_builder.values().append_option(arrow_value);
+                    }
+                    list_builder.append(true);
+                }
+                _ => {
+                    return build_list_array_for_strings(rows, field_idx);
+                }
+            }
+        } else {
+            list_builder.append_null();
+        }
+    }
+
+    Arc::new(list_builder.finish())
+}
+
+/// Builds a list array for Timestamp elements.
+fn build_timestamp_list_array(rows: &[TableRow], field_idx: usize, field: FieldRef) -> ArrayRef {
+    let mut list_builder =
+        ListBuilder::new(PrimitiveBuilder::<TimestampMicrosecondType>::new()).with_field(field);
+
+    for row in rows {
+        if let Some(array_cell) = cell_to_array_cell(&row.values[field_idx]) {
+            match array_cell {
+                ArrayCell::Timestamp(vec) => {
+                    for item in vec {
+                        let arrow_value = item.map(|ts| ts.and_utc().timestamp_micros());
+                        list_builder.values().append_option(arrow_value);
+                    }
+                    list_builder.append(true);
+                }
+                _ => {
+                    return build_list_array_for_strings(rows, field_idx);
+                }
+            }
+        } else {
+            list_builder.append_null();
+        }
+    }
+
+    Arc::new(list_builder.finish())
+}
+
+/// Builds a list array for TimestampTz elements.
+fn build_timestamptz_list_array(rows: &[TableRow], field_idx: usize, field: FieldRef) -> ArrayRef {
+    // Extract timezone from the field's data type
+    let tz = if let DataType::Timestamp(TimeUnit::Microsecond, Some(tz_str)) = field.data_type() {
+        tz_str.clone()
+    } else {
+        Arc::from("+00:00".to_string()) // Default to UTC
+    };
+
+    let mut list_builder =
+        ListBuilder::new(TimestampMicrosecondBuilder::new().with_timezone(tz)).with_field(field);
+
+    for row in rows {
+        if let Some(array_cell) = cell_to_array_cell(&row.values[field_idx]) {
+            match array_cell {
+                ArrayCell::TimestampTz(vec) => {
+                    for item in vec {
+                        let arrow_value = item.map(|ts| ts.timestamp_micros());
+                        list_builder.values().append_option(arrow_value);
+                    }
+                    list_builder.append(true);
+                }
+                _ => {
+                    return build_list_array_for_strings(rows, field_idx);
+                }
+            }
+        } else {
+            list_builder.append_null();
+        }
+    }
+
+    Arc::new(list_builder.finish())
+}
+
+/// Builds a list array for UUID elements.
+fn build_uuid_list_array(rows: &[TableRow], field_idx: usize, field: FieldRef) -> ArrayRef {
+    let mut list_builder =
+        ListBuilder::new(FixedSizeBinaryBuilder::new(UUID_BYTE_WIDTH)).with_field(field);
+
+    for row in rows {
+        if let Some(array_cell) = cell_to_array_cell(&row.values[field_idx]) {
+            match array_cell {
+                ArrayCell::Uuid(vec) => {
+                    for item in vec {
+                        match item {
+                            Some(uuid) => {
+                                list_builder
+                                    .values()
+                                    .append_value(uuid.as_bytes())
+                                    .expect("array length and builder byte width are both 16");
+                            }
+                            None => list_builder.values().append_null(),
+                        }
+                    }
+                    list_builder.append(true);
+                }
                 _ => {
                     return build_list_array_for_strings(rows, field_idx);
                 }
