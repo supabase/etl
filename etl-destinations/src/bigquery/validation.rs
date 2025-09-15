@@ -290,7 +290,6 @@ pub fn validate_cell_for_bigquery(cell: &CellNonOptional) -> EtlResult<()> {
 /// Returns an error if any array element is outside BigQuery's supported range for its type.
 pub fn validate_array_cell_for_bigquery(array_cell: &ArrayCellNonOptional) -> EtlResult<()> {
     match array_cell {
-        ArrayCellNonOptional::Null => Ok(()),
         ArrayCellNonOptional::Bool(_) => Ok(()),
         ArrayCellNonOptional::String(_) => Ok(()),
         ArrayCellNonOptional::I16(_) => Ok(()),

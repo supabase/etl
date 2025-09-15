@@ -250,7 +250,6 @@ pub fn array_cell_encode_prost(
     buf: &mut impl bytes::BufMut,
 ) {
     match array_cell {
-        ArrayCellNonOptional::Null => {}
         ArrayCellNonOptional::Bool(vec) => {
             prost::encoding::bool::encode_packed(tag, &vec, buf);
         }
@@ -332,7 +331,6 @@ pub fn array_cell_non_optional_encoded_len_prost(
     tag: u32,
 ) -> usize {
     match array_cell {
-        ArrayCellNonOptional::Null => 0,
         ArrayCellNonOptional::Bool(vec) => prost::encoding::bool::encoded_len_packed(tag, &vec),
         ArrayCellNonOptional::String(vec) => {
             prost::encoding::string::encoded_len_repeated(tag, &vec)

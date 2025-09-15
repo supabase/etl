@@ -110,8 +110,6 @@ impl Cell {
 /// [`ArrayCellNonOptional`] for destinations that don't support nullable array elements.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ArrayCell {
-    /// NULL array value
-    Null,
     /// Array of nullable boolean values
     Bool(Vec<Option<bool>>),
     /// Array of nullable string values
@@ -150,7 +148,6 @@ impl ArrayCell {
     /// Clears all elements from the array while preserving the variant type.
     fn clear(&mut self) {
         match self {
-            ArrayCell::Null => {}
             ArrayCell::Bool(vec) => vec.clear(),
             ArrayCell::String(vec) => vec.clear(),
             ArrayCell::I16(vec) => vec.clear(),
@@ -252,7 +249,6 @@ impl CellNonOptional {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ArrayCellNonOptional {
-    Null,
     Bool(Vec<bool>),
     String(Vec<String>),
     I16(Vec<i16>),
@@ -276,7 +272,6 @@ impl TryFrom<ArrayCell> for ArrayCellNonOptional {
 
     fn try_from(array_cell: ArrayCell) -> Result<Self, Self::Error> {
         match array_cell {
-            ArrayCell::Null => Ok(ArrayCellNonOptional::Null),
             ArrayCell::Bool(vec) => convert_array_variant!(Bool, vec),
             ArrayCell::String(vec) => convert_array_variant!(String, vec),
             ArrayCell::I16(vec) => convert_array_variant!(I16, vec),
@@ -300,7 +295,6 @@ impl TryFrom<ArrayCell> for ArrayCellNonOptional {
 impl ArrayCellNonOptional {
     fn clear(&mut self) {
         match self {
-            ArrayCellNonOptional::Null => {}
             ArrayCellNonOptional::Bool(vec) => vec.clear(),
             ArrayCellNonOptional::String(vec) => vec.clear(),
             ArrayCellNonOptional::I16(vec) => vec.clear(),
@@ -386,14 +380,6 @@ mod tests {
     }
 
     #[test]
-    fn array_cell_try_from_null_variant() {
-        let array_cell = ArrayCell::Null;
-
-        let result = ArrayCellNonOptional::try_from(array_cell).unwrap();
-        assert_eq!(result, ArrayCellNonOptional::Null);
-    }
-
-    #[test]
     fn cell_types_equality() {
         // Test that equal cells are actually equal
         assert_eq!(Cell::I32(42), Cell::I32(42));
@@ -430,7 +416,6 @@ mod tests {
             ArrayCell::Bool(vec![Some(true), Some(false)]),
             ArrayCell::String(vec![Some("hello".to_string()), Some("world".to_string())]),
             ArrayCell::I32(vec![Some(1), Some(2), Some(3)]),
-            ArrayCell::Null,
         ];
 
         for array_cell in mixed_types {
