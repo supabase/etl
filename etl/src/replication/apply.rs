@@ -11,7 +11,6 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::pin;
-use tokio::time::{sleep, Sleep};
 use tokio_postgres::types::PgLsn;
 use tracing::{debug, info};
 
@@ -483,9 +482,9 @@ where
                 state.delay_shutdown();
             }
 
-            // PRIORITY 2: Process incoming replication messages from Postgres
-            // This is the primary data flow - converts replication protocol messages
-            // into typed events and accumulates them into batches for efficient processing
+            // PRIORITY 2: Process incoming replication messages from Postgres.
+            // This is the primary data flow, converts replication protocol messages
+            // into typed events and accumulates them into batches for efficient processing.
             Some(message) = logical_replication_stream.next() => {
                 let continue_loop = handle_replication_message_with_timeout(
                     &mut state,
@@ -503,7 +502,7 @@ where
                 }
             }
 
-            // PRIORITY 3: Handle table synchronization coordination signals
+            // PRIORITY 3: Handle table synchronization coordination signals.
             // Table sync workers signal when they complete initial data copying and are ready
             // to transition to continuous replication mode. We use map_or_else with pending()
             // to make this branch optional - if no signal receiver exists, this branch never fires.
@@ -525,7 +524,7 @@ where
                 }
             }
 
-            // PRIORITY 4: Periodic housekeeping and Postgres status updates
+            // PRIORITY 4: Periodic housekeeping and Postgres status updates.
             // Every REFRESH_INTERVAL (1 second), send progress updates back to Postgres
             // This serves multiple purposes:
             // 1. Keeps Postgres informed of our processing progress
