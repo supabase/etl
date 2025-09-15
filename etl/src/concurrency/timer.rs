@@ -1,21 +1,23 @@
 use std::pin::Pin;
 use std::task::{ready, Context, Poll};
 use std::time::Duration;
-use pin_project_lite::pin_project;
 use tokio::time::{sleep, Sleep};
 
-pin_project! {
-    #[must_use = "streams do nothing unless polled"]
-    #[derive(Debug)]
-    pub struct Timer {
-        #[pin]
-        deadline: Option<Sleep>,
-        duration: Duration
-    }
+/// A simple timer future that resolves after a configured duration.
+///
+/// `Timer` starts inactive; call [`Timer::start`] to arm it. Once started,
+/// polling waits until the inner `Sleep` completes, then resolves to `()`.
+///
+/// Design note: the inner `Sleep` is stored as `Pin<Box<Sleep>>` so that
+/// `Timer` itself is `Unpin` and can be used directly in `tokio::select!`.
+#[derive(Debug)]
+pub struct Timer {
+    deadline: Option<Pin<Box<Sleep>>>,
+    duration: Duration,
 }
 
 impl Timer {
-
+    /// Creates a new, inactive timer for the given `duration`.
     pub fn new(duration: Duration) -> Self {
         Self {
             deadline: None,
@@ -23,23 +25,23 @@ impl Timer {
         }
     }
 
+    /// Arms the timer so that it will resolve after the configured duration.
     pub fn start(&mut self) {
-        self.deadline = Some(sleep(self.duration));
+        self.deadline = Some(Box::pin(sleep(self.duration)));
     }
 }
 
 impl Future for Timer {
-
     type Output = ();
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let this = self.project();
+        let this = self.get_mut();
 
-        let Some(deadline) = this.deadline.as_pin_mut() else {
+        let Some(deadline) = this.deadline.as_mut() else {
             return Poll::Pending;
         };
 
-        ready!(deadline.poll(cx));
+        ready!(deadline.as_mut().poll(cx));
 
         Poll::Ready(())
     }
