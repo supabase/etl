@@ -338,7 +338,7 @@ struct ApplyLoopState {
     ///
     /// When a shutdown has been discarded, the apply loop will continue processing events until a
     /// transaction boundary is found. If not found, the process will continue until it is killed via
-    /// a `SIGTERM`.
+    /// a `SIGKILL`.
     shutdown_discarded: bool,
 }
 
