@@ -1,36 +1,17 @@
 #![cfg(feature = "iceberg")]
 
-use std::collections::HashMap;
-
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use etl::types::{ArrayCell, Cell, ColumnSchema, TableId, TableName, TableRow, TableSchema, Type};
 use etl_destinations::iceberg::IcebergClient;
 use etl_telemetry::tracing::init_test_tracing;
-use iceberg::io::{S3_ACCESS_KEY_ID, S3_ENDPOINT, S3_SECRET_ACCESS_KEY};
 use uuid::Uuid;
 
-use crate::support::{iceberg::read_all_rows, lakekeeper::LakekeeperClient};
+use crate::support::{
+    iceberg::{LAKEKEEPER_URL, create_props, get_catalog_url, read_all_rows},
+    lakekeeper::LakekeeperClient,
+};
 
 mod support;
-
-const LAKEKEEPER_URL: &str = "http://localhost:8182";
-const MINIO_URL: &str = "http://localhost:9010";
-const MINIO_USERNAME: &str = "minio-admin";
-const MINIO_PASSWORD: &str = "minio-admin-password";
-
-fn get_catalog_url() -> String {
-    format!("{LAKEKEEPER_URL}/catalog")
-}
-
-fn create_props() -> HashMap<String, String> {
-    let mut props: HashMap<String, String> = HashMap::new();
-
-    props.insert(S3_ACCESS_KEY_ID.to_string(), MINIO_USERNAME.to_string());
-    props.insert(S3_SECRET_ACCESS_KEY.to_string(), MINIO_PASSWORD.to_string());
-    props.insert(S3_ENDPOINT.to_string(), MINIO_URL.to_string());
-
-    props
-}
 
 #[tokio::test]
 async fn create_namespace() {
