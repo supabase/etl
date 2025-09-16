@@ -2,11 +2,11 @@ use etl_config::shared::PipelineConfig;
 use etl_postgres::replication::slots::get_slot_name;
 use etl_postgres::replication::worker::WorkerType;
 use etl_postgres::types::TableId;
-use futures::{FutureExt, StreamExt};
+use futures::StreamExt;
 use metrics::histogram;
 use postgres_replication::protocol;
 use postgres_replication::protocol::{LogicalReplicationMessage, ReplicationMessage};
-use std::future::{Future, pending};
+use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -552,9 +552,9 @@ where
 
             // PRIORITY 3: Handle table synchronization coordination signals.
             // Table sync workers signal when they complete initial data copying and are ready
-            // to transition to continuous replication mode. We use map_or_else with pending()
-            // to make this branch optional - if no signal receiver exists, this branch never fires.
-            _ = force_syncing_tables_rx.as_mut().map_or_else(|| pending().boxed(), |rx| rx.changed().boxed()) => {
+            // to transition to continuous replication mode. Guard the branch so it stays
+            // dormant if no signal receiver was provided.
+            _ = force_syncing_tables_rx.as_mut().unwrap().changed(), if force_syncing_tables_rx.is_some() => {
                 // Table state transitions can only occur at transaction boundaries to maintain consistency.
                 // If we're in the middle of processing a transaction (remote_final_lsn is set),
                 // we defer the sync processing until the current transaction completes.
