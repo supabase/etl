@@ -85,6 +85,16 @@ impl<S> IcebergDestination<S>
 where
     S: StateStore + SchemaStore + Send + Sync,
 {
+    pub fn new(client: IcebergClient, namespace: String, store: S) -> IcebergDestination<S> {
+        IcebergDestination {
+            client,
+            namespace,
+            store,
+            inner: Arc::new(Mutex::new(Inner {
+                created_tables: HashSet::new(),
+            })),
+        }
+    }
     async fn write_table_rows(
         &self,
         table_id: TableId,
