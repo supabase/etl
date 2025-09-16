@@ -363,7 +363,7 @@ where
                     table_id
                 );
 
-                return Ok(ApplyLoopAction::Stop);
+                return Ok(ApplyLoopAction::Pause);
             }
 
             info!("the table sync worker {} has finished syncing", table_id);

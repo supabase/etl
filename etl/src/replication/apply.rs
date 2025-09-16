@@ -47,14 +47,13 @@ const REFRESH_INTERVAL: Duration = Duration::from_millis(1000);
 /// enabling appropriate cleanup and error handling by the caller.
 #[derive(Debug, Copy, Clone)]
 pub enum ApplyLoopResult {
-    /// The apply loop was stopped by a shutdown mechanism.
+    /// The apply loop was paused.
     ///
-    /// After the apply loop is stopped, we should NOT clean up resources, since it may be resumed
-    /// in the future.
-    Stopped,
-    /// The apply loop completed successfully.
+    /// When the apply loop is paused, the system assumes that it could be resumed in the future.
+    Paused,
+    /// The apply loop was completed.
     ///
-    /// After the apply loop is completed, we can safely clean up resources such as replication slots.
+    /// When the apply loop is completed, the system assumes that it will never be invoked again.
     Completed,
 }
 
@@ -65,8 +64,8 @@ pub enum ApplyLoopResult {
 pub enum ApplyLoopAction {
     /// The apply loop can continue on the next element.
     Continue,
-    /// The apply loop should stop processing.
-    Stop,
+    /// The apply loop should pause processing.
+    Pause,
     /// The apply loop should stop processing because it has completed.
     Complete,
 }
@@ -79,7 +78,7 @@ impl ApplyLoopAction {
     pub fn to_result(self) -> Option<ApplyLoopResult> {
         match self {
             Self::Continue => None,
-            Self::Stop => Some(ApplyLoopResult::Stopped),
+            Self::Pause => Some(ApplyLoopResult::Paused),
             Self::Complete => Some(ApplyLoopResult::Completed),
         }
     }
@@ -88,13 +87,13 @@ impl ApplyLoopAction {
     pub fn is_terminating(&self) -> bool {
         match self {
             Self::Continue => false,
-            Self::Stop | Self::Complete => true,
+            Self::Pause | Self::Complete => true,
         }
     }
 
     /// Merges two [`ApplyLoopAction`]s with the following priorities:
     /// 1. Complete
-    /// 2. Stop
+    /// 2. Pause
     /// 3. Continue
     ///
     /// The rationale for these priorities is that we want to give priority to terminating
@@ -104,15 +103,15 @@ impl ApplyLoopAction {
         match self {
             Self::Continue => match other {
                 Self::Continue => Self::Continue,
-                Self::Stop => Self::Stop,
+                Self::Pause => Self::Pause,
                 Self::Complete => Self::Complete,
             },
-            Self::Stop => {
+            Self::Pause => {
                 match other {
-                    // If we should stop, but we are told to continue, we will prioritize stop.
-                    Self::Continue => Self::Stop,
-                    Self::Stop => Self::Stop,
-                    // If we should stop, but we are told to complete, we will prioritize complete.
+                    // If we should pause, but we are told to continue, we will prioritize pause.
+                    Self::Continue => Self::Pause,
+                    Self::Pause => Self::Pause,
+                    // If we should pause, but we are told to complete, we will prioritize complete.
                     Self::Complete => Self::Complete,
                 }
             }
@@ -120,8 +119,8 @@ impl ApplyLoopAction {
                 match other {
                     // If we should complete, but we are told to continue, we will prioritize complete.
                     Self::Continue => Self::Complete,
-                    // If we should complete, but we are told to stop, we will prioritize complete.
-                    Self::Stop => Self::Complete,
+                    // If we should complete, but we are told to pause, we will prioritize complete.
+                    Self::Pause => Self::Complete,
                     Self::Complete => Self::Complete,
                 }
             }
@@ -523,7 +522,7 @@ where
                 // If we are not inside a transaction, we can cleanly stop streaming and return.
                 if !state.handling_transaction() {
                     info!("shutting down apply worker while waiting for incoming events outside of a transaction");
-                    return Ok(ApplyLoopResult::Stopped);
+                    return Ok(ApplyLoopResult::Paused);
                 }
 
                 info!("discarding shutdown because of a running transaction, the apply loop will shut down on the next transaction boundary");
@@ -1115,7 +1114,7 @@ where
     if let ApplyLoopAction::Continue = action
         && state.shutdown_discarded
     {
-        action = ApplyLoopAction::Stop;
+        action = ApplyLoopAction::Pause;
     }
 
     // Convert event from the protocol message.

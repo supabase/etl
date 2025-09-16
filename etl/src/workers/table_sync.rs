@@ -606,7 +606,7 @@ where
         )
         .await?;
 
-        // If the apply loop was completed, we perform cleanup.
+        // If the apply loop was completed, we perform cleanup since resources are not needed anymore.
         if let ApplyLoopResult::Completed = result {
             // We delete the replication slot used by this table sync worker.
             //
@@ -847,9 +847,9 @@ where
             .set_and_store(table_replication_error.into(), &self.state_store)
             .await?;
 
-        // If we mark a table as errored in a table sync worker, the worker will stop here, thus we
-        // signal the loop to stop.
-        Ok(ApplyLoopAction::Stop)
+        // If a table is marked as errored, this worker should stop processing immediately since there
+        // is no need to continue and for this we mark the loop as completed.
+        Ok(ApplyLoopAction::Complete)
     }
 
     /// Determines whether changes should be applied for the given table.
