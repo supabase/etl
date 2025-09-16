@@ -1045,7 +1045,7 @@ where
     // destination.
     let mut continue_loop = hook.process_syncing_tables(end_lsn, false).await?;
 
-    // If we are in delayed shutdown, and we are processing a `COMMIT` event it means that the transaction
+    // If discarded the shutdown, and we are processing a `COMMIT` event it means that the transaction
     // was finished, so we want to end the apply loop.
     if state.shutdown_discarded {
         continue_loop = false;

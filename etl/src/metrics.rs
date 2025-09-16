@@ -69,11 +69,5 @@ pub(crate) fn register_metrics() {
             Unit::Bytes,
             "Approximate size in bytes of a row copied during table sync"
         );
-
-        describe_counter!(
-            ETL_APPLY_SHUTDOWNS_TOTAL,
-            Unit::Count,
-            "Number of times the apply loop shut down"
-        );
     });
 }
