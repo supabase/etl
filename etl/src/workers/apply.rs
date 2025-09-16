@@ -6,6 +6,7 @@ use tokio::task::JoinHandle;
 use tokio_postgres::types::PgLsn;
 use tracing::{Instrument, debug, error, info};
 
+use crate::concurrency::pause::PauseRx;
 use crate::concurrency::shutdown::ShutdownRx;
 use crate::concurrency::signal::SignalTx;
 use crate::concurrency::signal::create_signal;
@@ -84,6 +85,7 @@ pub struct ApplyWorker<S, D> {
     store: S,
     destination: D,
     shutdown_rx: ShutdownRx,
+    pause_rx: PauseRx,
     table_sync_worker_permits: Arc<Semaphore>,
 }
 
@@ -102,6 +104,7 @@ impl<S, D> ApplyWorker<S, D> {
         store: S,
         destination: D,
         shutdown_rx: ShutdownRx,
+        pause_rx: PauseRx,
         table_sync_worker_permits: Arc<Semaphore>,
     ) -> Self {
         Self {
@@ -112,6 +115,7 @@ impl<S, D> ApplyWorker<S, D> {
             store,
             destination,
             shutdown_rx,
+            pause_rx,
             table_sync_worker_permits,
         }
     }
@@ -157,10 +161,12 @@ where
                     self.store,
                     self.destination,
                     self.shutdown_rx.clone(),
+                    self.pause_rx.clone(),
                     force_syncing_tables_tx,
                     self.table_sync_worker_permits.clone(),
                 ),
                 self.shutdown_rx,
+                self.pause_rx.clone(),
                 Some(force_syncing_tables_rx),
             )
             .await?;
@@ -225,6 +231,8 @@ struct ApplyWorkerHook<S, D> {
     destination: D,
     /// Shutdown signal receiver for graceful termination.
     shutdown_rx: ShutdownRx,
+    /// Pause signal receiver for temporarily suspending replication.
+    pause_rx: PauseRx,
     /// Signal transmitter for triggering table sync operations.
     force_syncing_tables_tx: SignalTx,
     /// Semaphore controlling maximum concurrent table sync workers.
@@ -244,6 +252,7 @@ impl<S, D> ApplyWorkerHook<S, D> {
         store: S,
         destination: D,
         shutdown_rx: ShutdownRx,
+        pause_rx: PauseRx,
         force_syncing_tables_tx: SignalTx,
         table_sync_worker_permits: Arc<Semaphore>,
     ) -> Self {
@@ -254,6 +263,7 @@ impl<S, D> ApplyWorkerHook<S, D> {
             store,
             destination,
             shutdown_rx,
+            pause_rx,
             force_syncing_tables_tx,
             table_sync_worker_permits,
         }
@@ -281,6 +291,7 @@ where
             self.store.clone(),
             self.destination.clone(),
             self.shutdown_rx.clone(),
+            self.pause_rx.clone(),
             self.force_syncing_tables_tx.clone(),
             self.table_sync_worker_permits.clone(),
         )
