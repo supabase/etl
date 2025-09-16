@@ -15,7 +15,9 @@ use crate::concurrency::shutdown::{ShutdownResult, ShutdownRx};
 use crate::concurrency::signal::SignalTx;
 use crate::destination::Destination;
 use crate::error::{ErrorKind, EtlError, EtlResult};
-use crate::replication::apply::{ApplyLoopHook, start_apply_loop};
+use crate::replication::apply::{
+    ApplyLoopAction, ApplyLoopHook, ApplyLoopResult, start_apply_loop,
+};
 use crate::replication::client::PgReplicationClient;
 use crate::replication::table_sync::{TableSyncResult, start_table_sync};
 use crate::state::table::{
@@ -591,7 +593,7 @@ where
             }
         };
 
-        start_apply_loop(
+        let result = start_apply_loop(
             self.pipeline_id,
             start_lsn,
             self.config,
@@ -604,26 +606,29 @@ where
         )
         .await?;
 
-        // We delete the replication slot used by this table sync worker.
-        //
-        // Note that if the deletion fails, the slot will remain in the database and will not be
-        // removed later, so manual intervention will be required. The reason for not implementing
-        // an automatic cleanup mechanism is that it would introduce performance overhead,
-        // and we expect this call to fail only rarely.
-        let worker_type = WorkerType::TableSync {
-            table_id: self.table_id,
-        };
-        let slot_name = get_slot_name(self.pipeline_id, worker_type)?;
-        let result = tokio::time::timeout(
-            MAX_DELETE_SLOT_WAIT,
-            replication_client.delete_slot(&slot_name),
-        )
-        .await;
-        if result.is_err() {
-            warn!(
-                "failed to delete the replication slot {slot_name} of the table sync worker {} due to timeout",
-                self.table_id
-            );
+        // If the apply loop was completed, we perform cleanup.
+        if let ApplyLoopResult::Completed = result {
+            // We delete the replication slot used by this table sync worker.
+            //
+            // Note that if the deletion fails, the slot will remain in the database and will not be
+            // removed later, so manual intervention will be required. The reason for not implementing
+            // an automatic cleanup mechanism is that it would introduce performance overhead,
+            // and we expect this call to fail only rarely.
+            let worker_type = WorkerType::TableSync {
+                table_id: self.table_id,
+            };
+            let slot_name = get_slot_name(self.pipeline_id, worker_type)?;
+            let result = tokio::time::timeout(
+                MAX_DELETE_SLOT_WAIT,
+                replication_client.delete_slot(&slot_name),
+            )
+            .await;
+            if result.is_err() {
+                warn!(
+                    "failed to delete the replication slot {slot_name} of the table sync worker {} due to timeout",
+                    self.table_id
+                );
+            }
         }
 
         // This explicit drop is not strictly necessary but is added to make it extra clear
@@ -736,7 +741,11 @@ where
     ///
     /// Returns `Ok(false)` when the worker is done with its work, signaling the caller that the apply
     /// loop should be stopped.
-    async fn try_advance_phase(&self, current_lsn: PgLsn, update_state: bool) -> EtlResult<bool> {
+    async fn try_advance_phase(
+        &self,
+        current_lsn: PgLsn,
+        update_state: bool,
+    ) -> EtlResult<ApplyLoopAction> {
         let mut inner = self.table_sync_worker_state.lock().await;
 
         // If we caught up with the lsn, we mark this table as `SyncDone` and stop the worker.
@@ -761,10 +770,14 @@ where
                 );
             }
 
-            return Ok(false);
+            // If we caught up, we want to complete the apply loop.
+            //
+            // Note that completion is different from stopping, when completion is returned, the loop
+            // is expected to never be run again.
+            return Ok(ApplyLoopAction::Complete);
         }
 
-        Ok(true)
+        Ok(ApplyLoopAction::Continue)
     }
 }
 
@@ -776,7 +789,7 @@ where
     ///
     /// This hook method evaluates whether the worker has already caught up with the
     /// apply worker's starting position.
-    async fn before_loop(&self, start_lsn: PgLsn) -> EtlResult<bool> {
+    async fn before_loop(&self, start_lsn: PgLsn) -> EtlResult<ApplyLoopAction> {
         info!("checking if the table sync worker is already caught up with the apply worker");
 
         self.try_advance_phase(start_lsn, true).await
@@ -803,7 +816,7 @@ where
         &self,
         current_lsn: PgLsn,
         update_state: bool,
-    ) -> EtlResult<bool> {
+    ) -> EtlResult<ApplyLoopAction> {
         info!(
             "processing syncing tables for table sync worker with lsn {}",
             current_lsn
@@ -820,11 +833,11 @@ where
     async fn mark_table_errored(
         &self,
         table_replication_error: TableReplicationError,
-    ) -> EtlResult<bool> {
+    ) -> EtlResult<ApplyLoopAction> {
         if self.table_id != table_replication_error.table_id() {
             // If the table is not the same as the one handled by this table sync worker, marking
             // the table will be a noop, and we want to continue the loop.
-            return Ok(true);
+            return Ok(ApplyLoopAction::Continue);
         }
 
         // Since we already have access to the table sync worker state, we can avoid going through
@@ -836,7 +849,7 @@ where
 
         // If we mark a table as errored in a table sync worker, the worker will stop here, thus we
         // signal the loop to stop.
-        Ok(false)
+        Ok(ApplyLoopAction::Stop)
     }
 
     /// Determines whether changes should be applied for the given table.
