@@ -47,8 +47,91 @@ const REFRESH_INTERVAL: Duration = Duration::from_millis(1000);
 /// enabling appropriate cleanup and error handling by the caller.
 #[derive(Debug, Copy, Clone)]
 pub enum ApplyLoopResult {
-    /// The apply loop stopped processing, either due to shutdown or completion
-    ApplyStopped,
+    /// The apply loop was paused.
+    ///
+    /// When the apply loop is paused, the system assumes that it could be resumed in the future.
+    Paused,
+    /// The apply loop was completed.
+    ///
+    /// When the apply loop is completed, the system assumes that it will never be invoked again.
+    Completed,
+}
+
+/// Action that should be taken during the apply loop.
+///
+/// An action defines what to do after one iteration of the apply loop.
+#[derive(Debug, Copy, Clone)]
+pub enum ApplyLoopAction {
+    /// The apply loop can continue on the next element.
+    Continue,
+    /// The apply loop should pause processing.
+    Pause,
+    /// The apply loop should stop processing because it has completed.
+    Complete,
+}
+
+impl ApplyLoopAction {
+    /// Builds an [`ApplyLoopResult`] given this [`ApplyLoopAction`].
+    ///
+    /// Returns `Some(result)` if the action can lead to a result of the loop, `None`
+    /// otherwise.
+    pub fn to_result(self) -> Option<ApplyLoopResult> {
+        match self {
+            Self::Continue => None,
+            Self::Pause => Some(ApplyLoopResult::Paused),
+            Self::Complete => Some(ApplyLoopResult::Completed),
+        }
+    }
+
+    /// Returns `true` if the apply loop action is terminating the loop, `false` otherwise.
+    pub fn is_terminating(&self) -> bool {
+        match self {
+            Self::Continue => false,
+            Self::Pause | Self::Complete => true,
+        }
+    }
+
+    /// Merges two [`ApplyLoopAction`]s with the following priorities:
+    /// 1. Complete
+    /// 2. Pause
+    /// 3. Continue
+    ///
+    /// The rationale for these priorities is that we want to give priority to terminating
+    /// actions and when choosing between two terminating actions, the most restrictive is the one
+    /// we want to honor.
+    pub fn merge(self, other: Self) -> Self {
+        match self {
+            Self::Continue => match other {
+                Self::Continue => Self::Continue,
+                Self::Pause => Self::Pause,
+                Self::Complete => Self::Complete,
+            },
+            Self::Pause => {
+                match other {
+                    // If we should pause, but we are told to continue, we will prioritize pause.
+                    Self::Continue => Self::Pause,
+                    Self::Pause => Self::Pause,
+                    // If we should pause, but we are told to complete, we will prioritize complete.
+                    Self::Complete => Self::Complete,
+                }
+            }
+            Self::Complete => {
+                match other {
+                    // If we should complete, but we are told to continue, we will prioritize complete.
+                    Self::Continue => Self::Complete,
+                    // If we should complete, but we are told to pause, we will prioritize complete.
+                    Self::Pause => Self::Complete,
+                    Self::Complete => Self::Complete,
+                }
+            }
+        }
+    }
+}
+
+impl Default for ApplyLoopAction {
+    fn default() -> Self {
+        Self::Continue
+    }
 }
 
 /// Hook trait for customizing apply loop behavior.
@@ -57,30 +140,28 @@ pub enum ApplyLoopResult {
 /// the apply loop processing cycle.
 pub trait ApplyLoopHook {
     /// Called before the main apply loop begins processing.
-    ///
-    /// This hook allows initialization logic to run before replication starts.
-    /// Return `false` to signal that the loop should terminate early.
-    fn before_loop(&self, start_lsn: PgLsn) -> impl Future<Output = EtlResult<bool>> + Send;
+    fn before_loop(
+        &self,
+        start_lsn: PgLsn,
+    ) -> impl Future<Output = EtlResult<ApplyLoopAction>> + Send;
 
     /// Called to process tables that are currently synchronizing.
     ///
     /// This hook coordinates with table sync workers and manages the transition
-    /// between initial sync and continuous replication. Return `false` to signal
-    /// that the loop should terminate.
+    /// between initial sync and continuous replication
     fn process_syncing_tables(
         &self,
         current_lsn: PgLsn,
         update_state: bool,
-    ) -> impl Future<Output = EtlResult<bool>> + Send;
+    ) -> impl Future<Output = EtlResult<ApplyLoopAction>> + Send;
 
     /// Called when a table encounters an error during replication.
     ///
     /// This hook handles error reporting and retry logic for failed tables.
-    /// Return `false` to signal that the loop should terminate due to the error.
     fn mark_table_errored(
         &self,
         table_replication_error: TableReplicationError,
-    ) -> impl Future<Output = EtlResult<bool>> + Send;
+    ) -> impl Future<Output = EtlResult<ApplyLoopAction>> + Send;
 
     /// Called to check if the events processed by this apply loop should be applied in the destination.
     ///
@@ -190,6 +271,12 @@ struct HandleMessageResult {
     ///   to the worker, however the error will be caught and persisted via the observer mechanism
     ///   in place for the table sync workers.
     table_replication_error: Option<TableReplicationError>,
+    /// The action that this event should have on the loop.
+    ///
+    /// Note that this action might be overridden by operations that are happening when a batch is flushed
+    ///and that can also return loop actions. Those actions will be merged with this action using the
+    /// [`ApplyLoopAction::merge`] method.
+    action: ApplyLoopAction,
 }
 
 impl HandleMessageResult {
@@ -211,31 +298,6 @@ impl HandleMessageResult {
         }
     }
 
-    /// Creates a result that returns an event and marks a transaction boundary.
-    ///
-    /// Sets `end_lsn` to the provided value so the caller can update
-    /// [`ApplyLoopState`] progress at the end of a transaction.
-    fn return_boundary_event(event: Event, end_lsn: PgLsn) -> Self {
-        Self {
-            event: Some(event),
-            end_lsn: Some(end_lsn),
-            ..Default::default()
-        }
-    }
-
-    /// Creates a result that returns an event and requests batch termination.
-    ///
-    /// The event is included in the batch (`Inclusive`) and `end_lsn` is set
-    /// to signal a transaction boundary.
-    fn finish_batch_and_return_boundary_event(event: Event, end_lsn: PgLsn) -> Self {
-        Self {
-            event: Some(event),
-            end_lsn: Some(end_lsn),
-            end_batch: Some(EndBatch::Inclusive),
-            ..Default::default()
-        }
-    }
-
     /// Creates a result that excludes the current event and requests batch termination.
     ///
     /// Used when the current message triggers a recoverable table-level error.
@@ -250,7 +312,7 @@ impl HandleMessageResult {
 }
 
 /// A shared state that is used throughout the apply loop to track progress.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 struct ApplyLoopState {
     /// The highest LSN received from the `end_lsn` field of a `Commit` message.
     ///
@@ -271,6 +333,13 @@ struct ApplyLoopState {
     current_tx_begin_ts: Option<Instant>,
     /// Number of events observed in the current transaction (excluding BEGIN/COMMIT).
     current_tx_events: u64,
+    /// Boolean representing whether the shutdown was requested but could not be processed because
+    /// a transaction was running.
+    ///
+    /// When a shutdown has been discarded, the apply loop will continue processing events until a
+    /// transaction boundary is found. If not found, the process will continue until it is killed via
+    /// a `SIGTERM`.
+    shutdown_discarded: bool,
 }
 
 impl ApplyLoopState {
@@ -286,6 +355,7 @@ impl ApplyLoopState {
             events_batch,
             current_tx_begin_ts: None,
             current_tx_events: 0,
+            shutdown_discarded: false,
         }
     }
 
@@ -386,14 +456,13 @@ where
     );
 
     // We call the `before_loop` hook and stop the loop immediately in case we are told to stop.
-    let continue_loop = hook.before_loop(start_lsn).await?;
-    if !continue_loop {
+    let action = hook.before_loop(start_lsn).await?;
+    if let Some(result) = action.to_result() {
         info!(
             "no need to run apply loop for worker '{:?}', the loop will terminate",
             hook.worker_type()
         );
-
-        return Ok(ApplyLoopResult::ApplyStopped);
+        return Ok(result);
     }
 
     // The first status update is defaulted from the start lsn since at this point we haven't
@@ -440,20 +509,32 @@ where
             // This ensures graceful shutdown takes precedence over event processing
             biased;
 
-            // PRIORITY 1: Handle shutdown signals immediately
-            // When shutdown is requested, we stop processing new events and terminate gracefully
-            // This allows current transactions to complete but prevents new ones from starting
+            // PRIORITY 1: Handle shutdown signals.
+            // When shutdown is requested, we check if we are in a transaction, if we are, we discard
+            // the shutdown and gracefully stop when a transaction boundary is found.
             _ = shutdown_rx.changed() => {
-                info!("shutting down apply worker while waiting for incoming events");
+                // If the shutdown is being discarded, we don't want to handle it again.
+                if state.shutdown_discarded {
+                    info!("shutdown was already requested but it has been discarded because of a running transaction");
+                    continue;
+                }
 
-                return Ok(ApplyLoopResult::ApplyStopped);
+                // If we are not inside a transaction, we can cleanly stop streaming and return.
+                if !state.handling_transaction() {
+                    info!("shutting down apply worker while waiting for incoming events outside of a transaction");
+                    return Ok(ApplyLoopResult::Paused);
+                }
+
+                info!("discarding shutdown because of a running transaction, the apply loop will shut down on the next transaction boundary");
+
+                state.shutdown_discarded = true;
             }
 
-            // PRIORITY 2: Process incoming replication messages from Postgres
-            // This is the primary data flow - converts replication protocol messages
-            // into typed events and accumulates them into batches for efficient processing
+            // PRIORITY 2: Process incoming replication messages from Postgres.
+            // This is the primary data flow, converts replication protocol messages
+            // into typed events and accumulates them into batches for efficient processing.
             Some(message) = logical_replication_stream.next() => {
-                let continue_loop = handle_replication_message_with_timeout(
+                let action = handle_replication_message_with_timeout(
                     &mut state,
                     logical_replication_stream.as_mut(),
                     message,
@@ -464,12 +545,12 @@ where
                     pipeline_id
                 )
                 .await?;
-                if !continue_loop {
-                    return Ok(ApplyLoopResult::ApplyStopped);
+                if let Some(result) = action.to_result() {
+                    return Ok(result);
                 }
             }
 
-            // PRIORITY 3: Handle table synchronization coordination signals
+            // PRIORITY 3: Handle table synchronization coordination signals.
             // Table sync workers signal when they complete initial data copying and are ready
             // to transition to continuous replication mode. We use map_or_else with pending()
             // to make this branch optional - if no signal receiver exists, this branch never fires.
@@ -482,16 +563,16 @@ where
 
                     // Delegate to hook for actual table sync processing
                     // Pass current flush LSN to ensure sync operations use consistent state
-                    let continue_loop = hook.process_syncing_tables(state.next_status_update.flush_lsn, true).await?;
-                    if !continue_loop {
-                        return Ok(ApplyLoopResult::ApplyStopped);
+                    let action = hook.process_syncing_tables(state.next_status_update.flush_lsn, true).await?;
+                    if let Some(result) = action.to_result() {
+                        return Ok(result);
                     }
                 } else {
                     debug!("skipping table sync processing - transaction in progress");
                 }
             }
 
-            // PRIORITY 4: Periodic housekeeping and Postgres status updates
+            // PRIORITY 4: Periodic housekeeping and Postgres status updates.
             // Every REFRESH_INTERVAL (1 second), send progress updates back to Postgres
             // This serves multiple purposes:
             // 1. Keeps Postgres informed of our processing progress
@@ -531,7 +612,7 @@ async fn handle_replication_message_with_timeout<S, D, T>(
     hook: &T,
     max_batch_size: usize,
     pipeline_id: PipelineId,
-) -> EtlResult<bool>
+) -> EtlResult<ApplyLoopAction>
 where
     S: SchemaStore + Clone + Send + 'static,
     D: Destination + Clone + Send + 'static,
@@ -559,7 +640,9 @@ where
                 state.update_last_commit_end_lsn(result.end_lsn);
             }
 
-            let mut continue_loop = true;
+            // TODO: check if this is what we want.
+            // The action that we want to perform is by default the action attached to the message.
+            let mut action = result.action;
 
             // If we have elements in the batch, and we have reached the max batch size, or we are told
             // to end the batch, we send it.
@@ -594,7 +677,7 @@ where
                 // Ideally we would get rid of this since it's an anomalous case which adds unnecessary
                 // complexity.
                 if let Some(error) = result.table_replication_error {
-                    continue_loop &= hook.mark_table_errored(error).await?;
+                    action = action.merge(hook.mark_table_errored(error).await?);
                 }
 
                 // Once the batch is sent, we have the guarantee that all events up to this point have
@@ -603,10 +686,10 @@ where
                 // If we were to synchronize for every event, we would risk data loss since we would notify
                 // Postgres about our progress of events processing without having those events durably
                 // persisted in the destination.
-                continue_loop &= synchronize(state, hook).await?;
+                action = action.merge(synchronize(state, hook).await?);
             }
 
-            Ok(continue_loop)
+            Ok(action)
         }
         TimeoutStreamResult::Timeout => {
             debug!(
@@ -693,7 +776,7 @@ where
 /// been durably written, and calls [`ApplyLoopHook::process_syncing_tables`]
 /// to advance table synchronization state. Returns `true` if the caller
 /// should terminate the loop based on hook feedback.
-async fn synchronize<T>(state: &mut ApplyLoopState, hook: &T) -> EtlResult<bool>
+async fn synchronize<T>(state: &mut ApplyLoopState, hook: &T) -> EtlResult<ApplyLoopAction>
 where
     T: ApplyLoopHook,
 {
@@ -704,7 +787,7 @@ where
     // with the same LSN, with `take` this can't happen under the assumption that the next LSN will be
     // strictly greater.
     let Some(last_commit_end_lsn) = state.last_commit_end_lsn.take() else {
-        return Ok(true);
+        return Ok(ApplyLoopAction::Continue);
     };
 
     // We also prepare the next status update for Postgres, where we will confirm that we flushed
@@ -1023,33 +1106,40 @@ where
     // with `update_state` set to true *after* sending the batch to the destination. This order is needed
     // for consistency because otherwise we might update the table state before receiving an ack from the
     // destination.
-    let continue_loop = hook.process_syncing_tables(end_lsn, false).await?;
+    let mut action = hook.process_syncing_tables(end_lsn, false).await?;
+
+    // If we are told to continue processing but the shutdown was discarded, it means that we should
+    // stop the apply loop. On the other hand, if we are already told to either stop or complete,
+    // we will honor that decision.
+    if let ApplyLoopAction::Continue = action
+        && state.shutdown_discarded
+    {
+        action = ApplyLoopAction::Pause;
+    }
 
     // Convert event from the protocol message.
     let event = parse_event_from_commit_message(start_lsn, commit_lsn, message);
 
-    // We mark this as the last commit end LSN since we want to be able to track from the outside
-    // what was the biggest transaction boundary LSN which was successfully applied.
-    //
-    // The rationale for using only the `end_lsn` of the `Commit` message is that once we found a
-    // commit and successfully processed it, we can say that the next byte we want is the next transaction
-    // since if we were to store an intermediate `end_lsn` (from a dml operation within a transaction)
-    // the replication will still start from a transaction boundary, that is, a `Begin` statement in
-    // our case.
-    if continue_loop {
-        Ok(HandleMessageResult::return_boundary_event(
-            Event::Commit(event),
-            end_lsn,
-        ))
-    } else {
-        // If we are told to stop the loop, it means we reached the end of processing for this specific
-        // worker, so we gracefully stop processing the batch, but we include in the batch the last processed
-        // element, in this case the `Commit` message.
-        Ok(HandleMessageResult::finish_batch_and_return_boundary_event(
-            Event::Commit(event),
-            end_lsn,
-        ))
+    let mut result = HandleMessageResult {
+        event: Some(Event::Commit(event)),
+        // The rationale for using only the `end_lsn` of the `COMMIT` message is that once we found a
+        // commit and successfully processed it, we can say that the next byte we want is the next transaction
+        // since if we were to store an intermediate `end_lsn` (from a dml operation within a transaction)
+        // the replication will still start from a transaction boundary, that is, a `Begin` statement in
+        // our case.
+        end_lsn: Some(end_lsn),
+        action,
+        ..Default::default()
+    };
+
+    // If we are told to stop the loop, it means we reached the end of processing for this specific
+    // worker, so we gracefully stop processing the batch, but we include in the batch the last processed
+    // element, in this case the `Commit` message.
+    if action.is_terminating() {
+        result.end_batch = Some(EndBatch::Inclusive);
     }
+
+    Ok(result)
 }
 
 /// Handles Postgres RELATION messages that describe table schemas.

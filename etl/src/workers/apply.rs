@@ -12,7 +12,7 @@ use crate::concurrency::signal::create_signal;
 use crate::destination::Destination;
 use crate::error::{ErrorKind, EtlError, EtlResult};
 use crate::etl_error;
-use crate::replication::apply::{ApplyLoopHook, start_apply_loop};
+use crate::replication::apply::{ApplyLoopAction, ApplyLoopHook, start_apply_loop};
 use crate::replication::client::PgReplicationClient;
 use crate::replication::common::get_table_replication_states;
 use crate::state::table::{
@@ -291,7 +291,11 @@ where
     /// This method checks if a table sync worker exists for the given table and
     /// either creates a new worker or coordinates with the existing one. It manages
     /// the transition from sync to catchup phases based on the current LSN.
-    async fn handle_syncing_table(&self, table_id: TableId, current_lsn: PgLsn) -> EtlResult<bool> {
+    async fn handle_syncing_table(
+        &self,
+        table_id: TableId,
+        current_lsn: PgLsn,
+    ) -> EtlResult<ApplyLoopAction> {
         let mut pool = self.pool.lock().await;
         let table_sync_worker_state = pool.get_active_worker_state(table_id);
 
@@ -300,7 +304,7 @@ where
             let table_sync_worker = self.build_table_sync_worker(table_id).await;
             pool.start_worker(table_sync_worker).await?;
 
-            return Ok(true);
+            return Ok(ApplyLoopAction::Continue);
         };
 
         self.handle_existing_worker(table_id, table_sync_worker_state, current_lsn)
@@ -317,7 +321,7 @@ where
         table_id: TableId,
         table_sync_worker_state: TableSyncWorkerState,
         current_lsn: PgLsn,
-    ) -> EtlResult<bool> {
+    ) -> EtlResult<ApplyLoopAction> {
         let mut catchup_started = false;
         {
             let mut inner = table_sync_worker_state.lock().await;
@@ -359,13 +363,13 @@ where
                     table_id
                 );
 
-                return Ok(false);
+                return Ok(ApplyLoopAction::Pause);
             }
 
             info!("the table sync worker {} has finished syncing", table_id);
         }
 
-        Ok(true)
+        Ok(ApplyLoopAction::Continue)
     }
 }
 
@@ -380,7 +384,7 @@ where
     /// initial synchronization. It excludes tables already in `SyncDone` state
     /// and avoids starting duplicate workers for tables that already have
     /// active workers in the pool.
-    async fn before_loop(&self, _start_lsn: PgLsn) -> EtlResult<bool> {
+    async fn before_loop(&self, _start_lsn: PgLsn) -> EtlResult<ApplyLoopAction> {
         info!("starting table sync workers before the main apply loop");
 
         let active_table_replication_states =
@@ -411,7 +415,7 @@ where
             }
         }
 
-        Ok(true)
+        Ok(ApplyLoopAction::Continue)
     }
 
     /// Processes all tables currently in synchronization phases.
@@ -423,7 +427,7 @@ where
         &self,
         current_lsn: PgLsn,
         update_state: bool,
-    ) -> EtlResult<bool> {
+    ) -> EtlResult<ApplyLoopAction> {
         let active_table_replication_states =
             get_table_replication_states(&self.store, false).await?;
         debug!(
@@ -456,9 +460,11 @@ where
                     }
                 }
                 _ => match self.handle_syncing_table(table_id, current_lsn).await {
-                    Ok(continue_loop) => {
-                        if !continue_loop {
-                            return Ok(false);
+                    Ok(action) => {
+                        // If the action is terminating the loop, it means that we want to stop processing,
+                        // so we return the action and stop iterating over tables.
+                        if action.is_terminating() {
+                            return Ok(action);
                         }
                     }
                     Err(err) => {
@@ -468,7 +474,7 @@ where
             }
         }
 
-        Ok(true)
+        Ok(ApplyLoopAction::Continue)
     }
 
     /// Handles table replication errors by updating the table's state.
@@ -480,7 +486,7 @@ where
     async fn mark_table_errored(
         &self,
         table_replication_error: TableReplicationError,
-    ) -> EtlResult<bool> {
+    ) -> EtlResult<ApplyLoopAction> {
         let pool = self.pool.lock().await;
 
         // Convert the table replication error directly to a phase.
@@ -495,7 +501,7 @@ where
 
         // We want to always continue the loop, since we have to deal with the events of other
         // tables.
-        Ok(true)
+        Ok(ApplyLoopAction::Continue)
     }
 
     /// Determines whether changes should be applied for a given table.
