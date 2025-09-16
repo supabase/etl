@@ -58,10 +58,16 @@ pub enum ApplyLoopResult {
     Completed,
 }
 
+/// Action that should be taken during the apply loop.
+///
+/// An action defines what to do after one iteration of the apply loop.
 #[derive(Debug, Copy, Clone)]
 pub enum ApplyLoopAction {
+    /// The apply loop can continue on the next element.
     Continue,
+    /// The apply loop should stop processing.
     Stop,
+    /// The apply loop should stop processing because it has completed.
     Complete,
 }
 
@@ -91,8 +97,8 @@ impl ApplyLoopAction {
     /// 2. Stop
     /// 3. Continue
     ///
-    /// The rationale for these priorities is that we want to give priority to terminal
-    /// actions and when choosing between two terminal actions, the most restrictive is the one
+    /// The rationale for these priorities is that we want to give priority to terminating
+    /// actions and when choosing between two terminating actions, the most restrictive is the one
     /// we want to honor.
     pub fn merge(self, other: Self) -> Self {
         match self {
@@ -267,6 +273,10 @@ struct HandleMessageResult {
     ///   in place for the table sync workers.
     table_replication_error: Option<TableReplicationError>,
     /// The action that this event should have on the loop.
+    ///
+    /// Note that this action might be overridden by operations that are happening when a batch is flushed
+    ///and that can also return loop actions. Those actions will be merged with this action using the
+    /// [`ApplyLoopAction::merge`] method.
     action: ApplyLoopAction,
 }
 
@@ -1100,7 +1110,7 @@ where
     let mut action = hook.process_syncing_tables(end_lsn, false).await?;
 
     // If we are told to continue processing but the shutdown was discarded, it means that we should
-    // stop the apply loop. On the other hand, if we are already told to either Stop or Terminate,
+    // stop the apply loop. On the other hand, if we are already told to either stop or complete,
     // we will honor that decision.
     if let ApplyLoopAction::Continue = action
         && state.shutdown_discarded
