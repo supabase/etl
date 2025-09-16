@@ -43,11 +43,7 @@ use crate::{bail, etl_error};
 const REFRESH_INTERVAL: Duration = Duration::from_millis(1000);
 
 /// The amount of seconds for which a shutdown can be delayed before being forced.
-#[cfg(not(feature = "test-utils"))]
 const DELAYED_SHUTDOWN_DELAY: Duration = Duration::from_secs(300);
-/// The amount of seconds for which a shutdown can be delayed before being forced (in tests).
-#[cfg(feature = "test-utils")]
-const DELAYED_SHUTDOWN_DELAY: Duration = Duration::from_secs(1);
 
 /// Result type for the apply loop execution.
 ///
@@ -464,17 +460,6 @@ where
             // When a forced shutdown is triggered, the apply loop has to stop.
             _ = &mut state.force_shutdown => {
                 info!("forcing shutdown of the apply worker, if a transaction was active, it will be interrupted");
-
-                // Count a shutdown that was forced.
-                let transaction_status = if state.handling_transaction() { "active" } else { "inactive" };
-                metrics::counter!(
-                    ETL_APPLY_SHUTDOWNS_TOTAL,
-                    WORKER_TYPE_LABEL => "apply",
-                    PIPELINE_ID_LABEL => pipeline_id.to_string(),
-                    SHUTDOWN_MODE_LABEL => "force",
-                    TRANSACTION_STATUS_LABEL => transaction_status
-                ).increment(1);
-
                 return Ok(ApplyLoopResult::ApplyStopped);
             }
 
@@ -491,27 +476,8 @@ where
                 // If we are not inside a transaction, we can cleanly stop streaming and return.
                 if !state.handling_transaction() {
                     info!("shutting down apply worker while waiting for incoming events outside of a transaction");
-
-                    // Count a normal shutdown that occurred outside a transaction.
-                    metrics::counter!(
-                        ETL_APPLY_SHUTDOWNS_TOTAL,
-                        WORKER_TYPE_LABEL => "apply",
-                        PIPELINE_ID_LABEL => pipeline_id.to_string(),
-                        SHUTDOWN_MODE_LABEL => "normal",
-                        TRANSACTION_STATUS_LABEL => "inactive"
-                    ).increment(1);
-
                     return Ok(ApplyLoopResult::ApplyStopped);
                 }
-
-                // Count a normal shutdown that occurred inside a transaction.
-                metrics::counter!(
-                    ETL_APPLY_SHUTDOWNS_TOTAL,
-                    WORKER_TYPE_LABEL => "apply",
-                    PIPELINE_ID_LABEL => pipeline_id.to_string(),
-                    SHUTDOWN_MODE_LABEL => "normal",
-                    TRANSACTION_STATUS_LABEL => "active"
-                ).increment(1);
 
                 info!("delaying shutdown for at most {:?} because we are in the middle of a transaction", DELAYED_SHUTDOWN_DELAY);
 
