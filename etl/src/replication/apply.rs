@@ -17,7 +17,6 @@ use tracing::{debug, info};
 use crate::concurrency::shutdown::ShutdownRx;
 use crate::concurrency::signal::SignalRx;
 use crate::concurrency::stream::{TimeoutStream, TimeoutStreamResult};
-use crate::concurrency::timer::DeferredTimer;
 use crate::conversions::event::{
     parse_event_from_begin_message, parse_event_from_commit_message,
     parse_event_from_delete_message, parse_event_from_insert_message,
@@ -27,9 +26,9 @@ use crate::conversions::event::{
 use crate::destination::Destination;
 use crate::error::{ErrorKind, EtlResult};
 use crate::metrics::{
-    ACTION_LABEL, DESTINATION_LABEL, ETL_APPLY_SHUTDOWNS_TOTAL, ETL_BATCH_ITEMS_WRITTEN_TOTAL,
+    ACTION_LABEL, DESTINATION_LABEL, ETL_BATCH_ITEMS_WRITTEN_TOTAL,
     ETL_ITEMS_SEND_DURATION_SECONDS, ETL_TRANSACTION_DURATION_SECONDS, ETL_TRANSACTION_SIZE,
-    PIPELINE_ID_LABEL, SHUTDOWN_MODE_LABEL, TRANSACTION_STATUS_LABEL, WORKER_TYPE_LABEL,
+    PIPELINE_ID_LABEL, WORKER_TYPE_LABEL,
 };
 use crate::replication::client::PgReplicationClient;
 use crate::replication::stream::EventsStream;
@@ -41,9 +40,6 @@ use crate::{bail, etl_error};
 /// The amount of milliseconds that pass between one refresh and the other of the system, in case no
 /// events or shutdown signal are received.
 const REFRESH_INTERVAL: Duration = Duration::from_millis(1000);
-
-/// The amount of seconds for which a shutdown can be delayed before being forced.
-const DELAYED_SHUTDOWN_DELAY: Duration = Duration::from_secs(300);
 
 /// Result type for the apply loop execution.
 ///
@@ -275,10 +271,13 @@ struct ApplyLoopState {
     current_tx_begin_ts: Option<Instant>,
     /// Number of events observed in the current transaction (excluding BEGIN/COMMIT).
     current_tx_events: u64,
-    /// Boolean representing whether the shutdown was requested and it's not in delayed mode.
-    delayed_shutdown: bool,
-    /// Timer that resolves when the delayed shutdown should be converted into a forced shutdown.
-    force_shutdown: DeferredTimer,
+    /// Boolean representing whether the shutdown was requested but could not be processed because
+    /// a transaction was running.
+    ///
+    /// When a shutdown has been discarded, the apply loop will continue processing events until a
+    /// transaction boundary is found. If not found, the process will continue until it is killed via
+    /// a `SIGTERM`.
+    shutdown_discarded: bool,
 }
 
 impl ApplyLoopState {
@@ -294,8 +293,7 @@ impl ApplyLoopState {
             events_batch,
             current_tx_begin_ts: None,
             current_tx_events: 0,
-            delayed_shutdown: false,
-            force_shutdown: DeferredTimer::new(DELAYED_SHUTDOWN_DELAY),
+            shutdown_discarded: false,
         }
     }
 
@@ -325,12 +323,6 @@ impl ApplyLoopState {
     /// but the corresponding `COMMIT` has not yet been handled.
     fn handling_transaction(&self) -> bool {
         self.remote_final_lsn.is_some()
-    }
-
-    /// Delays the shutdown of this apply loop.
-    fn delay_shutdown(&mut self) {
-        self.delayed_shutdown = true;
-        self.force_shutdown.start();
     }
 }
 
@@ -456,20 +448,13 @@ where
             // This ensures graceful shutdown takes precedence over event processing
             biased;
 
-            // PRIORITY 0: Handle the forced shutdown.
-            // When a forced shutdown is triggered, the apply loop has to stop.
-            _ = &mut state.force_shutdown => {
-                info!("forcing shutdown of the apply worker, if a transaction was active, it will be interrupted");
-                return Ok(ApplyLoopResult::ApplyStopped);
-            }
-
             // PRIORITY 1: Handle shutdown signals.
-            // When shutdown is requested, we check if we are in a transaction, if we are, we delay
-            // the shutdown by a fixed amount, otherwise we immediately return.
+            // When shutdown is requested, we check if we are in a transaction, if we are, we discard
+            // the shutdown and gracefully stop when a transaction boundary is found.
             _ = shutdown_rx.changed() => {
-                // If the shutdown is being delayed, we don't do anything.
-                if state.delayed_shutdown {
-                    info!("shutdown was already requested but it has been delayed because of a running transaction");
+                // If the shutdown is being discarded, we don't want to handle it again.
+                if state.shutdown_discarded {
+                    info!("shutdown was already requested but it has been discarded because of a running transaction");
                     continue;
                 }
 
@@ -479,9 +464,9 @@ where
                     return Ok(ApplyLoopResult::ApplyStopped);
                 }
 
-                info!("delaying shutdown for at most {:?} because we are in the middle of a transaction", DELAYED_SHUTDOWN_DELAY);
+                info!("discarding shutdown because of a running transaction, the apply loop will shut down on the next transaction boundary");
 
-                state.delay_shutdown();
+                state.shutdown_discarded = true;
             }
 
             // PRIORITY 2: Process incoming replication messages from Postgres.
@@ -1062,7 +1047,7 @@ where
 
     // If we are in delayed shutdown, and we are processing a `COMMIT` event it means that the transaction
     // was finished, so we want to end the apply loop.
-    if state.delayed_shutdown {
+    if state.shutdown_discarded {
         continue_loop = false;
     }
 
