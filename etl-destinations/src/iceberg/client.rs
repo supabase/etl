@@ -119,6 +119,17 @@ impl IcebergClient {
         self.catalog.drop_namespace(&namespace_ident).await
     }
 
+    /// Load a table
+    pub async fn load_table(
+        &self,
+        namespace: String,
+        table_name: String,
+    ) -> Result<iceberg::table::Table, iceberg::Error> {
+        let namespace_ident = NamespaceIdent::new(namespace);
+        let table_ident = TableIdent::new(namespace_ident, table_name);
+        self.catalog.load_table(&table_ident).await
+    }
+
     /// Insert table rows into the table in the destination
     pub async fn insert_rows(
         &self,
@@ -149,17 +160,6 @@ impl IcebergClient {
             .map_err(iceberg_error_to_etl_error)?;
 
         Ok(())
-    }
-
-    /// Load a table
-    pub async fn load_table_for_test(
-        &self,
-        namespace: String,
-        table_name: String,
-    ) -> Result<iceberg::table::Table, iceberg::Error> {
-        let namespace_ident = NamespaceIdent::new(namespace);
-        let table_ident = TableIdent::new(namespace_ident, table_name);
-        self.catalog.load_table(&table_ident).await
     }
 
     async fn write_record_batch(
