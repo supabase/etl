@@ -107,27 +107,26 @@ where
     async fn truncate_table(&self, table_id: TableId) -> EtlResult<()> {
         let mut inner = self.inner.lock().await;
 
-        let base_table_name = self.store.get_table_mapping(&table_id).await?.ok_or_else(|| etl_error!(
-            ErrorKind::MissingTableMapping,
-            "Table mapping not found",
-            format!(
-                "The table mapping for table id {table_id} was not found while processing truncate events for BigQuery"
-            )
-        ))?;
+        if let Some(base_table_name) = self.store.get_table_mapping(&table_id).await? {
+            let cdc_table_name = format!("{base_table_name}_cdc");
 
-        let cdc_table_name = format!("{base_table_name}_cdc");
+            self.client
+                .drop_table(&self.namespace, base_table_name.clone())
+                .await
+                .map_err(iceberg_error_to_etl_error)?;
+            self.client
+                .drop_table(&self.namespace, cdc_table_name.clone())
+                .await
+                .map_err(iceberg_error_to_etl_error)?;
 
-        self.client
-            .drop_table(&self.namespace, base_table_name.clone())
-            .await
-            .map_err(iceberg_error_to_etl_error)?;
-        self.client
-            .drop_table(&self.namespace, cdc_table_name.clone())
-            .await
-            .map_err(iceberg_error_to_etl_error)?;
+            inner.created_tables.remove(&base_table_name);
+            inner.created_tables.remove(&cdc_table_name);
 
-        inner.created_tables.remove(&base_table_name);
-        inner.created_tables.remove(&cdc_table_name);
+            drop(inner);
+
+            self.prepare_table_for_streaming(table_id).await?;
+            self.prepare_cdc_table_for_streaming(table_id).await?;
+        }
 
         Ok(())
     }
@@ -216,6 +215,10 @@ where
                 let mut join_set = JoinSet::new();
 
                 for (table_id, table_rows) in table_id_to_table_rows {
+                    // We also prepare base table for streaming because we want both of them to exist
+                    // because the background merge jobs will be expecting to read from cdc tables
+                    // into base tables.
+                    let _base_table_name = self.prepare_table_for_streaming(table_id).await?;
                     let iceberg_table_name = self.prepare_cdc_table_for_streaming(table_id).await?;
 
                     let namespace = self.namespace.clone();
@@ -329,8 +332,8 @@ where
                 )
             })?;
 
-        let cdc_table_name = table_name_to_iceberg_table_name(&table_schema.name);
-        let cdc_table_name = format!("{cdc_table_name}_cdc");
+        let base_table_name = table_name_to_iceberg_table_name(&table_schema.name);
+        let cdc_table_name = format!("{base_table_name}_cdc");
 
         if inner.created_tables.contains(&cdc_table_name) {
             return Ok(cdc_table_name);
