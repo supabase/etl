@@ -485,7 +485,11 @@ async fn insert_nullable_scalars() {
         },
     ];
     client
-        .insert_rows(namespace.to_string(), table_name.clone(), &table_rows)
+        .insert_rows(
+            namespace.to_string(),
+            table_name.clone(),
+            table_rows.clone(),
+        )
         .await
         .unwrap();
 
@@ -620,7 +624,11 @@ async fn insert_non_nullable_scalars() {
         ],
     }];
     client
-        .insert_rows(namespace.to_string(), table_name.clone(), &table_rows)
+        .insert_rows(
+            namespace.to_string(),
+            table_name.clone(),
+            table_rows.clone(),
+        )
         .await
         .unwrap();
 
@@ -951,7 +959,11 @@ async fn insert_nullable_array() {
     ];
 
     client
-        .insert_rows(namespace.to_string(), table_name.clone(), &table_rows)
+        .insert_rows(
+            namespace.to_string(),
+            table_name.clone(),
+            table_rows.clone(),
+        )
         .await
         .unwrap();
 
@@ -1288,7 +1300,11 @@ async fn insert_non_nullable_array() {
     }];
 
     client
-        .insert_rows(namespace.to_string(), table_name.clone(), &table_rows)
+        .insert_rows(
+            namespace.to_string(),
+            table_name.clone(),
+            table_rows.clone(),
+        )
         .await
         .unwrap();
 

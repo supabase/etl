@@ -20,6 +20,7 @@ iceberg = [
     "dep:iceberg",
     "dep:iceberg-catalog-rest",
     "dep:arrow",
+    "dep:tracing",
     "dep:parquet",
     "dep:uuid",
     "dep:tokio",

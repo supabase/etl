@@ -2,7 +2,7 @@ use etl::destination::Destination;
 use etl::error::{ErrorKind, EtlError, EtlResult};
 use etl::store::schema::SchemaStore;
 use etl::store::state::StateStore;
-use etl::types::{Cell, Event, PgLsn, TableId, TableName, TableRow};
+use etl::types::{Cell, Event, TableId, TableName, TableRow, generate_sequence_number};
 use etl::{bail, etl_error};
 use gcp_bigquery_client::storage::TableDescriptor;
 use std::collections::{HashMap, HashSet};
@@ -20,26 +20,6 @@ use crate::bigquery::{BigQueryDatasetId, BigQueryTableId};
 const BIGQUERY_TABLE_ID_DELIMITER: &str = "_";
 /// Replacement string for escaping underscores in Postgres names.
 const BIGQUERY_TABLE_ID_DELIMITER_ESCAPE_REPLACEMENT: &str = "__";
-
-/// Creates a hex-encoded sequence number from Postgres LSNs to ensure correct event ordering.
-///
-/// Creates a hex-encoded sequence number that ensures events are processed in the correct order
-/// even when they have the same system time. The format is compatible with BigQuery's
-/// `_CHANGE_SEQUENCE_NUMBER` column requirements.
-///
-/// The rationale for using the LSN is that BigQuery will preserve the highest sequence number
-/// in case of equal primary key, which is what we want since in case of updates, we want the
-/// latest update in Postgres order to be the winner. We have first the `commit_lsn` in the key
-/// so that BigQuery can first order operations based on the LSN at which the transaction committed
-/// and if two operations belong to the same transaction (meaning they have the same LSN), the
-/// `start_lsn` will be used. We first order by `commit_lsn` to preserve the order in which operations
-/// are received by the pipeline since transactions are ordered by commit time and not interleaved.
-fn generate_sequence_number(start_lsn: PgLsn, commit_lsn: PgLsn) -> String {
-    let start_lsn = u64::from(start_lsn);
-    let commit_lsn = u64::from(commit_lsn);
-
-    format!("{commit_lsn:016x}/{start_lsn:016x}")
-}
 
 /// Returns the [`BigQueryTableId`] for a supplied [`TableName`].
 ///
@@ -821,30 +801,6 @@ fn split_table_rows(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_generate_sequence_number() {
-        assert_eq!(
-            generate_sequence_number(PgLsn::from(0), PgLsn::from(0)),
-            "0000000000000000/0000000000000000"
-        );
-        assert_eq!(
-            generate_sequence_number(PgLsn::from(1), PgLsn::from(0)),
-            "0000000000000000/0000000000000001"
-        );
-        assert_eq!(
-            generate_sequence_number(PgLsn::from(255), PgLsn::from(0)),
-            "0000000000000000/00000000000000ff"
-        );
-        assert_eq!(
-            generate_sequence_number(PgLsn::from(65535), PgLsn::from(0)),
-            "0000000000000000/000000000000ffff"
-        );
-        assert_eq!(
-            generate_sequence_number(PgLsn::from(u64::MAX), PgLsn::from(0)),
-            "0000000000000000/ffffffffffffffff"
-        );
-    }
 
     #[test]
     fn test_table_name_to_bigquery_table_id_no_underscores() {

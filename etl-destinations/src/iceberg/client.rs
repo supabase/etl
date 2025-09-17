@@ -135,7 +135,7 @@ impl IcebergClient {
         &self,
         namespace: String,
         table_name: String,
-        table_rows: &[TableRow],
+        table_rows: Vec<TableRow>,
     ) -> EtlResult<()> {
         let namespace_ident = NamespaceIdent::new(namespace);
         let table_ident = TableIdent::new(namespace_ident, table_name);
@@ -153,7 +153,7 @@ impl IcebergClient {
         let arrow_schema = iceberg::arrow::schema_to_arrow_schema(iceberg_schema)
             .map_err(iceberg_error_to_etl_error)?;
         let record_batch =
-            rows_to_record_batch(table_rows, arrow_schema).map_err(arrow_error_to_etl_error)?;
+            rows_to_record_batch(&table_rows, arrow_schema).map_err(arrow_error_to_etl_error)?;
 
         self.write_record_batch(&table, record_batch)
             .await
