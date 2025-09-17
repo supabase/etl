@@ -26,8 +26,8 @@ use crate::conversions::event::{
 use crate::destination::Destination;
 use crate::error::{ErrorKind, EtlResult};
 use crate::metrics::{
-    ACTION_LABEL, DESTINATION_LABEL, ETL_BATCH_ITEMS_WRITTEN_TOTAL,
-    ETL_ITEMS_SEND_DURATION_SECONDS, ETL_TRANSACTION_DURATION_SECONDS, ETL_TRANSACTION_SIZE,
+    ACTION_LABEL, DESTINATION_LABEL, ETL_BATCH_ITEMS_SEND_DURATION_SECONDS,
+    ETL_BATCH_ITEMS_WRITTEN_TOTAL, ETL_TRANSACTION_DURATION_SECONDS, ETL_TRANSACTION_SIZE,
     PIPELINE_ID_LABEL, WORKER_TYPE_LABEL,
 };
 use crate::replication::client::PgReplicationClient;
@@ -755,7 +755,7 @@ where
 
     let send_duration_seconds = before_sending.elapsed().as_secs_f64();
     histogram!(
-        ETL_ITEMS_SEND_DURATION_SECONDS,
+        ETL_BATCH_ITEMS_SEND_DURATION_SECONDS,
         WORKER_TYPE_LABEL => "apply",
         ACTION_LABEL => "table_streaming",
         PIPELINE_ID_LABEL => pipeline_id.to_string(),
