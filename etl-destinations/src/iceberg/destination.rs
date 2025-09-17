@@ -351,8 +351,17 @@ where
                 column_schema.nullable = true;
             }
         }
+
+        // Add cdc specific columns
         cdc_table_schema.add_column_schema(ColumnSchema {
             name: "cdc_operation".to_string(), //TODO: fix the case when the source table already has a column with this name
+            typ: Type::TEXT,
+            modifier: -1,
+            nullable: false,
+            primary: false,
+        });
+        cdc_table_schema.add_column_schema(ColumnSchema {
+            name: "sequence_number".to_string(), //TODO: fix the case when the source table already has a column with this name
             typ: Type::TEXT,
             modifier: -1,
             nullable: false,
