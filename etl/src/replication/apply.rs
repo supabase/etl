@@ -915,91 +915,39 @@ where
     S: SchemaStore + Clone + Send + 'static,
     T: ApplyLoopHook,
 {
-    let commit_lsn = get_commit_lsn(state, &message)?;
-
     state.current_tx_events += 1;
 
     match &message {
         LogicalReplicationMessage::Begin(begin_body) => {
-            handle_begin_message(state, start_lsn, commit_lsn, begin_body).await
+            handle_begin_message(state, start_lsn, begin_body).await
         }
         LogicalReplicationMessage::Commit(commit_body) => {
-            handle_commit_message(state, start_lsn, commit_lsn, commit_body, hook, pipeline_id)
-                .await
+            handle_commit_message(state, start_lsn, commit_body, hook, pipeline_id).await
         }
         LogicalReplicationMessage::Relation(relation_body) => {
-            handle_relation_message(
-                state,
-                start_lsn,
-                commit_lsn,
-                relation_body,
-                schema_store,
-                hook,
-            )
-            .await
+            handle_relation_message(state, start_lsn, relation_body, schema_store, hook).await
         }
         LogicalReplicationMessage::Insert(insert_body) => {
-            handle_insert_message(
-                state,
-                start_lsn,
-                commit_lsn,
-                insert_body,
-                hook,
-                schema_store,
-            )
-            .await
+            handle_insert_message(state, start_lsn, insert_body, hook, schema_store).await
         }
         LogicalReplicationMessage::Update(update_body) => {
-            handle_update_message(
-                state,
-                start_lsn,
-                commit_lsn,
-                update_body,
-                hook,
-                schema_store,
-            )
-            .await
+            handle_update_message(state, start_lsn, update_body, hook, schema_store).await
         }
         LogicalReplicationMessage::Delete(delete_body) => {
-            handle_delete_message(
-                state,
-                start_lsn,
-                commit_lsn,
-                delete_body,
-                hook,
-                schema_store,
-            )
-            .await
+            handle_delete_message(state, start_lsn, delete_body, hook, schema_store).await
         }
         LogicalReplicationMessage::Truncate(truncate_body) => {
-            handle_truncate_message(state, start_lsn, commit_lsn, truncate_body, hook).await
+            handle_truncate_message(state, start_lsn, truncate_body, hook).await
         }
-        LogicalReplicationMessage::Origin(_) => Ok(HandleMessageResult::default()),
-        LogicalReplicationMessage::Type(_) => Ok(HandleMessageResult::default()),
+        LogicalReplicationMessage::Origin(_) => {
+            debug!("received unsupported ORIGIN message");
+            Ok(HandleMessageResult::default())
+        }
+        LogicalReplicationMessage::Type(_) => {
+            debug!("received unsupported TYPE message");
+            Ok(HandleMessageResult::default())
+        }
         _ => Ok(HandleMessageResult::default()),
-    }
-}
-
-/// Determines the commit LSN for a replication message based on transaction state.
-///
-/// This function extracts the appropriate commit LSN depending on the message type.
-/// For `BEGIN` messages, it uses the final LSN from the message payload. For all
-/// other message types, it retrieves the previously stored `remote_final_lsn`
-/// that was set when the transaction began.
-fn get_commit_lsn(state: &ApplyLoopState, message: &LogicalReplicationMessage) -> EtlResult<PgLsn> {
-    // If we are in a `Begin` message, the `commit_lsn` is the `final_lsn` of the payload, in all the
-    // other cases we read the `remote_final_lsn` which should be always set in case we are within or
-    // at the end of a transaction (meaning that the event type is different from `Begin`).
-    if let LogicalReplicationMessage::Begin(message) = message {
-        Ok(PgLsn::from(message.final_lsn()))
-    } else {
-        state.remote_final_lsn.ok_or_else(|| {
-            etl_error!(
-                ErrorKind::InvalidState,
-                "Invalid transaction",
-                "A transaction should have started for get_commit_lsn to be performed"
-            )
-        })
     }
 }
 
@@ -1015,7 +963,6 @@ fn get_commit_lsn(state: &ApplyLoopState, message: &LogicalReplicationMessage) -
 async fn handle_begin_message(
     state: &mut ApplyLoopState,
     start_lsn: PgLsn,
-    commit_lsn: PgLsn,
     message: &protocol::BeginBody,
 ) -> EtlResult<HandleMessageResult> {
     // We track the final lsn of this transaction, which should be equal to the `commit_lsn` of the
@@ -1028,7 +975,7 @@ async fn handle_begin_message(
     state.current_tx_events = 0;
 
     // Convert event from the protocol message.
-    let event = parse_event_from_begin_message(start_lsn, commit_lsn, message);
+    let event = parse_event_from_begin_message(start_lsn, final_lsn, message);
 
     Ok(HandleMessageResult::return_event(Event::Begin(event)))
 }
@@ -1046,7 +993,6 @@ async fn handle_begin_message(
 async fn handle_commit_message<T>(
     state: &mut ApplyLoopState,
     start_lsn: PgLsn,
-    commit_lsn: PgLsn,
     message: &protocol::CommitBody,
     hook: &T,
     pipeline_id: PipelineId,
@@ -1068,14 +1014,14 @@ where
     // If the commit lsn of the message is different from the remote final lsn, it means that the
     // transaction that was started expect a different commit lsn in the commit message. In this case,
     // we want to bail assuming we are in an inconsistent state.
-    let commit_lsn_msg = PgLsn::from(message.commit_lsn());
-    if commit_lsn_msg != remote_final_lsn {
+    let commit_lsn = PgLsn::from(message.commit_lsn());
+    if commit_lsn != remote_final_lsn {
         bail!(
             ErrorKind::ValidationError,
             "Invalid commit LSN",
             format!(
                 "Incorrect commit LSN {} in COMMIT message (expected {})",
-                commit_lsn_msg, remote_final_lsn
+                commit_lsn, remote_final_lsn
             )
         );
     }
@@ -1155,7 +1101,6 @@ where
 async fn handle_relation_message<S, T>(
     state: &mut ApplyLoopState,
     start_lsn: PgLsn,
-    commit_lsn: PgLsn,
     message: &protocol::RelationBody,
     schema_store: &S,
     hook: &T,
@@ -1196,7 +1141,7 @@ where
             })?;
 
     // Convert event from the protocol message.
-    let event = parse_event_from_relation_message(start_lsn, commit_lsn, message)?;
+    let event = parse_event_from_relation_message(start_lsn, remote_final_lsn, message)?;
 
     // We compare the table schema from the relation message with the existing schema (if any).
     // The purpose of this comparison is that we want to throw an error and stop the processing
@@ -1219,7 +1164,6 @@ where
 async fn handle_insert_message<S, T>(
     state: &mut ApplyLoopState,
     start_lsn: PgLsn,
-    commit_lsn: PgLsn,
     message: &protocol::InsertBody,
     hook: &T,
     schema_store: &S,
@@ -1245,7 +1189,7 @@ where
 
     // Convert event from the protocol message.
     let event =
-        parse_event_from_insert_message(schema_store, start_lsn, commit_lsn, message).await?;
+        parse_event_from_insert_message(schema_store, start_lsn, remote_final_lsn, message).await?;
 
     Ok(HandleMessageResult::return_event(Event::Insert(event)))
 }
@@ -1254,7 +1198,6 @@ where
 async fn handle_update_message<S, T>(
     state: &mut ApplyLoopState,
     start_lsn: PgLsn,
-    commit_lsn: PgLsn,
     message: &protocol::UpdateBody,
     hook: &T,
     schema_store: &S,
@@ -1280,7 +1223,7 @@ where
 
     // Convert event from the protocol message.
     let event =
-        parse_event_from_update_message(schema_store, start_lsn, commit_lsn, message).await?;
+        parse_event_from_update_message(schema_store, start_lsn, remote_final_lsn, message).await?;
 
     Ok(HandleMessageResult::return_event(Event::Update(event)))
 }
@@ -1289,7 +1232,6 @@ where
 async fn handle_delete_message<S, T>(
     state: &mut ApplyLoopState,
     start_lsn: PgLsn,
-    commit_lsn: PgLsn,
     message: &protocol::DeleteBody,
     hook: &T,
     schema_store: &S,
@@ -1315,7 +1257,7 @@ where
 
     // Convert event from the protocol message.
     let event =
-        parse_event_from_delete_message(schema_store, start_lsn, commit_lsn, message).await?;
+        parse_event_from_delete_message(schema_store, start_lsn, remote_final_lsn, message).await?;
 
     Ok(HandleMessageResult::return_event(Event::Delete(event)))
 }
@@ -1329,7 +1271,6 @@ where
 async fn handle_truncate_message<T>(
     state: &mut ApplyLoopState,
     start_lsn: PgLsn,
-    commit_lsn: PgLsn,
     message: &protocol::TruncateBody,
     hook: &T,
 ) -> EtlResult<HandleMessageResult>
@@ -1361,7 +1302,7 @@ where
     }
 
     // Convert event from the protocol message.
-    let event = parse_event_from_truncate_message(start_lsn, commit_lsn, message, rel_ids);
+    let event = parse_event_from_truncate_message(start_lsn, remote_final_lsn, message, rel_ids);
 
     Ok(HandleMessageResult::return_event(Event::Truncate(event)))
 }
