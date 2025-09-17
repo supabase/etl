@@ -6,12 +6,12 @@ use etl::test_utils::notify::NotifyingStore;
 use etl::test_utils::pipeline::create_pipeline;
 use etl::test_utils::test_destination_wrapper::TestDestinationWrapper;
 use etl::test_utils::test_schema::{TableSelection, insert_mock_data, setup_test_database_schema};
-use etl::types::PipelineId;
+use etl::types::{Cell, PipelineId, TableRow};
 use etl_destinations::iceberg::{IcebergClient, IcebergDestination};
 use etl_telemetry::tracing::init_test_tracing;
 use rand::random;
 
-use crate::support::iceberg::{LAKEKEEPER_URL, create_props, get_catalog_url};
+use crate::support::iceberg::{LAKEKEEPER_URL, create_props, get_catalog_url, read_all_rows};
 use crate::support::lakekeeper::LakekeeperClient;
 
 mod support;
@@ -79,10 +79,6 @@ async fn table_copy_and_streaming_with_restart() {
 
     pipeline.shutdown_and_wait().await.unwrap();
 
-    // Manual cleanup for now because lakekeeper doesn't allow cascade delete at the warehouse level
-    // This feature is planned for future releases. We'll start to use it when it becomes available.
-    // The cleanup is not in a Drop impl because each test has different number of object specitic to
-    // that test.
     let users_table = format!(
         "{}_{}",
         database_schema.users_schema().name.schema,
@@ -93,6 +89,50 @@ async fn table_copy_and_streaming_with_restart() {
         database_schema.orders_schema().name.schema,
         database_schema.orders_schema().name.name
     );
+
+    let mut actual_users = read_all_rows(&client, namespace.to_string(), users_table.clone()).await;
+
+    let expected_users = vec![
+        TableRow {
+            values: vec![
+                Cell::I64(1),
+                Cell::String("user_1".to_string()),
+                Cell::I32(1),
+            ],
+        },
+        TableRow {
+            values: vec![
+                Cell::I64(2),
+                Cell::String("user_2".to_string()),
+                Cell::I32(2),
+            ],
+        },
+    ];
+
+    // Sort deterministically by the debug representation as a simple stable key for tests.
+    actual_users.sort_by(|a, b| format!("{:?}", a.values[0]).cmp(&format!("{:?}", b.values[0])));
+    assert_eq!(actual_users, expected_users);
+
+    let mut actual_orders =
+        read_all_rows(&client, namespace.to_string(), orders_table.clone()).await;
+
+    let expected_orders = vec![
+        TableRow {
+            values: vec![Cell::I64(1), Cell::String("description_1".to_string())],
+        },
+        TableRow {
+            values: vec![Cell::I64(2), Cell::String("description_2".to_string())],
+        },
+    ];
+
+    // Sort deterministically by the debug representation as a simple stable key for tests.
+    actual_orders.sort_by(|a, b| format!("{:?}", a.values[0]).cmp(&format!("{:?}", b.values[0])));
+    assert_eq!(actual_orders, expected_orders);
+
+    // Manual cleanup for now because lakekeeper doesn't allow cascade delete at the warehouse level
+    // This feature is planned for future releases. We'll start to use it when it becomes available.
+    // The cleanup is not in a Drop impl because each test has different number of object specitic to
+    // that test.
     client.drop_table(namespace, users_table).await.unwrap();
     client.drop_table(namespace, orders_table).await.unwrap();
     client.drop_namespace(namespace).await.unwrap();
