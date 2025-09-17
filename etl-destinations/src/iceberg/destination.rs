@@ -104,6 +104,34 @@ where
         }
     }
 
+    async fn truncate_table(&self, table_id: TableId) -> EtlResult<()> {
+        let mut inner = self.inner.lock().await;
+
+        let base_table_name = self.store.get_table_mapping(&table_id).await?.ok_or_else(|| etl_error!(
+            ErrorKind::MissingTableMapping,
+            "Table mapping not found",
+            format!(
+                "The table mapping for table id {table_id} was not found while processing truncate events for BigQuery"
+            )
+        ))?;
+
+        let cdc_table_name = format!("{base_table_name}_cdc");
+
+        self.client
+            .drop_table(&self.namespace, base_table_name.clone())
+            .await
+            .map_err(iceberg_error_to_etl_error)?;
+        self.client
+            .drop_table(&self.namespace, cdc_table_name.clone())
+            .await
+            .map_err(iceberg_error_to_etl_error)?;
+
+        inner.created_tables.remove(&base_table_name);
+        inner.created_tables.remove(&cdc_table_name);
+
+        Ok(())
+    }
+
     async fn write_table_rows(
         &self,
         table_id: TableId,
@@ -116,46 +144,6 @@ where
             .await?;
 
         Ok(())
-    }
-
-    /// Prepares a table for CDC streaming operations with schema-aware table creation.
-    ///
-    /// Retrieves the table schema from the store, creates or verifies the iceberg table exists.
-    /// Uses caching to avoid redundant table creation checks.
-    async fn prepare_table_for_streaming(&self, table_id: TableId) -> EtlResult<IcebergTableName> {
-        // We hold the lock for the entire preparation to avoid race conditions since the consistency
-        // of this code path is critical.
-        let mut inner = self.inner.lock().await;
-
-        let table_schema = self
-            .store
-            .get_table_schema(&table_id)
-            .await?
-            .ok_or_else(|| {
-                etl_error!(
-                    ErrorKind::MissingTableSchema,
-                    "Table schema not found",
-                    format!("No schema found for table {table_id}")
-                )
-            })?;
-
-        let iceberg_table_name = table_name_to_iceberg_table_name(&table_schema.name);
-        let iceberg_table_name = self
-            .get_or_create_iceberg_table_name(&table_id, iceberg_table_name)
-            .await?;
-
-        if inner.created_tables.contains(&iceberg_table_name) {
-            return Ok(iceberg_table_name);
-        }
-
-        self.client
-            .create_table_if_missing(&self.namespace, iceberg_table_name.clone(), &table_schema)
-            .await
-            .map_err(iceberg_error_to_etl_error)?;
-
-        Self::add_to_created_tables_cache(&mut inner, &iceberg_table_name);
-
-        Ok(iceberg_table_name)
     }
 
     async fn write_events(&self, events: Vec<Event>) -> EtlResult<()> {
@@ -238,18 +226,10 @@ where
                             .insert_rows(namespace, iceberg_table_name, table_rows)
                             .await
                     });
-                    // let table_batch = self.client.create_table_batch(
-                    //     &self.dataset_id,
-                    //     &sequenced_bigquery_table_id.to_string(),
-                    //     table_descriptor.clone(),
-                    //     table_rows,
-                    // )?;
-                    // table_batches.push(table_batch);
                 }
                 while let Some(insert_result) = join_set.join_next().await {
                     insert_result
                         .map_err(|_| etl_error!(ErrorKind::Unknown, "Failed to join future"))??;
-                    // batch_results.push(batch_result);
 
                     //TODO:add egress metrics
                     // Logs with egress_metric = true can be used to identify egress logs.
@@ -264,14 +244,6 @@ where
                     //     "wrote cdc events to bigquery"
                     // );
                 }
-
-                // if !table_batches.is_empty() {
-                // let (bytes_sent, bytes_received) = self
-                //     .client
-                //     .stream_table_batches_concurrent(table_batches, self.max_concurrent_streams)
-                //     .await?;
-
-                // }
             }
 
             // Collect and deduplicate all table IDs from all truncate events.
@@ -289,13 +261,52 @@ where
                 }
             }
 
-            if !truncate_table_ids.is_empty() {
-                // self.process_truncate_for_table_ids(truncate_table_ids.into_iter(), true)
-                //     .await?;
+            for table_id in truncate_table_ids {
+                self.truncate_table(table_id).await?;
             }
         }
 
         Ok(())
+    }
+
+    /// Prepares a table for CDC streaming operations with schema-aware table creation.
+    ///
+    /// Retrieves the table schema from the store, creates or verifies the iceberg table exists.
+    /// Uses caching to avoid redundant table creation checks.
+    async fn prepare_table_for_streaming(&self, table_id: TableId) -> EtlResult<IcebergTableName> {
+        // We hold the lock for the entire preparation to avoid race conditions since the consistency
+        // of this code path is critical.
+        let mut inner = self.inner.lock().await;
+
+        let table_schema = self
+            .store
+            .get_table_schema(&table_id)
+            .await?
+            .ok_or_else(|| {
+                etl_error!(
+                    ErrorKind::MissingTableSchema,
+                    "Table schema not found",
+                    format!("No schema found for table {table_id}")
+                )
+            })?;
+
+        let iceberg_table_name = table_name_to_iceberg_table_name(&table_schema.name);
+        let iceberg_table_name = self
+            .get_or_create_iceberg_table_name(&table_id, iceberg_table_name)
+            .await?;
+
+        if inner.created_tables.contains(&iceberg_table_name) {
+            return Ok(iceberg_table_name);
+        }
+
+        self.client
+            .create_table_if_missing(&self.namespace, iceberg_table_name.clone(), &table_schema)
+            .await
+            .map_err(iceberg_error_to_etl_error)?;
+
+        Self::add_to_created_tables_cache(&mut inner, &iceberg_table_name);
+
+        Ok(iceberg_table_name)
     }
 
     async fn prepare_cdc_table_for_streaming(
@@ -318,11 +329,8 @@ where
                 )
             })?;
 
-        let cdc_table_name = TableName {
-            schema: table_schema.name.schema.clone(),
-            name: format!("{}_cdc", table_schema.name.name),
-        };
-        let cdc_table_name = table_name_to_iceberg_table_name(&cdc_table_name);
+        let cdc_table_name = table_name_to_iceberg_table_name(&table_schema.name);
+        let cdc_table_name = format!("{cdc_table_name}_cdc");
 
         if inner.created_tables.contains(&cdc_table_name) {
             return Ok(cdc_table_name);
@@ -406,7 +414,9 @@ where
         "iceberg"
     }
 
-    async fn truncate_table(&self, _table_id: etl::types::TableId) -> EtlResult<()> {
+    async fn truncate_table(&self, table_id: TableId) -> EtlResult<()> {
+        self.truncate_table(table_id).await?;
+
         Ok(())
     }
 

@@ -211,14 +211,14 @@ async fn cdc_streaming() {
     // Wait for all CDC insert events to be written to Iceberg.
     event_notify.notified().await;
 
-    // The CDC tables are the base table names with a `__cdc` suffix.
+    // The CDC tables are the base table names with a `_cdc` suffix.
     let users_table_cdc = format!(
-        "{}_{}__cdc",
+        "{}_{}_cdc",
         database_schema.users_schema().name.schema,
         database_schema.users_schema().name.name
     );
     let orders_table_cdc = format!(
-        "{}_{}__cdc",
+        "{}_{}_cdc",
         database_schema.orders_schema().name.schema,
         database_schema.orders_schema().name.name
     );
