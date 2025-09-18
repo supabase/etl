@@ -7,6 +7,7 @@ use etl::{
 };
 use iceberg::{
     Catalog, NamespaceIdent, TableCreation, TableIdent,
+    io::{S3_ACCESS_KEY_ID, S3_ENDPOINT, S3_SECRET_ACCESS_KEY},
     table::Table,
     transaction::{ApplyTransactionAction, Transaction},
     writer::{
@@ -40,6 +41,34 @@ impl IcebergClient {
         warehouse_name: String,
         props: HashMap<String, String>,
     ) -> Self {
+        let catalog_config = RestCatalogConfig::builder()
+            .uri(catalog_uri)
+            .warehouse(warehouse_name)
+            .props(props)
+            .build();
+        let catalog = RestCatalog::new(catalog_config);
+        IcebergClient {
+            catalog: Arc::new(catalog),
+        }
+    }
+
+    /// Creates a new [IcebergClient] from a REST catalog URI and a warehouse name.
+    pub fn new_with_s3_and_rest_catalog(
+        catalog_uri: String,
+        warehouse_name: String,
+        s3_endpoint: String,
+        s3_access_key_id: String,
+        s3_secret_access_key: String,
+    ) -> Self {
+        let mut props: HashMap<String, String> = HashMap::new();
+
+        props.insert(S3_ACCESS_KEY_ID.to_string(), s3_access_key_id.to_string());
+        props.insert(
+            S3_SECRET_ACCESS_KEY.to_string(),
+            s3_secret_access_key.to_string(),
+        );
+        props.insert(S3_ENDPOINT.to_string(), s3_endpoint.to_string());
+
         let catalog_config = RestCatalogConfig::builder()
             .uri(catalog_uri)
             .warehouse(warehouse_name)

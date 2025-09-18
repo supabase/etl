@@ -10,7 +10,10 @@ use etl::types::PipelineId;
 use etl_config::shared::{
     BatchConfig, DestinationConfig, PgConnectionConfig, PipelineConfig, ReplicatorConfig,
 };
-use etl_destinations::bigquery::{BigQueryDestination, install_crypto_provider_for_bigquery};
+use etl_destinations::{
+    bigquery::{BigQueryDestination, install_crypto_provider_for_bigquery},
+    iceberg::{IcebergClient, IcebergDestination},
+};
 use secrecy::ExposeSecret;
 use tokio::signal::unix::{SignalKind, signal};
 use tracing::{debug, info, warn};
@@ -65,6 +68,27 @@ pub async fn start_replicator_with_config(
             let pipeline = Pipeline::new(replicator_config.pipeline, state_store, destination);
             start_pipeline(pipeline).await?;
         }
+        DestinationConfig::Iceberg {
+            namespace,
+            catalog_uri,
+            warehouse_name,
+            s3_endpoint,
+            s3_access_key_id,
+            s3_secret_access_key,
+        } => {
+            let client = IcebergClient::new_with_s3_and_rest_catalog(
+                catalog_uri.clone(),
+                warehouse_name.clone(),
+                s3_endpoint.clone(),
+                s3_access_key_id.clone(),
+                s3_secret_access_key.expose_secret().to_string(),
+            );
+            let destination =
+                IcebergDestination::new(client, namespace.clone(), state_store.clone());
+
+            let pipeline = Pipeline::new(replicator_config.pipeline, state_store, destination);
+            start_pipeline(pipeline).await?;
+        }
     }
 
     info!("replicator service completed");
@@ -95,6 +119,23 @@ fn log_destination_config(config: &DestinationConfig) {
                 max_staleness_mins,
                 max_concurrent_streams,
                 "using bigquery destination config"
+            )
+        }
+        DestinationConfig::Iceberg {
+            namespace,
+            catalog_uri,
+            warehouse_name,
+            s3_endpoint,
+            s3_access_key_id,
+            s3_secret_access_key: _,
+        } => {
+            debug!(
+                namespace,
+                catalog_uri,
+                warehouse_name,
+                s3_endpoint,
+                s3_access_key_id,
+                "using iceberg destination config"
             )
         }
     }
