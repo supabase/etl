@@ -362,8 +362,9 @@ impl K8sClient for HttpK8sClient {
                 "nodeSelector": {
                   "nodeType": "workloads"
                 },
-                // We want to wait at most 60 seconds before K8S sends a `SIGKILL` to the containers.
-                "terminationGracePeriodSeconds": 60,
+                // We want to wait at most 5 minutes before K8S sends a `SIGKILL` to the containers,
+                // this way we let the system finish any in-flight transaction, if there are any.
+                "terminationGracePeriodSeconds": 300,
                 "initContainers": [
                   {
                     "name": vector_container_name,
