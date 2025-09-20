@@ -558,7 +558,7 @@ where
                 if let Some(rx) = force_syncing_tables_rx.as_mut() {
                     let _ = rx.changed().await;
                 }
-            } if force_syncing_tables_tx.is_some() => {
+            }, if force_syncing_tables_tx.is_some() => {
                 // Table state transitions can only occur at transaction boundaries to maintain consistency.
                 // If we're in the middle of processing a transaction (remote_final_lsn is set),
                 // we defer the sync processing until the current transaction completes.
