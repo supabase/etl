@@ -78,6 +78,7 @@ pub struct StoredPipelineConfig {
     pub publication_name: String,
     pub batch: BatchConfig,
     pub table_error_retry_delay_ms: u64,
+    #[serde(default = "DEFAULT_TABLE_ERROR_RETRY_MAX_ATTEMPTS")]
     pub table_error_retry_max_attempts: u32,
     pub max_table_sync_workers: u16,
 }
