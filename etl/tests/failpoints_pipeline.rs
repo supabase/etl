@@ -1,12 +1,11 @@
 #![cfg(all(feature = "test-utils", feature = "failpoints"))]
 
-use std::time::Duration;
 use etl::destination::memory::MemoryDestination;
 use etl::error::ErrorKind;
 use etl::failpoints::{
     START_TABLE_SYNC_BEFORE_DATA_SYNC_SLOT_CREATION, START_TABLE_SYNC_DURING_DATA_SYNC,
 };
-use etl::state::table::TableReplicationPhaseType;
+use etl::state::table::{RetryPolicy, TableReplicationPhase, TableReplicationPhaseType};
 use etl::test_utils::database::spawn_source_database;
 use etl::test_utils::notify::NotifyingStore;
 use etl::test_utils::pipeline::create_pipeline;
@@ -16,7 +15,6 @@ use etl::types::PipelineId;
 use etl_telemetry::tracing::init_test_tracing;
 use fail::FailScenario;
 use rand::random;
-use tokio::time::sleep;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn table_copy_fails_after_data_sync_threw_an_error_with_no_retry() {
@@ -118,11 +116,14 @@ async fn table_copy_fails_after_timed_retry_exceeded_max_attempts() {
         destination.clone(),
     );
 
-    // Register notifications for table sync phases.
+    // Register notifications for waiting on the manual retry which is expected to be flipped by the
+    // max attempts handling.
     let users_state_notify = store
-        .notify_on_table_state_type(
+        .notify_on_table_state(
             database_schema.users_schema().id,
-            TableReplicationPhaseType::Errored,
+            |phase| {
+                matches!(phase, TableReplicationPhase::Errored { retry_policy: RetryPolicy::ManualRetry, .. })
+            },
         )
         .await;
 

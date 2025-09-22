@@ -25,6 +25,11 @@ struct Inner {
     table_schemas: HashMap<TableId, Arc<TableSchema>>,
     table_mappings: HashMap<TableId, String>,
     table_state_type_conditions: Vec<(TableId, TableReplicationPhaseType, Arc<Notify>)>,
+    table_state_conditions: Vec<(
+        TableId,
+        Arc<Notify>,
+        Box<dyn Fn(&TableReplicationPhase) -> bool + Send + Sync>,
+    )>,
     method_call_notifiers: HashMap<StateStoreMethod, Vec<Arc<Notify>>>,
 }
 
@@ -35,6 +40,19 @@ impl Inner {
             .retain(|(tid, expected_state, notify)| {
                 if let Some(state) = table_states.get(tid) {
                     let should_retain = *expected_state != state.as_type();
+                    if !should_retain {
+                        notify.notify_one();
+                    }
+                    should_retain
+                } else {
+                    true
+                }
+            });
+
+        self.table_state_conditions
+            .retain(|(tid, notify, condition)| {
+                if let Some(state) = table_states.get(tid) {
+                    let should_retain = !condition(state);
                     if !should_retain {
                         notify.notify_one();
                     }
@@ -68,6 +86,7 @@ impl NotifyingStore {
             table_schemas: HashMap::new(),
             table_mappings: HashMap::new(),
             table_state_type_conditions: Vec::new(),
+            table_state_conditions: Vec::new(),
             method_call_notifiers: HashMap::new(),
         };
 
@@ -105,6 +124,21 @@ impl NotifyingStore {
         // the conditions are checking for is already reached by the time
         // this method is called, in which case this notification will not ever
         // fire if conditions are not checked here.
+        inner.check_conditions().await;
+
+        notify
+    }
+
+    pub async fn notify_on_table_state<F>(&self, table_id: TableId, condition: F) -> Arc<Notify>
+    where
+        F: Fn(&TableReplicationPhase) -> bool + Send + Sync + 'static,
+    {
+        let notify = Arc::new(Notify::new());
+        let mut inner = self.inner.write().await;
+        inner
+            .table_state_conditions
+            .push((table_id, notify.clone(), Box::new(condition)));
+
         inner.check_conditions().await;
 
         notify
