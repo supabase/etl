@@ -17,6 +17,12 @@ use etl::{
 use tokio::{sync::Mutex, task::JoinSet};
 use tracing::{debug, info};
 
+use crate::iceberg::encoding::rows_to_record_batch;
+use crate::iceberg::error::arrow_error_to_etl_error;
+use arrow::datatypes::Schema as ArrowSchema;
+use iceberg::arrow::schema_to_arrow_schema as iceberg_schema_to_arrow;
+use parquet::arrow::PARQUET_FIELD_ID_META_KEY;
+
 use crate::iceberg::{IcebergClient, error::iceberg_error_to_etl_error};
 
 /// Delimiter separating schema from table name in Iceberg table identifiers.
@@ -223,10 +229,104 @@ where
                                 format!("The table mapping for table {table_id} was not found")
                             ))?;
 
+                    // Retrieve table schema to determine primary key columns
+                    let table_schema =
+                        self.store
+                            .get_table_schema(&table_id)
+                            .await?
+                            .ok_or(etl_error!(
+                                ErrorKind::MissingTableSchema,
+                                "Table schema not found",
+                                format!("No schema found for table {table_id}")
+                            ))?;
+
+                    // Collect primary key column names and their indexes in the original schema
+                    let mut pk_col_names: Vec<String> = Vec::new();
+                    let mut pk_col_indexes: Vec<usize> = Vec::new();
+                    for (idx, col) in table_schema.column_schemas.iter().enumerate() {
+                        if col.primary {
+                            pk_col_names.push(col.name.clone());
+                            pk_col_indexes.push(idx);
+                        }
+                    }
+
                     let namespace = self.namespace.clone();
                     let client = self.client.clone();
 
                     join_set.spawn(async move {
+                        // If we have PKs and rows, write an equality delete file before inserting
+                        if !pk_col_names.is_empty() && !table_rows.is_empty() {
+                            // Load table to derive field IDs and Arrow schema with field metadata
+                            let table = client
+                                .load_table(namespace.clone(), table_name.clone())
+                                .await
+                                .map_err(iceberg_error_to_etl_error)?;
+
+                            // Convert Iceberg schema to Arrow schema and extract field IDs from metadata
+                            let iceberg_schema = table.metadata().current_schema();
+                            let full_arrow_schema = iceberg_schema_to_arrow(iceberg_schema)
+                                .map_err(iceberg_error_to_etl_error)?;
+                            // Create a map name -> Field to pick by name
+                            let mut name_to_field: HashMap<&str, arrow::datatypes::Field> =
+                                HashMap::new();
+                            for f in full_arrow_schema.fields() {
+                                name_to_field.insert(f.name().as_str(), f.as_ref().clone());
+                            }
+                            // Build equality_ids in PK order using Arrow metadata keys
+                            let mut equality_ids: Vec<i32> = Vec::with_capacity(pk_col_names.len());
+                            for name in &pk_col_names {
+                                match name_to_field
+                                    .get(name.as_str())
+                                    .and_then(|f| f.metadata().get(PARQUET_FIELD_ID_META_KEY))
+                                    .and_then(|s| s.parse::<i32>().ok())
+                                {
+                                    Some(id) => equality_ids.push(id),
+                                    None => {
+                                        // If any PK column is missing or ID parsing fails, skip equality delete
+                                        equality_ids.clear();
+                                        break;
+                                    }
+                                }
+                            }
+
+                            if !equality_ids.is_empty() {
+                                // Build a projected Arrow schema containing only PK fields, in the same
+                                // order as equality_ids (which follows pk_col_names order)
+                                let mut projected_fields: Vec<arrow::datatypes::Field> =
+                                    Vec::with_capacity(pk_col_names.len());
+                                for name in &pk_col_names {
+                                    if let Some(f) = name_to_field.get(name.as_str()) {
+                                        projected_fields.push(f.clone());
+                                    }
+                                }
+                                let projected_arrow_schema = ArrowSchema::new(projected_fields);
+
+                                // Build PK-only rows aligned with the projected schema order
+                                let mut pk_only_rows: Vec<TableRow> =
+                                    Vec::with_capacity(table_rows.len());
+                                for row in &table_rows {
+                                    let mut values = Vec::with_capacity(pk_col_indexes.len());
+                                    for &pk_idx in &pk_col_indexes {
+                                        // Safe: CDC columns are appended at the end, so original indexes remain valid
+                                        values.push(row.values[pk_idx].clone());
+                                    }
+                                    pk_only_rows.push(TableRow { values });
+                                }
+
+                                // Convert to RecordBatch
+                                let equality_rows =
+                                    rows_to_record_batch(&pk_only_rows, projected_arrow_schema)
+                                        .map_err(arrow_error_to_etl_error)?;
+
+                                // Write equality delete file
+                                client
+                                    .write_equality_delete_file(&table, equality_ids, equality_rows)
+                                    .await
+                                    .map_err(iceberg_error_to_etl_error)?;
+                            }
+                        }
+
+                        // Now insert the full rows
                         client.insert_rows(namespace, table_name, table_rows).await
                     });
                 }
