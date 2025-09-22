@@ -372,8 +372,13 @@ pub async fn read_all_rows(
 ) -> Vec<TableRow> {
     let table = client.load_table(namespace, table_name).await.unwrap();
 
+    let Some(current_snapshot) = table.metadata().current_snapshot_id() else {
+        return vec![];
+    };
+
     let mut table_rows_stream = table
         .scan()
+        .snapshot_id(current_snapshot)
         .select_all()
         .build()
         .unwrap()
