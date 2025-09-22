@@ -10,6 +10,10 @@ const DEFAULT_TABLE_ERROR_RETRY_DELAY_MS: u64 = 10000;
 const DEFAULT_TABLE_ERROR_RETRY_MAX_ATTEMPTS: u32 = 5;
 const DEFAULT_MAX_TABLE_SYNC_WORKERS: u16 = 4;
 
+const fn default_table_error_retry_max_attempts() -> u32 {
+    DEFAULT_TABLE_ERROR_RETRY_MAX_ATTEMPTS
+}
+
 /// Batch processing configuration for pipelines.
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
@@ -78,7 +82,7 @@ pub struct StoredPipelineConfig {
     pub publication_name: String,
     pub batch: BatchConfig,
     pub table_error_retry_delay_ms: u64,
-    #[serde(default = "DEFAULT_TABLE_ERROR_RETRY_MAX_ATTEMPTS")]
+    #[serde(default = "default_table_error_retry_max_attempts")]
     pub table_error_retry_max_attempts: u32,
     pub max_table_sync_workers: u16,
 }
