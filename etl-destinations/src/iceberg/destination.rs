@@ -108,24 +108,16 @@ where
         let mut inner = self.inner.lock().await;
 
         if let Some(base_table_name) = self.store.get_table_mapping(&table_id).await? {
-            let cdc_table_name = format!("{base_table_name}_cdc");
-
             self.client
                 .drop_table(&self.namespace, base_table_name.clone())
                 .await
                 .map_err(iceberg_error_to_etl_error)?;
-            self.client
-                .drop_table(&self.namespace, cdc_table_name.clone())
-                .await
-                .map_err(iceberg_error_to_etl_error)?;
 
             inner.created_tables.remove(&base_table_name);
-            inner.created_tables.remove(&cdc_table_name);
 
             drop(inner);
 
             self.prepare_table_for_streaming(table_id).await?;
-            self.prepare_cdc_table_for_streaming(table_id).await?;
         }
 
         Ok(())
@@ -134,9 +126,15 @@ where
     async fn write_table_rows(
         &self,
         table_id: TableId,
-        table_rows: Vec<TableRow>,
+        mut table_rows: Vec<TableRow>,
     ) -> EtlResult<()> {
         let iceberg_table_name = self.prepare_table_for_streaming(table_id).await?;
+
+        for row in &mut table_rows {
+            let sequence_number = generate_sequence_number(0.into(), 0.into());
+            row.values.push(IcebergOperationType::Upsert.into_cell());
+            row.values.push(Cell::String(sequence_number));
+        }
 
         self.client
             .insert_rows(self.namespace.clone(), iceberg_table_name, table_rows)
@@ -218,15 +216,14 @@ where
                     // We also prepare base table for streaming because we want both of them to exist
                     // because the background merge jobs will be expecting to read from cdc tables
                     // into base tables.
-                    let _base_table_name = self.prepare_table_for_streaming(table_id).await?;
-                    let iceberg_table_name = self.prepare_cdc_table_for_streaming(table_id).await?;
+                    let base_table_name = self.prepare_table_for_streaming(table_id).await?;
 
                     let namespace = self.namespace.clone();
                     let client = self.client.clone();
 
                     join_set.spawn(async move {
                         client
-                            .insert_rows(namespace, iceberg_table_name, table_rows)
+                            .insert_rows(namespace, base_table_name, table_rows)
                             .await
                     });
                 }
@@ -293,6 +290,8 @@ where
                 )
             })?;
 
+        let table_schema = Self::add_cdc_columns(&table_schema);
+
         let iceberg_table_name = table_name_to_iceberg_table_name(&table_schema.name);
         let iceberg_table_name = self
             .get_or_create_iceberg_table_name(&table_id, iceberg_table_name)
@@ -312,73 +311,28 @@ where
         Ok(iceberg_table_name)
     }
 
-    async fn prepare_cdc_table_for_streaming(
-        &self,
-        table_id: TableId,
-    ) -> EtlResult<IcebergTableName> {
-        // We hold the lock for the entire preparation to avoid race conditions since the consistency
-        // of this code path is critical.
-        let mut inner = self.inner.lock().await;
-
-        let table_schema = self
-            .store
-            .get_table_schema(&table_id)
-            .await?
-            .ok_or_else(|| {
-                etl_error!(
-                    ErrorKind::MissingTableSchema,
-                    "Table schema not found",
-                    format!("No schema found for table {table_id}")
-                )
-            })?;
-
-        let base_table_name = table_name_to_iceberg_table_name(&table_schema.name);
-        let cdc_table_name = format!("{base_table_name}_cdc");
-
-        if inner.created_tables.contains(&cdc_table_name) {
-            return Ok(cdc_table_name);
-        }
-
-        let cdc_table_schema = Self::derive_cdc_table_schema(&table_schema);
-        self.client
-            .create_table_if_missing(&self.namespace, cdc_table_name.clone(), &cdc_table_schema)
-            .await
-            .map_err(iceberg_error_to_etl_error)?;
-
-        Self::add_to_created_tables_cache(&mut inner, &cdc_table_name);
-
-        Ok(cdc_table_name)
-    }
-
     /// Derive cdc table's schema from the final table's schema by:
     ///
     /// 1. Marking all columns as nullable apart from the primary key columns
     /// 2. Adding a cdc_operation column to represent the cdc operation type (upsert/delete)
-    fn derive_cdc_table_schema(final_table_schema: &TableSchema) -> TableSchema {
-        let mut cdc_table_schema = final_table_schema.clone();
-        // Make all non-primary columns nullabe because the delete event will have null for those columns
-        for column_schema in &mut cdc_table_schema.column_schemas {
-            if !column_schema.primary {
-                column_schema.nullable = true;
-            }
-        }
-
+    fn add_cdc_columns(table_schema: &TableSchema) -> TableSchema {
+        let mut final_schema = table_schema.clone();
         // Add cdc specific columns
-        cdc_table_schema.add_column_schema(ColumnSchema {
+        final_schema.add_column_schema(ColumnSchema {
             name: "cdc_operation".to_string(), //TODO: fix the case when the source table already has a column with this name
             typ: Type::TEXT,
             modifier: -1,
             nullable: false,
             primary: false,
         });
-        cdc_table_schema.add_column_schema(ColumnSchema {
+        final_schema.add_column_schema(ColumnSchema {
             name: "sequence_number".to_string(), //TODO: fix the case when the source table already has a column with this name
             typ: Type::TEXT,
             modifier: -1,
             nullable: false,
             primary: false,
         });
-        cdc_table_schema
+        final_schema
     }
 
     /// Adds a table to the creation cache to avoid redundant existence checks.
