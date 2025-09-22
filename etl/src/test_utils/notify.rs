@@ -19,22 +19,43 @@ pub enum StateStoreMethod {
     RollbackTableReplicationState,
 }
 
+type TableStateTypeCondition = (TableId, TableReplicationPhaseType, Arc<Notify>);
+type TableStateCondition = (
+    TableId,
+    Arc<Notify>,
+    Box<dyn Fn(&TableReplicationPhase) -> bool + Send + Sync>,
+);
+
 struct Inner {
     table_replication_states: HashMap<TableId, TableReplicationPhase>,
     table_state_history: HashMap<TableId, Vec<TableReplicationPhase>>,
     table_schemas: HashMap<TableId, Arc<TableSchema>>,
     table_mappings: HashMap<TableId, String>,
-    table_state_conditions: Vec<(TableId, TableReplicationPhaseType, Arc<Notify>)>,
+    table_state_type_conditions: Vec<TableStateTypeCondition>,
+    table_state_conditions: Vec<TableStateCondition>,
     method_call_notifiers: HashMap<StateStoreMethod, Vec<Arc<Notify>>>,
 }
 
 impl Inner {
     async fn check_conditions(&mut self) {
         let table_states = self.table_replication_states.clone();
-        self.table_state_conditions
+        self.table_state_type_conditions
             .retain(|(tid, expected_state, notify)| {
                 if let Some(state) = table_states.get(tid) {
                     let should_retain = *expected_state != state.as_type();
+                    if !should_retain {
+                        notify.notify_one();
+                    }
+                    should_retain
+                } else {
+                    true
+                }
+            });
+
+        self.table_state_conditions
+            .retain(|(tid, notify, condition)| {
+                if let Some(state) = table_states.get(tid) {
+                    let should_retain = !condition(state);
                     if !should_retain {
                         notify.notify_one();
                     }
@@ -67,6 +88,7 @@ impl NotifyingStore {
             table_state_history: HashMap::new(),
             table_schemas: HashMap::new(),
             table_mappings: HashMap::new(),
+            table_state_type_conditions: Vec::new(),
             table_state_conditions: Vec::new(),
             method_call_notifiers: HashMap::new(),
         };
@@ -90,7 +112,7 @@ impl NotifyingStore {
             .collect()
     }
 
-    pub async fn notify_on_table_state(
+    pub async fn notify_on_table_state_type(
         &self,
         table_id: TableId,
         expected_state: TableReplicationPhaseType,
@@ -98,13 +120,28 @@ impl NotifyingStore {
         let notify = Arc::new(Notify::new());
         let mut inner = self.inner.write().await;
         inner
-            .table_state_conditions
+            .table_state_type_conditions
             .push((table_id, expected_state, notify.clone()));
 
         // Checking conditions here as well because it is possible that the state
         // the conditions are checking for is already reached by the time
         // this method is called, in which case this notification will not ever
         // fire if conditions are not checked here.
+        inner.check_conditions().await;
+
+        notify
+    }
+
+    pub async fn notify_on_table_state<F>(&self, table_id: TableId, condition: F) -> Arc<Notify>
+    where
+        F: Fn(&TableReplicationPhase) -> bool + Send + Sync + 'static,
+    {
+        let notify = Arc::new(Notify::new());
+        let mut inner = self.inner.write().await;
+        inner
+            .table_state_conditions
+            .push((table_id, notify.clone(), Box::new(condition)));
+
         inner.check_conditions().await;
 
         notify

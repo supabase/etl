@@ -7,7 +7,12 @@ use crate::configs::store::Store;
 const DEFAULT_BATCH_MAX_SIZE: usize = 100000;
 const DEFAULT_BATCH_MAX_FILL_MS: u64 = 10000;
 const DEFAULT_TABLE_ERROR_RETRY_DELAY_MS: u64 = 10000;
+const DEFAULT_TABLE_ERROR_RETRY_MAX_ATTEMPTS: u32 = 5;
 const DEFAULT_MAX_TABLE_SYNC_WORKERS: u16 = 4;
+
+const fn default_table_error_retry_max_attempts() -> u32 {
+    DEFAULT_TABLE_ERROR_RETRY_MAX_ATTEMPTS
+}
 
 /// Batch processing configuration for pipelines.
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
@@ -30,6 +35,9 @@ pub struct FullApiPipelineConfig {
     #[schema(example = 1000)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub table_error_retry_delay_ms: Option<u64>,
+    #[schema(example = 5)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub table_error_retry_max_attempts: Option<u32>,
     #[schema(example = 4)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_table_sync_workers: Option<u16>,
@@ -44,6 +52,7 @@ impl From<StoredPipelineConfig> for FullApiPipelineConfig {
                 max_fill_ms: Some(value.batch.max_fill_ms),
             }),
             table_error_retry_delay_ms: Some(value.table_error_retry_delay_ms),
+            table_error_retry_max_attempts: Some(value.table_error_retry_max_attempts),
             max_table_sync_workers: Some(value.max_table_sync_workers),
         }
     }
@@ -60,6 +69,9 @@ pub struct PartialApiPipelineConfig {
     #[schema(example = 1000)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub table_error_retry_delay_ms: Option<u64>,
+    #[schema(example = 5)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub table_error_retry_max_attempts: Option<u32>,
     #[schema(example = 4)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_table_sync_workers: Option<u16>,
@@ -70,6 +82,8 @@ pub struct StoredPipelineConfig {
     pub publication_name: String,
     pub batch: BatchConfig,
     pub table_error_retry_delay_ms: u64,
+    #[serde(default = "default_table_error_retry_max_attempts")]
+    pub table_error_retry_max_attempts: u32,
     pub max_table_sync_workers: u16,
 }
 
@@ -85,6 +99,7 @@ impl StoredPipelineConfig {
             pg_connection: pg_connection_config,
             batch: self.batch,
             table_error_retry_delay_ms: self.table_error_retry_delay_ms,
+            table_error_retry_max_attempts: self.table_error_retry_max_attempts,
             max_table_sync_workers: self.max_table_sync_workers,
         }
     }
@@ -105,6 +120,10 @@ impl StoredPipelineConfig {
 
         if let Some(value) = partial.table_error_retry_delay_ms {
             self.table_error_retry_delay_ms = value;
+        }
+
+        if let Some(value) = partial.table_error_retry_max_attempts {
+            self.table_error_retry_max_attempts = value;
         }
 
         if let Some(value) = partial.max_table_sync_workers {
@@ -134,6 +153,9 @@ impl From<FullApiPipelineConfig> for StoredPipelineConfig {
             table_error_retry_delay_ms: value
                 .table_error_retry_delay_ms
                 .unwrap_or(DEFAULT_TABLE_ERROR_RETRY_DELAY_MS),
+            table_error_retry_max_attempts: value
+                .table_error_retry_max_attempts
+                .unwrap_or(DEFAULT_TABLE_ERROR_RETRY_MAX_ATTEMPTS),
             max_table_sync_workers: value
                 .max_table_sync_workers
                 .unwrap_or(DEFAULT_MAX_TABLE_SYNC_WORKERS),
@@ -155,6 +177,7 @@ mod tests {
                 max_fill_ms: 5000,
             },
             table_error_retry_delay_ms: 2000,
+            table_error_retry_max_attempts: 7,
             max_table_sync_workers: 4,
         };
 
@@ -168,6 +191,10 @@ mod tests {
             deserialized.table_error_retry_delay_ms
         );
         assert_eq!(
+            config.table_error_retry_max_attempts,
+            deserialized.table_error_retry_max_attempts
+        );
+        assert_eq!(
             config.max_table_sync_workers,
             deserialized.max_table_sync_workers
         );
@@ -179,6 +206,7 @@ mod tests {
             publication_name: "test_publication".to_string(),
             batch: None,
             table_error_retry_delay_ms: None,
+            table_error_retry_max_attempts: None,
             max_table_sync_workers: None,
         };
 
@@ -194,6 +222,7 @@ mod tests {
             publication_name: "test_publication".to_string(),
             batch: None,
             table_error_retry_delay_ms: None,
+            table_error_retry_max_attempts: None,
             max_table_sync_workers: None,
         };
 
@@ -204,6 +233,10 @@ mod tests {
         assert_eq!(
             stored.table_error_retry_delay_ms,
             DEFAULT_TABLE_ERROR_RETRY_DELAY_MS
+        );
+        assert_eq!(
+            stored.table_error_retry_max_attempts,
+            DEFAULT_TABLE_ERROR_RETRY_MAX_ATTEMPTS
         );
         assert_eq!(
             stored.max_table_sync_workers,
@@ -220,6 +253,7 @@ mod tests {
                 max_fill_ms: 2000,
             },
             table_error_retry_delay_ms: 1000,
+            table_error_retry_max_attempts: 3,
             max_table_sync_workers: 2,
         };
 
@@ -230,6 +264,7 @@ mod tests {
                 max_fill_ms: Some(8000),
             }),
             table_error_retry_delay_ms: Some(5000),
+            table_error_retry_max_attempts: Some(9),
             max_table_sync_workers: None,
         };
 
@@ -239,6 +274,7 @@ mod tests {
         assert_eq!(stored.batch.max_size, 1000);
         assert_eq!(stored.batch.max_fill_ms, 8000);
         assert_eq!(stored.table_error_retry_delay_ms, 5000);
+        assert_eq!(stored.table_error_retry_max_attempts, 9);
         assert_eq!(stored.max_table_sync_workers, 2);
     }
 }

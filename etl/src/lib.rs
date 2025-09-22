@@ -78,6 +78,7 @@
 //!         pg_connection: pg_config,
 //!         batch: BatchConfig { max_size: 1000, max_fill_ms: 5000 },
 //!         table_error_retry_delay_ms: 10000,
+//!         table_error_retry_max_attempts: 5,
 //!         max_table_sync_workers: 4,
 //!     };
 //!
