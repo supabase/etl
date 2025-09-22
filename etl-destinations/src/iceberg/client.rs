@@ -256,11 +256,13 @@ impl IcebergClient {
 
     pub async fn write_equality_delete_file(
         &self,
-        namespace: String,
-        table_name: String,
+        // namespace: String,
+        // table_name: String,
+        table: &Table,
         equality_ids: Vec<i32>,
+        equality_rows: RecordBatch,
         // table_id: TableId,
-    ) -> EtlResult<()> {
+    ) -> Result<(), iceberg::Error> {
         // let table_schema = self
         //     .store
         //     .get_table_schema(&table_id)
@@ -298,10 +300,10 @@ impl IcebergClient {
         //         )
         //     })?;
 
-        let table = self
-            .load_table(namespace.clone(), table_name)
-            .await
-            .map_err(iceberg_error_to_etl_error)?;
+        // let table = self
+        //     .load_table(namespace.clone(), table_name)
+        //     .await
+        //     .map_err(iceberg_error_to_etl_error)?;
 
         let table_schema = table.metadata().current_schema();
 
@@ -310,8 +312,7 @@ impl IcebergClient {
             Arc::clone(table_schema),
             None,
             0, // TODO: use correct partition spec id
-        )
-        .map_err(iceberg_error_to_etl_error)?;
+        )?;
 
         let delete_arrow_schema = config.projected_arrow_schema_ref().clone();
         let delete_schema = arrow_schema_to_schema(&delete_arrow_schema).unwrap();
@@ -322,8 +323,7 @@ impl IcebergClient {
             .build();
 
         // Create location and file name generators
-        let location_gen = DefaultLocationGenerator::new(table.metadata().clone())
-            .map_err(iceberg_error_to_etl_error)?;
+        let location_gen = DefaultLocationGenerator::new(table.metadata().clone())?;
         let file_name_gen = DefaultFileNameGenerator::new(
             "delete".to_string(),
             Some(uuid::Uuid::new_v4().to_string()), // Add unique UUID for each file
@@ -339,11 +339,26 @@ impl IcebergClient {
             file_name_gen,
         );
 
-        let mut _equality_delete_writer =
+        let mut equality_delete_writer =
             EqualityDeleteFileWriterBuilder::new(parquet_writer_builder, config)
                 .build()
-                .await
-                .map_err(iceberg_error_to_etl_error)?;
+                .await?;
+
+        equality_delete_writer.write(equality_rows).await?;
+        let data_files = equality_delete_writer.close().await?;
+
+        // Create transaction and fast append action
+        let transaction = Transaction::new(table);
+        let mut append_action = transaction
+            .fast_append(None, None, vec![])?
+            .with_check_duplicate(false); // Don't check duplicates for performance
+        append_action.add_data_files(data_files)?;
+
+        // Apply the append action to create updated transaction
+        let updated_transaction = append_action.apply().await?;
+
+        // Commit the transaction to the catalog
+        let _updated_table = updated_transaction.commit(&*self.catalog).await?;
 
         Ok(())
     }
