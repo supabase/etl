@@ -24,14 +24,14 @@ struct Inner {
     table_state_history: HashMap<TableId, Vec<TableReplicationPhase>>,
     table_schemas: HashMap<TableId, Arc<TableSchema>>,
     table_mappings: HashMap<TableId, String>,
-    table_state_conditions: Vec<(TableId, TableReplicationPhaseType, Arc<Notify>)>,
+    table_state_type_conditions: Vec<(TableId, TableReplicationPhaseType, Arc<Notify>)>,
     method_call_notifiers: HashMap<StateStoreMethod, Vec<Arc<Notify>>>,
 }
 
 impl Inner {
     async fn check_conditions(&mut self) {
         let table_states = self.table_replication_states.clone();
-        self.table_state_conditions
+        self.table_state_type_conditions
             .retain(|(tid, expected_state, notify)| {
                 if let Some(state) = table_states.get(tid) {
                     let should_retain = *expected_state != state.as_type();
@@ -67,7 +67,7 @@ impl NotifyingStore {
             table_state_history: HashMap::new(),
             table_schemas: HashMap::new(),
             table_mappings: HashMap::new(),
-            table_state_conditions: Vec::new(),
+            table_state_type_conditions: Vec::new(),
             method_call_notifiers: HashMap::new(),
         };
 
@@ -90,7 +90,7 @@ impl NotifyingStore {
             .collect()
     }
 
-    pub async fn notify_on_table_state(
+    pub async fn notify_on_table_state_type(
         &self,
         table_id: TableId,
         expected_state: TableReplicationPhaseType,
@@ -98,7 +98,7 @@ impl NotifyingStore {
         let notify = Arc::new(Notify::new());
         let mut inner = self.inner.write().await;
         inner
-            .table_state_conditions
+            .table_state_type_conditions
             .push((table_id, expected_state, notify.clone()));
 
         // Checking conditions here as well because it is possible that the state

@@ -1,5 +1,6 @@
 #![cfg(all(feature = "test-utils", feature = "failpoints"))]
 
+use std::time::Duration;
 use etl::destination::memory::MemoryDestination;
 use etl::error::ErrorKind;
 use etl::failpoints::{
@@ -15,6 +16,7 @@ use etl::types::PipelineId;
 use etl_telemetry::tracing::init_test_tracing;
 use fail::FailScenario;
 use rand::random;
+use tokio::time::sleep;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn table_copy_fails_after_data_sync_threw_an_error_with_no_retry() {
@@ -54,7 +56,7 @@ async fn table_copy_fails_after_data_sync_threw_an_error_with_no_retry() {
 
     // Register notifications for table sync phases.
     let users_state_notify = store
-        .notify_on_table_state(
+        .notify_on_table_state_type(
             database_schema.users_schema().id,
             TableReplicationPhaseType::Errored,
         )
@@ -68,6 +70,70 @@ async fn table_copy_fails_after_data_sync_threw_an_error_with_no_retry() {
     let err = pipeline.shutdown_and_wait().await.err().unwrap();
     assert_eq!(err.kinds().len(), 1);
     assert_eq!(err.kinds()[0], ErrorKind::WithNoRetry);
+
+    // Verify no data is there.
+    let table_rows = destination.get_table_rows().await;
+    assert!(table_rows.is_empty());
+
+    // Verify table schemas were correctly stored.
+    let table_schemas = store.get_table_schemas().await;
+    assert!(table_schemas.is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn table_copy_fails_after_timed_retry_exceeded_max_attempts() {
+    let _scenario = FailScenario::setup();
+    // Since we have table_error_retry_max_attempts: 2, we want to fail 3 times, so that on the 3rd
+    // time, the system switches to manual retry.
+    fail::cfg(
+        START_TABLE_SYNC_BEFORE_DATA_SYNC_SLOT_CREATION,
+        "3*return(timed_retry)",
+    )
+    .unwrap();
+
+    init_test_tracing();
+
+    let mut database = spawn_source_database().await;
+    let database_schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
+
+    // Insert initial test data.
+    let rows_inserted = 10;
+    insert_users_data(
+        &mut database,
+        &database_schema.users_schema().name,
+        1..=rows_inserted,
+    )
+    .await;
+
+    let store = NotifyingStore::new();
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
+
+    // We start the pipeline from scratch.
+    let pipeline_id: PipelineId = random();
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        database_schema.publication_name(),
+        store.clone(),
+        destination.clone(),
+    );
+
+    // Register notifications for table sync phases.
+    let users_state_notify = store
+        .notify_on_table_state_type(
+            database_schema.users_schema().id,
+            TableReplicationPhaseType::Errored,
+        )
+        .await;
+
+    pipeline.start().await.unwrap();
+
+    users_state_notify.notified().await;
+
+    // We expect to have a manul retry error which was used after the max attempts have been reached.
+    let err = pipeline.shutdown_and_wait().await.err().unwrap();
+    assert_eq!(err.kinds().len(), 1);
+    assert_eq!(err.kinds()[0], ErrorKind::WithManualRetry);
 
     // Verify no data is there.
     let table_rows = destination.get_table_rows().await;
@@ -116,7 +182,7 @@ async fn table_copy_is_consistent_after_data_sync_threw_an_error_with_timed_retr
 
     // We register the interest in waiting for both table syncs to have started.
     let users_state_notify = store
-        .notify_on_table_state(
+        .notify_on_table_state_type(
             database_schema.users_schema().id,
             TableReplicationPhaseType::SyncDone,
         )
@@ -179,7 +245,7 @@ async fn table_copy_is_consistent_during_data_sync_threw_an_error_with_timed_ret
 
     // We register the interest in waiting for both table syncs to have started.
     let users_state_notify = store
-        .notify_on_table_state(
+        .notify_on_table_state_type(
             database_schema.users_schema().id,
             TableReplicationPhaseType::SyncDone,
         )

@@ -61,13 +61,13 @@ async fn table_copy_and_streaming_with_restart() {
 
     // Register notifications for table copy completion.
     let users_state_notify = store
-        .notify_on_table_state(
+        .notify_on_table_state_type(
             database_schema.users_schema().id,
             TableReplicationPhaseType::SyncDone,
         )
         .await;
     let orders_state_notify = store
-        .notify_on_table_state(
+        .notify_on_table_state_type(
             database_schema.orders_schema().id,
             TableReplicationPhaseType::SyncDone,
         )
@@ -194,7 +194,7 @@ async fn table_insert_update_delete() {
 
     // Register notifications for table copy completion.
     let users_state_notify = store
-        .notify_on_table_state(
+        .notify_on_table_state_type(
             database_schema.users_schema().id,
             TableReplicationPhaseType::SyncDone,
         )
@@ -311,7 +311,7 @@ async fn table_subsequent_updates() {
 
     // Register notifications for table copy completion.
     let users_state_notify = store
-        .notify_on_table_state(
+        .notify_on_table_state_type(
             database_schema.users_schema().id,
             TableReplicationPhaseType::SyncDone,
         )
@@ -410,13 +410,13 @@ async fn table_truncate_with_batching() {
 
     // Register notifications for table copy completion.
     let users_state_notify = store
-        .notify_on_table_state(
+        .notify_on_table_state_type(
             database_schema.users_schema().id,
             TableReplicationPhaseType::SyncDone,
         )
         .await;
     let orders_state_notify = store
-        .notify_on_table_state(
+        .notify_on_table_state_type(
             database_schema.orders_schema().id,
             TableReplicationPhaseType::SyncDone,
         )
@@ -549,7 +549,7 @@ async fn table_nullable_scalar_columns() {
     );
 
     let table_sync_done_notification = store
-        .notify_on_table_state(table_id, TableReplicationPhaseType::SyncDone)
+        .notify_on_table_state_type(table_id, TableReplicationPhaseType::SyncDone)
         .await;
 
     pipeline.start().await.unwrap();
@@ -758,7 +758,7 @@ async fn table_nullable_array_columns() {
     );
 
     let table_sync_done_notification = store
-        .notify_on_table_state(table_id, TableReplicationPhaseType::SyncDone)
+        .notify_on_table_state_type(table_id, TableReplicationPhaseType::SyncDone)
         .await;
 
     pipeline.start().await.unwrap();
@@ -993,7 +993,7 @@ async fn table_non_nullable_scalar_columns() {
     );
 
     let table_sync_done_notification = store
-        .notify_on_table_state(table_id, TableReplicationPhaseType::SyncDone)
+        .notify_on_table_state_type(table_id, TableReplicationPhaseType::SyncDone)
         .await;
 
     pipeline.start().await.unwrap();
@@ -1243,7 +1243,7 @@ async fn table_non_nullable_array_columns() {
     );
 
     let table_sync_done_notification = store
-        .notify_on_table_state(table_id, TableReplicationPhaseType::SyncDone)
+        .notify_on_table_state_type(table_id, TableReplicationPhaseType::SyncDone)
         .await;
 
     pipeline.start().await.unwrap();
@@ -1527,7 +1527,7 @@ async fn table_array_with_null_values() {
     );
 
     let table_sync_done_notification = store
-        .notify_on_table_state(table_id, TableReplicationPhaseType::SyncDone)
+        .notify_on_table_state_type(table_id, TableReplicationPhaseType::SyncDone)
         .await;
 
     pipeline.start().await.unwrap();
@@ -1594,7 +1594,7 @@ async fn table_array_with_null_values() {
     );
 
     let table_sync_done_notification = store
-        .notify_on_table_state(table_id, TableReplicationPhaseType::SyncDone)
+        .notify_on_table_state_type(table_id, TableReplicationPhaseType::SyncDone)
         .await;
 
     pipeline.start().await.unwrap();
@@ -1748,15 +1748,15 @@ async fn table_validation_out_of_bounds_values() {
 
     // Register notifications for errored replication phase
     let huge_numeric_error_notify = store
-        .notify_on_table_state(huge_numeric_table_id, TableReplicationPhaseType::Errored)
+        .notify_on_table_state_type(huge_numeric_table_id, TableReplicationPhaseType::Errored)
         .await;
 
     let old_date_error_notify = store
-        .notify_on_table_state(old_date_table_id, TableReplicationPhaseType::Errored)
+        .notify_on_table_state_type(old_date_table_id, TableReplicationPhaseType::Errored)
         .await;
 
     let nan_array_error_notify = store
-        .notify_on_table_state(nan_array_table_id, TableReplicationPhaseType::Errored)
+        .notify_on_table_state_type(nan_array_table_id, TableReplicationPhaseType::Errored)
         .await;
 
     pipeline.start().await.unwrap();

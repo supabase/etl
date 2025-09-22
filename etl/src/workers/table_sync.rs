@@ -474,29 +474,20 @@ where
                     let mut pool_guard = pool.lock().await;
                     let mut state_guard = state.lock().await;
 
-                    if let RetryPolicy::TimedRetry { .. } = retry_policy {
-                        let max_attempts = config.table_error_retry_max_attempts;
-                        let next_attempt = state_guard.retry_attempts().saturating_add(1);
+                    // If it's a timed retry, we want to see if we reached the maximum number of attempts
+                    // before trying again. If we did, we switch to a manual retry policy.
+                    if let RetryPolicy::TimedRetry { .. } = retry_policy
+                        && state_guard.retry_attempts() >= config.table_error_retry_max_attempts
+                    {
+                        info!(
+                            table_id = %table_id,
+                            config.table_error_retry_max_attempts,
+                            "maximum automatic retry attempts reached, switching to manual retry"
+                        );
 
-                        if next_attempt > max_attempts {
-                            info!(
-                                table_id = %table_id,
-                                max_attempts,
-                                "maximum automatic retry attempts reached, switching to manual retry"
-                            );
-
-                            table_error = table_error.with_retry_policy(RetryPolicy::ManualRetry);
-                            retry_policy = RetryPolicy::ManualRetry;
-                            state_guard.reset_retry_attempts();
-                        } else {
-                            let attempts = state_guard.increment_retry_attempts();
-                            info!(
-                                table_id = %table_id,
-                                attempts,
-                                max_attempts,
-                                "retrying table sync worker after error"
-                            );
-                        }
+                        table_error = table_error.with_retry_policy(RetryPolicy::ManualRetry);
+                        retry_policy = RetryPolicy::ManualRetry;
+                        state_guard.reset_retry_attempts();
                     }
 
                     // Update the state and store with the error.
@@ -537,6 +528,9 @@ where
                                     table_id
                                 );
                             }
+
+                            // We mark that we attempted a retry.
+                            state_guard.increment_retry_attempts();
 
                             // Before rolling back, we acquire the pool lock again for consistency.
                             let mut pool_guard = pool.lock().await;

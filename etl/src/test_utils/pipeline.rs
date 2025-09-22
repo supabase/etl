@@ -37,7 +37,7 @@ where
             max_fill_ms: 1000,
         },
         table_error_retry_delay_ms: 1000,
-        table_error_retry_max_attempts: 5,
+        table_error_retry_max_attempts: 2,
         max_table_sync_workers: 1,
     };
 
