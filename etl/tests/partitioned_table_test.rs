@@ -51,7 +51,7 @@ async fn partitioned_table_copy_replicates_existing_data() {
 
     // Register notification for initial copy completion.
     let parent_sync_done = state_store
-        .notify_on_table_state(parent_table_id, TableReplicationPhaseType::SyncDone)
+        .notify_on_table_state_type(parent_table_id, TableReplicationPhaseType::SyncDone)
         .await;
 
     let pipeline_id: PipelineId = random();
@@ -134,7 +134,7 @@ async fn partitioned_table_copy_and_streams_new_data_from_new_partition() {
 
     // Register notification for initial copy completion.
     let parent_sync_done = state_store
-        .notify_on_table_state(parent_table_id, TableReplicationPhaseType::SyncDone)
+        .notify_on_table_state_type(parent_table_id, TableReplicationPhaseType::SyncDone)
         .await;
 
     let pipeline_id: PipelineId = random();
