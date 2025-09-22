@@ -202,7 +202,7 @@ where
                     }
                     _ => {
                         // Every other event type is currently not supported.
-                        debug!("skipping unsupported event in BigQuery");
+                        debug!("skipping unsupported event in iceberg");
                     }
                 }
             }
@@ -213,18 +213,21 @@ where
                 let mut join_set = JoinSet::new();
 
                 for (table_id, table_rows) in table_id_to_table_rows {
-                    // We also prepare base table for streaming because we want both of them to exist
-                    // because the background merge jobs will be expecting to read from cdc tables
-                    // into base tables.
-                    let base_table_name = self.prepare_table_for_streaming(table_id).await?;
+                    let table_name =
+                        self.store
+                            .get_table_mapping(&table_id)
+                            .await?
+                            .ok_or(etl_error!(
+                                ErrorKind::MissingTableMapping,
+                                "Table mapping not found",
+                                format!("The table mapping for table {table_id} was not found")
+                            ))?;
 
                     let namespace = self.namespace.clone();
                     let client = self.client.clone();
 
                     join_set.spawn(async move {
-                        client
-                            .insert_rows(namespace, base_table_name, table_rows)
-                            .await
+                        client.insert_rows(namespace, table_name, table_rows).await
                     });
                 }
                 while let Some(insert_result) = join_set.join_next().await {
@@ -268,7 +271,6 @@ where
 
         Ok(())
     }
-
     /// Prepares a table for CDC streaming operations with schema-aware table creation.
     ///
     /// Retrieves the table schema from the store, creates or verifies the iceberg table exists.

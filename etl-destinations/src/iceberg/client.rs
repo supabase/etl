@@ -7,12 +7,16 @@ use etl::{
 };
 use iceberg::{
     Catalog, NamespaceIdent, TableCreation, TableIdent,
+    arrow::arrow_schema_to_schema,
     io::{S3_ACCESS_KEY_ID, S3_ENDPOINT, S3_SECRET_ACCESS_KEY},
     table::Table,
     transaction::Transaction,
     writer::{
         IcebergWriter, IcebergWriterBuilder,
-        base_writer::data_file_writer::DataFileWriterBuilder,
+        base_writer::{
+            data_file_writer::DataFileWriterBuilder,
+            equality_delete_writer::{EqualityDeleteFileWriterBuilder, EqualityDeleteWriterConfig},
+        },
         file_writer::{
             ParquetWriterBuilder,
             location_generator::{DefaultFileNameGenerator, DefaultLocationGenerator},
@@ -246,6 +250,100 @@ impl IcebergClient {
 
         // Commit the transaction to the catalog
         let _updated_table = updated_transaction.commit(&*self.catalog).await?;
+
+        Ok(())
+    }
+
+    pub async fn write_equality_delete_file(
+        &self,
+        namespace: String,
+        table_name: String,
+        equality_ids: Vec<i32>,
+        // table_id: TableId,
+    ) -> EtlResult<()> {
+        // let table_schema = self
+        //     .store
+        //     .get_table_schema(&table_id)
+        //     .await?
+        //     .ok_or_else(|| {
+        //         etl_error!(
+        //             ErrorKind::MissingTableSchema,
+        //             "Table schema not found",
+        //             format!("No schema found for table {table_id}")
+        //         )
+        //     })?;
+
+        // let equality_ids = table_schema
+        //     .column_schemas
+        //     .iter()
+        //     .enumerate()
+        //     .filter_map(|(id, column_schema)| {
+        //         if column_schema.primary {
+        //             Some(id as i32)
+        //         } else {
+        //             None
+        //         }
+        //     })
+        //     .collect();
+
+        // let table_name = self
+        //     .store
+        //     .get_table_mapping(&table_id)
+        //     .await?
+        //     .ok_or_else(|| {
+        //         etl_error!(
+        //             ErrorKind::MissingTableMapping,
+        //             "Table mapping not found",
+        //             format!("The table mapping for table id {table_id} was not found")
+        //         )
+        //     })?;
+
+        let table = self
+            .load_table(namespace.clone(), table_name)
+            .await
+            .map_err(iceberg_error_to_etl_error)?;
+
+        let table_schema = table.metadata().current_schema();
+
+        let config = EqualityDeleteWriterConfig::new(
+            equality_ids,
+            Arc::clone(table_schema),
+            None,
+            0, // TODO: use correct partition spec id
+        )
+        .map_err(iceberg_error_to_etl_error)?;
+
+        let delete_arrow_schema = config.projected_arrow_schema_ref().clone();
+        let delete_schema = arrow_schema_to_schema(&delete_arrow_schema).unwrap();
+
+        // Create Parquet writer properties
+        let writer_props = WriterProperties::builder()
+            .set_compression(Compression::SNAPPY)
+            .build();
+
+        // Create location and file name generators
+        let location_gen = DefaultLocationGenerator::new(table.metadata().clone())
+            .map_err(iceberg_error_to_etl_error)?;
+        let file_name_gen = DefaultFileNameGenerator::new(
+            "delete".to_string(),
+            Some(uuid::Uuid::new_v4().to_string()), // Add unique UUID for each file
+            iceberg::spec::DataFileFormat::Parquet,
+        );
+
+        // Create Parquet writer builder
+        let parquet_writer_builder = ParquetWriterBuilder::new(
+            writer_props,
+            Arc::new(delete_schema),
+            table.file_io().clone(),
+            location_gen,
+            file_name_gen,
+        );
+
+        let mut _equality_delete_writer =
+            EqualityDeleteFileWriterBuilder::new(parquet_writer_builder, config)
+                .build()
+                .await
+                .map_err(iceberg_error_to_etl_error)?;
 
         Ok(())
     }
