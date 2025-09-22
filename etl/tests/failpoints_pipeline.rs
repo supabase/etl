@@ -134,10 +134,10 @@ async fn table_copy_fails_after_timed_retry_exceeded_max_attempts() {
 
     users_state_notify.notified().await;
 
-    // We expect to have a manul retry error which was used after the max attempts have been reached.
+    // We expect to still have the timed retry kind since this is the kind of error that we triggered.
     let err = pipeline.shutdown_and_wait().await.err().unwrap();
     assert_eq!(err.kinds().len(), 1);
-    assert_eq!(err.kinds()[0], ErrorKind::WithManualRetry);
+    assert_eq!(err.kinds()[0], ErrorKind::WithTimedRetry);
 
     // Verify no data is there.
     let table_rows = destination.get_table_rows().await;

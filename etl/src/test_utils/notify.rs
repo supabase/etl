@@ -19,17 +19,20 @@ pub enum StateStoreMethod {
     RollbackTableReplicationState,
 }
 
+type TableStateTypeCondition = (TableId, TableReplicationPhaseType, Arc<Notify>);
+type TableStateCondition = (
+    TableId,
+    Arc<Notify>,
+    Box<dyn Fn(&TableReplicationPhase) -> bool + Send + Sync>,
+);
+
 struct Inner {
     table_replication_states: HashMap<TableId, TableReplicationPhase>,
     table_state_history: HashMap<TableId, Vec<TableReplicationPhase>>,
     table_schemas: HashMap<TableId, Arc<TableSchema>>,
     table_mappings: HashMap<TableId, String>,
-    table_state_type_conditions: Vec<(TableId, TableReplicationPhaseType, Arc<Notify>)>,
-    table_state_conditions: Vec<(
-        TableId,
-        Arc<Notify>,
-        Box<dyn Fn(&TableReplicationPhase) -> bool + Send + Sync>,
-    )>,
+    table_state_type_conditions: Vec<TableStateTypeCondition>,
+    table_state_conditions: Vec<TableStateCondition>,
     method_call_notifiers: HashMap<StateStoreMethod, Vec<Arc<Notify>>>,
 }
 
