@@ -119,12 +119,15 @@ async fn table_copy_fails_after_timed_retry_exceeded_max_attempts() {
     // Register notifications for waiting on the manual retry which is expected to be flipped by the
     // max attempts handling.
     let users_state_notify = store
-        .notify_on_table_state(
-            database_schema.users_schema().id,
-            |phase| {
-                matches!(phase, TableReplicationPhase::Errored { retry_policy: RetryPolicy::ManualRetry, .. })
-            },
-        )
+        .notify_on_table_state(database_schema.users_schema().id, |phase| {
+            matches!(
+                phase,
+                TableReplicationPhase::Errored {
+                    retry_policy: RetryPolicy::ManualRetry,
+                    ..
+                }
+            )
+        })
         .await;
 
     pipeline.start().await.unwrap();
