@@ -4,6 +4,7 @@ use std::sync::Arc;
 use tokio::sync::Semaphore;
 use tokio::task::JoinHandle;
 use tokio_postgres::types::PgLsn;
+use tracing::warn;
 use tracing::{Instrument, debug, error, info};
 
 use crate::concurrency::shutdown::ShutdownRx;
@@ -14,7 +15,7 @@ use crate::error::{ErrorKind, EtlError, EtlResult};
 use crate::etl_error;
 use crate::replication::apply::{ApplyLoopAction, ApplyLoopHook, start_apply_loop};
 use crate::replication::client::PgReplicationClient;
-use crate::replication::common::get_table_replication_states;
+use crate::replication::common::get_active_table_replication_states;
 use crate::state::table::{
     TableReplicationError, TableReplicationPhase, TableReplicationPhaseType,
 };
@@ -387,30 +388,34 @@ where
     async fn before_loop(&self, _start_lsn: PgLsn) -> EtlResult<ApplyLoopAction> {
         info!("starting table sync workers before the main apply loop");
 
-        let active_table_replication_states =
-            get_table_replication_states(&self.store, false).await?;
+        for (table_id, table_replication_phase) in self.store.get_table_replication_states().await?
+        {
+            if !table_replication_phase.as_type().is_done() {
+                // A table in `SyncDone` doesn't need to have its worker started, since the main apply
+                // worker will move it into `Ready` state automatically once the condition is met.
+                if let TableReplicationPhaseType::SyncDone = table_replication_phase.as_type() {
+                    continue;
+                }
 
-        for (table_id, table_replication_phase) in active_table_replication_states {
-            // A table in `SyncDone` doesn't need to have its worker started, since the main apply
-            // worker will move it into `Ready` state automatically once the condition is met.
-            if let TableReplicationPhaseType::SyncDone = table_replication_phase.as_type() {
-                continue;
-            }
+                // If there is already an active worker for this table in the pool, we can avoid starting
+                // it.
+                let mut pool = self.pool.lock().await;
+                if pool.get_active_worker_state(table_id).is_some() {
+                    continue;
+                }
 
-            // If there is already an active worker for this table in the pool, we can avoid starting
-            // it.
-            let mut pool = self.pool.lock().await;
-            if pool.get_active_worker_state(table_id).is_some() {
-                continue;
-            }
-
-            // If we fail, we just show an error, and hopefully we will succeed when starting it
-            // during syncing tables.
-            let table_sync_worker = self.build_table_sync_worker(table_id).await;
-            if let Err(err) = pool.start_worker(table_sync_worker).await {
-                error!(
-                    "error starting table sync worker for table {} during initialization: {}",
-                    table_id, err
+                // If we fail, we just show an error, and hopefully we will succeed when starting it
+                // during syncing tables.
+                let table_sync_worker = self.build_table_sync_worker(table_id).await;
+                if let Err(err) = pool.start_worker(table_sync_worker).await {
+                    error!(
+                        "error starting table sync worker for table {} during initialization: {}",
+                        table_id, err
+                    );
+                }
+            } else if table_replication_phase.as_type().is_errored() {
+                warn!(
+                    "table sync worker for table {table_id} won't run because it is in an errored state."
                 );
             }
         }
@@ -429,7 +434,7 @@ where
         update_state: bool,
     ) -> EtlResult<ApplyLoopAction> {
         let active_table_replication_states =
-            get_table_replication_states(&self.store, false).await?;
+            get_active_table_replication_states(&self.store).await?;
         debug!(
             "processing syncing tables for apply worker with lsn {}",
             current_lsn

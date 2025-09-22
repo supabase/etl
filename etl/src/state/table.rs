@@ -320,6 +320,11 @@ impl TableReplicationPhaseType {
         }
     }
 
+    /// Return `true` if a table with this phase is in error, `false` otherwise.
+    pub fn is_errored(&self) -> bool {
+        matches!(self, Self::Errored)
+    }
+
     pub fn as_static_str(&self) -> &'static str {
         match self {
             TableReplicationPhaseType::Init => "init",
