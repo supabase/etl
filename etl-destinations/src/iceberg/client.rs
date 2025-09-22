@@ -9,7 +9,7 @@ use iceberg::{
     Catalog, NamespaceIdent, TableCreation, TableIdent,
     io::{S3_ACCESS_KEY_ID, S3_ENDPOINT, S3_SECRET_ACCESS_KEY},
     table::Table,
-    transaction::{ApplyTransactionAction, Transaction},
+    transaction::Transaction,
     writer::{
         IcebergWriter, IcebergWriterBuilder,
         base_writer::data_file_writer::DataFileWriterBuilder,
@@ -236,13 +236,13 @@ impl IcebergClient {
 
         // Create transaction and fast append action
         let transaction = Transaction::new(table);
-        let append_action = transaction
-            .fast_append()
-            .with_check_duplicate(false) // Don't check duplicates for performance
-            .add_data_files(data_files);
+        let mut append_action = transaction
+            .fast_append(None, None, vec![])?
+            .with_check_duplicate(false); // Don't check duplicates for performance
+        append_action.add_data_files(data_files)?;
 
         // Apply the append action to create updated transaction
-        let updated_transaction = append_action.apply(transaction)?;
+        let updated_transaction = append_action.apply().await?;
 
         // Commit the transaction to the catalog
         let _updated_table = updated_transaction.commit(&*self.catalog).await?;
