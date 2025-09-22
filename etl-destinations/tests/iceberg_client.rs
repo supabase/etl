@@ -14,6 +14,96 @@ use crate::support::{
 mod support;
 
 #[tokio::test]
+#[ignore = "wip"]
+async fn equality_delete_then_insert_replaces_rows() {
+    init_test_tracing();
+
+    let lakekeeper_client = LakekeeperClient::new(LAKEKEEPER_URL);
+    let (warehouse_name, warehouse_id) = lakekeeper_client.create_warehouse().await.unwrap();
+    let client =
+        IcebergClient::new_with_rest_catalog(get_catalog_url(), warehouse_name, create_props());
+
+    // Create namespace and a simple table with a primary key and one value column
+    let namespace = "test_namespace";
+    client.create_namespace_if_missing(namespace).await.unwrap();
+
+    let table_name = "test_delete_rows".to_string();
+    let table_id = TableId::new(424242);
+    let table_name_struct = TableName::new("test_schema".to_string(), table_name.clone());
+    let columns = vec![
+        ColumnSchema::new("id".to_string(), Type::INT4, -1, false, true), // PK
+        ColumnSchema::new("val".to_string(), Type::TEXT, -1, true, false),
+    ];
+    let table_schema = TableSchema::new(table_id, table_name_struct, columns);
+
+    client
+        .create_table_if_missing(namespace, table_name.clone(), &table_schema)
+        .await
+        .unwrap();
+
+    // Insert an initial row
+    let initial_rows = vec![TableRow {
+        values: vec![Cell::I32(1), Cell::String("old".to_string())],
+    }];
+    client
+        .insert_rows(
+            namespace.to_string(),
+            table_name.clone(),
+            initial_rows.clone(),
+        )
+        .await
+        .unwrap();
+
+    // Prepare PK metadata from the schema
+    let mut pk_col_names: Vec<String> = Vec::new();
+    let mut pk_col_indexes: Vec<usize> = Vec::new();
+    for (idx, col) in table_schema.column_schemas.iter().enumerate() {
+        if col.primary {
+            pk_col_names.push(col.name.clone());
+            pk_col_indexes.push(idx);
+        }
+    }
+
+    // Build the batch we want to upsert: same PK with a new value
+    let upsert_rows = vec![TableRow {
+        values: vec![Cell::I32(1), Cell::String("new".to_string())],
+    }];
+
+    // First write equality delete for the PKs in the upcoming batch, then insert the new rows
+    client
+        .delete_rows(
+            namespace.to_string(),
+            table_name.clone(),
+            pk_col_names,
+            pk_col_indexes,
+            &upsert_rows,
+        )
+        .await
+        .unwrap();
+
+    client
+        .insert_rows(
+            namespace.to_string(),
+            table_name.clone(),
+            upsert_rows.clone(),
+        )
+        .await
+        .unwrap();
+
+    // Verify only the latest row remains (old row for the same PK should be gone)
+    let read_rows = read_all_rows(&client, namespace.to_string(), table_name.clone()).await;
+    assert_eq!(read_rows, upsert_rows);
+
+    // Cleanup
+    client.drop_table(namespace, table_name).await.unwrap();
+    client.drop_namespace(namespace).await.unwrap();
+    lakekeeper_client
+        .drop_warehouse(warehouse_id)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
 async fn create_namespace() {
     init_test_tracing();
 

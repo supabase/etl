@@ -313,7 +313,7 @@ impl IcebergClient {
             equality_ids,
             Arc::clone(table_schema),
             None,
-            0, // TODO: use correct partition spec id
+            table.metadata().default_partition_spec_id(),
         )?;
 
         let delete_arrow_schema = config.projected_arrow_schema_ref().clone();
