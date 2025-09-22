@@ -486,7 +486,8 @@ where
                         );
 
                         table_error = table_error.with_retry_policy(RetryPolicy::ManualRetry);
-                        retry_policy = RetryPolicy::ManualRetry;
+                        retry_policy = table_error.retry_policy().clone();
+
                         state_guard.reset_retry_attempts();
                     }
 
