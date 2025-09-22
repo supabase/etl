@@ -621,6 +621,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // Error handling configuration
         table_error_retry_delay_ms: 10000,  // Wait 10s before retrying failed tables
+        table_error_retry_max_attempts: 5,  // Stop automatic retries after 5 attempts
         max_table_sync_workers: 2,          // Use 2 workers for parallel table syncing
     };
 

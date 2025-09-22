@@ -795,6 +795,24 @@ async fn pipeline_config_can_be_updated() {
 
     // Act
     let update_request = UpdatePipelineConfigRequest {
+        config: partially_updated_optional_pipeline_config(
+            ConfigUpdateType::TableErrorRetryMaxAttempts(12),
+        ),
+    };
+    let response = app
+        .update_pipeline_config(&tenant_id, pipeline_id, &update_request)
+        .await;
+
+    // Assert
+    assert!(response.status().is_success());
+    let response: UpdatePipelineConfigResponse = response
+        .json()
+        .await
+        .expect("failed to deserialize response");
+    insta::assert_debug_snapshot!(response.config);
+
+    // Act
+    let update_request = UpdatePipelineConfigRequest {
         config: partially_updated_optional_pipeline_config(ConfigUpdateType::MaxTableSyncWorkers(
             8,
         )),

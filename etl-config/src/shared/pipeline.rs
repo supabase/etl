@@ -20,8 +20,10 @@ pub struct PipelineConfig {
     pub pg_connection: PgConnectionConfig,
     /// Batch processing configuration.
     pub batch: BatchConfig,
-    /// Number of ms between one retry and another when a table error occurs.
+    /// Number of milliseconds between one retry and another when a table error occurs.
     pub table_error_retry_delay_ms: u64,
+    /// Maximum number of automatic retry attempts before requiring manual intervention.
+    pub table_error_retry_max_attempts: u32,
     /// Maximum number of table sync workers that can run at a time
     pub max_table_sync_workers: u16,
 }
@@ -35,6 +37,10 @@ impl PipelineConfig {
 
         if self.max_table_sync_workers == 0 {
             return Err(ValidationError::MaxTableSyncWorkersZero);
+        }
+
+        if self.table_error_retry_max_attempts == 0 {
+            return Err(ValidationError::TableErrorRetryMaxAttemptsZero);
         }
 
         Ok(())

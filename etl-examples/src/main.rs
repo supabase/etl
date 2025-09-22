@@ -170,6 +170,7 @@ async fn main_impl() -> Result<(), Box<dyn Error>> {
             max_fill_ms: args.bq_args.max_batch_fill_duration_ms,
         },
         table_error_retry_delay_ms: 10000,
+        table_error_retry_max_attempts: 5,
         max_table_sync_workers: args.bq_args.max_table_sync_workers,
     };
 

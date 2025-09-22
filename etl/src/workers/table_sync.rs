@@ -50,6 +50,8 @@ pub struct TableSyncWorkerStateInner {
     table_replication_phase: TableReplicationPhase,
     /// Notification mechanism for notifying state changes to waiting workers.
     phase_change: Arc<Notify>,
+    /// Number of consecutive automatic retry attempts.
+    retry_attempts: u32,
 }
 
 impl TableSyncWorkerStateInner {
@@ -71,6 +73,22 @@ impl TableSyncWorkerStateInner {
         // Note that this notify will not wake up waiters that will be coming in the future since
         // no permit is stored, only active listeners will be notified.
         self.phase_change.notify_waiters();
+    }
+
+    /// Returns the number of consecutive automatic retry attempts.
+    pub fn retry_attempts(&self) -> u32 {
+        self.retry_attempts
+    }
+
+    /// Increments the retry attempt counter and returns the updated value.
+    pub fn increment_retry_attempts(&mut self) -> u32 {
+        self.retry_attempts = self.retry_attempts.saturating_add(1);
+        self.retry_attempts
+    }
+
+    /// Resets the automatic retry attempt counter to zero.
+    pub fn reset_retry_attempts(&mut self) {
+        self.retry_attempts = 0;
     }
 
     /// Updates the table's replication phase with conditional persistence to external storage.
@@ -153,6 +171,7 @@ impl TableSyncWorkerState {
             table_id,
             table_replication_phase,
             phase_change: Arc::new(Notify::new()),
+            retry_attempts: 0,
         };
 
         Self {
@@ -435,6 +454,10 @@ where
                 Ok(_) => {
                     // Worker completed successfully, mark as finished.
                     let mut pool = pool.lock().await;
+                    {
+                        let mut state_guard = state.lock().await;
+                        state_guard.reset_retry_attempts();
+                    }
                     pool.mark_worker_finished(table_id);
 
                     return Ok(());
@@ -443,13 +466,38 @@ where
                     error!("table sync worker failed for table {}: {}", table_id, err);
 
                     // Convert error to table replication error to determine retry policy.
-                    let table_error =
+                    let mut table_error =
                         TableReplicationError::from_etl_error(&config, table_id, &err);
-                    let retry_policy = table_error.retry_policy().clone();
+                    let mut retry_policy = table_error.retry_policy().clone();
 
                     // We lock both the pool and the table sync worker state to be consistent.
                     let mut pool_guard = pool.lock().await;
                     let mut state_guard = state.lock().await;
+
+                    if let RetryPolicy::TimedRetry { .. } = retry_policy {
+                        let max_attempts = config.table_error_retry_max_attempts;
+                        let next_attempt = state_guard.retry_attempts().saturating_add(1);
+
+                        if next_attempt > max_attempts {
+                            info!(
+                                table_id = %table_id,
+                                max_attempts,
+                                "maximum automatic retry attempts reached, switching to manual retry"
+                            );
+
+                            table_error = table_error.with_retry_policy(RetryPolicy::ManualRetry);
+                            retry_policy = RetryPolicy::ManualRetry;
+                            state_guard.reset_retry_attempts();
+                        } else {
+                            let attempts = state_guard.increment_retry_attempts();
+                            info!(
+                                table_id = %table_id,
+                                attempts,
+                                max_attempts,
+                                "retrying table sync worker after error"
+                            );
+                        }
+                    }
 
                     // Update the state and store with the error.
                     if let Err(err) = state_guard.set_and_store(table_error.into(), &store).await {
@@ -521,6 +569,7 @@ where
                             continue;
                         }
                         RetryPolicy::NoRetry | RetryPolicy::ManualRetry => {
+                            state_guard.reset_retry_attempts();
                             pool_guard.mark_worker_finished(table_id);
 
                             return Err(err);

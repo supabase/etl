@@ -3,14 +3,14 @@ source: etl-api/tests/pipelines.rs
 expression: response.config
 ---
 FullApiPipelineConfig {
-    publication_name: "updated_publication",
+    publication_name: "publication",
     batch: Some(
         ApiBatchConfig {
             max_size: Some(
-                2000,
+                10000,
             ),
             max_fill_ms: Some(
-                10,
+                100,
             ),
         },
     ),
@@ -18,9 +18,9 @@ FullApiPipelineConfig {
         20000,
     ),
     table_error_retry_max_attempts: Some(
-        10,
+        12,
     ),
     max_table_sync_workers: Some(
-        4,
+        8,
     ),
 }

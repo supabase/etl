@@ -331,6 +331,7 @@ async fn start_pipeline(args: RunArgs) -> Result<(), Box<dyn Error>> {
             max_fill_ms: args.batch_max_fill_ms,
         },
         table_error_retry_delay_ms: 10000,
+        table_error_retry_max_attempts: 5,
         max_table_sync_workers: args.max_table_sync_workers,
     };
 

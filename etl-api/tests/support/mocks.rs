@@ -187,6 +187,7 @@ pub mod pipelines {
                 max_fill_ms: Some(5),
             }),
             table_error_retry_delay_ms: Some(10000),
+            table_error_retry_max_attempts: Some(5),
             max_table_sync_workers: Some(2),
         }
     }
@@ -200,6 +201,7 @@ pub mod pipelines {
                 max_fill_ms: Some(10),
             }),
             table_error_retry_delay_ms: Some(20000),
+            table_error_retry_max_attempts: Some(10),
             max_table_sync_workers: Some(4),
         }
     }
@@ -208,6 +210,7 @@ pub mod pipelines {
     pub enum ConfigUpdateType {
         Batch(ApiBatchConfig),
         TableErrorRetryDelayMs(u64),
+        TableErrorRetryMaxAttempts(u32),
         MaxTableSyncWorkers(u16),
     }
 
@@ -220,6 +223,7 @@ pub mod pipelines {
                 publication_name: None,
                 batch: Some(batch_config),
                 table_error_retry_delay_ms: None,
+                table_error_retry_max_attempts: None,
                 max_table_sync_workers: None,
             },
             ConfigUpdateType::TableErrorRetryDelayMs(table_error_retry_delay_ms) => {
@@ -227,6 +231,16 @@ pub mod pipelines {
                     publication_name: None,
                     batch: None,
                     table_error_retry_delay_ms: Some(table_error_retry_delay_ms),
+                    table_error_retry_max_attempts: None,
+                    max_table_sync_workers: None,
+                }
+            }
+            ConfigUpdateType::TableErrorRetryMaxAttempts(max_attempts) => {
+                PartialApiPipelineConfig {
+                    publication_name: None,
+                    batch: None,
+                    table_error_retry_delay_ms: None,
+                    table_error_retry_max_attempts: Some(max_attempts),
                     max_table_sync_workers: None,
                 }
             }
@@ -234,6 +248,7 @@ pub mod pipelines {
                 publication_name: None,
                 batch: None,
                 table_error_retry_delay_ms: None,
+                table_error_retry_max_attempts: None,
                 max_table_sync_workers: Some(n),
             },
         }
@@ -248,6 +263,7 @@ pub mod pipelines {
                 max_fill_ms: Some(100),
             }),
             table_error_retry_delay_ms: Some(10000),
+            table_error_retry_max_attempts: Some(6),
             max_table_sync_workers: Some(8),
         }
     }
