@@ -35,8 +35,8 @@ struct SlotLagRow {
     restart_lsn_bytes: i64,
     confirmed_flush_lsn_bytes: i64,
     safe_wal_size_bytes: i64,
-    write_lag_milliseconds: Option<i64>,
-    flush_lag_milliseconds: Option<i64>,
+    write_lag_ms: Option<i64>,
+    flush_lag_ms: Option<i64>,
 }
 
 /// Fetches replication lag metrics for the given pipeline by inspecting logical replication slots.
@@ -78,24 +78,15 @@ pub async fn get_pipeline_lag_metrics(
     let mut metrics = PipelineLagMetrics::default();
 
     for row in rows {
-        let SlotLagRow {
-            slot_name,
-            restart_lsn_bytes,
-            confirmed_flush_lsn_bytes,
-            safe_wal_size_bytes,
-            write_lag_milliseconds: write_lag_ms,
-            flush_lag_milliseconds: flush_lag_ms,
-        } = row;
-
         let slot_lag_metrics = SlotLagMetrics {
-            restart_lsn_bytes,
-            confirmed_flush_lsn_bytes,
-            safe_wal_size_bytes,
-            write_lag_ms,
-            flush_lag_ms,
+            restart_lsn_bytes: row.restart_lsn_bytes,
+            confirmed_flush_lsn_bytes: row.confirmed_flush_lsn_bytes,
+            safe_wal_size_bytes: row.safe_wal_size_bytes,
+            write_lag_ms: row.write_lag_ms,
+            flush_lag_ms: row.flush_lag_ms,
         };
 
-        match EtlReplicationSlot::try_from_string(&slot_name) {
+        match EtlReplicationSlot::try_from_string(&row.slot_name) {
             Ok(EtlReplicationSlot::Apply {
                 pipeline_id: slot_pipeline_id,
             }) if slot_pipeline_id == pipeline_id => {
