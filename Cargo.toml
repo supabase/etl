@@ -46,7 +46,10 @@ constant_time_eq = { version = "0.4.2" }
 fail = { version = "0.5.1", default-features = false }
 futures = { version = "0.3.31", default-features = false }
 gcp-bigquery-client = { git = "https://github.com/lquerel/gcp-bigquery-client.git", default-features = false, rev = "391a162642bd0af6d55e2310ef46adf96f21228c" }
+# Need to fix indexmap version to fix a conflict between two other dependencies not agreeing on an indexmap version they need
+indexmap = { version = "2.11.4", default-features = false }
 iceberg = { git = "https://github.com/risingwavelabs/iceberg-rust.git", rev = "cccb65d0db06dcd0c67c8b563ca35183c15d6997", default-features = false }
+iceberg-compaction-core = { git = "https://github.com/nimtable/iceberg-compaction.git", rev = "23012c422989c9d443c5e7ba59df96d3f9522d1a", package = "iceberg-compaction-core", default-features = false }
 iceberg-catalog-rest = { git = "https://github.com/risingwavelabs/iceberg-rust.git", rev = "cccb65d0db06dcd0c67c8b563ca35183c15d6997", default-features = false }
 insta = { version = "1.43.1", default-features = false }
 k8s-openapi = { version = "0.25.0", default-features = false }

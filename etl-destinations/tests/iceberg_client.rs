@@ -7,21 +7,23 @@ use etl_telemetry::tracing::init_test_tracing;
 use uuid::Uuid;
 
 use crate::support::{
-    iceberg::{LAKEKEEPER_URL, create_props, get_catalog_url, read_all_rows},
+    iceberg::{LAKEKEEPER_URL, compact, create_props, get_catalog_url, read_all_rows},
     lakekeeper::LakekeeperClient,
 };
 
 mod support;
 
 #[tokio::test]
-#[ignore = "wip"]
 async fn equality_delete_then_insert_replaces_rows() {
     init_test_tracing();
 
     let lakekeeper_client = LakekeeperClient::new(LAKEKEEPER_URL);
     let (warehouse_name, warehouse_id) = lakekeeper_client.create_warehouse().await.unwrap();
-    let client =
-        IcebergClient::new_with_rest_catalog(get_catalog_url(), warehouse_name, create_props());
+    let client = IcebergClient::new_with_rest_catalog(
+        get_catalog_url(),
+        warehouse_name.clone(),
+        create_props(),
+    );
 
     // Create namespace and a simple table with a primary key and one value column
     let namespace = "test_namespace";
@@ -89,6 +91,10 @@ async fn equality_delete_then_insert_replaces_rows() {
         )
         .await
         .unwrap();
+
+    // compact because iceberg rust currectly doesn't read equality delete files
+    // so without compaction the test fails.
+    compact(warehouse_name).await;
 
     // Verify only the latest row remains (old row for the same PK should be gone)
     let read_rows = read_all_rows(&client, namespace.to_string(), table_name.clone()).await;
