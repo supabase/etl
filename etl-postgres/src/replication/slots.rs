@@ -31,10 +31,12 @@ pub enum EtlReplicationSlot {
 }
 
 impl EtlReplicationSlot {
+    /// Creates a new [`EtlReplicationSlot`] for the apply worker.
     pub fn for_apply_worker(pipeline_id: u64) -> Self {
         Self::Apply { pipeline_id }
     }
 
+    /// Creates a new [`EtlReplicationSlot`] for the table sync worker.
     pub fn for_table_sync_worker(pipeline_id: u64, table_id: TableId) -> Self {
         Self::TableSync {
             pipeline_id,
