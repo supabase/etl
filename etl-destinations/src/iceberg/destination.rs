@@ -1,6 +1,7 @@
 use std::{
     collections::{HashMap, HashSet},
     fmt,
+    hash::{Hash, Hasher},
     sync::Arc,
 };
 
@@ -234,11 +235,18 @@ where
                                 namespace.clone(),
                                 table_name.clone(),
                                 pk_col_names,
-                                pk_col_indexes,
+                                pk_col_indexes.clone(),
                                 &table_rows,
                             )
                             .await?;
-                        client.insert_rows(namespace, table_name, table_rows).await
+                        // Deduplicate by PK keeping only the latest event (highest sequence_number)
+                        let deduped_rows = IcebergDestination::<S>::dedup_latest_by_pk(
+                            table_rows,
+                            &pk_col_indexes,
+                        );
+                        client
+                            .insert_rows(namespace, table_name, deduped_rows)
+                            .await
                     });
                 }
                 while let Some(insert_result) = join_set.join_next().await {
@@ -281,6 +289,102 @@ where
         }
 
         Ok(())
+    }
+
+    /// Deduplicate table rows by primary key, keeping only the latest event per PK.
+    ///
+    /// Uses the provided primary key column indexes to identify duplicate rows and keeps
+    /// the last occurrence of each primary key combination (last-write-wins semantics).
+    ///
+    /// Uses a struct containing the actual primary key cell values for correct equality comparison
+    /// while still implementing efficient hashing.
+    ///
+    /// Assumptions:
+    /// - `pk_col_indexes` refer to positions in the original table schema (before CDC columns),
+    ///   which still match the same positions in `TableRow::values` since CDC columns are appended.
+    fn dedup_latest_by_pk(table_rows: Vec<TableRow>, pk_col_indexes: &[usize]) -> Vec<TableRow> {
+        // If no primary key columns specified, return all rows as-is
+        if pk_col_indexes.is_empty() {
+            return table_rows;
+        }
+
+        #[derive(Clone)]
+        struct PrimaryKey {
+            cells: Vec<Cell>,
+        }
+
+        impl PartialEq for PrimaryKey {
+            fn eq(&self, other: &Self) -> bool {
+                self.cells == other.cells
+            }
+        }
+
+        impl Eq for PrimaryKey {}
+
+        impl Hash for PrimaryKey {
+            fn hash<H: Hasher>(&self, state: &mut H) {
+                for cell in &self.cells {
+                    hash_cell(cell, state);
+                }
+            }
+        }
+
+        fn hash_cell<H: Hasher>(cell: &Cell, hasher: &mut H) {
+            match cell {
+                Cell::Null => 0u8.hash(hasher),
+                Cell::Bool(b) => (1u8, b).hash(hasher),
+                Cell::String(s) => (2u8, s).hash(hasher),
+                Cell::I16(i) => (3u8, i).hash(hasher),
+                Cell::I32(i) => (4u8, i).hash(hasher),
+                Cell::U32(u) => (5u8, u).hash(hasher),
+                Cell::I64(i) => (6u8, i).hash(hasher),
+                Cell::F32(f) => (7u8, f.to_bits()).hash(hasher),
+                Cell::F64(f) => (8u8, f.to_bits()).hash(hasher),
+                Cell::Numeric(n) => (9u8, format!("{:?}", n)).hash(hasher), // Fallback for complex type
+                Cell::Date(d) => (10u8, format!("{:?}", d)).hash(hasher),
+                Cell::Time(t) => (11u8, format!("{:?}", t)).hash(hasher), // Use debug format for simplicity
+                Cell::Timestamp(ts) => (
+                    12u8,
+                    ts.and_utc().timestamp(),
+                    ts.and_utc().timestamp_subsec_nanos(),
+                )
+                    .hash(hasher),
+                Cell::TimestampTz(ts) => {
+                    (13u8, ts.timestamp(), ts.timestamp_subsec_nanos()).hash(hasher)
+                }
+                Cell::Uuid(uuid) => (14u8, uuid.as_bytes()).hash(hasher),
+                Cell::Json(json) => (15u8, json.to_string()).hash(hasher), // Fallback for complex type
+                Cell::Bytes(bytes) => (16u8, bytes).hash(hasher),
+                Cell::Array(arr) => (17u8, format!("{:?}", arr)).hash(hasher), // Fallback for complex type
+            }
+        }
+
+        fn extract_primary_key(row_values: &[Cell], pk_col_indexes: &[usize]) -> PrimaryKey {
+            let cells = pk_col_indexes
+                .iter()
+                .map(|&idx| row_values[idx].clone())
+                .collect();
+            PrimaryKey { cells }
+        }
+
+        // Key: actual PK cell values. Value: index into `deduped` vector.
+        let mut index_by_pk: HashMap<PrimaryKey, usize> = HashMap::with_capacity(table_rows.len());
+        let mut deduped: Vec<TableRow> = Vec::with_capacity(table_rows.len());
+
+        for row in table_rows.into_iter() {
+            let key = extract_primary_key(&row.values, pk_col_indexes);
+
+            // Use last-write-wins semantics: replace any existing row with the same PK
+            if let Some(&existing_idx) = index_by_pk.get(&key) {
+                deduped[existing_idx] = row;
+            } else {
+                let idx = deduped.len();
+                deduped.push(row);
+                index_by_pk.insert(key, idx);
+            }
+        }
+
+        deduped
     }
     /// Prepares a table for CDC streaming operations with schema-aware table creation.
     ///
