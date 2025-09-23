@@ -5,7 +5,7 @@ use crate::replication::slots::EtlReplicationSlot;
 use crate::types::TableId;
 
 /// Lag metrics associated with a logical replication slot.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug)]
 pub struct SlotLagMetrics {
     /// The number of bytes between the current WAL LSN and the slot restart LSN.
     pub restart_lsn_bytes: i64,
@@ -20,7 +20,7 @@ pub struct SlotLagMetrics {
 }
 
 /// Lag metrics for pipeline apply and table sync workers.
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
+#[derive(Debug, Default)]
 pub struct PipelineLagMetrics {
     /// Lag metrics for the apply worker slot.
     pub apply: Option<SlotLagMetrics>,

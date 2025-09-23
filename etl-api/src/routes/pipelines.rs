@@ -341,7 +341,7 @@ pub struct TableReplicationStatus {
 }
 
 /// Lag metrics reported for replication slots.
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct SlotLagMetricsResponse {
     /// Bytes between the current WAL location and the slot restart LSN.
     #[schema(example = 1024)]
@@ -959,8 +959,8 @@ pub async fn get_pipeline_replication_status(
 
     // Fetch replication state for all tables in this pipeline
     let state_rows = state::get_table_replication_state_rows(&source_pool, pipeline_id).await?;
-    let lag_metrics = lag::get_pipeline_lag_metrics(&source_pool, pipeline_id as u64).await?;
-    let apply_lag = lag_metrics.apply.clone().map(Into::into);
+    let mut lag_metrics = lag::get_pipeline_lag_metrics(&source_pool, pipeline_id as u64).await?;
+    let apply_lag = lag_metrics.apply.map(Into::into);
 
     // Convert database states to UI-friendly format and fetch table names
     let mut tables: Vec<TableReplicationStatus> = Vec::new();
@@ -980,8 +980,7 @@ pub async fn get_pipeline_replication_status(
             state: table_replication_state.into(),
             table_sync_lag: lag_metrics
                 .table_sync
-                .get(&table_id)
-                .cloned()
+                .remove(&table_id)
                 .map(Into::into),
         });
     }
