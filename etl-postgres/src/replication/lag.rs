@@ -77,8 +77,6 @@ pub async fn get_pipeline_lag_metrics(
 
     let mut metrics = PipelineLagMetrics::default();
 
-    println!("rows {:?}", rows);
-
     for row in rows {
         let slot_lag_metrics = SlotLagMetrics {
             restart_lsn_bytes: row.restart_lsn_bytes,

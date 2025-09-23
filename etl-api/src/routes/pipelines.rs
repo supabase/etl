@@ -978,10 +978,7 @@ pub async fn get_pipeline_replication_status(
             table_id: table_id.into_inner(),
             table_name: table_name.to_string(),
             state: table_replication_state.into(),
-            table_sync_lag: lag_metrics
-                .table_sync
-                .remove(&table_id)
-                .map(Into::into),
+            table_sync_lag: lag_metrics.table_sync.remove(&table_id).map(Into::into),
         });
     }
 
