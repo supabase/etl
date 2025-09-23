@@ -62,8 +62,8 @@ pub async fn get_pipeline_lag_metrics(
             coalesce(pg_wal_lsn_diff(pg_current_wal_lsn(), s.restart_lsn), 0)::bigint as restart_lsn_bytes,
             coalesce(pg_wal_lsn_diff(pg_current_wal_lsn(), s.confirmed_flush_lsn), 0)::bigint as confirmed_flush_lsn_bytes,
             coalesce(s.safe_wal_size, 0) as safe_wal_size_bytes,
-            round(extract(epoch from r.write_lag) * 1000)::bigint as write_lag_milliseconds,
-            round(extract(epoch from r.flush_lag) * 1000)::bigint as flush_lag_milliseconds
+            round(extract(epoch from r.write_lag) * 1000)::bigint as write_lag_ms,
+            round(extract(epoch from r.flush_lag) * 1000)::bigint as flush_lag_ms
         from pg_replication_slots as s
         left outer join pg_stat_replication as r on s.active_pid = r.pid
         where s.slot_type = 'logical'
@@ -76,6 +76,8 @@ pub async fn get_pipeline_lag_metrics(
     .await?;
 
     let mut metrics = PipelineLagMetrics::default();
+
+    println!("rows {:?}", rows);
 
     for row in rows {
         let slot_lag_metrics = SlotLagMetrics {
