@@ -60,13 +60,13 @@ async fn table_copy() {
 
     // Register notifications for table copy completion.
     let users_state_notify = store
-        .notify_on_table_state(
+        .notify_on_table_state_type(
             database_schema.users_schema().id,
             TableReplicationPhaseType::SyncDone,
         )
         .await;
     let orders_state_notify = store
-        .notify_on_table_state(
+        .notify_on_table_state_type(
             database_schema.orders_schema().id,
             TableReplicationPhaseType::SyncDone,
         )
