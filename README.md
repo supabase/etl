@@ -87,6 +87,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         pg_connection: pg,
         batch: BatchConfig { max_size: 1000, max_fill_ms: 5000 },
         table_error_retry_delay_ms: 10_000,
+        table_error_retry_max_attempts: 5,
         max_table_sync_workers: 4,
     };
 

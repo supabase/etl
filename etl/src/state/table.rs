@@ -58,6 +58,12 @@ impl TableReplicationError {
         &self.retry_policy
     }
 
+    /// Returns a copy of the error with the provided retry policy.
+    pub fn with_retry_policy(mut self, retry_policy: RetryPolicy) -> Self {
+        self.retry_policy = retry_policy;
+        self
+    }
+
     /// Converts an [`EtlError`] to a [`TableReplicationError`] for a specific table.
     ///
     /// Determines appropriate retry policies based on the error kind.

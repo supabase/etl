@@ -37,6 +37,7 @@ where
             max_fill_ms: 1000,
         },
         table_error_retry_delay_ms: 1000,
+        table_error_retry_max_attempts: 2,
         max_table_sync_workers: 1,
     };
 
@@ -66,6 +67,7 @@ where
         pg_connection: pg_connection_config.clone(),
         batch,
         table_error_retry_delay_ms: 1000,
+        table_error_retry_max_attempts: 5,
         max_table_sync_workers: 1,
     };
 

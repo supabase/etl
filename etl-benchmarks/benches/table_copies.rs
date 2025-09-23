@@ -331,6 +331,7 @@ async fn start_pipeline(args: RunArgs) -> Result<(), Box<dyn Error>> {
             max_fill_ms: args.batch_max_fill_ms,
         },
         table_error_retry_delay_ms: 10000,
+        table_error_retry_max_attempts: 5,
         max_table_sync_workers: args.max_table_sync_workers,
     };
 
@@ -368,7 +369,7 @@ async fn start_pipeline(args: RunArgs) -> Result<(), Box<dyn Error>> {
     let mut table_copied_notifications = vec![];
     for table_id in &args.table_ids {
         let table_copied = store
-            .notify_on_table_state(
+            .notify_on_table_state_type(
                 TableId::new(*table_id),
                 TableReplicationPhaseType::FinishedCopy,
             )

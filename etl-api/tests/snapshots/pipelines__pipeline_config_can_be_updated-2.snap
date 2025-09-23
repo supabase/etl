@@ -17,6 +17,9 @@ FullApiPipelineConfig {
     table_error_retry_delay_ms: Some(
         20000,
     ),
+    table_error_retry_max_attempts: Some(
+        5,
+    ),
     max_table_sync_workers: Some(
         2,
     ),
