@@ -1,8 +1,6 @@
 [advisories]
 version = 2
 ignore = [
-    { id = "RUSTSEC-2024-0370", reason = "Disabling because it is not a real vulnerability. The crate proc-macro-error is just unmaintained." },
-    { id = "RUSTSEC-2024-0384", reason = "Disabling because it is not a real vulnerability. The crate instant is just unmaintained." },
-    { id = "RUSTSEC-2025-0012", reason = "Disabling because it is not a real vulnerability. The crate backoff is just unmaintained." },
     { id = "RUSTSEC-2024-0436", reason = "Disabling because it is not a real vulnerability. The crate paste is just unmaintained." },
+    { id = "RUSTSEC-2023-0071", reason = "rsa 0.9.8 is pulled in transitively via opendal/reqsign (GCS presign) and sqlx-mysql (enabled by a dev-only dependency in iceberg-compaction-core). We don’t use GCS or MySQL in production builds; no patched version exists. Tracked to remove by constraining upstream features or upgrading when available." },
 ]
