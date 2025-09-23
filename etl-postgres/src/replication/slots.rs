@@ -77,7 +77,7 @@ impl EtlReplicationSlot {
                 .ok()
                 .ok_or_else(|| EtlReplicationSlotError::InvalidSlotName(slot_name.into()))?;
 
-            return Ok(EtlReplicationSlot::Apply { pipeline_id });
+            return Ok(EtlReplicationSlot::for_apply_worker(pipeline_id));
         }
 
         if let Some(rest) = slot_name.strip_prefix(TABLE_SYNC_WORKER_PREFIX) {
@@ -101,10 +101,10 @@ impl EtlReplicationSlot {
                 .ok()
                 .ok_or_else(|| EtlReplicationSlotError::InvalidSlotName(slot_name.into()))?;
 
-            return Ok(EtlReplicationSlot::TableSync {
+            return Ok(EtlReplicationSlot::for_table_sync_worker(
                 pipeline_id,
-                table_id: TableId::new(table_oid),
-            });
+                TableId::new(table_oid),
+            ));
         }
 
         Err(EtlReplicationSlotError::InvalidSlotName(slot_name.into()))
@@ -148,17 +148,14 @@ pub async fn delete_pipeline_replication_slots(
     let mut slot_names = Vec::with_capacity(table_ids.len() + 1);
 
     // Add apply worker slot
-    let slot_name = EtlReplicationSlot::Apply { pipeline_id };
+    let slot_name = EtlReplicationSlot::for_apply_worker(pipeline_id);
     if let Ok(apply_slot_name) = slot_name.try_to_string() {
         slot_names.push(apply_slot_name.clone());
     };
 
     // Add table sync worker slots
     for table_id in table_ids {
-        let slot_name = EtlReplicationSlot::TableSync {
-            pipeline_id,
-            table_id: *table_id,
-        };
+        let slot_name = EtlReplicationSlot::for_table_sync_worker(pipeline_id, *table_id);
         if let Ok(table_sync_slot_name) = slot_name.try_to_string() {
             slot_names.push(table_sync_slot_name);
         };
@@ -184,9 +181,10 @@ mod tests {
     #[test]
     fn test_apply_worker_slot_name() {
         let pipeline_id = 1;
-        let result = EtlReplicationSlot::Apply { pipeline_id }
+        let result = EtlReplicationSlot::for_apply_worker(pipeline_id)
             .try_to_string()
             .unwrap();
+
         assert!(result.starts_with(APPLY_WORKER_PREFIX));
         assert!(result.len() <= MAX_SLOT_NAME_LENGTH);
         assert_eq!(result, "supabase_etl_apply_1");
@@ -195,12 +193,10 @@ mod tests {
     #[test]
     fn test_table_sync_slot_name() {
         let pipeline_id = 1;
-        let result = EtlReplicationSlot::TableSync {
-            pipeline_id,
-            table_id: TableId::new(123),
-        }
-        .try_to_string()
-        .unwrap();
+        let result = EtlReplicationSlot::for_table_sync_worker(pipeline_id, TableId::new(123))
+            .try_to_string()
+            .unwrap();
+
         assert!(result.starts_with(TABLE_SYNC_WORKER_PREFIX));
         assert!(result.len() <= MAX_SLOT_NAME_LENGTH);
         assert_eq!(result, "supabase_etl_table_sync_1_123");
@@ -209,13 +205,14 @@ mod tests {
     #[test]
     fn test_slot_name_length_validation() {
         // Test that normal slot names are within limits
-        let pipeline_id = 9223372036854775807_u64; // Max u64
-        let result = EtlReplicationSlot::TableSync {
-            pipeline_id,
-            table_id: TableId::new(4294967295), // Max u32
-        }
-        .try_to_string();
+        // Max u64
+        let pipeline_id = 9223372036854775807_u64;
+        // Max u32
+        let result =
+            EtlReplicationSlot::for_table_sync_worker(pipeline_id, TableId::new(4294967295))
+                .try_to_string();
         assert!(result.is_ok());
+
         let slot_name = result.unwrap();
         assert!(slot_name.len() <= MAX_SLOT_NAME_LENGTH);
 
