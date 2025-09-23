@@ -111,7 +111,7 @@ async fn tenant_cannot_create_more_than_three_destinations_pipelines() {
         .await;
 
     // Assert
-    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
 }
 
 #[tokio::test(flavor = "multi_thread")]

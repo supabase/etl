@@ -121,7 +121,9 @@ impl ResponseError for DestinationPipelineError {
                 StatusCode::BAD_REQUEST
             }
             DestinationPipelineError::DuplicatePipeline => StatusCode::CONFLICT,
-            DestinationPipelineError::PipelineLimitReached { .. } => StatusCode::FORBIDDEN,
+            DestinationPipelineError::PipelineLimitReached { .. } => {
+                StatusCode::UNPROCESSABLE_ENTITY
+            }
         }
     }
 

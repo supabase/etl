@@ -173,7 +173,7 @@ impl ResponseError for PipelineError {
                 StatusCode::BAD_REQUEST
             }
             PipelineError::DuplicatePipeline => StatusCode::CONFLICT,
-            PipelineError::PipelineLimitReached { .. } => StatusCode::FORBIDDEN,
+            PipelineError::PipelineLimitReached { .. } => StatusCode::UNPROCESSABLE_ENTITY,
         }
     }
 
