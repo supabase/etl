@@ -1027,7 +1027,7 @@ async fn pipeline_replication_status_returns_table_states_and_names() {
             )),
             "test.test_table_orders" => assert!(matches!(
                 table_status.state,
-                SimpleTableReplicationState::FollowingWal { .. }
+                SimpleTableReplicationState::FollowingWal
             )),
             _ => panic!("Unexpected table name: {table_name}"),
         }
@@ -1071,7 +1071,7 @@ async fn rollback_table_state_succeeds_for_manual_retry_errors() {
     assert_eq!(response.table_id, table_oid.0);
     assert!(matches!(
         response.new_state,
-        SimpleTableReplicationState::FollowingWal { .. }
+        SimpleTableReplicationState::FollowingWal
     ));
 
     drop_pg_database(&source_db_config).await;

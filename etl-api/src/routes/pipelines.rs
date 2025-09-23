@@ -271,9 +271,7 @@ pub enum SimpleTableReplicationState {
     Queued,
     CopyingTable,
     CopiedTable,
-    FollowingWal {
-        lag: u64,
-    },
+    FollowingWal,
     Error {
         reason: String,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -301,13 +299,10 @@ impl From<state::TableReplicationState> for SimpleTableReplicationState {
             state::TableReplicationState::Init => SimpleTableReplicationState::Queued,
             state::TableReplicationState::DataSync => SimpleTableReplicationState::CopyingTable,
             state::TableReplicationState::FinishedCopy => SimpleTableReplicationState::CopiedTable,
-            // TODO: add lag metric when available.
             state::TableReplicationState::SyncDone { .. } => {
-                SimpleTableReplicationState::FollowingWal { lag: 0 }
+                SimpleTableReplicationState::FollowingWal
             }
-            state::TableReplicationState::Ready => {
-                SimpleTableReplicationState::FollowingWal { lag: 0 }
-            }
+            state::TableReplicationState::Ready => SimpleTableReplicationState::FollowingWal,
             state::TableReplicationState::Errored {
                 reason,
                 solution,
