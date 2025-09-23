@@ -26,7 +26,7 @@ use crate::configs::source::StoredSourceConfig;
 use crate::db;
 use crate::db::destinations::{Destination, DestinationsDbError, destination_exists};
 use crate::db::images::{Image, ImagesDbError};
-use crate::db::pipelines::{Pipeline, PipelinesDbError};
+use crate::db::pipelines::{MAX_PIPELINES_PER_TENANT, Pipeline, PipelinesDbError};
 use crate::db::replicators::{Replicator, ReplicatorsDbError};
 use crate::db::sources::{Source, SourcesDbError, source_exists};
 use crate::k8s::http::{
@@ -103,6 +103,9 @@ pub enum PipelineError {
     #[error("The specified image id {0} does not match the default image id")]
     ImageIdNotDefault(i64),
 
+    #[error("The maximum number of pipelines ({limit}) has been reached for this project")]
+    PipelineLimitReached { limit: i64 },
+
     #[error("There was an error while looking up table information in the source database: {0}")]
     TableLookup(#[from] TableLookupError),
 
@@ -170,6 +173,7 @@ impl ResponseError for PipelineError {
                 StatusCode::BAD_REQUEST
             }
             PipelineError::DuplicatePipeline => StatusCode::CONFLICT,
+            PipelineError::PipelineLimitReached { .. } => StatusCode::UNPROCESSABLE_ENTITY,
         }
     }
 
@@ -426,6 +430,14 @@ pub async fn create_pipeline(
 
     if !destination_exists(txn.deref_mut(), tenant_id, pipeline.destination_id).await? {
         return Err(PipelineError::DestinationNotFound(pipeline.destination_id));
+    }
+
+    let pipeline_count =
+        db::pipelines::count_pipelines_for_tenant(txn.deref_mut(), tenant_id).await?;
+    if pipeline_count >= MAX_PIPELINES_PER_TENANT {
+        return Err(PipelineError::PipelineLimitReached {
+            limit: MAX_PIPELINES_PER_TENANT,
+        });
     }
 
     let image = db::images::read_default_image(txn.deref_mut())

@@ -222,6 +222,38 @@ async fn pipeline_can_be_created() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn tenant_cannot_create_more_than_three_pipelines() {
+    init_test_tracing();
+    // Arrange
+    let app = spawn_test_app().await;
+    create_default_image(&app).await;
+    let tenant_id = &create_tenant(&app).await;
+
+    for _ in 0..3 {
+        let source_id = create_source(&app, tenant_id).await;
+        let destination_id = create_destination(&app, tenant_id).await;
+        let pipeline = CreatePipelineRequest {
+            source_id,
+            destination_id,
+            config: new_pipeline_config(),
+        };
+        let response = app.create_pipeline(tenant_id, &pipeline).await;
+        assert!(response.status().is_success());
+    }
+
+    let source_id = create_source(&app, tenant_id).await;
+    let destination_id = create_destination(&app, tenant_id).await;
+    let pipeline = CreatePipelineRequest {
+        source_id,
+        destination_id,
+        config: new_pipeline_config(),
+    };
+    let response = app.create_pipeline(tenant_id, &pipeline).await;
+
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn pipeline_with_another_tenants_source_cannot_be_created() {
     init_test_tracing();
     // Arrange
