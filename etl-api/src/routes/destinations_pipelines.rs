@@ -208,7 +208,7 @@ pub async fn create_destination_and_pipeline(
         ));
     }
 
-    let pipeline_count = count_pipelines_for_tenant(txn.deref_mut(), &tenant_id).await?;
+    let pipeline_count = count_pipelines_for_tenant(txn.deref_mut(), tenant_id).await?;
     if pipeline_count >= MAX_PIPELINES_PER_TENANT {
         return Err(DestinationPipelineError::PipelineLimitReached {
             limit: MAX_PIPELINES_PER_TENANT,

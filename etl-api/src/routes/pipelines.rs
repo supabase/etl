@@ -433,7 +433,7 @@ pub async fn create_pipeline(
     }
 
     let pipeline_count =
-        db::pipelines::count_pipelines_for_tenant(txn.deref_mut(), &tenant_id).await?;
+        db::pipelines::count_pipelines_for_tenant(txn.deref_mut(), tenant_id).await?;
     if pipeline_count >= MAX_PIPELINES_PER_TENANT {
         return Err(PipelineError::PipelineLimitReached {
             limit: MAX_PIPELINES_PER_TENANT,
