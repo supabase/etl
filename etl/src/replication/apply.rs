@@ -1,5 +1,4 @@
 use etl_config::shared::PipelineConfig;
-use etl_postgres::replication::slots::get_slot_name;
 use etl_postgres::replication::worker::WorkerType;
 use etl_postgres::types::TableId;
 use futures::StreamExt;
@@ -475,7 +474,10 @@ where
 
     // We compute the slot name for the replication slot that we are going to use for the logical
     // replication. At this point we assume that the slot already exists.
-    let slot_name = get_slot_name(pipeline_id, hook.worker_type())?;
+    let slot_name = hook
+        .worker_type()
+        .build_etl_replication_slot(pipeline_id)
+        .try_to_string()?;
 
     // We start the logical replication stream with the supplied parameters at a given lsn. That
     // lsn is the last lsn from which we need to start fetching events.

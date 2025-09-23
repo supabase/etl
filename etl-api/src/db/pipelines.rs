@@ -47,7 +47,7 @@ pub enum PipelinesDbError {
     DestinationsDb(#[from] DestinationsDbError),
 
     #[error("Slot operation failed: {0}")]
-    SlotError(#[from] slots::SlotError),
+    SlotError(#[from] slots::EtlReplicationSlotError),
 }
 
 pub async fn count_pipelines_for_tenant<'c, E>(

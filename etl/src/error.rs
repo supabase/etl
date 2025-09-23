@@ -739,19 +739,28 @@ impl From<sqlx::Error> for EtlError {
     }
 }
 
-/// Converts [`etl_postgres::replication::slots::SlotError`] to [`EtlError`] with appropriate error kind.
-impl From<etl_postgres::replication::slots::SlotError> for EtlError {
-    fn from(err: etl_postgres::replication::slots::SlotError) -> EtlError {
+/// Converts [`etl_postgres::replication::slots::EtlReplicationSlotError`] to [`EtlError`] with appropriate error kind.
+impl From<etl_postgres::replication::slots::EtlReplicationSlotError> for EtlError {
+    fn from(err: etl_postgres::replication::slots::EtlReplicationSlotError) -> EtlError {
         match err {
-            etl_postgres::replication::slots::SlotError::InvalidSlotNameLength(slot_name) => {
-                EtlError {
-                    repr: ErrorRepr::WithDescriptionAndDetail(
-                        ErrorKind::ValidationError,
-                        "Replication slot name exceeds maximum length",
-                        slot_name,
-                    ),
-                }
-            }
+            etl_postgres::replication::slots::EtlReplicationSlotError::InvalidSlotNameLength(
+                slot_name,
+            ) => EtlError {
+                repr: ErrorRepr::WithDescriptionAndDetail(
+                    ErrorKind::ValidationError,
+                    "Replication slot name exceeds maximum length",
+                    slot_name,
+                ),
+            },
+            etl_postgres::replication::slots::EtlReplicationSlotError::InvalidSlotName(
+                slot_name,
+            ) => EtlError {
+                repr: ErrorRepr::WithDescriptionAndDetail(
+                    ErrorKind::ValidationError,
+                    "Replication slot name is invalid",
+                    slot_name,
+                ),
+            },
         }
     }
 }

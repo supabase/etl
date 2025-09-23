@@ -1,4 +1,6 @@
 use etl_config::shared::PipelineConfig;
+use etl_postgres::replication::slots::EtlReplicationSlot;
+use etl_postgres::replication::worker::WorkerType;
 use etl_postgres::types::TableId;
 use std::sync::Arc;
 use tokio::sync::Semaphore;
@@ -25,8 +27,6 @@ use crate::types::PipelineId;
 use crate::workers::base::{Worker, WorkerHandle};
 use crate::workers::pool::TableSyncWorkerPool;
 use crate::workers::table_sync::{TableSyncWorker, TableSyncWorkerState};
-use etl_postgres::replication::slots::get_slot_name;
-use etl_postgres::replication::worker::WorkerType;
 
 /// Handle for monitoring and controlling the apply worker.
 ///
@@ -189,7 +189,7 @@ async fn get_start_lsn(
     pipeline_id: PipelineId,
     replication_client: &PgReplicationClient,
 ) -> EtlResult<PgLsn> {
-    let slot_name = get_slot_name(pipeline_id, WorkerType::Apply)?;
+    let slot_name = EtlReplicationSlot::Apply { pipeline_id }.try_to_string()?;
 
     // TODO: validate that we only create the slot when we first start replication which
     //  means when all tables are in the Init state. In any other case we should raise an

@@ -9,7 +9,7 @@ use etl_config::{
     Environment,
     shared::{ReplicatorConfig, SupabaseConfig, TlsConfig},
 };
-use etl_postgres::replication::{TableLookupError, get_table_name_from_oid, health, state};
+use etl_postgres::replication::{TableLookupError, get_table_name_from_oid, health, lag, state};
 use etl_postgres::types::TableId;
 use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
@@ -340,12 +340,52 @@ pub struct TableReplicationStatus {
     #[schema(example = "public.users")]
     pub table_name: String,
     pub state: SimpleTableReplicationState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = true)]
+    pub table_sync_lag: Option<SlotLagMetricsResponse>,
+}
+
+/// Lag metrics reported for replication slots.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct SlotLagMetricsResponse {
+    /// Bytes between the current WAL location and the slot restart LSN.
+    #[schema(example = 1024)]
+    pub restart_lsn_bytes: i64,
+    /// Bytes between the current WAL location and the confirmed flush LSN.
+    #[schema(example = 2048)]
+    pub confirmed_flush_lsn_bytes: i64,
+    /// How many bytes of WAL are still safe to build up before the limit of the slot is reached.
+    #[schema(example = 8192)]
+    pub safe_wal_size_bytes: i64,
+    /// Write lag expressed in milliseconds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(example = 1500, nullable = true)]
+    pub write_lag: Option<i64>,
+    /// Flush lag expressed in milliseconds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(example = 1200, nullable = true)]
+    pub flush_lag: Option<i64>,
+}
+
+impl From<lag::SlotLagMetrics> for SlotLagMetricsResponse {
+    fn from(metrics: lag::SlotLagMetrics) -> Self {
+        Self {
+            restart_lsn_bytes: metrics.restart_lsn_bytes,
+            confirmed_flush_lsn_bytes: metrics.confirmed_flush_lsn_bytes,
+            safe_wal_size_bytes: metrics.safe_wal_size_bytes,
+            write_lag: metrics.write_lag_ms,
+            flush_lag: metrics.flush_lag_ms,
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct GetPipelineReplicationStatusResponse {
     #[schema(example = 1)]
     pub pipeline_id: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = true)]
+    pub apply_lag: Option<SlotLagMetricsResponse>,
     pub table_statuses: Vec<TableReplicationStatus>,
 }
 
@@ -924,13 +964,14 @@ pub async fn get_pipeline_replication_status(
 
     // Fetch replication state for all tables in this pipeline
     let state_rows = state::get_table_replication_state_rows(&source_pool, pipeline_id).await?;
+    let lag_metrics = lag::get_pipeline_lag_metrics(&source_pool, pipeline_id as u64).await?;
+    let apply_lag = lag_metrics.apply.clone().map(Into::into);
 
     // Convert database states to UI-friendly format and fetch table names
     let mut tables: Vec<TableReplicationStatus> = Vec::new();
     for row in state_rows {
-        let table_id = row.table_id.0;
-        let table_name =
-            get_table_name_from_oid(&source_pool, TableId::new(row.table_id.0)).await?;
+        let table_id = TableId::new(row.table_id.0);
+        let table_name = get_table_name_from_oid(&source_pool, table_id).await?;
 
         // Extract the metadata row from the database
         let table_replication_state = row
@@ -939,14 +980,20 @@ pub async fn get_pipeline_replication_status(
             .ok_or(PipelineError::MissingTableReplicationState)?;
 
         tables.push(TableReplicationStatus {
-            table_id,
+            table_id: table_id.into_inner(),
             table_name: table_name.to_string(),
             state: table_replication_state.into(),
+            table_sync_lag: lag_metrics
+                .table_sync
+                .get(&table_id)
+                .cloned()
+                .map(Into::into),
         });
     }
 
     let response = GetPipelineReplicationStatusResponse {
         pipeline_id,
+        apply_lag,
         table_statuses: tables,
     };
 
