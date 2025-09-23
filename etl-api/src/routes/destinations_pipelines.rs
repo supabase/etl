@@ -18,7 +18,9 @@ use crate::db;
 use crate::db::destinations::{DestinationsDbError, destination_exists};
 use crate::db::destinations_pipelines::DestinationPipelinesDbError;
 use crate::db::images::ImagesDbError;
-use crate::db::pipelines::{PipelinesDbError, read_pipeline};
+use crate::db::pipelines::{
+    MAX_PIPELINES_PER_TENANT, PipelinesDbError, count_pipelines_for_tenant, read_pipeline,
+};
 use crate::db::sources::{SourcesDbError, source_exists};
 
 #[derive(Debug, Error)]
@@ -46,6 +48,9 @@ enum DestinationPipelineError {
 
     #[error("A pipeline already exists for this source and destination combination")]
     DuplicatePipeline,
+
+    #[error("The maximum number of pipelines ({limit}) has been reached for this project")]
+    PipelineLimitReached { limit: i64 },
 
     #[error(transparent)]
     DestinationPipelinesDb(DestinationPipelinesDbError),
@@ -116,6 +121,7 @@ impl ResponseError for DestinationPipelineError {
                 StatusCode::BAD_REQUEST
             }
             DestinationPipelineError::DuplicatePipeline => StatusCode::CONFLICT,
+            DestinationPipelineError::PipelineLimitReached { .. } => StatusCode::FORBIDDEN,
         }
     }
 
@@ -200,6 +206,13 @@ pub async fn create_destination_and_pipeline(
         return Err(DestinationPipelineError::SourceNotFound(
             destination_and_pipeline.source_id,
         ));
+    }
+
+    let pipeline_count = count_pipelines_for_tenant(txn.deref_mut(), &tenant_id).await?;
+    if pipeline_count >= MAX_PIPELINES_PER_TENANT {
+        return Err(DestinationPipelineError::PipelineLimitReached {
+            limit: MAX_PIPELINES_PER_TENANT,
+        });
     }
 
     let image = db::images::read_default_image(&**pool)

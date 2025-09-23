@@ -79,6 +79,42 @@ async fn destination_and_pipeline_can_be_created() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn tenant_cannot_create_more_than_three_destinations_pipelines() {
+    init_test_tracing();
+    // Arrange
+    let app = spawn_test_app().await;
+    let tenant_id = &create_tenant(&app).await;
+    let source_id = create_source(&app, tenant_id).await;
+    create_default_image(&app).await;
+
+    for idx in 0..3 {
+        let destination_pipeline = CreateDestinationPipelineRequest {
+            destination_name: format!("BigQuery Destination {idx}"),
+            destination_config: new_destination_config(),
+            source_id,
+            pipeline_config: new_pipeline_config(),
+        };
+        let response = app
+            .create_destination_pipeline(tenant_id, &destination_pipeline)
+            .await;
+        assert!(response.status().is_success());
+    }
+
+    let destination_pipeline = CreateDestinationPipelineRequest {
+        destination_name: "BigQuery Destination 3".to_string(),
+        destination_config: new_destination_config(),
+        source_id,
+        pipeline_config: new_pipeline_config(),
+    };
+    let response = app
+        .create_destination_pipeline(tenant_id, &destination_pipeline)
+        .await;
+
+    // Assert
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn destination_and_pipeline_with_another_tenants_source_cannot_be_created() {
     init_test_tracing();
     // Arrange

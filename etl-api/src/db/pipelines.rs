@@ -15,6 +15,9 @@ use crate::db::replicators::{ReplicatorsDbError, create_replicator};
 use crate::db::sources::Source;
 use crate::routes::connect_to_source_database_with_defaults;
 
+/// Maximum number of pipelines allowed per tenant.
+pub const MAX_PIPELINES_PER_TENANT: i64 = 3;
+
 pub struct Pipeline {
     pub id: i64,
     pub tenant_id: String,
@@ -45,6 +48,27 @@ pub enum PipelinesDbError {
 
     #[error("Slot operation failed: {0}")]
     SlotError(#[from] slots::SlotError),
+}
+
+pub async fn count_pipelines_for_tenant<'c, E>(
+    executor: E,
+    tenant_id: &str,
+) -> Result<i64, PipelinesDbError>
+where
+    E: PgExecutor<'c>,
+{
+    let record = sqlx::query!(
+        r#"
+        select count(*) as "count!"
+        from app.pipelines
+        where tenant_id = $1
+        "#,
+        tenant_id
+    )
+    .fetch_one(executor)
+    .await?;
+
+    Ok(record.count)
 }
 
 pub async fn create_pipeline(
