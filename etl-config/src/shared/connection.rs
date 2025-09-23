@@ -181,6 +181,7 @@ impl IntoConnectOptions<SqlxConnectOptions> for PgConnectionConfig {
             SqlxSslMode::Prefer
         };
         let default_pg_options = PgConnectionOptions::default();
+
         let mut options = SqlxConnectOptions::new_without_pgpass()
             .host(&self.host)
             .username(&self.username)
@@ -214,13 +215,13 @@ impl IntoConnectOptions<TokioPgConnectOptions> for PgConnectionConfig {
             TokioPgSslMode::Prefer
         };
         let default_pg_options = PgConnectionOptions::default();
+
         let mut config = TokioPgConnectOptions::new();
         config
             .host(self.host.clone())
             .port(self.port)
             .user(self.username.clone())
             .options(default_pg_options.to_options_string())
-            //
             // We set only ssl_mode from the tls config here and not trusted_root_certs
             // because we are using rustls for tls connections and rust_postgres
             // crate doesn't yet support rustls. See the following for details:
