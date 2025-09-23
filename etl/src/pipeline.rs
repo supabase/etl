@@ -18,6 +18,8 @@ use crate::workers::apply::{ApplyWorker, ApplyWorkerHandle};
 use crate::workers::base::{Worker, WorkerHandle};
 use crate::workers::pool::TableSyncWorkerPool;
 use etl_config::shared::PipelineConfig;
+use etl_postgres::replication::slots::get_slot_name;
+use etl_postgres::replication::worker::WorkerType;
 use etl_postgres::types::TableId;
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -121,9 +123,13 @@ where
             self.config.publication_name, self.config.id
         );
 
-        // We create the first connection to Postgres.
-        let replication_client =
-            PgReplicationClient::connect(self.config.pg_connection.clone()).await?;
+        // We create the first connection to Postgres using the apply worker application name.
+        let apply_application_name = get_slot_name(self.config.id, WorkerType::Apply)?;
+        let replication_client = PgReplicationClient::connect_with_application_name(
+            self.config.pg_connection.clone(),
+            Some(apply_application_name),
+        )
+        .await?;
 
         // We load the table mappings and schemas from the store to have them cached for quick
         // access.

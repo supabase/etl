@@ -70,7 +70,7 @@ impl PgConnectionOptions {
     /// Returns space-separated `-c key=value` pairs suitable for the options parameter.
     pub fn to_options_string(&self) -> String {
         format!(
-            "-c datestyle={} -c intervalstyle={} -c extra_float_digits={} -c client_encoding={} -c timezone={} -c statement_timeout={} -c lock_timeout={} -c idle_in_transaction_session_timeout={} -c application_name={}",
+            "-c datestyle={} -c intervalstyle={} -c extra_float_digits={} -c client_encoding={} -c timezone={} -c statement_timeout={} -c lock_timeout={} -c idle_in_transaction_session_timeout={}",
             self.datestyle,
             self.intervalstyle,
             self.extra_float_digits,
@@ -78,8 +78,7 @@ impl PgConnectionOptions {
             self.timezone,
             self.statement_timeout,
             self.lock_timeout,
-            self.idle_in_transaction_session_timeout,
-            self.application_name
+            self.idle_in_transaction_session_timeout
         )
     }
 
@@ -104,10 +103,6 @@ impl PgConnectionOptions {
             (
                 "idle_in_transaction_session_timeout".to_string(),
                 self.idle_in_transaction_session_timeout.to_string(),
-            ),
-            (
-                "application_name".to_string(),
-                self.application_name.clone(),
             ),
         ]
     }
@@ -198,6 +193,8 @@ impl IntoConnectOptions<SqlxConnectOptions> for PgConnectionConfig {
             options = options.password(password.expose_secret());
         }
 
+        options = options.application_name(&default_pg_options.application_name);
+
         options
     }
 
@@ -238,6 +235,8 @@ impl IntoConnectOptions<TokioPgConnectOptions> for PgConnectionConfig {
             config.password(password.expose_secret());
         }
 
+        config.application_name(default_pg_options.application_name.clone());
+
         config
     }
 
@@ -260,7 +259,7 @@ mod tests {
 
         assert_eq!(
             options_string,
-            "-c datestyle=ISO -c intervalstyle=postgres -c extra_float_digits=3 -c client_encoding=UTF8 -c timezone=UTC -c statement_timeout=0 -c lock_timeout=30000 -c idle_in_transaction_session_timeout=0 -c application_name=etl"
+            "-c datestyle=ISO -c intervalstyle=postgres -c extra_float_digits=3 -c client_encoding=UTF8 -c timezone=UTC -c statement_timeout=0 -c lock_timeout=30000 -c idle_in_transaction_session_timeout=0"
         );
     }
 
@@ -269,7 +268,7 @@ mod tests {
         let options = PgConnectionOptions::default();
         let pairs = options.to_key_value_pairs();
 
-        assert_eq!(pairs.len(), 9);
+        assert_eq!(pairs.len(), 8);
         assert!(pairs.contains(&("datestyle".to_string(), "ISO".to_string())));
         assert!(pairs.contains(&("intervalstyle".to_string(), "postgres".to_string())));
         assert!(pairs.contains(&("extra_float_digits".to_string(), "3".to_string())));
@@ -281,6 +280,35 @@ mod tests {
             "idle_in_transaction_session_timeout".to_string(),
             "0".to_string()
         )));
-        assert!(pairs.contains(&("application_name".to_string(), "etl".to_string())));
+    }
+
+    fn build_test_pg_connection_config() -> PgConnectionConfig {
+        PgConnectionConfig {
+            host: "localhost".to_string(),
+            port: 5432,
+            name: "postgres".to_string(),
+            username: "postgres".to_string(),
+            password: None,
+            tls: TlsConfig {
+                trusted_root_certs: String::new(),
+                enabled: false,
+            },
+        }
+    }
+
+    #[test]
+    fn test_tokio_with_db_sets_application_name() {
+        let config = build_test_pg_connection_config();
+        let options: TokioPgConnectOptions = config.with_db();
+
+        assert_eq!(options.get_application_name(), Some("etl"));
+    }
+
+    #[test]
+    fn test_sqlx_with_db_sets_application_name() {
+        let config = build_test_pg_connection_config();
+        let options: SqlxConnectOptions = config.with_db();
+
+        assert_eq!(options.get_application_name(), Some("etl"));
     }
 }

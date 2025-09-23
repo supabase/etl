@@ -175,18 +175,41 @@ impl PgReplicationClient {
     ///
     /// The connection is configured for logical replication mode
     pub async fn connect(pg_connection_config: PgConnectionConfig) -> EtlResult<Self> {
-        match pg_connection_config.tls.enabled {
-            true => PgReplicationClient::connect_tls(pg_connection_config).await,
-            false => PgReplicationClient::connect_no_tls(pg_connection_config).await,
+        PgReplicationClient::connect_with_application_name(pg_connection_config, None).await
+    }
+
+    /// Establishes a connection to Postgres using the provided application name.
+    ///
+    /// The connection is configured for logical replication mode and uses TLS if configured
+    /// in the supplied [`PgConnectionConfig`]. When `application_name` is provided, the
+    /// connection reports it to Postgres using the same value that appears in
+    /// `pg_stat_activity`.
+    pub async fn connect_with_application_name(
+        pg_connection_config: PgConnectionConfig,
+        application_name: Option<String>,
+    ) -> EtlResult<Self> {
+        let application_name = application_name.as_deref();
+
+        if pg_connection_config.tls.enabled {
+            PgReplicationClient::connect_tls(pg_connection_config, application_name).await
+        } else {
+            PgReplicationClient::connect_no_tls(pg_connection_config, application_name).await
         }
     }
 
     /// Establishes a connection to Postgres without TLS encryption.
     ///
     /// The connection is configured for logical replication mode.
-    async fn connect_no_tls(pg_connection_config: PgConnectionConfig) -> EtlResult<Self> {
+    async fn connect_no_tls(
+        pg_connection_config: PgConnectionConfig,
+        application_name: Option<&str>,
+    ) -> EtlResult<Self> {
         let mut config: Config = pg_connection_config.clone().with_db();
         config.replication_mode(ReplicationMode::Logical);
+
+        if let Some(application_name) = application_name {
+            config.application_name(application_name);
+        }
 
         let (client, connection) = config.connect(NoTls).await?;
 
@@ -207,9 +230,16 @@ impl PgReplicationClient {
     /// Establishes a TLS-encrypted connection to Postgres.
     ///
     /// The connection is configured for logical replication mode
-    async fn connect_tls(pg_connection_config: PgConnectionConfig) -> EtlResult<Self> {
+    async fn connect_tls(
+        pg_connection_config: PgConnectionConfig,
+        application_name: Option<&str>,
+    ) -> EtlResult<Self> {
         let mut config: Config = pg_connection_config.clone().with_db();
         config.replication_mode(ReplicationMode::Logical);
+
+        if let Some(application_name) = application_name {
+            config.application_name(application_name);
+        }
 
         let mut root_store = rustls::RootCertStore::empty();
         if pg_connection_config.tls.enabled {

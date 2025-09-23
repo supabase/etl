@@ -610,8 +610,17 @@ where
         //
         // Note that this connection must be tied to the lifetime of this worker, otherwise
         // there will be problems when cleaning up the replication slot.
-        let replication_client =
-            PgReplicationClient::connect(self.config.pg_connection.clone()).await?;
+        let application_name = get_slot_name(
+            self.pipeline_id,
+            WorkerType::TableSync {
+                table_id: self.table_id,
+            },
+        )?;
+        let replication_client = PgReplicationClient::connect_with_application_name(
+            self.config.pg_connection.clone(),
+            Some(application_name),
+        )
+        .await?;
 
         let result = start_table_sync(
             self.pipeline_id,
