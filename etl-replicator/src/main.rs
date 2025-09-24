@@ -4,8 +4,6 @@
 //! and routes data to configured destinations. Includes telemetry, error handling, and
 //! graceful shutdown capabilities.
 
-use crate::config::load_replicator_config;
-use crate::core::start_replicator_with_config;
 use etl_config::Environment;
 use etl_config::shared::ReplicatorConfig;
 use etl_telemetry::metrics::init_metrics;
@@ -14,9 +12,14 @@ use std::sync::Arc;
 use thiserror::__private::AsDynError;
 use tracing::{error, info};
 
+use crate::config::load_replicator_config;
+use crate::core::start_replicator_with_config;
+use crate::notifications::send_error_notification;
+
 mod config;
 mod core;
 mod migrations;
+mod notifications;
 
 /// The name of the environment variable which contains version information for this replicator.
 const APP_VERSION_ENV_NAME: &str = "APP_VERSION";
@@ -27,9 +30,23 @@ const APP_VERSION_ENV_NAME: &str = "APP_VERSION";
 /// and launches the replicator pipeline. Handles all errors and ensures proper
 /// service initialization sequence.
 fn main() -> anyhow::Result<()> {
-    // Load replicator config
     let replicator_config = load_replicator_config()?;
 
+    if let Err(err) = guarded_main(replicator_config.clone()) {
+        sentry::capture_error(err.as_dyn_error());
+        error!("an error occurred in the replicator: {err}");
+
+        if let Err(notification_err) = send_error_notification(&replicator_config, &err) {
+            error!("failed to dispatch error notification email: {notification_err}");
+        }
+
+        return Err(err);
+    }
+
+    Ok(())
+}
+
+fn guarded_main(replicator_config: ReplicatorConfig) -> anyhow::Result<()> {
     // Extract project reference to use in logs
     let project_ref = replicator_config
         .supabase
@@ -44,32 +61,17 @@ fn main() -> anyhow::Result<()> {
     )?;
 
     // Initialize Sentry before the async runtime starts
-    let _sentry_guard = init_sentry()?;
+    let _sentry_guard = init_sentry(&replicator_config)?;
 
     // Initialize metrics collection
     init_metrics(project_ref)?;
 
-    // We start the runtime.
+    // We start the runtime and propagate any errors to Sentry and logs. The reason for why we do
+    // this here is that we know that at this point Sentry and logging are configured.
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?
-        .block_on(async_main(replicator_config))?;
-
-    Ok(())
-}
-
-/// Main async entry point that starts the replicator pipeline.
-///
-/// Launches the replicator with the provided configuration and captures any errors
-/// to Sentry before propagating them up.
-async fn async_main(replicator_config: ReplicatorConfig) -> anyhow::Result<()> {
-    // We start the replicator and catch any errors.
-    if let Err(err) = start_replicator_with_config(replicator_config).await {
-        sentry::capture_error(err.as_dyn_error());
-        error!("an error occurred in the replicator: {err}");
-
-        return Err(err);
-    }
+        .block_on(start_replicator_with_config(replicator_config))?;
 
     Ok(())
 }
@@ -79,10 +81,8 @@ async fn async_main(replicator_config: ReplicatorConfig) -> anyhow::Result<()> {
 /// Loads configuration and sets up Sentry if a DSN is provided in the config.
 /// Tags all errors with the "replicator" service identifier and configures
 /// panic handling to automatically capture and send panics to Sentry.
-fn init_sentry() -> anyhow::Result<Option<sentry::ClientInitGuard>> {
-    if let Ok(config) = load_replicator_config()
-        && let Some(sentry_config) = &config.sentry
-    {
+fn init_sentry(config: &ReplicatorConfig) -> anyhow::Result<Option<sentry::ClientInitGuard>> {
+    if let Some(sentry_config) = &config.sentry {
         info!("initializing sentry with supplied dsn");
 
         let environment = Environment::load()?;

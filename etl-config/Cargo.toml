@@ -14,6 +14,7 @@ utoipa = ["dep:utoipa"]
 config = { workspace = true, features = ["yaml"] }
 secrecy = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
 sqlx = { workspace = true, features = ["postgres"] }
 thiserror = { workspace = true }
 tokio-postgres = { workspace = true }

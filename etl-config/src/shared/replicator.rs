@@ -1,6 +1,6 @@
 use crate::Config;
 use crate::shared::pipeline::PipelineConfig;
-use crate::shared::{DestinationConfig, SentryConfig, SupabaseConfig, ValidationError};
+use crate::shared::{DestinationConfig, EmailNotificationsConfig, NotificationsConfig, SentryConfig, SupabaseConfig, ValidationError};
 use serde::{Deserialize, Serialize};
 
 /// Complete configuration for the replicator service.
@@ -24,6 +24,9 @@ pub struct ReplicatorConfig {
     /// If provided, enables Supabase-specific features or reporting. If `None`, the replicator operates independently of Supabase.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub supabase: Option<SupabaseConfig>,
+    /// Optional configuration for sending notifications.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub notifications: Option<NotificationsConfig>,
 }
 
 impl ReplicatorConfig {
