@@ -5,8 +5,8 @@ use tracing::trace;
 
 // One time initialization objects like Once, OnceCell, OnceLock or other variants
 // are not used here and instead a mutex is used because the initialization code
-// is fallible and ideally we'd like to use OnceLock::get_or_try_init which
-// allows fallibe code to run as part of initialization but it is currently
+// is fallible, and ideally we'd like to use OnceLock::get_or_try_init which
+// allows fallible code to run as part of initialization, but it is currently
 // unstable.
 //
 // The reason we want to only initialize this once is because the call to
