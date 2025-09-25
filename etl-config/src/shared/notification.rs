@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NotificationsConfig {
     /// Emails configuration for notifications.
-    pub email: EmailNotificationConfig
+    pub email: EmailNotificationConfig,
 }
 
 /// Configuration for sending error notifications via email.

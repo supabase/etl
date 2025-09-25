@@ -199,42 +199,127 @@ impl PartialEq for EtlError {
 
 impl fmt::Display for EtlError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
-        match self.repr {
+        match &self.repr {
             ErrorRepr::WithDescription(kind, desc) => {
-                fmt::Debug::fmt(&kind, f)?;
-                f.write_str(": ")?;
-                desc.fmt(f)?;
-
-                Ok(())
+                write_single_error_line(f, *kind, desc, None, 0)
             }
-            ErrorRepr::WithDescriptionAndDetail(kind, desc, ref detail) => {
-                fmt::Debug::fmt(&kind, f)?;
-                f.write_str(": ")?;
-                desc.fmt(f)?;
-                f.write_str(" -> ")?;
-                detail.fmt(f)?;
-
-                Ok(())
+            ErrorRepr::WithDescriptionAndDetail(kind, desc, detail) => {
+                write_single_error_line(f, *kind, desc, Some(detail.as_str()), 0)
             }
-            ErrorRepr::Many(ref errors) => {
-                if errors.is_empty() {
-                    write!(f, "Multiple errors occurred (empty)")?;
-                } else if errors.len() == 1 {
-                    // If there's only one error, just display it directly
-                    errors[0].fmt(f)?;
-                } else {
-                    write!(f, "Multiple errors occurred ({} total):", errors.len())?;
-                    for (i, error) in errors.iter().enumerate() {
-                        write!(f, "\n  {}: {}", i + 1, error)?;
-                    }
-                }
-                Ok(())
-            }
+            ErrorRepr::Many(errors) => write_many_errors(f, errors),
         }
     }
 }
 
 impl error::Error for EtlError {}
+
+fn write_single_error_line(
+    f: &mut fmt::Formatter<'_>,
+    kind: ErrorKind,
+    description: &str,
+    detail: Option<&str>,
+    indent_level: usize,
+) -> Result<(), fmt::Error> {
+    let prefix = "  ".repeat(indent_level);
+    write!(f, "{}{}: {}", prefix, format_error_kind(kind), description)?;
+
+    if let Some(detail) = detail {
+        if !detail.trim().is_empty() {
+            write!(f, "\n{}  Details: {}", prefix, detail)?;
+        }
+    }
+
+    Ok(())
+}
+
+fn write_many_errors(f: &mut fmt::Formatter<'_>, errors: &[EtlError]) -> Result<(), fmt::Error> {
+    match errors.len() {
+        0 => write!(f, "Multiple errors (empty)"),
+        1 => fmt::Display::fmt(&errors[0], f),
+        count => {
+            write!(f, "Multiple errors ({}):", count)?;
+            for (index, error) in errors.iter().enumerate() {
+                let rendered = error.to_string();
+                let mut lines = rendered.lines();
+
+                if let Some(first) = lines.next() {
+                    write!(f, "\n  {}. {}", index + 1, first)?;
+                }
+
+                for line in lines {
+                    write!(f, "\n       {}", line)?;
+                }
+            }
+            Ok(())
+        }
+    }
+}
+
+fn format_error_kind(kind: ErrorKind) -> String {
+    let identifier = format!("{:?}", kind);
+    let mut words = Vec::new();
+    let mut current = String::new();
+    let mut chars = identifier.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        if current.is_empty() {
+            current.push(ch);
+            continue;
+        }
+
+        let is_upper = ch.is_uppercase();
+        let prev_is_upper = current
+            .chars()
+            .last()
+            .map(|c| c.is_uppercase())
+            .unwrap_or(false);
+        let next_is_lower = chars
+            .peek()
+            .map(|next| next.is_lowercase())
+            .unwrap_or(false);
+
+        if is_upper && (!prev_is_upper || next_is_lower) {
+            words.push(current);
+            current = String::new();
+            current.push(ch);
+        } else {
+            current.push(ch);
+        }
+    }
+
+    if !current.is_empty() {
+        words.push(current);
+    }
+
+    let mut words_iter = words.into_iter();
+    let mut formatted = String::new();
+
+    if let Some(first) = words_iter.next() {
+        formatted.push_str(&capitalize(&first));
+    }
+
+    for word in words_iter {
+        formatted.push(' ');
+        formatted.push_str(&word.to_lowercase());
+    }
+
+    formatted
+}
+
+fn capitalize(segment: &str) -> String {
+    let mut chars = segment.chars();
+    match chars.next() {
+        None => String::new(),
+        Some(first) => {
+            let mut result = String::with_capacity(segment.len());
+            result.push(first.to_ascii_uppercase());
+            for ch in chars {
+                result.push(ch.to_ascii_lowercase());
+            }
+            result
+        }
+    }
+}
 
 /// Creates an [`EtlError`] from an error kind and static description.
 impl From<(ErrorKind, &'static str)> for EtlError {

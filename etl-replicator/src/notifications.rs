@@ -23,7 +23,10 @@ struct SendEmailRequest {
 /// The notification is only sent when the `email_notifications` configuration is present.
 /// Any failure encountered while preparing or sending the request is surfaced to the caller
 /// so it can be logged without masking the original error.
-pub fn send_error_notification(replicator_config: &ReplicatorConfig, error: &anyhow::Error) -> anyhow::Result<()> {
+pub fn send_error_notification(
+    replicator_config: &ReplicatorConfig,
+    error: &anyhow::Error,
+) -> anyhow::Result<()> {
     let Some(supabase_config) = &replicator_config.supabase else {
         return Ok(());
     };
@@ -69,7 +72,10 @@ fn build_send_email_request(
     error: &anyhow::Error,
 ) -> Option<SendEmailRequest> {
     let mut custom_properties = email_config.custom_properties.clone();
-    custom_properties.insert("project_ref".into(), Value::String(supabase_config.project_ref.clone()));
+    custom_properties.insert(
+        "project_ref".into(),
+        Value::String(supabase_config.project_ref.clone()),
+    );
     custom_properties.insert(
         "pipeline_id".into(),
         Value::String(replicator_config.pipeline.id.to_string()),
