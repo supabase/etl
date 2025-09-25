@@ -225,7 +225,7 @@ fn write_single_error_line(
 
     if let Some(detail) = detail {
         if !detail.trim().is_empty() {
-            write!(f, "\n{}  Details: {}", prefix, detail)?;
+            write!(f, "\n{prefix}  Details: {detail}")?;
         }
     }
 
@@ -237,7 +237,7 @@ fn write_many_errors(f: &mut fmt::Formatter<'_>, errors: &[EtlError]) -> Result<
         0 => write!(f, "Multiple errors (empty)"),
         1 => fmt::Display::fmt(&errors[0], f),
         count => {
-            write!(f, "Multiple errors ({}):", count)?;
+            write!(f, "Multiple errors ({count}):")?;
             for (index, error) in errors.iter().enumerate() {
                 let rendered = error.to_string();
                 let mut lines = rendered.lines();
@@ -247,7 +247,7 @@ fn write_many_errors(f: &mut fmt::Formatter<'_>, errors: &[EtlError]) -> Result<
                 }
 
                 for line in lines {
-                    write!(f, "\n       {}", line)?;
+                    write!(f, "\n       {line}")?;
                 }
             }
             Ok(())
@@ -256,7 +256,7 @@ fn write_many_errors(f: &mut fmt::Formatter<'_>, errors: &[EtlError]) -> Result<
 }
 
 fn format_error_kind(kind: ErrorKind) -> String {
-    let identifier = format!("{:?}", kind);
+    let identifier = format!("{kind:?}");
     let mut words = Vec::new();
     let mut current = String::new();
     let mut chars = identifier.chars().peekable();

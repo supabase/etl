@@ -1,7 +1,7 @@
 use crate::Config;
 use crate::shared::pipeline::PipelineConfig;
 use crate::shared::{
-    DestinationConfig, EmailNotificationConfig, NotificationsConfig, SentryConfig, SupabaseConfig,
+    DestinationConfig, SentryConfig, SupabaseConfig,
     ValidationError,
 };
 use serde::{Deserialize, Serialize};

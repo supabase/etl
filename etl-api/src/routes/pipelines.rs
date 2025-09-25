@@ -1226,6 +1226,8 @@ async fn create_or_update_pipeline_in_k8s(
         pipeline,
         SupabaseConfig {
             project_ref: tenant_id.to_owned(),
+            // TODO: build actual notifications configuration.
+            notifications: None
         },
     )
     .await?;

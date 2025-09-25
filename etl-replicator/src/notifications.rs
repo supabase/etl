@@ -4,7 +4,6 @@ use reqwest::blocking::Client;
 use serde::Serialize;
 use serde_json::Value;
 use std::collections::BTreeMap;
-use std::time::Duration;
 
 /// Represents the JSON payload accepted by the email service.
 #[derive(Debug, Serialize)]
