@@ -36,7 +36,9 @@ fn main() -> anyhow::Result<()> {
         sentry::capture_error(err.as_dyn_error());
         error!("an error occurred in the replicator: {err}");
 
+        // We try to send an error notification, if we fail, we just report the failure.
         if let Err(notification_err) = send_error_notification(&replicator_config, &err) {
+            sentry::capture_error(notification_err.as_dyn_error());
             error!("failed to dispatch error notification email: {notification_err}");
         }
 

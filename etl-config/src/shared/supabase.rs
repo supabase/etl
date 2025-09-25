@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
+use crate::shared::NotificationsConfig;
+
 /// Supabase integration configuration.
 ///
 /// Contains Supabase-specific settings for ETL applications that
@@ -9,6 +11,9 @@ use std::fmt;
 pub struct SupabaseConfig {
     /// Supabase project reference identifier.
     pub project_ref: String,
+    /// Optional configuration for sending notifications.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub notifications: Option<NotificationsConfig>,
 }
 
 impl fmt::Debug for SupabaseConfig {

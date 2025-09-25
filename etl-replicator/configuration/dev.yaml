@@ -10,3 +10,11 @@ pipeline:
     tls:
       trusted_root_certs: ""
       enabled: false
+supabase:
+  notifications:
+    email:
+      base_url: "http://localhost:8080"
+      addresses:
+        - "test_email@example.com"
+      template_alias: "etl-pipeline-error"
+      custom_properties: {}
