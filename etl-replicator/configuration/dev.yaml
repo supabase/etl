@@ -14,6 +14,7 @@ supabase:
   notifications:
     email:
       base_url: "http://localhost:8080"
+      api_key: "000000000000000000009"
       addresses:
         - "test_email@example.com"
       template_alias: "etl-pipeline-error"

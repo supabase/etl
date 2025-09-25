@@ -40,6 +40,7 @@ pub fn send_error_notification(
         .build()
         .context("failed to build HTTP client for email notifications")?;
 
+    // TODO: change endpoint when the new one is built.
     let endpoint = format!(
         "{}/system/email/send",
         email_config.base_url.trim_end_matches('/'),
@@ -47,6 +48,7 @@ pub fn send_error_notification(
 
     let response = client
         .post(&endpoint)
+        .header("apikey", email_config.api_key.as_str())
         .json(&payload)
         .send()
         .with_context(|| format!("failed to send error notification to {endpoint}"))?;

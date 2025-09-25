@@ -17,6 +17,8 @@ pub struct NotificationsConfig {
 pub struct EmailNotificationConfig {
     /// Base URL of the environment-specific API that receives email requests.
     pub base_url: String,
+    /// The API key to authenticate with the API that sends emails.
+    pub api_key: String,
     /// Email addresses that should receive the notification.
     pub addresses: Vec<String>,
     /// Postmark template alias that should be used to render the message.
