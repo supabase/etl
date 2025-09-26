@@ -1,23 +1,18 @@
 use std::{collections::HashMap, sync::Arc};
 
 use arrow::array::RecordBatch;
-use arrow::datatypes::Schema as ArrowSchema;
 use etl::{
     error::EtlResult,
     types::{TableRow, TableSchema},
 };
 use iceberg::{
     Catalog, NamespaceIdent, TableCreation, TableIdent,
-    arrow::arrow_schema_to_schema,
     io::{S3_ACCESS_KEY_ID, S3_ENDPOINT, S3_SECRET_ACCESS_KEY},
     table::Table,
     transaction::Transaction,
     writer::{
         IcebergWriter, IcebergWriterBuilder,
-        base_writer::{
-            data_file_writer::DataFileWriterBuilder,
-            equality_delete_writer::{EqualityDeleteFileWriterBuilder, EqualityDeleteWriterConfig},
-        },
+        base_writer::data_file_writer::DataFileWriterBuilder,
         file_writer::{
             ParquetWriterBuilder,
             location_generator::{DefaultFileNameGenerator, DefaultLocationGenerator},
@@ -32,7 +27,6 @@ use crate::iceberg::{
     error::{arrow_error_to_etl_error, iceberg_error_to_etl_error},
     schema::postgres_to_iceberg_schema,
 };
-use parquet::arrow::PARQUET_FIELD_ID_META_KEY;
 
 /// Client for connecting to Iceberg data lakes.
 #[derive(Debug, Clone)]
@@ -252,192 +246,6 @@ impl IcebergClient {
 
         // Commit the transaction to the catalog
         let _updated_table = updated_transaction.commit(&*self.catalog).await?;
-
-        Ok(())
-    }
-
-    async fn write_equality_delete_file(
-        &self,
-        // namespace: String,
-        // table_name: String,
-        table: &Table,
-        equality_ids: Vec<i32>,
-        equality_rows: RecordBatch,
-        // table_id: TableId,
-    ) -> Result<(), iceberg::Error> {
-        // let table_schema = self
-        //     .store
-        //     .get_table_schema(&table_id)
-        //     .await?
-        //     .ok_or_else(|| {
-        //         etl_error!(
-        //             ErrorKind::MissingTableSchema,
-        //             "Table schema not found",
-        //             format!("No schema found for table {table_id}")
-        //         )
-        //     })?;
-
-        // let equality_ids = table_schema
-        //     .column_schemas
-        //     .iter()
-        //     .enumerate()
-        //     .filter_map(|(id, column_schema)| {
-        //         if column_schema.primary {
-        //             Some(id as i32)
-        //         } else {
-        //             None
-        //         }
-        //     })
-        //     .collect();
-
-        // let table_name = self
-        //     .store
-        //     .get_table_mapping(&table_id)
-        //     .await?
-        //     .ok_or_else(|| {
-        //         etl_error!(
-        //             ErrorKind::MissingTableMapping,
-        //             "Table mapping not found",
-        //             format!("The table mapping for table id {table_id} was not found")
-        //         )
-        //     })?;
-
-        // let table = self
-        //     .load_table(namespace.clone(), table_name)
-        //     .await
-        //     .map_err(iceberg_error_to_etl_error)?;
-
-        let table_schema = table.metadata().current_schema();
-
-        let config = EqualityDeleteWriterConfig::new(
-            equality_ids,
-            Arc::clone(table_schema),
-            None,
-            table.metadata().default_partition_spec_id(),
-        )?;
-
-        let delete_arrow_schema = config.projected_arrow_schema_ref().clone();
-        let delete_schema = arrow_schema_to_schema(&delete_arrow_schema).unwrap();
-
-        // Create Parquet writer properties
-        let writer_props = WriterProperties::builder()
-            .set_compression(Compression::SNAPPY)
-            .build();
-
-        // Create location and file name generators
-        let location_gen = DefaultLocationGenerator::new(table.metadata().clone())?;
-        let file_name_gen = DefaultFileNameGenerator::new(
-            "delete".to_string(),
-            Some(uuid::Uuid::new_v4().to_string()), // Add unique UUID for each file
-            iceberg::spec::DataFileFormat::Parquet,
-        );
-
-        // Create Parquet writer builder
-        let parquet_writer_builder = ParquetWriterBuilder::new(
-            writer_props,
-            Arc::new(delete_schema),
-            table.file_io().clone(),
-            location_gen,
-            file_name_gen,
-        );
-
-        let mut equality_delete_writer =
-            EqualityDeleteFileWriterBuilder::new(parquet_writer_builder, config)
-                .build()
-                .await?;
-
-        equality_delete_writer.write(equality_rows).await?;
-        let data_files = equality_delete_writer.close().await?;
-
-        // Create transaction and fast append action
-        let transaction = Transaction::new(table);
-        let mut append_action = transaction
-            .fast_append(None, None, vec![])?
-            .with_check_duplicate(false); // Don't check duplicates for performance
-        append_action.add_data_files(data_files)?;
-
-        // Apply the append action to create updated transaction
-        let updated_transaction = append_action.apply().await?;
-
-        // Commit the transaction to the catalog
-        let _updated_table = updated_transaction.commit(&*self.catalog).await?;
-
-        Ok(())
-    }
-
-    /// Deletes existing rows matching the provided primary key values by writing an
-    /// equality delete file containing only the primary key columns for the batch.
-    pub async fn delete_rows(
-        &self,
-        namespace: String,
-        table_name: String,
-        pk_col_names: Vec<String>,
-        pk_col_indexes: Vec<usize>,
-        table_rows: &[TableRow],
-    ) -> EtlResult<()> {
-        // No-op if no PKs or no rows
-        if pk_col_names.is_empty() || table_rows.is_empty() {
-            return Ok(());
-        }
-
-        // Load table and get Arrow schema with field id metadata
-        let table = self
-            .load_table(namespace, table_name)
-            .await
-            .map_err(iceberg_error_to_etl_error)?;
-        let iceberg_schema = table.metadata().current_schema();
-        let full_arrow_schema = iceberg::arrow::schema_to_arrow_schema(iceberg_schema)
-            .map_err(iceberg_error_to_etl_error)?;
-
-        // Map name -> field and derive equality IDs from Arrow metadata
-        let mut name_to_field: std::collections::HashMap<&str, arrow::datatypes::Field> =
-            std::collections::HashMap::new();
-        for f in full_arrow_schema.fields() {
-            name_to_field.insert(f.name().as_str(), f.as_ref().clone());
-        }
-        let mut equality_ids: Vec<i32> = Vec::with_capacity(pk_col_names.len());
-        for name in &pk_col_names {
-            match name_to_field
-                .get(name.as_str())
-                .and_then(|f| f.metadata().get(PARQUET_FIELD_ID_META_KEY))
-                .and_then(|s| s.parse::<i32>().ok())
-            {
-                Some(id) => equality_ids.push(id),
-                None => {
-                    // Missing field id; skip writing equality delete
-                    return Ok(());
-                }
-            }
-        }
-
-        // Build projected Arrow schema for PK columns
-        let mut projected_fields: Vec<arrow::datatypes::Field> =
-            Vec::with_capacity(pk_col_names.len());
-        for name in &pk_col_names {
-            if let Some(f) = name_to_field.get(name.as_str()) {
-                projected_fields.push(f.clone());
-            }
-        }
-        let projected_arrow_schema = ArrowSchema::new(projected_fields);
-
-        // Build PK-only rows aligned with the projected schema order
-        let mut pk_only_rows: Vec<TableRow> = Vec::with_capacity(table_rows.len());
-        for row in table_rows {
-            let mut values = Vec::with_capacity(pk_col_indexes.len());
-            for &pk_idx in &pk_col_indexes {
-                values.push(row.values[pk_idx].clone());
-            }
-            pk_only_rows.push(TableRow { values });
-        }
-
-        // Convert to RecordBatch
-        let equality_rows = rows_to_record_batch(&pk_only_rows, projected_arrow_schema)
-            .map_err(arrow_error_to_etl_error)?;
-
-        // Write equality delete file and commit
-        self.write_equality_delete_file(&table, equality_ids, equality_rows)
-            .await
-            .map_err(iceberg_error_to_etl_error)?;
 
         Ok(())
     }

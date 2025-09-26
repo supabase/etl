@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 #![cfg(feature = "iceberg")]
 
-use std::{collections::HashMap, sync::Arc};
+use std::collections::HashMap;
 
 use arrow::{
     array::{ArrayRef, RecordBatch},
@@ -11,14 +11,7 @@ use etl::types::{ArrayCell, Cell, TableRow};
 use futures::StreamExt;
 
 use etl_destinations::iceberg::{IcebergClient, UNIX_EPOCH};
-use iceberg::{
-    NamespaceIdent, TableIdent,
-    io::{S3_ACCESS_KEY_ID, S3_ENDPOINT, S3_SECRET_ACCESS_KEY},
-};
-use iceberg_compaction_core::{
-    compaction::{CompactionBuilder, CompactionType},
-    config::CompactionConfigBuilder,
-};
+use iceberg::io::{S3_ACCESS_KEY_ID, S3_ENDPOINT, S3_SECRET_ACCESS_KEY};
 
 pub const LAKEKEEPER_URL: &str = "http://localhost:8182";
 const MINIO_URL: &str = "http://localhost:9010";
@@ -402,33 +395,4 @@ pub async fn read_all_rows(
     }
 
     all_rows
-}
-
-/// Compacts data in the iceberg tables.
-pub async fn compact(warehouse_name: String) {
-    let iceberg_configs = create_props();
-
-    let config_builder =
-        iceberg_compaction_core::iceberg_catalog_rest::RestCatalogConfig::builder()
-            .uri(get_catalog_url())
-            .warehouse(warehouse_name)
-            .props(iceberg_configs);
-
-    // 2. Create the catalog
-    let catalog = Arc::new(
-        iceberg_compaction_core::iceberg_catalog_rest::RestCatalog::new(config_builder.build()),
-    );
-
-    let namespace_ident = NamespaceIdent::new("test_namespace".into());
-    let table_ident = TableIdent::new(namespace_ident, "test_delete_rows".into());
-
-    // 3. Configure compaction settings
-    let compaction_config = CompactionConfigBuilder::default().build().unwrap();
-    let compaction =
-        CompactionBuilder::new(catalog.clone(), table_ident.clone(), CompactionType::Full)
-            .with_config(Arc::new(compaction_config))
-            .with_catalog_name("my_rest_catalog".to_owned())
-            .build();
-
-    compaction.compact().await.unwrap();
 }
