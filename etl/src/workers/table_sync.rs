@@ -1,6 +1,6 @@
 use chrono::Utc;
 use etl_config::shared::PipelineConfig;
-use etl_postgres::replication::slots::get_slot_name;
+use etl_postgres::replication::slots::EtlReplicationSlot;
 use etl_postgres::replication::worker::WorkerType;
 use etl_postgres::types::TableId;
 use std::ops::Deref;
@@ -658,10 +658,9 @@ where
             // removed later, so manual intervention will be required. The reason for not implementing
             // an automatic cleanup mechanism is that it would introduce performance overhead,
             // and we expect this call to fail only rarely.
-            let worker_type = WorkerType::TableSync {
-                table_id: self.table_id,
-            };
-            let slot_name = get_slot_name(self.pipeline_id, worker_type)?;
+            let slot_name: String =
+                EtlReplicationSlot::for_table_sync_worker(self.pipeline_id, self.table_id)
+                    .try_into()?;
             let result = tokio::time::timeout(
                 MAX_DELETE_SLOT_WAIT,
                 replication_client.delete_slot(&slot_name),
