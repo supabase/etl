@@ -183,7 +183,6 @@ pub trait ApplyLoopHook {
 struct StatusUpdate {
     write_lsn: PgLsn,
     flush_lsn: PgLsn,
-    apply_lsn: PgLsn,
 }
 
 impl StatusUpdate {
@@ -203,15 +202,6 @@ impl StatusUpdate {
         }
 
         self.flush_lsn = flush_lsn;
-    }
-
-    /// Updates the apply LSN to a higher value if the new LSN is greater.
-    fn update_apply_lsn(&mut self, apply_lsn: PgLsn) {
-        if apply_lsn <= self.apply_lsn {
-            return;
-        }
-
-        self.apply_lsn = apply_lsn;
     }
 }
 
@@ -469,7 +459,6 @@ where
     let first_status_update = StatusUpdate {
         write_lsn: start_lsn,
         flush_lsn: start_lsn,
-        apply_lsn: start_lsn,
     };
 
     // We compute the slot name for the replication slot that we are going to use for the logical
@@ -591,7 +580,6 @@ where
                     .send_status_update(
                         state.next_status_update.write_lsn,
                         state.next_status_update.flush_lsn,
-                        state.next_status_update.apply_lsn,
                         false
                     )
                     .await?;
@@ -803,7 +791,6 @@ where
     // we are guaranteed that data has been safely persisted. In all the other cases, we just update
     // the `write_lsn` which is used by Postgres to get an acknowledgement of how far we have processed
     // messages but not flushed them.
-    // TODO: maybe we want to send `apply_lsn` as a different value.
     debug!(
         "updating lsn for next status update to {}",
         last_commit_end_lsn
@@ -811,9 +798,6 @@ where
     state
         .next_status_update
         .update_flush_lsn(last_commit_end_lsn);
-    state
-        .next_status_update
-        .update_apply_lsn(last_commit_end_lsn);
 
     // We call `process_syncing_tables` with `update_state` set to true here *after* we've received
     // and ack for the batch from the destination. This is important to keep a consistent state.
@@ -888,7 +872,6 @@ where
                 .send_status_update(
                     state.next_status_update.write_lsn,
                     state.next_status_update.flush_lsn,
-                    state.next_status_update.apply_lsn,
                     message.reply() == 1,
                 )
                 .await?;
