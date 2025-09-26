@@ -86,19 +86,14 @@ jobs:
           sudo apt-get install libpq-dev -y
           ./etl-api/scripts/run_migrations.sh
 
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+
       - name: Run Tests
         run: |
-          cargo test \
-            --workspace \
-            --all-features \
-            --no-fail-fast \
-            --exclude etl-destinations \
-          && \
-          cargo test \
-            -p etl-destinations \
-            --no-default-features \
-            --no-fail-fast \
-            --features iceberg
+          cargo nextest run --all-features --no-fail-fast --profile no-bigquery
 
   test-full:
     name: Tests (Full)
@@ -117,6 +112,8 @@ jobs:
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@1.88.0
+        with:
+          components: llvm-tools-preview
 
       - name: Cache Cargo
         uses: Swatinem/rust-cache@v2
@@ -145,8 +142,10 @@ jobs:
           sudo apt-get install libpq-dev -y
           ./etl-api/scripts/run_migrations.sh
 
-      - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@cargo-llvm-cov
+      - name: Install cargo-llvm-cov and cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov,cargo-nextest
 
       - name: Set up BigQuery Credentials
         run: |
@@ -157,10 +156,8 @@ jobs:
       - name: Generate Code Coverage
         id: coverage
         run: |
-          cargo llvm-cov test \
-            --workspace --no-fail-fast \
-            --all-features \
-            --lcov --output-path lcov.info
+          cargo llvm-cov nextest --no-fail-fast \
+            --all-features --lcov --output-path lcov.info
 
       - name: Upload Coverage to Coveralls
         uses: coverallsapp/github-action@v2
