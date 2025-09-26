@@ -88,13 +88,13 @@ where
     async fn truncate_table(&self, table_id: TableId) -> EtlResult<()> {
         let mut inner = self.inner.lock().await;
 
-        if let Some(base_table_name) = self.store.get_table_mapping(&table_id).await? {
+        if let Some(iceberg_table_name) = self.store.get_table_mapping(&table_id).await? {
             self.client
-                .drop_table(&self.namespace, base_table_name.clone())
+                .drop_table(&self.namespace, iceberg_table_name.clone())
                 .await
                 .map_err(iceberg_error_to_etl_error)?;
 
-            inner.created_tables.remove(&base_table_name);
+            inner.created_tables.remove(&iceberg_table_name);
 
             drop(inner);
 
@@ -193,7 +193,7 @@ where
                 let mut join_set = JoinSet::new();
 
                 for (table_id, table_rows) in table_id_to_table_rows {
-                    let table_name =
+                    let iceberg_table_name =
                         self.store
                             .get_table_mapping(&table_id)
                             .await?
@@ -203,34 +203,16 @@ where
                                 format!("The table mapping for table {table_id} was not found")
                             ))?;
 
-                    // Retrieve table schema to determine primary key columns
-                    let table_schema =
-                        self.store
-                            .get_table_schema(&table_id)
-                            .await?
-                            .ok_or(etl_error!(
-                                ErrorKind::MissingTableSchema,
-                                "Table schema not found",
-                                format!("No schema found for table {table_id}")
-                            ))?;
-
-                    // Collect primary key column names and their indexes in the original schema
-                    let mut pk_col_names: Vec<String> = Vec::new();
-                    let mut pk_col_indexes: Vec<usize> = Vec::new();
-                    for (idx, col) in table_schema.column_schemas.iter().enumerate() {
-                        if col.primary {
-                            pk_col_names.push(col.name.clone());
-                            pk_col_indexes.push(idx);
-                        }
-                    }
-
                     let namespace = self.namespace.clone();
                     let client = self.client.clone();
 
                     join_set.spawn(async move {
-                        client.insert_rows(namespace, table_name, table_rows).await
+                        client
+                            .insert_rows(namespace, iceberg_table_name, table_rows)
+                            .await
                     });
                 }
+
                 while let Some(insert_result) = join_set.join_next().await {
                     insert_result
                         .map_err(|_| etl_error!(ErrorKind::Unknown, "Failed to join future"))??;
@@ -315,10 +297,10 @@ where
         Ok(iceberg_table_name)
     }
 
-    /// Derive cdc table's schema from the final table's schema by:
-    ///
-    /// 1. Marking all columns as nullable apart from the primary key columns
-    /// 2. Adding a cdc_operation column to represent the cdc operation type (upsert/delete)
+    /// Derive cdc table's schema from the final table's schema by
+    /// adding cdc_operation column to represent the cdc operation type (upsert/delete)
+    /// and a sequence_number column to represent the sequence in which rows were
+    /// inserted.
     fn add_cdc_columns(table_schema: &TableSchema) -> TableSchema {
         let mut final_schema = table_schema.clone();
         // Add cdc specific columns
