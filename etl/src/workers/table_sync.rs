@@ -658,9 +658,9 @@ where
             // removed later, so manual intervention will be required. The reason for not implementing
             // an automatic cleanup mechanism is that it would introduce performance overhead,
             // and we expect this call to fail only rarely.
-            let slot_name =
+            let slot_name: String =
                 EtlReplicationSlot::for_table_sync_worker(self.pipeline_id, self.table_id)
-                    .try_to_string()?;
+                    .try_into()?;
             let result = tokio::time::timeout(
                 MAX_DELETE_SLOT_WAIT,
                 replication_client.delete_slot(&slot_name),

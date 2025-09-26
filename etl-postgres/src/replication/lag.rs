@@ -86,7 +86,7 @@ pub async fn get_pipeline_lag_metrics(
             flush_lag_ms: row.flush_lag_ms,
         };
 
-        match EtlReplicationSlot::try_from_string(&row.slot_name) {
+        match EtlReplicationSlot::try_from(row.slot_name.as_str()) {
             Ok(EtlReplicationSlot::Apply {
                 pipeline_id: slot_pipeline_id,
             }) if slot_pipeline_id == pipeline_id => {

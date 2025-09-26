@@ -189,7 +189,7 @@ async fn get_start_lsn(
     pipeline_id: PipelineId,
     replication_client: &PgReplicationClient,
 ) -> EtlResult<PgLsn> {
-    let slot_name = EtlReplicationSlot::Apply { pipeline_id }.try_to_string()?;
+    let slot_name: String = EtlReplicationSlot::for_apply_worker(pipeline_id).try_into()?;
 
     // TODO: validate that we only create the slot when we first start replication which
     //  means when all tables are in the Init state. In any other case we should raise an
