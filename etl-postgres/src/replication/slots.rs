@@ -68,7 +68,6 @@ impl EtlReplicationSlot {
 }
 
 impl TryFrom<&str> for EtlReplicationSlot {
-
     type Error = EtlReplicationSlotError;
 
     fn try_from(slot_name: &str) -> Result<Self, Self::Error> {
@@ -116,7 +115,6 @@ impl TryFrom<&str> for EtlReplicationSlot {
 }
 
 impl TryFrom<EtlReplicationSlot> for String {
-
     type Error = EtlReplicationSlotError;
 
     fn try_from(slot: EtlReplicationSlot) -> Result<Self, Self::Error> {
@@ -203,9 +201,10 @@ mod tests {
     #[test]
     fn test_table_sync_slot_name() {
         let pipeline_id = 1;
-        let result: String = EtlReplicationSlot::for_table_sync_worker(pipeline_id, TableId::new(123))
-            .try_into()
-            .unwrap();
+        let result: String =
+            EtlReplicationSlot::for_table_sync_worker(pipeline_id, TableId::new(123))
+                .try_into()
+                .unwrap();
 
         assert!(result.starts_with(TABLE_SYNC_WORKER_PREFIX));
         assert!(result.len() <= MAX_SLOT_NAME_LENGTH);
@@ -254,8 +253,7 @@ mod tests {
 
     #[test]
     fn test_parse_table_sync_slot() {
-        let parsed =
-            EtlReplicationSlot::try_from("supabase_etl_table_sync_7_12345").unwrap();
+        let parsed = EtlReplicationSlot::try_from("supabase_etl_table_sync_7_12345").unwrap();
         assert_eq!(
             parsed,
             EtlReplicationSlot::TableSync {
