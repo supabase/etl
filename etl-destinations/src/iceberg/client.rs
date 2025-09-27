@@ -7,8 +7,9 @@ use etl::{
 };
 use iceberg::{
     Catalog, NamespaceIdent, TableCreation, TableIdent,
+    io::{S3_ACCESS_KEY_ID, S3_ENDPOINT, S3_SECRET_ACCESS_KEY},
     table::Table,
-    transaction::{ApplyTransactionAction, Transaction},
+    transaction::Transaction,
     writer::{
         IcebergWriter, IcebergWriterBuilder,
         base_writer::data_file_writer::DataFileWriterBuilder,
@@ -28,7 +29,7 @@ use crate::iceberg::{
 };
 
 /// Client for connecting to Iceberg data lakes.
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct IcebergClient {
     catalog: Arc<dyn Catalog>,
 }
@@ -40,6 +41,34 @@ impl IcebergClient {
         warehouse_name: String,
         props: HashMap<String, String>,
     ) -> Self {
+        let catalog_config = RestCatalogConfig::builder()
+            .uri(catalog_uri)
+            .warehouse(warehouse_name)
+            .props(props)
+            .build();
+        let catalog = RestCatalog::new(catalog_config);
+        IcebergClient {
+            catalog: Arc::new(catalog),
+        }
+    }
+
+    /// Creates a new [IcebergClient] from a REST catalog URI and a warehouse name.
+    pub fn new_with_s3_and_rest_catalog(
+        catalog_uri: String,
+        warehouse_name: String,
+        s3_endpoint: String,
+        s3_access_key_id: String,
+        s3_secret_access_key: String,
+    ) -> Self {
+        let mut props: HashMap<String, String> = HashMap::new();
+
+        props.insert(S3_ACCESS_KEY_ID.to_string(), s3_access_key_id.to_string());
+        props.insert(
+            S3_SECRET_ACCESS_KEY.to_string(),
+            s3_secret_access_key.to_string(),
+        );
+        props.insert(S3_ENDPOINT.to_string(), s3_endpoint.to_string());
+
         let catalog_config = RestCatalogConfig::builder()
             .uri(catalog_uri)
             .warehouse(warehouse_name)
@@ -135,7 +164,7 @@ impl IcebergClient {
         &self,
         namespace: String,
         table_name: String,
-        table_rows: &[TableRow],
+        table_rows: Vec<TableRow>,
     ) -> EtlResult<()> {
         let namespace_ident = NamespaceIdent::new(namespace);
         let table_ident = TableIdent::new(namespace_ident, table_name);
@@ -153,7 +182,7 @@ impl IcebergClient {
         let arrow_schema = iceberg::arrow::schema_to_arrow_schema(iceberg_schema)
             .map_err(iceberg_error_to_etl_error)?;
         let record_batch =
-            rows_to_record_batch(table_rows, arrow_schema).map_err(arrow_error_to_etl_error)?;
+            rows_to_record_batch(&table_rows, arrow_schema).map_err(arrow_error_to_etl_error)?;
 
         self.write_record_batch(&table, record_batch)
             .await
@@ -207,13 +236,13 @@ impl IcebergClient {
 
         // Create transaction and fast append action
         let transaction = Transaction::new(table);
-        let append_action = transaction
-            .fast_append()
-            .with_check_duplicate(false) // Don't check duplicates for performance
-            .add_data_files(data_files);
+        let mut append_action = transaction
+            .fast_append(None, None, vec![])?
+            .with_check_duplicate(false); // Don't check duplicates for performance
+        append_action.add_data_files(data_files)?;
 
         // Apply the append action to create updated transaction
-        let updated_transaction = append_action.apply(transaction)?;
+        let updated_transaction = append_action.apply().await?;
 
         // Commit the transaction to the catalog
         let _updated_table = updated_transaction.commit(&*self.catalog).await?;

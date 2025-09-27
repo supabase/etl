@@ -41,4 +41,18 @@ pub enum DestinationConfig {
         /// - and the configured batch size.
         max_concurrent_streams: usize,
     },
+    Iceberg {
+        /// Iceberg catalog namespace where tables will be created
+        namespace: String,
+        /// Base URL for the REST catalog
+        catalog_uri: String,
+        /// Name of the warehouse in the catalog
+        warehouse_name: String,
+        /// The S3 endpoint
+        s3_endpoint: String,
+        /// The S3 access key id
+        s3_access_key_id: String,
+        /// The S3 secret access key
+        s3_secret_access_key: SerializableSecretString,
+    },
 }

@@ -1,6 +1,8 @@
 #![allow(dead_code)]
 #![cfg(feature = "iceberg")]
 
+use std::collections::HashMap;
+
 use arrow::{
     array::{ArrayRef, RecordBatch},
     datatypes::TimeUnit,
@@ -9,6 +11,26 @@ use etl::types::{ArrayCell, Cell, TableRow};
 use futures::StreamExt;
 
 use etl_destinations::iceberg::{IcebergClient, UNIX_EPOCH};
+use iceberg::io::{S3_ACCESS_KEY_ID, S3_ENDPOINT, S3_SECRET_ACCESS_KEY};
+
+pub const LAKEKEEPER_URL: &str = "http://localhost:8182";
+const MINIO_URL: &str = "http://localhost:9010";
+const MINIO_USERNAME: &str = "minio-admin";
+const MINIO_PASSWORD: &str = "minio-admin-password";
+
+pub fn get_catalog_url() -> String {
+    format!("{LAKEKEEPER_URL}/catalog")
+}
+
+pub fn create_props() -> HashMap<String, String> {
+    let mut props: HashMap<String, String> = HashMap::new();
+
+    props.insert(S3_ACCESS_KEY_ID.to_string(), MINIO_USERNAME.to_string());
+    props.insert(S3_SECRET_ACCESS_KEY.to_string(), MINIO_PASSWORD.to_string());
+    props.insert(S3_ENDPOINT.to_string(), MINIO_URL.to_string());
+
+    props
+}
 
 /// Converts a RecordBatch back to a vector of TableRows.
 pub fn record_batch_to_table_rows(batch: &RecordBatch) -> Vec<TableRow> {
@@ -350,8 +372,13 @@ pub async fn read_all_rows(
 ) -> Vec<TableRow> {
     let table = client.load_table(namespace, table_name).await.unwrap();
 
+    let Some(current_snapshot) = table.metadata().current_snapshot_id() else {
+        return vec![];
+    };
+
     let mut table_rows_stream = table
         .scan()
+        .snapshot_id(current_snapshot)
         .select_all()
         .build()
         .unwrap()
