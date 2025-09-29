@@ -7,7 +7,7 @@ use etl::{
 };
 use iceberg::{
     Catalog, NamespaceIdent, TableCreation, TableIdent,
-    io::{S3_ACCESS_KEY_ID, S3_ENDPOINT, S3_PATH_STYLE_ACCESS, S3_REGION, S3_SECRET_ACCESS_KEY},
+    io::{S3_ACCESS_KEY_ID, S3_ENDPOINT, S3_REGION, S3_SECRET_ACCESS_KEY},
     table::Table,
     transaction::Transaction,
     writer::{
@@ -21,6 +21,7 @@ use iceberg::{
 };
 use iceberg_catalog_rest::{RestCatalog, RestCatalogConfig};
 use parquet::{basic::Compression, file::properties::WriterProperties};
+use tracing::debug;
 
 use crate::iceberg::{
     catalog::{SupabaseCatalog, SupabaseClient},
@@ -75,7 +76,6 @@ impl IcebergClient {
         props.insert(S3_SECRET_ACCESS_KEY.to_string(), s3_secret_access_key);
         props.insert(S3_ENDPOINT.to_string(), s3_endpoint);
         props.insert(S3_REGION.to_string(), s3_region);
-        props.insert(S3_PATH_STYLE_ACCESS.to_string(), "false".to_string());
 
         let catalog_config = RestCatalogConfig::builder()
             .uri(catalog_uri.clone())
@@ -94,6 +94,7 @@ impl IcebergClient {
 
     /// Creates a namespace if it doesn't exist.
     pub async fn create_namespace_if_missing(&self, namespace: &str) -> Result<(), iceberg::Error> {
+        debug!("creating namespace {namespace}");
         let namespace_ident = NamespaceIdent::from_strs(namespace.split('.'))?;
         if !self.catalog.namespace_exists(&namespace_ident).await? {
             self.catalog
@@ -106,6 +107,7 @@ impl IcebergClient {
 
     /// Returns true if the `namespace` exists, false otherwise.
     pub async fn namespace_exists(&self, namespace: &str) -> Result<bool, iceberg::Error> {
+        debug!("checking if namespace {namespace} exists");
         let namespace_ident = NamespaceIdent::from_strs(namespace.split('.'))?;
         self.catalog.namespace_exists(&namespace_ident).await
     }
@@ -117,6 +119,7 @@ impl IcebergClient {
         table_name: String,
         column_schemas: &[ColumnSchema],
     ) -> Result<(), iceberg::Error> {
+        debug!("creating table {table_name} in namespace {namespace} if missing");
         let namespace_ident = NamespaceIdent::from_strs(namespace.split('.'))?;
         let table_ident = TableIdent::new(namespace_ident.clone(), table_name.clone());
         if !self.catalog.table_exists(&table_ident).await? {
@@ -138,6 +141,7 @@ impl IcebergClient {
         namespace: &str,
         table_name: String,
     ) -> Result<bool, iceberg::Error> {
+        debug!("checking if table {table_name} in namespace {namespace} exists");
         let namespace_ident = NamespaceIdent::from_strs(namespace.split('.'))?;
         let table_ident = TableIdent::new(namespace_ident, table_name);
         self.catalog.table_exists(&table_ident).await
@@ -149,6 +153,7 @@ impl IcebergClient {
         namespace: &str,
         table_name: String,
     ) -> Result<(), iceberg::Error> {
+        debug!("dropping table {table_name} in namespace {namespace}");
         let namespace_ident = NamespaceIdent::from_strs(namespace.split('.'))?;
         let table_ident = TableIdent::new(namespace_ident, table_name);
         self.catalog.drop_table(&table_ident).await
@@ -156,6 +161,7 @@ impl IcebergClient {
 
     /// Drops a namespace
     pub async fn drop_namespace(&self, namespace: &str) -> Result<(), iceberg::Error> {
+        debug!("dropping namespace {namespace}");
         let namespace_ident = NamespaceIdent::from_strs(namespace.split('.'))?;
         self.catalog.drop_namespace(&namespace_ident).await
     }
@@ -166,6 +172,7 @@ impl IcebergClient {
         namespace: String,
         table_name: String,
     ) -> Result<iceberg::table::Table, iceberg::Error> {
+        debug!("loading table {table_name} in namespace {namespace}");
         let namespace_ident = NamespaceIdent::new(namespace);
         let table_ident = TableIdent::new(namespace_ident, table_name);
         self.catalog.load_table(&table_ident).await
