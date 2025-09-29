@@ -80,6 +80,7 @@ pub async fn start_replicator_with_config(
                     catalog_token,
                     s3_access_key_id,
                     s3_secret_access_key,
+                    s3_region,
                 },
         } => {
             let supabase_domain = match Environment::load()? {
@@ -93,6 +94,7 @@ pub async fn start_replicator_with_config(
                 warehouse_name.clone(),
                 s3_access_key_id.clone(),
                 s3_secret_access_key.expose_secret().to_string(),
+                s3_region.clone(),
             );
             let destination =
                 IcebergDestination::new(client, namespace.clone(), state_store.clone());
@@ -160,6 +162,7 @@ fn log_destination_config(config: &DestinationConfig) {
                     warehouse_name,
                     s3_access_key_id,
                     s3_secret_access_key: _,
+                    s3_region,
                 },
         } => {
             debug!(
@@ -167,6 +170,7 @@ fn log_destination_config(config: &DestinationConfig) {
                 project_ref,
                 warehouse_name,
                 s3_access_key_id,
+                s3_region,
                 "using Supabase iceberg destination config"
             )
         }

@@ -7,7 +7,7 @@ use etl::{
 };
 use iceberg::{
     Catalog, NamespaceIdent, TableCreation, TableIdent,
-    io::{S3_ACCESS_KEY_ID, S3_ENDPOINT, S3_SECRET_ACCESS_KEY},
+    io::{S3_ACCESS_KEY_ID, S3_ENDPOINT, S3_PATH_STYLE_ACCESS, S3_REGION, S3_SECRET_ACCESS_KEY},
     table::Table,
     transaction::Transaction,
     writer::{
@@ -63,6 +63,7 @@ impl IcebergClient {
         warehouse: String,
         s3_access_key_id: String,
         s3_secret_access_key: String,
+        s3_region: String,
     ) -> Self {
         let base_uri = format!("https://{project_ref}.storage.{supabase_domain}/storage");
         let catalog_uri = format!("{base_uri}/v1/iceberg");
@@ -72,7 +73,9 @@ impl IcebergClient {
         props.insert(CATALOG_TOKEN.to_string(), catalog_token.clone());
         props.insert(S3_ACCESS_KEY_ID.to_string(), s3_access_key_id);
         props.insert(S3_SECRET_ACCESS_KEY.to_string(), s3_secret_access_key);
-        props.insert(S3_ENDPOINT.to_string(), s3_endpoint.to_string());
+        props.insert(S3_ENDPOINT.to_string(), s3_endpoint);
+        props.insert(S3_REGION.to_string(), s3_region);
+        props.insert(S3_PATH_STYLE_ACCESS.to_string(), "false".to_string());
 
         let catalog_config = RestCatalogConfig::builder()
             .uri(catalog_uri.clone())
