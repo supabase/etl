@@ -242,16 +242,17 @@ impl SupabaseClient {
             request = request.json(&body);
         }
 
-        let response = request.send().await.map_err(|e| {
-            Error::new(ErrorKind::Unexpected, format!("HTTP request failed: {}", e))
-        })?;
+        let response = request
+            .send()
+            .await
+            .map_err(|e| Error::new(ErrorKind::Unexpected, format!("HTTP request failed: {e}")))?;
 
         if !response.status().is_success() {
             let status = response.status();
             let error_text = response.text().await.unwrap_or_default();
             return Err(Error::new(
                 ErrorKind::Unexpected,
-                format!("HTTP {} error: {}", status, error_text),
+                format!("HTTP {status} error: {error_text}"),
             ));
         }
 
