@@ -429,7 +429,6 @@ impl PgReplicationClient {
                 select c.oid
                 from pg_publication_tables pt
                 join pg_class c on c.relname = pt.tablename
-                join pg_namespace n on n.oid = c.relnamespace and n.nspname = pt.schemaname
                 where pt.pubname = {pub} and not (select has from has_rel)
             ),
             recurse(relid) as (
