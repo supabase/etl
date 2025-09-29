@@ -203,3 +203,98 @@ async fn partitioned_table_copy_and_streams_new_data_from_new_partition() {
         .unwrap_or_default();
     assert_eq!(parent_inserts.len(), 1);
 }
+
+/// Dropping a child partition must not emit DELETE/TRUNCATE events.
+#[tokio::test(flavor = "multi_thread")]
+async fn partition_drop_does_not_emit_delete_or_truncate() {
+    init_test_tracing();
+    let database = spawn_source_database().await;
+
+    let table_name = test_table_name("partitioned_events_drop");
+    let partition_specs = [("p1", "from (1) to (100)"), ("p2", "from (100) to (200)")];
+
+    let (parent_table_id, _partition_table_ids) =
+        create_partitioned_table(&database, table_name.clone(), &partition_specs)
+            .await
+            .expect("Failed to create partitioned table");
+
+    database
+        .run_sql(&format!(
+            "insert into {} (data, partition_key) values \
+             ('event1', 50), ('event2', 150)",
+            table_name.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+
+    let publication_name = "test_partitioned_pub_drop".to_string();
+    database
+        .create_publication(&publication_name, std::slice::from_ref(&table_name))
+        .await
+        .expect("Failed to create publication");
+
+    let state_store = NotifyingStore::new();
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
+
+    let parent_sync_done = state_store
+        .notify_on_table_state_type(parent_table_id, TableReplicationPhaseType::SyncDone)
+        .await;
+
+    let pipeline_id: PipelineId = random();
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        publication_name,
+        state_store.clone(),
+        destination.clone(),
+    );
+
+    pipeline.start().await.unwrap();
+    parent_sync_done.notified().await;
+
+    let events_before = destination.get_events().await;
+    let grouped_before = group_events_by_type_and_table_id(&events_before);
+    let del_before = grouped_before
+        .get(&(EventType::Delete, parent_table_id))
+        .map(|v| v.len())
+        .unwrap_or(0);
+    let trunc_before = grouped_before
+        .get(&(EventType::Truncate, parent_table_id))
+        .map(|v| v.len())
+        .unwrap_or(0);
+
+    // Detach and drop one child partition (DDL should not generate DML events)
+    let child_p1_name = format!("{}_{}", table_name.name, "p1");
+    let child_p1_qualified = format!("{}.{}", table_name.schema, child_p1_name);
+    database
+        .run_sql(&format!(
+            "alter table {} detach partition {}",
+            table_name.as_quoted_identifier(),
+            child_p1_qualified
+        ))
+        .await
+        .unwrap();
+    database
+        .run_sql(&format!("drop table {}", child_p1_qualified))
+        .await
+        .unwrap();
+
+    let _ = pipeline.shutdown_and_wait().await;
+
+    let events_after = destination.get_events().await;
+    let grouped_after = group_events_by_type_and_table_id(&events_after);
+    let del_after = grouped_after
+        .get(&(EventType::Delete, parent_table_id))
+        .map(|v| v.len())
+        .unwrap_or(0);
+    let trunc_after = grouped_after
+        .get(&(EventType::Truncate, parent_table_id))
+        .map(|v| v.len())
+        .unwrap_or(0);
+
+    assert_eq!(del_after, del_before, "Partition drop must not emit DELETE events");
+    assert_eq!(
+        trunc_after, trunc_before,
+        "Partition drop must not emit TRUNCATE events"
+    );
+}
