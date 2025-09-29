@@ -275,7 +275,7 @@ async fn partition_drop_does_not_emit_delete_or_truncate() {
         .await
         .unwrap();
     database
-        .run_sql(&format!("drop table {}", child_p1_qualified))
+        .run_sql(&format!("drop table {child_p1_qualified}"))
         .await
         .unwrap();
 
