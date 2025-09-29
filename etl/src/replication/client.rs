@@ -410,47 +410,53 @@ impl PgReplicationClient {
         &self,
         publication_name: &str,
     ) -> EtlResult<Vec<TableId>> {
-        // Prefer pg_publication_rel (explicit tables in the publication, including partition roots)
-        let rel_query = format!(
-            r#"select r.prrelid as oid
-               from pg_publication_rel r
-               join pg_publication p on p.oid = r.prpubid
-              where p.pubname = {}"#,
-            quote_literal(publication_name)
+        let query = format!(
+            r#"
+            with recursive has_rel as (
+                select exists(
+                    select 1
+                    from pg_publication_rel r
+                    join pg_publication p on p.oid = r.prpubid
+                    where p.pubname = {pub}
+                ) as has
+            ),
+            pub_tables as (
+                select r.prrelid as oid
+                from pg_publication_rel r
+                join pg_publication p on p.oid = r.prpubid
+                where p.pubname = {pub} and (select has from has_rel)
+                union all
+                select c.oid
+                from pg_publication_tables pt
+                join pg_class c on c.relname = pt.tablename
+                join pg_namespace n on n.oid = c.relnamespace and n.nspname = pt.schemaname
+                where pt.pubname = {pub} and not (select has from has_rel)
+            ),
+            recurse(relid) as (
+                select oid from pub_tables
+                union all
+                select i.inhparent
+                from pg_inherits i
+                join recurse r on r.relid = i.inhrelid
+            )
+            select distinct relid as oid
+            from recurse r
+            where not exists (
+                select 1 from pg_inherits i where i.inhrelid = r.relid
+            );
+            "#,
+            pub = quote_literal(publication_name)
         );
 
-        let mut table_ids = vec![];
-        let mut has_rows = false;
-        for msg in self.client.simple_query(&rel_query).await? {
-            if let SimpleQueryMessage::Row(row) = msg {
-                has_rows = true;
-                let table_id =
-                    Self::get_row_value::<TableId>(&row, "oid", "pg_publication_rel").await?;
-                table_ids.push(table_id);
-            }
-        }
-
-        if has_rows {
-            return Ok(table_ids);
-        }
-
-        // Fallback to pg_publication_tables (expanded view), used for publications like FOR ALL TABLES
-        let publication_query = format!(
-            "select c.oid from pg_publication_tables pt 
-         join pg_class c on c.relname = pt.tablename 
-         join pg_namespace n on n.oid = c.relnamespace AND n.nspname = pt.schemaname 
-         where pt.pubname = {};",
-            quote_literal(publication_name)
-        );
-
-        for msg in self.client.simple_query(&publication_query).await? {
+        let mut roots = vec![];
+        for msg in self.client.simple_query(&query).await? {
             if let SimpleQueryMessage::Row(row) = msg {
                 let table_id = Self::get_row_value::<TableId>(&row, "oid", "pg_class").await?;
-                table_ids.push(table_id);
+                roots.push(table_id);
             }
         }
 
-        Ok(table_ids)
+        Ok(roots)
     }
 
     /// Starts a logical replication stream from the specified publication and slot.
