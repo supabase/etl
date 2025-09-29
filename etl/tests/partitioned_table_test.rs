@@ -292,7 +292,10 @@ async fn partition_drop_does_not_emit_delete_or_truncate() {
         .map(|v| v.len())
         .unwrap_or(0);
 
-    assert_eq!(del_after, del_before, "Partition drop must not emit DELETE events");
+    assert_eq!(
+        del_after, del_before,
+        "Partition drop must not emit DELETE events"
+    );
     assert_eq!(
         trunc_after, trunc_before,
         "Partition drop must not emit TRUNCATE events"
