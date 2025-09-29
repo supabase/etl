@@ -814,31 +814,12 @@ impl PgReplicationClient {
             .collect::<Vec<_>>()
             .join(", ");
 
-        let copy_query = if self.is_partitioned_table(table_id).await?
-            && let leaf_partitions = self.get_leaf_partition_ids(table_id).await?
-            && !leaf_partitions.is_empty()
-        {
-            let mut selects = Vec::with_capacity(leaf_partitions.len());
-            for child_id in leaf_partitions {
-                let child_name = self.get_table_name(child_id).await?;
-                let select = format!(
-                    "select {} from {}",
-                    column_list,
-                    child_name.as_quoted_identifier()
-                );
-                selects.push(select);
-            }
-
-            let union_query = selects.join(" union all ");
-            format!(r#"copy ({union_query}) to stdout with (format text);"#)
-        } else {
-            let table_name = self.get_table_name(table_id).await?;
-            format!(
-                r#"copy {} ({}) to stdout with (format text);"#,
-                table_name.as_quoted_identifier(),
-                column_list
-            )
-        };
+        let table_name = self.get_table_name(table_id).await?;
+        let copy_query = format!(
+            r#"copy (select {} from {}) to stdout with (format text);"#,
+            column_list,
+            table_name.as_quoted_identifier()
+        );
 
         // TODO: allow passing in format binary or text
         let stream = self.client.copy_out_simple(&copy_query).await?;
@@ -875,54 +856,5 @@ impl PgReplicationClient {
                 )
             )
         })
-    }
-
-    /// Returns true if the given table id refers to a partitioned table (relkind = 'p').
-    async fn is_partitioned_table(&self, table_id: TableId) -> EtlResult<bool> {
-        let query = format!("select c.relkind from pg_class c where c.oid = {table_id}");
-
-        for msg in self.client.simple_query(&query).await? {
-            if let SimpleQueryMessage::Row(row) = msg {
-                let relkind = Self::get_row_value::<String>(&row, "relkind", "pg_class").await?;
-                return Ok(relkind == "p");
-            }
-        }
-
-        bail!(
-            ErrorKind::SourceSchemaError,
-            "Table not found",
-            format!("Table not found in database (table id: {})", table_id)
-        );
-    }
-
-    /// Returns all leaf partition OIDs for a partitioned table.
-    async fn get_leaf_partition_ids(&self, parent_id: TableId) -> EtlResult<Vec<TableId>> {
-        let query = format!(
-            r#"
-            with recursive parts(relid) as (
-                select i.inhrelid
-                from pg_inherits i
-                where i.inhparent = {parent_id}
-                union all
-                select i.inhrelid
-                from pg_inherits i
-                join parts p on p.relid = i.inhparent
-            )
-            select p.relid as oid
-            from parts p
-            left join pg_inherits i on i.inhparent = p.relid
-            where i.inhrelid is null
-            "#
-        );
-
-        let mut ids = Vec::new();
-        for msg in self.client.simple_query(&query).await? {
-            if let SimpleQueryMessage::Row(row) = msg {
-                let id = Self::get_row_value::<TableId>(&row, "oid", "pg_inherits").await?;
-                ids.push(id);
-            }
-        }
-
-        Ok(ids)
     }
 }
