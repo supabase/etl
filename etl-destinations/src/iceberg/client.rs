@@ -23,6 +23,7 @@ use iceberg_catalog_rest::{RestCatalog, RestCatalogConfig};
 use parquet::{basic::Compression, file::properties::WriterProperties};
 
 use crate::iceberg::{
+    catalog::{SupabaseCatalog, SupabaseClient},
     encoding::rows_to_record_batch,
     error::{arrow_error_to_etl_error, iceberg_error_to_etl_error},
     schema::postgres_to_iceberg_schema,
@@ -55,28 +56,34 @@ impl IcebergClient {
     }
 
     /// Creates a new [IcebergClient] from a REST catalog URI and a warehouse name.
-    pub fn new_with_s3_and_rest_catalog(
+    pub fn new_with_supabase_catalog(
         project_ref: &str,
+        supabase_domain: &str,
         catalog_token: String,
-        warehouse_name: String,
+        warehouse: String,
         s3_access_key_id: String,
         s3_secret_access_key: String,
     ) -> Self {
-        let catalog_uri = format!("https://{project_ref}.storage.supabase.red/storage/v1/iceberg");
-        let s3_endpoint = format!("https://{project_ref}.storage.supabase.red/storage/v1/s3");
+        let base_uri = format!("https://{project_ref}.storage.{supabase_domain}/storage");
+        let catalog_uri = format!("{base_uri}/v1/iceberg");
+        let s3_endpoint = format!("{base_uri}/v1/s3");
 
         let mut props: HashMap<String, String> = HashMap::new();
-        props.insert(CATALOG_TOKEN.to_string(), catalog_token);
+        props.insert(CATALOG_TOKEN.to_string(), catalog_token.clone());
         props.insert(S3_ACCESS_KEY_ID.to_string(), s3_access_key_id);
         props.insert(S3_SECRET_ACCESS_KEY.to_string(), s3_secret_access_key);
         props.insert(S3_ENDPOINT.to_string(), s3_endpoint.to_string());
 
         let catalog_config = RestCatalogConfig::builder()
             .uri(catalog_uri)
-            .warehouse(warehouse_name)
+            .warehouse(warehouse.clone())
             .props(props)
             .build();
-        let catalog = RestCatalog::new(catalog_config);
+        let inner = RestCatalog::new(catalog_config);
+        let client = SupabaseClient::new(base_uri, warehouse, catalog_token);
+
+        let catalog = SupabaseCatalog::new(inner, client);
+
         IcebergClient {
             catalog: Arc::new(catalog),
         }

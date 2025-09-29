@@ -42,17 +42,33 @@ pub enum DestinationConfig {
         max_concurrent_streams: usize,
     },
     Iceberg {
-        /// Iceberg catalog namespace where tables will be created
-        namespace: String,
-        /// Base URL for the REST catalog
-        catalog_uri: String,
+        config: IcebergConfig,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IcebergConfig {
+    Supabase {
+        /// Supabase project_ref (TODO: make this optional and use only for Supabase projects)
+        project_ref: String,
         /// Name of the warehouse in the catalog
         warehouse_name: String,
-        /// The S3 endpoint
-        s3_endpoint: String,
+        /// Iceberg catalog namespace where tables will be created
+        namespace: String,
+        /// Catalog authentication token
+        catalog_token: SerializableSecretString,
         /// The S3 access key id
         s3_access_key_id: String,
         /// The S3 secret access key
         s3_secret_access_key: SerializableSecretString,
+    },
+    Rest {
+        /// Iceberg catalog uri
+        catalog_uri: String,
+        /// Name of the warehouse in the catalog
+        warehouse_name: String,
+        /// Iceberg catalog namespace where tables will be created
+        namespace: String,
     },
 }
