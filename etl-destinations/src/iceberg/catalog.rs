@@ -4,12 +4,13 @@ use async_trait::async_trait;
 use iceberg::{
     Catalog, Error, ErrorKind, Namespace, NamespaceIdent, Result, TableCommit, TableCreation,
     TableIdent,
+    io::FileIO,
     spec::{Schema, SortOrder, TableMetadata, UnboundPartitionSpec},
     table::Table,
 };
 use iceberg_catalog_rest::RestCatalog;
-use reqwest::{Client, Response};
-use serde::{Deserialize, Serialize};
+use reqwest::{Client, Response, StatusCode};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 /// A REST catalog which fixes some incompatibilities in Supabase catalog REST endpoints.
 /// For endpoints which are compatible with the standard, it uses the inner [`RestCatalog`].
@@ -90,7 +91,6 @@ impl Catalog for SupabaseCatalog {
         creation: TableCreation,
     ) -> Result<Table> {
         self.client.create_table(namespace, creation).await
-        // self.inner.create_table(namespace, creation).await
     }
 
     async fn update_table(&self, commit: TableCommit) -> Result<Table> {
@@ -130,7 +130,7 @@ impl SupabaseClient {
         namespace: &NamespaceIdent,
         creation: TableCreation,
     ) -> Result<Table> {
-        let supabase_request = SupabaseCreateTableRequest {
+        let supabase_request = CreateTableRequest {
             name: creation.name.clone(),
             location: creation.location.clone(),
             schema: creation.schema.clone(),
@@ -145,30 +145,84 @@ impl SupabaseClient {
         };
 
         let namespace_path = namespace.as_ref().join(".");
-        // let url = self.build_url(&format!("namespaces/{}/tables", namespace_path))?;
         let url = self.tables_url(&namespace_path);
 
         let body = serde_json::to_value(supabase_request).map_err(|e| {
             Error::new(
                 ErrorKind::DataInvalid,
-                format!("JSON serialization failed: {}", e),
+                format!("JSON serialization failed: {e}"),
             )
         })?;
 
-        let response = self
+        let http_response = self
             .send_request(reqwest::Method::POST, &url, Some(body))
             .await?;
 
-        let create_response: SupabaseCreateTableResponse = response.json().await.map_err(|e| {
-            Error::new(
-                ErrorKind::DataInvalid,
-                format!("JSON deserialization failed: {}", e),
-            )
-        })?;
+        let response = match http_response.status() {
+            StatusCode::OK => {
+                deserialize_catalog_response::<LoadTableResponse>(http_response).await?
+            }
+            StatusCode::NOT_FOUND => {
+                return Err(Error::new(
+                    ErrorKind::Unexpected,
+                    "Tried to create a table under a namespace that does not exist",
+                ));
+            }
+            StatusCode::CONFLICT => {
+                return Err(Error::new(
+                    ErrorKind::Unexpected,
+                    "The table already exists",
+                ));
+            }
+            _ => return Err(deserialize_unexpected_catalog_error(http_response).await),
+        };
 
-        // Convert Supabase response back to Iceberg Table
-        self.convert_to_table(namespace, &creation.name, create_response)
-            .await
+        let metadata_location = response.metadata_location.as_ref().ok_or(Error::new(
+            ErrorKind::DataInvalid,
+            "Metadata location missing in `create_table` response!",
+        ))?;
+
+        let config = response.config.unwrap_or_default().into_iter().collect();
+
+        let file_io = self
+            .load_file_io(Some(metadata_location), Some(config))
+            .await?;
+
+        let table_ident = TableIdent::new(namespace.clone(), creation.name.to_string());
+
+        let table_builder = Table::builder()
+            .identifier(table_ident.clone())
+            .file_io(file_io)
+            .metadata(response.metadata);
+
+        if let Some(metadata_location) = response.metadata_location {
+            table_builder.metadata_location(metadata_location).build()
+        } else {
+            table_builder.build()
+        }
+    }
+
+    async fn load_file_io(
+        &self,
+        metadata_location: Option<&str>,
+        extra_config: Option<HashMap<String, String>>,
+    ) -> Result<FileIO> {
+        let mut props = HashMap::new();
+        if let Some(config) = extra_config {
+            props.extend(config);
+        }
+
+        let file_io = match metadata_location {
+            Some(url) => FileIO::from_path(url)?.with_props(props).build()?,
+            None => {
+                return Err(Error::new(
+                    ErrorKind::Unexpected,
+                    "Unable to load file io, metadata location is not set!",
+                ))?;
+            }
+        };
+
+        Ok(file_io)
     }
 
     /// Send authenticated request to Supabase
@@ -203,31 +257,51 @@ impl SupabaseClient {
 
         Ok(response)
     }
+}
 
-    /// Convert Supabase table response to Iceberg Table object
-    async fn convert_to_table(
-        &self,
-        namespace: &NamespaceIdent,
-        name: &str,
-        response: SupabaseCreateTableResponse,
-    ) -> Result<Table> {
-        let table_ident = TableIdent::new(namespace.clone(), name.to_string());
+/// Deserializes a catalog response into the given [`DeserializedOwned`] type.
+///
+/// Returns an error if unable to parse the response bytes.
+pub(crate) async fn deserialize_catalog_response<R: DeserializeOwned>(
+    response: Response,
+) -> Result<R> {
+    let bytes = response.bytes().await?;
 
-        // Create Table object with the returned metadata
-        // The metadata location and content are provided by Supabase
-        Table::builder()
-            .metadata_location(response.metadata_location)
-            .identifier(table_ident)
-            .metadata(response.metadata)
-            .build()
+    serde_json::from_slice::<R>(&bytes).map_err(|e| {
+        Error::new(
+            ErrorKind::Unexpected,
+            "Failed to parse response from rest catalog server",
+        )
+        .with_context("json", String::from_utf8_lossy(&bytes))
+        .with_source(e)
+    })
+}
+
+/// Deserializes a unexpected catalog response into an error.
+pub(crate) async fn deserialize_unexpected_catalog_error(response: Response) -> Error {
+    let err = Error::new(
+        ErrorKind::Unexpected,
+        "Received response with unexpected status code",
+    )
+    .with_context("status", response.status().to_string())
+    .with_context("headers", format!("{:?}", response.headers()));
+
+    let bytes = match response.bytes().await {
+        Ok(bytes) => bytes,
+        Err(err) => return err.into(),
+    };
+
+    if bytes.is_empty() {
+        return err;
     }
+    err.with_context("json", String::from_utf8_lossy(&bytes))
 }
 
 /// Supabase-specific create table request format.
 /// All optional properties must be omitted if missing instead of sending a null value.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "kebab-case")]
-struct SupabaseCreateTableRequest {
+struct CreateTableRequest {
     name: String,
 
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -252,7 +326,8 @@ struct SupabaseCreateTableRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "kebab-case")]
-struct SupabaseCreateTableResponse {
-    metadata_location: String,
+struct LoadTableResponse {
+    metadata_location: Option<String>,
     metadata: TableMetadata,
+    config: Option<HashMap<String, String>>,
 }
