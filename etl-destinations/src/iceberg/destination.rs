@@ -288,7 +288,11 @@ where
         }
 
         self.client
-            .create_table_if_missing(&self.namespace, iceberg_table_name.clone(), &table_schema)
+            .create_table_if_missing(
+                &self.namespace,
+                iceberg_table_name.clone(),
+                &table_schema.column_schemas,
+            )
             .await
             .map_err(iceberg_error_to_etl_error)?;
 

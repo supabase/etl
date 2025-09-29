@@ -1,7 +1,7 @@
 #![cfg(feature = "iceberg")]
 
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
-use etl::types::{ArrayCell, Cell, ColumnSchema, TableId, TableName, TableRow, TableSchema, Type};
+use etl::types::{ArrayCell, Cell, ColumnSchema, TableRow, Type};
 use etl_destinations::iceberg::IcebergClient;
 use etl_telemetry::tracing::init_test_tracing;
 use uuid::Uuid;
@@ -103,9 +103,7 @@ async fn create_table_if_missing() {
 
     // Create a sample table schema with all supported types
     let table_name = "test_table".to_string();
-    let table_id = TableId::new(12345);
-    let table_name_struct = TableName::new("test_schema".to_string(), table_name.clone());
-    let columns = vec![
+    let column_schemas = vec![
         // Primary key
         ColumnSchema::new("id".to_string(), Type::INT4, -1, false, true),
         // Boolean types
@@ -300,7 +298,6 @@ async fn create_table_if_missing() {
             false,
         ),
     ];
-    let table_schema = TableSchema::new(table_id, table_name_struct, columns);
 
     // table doesn't exist yet
     assert!(
@@ -312,7 +309,7 @@ async fn create_table_if_missing() {
 
     // Create table for the first time
     client
-        .create_table_if_missing(namespace, table_name.clone(), &table_schema)
+        .create_table_if_missing(namespace, table_name.clone(), &column_schemas)
         .await
         .unwrap();
 
@@ -326,7 +323,7 @@ async fn create_table_if_missing() {
 
     // Creating the same table again should be a no-op (no error)
     client
-        .create_table_if_missing(namespace, table_name.clone(), &table_schema)
+        .create_table_if_missing(namespace, table_name.clone(), &column_schemas)
         .await
         .unwrap();
 
@@ -365,9 +362,7 @@ async fn insert_nullable_scalars() {
 
     // Create a sample table schema with all supported types
     let table_name = "test_table".to_string();
-    let table_id = TableId::new(12345);
-    let table_name_struct = TableName::new("test_schema".to_string(), table_name.clone());
-    let columns = vec![
+    let column_schemas = vec![
         // Primary key
         ColumnSchema::new("id".to_string(), Type::INT4, -1, false, true),
         // Boolean types
@@ -414,10 +409,9 @@ async fn insert_nullable_scalars() {
         // Binary type
         ColumnSchema::new("bytea_col".to_string(), Type::BYTEA, -1, true, false),
     ];
-    let table_schema = TableSchema::new(table_id, table_name_struct, columns);
 
     client
-        .create_table_if_missing(namespace, table_name.clone(), &table_schema)
+        .create_table_if_missing(namespace, table_name.clone(), &column_schemas)
         .await
         .unwrap();
 
@@ -532,9 +526,7 @@ async fn insert_non_nullable_scalars() {
 
     // Create a sample table schema with all supported types as non-nullable
     let table_name = "test_table".to_string();
-    let table_id = TableId::new(12345);
-    let table_name_struct = TableName::new("test_schema".to_string(), table_name.clone());
-    let columns = vec![
+    let column_schemas = vec![
         // Primary key
         ColumnSchema::new("id".to_string(), Type::INT4, -1, false, true),
         // Boolean types
@@ -581,10 +573,9 @@ async fn insert_non_nullable_scalars() {
         // Binary type
         ColumnSchema::new("bytea_col".to_string(), Type::BYTEA, -1, false, false),
     ];
-    let table_schema = TableSchema::new(table_id, table_name_struct, columns);
 
     client
-        .create_table_if_missing(namespace, table_name.clone(), &table_schema)
+        .create_table_if_missing(namespace, table_name.clone(), &column_schemas)
         .await
         .unwrap();
 
@@ -673,9 +664,7 @@ async fn insert_nullable_array() {
 
     // Create a sample table schema with array types for all supported types
     let table_name = "test_array_table".to_string();
-    let table_id = TableId::new(12346);
-    let table_name_struct = TableName::new("test_schema".to_string(), table_name.clone());
-    let columns = vec![
+    let column_schemas = vec![
         // Primary key
         ColumnSchema::new("id".to_string(), Type::INT4, -1, false, true),
         // Boolean array type
@@ -836,10 +825,9 @@ async fn insert_nullable_array() {
             false,
         ),
     ];
-    let table_schema = TableSchema::new(table_id, table_name_struct, columns);
 
     client
-        .create_table_if_missing(namespace, table_name.clone(), &table_schema)
+        .create_table_if_missing(namespace, table_name.clone(), &column_schemas)
         .await
         .unwrap();
 
@@ -1042,9 +1030,7 @@ async fn insert_non_nullable_array() {
 
     // Create a sample table schema with non-nullable array types for all supported types
     let table_name = "test_non_nullable_array_table".to_string();
-    let table_id = TableId::new(12347);
-    let table_name_struct = TableName::new("test_schema".to_string(), table_name.clone());
-    let columns = vec![
+    let column_schemas = vec![
         // Primary key
         ColumnSchema::new("id".to_string(), Type::INT4, -1, false, true),
         // Boolean array type
@@ -1205,10 +1191,9 @@ async fn insert_non_nullable_array() {
             false,
         ),
     ];
-    let table_schema = TableSchema::new(table_id, table_name_struct, columns);
 
     client
-        .create_table_if_missing(namespace, table_name.clone(), &table_schema)
+        .create_table_if_missing(namespace, table_name.clone(), &column_schemas)
         .await
         .unwrap();
 

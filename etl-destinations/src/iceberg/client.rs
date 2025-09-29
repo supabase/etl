@@ -3,7 +3,7 @@ use std::{collections::HashMap, sync::Arc};
 use arrow::array::RecordBatch;
 use etl::{
     error::EtlResult,
-    types::{TableRow, TableSchema},
+    types::{ColumnSchema, TableRow},
 };
 use iceberg::{
     Catalog, NamespaceIdent, TableCreation, TableIdent,
@@ -27,6 +27,8 @@ use crate::iceberg::{
     error::{arrow_error_to_etl_error, iceberg_error_to_etl_error},
     schema::postgres_to_iceberg_schema,
 };
+
+const CATALOG_TOKEN: &str = "token";
 
 /// Client for connecting to Iceberg data lakes.
 #[derive(Debug, Clone)]
@@ -54,19 +56,19 @@ impl IcebergClient {
 
     /// Creates a new [IcebergClient] from a REST catalog URI and a warehouse name.
     pub fn new_with_s3_and_rest_catalog(
-        catalog_uri: String,
+        project_ref: &str,
+        catalog_token: String,
         warehouse_name: String,
-        s3_endpoint: String,
         s3_access_key_id: String,
         s3_secret_access_key: String,
     ) -> Self {
-        let mut props: HashMap<String, String> = HashMap::new();
+        let catalog_uri = format!("https://{project_ref}.storage.supabase.red/storage/v1/iceberg");
+        let s3_endpoint = format!("https://{project_ref}.storage.supabase.red/storage/v1/s3");
 
-        props.insert(S3_ACCESS_KEY_ID.to_string(), s3_access_key_id.to_string());
-        props.insert(
-            S3_SECRET_ACCESS_KEY.to_string(),
-            s3_secret_access_key.to_string(),
-        );
+        let mut props: HashMap<String, String> = HashMap::new();
+        props.insert(CATALOG_TOKEN.to_string(), catalog_token);
+        props.insert(S3_ACCESS_KEY_ID.to_string(), s3_access_key_id);
+        props.insert(S3_SECRET_ACCESS_KEY.to_string(), s3_secret_access_key);
         props.insert(S3_ENDPOINT.to_string(), s3_endpoint.to_string());
 
         let catalog_config = RestCatalogConfig::builder()
@@ -103,12 +105,12 @@ impl IcebergClient {
         &self,
         namespace: &str,
         table_name: String,
-        table_schema: &TableSchema,
+        column_schemas: &[ColumnSchema],
     ) -> Result<(), iceberg::Error> {
         let namespace_ident = NamespaceIdent::from_strs(namespace.split('.'))?;
         let table_ident = TableIdent::new(namespace_ident.clone(), table_name.clone());
         if !self.catalog.table_exists(&table_ident).await? {
-            let iceberg_schema = postgres_to_iceberg_schema(table_schema)?;
+            let iceberg_schema = postgres_to_iceberg_schema(column_schemas)?;
             let creation = TableCreation::builder()
                 .name(table_name)
                 .schema(iceberg_schema)

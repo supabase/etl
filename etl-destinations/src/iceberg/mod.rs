@@ -1,3 +1,4 @@
+mod catalog;
 mod client;
 mod destination;
 mod encoding;
