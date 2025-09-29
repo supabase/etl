@@ -28,6 +28,7 @@ sqlx = { workspace = true, features = [
     "postgres",
     "json",
     "migrate",
+    "time",
 ] }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

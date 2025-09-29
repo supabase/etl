@@ -104,7 +104,6 @@ pin_project! {
         stream: LogicalReplicationStream,
         last_update: Option<Instant>,
         last_flush_lsn: Option<PgLsn>,
-        last_apply_lsn: Option<PgLsn>,
     }
 }
 
@@ -115,7 +114,6 @@ impl EventsStream {
             stream,
             last_update: None,
             last_flush_lsn: None,
-            last_apply_lsn: None,
         }
     }
 
@@ -128,18 +126,14 @@ impl EventsStream {
         self: Pin<&mut Self>,
         write_lsn: PgLsn,
         flush_lsn: PgLsn,
-        apply_lsn: PgLsn,
         force: bool,
     ) -> EtlResult<()> {
         let this = self.project();
 
         // If we are not forced to send an update, we can willingly do so based on a set of conditions.
         if !force
-            && let (Some(last_update), Some(last_flush), Some(last_apply)) = (
-                this.last_update.as_mut(),
-                this.last_flush_lsn.as_mut(),
-                this.last_apply_lsn.as_mut(),
-            )
+            && let (Some(last_update), Some(last_flush)) =
+                (this.last_update.as_mut(), this.last_flush_lsn.as_mut())
         {
             // The reason for only checking `flush_lsn` and `apply_lsn` is that if we are not
             // forced to send a status update to Postgres (when reply is requested), we want to just
@@ -151,10 +145,7 @@ impl EventsStream {
             // If we were to check `write_lsn` too, we would end up sending updates more frequently
             // when they are not requested, simply because the `write_lsn` is updated for every
             // incoming message in the apply loop.
-            if flush_lsn == *last_flush
-                && apply_lsn == *last_apply
-                && last_update.elapsed() < STATUS_UPDATE_INTERVAL
-            {
+            if flush_lsn == *last_flush && last_update.elapsed() < STATUS_UPDATE_INTERVAL {
                 return Ok(());
             }
         }
@@ -172,19 +163,22 @@ impl EventsStream {
             })?
             .as_micros() as i64;
 
+        // We will send the `flush_lsn` as `apply_lsn` since in our case, we don't distinguish between
+        // them as Postgres does. The reason is that `apply_lsn` is used to mark when an LSN is both
+        // durable and visible, but from ETL's perspective we are fine with just it being durable, which
+        // is marked via the `flush_lsn`.
         this.stream
-            .standby_status_update(write_lsn, flush_lsn, apply_lsn, ts, 0)
+            .standby_status_update(write_lsn, flush_lsn, flush_lsn, ts, 0)
             .await?;
 
         debug!(
             "status update successfully sent (write_lsn = {}, flush_lsn = {}, apply_lsn = {})",
-            write_lsn, flush_lsn, apply_lsn
+            write_lsn, flush_lsn, flush_lsn
         );
 
         // Update the state after successful send.
         *this.last_update = Some(Instant::now());
         *this.last_flush_lsn = Some(flush_lsn);
-        *this.last_apply_lsn = Some(apply_lsn);
 
         Ok(())
     }

@@ -1007,6 +1007,7 @@ async fn pipeline_replication_status_returns_table_states_and_names() {
 
     assert_eq!(response.pipeline_id, pipeline_id);
     assert_eq!(response.table_statuses.len(), 2);
+    assert!(response.apply_lag.is_none());
 
     // Verify table states
     for (table_oid, table_name) in &tables {
@@ -1017,6 +1018,7 @@ async fn pipeline_replication_status_returns_table_states_and_names() {
             .expect("Table not found in response");
 
         assert_eq!(table_status.table_id, table_oid.0);
+        assert!(table_status.table_sync_lag.is_none());
 
         match table_name.as_str() {
             "test.test_table_users" => assert!(matches!(
@@ -1025,7 +1027,7 @@ async fn pipeline_replication_status_returns_table_states_and_names() {
             )),
             "test.test_table_orders" => assert!(matches!(
                 table_status.state,
-                SimpleTableReplicationState::FollowingWal { .. }
+                SimpleTableReplicationState::FollowingWal
             )),
             _ => panic!("Unexpected table name: {table_name}"),
         }
@@ -1069,7 +1071,7 @@ async fn rollback_table_state_succeeds_for_manual_retry_errors() {
     assert_eq!(response.table_id, table_oid.0);
     assert!(matches!(
         response.new_state,
-        SimpleTableReplicationState::FollowingWal { .. }
+        SimpleTableReplicationState::FollowingWal
     ));
 
     drop_pg_database(&source_db_config).await;

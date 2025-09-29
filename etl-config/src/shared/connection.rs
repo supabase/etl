@@ -6,6 +6,9 @@ use tokio_postgres::{Config as TokioPgConnectOptions, config::SslMode as TokioPg
 use crate::shared::ValidationError;
 use crate::{Config, SerializableSecretString};
 
+/// The name identifying the application using this connection.
+const ETL_APPLICATION_NAME: &str = "supabase_etl";
+
 /// Postgres server options for ETL workloads.
 ///
 /// Configures session-specific settings that are applied during connection
@@ -59,7 +62,7 @@ impl Default for PgConnectionOptions {
             statement_timeout: 0,
             lock_timeout: 30_000, // 30 seconds in milliseconds
             idle_in_transaction_session_timeout: 0,
-            application_name: "etl".to_string(),
+            application_name: ETL_APPLICATION_NAME.to_string(),
         }
     }
 }
@@ -260,7 +263,7 @@ mod tests {
 
         assert_eq!(
             options_string,
-            "-c datestyle=ISO -c intervalstyle=postgres -c extra_float_digits=3 -c client_encoding=UTF8 -c timezone=UTC -c statement_timeout=0 -c lock_timeout=30000 -c idle_in_transaction_session_timeout=0 -c application_name=etl"
+            "-c datestyle=ISO -c intervalstyle=postgres -c extra_float_digits=3 -c client_encoding=UTF8 -c timezone=UTC -c statement_timeout=0 -c lock_timeout=30000 -c idle_in_transaction_session_timeout=0 -c application_name=supabase_etl"
         );
     }
 
@@ -281,6 +284,6 @@ mod tests {
             "idle_in_transaction_session_timeout".to_string(),
             "0".to_string()
         )));
-        assert!(pairs.contains(&("application_name".to_string(), "etl".to_string())));
+        assert!(pairs.contains(&("application_name".to_string(), "supabase_etl".to_string())));
     }
 }
