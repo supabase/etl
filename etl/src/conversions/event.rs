@@ -54,30 +54,24 @@ pub fn parse_event_from_commit_message(
 ///
 /// This method parses the replication protocol relation message and builds
 /// a complete table schema for use in interpreting subsequent data events.
-pub fn parse_event_from_relation_message(
+pub fn parse_event_from_relation_message<S>(
+    schema_store: &S,
     start_lsn: PgLsn,
     commit_lsn: PgLsn,
     relation_body: &protocol::RelationBody,
-) -> EtlResult<RelationEvent> {
-    let table_name = TableName::new(
-        relation_body.namespace()?.to_string(),
-        relation_body.name()?.to_string(),
-    );
-    let column_schemas = relation_body
-        .columns()
-        .iter()
-        .map(build_column_schema)
-        .collect::<Result<Vec<ColumnSchema>, _>>()?;
-    let table_schema = TableSchema::new(
-        TableId::new(relation_body.rel_id()),
-        table_name,
-        column_schemas,
-    );
+) -> EtlResult<RelationEvent>
+where
+    S: SchemaStore,
+{
+    let table_id = relation_body.rel_id();
+
+    let column_schemas = relation_body.columns().iter().map(build_column_schema);
 
     Ok(RelationEvent {
         start_lsn,
         commit_lsn,
-        table_schema,
+        changes: vec![],
+        table_id: TableId::new(table_id),
     })
 }
 

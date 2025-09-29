@@ -1,4 +1,4 @@
-use etl_postgres::types::{TableId, TableSchema};
+use etl_postgres::types::{ColumnSchema, TableId, TableSchema};
 use std::fmt;
 use tokio_postgres::types::PgLsn;
 
@@ -40,6 +40,13 @@ pub struct CommitEvent {
     pub timestamp: i64,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum RelationChange {
+    AddColumn(ColumnSchema),
+    DropColumn(ColumnSchema),
+    AlterColumn(ColumnSchema),
+}
+
 /// Table schema definition event from Postgres logical replication.
 ///
 /// [`RelationEvent`] provides schema information for tables involved in replication.
@@ -51,8 +58,10 @@ pub struct RelationEvent {
     pub start_lsn: PgLsn,
     /// LSN position where the transaction of this event will commit.
     pub commit_lsn: PgLsn,
-    /// Complete table schema including columns and types.
-    pub table_schema: TableSchema,
+    /// Set of changes for this table (compared to the most recent version of the schema).
+    pub changes: Vec<RelationChange>,
+    /// ID of the table of which this is a schema change.
+    pub table_id: TableId,
 }
 
 /// Row insertion event from Postgres logical replication.

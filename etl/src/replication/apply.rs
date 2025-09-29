@@ -1115,36 +1115,9 @@ where
         return Ok(HandleMessageResult::no_event());
     }
 
-    // If no table schema is found, it means that something went wrong since we should have schemas
-    // ready before starting the apply loop.
-    let existing_table_schema =
-        schema_store
-            .get_table_schema(&table_id)
-            .await?
-            .ok_or_else(|| {
-                etl_error!(
-                    ErrorKind::MissingTableSchema,
-                    "Table not found in the schema cache",
-                    format!("The table schema for table {table_id} was not found in the cache")
-                )
-            })?;
-
     // Convert event from the protocol message.
-    let event = parse_event_from_relation_message(start_lsn, remote_final_lsn, message)?;
-
-    // We compare the table schema from the relation message with the existing schema (if any).
-    // The purpose of this comparison is that we want to throw an error and stop the processing
-    // of any table that incurs in a schema change after the initial table sync is performed.
-    if !existing_table_schema.partial_eq(&event.table_schema) {
-        let error = TableReplicationError::with_solution(
-            table_id,
-            format!("The schema for table {table_id} has changed during streaming"),
-            "ETL doesn't support schema changes at this point in time, rollback the schema",
-            RetryPolicy::ManualRetry,
-        );
-
-        return Ok(HandleMessageResult::finish_batch_and_exclude_event(error));
-    }
+    let event =
+        parse_event_from_relation_message(schema_store, start_lsn, remote_final_lsn, message)?;
 
     Ok(HandleMessageResult::return_event(Event::Relation(event)))
 }
