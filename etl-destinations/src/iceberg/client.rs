@@ -75,12 +75,12 @@ impl IcebergClient {
         props.insert(S3_ENDPOINT.to_string(), s3_endpoint.to_string());
 
         let catalog_config = RestCatalogConfig::builder()
-            .uri(catalog_uri)
+            .uri(catalog_uri.clone())
             .warehouse(warehouse.clone())
             .props(props)
             .build();
         let inner = RestCatalog::new(catalog_config);
-        let client = SupabaseClient::new(base_uri, warehouse, catalog_token);
+        let client = SupabaseClient::new(catalog_uri, warehouse, catalog_token);
 
         let catalog = SupabaseCatalog::new(inner, client);
 
