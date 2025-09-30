@@ -65,7 +65,6 @@ impl Catalog for SupabaseCatalog {
     }
 
     async fn list_tables(&self, namespace: &NamespaceIdent) -> Result<Vec<TableIdent>> {
-        // self.client.list_tables(namespace).await
         self.inner.list_tables(namespace).await
     }
 
@@ -74,7 +73,7 @@ impl Catalog for SupabaseCatalog {
     }
 
     async fn drop_table(&self, identifier: &TableIdent) -> Result<()> {
-        self.inner.drop_table(identifier).await
+        self.client.drop_table(identifier).await
     }
 
     async fn rename_table(&self, src: &TableIdent, dest: &TableIdent) -> Result<()> {
@@ -117,6 +116,14 @@ impl SupabaseClient {
         }
     }
 
+    fn table_url(&self, namespace: &str, table: &str) -> String {
+        let base = self.base_uri.trim_end_matches('/');
+        format!(
+            "{base}/v1/{}/namespaces/{namespace}/tables/{table}",
+            self.warehouse
+        )
+    }
+
     fn tables_url(&self, namespace_path: &str) -> String {
         let base = self.base_uri.trim_end_matches('/');
         format!(
@@ -155,7 +162,7 @@ impl SupabaseClient {
         })?;
 
         let http_response = self
-            .send_request(reqwest::Method::POST, &url, Some(body))
+            .send_request(reqwest::Method::POST, &url, Some(body), None)
             .await?;
 
         let response = match http_response.status() {
@@ -202,6 +209,30 @@ impl SupabaseClient {
         }
     }
 
+    /// Drop a table from the catalog.
+    async fn drop_table(&self, table: &TableIdent) -> Result<()> {
+        let namespace_path = table.namespace().as_ref().join(".");
+        let url = self.table_url(&namespace_path, table.name());
+
+        let http_response = self
+            .send_request(
+                reqwest::Method::DELETE,
+                &url,
+                None,
+                Some(&[("purgeRequested", "true")]), // S3 tables doesn't support dropping tables with purging
+            )
+            .await?;
+
+        match http_response.status() {
+            StatusCode::NO_CONTENT | StatusCode::OK => Ok(()),
+            StatusCode::NOT_FOUND => Err(Error::new(
+                ErrorKind::Unexpected,
+                "Tried to drop a table that does not exist",
+            )),
+            _ => Err(deserialize_unexpected_catalog_error(http_response).await),
+        }
+    }
+
     async fn load_file_io(
         &self,
         metadata_location: Option<&str>,
@@ -231,6 +262,7 @@ impl SupabaseClient {
         method: reqwest::Method,
         url: &str,
         body: Option<serde_json::Value>,
+        query: Option<&[(&str, &str)]>,
     ) -> Result<Response> {
         let mut request = self
             .client
@@ -240,6 +272,10 @@ impl SupabaseClient {
 
         if let Some(body) = body {
             request = request.json(&body);
+        }
+
+        if let Some(query) = query {
+            request = request.query(query)
         }
 
         let response = request
