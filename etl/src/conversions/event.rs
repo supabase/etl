@@ -5,6 +5,7 @@ use std::cmp::Ordering;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 use tokio_postgres::types::PgLsn;
+use tracing::info;
 
 use crate::conversions::text::{default_value_for_type, parse_cell_from_postgres_text};
 use crate::error::{ErrorKind, EtlError, EtlResult};
@@ -380,7 +381,7 @@ pub fn convert_tuple_to_row(
                 } else if use_default_for_missing_cols {
                     default_value_for_type(&column_schema.typ)?
                 } else {
-                    // This is protocol level error, so we panic instead of carrying on
+                    // This is a protocol level error, so we panic instead of carrying on
                     // with incorrect data to avoid corruption downstream.
                     panic!(
                         "A required column {} was missing from the tuple",
@@ -391,7 +392,7 @@ pub fn convert_tuple_to_row(
             protocol::TupleData::UnchangedToast => {
                 // For unchanged toast values we try to use the value from the old row if it is present
                 // but only if it is not null. In all other cases we send the default value for
-                // consistency. As a bit of a practical hack we take the value out of the old row and
+                // consistency. As a bit of a practical hack, we take the value out of the old row and
                 // move a null value in its place to avoid a clone because toast values tend to be large.
                 if let Some(row) = old_table_row {
                     let old_row_value = std::mem::replace(&mut row.values[i], Cell::Null);

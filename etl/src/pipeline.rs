@@ -22,7 +22,7 @@ use etl_postgres::types::TableId;
 use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::Semaphore;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 /// Internal state tracking for pipeline lifecycle.
 ///
@@ -204,7 +204,7 @@ where
             // it means that no table sync workers are running, which is fine.
             let _ = self.shutdown_tx.shutdown();
 
-            info!("apply worker completed with an error, shutting down table sync workers");
+            warn!("apply worker completed with an error, shutting down table sync workers");
         }
 
         info!("waiting for table sync workers to complete");
@@ -217,7 +217,7 @@ where
 
             errors.push(err);
 
-            info!("{} table sync workers failed with an error", errors_number);
+            warn!("{} table sync workers failed with an error", errors_number);
         }
 
         if !errors.is_empty() {

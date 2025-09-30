@@ -259,6 +259,175 @@ impl BigQueryClient {
         Ok(())
     }
 
+    /// Adds a column to an existing BigQuery table if it does not already exist.
+    pub async fn add_column(
+        &self,
+        dataset_id: &BigQueryDatasetId,
+        table_id: &BigQueryTableId,
+        column_schema: &ColumnSchema,
+    ) -> EtlResult<()> {
+        let full_table_name = self.full_table_name(dataset_id, table_id);
+        let column_definition = Self::column_spec(column_schema);
+        let query =
+            format!("alter table {full_table_name} add column if not exists {column_definition}");
+
+        let _ = self.query(QueryRequest::new(query)).await?;
+
+        Ok(())
+    }
+
+    /// Drops a column from an existing BigQuery table if it exists.
+    pub async fn drop_column(
+        &self,
+        dataset_id: &BigQueryDatasetId,
+        table_id: &BigQueryTableId,
+        column_name: &str,
+    ) -> EtlResult<()> {
+        let full_table_name = self.full_table_name(dataset_id, table_id);
+        let column_identifier = column_name;
+        let query =
+            format!("alter table {full_table_name} drop column if exists {column_identifier}");
+
+        let _ = self.query(QueryRequest::new(query)).await?;
+
+        Ok(())
+    }
+
+    /// Renames a column in an existing BigQuery table.
+    pub async fn rename_column(
+        &self,
+        dataset_id: &BigQueryDatasetId,
+        table_id: &BigQueryTableId,
+        old_name: &str,
+        new_name: &str,
+    ) -> EtlResult<()> {
+        let full_table_name = self.full_table_name(dataset_id, table_id);
+        let old_identifier = old_name;
+        let new_identifier = new_name;
+        let query = format!(
+            "alter table {full_table_name} rename column {old_identifier} to {new_identifier}"
+        );
+
+        let _ = self.query(QueryRequest::new(query)).await?;
+
+        Ok(())
+    }
+
+    /// Alters the data type of an existing column in a BigQuery table.
+    pub async fn alter_column_type(
+        &self,
+        dataset_id: &BigQueryDatasetId,
+        table_id: &BigQueryTableId,
+        column_schema: &ColumnSchema,
+    ) -> EtlResult<()> {
+        let full_table_name = self.full_table_name(dataset_id, table_id);
+        let column_identifier = &column_schema.name;
+        let column_type = Self::postgres_to_bigquery_type(&column_schema.typ);
+        let query = format!(
+            "alter table {full_table_name} alter column {column_identifier} set data type {column_type}"
+        );
+
+        let _ = self.query(QueryRequest::new(query)).await?;
+
+        Ok(())
+    }
+
+    /// Updates the nullability of an existing column in a BigQuery table.
+    pub async fn alter_column_nullability(
+        &self,
+        dataset_id: &BigQueryDatasetId,
+        table_id: &BigQueryTableId,
+        column_name: &str,
+        nullable: bool,
+    ) -> EtlResult<()> {
+        let full_table_name = self.full_table_name(dataset_id, table_id);
+        let column_identifier = column_name;
+        let clause = if nullable {
+            "drop not null"
+        } else {
+            "set not null"
+        };
+        let query =
+            format!("alter table {full_table_name} alter column {column_identifier} {clause}");
+
+        let _ = self.query(QueryRequest::new(query)).await?;
+
+        Ok(())
+    }
+
+    /// Synchronizes the primary key definition for a BigQuery table with the provided schema.
+    pub async fn sync_primary_key(
+        &self,
+        dataset_id: &BigQueryDatasetId,
+        table_id: &BigQueryTableId,
+        column_schemas: &[ColumnSchema],
+    ) -> EtlResult<()> {
+        let primary_columns: Vec<&ColumnSchema> = column_schemas
+            .iter()
+            .filter(|column| column.primary)
+            .collect();
+
+        let has_primary_key = self.has_primary_key(dataset_id, table_id).await?;
+
+        if primary_columns.is_empty() {
+            if has_primary_key {
+                self.drop_primary_key(dataset_id, table_id).await?;
+            }
+            return Ok(());
+        }
+
+        if has_primary_key {
+            self.drop_primary_key(dataset_id, table_id).await?;
+        }
+
+        let columns = primary_columns
+            .iter()
+            .map(|column| column.name)
+            .collect::<Vec<_>>()
+            .join(",");
+
+        let full_table_name = self.full_table_name(dataset_id, table_id);
+        let query =
+            format!("alter table {full_table_name} add primary key ({columns}) not enforced");
+
+        let _ = self.query(QueryRequest::new(query)).await?;
+
+        Ok(())
+    }
+
+    async fn has_primary_key(
+        &self,
+        dataset_id: &BigQueryDatasetId,
+        table_id: &BigQueryTableId,
+    ) -> EtlResult<bool> {
+        let info_schema_table = format!(
+            "`{}.{}`.INFORMATION_SCHEMA.TABLE_CONSTRAINTS`",
+            &self.project_id,
+            dataset_id
+        );
+        let table_literal = table_id;
+        let query = format!(
+            "select constraint_name from {info_schema_table} where table_name = '{table_literal}' and constraint_type = 'PRIMARY KEY'",
+        );
+
+        let result_set = self.query(QueryRequest::new(query)).await?;
+
+        Ok(result_set.row_count() > 0)
+    }
+
+    async fn drop_primary_key(
+        &self,
+        dataset_id: &BigQueryDatasetId,
+        table_id: &BigQueryTableId,
+    ) -> EtlResult<()> {
+        let full_table_name = self.full_table_name(dataset_id, table_id);
+        let query = format!("alter table {full_table_name} drop primary key");
+
+        let _ = self.query(QueryRequest::new(query)).await?;
+
+        Ok(())
+    }
+
     /// Checks whether a table exists in the BigQuery dataset.
     ///
     /// Returns `true` if the table exists, `false` otherwise.
