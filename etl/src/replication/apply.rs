@@ -13,6 +13,7 @@ use tokio::pin;
 use tokio_postgres::types::PgLsn;
 use tracing::{debug, info};
 
+use crate::bail;
 use crate::concurrency::shutdown::ShutdownRx;
 use crate::concurrency::signal::SignalRx;
 use crate::concurrency::stream::{TimeoutStream, TimeoutStreamResult};
@@ -31,10 +32,9 @@ use crate::metrics::{
 };
 use crate::replication::client::PgReplicationClient;
 use crate::replication::stream::EventsStream;
-use crate::state::table::{RetryPolicy, TableReplicationError};
+use crate::state::table::TableReplicationError;
 use crate::store::schema::SchemaStore;
 use crate::types::{Event, PipelineId};
-use crate::{bail, etl_error};
 
 /// The amount of milliseconds that pass between one refresh and the other of the system, in case no
 /// events or shutdown signal are received.
@@ -210,8 +210,6 @@ impl StatusUpdate {
 enum EndBatch {
     /// The batch should include the last processed event and end.
     Inclusive,
-    /// The batch should exclude the last processed event and end.
-    Exclusive,
 }
 
 /// Result returned from `handle_replication_message` and related functions
@@ -283,18 +281,6 @@ impl HandleMessageResult {
     fn return_event(event: Event) -> Self {
         Self {
             event: Some(event),
-            ..Default::default()
-        }
-    }
-
-    /// Creates a result that excludes the current event and requests batch termination.
-    ///
-    /// Used when the current message triggers a recoverable table-level error.
-    /// The error is propagated to be handled by the apply loop hook.
-    fn finish_batch_and_exclude_event(error: TableReplicationError) -> Self {
-        Self {
-            end_batch: Some(EndBatch::Exclusive),
-            table_replication_error: Some(error),
             ..Default::default()
         }
     }
@@ -1117,7 +1103,8 @@ where
 
     // Convert event from the protocol message.
     let event =
-        parse_event_from_relation_message(schema_store, start_lsn, remote_final_lsn, message)?;
+        parse_event_from_relation_message(schema_store, start_lsn, remote_final_lsn, message)
+            .await?;
 
     Ok(HandleMessageResult::return_event(Event::Relation(event)))
 }

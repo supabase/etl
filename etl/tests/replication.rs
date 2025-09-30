@@ -261,7 +261,7 @@ async fn test_table_schema_copy_across_multiple_connections() {
             test_table_name("table_1"),
             &[TableModification::AddColumn {
                 name: "year",
-                data_type: "integer",
+                params: "integer",
             }],
         )
         .await

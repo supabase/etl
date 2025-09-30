@@ -1,7 +1,5 @@
 use core::str;
-use etl_postgres::types::{
-    ColumnSchema, TableId, TableName, TableSchema, convert_type_oid_to_type,
-};
+use etl_postgres::types::{ColumnSchema, TableId, TableSchema, convert_type_oid_to_type};
 use postgres_replication::protocol;
 use std::collections::HashSet;
 use std::hash::Hash;
@@ -11,14 +9,16 @@ use tokio_postgres::types::PgLsn;
 use crate::conversions::text::{default_value_for_type, parse_cell_from_postgres_text};
 use crate::error::{ErrorKind, EtlError, EtlResult};
 use crate::store::schema::SchemaStore;
-use crate::types::{BeginEvent, Cell, CommitEvent, DeleteEvent, InsertEvent, RelationChange, RelationEvent, TableRow, TruncateEvent, UpdateEvent};
+use crate::types::{
+    BeginEvent, Cell, CommitEvent, DeleteEvent, InsertEvent, RelationChange, RelationEvent,
+    TableRow, TruncateEvent, UpdateEvent,
+};
 use crate::{bail, etl_error};
 
 #[derive(Debug, Clone)]
 struct IndexedColumnSchema(ColumnSchema);
 
 impl IndexedColumnSchema {
-
     fn into_inner(self) -> ColumnSchema {
         self.0
     }
@@ -27,14 +27,12 @@ impl IndexedColumnSchema {
 impl Eq for IndexedColumnSchema {}
 
 impl PartialEq for IndexedColumnSchema {
-
     fn eq(&self, other: &Self) -> bool {
         self.0.name == other.0.name
     }
 }
 
 impl Hash for IndexedColumnSchema {
-
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.0.name.hash(state);
     }
@@ -105,16 +103,22 @@ where
         .collect::<Result<HashSet<IndexedColumnSchema>, EtlError>>()?;
 
     let mut changes = vec![];
-    for column_schema in existing_column_schemas {
-        let latest_column_schema = latest_column_schemas.take(column_schema);
+    for column_schema in existing_column_schemas.column_schemas.iter() {
+        let column_schema = IndexedColumnSchema(column_schema.clone());
+        let latest_column_schema = latest_column_schemas.take(&column_schema);
         match latest_column_schema {
             Some(latest_column_schema) => {
-                changes.push(RelationChange::AlterColumn(latest_column_schema.into_inner()));
+                // If we find a column with the same name, we assume it was changed. The only changes
+                // that we detect are changes to the column but with preserved name.
+                changes.push(RelationChange::AlterColumn(
+                    column_schema.into_inner(),
+                    latest_column_schema.into_inner(),
+                ));
             }
             None => {
                 // If we don't find the column in the latest schema, we assume it was dropped even
                 // though it could be renamed.
-                changes.push(RelationChange::DropColumn(column_schema));
+                changes.push(RelationChange::DropColumn(column_schema.into_inner()));
             }
         }
     }

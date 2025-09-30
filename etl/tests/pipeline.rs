@@ -490,6 +490,140 @@ async fn table_copy_replicates_existing_data() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn table_schema_changes_are_handled_correctly() {
+    init_test_tracing();
+    let mut database = spawn_source_database().await;
+    let database_schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
+
+    // Insert initial users data.
+    insert_users_data(&mut database, &database_schema.users_schema().name, 1..=1).await;
+
+    let store = NotifyingStore::new();
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
+
+    // Start pipeline from scratch.
+    let pipeline_id: PipelineId = random();
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        database_schema.publication_name(),
+        store.clone(),
+        destination.clone(),
+    );
+
+    // Register notifications for table copy completion.
+    let users_state_notify = store
+        .notify_on_table_state_type(
+            database_schema.users_schema().id,
+            TableReplicationPhaseType::SyncDone,
+        )
+        .await;
+
+    pipeline.start().await.unwrap();
+
+    users_state_notify.notified().await;
+
+    // Check the initial schema.
+    let table_schemas = store.get_table_schemas().await;
+    assert_eq!(table_schemas.len(), 1);
+    assert!(table_schemas.contains_key(&database_schema.users_schema().id));
+
+    // Check the initial data.
+    let table_rows = destination.get_table_rows().await;
+    let users_table_rows = table_rows.get(&database_schema.users_schema().id).unwrap();
+    assert_eq!(users_table_rows.len(), 1);
+
+    // We perform schema changes.
+    database
+        .alter_table(
+            test_table_name("users"),
+            &[
+                TableModification::AddColumn {
+                    name: "year",
+                    params: "integer",
+                },
+                TableModification::RenameColumn {
+                    name: "age",
+                    new_name: "new_age",
+                },
+            ],
+        )
+        .await
+        .unwrap();
+
+    // Register notifications for the insert.
+    let insert_event_notify = destination
+        .wait_for_events_count(vec![(EventType::Insert, 1)])
+        .await;
+
+    // We insert data.
+    database
+        .insert_values(
+            database_schema.users_schema().name.clone(),
+            &["name", "new_age", "year"],
+            &[&"user_2", &(2i32), &(2025i32)],
+        )
+        .await
+        .expect("Failed to insert users");
+
+    insert_event_notify.notified().await;
+
+    // Check the updated schema.
+    let table_schemas = store.get_table_schemas().await;
+    assert_eq!(table_schemas.len(), 1);
+    assert!(table_schemas.contains_key(&database_schema.users_schema().id));
+
+    // Check the updated data.
+    let table_rows = destination.get_table_rows().await;
+    let users_table_rows = table_rows.get(&database_schema.users_schema().id).unwrap();
+    assert_eq!(users_table_rows.len(), 1);
+    //
+    // // We perform schema changes.
+    // database
+    //     .alter_table(
+    //         test_table_name("users"),
+    //         &[
+    //             TableModification::DropColumn {
+    //                 name: "year",
+    //             },
+    //             TableModification::AlterColumn {
+    //                 name: "new_age",
+    //                 params: "type double precision using new_age::double precision",
+    //             },
+    //         ],
+    //     )
+    //     .await
+    //     .unwrap();
+    //
+    // // Register notifications for the insert.
+    // let insert_event_notify = destination.wait_for_events_count(vec![(EventType::Insert, 2)]).await;
+    //
+    // // We insert data.
+    // database
+    //     .insert_values(
+    //         database_schema.users_schema().name.clone(),
+    //         &["name", "new_age", "year"],
+    //         &[&"user_3", &(2i32), &(2025i32)],
+    //     )
+    //     .await
+    //     .expect("Failed to insert users");
+    //
+    // insert_event_notify.notified().await;
+    //
+    // // Check the updated schema.
+    // let table_schemas = store.get_table_schemas().await;
+    // assert_eq!(table_schemas.len(), 1);
+    // assert!(table_schemas.contains_key(&database_schema.users_schema().id));
+    //
+    // // Check the updated data.
+    // let table_rows = destination.get_table_rows().await;
+    // let users_table_rows = table_rows.get(&database_schema.users_schema().id).unwrap();
+    // assert_eq!(users_table_rows.len(), 1);
+    //
+    // pipeline.shutdown_and_wait().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn table_copy_and_sync_streams_new_data() {
     init_test_tracing();
     let mut database = spawn_source_database().await;
@@ -889,7 +1023,7 @@ async fn table_processing_with_schema_change_errors_table() {
             database_schema.orders_schema().name.clone(),
             &[TableModification::AddColumn {
                 name: "date",
-                data_type: "integer",
+                params: "integer",
             }],
         )
         .await

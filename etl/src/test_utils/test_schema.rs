@@ -236,7 +236,7 @@ pub fn events_equal_excluding_fields(left: &Event, right: &Event) -> bool {
         (Event::Delete(left), Event::Delete(right)) => {
             left.table_id == right.table_id && left.old_table_row == right.old_table_row
         }
-        (Event::Relation(left), Event::Relation(right)) => left.table_schema == right.table_schema,
+        (Event::Relation(left), Event::Relation(right)) => left.table_id == right.table_id,
         (Event::Truncate(left), Event::Truncate(right)) => {
             left.options == right.options && left.rel_ids == right.rel_ids
         }

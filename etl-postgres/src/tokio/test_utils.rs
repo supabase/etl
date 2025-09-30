@@ -12,22 +12,15 @@ use crate::types::{ColumnSchema, TableId, TableName};
 /// Table modification operations for ALTER TABLE statements.
 pub enum TableModification<'a> {
     /// Add a new column with specified name and data type.
-    AddColumn {
-        name: &'a str,
-        data_type: &'a str,
-    },
+    AddColumn { name: &'a str, params: &'a str },
     /// Drop an existing column by name.
-    DropColumn {
-        name: &'a str,
-    },
+    DropColumn { name: &'a str },
     /// Alter an existing column with the specified alteration.
-    AlterColumn {
-        name: &'a str,
-        alteration: &'a str,
-    },
-    ReplicaIdentity {
-        value: &'a str,
-    },
+    AlterColumn { name: &'a str, params: &'a str },
+    /// Rename an existing column.
+    RenameColumn { name: &'a str, new_name: &'a str },
+    /// Change the replica identity setting for the table.
+    ReplicaIdentity { value: &'a str },
 }
 
 /// Postgres database wrapper for testing operations.
@@ -183,35 +176,39 @@ impl<G: GenericClient> PgDatabase<G> {
         table_name: TableName,
         modifications: &[TableModification<'_>],
     ) -> Result<(), tokio_postgres::Error> {
-        let modifications_str = modifications
-            .iter()
-            .map(|modification| match modification {
-                TableModification::AddColumn { name, data_type } => {
+        for modification in modifications {
+            let modification_str = match modification {
+                TableModification::AddColumn {
+                    name,
+                    params: data_type,
+                } => {
                     format!("add column {name} {data_type}")
                 }
                 TableModification::DropColumn { name } => {
                     format!("drop column {name}")
                 }
-                TableModification::AlterColumn { name, alteration } => {
+                TableModification::AlterColumn {
+                    name,
+                    params: alteration,
+                } => {
                     format!("alter column {name} {alteration}")
+                }
+                TableModification::RenameColumn { name, new_name } => {
+                    format!("rename column {name} to {new_name}")
                 }
                 TableModification::ReplicaIdentity { value } => {
                     format!("replica identity {value}")
                 }
-            })
-            .collect::<Vec<_>>()
-            .join(", ");
+            };
 
-        let alter_table_query = format!(
-            "alter table {} {}",
-            table_name.as_quoted_identifier(),
-            modifications_str
-        );
-        self.client
-            .as_ref()
-            .unwrap()
-            .execute(&alter_table_query, &[])
-            .await?;
+            let query = format!(
+                "alter table {} {}",
+                table_name.as_quoted_identifier(),
+                modification_str
+            );
+
+            self.client.as_ref().unwrap().execute(&query, &[]).await?;
+        }
 
         Ok(())
     }
@@ -224,7 +221,7 @@ impl<G: GenericClient> PgDatabase<G> {
         &self,
         table_name: TableName,
         columns: &[&str],
-        values: &[&(dyn tokio_postgres::types::ToSql + Sync)],
+        values: &[&(dyn ToSql + Sync)],
     ) -> Result<u64, tokio_postgres::Error> {
         let columns_str = columns.join(", ");
         let placeholders: Vec<String> = (1..=values.len()).map(|i| format!("${i}")).collect();

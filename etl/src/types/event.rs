@@ -1,4 +1,4 @@
-use etl_postgres::types::{ColumnSchema, TableId, TableSchema};
+use etl_postgres::types::{ColumnSchema, TableId};
 use std::fmt;
 use tokio_postgres::types::PgLsn;
 
@@ -44,7 +44,7 @@ pub struct CommitEvent {
 pub enum RelationChange {
     AddColumn(ColumnSchema),
     DropColumn(ColumnSchema),
-    AlterColumn(ColumnSchema),
+    AlterColumn(ColumnSchema, ColumnSchema),
 }
 
 /// Table schema definition event from Postgres logical replication.
@@ -184,7 +184,7 @@ impl Event {
             Event::Insert(insert_event) => insert_event.table_id == *table_id,
             Event::Update(update_event) => update_event.table_id == *table_id,
             Event::Delete(delete_event) => delete_event.table_id == *table_id,
-            Event::Relation(relation_event) => relation_event.table_schema.id == *table_id,
+            Event::Relation(relation_event) => relation_event.table_id == *table_id,
             Event::Truncate(event) => {
                 let Some(_) = event.rel_ids.iter().find(|&&id| table_id.0 == id) else {
                     return false;
