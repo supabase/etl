@@ -98,6 +98,33 @@ impl BigQueryClient {
         Ok(BigQueryClient { project_id, client })
     }
 
+    /// Creates a new [`BigQueryClient`] using Application Default Credentials.
+    ///
+    /// Authenticates with BigQuery using the environment's default credentials.
+    /// Returns an error if credentials are missing or invalid.
+    pub async fn new_with_adc(project_id: BigQueryProjectId) -> EtlResult<BigQueryClient> {
+        let client = Client::from_application_default_credentials()
+            .await
+            .map_err(bq_error_to_etl_error)?;
+
+        Ok(BigQueryClient { project_id, client })
+    }
+
+    /// Creates a new [`BigQueryClient`] using OAuth2 installed flow authentication.
+    ///
+    /// Authenticates with BigQuery using the OAuth2 installed flow.
+    pub async fn new_with_flow_authenticator<S: AsRef<[u8]>, P: Into<std::path::PathBuf>>(
+        project_id: BigQueryProjectId,
+        secret: S,
+        persistant_file_path: P,
+    ) -> EtlResult<BigQueryClient> {
+        let client = Client::from_installed_flow_authenticator(secret, persistant_file_path)
+            .await
+            .map_err(bq_error_to_etl_error)?;
+
+        Ok(BigQueryClient { project_id, client })
+    }
+
     /// Returns the fully qualified BigQuery table name.
     ///
     /// Formats the table name as `project_id.dataset_id.table_id` with proper quoting.
