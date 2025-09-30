@@ -3,17 +3,42 @@ use etl_postgres::types::{
     ColumnSchema, TableId, TableName, TableSchema, convert_type_oid_to_type,
 };
 use postgres_replication::protocol;
+use std::collections::HashSet;
+use std::hash::Hash;
 use std::sync::Arc;
 use tokio_postgres::types::PgLsn;
 
 use crate::conversions::text::{default_value_for_type, parse_cell_from_postgres_text};
-use crate::error::{ErrorKind, EtlResult};
+use crate::error::{ErrorKind, EtlError, EtlResult};
 use crate::store::schema::SchemaStore;
-use crate::types::{
-    BeginEvent, Cell, CommitEvent, DeleteEvent, InsertEvent, RelationEvent, TableRow,
-    TruncateEvent, UpdateEvent,
-};
+use crate::types::{BeginEvent, Cell, CommitEvent, DeleteEvent, InsertEvent, RelationChange, RelationEvent, TableRow, TruncateEvent, UpdateEvent};
 use crate::{bail, etl_error};
+
+#[derive(Debug, Clone)]
+struct IndexedColumnSchema(ColumnSchema);
+
+impl IndexedColumnSchema {
+
+    fn into_inner(self) -> ColumnSchema {
+        self.0
+    }
+}
+
+impl Eq for IndexedColumnSchema {}
+
+impl PartialEq for IndexedColumnSchema {
+
+    fn eq(&self, other: &Self) -> bool {
+        self.0.name == other.0.name
+    }
+}
+
+impl Hash for IndexedColumnSchema {
+
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.0.name.hash(state);
+    }
+}
 
 /// Creates a [`BeginEvent`] from Postgres protocol data.
 ///
@@ -54,7 +79,7 @@ pub fn parse_event_from_commit_message(
 ///
 /// This method parses the replication protocol relation message and builds
 /// a complete table schema for use in interpreting subsequent data events.
-pub fn parse_event_from_relation_message<S>(
+pub async fn parse_event_from_relation_message<S>(
     schema_store: &S,
     start_lsn: PgLsn,
     commit_lsn: PgLsn,
@@ -63,15 +88,47 @@ pub fn parse_event_from_relation_message<S>(
 where
     S: SchemaStore,
 {
-    let table_id = relation_body.rel_id();
+    let table_id = TableId::new(relation_body.rel_id());
 
-    let column_schemas = relation_body.columns().iter().map(build_column_schema);
+    let Some(existing_column_schemas) = schema_store.get_table_schema(&table_id).await? else {
+        bail!(
+            ErrorKind::MissingTableSchema,
+            "Table not found in the schema cache",
+            format!("The table schema for table {table_id} was not found in the cache")
+        )
+    };
+
+    let mut latest_column_schemas = relation_body
+        .columns()
+        .iter()
+        .map(build_indexed_column_schema)
+        .collect::<Result<HashSet<IndexedColumnSchema>, EtlError>>()?;
+
+    let mut changes = vec![];
+    for column_schema in existing_column_schemas {
+        let latest_column_schema = latest_column_schemas.take(column_schema);
+        match latest_column_schema {
+            Some(latest_column_schema) => {
+                changes.push(RelationChange::AlterColumn(latest_column_schema.into_inner()));
+            }
+            None => {
+                // If we don't find the column in the latest schema, we assume it was dropped even
+                // though it could be renamed.
+                changes.push(RelationChange::DropColumn(column_schema));
+            }
+        }
+    }
+
+    // For the remaining columns that didn't match, we assume they were added.
+    for column_schema in latest_column_schemas {
+        changes.push(RelationChange::AddColumn(column_schema.into_inner()));
+    }
 
     Ok(RelationEvent {
         start_lsn,
         commit_lsn,
         changes: vec![],
-        table_id: TableId::new(table_id),
+        table_id,
     })
 }
 
@@ -238,13 +295,13 @@ where
         })
 }
 
-/// Constructs a [`ColumnSchema`] from Postgres protocol column data.
+/// Constructs a [`IndexedColumnSchema`] from Postgres protocol column data.
 ///
 /// This helper method extracts column metadata from the replication protocol
 /// and converts it into the internal column schema representation. Some fields
 /// like nullable status have default values due to protocol limitations.
-fn build_column_schema(column: &protocol::Column) -> EtlResult<ColumnSchema> {
-    Ok(ColumnSchema::new(
+fn build_indexed_column_schema(column: &protocol::Column) -> EtlResult<IndexedColumnSchema> {
+    let column_schema = ColumnSchema::new(
         column.name()?.to_string(),
         convert_type_oid_to_type(column.type_id() as u32),
         column.type_modifier(),
@@ -254,7 +311,9 @@ fn build_column_schema(column: &protocol::Column) -> EtlResult<ColumnSchema> {
         false,
         // Currently 1 means that the column is part of the primary key.
         column.flags() == 1,
-    ))
+    );
+
+    Ok(IndexedColumnSchema(column_schema))
 }
 
 /// Converts Postgres tuple data into a [`TableRow`] using column schemas.
