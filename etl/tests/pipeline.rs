@@ -529,7 +529,7 @@ async fn table_schema_changes_are_handled_correctly() {
     let users_table_schema = table_schemas
         .get(&database_schema.users_schema().id)
         .unwrap();
-    println!("{:?}", users_table_schema);
+    println!("{users_table_schema:?}");
 
     // Check the initial data.
     let table_rows = destination.get_table_rows().await;
@@ -577,7 +577,7 @@ async fn table_schema_changes_are_handled_correctly() {
     let users_table_schema = table_schemas
         .get(&database_schema.users_schema().id)
         .unwrap();
-    println!("{:?}", users_table_schema);
+    println!("{users_table_schema:?}");
 
     // Check the updated data.
     let table_rows = destination.get_table_rows().await;
