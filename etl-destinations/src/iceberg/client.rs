@@ -8,6 +8,10 @@ use etl::{
 use iceberg::{
     Catalog, NamespaceIdent, TableCreation, TableIdent,
     io::{S3_ACCESS_KEY_ID, S3_ENDPOINT, S3_REGION, S3_SECRET_ACCESS_KEY},
+    spec::{
+        PROPERTY_COMMIT_MAX_RETRY_WAIT_MS, PROPERTY_COMMIT_MIN_RETRY_WAIT_MS,
+        PROPERTY_COMMIT_NUM_RETRIES, PROPERTY_COMMIT_TOTAL_RETRY_TIME_MS,
+    },
     table::Table,
     transaction::{ApplyTransactionAction, Transaction},
     writer::{
@@ -127,12 +131,31 @@ impl IcebergClient {
             let creation = TableCreation::builder()
                 .name(table_name)
                 .schema(iceberg_schema)
+                .properties(Self::get_table_properties())
                 .build();
             self.catalog
                 .create_table(&namespace_ident, creation)
                 .await?;
         }
         Ok(())
+    }
+
+    fn get_table_properties() -> HashMap<String, String> {
+        let mut props = HashMap::new();
+        props.insert(
+            PROPERTY_COMMIT_MIN_RETRY_WAIT_MS.to_string(),
+            "100".to_string(),
+        );
+        props.insert(
+            PROPERTY_COMMIT_MAX_RETRY_WAIT_MS.to_string(),
+            "10000".to_string(),
+        );
+        props.insert(PROPERTY_COMMIT_NUM_RETRIES.to_string(), "10".to_string());
+        props.insert(
+            PROPERTY_COMMIT_TOTAL_RETRY_TIME_MS.to_string(),
+            "1800000".to_string(),
+        );
+        props
     }
 
     /// Returns true if the table exists, false otherwise.
