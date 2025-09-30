@@ -1,7 +1,8 @@
 use core::str;
+use std::cmp::Ordering;
 use etl_postgres::types::{ColumnSchema, TableId, TableSchema, convert_type_oid_to_type};
 use postgres_replication::protocol;
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::hash::Hash;
 use std::sync::Arc;
 use tokio_postgres::types::PgLsn;
@@ -29,6 +30,19 @@ impl Eq for IndexedColumnSchema {}
 impl PartialEq for IndexedColumnSchema {
     fn eq(&self, other: &Self) -> bool {
         self.0.name == other.0.name
+    }
+}
+
+impl Ord for IndexedColumnSchema {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.0.name.cmp(&other.0.name)
+    }
+}
+
+impl PartialOrd for IndexedColumnSchema {
+
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.0.name.cmp(&other.0.name))
     }
 }
 
@@ -88,7 +102,7 @@ where
 {
     let table_id = TableId::new(relation_body.rel_id());
 
-    let Some(existing_column_schemas) = schema_store.get_table_schema(&table_id).await? else {
+    let Some(table_schema) = schema_store.get_table_schema(&table_id).await? else {
         bail!(
             ErrorKind::MissingTableSchema,
             "Table not found in the schema cache",
@@ -96,14 +110,30 @@ where
         )
     };
 
+    // We build a set of the new column chemas from the relation message. The rationale for using a
+    // BTreeSet is that we want to preserve the order of columns in the schema, which is important,
+    // and also we can reuse the same set to build the vector of column schemas needed for the table
+    // schema.
     let mut latest_column_schemas = relation_body
         .columns()
         .iter()
         .map(build_indexed_column_schema)
-        .collect::<Result<HashSet<IndexedColumnSchema>, EtlError>>()?;
+        .collect::<Result<BTreeSet<IndexedColumnSchema>, EtlError>>()?;
 
+    // We build the updated table schema to store in the schema store.
+    let mut latest_table_schema = TableSchema::new(
+        table_schema.id,
+        table_schema.name.clone(),
+        Vec::with_capacity(latest_column_schemas.len()),
+    );
+    for column_schema in latest_column_schemas.iter() {
+        latest_table_schema.add_column_schema(column_schema.clone().into_inner());
+    }
+    schema_store.store_table_schema(latest_table_schema).await?;
+
+    // We process all the changes that we want to dispatch to the destination.
     let mut changes = vec![];
-    for column_schema in existing_column_schemas.column_schemas.iter() {
+    for column_schema in table_schema.column_schemas.iter() {
         let column_schema = IndexedColumnSchema(column_schema.clone());
         let latest_column_schema = latest_column_schemas.take(&column_schema);
         match latest_column_schema {
