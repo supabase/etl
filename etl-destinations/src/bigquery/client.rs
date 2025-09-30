@@ -382,7 +382,7 @@ impl BigQueryClient {
 
         let columns = primary_columns
             .iter()
-            .map(|column| column.name)
+            .map(|column| format!("`{}`", column.name))
             .collect::<Vec<_>>()
             .join(",");
 
@@ -402,8 +402,7 @@ impl BigQueryClient {
     ) -> EtlResult<bool> {
         let info_schema_table = format!(
             "`{}.{}`.INFORMATION_SCHEMA.TABLE_CONSTRAINTS`",
-            &self.project_id,
-            dataset_id
+            &self.project_id, dataset_id
         );
         let table_literal = table_id;
         let query = format!(

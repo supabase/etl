@@ -5,7 +5,6 @@ use std::cmp::Ordering;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 use tokio_postgres::types::PgLsn;
-use tracing::info;
 
 use crate::conversions::text::{default_value_for_type, parse_cell_from_postgres_text};
 use crate::error::{ErrorKind, EtlError, EtlResult};
@@ -103,32 +102,26 @@ where
         )
     };
 
-    // We build a set of the new column chemas from the relation message. The rationale for using a
-    // BTreeSet is that we want to preserve the order of columns in the schema, which is important,
-    // and also we can reuse the same set to build the vector of column schemas needed for the table
-    // schema.
-    let mut latest_column_schemas = relation_body
+    // We construct the latest column schemas in order. The order is important since the table schema
+    // relies on the right ordering to interpret the Postgres correctly.
+    let latest_column_schemas = relation_body
         .columns()
         .iter()
-        .map(build_indexed_column_schema)
-        .collect::<Result<BTreeSet<IndexedColumnSchema>, EtlError>>()?;
+        .map(build_column_schema)
+        .collect::<Result<Vec<_>, EtlError>>()?;
 
-    // We build the updated table schema to store in the schema store.
-    let mut latest_table_schema = TableSchema::new(
-        table_schema.id,
-        table_schema.name.clone(),
-        Vec::with_capacity(latest_column_schemas.len()),
-    );
-    for column_schema in latest_column_schemas.iter() {
-        latest_table_schema.add_column_schema(column_schema.clone().into_inner());
-    }
-    schema_store.store_table_schema(latest_table_schema).await?;
+    // We build a lookup set for the latest column schemas for quick change detection.
+    let mut latest_indexed_column_schemas = latest_column_schemas
+        .iter()
+        .cloned()
+        .map(IndexedColumnSchema)
+        .collect::<BTreeSet<_>>();
 
     // We process all the changes that we want to dispatch to the destination.
     let mut changes = vec![];
     for column_schema in table_schema.column_schemas.iter() {
         let column_schema = IndexedColumnSchema(column_schema.clone());
-        let latest_column_schema = latest_column_schemas.take(&column_schema);
+        let latest_column_schema = latest_indexed_column_schemas.take(&column_schema);
         match latest_column_schema {
             Some(latest_column_schema) => {
                 let column_schema = column_schema.into_inner();
@@ -152,9 +145,18 @@ where
     }
 
     // For the remaining columns that didn't match, we assume they were added.
-    for column_schema in latest_column_schemas {
+    for column_schema in latest_indexed_column_schemas {
         changes.push(RelationChange::AddColumn(column_schema.into_inner()));
     }
+
+    // We build the updated table schema to store in the schema store.
+    schema_store
+        .store_table_schema(TableSchema::new(
+            table_schema.id,
+            table_schema.name.clone(),
+            latest_column_schemas,
+        ))
+        .await?;
 
     Ok(RelationEvent {
         start_lsn,
@@ -181,6 +183,7 @@ where
     let table_id = insert_body.rel_id();
     let table_schema = get_table_schema(schema_store, TableId::new(table_id)).await?;
 
+    println!("INSERT DATA {:?}", insert_body.tuple().tuple_data());
     let table_row = convert_tuple_to_row(
         &table_schema.column_schemas,
         insert_body.tuple().tuple_data(),
@@ -332,7 +335,7 @@ where
 /// This helper method extracts column metadata from the replication protocol
 /// and converts it into the internal column schema representation. Some fields
 /// like nullable status have default values due to protocol limitations.
-fn build_indexed_column_schema(column: &protocol::Column) -> EtlResult<IndexedColumnSchema> {
+fn build_column_schema(column: &protocol::Column) -> EtlResult<ColumnSchema> {
     let column_schema = ColumnSchema::new(
         column.name()?.to_string(),
         convert_type_oid_to_type(column.type_id() as u32),
@@ -341,7 +344,7 @@ fn build_indexed_column_schema(column: &protocol::Column) -> EtlResult<IndexedCo
         column.flags() == 1,
     );
 
-    Ok(IndexedColumnSchema(column_schema))
+    Ok(column_schema)
 }
 
 /// Converts Postgres tuple data into a [`TableRow`] using column schemas.

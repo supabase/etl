@@ -19,8 +19,8 @@ use etl_postgres::replication::slots::EtlReplicationSlot;
 use etl_postgres::tokio::test_utils::TableModification;
 use etl_telemetry::tracing::init_test_tracing;
 use rand::random;
-use std::time::Duration;
 use sqlx::__rt::timeout;
+use std::time::Duration;
 use tokio::time::sleep;
 
 #[tokio::test(flavor = "multi_thread")]
@@ -718,83 +718,81 @@ async fn table_copy_and_sync_streams_new_data() {
     )
     .await;
 
-    // users_state_notify.notified().await;
-    // orders_state_notify.notified().await;
-    timeout(Duration::from_secs(2), events_notify.notified()).await;
-    pipeline.shutdown_and_wait().await.unwrap();
-    //
-    // // Verify initial table copy data.
-    // let table_rows = destination.get_table_rows().await;
-    // let users_table_rows = table_rows.get(&database_schema.users_schema().id).unwrap();
-    // let orders_table_rows = table_rows.get(&database_schema.orders_schema().id).unwrap();
-    // assert_eq!(users_table_rows.len(), rows_inserted);
-    // assert_eq!(orders_table_rows.len(), rows_inserted);
-    //
-    // // Verify age sum calculation.
-    // let expected_age_sum = get_n_integers_sum(rows_inserted);
-    // let age_sum =
-    //     get_users_age_sum_from_rows(&destination, database_schema.users_schema().id).await;
-    // assert_eq!(age_sum, expected_age_sum);
-    //
-    // // Get all the events that were produced to the destination and assert them individually by table
-    // // since the only thing we are guaranteed is that the order of operations is preserved within the
-    // // same table but not across tables given the asynchronous nature of the pipeline (e.g., we could
-    // // start streaming earlier on a table for data which was inserted after another table which was
-    // // modified before this one)
-    // let events = destination.get_events().await;
-    // let grouped_events = group_events_by_type_and_table_id(&events);
-    // let users_inserts = grouped_events
-    //     .get(&(EventType::Insert, database_schema.users_schema().id))
-    //     .unwrap();
-    // let orders_inserts = grouped_events
-    //     .get(&(EventType::Insert, database_schema.orders_schema().id))
-    //     .unwrap();
-    //
-    // // Build expected events for verification
-    // let expected_users_inserts = build_expected_users_inserts(
-    //     11,
-    //     database_schema.users_schema().id,
-    //     vec![
-    //         ("user_11", 11),
-    //         ("user_12", 12),
-    //         ("user_13", 13),
-    //         ("user_14", 14),
-    //     ],
-    // );
-    // let expected_orders_inserts = build_expected_orders_inserts(
-    //     11,
-    //     database_schema.orders_schema().id,
-    //     vec![
-    //         "description_11",
-    //         "description_12",
-    //         "description_13",
-    //         "description_14",
-    //     ],
-    // );
-    // assert_events_equal(users_inserts, &expected_users_inserts);
-    // assert_events_equal(orders_inserts, &expected_orders_inserts);
-    //
-    // // Check that the replication slots for the two tables have been removed.
-    // let users_replication_slot: String =
-    //     EtlReplicationSlot::for_table_sync_worker(pipeline_id, database_schema.users_schema().id)
-    //         .try_into()
-    //         .unwrap();
-    // let orders_replication_slot: String =
-    //     EtlReplicationSlot::for_table_sync_worker(pipeline_id, database_schema.orders_schema().id)
-    //         .try_into()
-    //         .unwrap();
-    // assert!(
-    //     !database
-    //         .replication_slot_exists(&users_replication_slot)
-    //         .await
-    //         .unwrap()
-    // );
-    // assert!(
-    //     !database
-    //         .replication_slot_exists(&orders_replication_slot)
-    //         .await
-    //         .unwrap()
-    // );
+    users_state_notify.notified().await;
+    orders_state_notify.notified().await;
+
+    // Verify initial table copy data.
+    let table_rows = destination.get_table_rows().await;
+    let users_table_rows = table_rows.get(&database_schema.users_schema().id).unwrap();
+    let orders_table_rows = table_rows.get(&database_schema.orders_schema().id).unwrap();
+    assert_eq!(users_table_rows.len(), rows_inserted);
+    assert_eq!(orders_table_rows.len(), rows_inserted);
+
+    // Verify age sum calculation.
+    let expected_age_sum = get_n_integers_sum(rows_inserted);
+    let age_sum =
+        get_users_age_sum_from_rows(&destination, database_schema.users_schema().id).await;
+    assert_eq!(age_sum, expected_age_sum);
+
+    // Get all the events that were produced to the destination and assert them individually by table
+    // since the only thing we are guaranteed is that the order of operations is preserved within the
+    // same table but not across tables given the asynchronous nature of the pipeline (e.g., we could
+    // start streaming earlier on a table for data which was inserted after another table which was
+    // modified before this one)
+    let events = destination.get_events().await;
+    let grouped_events = group_events_by_type_and_table_id(&events);
+    let users_inserts = grouped_events
+        .get(&(EventType::Insert, database_schema.users_schema().id))
+        .unwrap();
+    let orders_inserts = grouped_events
+        .get(&(EventType::Insert, database_schema.orders_schema().id))
+        .unwrap();
+
+    // Build expected events for verification
+    let expected_users_inserts = build_expected_users_inserts(
+        11,
+        database_schema.users_schema().id,
+        vec![
+            ("user_11", 11),
+            ("user_12", 12),
+            ("user_13", 13),
+            ("user_14", 14),
+        ],
+    );
+    let expected_orders_inserts = build_expected_orders_inserts(
+        11,
+        database_schema.orders_schema().id,
+        vec![
+            "description_11",
+            "description_12",
+            "description_13",
+            "description_14",
+        ],
+    );
+    assert_events_equal(users_inserts, &expected_users_inserts);
+    assert_events_equal(orders_inserts, &expected_orders_inserts);
+
+    // Check that the replication slots for the two tables have been removed.
+    let users_replication_slot: String =
+        EtlReplicationSlot::for_table_sync_worker(pipeline_id, database_schema.users_schema().id)
+            .try_into()
+            .unwrap();
+    let orders_replication_slot: String =
+        EtlReplicationSlot::for_table_sync_worker(pipeline_id, database_schema.orders_schema().id)
+            .try_into()
+            .unwrap();
+    assert!(
+        !database
+            .replication_slot_exists(&users_replication_slot)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !database
+            .replication_slot_exists(&orders_replication_slot)
+            .await
+            .unwrap()
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
