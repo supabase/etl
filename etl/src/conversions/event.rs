@@ -108,12 +108,17 @@ where
         let latest_column_schema = latest_column_schemas.take(&column_schema);
         match latest_column_schema {
             Some(latest_column_schema) => {
-                // If we find a column with the same name, we assume it was changed. The only changes
-                // that we detect are changes to the column but with preserved name.
-                changes.push(RelationChange::AlterColumn(
-                    column_schema.into_inner(),
-                    latest_column_schema.into_inner(),
-                ));
+                let column_schema = column_schema.into_inner();
+                let latest_column_schema = latest_column_schema.into_inner();
+
+                if column_schema.name != latest_column_schema.name {
+                    // If we find a column with the same name but different fields, we assume it was changed. The only changes
+                    // that we detect are changes to the column but with preserved name.
+                    changes.push(RelationChange::AlterColumn(
+                        column_schema,
+                        latest_column_schema,
+                    ));
+                }
             }
             None => {
                 // If we don't find the column in the latest schema, we assume it was dropped even
@@ -131,7 +136,7 @@ where
     Ok(RelationEvent {
         start_lsn,
         commit_lsn,
-        changes: vec![],
+        changes,
         table_id,
     })
 }
@@ -309,10 +314,6 @@ fn build_indexed_column_schema(column: &protocol::Column) -> EtlResult<IndexedCo
         column.name()?.to_string(),
         convert_type_oid_to_type(column.type_id() as u32),
         column.type_modifier(),
-        // We do not have access to this information, so we default it to `false`.
-        // TODO: figure out how to fill this value correctly or how to handle the missing value
-        //  better.
-        false,
         // Currently 1 means that the column is part of the primary key.
         column.flags() == 1,
     );

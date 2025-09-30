@@ -303,14 +303,12 @@ fn parse_column_schema(row: &PgRow) -> ColumnSchema {
     let column_name: String = row.get("column_name");
     let column_type: String = row.get("column_type");
     let type_modifier: i32 = row.get("type_modifier");
-    let nullable: bool = row.get("nullable");
     let primary_key: bool = row.get("primary_key");
 
     ColumnSchema::new(
         column_name,
         string_to_postgres_type(&column_type),
         type_modifier,
-        nullable,
         primary_key,
     )
 }

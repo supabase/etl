@@ -54,31 +54,28 @@ type TypeModifier = i32;
 /// type modifier, nullability, and whether it's part of the primary key.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct ColumnSchema {
-    /// The name of the column
+    /// The name of the column.
     pub name: String,
-    /// The Postgres data type of the column
+    /// The Postgres data type of the column.
     pub typ: Type,
-    /// Type-specific modifier value (e.g., length for varchar)
+    /// Type-specific modifier value (e.g., length for varchar).
     pub modifier: TypeModifier,
-    /// Whether the column can contain NULL values
+    /// Whether the column can contain NULL values.
     pub nullable: bool,
-    /// Whether the column is part of the table's primary key
+    /// Whether the column is part of the table's primary key.
     pub primary: bool,
 }
 
 impl ColumnSchema {
-    pub fn new(
-        name: String,
-        typ: Type,
-        modifier: TypeModifier,
-        nullable: bool,
-        primary: bool,
-    ) -> ColumnSchema {
+    pub fn new(name: String, typ: Type, modifier: TypeModifier, primary: bool) -> ColumnSchema {
         Self {
             name,
             typ,
             modifier,
-            nullable,
+            // For now, we assume all columns are nullable. The rationale behind this is that we
+            // do not have access to nullability information on relation messages, so to support schema
+            // evolution, we assume all columns are nullable.
+            nullable: true,
             primary,
         }
     }
