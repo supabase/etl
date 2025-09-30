@@ -4,7 +4,6 @@
 //! for ETL pipeline operations. The [`EtlError`] type supports single errors, errors with additional detail,
 //! and multiple aggregated errors for complex failure scenarios.
 
-use std::backtrace::Backtrace;
 use std::error;
 use std::fmt;
 

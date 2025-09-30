@@ -19,7 +19,6 @@ use etl_postgres::replication::slots::EtlReplicationSlot;
 use etl_postgres::tokio::test_utils::TableModification;
 use etl_telemetry::tracing::init_test_tracing;
 use rand::random;
-use sqlx::__rt::timeout;
 use std::time::Duration;
 use tokio::time::sleep;
 
@@ -720,6 +719,9 @@ async fn table_copy_and_sync_streams_new_data() {
 
     users_state_notify.notified().await;
     orders_state_notify.notified().await;
+    events_notify.notified().await;
+
+    pipeline.shutdown_and_wait().await.unwrap();
 
     // Verify initial table copy data.
     let table_rows = destination.get_table_rows().await;

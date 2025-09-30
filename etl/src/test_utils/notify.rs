@@ -1,5 +1,4 @@
 use etl_postgres::types::{TableId, TableSchema};
-use log::info;
 use std::{collections::HashMap, fmt, sync::Arc};
 use tokio::sync::{Notify, RwLock};
 

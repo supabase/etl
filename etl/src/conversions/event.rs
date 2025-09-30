@@ -183,7 +183,6 @@ where
     let table_id = insert_body.rel_id();
     let table_schema = get_table_schema(schema_store, TableId::new(table_id)).await?;
 
-    println!("INSERT DATA {:?}", insert_body.tuple().tuple_data());
     let table_row = convert_tuple_to_row(
         &table_schema.column_schemas,
         insert_body.tuple().tuple_data(),
