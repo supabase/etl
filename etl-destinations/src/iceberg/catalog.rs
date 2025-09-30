@@ -95,6 +95,16 @@ impl Catalog for SupabaseCatalog {
     async fn update_table(&self, commit: TableCommit) -> Result<Table> {
         self.inner.update_table(commit).await
     }
+
+    async fn register_table(
+        &self,
+        identifier: &TableIdent,
+        metadata_location: String,
+    ) -> Result<Table> {
+        self.inner
+            .register_table(identifier, metadata_location)
+            .await
+    }
 }
 
 #[derive(Debug)]
