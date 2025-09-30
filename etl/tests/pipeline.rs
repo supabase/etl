@@ -7,6 +7,7 @@ use etl::test_utils::database::{spawn_source_database, test_table_name};
 use etl::test_utils::event::group_events_by_type_and_table_id;
 use etl::test_utils::notify::NotifyingStore;
 use etl::test_utils::pipeline::{create_pipeline, create_pipeline_with};
+use etl::test_utils::table::column_schema_names;
 use etl::test_utils::test_destination_wrapper::TestDestinationWrapper;
 use etl::test_utils::test_schema::{
     TableSelection, assert_events_equal, build_expected_orders_inserts,
@@ -526,10 +527,12 @@ async fn table_schema_changes_are_handled_correctly() {
     // Check the initial schema.
     let table_schemas = store.get_table_schemas().await;
     assert_eq!(table_schemas.len(), 1);
-    let users_table_schema = table_schemas
-        .get(&database_schema.users_schema().id)
-        .unwrap();
-    println!("{users_table_schema:?}");
+    let users_table_schema = column_schema_names(
+        table_schemas
+            .get(&database_schema.users_schema().id)
+            .unwrap(),
+    );
+    assert_eq!(users_table_schema, vec!["id", "name", "age"]);
 
     // Check the initial data.
     let table_rows = destination.get_table_rows().await;
@@ -574,59 +577,72 @@ async fn table_schema_changes_are_handled_correctly() {
     // Check the updated schema.
     let table_schemas = store.get_table_schemas().await;
     assert_eq!(table_schemas.len(), 1);
-    let users_table_schema = table_schemas
-        .get(&database_schema.users_schema().id)
-        .unwrap();
-    println!("{users_table_schema:?}");
+    let users_table_schema = column_schema_names(
+        table_schemas
+            .get(&database_schema.users_schema().id)
+            .unwrap(),
+    );
+    assert_eq!(users_table_schema, vec!["id", "name", "new_age", "year"]);
 
     // Check the updated data.
-    let table_rows = destination.get_table_rows().await;
-    let users_table_rows = table_rows.get(&database_schema.users_schema().id).unwrap();
-    assert_eq!(users_table_rows.len(), 1);
-    //
-    // // We perform schema changes.
-    // database
-    //     .alter_table(
-    //         test_table_name("users"),
-    //         &[
-    //             TableModification::DropColumn {
-    //                 name: "year",
-    //             },
-    //             TableModification::AlterColumn {
-    //                 name: "new_age",
-    //                 params: "type double precision using new_age::double precision",
-    //             },
-    //         ],
-    //     )
-    //     .await
-    //     .unwrap();
-    //
-    // // Register notifications for the insert.
-    // let insert_event_notify = destination.wait_for_events_count(vec![(EventType::Insert, 2)]).await;
-    //
-    // // We insert data.
-    // database
-    //     .insert_values(
-    //         database_schema.users_schema().name.clone(),
-    //         &["name", "new_age", "year"],
-    //         &[&"user_3", &(2i32), &(2025i32)],
-    //     )
-    //     .await
-    //     .expect("Failed to insert users");
-    //
-    // insert_event_notify.notified().await;
-    //
-    // // Check the updated schema.
-    // let table_schemas = store.get_table_schemas().await;
-    // assert_eq!(table_schemas.len(), 1);
-    // assert!(table_schemas.contains_key(&database_schema.users_schema().id));
-    //
-    // // Check the updated data.
-    // let table_rows = destination.get_table_rows().await;
-    // let users_table_rows = table_rows.get(&database_schema.users_schema().id).unwrap();
-    // assert_eq!(users_table_rows.len(), 1);
-    //
-    // pipeline.shutdown_and_wait().await.unwrap();
+    let events = destination.get_events().await;
+    let grouped_events = group_events_by_type_and_table_id(&events);
+    let users_inserts = grouped_events
+        .get(&(EventType::Insert, database_schema.users_schema().id))
+        .unwrap();
+    assert_eq!(users_inserts.len(), 1);
+
+    // We perform schema changes.
+    database
+        .alter_table(
+            test_table_name("users"),
+            &[
+                TableModification::DropColumn { name: "year" },
+                TableModification::AlterColumn {
+                    name: "new_age",
+                    params: "type double precision using new_age::double precision",
+                },
+            ],
+        )
+        .await
+        .unwrap();
+
+    // Register notifications for the insert.
+    let insert_event_notify = destination
+        .wait_for_events_count(vec![(EventType::Insert, 2)])
+        .await;
+
+    // We insert data.
+    database
+        .insert_values(
+            database_schema.users_schema().name.clone(),
+            &["name", "new_age"],
+            &[&"user_3", &(2f64)],
+        )
+        .await
+        .expect("Failed to insert users");
+
+    insert_event_notify.notified().await;
+
+    // Check the updated schema.
+    let table_schemas = store.get_table_schemas().await;
+    assert_eq!(table_schemas.len(), 1);
+    let users_table_schema = column_schema_names(
+        table_schemas
+            .get(&database_schema.users_schema().id)
+            .unwrap(),
+    );
+    assert_eq!(users_table_schema, vec!["id", "name", "new_age"]);
+
+    // Check the updated data.
+    let events = destination.get_events().await;
+    let grouped_events = group_events_by_type_and_table_id(&events);
+    let users_inserts = grouped_events
+        .get(&(EventType::Insert, database_schema.users_schema().id))
+        .unwrap();
+    assert_eq!(users_inserts.len(), 2);
+
+    pipeline.shutdown_and_wait().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -932,146 +948,6 @@ async fn table_processing_converges_to_apply_loop_with_no_events_coming() {
     let age_sum =
         get_users_age_sum_from_rows(&destination, database_schema.users_schema().id).await;
     assert_eq!(age_sum, expected_age_sum);
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn table_processing_with_schema_change_errors_table() {
-    init_test_tracing();
-    let database = spawn_source_database().await;
-    let database_schema = setup_test_database_schema(&database, TableSelection::OrdersOnly).await;
-
-    // Insert data in the table.
-    database
-        .insert_values(
-            database_schema.orders_schema().name.clone(),
-            &["description"],
-            &[&"description_1"],
-        )
-        .await
-        .unwrap();
-
-    let store = NotifyingStore::new();
-    let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
-
-    // Start pipeline from scratch.
-    let pipeline_id: PipelineId = random();
-    let mut pipeline = create_pipeline(
-        &database.config,
-        pipeline_id,
-        database_schema.publication_name(),
-        store.clone(),
-        destination.clone(),
-    );
-
-    // Register notifications for initial table copy completion.
-    let orders_state_notify = store
-        .notify_on_table_state_type(
-            database_schema.orders_schema().id,
-            TableReplicationPhaseType::FinishedCopy,
-        )
-        .await;
-
-    pipeline.start().await.unwrap();
-
-    orders_state_notify.notified().await;
-
-    // Register notification for the sync done state.
-    let orders_state_notify = store
-        .notify_on_table_state_type(
-            database_schema.orders_schema().id,
-            TableReplicationPhaseType::SyncDone,
-        )
-        .await;
-
-    // Insert new data in the table.
-    database
-        .insert_values(
-            database_schema.orders_schema().name.clone(),
-            &["description"],
-            &[&"description_2"],
-        )
-        .await
-        .unwrap();
-
-    orders_state_notify.notified().await;
-
-    // Register notification for the ready state.
-    let orders_state_notify = store
-        .notify_on_table_state_type(
-            database_schema.orders_schema().id,
-            TableReplicationPhaseType::Ready,
-        )
-        .await;
-
-    // Insert new data in the table.
-    database
-        .insert_values(
-            database_schema.orders_schema().name.clone(),
-            &["description"],
-            &[&"description_3"],
-        )
-        .await
-        .unwrap();
-
-    orders_state_notify.notified().await;
-
-    // Register notification for the errored state.
-    let orders_state_notify = store
-        .notify_on_table_state_type(
-            database_schema.orders_schema().id,
-            TableReplicationPhaseType::Errored,
-        )
-        .await;
-
-    // Change the schema of orders by adding a new column.
-    database
-        .alter_table(
-            database_schema.orders_schema().name.clone(),
-            &[TableModification::AddColumn {
-                name: "date",
-                params: "integer",
-            }],
-        )
-        .await
-        .unwrap();
-
-    // Insert new data in the table.
-    database
-        .insert_values(
-            database_schema.orders_schema().name.clone(),
-            &["description", "date"],
-            &[&"description_with_date", &10],
-        )
-        .await
-        .unwrap();
-
-    orders_state_notify.notified().await;
-
-    pipeline.shutdown_and_wait().await.unwrap();
-
-    // We assert that the schema is the initial one.
-    let table_schemas = store.get_table_schemas().await;
-    assert_eq!(table_schemas.len(), 1);
-    assert_eq!(
-        *table_schemas
-            .get(&database_schema.orders_schema().id)
-            .unwrap(),
-        database_schema.orders_schema()
-    );
-
-    // We check that we got the insert events after the first data of the table has been copied.
-    let events = destination.get_events().await;
-    let grouped_events = group_events_by_type_and_table_id(&events);
-    let orders_inserts = grouped_events
-        .get(&(EventType::Insert, database_schema.orders_schema().id))
-        .unwrap();
-
-    let expected_orders_inserts = build_expected_orders_inserts(
-        2,
-        database_schema.orders_schema().id,
-        vec!["description_2", "description_3"],
-    );
-    assert_events_equal(orders_inserts, &expected_orders_inserts);
 }
 
 #[tokio::test(flavor = "multi_thread")]
