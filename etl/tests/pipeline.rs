@@ -526,7 +526,10 @@ async fn table_schema_changes_are_handled_correctly() {
     // Check the initial schema.
     let table_schemas = store.get_table_schemas().await;
     assert_eq!(table_schemas.len(), 1);
-    assert!(table_schemas.contains_key(&database_schema.users_schema().id));
+    let users_table_schema = table_schemas
+        .get(&database_schema.users_schema().id)
+        .unwrap();
+    println!("{:?}", users_table_schema);
 
     // Check the initial data.
     let table_rows = destination.get_table_rows().await;
@@ -571,7 +574,10 @@ async fn table_schema_changes_are_handled_correctly() {
     // Check the updated schema.
     let table_schemas = store.get_table_schemas().await;
     assert_eq!(table_schemas.len(), 1);
-    assert!(table_schemas.contains_key(&database_schema.users_schema().id));
+    let users_table_schema = table_schemas
+        .get(&database_schema.users_schema().id)
+        .unwrap();
+    println!("{:?}", users_table_schema);
 
     // Check the updated data.
     let table_rows = destination.get_table_rows().await;

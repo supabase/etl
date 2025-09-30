@@ -164,8 +164,8 @@ mod tests {
 
     fn create_test_schema() -> Vec<ColumnSchema> {
         vec![
-            ColumnSchema::new("id".to_string(), Type::INT4, -1, false),
-            ColumnSchema::new("name".to_string(), Type::TEXT, -1, true),
+            ColumnSchema::new("id".to_string(), Type::INT4, -1, true),
+            ColumnSchema::new("name".to_string(), Type::TEXT, -1, false),
             ColumnSchema::new("active".to_string(), Type::BOOL, -1, false),
         ]
     }

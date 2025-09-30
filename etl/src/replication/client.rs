@@ -712,20 +712,12 @@ impl PgReplicationClient {
                 let type_oid = Self::get_row_value::<u32>(&row, "atttypid", "pg_attribute").await?;
                 let modifier =
                     Self::get_row_value::<i32>(&row, "atttypmod", "pg_attribute").await?;
-                let nullable =
-                    Self::get_row_value::<String>(&row, "attnotnull", "pg_attribute").await? == "f";
                 let primary =
                     Self::get_row_value::<String>(&row, "primary", "pg_index").await? == "t";
 
                 let typ = convert_type_oid_to_type(type_oid);
 
-                column_schemas.push(ColumnSchema {
-                    name,
-                    typ,
-                    modifier,
-                    nullable,
-                    primary,
-                })
+                column_schemas.push(ColumnSchema::new(name, typ, modifier, primary))
             }
         }
 

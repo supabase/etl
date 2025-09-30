@@ -1,7 +1,7 @@
 use core::str;
-use std::cmp::Ordering;
 use etl_postgres::types::{ColumnSchema, TableId, TableSchema, convert_type_oid_to_type};
 use postgres_replication::protocol;
+use std::cmp::Ordering;
 use std::collections::{BTreeSet, HashSet};
 use std::hash::Hash;
 use std::sync::Arc;
@@ -40,7 +40,6 @@ impl Ord for IndexedColumnSchema {
 }
 
 impl PartialOrd for IndexedColumnSchema {
-
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.0.name.cmp(&other.0.name))
     }

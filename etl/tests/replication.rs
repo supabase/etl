@@ -167,13 +167,7 @@ async fn test_table_schema_copy_is_consistent() {
         .await
         .unwrap();
 
-    let age_schema = ColumnSchema {
-        name: "age".to_string(),
-        typ: Type::INT4,
-        modifier: -1,
-        nullable: true,
-        primary: false,
-    };
+    let age_schema = ColumnSchema::new("age".to_string(), Type::INT4, -1, false);
 
     let table_1_id = database
         .create_table(test_table_name("table_1"), true, &[("age", "integer")])
@@ -212,20 +206,8 @@ async fn test_table_schema_copy_across_multiple_connections() {
         .await
         .unwrap();
 
-    let age_schema = ColumnSchema {
-        name: "age".to_string(),
-        typ: Type::INT4,
-        modifier: -1,
-        nullable: true,
-        primary: false,
-    };
-    let year_schema = ColumnSchema {
-        name: "year".to_string(),
-        typ: Type::INT4,
-        modifier: -1,
-        nullable: true,
-        primary: false,
-    };
+    let age_schema = ColumnSchema::new("age".to_string(), Type::INT4, -1, false);
+    let year_schema = ColumnSchema::new("year".to_string(), Type::INT4, -1, false);
 
     let table_1_id = database
         .create_table(test_table_name("table_1"), true, &[("age", "integer")])
@@ -341,13 +323,7 @@ async fn test_table_copy_stream_is_consistent() {
     let stream = transaction
         .get_table_copy_stream(
             table_1_id,
-            &[ColumnSchema {
-                name: "age".to_string(),
-                typ: Type::INT4,
-                modifier: -1,
-                nullable: true,
-                primary: false,
-            }],
+            &[ColumnSchema::new("age".to_string(), Type::INT4, -1, false)],
         )
         .await
         .unwrap();
