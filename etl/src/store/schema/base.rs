@@ -1,4 +1,4 @@
-use etl_postgres::types::{SchemaVersion, TableId, TableSchema, TableSchemaDraft};
+use etl_postgres::types::{SchemaVersion, TableId, VersionedTableSchema, TableSchema};
 use std::sync::Arc;
 
 use crate::error::EtlResult;
@@ -17,13 +17,13 @@ pub trait SchemaStore {
         &self,
         table_id: &TableId,
         version: SchemaVersion,
-    ) -> impl Future<Output = EtlResult<Option<Arc<TableSchema>>>> + Send;
+    ) -> impl Future<Output = EtlResult<Option<Arc<VersionedTableSchema>>>> + Send;
 
     /// Returns the latest table schema version for table with id `table_id` from the cache.
     fn get_latest_table_schema(
         &self,
         table_id: &TableId,
-    ) -> impl Future<Output = EtlResult<Option<Arc<TableSchema>>>> + Send;
+    ) -> impl Future<Output = EtlResult<Option<Arc<VersionedTableSchema>>>> + Send;
 
     /// Loads table schemas from the persistent state into the cache.
     ///
@@ -33,6 +33,6 @@ pub trait SchemaStore {
     /// Stores a table schema in both the cache and the persistent store.
     fn store_table_schema(
         &self,
-        table_schema: TableSchemaDraft,
-    ) -> impl Future<Output = EtlResult<Arc<TableSchema>>> + Send;
+        table_schema: TableSchema,
+    ) -> impl Future<Output = EtlResult<Arc<VersionedTableSchema>>> + Send;
 }

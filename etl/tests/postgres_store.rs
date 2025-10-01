@@ -7,12 +7,12 @@ use etl::store::schema::SchemaStore;
 use etl::store::state::StateStore;
 use etl::test_utils::database::spawn_source_database_for_store;
 use etl_postgres::replication::connect_to_source_database;
-use etl_postgres::types::{ColumnSchema, TableId, TableName, TableSchemaDraft};
+use etl_postgres::types::{ColumnSchema, TableId, TableName, TableSchema};
 use etl_telemetry::tracing::init_test_tracing;
 use sqlx::postgres::types::Oid as SqlxTableId;
 use tokio_postgres::types::{PgLsn, Type as PgType};
 
-fn create_sample_table_schema() -> TableSchemaDraft {
+fn create_sample_table_schema() -> TableSchema {
     let table_id = TableId::new(12345);
     let table_name = TableName::new("public".to_string(), "test_table".to_string());
     let columns = vec![
@@ -21,10 +21,10 @@ fn create_sample_table_schema() -> TableSchemaDraft {
         ColumnSchema::new("created_at".to_string(), PgType::TIMESTAMPTZ, -1, false),
     ];
 
-    TableSchemaDraft::new(table_id, table_name, columns)
+    TableSchema::new(table_id, table_name, columns)
 }
 
-fn create_another_table_schema() -> TableSchemaDraft {
+fn create_another_table_schema() -> TableSchema {
     let table_id = TableId::new(67890);
     let table_name = TableName::new("public".to_string(), "another_table".to_string());
     let columns = vec![
@@ -32,7 +32,7 @@ fn create_another_table_schema() -> TableSchemaDraft {
         ColumnSchema::new("description".to_string(), PgType::VARCHAR, 255, false),
     ];
 
-    TableSchemaDraft::new(table_id, table_name, columns)
+    TableSchema::new(table_id, table_name, columns)
 }
 
 #[tokio::test(flavor = "multi_thread")]

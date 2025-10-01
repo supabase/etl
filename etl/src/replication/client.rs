@@ -4,7 +4,7 @@ use crate::{bail, etl_error};
 use etl_config::shared::{IntoConnectOptions, PgConnectionConfig};
 use etl_postgres::replication::extract_server_version;
 use etl_postgres::types::{ColumnSchema, TableId, TableName};
-use etl_postgres::types::{TableSchemaDraft, convert_type_oid_to_type};
+use etl_postgres::types::{TableSchema, convert_type_oid_to_type};
 use pg_escape::{quote_identifier, quote_literal};
 use postgres_replication::LogicalReplicationStream;
 use rustls::ClientConfig;
@@ -117,7 +117,7 @@ impl PgReplicationSlotTransaction {
         &self,
         table_ids: &[TableId],
         publication_name: Option<&str>,
-    ) -> EtlResult<HashMap<TableId, TableSchemaDraft>> {
+    ) -> EtlResult<HashMap<TableId, TableSchema>> {
         self.client
             .get_table_schemas(table_ids, publication_name)
             .await
@@ -131,7 +131,7 @@ impl PgReplicationSlotTransaction {
         &self,
         table_id: TableId,
         publication: Option<&str>,
-    ) -> EtlResult<TableSchemaDraft> {
+    ) -> EtlResult<TableSchema> {
         self.client.get_table_schema(table_id, publication).await
     }
 
@@ -558,7 +558,7 @@ impl PgReplicationClient {
         &self,
         table_ids: &[TableId],
         publication_name: Option<&str>,
-    ) -> EtlResult<HashMap<TableId, TableSchemaDraft>> {
+    ) -> EtlResult<HashMap<TableId, TableSchema>> {
         let mut table_schemas = HashMap::new();
 
         // TODO: consider if we want to fail when at least one table was missing or not.
@@ -589,11 +589,11 @@ impl PgReplicationClient {
         &self,
         table_id: TableId,
         publication: Option<&str>,
-    ) -> EtlResult<TableSchemaDraft> {
+    ) -> EtlResult<TableSchema> {
         let table_name = self.get_table_name(table_id).await?;
         let column_schemas = self.get_column_schemas(table_id, publication).await?;
 
-        Ok(TableSchemaDraft {
+        Ok(TableSchema {
             name: table_name,
             id: table_id,
             column_schemas,

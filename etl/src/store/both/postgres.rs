@@ -1,6 +1,6 @@
 use etl_config::shared::PgConnectionConfig;
 use etl_postgres::replication::{connect_to_source_database, schema, state, table_mappings};
-use etl_postgres::types::{SchemaVersion, TableId, TableSchema, TableSchemaDraft};
+use etl_postgres::types::{SchemaVersion, TableId, VersionedTableSchema, TableSchema};
 use metrics::gauge;
 use sqlx::PgPool;
 use std::{
@@ -158,7 +158,7 @@ struct Inner {
     /// Cached table replication states indexed by table ID.
     table_states: HashMap<TableId, TableReplicationPhase>,
     /// Cached table schemas indexed by table ID.
-    table_schemas: HashMap<TableId, BTreeMap<SchemaVersion, Arc<TableSchema>>>,
+    table_schemas: HashMap<TableId, BTreeMap<SchemaVersion, Arc<VersionedTableSchema>>>,
     /// Cached table mappings from source table ID to destination table name.
     table_mappings: HashMap<TableId, String>,
 }
@@ -237,7 +237,7 @@ impl PostgresStore {
     #[cfg(feature = "test-utils")]
     pub async fn get_all_table_schemas(
         &self,
-    ) -> HashMap<TableId, BTreeMap<SchemaVersion, Arc<TableSchema>>> {
+    ) -> HashMap<TableId, BTreeMap<SchemaVersion, Arc<VersionedTableSchema>>> {
         let inner = self.inner.lock().await;
         inner.table_schemas.clone()
     }
@@ -522,7 +522,7 @@ impl SchemaStore for PostgresStore {
         &self,
         table_id: &TableId,
         version: SchemaVersion,
-    ) -> EtlResult<Option<Arc<TableSchema>>> {
+    ) -> EtlResult<Option<Arc<VersionedTableSchema>>> {
         let inner = self.inner.lock().await;
 
         Ok(inner
@@ -535,7 +535,7 @@ impl SchemaStore for PostgresStore {
     async fn get_latest_table_schema(
         &self,
         table_id: &TableId,
-    ) -> EtlResult<Option<Arc<TableSchema>>> {
+    ) -> EtlResult<Option<Arc<VersionedTableSchema>>> {
         let inner = self.inner.lock().await;
 
         Ok(inner
@@ -593,8 +593,8 @@ impl SchemaStore for PostgresStore {
     /// replication or when schema definitions need to be updated.
     async fn store_table_schema(
         &self,
-        table_schema: TableSchemaDraft,
-    ) -> EtlResult<Arc<TableSchema>> {
+        table_schema: TableSchema,
+    ) -> EtlResult<Arc<VersionedTableSchema>> {
         debug!("storing table schema for table '{}'", table_schema.name);
 
         let pool = self.connect_to_source().await?;

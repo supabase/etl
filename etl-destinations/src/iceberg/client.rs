@@ -3,7 +3,7 @@ use std::{collections::HashMap, sync::Arc};
 use arrow::array::RecordBatch;
 use etl::{
     error::EtlResult,
-    types::{TableRow, TableSchema},
+    types::{TableRow, VersionedTableSchema},
 };
 use iceberg::{
     Catalog, NamespaceIdent, TableCreation, TableIdent,
@@ -74,7 +74,7 @@ impl IcebergClient {
         &self,
         namespace: &str,
         table_name: String,
-        table_schema: &TableSchema,
+        table_schema: &VersionedTableSchema,
     ) -> Result<(), iceberg::Error> {
         let namespace_ident = NamespaceIdent::from_strs(namespace.split('.'))?;
         let table_ident = TableIdent::new(namespace_ident.clone(), table_name.clone());

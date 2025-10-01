@@ -1,6 +1,6 @@
 use core::str;
 use etl_postgres::types::{
-    ColumnSchema, SchemaVersion, TableId, TableSchema, convert_type_oid_to_type,
+    ColumnSchema, SchemaVersion, TableId, VersionedTableSchema, convert_type_oid_to_type,
 };
 use postgres_replication::protocol;
 use std::sync::Arc;
@@ -71,7 +71,7 @@ pub async fn parse_column_schemas_from_relation_message(
 /// This function processes an insert operation from the replication stream
 /// using the supplied table schema version to build the resulting event.
 pub fn parse_event_from_insert_message(
-    table_schema: Arc<TableSchema>,
+    table_schema: Arc<VersionedTableSchema>,
     start_lsn: PgLsn,
     commit_lsn: PgLsn,
     insert_body: &protocol::InsertBody,
@@ -99,7 +99,7 @@ pub fn parse_event_from_insert_message(
 /// the complete row or just the key columns, depending on the table's
 /// `REPLICA IDENTITY` setting in Postgres.
 pub fn parse_event_from_update_message(
-    table_schema: Arc<TableSchema>,
+    table_schema: Arc<VersionedTableSchema>,
     start_lsn: PgLsn,
     commit_lsn: PgLsn,
     update_body: &protocol::UpdateBody,
@@ -145,7 +145,7 @@ pub fn parse_event_from_update_message(
 /// either the complete row or just the key columns, depending on the table's
 /// `REPLICA IDENTITY` setting in Postgres.
 pub fn parse_event_from_delete_message(
-    table_schema: Arc<TableSchema>,
+    table_schema: Arc<VersionedTableSchema>,
     start_lsn: PgLsn,
     commit_lsn: PgLsn,
     delete_body: &protocol::DeleteBody,

@@ -211,7 +211,8 @@ async fn table_copy_is_consistent_after_data_sync_threw_an_error_with_timed_retr
         *table_schemas
             .get(&database_schema.users_schema().id)
             .unwrap(),
-        database_schema.users_schema()
+        // We expect version 0 since the schema is copied only once.
+        database_schema.users_schema().into_versioned(0)
     );
 }
 
@@ -274,6 +275,7 @@ async fn table_copy_is_consistent_during_data_sync_threw_an_error_with_timed_ret
         *table_schemas
             .get(&database_schema.users_schema().id)
             .unwrap(),
-        database_schema.users_schema()
+        // We expect version 1 since the schema is copied twice.
+        database_schema.users_schema().into_versioned(1)
     );
 }

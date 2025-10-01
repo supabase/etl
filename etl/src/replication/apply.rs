@@ -1,6 +1,6 @@
 use etl_config::shared::PipelineConfig;
 use etl_postgres::replication::worker::WorkerType;
-use etl_postgres::types::{TableId, TableSchema, TableSchemaDraft};
+use etl_postgres::types::{TableId, VersionedTableSchema, TableSchema};
 use futures::StreamExt;
 use metrics::histogram;
 use postgres_replication::protocol;
@@ -1120,7 +1120,7 @@ where
 
     // We store the new schema in the store and build the final relation event.
     let new_table_schema = schema_store
-        .store_table_schema(TableSchemaDraft::new(
+        .store_table_schema(TableSchema::new(
             table_id,
             old_table_schema.name.clone(),
             new_column_schemas,
@@ -1308,7 +1308,7 @@ where
 async fn load_latest_table_schema<S>(
     schema_store: &S,
     table_id: TableId,
-) -> EtlResult<Arc<TableSchema>>
+) -> EtlResult<Arc<VersionedTableSchema>>
 where
     S: SchemaStore + Clone + Send + 'static,
 {

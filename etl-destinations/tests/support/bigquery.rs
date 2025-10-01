@@ -256,6 +256,46 @@ pub async fn setup_bigquery_connection() -> BigQueryDatabase {
     BigQueryDatabase::new_real(sa_key_path).await
 }
 
+impl BigQueryDatabase {
+    /// Fetches primary key column names for a BigQuery table ordered by ordinal position.
+    pub async fn primary_key_columns(&self, table_id: &str) -> Vec<String> {
+        let client = self.client().expect("BigQuery client not available");
+        let project_id = self.project_id();
+        let dataset_id = self.dataset_id();
+
+        let query = format!(
+            "SELECT column_name \
+             FROM `{project}.{dataset}.INFORMATION_SCHEMA.KEY_COLUMN_USAGE` \
+             WHERE table_name = '{table}' AND constraint_name = 'PRIMARY KEY' \
+             ORDER BY ordinal_position",
+            project = project_id,
+            dataset = dataset_id,
+            table = table_id
+        );
+
+        let response = client
+            .job()
+            .query(project_id, QueryRequest::new(query))
+            .await
+            .expect("failed to query BigQuery primary key metadata");
+
+        response
+            .rows
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|row| {
+                row.columns.and_then(|mut columns| {
+                    columns
+                        .into_iter()
+                        .next()
+                        .and_then(|cell| cell.value)
+                        .and_then(|value| value.as_str().map(|s| s.to_owned()))
+                })
+            })
+            .collect()
+    }
+}
+
 pub fn parse_table_cell<O>(table_cell: TableCell) -> Option<O>
 where
     O: FromStr,
@@ -317,6 +357,38 @@ impl From<TableRow> for BigQueryOrder {
         BigQueryOrder {
             id: parse_table_cell(columns[0].clone()).unwrap(),
             description: parse_table_cell(columns[1].clone()).unwrap(),
+        }
+    }
+}
+
+#[derive(Debug, Eq, PartialEq, Ord, PartialOrd)]
+pub struct BigQueryUserWithTenant {
+    id: i32,
+    name: String,
+    age: i32,
+    tenant_id: i32,
+}
+
+impl BigQueryUserWithTenant {
+    pub fn new(id: i32, name: &str, age: i32, tenant_id: i32) -> Self {
+        Self {
+            id,
+            name: name.to_owned(),
+            age,
+            tenant_id,
+        }
+    }
+}
+
+impl From<TableRow> for BigQueryUserWithTenant {
+    fn from(value: TableRow) -> Self {
+        let columns = value.columns.unwrap();
+
+        BigQueryUserWithTenant {
+            id: parse_table_cell(columns[0].clone()).unwrap(),
+            name: parse_table_cell(columns[1].clone()).unwrap(),
+            age: parse_table_cell(columns[2].clone()).unwrap(),
+            tenant_id: parse_table_cell(columns[3].clone()).unwrap(),
         }
     }
 }

@@ -171,7 +171,7 @@ impl ToSql for TableId {
 /// This type contains all metadata about a table including its name, OID,
 /// and the schemas of all its columns.
 #[derive(Debug, Clone, Eq, PartialEq)]
-pub struct TableSchema {
+pub struct VersionedTableSchema {
     /// The Postgres OID of the table
     pub id: TableId,
     /// The fully qualified name of the table
@@ -182,7 +182,7 @@ pub struct TableSchema {
     pub column_schemas: Vec<ColumnSchema>,
 }
 
-impl TableSchema {
+impl VersionedTableSchema {
     pub fn new(
         id: TableId,
         name: TableName,
@@ -197,19 +197,19 @@ impl TableSchema {
         }
     }
 
-    /// Adds a new column schema to this [`TableSchema`].
+    /// Adds a new column schema to this [`VersionedTableSchema`].
     pub fn add_column_schema(&mut self, column_schema: ColumnSchema) {
         self.column_schemas.push(column_schema);
     }
 }
 
-impl PartialOrd for TableSchema {
+impl PartialOrd for VersionedTableSchema {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }
 
-impl Ord for TableSchema {
+impl Ord for VersionedTableSchema {
     fn cmp(&self, other: &Self) -> Ordering {
         self.name
             .cmp(&other.name)
@@ -217,15 +217,15 @@ impl Ord for TableSchema {
     }
 }
 
-/// Draft version of [`TableSchema`] used before a schema version is assigned.
+/// Draft version of [`VersionedTableSchema`] used before a schema version is assigned.
 #[derive(Debug, Clone, Eq, PartialEq)]
-pub struct TableSchemaDraft {
+pub struct TableSchema {
     pub id: TableId,
     pub name: TableName,
     pub column_schemas: Vec<ColumnSchema>,
 }
 
-impl TableSchemaDraft {
+impl TableSchema {
     pub fn new(id: TableId, name: TableName, column_schemas: Vec<ColumnSchema>) -> Self {
         Self {
             id,
@@ -253,7 +253,7 @@ impl TableSchemaDraft {
         self.column_schemas.iter().any(|cs| cs.primary)
     }
 
-    pub fn into_table_schema(self, version: SchemaVersion) -> TableSchema {
-        TableSchema::new(self.id, self.name, version, self.column_schemas)
+    pub fn into_versioned(self, version: SchemaVersion) -> VersionedTableSchema {
+        VersionedTableSchema::new(self.id, self.name, version, self.column_schemas)
     }
 }

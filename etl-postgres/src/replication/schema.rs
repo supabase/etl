@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use tokio_postgres::types::Type as PgType;
 
 use crate::types::{
-    ColumnSchema, SchemaVersion, TableId, TableName, TableSchema, TableSchemaDraft,
+    ColumnSchema, SchemaVersion, TableId, TableName, VersionedTableSchema, TableSchema,
 };
 
 /// The initial schema version number.
@@ -146,8 +146,8 @@ define_type_mappings! {
 pub async fn store_table_schema(
     pool: &PgPool,
     pipeline_id: i64,
-    table_schema: TableSchemaDraft,
-) -> Result<TableSchema, sqlx::Error> {
+    table_schema: TableSchema,
+) -> Result<VersionedTableSchema, sqlx::Error> {
     let mut tx = pool.begin().await?;
 
     // We are fine with running this query for every table schema store since we assume that
@@ -210,17 +210,17 @@ pub async fn store_table_schema(
 
     tx.commit().await?;
 
-    Ok(table_schema.into_table_schema(next_schema_version))
+    Ok(table_schema.into_versioned(next_schema_version))
 }
 
 /// Loads all table schemas for a pipeline from the database.
 ///
 /// Retrieves table schemas and columns from schema storage tables,
-/// reconstructing complete [`TableSchema`] objects.
+/// reconstructing complete [`VersionedTableSchema`] objects.
 pub async fn load_table_schemas(
     pool: &PgPool,
     pipeline_id: i64,
-) -> Result<Vec<TableSchema>, sqlx::Error> {
+) -> Result<Vec<VersionedTableSchema>, sqlx::Error> {
     let rows = sqlx::query(
         r#"
         select
@@ -244,7 +244,7 @@ pub async fn load_table_schemas(
     .fetch_all(pool)
     .await?;
 
-    let mut table_schemas: HashMap<(TableId, SchemaVersion), TableSchema> = HashMap::new();
+    let mut table_schemas: HashMap<(TableId, SchemaVersion), VersionedTableSchema> = HashMap::new();
 
     for row in rows {
         let table_oid: SqlxTableId = row.get("table_id");
@@ -261,7 +261,7 @@ pub async fn load_table_schemas(
         let entry = table_schemas
             .entry((table_id, schema_version))
             .or_insert_with(|| {
-                TableSchema::new(
+                VersionedTableSchema::new(
                     table_id,
                     TableName::new(schema_name.clone(), table_name.clone()),
                     schema_version,

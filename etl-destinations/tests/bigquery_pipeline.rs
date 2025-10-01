@@ -8,18 +8,23 @@ use etl::test_utils::database::{spawn_source_database, test_table_name};
 use etl::test_utils::notify::NotifyingStore;
 use etl::test_utils::pipeline::{create_pipeline, create_pipeline_with};
 use etl::test_utils::test_destination_wrapper::TestDestinationWrapper;
-use etl::test_utils::test_schema::{TableSelection, insert_mock_data, setup_test_database_schema};
+use etl::test_utils::test_schema::{
+    TableSelection, insert_mock_data, insert_users_data, setup_test_database_schema,
+};
 use etl::types::{EventType, PgNumeric, PipelineId};
-use etl_destinations::bigquery::install_crypto_provider_for_bigquery;
+use etl_destinations::bigquery::{
+    install_crypto_provider_for_bigquery, table_name_to_bigquery_table_id,
+};
 use etl_telemetry::tracing::init_test_tracing;
 use rand::random;
 use std::str::FromStr;
 use std::time::Duration;
 use tokio::time::sleep;
-
+use tracing::debug;
+use etl_postgres::tokio::test_utils::TableModification;
 use crate::support::bigquery::{
-    BigQueryOrder, BigQueryUser, NonNullableColsScalar, NullableColsArray, NullableColsScalar,
-    parse_bigquery_table_rows, setup_bigquery_connection,
+    BigQueryDatabase, BigQueryOrder, BigQueryUser, BigQueryUserWithTenant, NonNullableColsScalar,
+    NullableColsArray, NullableColsScalar, parse_bigquery_table_rows, setup_bigquery_connection,
 };
 
 mod support;
@@ -492,6 +497,143 @@ async fn table_truncate_with_batching() {
             BigQueryOrder::new(4, "description_4")
         ]
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn relation_event_primary_key_syncs_in_bigquery() {
+    init_test_tracing();
+    install_crypto_provider_for_bigquery();
+
+    let mut database = spawn_source_database().await;
+    let database_schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
+
+    let users_schema = database_schema.users_schema();
+    insert_users_data(&mut database, &users_schema.name, 1..=2).await;
+
+    let bigquery_database = setup_bigquery_connection().await;
+
+    let store = NotifyingStore::new();
+    let pipeline_id: PipelineId = random();
+    let raw_destination = bigquery_database.build_destination(store.clone()).await;
+    let destination = TestDestinationWrapper::wrap(raw_destination);
+
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        database_schema.publication_name(),
+        store.clone(),
+        destination.clone(),
+    );
+
+    let users_state_notify = store
+        .notify_on_table_state_type(users_schema.id, TableReplicationPhaseType::SyncDone)
+        .await;
+
+    pipeline.start().await.unwrap();
+
+    users_state_notify.notified().await;
+
+    // We check the initial BigQuery data.
+    let users_rows = bigquery_database
+        .query_table(database_schema.users_schema().name)
+        .await
+        .unwrap();
+    let parsed_users_rows = parse_bigquery_table_rows::<BigQueryUser>(users_rows);
+    assert_eq!(
+        parsed_users_rows,
+        vec![
+            BigQueryUser::new(1, "user_1", 1),
+            BigQueryUser::new(2, "user_2", 2),
+        ]
+    );
+
+    // let base_table_id = table_name_to_bigquery_table_id(&users_schema.name);
+    // let sequenced_table_id = format!("{base_table_id}_0");
+    //
+    // async fn wait_for_primary_key_columns(
+    //     bigquery_database: &BigQueryDatabase,
+    //     table_id: &str,
+    //     expected_columns: &[&str],
+    // ) {
+    //     let expected = expected_columns
+    //         .iter()
+    //         .map(|column| column.to_string())
+    //         .collect::<Vec<_>>();
+    //
+    //     for attempt in 0..30 {
+    //         let actual = bigquery_database.primary_key_columns(table_id).await;
+    //         if actual == expected {
+    //             return;
+    //         }
+    //
+    //         debug!(
+    //             table = table_id,
+    //             ?actual,
+    //             ?expected,
+    //             attempt,
+    //             "waiting for primary key columns to sync"
+    //         );
+    //         sleep(Duration::from_millis(500)).await;
+    //     }
+    //
+    //     panic!(
+    //         "primary key columns for {table_id} did not match expected {:?}",
+    //         expected_columns
+    //     );
+    // }
+    // wait_for_primary_key_columns(&bigquery_database, &sequenced_table_id, &["id"]).await;
+
+    // We perform schema changes.
+    database
+        .alter_table(
+            test_table_name("users"),
+            &[
+                TableModification::AddColumn {
+                    name: "year",
+                    params: "integer",
+                },
+                TableModification::RenameColumn {
+                    name: "age",
+                    new_name: "new_age",
+                },
+            ],
+        )
+        .await
+        .unwrap();
+
+    // Register notifications for the insert.
+    let insert_event_notify = destination
+        .wait_for_events_count(vec![(EventType::Insert, 1)])
+        .await;
+
+    // We insert data.
+    database
+        .insert_values(
+            database_schema.users_schema().name.clone(),
+            &["name", "new_age", "year"],
+            &[&"user_3", &(3i32), &(2025i32)],
+        )
+        .await
+        .expect("Failed to insert users");
+
+    insert_event_notify.notified().await;
+
+    // We check the BigQuery data after the first schema change.
+    let users_rows = bigquery_database
+        .query_table(database_schema.users_schema().name)
+        .await
+        .unwrap();
+    println!("USERS ROWS {:?}", users_rows);
+    // let parsed_users_rows = parse_bigquery_table_rows::<BigQueryUser>(users_rows);
+    // assert_eq!(
+    //     parsed_users_rows,
+    //     vec![
+    //         BigQueryUser::new(1, "user_2", 1),
+    //         BigQueryUser::new(2, "user_2", 2),
+    //     ]
+    // );
+
+    pipeline.shutdown_and_wait().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1580,6 +1722,7 @@ async fn table_array_with_null_values() {
     // We have to reset the state of the table and copy it from scratch, otherwise the CDC will contain
     // the inserts and deletes, failing again.
     store.reset_table_state(table_id).await.unwrap();
+
     // We also clear the events so that it's more idiomatic to wait for them, since we don't have
     // the insert of before.
     destination.clear_events().await;

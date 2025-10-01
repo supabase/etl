@@ -1,4 +1,4 @@
-use etl_postgres::types::{ColumnSchema, SchemaVersion, TableId, TableSchema};
+use etl_postgres::types::{ColumnSchema, SchemaVersion, TableId, VersionedTableSchema};
 use std::collections::HashSet;
 use std::fmt;
 use std::hash::Hash;
@@ -71,9 +71,9 @@ pub struct RelationEvent {
     /// ID of the table of which this is a schema change.
     pub table_id: TableId,
     /// The old table schema.
-    pub old_table_schema: Arc<TableSchema>,
+    pub old_table_schema: Arc<VersionedTableSchema>,
     /// The new table schema.
-    pub new_table_schema: Arc<TableSchema>,
+    pub new_table_schema: Arc<VersionedTableSchema>,
 }
 
 impl RelationEvent {

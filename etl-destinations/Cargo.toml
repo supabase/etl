@@ -46,6 +46,7 @@ uuid = { workspace = true, optional = true, features = ["v4"] }
 
 [dev-dependencies]
 etl = { workspace = true, features = ["test-utils"] }
+etl-postgres = { workspace = true, features = ["test-utils", "sqlx"] }
 etl-telemetry = { workspace = true }
 
 base64 = { workspace = true }

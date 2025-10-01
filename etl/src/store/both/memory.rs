@@ -1,4 +1,4 @@
-use etl_postgres::types::{SchemaVersion, TableId, TableSchema, TableSchemaDraft};
+use etl_postgres::types::{SchemaVersion, TableId, VersionedTableSchema, TableSchema};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -22,7 +22,7 @@ struct Inner {
     table_state_history: HashMap<TableId, Vec<TableReplicationPhase>>,
     /// Table schema definitions for each table. Each schema has multiple versions which are created
     /// when new schema changes are detected.
-    table_schemas: HashMap<TableId, BTreeMap<SchemaVersion, Arc<TableSchema>>>,
+    table_schemas: HashMap<TableId, BTreeMap<SchemaVersion, Arc<VersionedTableSchema>>>,
     /// Mappings between source and destination tables.
     table_mappings: HashMap<TableId, String>,
 }
@@ -174,7 +174,7 @@ impl SchemaStore for MemoryStore {
         &self,
         table_id: &TableId,
         version: SchemaVersion,
-    ) -> EtlResult<Option<Arc<TableSchema>>> {
+    ) -> EtlResult<Option<Arc<VersionedTableSchema>>> {
         let inner = self.inner.lock().await;
 
         Ok(inner
@@ -186,7 +186,7 @@ impl SchemaStore for MemoryStore {
     async fn get_latest_table_schema(
         &self,
         table_id: &TableId,
-    ) -> EtlResult<Option<Arc<TableSchema>>> {
+    ) -> EtlResult<Option<Arc<VersionedTableSchema>>> {
         let inner = self.inner.lock().await;
 
         Ok(inner.table_schemas.get(table_id).and_then(|table_schemas| {
@@ -209,8 +209,8 @@ impl SchemaStore for MemoryStore {
 
     async fn store_table_schema(
         &self,
-        table_schema: TableSchemaDraft,
-    ) -> EtlResult<Arc<TableSchema>> {
+        table_schema: TableSchema,
+    ) -> EtlResult<Arc<VersionedTableSchema>> {
         let mut inner = self.inner.lock().await;
         let table_schemas = inner
             .table_schemas
@@ -223,7 +223,7 @@ impl SchemaStore for MemoryStore {
             .map(|version| version + 1)
             .unwrap_or(STARTING_SCHEMA_VERSION);
 
-        let table_schema = Arc::new(table_schema.into_table_schema(next_version));
+        let table_schema = Arc::new(table_schema.into_versioned(next_version));
         table_schemas.insert(next_version, table_schema.clone());
 
         Ok(table_schema)

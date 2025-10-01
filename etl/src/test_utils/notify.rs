@@ -1,4 +1,4 @@
-use etl_postgres::types::{SchemaVersion, TableId, TableSchema, TableSchemaDraft};
+use etl_postgres::types::{SchemaVersion, TableId, VersionedTableSchema, TableSchema};
 use std::{
     collections::{BTreeMap, HashMap},
     fmt,
@@ -32,7 +32,7 @@ type TableStateCondition = (
 struct Inner {
     table_replication_states: HashMap<TableId, TableReplicationPhase>,
     table_state_history: HashMap<TableId, Vec<TableReplicationPhase>>,
-    table_schemas: HashMap<TableId, BTreeMap<SchemaVersion, Arc<TableSchema>>>,
+    table_schemas: HashMap<TableId, BTreeMap<SchemaVersion, Arc<VersionedTableSchema>>>,
     table_mappings: HashMap<TableId, String>,
     table_state_type_conditions: Vec<TableStateTypeCondition>,
     table_state_conditions: Vec<TableStateCondition>,
@@ -106,7 +106,7 @@ impl NotifyingStore {
         inner.table_replication_states.clone()
     }
 
-    pub async fn get_latest_table_schemas(&self) -> HashMap<TableId, TableSchema> {
+    pub async fn get_latest_table_schemas(&self) -> HashMap<TableId, VersionedTableSchema> {
         let inner = self.inner.read().await;
         inner
             .table_schemas
@@ -302,7 +302,7 @@ impl SchemaStore for NotifyingStore {
         &self,
         table_id: &TableId,
         version: SchemaVersion,
-    ) -> EtlResult<Option<Arc<TableSchema>>> {
+    ) -> EtlResult<Option<Arc<VersionedTableSchema>>> {
         let inner = self.inner.read().await;
 
         Ok(inner
@@ -314,7 +314,7 @@ impl SchemaStore for NotifyingStore {
     async fn get_latest_table_schema(
         &self,
         table_id: &TableId,
-    ) -> EtlResult<Option<Arc<TableSchema>>> {
+    ) -> EtlResult<Option<Arc<VersionedTableSchema>>> {
         let inner = self.inner.read().await;
 
         Ok(inner
@@ -334,8 +334,8 @@ impl SchemaStore for NotifyingStore {
 
     async fn store_table_schema(
         &self,
-        table_schema: TableSchemaDraft,
-    ) -> EtlResult<Arc<TableSchema>> {
+        table_schema: TableSchema,
+    ) -> EtlResult<Arc<VersionedTableSchema>> {
         let mut inner = self.inner.write().await;
         let schemas = inner
             .table_schemas
@@ -348,7 +348,7 @@ impl SchemaStore for NotifyingStore {
             .map(|version| version + 1)
             .unwrap_or(0);
 
-        let schema = Arc::new(table_schema.into_table_schema(next_version));
+        let schema = Arc::new(table_schema.into_versioned(next_version));
         schemas.insert(next_version, Arc::clone(&schema));
 
         Ok(schema)

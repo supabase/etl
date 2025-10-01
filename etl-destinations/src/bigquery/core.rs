@@ -4,7 +4,7 @@ use etl::store::schema::SchemaStore;
 use etl::store::state::StateStore;
 use etl::types::{
     Cell, Event, PgLsn, RelationChange, RelationEvent, SchemaVersion, TableId, TableName, TableRow,
-    TableSchema,
+    VersionedTableSchema,
 };
 use etl::{bail, etl_error};
 use gcp_bigquery_client::storage::TableDescriptor;
@@ -268,7 +268,7 @@ where
         &self,
         table_id: &TableId,
         schema_version: Option<SchemaVersion>,
-    ) -> EtlResult<(SequencedBigQueryTableId, Arc<TableSchema>)> {
+    ) -> EtlResult<(SequencedBigQueryTableId, Arc<VersionedTableSchema>)> {
         // We hold the lock for the entire preparation to avoid race conditions since the consistency
         // of this code path is critical.
         let mut inner = self.inner.lock().await;
