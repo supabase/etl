@@ -229,7 +229,7 @@ impl SupabaseClient {
                 reqwest::Method::DELETE,
                 &url,
                 None,
-                Some(&[("purgeRequested", "true")]), // S3 tables doesn't support dropping tables with purging
+                Some(&[("purgeRequested", "true")]), // S3 tables doesn't support dropping tables without purging
             )
             .await?;
 
