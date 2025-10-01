@@ -13,19 +13,14 @@ use crate::store::state::StateStore;
 /// Inner state of [`MemoryStore`]
 #[derive(Debug)]
 struct Inner {
-    /// Current replication state for each table - this is the authoritative source of truth
-    /// for table states. Every table being replicated must have an entry here.
+    /// Current replication state for each table.
     table_replication_states: HashMap<TableId, TableReplicationPhase>,
-    /// Complete history of state transitions for each table, used for debugging and auditing.
-    /// This is an append-only log that grows over time and provides visibility into
-    /// table state evolution. Entries are chronologically ordered.
+    /// Complete history of state transitions for each table which is used for state rollbacks.
     table_state_history: HashMap<TableId, Vec<TableReplicationPhase>>,
-    /// Cached table schema definitions, reference-counted for efficient sharing.
-    /// Schemas are expensive to fetch from Postgres, so they're cached here
-    /// once retrieved and shared via Arc across the application.
+    /// Table schema definitions for each table. Each schema has multiple versions which are created
+    /// when new schema changes are detected.
     table_schemas: HashMap<TableId, BTreeMap<SchemaVersion, Arc<TableSchema>>>,
-    /// Mapping from table IDs to human-readable table names for easier debugging
-    /// and logging. These mappings are established during schema discovery.
+    /// Mappings between source and destination tables.
     table_mappings: HashMap<TableId, String>,
 }
 
@@ -195,16 +190,6 @@ impl SchemaStore for MemoryStore {
             .table_schemas
             .get(table_id)
             .and_then(|schemas| schemas.iter().next_back().map(|(_, schema)| schema.clone())))
-    }
-
-    async fn get_table_schemas(&self) -> EtlResult<Vec<Arc<TableSchema>>> {
-        let inner = self.inner.lock().await;
-
-        Ok(inner
-            .table_schemas
-            .values()
-            .filter_map(|schemas| schemas.iter().next_back().map(|(_, schema)| schema.clone()))
-            .collect())
     }
 
     async fn load_table_schemas(&self) -> EtlResult<usize> {

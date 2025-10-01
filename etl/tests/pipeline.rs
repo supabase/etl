@@ -82,7 +82,7 @@ async fn table_schema_copy_survives_pipeline_restarts() {
     );
 
     // We check that the table schemas have been stored.
-    let table_schemas = store.get_table_schemas().await;
+    let table_schemas = store.get_latest_table_schemas().await;
     assert_eq!(table_schemas.len(), 2);
     assert_eq!(
         *table_schemas
@@ -371,7 +371,7 @@ async fn publication_for_all_tables_in_schema_ignores_new_tables_until_restart()
     pipeline.shutdown_and_wait().await.unwrap();
 
     // Check that only the schemas of the first table were stored.
-    let table_schemas = store.get_table_schemas().await;
+    let table_schemas = store.get_latest_table_schemas().await;
     assert_eq!(table_schemas.len(), 1);
     assert!(table_schemas.contains_key(&table_1_id));
     assert!(!table_schemas.contains_key(&table_2_id));
@@ -397,7 +397,7 @@ async fn publication_for_all_tables_in_schema_ignores_new_tables_until_restart()
     pipeline.shutdown_and_wait().await.unwrap();
 
     // Check that both schemas exist.
-    let table_schemas = store.get_table_schemas().await;
+    let table_schemas = store.get_latest_table_schemas().await;
     assert_eq!(table_schemas.len(), 2);
     assert!(table_schemas.contains_key(&table_1_id));
     assert!(table_schemas.contains_key(&table_2_id));
@@ -525,7 +525,7 @@ async fn table_schema_changes_are_handled_correctly() {
     users_state_notify.notified().await;
 
     // Check the initial schema.
-    let table_schemas = store.get_table_schemas().await;
+    let table_schemas = store.get_latest_table_schemas().await;
     assert_eq!(table_schemas.len(), 1);
     let users_table_schema = column_schema_names(
         table_schemas
@@ -575,7 +575,7 @@ async fn table_schema_changes_are_handled_correctly() {
     insert_event_notify.notified().await;
 
     // Check the updated schema.
-    let table_schemas = store.get_table_schemas().await;
+    let table_schemas = store.get_latest_table_schemas().await;
     assert_eq!(table_schemas.len(), 1);
     let users_table_schema = column_schema_names(
         table_schemas
@@ -625,7 +625,7 @@ async fn table_schema_changes_are_handled_correctly() {
     insert_event_notify.notified().await;
 
     // Check the updated schema.
-    let table_schemas = store.get_table_schemas().await;
+    let table_schemas = store.get_latest_table_schemas().await;
     assert_eq!(table_schemas.len(), 1);
     let users_table_schema = column_schema_names(
         table_schemas

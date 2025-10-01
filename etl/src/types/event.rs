@@ -79,7 +79,7 @@ pub struct RelationEvent {
 impl RelationEvent {
     /// Builds a list of [`RelationChange`]s that describe the changes between the old and new table
     /// schemas.
-    pub fn changes(&self) -> Vec<RelationChange> {
+    pub fn build_changes(&self) -> Vec<RelationChange> {
         // We build a lookup set for the new column schemas for quick change detection.
         let mut new_indexed_column_schemas = self
             .new_table_schema

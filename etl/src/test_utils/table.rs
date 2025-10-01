@@ -1,4 +1,4 @@
-use etl_postgres::types::{ColumnSchema, TableId, TableName, TableSchema};
+use etl_postgres::types::{ColumnSchema, TableId, TableName, TableSchema, TableSchemaDraft};
 use std::collections::HashMap;
 
 /// Return the names of the column schema.
@@ -21,7 +21,7 @@ pub fn column_schema_names(table_schema: &TableSchema) -> Vec<String> {
 /// Panics if the table ID doesn't exist in the provided schemas, or if any aspect
 /// of the schema doesn't match the expected values.
 pub fn assert_table_schema(
-    table_schemas: &HashMap<TableId, TableSchema>,
+    table_schemas: &HashMap<TableId, TableSchemaDraft>,
     table_id: TableId,
     expected_table_name: TableName,
     expected_columns: &[ColumnSchema],

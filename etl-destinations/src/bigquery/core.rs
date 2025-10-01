@@ -3,8 +3,7 @@ use etl::error::{ErrorKind, EtlError, EtlResult};
 use etl::store::schema::SchemaStore;
 use etl::store::state::StateStore;
 use etl::types::{
-    Cell, Event, PgLsn, RelationChange, RelationEvent, SchemaVersion, TableId, TableName, TableRow,
-    TableSchema,
+    Cell, Event, PgLsn, RelationEvent, SchemaVersion, TableId, TableName, TableRow, TableSchema,
 };
 use etl::{bail, etl_error};
 use gcp_bigquery_client::storage::TableDescriptor;
@@ -267,7 +266,7 @@ where
     async fn prepare_table(
         &self,
         table_id: &TableId,
-        schema_version: SchemaVersion,
+        schema_version: Option<SchemaVersion>,
     ) -> EtlResult<(SequencedBigQueryTableId, Arc<TableSchema>)> {
         // We hold the lock for the entire preparation to avoid race conditions since the consistency
         // of this code path is critical.
@@ -275,19 +274,21 @@ where
 
         // We load the schema of the table, if present. This is needed to create the table in BigQuery
         // and also prepare the table descriptor for CDC streaming.
-        let table_schema = self
-            .store
-            .get_table_schema(table_id, schema_version)
-            .await?
-            .ok_or_else(|| {
-                etl_error!(
-                    ErrorKind::MissingTableSchema,
-                    "Table not found in the schema store",
-                    format!(
-                        "The table schema for table {table_id} version {schema_version} was not found in the schema store"
-                    )
-                )
-            })?;
+        let table_schema = match schema_version {
+            Some(schema_version) => {
+                self.store
+                    .get_table_schema(table_id, schema_version)
+                    .await?
+            }
+            None => self.store.get_latest_table_schema(table_id).await?,
+        }
+        .ok_or_else(|| {
+            etl_error!(
+                ErrorKind::MissingTableSchema,
+                "Table not found in the schema store",
+                format!("The table schema for table {table_id} was not found in the schema store")
+            )
+        })?;
 
         // We determine the BigQuery table ID for the table together with the current sequence number.
         let bigquery_table_id = table_name_to_bigquery_table_id(&table_schema.name);
@@ -320,7 +321,7 @@ where
             );
         }
 
-        // Ensure view points to this sequenced table (uses cache to avoid redundant operations)
+        // Ensure view points to this sequenced table.
         self.ensure_view_points_to_table(
             &mut inner,
             &bigquery_table_id,
@@ -335,7 +336,7 @@ where
     async fn prepare_table_for_streaming(
         &self,
         table_id: &TableId,
-        schema_version: SchemaVersion,
+        schema_version: Option<SchemaVersion>,
         use_cdc_sequence_column: bool,
     ) -> EtlResult<(SequencedBigQueryTableId, Arc<TableDescriptor>)> {
         let (sequenced_bigquery_table_id, table_schema) =
@@ -439,23 +440,9 @@ where
         table_id: TableId,
         mut table_rows: Vec<TableRow>,
     ) -> EtlResult<()> {
-        // Prepare table for streaming.
-        let latest_schema = self
-            .store
-            .get_latest_table_schema(&table_id)
-            .await?
-            .ok_or_else(|| {
-                etl_error!(
-                    ErrorKind::MissingTableSchema,
-                    "Table not found in the schema store",
-                    format!(
-                        "The table schema for table {table_id} was not found in the schema store"
-                    )
-                )
-            })?;
-
+        // For table rows copy, we load the last table schema that we have available.
         let (sequenced_bigquery_table_id, table_descriptor) = self
-            .prepare_table_for_streaming(&table_id, latest_schema.version, false)
+            .prepare_table_for_streaming(&table_id, None, false)
             .await?;
 
         // Add CDC operation type to all rows (no lock needed).
@@ -508,16 +495,17 @@ where
     /// Persists the accumulated CDC batches for each table to BigQuery.
     async fn process_table_events(
         &self,
-        table_id_to_table_rows: HashMap<(TableId, SchemaVersion), Vec<TableRow>>,
+        schema_version: SchemaVersion,
+        table_id_to_table_rows: HashMap<TableId, Vec<TableRow>>,
     ) -> EtlResult<()> {
         if table_id_to_table_rows.is_empty() {
             return Ok(());
         }
 
         let mut table_batches = Vec::with_capacity(table_id_to_table_rows.len());
-        for ((table_id, schema_version), table_rows) in table_id_to_table_rows {
+        for (table_id, table_rows) in table_id_to_table_rows {
             let (sequenced_bigquery_table_id, table_descriptor) = self
-                .prepare_table_for_streaming(&table_id, schema_version, true)
+                .prepare_table_for_streaming(&table_id, Some(schema_version), true)
                 .await?;
 
             let table_batch = self.client.create_table_batch(
@@ -551,141 +539,142 @@ where
     }
 
     async fn apply_relation_event(&self, relation_event: RelationEvent) -> EtlResult<()> {
-        if relation_event.changes.is_empty() {
-            debug!(
-                table_id = %relation_event.table_id,
-                "relation event contained no schema changes; skipping"
-            );
-
-            return Ok(());
-        }
-
-        let (sequenced_bigquery_table_id, table_schema) = self
-            .prepare_table(&relation_event.table_id, relation_event.new_schema_version)
-            .await?;
-
-        let sequenced_table_name = sequenced_bigquery_table_id.to_string();
-        let mut primary_key_dirty = false;
-        for change in relation_event.changes {
-            match change {
-                RelationChange::AddColumn(column_schema) => {
-                    let column_name = column_schema.name.clone();
-                    let is_primary = column_schema.primary;
-
-                    self.client
-                        .add_column(&self.dataset_id, &sequenced_table_name, &column_schema)
-                        .await?;
-
-                    debug!(
-                        table = %sequenced_table_name,
-                        column = %column_name,
-                        "added column in BigQuery"
-                    );
-
-                    if is_primary {
-                        primary_key_dirty = true;
-                    }
-                }
-                RelationChange::DropColumn(column_schema) => {
-                    let column_name = column_schema.name.clone();
-                    let was_primary = column_schema.primary;
-
-                    self.client
-                        .drop_column(&self.dataset_id, &sequenced_table_name, &column_schema.name)
-                        .await?;
-
-                    debug!(
-                        table = %sequenced_table_name,
-                        column = %column_name,
-                        "dropped column in BigQuery"
-                    );
-
-                    if was_primary {
-                        primary_key_dirty = true;
-                    }
-                }
-                RelationChange::AlterColumn(previous, latest) => {
-                    let old_name = previous.name.clone();
-                    let new_name = latest.name.clone();
-                    let renamed = old_name != new_name;
-
-                    if renamed {
-                        self.client
-                            .rename_column(
-                                &self.dataset_id,
-                                &sequenced_table_name,
-                                &previous.name,
-                                &latest.name,
-                            )
-                            .await?;
-
-                        debug!(
-                            table = %sequenced_table_name,
-                            old_column = %old_name,
-                            new_column = %new_name,
-                            "renamed column in BigQuery"
-                        );
-                    }
-
-                    if previous.typ != latest.typ {
-                        self.client
-                            .alter_column_type(&self.dataset_id, &sequenced_table_name, &latest)
-                            .await?;
-
-                        debug!(
-                            table = %sequenced_table_name,
-                            column = %new_name,
-                            "updated column type in BigQuery"
-                        );
-                    }
-
-                    if previous.nullable != latest.nullable {
-                        self.client
-                            .alter_column_nullability(
-                                &self.dataset_id,
-                                &sequenced_table_name,
-                                &latest.name,
-                                latest.nullable,
-                            )
-                            .await?;
-
-                        debug!(
-                            table = %sequenced_table_name,
-                            column = %new_name,
-                            nullable = latest.nullable,
-                            "updated column nullability in BigQuery"
-                        );
-                    }
-
-                    if previous.primary != latest.primary
-                        || (renamed && (previous.primary || latest.primary))
-                    {
-                        primary_key_dirty = true;
-                    }
-                }
-            }
-        }
-
-        if primary_key_dirty {
-            self.client
-                .sync_primary_key(
-                    &self.dataset_id,
-                    &sequenced_table_name,
-                    &table_schema.column_schemas,
-                )
-                .await?;
-
-            debug!(
-                table = %sequenced_table_name,
-                "synchronized primary key definition in BigQuery"
-            );
-        }
-
-        info!(
-            table_id = %relation_event.table_id,
-            table = %sequenced_table_name,
-            "applied relation changes in BigQuery"
-        );
+        // TODO: implement the relation event.
+        // if relation_event.changes.is_empty() {
+        //     debug!(
+        //         table_id = %relation_event.table_id,
+        //         "relation event contained no schema changes; skipping"
+        //     );
+        //
+        //     return Ok(());
+        // }
+        //
+        // let (sequenced_bigquery_table_id, table_schema) = self
+        //     .prepare_table(&relation_event.table_id, relation_event.new_schema_version)
+        //     .await?;
+        //
+        // let sequenced_table_name = sequenced_bigquery_table_id.to_string();
+        // let mut primary_key_dirty = false;
+        // for change in relation_event.changes {
+        //     match change {
+        //         RelationChange::AddColumn(column_schema) => {
+        //             let column_name = column_schema.name.clone();
+        //             let is_primary = column_schema.primary;
+        //
+        //             self.client
+        //                 .add_column(&self.dataset_id, &sequenced_table_name, &column_schema)
+        //                 .await?;
+        //
+        //             debug!(
+        //                 table = %sequenced_table_name,
+        //                 column = %column_name,
+        //                 "added column in BigQuery"
+        //             );
+        //
+        //             if is_primary {
+        //                 primary_key_dirty = true;
+        //             }
+        //         }
+        //         RelationChange::DropColumn(column_schema) => {
+        //             let column_name = column_schema.name.clone();
+        //             let was_primary = column_schema.primary;
+        //
+        //             self.client
+        //                 .drop_column(&self.dataset_id, &sequenced_table_name, &column_schema.name)
+        //                 .await?;
+        //
+        //             debug!(
+        //                 table = %sequenced_table_name,
+        //                 column = %column_name,
+        //                 "dropped column in BigQuery"
+        //             );
+        //
+        //             if was_primary {
+        //                 primary_key_dirty = true;
+        //             }
+        //         }
+        //         RelationChange::AlterColumn(previous, latest) => {
+        //             let old_name = previous.name.clone();
+        //             let new_name = latest.name.clone();
+        //             let renamed = old_name != new_name;
+        //
+        //             if renamed {
+        //                 self.client
+        //                     .rename_column(
+        //                         &self.dataset_id,
+        //                         &sequenced_table_name,
+        //                         &previous.name,
+        //                         &latest.name,
+        //                     )
+        //                     .await?;
+        //
+        //                 debug!(
+        //                     table = %sequenced_table_name,
+        //                     old_column = %old_name,
+        //                     new_column = %new_name,
+        //                     "renamed column in BigQuery"
+        //                 );
+        //             }
+        //
+        //             if previous.typ != latest.typ {
+        //                 self.client
+        //                     .alter_column_type(&self.dataset_id, &sequenced_table_name, &latest)
+        //                     .await?;
+        //
+        //                 debug!(
+        //                     table = %sequenced_table_name,
+        //                     column = %new_name,
+        //                     "updated column type in BigQuery"
+        //                 );
+        //             }
+        //
+        //             if previous.nullable != latest.nullable {
+        //                 self.client
+        //                     .alter_column_nullability(
+        //                         &self.dataset_id,
+        //                         &sequenced_table_name,
+        //                         &latest.name,
+        //                         latest.nullable,
+        //                     )
+        //                     .await?;
+        //
+        //                 debug!(
+        //                     table = %sequenced_table_name,
+        //                     column = %new_name,
+        //                     nullable = latest.nullable,
+        //                     "updated column nullability in BigQuery"
+        //                 );
+        //             }
+        //
+        //             if previous.primary != latest.primary
+        //                 || (renamed && (previous.primary || latest.primary))
+        //             {
+        //                 primary_key_dirty = true;
+        //             }
+        //         }
+        //     }
+        // }
+        //
+        // if primary_key_dirty {
+        //     self.client
+        //         .sync_primary_key(
+        //             &self.dataset_id,
+        //             &sequenced_table_name,
+        //             &table_schema.column_schemas,
+        //         )
+        //         .await?;
+        //
+        //     debug!(
+        //         table = %sequenced_table_name,
+        //         "synchronized primary key definition in BigQuery"
+        //     );
+        // }
+        //
+        // info!(
+        //     table_id = %relation_event.table_id,
+        //     table = %sequenced_table_name,
+        //     "applied relation changes in BigQuery"
+        // );
 
         Ok(())
     }
@@ -693,11 +682,7 @@ where
     /// Returns `true` whether the event should break the batch that is being built up when
     /// writing events. `false` otherwise.
     fn is_batch_breaker(event: &Event) -> bool {
-        match event {
-            Event::Truncate(_) => true,
-            Event::Relation(_) => true,
-            _ => false,
-        }
+        matches!(event, Event::Truncate(_) | Event::Relation(_))
     }
 
     /// Processes CDC events in batches with proper ordering and truncate handling.
@@ -705,76 +690,86 @@ where
     /// Groups streaming operations (insert/update/delete) by table and processes them together,
     /// then handles truncate events separately by creating new versioned tables.
     async fn write_events(&self, events: Vec<Event>) -> EtlResult<()> {
-        let mut event_iter = events.into_iter().peekable();
+        let mut events = events.into_iter().peekable();
 
-        while event_iter.peek().is_some() {
-            let mut table_id_to_table_rows: HashMap<(TableId, SchemaVersion), Vec<TableRow>> =
-                HashMap::new();
+        while events.peek().is_some() {
+            let mut batch_schema_version = None;
+            let mut table_id_to_table_rows = HashMap::new();
 
-            // Process events until we hit a truncate event or run out of events
-            while let Some(event) = event_iter.peek() {
+            let mut handle_dml_statement =
+                |start_lsn: PgLsn,
+                 commit_lsn: PgLsn,
+                 table_id: TableId,
+                 mut table_row: TableRow,
+                 schema_version: SchemaVersion| {
+                    let sequence_number = generate_sequence_number(start_lsn, commit_lsn);
+                    table_row
+                        .values
+                        .push(BigQueryOperationType::Upsert.into_cell());
+                    table_row.values.push(Cell::String(sequence_number));
+
+                    let table_rows: &mut Vec<TableRow> =
+                        table_id_to_table_rows.entry(table_id).or_default();
+                    table_rows.push(table_row);
+
+                    batch_schema_version = Some(schema_version);
+                };
+
+            // Process events until we hit a batch breaker, or we run out of events.
+            while let Some(event) = events.peek() {
                 if Self::is_batch_breaker(event) {
                     break;
                 }
 
-                let event = event_iter.next().unwrap();
-                match event {
-                    Event::Insert(mut insert) => {
-                        let sequence_number =
-                            generate_sequence_number(insert.start_lsn, insert.commit_lsn);
-                        insert
-                            .table_row
-                            .values
-                            .push(BigQueryOperationType::Upsert.into_cell());
-                        insert.table_row.values.push(Cell::String(sequence_number));
-
-                        let table_rows: &mut Vec<TableRow> = table_id_to_table_rows
-                            .entry((insert.table_id, insert.schema_version))
-                            .or_default();
-                        table_rows.push(insert.table_row);
+                match events.next().unwrap() {
+                    Event::Insert(insert) => {
+                        handle_dml_statement(
+                            insert.start_lsn,
+                            insert.commit_lsn,
+                            insert.table_id,
+                            insert.table_row,
+                            insert.schema_version,
+                        );
                     }
-                    Event::Update(mut update) => {
-                        let sequence_number =
-                            generate_sequence_number(update.start_lsn, update.commit_lsn);
-                        update
-                            .table_row
-                            .values
-                            .push(BigQueryOperationType::Upsert.into_cell());
-                        update.table_row.values.push(Cell::String(sequence_number));
-
-                        let table_rows: &mut Vec<TableRow> = table_id_to_table_rows
-                            .entry((update.table_id, update.schema_version))
-                            .or_default();
-                        table_rows.push(update.table_row);
+                    Event::Update(update) => {
+                        handle_dml_statement(
+                            update.start_lsn,
+                            update.commit_lsn,
+                            update.table_id,
+                            update.table_row,
+                            update.schema_version,
+                        );
                     }
                     Event::Delete(delete) => {
-                        let Some((_, mut old_table_row)) = delete.old_table_row else {
+                        let Some((_, old_table_row)) = delete.old_table_row else {
                             info!("the `DELETE` event has no row, so it was skipped");
                             continue;
                         };
 
-                        let sequence_number =
-                            generate_sequence_number(delete.start_lsn, delete.commit_lsn);
-                        old_table_row
-                            .values
-                            .push(BigQueryOperationType::Delete.into_cell());
-                        old_table_row.values.push(Cell::String(sequence_number));
-
-                        let table_rows: &mut Vec<TableRow> = table_id_to_table_rows
-                            .entry((delete.table_id, delete.schema_version))
-                            .or_default();
-                        table_rows.push(old_table_row);
+                        handle_dml_statement(
+                            delete.start_lsn,
+                            delete.commit_lsn,
+                            delete.table_id,
+                            old_table_row,
+                            delete.schema_version,
+                        );
                     }
-                    _ => {
-                        debug!("skipping unsupported event in BigQuery");
+                    event => {
+                        debug!("skipping unsupported event {event:?} in BigQuery");
                     }
                 }
             }
-
-            // Process accumulated events for each table before a batch breaker is encountered.
             if !table_id_to_table_rows.is_empty() {
-                let pending_rows = mem::take(&mut table_id_to_table_rows);
-                self.process_table_events(pending_rows).await?;
+                let Some(schema_version) = batch_schema_version.take() else {
+                    bail!(
+                        ErrorKind::InvalidState,
+                        "Missing schema version",
+                        "Missing schema version before writing events in BigQuery"
+                    )
+                };
+                let table_id_to_table_rows = mem::take(&mut table_id_to_table_rows);
+                self.process_table_events(schema_version, table_id_to_table_rows)
+                    .await?;
             }
 
             // Collect and deduplicate all table IDs from all truncate events.
@@ -783,8 +778,8 @@ where
             // row without applying other events in the meanwhile, it doesn't make any sense to create
             // new empty tables for each of them.
             let mut truncate_tables = Vec::new();
-            while let Some(Event::Truncate(_)) = event_iter.peek() {
-                if let Some(Event::Truncate(truncate_event)) = event_iter.next() {
+            while let Some(Event::Truncate(_)) = events.peek() {
+                if let Some(Event::Truncate(truncate_event)) = events.next() {
                     for table_id in truncate_event.table_ids {
                         truncate_tables.push(table_id);
                     }
@@ -796,8 +791,8 @@ where
             }
 
             // Collect all the relation events in a sequence and apply them.
-            while let Some(Event::Relation(_)) = event_iter.peek() {
-                if let Some(Event::Relation(relation_event)) = event_iter.next() {
+            while let Some(Event::Relation(_)) = events.peek() {
+                if let Some(Event::Relation(relation_event)) = events.next() {
                     self.apply_relation_event(relation_event).await?;
                 }
             }
@@ -825,11 +820,13 @@ where
                 .store
                 .get_table_schema(&table_id, schema_version)
                 .await?;
+
             // If we are not doing CDC, it means that this truncation has been issued while recovering
             // from a failed data sync operation. In that case, we could have failed before table schemas
-            // were stored in the schema store, so we just continue and emit a warning. If we are doing
-            // CDC, it's a problem if the schema disappears while streaming, so we error out.
-            if !is_cdc_truncate {
+            // were stored in the schema store, so if we don't find a table schema we just continue
+            // and emit a warning. If we are doing CDC, it's a problem if the schema disappears while
+            // streaming, so we error out.
+            if table_schema.is_none() && !is_cdc_truncate {
                 warn!(
                     "the table schema for table {table_id} was not found in the schema store while processing truncate events for BigQuery",
                     table_id = table_id.to_string()

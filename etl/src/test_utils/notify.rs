@@ -106,12 +106,17 @@ impl NotifyingStore {
         inner.table_replication_states.clone()
     }
 
-    pub async fn get_table_schemas(&self) -> HashMap<TableId, TableSchema> {
+    pub async fn get_latest_table_schemas(&self) -> HashMap<TableId, TableSchema> {
         let inner = self.inner.read().await;
         inner
             .table_schemas
             .iter()
-            .map(|(id, schema)| (*id, Arc::as_ref(schema).clone()))
+            .filter_map(|(table_id, table_schemas)| {
+                table_schemas
+                    .iter()
+                    .next_back()
+                    .map(|(_, schema)| (*table_id, schema.as_ref().clone()))
+            })
             .collect()
     }
 
@@ -316,16 +321,6 @@ impl SchemaStore for NotifyingStore {
             .table_schemas
             .get(table_id)
             .and_then(|schemas| schemas.iter().next_back().map(|(_, schema)| schema.clone())))
-    }
-
-    async fn get_table_schemas(&self) -> EtlResult<Vec<Arc<TableSchema>>> {
-        let inner = self.inner.read().await;
-
-        Ok(inner
-            .table_schemas
-            .values()
-            .filter_map(|schemas| schemas.iter().next_back().map(|(_, schema)| schema.clone()))
-            .collect())
     }
 
     async fn load_table_schemas(&self) -> EtlResult<usize> {

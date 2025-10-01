@@ -1105,7 +1105,7 @@ where
     }
 
     // Convert event from the protocol message.
-    let old_table_schema = load_table_schema(schema_store, table_id).await?;
+    let old_table_schema = load_latest_table_schema(schema_store, table_id).await?;
     let new_table_schema_draft =
         parse_event_from_relation_message(old_table_schema.clone(), message).await?;
 
@@ -1155,7 +1155,7 @@ where
     }
 
     // Convert event from the protocol message.
-    let table_schema = load_table_schema(schema_store, table_id).await?;
+    let table_schema = load_latest_table_schema(schema_store, table_id).await?;
     let event =
         parse_event_from_insert_message(table_schema, start_lsn, remote_final_lsn, message)?;
 
@@ -1192,7 +1192,7 @@ where
     }
 
     // Convert event from the protocol message.
-    let table_schema = load_table_schema(schema_store, table_id).await?;
+    let table_schema = load_latest_table_schema(schema_store, table_id).await?;
     let event =
         parse_event_from_update_message(table_schema, start_lsn, remote_final_lsn, message)?;
 
@@ -1229,7 +1229,7 @@ where
     }
 
     // Convert event from the protocol message.
-    let table_schema = load_table_schema(schema_store, table_id).await?;
+    let table_schema = load_latest_table_schema(schema_store, table_id).await?;
     let event =
         parse_event_from_delete_message(table_schema, start_lsn, remote_final_lsn, message)?;
 
@@ -1250,7 +1250,7 @@ async fn handle_truncate_message<S, T>(
     schema_store: &S,
 ) -> EtlResult<HandleMessageResult>
 where
-S: SchemaStore + Clone + Send + 'static,
+    S: SchemaStore + Clone + Send + 'static,
     T: ApplyLoopHook,
 {
     let Some(remote_final_lsn) = state.remote_final_lsn else {
@@ -1272,7 +1272,7 @@ S: SchemaStore + Clone + Send + 'static,
         {
             // We load the last table schema available at the time of the truncation, this way we
             // can bind the schema version to use when processing the truncation in the destination.
-            let table_schema = load_table_schema(schema_store, table_id).await?;
+            let table_schema = load_latest_table_schema(schema_store, table_id).await?;
             table_ids.push((table_id, table_schema.version));
         }
     }
@@ -1288,8 +1288,14 @@ S: SchemaStore + Clone + Send + 'static,
     Ok(HandleMessageResult::return_event(Event::Truncate(event)))
 }
 
-/// Loads the table schema for processing a specific event.
-async fn load_table_schema<S>(schema_store: &S, table_id: TableId) -> EtlResult<Arc<TableSchema>>
+/// Loads the latest table schema for processing a specific event.
+///
+/// The latest table schema is defined as the schema with the highest version at a specific point
+/// of processing the WAL.
+async fn load_latest_table_schema<S>(
+    schema_store: &S,
+    table_id: TableId,
+) -> EtlResult<Arc<TableSchema>>
 where
     S: SchemaStore + Clone + Send + 'static,
 {

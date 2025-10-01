@@ -248,6 +248,7 @@ pub fn build_expected_users_inserts(
                     Cell::I32(age),
                 ],
             },
+            schema_version: 0,
         }));
 
         starting_id += 1;
@@ -271,6 +272,7 @@ pub fn build_expected_orders_inserts(
             table_row: TableRow {
                 values: vec![Cell::I64(starting_id), Cell::String(name.to_owned())],
             },
+            schema_version: 0,
         }));
 
         starting_id += 1;

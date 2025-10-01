@@ -10,7 +10,7 @@ use crate::error::EtlResult;
 ///
 /// Implementations should ensure thread-safety and handle concurrent access to the data.
 pub trait SchemaStore {
-    /// Returns table schema for table with id `table_id` from the cache.
+    /// Returns table schema for table with a specific schema version.
     ///
     /// Does not load any new data into the cache.
     fn get_table_schema(
@@ -24,9 +24,6 @@ pub trait SchemaStore {
         &self,
         table_id: &TableId,
     ) -> impl Future<Output = EtlResult<Option<Arc<TableSchema>>>> + Send;
-
-    /// Returns the latest table schema for all tables from the cache.
-    fn get_table_schemas(&self) -> impl Future<Output = EtlResult<Vec<Arc<TableSchema>>>> + Send;
 
     /// Loads table schemas from the persistent state into the cache.
     ///

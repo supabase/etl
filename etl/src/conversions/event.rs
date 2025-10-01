@@ -1,6 +1,6 @@
 use core::str;
 use etl_postgres::types::{
-    ColumnSchema, TableId, TableSchema, TableSchemaDraft, convert_type_oid_to_type,
+    ColumnSchema, SchemaVersion, TableId, TableSchema, TableSchemaDraft, convert_type_oid_to_type,
 };
 use postgres_replication::protocol;
 use std::sync::Arc;
@@ -10,8 +10,7 @@ use crate::bail;
 use crate::conversions::text::{default_value_for_type, parse_cell_from_postgres_text};
 use crate::error::{ErrorKind, EtlError, EtlResult};
 use crate::types::{
-    BeginEvent, Cell, CommitEvent, DeleteEvent, InsertEvent, TableRow,
-    TruncateEvent, UpdateEvent,
+    BeginEvent, Cell, CommitEvent, DeleteEvent, InsertEvent, TableRow, TruncateEvent, UpdateEvent,
 };
 
 /// Creates a [`BeginEvent`] from Postgres protocol data.
@@ -194,7 +193,7 @@ pub fn parse_event_from_truncate_message(
     start_lsn: PgLsn,
     commit_lsn: PgLsn,
     truncate_body: &protocol::TruncateBody,
-    table_ids: Vec<TableId>,
+    table_ids: Vec<(TableId, SchemaVersion)>,
 ) -> TruncateEvent {
     TruncateEvent {
         start_lsn,

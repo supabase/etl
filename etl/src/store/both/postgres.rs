@@ -19,7 +19,27 @@ use crate::store::state::StateStore;
 use crate::types::PipelineId;
 use crate::{bail, etl_error};
 
+/// Default number of connections in the pool used by the [`PostgresStore`] to connect to the
+/// source database.
 const NUM_POOL_CONNECTIONS: u32 = 1;
+
+/// Emits table-related metrics.
+fn emit_table_metrics(
+    pipeline_id: PipelineId,
+    total_tables: usize,
+    phase_counts: &HashMap<&'static str, u64>,
+) {
+    gauge!(ETL_TABLES_TOTAL, PIPELINE_ID_LABEL => pipeline_id.to_string()).set(total_tables as f64);
+
+    for (phase, count) in phase_counts {
+        gauge!(
+            ETL_TABLES_TOTAL,
+            PIPELINE_ID_LABEL => pipeline_id.to_string(),
+            PHASE_LABEL => *phase
+        )
+        .set(*count as f64);
+    }
+}
 
 /// Converts ETL table replication phases to Postgres database state format.
 ///
@@ -199,7 +219,7 @@ impl PostgresStore {
     /// than maintaining persistent connections. This approach trades connection
     /// setup overhead for reduced resource usage during periods of low activity.
     async fn connect_to_source(&self) -> Result<PgPool, sqlx::Error> {
-        // We connect to source database each time we update because we assume that
+        // We connect to the source database each time we update because we assume that
         // these updates will be infrequent. It has some overhead to establish a
         // connection, but it's better than holding a connection open for long periods
         // when there's little activity on it.
@@ -212,23 +232,14 @@ impl PostgresStore {
 
         Ok(pool)
     }
-}
 
-/// Emits table related metrics.
-fn emit_table_metrics(
-    pipeline_id: PipelineId,
-    total_tables: usize,
-    phase_counts: &HashMap<&'static str, u64>,
-) {
-    gauge!(ETL_TABLES_TOTAL, PIPELINE_ID_LABEL => pipeline_id.to_string()).set(total_tables as f64);
-
-    for (phase, count) in phase_counts {
-        gauge!(
-            ETL_TABLES_TOTAL,
-            PIPELINE_ID_LABEL => pipeline_id.to_string(),
-            PHASE_LABEL => *phase
-        )
-        .set(*count as f64);
+    /// Returns all the table schemas stored in this store.
+    #[cfg(feature = "test-utils")]
+    pub async fn get_all_table_schemas(
+        &self,
+    ) -> HashMap<TableId, BTreeMap<SchemaVersion, Arc<TableSchema>>> {
+        let inner = self.inner.lock().await;
+        inner.table_schemas.clone()
     }
 }
 
@@ -330,8 +341,7 @@ impl StateStore for PostgresStore {
         let mut inner = self.inner.lock().await;
         state::update_replication_state(&pool, self.pipeline_id as i64, table_id, db_state).await?;
 
-        // Compute which phases need to be increment and decremented to
-        // keep table metrics updated
+        // Compute which phases need to be increment and decremented to keep table metrics updated.
         let phase_to_decrement = inner
             .table_states
             .get(&table_id)
@@ -373,8 +383,8 @@ impl StateStore for PostgresStore {
         let mut inner = self.inner.lock().await;
         match state::rollback_replication_state(&pool, self.pipeline_id as i64, table_id).await? {
             Some(restored_row) => {
-                // Compute which phases need to be increment and decremented to
-                // keep table metrics updated
+                // Compute which phases need to be increment and decremented to keep table metrics
+                // updated.
                 let phase_to_decrement = inner
                     .table_states
                     .get(&table_id)
@@ -521,6 +531,7 @@ impl SchemaStore for PostgresStore {
             .and_then(|schemas| schemas.get(&version).cloned()))
     }
 
+    /// Retrieves the latest table schema for a table.
     async fn get_latest_table_schema(
         &self,
         table_id: &TableId,
@@ -531,21 +542,6 @@ impl SchemaStore for PostgresStore {
             .table_schemas
             .get(table_id)
             .and_then(|schemas| schemas.iter().next_back().map(|(_, schema)| schema.clone())))
-    }
-
-    /// Retrieves all cached table schemas as a vector.
-    ///
-    /// This method returns all currently cached table schemas, providing a
-    /// complete view of the schema information available to the pipeline.
-    /// Useful for operations that need to process or analyze all table schemas.
-    async fn get_table_schemas(&self) -> EtlResult<Vec<Arc<TableSchema>>> {
-        let inner = self.inner.lock().await;
-
-        Ok(inner
-            .table_schemas
-            .values()
-            .filter_map(|schemas| schemas.iter().next_back().map(|(_, schema)| schema.clone()))
-            .collect())
     }
 
     /// Loads table schemas from Postgres into memory cache.
@@ -585,12 +581,6 @@ impl SchemaStore for PostgresStore {
         info!(
             "loaded {} table schemas from postgres state store",
             table_schemas_len
-        );
-
-        emit_table_metrics(
-            self.pipeline_id,
-            inner.table_states.keys().len(),
-            inner.table_schemas.keys().len(),
         );
 
         Ok(table_schemas_len)
