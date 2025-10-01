@@ -313,27 +313,7 @@ impl BigQueryClient {
         Ok(())
     }
 
-    /// Renames a column in an existing BigQuery table.
-    pub async fn rename_column(
-        &self,
-        dataset_id: &BigQueryDatasetId,
-        table_id: &BigQueryTableId,
-        old_name: &str,
-        new_name: &str,
-    ) -> EtlResult<()> {
-        let full_table_name = self.full_table_name(dataset_id, table_id);
-        let old_identifier = Self::quote_identifier(old_name);
-        let new_identifier = Self::quote_identifier(new_name);
-        let query = format!(
-            "alter table {full_table_name} rename column {old_identifier} to {new_identifier}"
-        );
-
-        let _ = self.query(QueryRequest::new(query)).await?;
-
-        Ok(())
-    }
-
-    /// Alters the data type of an existing column in a BigQuery table.
+    /// Alters the data type of the existing column in a BigQuery table.
     pub async fn alter_column_type(
         &self,
         dataset_id: &BigQueryDatasetId,
@@ -346,29 +326,6 @@ impl BigQueryClient {
         let query = format!(
             "alter table {full_table_name} alter column {column_identifier} set data type {column_type}"
         );
-
-        let _ = self.query(QueryRequest::new(query)).await?;
-
-        Ok(())
-    }
-
-    /// Updates the nullability of an existing column in a BigQuery table.
-    pub async fn alter_column_nullability(
-        &self,
-        dataset_id: &BigQueryDatasetId,
-        table_id: &BigQueryTableId,
-        column_name: &str,
-        nullable: bool,
-    ) -> EtlResult<()> {
-        let full_table_name = self.full_table_name(dataset_id, table_id);
-        let column_identifier = Self::quote_identifier(column_name);
-        let clause = if nullable {
-            "drop not null"
-        } else {
-            "set not null"
-        };
-        let query =
-            format!("alter table {full_table_name} alter column {column_identifier} {clause}");
 
         let _ = self.query(QueryRequest::new(query)).await?;
 
@@ -388,16 +345,12 @@ impl BigQueryClient {
             .collect();
 
         let has_primary_key = self.has_primary_key(dataset_id, table_id).await?;
-
-        if primary_columns.is_empty() {
-            if has_primary_key {
-                self.drop_primary_key(dataset_id, table_id).await?;
-            }
-            return Ok(());
-        }
-
         if has_primary_key {
             self.drop_primary_key(dataset_id, table_id).await?;
+        }
+
+        if primary_columns.is_empty() {
+            return Ok(());
         }
 
         let columns = primary_columns
@@ -688,7 +641,7 @@ impl BigQueryClient {
     /// Converts Postgres column schemas to a BigQuery [`TableDescriptor`].
     ///
     /// Maps data types and nullability to BigQuery column specifications, setting
-    /// appropriate column modes and automatically adding CDC special columns.
+    /// appropriate column modes, and automatically adding CDC special columns.
     pub fn column_schemas_to_table_descriptor(
         column_schemas: &[ColumnSchema],
         use_cdc_sequence_column: bool,

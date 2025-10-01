@@ -723,6 +723,7 @@ impl PgReplicationClient {
 
         Ok(column_schemas)
     }
+
     /// Creates a COPY stream for reading data from a table using its OID.
     ///
     /// The stream will include only the specified columns and use text format.

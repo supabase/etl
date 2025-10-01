@@ -3,7 +3,8 @@ use etl::error::{ErrorKind, EtlError, EtlResult};
 use etl::store::schema::SchemaStore;
 use etl::store::state::StateStore;
 use etl::types::{
-    Cell, Event, PgLsn, RelationEvent, SchemaVersion, TableId, TableName, TableRow, TableSchema,
+    Cell, Event, PgLsn, RelationChange, RelationEvent, SchemaVersion, TableId, TableName, TableRow,
+    TableSchema,
 };
 use etl::{bail, etl_error};
 use gcp_bigquery_client::storage::TableDescriptor;
@@ -538,143 +539,95 @@ where
         Ok(())
     }
 
-    async fn apply_relation_event(&self, _relation_event: RelationEvent) -> EtlResult<()> {
-        // TODO: implement the relation event.
-        // if relation_event.changes.is_empty() {
-        //     debug!(
-        //         table_id = %relation_event.table_id,
-        //         "relation event contained no schema changes; skipping"
-        //     );
-        //
-        //     return Ok(());
-        // }
-        //
-        // let (sequenced_bigquery_table_id, table_schema) = self
-        //     .prepare_table(&relation_event.table_id, relation_event.new_schema_version)
-        //     .await?;
-        //
-        // let sequenced_table_name = sequenced_bigquery_table_id.to_string();
-        // let mut primary_key_dirty = false;
-        // for change in relation_event.changes {
-        //     match change {
-        //         RelationChange::AddColumn(column_schema) => {
-        //             let column_name = column_schema.name.clone();
-        //             let is_primary = column_schema.primary;
-        //
-        //             self.client
-        //                 .add_column(&self.dataset_id, &sequenced_table_name, &column_schema)
-        //                 .await?;
-        //
-        //             debug!(
-        //                 table = %sequenced_table_name,
-        //                 column = %column_name,
-        //                 "added column in BigQuery"
-        //             );
-        //
-        //             if is_primary {
-        //                 primary_key_dirty = true;
-        //             }
-        //         }
-        //         RelationChange::DropColumn(column_schema) => {
-        //             let column_name = column_schema.name.clone();
-        //             let was_primary = column_schema.primary;
-        //
-        //             self.client
-        //                 .drop_column(&self.dataset_id, &sequenced_table_name, &column_schema.name)
-        //                 .await?;
-        //
-        //             debug!(
-        //                 table = %sequenced_table_name,
-        //                 column = %column_name,
-        //                 "dropped column in BigQuery"
-        //             );
-        //
-        //             if was_primary {
-        //                 primary_key_dirty = true;
-        //             }
-        //         }
-        //         RelationChange::AlterColumn(previous, latest) => {
-        //             let old_name = previous.name.clone();
-        //             let new_name = latest.name.clone();
-        //             let renamed = old_name != new_name;
-        //
-        //             if renamed {
-        //                 self.client
-        //                     .rename_column(
-        //                         &self.dataset_id,
-        //                         &sequenced_table_name,
-        //                         &previous.name,
-        //                         &latest.name,
-        //                     )
-        //                     .await?;
-        //
-        //                 debug!(
-        //                     table = %sequenced_table_name,
-        //                     old_column = %old_name,
-        //                     new_column = %new_name,
-        //                     "renamed column in BigQuery"
-        //                 );
-        //             }
-        //
-        //             if previous.typ != latest.typ {
-        //                 self.client
-        //                     .alter_column_type(&self.dataset_id, &sequenced_table_name, &latest)
-        //                     .await?;
-        //
-        //                 debug!(
-        //                     table = %sequenced_table_name,
-        //                     column = %new_name,
-        //                     "updated column type in BigQuery"
-        //                 );
-        //             }
-        //
-        //             if previous.nullable != latest.nullable {
-        //                 self.client
-        //                     .alter_column_nullability(
-        //                         &self.dataset_id,
-        //                         &sequenced_table_name,
-        //                         &latest.name,
-        //                         latest.nullable,
-        //                     )
-        //                     .await?;
-        //
-        //                 debug!(
-        //                     table = %sequenced_table_name,
-        //                     column = %new_name,
-        //                     nullable = latest.nullable,
-        //                     "updated column nullability in BigQuery"
-        //                 );
-        //             }
-        //
-        //             if previous.primary != latest.primary
-        //                 || (renamed && (previous.primary || latest.primary))
-        //             {
-        //                 primary_key_dirty = true;
-        //             }
-        //         }
-        //     }
-        // }
-        //
-        // if primary_key_dirty {
-        //     self.client
-        //         .sync_primary_key(
-        //             &self.dataset_id,
-        //             &sequenced_table_name,
-        //             &table_schema.column_schemas,
-        //         )
-        //         .await?;
-        //
-        //     debug!(
-        //         table = %sequenced_table_name,
-        //         "synchronized primary key definition in BigQuery"
-        //     );
-        // }
-        //
-        // info!(
-        //     table_id = %relation_event.table_id,
-        //     table = %sequenced_table_name,
-        //     "applied relation changes in BigQuery"
-        // );
+    async fn apply_relation_event_changes(&self, relation_event: RelationEvent) -> EtlResult<()> {
+        // We build the list of changes for this relation event, this way, we can express the event
+        // in terms of a minimal set of operations to apply on the destination table schema.
+        let changes = relation_event.build_changes();
+        if changes.is_empty() {
+            debug!(
+                table_id = %relation_event.table_id,
+                "relation event contained no schema changes; skipping"
+            );
+
+            return Ok(());
+        }
+
+        // We prepare the table for the changes. We don't make any assumptions on the table state, we
+        // just want to work on an existing table and apply changes to it.
+        let (sequenced_bigquery_table_id, _table_schema) = self
+            .prepare_table(
+                &relation_event.table_id,
+                Some(relation_event.new_table_schema.version),
+            )
+            .await?;
+
+        let sequenced_table_name = sequenced_bigquery_table_id.to_string();
+        for change in changes {
+            match change {
+                RelationChange::AddColumn(column_schema) => {
+                    let column_name = column_schema.name.clone();
+
+                    self.client
+                        .add_column(&self.dataset_id, &sequenced_table_name, &column_schema)
+                        .await?;
+
+                    debug!(
+                        table = %sequenced_table_name,
+                        column = %column_name,
+                        "added column in BigQuery"
+                    );
+                }
+                RelationChange::DropColumn(column_schema) => {
+                    let column_name = column_schema.name.clone();
+
+                    self.client
+                        .drop_column(&self.dataset_id, &sequenced_table_name, &column_schema.name)
+                        .await?;
+
+                    debug!(
+                        table = %sequenced_table_name,
+                        column = %column_name,
+                        "dropped column in BigQuery"
+                    );
+                }
+                RelationChange::AlterColumn(previous_column_schema, latest_column_schema) => {
+                    if previous_column_schema.typ != latest_column_schema.typ {
+                        self.client
+                            .alter_column_type(
+                                &self.dataset_id,
+                                &sequenced_table_name,
+                                &latest_column_schema,
+                            )
+                            .await?;
+
+                        debug!(
+                            table = %sequenced_table_name,
+                            column = %latest_column_schema.name,
+                            "updated column type in BigQuery"
+                        );
+                    }
+                }
+            }
+        }
+
+        self.client
+            .sync_primary_key(
+                &self.dataset_id,
+                &sequenced_table_name,
+                &relation_event.new_table_schema.column_schemas,
+            )
+            .await?;
+
+        debug!(
+            table = %sequenced_table_name,
+            "synchronized primary key definition in BigQuery"
+        );
+
+        info!(
+            table_id = %relation_event.table_id,
+            table = %sequenced_table_name,
+            "applied relation changes in BigQuery"
+        );
 
         Ok(())
     }
@@ -814,7 +767,7 @@ where
                     batch_schema_version = Some(relation.new_table_schema.version);
 
                     // Apply relation change, then prime the next batch with the new schema version.
-                    self.apply_relation_event(relation).await?;
+                    self.apply_relation_event_changes(relation).await?;
                 }
                 Event::Truncate(truncate) => {
                     // Finish current batch before a TRUNCATE (it affects table state).
