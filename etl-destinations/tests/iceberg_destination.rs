@@ -80,12 +80,12 @@ async fn table_copy() {
     pipeline.shutdown_and_wait().await.unwrap();
 
     let users_table = format!(
-        "{}_{}",
+        "{}_{}_changelog",
         database_schema.users_schema().name.schema,
         database_schema.users_schema().name.name
     );
     let orders_table = format!(
-        "{}_{}",
+        "{}_{}_changelog",
         database_schema.orders_schema().name.schema,
         database_schema.orders_schema().name.name
     );

@@ -44,7 +44,7 @@ impl fmt::Display for IcebergOperationType {
 type IcebergTableName = String;
 
 fn table_name_to_iceberg_table_name(table_name: &TableName) -> IcebergTableName {
-    format!("{}_{}", table_name.schema, table_name.name)
+    format!("{}_{}_changelog", table_name.schema, table_name.name)
 }
 
 /// An iceberg destination that implements the ETL [`Destination`] trait.
