@@ -161,12 +161,12 @@ where
             if let Event::Truncate(event) = event
                 && has_table_id
             {
-                let Some(index) = event.rel_ids.iter().position(|&id| table_id.0 == id) else {
+                let Some(index) = event.table_ids.iter().position(|&id| table_id.0 == id) else {
                     return true;
                 };
 
-                event.rel_ids.remove(index);
-                if event.rel_ids.is_empty() {
+                event.table_ids.remove(index);
+                if event.table_ids.is_empty() {
                     return false;
                 }
 

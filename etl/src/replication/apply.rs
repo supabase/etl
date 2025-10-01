@@ -1,11 +1,10 @@
 use etl_config::shared::PipelineConfig;
 use etl_postgres::replication::worker::WorkerType;
-use etl_postgres::types::{SchemaVersion, TableId, TableSchema};
+use etl_postgres::types::{TableId, TableSchema};
 use futures::StreamExt;
 use metrics::histogram;
 use postgres_replication::protocol;
 use postgres_replication::protocol::{LogicalReplicationMessage, ReplicationMessage};
-use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -1247,7 +1246,6 @@ async fn handle_truncate_message<S, T>(
     state: &mut ApplyLoopState,
     start_lsn: PgLsn,
     message: &protocol::TruncateBody,
-    schema_store: &S,
     hook: &T,
 ) -> EtlResult<HandleMessageResult>
 where
@@ -1264,23 +1262,24 @@ where
 
     // We collect only the relation ids for which we are allowed to apply changes, thus in this case
     // the truncation.
-    let mut relations = Vec::with_capacity(message.rel_ids().len());
-    for &table_id in message.rel_ids().iter() {
-        let table_id = TableId::new(table_id);
+    let mut table_ids = Vec::with_capacity(message.rel_ids().len());
+    for table_id in message.rel_ids().iter() {
+        let table_id = TableId::new(*table_id);
         if hook
             .should_apply_changes(table_id, remote_final_lsn)
             .await?
         {
-            relations.push(table_id);
+            table_ids.push(table_id);
         }
     }
+
     // If nothing to apply, skip conversion entirely
-    if relations.is_empty() {
+    if table_ids.is_empty() {
         return Ok(HandleMessageResult::no_event());
     }
 
     // Convert event from the protocol message.
-    let event = parse_event_from_truncate_message(start_lsn, remote_final_lsn, message, relations);
+    let event = parse_event_from_truncate_message(start_lsn, remote_final_lsn, message, table_ids);
 
     Ok(HandleMessageResult::return_event(Event::Truncate(event)))
 }

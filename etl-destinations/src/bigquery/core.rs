@@ -785,8 +785,8 @@ where
             let mut truncate_tables = Vec::new();
             while let Some(Event::Truncate(_)) = event_iter.peek() {
                 if let Some(Event::Truncate(truncate_event)) = event_iter.next() {
-                    for (table_id, schema_version) in truncate_event.relations {
-                        truncate_tables.push((table_id, schema_version));
+                    for table_id in truncate_event.table_ids {
+                        truncate_tables.push(table_id);
                     }
                 }
             }

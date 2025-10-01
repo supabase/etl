@@ -1,4 +1,4 @@
-use etl_postgres::types::{ColumnSchema, SchemaVersion, TableId, TableSchema, TableSchemaDraft};
+use etl_postgres::types::{ColumnSchema, SchemaVersion, TableId, TableSchema};
 use std::collections::HashSet;
 use std::fmt;
 use std::hash::Hash;
@@ -204,7 +204,7 @@ pub struct TruncateEvent {
     /// Truncate operation options from Postgres.
     pub options: i8,
     /// List of table IDs that were truncated in this operation.
-    pub relations: Vec<TableId>,
+    pub table_ids: Vec<TableId>,
 }
 
 /// Represents a single replication event from Postgres logical replication.
@@ -252,7 +252,7 @@ impl Event {
             Event::Update(update_event) => update_event.table_id == *table_id,
             Event::Delete(delete_event) => delete_event.table_id == *table_id,
             Event::Relation(relation_event) => relation_event.table_id == *table_id,
-            Event::Truncate(event) => event.relations.iter().any(|rel_id| rel_id == table_id),
+            Event::Truncate(event) => event.table_ids.iter().any(|id| id == table_id),
             _ => false,
         }
     }

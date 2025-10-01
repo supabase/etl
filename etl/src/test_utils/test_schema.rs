@@ -222,7 +222,7 @@ pub fn events_equal_excluding_fields(left: &Event, right: &Event) -> bool {
         }
         (Event::Relation(left), Event::Relation(right)) => left.table_id == right.table_id,
         (Event::Truncate(left), Event::Truncate(right)) => {
-            left.options == right.options && left.rel_ids == right.rel_ids
+            left.options == right.options && left.table_ids == right.table_ids
         }
         (Event::Unsupported, Event::Unsupported) => true,
         _ => false, // Different event types
