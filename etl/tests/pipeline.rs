@@ -527,12 +527,11 @@ async fn table_schema_changes_are_handled_correctly() {
     // Check the initial schema.
     let table_schemas = store.get_latest_table_schemas().await;
     assert_eq!(table_schemas.len(), 1);
-    let users_table_schema = column_schema_names(
-        table_schemas
-            .get(&database_schema.users_schema().id)
-            .unwrap(),
-    );
-    assert_eq!(users_table_schema, vec!["id", "name", "age"]);
+    let users_table_schema = table_schemas
+        .get(&database_schema.users_schema().id)
+        .unwrap();
+    assert_eq!(users_table_schema.version, 0);
+    assert_eq!(column_schema_names(users_table_schema), vec!["id", "name", "age"]);
 
     // Check the initial data.
     let table_rows = destination.get_table_rows().await;
@@ -577,12 +576,11 @@ async fn table_schema_changes_are_handled_correctly() {
     // Check the updated schema.
     let table_schemas = store.get_latest_table_schemas().await;
     assert_eq!(table_schemas.len(), 1);
-    let users_table_schema = column_schema_names(
-        table_schemas
-            .get(&database_schema.users_schema().id)
-            .unwrap(),
-    );
-    assert_eq!(users_table_schema, vec!["id", "name", "new_age", "year"]);
+    let users_table_schema = table_schemas
+        .get(&database_schema.users_schema().id)
+        .unwrap();
+    assert_eq!(users_table_schema.version, 1);
+    assert_eq!(column_schema_names(users_table_schema), vec!["id", "name", "new_age", "year"]);
 
     // Check the updated data.
     let events = destination.get_events().await;
@@ -627,12 +625,11 @@ async fn table_schema_changes_are_handled_correctly() {
     // Check the updated schema.
     let table_schemas = store.get_latest_table_schemas().await;
     assert_eq!(table_schemas.len(), 1);
-    let users_table_schema = column_schema_names(
-        table_schemas
-            .get(&database_schema.users_schema().id)
-            .unwrap(),
-    );
-    assert_eq!(users_table_schema, vec!["id", "name", "new_age"]);
+    let users_table_schema = table_schemas
+        .get(&database_schema.users_schema().id)
+        .unwrap();
+    assert_eq!(users_table_schema.version, 2);
+    assert_eq!(column_schema_names(users_table_schema), vec!["id", "name", "new_age"]);
 
     // Check the updated data.
     let events = destination.get_events().await;

@@ -177,7 +177,7 @@ impl SchemaStore for MemoryStore {
         Ok(inner
             .table_schemas
             .get(table_id)
-            .and_then(|schemas| schemas.get(&version).cloned()))
+            .and_then(|table_schemas| table_schemas.get(&version).cloned()))
     }
 
     async fn get_latest_table_schema(
@@ -189,7 +189,7 @@ impl SchemaStore for MemoryStore {
         Ok(inner
             .table_schemas
             .get(table_id)
-            .and_then(|schemas| schemas.iter().next_back().map(|(_, schema)| schema.clone())))
+            .and_then(|table_schemas| table_schemas.iter().next_back().map(|(_, schema)| schema.clone())))
     }
 
     async fn load_table_schemas(&self) -> EtlResult<usize> {
@@ -198,7 +198,7 @@ impl SchemaStore for MemoryStore {
         Ok(inner
             .table_schemas
             .values()
-            .map(|schemas| schemas.len())
+            .map(|table_schemas| table_schemas.len())
             .sum())
     }
 
@@ -207,21 +207,21 @@ impl SchemaStore for MemoryStore {
         table_schema: TableSchemaDraft,
     ) -> EtlResult<Arc<TableSchema>> {
         let mut inner = self.inner.lock().await;
-        let schemas = inner
+        let table_schemas = inner
             .table_schemas
             .entry(table_schema.id)
             .or_insert_with(BTreeMap::new);
 
-        let next_version = schemas
+        let next_version = table_schemas
             .keys()
             .next_back()
             .map(|version| version + 1)
             .unwrap_or(0);
 
-        let schema = Arc::new(table_schema.into_table_schema(next_version));
-        schemas.insert(next_version, Arc::clone(&schema));
+        let table_schema = Arc::new(table_schema.into_table_schema(next_version));
+        table_schemas.insert(next_version, table_schema.clone());
 
-        Ok(schema)
+        Ok(table_schema)
     }
 }
 
