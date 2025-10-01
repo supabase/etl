@@ -216,7 +216,7 @@ async fn create_table_if_missing() {
         ColumnSchema::new("oid_array_col".to_string(), Type::OID_ARRAY, -1, false),
         ColumnSchema::new("bytea_array_col".to_string(), Type::BYTEA_ARRAY, -1, false),
     ];
-    let table_schema = TableSchema::new(table_id, table_name_struct, columns);
+    let table_schema = TableSchema::new(table_id, table_name_struct, 0, columns);
 
     // table doesn't exist yet
     assert!(
@@ -318,7 +318,7 @@ async fn insert_nullable_scalars() {
         // Binary type
         ColumnSchema::new("bytea_col".to_string(), Type::BYTEA, -1, false),
     ];
-    let table_schema = TableSchema::new(table_id, table_name_struct, columns);
+    let table_schema = TableSchema::new(table_id, table_name_struct, 0, columns);
 
     client
         .create_table_if_missing(namespace, table_name.clone(), &table_schema)
@@ -469,7 +469,7 @@ async fn insert_non_nullable_scalars() {
         // Binary type
         ColumnSchema::new("bytea_col".to_string(), Type::BYTEA, -1, false),
     ];
-    let table_schema = TableSchema::new(table_id, table_name_struct, columns);
+    let table_schema = TableSchema::new(table_id, table_name_struct, 0, columns);
 
     client
         .create_table_if_missing(namespace, table_name.clone(), &table_schema)
@@ -629,7 +629,7 @@ async fn insert_nullable_array() {
         // Binary array type
         ColumnSchema::new("bytea_array_col".to_string(), Type::BYTEA_ARRAY, -1, false),
     ];
-    let table_schema = TableSchema::new(table_id, table_name_struct, columns);
+    let table_schema = TableSchema::new(table_id, table_name_struct, 0, columns);
 
     client
         .create_table_if_missing(namespace, table_name.clone(), &table_schema)
@@ -903,7 +903,7 @@ async fn insert_non_nullable_array() {
         // Binary array type
         ColumnSchema::new("bytea_array_col".to_string(), Type::BYTEA_ARRAY, -1, false),
     ];
-    let table_schema = TableSchema::new(table_id, table_name_struct, columns);
+    let table_schema = TableSchema::new(table_id, table_name_struct, 0, columns);
 
     client
         .create_table_if_missing(namespace, table_name.clone(), &table_schema)

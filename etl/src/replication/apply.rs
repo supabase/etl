@@ -1,10 +1,11 @@
 use etl_config::shared::PipelineConfig;
 use etl_postgres::replication::worker::WorkerType;
-use etl_postgres::types::TableId;
+use etl_postgres::types::{SchemaVersion, TableId, TableSchema};
 use futures::StreamExt;
 use metrics::histogram;
 use postgres_replication::protocol;
 use postgres_replication::protocol::{LogicalReplicationMessage, ReplicationMessage};
+use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -13,7 +14,6 @@ use tokio::pin;
 use tokio_postgres::types::PgLsn;
 use tracing::{debug, info};
 
-use crate::bail;
 use crate::concurrency::shutdown::ShutdownRx;
 use crate::concurrency::signal::SignalRx;
 use crate::concurrency::stream::{TimeoutStream, TimeoutStreamResult};
@@ -34,7 +34,8 @@ use crate::replication::client::PgReplicationClient;
 use crate::replication::stream::EventsStream;
 use crate::state::table::TableReplicationError;
 use crate::store::schema::SchemaStore;
-use crate::types::{Event, PipelineId};
+use crate::types::{Event, PipelineId, RelationEvent};
+use crate::{bail, etl_error};
 
 /// The amount of milliseconds that pass between one refresh and the other of the system, in case no
 /// events or shutdown signal are received.
@@ -747,6 +748,9 @@ where
     // is restarted.
     events_stream.mark_reset_timer();
 
+    // TODO: once the batch is sent, we should also remove previous schema versions that are not needed
+    //   anymore.
+
     Ok(())
 }
 
@@ -912,7 +916,7 @@ where
             handle_delete_message(state, start_lsn, delete_body, hook, schema_store).await
         }
         LogicalReplicationMessage::Truncate(truncate_body) => {
-            handle_truncate_message(state, start_lsn, truncate_body, hook).await
+            handle_truncate_message(state, start_lsn, truncate_body, schema_store, hook).await
         }
         LogicalReplicationMessage::Origin(_) => {
             debug!("received unsupported ORIGIN message");
@@ -1102,9 +1106,22 @@ where
     }
 
     // Convert event from the protocol message.
-    let event =
-        parse_event_from_relation_message(schema_store, start_lsn, remote_final_lsn, message)
-            .await?;
+    let old_table_schema = load_table_schema(schema_store, table_id).await?;
+    let new_table_schema_draft =
+        parse_event_from_relation_message(old_table_schema.clone(), message).await?;
+
+    // We store the new schema in the store and build the final relation event.
+    let new_table_schema = schema_store
+        .store_table_schema(new_table_schema_draft)
+        .await?;
+
+    let event = RelationEvent {
+        start_lsn,
+        commit_lsn: remote_final_lsn,
+        table_id,
+        old_table_schema,
+        new_table_schema,
+    };
 
     Ok(HandleMessageResult::return_event(Event::Relation(event)))
 }
@@ -1129,16 +1146,19 @@ where
         );
     };
 
+    let table_id = TableId::new(message.rel_id());
+
     if !hook
-        .should_apply_changes(TableId::new(message.rel_id()), remote_final_lsn)
+        .should_apply_changes(table_id, remote_final_lsn)
         .await?
     {
         return Ok(HandleMessageResult::no_event());
     }
 
     // Convert event from the protocol message.
+    let table_schema = load_table_schema(schema_store, table_id).await?;
     let event =
-        parse_event_from_insert_message(schema_store, start_lsn, remote_final_lsn, message).await?;
+        parse_event_from_insert_message(table_schema, start_lsn, remote_final_lsn, message)?;
 
     Ok(HandleMessageResult::return_event(Event::Insert(event)))
 }
@@ -1163,16 +1183,19 @@ where
         );
     };
 
+    let table_id = TableId::new(message.rel_id());
+
     if !hook
-        .should_apply_changes(TableId::new(message.rel_id()), remote_final_lsn)
+        .should_apply_changes(table_id, remote_final_lsn)
         .await?
     {
         return Ok(HandleMessageResult::no_event());
     }
 
     // Convert event from the protocol message.
+    let table_schema = load_table_schema(schema_store, table_id).await?;
     let event =
-        parse_event_from_update_message(schema_store, start_lsn, remote_final_lsn, message).await?;
+        parse_event_from_update_message(table_schema, start_lsn, remote_final_lsn, message)?;
 
     Ok(HandleMessageResult::return_event(Event::Update(event)))
 }
@@ -1197,16 +1220,19 @@ where
         );
     };
 
+    let table_id = TableId::new(message.rel_id());
+
     if !hook
-        .should_apply_changes(TableId::new(message.rel_id()), remote_final_lsn)
+        .should_apply_changes(table_id, remote_final_lsn)
         .await?
     {
         return Ok(HandleMessageResult::no_event());
     }
 
     // Convert event from the protocol message.
+    let table_schema = load_table_schema(schema_store, table_id).await?;
     let event =
-        parse_event_from_delete_message(schema_store, start_lsn, remote_final_lsn, message).await?;
+        parse_event_from_delete_message(table_schema, start_lsn, remote_final_lsn, message)?;
 
     Ok(HandleMessageResult::return_event(Event::Delete(event)))
 }
@@ -1217,13 +1243,15 @@ where
 /// ensuring transaction context, and filtering the affected table list based on
 /// hook decisions. Since TRUNCATE can affect multiple tables simultaneously,
 /// it evaluates each table individually.
-async fn handle_truncate_message<T>(
+async fn handle_truncate_message<S, T>(
     state: &mut ApplyLoopState,
     start_lsn: PgLsn,
     message: &protocol::TruncateBody,
+    schema_store: &S,
     hook: &T,
 ) -> EtlResult<HandleMessageResult>
 where
+    S: SchemaStore + Clone + Send + 'static,
     T: ApplyLoopHook,
 {
     let Some(remote_final_lsn) = state.remote_final_lsn else {
@@ -1234,24 +1262,46 @@ where
         );
     };
 
-    // We collect only the relation ids for which we are allow to apply changes, thus in this case
+    // We collect only the relation ids for which we are allowed to apply changes, thus in this case
     // the truncation.
-    let mut rel_ids = Vec::with_capacity(message.rel_ids().len());
+    let mut relations = Vec::with_capacity(message.rel_ids().len());
     for &table_id in message.rel_ids().iter() {
+        let table_id = TableId::new(table_id);
         if hook
-            .should_apply_changes(TableId::new(table_id), remote_final_lsn)
+            .should_apply_changes(table_id, remote_final_lsn)
             .await?
         {
-            rel_ids.push(table_id)
+            relations.push(table_id);
         }
     }
     // If nothing to apply, skip conversion entirely
-    if rel_ids.is_empty() {
+    if relations.is_empty() {
         return Ok(HandleMessageResult::no_event());
     }
 
     // Convert event from the protocol message.
-    let event = parse_event_from_truncate_message(start_lsn, remote_final_lsn, message, rel_ids);
+    let event = parse_event_from_truncate_message(start_lsn, remote_final_lsn, message, relations);
 
     Ok(HandleMessageResult::return_event(Event::Truncate(event)))
+}
+
+/// Loads the table schema for processing a specific event.
+async fn load_table_schema<S>(schema_store: &S, table_id: TableId) -> EtlResult<Arc<TableSchema>>
+where
+    S: SchemaStore + Clone + Send + 'static,
+{
+    let table_schema = schema_store
+        .get_latest_table_schema(&table_id)
+        .await?
+        .ok_or_else(|| {
+            etl_error!(
+                ErrorKind::MissingTableSchema,
+                "Table not found in the schema store",
+                format!(
+                    "The latest table schema for table {table_id} was not found in the schema store"
+                )
+            )
+        })?;
+
+    Ok(table_schema)
 }

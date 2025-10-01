@@ -1,5 +1,5 @@
-use etl_postgres::types::{TableId, TableSchema};
-use std::collections::HashMap;
+use etl_postgres::types::{SchemaVersion, TableId, TableSchema, TableSchemaDraft};
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -23,7 +23,7 @@ struct Inner {
     /// Cached table schema definitions, reference-counted for efficient sharing.
     /// Schemas are expensive to fetch from Postgres, so they're cached here
     /// once retrieved and shared via Arc across the application.
-    table_schemas: HashMap<TableId, Arc<TableSchema>>,
+    table_schemas: HashMap<TableId, BTreeMap<SchemaVersion, Arc<TableSchema>>>,
     /// Mapping from table IDs to human-readable table names for easier debugging
     /// and logging. These mappings are established during schema discovery.
     table_mappings: HashMap<TableId, String>,
@@ -172,31 +172,71 @@ impl StateStore for MemoryStore {
 }
 
 impl SchemaStore for MemoryStore {
-    async fn get_table_schema(&self, table_id: &TableId) -> EtlResult<Option<Arc<TableSchema>>> {
+    async fn get_table_schema(
+        &self,
+        table_id: &TableId,
+        version: SchemaVersion,
+    ) -> EtlResult<Option<Arc<TableSchema>>> {
         let inner = self.inner.lock().await;
 
-        Ok(inner.table_schemas.get(table_id).cloned())
+        Ok(inner
+            .table_schemas
+            .get(table_id)
+            .and_then(|schemas| schemas.get(&version).cloned()))
+    }
+
+    async fn get_latest_table_schema(
+        &self,
+        table_id: &TableId,
+    ) -> EtlResult<Option<Arc<TableSchema>>> {
+        let inner = self.inner.lock().await;
+
+        Ok(inner
+            .table_schemas
+            .get(table_id)
+            .and_then(|schemas| schemas.iter().next_back().map(|(_, schema)| schema.clone())))
     }
 
     async fn get_table_schemas(&self) -> EtlResult<Vec<Arc<TableSchema>>> {
         let inner = self.inner.lock().await;
 
-        Ok(inner.table_schemas.values().cloned().collect())
+        Ok(inner
+            .table_schemas
+            .values()
+            .filter_map(|schemas| schemas.iter().next_back().map(|(_, schema)| schema.clone()))
+            .collect())
     }
 
     async fn load_table_schemas(&self) -> EtlResult<usize> {
         let inner = self.inner.lock().await;
 
-        Ok(inner.table_schemas.len())
+        Ok(inner
+            .table_schemas
+            .values()
+            .map(|schemas| schemas.len())
+            .sum())
     }
 
-    async fn store_table_schema(&self, table_schema: TableSchema) -> EtlResult<()> {
+    async fn store_table_schema(
+        &self,
+        table_schema: TableSchemaDraft,
+    ) -> EtlResult<Arc<TableSchema>> {
         let mut inner = self.inner.lock().await;
-        inner
+        let schemas = inner
             .table_schemas
-            .insert(table_schema.id, Arc::new(table_schema));
+            .entry(table_schema.id)
+            .or_insert_with(BTreeMap::new);
 
-        Ok(())
+        let next_version = schemas
+            .keys()
+            .next_back()
+            .map(|version| version + 1)
+            .unwrap_or(0);
+
+        let schema = Arc::new(table_schema.into_table_schema(next_version));
+        schemas.insert(next_version, Arc::clone(&schema));
+
+        Ok(schema)
     }
 }
 

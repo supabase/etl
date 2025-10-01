@@ -7,6 +7,9 @@ use tokio_postgres::types::{FromSql, ToSql, Type};
 /// An object identifier in Postgres.
 type Oid = u32;
 
+/// Version number for a table schema.
+pub type SchemaVersion = u64;
+
 /// A fully qualified Postgres table name consisting of a schema and table name.
 ///
 /// This type represents a table identifier in Postgres, which requires both a schema name
@@ -173,15 +176,23 @@ pub struct TableSchema {
     pub id: TableId,
     /// The fully qualified name of the table
     pub name: TableName,
+    /// Monotonically increasing schema version.
+    pub version: SchemaVersion,
     /// The schemas of all columns in the table
     pub column_schemas: Vec<ColumnSchema>,
 }
 
 impl TableSchema {
-    pub fn new(id: TableId, name: TableName, column_schemas: Vec<ColumnSchema>) -> Self {
+    pub fn new(
+        id: TableId,
+        name: TableName,
+        version: SchemaVersion,
+        column_schemas: Vec<ColumnSchema>,
+    ) -> Self {
         Self {
             id,
             name,
+            version,
             column_schemas,
         }
     }
@@ -189,13 +200,6 @@ impl TableSchema {
     /// Adds a new column schema to this [`TableSchema`].
     pub fn add_column_schema(&mut self, column_schema: ColumnSchema) {
         self.column_schemas.push(column_schema);
-    }
-
-    /// Returns whether the table has any primary key columns.
-    ///
-    /// This method checks if any column in the table is marked as part of the primary key.
-    pub fn has_primary_keys(&self) -> bool {
-        self.column_schemas.iter().any(|cs| cs.primary)
     }
 }
 
@@ -207,6 +211,49 @@ impl PartialOrd for TableSchema {
 
 impl Ord for TableSchema {
     fn cmp(&self, other: &Self) -> Ordering {
-        self.name.cmp(&other.name)
+        self.name
+            .cmp(&other.name)
+            .then(self.version.cmp(&other.version))
+    }
+}
+
+/// Draft version of [`TableSchema`] used before a schema version is assigned.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct TableSchemaDraft {
+    pub id: TableId,
+    pub name: TableName,
+    pub column_schemas: Vec<ColumnSchema>,
+}
+
+impl TableSchemaDraft {
+    pub fn new(id: TableId, name: TableName, column_schemas: Vec<ColumnSchema>) -> Self {
+        Self {
+            id,
+            name,
+            column_schemas,
+        }
+    }
+
+    pub fn with_capacity(id: TableId, name: TableName, capacity: usize) -> Self {
+        Self {
+            id,
+            name,
+            column_schemas: Vec::with_capacity(capacity),
+        }
+    }
+
+    pub fn add_column_schema(&mut self, column_schema: ColumnSchema) {
+        self.column_schemas.push(column_schema);
+    }
+
+    /// Returns whether the table has any primary key columns.
+    ///
+    /// This method checks if any column in the table is marked as part of the primary key.
+    pub fn has_primary_keys(&self) -> bool {
+        self.column_schemas.iter().any(|cs| cs.primary)
+    }
+
+    pub fn into_table_schema(self, version: SchemaVersion) -> TableSchema {
+        TableSchema::new(self.id, self.name, version, self.column_schemas)
     }
 }

@@ -1,48 +1,18 @@
 use core::str;
-use etl_postgres::types::{ColumnSchema, TableId, TableSchema, convert_type_oid_to_type};
+use etl_postgres::types::{
+    ColumnSchema, TableId, TableSchema, TableSchemaDraft, convert_type_oid_to_type,
+};
 use postgres_replication::protocol;
-use std::cmp::Ordering;
-use std::collections::BTreeSet;
 use std::sync::Arc;
 use tokio_postgres::types::PgLsn;
 
+use crate::bail;
 use crate::conversions::text::{default_value_for_type, parse_cell_from_postgres_text};
 use crate::error::{ErrorKind, EtlError, EtlResult};
-use crate::store::schema::SchemaStore;
 use crate::types::{
-    BeginEvent, Cell, CommitEvent, DeleteEvent, InsertEvent, RelationChange, RelationEvent,
-    TableRow, TruncateEvent, UpdateEvent,
+    BeginEvent, Cell, CommitEvent, DeleteEvent, InsertEvent, RelationEventDraft, TableRow,
+    TruncateEvent, UpdateEvent,
 };
-use crate::{bail, etl_error};
-
-#[derive(Debug, Clone)]
-struct IndexedColumnSchema(ColumnSchema);
-
-impl IndexedColumnSchema {
-    fn into_inner(self) -> ColumnSchema {
-        self.0
-    }
-}
-
-impl Eq for IndexedColumnSchema {}
-
-impl PartialEq for IndexedColumnSchema {
-    fn eq(&self, other: &Self) -> bool {
-        self.0.name == other.0.name
-    }
-}
-
-impl Ord for IndexedColumnSchema {
-    fn cmp(&self, other: &Self) -> Ordering {
-        self.0.name.cmp(&other.0.name)
-    }
-}
-
-impl PartialOrd for IndexedColumnSchema {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.0.name.cmp(&other.0.name))
-    }
-}
 
 /// Creates a [`BeginEvent`] from Postgres protocol data.
 ///
@@ -79,110 +49,45 @@ pub fn parse_event_from_commit_message(
     }
 }
 
-/// Creates a [`RelationEvent`] from Postgres protocol data.
+/// Creates a [`RelationEventDraft`] from Postgres protocol data.
 ///
 /// This method parses the replication protocol relation message and builds
-/// a complete table schema for use in interpreting subsequent data events.
-pub async fn parse_event_from_relation_message<S>(
-    schema_store: &S,
-    start_lsn: PgLsn,
-    commit_lsn: PgLsn,
+/// a complete table schema for use in interpreting later data events.
+///
+/// The method returns a draft since the actual full event needs the table schema version
+/// from the schema store, and we don't want to pollute the logic of this module with schema
+/// store logic.
+pub async fn parse_event_from_relation_message(
+    old_table_schema: Arc<TableSchema>,
     relation_body: &protocol::RelationBody,
-) -> EtlResult<RelationEvent>
-where
-    S: SchemaStore,
-{
-    let table_id = TableId::new(relation_body.rel_id());
-
-    let Some(table_schema) = schema_store.get_table_schema(&table_id).await? else {
-        bail!(
-            ErrorKind::MissingTableSchema,
-            "Table not found in the schema cache",
-            format!("The table schema for table {table_id} was not found in the cache")
-        )
-    };
-
-    // We construct the latest column schemas in order. The order is important since the table schema
+) -> EtlResult<TableSchemaDraft> {
+    // We construct the new column schemas in order. The order is important since the table schema
     // relies on the right ordering to interpret the Postgres correctly.
-    let latest_column_schemas = relation_body
+    let new_column_schemas = relation_body
         .columns()
         .iter()
         .map(build_column_schema)
         .collect::<Result<Vec<_>, EtlError>>()?;
 
-    // We build a lookup set for the latest column schemas for quick change detection.
-    let mut latest_indexed_column_schemas = latest_column_schemas
-        .iter()
-        .cloned()
-        .map(IndexedColumnSchema)
-        .collect::<BTreeSet<_>>();
+    let new_table_schema = TableSchemaDraft::new(
+        old_table_schema.id,
+        old_table_schema.name.clone(),
+        new_column_schemas,
+    );
 
-    // We process all the changes that we want to dispatch to the destination.
-    let mut changes = vec![];
-    for column_schema in table_schema.column_schemas.iter() {
-        let column_schema = IndexedColumnSchema(column_schema.clone());
-        let latest_column_schema = latest_indexed_column_schemas.take(&column_schema);
-        match latest_column_schema {
-            Some(latest_column_schema) => {
-                let column_schema = column_schema.into_inner();
-                let latest_column_schema = latest_column_schema.into_inner();
-
-                if column_schema.name != latest_column_schema.name {
-                    // If we find a column with the same name but different fields, we assume it was changed. The only changes
-                    // that we detect are changes to the column but with preserved name.
-                    changes.push(RelationChange::AlterColumn(
-                        column_schema,
-                        latest_column_schema,
-                    ));
-                }
-            }
-            None => {
-                // If we don't find the column in the latest schema, we assume it was dropped even
-                // though it could be renamed.
-                changes.push(RelationChange::DropColumn(column_schema.into_inner()));
-            }
-        }
-    }
-
-    // For the remaining columns that didn't match, we assume they were added.
-    for column_schema in latest_indexed_column_schemas {
-        changes.push(RelationChange::AddColumn(column_schema.into_inner()));
-    }
-
-    // We build the updated table schema to store in the schema store.
-    schema_store
-        .store_table_schema(TableSchema::new(
-            table_schema.id,
-            table_schema.name.clone(),
-            latest_column_schemas,
-        ))
-        .await?;
-
-    Ok(RelationEvent {
-        start_lsn,
-        commit_lsn,
-        changes,
-        table_id,
-    })
+    Ok(new_table_schema)
 }
 
 /// Converts a Postgres insert message into an [`InsertEvent`].
 ///
-/// This function processes an insert operation from the replication stream,
-/// retrieves the table schema from the store, and constructs a complete
-/// insert event with the new row data ready for ETL processing.
-pub async fn parse_event_from_insert_message<S>(
-    schema_store: &S,
+/// This function processes an insert operation from the replication stream
+/// using the supplied table schema version to build the resulting event.
+pub fn parse_event_from_insert_message(
+    table_schema: Arc<TableSchema>,
     start_lsn: PgLsn,
     commit_lsn: PgLsn,
     insert_body: &protocol::InsertBody,
-) -> EtlResult<InsertEvent>
-where
-    S: SchemaStore,
-{
-    let table_id = insert_body.rel_id();
-    let table_schema = get_table_schema(schema_store, TableId::new(table_id)).await?;
-
+) -> EtlResult<InsertEvent> {
     let table_row = convert_tuple_to_row(
         &table_schema.column_schemas,
         insert_body.tuple().tuple_data(),
@@ -193,7 +98,8 @@ where
     Ok(InsertEvent {
         start_lsn,
         commit_lsn,
-        table_id: TableId::new(table_id),
+        schema_version: table_schema.version,
+        table_id: table_schema.id,
         table_row,
     })
 }
@@ -204,18 +110,12 @@ where
 /// handling both the old and new row data. The old row data may be either
 /// the complete row or just the key columns, depending on the table's
 /// `REPLICA IDENTITY` setting in Postgres.
-pub async fn parse_event_from_update_message<S>(
-    schema_store: &S,
+pub fn parse_event_from_update_message(
+    table_schema: Arc<TableSchema>,
     start_lsn: PgLsn,
     commit_lsn: PgLsn,
     update_body: &protocol::UpdateBody,
-) -> EtlResult<UpdateEvent>
-where
-    S: SchemaStore,
-{
-    let table_id = update_body.rel_id();
-    let table_schema = get_table_schema(schema_store, TableId::new(table_id)).await?;
-
+) -> EtlResult<UpdateEvent> {
     // We try to extract the old tuple by either taking the entire old tuple or the key of the old
     // tuple.
     let is_key = update_body.old_tuple().is_none();
@@ -243,7 +143,8 @@ where
     Ok(UpdateEvent {
         start_lsn,
         commit_lsn,
-        table_id: TableId::new(table_id),
+        schema_version: table_schema.version,
+        table_id: table_schema.id,
         table_row,
         old_table_row,
     })
@@ -255,18 +156,12 @@ where
 /// extracting the old row data that was deleted. The old row data may be
 /// either the complete row or just the key columns, depending on the table's
 /// `REPLICA IDENTITY` setting in Postgres.
-pub async fn parse_event_from_delete_message<S>(
-    schema_store: &S,
+pub fn parse_event_from_delete_message(
+    table_schema: Arc<TableSchema>,
     start_lsn: PgLsn,
     commit_lsn: PgLsn,
     delete_body: &protocol::DeleteBody,
-) -> EtlResult<DeleteEvent>
-where
-    S: SchemaStore,
-{
-    let table_id = delete_body.rel_id();
-    let table_schema = get_table_schema(schema_store, TableId::new(table_id)).await?;
-
+) -> EtlResult<DeleteEvent> {
     // We try to extract the old tuple by either taking the entire old tuple or the key of the old
     // tuple.
     let is_key = delete_body.old_tuple().is_none();
@@ -285,7 +180,8 @@ where
     Ok(DeleteEvent {
         start_lsn,
         commit_lsn,
-        table_id: TableId::new(table_id),
+        schema_version: table_schema.version,
+        table_id: table_schema.id,
         old_table_row,
     })
 }
@@ -298,35 +194,14 @@ pub fn parse_event_from_truncate_message(
     start_lsn: PgLsn,
     commit_lsn: PgLsn,
     truncate_body: &protocol::TruncateBody,
-    overridden_rel_ids: Vec<u32>,
+    relations: Vec<TableId>,
 ) -> TruncateEvent {
     TruncateEvent {
         start_lsn,
         commit_lsn,
         options: truncate_body.options(),
-        rel_ids: overridden_rel_ids,
+        relations,
     }
-}
-
-/// Retrieves a table schema from the schema store by table ID.
-///
-/// This function looks up the table schema for the specified table ID in the
-/// schema store. If the schema is not found, it returns an error indicating
-/// that the table is missing from the cache.
-async fn get_table_schema<S>(schema_store: &S, table_id: TableId) -> EtlResult<Arc<TableSchema>>
-where
-    S: SchemaStore,
-{
-    schema_store
-        .get_table_schema(&table_id)
-        .await?
-        .ok_or_else(|| {
-            etl_error!(
-                ErrorKind::MissingTableSchema,
-                "Table not found in the schema cache",
-                format!("The table schema for table {table_id} was not found in the cache")
-            )
-        })
 }
 
 /// Constructs a [`IndexedColumnSchema`] from Postgres protocol column data.

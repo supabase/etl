@@ -1,10 +1,12 @@
-use std::{collections::HashMap, sync::Arc};
-
 use etl_config::shared::PgConnectionConfig;
 use etl_postgres::replication::{connect_to_source_database, schema, state, table_mappings};
-use etl_postgres::types::{TableId, TableSchema};
+use etl_postgres::types::{SchemaVersion, TableId, TableSchema, TableSchemaDraft};
 use metrics::gauge;
 use sqlx::PgPool;
+use std::{
+    collections::{BTreeMap, HashMap},
+    sync::Arc,
+};
 use tokio::sync::Mutex;
 use tracing::{debug, info};
 
@@ -136,7 +138,7 @@ struct Inner {
     /// Cached table replication states indexed by table ID.
     table_states: HashMap<TableId, TableReplicationPhase>,
     /// Cached table schemas indexed by table ID.
-    table_schemas: HashMap<TableId, Arc<TableSchema>>,
+    table_schemas: HashMap<TableId, BTreeMap<SchemaVersion, Arc<TableSchema>>>,
     /// Cached table mappings from source table ID to destination table name.
     table_mappings: HashMap<TableId, String>,
 }
@@ -506,10 +508,29 @@ impl SchemaStore for PostgresStore {
     /// This method provides fast access to cached table schemas, which are
     /// essential for processing replication events. Schemas are loaded during
     /// startup and cached for the lifetime of the pipeline.
-    async fn get_table_schema(&self, table_id: &TableId) -> EtlResult<Option<Arc<TableSchema>>> {
+    async fn get_table_schema(
+        &self,
+        table_id: &TableId,
+        version: SchemaVersion,
+    ) -> EtlResult<Option<Arc<TableSchema>>> {
         let inner = self.inner.lock().await;
 
-        Ok(inner.table_schemas.get(table_id).cloned())
+        Ok(inner
+            .table_schemas
+            .get(table_id)
+            .and_then(|schemas| schemas.get(&version).cloned()))
+    }
+
+    async fn get_latest_table_schema(
+        &self,
+        table_id: &TableId,
+    ) -> EtlResult<Option<Arc<TableSchema>>> {
+        let inner = self.inner.lock().await;
+
+        Ok(inner
+            .table_schemas
+            .get(table_id)
+            .and_then(|schemas| schemas.iter().next_back().map(|(_, schema)| schema.clone())))
     }
 
     /// Retrieves all cached table schemas as a vector.
@@ -520,7 +541,11 @@ impl SchemaStore for PostgresStore {
     async fn get_table_schemas(&self) -> EtlResult<Vec<Arc<TableSchema>>> {
         let inner = self.inner.lock().await;
 
-        Ok(inner.table_schemas.values().cloned().collect())
+        Ok(inner
+            .table_schemas
+            .values()
+            .filter_map(|schemas| schemas.iter().next_back().map(|(_, schema)| schema.clone()))
+            .collect())
     }
 
     /// Loads table schemas from Postgres into memory cache.
@@ -552,12 +577,20 @@ impl SchemaStore for PostgresStore {
         for table_schema in table_schemas {
             inner
                 .table_schemas
-                .insert(table_schema.id, Arc::new(table_schema));
+                .entry(table_schema.id)
+                .or_insert_with(BTreeMap::new)
+                .insert(table_schema.version, Arc::new(table_schema));
         }
 
         info!(
             "loaded {} table schemas from postgres state store",
             table_schemas_len
+        );
+
+        emit_table_metrics(
+            self.pipeline_id,
+            inner.table_states.keys().len(),
+            inner.table_schemas.keys().len(),
         );
 
         Ok(table_schemas_len)
@@ -568,27 +601,34 @@ impl SchemaStore for PostgresStore {
     /// This method persists a table schema to the database and updates the
     /// in-memory cache atomically. Used when new tables are discovered during
     /// replication or when schema definitions need to be updated.
-    async fn store_table_schema(&self, table_schema: TableSchema) -> EtlResult<()> {
+    async fn store_table_schema(
+        &self,
+        table_schema: TableSchemaDraft,
+    ) -> EtlResult<Arc<TableSchema>> {
         debug!("storing table schema for table '{}'", table_schema.name);
 
         let pool = self.connect_to_source().await?;
 
         // We also lock the entire section to be consistent.
         let mut inner = self.inner.lock().await;
-        schema::store_table_schema(&pool, self.pipeline_id as i64, &table_schema)
-            .await
-            .map_err(|err| {
-                etl_error!(
-                    ErrorKind::SourceQueryFailed,
-                    "Failed to store table schema",
-                    format!("Failed to store table schema in postgres: {err}")
-                )
-            })?;
+        let stored_schema =
+            schema::store_table_schema(&pool, self.pipeline_id as i64, table_schema)
+                .await
+                .map_err(|err| {
+                    etl_error!(
+                        ErrorKind::SourceQueryFailed,
+                        "Failed to store table schema",
+                        format!("Failed to store table schema in postgres: {err}")
+                    )
+                })?;
+        let schema_arc = Arc::new(stored_schema);
         inner
             .table_schemas
-            .insert(table_schema.id, Arc::new(table_schema));
+            .entry(schema_arc.id)
+            .or_insert_with(BTreeMap::new)
+            .insert(schema_arc.version, Arc::clone(&schema_arc));
 
-        Ok(())
+        Ok(schema_arc)
     }
 }
 

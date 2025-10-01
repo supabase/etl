@@ -21,7 +21,7 @@ fn create_sample_table_schema() -> TableSchema {
         ColumnSchema::new("created_at".to_string(), PgType::TIMESTAMPTZ, -1, false),
     ];
 
-    TableSchema::new(table_id, table_name, columns)
+    TableSchema::new(table_id, table_name, 0, columns)
 }
 
 fn create_another_table_schema() -> TableSchema {
@@ -32,7 +32,7 @@ fn create_another_table_schema() -> TableSchema {
         ColumnSchema::new("description".to_string(), PgType::VARCHAR, 255, false),
     ];
 
-    TableSchema::new(table_id, table_name, columns)
+    TableSchema::new(table_id, table_name, 0, columns)
 }
 
 #[tokio::test(flavor = "multi_thread")]

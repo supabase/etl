@@ -64,6 +64,7 @@ pub async fn setup_test_database_schema<G: GenericClient>(
         users_table_schema = Some(TableSchema::new(
             users_table_id,
             users_table_name,
+            0,
             vec![
                 id_column_schema(),
                 ColumnSchema::new("name".to_string(), Type::TEXT, -1, false),
@@ -88,6 +89,7 @@ pub async fn setup_test_database_schema<G: GenericClient>(
         orders_table_schema = Some(TableSchema::new(
             orders_table_id,
             orders_table_name,
+            0,
             vec![
                 id_column_schema(),
                 ColumnSchema::new("description".to_string(), Type::TEXT, -1, false),
