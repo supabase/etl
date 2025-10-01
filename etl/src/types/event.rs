@@ -204,7 +204,7 @@ pub struct TruncateEvent {
     /// Truncate operation options from Postgres.
     pub options: i8,
     /// List of table IDs that were truncated in this operation.
-    pub table_ids: Vec<TableId>,
+    pub table_ids: Vec<(TableId, SchemaVersion)>,
 }
 
 /// Represents a single replication event from Postgres logical replication.
@@ -252,7 +252,7 @@ impl Event {
             Event::Update(update_event) => update_event.table_id == *table_id,
             Event::Delete(delete_event) => delete_event.table_id == *table_id,
             Event::Relation(relation_event) => relation_event.table_id == *table_id,
-            Event::Truncate(event) => event.table_ids.iter().any(|id| id == table_id),
+            Event::Truncate(event) => event.table_ids.iter().any(|(id, _)| id == table_id),
             _ => false,
         }
     }

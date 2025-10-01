@@ -915,7 +915,7 @@ where
             handle_delete_message(state, start_lsn, delete_body, hook, schema_store).await
         }
         LogicalReplicationMessage::Truncate(truncate_body) => {
-            handle_truncate_message(state, start_lsn, truncate_body, schema_store, hook).await
+            handle_truncate_message(state, start_lsn, truncate_body, hook, schema_store).await
         }
         LogicalReplicationMessage::Origin(_) => {
             debug!("received unsupported ORIGIN message");
@@ -1247,9 +1247,10 @@ async fn handle_truncate_message<S, T>(
     start_lsn: PgLsn,
     message: &protocol::TruncateBody,
     hook: &T,
+    schema_store: &S,
 ) -> EtlResult<HandleMessageResult>
 where
-    S: SchemaStore + Clone + Send + 'static,
+S: SchemaStore + Clone + Send + 'static,
     T: ApplyLoopHook,
 {
     let Some(remote_final_lsn) = state.remote_final_lsn else {
@@ -1269,7 +1270,10 @@ where
             .should_apply_changes(table_id, remote_final_lsn)
             .await?
         {
-            table_ids.push(table_id);
+            // We load the last table schema available at the time of the truncation, this way we
+            // can bind the schema version to use when processing the truncation in the destination.
+            let table_schema = load_table_schema(schema_store, table_id).await?;
+            table_ids.push((table_id, table_schema.version));
         }
     }
 
