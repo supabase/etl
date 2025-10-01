@@ -301,7 +301,15 @@ async fn cdc_streaming() {
     );
 
     let mut actual_users = read_all_rows(&client, namespace.to_string(), users_table.clone()).await;
-    // Drop the last column (non-deterministic sequence) before comparison.
+
+    // Sort deterministically by the primary key (id) and sequence number for stable assertions
+    actual_users.sort_by(|a, b| {
+        let a_key = format!("{:?}_{:?}", a.values[0], a.values[4]);
+        let b_key = format!("{:?}_{:?}", b.values[0], b.values[4]);
+        a_key.cmp(&b_key)
+    });
+
+    // Drop the last column (non-deterministic sequence number) before comparison.
     for row in &mut actual_users {
         let _ = row.values.pop();
     }
@@ -310,13 +318,13 @@ async fn cdc_streaming() {
     // Note: order here is messed up due to limitations in how read_all_rows can't sort, so we sort manually
     // by id and cdc operation columns
     let expected_users = vec![
-        // Delete of user with id 1
+        // Initial insert of user 1
         TableRow {
             values: vec![
                 Cell::I64(1),
-                Cell::String("".to_string()),
-                Cell::I32(0),
-                Cell::String("DELETE".to_string()),
+                Cell::String("user_1".to_string()),
+                Cell::I32(1),
+                Cell::String("UPSERT".to_string()),
             ],
         },
         // Update of user 1
@@ -328,12 +336,21 @@ async fn cdc_streaming() {
                 Cell::String("UPSERT".to_string()),
             ],
         },
-        // Initial insert of user 1
+        // Delete of user with id 1
         TableRow {
             values: vec![
                 Cell::I64(1),
-                Cell::String("user_1".to_string()),
-                Cell::I32(1),
+                Cell::String("".to_string()),
+                Cell::I32(0),
+                Cell::String("DELETE".to_string()),
+            ],
+        },
+        // Initial insert of user 2
+        TableRow {
+            values: vec![
+                Cell::I64(2),
+                Cell::String("user_2".to_string()),
+                Cell::I32(2),
                 Cell::String("UPSERT".to_string()),
             ],
         },
@@ -346,34 +363,21 @@ async fn cdc_streaming() {
                 Cell::String("UPSERT".to_string()),
             ],
         },
-        // Initial insert of user 2
-        TableRow {
-            values: vec![
-                Cell::I64(2),
-                Cell::String("user_2".to_string()),
-                Cell::I32(2),
-                Cell::String("UPSERT".to_string()),
-            ],
-        },
     ];
 
-    // Sort deterministically by the primary key (id) and operation for stable assertions.
-    actual_users.sort_by(|a, b| {
-        let a_key = format!(
-            "{:?}_{:?}_{:?}_{:?}",
-            a.values[0], a.values[1], a.values[2], a.values[3]
-        );
-        let b_key = format!(
-            "{:?}_{:?}_{:?}_{:?}",
-            b.values[0], b.values[1], b.values[2], b.values[3]
-        );
-        a_key.cmp(&b_key)
-    });
     assert_eq!(actual_users, expected_users);
 
     let mut actual_orders =
         read_all_rows(&client, namespace.to_string(), orders_table.clone()).await;
-    // Drop the last column (non-deterministic sequence) before comparison.
+
+    // Sort deterministically by the primary key (id) and sequence number for stable assertions
+    actual_orders.sort_by(|a, b| {
+        let a_key = format!("{:?}_{:?}", a.values[0], a.values[3]);
+        let b_key = format!("{:?}_{:?}", b.values[0], b.values[3]);
+        a_key.cmp(&b_key)
+    });
+
+    // Drop the last column (non-deterministic sequence number) before comparison.
     for row in &mut actual_orders {
         let _ = row.values.pop();
     }
@@ -395,14 +399,6 @@ async fn cdc_streaming() {
                 Cell::String("UPSERT".to_string()),
             ],
         },
-        // Delete of order 2
-        TableRow {
-            values: vec![
-                Cell::I64(2),
-                Cell::String("".to_string()),
-                Cell::String("DELETE".to_string()),
-            ],
-        },
         // Initial insert of order 2
         TableRow {
             values: vec![
@@ -419,13 +415,16 @@ async fn cdc_streaming() {
                 Cell::String("UPSERT".to_string()),
             ],
         },
+        // Delete of order 2
+        TableRow {
+            values: vec![
+                Cell::I64(2),
+                Cell::String("".to_string()),
+                Cell::String("DELETE".to_string()),
+            ],
+        },
     ];
 
-    actual_orders.sort_by(|a, b| {
-        let a_key = format!("{:?}_{:?}_{:?}", a.values[0], a.values[1], a.values[2]);
-        let b_key = format!("{:?}_{:?}_{:?}", b.values[0], b.values[1], b.values[2]);
-        a_key.cmp(&b_key)
-    });
     assert_eq!(actual_orders, expected_orders);
 
     // Stop the pipeline to finalize writes.
