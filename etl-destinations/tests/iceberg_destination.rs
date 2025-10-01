@@ -207,6 +207,7 @@ async fn cdc_streaming() {
     users_state_notify.notified().await;
     orders_state_notify.notified().await;
 
+    // === CDC INSERT EVENTS ===
     // We'll expect 2 inserts per table -> 4 insert events total.
     let event_notify = destination
         .wait_for_events_count(vec![(EventType::Insert, 4)])
@@ -223,6 +224,68 @@ async fn cdc_streaming() {
     .await;
 
     // Wait for all CDC insert events to be written to Iceberg.
+    event_notify.notified().await;
+    destination.clear_events().await;
+
+    // === CDC UPDATE EVENTS ===
+    // We'll expect 2 updates per table -> 4 update events total.
+    let event_notify = destination
+        .wait_for_events_count(vec![(EventType::Update, 4)])
+        .await;
+
+    // Update users
+    database
+        .update_values(
+            database_schema.users_schema().name.clone(),
+            &["name", "age"],
+            &[&"updated_name", &42i32],
+        )
+        .await
+        .unwrap();
+
+    // Update orders
+    database
+        .update_values(
+            database_schema.orders_schema().name.clone(),
+            &["description"],
+            &[&"updated_description"],
+        )
+        .await
+        .unwrap();
+
+    // Wait for all CDC update events to be written to Iceberg.
+    event_notify.notified().await;
+    destination.clear_events().await;
+
+    // === CDC DELETE EVENTS ===
+    // We'll expect 1 delete per table -> 2 delete events total.
+    let event_notify = destination
+        .wait_for_events_count(vec![(EventType::Delete, 2)])
+        .await;
+
+    // Delete user with id 1
+    database
+        .delete_values(
+            database_schema.users_schema().name.clone(),
+            &["id"],
+            &["1"],
+            "",
+        )
+        .await
+        .unwrap();
+
+    // Delete order with id 2
+    database
+        .delete_values(
+            database_schema.orders_schema().name.clone(),
+            &["id"],
+            &["2"],
+            "",
+        )
+        .await
+        .unwrap();
+
+    // Wait for all CDC delete events to be written to Iceberg.
     event_notify.notified().await;
 
     // base table names
@@ -243,9 +306,29 @@ async fn cdc_streaming() {
         let _ = row.values.pop();
     }
 
-    // Expected CDC rows include all original columns plus `cdc_operation` at the end.
-    // Non-PK columns are nullable in the CDC schema, but will be populated for UPSERTs.
+    // Expected CDC rows: 2 inserts (UPSERT), 2 updates (UPSERT), 1 delete (DELETE)
+    // Note: order here is messed up due to limitations in how read_all_rows can't sort, so we sort manually
+    // by id and cdc operation columns
     let expected_users = vec![
+        // Delete of user with id 1
+        TableRow {
+            values: vec![
+                Cell::I64(1),
+                Cell::String("".to_string()),
+                Cell::I32(0),
+                Cell::String("DELETE".to_string()),
+            ],
+        },
+        // Update of user 1
+        TableRow {
+            values: vec![
+                Cell::I64(1),
+                Cell::String("updated_name".to_string()),
+                Cell::I32(42),
+                Cell::String("UPSERT".to_string()),
+            ],
+        },
+        // Initial insert of user 1
         TableRow {
             values: vec![
                 Cell::I64(1),
@@ -254,6 +337,16 @@ async fn cdc_streaming() {
                 Cell::String("UPSERT".to_string()),
             ],
         },
+        // Update of user 2
+        TableRow {
+            values: vec![
+                Cell::I64(2),
+                Cell::String("updated_name".to_string()),
+                Cell::I32(42),
+                Cell::String("UPSERT".to_string()),
+            ],
+        },
+        // Initial insert of user 2
         TableRow {
             values: vec![
                 Cell::I64(2),
@@ -264,8 +357,18 @@ async fn cdc_streaming() {
         },
     ];
 
-    // Sort deterministically by the primary key (id) for stable assertions.
-    actual_users.sort_by(|a, b| format!("{:?}", a.values[0]).cmp(&format!("{:?}", b.values[0])));
+    // Sort deterministically by the primary key (id) and operation for stable assertions.
+    actual_users.sort_by(|a, b| {
+        let a_key = format!(
+            "{:?}_{:?}_{:?}_{:?}",
+            a.values[0], a.values[1], a.values[2], a.values[3]
+        );
+        let b_key = format!(
+            "{:?}_{:?}_{:?}_{:?}",
+            b.values[0], b.values[1], b.values[2], b.values[3]
+        );
+        a_key.cmp(&b_key)
+    });
     assert_eq!(actual_users, expected_users);
 
     let mut actual_orders =
@@ -276,6 +379,7 @@ async fn cdc_streaming() {
     }
 
     let expected_orders = vec![
+        // Initial insert of order 1
         TableRow {
             values: vec![
                 Cell::I64(1),
@@ -283,6 +387,23 @@ async fn cdc_streaming() {
                 Cell::String("UPSERT".to_string()),
             ],
         },
+        // Update of order 1
+        TableRow {
+            values: vec![
+                Cell::I64(1),
+                Cell::String("updated_description".to_string()),
+                Cell::String("UPSERT".to_string()),
+            ],
+        },
+        // Delete of order 2
+        TableRow {
+            values: vec![
+                Cell::I64(2),
+                Cell::String("".to_string()),
+                Cell::String("DELETE".to_string()),
+            ],
+        },
+        // Initial insert of order 2
         TableRow {
             values: vec![
                 Cell::I64(2),
@@ -290,9 +411,21 @@ async fn cdc_streaming() {
                 Cell::String("UPSERT".to_string()),
             ],
         },
+        // Update of order 2
+        TableRow {
+            values: vec![
+                Cell::I64(2),
+                Cell::String("updated_description".to_string()),
+                Cell::String("UPSERT".to_string()),
+            ],
+        },
     ];
 
-    actual_orders.sort_by(|a, b| format!("{:?}", a.values[0]).cmp(&format!("{:?}", b.values[0])));
+    actual_orders.sort_by(|a, b| {
+        let a_key = format!("{:?}_{:?}_{:?}", a.values[0], a.values[1], a.values[2]);
+        let b_key = format!("{:?}_{:?}_{:?}", b.values[0], b.values[1], b.values[2]);
+        a_key.cmp(&b_key)
+    });
     assert_eq!(actual_orders, expected_orders);
 
     // Stop the pipeline to finalize writes.
