@@ -258,6 +258,71 @@ where
             inner: Arc::new(Mutex::new(inner)),
         })
     }
+    /// Creates a new [`BigQueryDestination`] using Application Default Credentials (ADC).
+    ///
+    /// Initializes the BigQuery client with the default credentials and project settings.
+    /// The `max_staleness_mins` parameter controls table metadata cache freshness.
+    /// The `max_concurrent_streams` parameter controls parallelism for streaming operations
+    /// and determines how table rows are split into batches for concurrent processing.
+    pub async fn new_with_adc(
+        project_id: String,
+        dataset_id: BigQueryDatasetId,
+        max_staleness_mins: Option<u16>,
+        max_concurrent_streams: usize,
+        store: S,
+    ) -> EtlResult<Self> {
+        let client = BigQueryClient::new_with_adc(project_id).await?;
+        let inner = Inner {
+            created_tables: HashSet::new(),
+            created_views: HashMap::new(),
+        };
+
+        Ok(Self {
+            client,
+            dataset_id,
+            max_staleness_mins,
+            max_concurrent_streams,
+            store,
+            inner: Arc::new(Mutex::new(inner)),
+        })
+    }
+
+    /// Creates a new [`BigQueryDestination`] using an installed flow authenticator.
+    ///
+    /// Initializes the BigQuery client with a flow authenticator using the provided secret and persistent file path.
+    /// The `max_staleness_mins` parameter controls table metadata cache freshness.
+    /// The `max_concurrent_streams` parameter controls parallelism for streaming operations
+    /// and determines how table rows are split into batches for concurrent processing.
+    pub async fn new_with_flow_authenticator<Secret, Path>(
+        project_id: String,
+        dataset_id: BigQueryDatasetId,
+        secret: Secret,
+        persistent_file_path: Path,
+        max_staleness_mins: Option<u16>,
+        max_concurrent_streams: usize,
+        store: S,
+    ) -> EtlResult<Self>
+    where
+        Secret: AsRef<[u8]>,
+        Path: Into<std::path::PathBuf>,
+    {
+        let client =
+            BigQueryClient::new_with_flow_authenticator(project_id, secret, persistent_file_path)
+                .await?;
+        let inner = Inner {
+            created_tables: HashSet::new(),
+            created_views: HashMap::new(),
+        };
+
+        Ok(Self {
+            client,
+            dataset_id,
+            max_staleness_mins,
+            max_concurrent_streams,
+            store,
+            inner: Arc::new(Mutex::new(inner)),
+        })
+    }
 
     /// Prepares a table for CDC streaming operations with schema-aware table creation.
     ///
