@@ -184,7 +184,6 @@ where
         });
 
         result
-        // Ok(())
     }
 
     async fn write_table_rows(
