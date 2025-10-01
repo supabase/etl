@@ -193,6 +193,7 @@ where
                 let mut join_set = JoinSet::new();
 
                 for (table_id, table_rows) in table_id_to_table_rows {
+                    self.prepare_table_for_streaming(table_id).await?;
                     let iceberg_table_name =
                         self.store
                             .get_table_mapping(&table_id)
