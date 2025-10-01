@@ -1,4 +1,4 @@
-use etl_postgres::types::{ColumnSchema, TableId};
+use etl_postgres::types::{ColumnSchema, TableId, TableName};
 use std::fmt;
 use tokio_postgres::types::PgLsn;
 
@@ -40,10 +40,17 @@ pub struct CommitEvent {
     pub timestamp: i64,
 }
 
+/// A change in a relation.
 #[derive(Debug, Clone, PartialEq)]
 pub enum RelationChange {
+    /// A change that describes adding a new column.
     AddColumn(ColumnSchema),
+    /// A change that describes dropping an existing column.
     DropColumn(ColumnSchema),
+    /// A change that describes altering an existing column.
+    ///
+    /// The alteration of a column is defined as any modifications to a column
+    /// while keeping the same name.
     AlterColumn(ColumnSchema, ColumnSchema),
 }
 

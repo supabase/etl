@@ -569,7 +569,7 @@ impl BigQueryClient {
     /// Generates SQL column specification for CREATE TABLE statements.
     fn column_spec(column_schema: &ColumnSchema) -> String {
         let mut column_spec = format!(
-            "`{}` {}",
+            "{} {}",
             column_schema.name,
             Self::postgres_to_bigquery_type(&column_schema.typ)
         );
@@ -588,7 +588,7 @@ impl BigQueryClient {
         let identity_columns: Vec<String> = column_schemas
             .iter()
             .filter(|s| s.primary)
-            .map(|c| format!("`{}`", c.name))
+            .map(|c| c.name.clone())
             .collect();
 
         if identity_columns.is_empty() {

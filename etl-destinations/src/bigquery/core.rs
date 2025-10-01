@@ -2,12 +2,13 @@ use etl::destination::Destination;
 use etl::error::{ErrorKind, EtlError, EtlResult};
 use etl::store::schema::SchemaStore;
 use etl::store::state::StateStore;
-use etl::types::{Cell, Event, PgLsn, RelationChange, RelationEvent, TableId, TableName, TableRow};
+use etl::types::{Cell, Event, PgLsn, RelationChange, RelationEvent, TableId, TableName, TableRow, TableSchema};
 use etl::{bail, etl_error};
 use gcp_bigquery_client::storage::TableDescriptor;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
 use std::iter;
+use std::mem;
 use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -259,16 +260,11 @@ where
         })
     }
 
-    /// Prepares a table for CDC streaming operations with schema-aware table creation.
-    ///
-    /// Retrieves the table schema from the store, creates or verifies the BigQuery table exists,
-    /// and ensures the view points to the current versioned table. Uses caching to avoid
-    /// redundant table creation checks.
-    async fn prepare_table_for_streaming(
+    /// Prepares a table for any operations.
+    async fn prepare_table(
         &self,
         table_id: &TableId,
-        use_cdc_sequence_column: bool,
-    ) -> EtlResult<(SequencedBigQueryTableId, Arc<TableDescriptor>)> {
+    ) -> EtlResult<(SequencedBigQueryTableId, Arc<TableSchema>)> {
         // We hold the lock for the entire preparation to avoid race conditions since the consistency
         // of this code path is critical.
         let mut inner = self.inner.lock().await;
@@ -326,7 +322,18 @@ where
             &bigquery_table_id,
             &sequenced_bigquery_table_id,
         )
-        .await?;
+            .await?;
+
+        Ok((sequenced_bigquery_table_id, table_schema))
+    }
+
+    /// Prepares a table for CDC streaming operations with the table descriptor.
+    async fn prepare_table_for_streaming(
+        &self,
+        table_id: &TableId,
+        use_cdc_sequence_column: bool,
+    ) -> EtlResult<(SequencedBigQueryTableId, Arc<TableDescriptor>)> {
+        let (sequenced_bigquery_table_id, table_schema) = self.prepare_table(table_id).await?;
 
         let table_descriptor = BigQueryClient::column_schemas_to_table_descriptor(
             &table_schema.column_schemas,
@@ -477,6 +484,50 @@ where
         Ok(())
     }
 
+    /// Persists the accumulated CDC batches for each table to BigQuery.
+    async fn process_table_events(
+        &self,
+        table_id_to_table_rows: HashMap<TableId, Vec<TableRow>>,
+    ) -> EtlResult<()> {
+        if table_id_to_table_rows.is_empty() {
+            return Ok(());
+        }
+
+        let mut table_batches = Vec::with_capacity(table_id_to_table_rows.len());
+        for (table_id, table_rows) in table_id_to_table_rows {
+            let (sequenced_bigquery_table_id, table_descriptor) =
+                self.prepare_table_for_streaming(&table_id, true).await?;
+
+            let table_batch = self.client.create_table_batch(
+                &self.dataset_id,
+                &sequenced_bigquery_table_id.to_string(),
+                table_descriptor.clone(),
+                table_rows,
+            )?;
+            table_batches.push(table_batch);
+        }
+
+        if table_batches.is_empty() {
+            return Ok(());
+        }
+
+        let (bytes_sent, bytes_received) = self
+            .client
+            .stream_table_batches_concurrent(table_batches, self.max_concurrent_streams)
+            .await?;
+
+        // Logs with egress_metric = true can be used to identify egress logs.
+        info!(
+            bytes_sent,
+            bytes_received,
+            phase = "apply",
+            egress_metric = true,
+            "wrote cdc events to bigquery"
+        );
+
+        Ok(())
+    }
+
     async fn apply_relation_event(&self, relation_event: RelationEvent) -> EtlResult<()> {
         if relation_event.changes.is_empty() {
             debug!(
@@ -487,52 +538,10 @@ where
             return Ok(());
         }
 
-        let Some(table_schema) = self
-            .store
-            .get_table_schema(&relation_event.table_id)
-            .await?
-        else {
-            bail!(
-                ErrorKind::MissingTableSchema,
-                "Table not found in the schema store",
-                format!(
-                    "The table schema for table {} was not found while applying relation changes to BigQuery",
-                    relation_event.table_id
-                )
-            );
-        };
-
-        let bigquery_table_id = table_name_to_bigquery_table_id(&table_schema.name);
-        let sequenced_bigquery_table_id = self
-            .get_or_create_sequenced_bigquery_table_id(&relation_event.table_id, &bigquery_table_id)
-            .await?;
-
-        {
-            let mut inner = self.inner.lock().await;
-            if !inner.created_tables.contains(&sequenced_bigquery_table_id) {
-                self.client
-                    .create_table_if_missing(
-                        &self.dataset_id,
-                        &sequenced_bigquery_table_id.to_string(),
-                        &table_schema.column_schemas,
-                        self.max_staleness_mins,
-                    )
-                    .await?;
-
-                Self::add_to_created_tables_cache(&mut inner, &sequenced_bigquery_table_id);
-
-                self.ensure_view_points_to_table(
-                    &mut inner,
-                    &bigquery_table_id,
-                    &sequenced_bigquery_table_id,
-                )
-                .await?;
-            }
-        }
+        let (sequenced_bigquery_table_id, table_schema) = self.prepare_table(&relation_event.table_id).await?;
 
         let sequenced_table_name = sequenced_bigquery_table_id.to_string();
         let mut primary_key_dirty = false;
-
         for change in relation_event.changes {
             match change {
                 RelationChange::AddColumn(column_schema) => {
@@ -657,6 +666,16 @@ where
         Ok(())
     }
 
+    /// Returns `true` whether the event should break the batch that is being built up when
+    /// writing events. `false` otherwise.
+    fn is_batch_breaker(event: &Event) -> bool {
+        match event {
+            Event::Truncate(_) => true,
+            Event::Relation(_) => true,
+            _ => false,
+        }
+    }
+
     /// Processes CDC events in batches with proper ordering and truncate handling.
     ///
     /// Groups streaming operations (insert/update/delete) by table and processes them together,
@@ -669,7 +688,7 @@ where
 
             // Process events until we hit a truncate event or run out of events
             while let Some(event) = event_iter.peek() {
-                if matches!(event, Event::Truncate(_)) {
+                if Self::is_batch_breaker(event) {
                     break;
                 }
 
@@ -718,51 +737,16 @@ where
                             table_id_to_table_rows.entry(delete.table_id).or_default();
                         table_rows.push(old_table_row);
                     }
-                    Event::Relation(relation_event) => {
-                        self.apply_relation_event(relation_event).await?;
-                    }
                     _ => {
-                        // Every other event type is currently not supported.
                         debug!("skipping unsupported event in BigQuery");
                     }
                 }
             }
 
-            // Process accumulated events for each table.
+            // Process accumulated events for each table before a batch breaker is encountered.
             if !table_id_to_table_rows.is_empty() {
-                let mut table_batches = Vec::with_capacity(table_id_to_table_rows.len());
-
-                for (table_id, table_rows) in table_id_to_table_rows {
-                    let (sequenced_bigquery_table_id, table_descriptor) =
-                        self.prepare_table_for_streaming(&table_id, true).await?;
-
-                    let table_batch = self.client.create_table_batch(
-                        &self.dataset_id,
-                        &sequenced_bigquery_table_id.to_string(),
-                        table_descriptor.clone(),
-                        table_rows,
-                    )?;
-                    table_batches.push(table_batch);
-                }
-
-                if !table_batches.is_empty() {
-                    let (bytes_sent, bytes_received) = self
-                        .client
-                        .stream_table_batches_concurrent(table_batches, self.max_concurrent_streams)
-                        .await?;
-
-                    // Logs with egress_metric = true can be used to identify egress logs.
-                    // This can e.g. be used to send egress logs to a location different
-                    // than the other logs. These logs should also have bytes_sent set to
-                    // the number of bytes sent to the destination.
-                    info!(
-                        bytes_sent,
-                        bytes_received,
-                        phase = "apply",
-                        egress_metric = true,
-                        "wrote cdc events to bigquery"
-                    );
-                }
+                let pending_rows = mem::take(&mut table_id_to_table_rows);
+                self.process_table_events(pending_rows).await?;
             }
 
             // Collect and deduplicate all table IDs from all truncate events.
@@ -771,7 +755,6 @@ where
             // row without applying other events in the meanwhile, it doesn't make any sense to create
             // new empty tables for each of them.
             let mut truncate_table_ids = HashSet::new();
-
             while let Some(Event::Truncate(_)) = event_iter.peek() {
                 if let Some(Event::Truncate(truncate_event)) = event_iter.next() {
                     for table_id in truncate_event.rel_ids {
@@ -779,10 +762,16 @@ where
                     }
                 }
             }
-
             if !truncate_table_ids.is_empty() {
                 self.process_truncate_for_table_ids(truncate_table_ids.into_iter(), true)
                     .await?;
+            }
+
+            // Collect all the relation events in a sequence and apply them.
+            while let Some(Event::Relation(_)) = event_iter.peek() {
+                if let Some(Event::Relation(relation_event)) = event_iter.next() {
+                    self.apply_relation_event(relation_event).await?;
+                }
             }
         }
 
