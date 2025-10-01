@@ -1,6 +1,6 @@
 use core::str;
 use etl_postgres::types::{
-    ColumnSchema, SchemaVersion, TableId, TableSchema, TableSchemaDraft, convert_type_oid_to_type,
+    ColumnSchema, SchemaVersion, TableId, TableSchema, convert_type_oid_to_type,
 };
 use postgres_replication::protocol;
 use std::sync::Arc;
@@ -48,18 +48,13 @@ pub fn parse_event_from_commit_message(
     }
 }
 
-/// Creates a [`RelationEventDraft`] from Postgres protocol data.
+/// Creates a [`Vec<ColumnSchema>`] from Postgres protocol data.
 ///
-/// This method parses the replication protocol relation message and builds
-/// a complete table schema for use in interpreting later data events.
-///
-/// The method returns a draft since the actual full event needs the table schema version
-/// from the schema store, and we don't want to pollute the logic of this module with schema
-/// store logic.
-pub async fn parse_event_from_relation_message(
-    old_table_schema: Arc<TableSchema>,
+/// This method parses the replication protocol relation message and builds a vector of all the
+/// columns that were received in the relation message.
+pub async fn parse_column_schemas_from_relation_message(
     relation_body: &protocol::RelationBody,
-) -> EtlResult<TableSchemaDraft> {
+) -> EtlResult<Vec<ColumnSchema>> {
     // We construct the new column schemas in order. The order is important since the table schema
     // relies on the right ordering to interpret the Postgres correctly.
     let new_column_schemas = relation_body
@@ -68,13 +63,7 @@ pub async fn parse_event_from_relation_message(
         .map(build_column_schema)
         .collect::<Result<Vec<_>, EtlError>>()?;
 
-    let new_table_schema = TableSchemaDraft::new(
-        old_table_schema.id,
-        old_table_schema.name.clone(),
-        new_column_schemas,
-    );
-
-    Ok(new_table_schema)
+    Ok(new_column_schemas)
 }
 
 /// Converts a Postgres insert message into an [`InsertEvent`].
