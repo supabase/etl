@@ -4,10 +4,10 @@ alter table etl.table_schemas
 
 -- Adjust unique constraint to account for schema versions
 alter table etl.table_schemas
-    drop constraint if exists etl_table_schemas_pipeline_id_table_id_key;
+    drop constraint if exists table_schemas_pipeline_id_table_id_key;
 
 alter table etl.table_schemas
-    add constraint etl_table_schemas_pipeline_id_table_id_version_key
+    add constraint table_schemas_pipeline_id_table_id_schema_version_key
     unique (pipeline_id, table_id, schema_version);
 
 -- Refresh supporting indexes

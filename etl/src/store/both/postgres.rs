@@ -601,6 +601,7 @@ impl SchemaStore for PostgresStore {
 
         // We also lock the entire section to be consistent.
         let mut inner = self.inner.lock().await;
+
         let stored_schema =
             schema::store_table_schema(&pool, self.pipeline_id as i64, table_schema)
                 .await
@@ -611,14 +612,15 @@ impl SchemaStore for PostgresStore {
                         format!("Failed to store table schema in postgres: {err}")
                     )
                 })?;
-        let schema_arc = Arc::new(stored_schema);
+
+        let stored_schema = Arc::new(stored_schema);
         inner
             .table_schemas
-            .entry(schema_arc.id)
+            .entry(stored_schema.id)
             .or_insert_with(BTreeMap::new)
-            .insert(schema_arc.version, Arc::clone(&schema_arc));
+            .insert(stored_schema.version, stored_schema.clone());
 
-        Ok(schema_arc)
+        Ok(stored_schema)
     }
 }
 

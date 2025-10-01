@@ -8,6 +8,9 @@ use crate::types::{
     ColumnSchema, SchemaVersion, TableId, TableName, TableSchema, TableSchemaDraft,
 };
 
+/// The initial schema version number.
+const STARTING_SCHEMA_VERSION: u64 = 0;
+
 macro_rules! define_type_mappings {
     (
         $(
@@ -147,12 +150,11 @@ pub async fn store_table_schema(
 ) -> Result<TableSchema, sqlx::Error> {
     let mut tx = pool.begin().await?;
 
-    let current_version: Option<i64> = sqlx::query_scalar(
+    let current_schema_version: Option<i64> = sqlx::query_scalar(
         r#"
         select max(schema_version)
         from etl.table_schemas
-        where pipeline_id = $1
-          and table_id = $2
+        where pipeline_id = $1 and table_id = $2
         "#,
     )
     .bind(pipeline_id)
@@ -160,10 +162,10 @@ pub async fn store_table_schema(
     .fetch_one(&mut *tx)
     .await?;
 
-    let next_version = current_version.unwrap_or(-1) + 1;
-    let schema_version: SchemaVersion = next_version
-        .try_into()
-        .expect("schema version should not overflow u64");
+    // We case to `u64` without checks. This is fine since we control the database, but we might want
+    // to be more defensive in the future.
+    let next_schema_version: u64 =
+        current_schema_version.map_or(STARTING_SCHEMA_VERSION, |v| v as u64) + 1;
 
     let table_schema_id: i64 = sqlx::query(
         r#"
@@ -176,7 +178,7 @@ pub async fn store_table_schema(
     .bind(table_schema.id.into_inner() as i64)
     .bind(&table_schema.name.schema)
     .bind(&table_schema.name.name)
-    .bind(next_version)
+    .bind(next_schema_version as i64)
     .fetch_one(&mut *tx)
     .await?
     .get(0);
@@ -204,7 +206,7 @@ pub async fn store_table_schema(
 
     tx.commit().await?;
 
-    Ok(table_schema.into_table_schema(schema_version))
+    Ok(table_schema.into_table_schema(next_schema_version))
 }
 
 /// Loads all table schemas for a pipeline from the database.

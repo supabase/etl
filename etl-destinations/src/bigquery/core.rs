@@ -538,7 +538,7 @@ where
         Ok(())
     }
 
-    async fn apply_relation_event(&self, relation_event: RelationEvent) -> EtlResult<()> {
+    async fn apply_relation_event(&self, _relation_event: RelationEvent) -> EtlResult<()> {
         // TODO: implement the relation event.
         // if relation_event.changes.is_empty() {
         //     debug!(
@@ -679,124 +679,162 @@ where
         Ok(())
     }
 
-    /// Returns `true` whether the event should break the batch that is being built up when
-    /// writing events. `false` otherwise.
-    fn is_batch_breaker(event: &Event) -> bool {
-        matches!(event, Event::Truncate(_) | Event::Relation(_))
+    #[inline]
+    fn push_dml_statement(
+        table_id_to_table_rows: &mut HashMap<TableId, Vec<TableRow>>,
+        batch_schema_version: &mut Option<SchemaVersion>,
+        start_lsn: PgLsn,
+        commit_lsn: PgLsn,
+        table_id: TableId,
+        mut table_row: TableRow,
+        schema_version: SchemaVersion,
+        operation_type: BigQueryOperationType,
+    ) -> EtlResult<()> {
+        // BigQuery CDC extras.
+        let sequence_number = generate_sequence_number(start_lsn, commit_lsn);
+        table_row.values.push(operation_type.into_cell());
+        table_row.values.push(Cell::String(sequence_number));
+
+        // Preserve per-table ordering.
+        table_id_to_table_rows
+            .entry(table_id)
+            .or_default()
+            .push(table_row);
+
+        // Ensure a single schema version per batch.
+        //
+        // We need to do this since we don't make any assumptions on relation events being there
+        // so we use the schema version of the first element that we find.
+        //
+        // The invariant that must be upheld is that for all events in a batch, they must all have
+        // the same schema version.
+        match batch_schema_version {
+            Some(batch_schema_version) => {
+                if schema_version != *batch_schema_version {
+                    bail!(
+                        ErrorKind::InvalidState,
+                        "Multiple schema versions in the same batch",
+                        "Multiple schema versions in the same batch were found while processing events for BigQuery"
+                    )
+                }
+            }
+            None => {
+                *batch_schema_version = Some(schema_version);
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn flush_batch(
+        &self,
+        batch_schema_version: &mut Option<SchemaVersion>,
+        table_id_to_table_rows: &mut HashMap<TableId, Vec<TableRow>>,
+    ) -> EtlResult<()> {
+        if table_id_to_table_rows.is_empty() {
+            return Ok(());
+        }
+
+        let Some(schema_version) = batch_schema_version.take() else {
+            bail!(
+                ErrorKind::InvalidState,
+                "Missing schema version",
+                "Missing schema version before writing events in BigQuery"
+            );
+        };
+
+        let rows = mem::take(table_id_to_table_rows);
+        self.process_table_events(schema_version, rows).await
     }
 
     /// Processes CDC events in batches with proper ordering and truncate handling.
     ///
     /// Groups streaming operations (insert/update/delete) by table and processes them together,
     /// then handles truncate events separately by creating new versioned tables.
-    async fn write_events(&self, events: Vec<Event>) -> EtlResult<()> {
-        let mut events = events.into_iter().peekable();
+    pub async fn write_events(&self, events: Vec<Event>) -> EtlResult<()> {
+        // Accumulates rows for the current batch, grouped by table.
+        let mut table_id_to_table_rows: HashMap<TableId, Vec<TableRow>> = HashMap::new();
 
-        while events.peek().is_some() {
-            let mut batch_schema_version = None;
-            let mut table_id_to_table_rows = HashMap::new();
+        // The schema version used for the *current* batch (must be consistent within a batch).
+        let mut batch_schema_version: Option<SchemaVersion> = None;
 
-            let mut handle_dml_statement =
-                |start_lsn: PgLsn,
-                 commit_lsn: PgLsn,
-                 table_id: TableId,
-                 mut table_row: TableRow,
-                 schema_version: SchemaVersion| {
-                    let sequence_number = generate_sequence_number(start_lsn, commit_lsn);
-                    table_row
-                        .values
-                        .push(BigQueryOperationType::Upsert.into_cell());
-                    table_row.values.push(Cell::String(sequence_number));
-
-                    let table_rows: &mut Vec<TableRow> =
-                        table_id_to_table_rows.entry(table_id).or_default();
-                    table_rows.push(table_row);
-
-                    batch_schema_version = Some(schema_version);
-                };
-
-            // Process events until we hit a batch breaker, or we run out of events.
-            while let Some(event) = events.peek() {
-                if Self::is_batch_breaker(event) {
-                    break;
+        // Process stream.
+        for event in events {
+            match event {
+                // DML events.
+                Event::Insert(insert) => {
+                    Self::push_dml_statement(
+                        &mut table_id_to_table_rows,
+                        &mut batch_schema_version,
+                        insert.start_lsn,
+                        insert.commit_lsn,
+                        insert.table_id,
+                        insert.table_row,
+                        insert.schema_version,
+                        BigQueryOperationType::Upsert,
+                    )?;
                 }
-
-                match events.next().unwrap() {
-                    Event::Insert(insert) => {
-                        handle_dml_statement(
-                            insert.start_lsn,
-                            insert.commit_lsn,
-                            insert.table_id,
-                            insert.table_row,
-                            insert.schema_version,
-                        );
-                    }
-                    Event::Update(update) => {
-                        handle_dml_statement(
-                            update.start_lsn,
-                            update.commit_lsn,
-                            update.table_id,
-                            update.table_row,
-                            update.schema_version,
-                        );
-                    }
-                    Event::Delete(delete) => {
-                        let Some((_, old_table_row)) = delete.old_table_row else {
-                            info!("the `DELETE` event has no row, so it was skipped");
-                            continue;
-                        };
-
-                        handle_dml_statement(
+                Event::Update(update) => {
+                    Self::push_dml_statement(
+                        &mut table_id_to_table_rows,
+                        &mut batch_schema_version,
+                        update.start_lsn,
+                        update.commit_lsn,
+                        update.table_id,
+                        update.table_row,
+                        update.schema_version,
+                        BigQueryOperationType::Upsert,
+                    )?;
+                }
+                Event::Delete(delete) => {
+                    if let Some((_, old_row)) = delete.old_table_row {
+                        Self::push_dml_statement(
+                            &mut table_id_to_table_rows,
+                            &mut batch_schema_version,
                             delete.start_lsn,
                             delete.commit_lsn,
                             delete.table_id,
-                            old_table_row,
+                            old_row,
                             delete.schema_version,
-                        );
-                    }
-                    event => {
-                        debug!("skipping unsupported event {event:?} in BigQuery");
-                    }
-                }
-            }
-            if !table_id_to_table_rows.is_empty() {
-                let Some(schema_version) = batch_schema_version.take() else {
-                    bail!(
-                        ErrorKind::InvalidState,
-                        "Missing schema version",
-                        "Missing schema version before writing events in BigQuery"
-                    )
-                };
-                let table_id_to_table_rows = mem::take(&mut table_id_to_table_rows);
-                self.process_table_events(schema_version, table_id_to_table_rows)
-                    .await?;
-            }
-
-            // Collect and deduplicate all table IDs from all truncate events.
-            //
-            // This is done as an optimization since if we have multiple table ids being truncated in a
-            // row without applying other events in the meanwhile, it doesn't make any sense to create
-            // new empty tables for each of them.
-            let mut truncate_tables = Vec::new();
-            while let Some(Event::Truncate(_)) = events.peek() {
-                if let Some(Event::Truncate(truncate_event)) = events.next() {
-                    for table_id in truncate_event.table_ids {
-                        truncate_tables.push(table_id);
+                            BigQueryOperationType::Delete,
+                        )?;
+                    } else {
+                        warn!("the `DELETE` event has no row, so it was skipped");
                     }
                 }
-            }
-            if !truncate_tables.is_empty() {
-                self.process_truncate_for_table_ids(truncate_tables.into_iter(), true)
-                    .await?;
-            }
 
-            // Collect all the relation events in a sequence and apply them.
-            while let Some(Event::Relation(_)) = events.peek() {
-                if let Some(Event::Relation(relation_event)) = events.next() {
-                    self.apply_relation_event(relation_event).await?;
+                // Batch breaker events.
+                Event::Relation(relation) => {
+                    // Finish current batch before applying schema change.
+                    self.flush_batch(&mut batch_schema_version, &mut table_id_to_table_rows)
+                        .await?;
+
+                    // We mark the new batch schema version with the relation schema version, since
+                    // after a relation message a new schema is meant to be stored in the schema store.
+                    batch_schema_version = Some(relation.new_table_schema.version);
+
+                    // Apply relation change, then prime the next batch with the new schema version.
+                    self.apply_relation_event(relation).await?;
+                }
+                Event::Truncate(truncate) => {
+                    // Finish current batch before a TRUNCATE (it affects table state).
+                    self.flush_batch(&mut batch_schema_version, &mut table_id_to_table_rows)
+                        .await?;
+
+                    self.process_truncate_for_table_ids(truncate.table_ids.into_iter(), true)
+                        .await?;
+                }
+
+                // Unsupported events.
+                other => {
+                    debug!("skipping unsupported event {other:?} in BigQuery");
                 }
             }
         }
+
+        // Flush any trailing DML.
+        self.flush_batch(&mut batch_schema_version, &mut table_id_to_table_rows)
+            .await?;
 
         Ok(())
     }
