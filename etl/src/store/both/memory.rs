@@ -10,6 +10,9 @@ use crate::store::cleanup::CleanupStore;
 use crate::store::schema::SchemaStore;
 use crate::store::state::StateStore;
 
+/// The initial schema version number.
+const STARTING_SCHEMA_VERSION: u64 = 0;
+
 /// Inner state of [`MemoryStore`]
 #[derive(Debug)]
 struct Inner {
@@ -186,10 +189,12 @@ impl SchemaStore for MemoryStore {
     ) -> EtlResult<Option<Arc<TableSchema>>> {
         let inner = self.inner.lock().await;
 
-        Ok(inner
-            .table_schemas
-            .get(table_id)
-            .and_then(|table_schemas| table_schemas.iter().next_back().map(|(_, schema)| schema.clone())))
+        Ok(inner.table_schemas.get(table_id).and_then(|table_schemas| {
+            table_schemas
+                .iter()
+                .next_back()
+                .map(|(_, schema)| schema.clone())
+        }))
     }
 
     async fn load_table_schemas(&self) -> EtlResult<usize> {
@@ -216,7 +221,7 @@ impl SchemaStore for MemoryStore {
             .keys()
             .next_back()
             .map(|version| version + 1)
-            .unwrap_or(0);
+            .unwrap_or(STARTING_SCHEMA_VERSION);
 
         let table_schema = Arc::new(table_schema.into_table_schema(next_version));
         table_schemas.insert(next_version, table_schema.clone());

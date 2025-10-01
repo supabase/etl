@@ -150,6 +150,8 @@ pub async fn store_table_schema(
 ) -> Result<TableSchema, sqlx::Error> {
     let mut tx = pool.begin().await?;
 
+    // We are fine with running this query for every table schema store since we assume that
+    // it's not a frequent operation.
     let current_schema_version: Option<i64> = sqlx::query_scalar(
         r#"
         select max(schema_version)
@@ -164,8 +166,10 @@ pub async fn store_table_schema(
 
     // We case to `u64` without checks. This is fine since we control the database, but we might want
     // to be more defensive in the future.
-    let next_schema_version: u64 =
-        current_schema_version.map_or(STARTING_SCHEMA_VERSION, |v| v as u64) + 1;
+    let next_schema_version: u64 = match current_schema_version {
+        Some(current_schema_version) => current_schema_version as u64 + 1,
+        None => STARTING_SCHEMA_VERSION,
+    };
 
     let table_schema_id: i64 = sqlx::query(
         r#"
