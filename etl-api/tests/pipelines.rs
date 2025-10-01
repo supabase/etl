@@ -1209,11 +1209,11 @@ async fn deleting_pipeline_removes_table_schemas_from_source_database() {
 
     // Insert table schemas using production schema
     let table_schema_id_1 = sqlx::query_scalar::<_, i64>(
-        "INSERT INTO etl.table_schemas (pipeline_id, table_id, schema_name, table_name) VALUES ($1, $2, 'public', 'test_users') RETURNING id"
+        "INSERT INTO etl.table_schemas (pipeline_id, table_id, schema_name, table_name, schema_version) VALUES ($1, $2, 'public', 'test_users', 0) RETURNING id"
     ).bind(pipeline_id).bind(table1_oid).fetch_one(&source_db_pool).await.unwrap();
 
     let table_schema_id_2 = sqlx::query_scalar::<_, i64>(
-        "INSERT INTO etl.table_schemas (pipeline_id, table_id, schema_name, table_name) VALUES ($1, $2, 'public', 'test_orders') RETURNING id"
+        "INSERT INTO etl.table_schemas (pipeline_id, table_id, schema_name, table_name, schema_version) VALUES ($1, $2, 'public', 'test_orders', 0) RETURNING id"
     ).bind(pipeline_id).bind(table2_oid).fetch_one(&source_db_pool).await.unwrap();
 
     // Insert multiple columns for each table to test CASCADE behavior

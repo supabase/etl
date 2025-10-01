@@ -632,6 +632,7 @@ where
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     #[inline]
     fn push_dml_statement(
         table_id_to_table_rows: &mut HashMap<TableId, Vec<TableRow>>,
