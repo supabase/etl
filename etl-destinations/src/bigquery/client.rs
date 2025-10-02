@@ -291,7 +291,7 @@ impl BigQueryClient {
         let query =
             format!("alter table {full_table_name} add column if not exists {column_definition}");
 
-        let _ = self.query(QueryRequest::new(query)).await?;
+        let x = self.query(QueryRequest::new(query)).await?;
 
         info!("added column {} to table {full_table_name} in BigQuery", column_schema.name);
 

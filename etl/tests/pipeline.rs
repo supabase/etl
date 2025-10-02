@@ -88,13 +88,13 @@ async fn table_schema_copy_survives_pipeline_restarts() {
         *table_schemas
             .get(&database_schema.users_schema().id)
             .unwrap(),
-        database_schema.users_schema()
+        database_schema.users_schema().into_versioned(0)
     );
     assert_eq!(
         *table_schemas
             .get(&database_schema.orders_schema().id)
             .unwrap(),
-        database_schema.orders_schema()
+        database_schema.orders_schema().into_versioned(0)
     );
 
     // We recreate a pipeline, assuming the other one was stopped, using the same state and destination.

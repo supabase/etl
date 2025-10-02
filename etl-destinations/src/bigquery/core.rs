@@ -698,8 +698,8 @@ where
             );
         };
 
-        let rows = mem::take(table_id_to_table_rows);
-        self.process_table_events(batch_schema_version, rows).await
+        let table_id_to_table_rows = mem::take(table_id_to_table_rows);
+        self.process_table_events(batch_schema_version, table_id_to_table_rows).await
     }
 
     /// Processes CDC events in batches with proper ordering and truncate handling.
