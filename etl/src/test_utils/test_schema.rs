@@ -1,5 +1,5 @@
 use etl_postgres::tokio::test_utils::{PgDatabase, id_column_schema};
-use etl_postgres::types::{ColumnSchema, TableId, TableName, TableSchema, VersionedTableSchema};
+use etl_postgres::types::{ColumnSchema, TableId, TableName, TableSchema};
 use std::ops::RangeInclusive;
 use tokio_postgres::types::{PgLsn, Type};
 use tokio_postgres::{Client, GenericClient};

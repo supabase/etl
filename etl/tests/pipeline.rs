@@ -128,6 +128,23 @@ async fn table_schema_copy_survives_pipeline_restarts() {
 
     pipeline.shutdown_and_wait().await.unwrap();
 
+    // We want to make sure that during a restart, a relation message with the same schema doesn't
+    // cause a new schema version to be created.
+    let table_schemas = store.get_latest_table_schemas().await;
+    assert_eq!(table_schemas.len(), 2);
+    assert_eq!(
+        *table_schemas
+            .get(&database_schema.users_schema().id)
+            .unwrap(),
+        database_schema.users_schema().into_versioned(0)
+    );
+    assert_eq!(
+        *table_schemas
+            .get(&database_schema.orders_schema().id)
+            .unwrap(),
+        database_schema.orders_schema().into_versioned(0)
+    );
+
     // We check that both inserts were received, and we know that we can receive them only when the table
     // schemas are available.
     let events = destination.get_events().await;

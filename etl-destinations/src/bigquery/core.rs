@@ -7,23 +7,30 @@ use etl::types::{
     VersionedTableSchema,
 };
 use etl::{bail, etl_error};
-use gcp_bigquery_client::storage::TableDescriptor;
+use gcp_bigquery_client::storage::{TableBatch, TableDescriptor};
 use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
 use std::iter;
 use std::mem;
 use std::str::FromStr;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::Mutex;
+use tokio::time::sleep;
 use tracing::{debug, info, warn};
 
 use crate::bigquery::client::{BigQueryClient, BigQueryOperationType};
+use crate::bigquery::encoding::BigQueryTableRow;
 use crate::bigquery::{BigQueryDatasetId, BigQueryTableId};
 
 /// Delimiter separating schema from table name in BigQuery table identifiers.
 const BIGQUERY_TABLE_ID_DELIMITER: &str = "_";
 /// Replacement string for escaping underscores in Postgres names.
 const BIGQUERY_TABLE_ID_DELIMITER_ESCAPE_REPLACEMENT: &str = "__";
+/// Maximum number of BigQuery streaming attempts when schema propagation lags behind.
+const MAX_SCHEMA_MISMATCH_ATTEMPTS: usize = 5;
+/// Delay in milliseconds between retry attempts triggered by BigQuery schema mismatches.
+const SCHEMA_MISMATCH_RETRY_DELAY_MS: u64 = 500;
 
 /// Creates a hex-encoded sequence number from Postgres LSNs to ensure correct event ordering.
 ///
@@ -472,10 +479,7 @@ where
 
         // Stream all the batches concurrently.
         if !table_batches.is_empty() {
-            let (bytes_sent, bytes_received) = self
-                .client
-                .stream_table_batches_concurrent(table_batches, self.max_concurrent_streams)
-                .await?;
+            let (bytes_sent, bytes_received) = self.stream_with_schema_retry(table_batches).await?;
 
             // Logs with egress_metric = true can be used to identify egress logs.
             // This can e.g. be used to send egress logs to a location different
@@ -522,10 +526,7 @@ where
             return Ok(());
         }
 
-        let (bytes_sent, bytes_received) = self
-            .client
-            .stream_table_batches_concurrent(table_batches, self.max_concurrent_streams)
-            .await?;
+        let (bytes_sent, bytes_received) = self.stream_with_schema_retry(table_batches).await?;
 
         // Logs with egress_metric = true can be used to identify egress logs.
         info!(
@@ -537,6 +538,57 @@ where
         );
 
         Ok(())
+    }
+
+    /// Streams table batches to BigQuery, retrying when schema mismatch errors occur.
+    ///
+    /// The rationale is that per BigQuery docs, the Storage Write API detects schema changes after
+    /// a short time, on the order of minutes.
+    async fn stream_with_schema_retry<T>(&self, table_batches: T) -> EtlResult<(usize, usize)>
+    where
+        T: Into<Arc<[TableBatch<BigQueryTableRow>]>>,
+    {
+        let retry_delay = Duration::from_millis(SCHEMA_MISMATCH_RETRY_DELAY_MS);
+        let mut attempts = 0;
+
+        let table_batches = table_batches.into();
+        loop {
+            match self
+                .client
+                .stream_table_batches_concurrent(table_batches.clone(), self.max_concurrent_streams)
+                .await
+            {
+                Ok(result) => return Ok(result),
+                Err(error) => {
+                    if !Self::is_schema_mismatch_error(&error) {
+                        return Err(error);
+                    }
+
+                    attempts += 1;
+
+                    if attempts >= MAX_SCHEMA_MISMATCH_ATTEMPTS {
+                        return Err(error);
+                    }
+
+                    warn!(
+                        attempt = attempts,
+                        max_attempts = MAX_SCHEMA_MISMATCH_ATTEMPTS,
+                        error = %error,
+                        "schema mismatch detected while streaming to BigQuery; retrying"
+                    );
+
+                    sleep(retry_delay).await;
+                }
+            }
+        }
+    }
+
+    /// Returns `true` when the error or one of its aggregated errors indicates a schema mismatch.
+    fn is_schema_mismatch_error(error: &EtlError) -> bool {
+        error
+            .kinds()
+            .iter()
+            .any(|kind| *kind == ErrorKind::DestinationSchemaMismatch)
     }
 
     async fn apply_relation_event_changes(&self, relation_event: RelationEvent) -> EtlResult<()> {
@@ -699,7 +751,8 @@ where
         };
 
         let table_id_to_table_rows = mem::take(table_id_to_table_rows);
-        self.process_table_events(batch_schema_version, table_id_to_table_rows).await
+        self.process_table_events(batch_schema_version, table_id_to_table_rows)
+            .await
     }
 
     /// Processes CDC events in batches with proper ordering and truncate handling.

@@ -580,15 +580,15 @@ async fn relation_event_primary_key_syncs_in_bigquery() {
         .await
         .expect("Failed to insert users");
 
-    timeout(Duration::from_secs(2), insert_event_notify.notified()).await;
+    insert_event_notify.notified().await;
 
     // We check the BigQuery data after the first schema change.
     let users_rows = bigquery_database
         .query_table(database_schema.users_schema().name)
         .await
         .unwrap();
-    println!("USERS {:?}", users_rows);
     // let parsed_users_rows = parse_bigquery_table_rows::<BigQueryUser>(users_rows);
+    // println!("{:#?}", parsed_users_rows);
     // assert_eq!(
     //     parsed_users_rows,
     //     vec![
@@ -596,6 +596,44 @@ async fn relation_event_primary_key_syncs_in_bigquery() {
     //         BigQueryUser::new(2, "user_2", 2),
     //     ]
     // );
+
+    // We perform schema changes.
+    database
+        .alter_table(
+            test_table_name("users"),
+            &[
+                TableModification::DropColumn { name: "year" },
+                TableModification::AlterColumn {
+                    name: "new_age",
+                    params: "type double precision using new_age::double precision",
+                },
+            ],
+        )
+        .await
+        .unwrap();
+
+    // Register notifications for the insert.
+    let insert_event_notify = destination
+        .wait_for_events_count(vec![(EventType::Insert, 2)])
+        .await;
+
+    // We insert data.
+    database
+        .insert_values(
+            database_schema.users_schema().name.clone(),
+            &["name", "new_age"],
+            &[&"user_3", &(2f64)],
+        )
+        .await
+        .expect("Failed to insert users");
+
+    timeout(Duration::from_secs(2), insert_event_notify.notified()).await;
+
+    let users_rows = bigquery_database
+        .query_table(database_schema.users_schema().name)
+        .await
+        .unwrap();
+    println!("users_rows: {:#?}", users_rows);
 
     pipeline.shutdown_and_wait().await.unwrap();
 }

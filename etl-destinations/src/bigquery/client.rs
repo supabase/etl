@@ -291,9 +291,12 @@ impl BigQueryClient {
         let query =
             format!("alter table {full_table_name} add column if not exists {column_definition}");
 
-        let x = self.query(QueryRequest::new(query)).await?;
+        let _ = self.query(QueryRequest::new(query)).await?;
 
-        info!("added column {} to table {full_table_name} in BigQuery", column_schema.name);
+        info!(
+            "added column {} to table {full_table_name} in BigQuery",
+            column_schema.name
+        );
 
         Ok(())
     }
@@ -312,7 +315,10 @@ impl BigQueryClient {
 
         let _ = self.query(QueryRequest::new(query)).await?;
 
-        info!("dropped column {} from table {full_table_name} in BigQuery", column_name);
+        info!(
+            "dropped column {} from table {full_table_name} in BigQuery",
+            column_name
+        );
 
         Ok(())
     }
@@ -333,7 +339,10 @@ impl BigQueryClient {
 
         let _ = self.query(QueryRequest::new(query)).await?;
 
-        info!("altered column type {} in table {full_table_name} in BigQuery", column_schema.name);
+        info!(
+            "altered column type {} in table {full_table_name} in BigQuery",
+            column_schema.name
+        );
 
         Ok(())
     }
@@ -444,16 +453,11 @@ impl BigQueryClient {
     /// in a single batch.
     pub async fn stream_table_batches_concurrent(
         &self,
-        table_batches: Vec<TableBatch<BigQueryTableRow>>,
+        table_batches: Arc<[TableBatch<BigQueryTableRow>]>,
         max_concurrent_streams: usize,
     ) -> EtlResult<(usize, usize)> {
-        if table_batches.is_empty() {
-            return Ok((0, 0));
-        }
-
         debug!(
-            "streaming {:?} table batches concurrently with maximum {:?} concurrent streams",
-            table_batches.len(),
+            "streaming table batches concurrently with maximum {:?} concurrent streams",
             max_concurrent_streams
         );
 
@@ -526,11 +530,11 @@ impl BigQueryClient {
         // We want to use the default stream from BigQuery since it allows multiple connections to
         // send data to it. In addition, it's available by default for every table, so it also reduces
         // complexity.
-        let stream_name = StreamName::new_default(
+        let stream_name = Arc::new(StreamName::new_default(
             self.project_id.clone(),
             dataset_id.to_string(),
             table_id.to_string(),
-        );
+        ));
 
         Ok(TableBatch::new(
             stream_name,
@@ -757,6 +761,16 @@ impl fmt::Debug for BigQueryClient {
 fn bq_error_to_etl_error(err: BQError) -> EtlError {
     use BQError;
 
+    let error_message = err.to_string();
+
+    if is_schema_mismatch_message(&error_message) {
+        return etl_error!(
+            ErrorKind::DestinationSchemaMismatch,
+            "BigQuery schema mismatch error",
+            error_message
+        );
+    }
+
     let (kind, description) = match &err {
         // Authentication related errors
         BQError::InvalidServiceAccountKey(_) => (
@@ -852,16 +866,30 @@ fn bq_error_to_etl_error(err: BQError) -> EtlError {
         ),
     };
 
-    etl_error!(kind, description, err.to_string())
+    etl_error!(kind, description, error_message)
 }
 
 /// Converts BigQuery row errors to ETL destination errors.
 fn row_error_to_etl_error(err: RowError) -> EtlError {
-    etl_error!(
-        ErrorKind::DestinationError,
-        "BigQuery row error",
-        format!("{err:?}")
-    )
+    let detail = format!("{err:?}");
+
+    if is_schema_mismatch_message(&detail) {
+        return etl_error!(
+            ErrorKind::DestinationSchemaMismatch,
+            "BigQuery schema mismatch error",
+            detail
+        );
+    }
+
+    etl_error!(ErrorKind::DestinationError, "BigQuery row error", detail)
+}
+
+/// Returns `true` when the provided message indicates a BigQuery schema mismatch.
+fn is_schema_mismatch_message(message: &str) -> bool {
+    let lowercase = message.to_ascii_lowercase();
+
+    lowercase.contains("input schema has more fields than bigquery schema")
+        || lowercase.contains("schema_mismatch_extra_field")
 }
 
 #[cfg(test)]
