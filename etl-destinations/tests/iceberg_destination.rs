@@ -302,10 +302,10 @@ async fn cdc_streaming() {
 
     let mut actual_users = read_all_rows(&client, namespace.to_string(), users_table.clone()).await;
 
-    // Sort deterministically by the primary key (id) and sequence number for stable assertions
+    // Sort deterministically by the sequence number for stable assertions
     actual_users.sort_by(|a, b| {
-        let a_key = format!("{:?}_{:?}", a.values[0], a.values[4]);
-        let b_key = format!("{:?}_{:?}", b.values[0], b.values[4]);
+        let a_key = format!("{:?}", a.values[4]);
+        let b_key = format!("{:?}", b.values[4]);
         a_key.cmp(&b_key)
     });
 
@@ -327,10 +327,28 @@ async fn cdc_streaming() {
                 Cell::String("UPSERT".to_string()),
             ],
         },
+        // Initial insert of user 2
+        TableRow {
+            values: vec![
+                Cell::I64(2),
+                Cell::String("user_2".to_string()),
+                Cell::I32(2),
+                Cell::String("UPSERT".to_string()),
+            ],
+        },
         // Update of user 1
         TableRow {
             values: vec![
                 Cell::I64(1),
+                Cell::String("updated_name".to_string()),
+                Cell::I32(42),
+                Cell::String("UPSERT".to_string()),
+            ],
+        },
+        // Update of user 2
+        TableRow {
+            values: vec![
+                Cell::I64(2),
                 Cell::String("updated_name".to_string()),
                 Cell::I32(42),
                 Cell::String("UPSERT".to_string()),
@@ -345,24 +363,6 @@ async fn cdc_streaming() {
                 Cell::String("DELETE".to_string()),
             ],
         },
-        // Initial insert of user 2
-        TableRow {
-            values: vec![
-                Cell::I64(2),
-                Cell::String("user_2".to_string()),
-                Cell::I32(2),
-                Cell::String("UPSERT".to_string()),
-            ],
-        },
-        // Update of user 2
-        TableRow {
-            values: vec![
-                Cell::I64(2),
-                Cell::String("updated_name".to_string()),
-                Cell::I32(42),
-                Cell::String("UPSERT".to_string()),
-            ],
-        },
     ];
 
     assert_eq!(actual_users, expected_users);
@@ -372,8 +372,8 @@ async fn cdc_streaming() {
 
     // Sort deterministically by the primary key (id) and sequence number for stable assertions
     actual_orders.sort_by(|a, b| {
-        let a_key = format!("{:?}_{:?}", a.values[0], a.values[3]);
-        let b_key = format!("{:?}_{:?}", b.values[0], b.values[3]);
+        let a_key = format!("{:?}", a.values[3]);
+        let b_key = format!("{:?}", b.values[3]);
         a_key.cmp(&b_key)
     });
 
@@ -391,19 +391,19 @@ async fn cdc_streaming() {
                 Cell::String("UPSERT".to_string()),
             ],
         },
-        // Update of order 1
-        TableRow {
-            values: vec![
-                Cell::I64(1),
-                Cell::String("updated_description".to_string()),
-                Cell::String("UPSERT".to_string()),
-            ],
-        },
         // Initial insert of order 2
         TableRow {
             values: vec![
                 Cell::I64(2),
                 Cell::String("description_2".to_string()),
+                Cell::String("UPSERT".to_string()),
+            ],
+        },
+        // Update of order 1
+        TableRow {
+            values: vec![
+                Cell::I64(1),
+                Cell::String("updated_description".to_string()),
                 Cell::String("UPSERT".to_string()),
             ],
         },
