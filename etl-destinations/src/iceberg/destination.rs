@@ -63,6 +63,11 @@ const ICEBERG_TABLE_ID_DELIMITER_ESCAPE_REPLACEMENT: &str = "__";
 /// Suffix for changelog tables
 const ICEBERG_CHANGELOG_TABLE_SUFFIX: &str = "changelog";
 
+/// CDC operation column name
+const CDC_OPERATION_COLUMN_NAME: &str = "cdc_operation";
+/// CDC operation column name
+const SEQUENCE_NUMBER_COLUMN_NAME: &str = "sequence_number";
+
 /// Converts a source table name to an Iceberg changelog table name.
 ///
 /// Creates a standardized naming convention for Iceberg tables by combining
@@ -379,15 +384,21 @@ where
     fn add_cdc_columns(table_schema: &TableSchema) -> TableSchema {
         let mut final_schema = table_schema.clone();
         // Add cdc specific columns
+
+        let cdc_operation_col =
+            find_unique_column_name(&final_schema.column_schemas, CDC_OPERATION_COLUMN_NAME);
+        let sequence_number_col =
+            find_unique_column_name(&final_schema.column_schemas, SEQUENCE_NUMBER_COLUMN_NAME);
+
         final_schema.add_column_schema(ColumnSchema {
-            name: "cdc_operation".to_string(), //TODO: fix the case when the source table already has a column with this name
+            name: cdc_operation_col,
             typ: Type::TEXT,
             modifier: -1,
             nullable: false,
             primary: false,
         });
         final_schema.add_column_schema(ColumnSchema {
-            name: "sequence_number".to_string(), //TODO: fix the case when the source table already has a column with this name
+            name: sequence_number_col,
             typ: Type::TEXT,
             modifier: -1,
             nullable: false,
@@ -475,5 +486,98 @@ where
         self.write_events(events).await?;
 
         Ok(())
+    }
+}
+
+/// Creates a unique columns name with prefix `new_column_name` to avoid collissions with
+/// existing columns in `column_schemas` by adding a numeric suffix.
+fn find_unique_column_name(column_schemas: &[ColumnSchema], new_column_name: &str) -> String {
+    let mut suffix = None;
+
+    loop {
+        let final_name = match suffix {
+            Some(s) => format!("{new_column_name}_{s}"),
+            None => new_column_name.to_string(),
+        };
+
+        let found = column_schemas.iter().any(|cs| cs.name == final_name);
+        if found {
+            if let Some(s) = &mut suffix {
+                *s += 1;
+            } else {
+                suffix = Some(1);
+            }
+        } else {
+            return final_name;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use etl::types::{ColumnSchema, Type};
+
+    use crate::iceberg::destination::{CDC_OPERATION_COLUMN_NAME, find_unique_column_name};
+
+    #[test]
+    fn can_find_unique_column_name() {
+        let column_schemas = vec![];
+        let col_name = find_unique_column_name(&column_schemas, CDC_OPERATION_COLUMN_NAME);
+        assert_eq!(col_name, CDC_OPERATION_COLUMN_NAME.to_string());
+
+        let column_schemas = vec![ColumnSchema {
+            name: "id".to_string(),
+            typ: Type::BOOL,
+            modifier: -1,
+            nullable: false,
+            primary: true,
+        }];
+        let col_name = find_unique_column_name(&column_schemas, CDC_OPERATION_COLUMN_NAME);
+        assert_eq!(col_name, CDC_OPERATION_COLUMN_NAME.to_string());
+
+        let column_schemas = vec![
+            ColumnSchema {
+                name: "id".to_string(),
+                typ: Type::BOOL,
+                modifier: -1,
+                nullable: false,
+                primary: true,
+            },
+            ColumnSchema {
+                name: CDC_OPERATION_COLUMN_NAME.to_string(),
+                typ: Type::BOOL,
+                modifier: -1,
+                nullable: false,
+                primary: true,
+            },
+        ];
+        let col_name = find_unique_column_name(&column_schemas, CDC_OPERATION_COLUMN_NAME);
+        assert_eq!(col_name, format!("{CDC_OPERATION_COLUMN_NAME}_1"));
+
+        let column_schemas = vec![
+            ColumnSchema {
+                name: "id".to_string(),
+                typ: Type::BOOL,
+                modifier: -1,
+                nullable: false,
+                primary: true,
+            },
+            ColumnSchema {
+                name: CDC_OPERATION_COLUMN_NAME.to_string(),
+                typ: Type::BOOL,
+                modifier: -1,
+                nullable: false,
+                primary: true,
+            },
+            ColumnSchema {
+                name: format!("{CDC_OPERATION_COLUMN_NAME}_1"),
+                typ: Type::BOOL,
+                modifier: -1,
+                nullable: false,
+                primary: true,
+            },
+        ];
+        let col_name = find_unique_column_name(&column_schemas, CDC_OPERATION_COLUMN_NAME);
+        assert_eq!(col_name, format!("{CDC_OPERATION_COLUMN_NAME}_2"));
     }
 }
