@@ -56,13 +56,29 @@ impl fmt::Display for IcebergOperationType {
 /// Type alias for Iceberg table names.
 type IcebergTableName = String;
 
+/// Delimiter separating schema from table name in BigQuery table identifiers.
+const ICEBERG_TABLE_ID_DELIMITER: &str = "_";
+/// Replacement string for escaping underscores in Postgres names.
+const ICEBERG_TABLE_ID_DELIMITER_ESCAPE_REPLACEMENT: &str = "__";
+/// Suffix for changelog tables
+const ICEBERG_CHANGELOG_TABLE_SUFFIX: &str = "changelog";
+
 /// Converts a source table name to an Iceberg changelog table name.
 ///
 /// Creates a standardized naming convention for Iceberg tables by combining
 /// the schema and table name with a `_changelog` suffix to distinguish
 /// CDC tables from regular data tables.
-fn table_name_to_iceberg_table_name(table_name: &TableName) -> IcebergTableName {
-    format!("{}_{}_changelog", table_name.schema, table_name.name)
+pub fn table_name_to_iceberg_table_name(table_name: &TableName) -> IcebergTableName {
+    let escaped_schema = table_name.schema.replace(
+        ICEBERG_TABLE_ID_DELIMITER,
+        ICEBERG_TABLE_ID_DELIMITER_ESCAPE_REPLACEMENT,
+    );
+    let escaped_table = table_name.name.replace(
+        ICEBERG_TABLE_ID_DELIMITER,
+        ICEBERG_TABLE_ID_DELIMITER_ESCAPE_REPLACEMENT,
+    );
+
+    format!("{escaped_schema}_{escaped_table}_{ICEBERG_CHANGELOG_TABLE_SUFFIX}")
 }
 
 /// An iceberg destination that implements the ETL [`Destination`] trait.

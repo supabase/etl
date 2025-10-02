@@ -7,7 +7,9 @@ use etl::test_utils::pipeline::create_pipeline;
 use etl::test_utils::test_destination_wrapper::TestDestinationWrapper;
 use etl::test_utils::test_schema::{TableSelection, insert_mock_data, setup_test_database_schema};
 use etl::types::{Cell, EventType, PipelineId, TableRow};
-use etl_destinations::iceberg::{IcebergClient, IcebergDestination};
+use etl_destinations::iceberg::{
+    IcebergClient, IcebergDestination, table_name_to_iceberg_table_name,
+};
 use etl_telemetry::tracing::init_test_tracing;
 use rand::random;
 
@@ -79,16 +81,8 @@ async fn table_copy() {
 
     pipeline.shutdown_and_wait().await.unwrap();
 
-    let users_table = format!(
-        "{}_{}_changelog",
-        database_schema.users_schema().name.schema,
-        database_schema.users_schema().name.name
-    );
-    let orders_table = format!(
-        "{}_{}_changelog",
-        database_schema.orders_schema().name.schema,
-        database_schema.orders_schema().name.name
-    );
+    let users_table = table_name_to_iceberg_table_name(&database_schema.users_schema().name);
+    let orders_table = table_name_to_iceberg_table_name(&database_schema.orders_schema().name);
 
     let mut actual_users = read_all_rows(&client, namespace.to_string(), users_table.clone()).await;
 
@@ -289,16 +283,8 @@ async fn cdc_streaming() {
     event_notify.notified().await;
 
     // base table names
-    let users_table = format!(
-        "{}_{}_changelog",
-        database_schema.users_schema().name.schema,
-        database_schema.users_schema().name.name
-    );
-    let orders_table = format!(
-        "{}_{}_changelog",
-        database_schema.orders_schema().name.schema,
-        database_schema.orders_schema().name.name
-    );
+    let users_table = table_name_to_iceberg_table_name(&database_schema.users_schema().name);
+    let orders_table = table_name_to_iceberg_table_name(&database_schema.orders_schema().name);
 
     let mut actual_users = read_all_rows(&client, namespace.to_string(), users_table.clone()).await;
 
@@ -529,16 +515,8 @@ async fn cdc_streaming_with_truncate() {
     destination.clear_events().await;
 
     // base table names
-    let users_table = format!(
-        "{}_{}_changelog",
-        database_schema.users_schema().name.schema,
-        database_schema.users_schema().name.name
-    );
-    let orders_table = format!(
-        "{}_{}_changelog",
-        database_schema.orders_schema().name.schema,
-        database_schema.orders_schema().name.name
-    );
+    let users_table = table_name_to_iceberg_table_name(&database_schema.users_schema().name);
+    let orders_table = table_name_to_iceberg_table_name(&database_schema.orders_schema().name);
 
     let actual_users = read_all_rows(&client, namespace.to_string(), users_table.clone()).await;
     let actual_orders = read_all_rows(&client, namespace.to_string(), users_table.clone()).await;
