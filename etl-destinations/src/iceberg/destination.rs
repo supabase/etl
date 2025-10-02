@@ -19,14 +19,26 @@ use tokio::sync::Mutex;
 use tokio::task::JoinSet;
 use tracing::{debug, info};
 
-/// Extra CDC operation column values used for Iceberg ingestion
+/// CDC operation types for Iceberg changelog tables.
+///
+/// Represents the type of change operation that occurred in the source database.
+/// These values are stored in the `cdc_operation` column of changelog tables
+/// to distinguish between data modifications and deletions.
 #[derive(Debug, Clone, Copy)]
 enum IcebergOperationType {
+    /// Represents insert or update operations from the source database.
+    /// Both inserts and updates are treated as upserts in the changelog.
     Upsert,
+    /// Represents delete operations from the source database.
+    /// Captures the final state of deleted rows for audit purposes.
     Delete,
 }
 
 impl IcebergOperationType {
+    /// Converts the operation type into a table cell for storage.
+    ///
+    /// Transforms the enum variant into a string cell that can be inserted
+    /// into the `cdc_operation` column of changelog tables.
     fn into_cell(self) -> Cell {
         Cell::String(self.to_string())
     }
@@ -41,8 +53,14 @@ impl fmt::Display for IcebergOperationType {
     }
 }
 
+/// Type alias for Iceberg table names.
 type IcebergTableName = String;
 
+/// Converts a source table name to an Iceberg changelog table name.
+///
+/// Creates a standardized naming convention for Iceberg tables by combining
+/// the schema and table name with a `_changelog` suffix to distinguish
+/// CDC tables from regular data tables.
 fn table_name_to_iceberg_table_name(table_name: &TableName) -> IcebergTableName {
     format!("{}_{}_changelog", table_name.schema, table_name.name)
 }
@@ -64,9 +82,17 @@ pub struct IcebergDestination<S> {
     inner: Arc<Mutex<Inner>>,
 }
 
+/// Internal state for the Iceberg destination.
+///
+/// Contains mutable state that requires synchronization across concurrent operations.
+/// Wrapped in a mutex to ensure thread-safe access while keeping the main
+/// destination struct cloneable.
 #[derive(Debug)]
 struct Inner {
-    /// Cache of table names we already created/verified in the namespace
+    /// Cache of table names we already created/verified in the namespace.
+    ///
+    /// Prevents redundant table existence checks and creation attempts.
+    /// Tables are added to this cache after successful creation or verification.
     created_tables: HashSet<IcebergTableName>,
 }
 
@@ -74,6 +100,11 @@ impl<S> IcebergDestination<S>
 where
     S: StateStore + SchemaStore + Send + Sync,
 {
+    /// Creates a new Iceberg destination instance.
+    ///
+    /// Initializes the destination with an Iceberg client, target namespace,
+    /// and state/schema store. The destination starts with an empty table
+    /// creation cache and is ready to handle streaming operations.
     pub fn new(client: IcebergClient, namespace: String, store: S) -> IcebergDestination<S> {
         IcebergDestination {
             client,
@@ -85,6 +116,11 @@ where
         }
     }
 
+    /// Truncates an Iceberg table by dropping and recreating it.
+    ///
+    /// Removes all data from the target table by dropping the existing Iceberg table
+    /// and creating a fresh empty table with the same schema. Updates the internal
+    /// table creation cache to reflect the new table state.
     async fn truncate_table(&self, table_id: TableId) -> EtlResult<()> {
         let mut inner = self.inner.lock().await;
 
@@ -104,6 +140,11 @@ where
         Ok(())
     }
 
+    /// Writes table rows to the Iceberg destination as upsert operations.
+    ///
+    /// Prepares the target table for streaming, augments each row with CDC metadata
+    /// (operation type and sequence number), and inserts the rows into the Iceberg table.
+    /// All rows are treated as upsert operations in this context.
     async fn write_table_rows(
         &self,
         table_id: TableId,
@@ -124,6 +165,12 @@ where
         Ok(())
     }
 
+    /// Processes and writes CDC events to Iceberg tables.
+    ///
+    /// Handles a stream of CDC events by batching non-truncate events by table ID
+    /// and processing them concurrently. Truncate events are processed separately
+    /// and deduplicated for efficiency. Each event is augmented with CDC metadata
+    /// including operation type and sequence number based on LSN information.
     async fn write_events(&self, events: Vec<Event>) -> EtlResult<()> {
         let mut event_iter = events.into_iter().peekable();
 
@@ -258,8 +305,10 @@ where
 
     /// Prepares a table for CDC streaming operations with schema-aware table creation.
     ///
-    /// Retrieves the table schema from the store, creates or verifies the iceberg table exists.
-    /// Uses caching to avoid redundant table creation checks.
+    /// Retrieves the table schema from the store, augments it with CDC columns,
+    /// and ensures the corresponding Iceberg table exists in the namespace.
+    /// Uses caching to avoid redundant table creation checks and holds a lock
+    /// during the entire preparation to prevent race conditions.
     async fn prepare_table_for_streaming(&self, table_id: TableId) -> EtlResult<IcebergTableName> {
         // We hold the lock for the entire preparation to avoid race conditions since the consistency
         // of this code path is critical.
@@ -302,10 +351,15 @@ where
         Ok(iceberg_table_name)
     }
 
-    /// Derive cdc table's schema from the final table's schema by
-    /// adding cdc_operation column to represent the cdc operation type (upsert/delete)
-    /// and a sequence_number column to represent the sequence in which rows were
-    /// inserted.
+    /// Derives a CDC table schema by adding CDC-specific columns.
+    ///
+    /// Creates a new table schema based on the source table schema with two
+    /// additional columns for CDC operations:
+    /// - `cdc_operation`: Tracks whether the row represents an upsert or delete
+    /// - `sequence_number`: Provides ordering information based on WAL LSN
+    ///
+    /// These columns enable CDC consumers to understand the chronological order
+    /// of changes and distinguish between different types of operations.
     fn add_cdc_columns(table_schema: &TableSchema) -> TableSchema {
         let mut final_schema = table_schema.clone();
         // Add cdc specific columns
@@ -327,6 +381,10 @@ where
     }
 
     /// Adds a table to the creation cache to avoid redundant existence checks.
+    ///
+    /// Updates the internal cache to mark a table as created or verified.
+    /// This optimization prevents unnecessary table existence checks and creation
+    /// attempts for tables that are already known to exist in the namespace.
     fn add_to_created_tables_cache(inner: &mut Inner, table_name: &IcebergTableName) {
         if inner.created_tables.contains(table_name) {
             return;
@@ -335,8 +393,12 @@ where
         inner.created_tables.insert(table_name.clone());
     }
 
-    /// Retrieves the current iceberg table name stored in the table mapping,
-    /// or updates the table mapping if the table name doesn't exist in it.
+    /// Retrieves or creates a table mapping for the Iceberg table name.
+    ///
+    /// Checks if a table mapping already exists for the given table ID.
+    /// If no mapping exists, creates a new mapping with the provided
+    /// Iceberg table name. This ensures consistent table name resolution
+    /// across multiple operations on the same logical table.
     async fn get_or_create_iceberg_table_name(
         &self,
         table_id: &TableId,
@@ -358,16 +420,26 @@ impl<S> Destination for IcebergDestination<S>
 where
     S: StateStore + SchemaStore + Send + Sync,
 {
+    /// Returns the identifier name for this destination type.
     fn name() -> &'static str {
         "iceberg"
     }
 
+    /// Truncates the specified table by dropping and recreating it.
+    ///
+    /// Removes all data from the target Iceberg table while preserving
+    /// the table schema structure for continued CDC operations.
     async fn truncate_table(&self, table_id: TableId) -> EtlResult<()> {
         self.truncate_table(table_id).await?;
 
         Ok(())
     }
 
+    /// Writes table rows to the destination as upsert operations.
+    ///
+    /// Augments each row with CDC metadata and inserts them into the
+    /// corresponding Iceberg changelog table. All rows are treated
+    /// as upsert operations with generated sequence numbers.
     async fn write_table_rows(
         &self,
         table_id: TableId,
@@ -378,6 +450,11 @@ where
         Ok(())
     }
 
+    /// Processes and writes CDC events to the destination tables.
+    ///
+    /// Handles insert, update, delete, and truncate events by converting
+    /// them to appropriate Iceberg operations. Events are batched by table
+    /// and processed concurrently for optimal performance.
     async fn write_events(&self, events: Vec<Event>) -> EtlResult<()> {
         self.write_events(events).await?;
 
