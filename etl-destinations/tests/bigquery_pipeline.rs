@@ -565,24 +565,22 @@ async fn relation_event_primary_key_syncs_in_bigquery() {
         .await
         .unwrap();
 
-    // // Register notifications for the insert.
-    // let insert_event_notify = destination
-    //     .wait_for_events_count(vec![(EventType::Insert, 1)])
-    //     .await;
-    //
-    // // We insert data.
-    // database
-    //     .insert_values(
-    //         database_schema.users_schema().name.clone(),
-    //         &["name", "new_age", "year"],
-    //         &[&"user_3", &(3i32), &(2025i32)],
-    //     )
-    //     .await
-    //     .expect("Failed to insert users");
-    //
-    // timeout(Duration::from_secs(2), insert_event_notify.notified()).await;
+    // Register notifications for the insert.
+    let insert_event_notify = destination
+        .wait_for_events_count(vec![(EventType::Insert, 1)])
+        .await;
 
-    sleep(Duration::from_secs(2)).await;
+    // We insert data.
+    database
+        .insert_values(
+            database_schema.users_schema().name.clone(),
+            &["name", "new_age", "year"],
+            &[&"user_3", &(3i32), &(2025i32)],
+        )
+        .await
+        .expect("Failed to insert users");
+
+    timeout(Duration::from_secs(2), insert_event_notify.notified()).await;
 
     // We check the BigQuery data after the first schema change.
     let users_rows = bigquery_database

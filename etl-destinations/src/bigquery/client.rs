@@ -293,6 +293,8 @@ impl BigQueryClient {
 
         let _ = self.query(QueryRequest::new(query)).await?;
 
+        info!("added column {} to table {full_table_name} in BigQuery", column_schema.name);
+
         Ok(())
     }
 
@@ -309,6 +311,8 @@ impl BigQueryClient {
             format!("alter table {full_table_name} drop column if exists {column_identifier}");
 
         let _ = self.query(QueryRequest::new(query)).await?;
+
+        info!("dropped column {} from table {full_table_name} in BigQuery", column_name);
 
         Ok(())
     }
@@ -328,6 +332,8 @@ impl BigQueryClient {
         );
 
         let _ = self.query(QueryRequest::new(query)).await?;
+
+        info!("altered column {} in table {full_table_name} in BigQuery", column_schema.name);
 
         Ok(())
     }
@@ -365,6 +371,8 @@ impl BigQueryClient {
 
         let _ = self.query(QueryRequest::new(query)).await?;
 
+        info!("synced primary key for table {full_table_name} in BigQuery");
+
         Ok(())
     }
 
@@ -398,6 +406,8 @@ impl BigQueryClient {
         let query = format!("alter table {full_table_name} drop primary key");
 
         let _ = self.query(QueryRequest::new(query)).await?;
+
+        info!("dropped primary key for table {full_table_name} in BigQuery");
 
         Ok(())
     }
