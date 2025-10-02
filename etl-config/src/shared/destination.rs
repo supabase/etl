@@ -62,7 +62,7 @@ pub enum IcebergConfig {
         s3_access_key_id: String,
         /// The S3 secret access key
         s3_secret_access_key: SerializableSecretString,
-        /// THe S3 region
+        /// The S3 region
         s3_region: String,
     },
     Rest {
