@@ -333,7 +333,7 @@ impl BigQueryClient {
 
         let _ = self.query(QueryRequest::new(query)).await?;
 
-        info!("altered column {} in table {full_table_name} in BigQuery", column_schema.name);
+        info!("altered column type {} in table {full_table_name} in BigQuery", column_schema.name);
 
         Ok(())
     }

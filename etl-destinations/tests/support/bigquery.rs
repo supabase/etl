@@ -204,17 +204,17 @@ impl Drop for BigQueryDatabase {
     fn drop(&mut self) {
         // We take out the client since during destruction we know that the struct won't be used
         // anymore.
-        let Some(client) = self.take_client() else {
-            return;
-        };
-
-        // To use `block_in_place,` we need a multithreaded runtime since when a blocking
-        // task is issued, the runtime will offload existing tasks to another worker.
-        tokio::task::block_in_place(move || {
-            Handle::current().block_on(async move {
-                destroy_bigquery(&client, self.project_id(), self.dataset_id()).await;
-            });
-        });
+        // let Some(client) = self.take_client() else {
+        //     return;
+        // };
+        //
+        // // To use `block_in_place,` we need a multithreaded runtime since when a blocking
+        // // task is issued, the runtime will offload existing tasks to another worker.
+        // tokio::task::block_in_place(move || {
+        //     Handle::current().block_on(async move {
+        //         destroy_bigquery(&client, self.project_id(), self.dataset_id()).await;
+        //     });
+        // });
     }
 }
 
