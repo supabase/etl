@@ -1,4 +1,4 @@
-use etl_postgres::types::{SchemaVersion, TableId, VersionedTableSchema, TableSchema};
+use etl_postgres::types::{SchemaVersion, TableId, TableSchema, VersionedTableSchema};
 use std::sync::Arc;
 
 use crate::error::EtlResult;

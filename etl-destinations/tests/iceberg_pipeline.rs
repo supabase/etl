@@ -3,7 +3,9 @@
 use std::collections::HashMap;
 
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
-use etl::types::{ArrayCell, Cell, ColumnSchema, TableId, TableName, TableRow, VersionedTableSchema, Type};
+use etl::types::{
+    ArrayCell, Cell, ColumnSchema, TableId, TableName, TableRow, Type, VersionedTableSchema,
+};
 use etl_destinations::iceberg::IcebergClient;
 use etl_telemetry::tracing::init_test_tracing;
 use iceberg::io::{S3_ACCESS_KEY_ID, S3_ENDPOINT, S3_SECRET_ACCESS_KEY};

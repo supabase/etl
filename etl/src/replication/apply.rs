@@ -1,6 +1,6 @@
 use etl_config::shared::PipelineConfig;
 use etl_postgres::replication::worker::WorkerType;
-use etl_postgres::types::{TableId, VersionedTableSchema, TableSchema};
+use etl_postgres::types::{TableId, TableSchema, VersionedTableSchema};
 use futures::StreamExt;
 use metrics::histogram;
 use postgres_replication::protocol;

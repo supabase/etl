@@ -1,4 +1,4 @@
-use etl_postgres::types::{ColumnSchema, TableId, TableName, VersionedTableSchema, TableSchema};
+use etl_postgres::types::{ColumnSchema, TableId, TableName, TableSchema, VersionedTableSchema};
 use std::collections::HashMap;
 
 /// Return the names of the column schema.

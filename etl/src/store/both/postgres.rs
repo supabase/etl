@@ -1,6 +1,6 @@
 use etl_config::shared::PgConnectionConfig;
 use etl_postgres::replication::{connect_to_source_database, schema, state, table_mappings};
-use etl_postgres::types::{SchemaVersion, TableId, VersionedTableSchema, TableSchema};
+use etl_postgres::types::{SchemaVersion, TableId, TableSchema, VersionedTableSchema};
 use metrics::gauge;
 use sqlx::PgPool;
 use std::{

@@ -1,4 +1,4 @@
-use etl_postgres::types::{SchemaVersion, TableId, VersionedTableSchema, TableSchema};
+use etl_postgres::types::{SchemaVersion, TableId, TableSchema, VersionedTableSchema};
 use std::{
     collections::{BTreeMap, HashMap},
     fmt,

@@ -610,18 +610,19 @@ where
             }
         }
 
-        self.client
-            .sync_primary_key(
-                &self.dataset_id,
-                &sequenced_table_name,
-                &relation_event.new_table_schema.column_schemas,
-            )
-            .await?;
-
-        debug!(
-            table = %sequenced_table_name,
-            "synchronized primary key definition in BigQuery"
-        );
+        // TODO: implement primary key synchronization.
+        // self.client
+        //     .sync_primary_key(
+        //         &self.dataset_id,
+        //         &sequenced_table_name,
+        //         &relation_event.new_table_schema.column_schemas,
+        //     )
+        //     .await?;
+        //
+        // debug!(
+        //     table = %sequenced_table_name,
+        //     "synchronized primary key definition in BigQuery"
+        // );
 
         info!(
             table_id = %relation_event.table_id,
@@ -689,7 +690,7 @@ where
             return Ok(());
         }
 
-        let Some(schema_version) = batch_schema_version.take() else {
+        let Some(batch_schema_version) = batch_schema_version.take() else {
             bail!(
                 ErrorKind::InvalidState,
                 "Missing schema version",
@@ -698,7 +699,7 @@ where
         };
 
         let rows = mem::take(table_id_to_table_rows);
-        self.process_table_events(schema_version, rows).await
+        self.process_table_events(batch_schema_version, rows).await
     }
 
     /// Processes CDC events in batches with proper ordering and truncate handling.
@@ -759,19 +760,19 @@ where
 
                 // Batch breaker events.
                 Event::Relation(relation) => {
-                    // Finish current batch before applying schema change.
+                    // Finish the current batch before applying schema change.
                     self.flush_batch(&mut batch_schema_version, &mut table_id_to_table_rows)
                         .await?;
 
                     // We mark the new batch schema version with the relation schema version, since
-                    // after a relation message a new schema is meant to be stored in the schema store.
+                    // after a relation message, a new schema is meant to be stored in the schema store.
                     batch_schema_version = Some(relation.new_table_schema.version);
 
                     // Apply relation change, then prime the next batch with the new schema version.
                     self.apply_relation_event_changes(relation).await?;
                 }
                 Event::Truncate(truncate) => {
-                    // Finish current batch before a TRUNCATE (it affects table state).
+                    // Finish the current batch before a TRUNCATE (it affects the table state).
                     self.flush_batch(&mut batch_schema_version, &mut table_id_to_table_rows)
                         .await?;
 

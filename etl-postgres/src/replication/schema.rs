@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use tokio_postgres::types::Type as PgType;
 
 use crate::types::{
-    ColumnSchema, SchemaVersion, TableId, TableName, VersionedTableSchema, TableSchema,
+    ColumnSchema, SchemaVersion, TableId, TableName, TableSchema, VersionedTableSchema,
 };
 
 /// The initial schema version number.
