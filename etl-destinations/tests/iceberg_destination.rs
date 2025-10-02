@@ -8,7 +8,7 @@ use etl::test_utils::test_destination_wrapper::TestDestinationWrapper;
 use etl::test_utils::test_schema::{TableSelection, insert_mock_data, setup_test_database_schema};
 use etl::types::{Cell, EventType, PipelineId, TableRow};
 use etl_destinations::iceberg::{
-    IcebergClient, IcebergDestination, table_name_to_iceberg_table_name,
+    IcebergClient, IcebergDestination, IcebergOperationType, table_name_to_iceberg_table_name,
 };
 use etl_telemetry::tracing::init_test_tracing;
 use rand::random;
@@ -92,7 +92,7 @@ async fn table_copy() {
                 Cell::I64(1),
                 Cell::String("user_1".to_string()),
                 Cell::I32(1),
-                Cell::String("UPSERT".to_string()),
+                IcebergOperationType::Insert.into(),
                 Cell::String("0000000000000000/0000000000000000".to_string()),
             ],
         },
@@ -101,7 +101,7 @@ async fn table_copy() {
                 Cell::I64(2),
                 Cell::String("user_2".to_string()),
                 Cell::I32(2),
-                Cell::String("UPSERT".to_string()),
+                IcebergOperationType::Insert.into(),
                 Cell::String("0000000000000000/0000000000000000".to_string()),
             ],
         },
@@ -119,7 +119,7 @@ async fn table_copy() {
             values: vec![
                 Cell::I64(1),
                 Cell::String("description_1".to_string()),
-                Cell::String("UPSERT".to_string()),
+                IcebergOperationType::Insert.into(),
                 Cell::String("0000000000000000/0000000000000000".to_string()),
             ],
         },
@@ -127,7 +127,7 @@ async fn table_copy() {
             values: vec![
                 Cell::I64(2),
                 Cell::String("description_2".to_string()),
-                Cell::String("UPSERT".to_string()),
+                IcebergOperationType::Insert.into(),
                 Cell::String("0000000000000000/0000000000000000".to_string()),
             ],
         },
@@ -310,7 +310,7 @@ async fn cdc_streaming() {
                 Cell::I64(1),
                 Cell::String("user_1".to_string()),
                 Cell::I32(1),
-                Cell::String("UPSERT".to_string()),
+                IcebergOperationType::Insert.into(),
             ],
         },
         // Initial insert of user 2
@@ -319,7 +319,7 @@ async fn cdc_streaming() {
                 Cell::I64(2),
                 Cell::String("user_2".to_string()),
                 Cell::I32(2),
-                Cell::String("UPSERT".to_string()),
+                IcebergOperationType::Insert.into(),
             ],
         },
         // Update of user 1
@@ -328,7 +328,7 @@ async fn cdc_streaming() {
                 Cell::I64(1),
                 Cell::String("updated_name".to_string()),
                 Cell::I32(42),
-                Cell::String("UPSERT".to_string()),
+                IcebergOperationType::Update.into(),
             ],
         },
         // Update of user 2
@@ -337,7 +337,7 @@ async fn cdc_streaming() {
                 Cell::I64(2),
                 Cell::String("updated_name".to_string()),
                 Cell::I32(42),
-                Cell::String("UPSERT".to_string()),
+                IcebergOperationType::Update.into(),
             ],
         },
         // Delete of user with id 1
@@ -346,7 +346,7 @@ async fn cdc_streaming() {
                 Cell::I64(1),
                 Cell::String("".to_string()),
                 Cell::I32(0),
-                Cell::String("DELETE".to_string()),
+                IcebergOperationType::Delete.into(),
             ],
         },
     ];
@@ -374,7 +374,7 @@ async fn cdc_streaming() {
             values: vec![
                 Cell::I64(1),
                 Cell::String("description_1".to_string()),
-                Cell::String("UPSERT".to_string()),
+                IcebergOperationType::Insert.into(),
             ],
         },
         // Initial insert of order 2
@@ -382,7 +382,7 @@ async fn cdc_streaming() {
             values: vec![
                 Cell::I64(2),
                 Cell::String("description_2".to_string()),
-                Cell::String("UPSERT".to_string()),
+                IcebergOperationType::Insert.into(),
             ],
         },
         // Update of order 1
@@ -390,7 +390,7 @@ async fn cdc_streaming() {
             values: vec![
                 Cell::I64(1),
                 Cell::String("updated_description".to_string()),
-                Cell::String("UPSERT".to_string()),
+                IcebergOperationType::Update.into(),
             ],
         },
         // Update of order 2
@@ -398,7 +398,7 @@ async fn cdc_streaming() {
             values: vec![
                 Cell::I64(2),
                 Cell::String("updated_description".to_string()),
-                Cell::String("UPSERT".to_string()),
+                IcebergOperationType::Update.into(),
             ],
         },
         // Delete of order 2
@@ -406,7 +406,7 @@ async fn cdc_streaming() {
             values: vec![
                 Cell::I64(2),
                 Cell::String("".to_string()),
-                Cell::String("DELETE".to_string()),
+                IcebergOperationType::Delete.into(),
             ],
         },
     ];
@@ -556,7 +556,7 @@ async fn cdc_streaming_with_truncate() {
                 Cell::I64(3),
                 Cell::String("user_3".to_string()),
                 Cell::I32(3),
-                Cell::String("UPSERT".to_string()),
+                IcebergOperationType::Insert.into(),
             ],
         },
         TableRow {
@@ -564,7 +564,7 @@ async fn cdc_streaming_with_truncate() {
                 Cell::I64(4),
                 Cell::String("user_4".to_string()),
                 Cell::I32(4),
-                Cell::String("UPSERT".to_string()),
+                IcebergOperationType::Insert.into(),
             ],
         },
     ];
@@ -582,14 +582,14 @@ async fn cdc_streaming_with_truncate() {
             values: vec![
                 Cell::I64(3),
                 Cell::String("description_3".to_string()),
-                Cell::String("UPSERT".to_string()),
+                IcebergOperationType::Insert.into(),
             ],
         },
         TableRow {
             values: vec![
                 Cell::I64(4),
                 Cell::String("description_4".to_string()),
-                Cell::String("UPSERT".to_string()),
+                IcebergOperationType::Insert.into(),
             ],
         },
     ];

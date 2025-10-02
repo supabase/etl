@@ -25,29 +25,26 @@ use tracing::{debug, info};
 /// These values are stored in the `cdc_operation` column of changelog tables
 /// to distinguish between data modifications and deletions.
 #[derive(Debug, Clone, Copy)]
-enum IcebergOperationType {
-    /// Represents insert or update operations from the source database.
-    /// Both inserts and updates are treated as upserts in the changelog.
-    Upsert,
+pub enum IcebergOperationType {
+    /// Represents insert operations from the source database.
+    Insert,
+    /// Represents update operations from the source database.
+    Update,
     /// Represents delete operations from the source database.
-    /// Captures the final state of deleted rows for audit purposes.
     Delete,
 }
 
-impl IcebergOperationType {
-    /// Converts the operation type into a table cell for storage.
-    ///
-    /// Transforms the enum variant into a string cell that can be inserted
-    /// into the `cdc_operation` column of changelog tables.
-    fn into_cell(self) -> Cell {
-        Cell::String(self.to_string())
+impl From<IcebergOperationType> for Cell {
+    fn from(value: IcebergOperationType) -> Self {
+        Cell::String(value.to_string())
     }
 }
 
 impl fmt::Display for IcebergOperationType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            IcebergOperationType::Upsert => write!(f, "UPSERT"),
+            IcebergOperationType::Insert => write!(f, "INSERT"),
+            IcebergOperationType::Update => write!(f, "UPDATE"),
             IcebergOperationType::Delete => write!(f, "DELETE"),
         }
     }
@@ -175,7 +172,7 @@ where
 
         for row in &mut table_rows {
             let sequence_number = generate_sequence_number(0.into(), 0.into());
-            row.values.push(IcebergOperationType::Upsert.into_cell());
+            row.values.push(IcebergOperationType::Insert.into());
             row.values.push(Cell::String(sequence_number));
         }
 
@@ -212,7 +209,7 @@ where
                         insert
                             .table_row
                             .values
-                            .push(IcebergOperationType::Upsert.into_cell());
+                            .push(IcebergOperationType::Insert.into());
                         insert.table_row.values.push(Cell::String(sequence_number));
 
                         let table_rows: &mut Vec<TableRow> =
@@ -225,7 +222,7 @@ where
                         update
                             .table_row
                             .values
-                            .push(IcebergOperationType::Upsert.into_cell());
+                            .push(IcebergOperationType::Update.into());
                         update.table_row.values.push(Cell::String(sequence_number));
 
                         let table_rows: &mut Vec<TableRow> =
@@ -242,7 +239,7 @@ where
                             generate_sequence_number(delete.start_lsn, delete.commit_lsn);
                         old_table_row
                             .values
-                            .push(IcebergOperationType::Delete.into_cell());
+                            .push(IcebergOperationType::Delete.into());
                         old_table_row.values.push(Cell::String(sequence_number));
 
                         let table_rows: &mut Vec<TableRow> =
