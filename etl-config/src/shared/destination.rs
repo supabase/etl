@@ -50,7 +50,7 @@ pub enum DestinationConfig {
 #[serde(rename_all = "snake_case")]
 pub enum IcebergConfig {
     Supabase {
-        /// Supabase project_ref (TODO: make this optional and use only for Supabase projects)
+        /// Supabase project_ref
         project_ref: String,
         /// Name of the warehouse in the catalog
         warehouse_name: String,
