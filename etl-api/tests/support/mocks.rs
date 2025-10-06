@@ -87,6 +87,27 @@ pub mod destinations {
         }
     }
 
+    /// Returns an updated Iceberg Supabase destination config.
+    pub fn updated_iceberg_supabase_destination_config() -> FullApiDestinationConfig {
+        use etl_api::configs::destination::FullApiIcebergConfig;
+
+        FullApiDestinationConfig::Iceberg {
+            config: FullApiIcebergConfig::Supabase {
+                project_ref: "tsrqponmlkjihgfedcba".to_string(),
+                warehouse_name: "my-updated-warehouse".to_string(),
+                namespace: "my-updated-namespace".to_string(),
+                catalog_token: SerializableSecretString::from(
+                    "eyJ0eXAiOiJKV1QiLCJhbGciOiJFUzI1NiIsImtpZCI6IjJlOGQxZDNjN2MyMTJkOTU4ZmEyOGU2ZDhjZDEwYTMzIn0.eyJleHAiOjIwNzA3MTcxNjAsImlhdCI6MTc1NjE0NTE1MCwiaXNzIjoic3VwYWJhc2UiLCJyZWYiOiJ0c3JxcG9ubWxramloZ2ZlZGNiYSIsInJvbGUiOiJzZXJ2aWNlX3JvbGUifQ.UpdatedTokenSignatureForTesting".to_string()
+                ),
+                s3_access_key_id: "updated9156667efc2c70d89af6588da86d2924".to_string(),
+                s3_secret_access_key: SerializableSecretString::from(
+                    "updatedca833e890916d848c69135924bcd75e5909184814a0ebc6c988937ee094120d4".to_string()
+                ),
+                s3_region: "us-west-2".to_string(),
+            },
+        }
+    }
+
     /// Creates a destination with the provided name and config and returns its id.
     pub async fn create_destination_with_config(
         app: &TestApp,

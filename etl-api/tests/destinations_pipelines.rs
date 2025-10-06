@@ -15,7 +15,7 @@ use crate::{
     support::mocks::destinations::{
         create_destination, new_bigquery_destination_config,
         new_iceberg_supabase_destination_config, new_name, updated_destination_config,
-        updated_name,
+        updated_iceberg_supabase_destination_config, updated_name,
     },
     support::mocks::pipelines::{new_pipeline_config, updated_pipeline_config},
     support::mocks::sources::create_source,
@@ -234,6 +234,74 @@ async fn an_existing_bigquery_destination_and_pipeline_can_be_updated() {
     let destination_pipeline = UpdateDestinationPipelineRequest {
         destination_name: updated_name(),
         destination_config: updated_destination_config(),
+        source_id: new_source_id,
+        pipeline_config: updated_pipeline_config(),
+    };
+    let response = app
+        .update_destination_pipeline(
+            tenant_id,
+            destination_id,
+            pipeline_id,
+            &destination_pipeline,
+        )
+        .await;
+
+    // Assert
+    assert!(response.status().is_success());
+
+    let response = app.read_destination(tenant_id, destination_id).await;
+    let response: ReadDestinationResponse = response
+        .json()
+        .await
+        .expect("failed to deserialize response");
+    assert_eq!(response.id, destination_id);
+    assert_eq!(response.name, destination_pipeline.destination_name);
+    insta::assert_debug_snapshot!(response.config);
+
+    let response = app.read_pipeline(tenant_id, pipeline_id).await;
+    let response: ReadPipelineResponse = response
+        .json()
+        .await
+        .expect("failed to deserialize response");
+    assert_eq!(response.id, pipeline_id);
+    assert_eq!(&response.tenant_id, tenant_id);
+    assert_eq!(response.source_id, destination_pipeline.source_id);
+    assert_eq!(response.destination_id, destination_id);
+    assert_eq!(response.replicator_id, 1);
+    insta::assert_debug_snapshot!(response.config);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_existing_iceberg_supabase_destination_and_pipeline_can_be_updated() {
+    init_test_tracing();
+    // Arrange
+    let app = spawn_test_app().await;
+    let tenant_id = &create_tenant(&app).await;
+    let source_id = create_source(&app, tenant_id).await;
+    create_default_image(&app).await;
+    let destination_pipeline = CreateDestinationPipelineRequest {
+        destination_name: "Iceberg Supabase Destination".to_string(),
+        destination_config: new_iceberg_supabase_destination_config(),
+        source_id,
+        pipeline_config: new_pipeline_config(),
+    };
+    let response = app
+        .create_destination_pipeline(tenant_id, &destination_pipeline)
+        .await;
+    let response: CreateDestinationPipelineResponse = response
+        .json()
+        .await
+        .expect("failed to deserialize response");
+    let CreateDestinationPipelineResponse {
+        destination_id,
+        pipeline_id,
+    } = response;
+    let new_source_id = create_source(&app, tenant_id).await;
+
+    // Act
+    let destination_pipeline = UpdateDestinationPipelineRequest {
+        destination_name: "Iceberg Supabase Destination (Updated)".to_string(),
+        destination_config: updated_iceberg_supabase_destination_config(),
         source_id: new_source_id,
         pipeline_config: updated_pipeline_config(),
     };
