@@ -55,14 +55,35 @@ pub mod destinations {
         }
     }
 
-    /// Returns a default destination config.
-    pub fn new_destination_config() -> FullApiDestinationConfig {
+    /// Returns a default destination config (BigQuery).
+    pub fn new_bigquery_destination_config() -> FullApiDestinationConfig {
         FullApiDestinationConfig::BigQuery {
             project_id: "project-id".to_string(),
             dataset_id: "dataset-id".to_string(),
             service_account_key: SerializableSecretString::from("service-account-key".to_string()),
             max_staleness_mins: None,
             max_concurrent_streams: Some(1),
+        }
+    }
+
+    /// Returns a default Iceberg Supabase destination config.
+    pub fn new_iceberg_supabase_destination_config() -> FullApiDestinationConfig {
+        use etl_api::configs::destination::FullApiIcebergConfig;
+
+        FullApiDestinationConfig::Iceberg {
+            config: FullApiIcebergConfig::Supabase {
+                project_ref: "abcdefghijklmnopqrst".to_string(),
+                warehouse_name: "my-warehouse".to_string(),
+                namespace: "my-namespace".to_string(),
+                catalog_token: SerializableSecretString::from(
+                    "eyJ0eXAiOiJKV1QiLCJhbGciOiJFUzI1NiIsImtpZCI6IjFkNzFjMGEyNmIxMDFjODQ5ZTkxZmQ1NjdjYjA5NTJmIn0.eyJleHAiOjIwNzA3MTcxNjAsImlhdCI6MTc1NjE0NTE1MCwiaXNzIjoic3VwYWJhc2UiLCJyZWYiOiJhYmNkZWZnaGlqbGttbm9wcXJzdCIsInJvbGUiOiJzZXJ2aWNlX3JvbGUifQ.YdTWkkIvwjSkXot3NC07xyjPjGWQMNzLq5EPzumzrdLzuHrj-zuzI-nlyQtQ5V7gZauysm-wGwmpztRXfPc3AQ".to_string()
+                ),
+                s3_access_key_id: "9156667efc2c70d89af6588da86d2924".to_string(),
+                s3_secret_access_key: SerializableSecretString::from(
+                    "ca833e890916d848c69135924bcd75e5909184814a0ebc6c988937ee094120d4".to_string()
+                ),
+                s3_region: "ap-southeast-1".to_string(),
+            },
         }
     }
 
@@ -84,7 +105,13 @@ pub mod destinations {
 
     /// Creates a default destination and returns its id.
     pub async fn create_destination(app: &TestApp, tenant_id: &str) -> i64 {
-        create_destination_with_config(app, tenant_id, new_name(), new_destination_config()).await
+        create_destination_with_config(
+            app,
+            tenant_id,
+            new_name(),
+            new_bigquery_destination_config(),
+        )
+        .await
     }
 }
 

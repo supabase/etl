@@ -9,8 +9,8 @@ use reqwest::StatusCode;
 use crate::{
     support::mocks::create_default_image,
     support::mocks::destinations::{
-        create_destination, create_destination_with_config, new_destination_config, new_name,
-        updated_destination_config, updated_name,
+        create_destination, create_destination_with_config, new_bigquery_destination_config,
+        new_name, updated_destination_config, updated_name,
     },
     support::mocks::pipelines::new_pipeline_config,
     support::mocks::sources::create_source,
@@ -30,7 +30,7 @@ async fn destination_can_be_created() {
     // Act
     let destination = CreateDestinationRequest {
         name: new_name(),
-        config: new_destination_config(),
+        config: new_bigquery_destination_config(),
     };
     let response = app.create_destination(tenant_id, &destination).await;
 
@@ -52,7 +52,7 @@ async fn an_existing_destination_can_be_read() {
 
     let destination = CreateDestinationRequest {
         name: new_name(),
-        config: new_destination_config(),
+        config: new_bigquery_destination_config(),
     };
     let response = app.create_destination(tenant_id, &destination).await;
     let response: CreateDestinationResponse = response
@@ -99,7 +99,7 @@ async fn an_existing_destination_can_be_updated() {
 
     let destination = CreateDestinationRequest {
         name: new_name(),
-        config: new_destination_config(),
+        config: new_bigquery_destination_config(),
     };
     let response = app.create_destination(tenant_id, &destination).await;
     let response: CreateDestinationResponse = response
@@ -157,7 +157,7 @@ async fn an_existing_destination_can_be_deleted() {
 
     let destination = CreateDestinationRequest {
         name: new_name(),
-        config: new_destination_config(),
+        config: new_bigquery_destination_config(),
     };
     let response = app.create_destination(tenant_id, &destination).await;
     let response: CreateDestinationResponse = response
@@ -195,8 +195,13 @@ async fn all_destinations_can_be_read() {
     // Arrange
     let app = spawn_test_app().await;
     let tenant_id = &create_tenant(&app).await;
-    let destination1_id =
-        create_destination_with_config(&app, tenant_id, new_name(), new_destination_config()).await;
+    let destination1_id = create_destination_with_config(
+        &app,
+        tenant_id,
+        new_name(),
+        new_bigquery_destination_config(),
+    )
+    .await;
     let destination2_id = create_destination_with_config(
         &app,
         tenant_id,
