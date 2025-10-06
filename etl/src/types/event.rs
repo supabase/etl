@@ -99,7 +99,7 @@ impl RelationEvent {
                     let column_schema = column_schema.into_inner();
                     let latest_column_schema = latest_column_schema.into_inner();
 
-                    if column_schema.name != latest_column_schema.name {
+                    if column_schema != latest_column_schema {
                         // If we find a column with the same name but different fields, we assume it was changed. The only changes
                         // that we detect are changes to the column but with preserved name.
                         changes.push(RelationChange::AlterColumn(
