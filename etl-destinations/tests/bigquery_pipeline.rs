@@ -636,12 +636,7 @@ async fn table_renames_are_handled_correctly() {
     let mut database = spawn_source_database().await;
     let database_schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
 
-    insert_users_data(
-        &mut database,
-        &database_schema.users_schema().name,
-        1..=1,
-    )
-        .await;
+    insert_users_data(&mut database, &database_schema.users_schema().name, 1..=1).await;
 
     let bigquery_database = setup_bigquery_connection().await;
 
