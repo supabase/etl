@@ -924,6 +924,53 @@ mod tests {
 
         // Use snapshot testing to verify the exact JSON structure
         assert_json_snapshot!(full_config);
+
+        // Test that we can deserialize it back and all fields match
+        let json = serde_json::to_string_pretty(&full_config).unwrap();
+        let deserialized: FullApiDestinationConfig = serde_json::from_str(&json).unwrap();
+        match (&full_config, deserialized) {
+            (
+                FullApiDestinationConfig::Iceberg {
+                    config:
+                        FullApiIcebergConfig::Supabase {
+                            project_ref: orig_project_ref,
+                            warehouse_name: orig_warehouse_name,
+                            namespace: orig_namespace,
+                            catalog_token: orig_catalog_token,
+                            s3_access_key_id: orig_s3_access_key_id,
+                            s3_secret_access_key: orig_s3_secret_access_key,
+                            s3_region: orig_s3_region,
+                        },
+                },
+                FullApiDestinationConfig::Iceberg {
+                    config:
+                        FullApiIcebergConfig::Supabase {
+                            project_ref: deser_project_ref,
+                            warehouse_name: deser_warehouse_name,
+                            namespace: deser_namespace,
+                            catalog_token: deser_catalog_token,
+                            s3_access_key_id: deser_s3_access_key_id,
+                            s3_secret_access_key: deser_s3_secret_access_key,
+                            s3_region: deser_s3_region,
+                        },
+                },
+            ) => {
+                assert_eq!(orig_project_ref, &deser_project_ref);
+                assert_eq!(orig_warehouse_name, &deser_warehouse_name);
+                assert_eq!(orig_namespace, &deser_namespace);
+                assert_eq!(
+                    orig_catalog_token.expose_secret(),
+                    deser_catalog_token.expose_secret()
+                );
+                assert_eq!(orig_s3_access_key_id, &deser_s3_access_key_id);
+                assert_eq!(
+                    orig_s3_secret_access_key.expose_secret(),
+                    deser_s3_secret_access_key.expose_secret()
+                );
+                assert_eq!(orig_s3_region, &deser_s3_region);
+            }
+            _ => panic!("Deserialization failed or variant mismatch"),
+        }
     }
 
     #[test]
@@ -938,5 +985,34 @@ mod tests {
 
         // Use snapshot testing to verify the exact JSON structure
         assert_json_snapshot!(full_config);
+
+        // Test that we can deserialize it back and all fields match
+        let json = serde_json::to_string_pretty(&full_config).unwrap();
+        let deserialized: FullApiDestinationConfig = serde_json::from_str(&json).unwrap();
+        match (&full_config, deserialized) {
+            (
+                FullApiDestinationConfig::Iceberg {
+                    config:
+                        FullApiIcebergConfig::Rest {
+                            catalog_uri: orig_catalog_uri,
+                            warehouse_name: orig_warehouse_name,
+                            namespace: orig_namespace,
+                        },
+                },
+                FullApiDestinationConfig::Iceberg {
+                    config:
+                        FullApiIcebergConfig::Rest {
+                            catalog_uri: deser_catalog_uri,
+                            warehouse_name: deser_warehouse_name,
+                            namespace: deser_namespace,
+                        },
+                },
+            ) => {
+                assert_eq!(orig_catalog_uri, &deser_catalog_uri);
+                assert_eq!(orig_warehouse_name, &deser_warehouse_name);
+                assert_eq!(orig_namespace, &deser_namespace);
+            }
+            _ => panic!("Deserialization failed or variant mismatch"),
+        }
     }
 }
