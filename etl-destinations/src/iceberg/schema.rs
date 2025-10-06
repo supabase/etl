@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use etl::types::{Type, VersionedTableSchema, is_array_type};
+use etl::types::{ColumnSchema, Type, is_array_type};
 use iceberg::spec::{
     ListType, NestedField, PrimitiveType, Schema as IcebergSchema, Type as IcebergType,
 };
@@ -80,13 +80,13 @@ fn create_iceberg_list_type(element_type: PrimitiveType, field_id: i32) -> Icebe
 
 /// Converts a Postgres table schema to an Iceberg schema.
 pub fn postgres_to_iceberg_schema(
-    schema: &VersionedTableSchema,
+    column_schemas: &[ColumnSchema],
 ) -> Result<IcebergSchema, iceberg::Error> {
     let mut fields = Vec::new();
     let mut field_id = 1;
 
     // Convert each column to Iceberg field
-    for column in &schema.column_schemas {
+    for column in column_schemas {
         let field_type = if is_array_type(&column.typ) {
             // For array types, we need to assign a unique field ID to the list element
             // We increment field_id and use it for the element field

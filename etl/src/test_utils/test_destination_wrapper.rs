@@ -153,6 +153,13 @@ where
     }
 
     async fn truncate_table(&self, table_id: TableId) -> EtlResult<()> {
+        let destination = {
+            let inner = self.inner.read().await;
+            inner.wrapped_destination.clone()
+        };
+
+        let result = destination.truncate_table(table_id).await;
+
         let mut inner = self.inner.write().await;
 
         inner.table_rows.remove(&table_id);
@@ -180,7 +187,7 @@ where
             !has_table_id
         });
 
-        Ok(())
+        result
     }
 
     async fn write_table_rows(

@@ -6,6 +6,7 @@ use etl::types::{
     Cell, Event, PgLsn, RelationChange, RelationEvent, SchemaVersion, TableId, TableName, TableRow,
     VersionedTableSchema,
 };
+use etl::types::{Cell, Event, TableId, TableName, TableRow, generate_sequence_number};
 use etl::{bail, etl_error};
 use gcp_bigquery_client::storage::{TableBatch, TableDescriptor};
 use std::collections::{HashMap, HashSet};
@@ -31,26 +32,6 @@ const BIGQUERY_TABLE_ID_DELIMITER_ESCAPE_REPLACEMENT: &str = "__";
 const MAX_SCHEMA_MISMATCH_ATTEMPTS: usize = 5;
 /// Delay in milliseconds between retry attempts triggered by BigQuery schema mismatches.
 const SCHEMA_MISMATCH_RETRY_DELAY_MS: u64 = 500;
-
-/// Creates a hex-encoded sequence number from Postgres LSNs to ensure correct event ordering.
-///
-/// Creates a hex-encoded sequence number that ensures events are processed in the correct order
-/// even when they have the same system time. The format is compatible with BigQuery's
-/// `_CHANGE_SEQUENCE_NUMBER` column requirements.
-///
-/// The rationale for using the LSN is that BigQuery will preserve the highest sequence number
-/// in case of equal primary key, which is what we want since in case of updates, we want the
-/// latest update in Postgres order to be the winner. We have first the `commit_lsn` in the key
-/// so that BigQuery can first order operations based on the LSN at which the transaction committed
-/// and if two operations belong to the same transaction (meaning they have the same LSN), the
-/// `start_lsn` will be used. We first order by `commit_lsn` to preserve the order in which operations
-/// are received by the pipeline since transactions are ordered by commit time and not interleaved.
-fn generate_sequence_number(start_lsn: PgLsn, commit_lsn: PgLsn) -> String {
-    let start_lsn = u64::from(start_lsn);
-    let commit_lsn = u64::from(commit_lsn);
-
-    format!("{commit_lsn:016x}/{start_lsn:016x}")
-}
 
 /// Returns the [`BigQueryTableId`] for a supplied [`TableName`].
 ///
@@ -255,6 +236,71 @@ where
         store: S,
     ) -> EtlResult<Self> {
         let client = BigQueryClient::new_with_key(project_id, sa_key).await?;
+        let inner = Inner {
+            created_tables: HashSet::new(),
+            created_views: HashMap::new(),
+        };
+
+        Ok(Self {
+            client,
+            dataset_id,
+            max_staleness_mins,
+            max_concurrent_streams,
+            store,
+            inner: Arc::new(Mutex::new(inner)),
+        })
+    }
+    /// Creates a new [`BigQueryDestination`] using Application Default Credentials (ADC).
+    ///
+    /// Initializes the BigQuery client with the default credentials and project settings.
+    /// The `max_staleness_mins` parameter controls table metadata cache freshness.
+    /// The `max_concurrent_streams` parameter controls parallelism for streaming operations
+    /// and determines how table rows are split into batches for concurrent processing.
+    pub async fn new_with_adc(
+        project_id: String,
+        dataset_id: BigQueryDatasetId,
+        max_staleness_mins: Option<u16>,
+        max_concurrent_streams: usize,
+        store: S,
+    ) -> EtlResult<Self> {
+        let client = BigQueryClient::new_with_adc(project_id).await?;
+        let inner = Inner {
+            created_tables: HashSet::new(),
+            created_views: HashMap::new(),
+        };
+
+        Ok(Self {
+            client,
+            dataset_id,
+            max_staleness_mins,
+            max_concurrent_streams,
+            store,
+            inner: Arc::new(Mutex::new(inner)),
+        })
+    }
+
+    /// Creates a new [`BigQueryDestination`] using an installed flow authenticator.
+    ///
+    /// Initializes the BigQuery client with a flow authenticator using the provided secret and persistent file path.
+    /// The `max_staleness_mins` parameter controls table metadata cache freshness.
+    /// The `max_concurrent_streams` parameter controls parallelism for streaming operations
+    /// and determines how table rows are split into batches for concurrent processing.
+    pub async fn new_with_flow_authenticator<Secret, Path>(
+        project_id: String,
+        dataset_id: BigQueryDatasetId,
+        secret: Secret,
+        persistent_file_path: Path,
+        max_staleness_mins: Option<u16>,
+        max_concurrent_streams: usize,
+        store: S,
+    ) -> EtlResult<Self>
+    where
+        Secret: AsRef<[u8]>,
+        Path: Into<std::path::PathBuf>,
+    {
+        let client =
+            BigQueryClient::new_with_flow_authenticator(project_id, secret, persistent_file_path)
+                .await?;
         let inner = Inner {
             created_tables: HashSet::new(),
             created_views: HashMap::new(),
@@ -1058,30 +1104,6 @@ fn split_table_rows(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_generate_sequence_number() {
-        assert_eq!(
-            generate_sequence_number(PgLsn::from(0), PgLsn::from(0)),
-            "0000000000000000/0000000000000000"
-        );
-        assert_eq!(
-            generate_sequence_number(PgLsn::from(1), PgLsn::from(0)),
-            "0000000000000000/0000000000000001"
-        );
-        assert_eq!(
-            generate_sequence_number(PgLsn::from(255), PgLsn::from(0)),
-            "0000000000000000/00000000000000ff"
-        );
-        assert_eq!(
-            generate_sequence_number(PgLsn::from(65535), PgLsn::from(0)),
-            "0000000000000000/000000000000ffff"
-        );
-        assert_eq!(
-            generate_sequence_number(PgLsn::from(u64::MAX), PgLsn::from(0)),
-            "0000000000000000/ffffffffffffffff"
-        );
-    }
 
     #[test]
     fn test_table_name_to_bigquery_table_id_no_underscores() {

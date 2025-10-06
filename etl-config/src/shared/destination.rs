@@ -41,4 +41,36 @@ pub enum DestinationConfig {
         /// - and the configured batch size.
         max_concurrent_streams: usize,
     },
+    Iceberg {
+        config: IcebergConfig,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IcebergConfig {
+    Supabase {
+        /// Supabase project_ref
+        project_ref: String,
+        /// Name of the warehouse in the catalog
+        warehouse_name: String,
+        /// Iceberg catalog namespace where tables will be created
+        namespace: String,
+        /// Catalog authentication token
+        catalog_token: SerializableSecretString,
+        /// The S3 access key id
+        s3_access_key_id: String,
+        /// The S3 secret access key
+        s3_secret_access_key: SerializableSecretString,
+        /// The S3 region
+        s3_region: String,
+    },
+    Rest {
+        /// Iceberg catalog uri
+        catalog_uri: String,
+        /// Name of the warehouse in the catalog
+        warehouse_name: String,
+        /// Iceberg catalog namespace where tables will be created
+        namespace: String,
+    },
 }
