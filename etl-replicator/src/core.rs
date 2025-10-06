@@ -1,5 +1,6 @@
+use std::collections::HashMap;
+
 use crate::migrations::migrate_state_store;
-use etl::destination::Destination;
 use etl::destination::memory::MemoryDestination;
 use etl::pipeline::Pipeline;
 use etl::store::both::postgres::PostgresStore;
@@ -7,10 +8,15 @@ use etl::store::cleanup::CleanupStore;
 use etl::store::schema::SchemaStore;
 use etl::store::state::StateStore;
 use etl::types::PipelineId;
+use etl::{config::IcebergConfig, destination::Destination};
+use etl_config::Environment;
 use etl_config::shared::{
     BatchConfig, DestinationConfig, PgConnectionConfig, PipelineConfig, ReplicatorConfig,
 };
-use etl_destinations::bigquery::{BigQueryDestination, install_crypto_provider_for_bigquery};
+use etl_destinations::{
+    bigquery::{BigQueryDestination, install_crypto_provider_for_bigquery},
+    iceberg::{IcebergClient, IcebergDestination},
+};
 use secrecy::ExposeSecret;
 use tokio::signal::unix::{SignalKind, signal};
 use tracing::{debug, info, warn};
@@ -65,6 +71,56 @@ pub async fn start_replicator_with_config(
             let pipeline = Pipeline::new(replicator_config.pipeline, state_store, destination);
             start_pipeline(pipeline).await?;
         }
+        DestinationConfig::Iceberg {
+            config:
+                IcebergConfig::Supabase {
+                    project_ref,
+                    warehouse_name,
+                    namespace,
+                    catalog_token,
+                    s3_access_key_id,
+                    s3_secret_access_key,
+                    s3_region,
+                },
+        } => {
+            let supabase_domain = match Environment::load()? {
+                Environment::Prod => "supabase.com",
+                Environment::Staging | Environment::Dev => "supabase.red",
+            };
+            let client = IcebergClient::new_with_supabase_catalog(
+                project_ref,
+                supabase_domain,
+                catalog_token.expose_secret().to_string(),
+                warehouse_name.clone(),
+                s3_access_key_id.clone(),
+                s3_secret_access_key.expose_secret().to_string(),
+                s3_region.clone(),
+            );
+            let destination =
+                IcebergDestination::new(client, namespace.clone(), state_store.clone());
+
+            let pipeline = Pipeline::new(replicator_config.pipeline, state_store, destination);
+            start_pipeline(pipeline).await?;
+        }
+        DestinationConfig::Iceberg {
+            config:
+                IcebergConfig::Rest {
+                    catalog_uri,
+                    warehouse_name,
+                    namespace,
+                },
+        } => {
+            let client = IcebergClient::new_with_rest_catalog(
+                catalog_uri.clone(),
+                warehouse_name.clone(),
+                HashMap::new(),
+            );
+            let destination =
+                IcebergDestination::new(client, namespace.clone(), state_store.clone());
+
+            let pipeline = Pipeline::new(replicator_config.pipeline, state_store, destination);
+            start_pipeline(pipeline).await?;
+        }
     }
 
     info!("replicator service completed");
@@ -95,6 +151,40 @@ fn log_destination_config(config: &DestinationConfig) {
                 max_staleness_mins,
                 max_concurrent_streams,
                 "using bigquery destination config"
+            )
+        }
+        DestinationConfig::Iceberg {
+            config:
+                IcebergConfig::Supabase {
+                    namespace,
+                    project_ref,
+                    catalog_token: _,
+                    warehouse_name,
+                    s3_access_key_id,
+                    s3_secret_access_key: _,
+                    s3_region,
+                },
+        } => {
+            debug!(
+                namespace,
+                project_ref,
+                warehouse_name,
+                s3_access_key_id,
+                s3_region,
+                "using Supabase iceberg destination config"
+            )
+        }
+        DestinationConfig::Iceberg {
+            config:
+                IcebergConfig::Rest {
+                    catalog_uri,
+                    warehouse_name,
+                    namespace,
+                },
+        } => {
+            debug!(
+                catalog_uri,
+                warehouse_name, namespace, "using generic REST iceberg destination config"
             )
         }
     }
