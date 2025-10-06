@@ -344,7 +344,7 @@ async fn cdc_streaming() {
         TableRow {
             values: vec![
                 Cell::I64(1),
-                Cell::String("".to_string()),
+                Cell::Null,
                 Cell::I32(0),
                 IcebergOperationType::Delete.into(),
             ],
@@ -405,7 +405,7 @@ async fn cdc_streaming() {
         TableRow {
             values: vec![
                 Cell::I64(2),
-                Cell::String("".to_string()),
+                Cell::Null,
                 IcebergOperationType::Delete.into(),
             ],
         },
