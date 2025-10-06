@@ -15,7 +15,7 @@ use etl::test_utils::test_destination_wrapper::TestDestinationWrapper;
 use etl::test_utils::test_schema::{
     TableSelection, insert_mock_data, insert_users_data, setup_test_database_schema,
 };
-use etl::types::{EventType, PgNumeric, PipelineId};
+use etl::types::{EventType, PgNumeric, PipelineId, TableName};
 use etl_destinations::bigquery::install_crypto_provider_for_bigquery;
 use etl_postgres::tokio::test_utils::TableModification;
 use etl_telemetry::tracing::init_test_tracing;
@@ -497,7 +497,7 @@ async fn table_truncate_with_batching() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn relation_event_primary_key_syncs_in_bigquery() {
+async fn table_schema_changes_are_handled_correctly() {
     init_test_tracing();
     install_crypto_provider_for_bigquery();
 
@@ -624,6 +624,158 @@ async fn relation_event_primary_key_syncs_in_bigquery() {
         .await
         .unwrap();
     assert_eq!(users_rows.len(), 4);
+
+    pipeline.shutdown_and_wait().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn table_renames_are_handled_correctly() {
+    init_test_tracing();
+    install_crypto_provider_for_bigquery();
+
+    let mut database = spawn_source_database().await;
+    let database_schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
+
+    insert_users_data(
+        &mut database,
+        &database_schema.users_schema().name,
+        1..=1,
+    )
+        .await;
+
+    let bigquery_database = setup_bigquery_connection().await;
+
+    let store = NotifyingStore::new();
+    let pipeline_id: PipelineId = random();
+    let raw_destination = bigquery_database.build_destination(store.clone()).await;
+    let destination = TestDestinationWrapper::wrap(raw_destination);
+
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        database_schema.publication_name(),
+        store.clone(),
+        destination.clone(),
+    );
+
+    let users_state_notify = store
+        .notify_on_table_state_type(
+            database_schema.users_schema().id,
+            TableReplicationPhaseType::SyncDone,
+        )
+        .await;
+
+    pipeline.start().await.unwrap();
+
+    users_state_notify.notified().await;
+
+    let initial_rows = bigquery_database
+        .query_table(database_schema.users_schema().name.clone())
+        .await
+        .unwrap();
+    let parsed_initial_rows = parse_bigquery_table_rows::<BigQueryUser>(initial_rows);
+    assert_eq!(parsed_initial_rows, vec![BigQueryUser::new(1, "user_1", 1)]);
+
+    database
+        .client
+        .as_ref()
+        .unwrap()
+        .execute("create schema renamed", &[])
+        .await
+        .unwrap();
+
+    database
+        .client
+        .as_ref()
+        .unwrap()
+        .execute("alter table test.users rename to customers", &[])
+        .await
+        .unwrap();
+
+    let insert_event_notify = destination
+        .wait_for_events_count(vec![(EventType::Insert, 1)])
+        .await;
+
+    database
+        .insert_values(
+            TableName::new("test".to_owned(), "customers".to_owned()),
+            &["name", "age"],
+            &[&"customer_2", &2i32],
+        )
+        .await
+        .unwrap();
+
+    insert_event_notify.notified().await;
+
+    let renamed_rows = bigquery_database
+        .query_table(TableName::new("test".to_owned(), "customers".to_owned()))
+        .await
+        .unwrap();
+    let parsed_renamed_rows = parse_bigquery_table_rows::<BigQueryUser>(renamed_rows);
+    assert_eq!(
+        parsed_renamed_rows,
+        vec![
+            BigQueryUser::new(1, "user_1", 1),
+            BigQueryUser::new(2, "customer_2", 2),
+        ],
+    );
+
+    let table_schemas = store.get_latest_table_schemas().await;
+    let users_schema = table_schemas
+        .get(&database_schema.users_schema().id)
+        .unwrap();
+    assert_eq!(users_schema.version, 1);
+    assert_eq!(
+        users_schema.name,
+        TableName::new("test".to_owned(), "customers".to_owned())
+    );
+
+    database
+        .client
+        .as_ref()
+        .unwrap()
+        .execute("alter table test.customers set schema renamed", &[])
+        .await
+        .unwrap();
+
+    let insert_event_notify = destination
+        .wait_for_events_count(vec![(EventType::Insert, 1)])
+        .await;
+
+    database
+        .insert_values(
+            TableName::new("renamed".to_owned(), "customers".to_owned()),
+            &["name", "age"],
+            &[&"customer_3", &3i32],
+        )
+        .await
+        .unwrap();
+
+    insert_event_notify.notified().await;
+
+    let moved_rows = bigquery_database
+        .query_table(TableName::new("renamed".to_owned(), "customers".to_owned()))
+        .await
+        .unwrap();
+    let parsed_moved_rows = parse_bigquery_table_rows::<BigQueryUser>(moved_rows);
+    assert_eq!(
+        parsed_moved_rows,
+        vec![
+            BigQueryUser::new(1, "user_1", 1),
+            BigQueryUser::new(2, "customer_2", 2),
+            BigQueryUser::new(3, "customer_3", 3),
+        ],
+    );
+
+    let table_schemas = store.get_latest_table_schemas().await;
+    let users_schema = table_schemas
+        .get(&database_schema.users_schema().id)
+        .unwrap();
+    assert_eq!(users_schema.version, 2);
+    assert_eq!(
+        users_schema.name,
+        TableName::new("renamed".to_owned(), "customers".to_owned())
+    );
 
     pipeline.shutdown_and_wait().await.unwrap();
 }

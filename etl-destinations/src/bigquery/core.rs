@@ -28,9 +28,9 @@ const BIGQUERY_TABLE_ID_DELIMITER: &str = "_";
 /// Replacement string for escaping underscores in Postgres names.
 const BIGQUERY_TABLE_ID_DELIMITER_ESCAPE_REPLACEMENT: &str = "__";
 /// Maximum number of BigQuery streaming attempts when schema propagation lags behind.
-const MAX_SCHEMA_MISMATCH_ATTEMPTS: usize = 5;
+const MAX_SCHEMA_MISMATCH_ATTEMPTS: usize = 10;
 /// Delay in milliseconds between retry attempts triggered by BigQuery schema mismatches.
-const SCHEMA_MISMATCH_RETRY_DELAY_MS: u64 = 500;
+const SCHEMA_MISMATCH_RETRY_DELAY_MS: u64 = 1000;
 
 /// Returns the [`BigQueryTableId`] for a supplied [`TableName`].
 ///
@@ -625,7 +625,7 @@ where
     /// Streams table batches to BigQuery, retrying when schema mismatch errors occur.
     ///
     /// The rationale is that per BigQuery docs, the Storage Write API detects schema changes after
-    /// a short time, on the order of minutes.
+    /// a short time, on the order of minutes, thus we want to retry for a bit until we succeed.
     async fn stream_with_schema_retry<T>(&self, table_batches: T) -> EtlResult<(usize, usize)>
     where
         T: Into<Arc<[TableBatch<BigQueryTableRow>]>>,
