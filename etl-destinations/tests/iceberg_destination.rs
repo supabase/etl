@@ -345,7 +345,7 @@ async fn cdc_streaming() {
             values: vec![
                 Cell::I64(1),
                 Cell::Null,
-                Cell::I32(0),
+                Cell::Null,
                 IcebergOperationType::Delete.into(),
             ],
         },
