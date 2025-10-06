@@ -479,7 +479,9 @@ where
         Ok(true)
     }
 
-    /// Handles a table rename by dropping the old view and updating view caches.
+    /// Handles a table rename by dropping the old view, creating a new one and updating view caches.
+    ///
+    /// For performance reasons, we only rename the view and not the underlying table.
     async fn handle_table_rename(
         &self,
         sequenced_table_id: &SequencedBigQueryTableId,
