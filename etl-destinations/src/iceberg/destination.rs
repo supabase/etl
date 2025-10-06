@@ -4,20 +4,21 @@ use std::{
     sync::Arc,
 };
 
-use crate::iceberg::IcebergClient;
-use crate::iceberg::error::iceberg_error_to_etl_error;
 use etl::destination::Destination;
 use etl::error::{ErrorKind, EtlResult};
 use etl::etl_error;
 use etl::store::schema::SchemaStore;
 use etl::store::state::StateStore;
 use etl::types::{
-    Cell, ColumnSchema, Event, TableId, TableName, TableRow, TableSchema, Type,
+    Cell, ColumnSchema, Event, TableId, TableName, TableRow, Type, VersionedTableSchema,
     generate_sequence_number,
 };
 use tokio::sync::Mutex;
 use tokio::task::JoinSet;
 use tracing::{debug, info};
+
+use crate::iceberg::IcebergClient;
+use crate::iceberg::error::iceberg_error_to_etl_error;
 
 /// CDC operation types for Iceberg changelog tables.
 ///
@@ -307,8 +308,8 @@ where
 
             while let Some(Event::Truncate(_)) = event_iter.peek() {
                 if let Some(Event::Truncate(truncate_event)) = event_iter.next() {
-                    for table_id in truncate_event.rel_ids {
-                        truncate_table_ids.insert(TableId::new(table_id));
+                    for (table_id, _schema_version) in truncate_event.table_ids {
+                        truncate_table_ids.insert(table_id);
                     }
                 }
             }
@@ -334,7 +335,7 @@ where
 
         let table_schema = self
             .store
-            .get_table_schema(&table_id)
+            .get_latest_table_schema(&table_id)
             .await?
             .ok_or_else(|| {
                 etl_error!(
@@ -344,7 +345,7 @@ where
                 )
             })?;
 
-        let table_schema = Self::add_cdc_columns(&table_schema);
+        let table_schema = Self::add_cdc_columns(table_schema.as_ref());
 
         let iceberg_table_name = table_name_to_iceberg_table_name(&table_schema.name);
         let iceberg_table_name = self
@@ -378,7 +379,7 @@ where
     ///
     /// These columns enable CDC consumers to understand the chronological order
     /// of changes and distinguish between different types of operations.
-    fn add_cdc_columns(table_schema: &TableSchema) -> TableSchema {
+    fn add_cdc_columns(table_schema: &VersionedTableSchema) -> VersionedTableSchema {
         let mut final_schema = table_schema.clone();
         // Add cdc specific columns
 

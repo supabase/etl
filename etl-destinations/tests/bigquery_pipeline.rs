@@ -1,8 +1,8 @@
 #![cfg(feature = "bigquery")]
 
 use crate::support::bigquery::{
-    BigQueryOrder, BigQueryUser, NonNullableColsScalar,
-    NullableColsArray, NullableColsScalar, parse_bigquery_table_rows, setup_bigquery_connection,
+    BigQueryOrder, BigQueryUser, NonNullableColsScalar, NullableColsArray, NullableColsScalar,
+    parse_bigquery_table_rows, setup_bigquery_connection,
 };
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use etl::config::BatchConfig;
@@ -16,9 +16,7 @@ use etl::test_utils::test_schema::{
     TableSelection, insert_mock_data, insert_users_data, setup_test_database_schema,
 };
 use etl::types::{EventType, PgNumeric, PipelineId};
-use etl_destinations::bigquery::{
-    install_crypto_provider_for_bigquery,
-};
+use etl_destinations::bigquery::install_crypto_provider_for_bigquery;
 use etl_postgres::tokio::test_utils::TableModification;
 use etl_telemetry::tracing::init_test_tracing;
 use rand::random;

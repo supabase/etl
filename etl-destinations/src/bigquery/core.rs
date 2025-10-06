@@ -4,9 +4,8 @@ use etl::store::schema::SchemaStore;
 use etl::store::state::StateStore;
 use etl::types::{
     Cell, Event, PgLsn, RelationChange, RelationEvent, SchemaVersion, TableId, TableName, TableRow,
-    VersionedTableSchema,
+    VersionedTableSchema, generate_sequence_number,
 };
-use etl::types::{Cell, Event, TableId, TableName, TableRow, generate_sequence_number};
 use etl::{bail, etl_error};
 use gcp_bigquery_client::storage::{TableBatch, TableDescriptor};
 use std::collections::{HashMap, HashSet};
