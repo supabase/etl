@@ -1,17 +1,18 @@
 use core::str;
 use etl_postgres::types::{
-    ColumnSchema, SchemaVersion, TableId, VersionedTableSchema, convert_type_oid_to_type,
+    ColumnSchema, SchemaVersion, TableId, TableName, TableSchema, VersionedTableSchema,
+    convert_type_oid_to_type,
 };
 use postgres_replication::protocol;
 use std::sync::Arc;
 use tokio_postgres::types::PgLsn;
 
-use crate::bail;
 use crate::conversions::text::{default_value_for_type, parse_cell_from_postgres_text};
 use crate::error::{ErrorKind, EtlError, EtlResult};
 use crate::types::{
     BeginEvent, Cell, CommitEvent, DeleteEvent, InsertEvent, TableRow, TruncateEvent, UpdateEvent,
 };
+use crate::{bail, etl_error};
 
 /// Creates a [`BeginEvent`] from Postgres protocol data.
 ///
@@ -48,13 +49,37 @@ pub fn parse_event_from_commit_message(
     }
 }
 
-/// Creates a [`Vec<ColumnSchema>`] from Postgres protocol data.
+/// Creates a [`TableSchema`] from Postgres protocol data.
 ///
-/// This method parses the replication protocol relation message and builds a vector of all the
-/// columns that were received in the relation message.
-pub async fn parse_column_schemas_from_relation_message(
+/// This method parses the replication protocol relation message and builds the table schema that
+/// it represents.
+pub async fn parse_table_schema_from_relation_message(
     relation_body: &protocol::RelationBody,
-) -> EtlResult<Vec<ColumnSchema>> {
+) -> EtlResult<TableSchema> {
+    let table_id = TableId::new(relation_body.rel_id());
+    let schema = relation_body.namespace().map_err(|error| {
+        etl_error!(
+            ErrorKind::InvalidData,
+            "Invalid namespace in relation message",
+            format!(
+                "Failed to decode namespace for relation {}: {error}",
+                relation_body.rel_id()
+            )
+        )
+    })?;
+    let table = relation_body.name().map_err(|error| {
+        etl_error!(
+            ErrorKind::InvalidData,
+            "Invalid table name in relation message",
+            format!(
+                "Failed to decode table name for relation {}: {error}",
+                relation_body.rel_id()
+            )
+        )
+    })?;
+
+    let table_name = TableName::new(schema.to_string(), table.to_string());
+
     // We construct the new column schemas in order. The order is important since the table schema
     // relies on the right ordering to interpret the Postgres correctly.
     let new_column_schemas = relation_body
@@ -63,7 +88,7 @@ pub async fn parse_column_schemas_from_relation_message(
         .map(build_column_schema)
         .collect::<Result<Vec<_>, EtlError>>()?;
 
-    Ok(new_column_schemas)
+    Ok(TableSchema::new(table_id, table_name, new_column_schemas))
 }
 
 /// Converts a Postgres insert message into an [`InsertEvent`].

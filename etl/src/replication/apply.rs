@@ -1,6 +1,6 @@
 use etl_config::shared::PipelineConfig;
 use etl_postgres::replication::worker::WorkerType;
-use etl_postgres::types::{TableId, TableSchema, VersionedTableSchema};
+use etl_postgres::types::{TableId, VersionedTableSchema};
 use futures::StreamExt;
 use metrics::histogram;
 use postgres_replication::protocol;
@@ -17,10 +17,10 @@ use crate::concurrency::shutdown::ShutdownRx;
 use crate::concurrency::signal::SignalRx;
 use crate::concurrency::stream::{TimeoutStream, TimeoutStreamResult};
 use crate::conversions::event::{
-    parse_column_schemas_from_relation_message, parse_event_from_begin_message,
-    parse_event_from_commit_message, parse_event_from_delete_message,
-    parse_event_from_insert_message, parse_event_from_truncate_message,
-    parse_event_from_update_message,
+    parse_event_from_begin_message, parse_event_from_commit_message,
+    parse_event_from_delete_message, parse_event_from_insert_message,
+    parse_event_from_truncate_message, parse_event_from_update_message,
+    parse_table_schema_from_relation_message,
 };
 use crate::destination::Destination;
 use crate::error::{ErrorKind, EtlResult};
@@ -1104,28 +1104,26 @@ where
         return Ok(HandleMessageResult::no_event());
     }
 
-    // Parse the relation message columns into column schemas.
-    let new_column_schemas = parse_column_schemas_from_relation_message(message).await?;
+    // Parse the relation message columns into column schemas and resolve the table name.
+    let new_table_schema = parse_table_schema_from_relation_message(message).await?;
 
     // We load the latest table schema before this relation message, which contains the last known
     // schema.
     let old_table_schema = load_latest_table_schema(schema_store, table_id).await?;
 
+    info!("SCHEMAS {:?} {:?}", new_table_schema, old_table_schema);
+
     // If the column schemas are the same, we treat the relation message as a no-op. This is pretty
     // common since Postgres will send a `Relation` message as the first message for every new
     // connection even if the table schema hasn't changed.
-    if new_column_schemas == old_table_schema.column_schemas {
+    if new_table_schema.name == old_table_schema.name
+        && new_table_schema.column_schemas == old_table_schema.column_schemas
+    {
         return Ok(HandleMessageResult::no_event());
     }
 
     // We store the new schema in the store and build the final relation event.
-    let new_table_schema = schema_store
-        .store_table_schema(TableSchema::new(
-            table_id,
-            old_table_schema.name.clone(),
-            new_column_schemas,
-        ))
-        .await?;
+    let new_table_schema = schema_store.store_table_schema(new_table_schema).await?;
 
     let event = RelationEvent {
         start_lsn,

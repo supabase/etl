@@ -1,4 +1,4 @@
-use etl_postgres::types::{ColumnSchema, SchemaVersion, TableId, VersionedTableSchema};
+use etl_postgres::types::{ColumnSchema, SchemaVersion, TableId, TableName, VersionedTableSchema};
 use std::collections::HashSet;
 use std::fmt;
 use std::hash::Hash;
@@ -46,6 +46,11 @@ pub struct CommitEvent {
 /// A change in a relation.
 #[derive(Debug, Clone, PartialEq)]
 pub enum RelationChange {
+    /// A change that describes renaming the table or moving it across schemas.
+    RenameTable {
+        old_name: TableName,
+        new_name: TableName,
+    },
     /// A change that describes adding a new column.
     AddColumn(ColumnSchema),
     /// A change that describes dropping an existing column.
@@ -78,8 +83,18 @@ pub struct RelationEvent {
 
 impl RelationEvent {
     /// Builds a list of [`RelationChange`]s that describe the changes between the old and new table
-    /// schemas.
+    /// schemas. Table-level operations (such as renames) are emitted before column-level operations
+    /// so destinations can adjust object names before applying column mutations.
     pub fn build_changes(&self) -> Vec<RelationChange> {
+        let mut changes = Vec::new();
+
+        if self.old_table_schema.name != self.new_table_schema.name {
+            changes.push(RelationChange::RenameTable {
+                old_name: self.old_table_schema.name.clone(),
+                new_name: self.new_table_schema.name.clone(),
+            });
+        }
+
         // We build a lookup set for the new column schemas for quick change detection.
         let mut new_indexed_column_schemas = self
             .new_table_schema
@@ -90,7 +105,6 @@ impl RelationEvent {
             .collect::<HashSet<_>>();
 
         // We process all the changes that we want to dispatch to the destination.
-        let mut changes = vec![];
         for column_schema in self.old_table_schema.column_schemas.iter() {
             let column_schema = IndexedColumnSchema(column_schema.clone());
             let latest_column_schema = new_indexed_column_schemas.take(&column_schema);

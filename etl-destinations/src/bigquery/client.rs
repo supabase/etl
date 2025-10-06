@@ -287,6 +287,23 @@ impl BigQueryClient {
         Ok(())
     }
 
+    /// Drops a view from BigQuery if it exists.
+    pub async fn drop_view(
+        &self,
+        dataset_id: &BigQueryDatasetId,
+        view_name: &BigQueryTableId,
+    ) -> EtlResult<()> {
+        let full_view_name = self.full_table_name(dataset_id, view_name);
+
+        info!("dropping view {full_view_name} from bigquery");
+
+        let query = format!("drop view if exists {full_view_name}");
+
+        let _ = self.query(QueryRequest::new(query)).await?;
+
+        Ok(())
+    }
+
     /// Drops a table from BigQuery.
     ///
     /// Executes a DROP TABLE statement to remove the table and all its data.

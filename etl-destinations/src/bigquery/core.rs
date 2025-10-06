@@ -484,6 +484,45 @@ where
         Ok(true)
     }
 
+    /// Handles a table rename by dropping the old view and updating view caches.
+    async fn handle_table_rename(
+        &self,
+        sequenced_table_id: &SequencedBigQueryTableId,
+        old_name: &TableName,
+        new_name: &TableName,
+    ) -> EtlResult<()> {
+        let old_view_name = table_name_to_bigquery_table_id(old_name);
+        let new_view_name = table_name_to_bigquery_table_id(new_name);
+
+        if old_view_name == new_view_name {
+            return Ok(());
+        }
+
+        debug!(
+            table = %sequenced_table_id,
+            old_view = %old_view_name,
+            new_view = %new_view_name,
+            "renaming BigQuery table view"
+        );
+
+        self.client
+            .drop_view(&self.dataset_id, &old_view_name)
+            .await?;
+
+        let target_table_id = sequenced_table_id.to_string();
+        self.client
+            .create_or_replace_view(&self.dataset_id, &new_view_name, &target_table_id)
+            .await?;
+
+        let mut inner = self.inner.lock().await;
+        inner.created_views.remove(&old_view_name);
+        inner
+            .created_views
+            .insert(new_view_name, sequenced_table_id.clone());
+
+        Ok(())
+    }
+
     /// Writes table rows with CDC metadata for non-event streaming operations.
     ///
     /// Adds an `Upsert` operation type to each row, splits them into optimal batches based on
@@ -663,6 +702,10 @@ where
         let sequenced_table_name = sequenced_bigquery_table_id.to_string();
         for change in changes {
             match change {
+                RelationChange::RenameTable { old_name, new_name } => {
+                    self.handle_table_rename(&sequenced_bigquery_table_id, &old_name, &new_name)
+                        .await?;
+                }
                 RelationChange::AddColumn(column_schema) => {
                     let column_name = column_schema.name.clone();
 
@@ -946,11 +989,10 @@ where
             Self::add_to_created_tables_cache(&mut inner, &next_sequenced_bigquery_table_id);
 
             // Update the view to point to the new table.
+            let view_name = table_name_to_bigquery_table_id(&table_schema.name);
             self.ensure_view_points_to_table(
                 &mut inner,
-                // We convert the sequenced table ID to a BigQuery table ID since the view will have
-                // the name of the BigQuery table id (without the sequence number).
-                &sequenced_bigquery_table_id.to_bigquery_table_id(),
+                &view_name,
                 &next_sequenced_bigquery_table_id,
             )
             .await?;

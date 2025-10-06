@@ -14,10 +14,11 @@ use etl::test_utils::test_schema::{
     build_expected_users_inserts, get_n_integers_sum, get_users_age_sum_from_rows,
     insert_mock_data, insert_orders_data, insert_users_data, setup_test_database_schema,
 };
-use etl::types::{EventType, PipelineId};
+use etl::types::{Event, EventType, PipelineId, RelationChange};
 use etl_config::shared::BatchConfig;
 use etl_postgres::replication::slots::EtlReplicationSlot;
 use etl_postgres::tokio::test_utils::TableModification;
+use etl_postgres::types::TableName;
 use etl_telemetry::tracing::init_test_tracing;
 use rand::random;
 use std::time::Duration;
@@ -745,6 +746,213 @@ async fn table_schema_changes_are_handled_correctly() {
         .get(&(EventType::Insert, database_schema.orders_schema().id))
         .unwrap();
     assert_eq!(orders_inserts.len(), 2);
+
+    pipeline.shutdown_and_wait().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn table_renames_are_handled_correctly() {
+    init_test_tracing();
+    let mut database = spawn_source_database().await;
+    let database_schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
+
+    // Seed a single row so the initial copy has data.
+    insert_users_data(&mut database, &database_schema.users_schema().name, 1..=1).await;
+
+    let store = NotifyingStore::new();
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
+
+    let pipeline_id: PipelineId = random();
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        database_schema.publication_name(),
+        store.clone(),
+        destination.clone(),
+    );
+
+    let users_state_notify = store
+        .notify_on_table_state_type(
+            database_schema.users_schema().id,
+            TableReplicationPhaseType::SyncDone,
+        )
+        .await;
+
+    pipeline.start().await.unwrap();
+
+    users_state_notify.notified().await;
+
+    // Validate the initial schema snapshot.
+    let initial_table_schemas = store.get_latest_table_schemas().await;
+    let initial_users_schema = initial_table_schemas
+        .get(&database_schema.users_schema().id)
+        .expect("users table schema not stored");
+    assert_eq!(initial_users_schema.version, 0);
+    assert_eq!(initial_users_schema.name, test_table_name("users"));
+
+    // Create a new schema for the future table to be moved here.
+    database
+        .client
+        .as_ref()
+        .unwrap()
+        .execute("create schema renamed", &[])
+        .await
+        .unwrap();
+
+    // Rename table.
+    database
+        .client
+        .as_ref()
+        .unwrap()
+        .execute("alter table test.users rename to customers", &[])
+        .await
+        .unwrap();
+
+    // Register notifications for the inserts.
+    let insert_event_notify = destination
+        .wait_for_events_count(vec![(EventType::Insert, 1)])
+        .await;
+
+    database
+        .insert_values(
+            TableName::new("test".to_owned(), "customers".to_owned()),
+            &["name", "age"],
+            &[&"customer_2", &25i32],
+        )
+        .await
+        .expect("Failed to insert user");
+
+    insert_event_notify.notified().await;
+
+    let events = destination.get_events().await;
+    let grouped_events = group_events_by_type_and_table_id(&events);
+    let users_inserts = grouped_events
+        .get(&(EventType::Insert, database_schema.users_schema().id))
+        .unwrap();
+    assert_eq!(users_inserts.len(), 1);
+
+    let table_schemas = store.get_latest_table_schemas().await;
+    let users_table_schema = table_schemas
+        .get(&database_schema.users_schema().id)
+        .expect("users schema missing after rename");
+    assert_eq!(users_table_schema.version, 1);
+    assert_eq!(users_table_schema.name, test_table_name("customers"));
+    
+    // assert_eq!(
+    //     users_table_schema.version,
+    //     rename_event.new_table_schema.version
+    // );
+    // assert_eq!(users_table_schema.name, renamed_users_name);
+
+    // // Insert data into the renamed table and ensure it streams correctly.
+    // let insert_notify = destination
+    //     .wait_for_events_count(vec![(EventType::Insert, 1)])
+    //     .await;
+    // database
+    //     .insert_values(
+    //         renamed_users_name.clone(),
+    //         &["name", "age"],
+    //         &[&"user_after_name_rename", &(42i32)],
+    //     )
+    //     .await
+    //     .expect("failed to insert after table rename");
+    // insert_notify.notified().await;
+    //
+    // let post_rename_events = destination.get_events().await;
+    // let post_rename_insert = post_rename_events
+    //     .iter()
+    //     .find_map(|event| {
+    //         if let Event::Insert(insert) = event {
+    //             Some(insert.clone())
+    //         } else {
+    //             None
+    //         }
+    //     })
+    //     .expect("expected insert event after table rename");
+    // assert_eq!(
+    //     post_rename_insert.schema_version,
+    //     rename_event.new_table_schema.version
+    // );
+    //
+    // destination.clear_events().await;
+    //
+    // // --- Move the table to a different schema ---
+    // let relation_notify = destination
+    //     .wait_for_events_count(vec![(EventType::Relation, 1)])
+    //     .await;
+    //
+    // database
+    //     .client
+    //     .as_ref()
+    //     .unwrap()
+    //     .execute("alter table test.customers set schema renamed", &[])
+    //     .await
+    //     .unwrap();
+    //
+    // relation_notify.notified().await;
+    //
+    // let relation_events = destination.get_events().await;
+    // let move_event = relation_events
+    //     .iter()
+    //     .find_map(|event| {
+    //         if let Event::Relation(relation) = event {
+    //             Some(relation.clone())
+    //         } else {
+    //             None
+    //         }
+    //     })
+    //     .expect("expected relation event for schema move");
+    //
+    // let moved_users_name = TableName::new("renamed".to_owned(), "customers".to_owned());
+    // assert_eq!(move_event.new_table_schema.name, moved_users_name);
+    // assert_eq!(move_event.old_table_schema.name, renamed_users_name);
+    // let changes = move_event.build_changes();
+    // assert_eq!(changes.len(), 1);
+    // assert!(matches!(
+    //     &changes[0],
+    //     RelationChange::RenameTable { new_name, .. } if new_name == &moved_users_name
+    // ));
+    //
+    // let table_schemas = store.get_latest_table_schemas().await;
+    // let latest_users_schema = table_schemas
+    //     .get(&database_schema.users_schema().id)
+    //     .expect("users schema missing after schema move");
+    // assert_eq!(
+    //     latest_users_schema.version,
+    //     move_event.new_table_schema.version
+    // );
+    // assert_eq!(latest_users_schema.name, moved_users_name);
+    //
+    // destination.clear_events().await;
+    //
+    // let insert_notify = destination
+    //     .wait_for_events_count(vec![(EventType::Insert, 1)])
+    //     .await;
+    // database
+    //     .insert_values(
+    //         moved_users_name.clone(),
+    //         &["name", "age"],
+    //         &[&"user_after_schema_move", &(43i32)],
+    //     )
+    //     .await
+    //     .expect("failed to insert after schema move");
+    // insert_notify.notified().await;
+    //
+    // let post_move_events = destination.get_events().await;
+    // let post_move_insert = post_move_events
+    //     .iter()
+    //     .find_map(|event| {
+    //         if let Event::Insert(insert) = event {
+    //             Some(insert.clone())
+    //         } else {
+    //             None
+    //         }
+    //     })
+    //     .expect("expected insert event after schema move");
+    // assert_eq!(
+    //     post_move_insert.schema_version,
+    //     move_event.new_table_schema.version
+    // );
 
     pipeline.shutdown_and_wait().await.unwrap();
 }
