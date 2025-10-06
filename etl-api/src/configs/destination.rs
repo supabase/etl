@@ -1,5 +1,5 @@
 use etl_config::SerializableSecretString;
-use etl_config::shared::DestinationConfig;
+use etl_config::shared::{DestinationConfig, IcebergConfig};
 use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
@@ -30,6 +30,9 @@ pub enum FullApiDestinationConfig {
         #[serde(skip_serializing_if = "Option::is_none")]
         max_concurrent_streams: Option<usize>,
     },
+    Iceberg {
+        config: FullApiIcebergConfig,
+    },
 }
 
 impl From<StoredDestinationConfig> for FullApiDestinationConfig {
@@ -49,6 +52,38 @@ impl From<StoredDestinationConfig> for FullApiDestinationConfig {
                 max_staleness_mins,
                 max_concurrent_streams: Some(max_concurrent_streams),
             },
+            StoredDestinationConfig::Iceberg { config } => match config {
+                StoredIcebergConfig::Supabase {
+                    project_ref,
+                    warehouse_name,
+                    namespace,
+                    catalog_token,
+                    s3_access_key_id,
+                    s3_secret_access_key,
+                    s3_region,
+                } => FullApiDestinationConfig::Iceberg {
+                    config: FullApiIcebergConfig::Supabase {
+                        project_ref,
+                        warehouse_name,
+                        namespace,
+                        catalog_token,
+                        s3_access_key_id,
+                        s3_secret_access_key,
+                        s3_region,
+                    },
+                },
+                StoredIcebergConfig::Rest {
+                    catalog_uri,
+                    warehouse_name,
+                    namespace,
+                } => FullApiDestinationConfig::Iceberg {
+                    config: FullApiIcebergConfig::Rest {
+                        catalog_uri,
+                        warehouse_name,
+                        namespace,
+                    },
+                },
+            },
         }
     }
 }
@@ -63,6 +98,9 @@ pub enum StoredDestinationConfig {
         service_account_key: SerializableSecretString,
         max_staleness_mins: Option<u16>,
         max_concurrent_streams: usize,
+    },
+    Iceberg {
+        config: StoredIcebergConfig,
     },
 }
 
@@ -82,6 +120,38 @@ impl StoredDestinationConfig {
                 service_account_key,
                 max_staleness_mins,
                 max_concurrent_streams,
+            },
+            Self::Iceberg { config } => match config {
+                StoredIcebergConfig::Supabase {
+                    project_ref,
+                    warehouse_name,
+                    namespace,
+                    catalog_token,
+                    s3_access_key_id,
+                    s3_secret_access_key,
+                    s3_region,
+                } => DestinationConfig::Iceberg {
+                    config: IcebergConfig::Supabase {
+                        project_ref,
+                        warehouse_name,
+                        namespace,
+                        catalog_token,
+                        s3_access_key_id,
+                        s3_secret_access_key,
+                        s3_region,
+                    },
+                },
+                StoredIcebergConfig::Rest {
+                    catalog_uri,
+                    warehouse_name,
+                    namespace,
+                } => DestinationConfig::Iceberg {
+                    config: IcebergConfig::Rest {
+                        catalog_uri,
+                        warehouse_name,
+                        namespace,
+                    },
+                },
             },
         }
     }
@@ -104,6 +174,38 @@ impl From<FullApiDestinationConfig> for StoredDestinationConfig {
                 max_staleness_mins,
                 max_concurrent_streams: max_concurrent_streams
                     .unwrap_or(DEFAULT_MAX_CONCURRENT_STREAMS),
+            },
+            FullApiDestinationConfig::Iceberg { config } => match config {
+                FullApiIcebergConfig::Supabase {
+                    project_ref,
+                    warehouse_name,
+                    namespace,
+                    catalog_token,
+                    s3_access_key_id,
+                    s3_secret_access_key,
+                    s3_region,
+                } => Self::Iceberg {
+                    config: StoredIcebergConfig::Supabase {
+                        project_ref,
+                        warehouse_name,
+                        namespace,
+                        catalog_token,
+                        s3_access_key_id,
+                        s3_secret_access_key,
+                        s3_region,
+                    },
+                },
+                FullApiIcebergConfig::Rest {
+                    catalog_uri,
+                    warehouse_name,
+                    namespace,
+                } => Self::Iceberg {
+                    config: StoredIcebergConfig::Rest {
+                        catalog_uri,
+                        warehouse_name,
+                        namespace,
+                    },
+                },
             },
         }
     }
@@ -136,6 +238,46 @@ impl Encrypt<EncryptedStoredDestinationConfig> for StoredDestinationConfig {
                     max_concurrent_streams,
                 })
             }
+            Self::Iceberg { config } => match config {
+                StoredIcebergConfig::Supabase {
+                    project_ref,
+                    warehouse_name,
+                    namespace,
+                    catalog_token,
+                    s3_access_key_id,
+                    s3_secret_access_key,
+                    s3_region,
+                } => {
+                    let encrypted_catalog_token =
+                        encrypt_text(catalog_token.expose_secret().to_owned(), encryption_key)?;
+                    let encrypted_s3_secret_access_key = encrypt_text(
+                        s3_secret_access_key.expose_secret().to_owned(),
+                        encryption_key,
+                    )?;
+                    Ok(EncryptedStoredDestinationConfig::Iceberg {
+                        config: EncryptedStoredIcebergConfig::Supabase {
+                            project_ref,
+                            warehouse_name,
+                            namespace,
+                            catalog_token: encrypted_catalog_token,
+                            s3_access_key_id,
+                            s3_secret_access_key: encrypted_s3_secret_access_key,
+                            s3_region,
+                        },
+                    })
+                }
+                StoredIcebergConfig::Rest {
+                    catalog_uri,
+                    warehouse_name,
+                    namespace,
+                } => Ok(EncryptedStoredDestinationConfig::Iceberg {
+                    config: EncryptedStoredIcebergConfig::Rest {
+                        catalog_uri,
+                        warehouse_name,
+                        namespace,
+                    },
+                }),
+            },
         }
     }
 }
@@ -150,6 +292,9 @@ pub enum EncryptedStoredDestinationConfig {
         service_account_key: EncryptedValue,
         max_staleness_mins: Option<u16>,
         max_concurrent_streams: usize,
+    },
+    Iceberg {
+        config: EncryptedStoredIcebergConfig,
     },
 }
 
@@ -182,8 +327,121 @@ impl Decrypt<StoredDestinationConfig> for EncryptedStoredDestinationConfig {
                     max_concurrent_streams,
                 })
             }
+            Self::Iceberg { config } => match config {
+                EncryptedStoredIcebergConfig::Supabase {
+                    project_ref,
+                    warehouse_name,
+                    namespace,
+                    catalog_token: encrypted_catalog_token,
+                    s3_access_key_id,
+                    s3_secret_access_key: encrypted_s3_secret_access_key,
+                    s3_region,
+                } => {
+                    let catalog_token = SerializableSecretString::from(decrypt_text(
+                        encrypted_catalog_token,
+                        encryption_key,
+                    )?);
+
+                    let s3_secret_access_key = SerializableSecretString::from(decrypt_text(
+                        encrypted_s3_secret_access_key,
+                        encryption_key,
+                    )?);
+
+                    Ok(StoredDestinationConfig::Iceberg {
+                        config: StoredIcebergConfig::Supabase {
+                            project_ref,
+                            warehouse_name,
+                            namespace,
+                            catalog_token,
+                            s3_access_key_id,
+                            s3_secret_access_key,
+                            s3_region,
+                        },
+                    })
+                }
+                EncryptedStoredIcebergConfig::Rest {
+                    catalog_uri,
+                    warehouse_name,
+                    namespace,
+                } => Ok(StoredDestinationConfig::Iceberg {
+                    config: StoredIcebergConfig::Rest {
+                        catalog_uri,
+                        warehouse_name,
+                        namespace,
+                    },
+                }),
+            },
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StoredIcebergConfig {
+    Supabase {
+        project_ref: String,
+        warehouse_name: String,
+        namespace: String,
+        catalog_token: SerializableSecretString,
+        s3_access_key_id: String,
+        s3_secret_access_key: SerializableSecretString,
+        s3_region: String,
+    },
+    Rest {
+        catalog_uri: String,
+        warehouse_name: String,
+        namespace: String,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum FullApiIcebergConfig {
+    Supabase {
+        #[schema(example = "abcdefghijklmnopqrst")]
+        project_ref: String,
+        #[schema(example = "my-warehouse")]
+        warehouse_name: String,
+        #[schema(example = "my-namespace")]
+        namespace: String,
+        #[schema(
+            example = "eyJ0eXAiOiJKV1QiLCJhbGciOiJFUzI1NiIsImtpZCI6IjFkNzFjMGEyNmIxMDFjODQ5ZTkxZmQ1NjdjYjA5NTJmIn0.eyJleHAiOjIwNzA3MTcxNjAsImlhdCI6MTc1NjE0NTE1MCwiaXNzIjoic3VwYWJhc2UiLCJyZWYiOiJhYmNkZWZnaGlqbGttbm9wcXJzdCIsInJvbGUiOiJzZXJ2aWNlX3JvbGUifQ.YdTWkkIvwjSkXot3NC07xyjPjGWQMNzLq5EPzumzrdLzuHrj-zuzI-nlyQtQ5V7gZauysm-wGwmpztRXfPc3AQ"
+        )]
+        catalog_token: SerializableSecretString,
+        #[schema(example = "9156667efc2c70d89af6588da86d2924")]
+        s3_access_key_id: String,
+        #[schema(example = "ca833e890916d848c69135924bcd75e5909184814a0ebc6c988937ee094120d4")]
+        s3_secret_access_key: SerializableSecretString,
+        #[schema(example = "ap-southeast-1")]
+        s3_region: String,
+    },
+    Rest {
+        #[schema(example = "https://abcdefghijklmnopqrst.storage.supabase.com/storage/v1/iceberg")]
+        catalog_uri: String,
+        #[schema(example = "my-warehouse")]
+        warehouse_name: String,
+        #[schema(example = "my-namespace")]
+        namespace: String,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EncryptedStoredIcebergConfig {
+    Supabase {
+        project_ref: String,
+        warehouse_name: String,
+        namespace: String,
+        catalog_token: EncryptedValue,
+        s3_access_key_id: String,
+        s3_secret_access_key: EncryptedValue,
+        s3_region: String,
+    },
+    Rest {
+        catalog_uri: String,
+        warehouse_name: String,
+        namespace: String,
+    },
 }
 
 #[cfg(test)]
