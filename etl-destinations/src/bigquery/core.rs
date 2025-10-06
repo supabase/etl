@@ -63,7 +63,7 @@ pub fn table_name_to_bigquery_table_id(table_name: &TableName) -> BigQueryTableI
 /// Combines a base table name with a sequence number to enable versioned tables.
 /// Used for truncate handling where each truncate creates a new table version.
 #[derive(Debug, Clone, Eq, PartialEq, Hash)]
-struct SequencedBigQueryTableId(BigQueryTableId, u64);
+struct SequencedBigQueryTableId(pub BigQueryTableId, pub u64);
 
 impl SequencedBigQueryTableId {
     /// Creates a new sequenced table ID starting at version 0.
@@ -74,11 +74,6 @@ impl SequencedBigQueryTableId {
     /// Returns the next version of this sequenced table ID.
     pub fn next(&self) -> Self {
         Self(self.0.clone(), self.1 + 1)
-    }
-
-    /// Extracts the base BigQuery table ID without the sequence number.
-    pub fn to_bigquery_table_id(&self) -> BigQueryTableId {
-        self.0.clone()
     }
 }
 
@@ -919,40 +914,50 @@ where
     /// to optimize multiple truncates of the same table.
     async fn process_truncate_for_table_ids(
         &self,
-        table_ids: impl IntoIterator<Item = (TableId, SchemaVersion)>,
-        is_cdc_truncate: bool,
+        table_ids: impl IntoIterator<Item = (TableId, Option<SchemaVersion>)>,
+        is_truncate_event: bool,
     ) -> EtlResult<()> {
         // We want to lock for the entire processing to ensure that we don't have any race conditions
         // and possible errors are easier to reason about.
         let mut inner = self.inner.lock().await;
 
         for (table_id, schema_version) in table_ids {
-            let table_schema = self
-                .store
-                .get_table_schema(&table_id, schema_version)
-                .await?;
+            // If a schema version is supplied, we use it to create a new table. Otherwise, we use
+            // the latest schema version since that is what we have available.
+            let table_schema = match schema_version {
+                Some(schema_version) => {
+                    self.store
+                        .get_table_schema(&table_id, schema_version)
+                        .await?
+                }
+                None => self.store.get_latest_table_schema(&table_id).await?,
+            };
 
-            // If we are not doing CDC, it means that this truncation has been issued while recovering
-            // from a failed data sync operation. In that case, we could have failed before table schemas
-            // were stored in the schema store, so if we don't find a table schema we just continue
-            // and emit a warning. If we are doing CDC, it's a problem if the schema disappears while
-            // streaming, so we error out.
-            if table_schema.is_none() && !is_cdc_truncate {
-                warn!(
-                    "the table schema for table {table_id} was not found in the schema store while processing truncate events for BigQuery",
-                    table_id = table_id.to_string()
-                );
+            let table_schema = match table_schema {
+                Some(table_schema) => table_schema,
+                // If we are not doing CDC, it means that this truncation has been issued while recovering
+                // from a failed data sync operation. In that case, we could have failed before table schemas
+                // were stored in the schema store, so if we don't find a table schema we just continue
+                // and emit a warning. If we are doing CDC, it's a problem if the schema disappears while
+                // streaming, so we error out.
+                None if !is_truncate_event => {
+                    warn!(
+                        "the table schema for table {table_id} was not found in the schema store while processing truncate events for BigQuery",
+                        table_id = table_id.to_string()
+                    );
 
-                continue;
-            }
-
-            let table_schema = table_schema.ok_or_else(|| etl_error!(
-                ErrorKind::MissingTableSchema,
-                    "Table not found in the schema store",
-                    format!(
-                        "The table schema for table {table_id} was not found in the schema store while processing truncate events for BigQuery"
+                    continue;
+                }
+                None => {
+                    bail!(
+                        ErrorKind::MissingTableSchema,
+                        "Table not found in the schema store",
+                        format!(
+                            "The table schema for table {table_id} was not found in the schema store while processing truncate events for BigQuery"
+                        )
                     )
-            ))?;
+                }
+            };
 
             // We need to determine the current sequenced table ID for this table.
             let sequenced_bigquery_table_id =
@@ -1058,21 +1063,7 @@ where
     }
 
     async fn truncate_table(&self, table_id: TableId) -> EtlResult<()> {
-        let latest_schema = self
-            .store
-            .get_latest_table_schema(&table_id)
-            .await?
-            .ok_or_else(|| {
-                etl_error!(
-                    ErrorKind::MissingTableSchema,
-                    "Table not found in the schema store",
-                    format!(
-                        "The table schema for table {table_id} was not found in the schema store"
-                    )
-                )
-            })?;
-
-        self.process_truncate_for_table_ids(iter::once((table_id, latest_schema.version)), false)
+        self.process_truncate_for_table_ids(iter::once((table_id, None)), false)
             .await
     }
 
@@ -1185,7 +1176,7 @@ mod tests {
     fn test_sequenced_bigquery_table_id_from_str_valid() {
         let table_id = "users_table_123";
         let parsed = table_id.parse::<SequencedBigQueryTableId>().unwrap();
-        assert_eq!(parsed.to_bigquery_table_id(), "users_table");
+        assert_eq!(parsed.0, "users_table");
         assert_eq!(parsed.1, 123);
     }
 
@@ -1193,7 +1184,7 @@ mod tests {
     fn test_sequenced_bigquery_table_id_from_str_zero_sequence() {
         let table_id = "simple_table_0";
         let parsed = table_id.parse::<SequencedBigQueryTableId>().unwrap();
-        assert_eq!(parsed.to_bigquery_table_id(), "simple_table");
+        assert_eq!(parsed.0, "simple_table");
         assert_eq!(parsed.1, 0);
     }
 
@@ -1201,7 +1192,7 @@ mod tests {
     fn test_sequenced_bigquery_table_id_from_str_large_sequence() {
         let table_id = "test_table_18446744073709551615"; // u64::MAX
         let parsed = table_id.parse::<SequencedBigQueryTableId>().unwrap();
-        assert_eq!(parsed.to_bigquery_table_id(), "test_table");
+        assert_eq!(parsed.0, "test_table");
         assert_eq!(parsed.1, u64::MAX);
     }
 
@@ -1209,7 +1200,7 @@ mod tests {
     fn test_sequenced_bigquery_table_id_from_str_escaped_underscores() {
         let table_id = "a__b_c__d_42";
         let parsed = table_id.parse::<SequencedBigQueryTableId>().unwrap();
-        assert_eq!(parsed.to_bigquery_table_id(), "a__b_c__d");
+        assert_eq!(parsed.0, "a__b_c__d");
         assert_eq!(parsed.1, 42);
     }
 
@@ -1240,14 +1231,14 @@ mod tests {
     #[test]
     fn test_sequenced_bigquery_table_id_new() {
         let table_id = SequencedBigQueryTableId::new("users_table".to_string());
-        assert_eq!(table_id.to_bigquery_table_id(), "users_table");
+        assert_eq!(table_id.0, "users_table");
         assert_eq!(table_id.1, 0);
     }
 
     #[test]
     fn test_sequenced_bigquery_table_id_new_with_underscores() {
         let table_id = SequencedBigQueryTableId::new("a__b_c__d".to_string());
-        assert_eq!(table_id.to_bigquery_table_id(), "a__b_c__d");
+        assert_eq!(table_id.0, "a__b_c__d");
         assert_eq!(table_id.1, 0);
     }
 
@@ -1258,7 +1249,7 @@ mod tests {
 
         assert_eq!(table_id.1, 0);
         assert_eq!(next_table_id.1, 1);
-        assert_eq!(next_table_id.to_bigquery_table_id(), "users_table");
+        assert_eq!(next_table_id.0, "users_table");
     }
 
     #[test]
@@ -1267,7 +1258,7 @@ mod tests {
         let next_table_id = table_id.next();
 
         assert_eq!(next_table_id.1, 43);
-        assert_eq!(next_table_id.to_bigquery_table_id(), "test_table");
+        assert_eq!(next_table_id.0, "test_table");
     }
 
     #[test]
@@ -1276,25 +1267,25 @@ mod tests {
         let next_table_id = table_id.next();
 
         assert_eq!(next_table_id.1, u64::MAX);
-        assert_eq!(next_table_id.to_bigquery_table_id(), "test_table");
+        assert_eq!(next_table_id.0, "test_table");
     }
 
     #[test]
     fn test_sequenced_bigquery_table_id_to_bigquery_table_id() {
         let table_id = SequencedBigQueryTableId("users_table".to_string(), 123);
-        assert_eq!(table_id.to_bigquery_table_id(), "users_table");
+        assert_eq!(table_id.0, "users_table");
     }
 
     #[test]
     fn test_sequenced_bigquery_table_id_to_bigquery_table_id_with_underscores() {
         let table_id = SequencedBigQueryTableId("a__b_c__d".to_string(), 42);
-        assert_eq!(table_id.to_bigquery_table_id(), "a__b_c__d");
+        assert_eq!(table_id.0, "a__b_c__d");
     }
 
     #[test]
     fn test_sequenced_bigquery_table_id_to_bigquery_table_id_zero_sequence() {
         let table_id = SequencedBigQueryTableId("simple_table".to_string(), 0);
-        assert_eq!(table_id.to_bigquery_table_id(), "simple_table");
+        assert_eq!(table_id.0, "simple_table");
     }
 
     #[test]
@@ -1421,7 +1412,7 @@ mod tests {
         let parsed = original.parse::<SequencedBigQueryTableId>().unwrap();
         let formatted = parsed.to_string();
         assert_eq!(original, formatted);
-        assert_eq!(parsed.to_bigquery_table_id(), "a__b_c__d");
+        assert_eq!(parsed.0, "a__b_c__d");
         assert_eq!(parsed.1, 999);
     }
 
