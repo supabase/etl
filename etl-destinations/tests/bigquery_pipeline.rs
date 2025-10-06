@@ -739,7 +739,7 @@ async fn table_renames_are_handled_correctly() {
         .unwrap();
 
     let insert_event_notify = destination
-        .wait_for_events_count(vec![(EventType::Insert, 1)])
+        .wait_for_events_count(vec![(EventType::Insert, 2)])
         .await;
 
     database
