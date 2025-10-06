@@ -590,8 +590,7 @@ where
     fn is_schema_mismatch_error(error: &EtlError) -> bool {
         error
             .kinds()
-            .iter()
-            .any(|kind| *kind == ErrorKind::DestinationSchemaMismatch)
+            .contains(&ErrorKind::DestinationSchemaMismatch)
     }
 
     async fn apply_relation_event_changes(&self, relation_event: RelationEvent) -> EtlResult<()> {

@@ -9,7 +9,11 @@ use etl::test_utils::notify::NotifyingStore;
 use etl::test_utils::pipeline::{create_pipeline, create_pipeline_with};
 use etl::test_utils::table::column_schema_names;
 use etl::test_utils::test_destination_wrapper::TestDestinationWrapper;
-use etl::test_utils::test_schema::{TableSelection, assert_events_equal, build_expected_orders_inserts, build_expected_users_inserts, get_n_integers_sum, get_users_age_sum_from_rows, insert_mock_data, insert_users_data, setup_test_database_schema, insert_orders_data};
+use etl::test_utils::test_schema::{
+    TableSelection, assert_events_equal, build_expected_orders_inserts,
+    build_expected_users_inserts, get_n_integers_sum, get_users_age_sum_from_rows,
+    insert_mock_data, insert_orders_data, insert_users_data, setup_test_database_schema,
+};
 use etl::types::{EventType, PipelineId};
 use etl_config::shared::BatchConfig;
 use etl_postgres::replication::slots::EtlReplicationSlot;
@@ -592,12 +596,10 @@ async fn table_schema_changes_are_handled_correctly() {
     database
         .alter_table(
             test_table_name("orders"),
-            &[
-                TableModification::AddColumn {
-                    name: "summary",
-                    params: "text",
-                },
-            ],
+            &[TableModification::AddColumn {
+                name: "summary",
+                params: "text",
+            }],
         )
         .await
         .unwrap();

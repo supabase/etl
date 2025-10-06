@@ -127,7 +127,11 @@ impl Destination for MemoryDestination {
         for table_row in &table_rows {
             info!("  {:?}", table_row);
         }
-        inner.table_rows.entry(table_id).or_default().extend(table_rows);
+        inner
+            .table_rows
+            .entry(table_id)
+            .or_default()
+            .extend(table_rows);
 
         Ok(())
     }

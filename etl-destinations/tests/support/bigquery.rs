@@ -16,7 +16,6 @@ use gcp_bigquery_client::model::table_cell::TableCell;
 use gcp_bigquery_client::model::table_row::TableRow;
 use std::fmt;
 use std::str::FromStr;
-use tokio::runtime::Handle;
 use uuid::Uuid;
 
 /// Environment variable name for the BigQuery project id.
@@ -265,12 +264,9 @@ impl BigQueryDatabase {
 
         let query = format!(
             "SELECT column_name \
-             FROM `{project}.{dataset}.INFORMATION_SCHEMA.KEY_COLUMN_USAGE` \
-             WHERE table_name = '{table}' AND constraint_name = 'PRIMARY KEY' \
-             ORDER BY ordinal_position",
-            project = project_id,
-            dataset = dataset_id,
-            table = table_id
+             FROM `{project_id}.{dataset_id}.INFORMATION_SCHEMA.KEY_COLUMN_USAGE` \
+             WHERE table_name = '{table_id}' AND constraint_name = 'PRIMARY KEY' \
+             ORDER BY ordinal_position"
         );
 
         let response = client
@@ -284,7 +280,7 @@ impl BigQueryDatabase {
             .unwrap_or_default()
             .into_iter()
             .filter_map(|row| {
-                row.columns.and_then(|mut columns| {
+                row.columns.and_then(|columns| {
                     columns
                         .into_iter()
                         .next()

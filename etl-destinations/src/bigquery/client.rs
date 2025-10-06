@@ -348,6 +348,7 @@ impl BigQueryClient {
     }
 
     /// Synchronizes the primary key definition for a BigQuery table with the provided schema.
+    #[allow(dead_code)]
     pub async fn sync_primary_key(
         &self,
         dataset_id: &BigQueryDatasetId,
@@ -539,7 +540,7 @@ impl BigQueryClient {
         Ok(TableBatch::new(
             stream_name,
             table_descriptor,
-            validated_rows,
+            validated_rows.into(),
         ))
     }
 
