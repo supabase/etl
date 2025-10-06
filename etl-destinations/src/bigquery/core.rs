@@ -890,8 +890,11 @@ where
                     // Finish the current batch before a TRUNCATE (it affects the table state).
                     self.flush_batch(&mut table_batches_by_id).await?;
 
-                    self.process_truncate_for_table_ids(truncate.table_ids.into_iter(), true)
-                        .await?;
+                    let table_ids = truncate
+                        .table_ids
+                        .into_iter()
+                        .map(|(table_id, schema_version)| (table_id, Some(schema_version)));
+                    self.process_truncate_for_table_ids(table_ids, true).await?;
                 }
 
                 // Unsupported events.

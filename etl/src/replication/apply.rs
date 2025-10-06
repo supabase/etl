@@ -1111,8 +1111,6 @@ where
     // schema.
     let old_table_schema = load_latest_table_schema(schema_store, table_id).await?;
 
-    info!("SCHEMAS {:?} {:?}", new_table_schema, old_table_schema);
-
     // If the column schemas are the same, we treat the relation message as a no-op. This is pretty
     // common since Postgres will send a `Relation` message as the first message for every new
     // connection even if the table schema hasn't changed.
