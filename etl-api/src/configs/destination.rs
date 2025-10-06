@@ -31,6 +31,7 @@ pub enum FullApiDestinationConfig {
         max_concurrent_streams: Option<usize>,
     },
     Iceberg {
+        #[serde(flatten)]
         config: FullApiIcebergConfig,
     },
 }
@@ -448,6 +449,7 @@ pub enum EncryptedStoredIcebergConfig {
 mod tests {
     use super::*;
     use crate::configs::encryption::{EncryptionKey, generate_random_key};
+    use insta::assert_json_snapshot;
 
     #[test]
     fn test_stored_destination_config_serialization_bigquery() {
@@ -904,5 +906,37 @@ mod tests {
             }
             _ => panic!("Config types don't match"),
         }
+    }
+
+    #[test]
+    fn test_full_api_destination_config_serialization_iceberg_supabase() {
+        let full_config = FullApiDestinationConfig::Iceberg {
+            config: FullApiIcebergConfig::Supabase {
+                project_ref: "abcdefghijklmnopqrst".to_string(),
+                warehouse_name: "my-warehouse".to_string(),
+                namespace: "my-namespace".to_string(),
+                catalog_token: SerializableSecretString::from("token123".to_string()),
+                s3_access_key_id: "access_key_123".to_string(),
+                s3_secret_access_key: SerializableSecretString::from("secret123".to_string()),
+                s3_region: "us-west-2".to_string(),
+            },
+        };
+
+        // Use snapshot testing to verify the exact JSON structure
+        assert_json_snapshot!(full_config);
+    }
+
+    #[test]
+    fn test_full_api_destination_config_serialization_iceberg_rest() {
+        let full_config = FullApiDestinationConfig::Iceberg {
+            config: FullApiIcebergConfig::Rest {
+                catalog_uri: "https://catalog.example.com/iceberg".to_string(),
+                warehouse_name: "my-warehouse".to_string(),
+                namespace: "my-namespace".to_string(),
+            },
+        };
+
+        // Use snapshot testing to verify the exact JSON structure
+        assert_json_snapshot!(full_config);
     }
 }
