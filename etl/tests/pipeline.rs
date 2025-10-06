@@ -9,11 +9,7 @@ use etl::test_utils::notify::NotifyingStore;
 use etl::test_utils::pipeline::{create_pipeline, create_pipeline_with};
 use etl::test_utils::table::column_schema_names;
 use etl::test_utils::test_destination_wrapper::TestDestinationWrapper;
-use etl::test_utils::test_schema::{
-    TableSelection, assert_events_equal, build_expected_orders_inserts,
-    build_expected_users_inserts, get_n_integers_sum, get_users_age_sum_from_rows,
-    insert_mock_data, insert_users_data, setup_test_database_schema,
-};
+use etl::test_utils::test_schema::{TableSelection, assert_events_equal, build_expected_orders_inserts, build_expected_users_inserts, get_n_integers_sum, get_users_age_sum_from_rows, insert_mock_data, insert_users_data, setup_test_database_schema, insert_orders_data};
 use etl::types::{EventType, PipelineId};
 use etl_config::shared::BatchConfig;
 use etl_postgres::replication::slots::EtlReplicationSlot;
@@ -511,10 +507,11 @@ async fn table_copy_replicates_existing_data() {
 async fn table_schema_changes_are_handled_correctly() {
     init_test_tracing();
     let mut database = spawn_source_database().await;
-    let database_schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
+    let database_schema = setup_test_database_schema(&database, TableSelection::Both).await;
 
-    // Insert initial users data.
+    // Insert initial users/orders data.
     insert_users_data(&mut database, &database_schema.users_schema().name, 1..=1).await;
+    insert_orders_data(&mut database, &database_schema.orders_schema().name, 1..=1).await;
 
     let store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
@@ -536,14 +533,21 @@ async fn table_schema_changes_are_handled_correctly() {
             TableReplicationPhaseType::SyncDone,
         )
         .await;
+    let orders_state_notify = store
+        .notify_on_table_state_type(
+            database_schema.orders_schema().id,
+            TableReplicationPhaseType::SyncDone,
+        )
+        .await;
 
     pipeline.start().await.unwrap();
 
     users_state_notify.notified().await;
+    orders_state_notify.notified().await;
 
     // Check the initial schema.
     let table_schemas = store.get_latest_table_schemas().await;
-    assert_eq!(table_schemas.len(), 1);
+    assert_eq!(table_schemas.len(), 2);
     let users_table_schema = table_schemas
         .get(&database_schema.users_schema().id)
         .unwrap();
@@ -552,11 +556,21 @@ async fn table_schema_changes_are_handled_correctly() {
         column_schema_names(users_table_schema),
         vec!["id", "name", "age"]
     );
+    let orders_table_schema = table_schemas
+        .get(&database_schema.orders_schema().id)
+        .unwrap();
+    assert_eq!(orders_table_schema.version, 0);
+    assert_eq!(
+        column_schema_names(orders_table_schema),
+        vec!["id", "description"]
+    );
 
     // Check the initial data.
     let table_rows = destination.get_table_rows().await;
     let users_table_rows = table_rows.get(&database_schema.users_schema().id).unwrap();
     assert_eq!(users_table_rows.len(), 1);
+    let orders_table_rows = table_rows.get(&database_schema.orders_schema().id).unwrap();
+    assert_eq!(orders_table_rows.len(), 1);
 
     // We perform schema changes.
     database
@@ -575,10 +589,22 @@ async fn table_schema_changes_are_handled_correctly() {
         )
         .await
         .unwrap();
+    database
+        .alter_table(
+            test_table_name("orders"),
+            &[
+                TableModification::AddColumn {
+                    name: "summary",
+                    params: "text",
+                },
+            ],
+        )
+        .await
+        .unwrap();
 
-    // Register notifications for the insert.
+    // Register notifications for the inserts.
     let insert_event_notify = destination
-        .wait_for_events_count(vec![(EventType::Insert, 1)])
+        .wait_for_events_count(vec![(EventType::Insert, 2)])
         .await;
 
     // We insert data.
@@ -589,13 +615,21 @@ async fn table_schema_changes_are_handled_correctly() {
             &[&"user_2", &(2i32), &(2025i32)],
         )
         .await
-        .expect("Failed to insert users");
+        .expect("Failed to insert user");
+    database
+        .insert_values(
+            database_schema.orders_schema().name.clone(),
+            &["description", "summary"],
+            &[&"order_2", &"order_2_summary"],
+        )
+        .await
+        .expect("Failed to insert order");
 
     insert_event_notify.notified().await;
 
     // Check the updated schema.
     let table_schemas = store.get_latest_table_schemas().await;
-    assert_eq!(table_schemas.len(), 1);
+    assert_eq!(table_schemas.len(), 2);
     let users_table_schema = table_schemas
         .get(&database_schema.users_schema().id)
         .unwrap();
@@ -603,6 +637,14 @@ async fn table_schema_changes_are_handled_correctly() {
     assert_eq!(
         column_schema_names(users_table_schema),
         vec!["id", "name", "new_age", "year"]
+    );
+    let orders_table_schema = table_schemas
+        .get(&database_schema.orders_schema().id)
+        .unwrap();
+    assert_eq!(orders_table_schema.version, 1);
+    assert_eq!(
+        column_schema_names(orders_table_schema),
+        vec!["id", "description", "summary"]
     );
 
     // Check the updated data.
@@ -612,6 +654,10 @@ async fn table_schema_changes_are_handled_correctly() {
         .get(&(EventType::Insert, database_schema.users_schema().id))
         .unwrap();
     assert_eq!(users_inserts.len(), 1);
+    let orders_inserts = grouped_events
+        .get(&(EventType::Insert, database_schema.orders_schema().id))
+        .unwrap();
+    assert_eq!(orders_inserts.len(), 1);
 
     // We perform schema changes.
     database
@@ -627,10 +673,23 @@ async fn table_schema_changes_are_handled_correctly() {
         )
         .await
         .unwrap();
+    database
+        .alter_table(
+            test_table_name("orders"),
+            &[
+                TableModification::DropColumn { name: "summary" },
+                TableModification::RenameColumn {
+                    name: "description",
+                    new_name: "new_description",
+                },
+            ],
+        )
+        .await
+        .unwrap();
 
-    // Register notifications for the insert.
+    // Register notifications for the inserts.
     let insert_event_notify = destination
-        .wait_for_events_count(vec![(EventType::Insert, 2)])
+        .wait_for_events_count(vec![(EventType::Insert, 4)])
         .await;
 
     // We insert data.
@@ -641,13 +700,21 @@ async fn table_schema_changes_are_handled_correctly() {
             &[&"user_3", &(2f64)],
         )
         .await
-        .expect("Failed to insert users");
+        .expect("Failed to insert user");
+    database
+        .insert_values(
+            database_schema.orders_schema().name.clone(),
+            &["new_description"],
+            &[&"order_3"],
+        )
+        .await
+        .expect("Failed to insert order");
 
     insert_event_notify.notified().await;
 
     // Check the updated schema.
     let table_schemas = store.get_latest_table_schemas().await;
-    assert_eq!(table_schemas.len(), 1);
+    assert_eq!(table_schemas.len(), 2);
     let users_table_schema = table_schemas
         .get(&database_schema.users_schema().id)
         .unwrap();
@@ -655,6 +722,14 @@ async fn table_schema_changes_are_handled_correctly() {
     assert_eq!(
         column_schema_names(users_table_schema),
         vec!["id", "name", "new_age"]
+    );
+    let orders_table_schema = table_schemas
+        .get(&database_schema.orders_schema().id)
+        .unwrap();
+    assert_eq!(orders_table_schema.version, 2);
+    assert_eq!(
+        column_schema_names(orders_table_schema),
+        vec!["id", "new_description"]
     );
 
     // Check the updated data.
@@ -664,6 +739,10 @@ async fn table_schema_changes_are_handled_correctly() {
         .get(&(EventType::Insert, database_schema.users_schema().id))
         .unwrap();
     assert_eq!(users_inserts.len(), 2);
+    let orders_inserts = grouped_events
+        .get(&(EventType::Insert, database_schema.orders_schema().id))
+        .unwrap();
+    assert_eq!(orders_inserts.len(), 2);
 
     pipeline.shutdown_and_wait().await.unwrap();
 }

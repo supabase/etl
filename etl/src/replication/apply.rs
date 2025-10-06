@@ -629,8 +629,8 @@ where
             if state.events_batch.len() >= max_batch_size || result.end_batch.is_some() {
                 // We check if the batch has elements. It can be that a batch has no elements when
                 // the batch is ended prematurely, and it contains only skipped events. In this case,
-                // we don't produce any events to the destination but downstream code treats it as if
-                // those evets are "persisted".
+                // we don't produce any events to the destination, but downstream code treats it as if
+                // those events are "persisted".
                 if !state.events_batch.is_empty() {
                     send_batch(
                         state,
@@ -648,13 +648,13 @@ where
                 // be reprocessed, even the events before the failure will be skipped.
                 //
                 // Usually in the apply loop, errors are propagated upstream and handled based on if
-                // we are in a table sync worker or apply worker, however we have an edge case (for
+                // we are in a table sync worker or apply worker, however, we have an edge case (for
                 // relation messages that change the schema) where we want to mark a table as errored
                 // manually, not propagating the error outside the loop, which is going to be handled
                 // differently based on the worker:
                 // - Apply worker -> will continue the loop skipping the table.
                 // - Table sync worker -> will stop the work (as if it had a normal uncaught error).
-                // Ideally we would get rid of this since it's an anomalous case which adds unnecessary
+                // Ideally, we would get rid of this since it's an anomalous case that adds unnecessary
                 // complexity.
                 if let Some(error) = result.table_replication_error {
                     action = action.merge(hook.mark_table_errored(error).await?);
@@ -690,7 +690,7 @@ where
                 .await?;
             }
 
-            // We perform synchronization, to make sure that tables are synced.
+            // We perform synchronization to make sure that tables are synced.
             synchronize(state, hook).await
         }
     }
