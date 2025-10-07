@@ -101,6 +101,7 @@ pub enum StoredDestinationConfig {
         max_concurrent_streams: usize,
     },
     Iceberg {
+        #[serde(flatten)]
         config: StoredIcebergConfig,
     },
 }
@@ -295,6 +296,7 @@ pub enum EncryptedStoredDestinationConfig {
         max_concurrent_streams: usize,
     },
     Iceberg {
+        #[serde(flatten)]
         config: EncryptedStoredIcebergConfig,
     },
 }
