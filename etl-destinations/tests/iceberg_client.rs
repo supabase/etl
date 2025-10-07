@@ -13,6 +13,26 @@ use crate::support::{
 
 mod support;
 
+fn column(name: &str, typ: Type, modifier: i32, nullable: bool, primary: bool) -> ColumnSchema {
+    ColumnSchema::new(name.to_string(), typ, modifier, nullable, primary)
+}
+
+fn with_positions(mut columns: Vec<ColumnSchema>) -> Vec<ColumnSchema> {
+    let mut primary_index = 0;
+    for (idx, column) in columns.iter_mut().enumerate() {
+        column.ordinal_position = (idx + 1) as i32;
+        let is_primary = column.primary_key_position.is_some();
+        column.primary_key_position = if is_primary {
+            primary_index += 1;
+            Some(primary_index)
+        } else {
+            None
+        };
+    }
+
+    columns
+}
+
 #[tokio::test]
 async fn create_namespace() {
     init_test_tracing();

@@ -164,14 +164,21 @@ mod tests {
 
     fn create_test_schema() -> Vec<ColumnSchema> {
         vec![
-            ColumnSchema::new("id".to_string(), Type::INT4, -1, false, true),
-            ColumnSchema::new("name".to_string(), Type::TEXT, -1, true, false),
-            ColumnSchema::new("active".to_string(), Type::BOOL, -1, false, false),
+            ColumnSchema::with_positions("id".to_string(), Type::INT4, -1, false, 1, Some(1)),
+            ColumnSchema::with_positions("name".to_string(), Type::TEXT, -1, true, 2, None),
+            ColumnSchema::with_positions("active".to_string(), Type::BOOL, -1, false, 3, None),
         ]
     }
 
     fn create_single_column_schema(name: &str, typ: Type) -> Vec<ColumnSchema> {
-        vec![ColumnSchema::new(name.to_string(), typ, -1, false, false)]
+        vec![ColumnSchema::with_positions(
+            name.to_string(),
+            typ,
+            -1,
+            false,
+            1,
+            None,
+        )]
     }
 
     #[test]
@@ -227,10 +234,10 @@ mod tests {
     #[test]
     fn try_from_multiple_columns_different_types() {
         let schema = vec![
-            ColumnSchema::new("int_col".to_string(), Type::INT4, -1, false, false),
-            ColumnSchema::new("float_col".to_string(), Type::FLOAT8, -1, false, false),
-            ColumnSchema::new("text_col".to_string(), Type::TEXT, -1, false, false),
-            ColumnSchema::new("bool_col".to_string(), Type::BOOL, -1, false, false),
+            ColumnSchema::with_positions("int_col".to_string(), Type::INT4, -1, false, 1, None),
+            ColumnSchema::with_positions("float_col".to_string(), Type::FLOAT8, -1, false, 2, None),
+            ColumnSchema::with_positions("text_col".to_string(), Type::TEXT, -1, false, 3, None),
+            ColumnSchema::with_positions("bool_col".to_string(), Type::BOOL, -1, false, 4, None),
         ];
 
         let row_data = b"123\t3.15\tHello World\tt\n";
@@ -333,12 +340,14 @@ mod tests {
         let mut expected_row = String::new();
 
         for i in 0..50 {
-            schema.push(ColumnSchema::new(
+            let ordinal_position = (i + 1) as i32;
+            schema.push(ColumnSchema::with_positions(
                 format!("col{i}"),
                 Type::INT4,
                 -1,
                 false,
-                false,
+                ordinal_position,
+                None,
             ));
             if i > 0 {
                 expected_row.push('\t');
@@ -369,8 +378,8 @@ mod tests {
     #[test]
     fn try_from_postgres_delimiter_escaping() {
         let schema = vec![
-            ColumnSchema::new("col1".to_string(), Type::TEXT, -1, false, false),
-            ColumnSchema::new("col2".to_string(), Type::TEXT, -1, false, false),
+            ColumnSchema::with_positions("col1".to_string(), Type::TEXT, -1, false, 1, None),
+            ColumnSchema::with_positions("col2".to_string(), Type::TEXT, -1, false, 2, None),
         ];
 
         // Postgres escapes tab characters in data with \\t
@@ -387,9 +396,9 @@ mod tests {
     #[test]
     fn try_from_postgres_escape_at_field_boundaries() {
         let schema = vec![
-            ColumnSchema::new("col1".to_string(), Type::TEXT, -1, false, false),
-            ColumnSchema::new("col2".to_string(), Type::TEXT, -1, false, false),
-            ColumnSchema::new("col3".to_string(), Type::TEXT, -1, false, false),
+            ColumnSchema::with_positions("col1".to_string(), Type::TEXT, -1, false, 1, None),
+            ColumnSchema::with_positions("col2".to_string(), Type::TEXT, -1, false, 2, None),
+            ColumnSchema::with_positions("col3".to_string(), Type::TEXT, -1, false, 3, None),
         ];
 
         // Escapes at the beginning, middle, and end of fields

@@ -685,16 +685,24 @@ impl PgReplicationClient {
 
         let column_info_query = format!(
             "{pub_cte}
-            select a.attname,
+            select
+                a.attname,
                 a.atttypid,
                 a.atttypmod,
                 a.attnotnull,
-                coalesce(i.indisprimary, false) as primary
+                pk.primary_key_position,
+                a.attnum as ordinal_position
             from pg_attribute a
-            left join pg_index i
-                on a.attrelid = i.indrelid
-                and a.attnum = any(i.indkey)
-                and i.indisprimary = true
+            left join lateral (
+                select
+                    att_positions.ordinality as primary_key_position
+                from pg_index i
+                cross join lateral unnest(i.indkey) with ordinality as att_positions(attnum, ordinality)
+                where i.indrelid = a.attrelid
+                    and i.indisprimary = true
+                    and att_positions.attnum = a.attnum
+                limit 1
+            ) pk on true
             where a.attnum > 0::int2
             and not a.attisdropped
             and a.attgenerated = ''
@@ -714,8 +722,11 @@ impl PgReplicationClient {
                     Self::get_row_value::<i32>(&row, "atttypmod", "pg_attribute").await?;
                 let nullable =
                     Self::get_row_value::<String>(&row, "attnotnull", "pg_attribute").await? == "f";
-                let primary =
-                    Self::get_row_value::<String>(&row, "primary", "pg_index").await? == "t";
+                let ordinal_position =
+                    Self::get_row_value::<i32>(&row, "ordinal_position", "pg_attribute").await?;
+                let primary_key_position =
+                    Self::get_optional_row_value::<i32>(&row, "primary_key_position", "pg_index")
+                        .await?;
 
                 let typ = convert_type_oid_to_type(type_oid);
 
@@ -724,7 +735,8 @@ impl PgReplicationClient {
                     typ,
                     modifier,
                     nullable,
-                    primary,
+                    ordinal_position,
+                    primary_key_position,
                 })
             }
         }
@@ -780,6 +792,33 @@ impl PgReplicationClient {
         ))?;
 
         value.parse().map_err(|e: T::Err| {
+            etl_error!(
+                ErrorKind::ConversionError,
+                "Column parsing failed",
+                format!(
+                    "Failed to parse value from column '{}' in table '{}': {:?}",
+                    column_name, table_name, e
+                )
+            )
+        })
+    }
+
+    /// Attempts to extract an optional typed value from a row column.
+    ///
+    /// Returns `Ok(None)` when the column is NULL.
+    async fn get_optional_row_value<T: std::str::FromStr>(
+        row: &SimpleQueryRow,
+        column_name: &str,
+        table_name: &str,
+    ) -> EtlResult<Option<T>>
+    where
+        T::Err: fmt::Debug,
+    {
+        let Some(value) = row.try_get(column_name)? else {
+            return Ok(None);
+        };
+
+        value.parse().map(Some).map_err(|e: T::Err| {
             etl_error!(
                 ErrorKind::ConversionError,
                 "Column parsing failed",

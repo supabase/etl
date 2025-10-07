@@ -387,20 +387,24 @@ where
         let sequence_number_col =
             find_unique_column_name(&final_schema.column_schemas, SEQUENCE_NUMBER_COLUMN_NAME);
 
-        final_schema.add_column_schema(ColumnSchema {
-            name: cdc_operation_col,
-            typ: Type::TEXT,
-            modifier: -1,
-            nullable: false,
-            primary: false,
-        });
-        final_schema.add_column_schema(ColumnSchema {
-            name: sequence_number_col,
-            typ: Type::TEXT,
-            modifier: -1,
-            nullable: false,
-            primary: false,
-        });
+        let next_ordinal = (final_schema.column_schemas.len() as i32) + 1;
+        final_schema.add_column_schema(ColumnSchema::with_positions(
+            cdc_operation_col,
+            Type::TEXT,
+            -1,
+            false,
+            next_ordinal,
+            None,
+        ));
+        let next_ordinal = (final_schema.column_schemas.len() as i32) + 1;
+        final_schema.add_column_schema(ColumnSchema::with_positions(
+            sequence_number_col,
+            Type::TEXT,
+            -1,
+            false,
+            next_ordinal,
+            None,
+        ));
         final_schema
     }
 

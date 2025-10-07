@@ -446,7 +446,7 @@ impl BigQueryClient {
     fn add_primary_key_clause(column_schemas: &[ColumnSchema]) -> String {
         let identity_columns: Vec<String> = column_schemas
             .iter()
-            .filter(|s| s.primary)
+            .filter(|s| s.primary_key_position.is_some())
             .map(|c| format!("`{}`", c.name))
             .collect();
 
@@ -800,16 +800,18 @@ mod tests {
 
     #[test]
     fn test_column_spec() {
-        let column_schema = ColumnSchema::new("test_col".to_string(), Type::TEXT, -1, true, false);
+        let column_schema =
+            ColumnSchema::with_positions("test_col".to_string(), Type::TEXT, -1, true, 1, None);
         let spec = BigQueryClient::column_spec(&column_schema);
         assert_eq!(spec, "`test_col` string");
 
-        let not_null_column = ColumnSchema::new("id".to_string(), Type::INT4, -1, false, true);
+        let not_null_column =
+            ColumnSchema::with_positions("id".to_string(), Type::INT4, -1, false, 1, Some(1));
         let not_null_spec = BigQueryClient::column_spec(&not_null_column);
         assert_eq!(not_null_spec, "`id` int64 not null");
 
         let array_column =
-            ColumnSchema::new("tags".to_string(), Type::TEXT_ARRAY, -1, false, false);
+            ColumnSchema::with_positions("tags".to_string(), Type::TEXT_ARRAY, -1, false, 1, None);
         let array_spec = BigQueryClient::column_spec(&array_column);
         assert_eq!(array_spec, "`tags` array<string>");
     }
@@ -817,16 +819,23 @@ mod tests {
     #[test]
     fn test_add_primary_key_clause() {
         let columns_with_pk = vec![
-            ColumnSchema::new("id".to_string(), Type::INT4, -1, false, true),
-            ColumnSchema::new("name".to_string(), Type::TEXT, -1, true, false),
+            ColumnSchema::with_positions("id".to_string(), Type::INT4, -1, false, 1, Some(1)),
+            ColumnSchema::with_positions("name".to_string(), Type::TEXT, -1, true, 2, None),
         ];
         let pk_clause = BigQueryClient::add_primary_key_clause(&columns_with_pk);
         assert_eq!(pk_clause, ", primary key (`id`) not enforced");
 
         let columns_with_composite_pk = vec![
-            ColumnSchema::new("tenant_id".to_string(), Type::INT4, -1, false, true),
-            ColumnSchema::new("id".to_string(), Type::INT4, -1, false, true),
-            ColumnSchema::new("name".to_string(), Type::TEXT, -1, true, false),
+            ColumnSchema::with_positions(
+                "tenant_id".to_string(),
+                Type::INT4,
+                -1,
+                false,
+                1,
+                Some(1),
+            ),
+            ColumnSchema::with_positions("id".to_string(), Type::INT4, -1, false, 2, Some(2)),
+            ColumnSchema::with_positions("name".to_string(), Type::TEXT, -1, true, 3, None),
         ];
         let composite_pk_clause =
             BigQueryClient::add_primary_key_clause(&columns_with_composite_pk);
@@ -836,8 +845,8 @@ mod tests {
         );
 
         let columns_no_pk = vec![
-            ColumnSchema::new("name".to_string(), Type::TEXT, -1, true, false),
-            ColumnSchema::new("age".to_string(), Type::INT4, -1, true, false),
+            ColumnSchema::with_positions("name".to_string(), Type::TEXT, -1, true, 1, None),
+            ColumnSchema::with_positions("age".to_string(), Type::INT4, -1, true, 2, None),
         ];
         let no_pk_clause = BigQueryClient::add_primary_key_clause(&columns_no_pk);
         assert_eq!(no_pk_clause, "");
@@ -846,9 +855,9 @@ mod tests {
     #[test]
     fn test_create_columns_spec() {
         let columns = vec![
-            ColumnSchema::new("id".to_string(), Type::INT4, -1, false, true),
-            ColumnSchema::new("name".to_string(), Type::TEXT, -1, true, false),
-            ColumnSchema::new("active".to_string(), Type::BOOL, -1, false, false),
+            ColumnSchema::with_positions("id".to_string(), Type::INT4, -1, false, 1, Some(1)),
+            ColumnSchema::with_positions("name".to_string(), Type::TEXT, -1, true, 2, None),
+            ColumnSchema::with_positions("active".to_string(), Type::BOOL, -1, false, 3, None),
         ];
         let spec = BigQueryClient::create_columns_spec(&columns);
         assert_eq!(
@@ -866,10 +875,10 @@ mod tests {
     #[test]
     fn test_column_schemas_to_table_descriptor() {
         let columns = vec![
-            ColumnSchema::new("id".to_string(), Type::INT4, -1, false, true),
-            ColumnSchema::new("name".to_string(), Type::TEXT, -1, true, false),
-            ColumnSchema::new("active".to_string(), Type::BOOL, -1, false, false),
-            ColumnSchema::new("tags".to_string(), Type::TEXT_ARRAY, -1, false, false),
+            ColumnSchema::with_positions("id".to_string(), Type::INT4, -1, false, 1, Some(1)),
+            ColumnSchema::with_positions("name".to_string(), Type::TEXT, -1, true, 2, None),
+            ColumnSchema::with_positions("active".to_string(), Type::BOOL, -1, false, 3, None),
+            ColumnSchema::with_positions("tags".to_string(), Type::TEXT_ARRAY, -1, false, 4, None),
         ];
 
         let descriptor = BigQueryClient::column_schemas_to_table_descriptor(&columns, true);
@@ -949,12 +958,19 @@ mod tests {
     #[test]
     fn test_column_schemas_to_table_descriptor_complex_types() {
         let columns = vec![
-            ColumnSchema::new("uuid_col".to_string(), Type::UUID, -1, true, false),
-            ColumnSchema::new("json_col".to_string(), Type::JSON, -1, true, false),
-            ColumnSchema::new("bytea_col".to_string(), Type::BYTEA, -1, true, false),
-            ColumnSchema::new("numeric_col".to_string(), Type::NUMERIC, -1, true, false),
-            ColumnSchema::new("date_col".to_string(), Type::DATE, -1, true, false),
-            ColumnSchema::new("time_col".to_string(), Type::TIME, -1, true, false),
+            ColumnSchema::with_positions("uuid_col".to_string(), Type::UUID, -1, true, 1, None),
+            ColumnSchema::with_positions("json_col".to_string(), Type::JSON, -1, true, 2, None),
+            ColumnSchema::with_positions("bytea_col".to_string(), Type::BYTEA, -1, true, 3, None),
+            ColumnSchema::with_positions(
+                "numeric_col".to_string(),
+                Type::NUMERIC,
+                -1,
+                true,
+                4,
+                None,
+            ),
+            ColumnSchema::with_positions("date_col".to_string(), Type::DATE, -1, true, 5, None),
+            ColumnSchema::with_positions("time_col".to_string(), Type::TIME, -1, true, 6, None),
         ];
 
         let descriptor = BigQueryClient::column_schemas_to_table_descriptor(&columns, true);
@@ -1006,8 +1022,8 @@ mod tests {
         let table_id = "test_table";
 
         let columns = vec![
-            ColumnSchema::new("id".to_string(), Type::INT4, -1, false, true),
-            ColumnSchema::new("name".to_string(), Type::TEXT, -1, true, false),
+            ColumnSchema::with_positions("id".to_string(), Type::INT4, -1, false, true, 1, Some(1)),
+            ColumnSchema::with_positions("name".to_string(), Type::TEXT, -1, true, 2, None),
         ];
 
         // Simulate the query generation logic
@@ -1026,12 +1042,13 @@ mod tests {
         let table_id = "test_table";
         let max_staleness_mins = 15;
 
-        let columns = vec![ColumnSchema::new(
+        let columns = vec![ColumnSchema::with_positions(
             "id".to_string(),
             Type::INT4,
             -1,
             false,
-            true,
+            1,
+            Some(1),
         )];
 
         // Simulate the query generation logic with staleness

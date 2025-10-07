@@ -173,14 +173,33 @@ pub async fn store_table_schema(
         .await?;
 
     // Insert all columns
+    let mut sequential_primary_index = 0;
+
     for (column_order, column_schema) in table_schema.column_schemas.iter().enumerate() {
         let column_type_str = postgres_type_to_string(&column_schema.typ);
+        let ordinal_position = if column_schema.ordinal_position > 0 {
+            column_schema.ordinal_position
+        } else {
+            (column_order as i32) + 1
+        };
+        let primary_key_position = match column_schema.primary_key_position {
+            Some(position) if position > 0 => {
+                sequential_primary_index = sequential_primary_index.max(position);
+                Some(position)
+            }
+            Some(_) => {
+                sequential_primary_index += 1;
+                Some(sequential_primary_index)
+            }
+            None => None,
+        };
+        let is_primary = primary_key_position.is_some();
 
         sqlx::query(
             r#"
             insert into etl.table_columns 
-            (table_schema_id, column_name, column_type, type_modifier, nullable, primary_key, column_order)
-            values ($1, $2, $3, $4, $5, $6, $7)
+            (table_schema_id, column_name, column_type, type_modifier, nullable, primary_key, ordinal_position, primary_key_position)
+            values ($1, $2, $3, $4, $5, $6, $7, $8)
             "#,
         )
         .bind(table_schema_id)
@@ -188,8 +207,9 @@ pub async fn store_table_schema(
         .bind(column_type_str)
         .bind(column_schema.modifier)
         .bind(column_schema.nullable)
-        .bind(column_schema.primary)
-        .bind(column_order as i32)
+        .bind(is_primary)
+        .bind(ordinal_position)
+        .bind(primary_key_position)
         .execute(&mut *tx)
         .await?;
     }
@@ -217,12 +237,12 @@ pub async fn load_table_schemas(
             tc.column_type,
             tc.type_modifier,
             tc.nullable,
-            tc.primary_key,
-            tc.column_order
+            tc.ordinal_position,
+            tc.primary_key_position
         from etl.table_schemas ts
         inner join etl.table_columns tc on ts.id = tc.table_schema_id
         where ts.pipeline_id = $1
-        order by ts.table_id, tc.column_order
+        order by ts.table_id, tc.ordinal_position
         "#,
     )
     .bind(pipeline_id)
@@ -304,14 +324,16 @@ fn parse_column_schema(row: &PgRow) -> ColumnSchema {
     let column_type: String = row.get("column_type");
     let type_modifier: i32 = row.get("type_modifier");
     let nullable: bool = row.get("nullable");
-    let primary_key: bool = row.get("primary_key");
+    let ordinal_position: i32 = row.get("ordinal_position");
+    let primary_key_position: Option<i32> = row.get("primary_key_position");
 
-    ColumnSchema::new(
+    ColumnSchema::with_positions(
         column_name,
         string_to_postgres_type(&column_type),
         type_modifier,
         nullable,
-        primary_key,
+        ordinal_position,
+        primary_key_position,
     )
 }
 

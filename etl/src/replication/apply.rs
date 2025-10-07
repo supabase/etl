@@ -14,14 +14,14 @@ use tokio::pin;
 use tokio_postgres::types::PgLsn;
 use tracing::{debug, info, warn};
 
+use crate::bail;
 use crate::concurrency::shutdown::ShutdownRx;
 use crate::concurrency::signal::SignalRx;
 use crate::concurrency::stream::{TimeoutStream, TimeoutStreamResult};
 use crate::conversions::event::{
     parse_event_from_begin_message, parse_event_from_commit_message,
     parse_event_from_delete_message, parse_event_from_insert_message,
-    parse_event_from_relation_message, parse_event_from_truncate_message,
-    parse_event_from_update_message,
+    parse_event_from_truncate_message, parse_event_from_update_message,
 };
 use crate::destination::Destination;
 use crate::error::{ErrorKind, EtlResult};
@@ -32,10 +32,9 @@ use crate::metrics::{
 };
 use crate::replication::client::PgReplicationClient;
 use crate::replication::stream::EventsStream;
-use crate::state::table::{RetryPolicy, TableReplicationError};
+use crate::state::table::TableReplicationError;
 use crate::store::schema::SchemaStore;
 use crate::types::{Event, PipelineId};
-use crate::{bail, etl_error};
 
 /// The amount of milliseconds that pass between one refresh and the other of the system, in case no
 /// events or shutdown signal are received.
@@ -279,8 +278,6 @@ impl StatusUpdate {
 enum EndBatch {
     /// The batch should include the last processed event and end.
     Inclusive,
-    /// The batch should exclude the last processed event and end.
-    Exclusive,
 }
 
 /// Result returned from `handle_replication_message` and related functions
@@ -304,7 +301,7 @@ struct HandleMessageResult {
     /// max size and max fill duration. Currently, this will be set in the following
     /// conditions:
     ///
-    /// * Set to [`EndBatch::Inclusive`]` when a commit message indicates that it will
+    /// * Set to [`EndBatch::Inclusive`] when a commit message indicates that it will
     ///   mark the table sync worker as caught up. We want to end the batch in this
     ///   case because we do not want to sent events after this commit message because
     ///   these events will also be sent by the apply worker later, leading to
@@ -352,18 +349,6 @@ impl HandleMessageResult {
     fn return_event(event: Event) -> Self {
         Self {
             event: Some(event),
-            ..Default::default()
-        }
-    }
-
-    /// Creates a result that excludes the current event and requests batch termination.
-    ///
-    /// Used when the current message triggers a recoverable table-level error.
-    /// The error is propagated to be handled by the apply loop hook.
-    fn finish_batch_and_exclude_event(error: TableReplicationError) -> Self {
-        Self {
-            end_batch: Some(EndBatch::Exclusive),
-            table_replication_error: Some(error),
             ..Default::default()
         }
     }
@@ -982,8 +967,9 @@ where
         LogicalReplicationMessage::Commit(commit_body) => {
             handle_commit_message(state, start_lsn, commit_body, hook, pipeline_id).await
         }
-        LogicalReplicationMessage::Relation(relation_body) => {
-            handle_relation_message(state, start_lsn, relation_body, schema_store, hook).await
+        LogicalReplicationMessage::Relation(_) => {
+            debug!("skipping RELATION message");
+            Ok(HandleMessageResult::default())
         }
         LogicalReplicationMessage::Insert(insert_body) => {
             handle_insert_message(state, start_lsn, insert_body, hook, schema_store).await
@@ -1010,69 +996,6 @@ where
         }
         _ => Ok(HandleMessageResult::default()),
     }
-}
-
-/// Handles logical decoding messages emitted by Postgres event triggers.
-///
-/// Currently, processes schema change notifications produced by the
-/// `etl.emit_schema_change_messages` trigger. Unsupported prefixes are ignored so
-/// that other logical decoding messages can be introduced without impacting the
-/// replication pipeline.
-async fn handle_logical_decoding_message(
-    state: &mut ApplyLoopState,
-    start_lsn: PgLsn,
-    message: &protocol::MessageBody,
-) -> EtlResult<HandleMessageResult> {
-    let Some(remote_final_lsn) = state.remote_final_lsn else {
-        bail!(
-            ErrorKind::InvalidState,
-            "Invalid transaction",
-            "A transaction should have started for handle_logical_decoding_message to be performed"
-        );
-    };
-
-    let prefix = match message.prefix() {
-        Ok(prefix) => prefix,
-        Err(error) => {
-            warn!(?error, "failed to read logical decoding message prefix");
-
-            return Ok(HandleMessageResult::default());
-        }
-    };
-
-    if prefix != ETL_PREFIX {
-        debug!(
-            prefix,
-            "ignoring logical decoding message with unsupported prefix {prefix}"
-        );
-
-        return Ok(HandleMessageResult::default());
-    }
-
-    let content = match message.content() {
-        Ok(content) => content,
-        Err(error) => {
-            warn!(?error, "failed to read logical decoding message content");
-            return Ok(HandleMessageResult::default());
-        }
-    };
-
-    let Some(payload) = decode_schema_change_message(content) else {
-        return Ok(HandleMessageResult::default());
-    };
-
-    info!(
-        start_lsn = %start_lsn,
-        commit_lsn = %remote_final_lsn,
-        event = %payload.event,
-        schema_name = %payload.schema_name,
-        table_name = %payload.table_name,
-        table_id = payload.table_id,
-        columns = payload.columns.len(),
-        "received schema change logical decoding message"
-    );
-
-    Ok(HandleMessageResult::default())
 }
 
 /// Handles Postgres BEGIN messages that mark transaction boundaries.
@@ -1216,74 +1139,6 @@ where
 ///
 /// This function processes schema definition messages by validating that table
 /// schemas haven't changed unexpectedly during replication. Schema stability
-/// is critical for maintaining data consistency between source and destination.
-///
-/// When schema changes are detected, the function creates appropriate error
-/// conditions and signals batch termination to prevent processing of events
-/// with mismatched schemas. This protection mechanism ensures data integrity
-/// by failing fast on incompatible schema evolution.
-async fn handle_relation_message<S, T>(
-    state: &mut ApplyLoopState,
-    start_lsn: PgLsn,
-    message: &protocol::RelationBody,
-    schema_store: &S,
-    hook: &T,
-) -> EtlResult<HandleMessageResult>
-where
-    S: SchemaStore + Clone + Send + 'static,
-    T: ApplyLoopHook,
-{
-    let Some(remote_final_lsn) = state.remote_final_lsn else {
-        bail!(
-            ErrorKind::InvalidState,
-            "Invalid transaction",
-            "A transaction should have started for handle_relation_message to be performed"
-        );
-    };
-
-    let table_id = TableId::new(message.rel_id());
-
-    if !hook
-        .should_apply_changes(table_id, remote_final_lsn)
-        .await?
-    {
-        return Ok(HandleMessageResult::no_event());
-    }
-
-    // If no table schema is found, it means that something went wrong since we should have schemas
-    // ready before starting the apply loop.
-    let existing_table_schema =
-        schema_store
-            .get_table_schema(&table_id)
-            .await?
-            .ok_or_else(|| {
-                etl_error!(
-                    ErrorKind::MissingTableSchema,
-                    "Table not found in the schema cache",
-                    format!("The table schema for table {table_id} was not found in the cache")
-                )
-            })?;
-
-    // Convert event from the protocol message.
-    let event = parse_event_from_relation_message(start_lsn, remote_final_lsn, message)?;
-
-    // We compare the table schema from the relation message with the existing schema (if any).
-    // The purpose of this comparison is that we want to throw an error and stop the processing
-    // of any table that incurs in a schema change after the initial table sync is performed.
-    if !existing_table_schema.partial_eq(&event.table_schema) {
-        let error = TableReplicationError::with_solution(
-            table_id,
-            format!("The schema for table {table_id} has changed during streaming"),
-            "ETL doesn't support schema changes at this point in time, rollback the schema",
-            RetryPolicy::ManualRetry,
-        );
-
-        return Ok(HandleMessageResult::finish_batch_and_exclude_event(error));
-    }
-
-    Ok(HandleMessageResult::return_event(Event::Relation(event)))
-}
-
 /// Handles Postgres INSERT messages for row insertion events.
 async fn handle_insert_message<S, T>(
     state: &mut ApplyLoopState,
@@ -1429,4 +1284,67 @@ where
     let event = parse_event_from_truncate_message(start_lsn, remote_final_lsn, message, rel_ids);
 
     Ok(HandleMessageResult::return_event(Event::Truncate(event)))
+}
+
+/// Handles logical decoding messages emitted by Postgres event triggers.
+///
+/// Currently, processes schema change notifications produced by the
+/// `etl.emit_schema_change_messages` trigger. Unsupported prefixes are ignored so
+/// that other logical decoding messages can be introduced without impacting the
+/// replication pipeline.
+async fn handle_logical_decoding_message(
+    state: &mut ApplyLoopState,
+    start_lsn: PgLsn,
+    message: &protocol::MessageBody,
+) -> EtlResult<HandleMessageResult> {
+    let Some(remote_final_lsn) = state.remote_final_lsn else {
+        bail!(
+            ErrorKind::InvalidState,
+            "Invalid transaction",
+            "A transaction should have started for handle_logical_decoding_message to be performed"
+        );
+    };
+
+    let prefix = match message.prefix() {
+        Ok(prefix) => prefix,
+        Err(error) => {
+            warn!(?error, "failed to read logical decoding message prefix");
+
+            return Ok(HandleMessageResult::default());
+        }
+    };
+
+    if prefix != ETL_PREFIX {
+        debug!(
+            prefix,
+            "ignoring logical decoding message with unsupported prefix {prefix}"
+        );
+
+        return Ok(HandleMessageResult::default());
+    }
+
+    let content = match message.content() {
+        Ok(content) => content,
+        Err(error) => {
+            warn!(?error, "failed to read logical decoding message content");
+            return Ok(HandleMessageResult::default());
+        }
+    };
+
+    let Some(payload) = decode_schema_change_message(content) else {
+        return Ok(HandleMessageResult::default());
+    };
+
+    info!(
+        start_lsn = %start_lsn,
+        commit_lsn = %remote_final_lsn,
+        event = %payload.event,
+        schema_name = %payload.schema_name,
+        table_name = %payload.table_name,
+        table_id = payload.table_id,
+        columns = payload.columns.len(),
+        "received schema change logical decoding message"
+    );
+
+    Ok(HandleMessageResult::default())
 }

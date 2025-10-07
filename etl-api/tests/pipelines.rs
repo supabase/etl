@@ -1217,10 +1217,10 @@ async fn deleting_pipeline_removes_table_schemas_from_source_database() {
     ).bind(pipeline_id).bind(table2_oid).fetch_one(&source_db_pool).await.unwrap();
 
     // Insert multiple columns for each table to test CASCADE behavior
-    sqlx::query("INSERT INTO etl.table_columns (table_schema_id, column_name, column_type, type_modifier, nullable, primary_key, column_order) VALUES ($1, 'id', 'INT4', -1, false, true, 0), ($1, 'name', 'TEXT', -1, true, false, 1)")
+    sqlx::query("INSERT INTO etl.table_columns (table_schema_id, column_name, column_type, type_modifier, nullable, primary_key, ordinal_position, primary_key_position) VALUES ($1, 'id', 'INT4', -1, false, true, 1, 1), ($1, 'name', 'TEXT', -1, true, false, 2, NULL)")
         .bind(table_schema_id_1).execute(&source_db_pool).await.unwrap();
 
-    sqlx::query("INSERT INTO etl.table_columns (table_schema_id, column_name, column_type, type_modifier, nullable, primary_key, column_order) VALUES ($1, 'order_id', 'INT8', -1, false, true, 0), ($1, 'amount', 'NUMERIC', -1, false, false, 1)")
+    sqlx::query("INSERT INTO etl.table_columns (table_schema_id, column_name, column_type, type_modifier, nullable, primary_key, ordinal_position, primary_key_position) VALUES ($1, 'order_id', 'INT8', -1, false, true, 1, 1), ($1, 'amount', 'NUMERIC', -1, false, false, 2, NULL)")
         .bind(table_schema_id_2).execute(&source_db_pool).await.unwrap();
 
     // Verify data exists before deletion
