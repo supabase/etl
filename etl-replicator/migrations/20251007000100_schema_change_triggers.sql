@@ -1,6 +1,5 @@
 -- Adds helper functions and event trigger to emit schema change messages via logical decoding.
-create
-or replace function etl.describe_table_schema(p_schema text, p_table text)
+create or replace function etl.describe_table_schema(p_schema text, p_table text)
 returns jsonb
 language sql
 stable
@@ -31,67 +30,53 @@ where c.table_schema = p_schema
   and c.table_name = p_table;
 $$;
 
-drop
-event trigger if exists etl_ddl_message_trigger;
+drop event trigger if exists etl_ddl_message_trigger;
 
-create
-or replace function etl.emit_schema_change_messages()
+create or replace function etl.emit_schema_change_messages()
 returns event_trigger
 language plpgsql
 as
 $$
 declare
-cmd record;
-    table_schema
-text;
-    table_name
-text;
-    table_oid
-oid;
-    schema_json
-jsonb;
-    msg_json
-jsonb;
+    cmd record;
+    table_schema text;
+    table_name text;
+    table_oid oid;
+    schema_json jsonb;
+    msg_json jsonb;
 begin
-for cmd in
-select *
-from pg_event_trigger_ddl_commands() loop if cmd.object_type not in ('table', 'column') then
+    for cmd in
+        select * from pg_event_trigger_ddl_commands()
+    loop
+        if cmd.object_type not in ('table', 'column') then
             continue;
-end if;
+        end if;
 
-        table_schema
-:= cmd.schema_name;
-        table_name
-:= cmd.object_name;
+        table_oid := cmd.objid;
 
-        if
-table_schema is null or table_name is null then
+        if table_oid is null then
             continue;
-end if;
+        end if;
 
-select c.oid
-into table_oid
-from pg_class c
-         join pg_namespace n on n.oid = c.relnamespace
-where n.nspname = table_schema
-  and c.relname = table_name
-  and c.relkind = 'r';
+        select n.nspname, c.relname
+        into table_schema, table_name
+        from pg_class c
+                 join pg_namespace n on n.oid = c.relnamespace
+        where c.oid = table_oid
+          and c.relkind = 'r';
 
-if
-table_oid is null then
+        if table_schema is null or table_name is null then
             continue;
-end if;
+        end if;
 
-select etl.describe_table_schema(table_schema, table_name)
-into schema_json;
+        select etl.describe_table_schema(table_schema, table_name)
+        into schema_json;
 
-if
-schema_json is null then
+        if schema_json is null then
             continue;
-end if;
+        end if;
 
-        msg_json
-:= jsonb_build_object(
+        msg_json := jsonb_build_object(
             'event', cmd.command_tag,
             'schema_name', table_schema,
             'table_name', table_name,
@@ -99,20 +84,18 @@ end if;
             'columns', schema_json
         );
 
-        perform
-pg_logical_emit_message(
+        perform pg_logical_emit_message(
             transactional => true,
             prefix        => 'supabase_etl_ddl',
             content       => msg_json::text
         );
-end loop;
+    end loop;
 
-return null;
+    return;
 end;
 $$;
 
-create
-event trigger etl_ddl_message_trigger
+create event trigger etl_ddl_message_trigger
     on ddl_command_end
-    when tag in ('ALTER TABLE', 'CREATE TABLE', 'RENAME TABLE')
+    when tag = 'ALTER TABLE'
     execute function etl.emit_schema_change_messages();
