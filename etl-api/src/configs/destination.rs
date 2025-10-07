@@ -252,6 +252,8 @@ impl Encrypt<EncryptedStoredDestinationConfig> for StoredDestinationConfig {
                 } => {
                     let encrypted_catalog_token =
                         encrypt_text(catalog_token.expose_secret().to_owned(), encryption_key)?;
+                    let encrypted_s3_access_key_id =
+                        encrypt_text(s3_access_key_id.expose_secret().to_owned(), encryption_key)?;
                     let encrypted_s3_secret_access_key = encrypt_text(
                         s3_secret_access_key.expose_secret().to_owned(),
                         encryption_key,
@@ -262,7 +264,7 @@ impl Encrypt<EncryptedStoredDestinationConfig> for StoredDestinationConfig {
                             warehouse_name,
                             namespace,
                             catalog_token: encrypted_catalog_token,
-                            s3_access_key_id,
+                            s3_access_key_id: encrypted_s3_access_key_id,
                             s3_secret_access_key: encrypted_s3_secret_access_key,
                             s3_region,
                         },
@@ -336,12 +338,17 @@ impl Decrypt<StoredDestinationConfig> for EncryptedStoredDestinationConfig {
                     warehouse_name,
                     namespace,
                     catalog_token: encrypted_catalog_token,
-                    s3_access_key_id,
+                    s3_access_key_id: encrypted_s3_access_key_id,
                     s3_secret_access_key: encrypted_s3_secret_access_key,
                     s3_region,
                 } => {
                     let catalog_token = SerializableSecretString::from(decrypt_text(
                         encrypted_catalog_token,
+                        encryption_key,
+                    )?);
+
+                    let s3_access_key_id = SerializableSecretString::from(decrypt_text(
+                        encrypted_s3_access_key_id,
                         encryption_key,
                     )?);
 
@@ -386,7 +393,7 @@ pub enum StoredIcebergConfig {
         warehouse_name: String,
         namespace: String,
         catalog_token: SerializableSecretString,
-        s3_access_key_id: String,
+        s3_access_key_id: SerializableSecretString,
         s3_secret_access_key: SerializableSecretString,
         s3_region: String,
     },
@@ -412,7 +419,7 @@ pub enum FullApiIcebergConfig {
         )]
         catalog_token: SerializableSecretString,
         #[schema(example = "9156667efc2c70d89af6588da86d2924")]
-        s3_access_key_id: String,
+        s3_access_key_id: SerializableSecretString,
         #[schema(example = "ca833e890916d848c69135924bcd75e5909184814a0ebc6c988937ee094120d4")]
         s3_secret_access_key: SerializableSecretString,
         #[schema(example = "ap-southeast-1")]
@@ -436,7 +443,7 @@ pub enum EncryptedStoredIcebergConfig {
         warehouse_name: String,
         namespace: String,
         catalog_token: EncryptedValue,
-        s3_access_key_id: String,
+        s3_access_key_id: EncryptedValue,
         s3_secret_access_key: EncryptedValue,
         s3_region: String,
     },
@@ -504,7 +511,7 @@ mod tests {
                 warehouse_name: "my-warehouse".to_string(),
                 namespace: "my-namespace".to_string(),
                 catalog_token: SerializableSecretString::from("eyJ0eXAiOiJKV1QiLCJhbGciOiJFUzI1NiIsImtpZCI6IjFkNzFjMGEyNmIxMDFjODQ5ZTkxZmQ1NjdjYjA5NTJmIn0.eyJleHAiOjIwNzA3MTcxNjAsImlhdCI6MTc1NjE0NTE1MCwiaXNzIjoic3VwYWJhc2UiLCJyZWYiOiJhYmNkZWZnaGlqbGttbm9wcXJzdCIsInJvbGUiOiJzZXJ2aWNlX3JvbGUifQ.YdTWkkIvwjSkXot3NC07xyjPjGWQMNzLq5EPzumzrdLzuHrj-zuzI-nlyQtQ5V7gZauysm-wGwmpztRXfPc3AQ".to_string()),
-                s3_access_key_id: "9156667efc2c70d89af6588da86d2924".to_string(),
+                s3_access_key_id: SerializableSecretString::from("9156667efc2c70d89af6588da86d2924".to_string()),
                 s3_secret_access_key: SerializableSecretString::from("ca833e890916d848c69135924bcd75e5909184814a0ebc6c988937ee094120d4".to_string()),
                 s3_region: "ap-southeast-1".to_string(),
             },
@@ -547,7 +554,10 @@ mod tests {
                     p1_catalog_token.expose_secret(),
                     p2_catalog_token.expose_secret()
                 );
-                assert_eq!(p1_s3_access_key_id, p2_s3_access_key_id);
+                assert_eq!(
+                    p1_s3_access_key_id.expose_secret(),
+                    p2_s3_access_key_id.expose_secret()
+                );
                 assert_eq!(
                     p1_s3_secret_access_key.expose_secret(),
                     p2_s3_secret_access_key.expose_secret()
@@ -653,7 +663,7 @@ mod tests {
                 warehouse_name: "my-warehouse".to_string(),
                 namespace: "my-namespace".to_string(),
                 catalog_token: SerializableSecretString::from("eyJ0eXAiOiJKV1QiLCJhbGciOiJFUzI1NiIsImtpZCI6IjFkNzFjMGEyNmIxMDFjODQ5ZTkxZmQ1NjdjYjA5NTJmIn0.eyJleHAiOjIwNzA3MTcxNjAsImlhdCI6MTc1NjE0NTE1MCwiaXNzIjoic3VwYWJhc2UiLCJyZWYiOiJhYmNkZWZnaGlqbGttbm9wcXJzdCIsInJvbGUiOiJzZXJ2aWNlX3JvbGUifQ.YdTWkkIvwjSkXot3NC07xyjPjGWQMNzLq5EPzumzrdLzuHrj-zuzI-nlyQtQ5V7gZauysm-wGwmpztRXfPc3AQ".to_string()),
-                s3_access_key_id: "9156667efc2c70d89af6588da86d2924".to_string(),
+                s3_access_key_id: SerializableSecretString::from("9156667efc2c70d89af6588da86d2924".to_string()),
                 s3_secret_access_key: SerializableSecretString::from("ca833e890916d848c69135924bcd75e5909184814a0ebc6c988937ee094120d4".to_string()),
                 s3_region: "ap-southeast-1".to_string(),
             },
@@ -697,7 +707,10 @@ mod tests {
                 assert_eq!(p1_project_ref, p2_project_ref);
                 assert_eq!(p1_warehouse_name, p2_warehouse_name);
                 assert_eq!(p1_namespace, p2_namespace);
-                assert_eq!(p1_s3_access_key_id, p2_s3_access_key_id);
+                assert_eq!(
+                    p1_s3_access_key_id.expose_secret(),
+                    p2_s3_access_key_id.expose_secret()
+                );
                 assert_eq!(p1_s3_region, p2_s3_region);
                 // Assert that secret fields were encrypted and decrypted correctly
                 assert_eq!(
@@ -815,7 +828,7 @@ mod tests {
                 warehouse_name: "my-warehouse".to_string(),
                 namespace: "my-namespace".to_string(),
                 catalog_token: SerializableSecretString::from("eyJ0eXAiOiJKV1QiLCJhbGciOiJFUzI1NiIsImtpZCI6IjFkNzFjMGEyNmIxMDFjODQ5ZTkxZmQ1NjdjYjA5NTJmIn0.eyJleHAiOjIwNzA3MTcxNjAsImlhdCI6MTc1NjE0NTE1MCwiaXNzIjoic3VwYWJhc2UiLCJyZWYiOiJhYmNkZWZnaGlqbGttbm9wcXJzdCIsInJvbGUiOiJzZXJ2aWNlX3JvbGUifQ.YdTWkkIvwjSkXot3NC07xyjPjGWQMNzLq5EPzumzrdLzuHrj-zuzI-nlyQtQ5V7gZauysm-wGwmpztRXfPc3AQ".to_string()),
-                s3_access_key_id: "9156667efc2c70d89af6588da86d2924".to_string(),
+                s3_access_key_id: SerializableSecretString::from("9156667efc2c70d89af6588da86d2924".to_string()),
                 s3_secret_access_key: SerializableSecretString::from("ca833e890916d848c69135924bcd75e5909184814a0ebc6c988937ee094120d4".to_string()),
                 s3_region: "ap-southeast-1".to_string(),
             },
@@ -858,7 +871,10 @@ mod tests {
                     p1_catalog_token.expose_secret(),
                     p2_catalog_token.expose_secret()
                 );
-                assert_eq!(p1_s3_access_key_id, p2_s3_access_key_id);
+                assert_eq!(
+                    p1_s3_access_key_id.expose_secret(),
+                    p2_s3_access_key_id.expose_secret()
+                );
                 assert_eq!(
                     p1_s3_secret_access_key.expose_secret(),
                     p2_s3_secret_access_key.expose_secret()
@@ -918,7 +934,7 @@ mod tests {
                 warehouse_name: "my-warehouse".to_string(),
                 namespace: "my-namespace".to_string(),
                 catalog_token: SerializableSecretString::from("token123".to_string()),
-                s3_access_key_id: "access_key_123".to_string(),
+                s3_access_key_id: SerializableSecretString::from("access_key_123".to_string()),
                 s3_secret_access_key: SerializableSecretString::from("secret123".to_string()),
                 s3_region: "us-west-2".to_string(),
             },
@@ -964,7 +980,10 @@ mod tests {
                     orig_catalog_token.expose_secret(),
                     deser_catalog_token.expose_secret()
                 );
-                assert_eq!(orig_s3_access_key_id, &deser_s3_access_key_id);
+                assert_eq!(
+                    orig_s3_access_key_id.expose_secret(),
+                    deser_s3_access_key_id.expose_secret()
+                );
                 assert_eq!(
                     orig_s3_secret_access_key.expose_secret(),
                     deser_s3_secret_access_key.expose_secret()

@@ -59,7 +59,7 @@ pub enum IcebergConfig {
         /// Catalog authentication token
         catalog_token: SerializableSecretString,
         /// The S3 access key id
-        s3_access_key_id: String,
+        s3_access_key_id: SerializableSecretString,
         /// The S3 secret access key
         s3_secret_access_key: SerializableSecretString,
         /// The S3 region

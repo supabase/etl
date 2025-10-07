@@ -92,7 +92,7 @@ pub async fn start_replicator_with_config(
                 supabase_domain,
                 catalog_token.expose_secret().to_string(),
                 warehouse_name.clone(),
-                s3_access_key_id.clone(),
+                s3_access_key_id.expose_secret().to_string(),
                 s3_secret_access_key.expose_secret().to_string(),
                 s3_region.clone(),
             );
@@ -160,18 +160,14 @@ fn log_destination_config(config: &DestinationConfig) {
                     project_ref,
                     catalog_token: _,
                     warehouse_name,
-                    s3_access_key_id,
+                    s3_access_key_id: _,
                     s3_secret_access_key: _,
                     s3_region,
                 },
         } => {
             debug!(
                 namespace,
-                project_ref,
-                warehouse_name,
-                s3_access_key_id,
-                s3_region,
-                "using Supabase iceberg destination config"
+                project_ref, warehouse_name, s3_region, "using Supabase iceberg destination config"
             )
         }
         DestinationConfig::Iceberg {
