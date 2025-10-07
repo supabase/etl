@@ -9,8 +9,9 @@ use reqwest::StatusCode;
 use crate::{
     support::mocks::create_default_image,
     support::mocks::destinations::{
-        create_destination, create_destination_with_config, new_destination_config, new_name,
-        updated_destination_config, updated_name,
+        create_destination, create_destination_with_config, new_bigquery_destination_config,
+        new_iceberg_supabase_destination_config, new_name, updated_destination_config,
+        updated_iceberg_supabase_destination_config, updated_name,
     },
     support::mocks::pipelines::new_pipeline_config,
     support::mocks::sources::create_source,
@@ -21,7 +22,7 @@ use crate::{
 mod support;
 
 #[tokio::test(flavor = "multi_thread")]
-async fn destination_can_be_created() {
+async fn bigquery_destination_can_be_created() {
     init_test_tracing();
     // Arrange
     let app = spawn_test_app().await;
@@ -30,7 +31,30 @@ async fn destination_can_be_created() {
     // Act
     let destination = CreateDestinationRequest {
         name: new_name(),
-        config: new_destination_config(),
+        config: new_bigquery_destination_config(),
+    };
+    let response = app.create_destination(tenant_id, &destination).await;
+
+    // Assert
+    assert!(response.status().is_success());
+    let response: CreateDestinationResponse = response
+        .json()
+        .await
+        .expect("failed to deserialize response");
+    assert_eq!(response.id, 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn iceberg_supabase_destination_can_be_created() {
+    init_test_tracing();
+    // Arrange
+    let app = spawn_test_app().await;
+    let tenant_id = &create_tenant(&app).await;
+
+    // Act
+    let destination = CreateDestinationRequest {
+        name: "Iceberg Supabase Destination".to_string(),
+        config: new_iceberg_supabase_destination_config(),
     };
     let response = app.create_destination(tenant_id, &destination).await;
 
@@ -52,7 +76,7 @@ async fn an_existing_destination_can_be_read() {
 
     let destination = CreateDestinationRequest {
         name: new_name(),
-        config: new_destination_config(),
+        config: new_bigquery_destination_config(),
     };
     let response = app.create_destination(tenant_id, &destination).await;
     let response: CreateDestinationResponse = response
@@ -91,7 +115,7 @@ async fn non_existing_destination_cannot_be_read() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn an_existing_destination_can_be_updated() {
+async fn an_existing_bigquery_destination_can_be_updated() {
     init_test_tracing();
     // Arrange
     let app = spawn_test_app().await;
@@ -99,7 +123,7 @@ async fn an_existing_destination_can_be_updated() {
 
     let destination = CreateDestinationRequest {
         name: new_name(),
-        config: new_destination_config(),
+        config: new_bigquery_destination_config(),
     };
     let response = app.create_destination(tenant_id, &destination).await;
     let response: CreateDestinationResponse = response
@@ -112,6 +136,46 @@ async fn an_existing_destination_can_be_updated() {
     let updated_config = UpdateDestinationRequest {
         name: updated_name(),
         config: updated_destination_config(),
+    };
+    let response = app
+        .update_destination(tenant_id, destination_id, &updated_config)
+        .await;
+
+    // Assert
+    assert!(response.status().is_success());
+    let response = app.read_destination(tenant_id, destination_id).await;
+    let response: ReadDestinationResponse = response
+        .json()
+        .await
+        .expect("failed to deserialize response");
+    assert_eq!(response.id, destination_id);
+    assert_eq!(&response.tenant_id, tenant_id);
+    assert_eq!(response.name, updated_config.name);
+    insta::assert_debug_snapshot!(response.config);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_existing_iceberg_supabase_destination_can_be_updated() {
+    init_test_tracing();
+    // Arrange
+    let app = spawn_test_app().await;
+    let tenant_id = &create_tenant(&app).await;
+
+    let destination = CreateDestinationRequest {
+        name: "Iceberg Supabase Destination".to_string(),
+        config: new_iceberg_supabase_destination_config(),
+    };
+    let response = app.create_destination(tenant_id, &destination).await;
+    let response: CreateDestinationResponse = response
+        .json()
+        .await
+        .expect("failed to deserialize response");
+    let destination_id = response.id;
+
+    // Act
+    let updated_config = UpdateDestinationRequest {
+        name: "Iceberg Supabase Destination (Updated)".to_string(),
+        config: updated_iceberg_supabase_destination_config(),
     };
     let response = app
         .update_destination(tenant_id, destination_id, &updated_config)
@@ -157,7 +221,7 @@ async fn an_existing_destination_can_be_deleted() {
 
     let destination = CreateDestinationRequest {
         name: new_name(),
-        config: new_destination_config(),
+        config: new_bigquery_destination_config(),
     };
     let response = app.create_destination(tenant_id, &destination).await;
     let response: CreateDestinationResponse = response
@@ -195,8 +259,13 @@ async fn all_destinations_can_be_read() {
     // Arrange
     let app = spawn_test_app().await;
     let tenant_id = &create_tenant(&app).await;
-    let destination1_id =
-        create_destination_with_config(&app, tenant_id, new_name(), new_destination_config()).await;
+    let destination1_id = create_destination_with_config(
+        &app,
+        tenant_id,
+        new_name(),
+        new_bigquery_destination_config(),
+    )
+    .await;
     let destination2_id = create_destination_with_config(
         &app,
         tenant_id,

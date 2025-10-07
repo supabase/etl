@@ -1,0 +1,17 @@
+---
+source: etl-api/src/configs/destination.rs
+expression: full_config
+---
+{
+  "iceberg": {
+    "supabase": {
+      "project_ref": "abcdefghijklmnopqrst",
+      "warehouse_name": "my-warehouse",
+      "namespace": "my-namespace",
+      "catalog_token": "token123",
+      "s3_access_key_id": "access_key_123",
+      "s3_secret_access_key": "secret123",
+      "s3_region": "us-west-2"
+    }
+  }
+}

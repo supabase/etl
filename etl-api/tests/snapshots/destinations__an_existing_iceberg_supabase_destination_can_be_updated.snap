@@ -1,0 +1,19 @@
+---
+source: etl-api/tests/destinations.rs
+expression: response.config
+---
+Iceberg {
+    config: Supabase {
+        project_ref: "tsrqponmlkjihgfedcba",
+        warehouse_name: "my-updated-warehouse",
+        namespace: "my-updated-namespace",
+        catalog_token: SerializableSecretString(
+            SecretBox<str>([REDACTED]),
+        ),
+        s3_access_key_id: "updated9156667efc2c70d89af6588da86d2924",
+        s3_secret_access_key: SerializableSecretString(
+            SecretBox<str>([REDACTED]),
+        ),
+        s3_region: "us-west-2",
+    },
+}
