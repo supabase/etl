@@ -367,7 +367,7 @@ impl fmt::Display for EtlError {
                             if line.trim().is_empty() {
                                 write!(f, "\n    ")?;
                             } else {
-                                write!(f, "\n    {}", line)?;
+                                write!(f, "\n    {line}")?;
                             }
                         }
                     }
@@ -391,7 +391,7 @@ impl fmt::Display for EtlError {
                     write!(f, "\n  (no inner errors provided)")?;
                 } else {
                     for (index, error) in errors.iter().enumerate() {
-                        let rendered = format!("{}", error);
+                        let rendered = format!("{error}");
                         let mut lines = rendered.lines();
                         if let Some(first_line) = lines.next() {
                             write!(f, "\n  {}. {}", index + 1, first_line)?;
@@ -402,7 +402,7 @@ impl fmt::Display for EtlError {
                             if line.is_empty() {
                                 write!(f, "\n     ")?;
                             } else {
-                                write!(f, "\n     {}", line)?;
+                                write!(f, "\n     {line}")?;
                             }
                         }
                     }
@@ -424,7 +424,7 @@ fn write_metadata(
     let indent_str = "  ".repeat(indent);
 
     if !metadata.contexts.is_empty() {
-        write!(f, "\n{}Context:", indent_str)?;
+        write!(f, "\n{indent_str}Context:")?;
         for frame in metadata.contexts() {
             let location = frame.location();
             write!(
@@ -441,12 +441,12 @@ fn write_metadata(
 
     let rendered_backtrace = format!("{}", metadata.backtrace());
     if !rendered_backtrace.trim().is_empty() {
-        write!(f, "\n{}Backtrace:", indent_str)?;
+        write!(f, "\n{indent_str}Backtrace:")?;
         for line in rendered_backtrace.lines() {
             if line.trim().is_empty() {
-                write!(f, "\n{}  ", indent_str)?;
+                write!(f, "\n{indent_str}  ")?;
             } else {
-                write!(f, "\n{}  {}", indent_str, line)?;
+                write!(f, "\n{indent_str}  {line}")?;
             }
         }
     }
