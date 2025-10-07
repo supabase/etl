@@ -83,9 +83,9 @@ begin
         );
 
         perform pg_logical_emit_message(
-            transactional => true,
-            prefix        => 'supabase_etl_ddl',
-            content       => msg_json::text
+            true,
+            'supabase_etl_ddl',
+            convert_to(msg_json::text, 'utf8')
         );
     end loop;
 
@@ -95,5 +95,5 @@ $$;
 
 create event trigger etl_ddl_message_trigger
     on ddl_command_end
-    when tag = 'ALTER TABLE'
+    when tag in ('ALTER TABLE')
     execute function etl.emit_schema_change_messages();
