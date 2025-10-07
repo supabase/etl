@@ -30,8 +30,6 @@ where c.table_schema = p_schema
   and c.table_name = p_table;
 $$;
 
-drop event trigger if exists etl_ddl_message_trigger;
-
 create or replace function etl.emit_schema_change_messages()
 returns event_trigger
 language plpgsql
