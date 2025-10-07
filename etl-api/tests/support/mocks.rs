@@ -78,7 +78,7 @@ pub mod destinations {
                 catalog_token: SerializableSecretString::from(
                     "eyJ0eXAiOiJKV1QiLCJhbGciOiJFUzI1NiIsImtpZCI6IjFkNzFjMGEyNmIxMDFjODQ5ZTkxZmQ1NjdjYjA5NTJmIn0.eyJleHAiOjIwNzA3MTcxNjAsImlhdCI6MTc1NjE0NTE1MCwiaXNzIjoic3VwYWJhc2UiLCJyZWYiOiJhYmNkZWZnaGlqbGttbm9wcXJzdCIsInJvbGUiOiJzZXJ2aWNlX3JvbGUifQ.YdTWkkIvwjSkXot3NC07xyjPjGWQMNzLq5EPzumzrdLzuHrj-zuzI-nlyQtQ5V7gZauysm-wGwmpztRXfPc3AQ".to_string()
                 ),
-                s3_access_key_id: "9156667efc2c70d89af6588da86d2924".to_string(),
+                s3_access_key_id: SerializableSecretString::from("9156667efc2c70d89af6588da86d2924".to_string()),
                 s3_secret_access_key: SerializableSecretString::from(
                     "ca833e890916d848c69135924bcd75e5909184814a0ebc6c988937ee094120d4".to_string()
                 ),
@@ -99,7 +99,7 @@ pub mod destinations {
                 catalog_token: SerializableSecretString::from(
                     "eyJ0eXAiOiJKV1QiLCJhbGciOiJFUzI1NiIsImtpZCI6IjJlOGQxZDNjN2MyMTJkOTU4ZmEyOGU2ZDhjZDEwYTMzIn0.eyJleHAiOjIwNzA3MTcxNjAsImlhdCI6MTc1NjE0NTE1MCwiaXNzIjoic3VwYWJhc2UiLCJyZWYiOiJ0c3JxcG9ubWxramloZ2ZlZGNiYSIsInJvbGUiOiJzZXJ2aWNlX3JvbGUifQ.UpdatedTokenSignatureForTesting".to_string()
                 ),
-                s3_access_key_id: "updated9156667efc2c70d89af6588da86d2924".to_string(),
+                s3_access_key_id: SerializableSecretString::from("updated9156667efc2c70d89af6588da86d2924".to_string()),
                 s3_secret_access_key: SerializableSecretString::from(
                     "updatedca833e890916d848c69135924bcd75e5909184814a0ebc6c988937ee094120d4".to_string()
                 ),
