@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::pin;
 use tokio_postgres::types::PgLsn;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::bail;
 use crate::concurrency::shutdown::ShutdownRx;
@@ -1317,7 +1317,7 @@ async fn handle_logical_decoding_message(
     if prefix != ETL_PREFIX {
         debug!(
             prefix,
-            "ignoring logical decoding message with unsupported prefix {prefix}"
+            "ignoring logical decoding message with unsupported prefix '{prefix}'"
         );
 
         return Ok(HandleMessageResult::default());
@@ -1332,6 +1332,7 @@ async fn handle_logical_decoding_message(
     };
 
     let Some(payload) = decode_schema_change_message(content) else {
+        error!("didn't manage");
         return Ok(HandleMessageResult::default());
     };
 

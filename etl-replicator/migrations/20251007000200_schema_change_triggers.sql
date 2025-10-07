@@ -78,7 +78,7 @@ begin
             'event', cmd.command_tag,
             'schema_name', table_schema,
             'table_name', table_name,
-            'table_id', table_oid,
+            'table_id', table_oid::bigint,
             'columns', schema_json
         );
 
