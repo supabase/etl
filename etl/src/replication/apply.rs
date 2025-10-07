@@ -5,13 +5,14 @@ use futures::StreamExt;
 use metrics::histogram;
 use postgres_replication::protocol;
 use postgres_replication::protocol::{LogicalReplicationMessage, ReplicationMessage};
+use serde::Deserialize;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::pin;
 use tokio_postgres::types::PgLsn;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use crate::concurrency::shutdown::ShutdownRx;
 use crate::concurrency::signal::SignalRx;
@@ -39,6 +40,74 @@ use crate::{bail, etl_error};
 /// The amount of milliseconds that pass between one refresh and the other of the system, in case no
 /// events or shutdown signal are received.
 const REFRESH_INTERVAL: Duration = Duration::from_millis(1000);
+
+/// The prefix for the custom logical message.
+const ETL_PREFIX: &str = "supabase_etl_ddl";
+
+/// Column metadata produced by the schema change event trigger.
+///
+/// The struct mirrors the JSON payload emitted by the
+/// `etl.emit_schema_change_messages` trigger, enabling precise reconstruction of the
+/// table definition that triggered the event.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+struct SchemaChangeColumn {
+    /// Column identifier in the source table.
+    column_name: String,
+    /// Position of the column within the table definition.
+    ordinal_position: i32,
+    /// Native Postgres data type for the column.
+    data_type: String,
+    /// Nullability marker reported by `information_schema.columns`.
+    is_nullable: String,
+    /// Optional default expression for the column.
+    column_default: Option<String>,
+    /// True when the column belongs to the primary key.
+    is_primary_key: bool,
+    /// Relative position inside the primary key, if applicable.
+    primary_key_position: Option<i32>,
+}
+
+/// Schema change message emitted through logical decoding.
+///
+/// The payload describes the DDL command tag, fully qualified table name, and
+/// the complete collection of column definitions captured at the time of the change.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+struct SchemaChangeMessage {
+    /// Command tag describing the triggering DDL operation.
+    event: String,
+    /// Schema that owns the modified table.
+    schema_name: String,
+    /// Name of the table affected by the schema change.
+    table_name: String,
+    /// Postgres OID identifying the table when it exists at commit time.
+    table_id: u32,
+    /// Ordered collection of column metadata for the table.
+    columns: Vec<SchemaChangeColumn>,
+}
+
+/// Attempts to deserialize a schema change message from raw logical decoding text.
+///
+/// Returns `None` when the payload is not valid JSON matching
+/// [`SchemaChangeMessage`]. Diagnostic warnings are emitted to aid debugging while
+/// ensuring replication continues uninterrupted.
+fn decode_schema_change_message(content: &str) -> Option<SchemaChangeMessage> {
+    let payload = match serde_json::from_str::<SchemaChangeMessage>(content) {
+        Ok(message) => message,
+        Err(error) => {
+            warn!(
+                ?error,
+                raw_message = %content,
+                "failed to decode schema change message, skipping"
+            );
+
+            return None;
+        }
+    };
+
+    Some(payload)
+}
 
 /// Result type for the apply loop execution.
 ///
@@ -928,6 +997,9 @@ where
         LogicalReplicationMessage::Truncate(truncate_body) => {
             handle_truncate_message(state, start_lsn, truncate_body, hook).await
         }
+        LogicalReplicationMessage::Message(message_body) => {
+            handle_logical_decoding_message(state, start_lsn, message_body).await
+        }
         LogicalReplicationMessage::Origin(_) => {
             debug!("received unsupported ORIGIN message");
             Ok(HandleMessageResult::default())
@@ -938,6 +1010,69 @@ where
         }
         _ => Ok(HandleMessageResult::default()),
     }
+}
+
+/// Handles logical decoding messages emitted by Postgres event triggers.
+///
+/// Currently, processes schema change notifications produced by the
+/// `etl.emit_schema_change_messages` trigger. Unsupported prefixes are ignored so
+/// that other logical decoding messages can be introduced without impacting the
+/// replication pipeline.
+async fn handle_logical_decoding_message(
+    state: &mut ApplyLoopState,
+    start_lsn: PgLsn,
+    message: &protocol::MessageBody,
+) -> EtlResult<HandleMessageResult> {
+    let Some(remote_final_lsn) = state.remote_final_lsn else {
+        bail!(
+            ErrorKind::InvalidState,
+            "Invalid transaction",
+            "A transaction should have started for handle_logical_decoding_message to be performed"
+        );
+    };
+
+    let prefix = match message.prefix() {
+        Ok(prefix) => prefix,
+        Err(error) => {
+            warn!(?error, "failed to read logical decoding message prefix");
+
+            return Ok(HandleMessageResult::default());
+        }
+    };
+
+    if prefix != ETL_PREFIX {
+        debug!(
+            prefix,
+            "ignoring logical decoding message with unsupported prefix {prefix}"
+        );
+
+        return Ok(HandleMessageResult::default());
+    }
+
+    let content = match message.content() {
+        Ok(content) => content,
+        Err(error) => {
+            warn!(?error, "failed to read logical decoding message content");
+            return Ok(HandleMessageResult::default());
+        }
+    };
+
+    let Some(payload) = decode_schema_change_message(content) else {
+        return Ok(HandleMessageResult::default());
+    };
+
+    info!(
+        start_lsn = %start_lsn,
+        commit_lsn = %remote_final_lsn,
+        event = %payload.event,
+        schema_name = %payload.schema_name,
+        table_name = %payload.table_name,
+        table_id = payload.table_id,
+        columns = payload.columns.len(),
+        "received schema change logical decoding message"
+    );
+
+    Ok(HandleMessageResult::default())
 }
 
 /// Handles Postgres BEGIN messages that mark transaction boundaries.

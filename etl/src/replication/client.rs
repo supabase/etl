@@ -446,7 +446,7 @@ impl PgReplicationClient {
 
         // Do not convert the query or the options to lowercase, see comment in `create_slot_internal`.
         let options = format!(
-            r#"("proto_version" '1', "publication_names" {})"#,
+            r#"("proto_version" '1', "publication_names" {}, "messages" 'true')"#,
             quote_literal(quote_identifier(publication_name).as_ref()),
         );
 
