@@ -3,7 +3,7 @@ use actix_web::{
     body::MessageBody,
     dev::{ServiceRequest, ServiceResponse},
 };
-use tracing::{Span, info};
+use tracing::{Span, debug};
 use tracing_actix_web::{DefaultRootSpanBuilder, RootSpanBuilder};
 
 /// The `RootSpanBuilder` implementation for the API service.
@@ -34,7 +34,7 @@ impl RootSpanBuilder for ApiRootSpanBuilder {
         // automatically before the request is handled.
         {
             let _enter = span.enter();
-            info!(
+            debug!(
                 method = %request.method(),
                 uri = %request.uri(),
                 path = %request.path(),
@@ -52,11 +52,12 @@ impl RootSpanBuilder for ApiRootSpanBuilder {
         DefaultRootSpanBuilder::on_request_end(span, outcome);
 
         // In case we have a positive response, we want to log the success. In case of error, it will
-        // be logged automatically since we have the `emit_event_on_error` feature enabled.
+        // be logged automatically since we have the `emit_event_on_error` feature enabled on
+        // `tracing-actix-web` crate.
         if let Ok(response) = outcome
             && response.response().error().is_none()
         {
-            info!("HTTP request completed successfully");
+            debug!("HTTP request completed successfully");
         }
     }
 }
