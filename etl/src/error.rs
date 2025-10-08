@@ -75,7 +75,6 @@ enum ErrorRepr {
     Many {
         errors: Vec<EtlError>,
         location: &'static Location<'static>,
-        backtrace: Arc<Backtrace>,
     },
 }
 
@@ -203,10 +202,10 @@ impl EtlError {
     }
 
     /// Returns the captured backtrace for this error.
-    pub fn backtrace(&self) -> &Backtrace {
+    pub fn backtrace(&self) -> Option<&Backtrace> {
         match self.repr {
-            ErrorRepr::Single(ref payload) => payload.backtrace.as_ref(),
-            ErrorRepr::Many { ref backtrace, .. } => backtrace.as_ref(),
+            ErrorRepr::Single(ref payload) => Some(payload.backtrace.as_ref()),
+            ErrorRepr::Many { .. } => None,
         }
     }
 
@@ -302,11 +301,7 @@ impl fmt::Display for EtlError {
 
                 Ok(())
             }
-            ErrorRepr::Many {
-                errors,
-                location,
-                backtrace,
-            } => {
+            ErrorRepr::Many { errors, location } => {
                 let count = errors.len();
                 write!(
                     f,
@@ -317,8 +312,6 @@ impl fmt::Display for EtlError {
                     location.line(),
                     location.column()
                 )?;
-
-                write_backtrace(backtrace.as_ref(), f, 1)?;
 
                 if errors.is_empty() {
                     write!(f, "\n  (no inner errors provided)")?;
@@ -434,16 +427,11 @@ where
     #[track_caller]
     fn from(errors: Vec<E>) -> EtlError {
         let location = Location::caller();
-        let backtrace = Arc::new(Backtrace::capture());
 
         let errors = errors.into_iter().map(Into::into).collect();
 
         EtlError {
-            repr: ErrorRepr::Many {
-                errors,
-                location,
-                backtrace,
-            },
+            repr: ErrorRepr::Many { errors, location },
         }
     }
 }
@@ -1229,7 +1217,7 @@ mod tests {
         assert!(kinds.contains(&ErrorKind::IoError));
 
         let rendered = format!("{outer_multi}");
-        println!("{}", rendered);
+        println!("{rendered}");
         assert!(rendered.contains("[Many] 2 errors aggregated"));
         assert!(rendered.contains("1. [Many]"));
     }
