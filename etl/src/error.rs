@@ -1107,9 +1107,7 @@ mod tests {
 
     #[test]
     fn test_many_forwards_source() {
-        let inner = EtlError::from(std::io::Error::other(
-            "inner failure",
-        ));
+        let inner = EtlError::from(std::io::Error::other("inner failure"));
         let outer = EtlError::many(vec![
             inner.clone(),
             EtlError::from((ErrorKind::Unknown, "x")),
@@ -1136,7 +1134,7 @@ mod tests {
         let err_with_owned = etl_error!(
             ErrorKind::InvalidData,
             "Owned detail preserved",
-            detail = owned_detail
+            owned_detail
         );
         assert_eq!(err_with_owned.detail(), Some("Owned detail"));
     }
@@ -1172,7 +1170,7 @@ mod tests {
             bail!(
                 ErrorKind::DestinationError,
                 "Test error with owned detail",
-                detail = detail
+                detail
             );
         }
 

@@ -16,12 +16,6 @@ macro_rules! etl_error {
     ($kind:expr, $desc:expr, source: $source:expr) => {
         $crate::error::EtlError::from(($kind, $desc)).with_source($source)
     };
-    ($kind:expr, $desc:expr, detail = $detail:expr) => {
-        $crate::error::EtlError::from(($kind, $desc, $detail))
-    };
-    ($kind:expr, $desc:expr, detail = $detail:expr, source: $source:expr) => {
-        $crate::error::EtlError::from(($kind, $desc, $detail)).with_source($source)
-    };
     ($kind:expr, $desc:expr, $detail:expr) => {
         $crate::error::EtlError::from(($kind, $desc, $detail.to_string()))
     };
@@ -42,17 +36,6 @@ macro_rules! bail {
     };
     ($kind:expr, $desc:expr, source: $source:expr) => {
         return ::core::result::Result::Err($crate::etl_error!($kind, $desc, source: $source))
-    };
-    ($kind:expr, $desc:expr, detail = $detail:expr) => {
-        return ::core::result::Result::Err($crate::etl_error!($kind, $desc, detail = $detail))
-    };
-    ($kind:expr, $desc:expr, detail = $detail:expr, source: $source:expr) => {
-        return ::core::result::Result::Err($crate::etl_error!(
-            $kind,
-            $desc,
-            detail = $detail,
-            source: $source
-        ))
     };
     ($kind:expr, $desc:expr, $detail:expr) => {
         return ::core::result::Result::Err($crate::etl_error!($kind, $desc, $detail))
