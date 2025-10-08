@@ -398,6 +398,7 @@ impl error::Error for EtlError {
                 .source
                 .as_ref()
                 .map(|source| source as &(dyn error::Error + 'static)),
+            // For aggregated errors, we forward the first contained error as the source.
             ErrorRepr::Many { errors, .. } => errors
                 .first()
                 .map(|error| error as &(dyn error::Error + 'static)),
