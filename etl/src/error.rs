@@ -1,12 +1,14 @@
 //! Error types and result definitions for ETL operations.
 //!
 //! Provides a comprehensive error system with classification, aggregation, and captured
-//! backtrace information for ETL pipeline operations. The [`EtlError`] type supports single errors,
+//! diagnostic metadata for ETL pipeline operations. The [`EtlError`] type supports single errors,
 //! errors with additional detail, and multiple aggregated errors for complex failure scenarios.
 
 use std::backtrace::Backtrace;
+use std::borrow::Cow;
 use std::error;
 use std::fmt;
+use std::panic::Location;
 use std::sync::Arc;
 
 use crate::conversions::numeric::ParseNumericError;
@@ -19,19 +21,26 @@ pub type EtlResult<T> = Result<T, EtlError>;
 
 /// Collected metadata used to augment error diagnostics.
 ///
-/// Currently only retains captured backtraces, but keeping the wrapper simplifies
-/// future extensions if richer metadata becomes necessary again.
+/// Retains both the callsite location and captured backtrace for later inspection. The wrapper
+/// keeps future extensions simple if richer metadata becomes necessary again.
 #[derive(Debug, Clone)]
 struct ErrorMetadata {
+    location: &'static Location<'static>,
     backtrace: Arc<Backtrace>,
 }
 
 impl ErrorMetadata {
-    /// Captures a new metadata instance with a fresh backtrace.
-    fn capture() -> Self {
+    /// Captures metadata from the provided callsite.
+    fn new(location: &'static Location<'static>) -> Self {
         Self {
+            location,
             backtrace: Arc::new(Backtrace::capture()),
         }
+    }
+
+    /// Returns the captured location.
+    fn location(&self) -> &'static Location<'static> {
+        self.location
     }
 
     /// Returns the captured backtrace.
@@ -44,8 +53,8 @@ impl ErrorMetadata {
 #[derive(Debug, Clone)]
 struct ErrorPayload {
     kind: ErrorKind,
-    description: &'static str,
-    detail: Option<String>,
+    description: Cow<'static, str>,
+    detail: Option<Cow<'static, str>>,
     source: Option<Arc<dyn error::Error + Send + Sync>>,
     metadata: ErrorMetadata,
 }
@@ -54,16 +63,17 @@ impl ErrorPayload {
     /// Creates a new payload with optional dynamic detail.
     fn new(
         kind: ErrorKind,
-        description: &'static str,
-        detail: Option<String>,
+        description: Cow<'static, str>,
+        detail: Option<Cow<'static, str>>,
         source: Option<Arc<dyn error::Error + Send + Sync>>,
+        location: &'static Location<'static>,
     ) -> Self {
         Self {
             kind,
             description,
             detail,
             source,
-            metadata: ErrorMetadata::capture(),
+            metadata: ErrorMetadata::new(location),
         }
     }
 }
@@ -178,20 +188,6 @@ pub enum ErrorKind {
 }
 
 impl EtlError {
-    /// Creates an [`EtlError`] containing multiple aggregated errors.
-    ///
-    /// This is useful when multiple operations fail, and you want to report all failures
-    /// rather than just the first one.
-    pub fn many(errors: Vec<EtlError>) -> EtlError {
-        let errors = flatten_errors(errors);
-        EtlError {
-            repr: ErrorRepr::Many {
-                errors,
-                metadata: ErrorMetadata::capture(),
-            },
-        }
-    }
-
     /// Returns the [`ErrorKind`] of this error.
     ///
     /// For multiple errors, returns the kind of the first error or [`ErrorKind::Unknown`]
@@ -242,6 +238,14 @@ impl EtlError {
         }
     }
 
+    /// Returns the captured callsite location for this error.
+    pub fn location(&self) -> &'static Location<'static> {
+        match self.repr {
+            ErrorRepr::Single(ref payload) => payload.metadata.location(),
+            ErrorRepr::Many { ref metadata, .. } => metadata.location(),
+        }
+    }
+
     /// Attaches an originating [`error::Error`] to this error and returns the modified instance.
     ///
     /// The stored source is preserved across clones and exposed via [`error::Error::source`].
@@ -255,16 +259,28 @@ impl EtlError {
         self
     }
 
-    /// Attaches an originating [`error::Error`] to this error in place.
-    ///
-    /// Has no effect when invoked on aggregated errors; see [`EtlError::with_source`].
-    pub fn add_source<E>(&mut self, source: E)
-    where
-        E: error::Error + Send + Sync + 'static,
-    {
-        self.set_source(Some(Arc::new(source)));
+    /// Creates an [`EtlError`] from its components.
+    #[track_caller]
+    fn from_components(
+        kind: ErrorKind,
+        description: Cow<'static, str>,
+        detail: Option<Cow<'static, str>>,
+        source: Option<Arc<dyn error::Error + Send + Sync>>,
+    ) -> Self {
+        let location = Location::caller();
+
+        EtlError {
+            repr: ErrorRepr::Single(ErrorPayload::new(
+                kind,
+                description,
+                detail,
+                source,
+                location,
+            )),
+        }
     }
 
+    /// Sets the source for this [`EtlError`].
     fn set_source(&mut self, source: Option<Arc<dyn error::Error + Send + Sync>>) {
         if let ErrorRepr::Single(ref mut payload) = self.repr {
             payload.source = source;
@@ -274,7 +290,7 @@ impl EtlError {
 
 /// Flattens nested aggregated errors into a single vector.
 fn flatten_errors(errors: Vec<EtlError>) -> Vec<EtlError> {
-    let mut flat = Vec::new();
+    let mut flat = Vec::with_capacity(errors.len());
     for err in errors {
         match err.repr {
             ErrorRepr::Single(payload) => {
@@ -315,35 +331,34 @@ impl fmt::Display for EtlError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
         match &self.repr {
             ErrorRepr::Single(payload) => {
-                write!(f, "[{:?}] {}", payload.kind, payload.description)?;
+                let metadata = &payload.metadata;
+                let location = metadata.location();
+                write!(
+                    f,
+                    "[{:?}] {} @ {}:{}:{}",
+                    payload.kind,
+                    payload.description,
+                    location.file(),
+                    location.line(),
+                    location.column()
+                )?;
 
-                if let Some(detail) = &payload.detail {
-                    if detail.trim().is_empty() {
-                        write!(f, "\n  Detail: <empty>")?;
-                    } else {
-                        write!(f, "\n  Detail:")?;
-
-                        for line in detail.lines() {
-                            if line.trim().is_empty() {
-                                write!(f, "\n    ")?;
-                            } else {
-                                write!(f, "\n    {line}")?;
-                            }
-                        }
-                    }
-                }
-
+                write_detail(payload.detail.as_deref(), f, 1)?;
                 write_backtrace(&payload.metadata, f, 1)?;
 
                 Ok(())
             }
             ErrorRepr::Many { errors, metadata } => {
                 let count = errors.len();
+                let location = metadata.location();
                 write!(
                     f,
-                    "[Many] {} error{} aggregated",
+                    "[Many] {} error{} aggregated @ {}:{}:{}",
                     count,
-                    if count == 1 { "" } else { "s" }
+                    if count == 1 { "" } else { "s" },
+                    location.file(),
+                    location.line(),
+                    location.column()
                 )?;
 
                 write_backtrace(metadata, f, 1)?;
@@ -413,24 +428,43 @@ fn write_backtrace(
     Ok(())
 }
 
+/// Writes the detail block with indentation.
+fn write_detail(detail: Option<&str>, f: &mut fmt::Formatter<'_>, indent: usize) -> fmt::Result {
+    if let Some(detail) = detail {
+        let indent_str = "  ".repeat(indent);
+        if detail.trim().is_empty() {
+            write!(f, "\n{indent_str}Detail: <empty>")?;
+        } else {
+            write!(f, "\n{indent_str}Detail:")?;
+            for line in detail.lines() {
+                if line.trim().is_empty() {
+                    write!(f, "\n{indent_str}  ")?;
+                } else {
+                    write!(f, "\n{indent_str}  {line}")?;
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
 /// Creates an [`EtlError`] from an error kind and static description.
 impl From<(ErrorKind, &'static str)> for EtlError {
+    #[track_caller]
     fn from((kind, desc): (ErrorKind, &'static str)) -> EtlError {
-        EtlError {
-            repr: ErrorRepr::Single(ErrorPayload::new(kind, desc, None, None)),
-        }
+        EtlError::from_components(kind, Cow::Borrowed(desc), None, None)
     }
 }
 
 /// Creates an [`EtlError`] from an error kind, static description, and dynamic detail.
 impl<D> From<(ErrorKind, &'static str, D)> for EtlError
 where
-    D: Into<String>,
+    D: Into<Cow<'static, str>>,
 {
+    #[track_caller]
     fn from((kind, desc, detail): (ErrorKind, &'static str, D)) -> EtlError {
-        EtlError {
-            repr: ErrorRepr::Single(ErrorPayload::new(kind, desc, Some(detail.into()), None)),
-        }
+        EtlError::from_components(kind, Cow::Borrowed(desc), Some(detail.into()), None)
     }
 }
 
@@ -439,14 +473,16 @@ impl<E> From<Vec<E>> for EtlError
 where
     E: Into<EtlError>,
 {
+    #[track_caller]
     fn from(errors: Vec<E>) -> EtlError {
+        let location = Location::caller();
         let errors = errors.into_iter().map(Into::into).collect();
         let errors = flatten_errors(errors);
 
         EtlError {
             repr: ErrorRepr::Many {
                 errors,
-                metadata: ErrorMetadata::capture(),
+                metadata: ErrorMetadata::new(location),
             },
         }
     }
@@ -454,15 +490,16 @@ where
 
 /// Converts [`std::io::Error`] to [`EtlError`] with [`ErrorKind::IoError`].
 impl From<std::io::Error> for EtlError {
+    #[track_caller]
     fn from(err: std::io::Error) -> EtlError {
-        EtlError {
-            repr: ErrorRepr::Single(ErrorPayload::new(
-                ErrorKind::IoError,
-                "I/O error occurred",
-                Some(err.to_string()),
-                Some(Arc::new(err)),
-            )),
-        }
+        let detail = err.to_string();
+        let source = Arc::new(err);
+        EtlError::from_components(
+            ErrorKind::IoError,
+            Cow::Borrowed("I/O error occurred"),
+            Some(Cow::Owned(detail)),
+            Some(source),
+        )
     }
 }
 
@@ -471,6 +508,7 @@ impl From<std::io::Error> for EtlError {
 /// Maps to [`ErrorKind::SerializationError`] for serialization failures and
 /// [`ErrorKind::DeserializationError`] for deserialization failures based on error classification.
 impl From<serde_json::Error> for EtlError {
+    #[track_caller]
     fn from(err: serde_json::Error) -> EtlError {
         let (kind, description) = match err.classify() {
             serde_json::error::Category::Io => (ErrorKind::IoError, "JSON I/O operation failed"),
@@ -484,70 +522,74 @@ impl From<serde_json::Error> for EtlError {
             ),
         };
 
-        EtlError {
-            repr: ErrorRepr::Single(ErrorPayload::new(
-                kind,
-                description,
-                Some(err.to_string()),
-                Some(Arc::new(err)),
-            )),
-        }
+        let detail = err.to_string();
+        let source = Arc::new(err);
+        EtlError::from_components(
+            kind,
+            Cow::Borrowed(description),
+            Some(Cow::Owned(detail)),
+            Some(source),
+        )
     }
 }
 
 /// Converts [`std::str::Utf8Error`] to [`EtlError`] with [`ErrorKind::ConversionError`].
 impl From<std::str::Utf8Error> for EtlError {
+    #[track_caller]
     fn from(err: std::str::Utf8Error) -> EtlError {
-        EtlError {
-            repr: ErrorRepr::Single(ErrorPayload::new(
-                ErrorKind::ConversionError,
-                "UTF-8 conversion failed",
-                Some(err.to_string()),
-                Some(Arc::new(err)),
-            )),
-        }
+        let detail = err.to_string();
+        let source = Arc::new(err);
+        EtlError::from_components(
+            ErrorKind::ConversionError,
+            Cow::Borrowed("UTF-8 conversion failed"),
+            Some(Cow::Owned(detail)),
+            Some(source),
+        )
     }
 }
 
 /// Converts [`std::string::FromUtf8Error`] to [`EtlError`] with [`ErrorKind::ConversionError`].
 impl From<std::string::FromUtf8Error> for EtlError {
+    #[track_caller]
     fn from(err: std::string::FromUtf8Error) -> EtlError {
-        EtlError {
-            repr: ErrorRepr::Single(ErrorPayload::new(
-                ErrorKind::ConversionError,
-                "UTF-8 string conversion failed",
-                Some(err.to_string()),
-                Some(Arc::new(err)),
-            )),
-        }
+        let detail = err.to_string();
+        let source = Arc::new(err);
+        EtlError::from_components(
+            ErrorKind::ConversionError,
+            Cow::Borrowed("UTF-8 string conversion failed"),
+            Some(Cow::Owned(detail)),
+            Some(source),
+        )
     }
 }
 
 /// Converts [`std::num::ParseIntError`] to [`EtlError`] with [`ErrorKind::ConversionError`].
 impl From<std::num::ParseIntError> for EtlError {
+    #[track_caller]
     fn from(err: std::num::ParseIntError) -> EtlError {
-        EtlError {
-            repr: ErrorRepr::Single(ErrorPayload::new(
-                ErrorKind::ConversionError,
-                "Integer parsing failed",
-                Some(err.to_string()),
-                Some(Arc::new(err)),
-            )),
-        }
+        let detail = err.to_string();
+        let source = Arc::new(err);
+        EtlError::from_components(
+            ErrorKind::ConversionError,
+            Cow::Borrowed("Integer parsing failed"),
+            Some(Cow::Owned(detail)),
+            Some(source),
+        )
     }
 }
 
 /// Converts [`std::num::ParseFloatError`] to [`EtlError`] with [`ErrorKind::ConversionError`].
 impl From<std::num::ParseFloatError> for EtlError {
+    #[track_caller]
     fn from(err: std::num::ParseFloatError) -> EtlError {
-        EtlError {
-            repr: ErrorRepr::Single(ErrorPayload::new(
-                ErrorKind::ConversionError,
-                "Float parsing failed",
-                Some(err.to_string()),
-                Some(Arc::new(err)),
-            )),
-        }
+        let detail = err.to_string();
+        let source = Arc::new(err);
+        EtlError::from_components(
+            ErrorKind::ConversionError,
+            Cow::Borrowed("Float parsing failed"),
+            Some(Cow::Owned(detail)),
+            Some(source),
+        )
     }
 }
 
@@ -556,6 +598,7 @@ impl From<std::num::ParseFloatError> for EtlError {
 /// Maps errors based on Postgres SQLSTATE codes to provide granular error classification
 /// for better error handling in ETL operations.
 impl From<tokio_postgres::Error> for EtlError {
+    #[track_caller]
     fn from(err: tokio_postgres::Error) -> EtlError {
         let (kind, description) = match err.code() {
             Some(sqlstate) => {
@@ -850,70 +893,74 @@ impl From<tokio_postgres::Error> for EtlError {
             ),
         };
 
-        EtlError {
-            repr: ErrorRepr::Single(ErrorPayload::new(
-                kind,
-                description,
-                Some(err.to_string()),
-                Some(Arc::new(err)),
-            )),
-        }
+        let detail = err.to_string();
+        let source = Arc::new(err);
+        EtlError::from_components(
+            kind,
+            Cow::Borrowed(description),
+            Some(Cow::Owned(detail)),
+            Some(source),
+        )
     }
 }
 
 /// Converts [`rustls::Error`] to [`EtlError`] with [`ErrorKind::EncryptionError`].
 impl From<rustls::Error> for EtlError {
+    #[track_caller]
     fn from(err: rustls::Error) -> EtlError {
-        EtlError {
-            repr: ErrorRepr::Single(ErrorPayload::new(
-                ErrorKind::EncryptionError,
-                "TLS configuration failed",
-                Some(err.to_string()),
-                Some(Arc::new(err)),
-            )),
-        }
+        let detail = err.to_string();
+        let source = Arc::new(err);
+        EtlError::from_components(
+            ErrorKind::EncryptionError,
+            Cow::Borrowed("TLS configuration failed"),
+            Some(Cow::Owned(detail)),
+            Some(source),
+        )
     }
 }
 
 /// Converts [`uuid::Error`] to [`EtlError`] with [`ErrorKind::InvalidData`].
 impl From<uuid::Error> for EtlError {
+    #[track_caller]
     fn from(err: uuid::Error) -> EtlError {
-        EtlError {
-            repr: ErrorRepr::Single(ErrorPayload::new(
-                ErrorKind::InvalidData,
-                "UUID parsing failed",
-                Some(err.to_string()),
-                Some(Arc::new(err)),
-            )),
-        }
+        let detail = err.to_string();
+        let source = Arc::new(err);
+        EtlError::from_components(
+            ErrorKind::InvalidData,
+            Cow::Borrowed("UUID parsing failed"),
+            Some(Cow::Owned(detail)),
+            Some(source),
+        )
     }
 }
 
 /// Converts [`chrono::ParseError`] to [`EtlError`] with [`ErrorKind::ConversionError`].
 impl From<chrono::ParseError> for EtlError {
+    #[track_caller]
     fn from(err: chrono::ParseError) -> EtlError {
-        EtlError {
-            repr: ErrorRepr::Single(ErrorPayload::new(
-                ErrorKind::ConversionError,
-                "Chrono parse failed",
-                Some(err.to_string()),
-                Some(Arc::new(err)),
-            )),
-        }
+        let detail = err.to_string();
+        let source = Arc::new(err);
+        EtlError::from_components(
+            ErrorKind::ConversionError,
+            Cow::Borrowed("Chrono parse failed"),
+            Some(Cow::Owned(detail)),
+            Some(source),
+        )
     }
 }
 
 /// Converts [`ParseNumericError`] to [`EtlError`] with [`ErrorKind::ConversionError`].
 impl From<ParseNumericError> for EtlError {
+    #[track_caller]
     fn from(err: ParseNumericError) -> EtlError {
-        EtlError {
-            repr: ErrorRepr::Single(ErrorPayload::new(
-                ErrorKind::ConversionError,
-                "Numeric parsing failed",
-                Some(err.to_string()),
-                Some(Arc::new(err)),
-            )),
-        }
+        let detail = err.to_string();
+        let source = Arc::new(err);
+        EtlError::from_components(
+            ErrorKind::ConversionError,
+            Cow::Borrowed("Numeric parsing failed"),
+            Some(Cow::Owned(detail)),
+            Some(source),
+        )
     }
 }
 
@@ -922,6 +969,7 @@ impl From<ParseNumericError> for EtlError {
 /// Maps database errors to [`ErrorKind::SourceQueryFailed`], I/O errors to [`ErrorKind::IoError`],
 /// and connection pool errors to [`ErrorKind::SourceConnectionFailed`].
 impl From<sqlx::Error> for EtlError {
+    #[track_caller]
     fn from(err: sqlx::Error) -> EtlError {
         let kind = match &err {
             sqlx::Error::Database(_) => ErrorKind::SourceQueryFailed,
@@ -932,41 +980,38 @@ impl From<sqlx::Error> for EtlError {
             _ => ErrorKind::SourceQueryFailed,
         };
 
-        EtlError {
-            repr: ErrorRepr::Single(ErrorPayload::new(
-                kind,
-                "Database operation failed",
-                Some(err.to_string()),
-                Some(Arc::new(err)),
-            )),
-        }
+        let detail = err.to_string();
+        let source = Arc::new(err);
+        EtlError::from_components(
+            kind,
+            Cow::Borrowed("Database operation failed"),
+            Some(Cow::Owned(detail)),
+            Some(source),
+        )
     }
 }
 
 /// Converts [`etl_postgres::replication::slots::EtlReplicationSlotError`] to [`EtlError`] with appropriate error kind.
 impl From<etl_postgres::replication::slots::EtlReplicationSlotError> for EtlError {
+    #[track_caller]
     fn from(err: etl_postgres::replication::slots::EtlReplicationSlotError) -> EtlError {
         match err {
             etl_postgres::replication::slots::EtlReplicationSlotError::InvalidSlotNameLength(
                 slot_name,
-            ) => EtlError {
-                repr: ErrorRepr::Single(ErrorPayload::new(
-                    ErrorKind::ValidationError,
-                    "Replication slot name exceeds maximum length",
-                    Some(slot_name),
-                    None,
-                )),
-            },
+            ) => EtlError::from_components(
+                ErrorKind::ValidationError,
+                Cow::Borrowed("Replication slot name exceeds maximum length"),
+                Some(Cow::Owned(slot_name)),
+                None,
+            ),
             etl_postgres::replication::slots::EtlReplicationSlotError::InvalidSlotName(
                 slot_name,
-            ) => EtlError {
-                repr: ErrorRepr::Single(ErrorPayload::new(
-                    ErrorKind::ValidationError,
-                    "Replication slot name is invalid",
-                    Some(slot_name),
-                    None,
-                )),
-            },
+            ) => EtlError::from_components(
+                ErrorKind::ValidationError,
+                Cow::Borrowed("Replication slot name is invalid"),
+                Some(Cow::Owned(slot_name)),
+                None,
+            ),
         }
     }
 }
@@ -1007,7 +1052,7 @@ mod tests {
             EtlError::from((ErrorKind::ConversionError, "Type mismatch")),
             EtlError::from((ErrorKind::IoError, "Connection timeout")),
         ];
-        let multi_err = EtlError::many(errors);
+        let multi_err: EtlError = errors.into();
 
         assert_eq!(multi_err.kind(), ErrorKind::ValidationError);
         assert_eq!(
@@ -1031,7 +1076,7 @@ mod tests {
             )),
             EtlError::from((ErrorKind::ConversionError, "Type mismatch")),
         ];
-        let multi_err = EtlError::many(errors);
+        let multi_err: EtlError = errors.into();
 
         assert_eq!(multi_err.detail(), Some("Missing required field"));
     }
@@ -1044,14 +1089,6 @@ mod tests {
         ];
         let multi_err = EtlError::from(errors);
         assert_eq!(multi_err.kinds().len(), 2);
-    }
-
-    #[test]
-    fn test_empty_multiple_errors() {
-        let multi_err = EtlError::many(vec![]);
-        assert_eq!(multi_err.kind(), ErrorKind::Unknown);
-        assert_eq!(multi_err.kinds(), vec![]);
-        assert_eq!(multi_err.detail(), None);
     }
 
     #[test]
@@ -1073,6 +1110,7 @@ mod tests {
         let display_str = format!("{err}");
         assert!(display_str.contains("ConnectionFailed"));
         assert!(display_str.contains("Database connection failed"));
+        assert!(display_str.contains(" @ "));
     }
 
     #[test]
@@ -1086,6 +1124,7 @@ mod tests {
         assert!(display_str.contains("QueryFailed"));
         assert!(display_str.contains("SQL query failed"));
         assert!(display_str.contains("Invalid table name"));
+        assert!(display_str.contains("\n  Detail:"));
     }
 
     #[test]
@@ -1094,10 +1133,10 @@ mod tests {
             EtlError::from((ErrorKind::ValidationError, "Invalid schema")),
             EtlError::from((ErrorKind::ConversionError, "Type mismatch")),
         ];
-        let multi_err = EtlError::many(errors);
+        let multi_err: EtlError = errors.into();
         let display_str = format!("{multi_err}");
-        assert!(display_str.contains("[Many] 2 errors aggregated"));
-        assert!(display_str.contains("1. [ValidationError] Invalid schema"));
+        assert!(display_str.contains("[Many] 2 errors aggregated @ "));
+        assert!(display_str.contains("1. [ValidationError] Invalid schema @ "));
     }
 
     #[test]
@@ -1111,10 +1150,7 @@ mod tests {
     #[test]
     fn test_many_forwards_source() {
         let inner = EtlError::from(std::io::Error::other("inner failure"));
-        let outer = EtlError::many(vec![
-            inner.clone(),
-            EtlError::from((ErrorKind::Unknown, "x")),
-        ]);
+        let outer: EtlError = vec![inner.clone(), EtlError::from((ErrorKind::Unknown, "x"))].into();
         let source = outer.source().expect("missing aggregate source");
         assert_eq!(source.to_string(), inner.to_string());
     }
@@ -1218,13 +1254,13 @@ mod tests {
             EtlError::from((ErrorKind::ConversionError, "Inner error 1")),
             EtlError::from((ErrorKind::ValidationError, "Inner error 2")),
         ];
-        let inner_multi = EtlError::many(inner_errors);
+        let inner_multi: EtlError = inner_errors.into();
 
         let outer_errors = vec![
             inner_multi,
             EtlError::from((ErrorKind::IoError, "Outer error")),
         ];
-        let outer_multi = EtlError::many(outer_errors);
+        let outer_multi: EtlError = outer_errors.into();
 
         let kinds = outer_multi.kinds();
         assert_eq!(kinds.len(), 3);
