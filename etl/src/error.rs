@@ -452,8 +452,6 @@ where
     }
 }
 
-// Common standard library error conversions
-
 /// Converts [`std::io::Error`] to [`EtlError`] with [`ErrorKind::IoError`].
 impl From<std::io::Error> for EtlError {
     fn from(err: std::io::Error) -> EtlError {
