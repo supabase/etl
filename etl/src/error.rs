@@ -228,7 +228,7 @@ impl EtlError {
         match self.repr {
             ErrorRepr::Single(ref payload) => payload.detail.as_deref(),
             ErrorRepr::Many { ref errors, .. } => {
-                // For multiple errors, return the detail of the first error that has one
+                // For multiple errors, return the detail of the first error that has one.
                 errors.iter().find_map(|e| e.detail())
             }
         }
@@ -287,6 +287,7 @@ fn flatten_errors(errors: Vec<EtlError>) -> Vec<EtlError> {
             }
         }
     }
+
     flat
 }
 
@@ -321,6 +322,7 @@ impl fmt::Display for EtlError {
                         write!(f, "\n  Detail: <empty>")?;
                     } else {
                         write!(f, "\n  Detail:")?;
+
                         for line in detail.lines() {
                             if line.trim().is_empty() {
                                 write!(f, "\n    ")?;
@@ -332,6 +334,7 @@ impl fmt::Display for EtlError {
                 }
 
                 write_backtrace(&payload.metadata, f, 1)?;
+
                 Ok(())
             }
             ErrorRepr::Many { errors, metadata } => {
@@ -356,6 +359,7 @@ impl fmt::Display for EtlError {
                         } else {
                             write!(f, "\n  {}.", index + 1)?;
                         }
+
                         for line in lines {
                             if line.is_empty() {
                                 write!(f, "\n     ")?;
@@ -365,6 +369,7 @@ impl fmt::Display for EtlError {
                         }
                     }
                 }
+
                 Ok(())
             }
         }
