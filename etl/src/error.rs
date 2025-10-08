@@ -262,25 +262,6 @@ impl EtlError {
     }
 }
 
-/// Flattens nested aggregated errors into a single vector.
-fn flatten_errors(errors: Vec<EtlError>) -> Vec<EtlError> {
-    let mut flat = Vec::with_capacity(errors.len());
-    for err in errors {
-        match err.repr {
-            ErrorRepr::Single(payload) => {
-                flat.push(EtlError {
-                    repr: ErrorRepr::Single(payload),
-                });
-            }
-            ErrorRepr::Many { errors: nested, .. } => {
-                flat.extend(flatten_errors(nested));
-            }
-        }
-    }
-
-    flat
-}
-
 impl PartialEq for EtlError {
     fn eq(&self, other: &EtlError) -> bool {
         match (&self.repr, &other.repr) {
@@ -456,7 +437,6 @@ where
         let backtrace = Arc::new(Backtrace::capture());
 
         let errors = errors.into_iter().map(Into::into).collect();
-        let errors = flatten_errors(errors);
 
         EtlError {
             repr: ErrorRepr::Many {
@@ -1249,8 +1229,9 @@ mod tests {
         assert!(kinds.contains(&ErrorKind::IoError));
 
         let rendered = format!("{outer_multi}");
-        assert!(rendered.contains("[Many] 3 errors aggregated"));
-        assert!(!rendered.contains("1. [Many]"));
+        println!("{}", rendered);
+        assert!(rendered.contains("[Many] 2 errors aggregated"));
+        assert!(rendered.contains("1. [Many]"));
     }
 
     #[test]
