@@ -19,36 +19,6 @@ use crate::conversions::numeric::ParseNumericError;
 /// Most ETL functions return this type.
 pub type EtlResult<T> = Result<T, EtlError>;
 
-/// Collected metadata used to augment error diagnostics.
-///
-/// Retains both the callsite location and captured backtrace for later inspection. The wrapper
-/// keeps future extensions simple if richer metadata becomes necessary again.
-#[derive(Debug, Clone)]
-struct ErrorMetadata {
-    location: &'static Location<'static>,
-    backtrace: Arc<Backtrace>,
-}
-
-impl ErrorMetadata {
-    /// Captures metadata from the provided callsite.
-    fn new(location: &'static Location<'static>) -> Self {
-        Self {
-            location,
-            backtrace: Arc::new(Backtrace::capture()),
-        }
-    }
-
-    /// Returns the captured location.
-    fn location(&self) -> &'static Location<'static> {
-        self.location
-    }
-
-    /// Returns the captured backtrace.
-    fn backtrace(&self) -> &Backtrace {
-        self.backtrace.as_ref()
-    }
-}
-
 /// Detailed payload stored for single [`EtlError`] instances.
 #[derive(Debug, Clone)]
 struct ErrorPayload {
@@ -56,7 +26,8 @@ struct ErrorPayload {
     description: Cow<'static, str>,
     detail: Option<Cow<'static, str>>,
     source: Option<Arc<dyn error::Error + Send + Sync>>,
-    metadata: ErrorMetadata,
+    location: &'static Location<'static>,
+    backtrace: Arc<Backtrace>,
 }
 
 impl ErrorPayload {
@@ -67,13 +38,15 @@ impl ErrorPayload {
         detail: Option<Cow<'static, str>>,
         source: Option<Arc<dyn error::Error + Send + Sync>>,
         location: &'static Location<'static>,
+        backtrace: Arc<Backtrace>,
     ) -> Self {
         Self {
             kind,
             description,
             detail,
             source,
-            metadata: ErrorMetadata::new(location),
+            location,
+            backtrace,
         }
     }
 }
@@ -100,10 +73,9 @@ enum ErrorRepr {
     ///
     /// This variant is mainly useful to capture multiple workers failures.
     Many {
-        /// Errors gathered under the aggregate.
         errors: Vec<EtlError>,
-        /// Metadata associated with the aggregate itself.
-        metadata: ErrorMetadata,
+        location: &'static Location<'static>,
+        backtrace: Arc<Backtrace>,
     },
 }
 
@@ -233,16 +205,16 @@ impl EtlError {
     /// Returns the captured backtrace for this error.
     pub fn backtrace(&self) -> &Backtrace {
         match self.repr {
-            ErrorRepr::Single(ref payload) => payload.metadata.backtrace(),
-            ErrorRepr::Many { ref metadata, .. } => metadata.backtrace(),
+            ErrorRepr::Single(ref payload) => payload.backtrace.as_ref(),
+            ErrorRepr::Many { ref backtrace, .. } => backtrace.as_ref(),
         }
     }
 
     /// Returns the captured callsite location for this error.
     pub fn location(&self) -> &'static Location<'static> {
         match self.repr {
-            ErrorRepr::Single(ref payload) => payload.metadata.location(),
-            ErrorRepr::Many { ref metadata, .. } => metadata.location(),
+            ErrorRepr::Single(ref payload) => payload.location,
+            ErrorRepr::Many { location, .. } => location,
         }
     }
 
@@ -268,6 +240,7 @@ impl EtlError {
         source: Option<Arc<dyn error::Error + Send + Sync>>,
     ) -> Self {
         let location = Location::caller();
+        let backtrace = Arc::new(Backtrace::capture());
 
         EtlError {
             repr: ErrorRepr::Single(ErrorPayload::new(
@@ -276,6 +249,7 @@ impl EtlError {
                 detail,
                 source,
                 location,
+                backtrace,
             )),
         }
     }
@@ -331,8 +305,7 @@ impl fmt::Display for EtlError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
         match &self.repr {
             ErrorRepr::Single(payload) => {
-                let metadata = &payload.metadata;
-                let location = metadata.location();
+                let location = payload.location;
                 write!(
                     f,
                     "[{:?}] {} @ {}:{}:{}",
@@ -344,13 +317,16 @@ impl fmt::Display for EtlError {
                 )?;
 
                 write_detail(payload.detail.as_deref(), f, 1)?;
-                write_backtrace(&payload.metadata, f, 1)?;
+                write_backtrace(payload.backtrace.as_ref(), f, 1)?;
 
                 Ok(())
             }
-            ErrorRepr::Many { errors, metadata } => {
+            ErrorRepr::Many {
+                errors,
+                location,
+                backtrace,
+            } => {
                 let count = errors.len();
-                let location = metadata.location();
                 write!(
                     f,
                     "[Many] {} error{} aggregated @ {}:{}:{}",
@@ -361,7 +337,7 @@ impl fmt::Display for EtlError {
                     location.column()
                 )?;
 
-                write_backtrace(metadata, f, 1)?;
+                write_backtrace(backtrace.as_ref(), f, 1)?;
 
                 if errors.is_empty() {
                     write!(f, "\n  (no inner errors provided)")?;
@@ -408,13 +384,13 @@ impl error::Error for EtlError {
 
 /// Writes the captured backtrace with indentation.
 fn write_backtrace(
-    metadata: &ErrorMetadata,
+    backtrace: &Backtrace,
     f: &mut fmt::Formatter<'_>,
     indent: usize,
 ) -> fmt::Result {
     let indent_str = "  ".repeat(indent);
 
-    let rendered_backtrace = format!("{}", metadata.backtrace());
+    let rendered_backtrace = format!("{backtrace}");
     if !rendered_backtrace.trim().is_empty() {
         write!(f, "\n{indent_str}Backtrace:")?;
         for line in rendered_backtrace.lines() {
@@ -477,13 +453,16 @@ where
     #[track_caller]
     fn from(errors: Vec<E>) -> EtlError {
         let location = Location::caller();
+        let backtrace = Arc::new(Backtrace::capture());
+
         let errors = errors.into_iter().map(Into::into).collect();
         let errors = flatten_errors(errors);
 
         EtlError {
             repr: ErrorRepr::Many {
                 errors,
-                metadata: ErrorMetadata::new(location),
+                location,
+                backtrace,
             },
         }
     }
