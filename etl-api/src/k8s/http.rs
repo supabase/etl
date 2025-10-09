@@ -49,7 +49,7 @@ pub const TRUSTED_ROOT_CERT_CONFIG_MAP_NAME: &str = "trusted-root-certs-config";
 /// Key inside the trusted root certificates ConfigMap.
 pub const TRUSTED_ROOT_CERT_KEY_NAME: &str = "trusted_root_certs";
 /// Pod template annotation used to trigger rolling restarts.
-pub const RESTARTED_AT_ANNOTATION_KEY: &str = "etl.supabase.com/restarted-at";
+const RESTARTED_AT_ANNOTATION_KEY: &str = "etl.supabase.com/restarted-at";
 /// Label used to identify replicator pods.
 const REPLICATOR_APP_LABEL: &str = "etl-replicator-app";
 
@@ -280,10 +280,10 @@ impl K8sClient for HttpK8sClient {
         let config = ReplicatorResourceConfig::load(&environment)?;
 
         let stateful_set_name = create_stateful_set_name(prefix);
-        let replicator_app_name = format!("{prefix}-{REPLICATOR_APP_SUFFIX}");
+        let replicator_app_name = create_replicator_app_name(prefix);
         let restarted_at_annotation = get_restarted_at_annotation_value();
-        let replicator_container_name = format!("{prefix}-{REPLICATOR_CONTAINER_NAME_SUFFIX}");
-        let vector_container_name = format!("{prefix}-{VECTOR_CONTAINER_NAME_SUFFIX}");
+        let replicator_container_name = create_replicator_container_name(prefix);
+        let vector_container_name = create_vector_container_name(prefix);
         let postgres_secret_name = create_postgres_secret_name(prefix);
         let bq_secret_name = create_bq_secret_name(prefix);
         let replicator_config_map_name = create_replicator_config_map_name(prefix);
@@ -392,7 +392,7 @@ impl K8sClient for HttpK8sClient {
             }
         };
 
-        let replicator_container_name = format!("{prefix}-{REPLICATOR_CONTAINER_NAME_SUFFIX}");
+        let replicator_container_name = create_replicator_container_name(prefix);
 
         // Find the replicator container status
         let container_status = pod.status.and_then(|status| {
@@ -437,6 +437,18 @@ fn create_stateful_set_name(prefix: &str) -> String {
 
 fn create_pod_name(prefix: &str) -> String {
     format!("{prefix}-{REPLICATOR_STATEFUL_SET_SUFFIX}-0")
+}
+
+fn create_replicator_app_name(prefix: &str) -> String {
+    format!("{prefix}-{REPLICATOR_APP_SUFFIX}")
+}
+
+fn create_replicator_container_name(prefix: &str) -> String {
+    format!("{prefix}-{REPLICATOR_CONTAINER_NAME_SUFFIX}")
+}
+
+fn create_vector_container_name(prefix: &str) -> String {
+    format!("{prefix}-{VECTOR_CONTAINER_NAME_SUFFIX}")
 }
 
 fn create_postgres_secret_json(
@@ -782,10 +794,10 @@ mod tests {
     fn test_create_replicator_stateful_set_json() {
         let prefix = create_k8s_object_prefix(TENANT_ID, 42);
         let stateful_set_name = create_stateful_set_name(&prefix);
-        let replicator_app_name = format!("{prefix}-{REPLICATOR_APP_SUFFIX}");
+        let replicator_app_name = create_replicator_app_name(&prefix);
         let restarted_at_annotation = "2025-10-09T16:02:24.127400000Z";
-        let replicator_container_name = format!("{prefix}-{REPLICATOR_CONTAINER_NAME_SUFFIX}");
-        let vector_container_name = format!("{prefix}-{VECTOR_CONTAINER_NAME_SUFFIX}");
+        let replicator_container_name = create_replicator_container_name(&prefix);
+        let vector_container_name = create_vector_container_name(&prefix);
         let postgres_secret_name = create_postgres_secret_name(&prefix);
         let bq_secret_name = create_bq_secret_name(&prefix);
         let replicator_config_map_name = create_replicator_config_map_name(&prefix);
