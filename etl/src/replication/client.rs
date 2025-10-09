@@ -799,7 +799,9 @@ impl PgReplicationClient {
             .join(", ");
 
         let table_name = self.get_table_name(table_id).await?;
-        let filter = self.get_row_filter(table_id, publication).await?;
+        let filter = self.get_row_filter(table_id, publication).await;
+        info!("Row filter: {filter:?}");
+        let filter = filter?;
 
         let copy_query = if let Some(pred) = filter {
             // Use SELECT-form so we can add WHERE. Parenthesize the predicate to be safe.
@@ -816,6 +818,8 @@ impl PgReplicationClient {
                 column_list,
             )
         };
+
+        info!("Copy stream query:\n{copy_query}");
 
         let stream = self.client.copy_out_simple(&copy_query).await?;
 
