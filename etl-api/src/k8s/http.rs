@@ -250,7 +250,11 @@ impl K8sClient for HttpK8sClient {
         info!("deleting config map");
         let replicator_config_map_name = create_replicator_config_map_name(prefix);
         let dp = DeleteParams::default();
-        match self.config_maps_api.delete(&replicator_config_map_name, &dp).await {
+        match self
+            .config_maps_api
+            .delete(&replicator_config_map_name, &dp)
+            .await
+        {
             Ok(_) => {}
             Err(e) => match e {
                 kube::Error::Api(ref er) => {
