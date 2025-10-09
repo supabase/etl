@@ -131,13 +131,14 @@ impl K8sClient for HttpK8sClient {
         info!("patching postgres secret");
 
         let encoded_postgres_password = BASE64_STANDARD.encode(postgres_password);
-        let secret_name = format!("{prefix}-{POSTGRES_SECRET_NAME_SUFFIX}");
-        let secret_json = create_postgres_secret_json(&secret_name, &encoded_postgres_password);
+        let postgres_secret_name = create_postgres_secret_name(prefix);
+        let secret_json =
+            create_postgres_secret_json(&postgres_secret_name, &encoded_postgres_password);
         let secret: Secret = serde_json::from_value(secret_json)?;
 
-        let pp = PatchParams::apply(&secret_name);
+        let pp = PatchParams::apply(&postgres_secret_name);
         self.secrets_api
-            .patch(&secret_name, &pp, &Patch::Apply(secret))
+            .patch(&postgres_secret_name, &pp, &Patch::Apply(secret))
             .await?;
         info!("patched postgres secret");
 
@@ -170,9 +171,9 @@ impl K8sClient for HttpK8sClient {
 
     async fn delete_postgres_secret(&self, prefix: &str) -> Result<(), K8sError> {
         info!("deleting postgres secret");
-        let secret_name = format!("{prefix}-{POSTGRES_SECRET_NAME_SUFFIX}");
+        let postgres_secret_name = create_postgres_secret_name(prefix);
         let dp = DeleteParams::default();
-        match self.secrets_api.delete(&secret_name, &dp).await {
+        match self.secrets_api.delete(&postgres_secret_name, &dp).await {
             Ok(_) => {}
             Err(e) => match e {
                 kube::Error::Api(ref er) => {
@@ -279,7 +280,7 @@ impl K8sClient for HttpK8sClient {
         let restarted_at_annotation = get_restarted_at_annotation_value();
         let replicator_container_name = format!("{prefix}-{REPLICATOR_CONTAINER_NAME_SUFFIX}");
         let vector_container_name = format!("{prefix}-{VECTOR_CONTAINER_NAME_SUFFIX}");
-        let postgres_secret_name = format!("{prefix}-{POSTGRES_SECRET_NAME_SUFFIX}");
+        let postgres_secret_name = create_postgres_secret_name(prefix);
         let bq_secret_name = format!("{prefix}-{BQ_SECRET_NAME_SUFFIX}");
         let replicator_config_map_name = format!("{prefix}-{REPLICATOR_CONFIG_MAP_NAME_SUFFIX}");
 
@@ -433,6 +434,10 @@ impl K8sClient for HttpK8sClient {
 
         Ok(())
     }
+}
+
+fn create_postgres_secret_name(prefix: &str) -> String {
+    format!("{prefix}-{POSTGRES_SECRET_NAME_SUFFIX}")
 }
 
 fn create_postgres_secret_json(
@@ -782,7 +787,7 @@ mod tests {
         let restarted_at_annotation = "2025-10-09T16:02:24.127400000Z";
         let replicator_container_name = format!("{prefix}-{REPLICATOR_CONTAINER_NAME_SUFFIX}");
         let vector_container_name = format!("{prefix}-{VECTOR_CONTAINER_NAME_SUFFIX}");
-        let postgres_secret_name = format!("{prefix}-{POSTGRES_SECRET_NAME_SUFFIX}");
+        let postgres_secret_name = create_postgres_secret_name(&prefix);
         let bq_secret_name = format!("{prefix}-{BQ_SECRET_NAME_SUFFIX}");
         let replicator_config_map_name = format!("{prefix}-{REPLICATOR_CONFIG_MAP_NAME_SUFFIX}");
         let environment = Environment::Prod;
