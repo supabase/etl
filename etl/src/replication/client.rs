@@ -763,8 +763,8 @@ impl PgReplicationClient {
                 JOIN pg_namespace n ON n.oid = c.relnamespace
                 WHERE p.pubname = {} AND c.oid = {};
                 ",
-                table_id,
                 quote_literal(publication),
+                table_id,
             );
 
         let messages = self.client.simple_query(&row_filter_query).await?;
