@@ -766,6 +766,7 @@ impl PgReplicationClient {
                 quote_literal(publication),
             );
 
+        info!("Row filter query:\n{row_filter_query}");
         let messages = self.client.simple_query(&row_filter_query).await?;
 
         if messages.len() < 1 {
@@ -800,7 +801,7 @@ impl PgReplicationClient {
 
         let table_name = self.get_table_name(table_id).await?;
         let filter = self.get_row_filter(table_id, publication).await;
-        info!("Row filter: {filter:?}");
+        info!("publication: {publication}, row filter: {filter:?}");
         let filter = filter?;
 
         let copy_query = if let Some(pred) = filter {
