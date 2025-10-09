@@ -752,7 +752,7 @@ impl PgReplicationClient {
             _ => return Ok(None),
         };
 
-        // This uses the same query as the `pg_publication_tables`, but with some minor tweaks (COALESCE, only return the rowfilter, 
+        // This uses the same query as the `pg_publication_tables`, but with some minor tweaks (COALESCE, only return the rowfilter,
         // filter on oid and pubname). All of these are available >= Postgres 15.
         let row_filter_query = format!(
                 "SELECT

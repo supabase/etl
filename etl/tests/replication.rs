@@ -374,24 +374,28 @@ async fn test_table_copy_stream_respects_row_filter() {
         .await
         .unwrap();
 
-    database.run_sql(&format!("ALTER TABLE {test_table_name} REPLICA IDENTITY FULL")).await.unwrap();
-    database.run_sql(&format!("CREATE PUBLICATION test_pub FOR TABLE {test_table_name} WHERE (age >= 18)")).await.unwrap();
+    database
+        .run_sql(&format!(
+            "ALTER TABLE {test_table_name} REPLICA IDENTITY FULL"
+        ))
+        .await
+        .unwrap();
+    database
+        .run_sql(&format!(
+            "CREATE PUBLICATION test_pub FOR TABLE {test_table_name} WHERE (age >= 18)"
+        ))
+        .await
+        .unwrap();
 
     let parent_client = PgReplicationClient::connect(database.config.clone())
         .await
         .unwrap();
 
     let total_rows_count = 30;
-    let expected_rows_count = (18.. 1 + total_rows_count as i32).len();
+    let expected_rows_count = (18..1 + total_rows_count as i32).len();
 
     database
-        .insert_generate_series(
-            test_table_name,
-            &["age"],
-            1,
-            total_rows_count,
-            1,
-        )
+        .insert_generate_series(test_table_name, &["age"], 1, total_rows_count, 1)
         .await
         .unwrap();
 
