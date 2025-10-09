@@ -738,7 +738,7 @@ impl PgReplicationClient {
     pub async fn get_row_filter(
         &self,
         table_id: TableId,
-        publication: Option<&str>,
+        publication_name: Option<&str>,
     ) -> EtlResult<Option<String>> {
         // Row filters on publications were added in Postgres 15. For any earlier versions we know that there is no row filter
         if let Some(server_version) = self.server_version
@@ -747,7 +747,7 @@ impl PgReplicationClient {
             return Ok(None);
         }
         // If we don't have a publication the row filter is implicitly non-existent
-        let publication = match publication {
+        let publication = match publication_name {
             Some(x) => x,
             _ => return Ok(None),
         };
