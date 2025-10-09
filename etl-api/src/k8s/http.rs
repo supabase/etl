@@ -132,9 +132,9 @@ impl K8sClient for HttpK8sClient {
 
         let encoded_postgres_password = BASE64_STANDARD.encode(postgres_password);
         let postgres_secret_name = create_postgres_secret_name(prefix);
-        let secret_json =
+        let postgres_secret_json =
             create_postgres_secret_json(&postgres_secret_name, &encoded_postgres_password);
-        let secret: Secret = serde_json::from_value(secret_json)?;
+        let secret: Secret = serde_json::from_value(postgres_secret_json)?;
 
         let pp = PatchParams::apply(&postgres_secret_name);
         self.secrets_api
@@ -154,11 +154,11 @@ impl K8sClient for HttpK8sClient {
 
         let encoded_bq_service_account_key = BASE64_STANDARD.encode(bq_service_account_key);
         let bq_secret_name = create_bq_secret_name(prefix);
-        let secret_json = create_bq_service_account_key_secret_json(
+        let bq_secret_json = create_bq_service_account_key_secret_json(
             &bq_secret_name,
             &encoded_bq_service_account_key,
         );
-        let secret: Secret = serde_json::from_value(secret_json)?;
+        let secret: Secret = serde_json::from_value(bq_secret_json)?;
 
         let pp = PatchParams::apply(&bq_secret_name);
         self.secrets_api
