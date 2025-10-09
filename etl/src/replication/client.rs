@@ -145,7 +145,7 @@ impl PgReplicationSlotTransaction {
         publication_name: Option<&str>,
     ) -> EtlResult<CopyOutStream> {
         self.client
-            .get_table_copy_stream(table_id, column_schemas, publication)
+            .get_table_copy_stream(table_id, column_schemas, publication_name)
             .await
     }
 
