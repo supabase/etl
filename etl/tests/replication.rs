@@ -363,6 +363,69 @@ async fn test_table_copy_stream_is_consistent() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn test_table_copy_stream_respects_row_filter() {
+    init_test_tracing();
+    let database = spawn_source_database().await;
+
+    // We create a table and insert one row.
+    let table_1_id = database
+        .create_table(test_table_name("table_1"), true, &[("age", "integer")])
+        .await
+        .unwrap();
+
+    database.run_sql("ALTER TABLE table_1 REPLICA IDENTITY FULL").await.unwrap();
+    database.run_sql("CREATE PUBLICATION test_pub FOR TABLE table_1 WHERE (age >= 18)").await.unwrap();
+
+    let parent_client = PgReplicationClient::connect(database.config.clone())
+        .await
+        .unwrap();
+
+    let total_rows_count = 30;
+    let expected_rows_count = (18.. 1 + total_rows_count as i32).len();
+
+    database
+        .insert_generate_series(
+            test_table_name("table_1"),
+            &["age"],
+            1,
+            total_rows_count,
+            1,
+        )
+        .await
+        .unwrap();
+
+    // We create the slot when the database schema contains only 'table_1' data.
+    let (transaction, _) = parent_client
+        .create_slot_with_transaction(&test_slot_name("my_slot"))
+        .await
+        .unwrap();
+
+    // We create a transaction to copy the table data consistently.
+    let stream = transaction
+        .get_table_copy_stream(
+            table_1_id,
+            &[ColumnSchema {
+                name: "age".to_string(),
+                typ: Type::INT4,
+                modifier: -1,
+                nullable: true,
+                primary: false,
+            }],
+            Some("test_pub"),
+        )
+        .await
+        .unwrap();
+
+    let rows_count = count_stream_rows(stream).await;
+
+    // Transaction should be committed after the copy stream is exhausted.
+    transaction.commit().await.unwrap();
+
+    // We expect to have the inserted number of rows.
+    assert_eq!(rows_count, expected_rows_count as u64);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn test_publication_creation_and_check() {
     init_test_tracing();
     let database = spawn_source_database().await;
