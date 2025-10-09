@@ -30,6 +30,6 @@ pub fn assert_table_schema(
         assert_eq!(actual.typ, expected.typ);
         assert_eq!(actual.modifier, expected.modifier);
         assert_eq!(actual.nullable, expected.nullable);
-        assert_eq!(actual.primary, expected.primary);
+        assert_eq!(actual.primary_key_position, expected.primary_key_position);
     }
 }

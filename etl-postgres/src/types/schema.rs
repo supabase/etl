@@ -62,8 +62,10 @@ pub struct ColumnSchema {
     pub modifier: TypeModifier,
     /// Whether the column can contain NULL values
     pub nullable: bool,
-    /// Whether the column is part of the table's primary key
-    pub primary: bool,
+    /// One-based ordinal position of the column within the table definition.
+    pub ordinal_position: i32,
+    /// One-based position within the primary key definition when the column is part of it.
+    pub primary_key_position: Option<i32>,
 }
 
 impl ColumnSchema {
@@ -79,7 +81,26 @@ impl ColumnSchema {
             typ,
             modifier,
             nullable,
-            primary,
+            ordinal_position: 0,
+            primary_key_position: if primary { Some(0) } else { None },
+        }
+    }
+
+    pub fn with_positions(
+        name: String,
+        typ: Type,
+        modifier: TypeModifier,
+        nullable: bool,
+        ordinal_position: i32,
+        primary_key_position: Option<i32>,
+    ) -> ColumnSchema {
+        Self {
+            name,
+            typ,
+            modifier,
+            nullable,
+            ordinal_position,
+            primary_key_position,
         }
     }
 
@@ -90,9 +111,9 @@ impl ColumnSchema {
     /// This method is used for comparing table schemas loaded via the initial table sync and the
     /// relation messages received via CDC. The reason for skipping the `nullable` field is that
     /// unfortunately Postgres doesn't seem to propagate nullable information of a column via
-    /// relation messages. The reason for skipping the `primary` field is that if the replica
-    /// identity of a table is set to full, the relation message sets all columns as primary
-    /// key, irrespective of what the actual primary key in the table is.
+    /// relation messages. The method also ignores `ordinal_position` and `primary_key_position`
+    /// because relation messages only imply ordering indirectly through their sequence and mark
+    /// all columns as primary when replica identity is full.
     fn partial_eq(&self, other: &ColumnSchema) -> bool {
         self.name == other.name && self.typ == other.typ && self.modifier == other.modifier
     }
@@ -212,7 +233,9 @@ impl TableSchema {
     ///
     /// This method checks if any column in the table is marked as part of the primary key.
     pub fn has_primary_keys(&self) -> bool {
-        self.column_schemas.iter().any(|cs| cs.primary)
+        self.column_schemas
+            .iter()
+            .any(|cs| cs.primary_key_position.is_some())
     }
 
     /// Compares two [`TableSchema`] instances, excluding the [`ColumnSchema`]'s `nullable` field.

@@ -16,14 +16,15 @@ fn create_sample_table_schema() -> TableSchema {
     let table_id = TableId::new(12345);
     let table_name = TableName::new("public".to_string(), "test_table".to_string());
     let columns = vec![
-        ColumnSchema::new("id".to_string(), PgType::INT4, -1, false, true),
-        ColumnSchema::new("name".to_string(), PgType::TEXT, -1, true, false),
-        ColumnSchema::new(
+        ColumnSchema::with_positions("id".to_string(), PgType::INT4, -1, false, 1, Some(1)),
+        ColumnSchema::with_positions("name".to_string(), PgType::TEXT, -1, true, 2, None),
+        ColumnSchema::with_positions(
             "created_at".to_string(),
             PgType::TIMESTAMPTZ,
             -1,
             false,
-            false,
+            3,
+            None,
         ),
     ];
 
@@ -34,8 +35,15 @@ fn create_another_table_schema() -> TableSchema {
     let table_id = TableId::new(67890);
     let table_name = TableName::new("public".to_string(), "another_table".to_string());
     let columns = vec![
-        ColumnSchema::new("id".to_string(), PgType::INT8, -1, false, true),
-        ColumnSchema::new("description".to_string(), PgType::VARCHAR, 255, true, false),
+        ColumnSchema::with_positions("id".to_string(), PgType::INT8, -1, false, 1, Some(1)),
+        ColumnSchema::with_positions(
+            "description".to_string(),
+            PgType::VARCHAR,
+            255,
+            true,
+            2,
+            None,
+        ),
     ];
 
     TableSchema::new(table_id, table_name, columns)
@@ -333,12 +341,13 @@ async fn test_schema_store_update_existing() {
         .unwrap();
 
     // Update schema by adding a column
-    table_schema.add_column_schema(ColumnSchema::new(
+    table_schema.add_column_schema(ColumnSchema::with_positions(
         "updated_at".to_string(),
         PgType::TIMESTAMPTZ,
         -1,
         true,
-        false,
+        4,
+        None,
     ));
 
     // Store updated schema
