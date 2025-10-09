@@ -127,16 +127,8 @@ impl HttpK8sClient {
     ) -> Result<(), K8sError> {
         match delete_result {
             Ok(_) => Ok(()),
-            Err(e) => match e {
-                kube::Error::Api(ref er) => {
-                    if er.code != 404 {
-                        Err(e.into())
-                    } else {
-                        Ok(())
-                    }
-                }
-                e => Err(e.into()),
-            },
+            Err(kube::Error::Api(er)) if er.code == 404 => Ok(()),
+            Err(e) => Err(e.into()),
         }
     }
 }
@@ -326,18 +318,8 @@ impl K8sClient for HttpK8sClient {
         let pod_name = create_pod_name(prefix);
         let pod = match self.pods_api.get(&pod_name).await {
             Ok(pod) => pod,
-            Err(e) => {
-                return match e {
-                    kube::Error::Api(ref er) => {
-                        if er.code == 404 {
-                            return Ok(PodPhase::Succeeded);
-                        }
-
-                        Err(e.into())
-                    }
-                    e => Err(e.into()),
-                };
-            }
+            Err(kube::Error::Api(er)) if er.code == 404 => return Ok(PodPhase::Succeeded),
+            Err(e) => return Err(e.into()),
         };
 
         let phase = pod
@@ -363,17 +345,8 @@ impl K8sClient for HttpK8sClient {
         let pod_name = create_pod_name(prefix);
         let pod = match self.pods_api.get(&pod_name).await {
             Ok(pod) => pod,
-            Err(e) => {
-                return match e {
-                    kube::Error::Api(ref er) => {
-                        if er.code == 404 {
-                            return Ok(false);
-                        }
-                        Err(e.into())
-                    }
-                    e => Err(e.into()),
-                };
-            }
+            Err(kube::Error::Api(er)) if er.code == 404 => return Ok(false),
+            Err(e) => return Err(e.into()),
         };
 
         let replicator_container_name = create_replicator_container_name(prefix);
