@@ -756,13 +756,12 @@ impl PgReplicationClient {
         // filter on oid and pubname). All of these are available >= Postgres 15.
         let row_filter_query = format!(
                 "SELECT
-  COALESCE(pg_get_expr(gpt.qual, gpt.relid), '') AS row_filter
-FROM pg_publication p
-JOIN LATERAL pg_get_publication_tables(p.pubname) AS gpt(pubid, relid, attrs, qual) ON TRUE
-JOIN pg_class c ON c.oid = gpt.relid
-JOIN pg_namespace n ON n.oid = c.relnamespace
-WHERE p.pubname = {}
-  AND c.oid = {};
+                    COALESCE(pg_get_expr(gpt.qual, gpt.relid), '') AS row_filter
+                FROM pg_publication p
+                JOIN LATERAL pg_get_publication_tables(p.pubname) AS gpt(pubid, relid, attrs, qual) ON TRUE
+                JOIN pg_class c ON c.oid = gpt.relid
+                JOIN pg_namespace n ON n.oid = c.relnamespace
+                WHERE p.pubname = {} AND c.oid = {};
                 ",
                 table_id,
                 quote_literal(publication),
@@ -776,10 +775,7 @@ WHERE p.pubname = {}
                 match row_filter.as_str() {
                     "" => return Ok(None),
                     _ => return Ok(Some(row_filter)),
-                match rowfilter.as_str() {
-                    "" => return Ok(None),
-                    _ => return Ok(Some(rowfilter)),
-                };
+                }
             }
         }
 
