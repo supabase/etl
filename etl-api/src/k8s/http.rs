@@ -62,13 +62,13 @@ const REPLICATOR_MAX_MEMORY_STAGING: &str = "100Mi";
 /// Replicator CPU limit tuned for `t3.small` instances.
 const REPLICATOR_MAX_CPU_STAGING: &str = "100m";
 
-/// Runtime limits derived from the current environment.
-struct DynamicReplicatorConfig {
+/// Resource limits for a replicator pod.
+struct ReplicatorResourceConfig {
     max_memory: &'static str,
     max_cpu: &'static str,
 }
 
-impl DynamicReplicatorConfig {
+impl ReplicatorResourceConfig {
     /// Loads the runtime limits for the current environment.
     fn load(environment: &Environment) -> Result<Self, K8sError> {
         let config = match environment {
@@ -273,7 +273,7 @@ impl K8sClient for HttpK8sClient {
     ) -> Result<(), K8sError> {
         info!("patching stateful set");
 
-        let config = DynamicReplicatorConfig::load(&environment)?;
+        let config = ReplicatorResourceConfig::load(&environment)?;
 
         let stateful_set_name = format!("{prefix}-{REPLICATOR_STATEFUL_SET_SUFFIX}");
         let replicator_app_name = format!("{prefix}-{REPLICATOR_APP_SUFFIX}");
@@ -283,164 +283,18 @@ impl K8sClient for HttpK8sClient {
         let bq_secret_name = format!("{prefix}-{BQ_SECRET_NAME_SUFFIX}");
         let replicator_config_map_name = format!("{prefix}-{REPLICATOR_CONFIG_MAP_NAME_SUFFIX}");
 
-        let mut stateful_set_json = json!({
-          "apiVersion": "apps/v1",
-          "kind": "StatefulSet",
-          "metadata": {
-            "name": stateful_set_name,
-            "namespace": DATA_PLANE_NAMESPACE,
-          },
-          "spec": {
-            "replicas": 1,
-            "selector": {
-              "matchLabels": {
-                "app-name": replicator_app_name,
-              }
-            },
-            "template": {
-              "metadata": {
-                "labels": {
-                  "app-name": replicator_app_name,
-                  "app": REPLICATOR_APP_LABEL
-                }
-              },
-              "spec": {
-                "volumes": [
-                  {
-                    "name": REPLICATOR_CONFIG_FILE_VOLUME_NAME,
-                    "configMap": {
-                      "name": replicator_config_map_name
-                    }
-                  },
-                  {
-                    "name": VECTOR_CONFIG_FILE_VOLUME_NAME,
-                    "configMap": {
-                      "name": VECTOR_CONFIG_MAP_NAME
-                    }
-                  },
-                  {
-                    "name": LOGS_VOLUME_NAME,
-                    "emptyDir": {}
-                  }
-                ],
-                // Allow scheduling onto nodes tainted with `nodeType=workloads`.
-                "tolerations": [
-                  {
-                    "key": "nodeType",
-                    "operator": "Equal",
-                    "value": "workloads",
-                    "effect": "NoSchedule"
-                  }
-                ],
-                // Pin pods to nodes labeled with `nodeType=workloads`.
-                "nodeSelector": {
-                  "nodeType": "workloads"
-                },
-                // We want to wait at most 5 minutes before K8S sends a `SIGKILL` to the containers,
-                // this way we let the system finish any in-flight transaction, if there are any.
-                "terminationGracePeriodSeconds": 300,
-                "initContainers": [
-                  {
-                    "name": vector_container_name,
-                    "image": VECTOR_IMAGE_NAME,
-                    "restartPolicy": "Always",
-                    "env": [
-                      {
-                        "name": "LOGFLARE_API_KEY",
-                        "valueFrom": {
-                          "secretKeyRef": {
-                            "name": LOGFLARE_SECRET_NAME,
-                            "key": "key"
-                          }
-                        }
-                      }
-                    ],
-                    "resources": {
-                      "limits": {
-                        "memory": config.max_memory,
-                        "cpu": config.max_cpu,
-                      },
-                      "requests": {
-                        "memory": config.max_memory,
-                        "cpu": config.max_cpu,
-                      }
-                    },
-                    "volumeMounts": [
-                      {
-                        "name": VECTOR_CONFIG_FILE_VOLUME_NAME,
-                        "mountPath": "/etc/vector"
-                      },
-                      {
-                        "name": LOGS_VOLUME_NAME,
-                        "mountPath": "/var/log"
-                      }
-                    ]
-                  }
-                ],
-                "containers": [
-                  {
-                    "name": replicator_container_name,
-                    "image": replicator_image,
-                    "ports": [
-                      {
-                        "name": "metrics",
-                        "containerPort": 9000,
-                        "protocol": "TCP"
-                      }
-                    ],
-                    "env": [
-                      {
-                        "name": "APP_ENVIRONMENT",
-                        "value": environment.to_string()
-                      },
-                      {
-                          "name": "APP_VERSION",
-                          "value": replicator_image
-                      },
-                      {
-                        "name": "APP_SENTRY__DSN",
-                        "valueFrom": {
-                          "secretKeyRef": {
-                            "name": SENTRY_DSN_SECRET_NAME,
-                            "key": "dsn"
-                          }
-                        }
-                      },
-                      {
-                        "name": "APP_PIPELINE__PG_CONNECTION__PASSWORD",
-                        "valueFrom": {
-                          "secretKeyRef": {
-                            "name": postgres_secret_name,
-                            "key": "password"
-                          }
-                        }
-                      },
-                      {
-                        "name": "APP_DESTINATION__BIG_QUERY__SERVICE_ACCOUNT_KEY",
-                        "valueFrom": {
-                          "secretKeyRef": {
-                            "name": bq_secret_name,
-                            "key": "service-account-key"
-                          }
-                        }
-                      }
-                    ],
-                    "volumeMounts": [
-                      {
-                        "name": REPLICATOR_CONFIG_FILE_VOLUME_NAME,
-                        "mountPath": "/app/configuration"
-                      },
-                      {
-                        "name": LOGS_VOLUME_NAME,
-                        "mountPath": "/app/logs"
-                      },
-                    ]
-                  }
-                ]
-              }
-            }
-          }
-        });
+        let mut stateful_set_json = create_replicator_stateful_set_json(
+            &stateful_set_name,
+            &replicator_app_name,
+            &replicator_config_map_name,
+            &vector_container_name,
+            &config,
+            &replicator_container_name,
+            replicator_image,
+            &environment,
+            &postgres_secret_name,
+            &bq_secret_name,
+        );
 
         // Attach template annotations (e.g., restart checksum) to trigger a rolling restart
         if let Some(annotations) = template_annotations
@@ -650,6 +504,180 @@ fn create_replicator_config_map(
     })
 }
 
+#[expect(clippy::too_many_arguments)]
+fn create_replicator_stateful_set_json(
+    stateful_set_name: &str,
+    replicator_app_name: &str,
+    replicator_config_map_name: &str,
+    vector_container_name: &str,
+    config: &ReplicatorResourceConfig,
+    replicator_container_name: &str,
+    replicator_image: &str,
+    environment: &Environment,
+    postgres_secret_name: &str,
+    bq_secret_name: &str,
+) -> serde_json::Value {
+    json!({
+      "apiVersion": "apps/v1",
+      "kind": "StatefulSet",
+      "metadata": {
+        "name": stateful_set_name,
+        "namespace": DATA_PLANE_NAMESPACE,
+      },
+      "spec": {
+        "replicas": 1,
+        "selector": {
+          "matchLabels": {
+            "app-name": replicator_app_name,
+          }
+        },
+        "template": {
+          "metadata": {
+            "labels": {
+              "app-name": replicator_app_name,
+              "app": REPLICATOR_APP_LABEL
+            }
+          },
+          "spec": {
+            "volumes": [
+              {
+                "name": REPLICATOR_CONFIG_FILE_VOLUME_NAME,
+                "configMap": {
+                  "name": replicator_config_map_name
+                }
+              },
+              {
+                "name": VECTOR_CONFIG_FILE_VOLUME_NAME,
+                "configMap": {
+                  "name": VECTOR_CONFIG_MAP_NAME
+                }
+              },
+              {
+                "name": LOGS_VOLUME_NAME,
+                "emptyDir": {}
+              }
+            ],
+            // Allow scheduling onto nodes tainted with `nodeType=workloads`.
+            "tolerations": [
+              {
+                "key": "nodeType",
+                "operator": "Equal",
+                "value": "workloads",
+                "effect": "NoSchedule"
+              }
+            ],
+            // Pin pods to nodes labeled with `nodeType=workloads`.
+            "nodeSelector": {
+              "nodeType": "workloads"
+            },
+            // We want to wait at most 5 minutes before K8S sends a `SIGKILL` to the containers,
+            // this way we let the system finish any in-flight transaction, if there are any.
+            "terminationGracePeriodSeconds": 300,
+            "initContainers": [
+              {
+                "name": vector_container_name,
+                "image": VECTOR_IMAGE_NAME,
+                "restartPolicy": "Always",
+                "env": [
+                  {
+                    "name": "LOGFLARE_API_KEY",
+                    "valueFrom": {
+                      "secretKeyRef": {
+                        "name": LOGFLARE_SECRET_NAME,
+                        "key": "key"
+                      }
+                    }
+                  }
+                ],
+                "resources": {
+                  "limits": {
+                    "memory": config.max_memory,
+                    "cpu": config.max_cpu,
+                  },
+                  "requests": {
+                    "memory": config.max_memory,
+                    "cpu": config.max_cpu,
+                  }
+                },
+                "volumeMounts": [
+                  {
+                    "name": VECTOR_CONFIG_FILE_VOLUME_NAME,
+                    "mountPath": "/etc/vector"
+                  },
+                  {
+                    "name": LOGS_VOLUME_NAME,
+                    "mountPath": "/var/log"
+                  }
+                ]
+              }
+            ],
+            "containers": [
+              {
+                "name": replicator_container_name,
+                "image": replicator_image,
+                "ports": [
+                  {
+                    "name": "metrics",
+                    "containerPort": 9000,
+                    "protocol": "TCP"
+                  }
+                ],
+                "env": [
+                  {
+                    "name": "APP_ENVIRONMENT",
+                    "value": environment.to_string()
+                  },
+                  {
+                      "name": "APP_VERSION",
+                      //TODO: set APP_VERSION to proper vesrion instead of the replicator image name
+                      "value": replicator_image
+                  },
+                  {
+                    "name": "APP_SENTRY__DSN",
+                    "valueFrom": {
+                      "secretKeyRef": {
+                        "name": SENTRY_DSN_SECRET_NAME,
+                        "key": "dsn"
+                      }
+                    }
+                  },
+                  {
+                    "name": "APP_PIPELINE__PG_CONNECTION__PASSWORD",
+                    "valueFrom": {
+                      "secretKeyRef": {
+                        "name": postgres_secret_name,
+                        "key": "password"
+                      }
+                    }
+                  },
+                  {
+                    "name": "APP_DESTINATION__BIG_QUERY__SERVICE_ACCOUNT_KEY",
+                    "valueFrom": {
+                      "secretKeyRef": {
+                        "name": bq_secret_name,
+                        "key": "service-account-key"
+                      }
+                    }
+                  }
+                ],
+                "volumeMounts": [
+                  {
+                    "name": REPLICATOR_CONFIG_FILE_VOLUME_NAME,
+                    "mountPath": "/app/configuration"
+                  },
+                  {
+                    "name": LOGS_VOLUME_NAME,
+                    "mountPath": "/app/logs"
+                  },
+                ]
+              }
+            ]
+          }
+        }
+      }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -661,6 +689,8 @@ mod tests {
         },
     };
     use insta::assert_json_snapshot;
+
+    const TENANT_ID: &str = "abcdefghijklmnopqrst";
 
     fn create_k8s_object_prefix(tenant_id: &str, replicator_id: i64) -> String {
         format!("{tenant_id}-{replicator_id}")
@@ -689,7 +719,7 @@ mod tests {
 
     #[test]
     fn test_create_replicator_config_map_json() {
-        let prefix = create_k8s_object_prefix("abcdefghijklmnopqrst", 42);
+        let prefix = create_k8s_object_prefix(TENANT_ID, 42);
         let config_map_name = format!("{prefix}-{REPLICATOR_CONFIG_MAP_NAME_SUFFIX}");
         let environment = Environment::Prod;
         let env_config_file = format!("{environment}.yaml");
@@ -729,13 +759,43 @@ mod tests {
         };
         let env_config = serde_json::to_string(&replicator_config).unwrap();
 
-        let secret_json = create_replicator_config_map(
+        let config_map_json = create_replicator_config_map(
             &config_map_name,
             base_config,
             &env_config_file,
             &env_config,
         );
 
-        assert_json_snapshot!(secret_json);
+        assert_json_snapshot!(config_map_json);
+    }
+
+    #[test]
+    fn test_create_replicator_stateful_set_json() {
+        let prefix = create_k8s_object_prefix(TENANT_ID, 42);
+        let stateful_set_name = format!("{prefix}-{REPLICATOR_STATEFUL_SET_SUFFIX}");
+        let replicator_app_name = format!("{prefix}-{REPLICATOR_APP_SUFFIX}");
+        let replicator_container_name = format!("{prefix}-{REPLICATOR_CONTAINER_NAME_SUFFIX}");
+        let vector_container_name = format!("{prefix}-{VECTOR_CONTAINER_NAME_SUFFIX}");
+        let postgres_secret_name = format!("{prefix}-{POSTGRES_SECRET_NAME_SUFFIX}");
+        let bq_secret_name = format!("{prefix}-{BQ_SECRET_NAME_SUFFIX}");
+        let replicator_config_map_name = format!("{prefix}-{REPLICATOR_CONFIG_MAP_NAME_SUFFIX}");
+        let environment = Environment::Prod;
+        let config = ReplicatorResourceConfig::load(&environment).unwrap();
+        let replicator_image = "ramsup/etl-replicator:2a41356af735f891de37d71c0e1a62864fe4630e";
+
+        let stateful_set_json = create_replicator_stateful_set_json(
+            &stateful_set_name,
+            &replicator_app_name,
+            &replicator_config_map_name,
+            &vector_container_name,
+            &config,
+            &replicator_container_name,
+            replicator_image,
+            &environment,
+            &postgres_secret_name,
+            &bq_secret_name,
+        );
+
+        assert_json_snapshot!(stateful_set_json);
     }
 }
