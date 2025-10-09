@@ -12,7 +12,7 @@ use kube::{
     api::{Api, DeleteParams, Patch, PatchParams},
 };
 use serde_json::json;
-use tracing::info;
+use tracing::debug;
 
 /// Secret name suffix for the BigQuery service account key.
 const BQ_SECRET_NAME_SUFFIX: &str = "bq-service-account-key";
@@ -49,7 +49,7 @@ pub const TRUSTED_ROOT_CERT_CONFIG_MAP_NAME: &str = "trusted-root-certs-config";
 /// Key inside the trusted root certificates ConfigMap.
 pub const TRUSTED_ROOT_CERT_KEY_NAME: &str = "trusted_root_certs";
 /// Pod template annotation used to trigger rolling restarts.
-pub const RESTARTED_AT_ANNOTATION_KEY: &str = "etl.supabase.com/restarted-at";
+const RESTARTED_AT_ANNOTATION_KEY: &str = "etl.supabase.com/restarted-at";
 /// Label used to identify replicator pods.
 const REPLICATOR_APP_LABEL: &str = "etl-replicator-app";
 
@@ -119,6 +119,18 @@ impl HttpK8sClient {
             pods_api,
         })
     }
+
+    /// Helper function to handle delete operations that should ignore 404 errors
+    /// but propagate other errors.
+    fn handle_delete_with_404_ignore<T>(
+        delete_result: Result<T, kube::Error>,
+    ) -> Result<(), K8sError> {
+        match delete_result {
+            Ok(_) => Ok(()),
+            Err(kube::Error::Api(er)) if er.code == 404 => Ok(()),
+            Err(e) => Err(e.into()),
+        }
+    }
 }
 
 #[async_trait]
@@ -128,18 +140,18 @@ impl K8sClient for HttpK8sClient {
         prefix: &str,
         postgres_password: &str,
     ) -> Result<(), K8sError> {
-        info!("patching postgres secret");
+        debug!("patching postgres secret");
 
         let encoded_postgres_password = BASE64_STANDARD.encode(postgres_password);
-        let secret_name = format!("{prefix}-{POSTGRES_SECRET_NAME_SUFFIX}");
-        let secret_json = create_postgres_secret_json(&secret_name, &encoded_postgres_password);
-        let secret: Secret = serde_json::from_value(secret_json)?;
+        let postgres_secret_name = create_postgres_secret_name(prefix);
+        let postgres_secret_json =
+            create_postgres_secret_json(&postgres_secret_name, &encoded_postgres_password);
+        let secret: Secret = serde_json::from_value(postgres_secret_json)?;
 
-        let pp = PatchParams::apply(&secret_name);
+        let pp = PatchParams::apply(&postgres_secret_name);
         self.secrets_api
-            .patch(&secret_name, &pp, &Patch::Apply(secret))
+            .patch(&postgres_secret_name, &pp, &Patch::Apply(secret))
             .await?;
-        info!("patched postgres secret");
 
         Ok(())
     }
@@ -149,72 +161,56 @@ impl K8sClient for HttpK8sClient {
         prefix: &str,
         bq_service_account_key: &str,
     ) -> Result<(), K8sError> {
-        info!("patching bq secret");
+        debug!("patching bq secret");
 
         let encoded_bq_service_account_key = BASE64_STANDARD.encode(bq_service_account_key);
-        let secret_name = format!("{prefix}-{BQ_SECRET_NAME_SUFFIX}");
-        let secret_json = create_bq_service_account_key_secret_json(
-            &secret_name,
+        let bq_secret_name = create_bq_secret_name(prefix);
+        let bq_secret_json = create_bq_service_account_key_secret_json(
+            &bq_secret_name,
             &encoded_bq_service_account_key,
         );
-        let secret: Secret = serde_json::from_value(secret_json)?;
+        let secret: Secret = serde_json::from_value(bq_secret_json)?;
 
-        let pp = PatchParams::apply(&secret_name);
+        let pp = PatchParams::apply(&bq_secret_name);
         self.secrets_api
-            .patch(&secret_name, &pp, &Patch::Apply(secret))
+            .patch(&bq_secret_name, &pp, &Patch::Apply(secret))
             .await?;
-        info!("patched bq secret");
 
         Ok(())
     }
 
     async fn delete_postgres_secret(&self, prefix: &str) -> Result<(), K8sError> {
-        info!("deleting postgres secret");
-        let secret_name = format!("{prefix}-{POSTGRES_SECRET_NAME_SUFFIX}");
+        debug!("deleting postgres secret");
+
+        let postgres_secret_name = create_postgres_secret_name(prefix);
         let dp = DeleteParams::default();
-        match self.secrets_api.delete(&secret_name, &dp).await {
-            Ok(_) => {}
-            Err(e) => match e {
-                kube::Error::Api(ref er) => {
-                    if er.code != 404 {
-                        return Err(e.into());
-                    }
-                }
-                e => return Err(e.into()),
-            },
-        }
-        info!("deleted postgres secret");
+        Self::handle_delete_with_404_ignore(
+            self.secrets_api.delete(&postgres_secret_name, &dp).await,
+        )?;
+
         Ok(())
     }
 
     async fn delete_bq_secret(&self, prefix: &str) -> Result<(), K8sError> {
-        info!("deleting bq secret");
-        let secret_name = format!("{prefix}-{BQ_SECRET_NAME_SUFFIX}");
+        debug!("deleting bq secret");
+
+        let bq_secret_name = create_bq_secret_name(prefix);
         let dp = DeleteParams::default();
-        match self.secrets_api.delete(&secret_name, &dp).await {
-            Ok(_) => {}
-            Err(e) => match e {
-                kube::Error::Api(ref er) => {
-                    if er.code != 404 {
-                        return Err(e.into());
-                    }
-                }
-                e => return Err(e.into()),
-            },
-        }
-        info!("deleted bq secret");
+        Self::handle_delete_with_404_ignore(self.secrets_api.delete(&bq_secret_name, &dp).await)?;
+
         Ok(())
     }
 
     async fn get_config_map(&self, config_map_name: &str) -> Result<ConfigMap, K8sError> {
-        info!("getting config map");
+        debug!("getting config map");
+
         let config_map = match self.config_maps_api.get(config_map_name).await {
             Ok(config_map) => config_map,
             Err(e) => {
                 return Err(e.into());
             }
         };
-        info!("got config map");
+
         Ok(config_map)
     }
 
@@ -225,42 +221,37 @@ impl K8sClient for HttpK8sClient {
         env_config: &str,
         environment: Environment,
     ) -> Result<(), K8sError> {
-        info!("patching config map");
+        debug!("patching config map");
 
         let env_config_file = format!("{environment}.yaml");
-        let config_map_name = format!("{prefix}-{REPLICATOR_CONFIG_MAP_NAME_SUFFIX}");
-        let config_map_json = create_replicator_config_map(
-            &config_map_name,
+        let replicator_config_map_name = create_replicator_config_map_name(prefix);
+        let config_map_json = create_replicator_config_map_json(
+            &replicator_config_map_name,
             base_config,
             &env_config_file,
             env_config,
         );
         let config_map: ConfigMap = serde_json::from_value(config_map_json)?;
 
-        let pp = PatchParams::apply(&config_map_name);
+        let pp = PatchParams::apply(&replicator_config_map_name);
         self.config_maps_api
-            .patch(&config_map_name, &pp, &Patch::Apply(config_map))
+            .patch(&replicator_config_map_name, &pp, &Patch::Apply(config_map))
             .await?;
-        info!("patched config map");
+
         Ok(())
     }
 
     async fn delete_config_map(&self, prefix: &str) -> Result<(), K8sError> {
-        info!("deleting config map");
-        let config_map_name = format!("{prefix}-{REPLICATOR_CONFIG_MAP_NAME_SUFFIX}");
+        debug!("deleting config map");
+
+        let replicator_config_map_name = create_replicator_config_map_name(prefix);
         let dp = DeleteParams::default();
-        match self.config_maps_api.delete(&config_map_name, &dp).await {
-            Ok(_) => {}
-            Err(e) => match e {
-                kube::Error::Api(ref er) => {
-                    if er.code != 404 {
-                        return Err(e.into());
-                    }
-                }
-                e => return Err(e.into()),
-            },
-        }
-        info!("deleted config map");
+        Self::handle_delete_with_404_ignore(
+            self.config_maps_api
+                .delete(&replicator_config_map_name, &dp)
+                .await,
+        )?;
+
         Ok(())
     }
 
@@ -270,18 +261,18 @@ impl K8sClient for HttpK8sClient {
         replicator_image: &str,
         environment: Environment,
     ) -> Result<(), K8sError> {
-        info!("patching stateful set");
+        debug!("patching stateful set");
 
         let config = ReplicatorResourceConfig::load(&environment)?;
 
-        let stateful_set_name = format!("{prefix}-{REPLICATOR_STATEFUL_SET_SUFFIX}");
-        let replicator_app_name = format!("{prefix}-{REPLICATOR_APP_SUFFIX}");
+        let stateful_set_name = create_stateful_set_name(prefix);
+        let replicator_app_name = create_replicator_app_name(prefix);
         let restarted_at_annotation = get_restarted_at_annotation_value();
-        let replicator_container_name = format!("{prefix}-{REPLICATOR_CONTAINER_NAME_SUFFIX}");
-        let vector_container_name = format!("{prefix}-{VECTOR_CONTAINER_NAME_SUFFIX}");
-        let postgres_secret_name = format!("{prefix}-{POSTGRES_SECRET_NAME_SUFFIX}");
-        let bq_secret_name = format!("{prefix}-{BQ_SECRET_NAME_SUFFIX}");
-        let replicator_config_map_name = format!("{prefix}-{REPLICATOR_CONFIG_MAP_NAME_SUFFIX}");
+        let replicator_container_name = create_replicator_container_name(prefix);
+        let vector_container_name = create_vector_container_name(prefix);
+        let postgres_secret_name = create_postgres_secret_name(prefix);
+        let bq_secret_name = create_bq_secret_name(prefix);
+        let replicator_config_map_name = create_replicator_config_map_name(prefix);
 
         let stateful_set_json = create_replicator_stateful_set_json(
             &stateful_set_name,
@@ -304,51 +295,29 @@ impl K8sClient for HttpK8sClient {
             .patch(&stateful_set_name, &pp, &Patch::Apply(stateful_set))
             .await?;
 
-        info!("patched stateful set");
-
         Ok(())
     }
 
     async fn delete_stateful_set(&self, prefix: &str) -> Result<(), K8sError> {
-        info!("deleting stateful set");
+        debug!("deleting stateful set");
 
-        let stateful_set_name = format!("{prefix}-{REPLICATOR_STATEFUL_SET_SUFFIX}");
+        let stateful_set_name = create_stateful_set_name(prefix);
         let dp = DeleteParams::default();
-        match self.stateful_sets_api.delete(&stateful_set_name, &dp).await {
-            Ok(_) => {}
-            Err(e) => match e {
-                kube::Error::Api(ref er) => {
-                    if er.code != 404 {
-                        return Err(e.into());
-                    }
-                }
-                e => return Err(e.into()),
-            },
-        }
-
-        info!("deleted stateful set");
+        Self::handle_delete_with_404_ignore(
+            self.stateful_sets_api.delete(&stateful_set_name, &dp).await,
+        )?;
 
         Ok(())
     }
 
     async fn get_pod_phase(&self, prefix: &str) -> Result<PodPhase, K8sError> {
-        info!("getting pod status");
+        debug!("getting pod status");
 
-        let pod_name = format!("{prefix}-{REPLICATOR_STATEFUL_SET_SUFFIX}-0");
+        let pod_name = create_pod_name(prefix);
         let pod = match self.pods_api.get(&pod_name).await {
             Ok(pod) => pod,
-            Err(e) => {
-                return match e {
-                    kube::Error::Api(ref er) => {
-                        if er.code == 404 {
-                            return Ok(PodPhase::Succeeded);
-                        }
-
-                        Err(e.into())
-                    }
-                    e => Err(e.into()),
-                };
-            }
+            Err(kube::Error::Api(er)) if er.code == 404 => return Ok(PodPhase::Succeeded),
+            Err(e) => return Err(e.into()),
         };
 
         let phase = pod
@@ -369,25 +338,16 @@ impl K8sClient for HttpK8sClient {
     }
 
     async fn has_replicator_container_error(&self, prefix: &str) -> Result<bool, K8sError> {
-        info!("checking for replicator container error");
+        debug!("checking for replicator container error");
 
-        let pod_name = format!("{prefix}-{REPLICATOR_STATEFUL_SET_SUFFIX}-0");
+        let pod_name = create_pod_name(prefix);
         let pod = match self.pods_api.get(&pod_name).await {
             Ok(pod) => pod,
-            Err(e) => {
-                return match e {
-                    kube::Error::Api(ref er) => {
-                        if er.code == 404 {
-                            return Ok(false);
-                        }
-                        Err(e.into())
-                    }
-                    e => Err(e.into()),
-                };
-            }
+            Err(kube::Error::Api(er)) if er.code == 404 => return Ok(false),
+            Err(e) => return Err(e.into()),
         };
 
-        let replicator_container_name = format!("{prefix}-{REPLICATOR_CONTAINER_NAME_SUFFIX}");
+        let replicator_container_name = create_replicator_container_name(prefix);
 
         // Find the replicator container status
         let container_status = pod.status.and_then(|status| {
@@ -412,6 +372,38 @@ impl K8sClient for HttpK8sClient {
 
         Ok(false)
     }
+}
+
+fn create_postgres_secret_name(prefix: &str) -> String {
+    format!("{prefix}-{POSTGRES_SECRET_NAME_SUFFIX}")
+}
+
+fn create_bq_secret_name(prefix: &str) -> String {
+    format!("{prefix}-{BQ_SECRET_NAME_SUFFIX}")
+}
+
+fn create_replicator_config_map_name(prefix: &str) -> String {
+    format!("{prefix}-{REPLICATOR_CONFIG_MAP_NAME_SUFFIX}")
+}
+
+fn create_stateful_set_name(prefix: &str) -> String {
+    format!("{prefix}-{REPLICATOR_STATEFUL_SET_SUFFIX}")
+}
+
+fn create_pod_name(prefix: &str) -> String {
+    format!("{prefix}-{REPLICATOR_STATEFUL_SET_SUFFIX}-0")
+}
+
+fn create_replicator_app_name(prefix: &str) -> String {
+    format!("{prefix}-{REPLICATOR_APP_SUFFIX}")
+}
+
+fn create_replicator_container_name(prefix: &str) -> String {
+    format!("{prefix}-{REPLICATOR_CONTAINER_NAME_SUFFIX}")
+}
+
+fn create_vector_container_name(prefix: &str) -> String {
+    format!("{prefix}-{VECTOR_CONTAINER_NAME_SUFFIX}")
 }
 
 fn create_postgres_secret_json(
@@ -450,7 +442,7 @@ fn create_bq_service_account_key_secret_json(
     })
 }
 
-fn create_replicator_config_map(
+fn create_replicator_config_map_json(
     config_map_name: &str,
     base_config: &str,
     env_config_file: &str,
@@ -702,7 +694,7 @@ mod tests {
     #[test]
     fn test_create_replicator_config_map_json() {
         let prefix = create_k8s_object_prefix(TENANT_ID, 42);
-        let config_map_name = format!("{prefix}-{REPLICATOR_CONFIG_MAP_NAME_SUFFIX}");
+        let replicator_config_map_name = create_replicator_config_map_name(&prefix);
         let environment = Environment::Prod;
         let env_config_file = format!("{environment}.yaml");
         let base_config = "";
@@ -741,8 +733,8 @@ mod tests {
         };
         let env_config = serde_json::to_string(&replicator_config).unwrap();
 
-        let config_map_json = create_replicator_config_map(
-            &config_map_name,
+        let config_map_json = create_replicator_config_map_json(
+            &replicator_config_map_name,
             base_config,
             &env_config_file,
             &env_config,
@@ -756,14 +748,14 @@ mod tests {
     #[test]
     fn test_create_replicator_stateful_set_json() {
         let prefix = create_k8s_object_prefix(TENANT_ID, 42);
-        let stateful_set_name = format!("{prefix}-{REPLICATOR_STATEFUL_SET_SUFFIX}");
-        let replicator_app_name = format!("{prefix}-{REPLICATOR_APP_SUFFIX}");
+        let stateful_set_name = create_stateful_set_name(&prefix);
+        let replicator_app_name = create_replicator_app_name(&prefix);
         let restarted_at_annotation = "2025-10-09T16:02:24.127400000Z";
-        let replicator_container_name = format!("{prefix}-{REPLICATOR_CONTAINER_NAME_SUFFIX}");
-        let vector_container_name = format!("{prefix}-{VECTOR_CONTAINER_NAME_SUFFIX}");
-        let postgres_secret_name = format!("{prefix}-{POSTGRES_SECRET_NAME_SUFFIX}");
-        let bq_secret_name = format!("{prefix}-{BQ_SECRET_NAME_SUFFIX}");
-        let replicator_config_map_name = format!("{prefix}-{REPLICATOR_CONFIG_MAP_NAME_SUFFIX}");
+        let replicator_container_name = create_replicator_container_name(&prefix);
+        let vector_container_name = create_vector_container_name(&prefix);
+        let postgres_secret_name = create_postgres_secret_name(&prefix);
+        let bq_secret_name = create_bq_secret_name(&prefix);
+        let replicator_config_map_name = create_replicator_config_map_name(&prefix);
         let environment = Environment::Prod;
         let config = ReplicatorResourceConfig::load(&environment).unwrap();
         let replicator_image = "ramsup/etl-replicator:2a41356af735f891de37d71c0e1a62864fe4630e";
