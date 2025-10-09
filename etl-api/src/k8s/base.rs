@@ -119,7 +119,4 @@ pub trait K8sClient: Send + Sync {
     /// Reports whether the replicator container terminated with a non-zero exit
     /// code.
     async fn has_replicator_container_error(&self, prefix: &str) -> Result<bool, K8sError>;
-
-    /// Deletes the replicator pod if it exists.
-    async fn delete_pod(&self, prefix: &str) -> Result<(), K8sError>;
 }
