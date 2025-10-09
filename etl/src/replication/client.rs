@@ -766,14 +766,11 @@ impl PgReplicationClient {
                 quote_literal(publication),
             );
 
-        info!("Row filter query:\n{row_filter_query}");
         let messages = self.client.simple_query(&row_filter_query).await?;
-        info!("Messages: {messages:?}");
 
         for message in messages {
             if let SimpleQueryMessage::Row(row) = message {
                 let rowfilter = Self::get_row_value::<String>(&row, "rowfilter", "gpt").await?;
-                info!("raw row filter: {rowfilter}");
                 match rowfilter.as_str() {
                     "" => return Ok(None),
                     _ => return Ok(Some(rowfilter)),
@@ -800,9 +797,7 @@ impl PgReplicationClient {
             .join(", ");
 
         let table_name = self.get_table_name(table_id).await?;
-        let filter = self.get_row_filter(table_id, publication).await;
-        info!("publication: {publication:?}, row filter: {filter:?}");
-        let filter = filter?;
+        let filter = self.get_row_filter(table_id, publication).await?;
 
         let copy_query = if let Some(pred) = filter {
             // Use SELECT-form so we can add WHERE. Parenthesize the predicate to be safe.
@@ -819,8 +814,6 @@ impl PgReplicationClient {
                 column_list,
             )
         };
-
-        info!("Copy stream query:\n{copy_query}");
 
         let stream = self.client.copy_out_simple(&copy_query).await?;
 
