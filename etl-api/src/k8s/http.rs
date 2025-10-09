@@ -12,7 +12,7 @@ use kube::{
     api::{Api, DeleteParams, Patch, PatchParams},
 };
 use serde_json::json;
-use tracing::info;
+use tracing::debug;
 
 /// Secret name suffix for the BigQuery service account key.
 const BQ_SECRET_NAME_SUFFIX: &str = "bq-service-account-key";
@@ -140,7 +140,7 @@ impl K8sClient for HttpK8sClient {
         prefix: &str,
         postgres_password: &str,
     ) -> Result<(), K8sError> {
-        info!("patching postgres secret");
+        debug!("patching postgres secret");
 
         let encoded_postgres_password = BASE64_STANDARD.encode(postgres_password);
         let postgres_secret_name = create_postgres_secret_name(prefix);
@@ -152,7 +152,6 @@ impl K8sClient for HttpK8sClient {
         self.secrets_api
             .patch(&postgres_secret_name, &pp, &Patch::Apply(secret))
             .await?;
-        info!("patched postgres secret");
 
         Ok(())
     }
@@ -162,7 +161,7 @@ impl K8sClient for HttpK8sClient {
         prefix: &str,
         bq_service_account_key: &str,
     ) -> Result<(), K8sError> {
-        info!("patching bq secret");
+        debug!("patching bq secret");
 
         let encoded_bq_service_account_key = BASE64_STANDARD.encode(bq_service_account_key);
         let bq_secret_name = create_bq_secret_name(prefix);
@@ -176,40 +175,42 @@ impl K8sClient for HttpK8sClient {
         self.secrets_api
             .patch(&bq_secret_name, &pp, &Patch::Apply(secret))
             .await?;
-        info!("patched bq secret");
 
         Ok(())
     }
 
     async fn delete_postgres_secret(&self, prefix: &str) -> Result<(), K8sError> {
-        info!("deleting postgres secret");
+        debug!("deleting postgres secret");
+
         let postgres_secret_name = create_postgres_secret_name(prefix);
         let dp = DeleteParams::default();
         Self::handle_delete_with_404_ignore(
             self.secrets_api.delete(&postgres_secret_name, &dp).await,
         )?;
-        info!("deleted postgres secret");
+
         Ok(())
     }
 
     async fn delete_bq_secret(&self, prefix: &str) -> Result<(), K8sError> {
-        info!("deleting bq secret");
+        debug!("deleting bq secret");
+
         let bq_secret_name = create_bq_secret_name(prefix);
         let dp = DeleteParams::default();
         Self::handle_delete_with_404_ignore(self.secrets_api.delete(&bq_secret_name, &dp).await)?;
-        info!("deleted bq secret");
+
         Ok(())
     }
 
     async fn get_config_map(&self, config_map_name: &str) -> Result<ConfigMap, K8sError> {
-        info!("getting config map");
+        debug!("getting config map");
+
         let config_map = match self.config_maps_api.get(config_map_name).await {
             Ok(config_map) => config_map,
             Err(e) => {
                 return Err(e.into());
             }
         };
-        info!("got config map");
+
         Ok(config_map)
     }
 
@@ -220,7 +221,7 @@ impl K8sClient for HttpK8sClient {
         env_config: &str,
         environment: Environment,
     ) -> Result<(), K8sError> {
-        info!("patching config map");
+        debug!("patching config map");
 
         let env_config_file = format!("{environment}.yaml");
         let replicator_config_map_name = create_replicator_config_map_name(prefix);
@@ -236,12 +237,13 @@ impl K8sClient for HttpK8sClient {
         self.config_maps_api
             .patch(&replicator_config_map_name, &pp, &Patch::Apply(config_map))
             .await?;
-        info!("patched config map");
+
         Ok(())
     }
 
     async fn delete_config_map(&self, prefix: &str) -> Result<(), K8sError> {
-        info!("deleting config map");
+        debug!("deleting config map");
+
         let replicator_config_map_name = create_replicator_config_map_name(prefix);
         let dp = DeleteParams::default();
         Self::handle_delete_with_404_ignore(
@@ -249,7 +251,7 @@ impl K8sClient for HttpK8sClient {
                 .delete(&replicator_config_map_name, &dp)
                 .await,
         )?;
-        info!("deleted config map");
+
         Ok(())
     }
 
@@ -259,7 +261,7 @@ impl K8sClient for HttpK8sClient {
         replicator_image: &str,
         environment: Environment,
     ) -> Result<(), K8sError> {
-        info!("patching stateful set");
+        debug!("patching stateful set");
 
         let config = ReplicatorResourceConfig::load(&environment)?;
 
@@ -293,13 +295,11 @@ impl K8sClient for HttpK8sClient {
             .patch(&stateful_set_name, &pp, &Patch::Apply(stateful_set))
             .await?;
 
-        info!("patched stateful set");
-
         Ok(())
     }
 
     async fn delete_stateful_set(&self, prefix: &str) -> Result<(), K8sError> {
-        info!("deleting stateful set");
+        debug!("deleting stateful set");
 
         let stateful_set_name = create_stateful_set_name(prefix);
         let dp = DeleteParams::default();
@@ -307,13 +307,11 @@ impl K8sClient for HttpK8sClient {
             self.stateful_sets_api.delete(&stateful_set_name, &dp).await,
         )?;
 
-        info!("deleted stateful set");
-
         Ok(())
     }
 
     async fn get_pod_phase(&self, prefix: &str) -> Result<PodPhase, K8sError> {
-        info!("getting pod status");
+        debug!("getting pod status");
 
         let pod_name = create_pod_name(prefix);
         let pod = match self.pods_api.get(&pod_name).await {
@@ -340,7 +338,7 @@ impl K8sClient for HttpK8sClient {
     }
 
     async fn has_replicator_container_error(&self, prefix: &str) -> Result<bool, K8sError> {
-        info!("checking for replicator container error");
+        debug!("checking for replicator container error");
 
         let pod_name = create_pod_name(prefix);
         let pod = match self.pods_api.get(&pod_name).await {
