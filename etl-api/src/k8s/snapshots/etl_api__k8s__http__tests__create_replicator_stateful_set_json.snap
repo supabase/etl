@@ -1,0 +1,161 @@
+---
+source: etl-api/src/k8s/http.rs
+expression: stateful_set_json
+---
+{
+  "apiVersion": "apps/v1",
+  "kind": "StatefulSet",
+  "metadata": {
+    "name": "abcdefghijklmnopqrst-42-replicator-stateful-set",
+    "namespace": "etl-data-plane"
+  },
+  "spec": {
+    "replicas": 1,
+    "selector": {
+      "matchLabels": {
+        "app-name": "abcdefghijklmnopqrst-42-replicator-app"
+      }
+    },
+    "template": {
+      "metadata": {
+        "annotations": {
+          "etl.supabase.com/restarted-at": "2025-10-09T16:02:24.127400000Z"
+        },
+        "labels": {
+          "app": "etl-replicator-app",
+          "app-name": "abcdefghijklmnopqrst-42-replicator-app"
+        }
+      },
+      "spec": {
+        "containers": [
+          {
+            "env": [
+              {
+                "name": "APP_ENVIRONMENT",
+                "value": "prod"
+              },
+              {
+                "name": "APP_VERSION",
+                "value": "ramsup/etl-replicator:2a41356af735f891de37d71c0e1a62864fe4630e"
+              },
+              {
+                "name": "APP_SENTRY__DSN",
+                "valueFrom": {
+                  "secretKeyRef": {
+                    "key": "dsn",
+                    "name": "replicator-sentry-dsn"
+                  }
+                }
+              },
+              {
+                "name": "APP_PIPELINE__PG_CONNECTION__PASSWORD",
+                "valueFrom": {
+                  "secretKeyRef": {
+                    "key": "password",
+                    "name": "abcdefghijklmnopqrst-42-postgres-password"
+                  }
+                }
+              },
+              {
+                "name": "APP_DESTINATION__BIG_QUERY__SERVICE_ACCOUNT_KEY",
+                "valueFrom": {
+                  "secretKeyRef": {
+                    "key": "service-account-key",
+                    "name": "abcdefghijklmnopqrst-42-bq-service-account-key"
+                  }
+                }
+              }
+            ],
+            "image": "ramsup/etl-replicator:2a41356af735f891de37d71c0e1a62864fe4630e",
+            "name": "abcdefghijklmnopqrst-42-replicator",
+            "ports": [
+              {
+                "containerPort": 9000,
+                "name": "metrics",
+                "protocol": "TCP"
+              }
+            ],
+            "volumeMounts": [
+              {
+                "mountPath": "/app/configuration",
+                "name": "replicator-config-file"
+              },
+              {
+                "mountPath": "/app/logs",
+                "name": "logs"
+              }
+            ]
+          }
+        ],
+        "initContainers": [
+          {
+            "env": [
+              {
+                "name": "LOGFLARE_API_KEY",
+                "valueFrom": {
+                  "secretKeyRef": {
+                    "key": "key",
+                    "name": "replicator-logflare-api-key"
+                  }
+                }
+              }
+            ],
+            "image": "timberio/vector:0.46.1-distroless-libc",
+            "name": "abcdefghijklmnopqrst-42-vector",
+            "resources": {
+              "limits": {
+                "cpu": "100m",
+                "memory": "500Mi"
+              },
+              "requests": {
+                "cpu": "100m",
+                "memory": "500Mi"
+              }
+            },
+            "restartPolicy": "Always",
+            "volumeMounts": [
+              {
+                "mountPath": "/etc/vector",
+                "name": "vector-config-file"
+              },
+              {
+                "mountPath": "/var/log",
+                "name": "logs"
+              }
+            ]
+          }
+        ],
+        "nodeSelector": {
+          "nodeType": "workloads"
+        },
+        "terminationGracePeriodSeconds": 300,
+        "tolerations": [
+          {
+            "effect": "NoSchedule",
+            "key": "nodeType",
+            "operator": "Equal",
+            "value": "workloads"
+          }
+        ],
+        "volumes": [
+          {
+            "configMap": {
+              "name": "abcdefghijklmnopqrst-42-replicator-config"
+            },
+            "name": "replicator-config-file"
+          },
+          {
+            "configMap": {
+              "name": "replicator-vector-config"
+            },
+            "name": "vector-config-file"
+          },
+          {
+            "emptyDir": {},
+            "name": "logs"
+          }
+        ]
+      }
+    }
+  }
+}

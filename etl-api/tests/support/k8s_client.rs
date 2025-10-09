@@ -70,7 +70,6 @@ impl K8sClient for MockK8sClient {
         &self,
         _prefix: &str,
         _replicator_image: &str,
-        _template_annotations: Option<BTreeMap<String, String>>,
         _environment: Environment,
     ) -> Result<(), K8sError> {
         Ok(())

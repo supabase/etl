@@ -1,7 +1,6 @@
 use async_trait::async_trait;
 use etl_config::Environment;
 use k8s_openapi::api::core::v1::ConfigMap;
-use std::collections::BTreeMap;
 use thiserror::Error;
 
 /// Errors emitted by the Kubernetes integration.
@@ -106,7 +105,6 @@ pub trait K8sClient: Send + Sync {
         &self,
         prefix: &str,
         replicator_image: &str,
-        template_annotations: Option<BTreeMap<String, String>>,
         environment: Environment,
     ) -> Result<(), K8sError>;
 
