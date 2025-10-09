@@ -132,18 +132,7 @@ impl K8sClient for HttpK8sClient {
 
         let encoded_postgres_password = BASE64_STANDARD.encode(postgres_password);
         let secret_name = format!("{prefix}-{POSTGRES_SECRET_NAME_SUFFIX}");
-        let secret_json = json!({
-          "apiVersion": "v1",
-          "kind": "Secret",
-          "metadata": {
-            "name": secret_name,
-            "namespace": DATA_PLANE_NAMESPACE,
-          },
-          "type": "Opaque",
-          "data": {
-            "password": encoded_postgres_password,
-          }
-        });
+        let secret_json = create_postgres_secret_json(&secret_name, &encoded_postgres_password);
         let secret: Secret = serde_json::from_value(secret_json)?;
 
         let pp = PatchParams::apply(&secret_name);
@@ -617,5 +606,39 @@ impl K8sClient for HttpK8sClient {
         info!("deleted pod");
 
         Ok(())
+    }
+}
+
+fn create_postgres_secret_json(
+    secret_name: &str,
+    encoded_postgres_password: &str,
+) -> serde_json::Value {
+    json!({
+      "apiVersion": "v1",
+      "kind": "Secret",
+      "metadata": {
+        "name": secret_name,
+        "namespace": DATA_PLANE_NAMESPACE,
+      },
+      "type": "Opaque",
+      "data": {
+        "password": encoded_postgres_password,
+      }
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use insta::assert_json_snapshot;
+
+    #[test]
+    fn test_create_postgres_secret_json() {
+        let secret_name = "test-secret";
+        let encoded_password = "dGVzdC1wYXNzd29yZA==";
+
+        let secret_json = create_postgres_secret_json(secret_name, encoded_password);
+
+        assert_json_snapshot!(secret_json);
     }
 }
