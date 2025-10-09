@@ -438,7 +438,7 @@ async fn test_table_copy_stream_respects_row_filter() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn test_table_copy_stream_works_without_row_filter() {
+async fn test_table_copy_stream_no_row_filter() {
     init_test_tracing();
     let database = spawn_source_database().await;
     // We create a table and insert one row.
