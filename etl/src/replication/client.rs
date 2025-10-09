@@ -772,7 +772,10 @@ WHERE p.pubname = {}
 
         for message in messages {
             if let SimpleQueryMessage::Row(row) = message {
-                let rowfilter = Self::get_row_value::<String>(&row, "rowfilter", "gpt").await?;
+                let row_filter = Self::get_row_value::<String>(&row, "row_filter", "gpt").await?;
+                match row_filter.as_str() {
+                    "" => return Ok(None),
+                    _ => return Ok(Some(row_filter)),
                 match rowfilter.as_str() {
                     "" => return Ok(None),
                     _ => return Ok(Some(rowfilter)),
