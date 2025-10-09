@@ -229,19 +229,12 @@ impl K8sClient for HttpK8sClient {
 
         let env_config_file = format!("{environment}.yaml");
         let config_map_name = format!("{prefix}-{REPLICATOR_CONFIG_MAP_NAME_SUFFIX}");
-        let config_map_json = json!({
-          "kind": "ConfigMap",
-          "apiVersion": "v1",
-          "metadata": {
-            "name": config_map_name,
-            "namespace": DATA_PLANE_NAMESPACE,
-          },
-          "data": {
-            "base.yaml": base_config,
-            env_config_file: env_config,
-          }
-        });
-        // TODO: for consistency we might want to use `serde_yaml` since writing a `.yaml` as JSON.
+        let config_map_json = create_replicator_config_map(
+            &config_map_name,
+            base_config,
+            &env_config_file,
+            env_config,
+        );
         let config_map: ConfigMap = serde_json::from_value(config_map_json)?;
 
         let pp = PatchParams::apply(&config_map_name);
@@ -637,10 +630,41 @@ fn create_bq_service_account_key_secret_json(
     })
 }
 
+fn create_replicator_config_map(
+    config_map_name: &str,
+    base_config: &str,
+    env_config_file: &str,
+    env_config: &str,
+) -> serde_json::Value {
+    json!({
+      "kind": "ConfigMap",
+      "apiVersion": "v1",
+      "metadata": {
+        "name": config_map_name,
+        "namespace": DATA_PLANE_NAMESPACE,
+      },
+      "data": {
+        "base.yaml": base_config,
+        env_config_file: env_config,
+      }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use etl_config::{
+        SerializableSecretString,
+        shared::{
+            BatchConfig, DestinationConfig, PgConnectionConfig, PipelineConfig, ReplicatorConfig,
+            TlsConfig,
+        },
+    };
     use insta::assert_json_snapshot;
+
+    fn create_k8s_object_prefix(tenant_id: &str, replicator_id: i64) -> String {
+        format!("{tenant_id}-{replicator_id}")
+    }
 
     #[test]
     fn test_create_postgres_secret_json() {
@@ -659,6 +683,58 @@ mod tests {
 
         let secret_json =
             create_bq_service_account_key_secret_json(secret_name, encoded_bq_service_account_key);
+
+        assert_json_snapshot!(secret_json);
+    }
+
+    #[test]
+    fn test_create_replicator_config_map_json() {
+        let prefix = create_k8s_object_prefix("abcdefghijklmnopqrst", 42);
+        let config_map_name = format!("{prefix}-{REPLICATOR_CONFIG_MAP_NAME_SUFFIX}");
+        let environment = Environment::Prod;
+        let env_config_file = format!("{environment}.yaml");
+        let base_config = "";
+        let replicator_config = ReplicatorConfig {
+            destination: DestinationConfig::BigQuery {
+                project_id: "project-id".to_string(),
+                dataset_id: "dataset-id".to_string(),
+                service_account_key: SerializableSecretString::from("sa-key".to_string()),
+                max_staleness_mins: None,
+                max_concurrent_streams: 4,
+            },
+            pipeline: PipelineConfig {
+                id: 42,
+                publication_name: "all-pub".to_string(),
+                pg_connection: PgConnectionConfig {
+                    host: "localhost".to_string(),
+                    port: 5432,
+                    name: "postgres".to_string(),
+                    username: "postgres".to_string(),
+                    password: None,
+                    tls: TlsConfig {
+                        trusted_root_certs: "".to_string(),
+                        enabled: false,
+                    },
+                },
+                batch: BatchConfig {
+                    max_size: 10_000,
+                    max_fill_ms: 1_000,
+                },
+                table_error_retry_delay_ms: 500,
+                table_error_retry_max_attempts: 3,
+                max_table_sync_workers: 4,
+            },
+            sentry: None,
+            supabase: None,
+        };
+        let env_config = serde_json::to_string(&replicator_config).unwrap();
+
+        let secret_json = create_replicator_config_map(
+            &config_map_name,
+            base_config,
+            &env_config_file,
+            &env_config,
+        );
 
         assert_json_snapshot!(secret_json);
     }
