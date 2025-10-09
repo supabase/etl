@@ -770,16 +770,14 @@ impl PgReplicationClient {
         let messages = self.client.simple_query(&row_filter_query).await?;
         info!("Messages: {messages:?}");
 
-        if messages.len() < 1 {
-            return Ok(None);
-        }
-
-        if let SimpleQueryMessage::Row(row) = &messages[0] {
-            let rowfilter = Self::get_row_value::<String>(&row, "rowfilter", "gpt").await?;
-            match rowfilter.as_str() {
-                "" => return Ok(None),
-                _ => return Ok(Some(rowfilter)),
-            };
+        for message in messages {
+            if let SimpleQueryMessage::Row(row) = message {
+                let rowfilter = Self::get_row_value::<String>(&row, "rowfilter", "gpt").await?;
+                match rowfilter.as_str() {
+                    "" => return Ok(None),
+                    _ => return Ok(Some(rowfilter)),
+                };
+            }
         }
 
         Ok(None)
