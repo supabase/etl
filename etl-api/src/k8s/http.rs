@@ -279,7 +279,7 @@ impl K8sClient for HttpK8sClient {
 
         let config = ReplicatorResourceConfig::load(&environment)?;
 
-        let stateful_set_name = format!("{prefix}-{REPLICATOR_STATEFUL_SET_SUFFIX}");
+        let stateful_set_name = create_stateful_set_name(prefix);
         let replicator_app_name = format!("{prefix}-{REPLICATOR_APP_SUFFIX}");
         let restarted_at_annotation = get_restarted_at_annotation_value();
         let replicator_container_name = format!("{prefix}-{REPLICATOR_CONTAINER_NAME_SUFFIX}");
@@ -317,7 +317,7 @@ impl K8sClient for HttpK8sClient {
     async fn delete_stateful_set(&self, prefix: &str) -> Result<(), K8sError> {
         info!("deleting stateful set");
 
-        let stateful_set_name = format!("{prefix}-{REPLICATOR_STATEFUL_SET_SUFFIX}");
+        let stateful_set_name = create_stateful_set_name(prefix);
         let dp = DeleteParams::default();
         match self.stateful_sets_api.delete(&stateful_set_name, &dp).await {
             Ok(_) => {}
@@ -339,7 +339,7 @@ impl K8sClient for HttpK8sClient {
     async fn get_pod_phase(&self, prefix: &str) -> Result<PodPhase, K8sError> {
         info!("getting pod status");
 
-        let pod_name = format!("{prefix}-{REPLICATOR_STATEFUL_SET_SUFFIX}-0");
+        let pod_name = create_pod_name(prefix);
         let pod = match self.pods_api.get(&pod_name).await {
             Ok(pod) => pod,
             Err(e) => {
@@ -376,7 +376,7 @@ impl K8sClient for HttpK8sClient {
     async fn has_replicator_container_error(&self, prefix: &str) -> Result<bool, K8sError> {
         info!("checking for replicator container error");
 
-        let pod_name = format!("{prefix}-{REPLICATOR_STATEFUL_SET_SUFFIX}-0");
+        let pod_name = create_pod_name(prefix);
         let pod = match self.pods_api.get(&pod_name).await {
             Ok(pod) => pod,
             Err(e) => {
@@ -429,6 +429,14 @@ fn create_bq_secret_name(prefix: &str) -> String {
 
 fn create_replicator_config_map_name(prefix: &str) -> String {
     format!("{prefix}-{REPLICATOR_CONFIG_MAP_NAME_SUFFIX}")
+}
+
+fn create_stateful_set_name(prefix: &str) -> String {
+    format!("{prefix}-{REPLICATOR_STATEFUL_SET_SUFFIX}")
+}
+
+fn create_pod_name(prefix: &str) -> String {
+    format!("{prefix}-{REPLICATOR_STATEFUL_SET_SUFFIX}-0")
 }
 
 fn create_postgres_secret_json(
@@ -773,7 +781,7 @@ mod tests {
     #[test]
     fn test_create_replicator_stateful_set_json() {
         let prefix = create_k8s_object_prefix(TENANT_ID, 42);
-        let stateful_set_name = format!("{prefix}-{REPLICATOR_STATEFUL_SET_SUFFIX}");
+        let stateful_set_name = create_stateful_set_name(&prefix);
         let replicator_app_name = format!("{prefix}-{REPLICATOR_APP_SUFFIX}");
         let restarted_at_annotation = "2025-10-09T16:02:24.127400000Z";
         let replicator_container_name = format!("{prefix}-{REPLICATOR_CONTAINER_NAME_SUFFIX}");
