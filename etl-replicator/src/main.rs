@@ -66,7 +66,6 @@ async fn async_main(replicator_config: ReplicatorConfig) -> anyhow::Result<()> {
     if let Err(err) = start_replicator_with_config(replicator_config).await {
         sentry::capture_error(&*err);
         error!("an error occurred in the replicator: {err}");
-
         return Err(err);
     }
 

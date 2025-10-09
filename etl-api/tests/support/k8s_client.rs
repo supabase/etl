@@ -86,8 +86,4 @@ impl K8sClient for MockK8sClient {
     async fn has_replicator_container_error(&self, _prefix: &str) -> Result<bool, K8sError> {
         Ok(false)
     }
-
-    async fn delete_pod(&self, _prefix: &str) -> Result<(), K8sError> {
-        Ok(())
-    }
 }

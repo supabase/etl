@@ -413,27 +413,6 @@ impl K8sClient for HttpK8sClient {
 
         Ok(false)
     }
-
-    async fn delete_pod(&self, prefix: &str) -> Result<(), K8sError> {
-        info!("deleting pod");
-
-        let pod_name = format!("{prefix}-{REPLICATOR_STATEFUL_SET_SUFFIX}-0");
-        let dp = DeleteParams::default();
-        match self.pods_api.delete(&pod_name, &dp).await {
-            Ok(_) => {}
-            Err(e) => match e {
-                kube::Error::Api(ref er) => {
-                    if er.code != 404 {
-                        return Err(e.into());
-                    }
-                }
-                e => return Err(e.into()),
-            },
-        }
-        info!("deleted pod");
-
-        Ok(())
-    }
 }
 
 fn create_postgres_secret_name(prefix: &str) -> String {
