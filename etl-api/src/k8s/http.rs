@@ -153,16 +153,16 @@ impl K8sClient for HttpK8sClient {
         info!("patching bq secret");
 
         let encoded_bq_service_account_key = BASE64_STANDARD.encode(bq_service_account_key);
-        let secret_name = format!("{prefix}-{BQ_SECRET_NAME_SUFFIX}");
+        let bq_secret_name = create_bq_secret_name(prefix);
         let secret_json = create_bq_service_account_key_secret_json(
-            &secret_name,
+            &bq_secret_name,
             &encoded_bq_service_account_key,
         );
         let secret: Secret = serde_json::from_value(secret_json)?;
 
-        let pp = PatchParams::apply(&secret_name);
+        let pp = PatchParams::apply(&bq_secret_name);
         self.secrets_api
-            .patch(&secret_name, &pp, &Patch::Apply(secret))
+            .patch(&bq_secret_name, &pp, &Patch::Apply(secret))
             .await?;
         info!("patched bq secret");
 
@@ -190,9 +190,9 @@ impl K8sClient for HttpK8sClient {
 
     async fn delete_bq_secret(&self, prefix: &str) -> Result<(), K8sError> {
         info!("deleting bq secret");
-        let secret_name = format!("{prefix}-{BQ_SECRET_NAME_SUFFIX}");
+        let bq_secret_name = create_bq_secret_name(prefix);
         let dp = DeleteParams::default();
-        match self.secrets_api.delete(&secret_name, &dp).await {
+        match self.secrets_api.delete(&bq_secret_name, &dp).await {
             Ok(_) => {}
             Err(e) => match e {
                 kube::Error::Api(ref er) => {
@@ -281,7 +281,7 @@ impl K8sClient for HttpK8sClient {
         let replicator_container_name = format!("{prefix}-{REPLICATOR_CONTAINER_NAME_SUFFIX}");
         let vector_container_name = format!("{prefix}-{VECTOR_CONTAINER_NAME_SUFFIX}");
         let postgres_secret_name = create_postgres_secret_name(prefix);
-        let bq_secret_name = format!("{prefix}-{BQ_SECRET_NAME_SUFFIX}");
+        let bq_secret_name = create_bq_secret_name(prefix);
         let replicator_config_map_name = format!("{prefix}-{REPLICATOR_CONFIG_MAP_NAME_SUFFIX}");
 
         let stateful_set_json = create_replicator_stateful_set_json(
@@ -438,6 +438,10 @@ impl K8sClient for HttpK8sClient {
 
 fn create_postgres_secret_name(prefix: &str) -> String {
     format!("{prefix}-{POSTGRES_SECRET_NAME_SUFFIX}")
+}
+
+fn create_bq_secret_name(prefix: &str) -> String {
+    format!("{prefix}-{BQ_SECRET_NAME_SUFFIX}")
 }
 
 fn create_postgres_secret_json(
@@ -788,7 +792,7 @@ mod tests {
         let replicator_container_name = format!("{prefix}-{REPLICATOR_CONTAINER_NAME_SUFFIX}");
         let vector_container_name = format!("{prefix}-{VECTOR_CONTAINER_NAME_SUFFIX}");
         let postgres_secret_name = create_postgres_secret_name(&prefix);
-        let bq_secret_name = format!("{prefix}-{BQ_SECRET_NAME_SUFFIX}");
+        let bq_secret_name = create_bq_secret_name(&prefix);
         let replicator_config_map_name = format!("{prefix}-{REPLICATOR_CONFIG_MAP_NAME_SUFFIX}");
         let environment = Environment::Prod;
         let config = ReplicatorResourceConfig::load(&environment).unwrap();
