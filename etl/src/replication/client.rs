@@ -768,6 +768,7 @@ impl PgReplicationClient {
 
         info!("Row filter query:\n{row_filter_query}");
         let messages = self.client.simple_query(&row_filter_query).await?;
+        info!("Messages: {messages:?}");
 
         if messages.len() < 1 {
             return Ok(None);
