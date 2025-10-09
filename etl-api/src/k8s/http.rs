@@ -12,7 +12,6 @@ use kube::{
     api::{Api, DeleteParams, Patch, PatchParams},
 };
 use serde_json::json;
-use std::collections::BTreeMap;
 use tracing::info;
 
 /// Secret name suffix for the BigQuery service account key.
@@ -277,15 +276,17 @@ impl K8sClient for HttpK8sClient {
 
         let stateful_set_name = format!("{prefix}-{REPLICATOR_STATEFUL_SET_SUFFIX}");
         let replicator_app_name = format!("{prefix}-{REPLICATOR_APP_SUFFIX}");
+        let restarted_at_annotation = get_restarted_at_annotation_value();
         let replicator_container_name = format!("{prefix}-{REPLICATOR_CONTAINER_NAME_SUFFIX}");
         let vector_container_name = format!("{prefix}-{VECTOR_CONTAINER_NAME_SUFFIX}");
         let postgres_secret_name = format!("{prefix}-{POSTGRES_SECRET_NAME_SUFFIX}");
         let bq_secret_name = format!("{prefix}-{BQ_SECRET_NAME_SUFFIX}");
         let replicator_config_map_name = format!("{prefix}-{REPLICATOR_CONFIG_MAP_NAME_SUFFIX}");
 
-        let mut stateful_set_json = create_replicator_stateful_set_json(
+        let stateful_set_json = create_replicator_stateful_set_json(
             &stateful_set_name,
             &replicator_app_name,
+            &restarted_at_annotation,
             &replicator_config_map_name,
             &vector_container_name,
             &config,
@@ -295,21 +296,6 @@ impl K8sClient for HttpK8sClient {
             &postgres_secret_name,
             &bq_secret_name,
         );
-
-        let annotations = create_restarted_at_annotation();
-
-        // Attach template annotations (e.g., restart checksum) to trigger a rolling restart
-        if let Some(template) = stateful_set_json
-            .get_mut("spec")
-            .and_then(|s| s.get_mut("template"))
-            .and_then(|t| t.get_mut("metadata"))
-        {
-            // Insert annotations map
-            let annotations_value = serde_json::to_value(annotations)?;
-            if let Some(obj) = template.as_object_mut() {
-                obj.insert("annotations".to_string(), annotations_value);
-            }
-        }
 
         let stateful_set: StatefulSet = serde_json::from_value(stateful_set_json)?;
 
@@ -509,6 +495,7 @@ fn create_replicator_config_map(
 fn create_replicator_stateful_set_json(
     stateful_set_name: &str,
     replicator_app_name: &str,
+    restarted_at_annotation: &str,
     replicator_config_map_name: &str,
     vector_container_name: &str,
     config: &ReplicatorResourceConfig,
@@ -537,6 +524,10 @@ fn create_replicator_stateful_set_json(
             "labels": {
               "app-name": replicator_app_name,
               "app": REPLICATOR_APP_LABEL
+            },
+            "annotations": {
+              // Attach template annotations (e.g., restart checksum) to trigger a rolling restart
+              RESTARTED_AT_ANNOTATION_KEY: restarted_at_annotation,
             }
           },
           "spec": {
@@ -679,19 +670,6 @@ fn create_replicator_stateful_set_json(
     })
 }
 
-fn create_restarted_at_annotation() -> BTreeMap<String, String> {
-    // To force restart everytime, we want to annotate the stateful set with the current UTC time for every
-    // start call. Technically we can optimally perform a restart by calculating a checksum on a deterministic
-    // set of inputs like the configs, states in the database, etc... however we deemed that too cumbersome
-    // and risky, since forgetting a component will lead to the pipeline not restarting.
-    let mut annotations = BTreeMap::new();
-    annotations.insert(
-        RESTARTED_AT_ANNOTATION_KEY.to_string(),
-        get_restarted_at_annotation_value(),
-    );
-    annotations
-}
-
 fn get_restarted_at_annotation_value() -> String {
     let now = Utc::now();
     // We use nanoseconds to decrease the likelihood of generating the same annotation in sequence,
@@ -795,6 +773,7 @@ mod tests {
         let prefix = create_k8s_object_prefix(TENANT_ID, 42);
         let stateful_set_name = format!("{prefix}-{REPLICATOR_STATEFUL_SET_SUFFIX}");
         let replicator_app_name = format!("{prefix}-{REPLICATOR_APP_SUFFIX}");
+        let restarted_at_annotation = "2025-10-09T16:02:24.127400000Z";
         let replicator_container_name = format!("{prefix}-{REPLICATOR_CONTAINER_NAME_SUFFIX}");
         let vector_container_name = format!("{prefix}-{VECTOR_CONTAINER_NAME_SUFFIX}");
         let postgres_secret_name = format!("{prefix}-{POSTGRES_SECRET_NAME_SUFFIX}");
@@ -807,6 +786,7 @@ mod tests {
         let stateful_set_json = create_replicator_stateful_set_json(
             &stateful_set_name,
             &replicator_app_name,
+            restarted_at_annotation,
             &replicator_config_map_name,
             &vector_container_name,
             &config,

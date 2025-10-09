@@ -18,6 +18,9 @@ expression: stateful_set_json
     },
     "template": {
       "metadata": {
+        "annotations": {
+          "etl.supabase.com/restarted-at": "2025-10-09T16:02:24.127400000Z"
+        },
         "labels": {
           "app": "etl-replicator-app",
           "app-name": "abcdefghijklmnopqrst-42-replicator-app"
