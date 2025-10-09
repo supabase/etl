@@ -367,6 +367,13 @@ async fn test_table_copy_stream_respects_row_filter() {
     init_test_tracing();
     let database = spawn_source_database().await;
 
+    // Row filters in publication is only available from Postgres 15 and onwards.
+    // As such, we skip the test for versions earlier than 15.
+    if let Some(server_version) = database.server_version()
+        && server_version.get() < 150000
+    {
+        return;
+    }
     // We create a table and insert one row.
     let test_table_name = test_table_name("table_1");
     let test_table_id = database
