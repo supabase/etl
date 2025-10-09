@@ -1,6 +1,7 @@
 use crate::k8s::{K8sClient, K8sError, PodPhase};
 use async_trait::async_trait;
 use base64::{Engine, prelude::BASE64_STANDARD};
+use chrono::Utc;
 use etl_config::Environment;
 use k8s_openapi::api::{
     apps::v1::StatefulSet,
@@ -268,7 +269,6 @@ impl K8sClient for HttpK8sClient {
         &self,
         prefix: &str,
         replicator_image: &str,
-        template_annotations: Option<BTreeMap<String, String>>,
         environment: Environment,
     ) -> Result<(), K8sError> {
         info!("patching stateful set");
@@ -296,12 +296,13 @@ impl K8sClient for HttpK8sClient {
             &bq_secret_name,
         );
 
+        let annotations = create_restarted_at_annotation();
+
         // Attach template annotations (e.g., restart checksum) to trigger a rolling restart
-        if let Some(annotations) = template_annotations
-            && let Some(template) = stateful_set_json
-                .get_mut("spec")
-                .and_then(|s| s.get_mut("template"))
-                .and_then(|t| t.get_mut("metadata"))
+        if let Some(template) = stateful_set_json
+            .get_mut("spec")
+            .and_then(|s| s.get_mut("template"))
+            .and_then(|t| t.get_mut("metadata"))
         {
             // Insert annotations map
             let annotations_value = serde_json::to_value(annotations)?;
@@ -676,6 +677,26 @@ fn create_replicator_stateful_set_json(
         }
       }
     })
+}
+
+fn create_restarted_at_annotation() -> BTreeMap<String, String> {
+    // To force restart everytime, we want to annotate the stateful set with the current UTC time for every
+    // start call. Technically we can optimally perform a restart by calculating a checksum on a deterministic
+    // set of inputs like the configs, states in the database, etc... however we deemed that too cumbersome
+    // and risky, since forgetting a component will lead to the pipeline not restarting.
+    let mut annotations = BTreeMap::new();
+    annotations.insert(
+        RESTARTED_AT_ANNOTATION_KEY.to_string(),
+        get_restarted_at_annotation_value(),
+    );
+    annotations
+}
+
+fn get_restarted_at_annotation_value() -> String {
+    let now = Utc::now();
+    // We use nanoseconds to decrease the likelihood of generating the same annotation in sequence,
+    // which would not result in a restart.
+    now.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true)
 }
 
 #[cfg(test)]
