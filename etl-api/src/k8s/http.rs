@@ -629,7 +629,7 @@ fn create_replicator_stateful_set_json(
                   },
                   {
                       "name": "APP_VERSION",
-                      //TODO: set APP_VERSION to proper vesrion instead of the replicator image name
+                      //TODO: set APP_VERSION to proper version instead of the replicator image name
                       "value": replicator_image
                   },
                   {
