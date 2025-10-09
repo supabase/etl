@@ -703,6 +703,8 @@ mod tests {
         let secret_json = create_postgres_secret_json(secret_name, encoded_postgres_password);
 
         assert_json_snapshot!(secret_json);
+
+        let _secret: Secret = serde_json::from_value(secret_json).unwrap();
     }
 
     #[test]
@@ -714,6 +716,8 @@ mod tests {
             create_bq_service_account_key_secret_json(secret_name, encoded_bq_service_account_key);
 
         assert_json_snapshot!(secret_json);
+
+        let _secret: Secret = serde_json::from_value(secret_json).unwrap();
     }
 
     #[test]
@@ -766,6 +770,8 @@ mod tests {
         );
 
         assert_json_snapshot!(config_map_json);
+
+        let _config_map: ConfigMap = serde_json::from_value(config_map_json).unwrap();
     }
 
     #[test]
@@ -798,5 +804,7 @@ mod tests {
         );
 
         assert_json_snapshot!(stateful_set_json);
+
+        let _stateful_set: StatefulSet = serde_json::from_value(stateful_set_json).unwrap();
     }
 }
