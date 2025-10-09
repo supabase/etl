@@ -348,6 +348,7 @@ async fn test_table_copy_stream_is_consistent() {
                 nullable: true,
                 primary: false,
             }],
+            None,
         )
         .await
         .unwrap();

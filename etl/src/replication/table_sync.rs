@@ -206,7 +206,7 @@ where
 
             // We create the copy table stream.
             let table_copy_stream = transaction
-                .get_table_copy_stream(table_id, &table_schema.column_schemas)
+                .get_table_copy_stream(table_id, &table_schema.column_schemas, Some(&config.publication_name))
                 .await?;
             let table_copy_stream =
                 TableCopyStream::wrap(table_copy_stream, &table_schema.column_schemas, pipeline_id);
