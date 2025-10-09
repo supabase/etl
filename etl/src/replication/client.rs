@@ -801,7 +801,7 @@ impl PgReplicationClient {
 
         let table_name = self.get_table_name(table_id).await?;
         let filter = self.get_row_filter(table_id, publication).await;
-        info!("publication: {publication}, row filter: {filter:?}");
+        info!("publication: {publication:?}, row filter: {filter:?}");
         let filter = filter?;
 
         let copy_query = if let Some(pred) = filter {
