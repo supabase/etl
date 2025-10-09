@@ -755,12 +755,14 @@ impl PgReplicationClient {
         // This uses the same query as the `pg_publication_tables`, but with some minor tweaks (COALESCE, only return the rowfilter, 
         // filter on oid and pubname). All of these are available >= Postgres 15.
         let row_filter_query = format!(
-                "SELECT 
-                     COALESCE(pg_get_expr(gpt.qual, gpt.relid), '') AS rowfilter
-                FROM pg_publication p, 
-                    LATERAL pg_get_publication_tables(VARIADIC ARRAY[p.pubname::text]) gpt(pubid, relid, attrs, qual), 
-                    pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace 
-                WHERE c.oid = gpt.relid AND c.oid = {} AND pubname = {};
+                "SELECT
+  COALESCE(pg_get_expr(gpt.qual, gpt.relid), '') AS row_filter
+FROM pg_publication p
+JOIN LATERAL pg_get_publication_tables(p.pubname) AS gpt(pubid, relid, attrs, qual) ON TRUE
+JOIN pg_class c ON c.oid = gpt.relid
+JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE p.pubname = {}
+  AND c.oid = {};
                 ",
                 table_id,
                 quote_literal(publication),
