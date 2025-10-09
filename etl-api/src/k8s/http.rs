@@ -229,18 +229,18 @@ impl K8sClient for HttpK8sClient {
         info!("patching config map");
 
         let env_config_file = format!("{environment}.yaml");
-        let config_map_name = format!("{prefix}-{REPLICATOR_CONFIG_MAP_NAME_SUFFIX}");
-        let config_map_json = create_replicator_config_map(
-            &config_map_name,
+        let replicator_config_map_name = create_replicator_config_map_name(prefix);
+        let config_map_json = create_replicator_config_map_json(
+            &replicator_config_map_name,
             base_config,
             &env_config_file,
             env_config,
         );
         let config_map: ConfigMap = serde_json::from_value(config_map_json)?;
 
-        let pp = PatchParams::apply(&config_map_name);
+        let pp = PatchParams::apply(&replicator_config_map_name);
         self.config_maps_api
-            .patch(&config_map_name, &pp, &Patch::Apply(config_map))
+            .patch(&replicator_config_map_name, &pp, &Patch::Apply(config_map))
             .await?;
         info!("patched config map");
         Ok(())
@@ -248,9 +248,9 @@ impl K8sClient for HttpK8sClient {
 
     async fn delete_config_map(&self, prefix: &str) -> Result<(), K8sError> {
         info!("deleting config map");
-        let config_map_name = format!("{prefix}-{REPLICATOR_CONFIG_MAP_NAME_SUFFIX}");
+        let replicator_config_map_name = create_replicator_config_map_name(prefix);
         let dp = DeleteParams::default();
-        match self.config_maps_api.delete(&config_map_name, &dp).await {
+        match self.config_maps_api.delete(&replicator_config_map_name, &dp).await {
             Ok(_) => {}
             Err(e) => match e {
                 kube::Error::Api(ref er) => {
@@ -282,7 +282,7 @@ impl K8sClient for HttpK8sClient {
         let vector_container_name = format!("{prefix}-{VECTOR_CONTAINER_NAME_SUFFIX}");
         let postgres_secret_name = create_postgres_secret_name(prefix);
         let bq_secret_name = create_bq_secret_name(prefix);
-        let replicator_config_map_name = format!("{prefix}-{REPLICATOR_CONFIG_MAP_NAME_SUFFIX}");
+        let replicator_config_map_name = create_replicator_config_map_name(prefix);
 
         let stateful_set_json = create_replicator_stateful_set_json(
             &stateful_set_name,
@@ -444,6 +444,10 @@ fn create_bq_secret_name(prefix: &str) -> String {
     format!("{prefix}-{BQ_SECRET_NAME_SUFFIX}")
 }
 
+fn create_replicator_config_map_name(prefix: &str) -> String {
+    format!("{prefix}-{REPLICATOR_CONFIG_MAP_NAME_SUFFIX}")
+}
+
 fn create_postgres_secret_json(
     secret_name: &str,
     encoded_postgres_password: &str,
@@ -480,7 +484,7 @@ fn create_bq_service_account_key_secret_json(
     })
 }
 
-fn create_replicator_config_map(
+fn create_replicator_config_map_json(
     config_map_name: &str,
     base_config: &str,
     env_config_file: &str,
@@ -732,7 +736,7 @@ mod tests {
     #[test]
     fn test_create_replicator_config_map_json() {
         let prefix = create_k8s_object_prefix(TENANT_ID, 42);
-        let config_map_name = format!("{prefix}-{REPLICATOR_CONFIG_MAP_NAME_SUFFIX}");
+        let replicator_config_map_name = create_replicator_config_map_name(&prefix);
         let environment = Environment::Prod;
         let env_config_file = format!("{environment}.yaml");
         let base_config = "";
@@ -771,8 +775,8 @@ mod tests {
         };
         let env_config = serde_json::to_string(&replicator_config).unwrap();
 
-        let config_map_json = create_replicator_config_map(
-            &config_map_name,
+        let config_map_json = create_replicator_config_map_json(
+            &replicator_config_map_name,
             base_config,
             &env_config_file,
             &env_config,
@@ -793,7 +797,7 @@ mod tests {
         let vector_container_name = format!("{prefix}-{VECTOR_CONTAINER_NAME_SUFFIX}");
         let postgres_secret_name = create_postgres_secret_name(&prefix);
         let bq_secret_name = create_bq_secret_name(&prefix);
-        let replicator_config_map_name = format!("{prefix}-{REPLICATOR_CONFIG_MAP_NAME_SUFFIX}");
+        let replicator_config_map_name = create_replicator_config_map_name(&prefix);
         let environment = Environment::Prod;
         let config = ReplicatorResourceConfig::load(&environment).unwrap();
         let replicator_image = "ramsup/etl-replicator:2a41356af735f891de37d71c0e1a62864fe4630e";
