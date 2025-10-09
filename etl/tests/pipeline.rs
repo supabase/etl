@@ -7,16 +7,18 @@ use etl::test_utils::database::{spawn_source_database, test_table_name};
 use etl::test_utils::event::group_events_by_type_and_table_id;
 use etl::test_utils::notify::NotifyingStore;
 use etl::test_utils::pipeline::{create_pipeline, create_pipeline_with};
+use etl::test_utils::table::column_schema_names;
 use etl::test_utils::test_destination_wrapper::TestDestinationWrapper;
 use etl::test_utils::test_schema::{
     TableSelection, assert_events_equal, build_expected_orders_inserts,
     build_expected_users_inserts, get_n_integers_sum, get_users_age_sum_from_rows,
-    insert_mock_data, insert_users_data, setup_test_database_schema,
+    insert_mock_data, insert_orders_data, insert_users_data, setup_test_database_schema,
 };
 use etl::types::{EventType, PipelineId};
 use etl_config::shared::BatchConfig;
 use etl_postgres::replication::slots::EtlReplicationSlot;
 use etl_postgres::tokio::test_utils::TableModification;
+use etl_postgres::types::TableName;
 use etl_telemetry::tracing::init_test_tracing;
 use rand::random;
 use std::time::Duration;
@@ -81,19 +83,19 @@ async fn table_schema_copy_survives_pipeline_restarts() {
     );
 
     // We check that the table schemas have been stored.
-    let table_schemas = store.get_table_schemas().await;
+    let table_schemas = store.get_latest_table_schemas().await;
     assert_eq!(table_schemas.len(), 2);
     assert_eq!(
         *table_schemas
             .get(&database_schema.users_schema().id)
             .unwrap(),
-        database_schema.users_schema()
+        database_schema.users_schema().into_versioned(0)
     );
     assert_eq!(
         *table_schemas
             .get(&database_schema.orders_schema().id)
             .unwrap(),
-        database_schema.orders_schema()
+        database_schema.orders_schema().into_versioned(0)
     );
 
     // We recreate a pipeline, assuming the other one was stopped, using the same state and destination.
@@ -126,6 +128,23 @@ async fn table_schema_copy_survives_pipeline_restarts() {
     insert_events_notify.notified().await;
 
     pipeline.shutdown_and_wait().await.unwrap();
+
+    // We want to make sure that during a restart, a relation message with the same schema doesn't
+    // cause a new schema version to be created.
+    let table_schemas = store.get_latest_table_schemas().await;
+    assert_eq!(table_schemas.len(), 2);
+    assert_eq!(
+        *table_schemas
+            .get(&database_schema.users_schema().id)
+            .unwrap(),
+        database_schema.users_schema().into_versioned(0)
+    );
+    assert_eq!(
+        *table_schemas
+            .get(&database_schema.orders_schema().id)
+            .unwrap(),
+        database_schema.orders_schema().into_versioned(0)
+    );
 
     // We check that both inserts were received, and we know that we can receive them only when the table
     // schemas are available.
@@ -370,7 +389,7 @@ async fn publication_for_all_tables_in_schema_ignores_new_tables_until_restart()
     pipeline.shutdown_and_wait().await.unwrap();
 
     // Check that only the schemas of the first table were stored.
-    let table_schemas = store.get_table_schemas().await;
+    let table_schemas = store.get_latest_table_schemas().await;
     assert_eq!(table_schemas.len(), 1);
     assert!(table_schemas.contains_key(&table_1_id));
     assert!(!table_schemas.contains_key(&table_2_id));
@@ -396,7 +415,7 @@ async fn publication_for_all_tables_in_schema_ignores_new_tables_until_restart()
     pipeline.shutdown_and_wait().await.unwrap();
 
     // Check that both schemas exist.
-    let table_schemas = store.get_table_schemas().await;
+    let table_schemas = store.get_latest_table_schemas().await;
     assert_eq!(table_schemas.len(), 2);
     assert!(table_schemas.contains_key(&table_1_id));
     assert!(table_schemas.contains_key(&table_2_id));
@@ -487,6 +506,385 @@ async fn table_copy_replicates_existing_data() {
             .await
             .unwrap()
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn table_schema_changes_are_handled_correctly() {
+    init_test_tracing();
+    let mut database = spawn_source_database().await;
+    let database_schema = setup_test_database_schema(&database, TableSelection::Both).await;
+
+    // Insert initial users/orders data.
+    insert_users_data(&mut database, &database_schema.users_schema().name, 1..=1).await;
+    insert_orders_data(&mut database, &database_schema.orders_schema().name, 1..=1).await;
+
+    let store = NotifyingStore::new();
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
+
+    // Start pipeline from scratch.
+    let pipeline_id: PipelineId = random();
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        database_schema.publication_name(),
+        store.clone(),
+        destination.clone(),
+    );
+
+    // Register notifications for table copy completion.
+    let users_state_notify = store
+        .notify_on_table_state_type(
+            database_schema.users_schema().id,
+            TableReplicationPhaseType::SyncDone,
+        )
+        .await;
+    let orders_state_notify = store
+        .notify_on_table_state_type(
+            database_schema.orders_schema().id,
+            TableReplicationPhaseType::SyncDone,
+        )
+        .await;
+
+    pipeline.start().await.unwrap();
+
+    users_state_notify.notified().await;
+    orders_state_notify.notified().await;
+
+    // Check the initial schema.
+    let table_schemas = store.get_latest_table_schemas().await;
+    assert_eq!(table_schemas.len(), 2);
+    let users_table_schema = table_schemas
+        .get(&database_schema.users_schema().id)
+        .unwrap();
+    assert_eq!(users_table_schema.version, 0);
+    assert_eq!(
+        column_schema_names(users_table_schema),
+        vec!["id", "name", "age"]
+    );
+    let orders_table_schema = table_schemas
+        .get(&database_schema.orders_schema().id)
+        .unwrap();
+    assert_eq!(orders_table_schema.version, 0);
+    assert_eq!(
+        column_schema_names(orders_table_schema),
+        vec!["id", "description"]
+    );
+
+    // Check the initial data.
+    let table_rows = destination.get_table_rows().await;
+    let users_table_rows = table_rows.get(&database_schema.users_schema().id).unwrap();
+    assert_eq!(users_table_rows.len(), 1);
+    let orders_table_rows = table_rows.get(&database_schema.orders_schema().id).unwrap();
+    assert_eq!(orders_table_rows.len(), 1);
+
+    // We perform schema changes.
+    database
+        .alter_table(
+            test_table_name("users"),
+            &[
+                TableModification::AddColumn {
+                    name: "year",
+                    params: "integer",
+                },
+                TableModification::RenameColumn {
+                    name: "age",
+                    new_name: "new_age",
+                },
+            ],
+        )
+        .await
+        .unwrap();
+    database
+        .alter_table(
+            test_table_name("orders"),
+            &[TableModification::AddColumn {
+                name: "summary",
+                params: "text",
+            }],
+        )
+        .await
+        .unwrap();
+
+    // Register notifications for the inserts.
+    let insert_event_notify = destination
+        .wait_for_events_count(vec![(EventType::Insert, 2)])
+        .await;
+
+    // We insert data.
+    database
+        .insert_values(
+            database_schema.users_schema().name.clone(),
+            &["name", "new_age", "year"],
+            &[&"user_2", &(2i32), &(2025i32)],
+        )
+        .await
+        .expect("Failed to insert user");
+    database
+        .insert_values(
+            database_schema.orders_schema().name.clone(),
+            &["description", "summary"],
+            &[&"order_2", &"order_2_summary"],
+        )
+        .await
+        .expect("Failed to insert order");
+
+    insert_event_notify.notified().await;
+
+    // Check the updated schema.
+    let table_schemas = store.get_latest_table_schemas().await;
+    assert_eq!(table_schemas.len(), 2);
+    let users_table_schema = table_schemas
+        .get(&database_schema.users_schema().id)
+        .unwrap();
+    assert_eq!(users_table_schema.version, 1);
+    assert_eq!(
+        column_schema_names(users_table_schema),
+        vec!["id", "name", "new_age", "year"]
+    );
+    let orders_table_schema = table_schemas
+        .get(&database_schema.orders_schema().id)
+        .unwrap();
+    assert_eq!(orders_table_schema.version, 1);
+    assert_eq!(
+        column_schema_names(orders_table_schema),
+        vec!["id", "description", "summary"]
+    );
+
+    // Check the updated data.
+    let events = destination.get_events().await;
+    let grouped_events = group_events_by_type_and_table_id(&events);
+    let users_inserts = grouped_events
+        .get(&(EventType::Insert, database_schema.users_schema().id))
+        .unwrap();
+    assert_eq!(users_inserts.len(), 1);
+    let orders_inserts = grouped_events
+        .get(&(EventType::Insert, database_schema.orders_schema().id))
+        .unwrap();
+    assert_eq!(orders_inserts.len(), 1);
+
+    // We perform schema changes.
+    database
+        .alter_table(
+            test_table_name("users"),
+            &[
+                TableModification::DropColumn { name: "year" },
+                TableModification::AlterColumn {
+                    name: "new_age",
+                    params: "type double precision using new_age::double precision",
+                },
+            ],
+        )
+        .await
+        .unwrap();
+    database
+        .alter_table(
+            test_table_name("orders"),
+            &[
+                TableModification::DropColumn { name: "summary" },
+                TableModification::RenameColumn {
+                    name: "description",
+                    new_name: "new_description",
+                },
+            ],
+        )
+        .await
+        .unwrap();
+
+    // Register notifications for the inserts.
+    let insert_event_notify = destination
+        .wait_for_events_count(vec![(EventType::Insert, 4)])
+        .await;
+
+    // We insert data.
+    database
+        .insert_values(
+            database_schema.users_schema().name.clone(),
+            &["name", "new_age"],
+            &[&"user_3", &(2f64)],
+        )
+        .await
+        .expect("Failed to insert user");
+    database
+        .insert_values(
+            database_schema.orders_schema().name.clone(),
+            &["new_description"],
+            &[&"order_3"],
+        )
+        .await
+        .expect("Failed to insert order");
+
+    insert_event_notify.notified().await;
+
+    // Check the updated schema.
+    let table_schemas = store.get_latest_table_schemas().await;
+    assert_eq!(table_schemas.len(), 2);
+    let users_table_schema = table_schemas
+        .get(&database_schema.users_schema().id)
+        .unwrap();
+    assert_eq!(users_table_schema.version, 2);
+    assert_eq!(
+        column_schema_names(users_table_schema),
+        vec!["id", "name", "new_age"]
+    );
+    let orders_table_schema = table_schemas
+        .get(&database_schema.orders_schema().id)
+        .unwrap();
+    assert_eq!(orders_table_schema.version, 2);
+    assert_eq!(
+        column_schema_names(orders_table_schema),
+        vec!["id", "new_description"]
+    );
+
+    // Check the updated data.
+    let events = destination.get_events().await;
+    let grouped_events = group_events_by_type_and_table_id(&events);
+    let users_inserts = grouped_events
+        .get(&(EventType::Insert, database_schema.users_schema().id))
+        .unwrap();
+    assert_eq!(users_inserts.len(), 2);
+    let orders_inserts = grouped_events
+        .get(&(EventType::Insert, database_schema.orders_schema().id))
+        .unwrap();
+    assert_eq!(orders_inserts.len(), 2);
+
+    pipeline.shutdown_and_wait().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn table_renames_are_handled_correctly() {
+    init_test_tracing();
+    let mut database = spawn_source_database().await;
+    let database_schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
+
+    // Seed a single row so the initial copy has data.
+    insert_users_data(&mut database, &database_schema.users_schema().name, 1..=1).await;
+
+    let store = NotifyingStore::new();
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
+
+    let pipeline_id: PipelineId = random();
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        database_schema.publication_name(),
+        store.clone(),
+        destination.clone(),
+    );
+
+    let users_state_notify = store
+        .notify_on_table_state_type(
+            database_schema.users_schema().id,
+            TableReplicationPhaseType::SyncDone,
+        )
+        .await;
+
+    pipeline.start().await.unwrap();
+
+    users_state_notify.notified().await;
+
+    // Validate the initial schema snapshot.
+    let initial_table_schemas = store.get_latest_table_schemas().await;
+    let initial_users_schema = initial_table_schemas
+        .get(&database_schema.users_schema().id)
+        .expect("users table schema not stored");
+    assert_eq!(initial_users_schema.version, 0);
+    assert_eq!(initial_users_schema.name, test_table_name("users"));
+
+    // Create a new schema for the future table to be moved here.
+    database
+        .client
+        .as_ref()
+        .unwrap()
+        .execute("create schema renamed", &[])
+        .await
+        .unwrap();
+
+    // Rename table.
+    database
+        .client
+        .as_ref()
+        .unwrap()
+        .execute("alter table test.users rename to customers", &[])
+        .await
+        .unwrap();
+
+    // Register notifications for the inserts.
+    let insert_event_notify = destination
+        .wait_for_events_count(vec![(EventType::Insert, 1)])
+        .await;
+
+    database
+        .insert_values(
+            TableName::new("test".to_owned(), "customers".to_owned()),
+            &["name", "age"],
+            &[&"customer_2", &2i32],
+        )
+        .await
+        .expect("Failed to insert user");
+
+    insert_event_notify.notified().await;
+
+    // Check the new event.
+    let events = destination.get_events().await;
+    let grouped_events = group_events_by_type_and_table_id(&events);
+    let users_inserts = grouped_events
+        .get(&(EventType::Insert, database_schema.users_schema().id))
+        .unwrap();
+    assert_eq!(users_inserts.len(), 1);
+
+    // Check updated schema.
+    let table_schemas = store.get_latest_table_schemas().await;
+    let users_table_schema = table_schemas
+        .get(&database_schema.users_schema().id)
+        .unwrap();
+    assert_eq!(users_table_schema.version, 1);
+    assert_eq!(users_table_schema.name, test_table_name("customers"));
+
+    // Move the table to a different schema.
+    database
+        .client
+        .as_ref()
+        .unwrap()
+        .execute("alter table test.customers set schema renamed", &[])
+        .await
+        .unwrap();
+
+    // Register notifications for the inserts.
+    let insert_event_notify = destination
+        .wait_for_events_count(vec![(EventType::Insert, 2)])
+        .await;
+
+    database
+        .insert_values(
+            TableName::new("renamed".to_owned(), "customers".to_owned()),
+            &["name", "age"],
+            &[&"customer_3", &3i32],
+        )
+        .await
+        .expect("Failed to insert user");
+
+    insert_event_notify.notified().await;
+
+    // Check the new event.
+    let events = destination.get_events().await;
+    let grouped_events = group_events_by_type_and_table_id(&events);
+    let users_inserts = grouped_events
+        .get(&(EventType::Insert, database_schema.users_schema().id))
+        .unwrap();
+    assert_eq!(users_inserts.len(), 2);
+
+    // Check updated schema.
+    let table_schemas = store.get_latest_table_schemas().await;
+    let users_table_schema = table_schemas
+        .get(&database_schema.users_schema().id)
+        .unwrap();
+    assert_eq!(users_table_schema.version, 2);
+    assert_eq!(
+        users_table_schema.name,
+        TableName::new("renamed".to_owned(), "customers".to_owned())
+    );
+
+    pipeline.shutdown_and_wait().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -792,146 +1190,6 @@ async fn table_processing_converges_to_apply_loop_with_no_events_coming() {
     let age_sum =
         get_users_age_sum_from_rows(&destination, database_schema.users_schema().id).await;
     assert_eq!(age_sum, expected_age_sum);
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn table_processing_with_schema_change_errors_table() {
-    init_test_tracing();
-    let database = spawn_source_database().await;
-    let database_schema = setup_test_database_schema(&database, TableSelection::OrdersOnly).await;
-
-    // Insert data in the table.
-    database
-        .insert_values(
-            database_schema.orders_schema().name.clone(),
-            &["description"],
-            &[&"description_1"],
-        )
-        .await
-        .unwrap();
-
-    let store = NotifyingStore::new();
-    let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
-
-    // Start pipeline from scratch.
-    let pipeline_id: PipelineId = random();
-    let mut pipeline = create_pipeline(
-        &database.config,
-        pipeline_id,
-        database_schema.publication_name(),
-        store.clone(),
-        destination.clone(),
-    );
-
-    // Register notifications for initial table copy completion.
-    let orders_state_notify = store
-        .notify_on_table_state_type(
-            database_schema.orders_schema().id,
-            TableReplicationPhaseType::FinishedCopy,
-        )
-        .await;
-
-    pipeline.start().await.unwrap();
-
-    orders_state_notify.notified().await;
-
-    // Register notification for the sync done state.
-    let orders_state_notify = store
-        .notify_on_table_state_type(
-            database_schema.orders_schema().id,
-            TableReplicationPhaseType::SyncDone,
-        )
-        .await;
-
-    // Insert new data in the table.
-    database
-        .insert_values(
-            database_schema.orders_schema().name.clone(),
-            &["description"],
-            &[&"description_2"],
-        )
-        .await
-        .unwrap();
-
-    orders_state_notify.notified().await;
-
-    // Register notification for the ready state.
-    let orders_state_notify = store
-        .notify_on_table_state_type(
-            database_schema.orders_schema().id,
-            TableReplicationPhaseType::Ready,
-        )
-        .await;
-
-    // Insert new data in the table.
-    database
-        .insert_values(
-            database_schema.orders_schema().name.clone(),
-            &["description"],
-            &[&"description_3"],
-        )
-        .await
-        .unwrap();
-
-    orders_state_notify.notified().await;
-
-    // Register notification for the errored state.
-    let orders_state_notify = store
-        .notify_on_table_state_type(
-            database_schema.orders_schema().id,
-            TableReplicationPhaseType::Errored,
-        )
-        .await;
-
-    // Change the schema of orders by adding a new column.
-    database
-        .alter_table(
-            database_schema.orders_schema().name.clone(),
-            &[TableModification::AddColumn {
-                name: "date",
-                data_type: "integer",
-            }],
-        )
-        .await
-        .unwrap();
-
-    // Insert new data in the table.
-    database
-        .insert_values(
-            database_schema.orders_schema().name.clone(),
-            &["description", "date"],
-            &[&"description_with_date", &10],
-        )
-        .await
-        .unwrap();
-
-    orders_state_notify.notified().await;
-
-    pipeline.shutdown_and_wait().await.unwrap();
-
-    // We assert that the schema is the initial one.
-    let table_schemas = store.get_table_schemas().await;
-    assert_eq!(table_schemas.len(), 1);
-    assert_eq!(
-        *table_schemas
-            .get(&database_schema.orders_schema().id)
-            .unwrap(),
-        database_schema.orders_schema()
-    );
-
-    // We check that we got the insert events after the first data of the table has been copied.
-    let events = destination.get_events().await;
-    let grouped_events = group_events_by_type_and_table_id(&events);
-    let orders_inserts = grouped_events
-        .get(&(EventType::Insert, database_schema.orders_schema().id))
-        .unwrap();
-
-    let expected_orders_inserts = build_expected_orders_inserts(
-        2,
-        database_schema.orders_schema().id,
-        vec!["description_2", "description_3"],
-    );
-    assert_events_equal(orders_inserts, &expected_orders_inserts);
 }
 
 #[tokio::test(flavor = "multi_thread")]

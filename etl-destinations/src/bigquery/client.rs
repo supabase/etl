@@ -67,6 +67,22 @@ pub struct BigQueryClient {
 }
 
 impl BigQueryClient {
+    /// Quotes a single BigQuery identifier, escaping embedded backticks.
+    fn quote_identifier(identifier: &str) -> String {
+        format!("`{}`", identifier.replace('`', "``"))
+    }
+
+    /// Quotes a dotted BigQuery path (e.g. project.dataset.table), escaping each segment.
+    fn quote_qualified_identifiers(parts: &[&str]) -> String {
+        let escaped = parts
+            .iter()
+            .map(|part| part.replace('`', "``"))
+            .collect::<Vec<_>>()
+            .join(".");
+
+        format!("`{escaped}`")
+    }
+
     /// Creates a new [`BigQueryClient`] from a service account key file.
     ///
     /// Authenticates with BigQuery using the service account key at the specified file path.
@@ -133,7 +149,11 @@ impl BigQueryClient {
         dataset_id: &BigQueryDatasetId,
         table_id: &BigQueryTableId,
     ) -> String {
-        format!("`{}.{}.{}`", self.project_id, dataset_id, table_id)
+        Self::quote_qualified_identifiers(&[
+            &self.project_id,
+            dataset_id.as_str(),
+            table_id.as_str(),
+        ])
     }
 
     /// Creates a table in BigQuery if it doesn't already exist, otherwise efficiently truncates
@@ -267,6 +287,23 @@ impl BigQueryClient {
         Ok(())
     }
 
+    /// Drops a view from BigQuery if it exists.
+    pub async fn drop_view(
+        &self,
+        dataset_id: &BigQueryDatasetId,
+        view_name: &BigQueryTableId,
+    ) -> EtlResult<()> {
+        let full_view_name = self.full_table_name(dataset_id, view_name);
+
+        info!("dropping view {full_view_name} from bigquery");
+
+        let query = format!("drop view if exists {full_view_name}");
+
+        let _ = self.query(QueryRequest::new(query)).await?;
+
+        Ok(())
+    }
+
     /// Drops a table from BigQuery.
     ///
     /// Executes a DROP TABLE statement to remove the table and all its data.
@@ -282,6 +319,149 @@ impl BigQueryClient {
         let query = format!("drop table if exists {full_table_name}");
 
         let _ = self.query(QueryRequest::new(query)).await?;
+
+        Ok(())
+    }
+
+    /// Adds a column to an existing BigQuery table if it does not already exist.
+    pub async fn add_column(
+        &self,
+        dataset_id: &BigQueryDatasetId,
+        table_id: &BigQueryTableId,
+        column_schema: &ColumnSchema,
+    ) -> EtlResult<()> {
+        let full_table_name = self.full_table_name(dataset_id, table_id);
+        let column_definition = Self::column_spec(column_schema);
+        let query =
+            format!("alter table {full_table_name} add column if not exists {column_definition}");
+
+        let _ = self.query(QueryRequest::new(query)).await?;
+
+        info!(
+            "added column {} to table {full_table_name} in BigQuery",
+            column_schema.name
+        );
+
+        Ok(())
+    }
+
+    /// Drops a column from an existing BigQuery table if it exists.
+    pub async fn drop_column(
+        &self,
+        dataset_id: &BigQueryDatasetId,
+        table_id: &BigQueryTableId,
+        column_name: &str,
+    ) -> EtlResult<()> {
+        let full_table_name = self.full_table_name(dataset_id, table_id);
+        let column_identifier = Self::quote_identifier(column_name);
+        let query =
+            format!("alter table {full_table_name} drop column if exists {column_identifier}");
+
+        let _ = self.query(QueryRequest::new(query)).await?;
+
+        info!(
+            "dropped column {} from table {full_table_name} in BigQuery",
+            column_name
+        );
+
+        Ok(())
+    }
+
+    /// Alters the data type of the existing column in a BigQuery table.
+    pub async fn alter_column_type(
+        &self,
+        dataset_id: &BigQueryDatasetId,
+        table_id: &BigQueryTableId,
+        column_schema: &ColumnSchema,
+    ) -> EtlResult<()> {
+        let full_table_name = self.full_table_name(dataset_id, table_id);
+        let column_identifier = Self::quote_identifier(&column_schema.name);
+        let column_type = Self::postgres_to_bigquery_type(&column_schema.typ);
+        let query = format!(
+            "alter table {full_table_name} alter column {column_identifier} set data type {column_type}"
+        );
+
+        let _ = self.query(QueryRequest::new(query)).await?;
+
+        info!(
+            "altered column type {} in table {full_table_name} in BigQuery",
+            column_schema.name
+        );
+
+        Ok(())
+    }
+
+    /// Synchronizes the primary key definition for a BigQuery table with the provided schema.
+    #[allow(dead_code)]
+    pub async fn sync_primary_key(
+        &self,
+        dataset_id: &BigQueryDatasetId,
+        table_id: &BigQueryTableId,
+        column_schemas: &[ColumnSchema],
+    ) -> EtlResult<()> {
+        let primary_columns: Vec<&ColumnSchema> = column_schemas
+            .iter()
+            .filter(|column| column.primary)
+            .collect();
+
+        let has_primary_key = self.has_primary_key(dataset_id, table_id).await?;
+        if has_primary_key {
+            self.drop_primary_key(dataset_id, table_id).await?;
+        }
+
+        if primary_columns.is_empty() {
+            return Ok(());
+        }
+
+        let columns = primary_columns
+            .iter()
+            .map(|column| Self::quote_identifier(&column.name))
+            .collect::<Vec<_>>()
+            .join(",");
+
+        let full_table_name = self.full_table_name(dataset_id, table_id);
+        let query =
+            format!("alter table {full_table_name} add primary key ({columns}) not enforced");
+
+        let _ = self.query(QueryRequest::new(query)).await?;
+
+        info!("synced primary key for table {full_table_name} in BigQuery");
+
+        Ok(())
+    }
+
+    async fn has_primary_key(
+        &self,
+        dataset_id: &BigQueryDatasetId,
+        table_id: &BigQueryTableId,
+    ) -> EtlResult<bool> {
+        let info_schema_table = Self::quote_qualified_identifiers(&[
+            &self.project_id,
+            dataset_id.as_str(),
+            "INFORMATION_SCHEMA",
+            "TABLE_CONSTRAINTS",
+        ]);
+        let table_literal = table_id;
+        let query = format!(
+            "select constraint_name from {info_schema_table} where table_name = '{table_literal}' and constraint_type = 'PRIMARY KEY'",
+        );
+
+        let result_set = self.query(QueryRequest::new(query)).await?;
+
+        Ok(result_set.row_count() > 0)
+    }
+
+    async fn drop_primary_key(
+        &self,
+        dataset_id: &BigQueryDatasetId,
+        table_id: &BigQueryTableId,
+    ) -> EtlResult<()> {
+        let full_table_name = self.full_table_name(dataset_id, table_id);
+        let query = format!("alter table {full_table_name} drop primary key");
+
+        let _ = self.query(QueryRequest::new(query)).await?;
+
+        info!("dropped primary key for table {full_table_name} in BigQuery");
 
         Ok(())
     }
@@ -318,16 +498,11 @@ impl BigQueryClient {
     /// in a single batch.
     pub async fn stream_table_batches_concurrent(
         &self,
-        table_batches: Vec<TableBatch<BigQueryTableRow>>,
+        table_batches: Arc<[TableBatch<BigQueryTableRow>]>,
         max_concurrent_streams: usize,
     ) -> EtlResult<(usize, usize)> {
-        if table_batches.is_empty() {
-            return Ok((0, 0));
-        }
-
         debug!(
-            "streaming {:?} table batches concurrently with maximum {:?} concurrent streams",
-            table_batches.len(),
+            "streaming table batches concurrently with maximum {:?} concurrent streams",
             max_concurrent_streams
         );
 
@@ -400,16 +575,16 @@ impl BigQueryClient {
         // We want to use the default stream from BigQuery since it allows multiple connections to
         // send data to it. In addition, it's available by default for every table, so it also reduces
         // complexity.
-        let stream_name = StreamName::new_default(
+        let stream_name = Arc::new(StreamName::new_default(
             self.project_id.clone(),
             dataset_id.to_string(),
             table_id.to_string(),
-        );
+        ));
 
         Ok(TableBatch::new(
             stream_name,
             table_descriptor,
-            validated_rows,
+            validated_rows.into(),
         ))
     }
 
@@ -428,8 +603,8 @@ impl BigQueryClient {
     /// Generates SQL column specification for CREATE TABLE statements.
     fn column_spec(column_schema: &ColumnSchema) -> String {
         let mut column_spec = format!(
-            "`{}` {}",
-            column_schema.name,
+            "{} {}",
+            Self::quote_identifier(&column_schema.name),
             Self::postgres_to_bigquery_type(&column_schema.typ)
         );
 
@@ -447,7 +622,7 @@ impl BigQueryClient {
         let identity_columns: Vec<String> = column_schemas
             .iter()
             .filter(|s| s.primary)
-            .map(|c| format!("`{}`", c.name))
+            .map(|c| Self::quote_identifier(&c.name))
             .collect();
 
         if identity_columns.is_empty() {
@@ -525,7 +700,7 @@ impl BigQueryClient {
     /// Converts Postgres column schemas to a BigQuery [`TableDescriptor`].
     ///
     /// Maps data types and nullability to BigQuery column specifications, setting
-    /// appropriate column modes and automatically adding CDC special columns.
+    /// appropriate column modes, and automatically adding CDC special columns.
     pub fn column_schemas_to_table_descriptor(
         column_schemas: &[ColumnSchema],
         use_cdc_sequence_column: bool,
@@ -631,6 +806,16 @@ impl fmt::Debug for BigQueryClient {
 fn bq_error_to_etl_error(err: BQError) -> EtlError {
     use BQError;
 
+    let error_message = err.to_string();
+
+    if is_schema_mismatch_message(&error_message) {
+        return etl_error!(
+            ErrorKind::DestinationSchemaMismatch,
+            "BigQuery schema mismatch error",
+            error_message
+        );
+    }
+
     let (kind, description) = match &err {
         // Authentication related errors
         BQError::InvalidServiceAccountKey(_) => (
@@ -726,16 +911,30 @@ fn bq_error_to_etl_error(err: BQError) -> EtlError {
         ),
     };
 
-    etl_error!(kind, description, err.to_string())
+    etl_error!(kind, description, error_message)
 }
 
 /// Converts BigQuery row errors to ETL destination errors.
 fn row_error_to_etl_error(err: RowError) -> EtlError {
-    etl_error!(
-        ErrorKind::DestinationError,
-        "BigQuery row error",
-        format!("{err:?}")
-    )
+    let detail = format!("{err:?}");
+
+    if is_schema_mismatch_message(&detail) {
+        return etl_error!(
+            ErrorKind::DestinationSchemaMismatch,
+            "BigQuery schema mismatch error",
+            detail
+        );
+    }
+
+    etl_error!(ErrorKind::DestinationError, "BigQuery row error", detail)
+}
+
+/// Returns `true` when the provided message indicates a BigQuery schema mismatch.
+fn is_schema_mismatch_message(message: &str) -> bool {
+    let lowercase = message.to_ascii_lowercase();
+
+    lowercase.contains("input schema has more fields than bigquery schema")
+        || lowercase.contains("schema_mismatch_extra_field")
 }
 
 #[cfg(test)]
@@ -800,16 +999,15 @@ mod tests {
 
     #[test]
     fn test_column_spec() {
-        let column_schema = ColumnSchema::new("test_col".to_string(), Type::TEXT, -1, true, false);
+        let column_schema = ColumnSchema::new("test_col".to_string(), Type::TEXT, -1, false);
         let spec = BigQueryClient::column_spec(&column_schema);
         assert_eq!(spec, "`test_col` string");
 
-        let not_null_column = ColumnSchema::new("id".to_string(), Type::INT4, -1, false, true);
+        let not_null_column = ColumnSchema::new("id".to_string(), Type::INT4, -1, true);
         let not_null_spec = BigQueryClient::column_spec(&not_null_column);
-        assert_eq!(not_null_spec, "`id` int64 not null");
+        assert_eq!(not_null_spec, "`id` int64");
 
-        let array_column =
-            ColumnSchema::new("tags".to_string(), Type::TEXT_ARRAY, -1, false, false);
+        let array_column = ColumnSchema::new("tags".to_string(), Type::TEXT_ARRAY, -1, false);
         let array_spec = BigQueryClient::column_spec(&array_column);
         assert_eq!(array_spec, "`tags` array<string>");
     }
@@ -817,16 +1015,16 @@ mod tests {
     #[test]
     fn test_add_primary_key_clause() {
         let columns_with_pk = vec![
-            ColumnSchema::new("id".to_string(), Type::INT4, -1, false, true),
-            ColumnSchema::new("name".to_string(), Type::TEXT, -1, true, false),
+            ColumnSchema::new("id".to_string(), Type::INT4, -1, true),
+            ColumnSchema::new("name".to_string(), Type::TEXT, -1, false),
         ];
         let pk_clause = BigQueryClient::add_primary_key_clause(&columns_with_pk);
         assert_eq!(pk_clause, ", primary key (`id`) not enforced");
 
         let columns_with_composite_pk = vec![
-            ColumnSchema::new("tenant_id".to_string(), Type::INT4, -1, false, true),
-            ColumnSchema::new("id".to_string(), Type::INT4, -1, false, true),
-            ColumnSchema::new("name".to_string(), Type::TEXT, -1, true, false),
+            ColumnSchema::new("tenant_id".to_string(), Type::INT4, -1, true),
+            ColumnSchema::new("id".to_string(), Type::INT4, -1, true),
+            ColumnSchema::new("name".to_string(), Type::TEXT, -1, false),
         ];
         let composite_pk_clause =
             BigQueryClient::add_primary_key_clause(&columns_with_composite_pk);
@@ -836,8 +1034,8 @@ mod tests {
         );
 
         let columns_no_pk = vec![
-            ColumnSchema::new("name".to_string(), Type::TEXT, -1, true, false),
-            ColumnSchema::new("age".to_string(), Type::INT4, -1, true, false),
+            ColumnSchema::new("name".to_string(), Type::TEXT, -1, false),
+            ColumnSchema::new("age".to_string(), Type::INT4, -1, false),
         ];
         let no_pk_clause = BigQueryClient::add_primary_key_clause(&columns_no_pk);
         assert_eq!(no_pk_clause, "");
@@ -846,14 +1044,14 @@ mod tests {
     #[test]
     fn test_create_columns_spec() {
         let columns = vec![
-            ColumnSchema::new("id".to_string(), Type::INT4, -1, false, true),
-            ColumnSchema::new("name".to_string(), Type::TEXT, -1, true, false),
-            ColumnSchema::new("active".to_string(), Type::BOOL, -1, false, false),
+            ColumnSchema::new("id".to_string(), Type::INT4, -1, true),
+            ColumnSchema::new("name".to_string(), Type::TEXT, -1, false),
+            ColumnSchema::new("active".to_string(), Type::BOOL, -1, false),
         ];
         let spec = BigQueryClient::create_columns_spec(&columns);
         assert_eq!(
             spec,
-            "(`id` int64 not null,`name` string,`active` bool not null, primary key (`id`) not enforced)"
+            "(`id` int64,`name` string,`active` bool, primary key (`id`) not enforced)"
         );
     }
 
@@ -866,10 +1064,10 @@ mod tests {
     #[test]
     fn test_column_schemas_to_table_descriptor() {
         let columns = vec![
-            ColumnSchema::new("id".to_string(), Type::INT4, -1, false, true),
-            ColumnSchema::new("name".to_string(), Type::TEXT, -1, true, false),
-            ColumnSchema::new("active".to_string(), Type::BOOL, -1, false, false),
-            ColumnSchema::new("tags".to_string(), Type::TEXT_ARRAY, -1, false, false),
+            ColumnSchema::new("id".to_string(), Type::INT4, -1, true),
+            ColumnSchema::new("name".to_string(), Type::TEXT, -1, false),
+            ColumnSchema::new("active".to_string(), Type::BOOL, -1, false),
+            ColumnSchema::new("tags".to_string(), Type::TEXT_ARRAY, -1, false),
         ];
 
         let descriptor = BigQueryClient::column_schemas_to_table_descriptor(&columns, true);
@@ -884,7 +1082,7 @@ mod tests {
         ));
         assert!(matches!(
             descriptor.field_descriptors[0].mode,
-            ColumnMode::Required
+            ColumnMode::Nullable
         ));
 
         assert_eq!(descriptor.field_descriptors[1].name, "name");
@@ -904,7 +1102,7 @@ mod tests {
         ));
         assert!(matches!(
             descriptor.field_descriptors[2].mode,
-            ColumnMode::Required
+            ColumnMode::Nullable
         ));
 
         // Check array column
@@ -949,12 +1147,12 @@ mod tests {
     #[test]
     fn test_column_schemas_to_table_descriptor_complex_types() {
         let columns = vec![
-            ColumnSchema::new("uuid_col".to_string(), Type::UUID, -1, true, false),
-            ColumnSchema::new("json_col".to_string(), Type::JSON, -1, true, false),
-            ColumnSchema::new("bytea_col".to_string(), Type::BYTEA, -1, true, false),
-            ColumnSchema::new("numeric_col".to_string(), Type::NUMERIC, -1, true, false),
-            ColumnSchema::new("date_col".to_string(), Type::DATE, -1, true, false),
-            ColumnSchema::new("time_col".to_string(), Type::TIME, -1, true, false),
+            ColumnSchema::new("uuid_col".to_string(), Type::UUID, -1, false),
+            ColumnSchema::new("json_col".to_string(), Type::JSON, -1, false),
+            ColumnSchema::new("bytea_col".to_string(), Type::BYTEA, -1, false),
+            ColumnSchema::new("numeric_col".to_string(), Type::NUMERIC, -1, false),
+            ColumnSchema::new("date_col".to_string(), Type::DATE, -1, false),
+            ColumnSchema::new("time_col".to_string(), Type::TIME, -1, false),
         ];
 
         let descriptor = BigQueryClient::column_schemas_to_table_descriptor(&columns, true);
@@ -1006,8 +1204,8 @@ mod tests {
         let table_id = "test_table";
 
         let columns = vec![
-            ColumnSchema::new("id".to_string(), Type::INT4, -1, false, true),
-            ColumnSchema::new("name".to_string(), Type::TEXT, -1, true, false),
+            ColumnSchema::new("id".to_string(), Type::INT4, -1, true),
+            ColumnSchema::new("name".to_string(), Type::TEXT, -1, false),
         ];
 
         // Simulate the query generation logic
@@ -1015,7 +1213,7 @@ mod tests {
         let columns_spec = BigQueryClient::create_columns_spec(&columns);
         let query = format!("create or replace table {full_table_name} {columns_spec}");
 
-        let expected_query = "create or replace table `test-project.test_dataset.test_table` (`id` int64 not null,`name` string, primary key (`id`) not enforced)";
+        let expected_query = "create or replace table `test-project.test_dataset.test_table` (`id` int64,`name` string, primary key (`id`) not enforced)";
         assert_eq!(query, expected_query);
     }
 
@@ -1026,13 +1224,7 @@ mod tests {
         let table_id = "test_table";
         let max_staleness_mins = 15;
 
-        let columns = vec![ColumnSchema::new(
-            "id".to_string(),
-            Type::INT4,
-            -1,
-            false,
-            true,
-        )];
+        let columns = vec![ColumnSchema::new("id".to_string(), Type::INT4, -1, true)];
 
         // Simulate the query generation logic with staleness
         let full_table_name = format!("`{project_id}.{dataset_id}.{table_id}`");
@@ -1042,7 +1234,7 @@ mod tests {
             "create or replace table {full_table_name} {columns_spec} {max_staleness_option}"
         );
 
-        let expected_query = "create or replace table `test-project.test_dataset.test_table` (`id` int64 not null, primary key (`id`) not enforced) options (max_staleness = interval 15 minute)";
+        let expected_query = "create or replace table `test-project.test_dataset.test_table` (`id` int64, primary key (`id`) not enforced) options (max_staleness = interval 15 minute)";
         assert_eq!(query, expected_query);
     }
 }

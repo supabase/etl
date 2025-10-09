@@ -93,12 +93,16 @@ impl Destination for MemoryDestination {
             if let Event::Truncate(event) = event
                 && has_table_id
             {
-                let Some(index) = event.rel_ids.iter().position(|&id| table_id.0 == id) else {
+                let Some(index) = event
+                    .table_ids
+                    .iter()
+                    .position(|(id, _)| id.0 == table_id.0)
+                else {
                     return true;
                 };
 
-                event.rel_ids.remove(index);
-                if event.rel_ids.is_empty() {
+                event.table_ids.remove(index);
+                if event.table_ids.is_empty() {
                     return false;
                 }
 
@@ -123,7 +127,11 @@ impl Destination for MemoryDestination {
         for table_row in &table_rows {
             info!("  {:?}", table_row);
         }
-        inner.table_rows.insert(table_id, table_rows);
+        inner
+            .table_rows
+            .entry(table_id)
+            .or_default()
+            .extend(table_rows);
 
         Ok(())
     }

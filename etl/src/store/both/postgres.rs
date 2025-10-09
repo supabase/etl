@@ -1,10 +1,12 @@
-use std::{collections::HashMap, sync::Arc};
-
 use etl_config::shared::PgConnectionConfig;
 use etl_postgres::replication::{connect_to_source_database, schema, state, table_mappings};
-use etl_postgres::types::{TableId, TableSchema};
+use etl_postgres::types::{SchemaVersion, TableId, TableSchema, VersionedTableSchema};
 use metrics::gauge;
 use sqlx::PgPool;
+use std::{
+    collections::{BTreeMap, HashMap},
+    sync::Arc,
+};
 use tokio::sync::Mutex;
 use tracing::{debug, info};
 
@@ -17,7 +19,27 @@ use crate::store::state::StateStore;
 use crate::types::PipelineId;
 use crate::{bail, etl_error};
 
+/// Default number of connections in the pool used by the [`PostgresStore`] to connect to the
+/// source database.
 const NUM_POOL_CONNECTIONS: u32 = 1;
+
+/// Emits table-related metrics.
+fn emit_table_metrics(
+    pipeline_id: PipelineId,
+    total_tables: usize,
+    phase_counts: &HashMap<&'static str, u64>,
+) {
+    gauge!(ETL_TABLES_TOTAL, PIPELINE_ID_LABEL => pipeline_id.to_string()).set(total_tables as f64);
+
+    for (phase, count) in phase_counts {
+        gauge!(
+            ETL_TABLES_TOTAL,
+            PIPELINE_ID_LABEL => pipeline_id.to_string(),
+            PHASE_LABEL => *phase
+        )
+        .set(*count as f64);
+    }
+}
 
 /// Converts ETL table replication phases to Postgres database state format.
 ///
@@ -136,7 +158,7 @@ struct Inner {
     /// Cached table replication states indexed by table ID.
     table_states: HashMap<TableId, TableReplicationPhase>,
     /// Cached table schemas indexed by table ID.
-    table_schemas: HashMap<TableId, Arc<TableSchema>>,
+    table_schemas: HashMap<TableId, BTreeMap<SchemaVersion, Arc<VersionedTableSchema>>>,
     /// Cached table mappings from source table ID to destination table name.
     table_mappings: HashMap<TableId, String>,
 }
@@ -197,7 +219,7 @@ impl PostgresStore {
     /// than maintaining persistent connections. This approach trades connection
     /// setup overhead for reduced resource usage during periods of low activity.
     async fn connect_to_source(&self) -> Result<PgPool, sqlx::Error> {
-        // We connect to source database each time we update because we assume that
+        // We connect to the source database each time we update because we assume that
         // these updates will be infrequent. It has some overhead to establish a
         // connection, but it's better than holding a connection open for long periods
         // when there's little activity on it.
@@ -210,23 +232,14 @@ impl PostgresStore {
 
         Ok(pool)
     }
-}
 
-/// Emits table related metrics.
-fn emit_table_metrics(
-    pipeline_id: PipelineId,
-    total_tables: usize,
-    phase_counts: &HashMap<&'static str, u64>,
-) {
-    gauge!(ETL_TABLES_TOTAL, PIPELINE_ID_LABEL => pipeline_id.to_string()).set(total_tables as f64);
-
-    for (phase, count) in phase_counts {
-        gauge!(
-            ETL_TABLES_TOTAL,
-            PIPELINE_ID_LABEL => pipeline_id.to_string(),
-            PHASE_LABEL => *phase
-        )
-        .set(*count as f64);
+    /// Returns all the table schemas stored in this store.
+    #[cfg(feature = "test-utils")]
+    pub async fn get_all_table_schemas(
+        &self,
+    ) -> HashMap<TableId, BTreeMap<SchemaVersion, Arc<VersionedTableSchema>>> {
+        let inner = self.inner.lock().await;
+        inner.table_schemas.clone()
     }
 }
 
@@ -328,8 +341,7 @@ impl StateStore for PostgresStore {
         let mut inner = self.inner.lock().await;
         state::update_replication_state(&pool, self.pipeline_id as i64, table_id, db_state).await?;
 
-        // Compute which phases need to be increment and decremented to
-        // keep table metrics updated
+        // Compute which phases need to be increment and decremented to keep table metrics updated.
         let phase_to_decrement = inner
             .table_states
             .get(&table_id)
@@ -371,8 +383,8 @@ impl StateStore for PostgresStore {
         let mut inner = self.inner.lock().await;
         match state::rollback_replication_state(&pool, self.pipeline_id as i64, table_id).await? {
             Some(restored_row) => {
-                // Compute which phases need to be increment and decremented to
-                // keep table metrics updated
+                // Compute which phases need to be increment and decremented to keep table metrics
+                // updated.
                 let phase_to_decrement = inner
                     .table_states
                     .get(&table_id)
@@ -506,21 +518,30 @@ impl SchemaStore for PostgresStore {
     /// This method provides fast access to cached table schemas, which are
     /// essential for processing replication events. Schemas are loaded during
     /// startup and cached for the lifetime of the pipeline.
-    async fn get_table_schema(&self, table_id: &TableId) -> EtlResult<Option<Arc<TableSchema>>> {
+    async fn get_table_schema(
+        &self,
+        table_id: &TableId,
+        version: SchemaVersion,
+    ) -> EtlResult<Option<Arc<VersionedTableSchema>>> {
         let inner = self.inner.lock().await;
 
-        Ok(inner.table_schemas.get(table_id).cloned())
+        Ok(inner
+            .table_schemas
+            .get(table_id)
+            .and_then(|schemas| schemas.get(&version).cloned()))
     }
 
-    /// Retrieves all cached table schemas as a vector.
-    ///
-    /// This method returns all currently cached table schemas, providing a
-    /// complete view of the schema information available to the pipeline.
-    /// Useful for operations that need to process or analyze all table schemas.
-    async fn get_table_schemas(&self) -> EtlResult<Vec<Arc<TableSchema>>> {
+    /// Retrieves the latest table schema for a table.
+    async fn get_latest_table_schema(
+        &self,
+        table_id: &TableId,
+    ) -> EtlResult<Option<Arc<VersionedTableSchema>>> {
         let inner = self.inner.lock().await;
 
-        Ok(inner.table_schemas.values().cloned().collect())
+        Ok(inner
+            .table_schemas
+            .get(table_id)
+            .and_then(|schemas| schemas.iter().next_back().map(|(_, schema)| schema.clone())))
     }
 
     /// Loads table schemas from Postgres into memory cache.
@@ -552,7 +573,9 @@ impl SchemaStore for PostgresStore {
         for table_schema in table_schemas {
             inner
                 .table_schemas
-                .insert(table_schema.id, Arc::new(table_schema));
+                .entry(table_schema.id)
+                .or_insert_with(BTreeMap::new)
+                .insert(table_schema.version, Arc::new(table_schema));
         }
 
         info!(
@@ -568,27 +591,36 @@ impl SchemaStore for PostgresStore {
     /// This method persists a table schema to the database and updates the
     /// in-memory cache atomically. Used when new tables are discovered during
     /// replication or when schema definitions need to be updated.
-    async fn store_table_schema(&self, table_schema: TableSchema) -> EtlResult<()> {
+    async fn store_table_schema(
+        &self,
+        table_schema: TableSchema,
+    ) -> EtlResult<Arc<VersionedTableSchema>> {
         debug!("storing table schema for table '{}'", table_schema.name);
 
         let pool = self.connect_to_source().await?;
 
         // We also lock the entire section to be consistent.
         let mut inner = self.inner.lock().await;
-        schema::store_table_schema(&pool, self.pipeline_id as i64, &table_schema)
-            .await
-            .map_err(|err| {
-                etl_error!(
-                    ErrorKind::SourceQueryFailed,
-                    "Failed to store table schema",
-                    format!("Failed to store table schema in postgres: {err}")
-                )
-            })?;
+
+        let stored_schema =
+            schema::store_table_schema(&pool, self.pipeline_id as i64, table_schema)
+                .await
+                .map_err(|err| {
+                    etl_error!(
+                        ErrorKind::SourceQueryFailed,
+                        "Failed to store table schema",
+                        format!("Failed to store table schema in postgres: {err}")
+                    )
+                })?;
+
+        let stored_schema = Arc::new(stored_schema);
         inner
             .table_schemas
-            .insert(table_schema.id, Arc::new(table_schema));
+            .entry(stored_schema.id)
+            .or_insert_with(BTreeMap::new)
+            .insert(stored_schema.version, stored_schema.clone());
 
-        Ok(())
+        Ok(stored_schema)
     }
 }
 

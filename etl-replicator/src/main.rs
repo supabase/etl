@@ -4,14 +4,15 @@
 //! and routes data to configured destinations. Includes telemetry, error handling, and
 //! graceful shutdown capabilities.
 
-use crate::config::load_replicator_config;
-use crate::core::start_replicator_with_config;
 use etl_config::Environment;
 use etl_config::shared::ReplicatorConfig;
 use etl_telemetry::metrics::init_metrics;
 use etl_telemetry::tracing::init_tracing_with_top_level_fields;
 use std::sync::Arc;
 use tracing::{error, info};
+
+use crate::config::load_replicator_config;
+use crate::core::start_replicator_with_config;
 
 mod config;
 mod core;

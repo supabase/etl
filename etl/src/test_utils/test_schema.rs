@@ -66,20 +66,8 @@ pub async fn setup_test_database_schema<G: GenericClient>(
             users_table_name,
             vec![
                 id_column_schema(),
-                ColumnSchema {
-                    name: "name".to_string(),
-                    typ: Type::TEXT,
-                    modifier: -1,
-                    nullable: false,
-                    primary: false,
-                },
-                ColumnSchema {
-                    name: "age".to_string(),
-                    typ: Type::INT4,
-                    modifier: -1,
-                    nullable: false,
-                    primary: false,
-                },
+                ColumnSchema::new("name".to_string(), Type::TEXT, -1, false),
+                ColumnSchema::new("age".to_string(), Type::INT4, -1, false),
             ],
         ));
     }
@@ -102,13 +90,7 @@ pub async fn setup_test_database_schema<G: GenericClient>(
             orders_table_name,
             vec![
                 id_column_schema(),
-                ColumnSchema {
-                    name: "description".to_string(),
-                    typ: Type::TEXT,
-                    modifier: -1,
-                    nullable: false,
-                    primary: false,
-                },
+                ColumnSchema::new("description".to_string(), Type::TEXT, -1, false),
             ],
         ));
     }
@@ -236,9 +218,9 @@ pub fn events_equal_excluding_fields(left: &Event, right: &Event) -> bool {
         (Event::Delete(left), Event::Delete(right)) => {
             left.table_id == right.table_id && left.old_table_row == right.old_table_row
         }
-        (Event::Relation(left), Event::Relation(right)) => left.table_schema == right.table_schema,
+        (Event::Relation(left), Event::Relation(right)) => left.table_id == right.table_id,
         (Event::Truncate(left), Event::Truncate(right)) => {
-            left.options == right.options && left.rel_ids == right.rel_ids
+            left.options == right.options && left.table_ids == right.table_ids
         }
         (Event::Unsupported, Event::Unsupported) => true,
         _ => false, // Different event types
@@ -264,6 +246,7 @@ pub fn build_expected_users_inserts(
                     Cell::I32(age),
                 ],
             },
+            schema_version: 0,
         }));
 
         starting_id += 1;
@@ -287,6 +270,7 @@ pub fn build_expected_orders_inserts(
             table_row: TableRow {
                 values: vec![Cell::I64(starting_id), Cell::String(name.to_owned())],
             },
+            schema_version: 0,
         }));
 
         starting_id += 1;

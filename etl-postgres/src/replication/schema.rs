@@ -4,7 +4,12 @@ use sqlx::{PgExecutor, PgPool, Row};
 use std::collections::HashMap;
 use tokio_postgres::types::Type as PgType;
 
-use crate::types::{ColumnSchema, TableId, TableName, TableSchema};
+use crate::types::{
+    ColumnSchema, SchemaVersion, TableId, TableName, TableSchema, VersionedTableSchema,
+};
+
+/// The initial schema version number.
+const STARTING_SCHEMA_VERSION: u64 = 0;
 
 macro_rules! define_type_mappings {
     (
@@ -141,20 +146,35 @@ define_type_mappings! {
 pub async fn store_table_schema(
     pool: &PgPool,
     pipeline_id: i64,
-    table_schema: &TableSchema,
-) -> Result<(), sqlx::Error> {
+    table_schema: TableSchema,
+) -> Result<VersionedTableSchema, sqlx::Error> {
     let mut tx = pool.begin().await?;
 
-    // Insert or update table schema record
+    // We are fine with running this query for every table schema store since we assume that
+    // it's not a frequent operation.
+    let current_schema_version: Option<i64> = sqlx::query_scalar(
+        r#"
+        select max(schema_version)
+        from etl.table_schemas
+        where pipeline_id = $1 and table_id = $2
+        "#,
+    )
+    .bind(pipeline_id)
+    .bind(table_schema.id.into_inner() as i64)
+    .fetch_one(&mut *tx)
+    .await?;
+
+    // We case to `u64` without checks. This is fine since we control the database, but we might want
+    // to be more defensive in the future.
+    let next_schema_version: u64 = match current_schema_version {
+        Some(current_schema_version) => current_schema_version as u64 + 1,
+        None => STARTING_SCHEMA_VERSION,
+    };
+
     let table_schema_id: i64 = sqlx::query(
         r#"
-        insert into etl.table_schemas (pipeline_id, table_id, schema_name, table_name)
-        values ($1, $2, $3, $4)
-        on conflict (pipeline_id, table_id)
-        do update set 
-            schema_name = excluded.schema_name,
-            table_name = excluded.table_name,
-            updated_at = now()
+        insert into etl.table_schemas (pipeline_id, table_id, schema_name, table_name, schema_version)
+        values ($1, $2, $3, $4, $5)
         returning id
         "#,
     )
@@ -162,17 +182,11 @@ pub async fn store_table_schema(
     .bind(table_schema.id.into_inner() as i64)
     .bind(&table_schema.name.schema)
     .bind(&table_schema.name.name)
+    .bind(next_schema_version as i64)
     .fetch_one(&mut *tx)
     .await?
     .get(0);
 
-    // Delete existing columns for this table schema to handle schema changes
-    sqlx::query("delete from etl.table_columns where table_schema_id = $1")
-        .bind(table_schema_id)
-        .execute(&mut *tx)
-        .await?;
-
-    // Insert all columns
     for (column_order, column_schema) in table_schema.column_schemas.iter().enumerate() {
         let column_type_str = postgres_type_to_string(&column_schema.typ);
 
@@ -196,23 +210,24 @@ pub async fn store_table_schema(
 
     tx.commit().await?;
 
-    Ok(())
+    Ok(table_schema.into_versioned(next_schema_version))
 }
 
 /// Loads all table schemas for a pipeline from the database.
 ///
 /// Retrieves table schemas and columns from schema storage tables,
-/// reconstructing complete [`TableSchema`] objects.
+/// reconstructing complete [`VersionedTableSchema`] objects.
 pub async fn load_table_schemas(
     pool: &PgPool,
     pipeline_id: i64,
-) -> Result<Vec<TableSchema>, sqlx::Error> {
+) -> Result<Vec<VersionedTableSchema>, sqlx::Error> {
     let rows = sqlx::query(
         r#"
         select
             ts.table_id,
             ts.schema_name,
             ts.table_name,
+            ts.schema_version,
             tc.column_name,
             tc.column_type,
             tc.type_modifier,
@@ -222,24 +237,37 @@ pub async fn load_table_schemas(
         from etl.table_schemas ts
         inner join etl.table_columns tc on ts.id = tc.table_schema_id
         where ts.pipeline_id = $1
-        order by ts.table_id, tc.column_order
+        order by ts.table_id, ts.schema_version, tc.column_order
         "#,
     )
     .bind(pipeline_id)
     .fetch_all(pool)
     .await?;
 
-    let mut table_schemas = HashMap::new();
+    let mut table_schemas: HashMap<(TableId, SchemaVersion), VersionedTableSchema> = HashMap::new();
 
     for row in rows {
         let table_oid: SqlxTableId = row.get("table_id");
         let table_id = TableId::new(table_oid.0);
         let schema_name: String = row.get("schema_name");
         let table_name: String = row.get("table_name");
+        let schema_version: SchemaVersion = {
+            let value: i64 = row.get("schema_version");
+            value
+                .try_into()
+                .expect("schema_version should fit into SchemaVersion")
+        };
 
-        let entry = table_schemas.entry(table_id).or_insert_with(|| {
-            TableSchema::new(table_id, TableName::new(schema_name, table_name), vec![])
-        });
+        let entry = table_schemas
+            .entry((table_id, schema_version))
+            .or_insert_with(|| {
+                VersionedTableSchema::new(
+                    table_id,
+                    TableName::new(schema_name.clone(), table_name.clone()),
+                    schema_version,
+                    vec![],
+                )
+            });
 
         entry.add_column_schema(parse_column_schema(&row));
     }
@@ -303,14 +331,12 @@ fn parse_column_schema(row: &PgRow) -> ColumnSchema {
     let column_name: String = row.get("column_name");
     let column_type: String = row.get("column_type");
     let type_modifier: i32 = row.get("type_modifier");
-    let nullable: bool = row.get("nullable");
     let primary_key: bool = row.get("primary_key");
 
     ColumnSchema::new(
         column_name,
         string_to_postgres_type(&column_type),
         type_modifier,
-        nullable,
         primary_key,
     )
 }

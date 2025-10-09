@@ -1,5 +1,8 @@
-use etl_postgres::types::{TableId, TableSchema};
+use etl_postgres::types::{ColumnSchema, SchemaVersion, TableId, TableName, VersionedTableSchema};
+use std::collections::HashSet;
 use std::fmt;
+use std::hash::Hash;
+use std::sync::Arc;
 use tokio_postgres::types::PgLsn;
 
 use crate::types::TableRow;
@@ -40,6 +43,25 @@ pub struct CommitEvent {
     pub timestamp: i64,
 }
 
+/// A change in a relation.
+#[derive(Debug, Clone, PartialEq)]
+pub enum RelationChange {
+    /// A change that describes renaming the table or moving it across schemas.
+    RenameTable {
+        old_name: TableName,
+        new_name: TableName,
+    },
+    /// A change that describes adding a new column.
+    AddColumn(ColumnSchema),
+    /// A change that describes dropping an existing column.
+    DropColumn(ColumnSchema),
+    /// A change that describes altering an existing column.
+    ///
+    /// The alteration of a column is defined as any modifications to a column
+    /// while keeping the same name.
+    AlterColumn(ColumnSchema, ColumnSchema),
+}
+
 /// Table schema definition event from Postgres logical replication.
 ///
 /// [`RelationEvent`] provides schema information for tables involved in replication.
@@ -51,8 +73,70 @@ pub struct RelationEvent {
     pub start_lsn: PgLsn,
     /// LSN position where the transaction of this event will commit.
     pub commit_lsn: PgLsn,
-    /// Complete table schema including columns and types.
-    pub table_schema: TableSchema,
+    /// ID of the table of which this is a schema change.
+    pub table_id: TableId,
+    /// The old table schema.
+    pub old_table_schema: Arc<VersionedTableSchema>,
+    /// The new table schema.
+    pub new_table_schema: Arc<VersionedTableSchema>,
+}
+
+impl RelationEvent {
+    /// Builds a list of [`RelationChange`]s that describe the changes between the old and new table
+    /// schemas. Table-level operations (such as renames) are emitted before column-level operations
+    /// so destinations can adjust object names before applying column mutations.
+    pub fn build_changes(&self) -> Vec<RelationChange> {
+        let mut changes = Vec::new();
+
+        if self.old_table_schema.name != self.new_table_schema.name {
+            changes.push(RelationChange::RenameTable {
+                old_name: self.old_table_schema.name.clone(),
+                new_name: self.new_table_schema.name.clone(),
+            });
+        }
+
+        // We build a lookup set for the new column schemas for quick change detection.
+        let mut new_indexed_column_schemas = self
+            .new_table_schema
+            .column_schemas
+            .iter()
+            .cloned()
+            .map(IndexedColumnSchema)
+            .collect::<HashSet<_>>();
+
+        // We process all the changes that we want to dispatch to the destination.
+        for column_schema in self.old_table_schema.column_schemas.iter() {
+            let column_schema = IndexedColumnSchema(column_schema.clone());
+            let latest_column_schema = new_indexed_column_schemas.take(&column_schema);
+            match latest_column_schema {
+                Some(latest_column_schema) => {
+                    let column_schema = column_schema.into_inner();
+                    let latest_column_schema = latest_column_schema.into_inner();
+
+                    if column_schema != latest_column_schema {
+                        // If we find a column with the same name but different fields, we assume it was changed. The only changes
+                        // that we detect are changes to the column but with preserved name.
+                        changes.push(RelationChange::AlterColumn(
+                            column_schema,
+                            latest_column_schema,
+                        ));
+                    }
+                }
+                None => {
+                    // If we don't find the column in the latest schema, we assume it was dropped even
+                    // though it could be renamed.
+                    changes.push(RelationChange::DropColumn(column_schema.into_inner()));
+                }
+            }
+        }
+
+        // For the remaining columns that didn't match, we assume they were added.
+        for column_schema in new_indexed_column_schemas {
+            changes.push(RelationChange::AddColumn(column_schema.into_inner()));
+        }
+
+        changes
+    }
 }
 
 /// Row insertion event from Postgres logical replication.
@@ -67,6 +151,8 @@ pub struct InsertEvent {
     pub commit_lsn: PgLsn,
     /// ID of the table where the row was inserted.
     pub table_id: TableId,
+    /// Schema version that should be used to interpret this row.
+    pub schema_version: SchemaVersion,
     /// Complete row data for the inserted row.
     pub table_row: TableRow,
 }
@@ -84,6 +170,8 @@ pub struct UpdateEvent {
     pub commit_lsn: PgLsn,
     /// ID of the table where the row was updated.
     pub table_id: TableId,
+    /// Schema version that should be used to interpret this row.
+    pub schema_version: SchemaVersion,
     /// New row data after the update.
     pub table_row: TableRow,
     /// Previous row data before the update.
@@ -106,6 +194,8 @@ pub struct DeleteEvent {
     pub commit_lsn: PgLsn,
     /// ID of the table where the row was deleted.
     pub table_id: TableId,
+    /// Schema version that should be used to interpret this row.
+    pub schema_version: SchemaVersion,
     /// Data from the deleted row.
     ///
     /// The boolean indicates whether the row contains only key columns (`true`)
@@ -128,7 +218,7 @@ pub struct TruncateEvent {
     /// Truncate operation options from Postgres.
     pub options: i8,
     /// List of table IDs that were truncated in this operation.
-    pub rel_ids: Vec<u32>,
+    pub table_ids: Vec<(TableId, SchemaVersion)>,
 }
 
 /// Represents a single replication event from Postgres logical replication.
@@ -175,14 +265,8 @@ impl Event {
             Event::Insert(insert_event) => insert_event.table_id == *table_id,
             Event::Update(update_event) => update_event.table_id == *table_id,
             Event::Delete(delete_event) => delete_event.table_id == *table_id,
-            Event::Relation(relation_event) => relation_event.table_schema.id == *table_id,
-            Event::Truncate(event) => {
-                let Some(_) = event.rel_ids.iter().find(|&&id| table_id.0 == id) else {
-                    return false;
-                };
-
-                true
-            }
+            Event::Relation(relation_event) => relation_event.table_id == *table_id,
+            Event::Truncate(event) => event.table_ids.iter().any(|(id, _)| id == table_id),
             _ => false,
         }
     }
@@ -246,5 +330,28 @@ impl From<&Event> for EventType {
 impl From<Event> for EventType {
     fn from(event: Event) -> Self {
         (&event).into()
+    }
+}
+
+#[derive(Debug, Clone)]
+struct IndexedColumnSchema(ColumnSchema);
+
+impl IndexedColumnSchema {
+    fn into_inner(self) -> ColumnSchema {
+        self.0
+    }
+}
+
+impl Eq for IndexedColumnSchema {}
+
+impl PartialEq for IndexedColumnSchema {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.name == other.0.name
+    }
+}
+
+impl Hash for IndexedColumnSchema {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.0.name.hash(state);
     }
 }

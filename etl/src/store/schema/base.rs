@@ -1,4 +1,4 @@
-use etl_postgres::types::{TableId, TableSchema};
+use etl_postgres::types::{SchemaVersion, TableId, TableSchema, VersionedTableSchema};
 use std::sync::Arc;
 
 use crate::error::EtlResult;
@@ -10,18 +10,20 @@ use crate::error::EtlResult;
 ///
 /// Implementations should ensure thread-safety and handle concurrent access to the data.
 pub trait SchemaStore {
-    /// Returns table schema for table with id `table_id` from the cache.
+    /// Returns table schema for table with a specific schema version.
     ///
     /// Does not load any new data into the cache.
     fn get_table_schema(
         &self,
         table_id: &TableId,
-    ) -> impl Future<Output = EtlResult<Option<Arc<TableSchema>>>> + Send;
+        version: SchemaVersion,
+    ) -> impl Future<Output = EtlResult<Option<Arc<VersionedTableSchema>>>> + Send;
 
-    /// Returns all table schemas from the cache.
-    ///
-    /// Does not read from the persistent store.
-    fn get_table_schemas(&self) -> impl Future<Output = EtlResult<Vec<Arc<TableSchema>>>> + Send;
+    /// Returns the latest table schema version for table with id `table_id` from the cache.
+    fn get_latest_table_schema(
+        &self,
+        table_id: &TableId,
+    ) -> impl Future<Output = EtlResult<Option<Arc<VersionedTableSchema>>>> + Send;
 
     /// Loads table schemas from the persistent state into the cache.
     ///
@@ -32,5 +34,5 @@ pub trait SchemaStore {
     fn store_table_schema(
         &self,
         table_schema: TableSchema,
-    ) -> impl Future<Output = EtlResult<()>> + Send;
+    ) -> impl Future<Output = EtlResult<Arc<VersionedTableSchema>>> + Send;
 }
