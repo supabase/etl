@@ -119,6 +119,26 @@ impl HttpK8sClient {
             pods_api,
         })
     }
+
+    /// Helper function to handle delete operations that should ignore 404 errors
+    /// but propagate other errors.
+    fn handle_delete_with_404_ignore<T>(
+        delete_result: Result<T, kube::Error>,
+    ) -> Result<(), K8sError> {
+        match delete_result {
+            Ok(_) => Ok(()),
+            Err(e) => match e {
+                kube::Error::Api(ref er) => {
+                    if er.code != 404 {
+                        Err(e.into())
+                    } else {
+                        Ok(())
+                    }
+                }
+                e => Err(e.into()),
+            },
+        }
+    }
 }
 
 #[async_trait]
@@ -173,17 +193,9 @@ impl K8sClient for HttpK8sClient {
         info!("deleting postgres secret");
         let postgres_secret_name = create_postgres_secret_name(prefix);
         let dp = DeleteParams::default();
-        match self.secrets_api.delete(&postgres_secret_name, &dp).await {
-            Ok(_) => {}
-            Err(e) => match e {
-                kube::Error::Api(ref er) => {
-                    if er.code != 404 {
-                        return Err(e.into());
-                    }
-                }
-                e => return Err(e.into()),
-            },
-        }
+        Self::handle_delete_with_404_ignore(
+            self.secrets_api.delete(&postgres_secret_name, &dp).await,
+        )?;
         info!("deleted postgres secret");
         Ok(())
     }
@@ -192,17 +204,7 @@ impl K8sClient for HttpK8sClient {
         info!("deleting bq secret");
         let bq_secret_name = create_bq_secret_name(prefix);
         let dp = DeleteParams::default();
-        match self.secrets_api.delete(&bq_secret_name, &dp).await {
-            Ok(_) => {}
-            Err(e) => match e {
-                kube::Error::Api(ref er) => {
-                    if er.code != 404 {
-                        return Err(e.into());
-                    }
-                }
-                e => return Err(e.into()),
-            },
-        }
+        Self::handle_delete_with_404_ignore(self.secrets_api.delete(&bq_secret_name, &dp).await)?;
         info!("deleted bq secret");
         Ok(())
     }
@@ -250,21 +252,11 @@ impl K8sClient for HttpK8sClient {
         info!("deleting config map");
         let replicator_config_map_name = create_replicator_config_map_name(prefix);
         let dp = DeleteParams::default();
-        match self
-            .config_maps_api
-            .delete(&replicator_config_map_name, &dp)
-            .await
-        {
-            Ok(_) => {}
-            Err(e) => match e {
-                kube::Error::Api(ref er) => {
-                    if er.code != 404 {
-                        return Err(e.into());
-                    }
-                }
-                e => return Err(e.into()),
-            },
-        }
+        Self::handle_delete_with_404_ignore(
+            self.config_maps_api
+                .delete(&replicator_config_map_name, &dp)
+                .await,
+        )?;
         info!("deleted config map");
         Ok(())
     }
@@ -319,17 +311,9 @@ impl K8sClient for HttpK8sClient {
 
         let stateful_set_name = create_stateful_set_name(prefix);
         let dp = DeleteParams::default();
-        match self.stateful_sets_api.delete(&stateful_set_name, &dp).await {
-            Ok(_) => {}
-            Err(e) => match e {
-                kube::Error::Api(ref er) => {
-                    if er.code != 404 {
-                        return Err(e.into());
-                    }
-                }
-                e => return Err(e.into()),
-            },
-        }
+        Self::handle_delete_with_404_ignore(
+            self.stateful_sets_api.delete(&stateful_set_name, &dp).await,
+        )?;
 
         info!("deleted stateful set");
 
