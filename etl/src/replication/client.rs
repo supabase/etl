@@ -142,9 +142,10 @@ impl PgReplicationSlotTransaction {
         &self,
         table_id: TableId,
         column_schemas: &[ColumnSchema],
+        publication_name: Option<&str>,
     ) -> EtlResult<CopyOutStream> {
         self.client
-            .get_table_copy_stream(table_id, column_schemas)
+            .get_table_copy_stream(table_id, column_schemas, publication_name)
             .await
     }
 
@@ -731,13 +732,64 @@ impl PgReplicationClient {
 
         Ok(column_schemas)
     }
+
+    /// Retrieves the publication row filter for a table.
+    /// If no publication is specified, we will always return None
+    pub async fn get_row_filter(
+        &self,
+        table_id: TableId,
+        publication_name: Option<&str>,
+    ) -> EtlResult<Option<String>> {
+        // Row filters on publications were added in Postgres 15. For any earlier versions we know that there is no row filter
+        if let Some(server_version) = self.server_version
+            && server_version.get() < 150000
+        {
+            return Ok(None);
+        }
+        // If we don't have a publication the row filter is implicitly non-existent
+        let publication = match publication_name {
+            Some(x) => x,
+            _ => return Ok(None),
+        };
+
+        // This uses the same query as the `pg_publication_tables`, but with some minor tweaks (COALESCE, only return the rowfilter,
+        // filter on oid and pubname). All of these are available >= Postgres 15.
+        let row_filter_query = format!(
+                "SELECT
+                    COALESCE(pg_get_expr(gpt.qual, gpt.relid), '') AS row_filter
+                FROM pg_publication p
+                JOIN LATERAL pg_get_publication_tables(p.pubname) AS gpt(pubid, relid, attrs, qual) ON TRUE
+                JOIN pg_class c ON c.oid = gpt.relid
+                JOIN pg_namespace n ON n.oid = c.relnamespace
+                WHERE p.pubname = {} AND c.oid = {};
+                ",
+                quote_literal(publication),
+                table_id,
+            );
+
+        let messages = self.client.simple_query(&row_filter_query).await?;
+
+        for message in messages {
+            if let SimpleQueryMessage::Row(row) = message {
+                let row_filter = Self::get_row_value::<String>(&row, "row_filter", "gpt").await?;
+                match row_filter.as_str() {
+                    "" => return Ok(None),
+                    _ => return Ok(Some(row_filter)),
+                }
+            }
+        }
+
+        Ok(None)
+    }
+
     /// Creates a COPY stream for reading data from a table using its OID.
     ///
-    /// The stream will include only the specified columns and use text format.
+    /// The stream will include only the specified columns and use text format, and respect publication row filters (if a publication is specified)
     pub async fn get_table_copy_stream(
         &self,
         table_id: TableId,
         column_schemas: &[ColumnSchema],
+        publication: Option<&str>,
     ) -> EtlResult<CopyOutStream> {
         let column_list = column_schemas
             .iter()
@@ -746,13 +798,23 @@ impl PgReplicationClient {
             .join(", ");
 
         let table_name = self.get_table_name(table_id).await?;
+        let filter = self.get_row_filter(table_id, publication).await?;
 
-        // TODO: allow passing in format binary or text
-        let copy_query = format!(
-            r#"copy {} ({}) to stdout with (format text);"#,
-            table_name.as_quoted_identifier(),
-            column_list
-        );
+        let copy_query = if let Some(pred) = filter {
+            // Use SELECT-form so we can add WHERE. Parenthesize the predicate to be safe.
+            format!(
+                r#"COPY (SELECT {} FROM {} WHERE ({})) TO STDOUT WITH (FORMAT text);"#,
+                column_list,
+                table_name.as_quoted_identifier(),
+                pred,
+            )
+        } else {
+            format!(
+                r#"COPY {} ({}) TO STDOUT WITH (FORMAT text);"#,
+                table_name.as_quoted_identifier(),
+                column_list,
+            )
+        };
 
         let stream = self.client.copy_out_simple(&copy_query).await?;
 

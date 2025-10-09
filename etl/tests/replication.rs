@@ -348,6 +348,148 @@ async fn test_table_copy_stream_is_consistent() {
                 nullable: true,
                 primary: false,
             }],
+            None,
+        )
+        .await
+        .unwrap();
+
+    let rows_count = count_stream_rows(stream).await;
+
+    // Transaction should be committed after the copy stream is exhausted.
+    transaction.commit().await.unwrap();
+
+    // We expect to have the inserted number of rows.
+    assert_eq!(rows_count, expected_rows_count as u64);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_table_copy_stream_respects_row_filter() {
+    init_test_tracing();
+    let database = spawn_source_database().await;
+
+    // Row filters in publication are only available from Postgres 15 and onwards.
+    // As such, we skip the test for versions earlier than 15.
+    if let Some(server_version) = database.server_version()
+        && server_version.get() < 150000
+    {
+        return;
+    }
+    // We create a table and insert one row.
+    let test_table_name = test_table_name("table_1");
+    let test_table_id = database
+        .create_table(test_table_name.clone(), true, &[("age", "integer")])
+        .await
+        .unwrap();
+
+    database
+        .run_sql(&format!(
+            "ALTER TABLE {test_table_name} REPLICA IDENTITY FULL"
+        ))
+        .await
+        .unwrap();
+    database
+        .run_sql(&format!(
+            "CREATE PUBLICATION test_pub FOR TABLE {test_table_name} WHERE (age >= 18)"
+        ))
+        .await
+        .unwrap();
+
+    let parent_client = PgReplicationClient::connect(database.config.clone())
+        .await
+        .unwrap();
+
+    let total_rows_count = 30;
+    let expected_rows_count = (18..1 + total_rows_count as i32).len();
+
+    database
+        .insert_generate_series(test_table_name, &["age"], 1, total_rows_count, 1)
+        .await
+        .unwrap();
+
+    // We create the slot when the database schema contains only 'table_1' data.
+    let (transaction, _) = parent_client
+        .create_slot_with_transaction(&test_slot_name("my_slot"))
+        .await
+        .unwrap();
+
+    // We create a transaction to copy the table data consistently.
+    let stream = transaction
+        .get_table_copy_stream(
+            test_table_id,
+            &[ColumnSchema {
+                name: "age".to_string(),
+                typ: Type::INT4,
+                modifier: -1,
+                nullable: true,
+                primary: false,
+            }],
+            Some("test_pub"),
+        )
+        .await
+        .unwrap();
+
+    let rows_count = count_stream_rows(stream).await;
+
+    // Transaction should be committed after the copy stream is exhausted.
+    transaction.commit().await.unwrap();
+
+    // We expect to have the inserted number of rows.
+    assert_eq!(rows_count, expected_rows_count as u64);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_table_copy_stream_no_row_filter() {
+    init_test_tracing();
+    let database = spawn_source_database().await;
+    // We create a table and insert one row.
+    let test_table_name = test_table_name("table_1");
+    let test_table_id = database
+        .create_table(test_table_name.clone(), true, &[("age", "integer")])
+        .await
+        .unwrap();
+
+    database
+        .run_sql(&format!(
+            "ALTER TABLE {test_table_name} REPLICA IDENTITY FULL"
+        ))
+        .await
+        .unwrap();
+    database
+        .run_sql(&format!(
+            "CREATE PUBLICATION test_pub FOR TABLE {test_table_name}"
+        ))
+        .await
+        .unwrap();
+
+    let parent_client = PgReplicationClient::connect(database.config.clone())
+        .await
+        .unwrap();
+
+    let expected_rows_count = 30;
+
+    database
+        .insert_generate_series(test_table_name, &["age"], 1, expected_rows_count, 1)
+        .await
+        .unwrap();
+
+    // We create the slot when the database schema contains only 'table_1' data.
+    let (transaction, _) = parent_client
+        .create_slot_with_transaction(&test_slot_name("my_slot"))
+        .await
+        .unwrap();
+
+    // We create a transaction to copy the table data consistently.
+    let stream = transaction
+        .get_table_copy_stream(
+            test_table_id,
+            &[ColumnSchema {
+                name: "age".to_string(),
+                typ: Type::INT4,
+                modifier: -1,
+                nullable: true,
+                primary: false,
+            }],
+            Some("test_pub"),
         )
         .await
         .unwrap();
