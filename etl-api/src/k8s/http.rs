@@ -620,7 +620,7 @@ fn create_bq_secret_env_var_json(bq_secret_name: &str) -> serde_json::Value {
 
 fn create_iceberg_catlog_token_env_var_json(iceberg_secret_name: &str) -> serde_json::Value {
     json!({
-      "name": "APP_DESTINATION__ICEBERG__CONFIG__SUPABASE__CATALOG_TOKEN",
+      "name": "APP_DESTINATION__ICEBERG__SUPABASE__CATALOG_TOKEN",
       "valueFrom": {
         "secretKeyRef": {
           "name": iceberg_secret_name,
@@ -632,7 +632,7 @@ fn create_iceberg_catlog_token_env_var_json(iceberg_secret_name: &str) -> serde_
 
 fn create_iceberg_s3_access_key_id_env_var_json(iceberg_secret_name: &str) -> serde_json::Value {
     json!({
-      "name": "APP_DESTINATION__ICEBERG__CONFIG__SUPABASE__S3_ACCESS_KEY_ID",
+      "name": "APP_DESTINATION__ICEBERG__SUPABASE__S3_ACCESS_KEY_ID",
       "valueFrom": {
         "secretKeyRef": {
           "name": iceberg_secret_name,
@@ -646,7 +646,7 @@ fn create_iceberg_s3_secret_access_key_env_var_json(
     iceberg_secret_name: &str,
 ) -> serde_json::Value {
     json!({
-      "name": "APP_DESTINATION__ICEBERG__CONFIG__SUPABASE__S3_SECRET_ACCESS_KEY",
+      "name": "APP_DESTINATION__ICEBERG__SUPABASE__S3_SECRET_ACCESS_KEY",
       "valueFrom": {
         "secretKeyRef": {
           "name": iceberg_secret_name,

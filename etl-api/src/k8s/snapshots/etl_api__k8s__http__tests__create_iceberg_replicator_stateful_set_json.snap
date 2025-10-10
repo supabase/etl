@@ -48,7 +48,7 @@ expression: stateful_set_json
                 }
               },
               {
-                "name": "APP_DESTINATION__ICEBERG__CONFIG__SUPABASE__CATALOG_TOKEN",
+                "name": "APP_DESTINATION__ICEBERG__SUPABASE__CATALOG_TOKEN",
                 "valueFrom": {
                   "secretKeyRef": {
                     "key": "catalog-token",
@@ -57,7 +57,7 @@ expression: stateful_set_json
                 }
               },
               {
-                "name": "APP_DESTINATION__ICEBERG__CONFIG__SUPABASE__S3_ACCESS_KEY_ID",
+                "name": "APP_DESTINATION__ICEBERG__SUPABASE__S3_ACCESS_KEY_ID",
                 "valueFrom": {
                   "secretKeyRef": {
                     "key": "s3-access-key-id",
@@ -66,7 +66,7 @@ expression: stateful_set_json
                 }
               },
               {
-                "name": "APP_DESTINATION__ICEBERG__CONFIG__SUPABASE__S3_SECRET_ACCESS_KEY",
+                "name": "APP_DESTINATION__ICEBERG__SUPABASE__S3_SECRET_ACCESS_KEY",
                 "valueFrom": {
                   "secretKeyRef": {
                     "key": "s3-secret-access-key",
