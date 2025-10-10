@@ -868,6 +868,26 @@ mod tests {
     }
 
     #[test]
+    fn test_create_postgres_secret_env_var_json() {
+        let prefix = create_k8s_object_prefix(TENANT_ID, 42);
+        let postgres_secret_name = create_postgres_secret_name(&prefix);
+
+        let postgres_env_var_json = create_postgres_secret_env_var_json(&postgres_secret_name);
+
+        assert_json_snapshot!(postgres_env_var_json);
+    }
+
+    #[test]
+    fn test_create_bq_secret_env_var_json() {
+        let prefix = create_k8s_object_prefix(TENANT_ID, 42);
+        let bq_secret_name = create_bq_secret_name(&prefix);
+
+        let bq_env_var_json = create_bq_secret_env_var_json(&bq_secret_name);
+
+        assert_json_snapshot!(bq_env_var_json);
+    }
+
+    #[test]
     fn test_create_container_environment() {
         let prefix = create_k8s_object_prefix(TENANT_ID, 42);
         let environment = Environment::Prod;
