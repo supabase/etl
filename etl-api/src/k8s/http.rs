@@ -322,37 +322,14 @@ impl K8sClient for HttpK8sClient {
 
         let config = ReplicatorResourceConfig::load(&environment)?;
 
-        let mut container_environment =
-            create_container_environment_json(&environment, replicator_image);
-
-        match destination_type {
-            DestinationType::Memory => {}
-            DestinationType::BigQuery => {
-                let postgres_secret_name = create_postgres_secret_name(prefix);
-                let bq_secret_name = create_bq_secret_name(prefix);
-                let postgres_secret_env_var_json =
-                    create_postgres_secret_env_var_json(&postgres_secret_name);
-                let bq_secret_env_var_json = create_bq_secret_env_var_json(&bq_secret_name);
-
-                container_environment.push(postgres_secret_env_var_json);
-                container_environment.push(bq_secret_env_var_json);
-            }
-            DestinationType::Iceberg => {
-                let iceberg_secret_name = create_iceberg_secret_name(prefix);
-                let iceberg_catlog_token_env_var_json =
-                    create_iceberg_catlog_token_env_var_json(&iceberg_secret_name);
-                let iceberg_s3_access_key_id_env_var_json =
-                    create_iceberg_s3_access_key_id_env_var_json(&iceberg_secret_name);
-                let iceberg_s3_secret_access_key_env_var_json =
-                    create_iceberg_s3_secret_access_key_env_var_json(&iceberg_secret_name);
-
-                container_environment.push(iceberg_catlog_token_env_var_json);
-                container_environment.push(iceberg_s3_access_key_id_env_var_json);
-                container_environment.push(iceberg_s3_secret_access_key_env_var_json);
-            }
-        }
-
         let stateful_set_name = create_stateful_set_name(prefix);
+
+        let container_environment = create_container_environment_json(
+            prefix,
+            &environment,
+            replicator_image,
+            destination_type,
+        );
 
         let stateful_set_json = create_replicator_stateful_set_json(
             prefix,
@@ -563,10 +540,12 @@ fn create_replicator_config_map_json(
 }
 
 fn create_container_environment_json(
+    prefix: &str,
     environment: &Environment,
     replicator_image: &str,
+    destination_type: DestinationType,
 ) -> Vec<serde_json::Value> {
-    vec![
+    let mut container_environment = vec![
         json!({
           "name": "APP_ENVIRONMENT",
           "value": environment.to_string()
@@ -585,7 +564,34 @@ fn create_container_environment_json(
             }
           }
         }),
-    ]
+    ];
+    match destination_type {
+        DestinationType::Memory => {}
+        DestinationType::BigQuery => {
+            let postgres_secret_name = create_postgres_secret_name(prefix);
+            let bq_secret_name = create_bq_secret_name(prefix);
+            let postgres_secret_env_var_json =
+                create_postgres_secret_env_var_json(&postgres_secret_name);
+            let bq_secret_env_var_json = create_bq_secret_env_var_json(&bq_secret_name);
+
+            container_environment.push(postgres_secret_env_var_json);
+            container_environment.push(bq_secret_env_var_json);
+        }
+        DestinationType::Iceberg => {
+            let iceberg_secret_name = create_iceberg_secret_name(prefix);
+            let iceberg_catlog_token_env_var_json =
+                create_iceberg_catlog_token_env_var_json(&iceberg_secret_name);
+            let iceberg_s3_access_key_id_env_var_json =
+                create_iceberg_s3_access_key_id_env_var_json(&iceberg_secret_name);
+            let iceberg_s3_secret_access_key_env_var_json =
+                create_iceberg_s3_secret_access_key_env_var_json(&iceberg_secret_name);
+
+            container_environment.push(iceberg_catlog_token_env_var_json);
+            container_environment.push(iceberg_s3_access_key_id_env_var_json);
+            container_environment.push(iceberg_s3_secret_access_key_env_var_json);
+        }
+    }
+    container_environment
 }
 
 fn create_postgres_secret_env_var_json(postgres_secret_name: &str) -> serde_json::Value {
@@ -982,8 +988,12 @@ mod tests {
             create_postgres_secret_env_var_json(&postgres_secret_name);
         let bq_secret_env_var_json = create_bq_secret_env_var_json(&bq_secret_name);
 
-        let mut container_environment =
-            create_container_environment_json(&environment, replicator_image);
+        let mut container_environment = create_container_environment_json(
+            &prefix,
+            &environment,
+            replicator_image,
+            DestinationType::BigQuery,
+        );
         container_environment.push(postgres_secret_env_var_json);
         container_environment.push(bq_secret_env_var_json);
 
@@ -1004,8 +1014,12 @@ mod tests {
             create_postgres_secret_env_var_json(&postgres_secret_name);
         let bq_secret_env_var_json = create_bq_secret_env_var_json(&bq_secret_name);
 
-        let mut container_environment =
-            create_container_environment_json(&environment, replicator_image);
+        let mut container_environment = create_container_environment_json(
+            &prefix,
+            &environment,
+            replicator_image,
+            DestinationType::BigQuery,
+        );
         container_environment.push(postgres_secret_env_var_json);
         container_environment.push(bq_secret_env_var_json);
 
