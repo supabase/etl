@@ -48,6 +48,15 @@ expression: stateful_set_json
                 }
               },
               {
+                "name": "APP_PIPELINE__PG_CONNECTION__PASSWORD",
+                "valueFrom": {
+                  "secretKeyRef": {
+                    "key": "password",
+                    "name": "abcdefghijklmnopqrst-42-postgres-password"
+                  }
+                }
+              },
+              {
                 "name": "APP_DESTINATION__ICEBERG__SUPABASE__CATALOG_TOKEN",
                 "valueFrom": {
                   "secretKeyRef": {

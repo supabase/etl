@@ -569,25 +569,32 @@ fn create_container_environment_json(
         DestinationType::Memory => {}
         DestinationType::BigQuery => {
             let postgres_secret_name = create_postgres_secret_name(prefix);
-            let bq_secret_name = create_bq_secret_name(prefix);
             let postgres_secret_env_var_json =
                 create_postgres_secret_env_var_json(&postgres_secret_name);
-            let bq_secret_env_var_json = create_bq_secret_env_var_json(&bq_secret_name);
-
             container_environment.push(postgres_secret_env_var_json);
+
+            let bq_secret_name = create_bq_secret_name(prefix);
+            let bq_secret_env_var_json = create_bq_secret_env_var_json(&bq_secret_name);
             container_environment.push(bq_secret_env_var_json);
         }
         DestinationType::Iceberg => {
+            let postgres_secret_name = create_postgres_secret_name(prefix);
+            let postgres_secret_env_var_json =
+                create_postgres_secret_env_var_json(&postgres_secret_name);
+
+            container_environment.push(postgres_secret_env_var_json);
             let iceberg_secret_name = create_iceberg_secret_name(prefix);
+
             let iceberg_catlog_token_env_var_json =
                 create_iceberg_catlog_token_env_var_json(&iceberg_secret_name);
+            container_environment.push(iceberg_catlog_token_env_var_json);
+
             let iceberg_s3_access_key_id_env_var_json =
                 create_iceberg_s3_access_key_id_env_var_json(&iceberg_secret_name);
+            container_environment.push(iceberg_s3_access_key_id_env_var_json);
+
             let iceberg_s3_secret_access_key_env_var_json =
                 create_iceberg_s3_secret_access_key_env_var_json(&iceberg_secret_name);
-
-            container_environment.push(iceberg_catlog_token_env_var_json);
-            container_environment.push(iceberg_s3_access_key_id_env_var_json);
             container_environment.push(iceberg_s3_secret_access_key_env_var_json);
         }
     }
