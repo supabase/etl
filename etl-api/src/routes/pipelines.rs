@@ -1229,7 +1229,7 @@ pub async fn update_pipeline_config(
     Ok(Json(response))
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug)]
 enum Secrets {
     None,
     BigQuery {
@@ -1242,6 +1242,23 @@ enum Secrets {
         s3_access_key_id: String,
         s3_secret_access_key: String,
     },
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum DestinationType {
+    Memory,
+    BigQuery,
+    Iceberg,
+}
+
+impl From<&StoredDestinationConfig> for DestinationType {
+    fn from(value: &StoredDestinationConfig) -> DestinationType {
+        match value {
+            StoredDestinationConfig::Memory => DestinationType::Memory,
+            StoredDestinationConfig::BigQuery { .. } => DestinationType::BigQuery,
+            StoredDestinationConfig::Iceberg { .. } => DestinationType::Iceberg,
+        }
+    }
 }
 
 async fn create_or_update_pipeline_in_k8s(
@@ -1259,6 +1276,7 @@ async fn create_or_update_pipeline_in_k8s(
 
     let environment = Environment::load().map_err(|_| PipelineError::MissingEnvironment)?;
 
+    let destination_type = (&destination.config).into();
     let replicator_config = build_replicator_config(
         k8s_client,
         source.config,
@@ -1271,8 +1289,14 @@ async fn create_or_update_pipeline_in_k8s(
     .await?;
 
     create_or_update_secrets(k8s_client, &prefix, secrets).await?;
-    create_or_update_config(k8s_client, &prefix, replicator_config, environment).await?;
-    create_or_update_replicator(k8s_client, &prefix, image.name, environment).await?;
+    create_or_update_config(
+        k8s_client,
+        &prefix,
+        replicator_config,
+        environment,
+    )
+    .await?;
+    create_or_update_replicator(k8s_client, &prefix, image.name, environment, destination_type).await?;
 
     Ok(())
 }
@@ -1457,9 +1481,9 @@ async fn create_or_update_config(
 ) -> Result<(), PipelineError> {
     // For now the base config is empty.
     let base_config = "";
-    let prod_config = serde_json::to_string(&config)?;
+    let env_config = serde_json::to_string(&config)?;
     k8s_client
-        .create_or_update_config_map(prefix, base_config, &prod_config, environment)
+        .create_or_update_config_map(prefix, base_config, &env_config, environment)
         .await?;
 
     Ok(())
@@ -1470,9 +1494,10 @@ async fn create_or_update_replicator(
     prefix: &str,
     replicator_image: String,
     environment: Environment,
+    destination_type: DestinationType,
 ) -> Result<(), PipelineError> {
     k8s_client
-        .create_or_update_stateful_set(prefix, &replicator_image, environment)
+        .create_or_update_stateful_set(prefix, &replicator_image, environment, destination_type)
         .await?;
 
     Ok(())

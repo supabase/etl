@@ -3,6 +3,8 @@ use etl_config::Environment;
 use k8s_openapi::api::core::v1::ConfigMap;
 use thiserror::Error;
 
+use crate::routes::pipelines::DestinationType;
+
 /// Errors emitted by the Kubernetes integration.
 ///
 /// Variants wrap lower-level libraries where appropriate to preserve context.
@@ -122,6 +124,7 @@ pub trait K8sClient: Send + Sync {
         prefix: &str,
         replicator_image: &str,
         environment: Environment,
+        destination_type: DestinationType,
     ) -> Result<(), K8sError>;
 
     /// Deletes the replicator [`StatefulSet`] if it exists.

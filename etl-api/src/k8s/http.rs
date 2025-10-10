@@ -1,4 +1,7 @@
-use crate::k8s::{K8sClient, K8sError, PodPhase};
+use crate::{
+    k8s::{K8sClient, K8sError, PodPhase},
+    routes::pipelines::DestinationType,
+};
 use async_trait::async_trait;
 use base64::{Engine, prelude::BASE64_STANDARD};
 use chrono::Utc;
@@ -313,6 +316,7 @@ impl K8sClient for HttpK8sClient {
         prefix: &str,
         replicator_image: &str,
         environment: Environment,
+        destination_type: DestinationType,
     ) -> Result<(), K8sError> {
         debug!("patching stateful set");
 
@@ -323,16 +327,38 @@ impl K8sClient for HttpK8sClient {
         let restarted_at_annotation = get_restarted_at_annotation_value();
         let replicator_container_name = create_replicator_container_name(prefix);
         let vector_container_name = create_vector_container_name(prefix);
-        let postgres_secret_name = create_postgres_secret_name(prefix);
-        let bq_secret_name = create_bq_secret_name(prefix);
         let replicator_config_map_name = create_replicator_config_map_name(prefix);
 
-        let container_environment = create_container_environment_json(
-            &environment,
-            replicator_image,
-            &postgres_secret_name,
-            &bq_secret_name,
-        );
+        let mut container_environment =
+            create_container_environment_json(&environment, replicator_image);
+
+        match destination_type {
+            DestinationType::Memory => {}
+            DestinationType::BigQuery => {
+                let postgres_secret_name = create_postgres_secret_name(prefix);
+                let bq_secret_name = create_bq_secret_name(prefix);
+                let postgres_secret_env_var_json =
+                    create_postgres_secret_env_var_json(&postgres_secret_name);
+                let bq_secret_env_var_json = create_bq_secret_env_var_json(&bq_secret_name);
+
+                container_environment.push(postgres_secret_env_var_json);
+                container_environment.push(bq_secret_env_var_json);
+            }
+            DestinationType::Iceberg => {
+                let iceberg_secret_name = create_iceberg_secret_name(prefix);
+                let iceberg_catlog_token_env_var_json =
+                    create_iceberg_catlog_token_env_var_json(&iceberg_secret_name);
+                let iceberg_s3_access_key_id_env_var_json =
+                    create_iceberg_s3_access_key_id_env_var_json(&iceberg_secret_name);
+                let iceberg_s3_secret_access_key_env_var_json =
+                    create_iceberg_s3_secret_access_key_env_var_json(&iceberg_secret_name);
+
+                container_environment.push(iceberg_catlog_token_env_var_json);
+                container_environment.push(iceberg_s3_access_key_id_env_var_json);
+                container_environment.push(iceberg_s3_secret_access_key_env_var_json);
+            }
+        }
+
         let stateful_set_json = create_replicator_stateful_set_json(
             &stateful_set_name,
             &replicator_app_name,
@@ -548,33 +574,27 @@ fn create_replicator_config_map_json(
 fn create_container_environment_json(
     environment: &Environment,
     replicator_image: &str,
-    postgres_secret_name: &str,
-    bq_secret_name: &str,
-) -> serde_json::Value {
-    let postgres_secret_env_var_json = create_postgres_secret_env_var_json(postgres_secret_name);
-    let bq_secret_env_var_json = create_bq_secret_env_var_json(bq_secret_name);
-    json!([
-      {
-        "name": "APP_ENVIRONMENT",
-        "value": environment.to_string()
-      },
-      {
-          "name": "APP_VERSION",
-          //TODO: set APP_VERSION to proper version instead of the replicator image name
-          "value": replicator_image
-      },
-      {
-        "name": "APP_SENTRY__DSN",
-        "valueFrom": {
-          "secretKeyRef": {
-            "name": SENTRY_DSN_SECRET_NAME,
-            "key": "dsn"
+) -> Vec<serde_json::Value> {
+    vec![
+        json!({
+          "name": "APP_ENVIRONMENT",
+          "value": environment.to_string()
+        }),
+        json!({
+            "name": "APP_VERSION",
+            //TODO: set APP_VERSION to proper version instead of the replicator image name
+            "value": replicator_image
+        }),
+        json!({
+          "name": "APP_SENTRY__DSN",
+          "valueFrom": {
+            "secretKeyRef": {
+              "name": SENTRY_DSN_SECRET_NAME,
+              "key": "dsn"
+            }
           }
-        }
-      },
-      postgres_secret_env_var_json,
-      bq_secret_env_var_json,
-    ])
+        }),
+    ]
 }
 
 fn create_postgres_secret_env_var_json(postgres_secret_name: &str) -> serde_json::Value {
@@ -649,7 +669,7 @@ fn create_replicator_stateful_set_json(
     config: &ReplicatorResourceConfig,
     replicator_container_name: &str,
     replicator_image: &str,
-    container_environment: serde_json::Value,
+    container_environment: Vec<serde_json::Value>,
 ) -> serde_json::Value {
     json!({
       "apiVersion": "apps/v1",
@@ -966,12 +986,14 @@ mod tests {
         let postgres_secret_name = create_postgres_secret_name(&prefix);
         let bq_secret_name = create_bq_secret_name(&prefix);
 
-        let container_environment = create_container_environment_json(
-            &environment,
-            replicator_image,
-            &postgres_secret_name,
-            &bq_secret_name,
-        );
+        let postgres_secret_env_var_json =
+            create_postgres_secret_env_var_json(&postgres_secret_name);
+        let bq_secret_env_var_json = create_bq_secret_env_var_json(&bq_secret_name);
+
+        let mut container_environment =
+            create_container_environment_json(&environment, replicator_image);
+        container_environment.push(postgres_secret_env_var_json);
+        container_environment.push(bq_secret_env_var_json);
 
         assert_json_snapshot!(container_environment);
     }
@@ -991,12 +1013,14 @@ mod tests {
         let config = ReplicatorResourceConfig::load(&environment).unwrap();
         let replicator_image = "ramsup/etl-replicator:2a41356af735f891de37d71c0e1a62864fe4630e";
 
-        let container_environment = create_container_environment_json(
-            &environment,
-            replicator_image,
-            &postgres_secret_name,
-            &bq_secret_name,
-        );
+        let postgres_secret_env_var_json =
+            create_postgres_secret_env_var_json(&postgres_secret_name);
+        let bq_secret_env_var_json = create_bq_secret_env_var_json(&bq_secret_name);
+
+        let mut container_environment =
+            create_container_environment_json(&environment, replicator_image);
+        container_environment.push(postgres_secret_env_var_json);
+        container_environment.push(bq_secret_env_var_json);
 
         let stateful_set_json = create_replicator_stateful_set_json(
             &stateful_set_name,
