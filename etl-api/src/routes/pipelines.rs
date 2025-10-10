@@ -17,7 +17,7 @@ use std::ops::DerefMut;
 use thiserror::Error;
 use utoipa::ToSchema;
 
-use crate::configs::destination::StoredDestinationConfig;
+use crate::configs::destination::{StoredDestinationConfig, StoredIcebergConfig};
 use crate::configs::encryption::EncryptionKey;
 use crate::configs::pipeline::{FullApiPipelineConfig, PartialApiPipelineConfig};
 use crate::configs::source::StoredSourceConfig;
@@ -1230,9 +1230,18 @@ pub async fn update_pipeline_config(
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct Secrets {
-    postgres_password: String,
-    big_query_service_account_key: Option<String>,
+enum Secrets {
+    None,
+    BigQuery {
+        postgres_password: String,
+        big_query_service_account_key: String,
+    },
+    Iceberg {
+        postgres_password: String,
+        catalog_token: String,
+        s3_access_key_id: String,
+        s3_secret_access_key: String,
+    },
 }
 
 async fn create_or_update_pipeline_in_k8s(
@@ -1246,13 +1255,10 @@ async fn create_or_update_pipeline_in_k8s(
 ) -> Result<(), PipelineError> {
     let prefix = create_k8s_object_prefix(tenant_id, replicator.id);
 
-    // We create the secrets.
     let secrets = build_secrets(&source.config, &destination.config);
-    create_or_update_secrets(k8s_client, &prefix, secrets.clone()).await?;
 
     let environment = Environment::load().map_err(|_| PipelineError::MissingEnvironment)?;
 
-    // We create the replicator configuration.
     let replicator_config = build_replicator_config(
         k8s_client,
         source.config,
@@ -1263,15 +1269,9 @@ async fn create_or_update_pipeline_in_k8s(
         },
     )
     .await?;
-    create_or_update_config(
-        k8s_client,
-        &prefix,
-        replicator_config.clone(),
-        environment.clone(),
-    )
-    .await?;
 
-    // We create the replicator stateful set.
+    create_or_update_secrets(k8s_client, &prefix, secrets).await?;
+    create_or_update_config(k8s_client, &prefix, replicator_config, environment).await?;
     create_or_update_replicator(k8s_client, &prefix, image.name, environment).await?;
 
     Ok(())
@@ -1337,18 +1337,33 @@ fn build_secrets(
         .as_ref()
         .map(|p| p.expose_secret().to_owned())
         .unwrap_or_default();
-    let mut big_query_service_account_key = None;
-    if let StoredDestinationConfig::BigQuery {
-        service_account_key,
-        ..
-    } = destination_config
-    {
-        big_query_service_account_key = Some(service_account_key.expose_secret().to_owned());
-    };
 
-    Secrets {
-        postgres_password,
-        big_query_service_account_key,
+    match destination_config {
+        StoredDestinationConfig::Memory => Secrets::None,
+        StoredDestinationConfig::BigQuery {
+            service_account_key,
+            ..
+        } => Secrets::BigQuery {
+            postgres_password,
+            big_query_service_account_key: service_account_key.expose_secret().to_string(),
+        },
+        StoredDestinationConfig::Iceberg {
+            config: StoredIcebergConfig::Rest { .. },
+        } => Secrets::None,
+        StoredDestinationConfig::Iceberg {
+            config:
+                StoredIcebergConfig::Supabase {
+                    catalog_token,
+                    s3_access_key_id,
+                    s3_secret_access_key,
+                    ..
+                },
+        } => Secrets::Iceberg {
+            postgres_password,
+            catalog_token: catalog_token.expose_secret().to_string(),
+            s3_access_key_id: s3_access_key_id.expose_secret().to_string(),
+            s3_secret_access_key: s3_secret_access_key.expose_secret().to_string(),
+        },
     }
 }
 
@@ -1398,14 +1413,37 @@ async fn create_or_update_secrets(
     prefix: &str,
     secrets: Secrets,
 ) -> Result<(), PipelineError> {
-    k8s_client
-        .create_or_update_postgres_secret(prefix, &secrets.postgres_password)
-        .await?;
-
-    if let Some(bigquery_service_account_key) = secrets.big_query_service_account_key {
-        k8s_client
-            .create_or_update_bq_secret(prefix, &bigquery_service_account_key)
-            .await?;
+    match secrets {
+        Secrets::None => {}
+        Secrets::BigQuery {
+            postgres_password,
+            big_query_service_account_key,
+        } => {
+            k8s_client
+                .create_or_update_postgres_secret(prefix, &postgres_password)
+                .await?;
+            k8s_client
+                .create_or_update_bq_secret(prefix, &big_query_service_account_key)
+                .await?;
+        }
+        Secrets::Iceberg {
+            postgres_password,
+            catalog_token,
+            s3_access_key_id,
+            s3_secret_access_key,
+        } => {
+            k8s_client
+                .create_or_update_postgres_secret(prefix, &postgres_password)
+                .await?;
+            k8s_client
+                .create_or_update_iceberg_secret(
+                    prefix,
+                    &catalog_token,
+                    &s3_access_key_id,
+                    &s3_secret_access_key,
+                )
+                .await?;
+        }
     }
 
     Ok(())
@@ -1442,7 +1480,11 @@ async fn create_or_update_replicator(
 
 async fn delete_secrets(k8s_client: &dyn K8sClient, prefix: &str) -> Result<(), PipelineError> {
     k8s_client.delete_postgres_secret(prefix).await?;
+
+    // Although it won't happen that there are both bq and iceberg secrets at the same time
+    // for now we just try to delete them both for simplicity.
     k8s_client.delete_bq_secret(prefix).await?;
+    k8s_client.delete_iceberg_secret(prefix).await?;
 
     Ok(())
 }

@@ -72,12 +72,28 @@ pub trait K8sClient: Send + Sync {
         bq_service_account_key: &str,
     ) -> Result<(), K8sError>;
 
+    /// Creates or updates the Iceberg's secret for a replicator.
+    /// The secret includes catalog toke, s3 access key id and secret.
+    ///
+    /// The secret name is derived from `prefix` and is stored in the
+    /// data-plane namespace.
+    async fn create_or_update_iceberg_secret(
+        &self,
+        prefix: &str,
+        catalog_token: &str,
+        s3_access_key_id: &str,
+        s3_secret_access_key: &str,
+    ) -> Result<(), K8sError>;
+
     /// Deletes the Postgres password secret for a replicator if it exists.
     async fn delete_postgres_secret(&self, prefix: &str) -> Result<(), K8sError>;
 
     /// Deletes the BigQuery service account secret for a replicator if it
     /// exists.
     async fn delete_bq_secret(&self, prefix: &str) -> Result<(), K8sError>;
+
+    /// Deletes the iceberg secret for a replicator if it exists.
+    async fn delete_iceberg_secret(&self, prefix: &str) -> Result<(), K8sError>;
 
     /// Retrieves a named [`ConfigMap`].
     async fn get_config_map(&self, config_map_name: &str) -> Result<ConfigMap, K8sError>;

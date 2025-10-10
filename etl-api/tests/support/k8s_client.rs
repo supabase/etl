@@ -28,11 +28,25 @@ impl K8sClient for MockK8sClient {
         Ok(())
     }
 
+    async fn create_or_update_iceberg_secret(
+        &self,
+        _prefix: &str,
+        _catalog_token: &str,
+        _s3_access_key_id: &str,
+        _s3_secret_access_key: &str,
+    ) -> Result<(), K8sError> {
+        Ok(())
+    }
+
     async fn delete_postgres_secret(&self, _prefix: &str) -> Result<(), K8sError> {
         Ok(())
     }
 
     async fn delete_bq_secret(&self, _prefix: &str) -> Result<(), K8sError> {
+        Ok(())
+    }
+
+    async fn delete_iceberg_secret(&self, _prefix: &str) -> Result<(), K8sError> {
         Ok(())
     }
 

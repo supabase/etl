@@ -16,6 +16,17 @@ use tracing::debug;
 
 /// Secret name suffix for the BigQuery service account key.
 const BQ_SECRET_NAME_SUFFIX: &str = "bq-service-account-key";
+/// Name of the service account key in the BigQuery secret and its reference.
+const BQ_SERVICE_ACCOUNT_KEY_NAME: &str = "service-account-key";
+/// Secret name suffix for iceberg secrets (includes catalog token,
+/// s3 access key id and s3 secret access key)
+const ICEBERG_SECRET_NAME_SUFFIX: &str = "iceberg";
+/// Name of catalog token in the iceberg secret and its reference.
+const ICEBERG_CATALOG_TOKEN_KEY_NAME: &str = "catalog-token";
+/// Name of s3 acess key id in the iceberg secret and its reference.
+const ICEBERG_S3_ACCESS_KEY_ID_KEY_NAME: &str = "s3-access-key-id";
+/// Name of s3 acess key id in the iceberg secret and its reference.
+const ICEBERG_S3_SECRET_ACCESS_KEY_KEY_NAME: &str = "s3-secret-access-key";
 /// Secret name suffix for the Postgres password.
 const POSTGRES_SECRET_NAME_SUFFIX: &str = "postgres-password";
 /// ConfigMap name suffix for the replicator configuration files.
@@ -179,6 +190,36 @@ impl K8sClient for HttpK8sClient {
         Ok(())
     }
 
+    async fn create_or_update_iceberg_secret(
+        &self,
+        prefix: &str,
+        catalog_token: &str,
+        s3_access_key_id: &str,
+        s3_secret_access_key: &str,
+    ) -> Result<(), K8sError> {
+        debug!("patching iceberg secret");
+
+        let encoded_catalog_token = BASE64_STANDARD.encode(catalog_token);
+        let encoded_s3_access_key_id = BASE64_STANDARD.encode(s3_access_key_id);
+        let encoded_s3_secret_access_key = BASE64_STANDARD.encode(s3_secret_access_key);
+
+        let iceberg_secret_name = create_iceberg_secret_name(prefix);
+        let iceberg_secret_json = create_iceberg_secret_json(
+            &iceberg_secret_name,
+            &encoded_catalog_token,
+            &encoded_s3_access_key_id,
+            &encoded_s3_secret_access_key,
+        );
+        let secret: Secret = serde_json::from_value(iceberg_secret_json)?;
+
+        let pp = PatchParams::apply(&iceberg_secret_name);
+        self.secrets_api
+            .patch(&iceberg_secret_name, &pp, &Patch::Apply(secret))
+            .await?;
+
+        Ok(())
+    }
+
     async fn delete_postgres_secret(&self, prefix: &str) -> Result<(), K8sError> {
         debug!("deleting postgres secret");
 
@@ -197,6 +238,18 @@ impl K8sClient for HttpK8sClient {
         let bq_secret_name = create_bq_secret_name(prefix);
         let dp = DeleteParams::default();
         Self::handle_delete_with_404_ignore(self.secrets_api.delete(&bq_secret_name, &dp).await)?;
+
+        Ok(())
+    }
+
+    async fn delete_iceberg_secret(&self, prefix: &str) -> Result<(), K8sError> {
+        debug!("deleting iceberg secret");
+
+        let iceberg_secret_name = create_iceberg_secret_name(prefix);
+        let dp = DeleteParams::default();
+        Self::handle_delete_with_404_ignore(
+            self.secrets_api.delete(&iceberg_secret_name, &dp).await,
+        )?;
 
         Ok(())
     }
@@ -382,6 +435,10 @@ fn create_bq_secret_name(prefix: &str) -> String {
     format!("{prefix}-{BQ_SECRET_NAME_SUFFIX}")
 }
 
+fn create_iceberg_secret_name(prefix: &str) -> String {
+    format!("{prefix}-{ICEBERG_SECRET_NAME_SUFFIX}")
+}
+
 fn create_replicator_config_map_name(prefix: &str) -> String {
     format!("{prefix}-{REPLICATOR_CONFIG_MAP_NAME_SUFFIX}")
 }
@@ -437,7 +494,29 @@ fn create_bq_service_account_key_secret_json(
       },
       "type": "Opaque",
       "data": {
-        "service-account-key": encoded_bq_service_account_key,
+        BQ_SERVICE_ACCOUNT_KEY_NAME: encoded_bq_service_account_key,
+      }
+    })
+}
+
+fn create_iceberg_secret_json(
+    secret_name: &str,
+    encoded_catalog_token: &str,
+    encoded_s3_access_key_id: &str,
+    encoded_s3_secret_access_key: &str,
+) -> serde_json::Value {
+    json!({
+      "apiVersion": "v1",
+      "kind": "Secret",
+      "metadata": {
+        "name": secret_name,
+        "namespace": DATA_PLANE_NAMESPACE,
+      },
+      "type": "Opaque",
+      "data": {
+        ICEBERG_CATALOG_TOKEN_KEY_NAME: encoded_catalog_token,
+        ICEBERG_S3_ACCESS_KEY_ID_KEY_NAME: encoded_s3_access_key_id,
+        ICEBERG_S3_SECRET_ACCESS_KEY_KEY_NAME: encoded_s3_secret_access_key
       }
     })
 }
@@ -618,7 +697,7 @@ fn create_replicator_stateful_set_json(
                     "valueFrom": {
                       "secretKeyRef": {
                         "name": bq_secret_name,
-                        "key": "service-account-key"
+                        "key": BQ_SERVICE_ACCOUNT_KEY_NAME
                       }
                     }
                   }
@@ -668,7 +747,8 @@ mod tests {
 
     #[test]
     fn test_create_postgres_secret_json() {
-        let secret_name = "test-secret";
+        let prefix = create_k8s_object_prefix(TENANT_ID, 42);
+        let secret_name = &create_postgres_secret_name(&prefix);
         let encoded_postgres_password = "dGVzdC1wYXNzd29yZA==";
 
         let secret_json = create_postgres_secret_json(secret_name, encoded_postgres_password);
@@ -680,11 +760,32 @@ mod tests {
 
     #[test]
     fn test_create_bq_service_account_key_secret_json() {
-        let secret_name = "test-secret";
+        let prefix = create_k8s_object_prefix(TENANT_ID, 42);
+        let secret_name = &create_bq_secret_name(&prefix);
         let encoded_bq_service_account_key = "ewogICJrZXkiOiAidmFsdWUiCn0=";
 
         let secret_json =
             create_bq_service_account_key_secret_json(secret_name, encoded_bq_service_account_key);
+
+        assert_json_snapshot!(secret_json);
+
+        let _secret: Secret = serde_json::from_value(secret_json).unwrap();
+    }
+
+    #[test]
+    fn test_create_iceberg_secret_json() {
+        let prefix = create_k8s_object_prefix(TENANT_ID, 42);
+        let secret_name = &&create_iceberg_secret_name(&prefix);
+        let encoded_catalog_token = "ZXlKMGVYQWlPaUpLVjFRaUxDSmhiR2NpT2lKRlV6STFOaUlzSW10cFpDSTZJakZrTnpGak1HRXlObUl4TURGak9EUTVaVGt4Wm1RMU5qZGpZakE1TlRKbUluMC5leUpsZUhBaU9qSXdOekEzTVRjeE5qQXNJbWxoZENJNk1UYzFOakUwTlRFMU1Dd2lhWE56SWpvaWMzVndZV0poYzJVaUxDSnlaV1lpT2lKaFltTmtaV1puYUdscWJHdHRibTl3Y1hKemRDSXNJbkp2YkdVaU9pSnpaWEoyYVdObFgzSnZiR1VpZlEuWWRUV2trSXZ3alNrWG90M05DMDd4eWpQakdXUU1OekxxNUVQenVtenJkTHp1SHJqLXp1ekktbmx5UXRRNVY3Z1phdXlzbS13R3dtcHp0UlhmUGMzQVE=";
+        let encoded_s3_access_key_id = "Y2FlNGY0NjliNTY5MjJhMTNmMzNiNjM3YTNjMWU2ZjI=";
+        let encoded_s3_secret_access_key = "NDUyOWE3ZmMwNzY2NDBjODRiZTgzZGJiNGMyNDI3MTNhOTk0MzE5OTBjYzJmMzIzMGM4MzVjOGJmZjAzYWE2ZQ==";
+
+        let secret_json = create_iceberg_secret_json(
+            secret_name,
+            encoded_catalog_token,
+            encoded_s3_access_key_id,
+            encoded_s3_secret_access_key,
+        );
 
         assert_json_snapshot!(secret_json);
 
