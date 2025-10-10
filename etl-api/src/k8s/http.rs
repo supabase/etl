@@ -993,6 +993,22 @@ mod tests {
     }
 
     #[test]
+    fn test_create_iceberg_container_environment() {
+        let prefix = create_k8s_object_prefix(TENANT_ID, 42);
+        let environment = Environment::Prod;
+        let replicator_image = "ramsup/etl-replicator:2a41356af735f891de37d71c0e1a62864fe4630e";
+
+        let container_environment = create_container_environment_json(
+            &prefix,
+            &environment,
+            replicator_image,
+            DestinationType::Iceberg,
+        );
+
+        assert_json_snapshot!(container_environment);
+    }
+
+    #[test]
     fn test_create_bq_replicator_stateful_set_json() {
         let prefix = create_k8s_object_prefix(TENANT_ID, 42);
         let stateful_set_name = create_stateful_set_name(&prefix);
@@ -1005,6 +1021,34 @@ mod tests {
             &environment,
             replicator_image,
             DestinationType::BigQuery,
+        );
+
+        let stateful_set_json = create_replicator_stateful_set_json(
+            &prefix,
+            &stateful_set_name,
+            &config,
+            replicator_image,
+            container_environment,
+        );
+
+        assert_json_snapshot!(stateful_set_json, { ".spec.template.metadata.annotations[\"etl.supabase.com/restarted-at\"]" => "[timestamp]"});
+
+        let _stateful_set: StatefulSet = serde_json::from_value(stateful_set_json).unwrap();
+    }
+
+    #[test]
+    fn test_create_iceberg_replicator_stateful_set_json() {
+        let prefix = create_k8s_object_prefix(TENANT_ID, 42);
+        let stateful_set_name = create_stateful_set_name(&prefix);
+        let environment = Environment::Prod;
+        let config = ReplicatorResourceConfig::load(&environment).unwrap();
+        let replicator_image = "ramsup/etl-replicator:2a41356af735f891de37d71c0e1a62864fe4630e";
+
+        let container_environment = create_container_environment_json(
+            &prefix,
+            &environment,
+            replicator_image,
+            DestinationType::Iceberg,
         );
 
         let stateful_set_json = create_replicator_stateful_set_json(

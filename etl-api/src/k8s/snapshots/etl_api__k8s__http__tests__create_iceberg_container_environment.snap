@@ -1,0 +1,50 @@
+---
+source: etl-api/src/k8s/http.rs
+expression: container_environment
+---
+[
+  {
+    "name": "APP_ENVIRONMENT",
+    "value": "prod"
+  },
+  {
+    "name": "APP_VERSION",
+    "value": "ramsup/etl-replicator:2a41356af735f891de37d71c0e1a62864fe4630e"
+  },
+  {
+    "name": "APP_SENTRY__DSN",
+    "valueFrom": {
+      "secretKeyRef": {
+        "key": "dsn",
+        "name": "replicator-sentry-dsn"
+      }
+    }
+  },
+  {
+    "name": "APP_DESTINATION__ICEBERG__CONFIG__SUPABASE__CATALOG_TOKEN",
+    "valueFrom": {
+      "secretKeyRef": {
+        "key": "catalog-token",
+        "name": "abcdefghijklmnopqrst-42-iceberg"
+      }
+    }
+  },
+  {
+    "name": "APP_DESTINATION__ICEBERG__CONFIG__SUPABASE__S3_ACCESS_KEY_ID",
+    "valueFrom": {
+      "secretKeyRef": {
+        "key": "s3-access-key-id",
+        "name": "abcdefghijklmnopqrst-42-iceberg"
+      }
+    }
+  },
+  {
+    "name": "APP_DESTINATION__ICEBERG__CONFIG__SUPABASE__S3_SECRET_ACCESS_KEY",
+    "valueFrom": {
+      "secretKeyRef": {
+        "key": "s3-secret-access-key",
+        "name": "abcdefghijklmnopqrst-42-iceberg"
+      }
+    }
+  }
+]
