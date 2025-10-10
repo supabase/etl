@@ -1,0 +1,13 @@
+---
+source: etl-api/src/k8s/http.rs
+expression: iceberg_s3_access_key_id_env_var_json
+---
+{
+  "name": "APP_DESTINATION__ICEBERG__CONFIG__SUPABASE__S3_ACCESS_KEY_ID",
+  "valueFrom": {
+    "secretKeyRef": {
+      "key": "s3-access-key-id",
+      "name": "abcdefghijklmnopqrst-42-iceberg"
+    }
+  }
+}

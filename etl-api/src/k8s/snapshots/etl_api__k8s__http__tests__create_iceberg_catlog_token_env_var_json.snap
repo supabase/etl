@@ -1,0 +1,13 @@
+---
+source: etl-api/src/k8s/http.rs
+expression: iceberg_catalog_token_env_var_json
+---
+{
+  "name": "APP_DESTINATION__ICEBERG__CONFIG__SUPABASE__CATALOG_TOKEN",
+  "valueFrom": {
+    "secretKeyRef": {
+      "key": "catalog-token",
+      "name": "abcdefghijklmnopqrst-42-iceberg"
+    }
+  }
+}

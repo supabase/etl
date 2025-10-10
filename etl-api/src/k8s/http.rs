@@ -601,6 +601,44 @@ fn create_bq_secret_env_var_json(bq_secret_name: &str) -> serde_json::Value {
     })
 }
 
+fn create_iceberg_catlog_token_env_var_json(iceberg_secret_name: &str) -> serde_json::Value {
+    json!({
+      "name": "APP_DESTINATION__ICEBERG__CONFIG__SUPABASE__CATALOG_TOKEN",
+      "valueFrom": {
+        "secretKeyRef": {
+          "name": iceberg_secret_name,
+          "key": ICEBERG_CATALOG_TOKEN_KEY_NAME
+        }
+      }
+    })
+}
+
+fn create_iceberg_s3_access_key_id_env_var_json(iceberg_secret_name: &str) -> serde_json::Value {
+    json!({
+      "name": "APP_DESTINATION__ICEBERG__CONFIG__SUPABASE__S3_ACCESS_KEY_ID",
+      "valueFrom": {
+        "secretKeyRef": {
+          "name": iceberg_secret_name,
+          "key": ICEBERG_S3_ACCESS_KEY_ID_KEY_NAME
+        }
+      }
+    })
+}
+
+fn create_iceberg_s3_secret_access_key_env_var_json(
+    iceberg_secret_name: &str,
+) -> serde_json::Value {
+    json!({
+      "name": "APP_DESTINATION__ICEBERG__CONFIG__SUPABASE__S3_SECRET_ACCESS_KEY",
+      "valueFrom": {
+        "secretKeyRef": {
+          "name": iceberg_secret_name,
+          "key": ICEBERG_S3_SECRET_ACCESS_KEY_KEY_NAME
+        }
+      }
+    })
+}
+
 #[expect(clippy::too_many_arguments)]
 fn create_replicator_stateful_set_json(
     stateful_set_name: &str,
@@ -885,6 +923,39 @@ mod tests {
         let bq_env_var_json = create_bq_secret_env_var_json(&bq_secret_name);
 
         assert_json_snapshot!(bq_env_var_json);
+    }
+
+    #[test]
+    fn test_create_iceberg_catlog_token_env_var_json() {
+        let prefix = create_k8s_object_prefix(TENANT_ID, 42);
+        let iceberg_secret_name = create_iceberg_secret_name(&prefix);
+
+        let iceberg_catalog_token_env_var_json =
+            create_iceberg_catlog_token_env_var_json(&iceberg_secret_name);
+
+        assert_json_snapshot!(iceberg_catalog_token_env_var_json);
+    }
+
+    #[test]
+    fn test_create_iceberg_s3_access_key_id_env_var_json() {
+        let prefix = create_k8s_object_prefix(TENANT_ID, 42);
+        let iceberg_secret_name = create_iceberg_secret_name(&prefix);
+
+        let iceberg_s3_access_key_id_env_var_json =
+            create_iceberg_s3_access_key_id_env_var_json(&iceberg_secret_name);
+
+        assert_json_snapshot!(iceberg_s3_access_key_id_env_var_json);
+    }
+
+    #[test]
+    fn test_create_iceberg_s3_secret_access_key_env_var_json() {
+        let prefix = create_k8s_object_prefix(TENANT_ID, 42);
+        let iceberg_secret_name = create_iceberg_secret_name(&prefix);
+
+        let iceberg_s3_secret_access_key_env_var_json =
+            create_iceberg_s3_secret_access_key_env_var_json(&iceberg_secret_name);
+
+        assert_json_snapshot!(iceberg_s3_secret_access_key_env_var_json);
     }
 
     #[test]
