@@ -322,13 +322,6 @@ impl K8sClient for HttpK8sClient {
 
         let config = ReplicatorResourceConfig::load(&environment)?;
 
-        let stateful_set_name = create_stateful_set_name(prefix);
-        let replicator_app_name = create_replicator_app_name(prefix);
-        let restarted_at_annotation = get_restarted_at_annotation_value();
-        let replicator_container_name = create_replicator_container_name(prefix);
-        let vector_container_name = create_vector_container_name(prefix);
-        let replicator_config_map_name = create_replicator_config_map_name(prefix);
-
         let mut container_environment =
             create_container_environment_json(&environment, replicator_image);
 
@@ -359,14 +352,12 @@ impl K8sClient for HttpK8sClient {
             }
         }
 
+        let stateful_set_name = create_stateful_set_name(prefix);
+
         let stateful_set_json = create_replicator_stateful_set_json(
+            prefix,
             &stateful_set_name,
-            &replicator_app_name,
-            &restarted_at_annotation,
-            &replicator_config_map_name,
-            &vector_container_name,
             &config,
-            &replicator_container_name,
             replicator_image,
             container_environment,
         );
@@ -659,18 +650,19 @@ fn create_iceberg_s3_secret_access_key_env_var_json(
     })
 }
 
-#[expect(clippy::too_many_arguments)]
 fn create_replicator_stateful_set_json(
+    prefix: &str,
     stateful_set_name: &str,
-    replicator_app_name: &str,
-    restarted_at_annotation: &str,
-    replicator_config_map_name: &str,
-    vector_container_name: &str,
     config: &ReplicatorResourceConfig,
-    replicator_container_name: &str,
     replicator_image: &str,
     container_environment: Vec<serde_json::Value>,
 ) -> serde_json::Value {
+    let replicator_app_name = create_replicator_app_name(prefix);
+    let restarted_at_annotation = get_restarted_at_annotation_value();
+    let replicator_config_map_name = create_replicator_config_map_name(prefix);
+    let vector_container_name = create_vector_container_name(prefix);
+    let replicator_container_name = create_replicator_container_name(prefix);
+
     json!({
       "apiVersion": "apps/v1",
       "kind": "StatefulSet",
@@ -1002,13 +994,8 @@ mod tests {
     fn test_create_replicator_stateful_set_json() {
         let prefix = create_k8s_object_prefix(TENANT_ID, 42);
         let stateful_set_name = create_stateful_set_name(&prefix);
-        let replicator_app_name = create_replicator_app_name(&prefix);
-        let restarted_at_annotation = "2025-10-09T16:02:24.127400000Z";
-        let replicator_container_name = create_replicator_container_name(&prefix);
-        let vector_container_name = create_vector_container_name(&prefix);
         let postgres_secret_name = create_postgres_secret_name(&prefix);
         let bq_secret_name = create_bq_secret_name(&prefix);
-        let replicator_config_map_name = create_replicator_config_map_name(&prefix);
         let environment = Environment::Prod;
         let config = ReplicatorResourceConfig::load(&environment).unwrap();
         let replicator_image = "ramsup/etl-replicator:2a41356af735f891de37d71c0e1a62864fe4630e";
@@ -1023,18 +1010,14 @@ mod tests {
         container_environment.push(bq_secret_env_var_json);
 
         let stateful_set_json = create_replicator_stateful_set_json(
+            &prefix,
             &stateful_set_name,
-            &replicator_app_name,
-            restarted_at_annotation,
-            &replicator_config_map_name,
-            &vector_container_name,
             &config,
-            &replicator_container_name,
             replicator_image,
             container_environment,
         );
 
-        assert_json_snapshot!(stateful_set_json);
+        assert_json_snapshot!(stateful_set_json, { ".spec.template.metadata.annotations[\"etl.supabase.com/restarted-at\"]" => "[timestamp]"});
 
         let _stateful_set: StatefulSet = serde_json::from_value(stateful_set_json).unwrap();
     }
