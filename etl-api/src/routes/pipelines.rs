@@ -1289,14 +1289,15 @@ async fn create_or_update_pipeline_in_k8s(
     .await?;
 
     create_or_update_secrets(k8s_client, &prefix, secrets).await?;
-    create_or_update_config(
+    create_or_update_config(k8s_client, &prefix, replicator_config, environment).await?;
+    create_or_update_replicator(
         k8s_client,
         &prefix,
-        replicator_config,
+        image.name,
         environment,
+        destination_type,
     )
     .await?;
-    create_or_update_replicator(k8s_client, &prefix, image.name, environment, destination_type).await?;
 
     Ok(())
 }
