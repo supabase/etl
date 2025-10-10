@@ -981,21 +981,13 @@ mod tests {
         let prefix = create_k8s_object_prefix(TENANT_ID, 42);
         let environment = Environment::Prod;
         let replicator_image = "ramsup/etl-replicator:2a41356af735f891de37d71c0e1a62864fe4630e";
-        let postgres_secret_name = create_postgres_secret_name(&prefix);
-        let bq_secret_name = create_bq_secret_name(&prefix);
 
-        let postgres_secret_env_var_json =
-            create_postgres_secret_env_var_json(&postgres_secret_name);
-        let bq_secret_env_var_json = create_bq_secret_env_var_json(&bq_secret_name);
-
-        let mut container_environment = create_container_environment_json(
+        let container_environment = create_container_environment_json(
             &prefix,
             &environment,
             replicator_image,
             DestinationType::BigQuery,
         );
-        container_environment.push(postgres_secret_env_var_json);
-        container_environment.push(bq_secret_env_var_json);
 
         assert_json_snapshot!(container_environment);
     }
@@ -1004,24 +996,16 @@ mod tests {
     fn test_create_replicator_stateful_set_json() {
         let prefix = create_k8s_object_prefix(TENANT_ID, 42);
         let stateful_set_name = create_stateful_set_name(&prefix);
-        let postgres_secret_name = create_postgres_secret_name(&prefix);
-        let bq_secret_name = create_bq_secret_name(&prefix);
         let environment = Environment::Prod;
         let config = ReplicatorResourceConfig::load(&environment).unwrap();
         let replicator_image = "ramsup/etl-replicator:2a41356af735f891de37d71c0e1a62864fe4630e";
 
-        let postgres_secret_env_var_json =
-            create_postgres_secret_env_var_json(&postgres_secret_name);
-        let bq_secret_env_var_json = create_bq_secret_env_var_json(&bq_secret_name);
-
-        let mut container_environment = create_container_environment_json(
+        let container_environment = create_container_environment_json(
             &prefix,
             &environment,
             replicator_image,
             DestinationType::BigQuery,
         );
-        container_environment.push(postgres_secret_env_var_json);
-        container_environment.push(bq_secret_env_var_json);
 
         let stateful_set_json = create_replicator_stateful_set_json(
             &prefix,
