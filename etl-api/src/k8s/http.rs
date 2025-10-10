@@ -977,7 +977,7 @@ mod tests {
     }
 
     #[test]
-    fn test_create_container_environment() {
+    fn test_create_bq_container_environment() {
         let prefix = create_k8s_object_prefix(TENANT_ID, 42);
         let environment = Environment::Prod;
         let replicator_image = "ramsup/etl-replicator:2a41356af735f891de37d71c0e1a62864fe4630e";
@@ -993,7 +993,7 @@ mod tests {
     }
 
     #[test]
-    fn test_create_replicator_stateful_set_json() {
+    fn test_create_bq_replicator_stateful_set_json() {
         let prefix = create_k8s_object_prefix(TENANT_ID, 42);
         let stateful_set_name = create_stateful_set_name(&prefix);
         let environment = Environment::Prod;
