@@ -327,7 +327,7 @@ impl K8sClient for HttpK8sClient {
         let bq_secret_name = create_bq_secret_name(prefix);
         let replicator_config_map_name = create_replicator_config_map_name(prefix);
 
-        let container_environment = create_container_environment(
+        let container_environment = create_container_environment_json(
             &environment,
             replicator_image,
             &postgres_secret_name,
@@ -545,12 +545,14 @@ fn create_replicator_config_map_json(
     })
 }
 
-fn create_container_environment(
+fn create_container_environment_json(
     environment: &Environment,
     replicator_image: &str,
     postgres_secret_name: &str,
     bq_secret_name: &str,
 ) -> serde_json::Value {
+    let postgres_secret_env_var_json = create_postgres_secret_env_var_json(postgres_secret_name);
+    let bq_secret_env_var_json = create_bq_secret_env_var_json(bq_secret_name);
     json!([
       {
         "name": "APP_ENVIRONMENT",
@@ -570,25 +572,33 @@ fn create_container_environment(
           }
         }
       },
-      {
-        "name": "APP_PIPELINE__PG_CONNECTION__PASSWORD",
-        "valueFrom": {
-          "secretKeyRef": {
-            "name": postgres_secret_name,
-            "key": "password"
-          }
-        }
-      },
-      {
-        "name": "APP_DESTINATION__BIG_QUERY__SERVICE_ACCOUNT_KEY",
-        "valueFrom": {
-          "secretKeyRef": {
-            "name": bq_secret_name,
-            "key": BQ_SERVICE_ACCOUNT_KEY_NAME
-          }
+      postgres_secret_env_var_json,
+      bq_secret_env_var_json,
+    ])
+}
+
+fn create_postgres_secret_env_var_json(postgres_secret_name: &str) -> serde_json::Value {
+    json!({
+      "name": "APP_PIPELINE__PG_CONNECTION__PASSWORD",
+      "valueFrom": {
+        "secretKeyRef": {
+          "name": postgres_secret_name,
+          "key": "password"
         }
       }
-    ])
+    })
+}
+
+fn create_bq_secret_env_var_json(bq_secret_name: &str) -> serde_json::Value {
+    json!({
+      "name": "APP_DESTINATION__BIG_QUERY__SERVICE_ACCOUNT_KEY",
+      "valueFrom": {
+        "secretKeyRef": {
+          "name": bq_secret_name,
+          "key": BQ_SERVICE_ACCOUNT_KEY_NAME
+        }
+      }
+    })
 }
 
 #[expect(clippy::too_many_arguments)]
@@ -865,7 +875,7 @@ mod tests {
         let postgres_secret_name = create_postgres_secret_name(&prefix);
         let bq_secret_name = create_bq_secret_name(&prefix);
 
-        let container_environment = create_container_environment(
+        let container_environment = create_container_environment_json(
             &environment,
             replicator_image,
             &postgres_secret_name,
@@ -890,7 +900,7 @@ mod tests {
         let config = ReplicatorResourceConfig::load(&environment).unwrap();
         let replicator_image = "ramsup/etl-replicator:2a41356af735f891de37d71c0e1a62864fe4630e";
 
-        let container_environment = create_container_environment(
+        let container_environment = create_container_environment_json(
             &environment,
             replicator_image,
             &postgres_secret_name,
