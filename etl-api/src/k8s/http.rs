@@ -327,6 +327,12 @@ impl K8sClient for HttpK8sClient {
         let bq_secret_name = create_bq_secret_name(prefix);
         let replicator_config_map_name = create_replicator_config_map_name(prefix);
 
+        let container_environment = create_container_environment(
+            &environment,
+            replicator_image,
+            &postgres_secret_name,
+            &bq_secret_name,
+        );
         let stateful_set_json = create_replicator_stateful_set_json(
             &stateful_set_name,
             &replicator_app_name,
@@ -336,9 +342,7 @@ impl K8sClient for HttpK8sClient {
             &config,
             &replicator_container_name,
             replicator_image,
-            &environment,
-            &postgres_secret_name,
-            &bq_secret_name,
+            container_environment,
         );
 
         let stateful_set: StatefulSet = serde_json::from_value(stateful_set_json)?;
@@ -541,6 +545,52 @@ fn create_replicator_config_map_json(
     })
 }
 
+fn create_container_environment(
+    environment: &Environment,
+    replicator_image: &str,
+    postgres_secret_name: &str,
+    bq_secret_name: &str,
+) -> serde_json::Value {
+    json!([
+      {
+        "name": "APP_ENVIRONMENT",
+        "value": environment.to_string()
+      },
+      {
+          "name": "APP_VERSION",
+          //TODO: set APP_VERSION to proper version instead of the replicator image name
+          "value": replicator_image
+      },
+      {
+        "name": "APP_SENTRY__DSN",
+        "valueFrom": {
+          "secretKeyRef": {
+            "name": SENTRY_DSN_SECRET_NAME,
+            "key": "dsn"
+          }
+        }
+      },
+      {
+        "name": "APP_PIPELINE__PG_CONNECTION__PASSWORD",
+        "valueFrom": {
+          "secretKeyRef": {
+            "name": postgres_secret_name,
+            "key": "password"
+          }
+        }
+      },
+      {
+        "name": "APP_DESTINATION__BIG_QUERY__SERVICE_ACCOUNT_KEY",
+        "valueFrom": {
+          "secretKeyRef": {
+            "name": bq_secret_name,
+            "key": BQ_SERVICE_ACCOUNT_KEY_NAME
+          }
+        }
+      }
+    ])
+}
+
 #[expect(clippy::too_many_arguments)]
 fn create_replicator_stateful_set_json(
     stateful_set_name: &str,
@@ -551,9 +601,7 @@ fn create_replicator_stateful_set_json(
     config: &ReplicatorResourceConfig,
     replicator_container_name: &str,
     replicator_image: &str,
-    environment: &Environment,
-    postgres_secret_name: &str,
-    bq_secret_name: &str,
+    container_environment: serde_json::Value,
 ) -> serde_json::Value {
     json!({
       "apiVersion": "apps/v1",
@@ -664,44 +712,7 @@ fn create_replicator_stateful_set_json(
                     "protocol": "TCP"
                   }
                 ],
-                "env": [
-                  {
-                    "name": "APP_ENVIRONMENT",
-                    "value": environment.to_string()
-                  },
-                  {
-                      "name": "APP_VERSION",
-                      //TODO: set APP_VERSION to proper version instead of the replicator image name
-                      "value": replicator_image
-                  },
-                  {
-                    "name": "APP_SENTRY__DSN",
-                    "valueFrom": {
-                      "secretKeyRef": {
-                        "name": SENTRY_DSN_SECRET_NAME,
-                        "key": "dsn"
-                      }
-                    }
-                  },
-                  {
-                    "name": "APP_PIPELINE__PG_CONNECTION__PASSWORD",
-                    "valueFrom": {
-                      "secretKeyRef": {
-                        "name": postgres_secret_name,
-                        "key": "password"
-                      }
-                    }
-                  },
-                  {
-                    "name": "APP_DESTINATION__BIG_QUERY__SERVICE_ACCOUNT_KEY",
-                    "valueFrom": {
-                      "secretKeyRef": {
-                        "name": bq_secret_name,
-                        "key": BQ_SERVICE_ACCOUNT_KEY_NAME
-                      }
-                    }
-                  }
-                ],
+                "env": container_environment,
                 "volumeMounts": [
                   {
                     "name": REPLICATOR_CONFIG_FILE_VOLUME_NAME,
@@ -861,6 +872,13 @@ mod tests {
         let config = ReplicatorResourceConfig::load(&environment).unwrap();
         let replicator_image = "ramsup/etl-replicator:2a41356af735f891de37d71c0e1a62864fe4630e";
 
+        let container_environment = create_container_environment(
+            &environment,
+            replicator_image,
+            &postgres_secret_name,
+            &bq_secret_name,
+        );
+
         let stateful_set_json = create_replicator_stateful_set_json(
             &stateful_set_name,
             &replicator_app_name,
@@ -870,9 +888,7 @@ mod tests {
             &config,
             &replicator_container_name,
             replicator_image,
-            &environment,
-            &postgres_secret_name,
-            &bq_secret_name,
+            container_environment,
         );
 
         assert_json_snapshot!(stateful_set_json);
