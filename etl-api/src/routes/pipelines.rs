@@ -1507,7 +1507,11 @@ async fn delete_secrets(k8s_client: &dyn K8sClient, prefix: &str) -> Result<(), 
     k8s_client.delete_postgres_secret(prefix).await?;
 
     // Although it won't happen that there are both bq and iceberg secrets at the same time
-    // for now we just try to delete them both for simplicity.
+    // we delete them both here because the state in the db might not be the same as that
+    // running in the k8s cluster. E.g. if a pipeline is updated from bq to iceberg or vice-versa
+    // then there's a risk of wrong secret type being attempted for deletion which might leave
+    // the actual secret behind. So for simplicty we just delete both kinds of secrets. The
+    // one which doesn't exist will be safely ignored.
     k8s_client.delete_bq_secret(prefix).await?;
     k8s_client.delete_iceberg_secret(prefix).await?;
 
