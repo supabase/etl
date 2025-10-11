@@ -1,0 +1,41 @@
+---
+source: etl-api/src/k8s/http.rs
+expression: container_environment
+---
+[
+  {
+    "name": "APP_ENVIRONMENT",
+    "value": "prod"
+  },
+  {
+    "name": "APP_VERSION",
+    "value": "ramsup/etl-replicator:2a41356af735f891de37d71c0e1a62864fe4630e"
+  },
+  {
+    "name": "APP_SENTRY__DSN",
+    "valueFrom": {
+      "secretKeyRef": {
+        "key": "dsn",
+        "name": "replicator-sentry-dsn"
+      }
+    }
+  },
+  {
+    "name": "APP_PIPELINE__PG_CONNECTION__PASSWORD",
+    "valueFrom": {
+      "secretKeyRef": {
+        "key": "password",
+        "name": "abcdefghijklmnopqrst-42-postgres-password"
+      }
+    }
+  },
+  {
+    "name": "APP_DESTINATION__BIG_QUERY__SERVICE_ACCOUNT_KEY",
+    "valueFrom": {
+      "secretKeyRef": {
+        "key": "service-account-key",
+        "name": "abcdefghijklmnopqrst-42-bq-service-account-key"
+      }
+    }
+  }
+]

@@ -1,4 +1,7 @@
-use crate::k8s::{K8sClient, K8sError, PodPhase};
+use crate::{
+    k8s::{K8sClient, K8sError, PodPhase},
+    routes::pipelines::DestinationType,
+};
 use async_trait::async_trait;
 use base64::{Engine, prelude::BASE64_STANDARD};
 use chrono::Utc;
@@ -16,6 +19,17 @@ use tracing::debug;
 
 /// Secret name suffix for the BigQuery service account key.
 const BQ_SECRET_NAME_SUFFIX: &str = "bq-service-account-key";
+/// Name of the service account key in the BigQuery secret and its reference.
+const BQ_SERVICE_ACCOUNT_KEY_NAME: &str = "service-account-key";
+/// Secret name suffix for iceberg secrets (includes catalog token,
+/// s3 access key id and s3 secret access key)
+const ICEBERG_SECRET_NAME_SUFFIX: &str = "iceberg";
+/// Name of catalog token in the iceberg secret and its reference.
+const ICEBERG_CATALOG_TOKEN_KEY_NAME: &str = "catalog-token";
+/// Name of s3 acess key id in the iceberg secret and its reference.
+const ICEBERG_S3_ACCESS_KEY_ID_KEY_NAME: &str = "s3-access-key-id";
+/// Name of s3 acess key id in the iceberg secret and its reference.
+const ICEBERG_S3_SECRET_ACCESS_KEY_KEY_NAME: &str = "s3-secret-access-key";
 /// Secret name suffix for the Postgres password.
 const POSTGRES_SECRET_NAME_SUFFIX: &str = "postgres-password";
 /// ConfigMap name suffix for the replicator configuration files.
@@ -179,6 +193,36 @@ impl K8sClient for HttpK8sClient {
         Ok(())
     }
 
+    async fn create_or_update_iceberg_secret(
+        &self,
+        prefix: &str,
+        catalog_token: &str,
+        s3_access_key_id: &str,
+        s3_secret_access_key: &str,
+    ) -> Result<(), K8sError> {
+        debug!("patching iceberg secret");
+
+        let encoded_catalog_token = BASE64_STANDARD.encode(catalog_token);
+        let encoded_s3_access_key_id = BASE64_STANDARD.encode(s3_access_key_id);
+        let encoded_s3_secret_access_key = BASE64_STANDARD.encode(s3_secret_access_key);
+
+        let iceberg_secret_name = create_iceberg_secret_name(prefix);
+        let iceberg_secret_json = create_iceberg_secret_json(
+            &iceberg_secret_name,
+            &encoded_catalog_token,
+            &encoded_s3_access_key_id,
+            &encoded_s3_secret_access_key,
+        );
+        let secret: Secret = serde_json::from_value(iceberg_secret_json)?;
+
+        let pp = PatchParams::apply(&iceberg_secret_name);
+        self.secrets_api
+            .patch(&iceberg_secret_name, &pp, &Patch::Apply(secret))
+            .await?;
+
+        Ok(())
+    }
+
     async fn delete_postgres_secret(&self, prefix: &str) -> Result<(), K8sError> {
         debug!("deleting postgres secret");
 
@@ -197,6 +241,18 @@ impl K8sClient for HttpK8sClient {
         let bq_secret_name = create_bq_secret_name(prefix);
         let dp = DeleteParams::default();
         Self::handle_delete_with_404_ignore(self.secrets_api.delete(&bq_secret_name, &dp).await)?;
+
+        Ok(())
+    }
+
+    async fn delete_iceberg_secret(&self, prefix: &str) -> Result<(), K8sError> {
+        debug!("deleting iceberg secret");
+
+        let iceberg_secret_name = create_iceberg_secret_name(prefix);
+        let dp = DeleteParams::default();
+        Self::handle_delete_with_404_ignore(
+            self.secrets_api.delete(&iceberg_secret_name, &dp).await,
+        )?;
 
         Ok(())
     }
@@ -260,32 +316,27 @@ impl K8sClient for HttpK8sClient {
         prefix: &str,
         replicator_image: &str,
         environment: Environment,
+        destination_type: DestinationType,
     ) -> Result<(), K8sError> {
         debug!("patching stateful set");
 
         let config = ReplicatorResourceConfig::load(&environment)?;
 
         let stateful_set_name = create_stateful_set_name(prefix);
-        let replicator_app_name = create_replicator_app_name(prefix);
-        let restarted_at_annotation = get_restarted_at_annotation_value();
-        let replicator_container_name = create_replicator_container_name(prefix);
-        let vector_container_name = create_vector_container_name(prefix);
-        let postgres_secret_name = create_postgres_secret_name(prefix);
-        let bq_secret_name = create_bq_secret_name(prefix);
-        let replicator_config_map_name = create_replicator_config_map_name(prefix);
+
+        let container_environment = create_container_environment_json(
+            prefix,
+            &environment,
+            replicator_image,
+            destination_type,
+        );
 
         let stateful_set_json = create_replicator_stateful_set_json(
+            prefix,
             &stateful_set_name,
-            &replicator_app_name,
-            &restarted_at_annotation,
-            &replicator_config_map_name,
-            &vector_container_name,
             &config,
-            &replicator_container_name,
             replicator_image,
-            &environment,
-            &postgres_secret_name,
-            &bq_secret_name,
+            container_environment,
         );
 
         let stateful_set: StatefulSet = serde_json::from_value(stateful_set_json)?;
@@ -382,6 +433,10 @@ fn create_bq_secret_name(prefix: &str) -> String {
     format!("{prefix}-{BQ_SECRET_NAME_SUFFIX}")
 }
 
+fn create_iceberg_secret_name(prefix: &str) -> String {
+    format!("{prefix}-{ICEBERG_SECRET_NAME_SUFFIX}")
+}
+
 fn create_replicator_config_map_name(prefix: &str) -> String {
     format!("{prefix}-{REPLICATOR_CONFIG_MAP_NAME_SUFFIX}")
 }
@@ -437,7 +492,29 @@ fn create_bq_service_account_key_secret_json(
       },
       "type": "Opaque",
       "data": {
-        "service-account-key": encoded_bq_service_account_key,
+        BQ_SERVICE_ACCOUNT_KEY_NAME: encoded_bq_service_account_key,
+      }
+    })
+}
+
+fn create_iceberg_secret_json(
+    secret_name: &str,
+    encoded_catalog_token: &str,
+    encoded_s3_access_key_id: &str,
+    encoded_s3_secret_access_key: &str,
+) -> serde_json::Value {
+    json!({
+      "apiVersion": "v1",
+      "kind": "Secret",
+      "metadata": {
+        "name": secret_name,
+        "namespace": DATA_PLANE_NAMESPACE,
+      },
+      "type": "Opaque",
+      "data": {
+        ICEBERG_CATALOG_TOKEN_KEY_NAME: encoded_catalog_token,
+        ICEBERG_S3_ACCESS_KEY_ID_KEY_NAME: encoded_s3_access_key_id,
+        ICEBERG_S3_SECRET_ACCESS_KEY_KEY_NAME: encoded_s3_secret_access_key
       }
     })
 }
@@ -462,20 +539,143 @@ fn create_replicator_config_map_json(
     })
 }
 
-#[expect(clippy::too_many_arguments)]
-fn create_replicator_stateful_set_json(
-    stateful_set_name: &str,
-    replicator_app_name: &str,
-    restarted_at_annotation: &str,
-    replicator_config_map_name: &str,
-    vector_container_name: &str,
-    config: &ReplicatorResourceConfig,
-    replicator_container_name: &str,
-    replicator_image: &str,
+fn create_container_environment_json(
+    prefix: &str,
     environment: &Environment,
-    postgres_secret_name: &str,
-    bq_secret_name: &str,
+    replicator_image: &str,
+    destination_type: DestinationType,
+) -> Vec<serde_json::Value> {
+    let mut container_environment = vec![
+        json!({
+          "name": "APP_ENVIRONMENT",
+          "value": environment.to_string()
+        }),
+        json!({
+            "name": "APP_VERSION",
+            //TODO: set APP_VERSION to proper version instead of the replicator image name
+            "value": replicator_image
+        }),
+        json!({
+          "name": "APP_SENTRY__DSN",
+          "valueFrom": {
+            "secretKeyRef": {
+              "name": SENTRY_DSN_SECRET_NAME,
+              "key": "dsn"
+            }
+          }
+        }),
+    ];
+    match destination_type {
+        DestinationType::Memory => {}
+        DestinationType::BigQuery => {
+            let postgres_secret_name = create_postgres_secret_name(prefix);
+            let postgres_secret_env_var_json =
+                create_postgres_secret_env_var_json(&postgres_secret_name);
+            container_environment.push(postgres_secret_env_var_json);
+
+            let bq_secret_name = create_bq_secret_name(prefix);
+            let bq_secret_env_var_json = create_bq_secret_env_var_json(&bq_secret_name);
+            container_environment.push(bq_secret_env_var_json);
+        }
+        DestinationType::Iceberg => {
+            let postgres_secret_name = create_postgres_secret_name(prefix);
+            let postgres_secret_env_var_json =
+                create_postgres_secret_env_var_json(&postgres_secret_name);
+
+            container_environment.push(postgres_secret_env_var_json);
+            let iceberg_secret_name = create_iceberg_secret_name(prefix);
+
+            let iceberg_catlog_token_env_var_json =
+                create_iceberg_catlog_token_env_var_json(&iceberg_secret_name);
+            container_environment.push(iceberg_catlog_token_env_var_json);
+
+            let iceberg_s3_access_key_id_env_var_json =
+                create_iceberg_s3_access_key_id_env_var_json(&iceberg_secret_name);
+            container_environment.push(iceberg_s3_access_key_id_env_var_json);
+
+            let iceberg_s3_secret_access_key_env_var_json =
+                create_iceberg_s3_secret_access_key_env_var_json(&iceberg_secret_name);
+            container_environment.push(iceberg_s3_secret_access_key_env_var_json);
+        }
+    }
+    container_environment
+}
+
+fn create_postgres_secret_env_var_json(postgres_secret_name: &str) -> serde_json::Value {
+    json!({
+      "name": "APP_PIPELINE__PG_CONNECTION__PASSWORD",
+      "valueFrom": {
+        "secretKeyRef": {
+          "name": postgres_secret_name,
+          "key": "password"
+        }
+      }
+    })
+}
+
+fn create_bq_secret_env_var_json(bq_secret_name: &str) -> serde_json::Value {
+    json!({
+      "name": "APP_DESTINATION__BIG_QUERY__SERVICE_ACCOUNT_KEY",
+      "valueFrom": {
+        "secretKeyRef": {
+          "name": bq_secret_name,
+          "key": BQ_SERVICE_ACCOUNT_KEY_NAME
+        }
+      }
+    })
+}
+
+fn create_iceberg_catlog_token_env_var_json(iceberg_secret_name: &str) -> serde_json::Value {
+    json!({
+      "name": "APP_DESTINATION__ICEBERG__SUPABASE__CATALOG_TOKEN",
+      "valueFrom": {
+        "secretKeyRef": {
+          "name": iceberg_secret_name,
+          "key": ICEBERG_CATALOG_TOKEN_KEY_NAME
+        }
+      }
+    })
+}
+
+fn create_iceberg_s3_access_key_id_env_var_json(iceberg_secret_name: &str) -> serde_json::Value {
+    json!({
+      "name": "APP_DESTINATION__ICEBERG__SUPABASE__S3_ACCESS_KEY_ID",
+      "valueFrom": {
+        "secretKeyRef": {
+          "name": iceberg_secret_name,
+          "key": ICEBERG_S3_ACCESS_KEY_ID_KEY_NAME
+        }
+      }
+    })
+}
+
+fn create_iceberg_s3_secret_access_key_env_var_json(
+    iceberg_secret_name: &str,
 ) -> serde_json::Value {
+    json!({
+      "name": "APP_DESTINATION__ICEBERG__SUPABASE__S3_SECRET_ACCESS_KEY",
+      "valueFrom": {
+        "secretKeyRef": {
+          "name": iceberg_secret_name,
+          "key": ICEBERG_S3_SECRET_ACCESS_KEY_KEY_NAME
+        }
+      }
+    })
+}
+
+fn create_replicator_stateful_set_json(
+    prefix: &str,
+    stateful_set_name: &str,
+    config: &ReplicatorResourceConfig,
+    replicator_image: &str,
+    container_environment: Vec<serde_json::Value>,
+) -> serde_json::Value {
+    let replicator_app_name = create_replicator_app_name(prefix);
+    let restarted_at_annotation = get_restarted_at_annotation_value();
+    let replicator_config_map_name = create_replicator_config_map_name(prefix);
+    let vector_container_name = create_vector_container_name(prefix);
+    let replicator_container_name = create_replicator_container_name(prefix);
+
     json!({
       "apiVersion": "apps/v1",
       "kind": "StatefulSet",
@@ -585,44 +785,7 @@ fn create_replicator_stateful_set_json(
                     "protocol": "TCP"
                   }
                 ],
-                "env": [
-                  {
-                    "name": "APP_ENVIRONMENT",
-                    "value": environment.to_string()
-                  },
-                  {
-                      "name": "APP_VERSION",
-                      //TODO: set APP_VERSION to proper version instead of the replicator image name
-                      "value": replicator_image
-                  },
-                  {
-                    "name": "APP_SENTRY__DSN",
-                    "valueFrom": {
-                      "secretKeyRef": {
-                        "name": SENTRY_DSN_SECRET_NAME,
-                        "key": "dsn"
-                      }
-                    }
-                  },
-                  {
-                    "name": "APP_PIPELINE__PG_CONNECTION__PASSWORD",
-                    "valueFrom": {
-                      "secretKeyRef": {
-                        "name": postgres_secret_name,
-                        "key": "password"
-                      }
-                    }
-                  },
-                  {
-                    "name": "APP_DESTINATION__BIG_QUERY__SERVICE_ACCOUNT_KEY",
-                    "valueFrom": {
-                      "secretKeyRef": {
-                        "name": bq_secret_name,
-                        "key": "service-account-key"
-                      }
-                    }
-                  }
-                ],
+                "env": container_environment,
                 "volumeMounts": [
                   {
                     "name": REPLICATOR_CONFIG_FILE_VOLUME_NAME,
@@ -668,7 +831,8 @@ mod tests {
 
     #[test]
     fn test_create_postgres_secret_json() {
-        let secret_name = "test-secret";
+        let prefix = create_k8s_object_prefix(TENANT_ID, 42);
+        let secret_name = &create_postgres_secret_name(&prefix);
         let encoded_postgres_password = "dGVzdC1wYXNzd29yZA==";
 
         let secret_json = create_postgres_secret_json(secret_name, encoded_postgres_password);
@@ -680,11 +844,32 @@ mod tests {
 
     #[test]
     fn test_create_bq_service_account_key_secret_json() {
-        let secret_name = "test-secret";
+        let prefix = create_k8s_object_prefix(TENANT_ID, 42);
+        let secret_name = &create_bq_secret_name(&prefix);
         let encoded_bq_service_account_key = "ewogICJrZXkiOiAidmFsdWUiCn0=";
 
         let secret_json =
             create_bq_service_account_key_secret_json(secret_name, encoded_bq_service_account_key);
+
+        assert_json_snapshot!(secret_json);
+
+        let _secret: Secret = serde_json::from_value(secret_json).unwrap();
+    }
+
+    #[test]
+    fn test_create_iceberg_secret_json() {
+        let prefix = create_k8s_object_prefix(TENANT_ID, 42);
+        let secret_name = &&create_iceberg_secret_name(&prefix);
+        let encoded_catalog_token = "ZXlKMGVYQWlPaUpLVjFRaUxDSmhiR2NpT2lKRlV6STFOaUlzSW10cFpDSTZJakZrTnpGak1HRXlObUl4TURGak9EUTVaVGt4Wm1RMU5qZGpZakE1TlRKbUluMC5leUpsZUhBaU9qSXdOekEzTVRjeE5qQXNJbWxoZENJNk1UYzFOakUwTlRFMU1Dd2lhWE56SWpvaWMzVndZV0poYzJVaUxDSnlaV1lpT2lKaFltTmtaV1puYUdscWJHdHRibTl3Y1hKemRDSXNJbkp2YkdVaU9pSnpaWEoyYVdObFgzSnZiR1VpZlEuWWRUV2trSXZ3alNrWG90M05DMDd4eWpQakdXUU1OekxxNUVQenVtenJkTHp1SHJqLXp1ekktbmx5UXRRNVY3Z1phdXlzbS13R3dtcHp0UlhmUGMzQVE=";
+        let encoded_s3_access_key_id = "Y2FlNGY0NjliNTY5MjJhMTNmMzNiNjM3YTNjMWU2ZjI=";
+        let encoded_s3_secret_access_key = "NDUyOWE3ZmMwNzY2NDBjODRiZTgzZGJiNGMyNDI3MTNhOTk0MzE5OTBjYzJmMzIzMGM4MzVjOGJmZjAzYWE2ZQ==";
+
+        let secret_json = create_iceberg_secret_json(
+            secret_name,
+            encoded_catalog_token,
+            encoded_s3_access_key_id,
+            encoded_s3_secret_access_key,
+        );
 
         assert_json_snapshot!(secret_json);
 
@@ -746,35 +931,142 @@ mod tests {
     }
 
     #[test]
-    fn test_create_replicator_stateful_set_json() {
+    fn test_create_postgres_secret_env_var_json() {
+        let prefix = create_k8s_object_prefix(TENANT_ID, 42);
+        let postgres_secret_name = create_postgres_secret_name(&prefix);
+
+        let postgres_env_var_json = create_postgres_secret_env_var_json(&postgres_secret_name);
+
+        assert_json_snapshot!(postgres_env_var_json);
+    }
+
+    #[test]
+    fn test_create_bq_secret_env_var_json() {
+        let prefix = create_k8s_object_prefix(TENANT_ID, 42);
+        let bq_secret_name = create_bq_secret_name(&prefix);
+
+        let bq_env_var_json = create_bq_secret_env_var_json(&bq_secret_name);
+
+        assert_json_snapshot!(bq_env_var_json);
+    }
+
+    #[test]
+    fn test_create_iceberg_catlog_token_env_var_json() {
+        let prefix = create_k8s_object_prefix(TENANT_ID, 42);
+        let iceberg_secret_name = create_iceberg_secret_name(&prefix);
+
+        let iceberg_catalog_token_env_var_json =
+            create_iceberg_catlog_token_env_var_json(&iceberg_secret_name);
+
+        assert_json_snapshot!(iceberg_catalog_token_env_var_json);
+    }
+
+    #[test]
+    fn test_create_iceberg_s3_access_key_id_env_var_json() {
+        let prefix = create_k8s_object_prefix(TENANT_ID, 42);
+        let iceberg_secret_name = create_iceberg_secret_name(&prefix);
+
+        let iceberg_s3_access_key_id_env_var_json =
+            create_iceberg_s3_access_key_id_env_var_json(&iceberg_secret_name);
+
+        assert_json_snapshot!(iceberg_s3_access_key_id_env_var_json);
+    }
+
+    #[test]
+    fn test_create_iceberg_s3_secret_access_key_env_var_json() {
+        let prefix = create_k8s_object_prefix(TENANT_ID, 42);
+        let iceberg_secret_name = create_iceberg_secret_name(&prefix);
+
+        let iceberg_s3_secret_access_key_env_var_json =
+            create_iceberg_s3_secret_access_key_env_var_json(&iceberg_secret_name);
+
+        assert_json_snapshot!(iceberg_s3_secret_access_key_env_var_json);
+    }
+
+    #[test]
+    fn test_create_bq_container_environment() {
+        let prefix = create_k8s_object_prefix(TENANT_ID, 42);
+        let environment = Environment::Prod;
+        let replicator_image = "ramsup/etl-replicator:2a41356af735f891de37d71c0e1a62864fe4630e";
+
+        let container_environment = create_container_environment_json(
+            &prefix,
+            &environment,
+            replicator_image,
+            DestinationType::BigQuery,
+        );
+
+        assert_json_snapshot!(container_environment);
+    }
+
+    #[test]
+    fn test_create_iceberg_container_environment() {
+        let prefix = create_k8s_object_prefix(TENANT_ID, 42);
+        let environment = Environment::Prod;
+        let replicator_image = "ramsup/etl-replicator:2a41356af735f891de37d71c0e1a62864fe4630e";
+
+        let container_environment = create_container_environment_json(
+            &prefix,
+            &environment,
+            replicator_image,
+            DestinationType::Iceberg,
+        );
+
+        assert_json_snapshot!(container_environment);
+    }
+
+    #[test]
+    fn test_create_bq_replicator_stateful_set_json() {
         let prefix = create_k8s_object_prefix(TENANT_ID, 42);
         let stateful_set_name = create_stateful_set_name(&prefix);
-        let replicator_app_name = create_replicator_app_name(&prefix);
-        let restarted_at_annotation = "2025-10-09T16:02:24.127400000Z";
-        let replicator_container_name = create_replicator_container_name(&prefix);
-        let vector_container_name = create_vector_container_name(&prefix);
-        let postgres_secret_name = create_postgres_secret_name(&prefix);
-        let bq_secret_name = create_bq_secret_name(&prefix);
-        let replicator_config_map_name = create_replicator_config_map_name(&prefix);
         let environment = Environment::Prod;
         let config = ReplicatorResourceConfig::load(&environment).unwrap();
         let replicator_image = "ramsup/etl-replicator:2a41356af735f891de37d71c0e1a62864fe4630e";
 
-        let stateful_set_json = create_replicator_stateful_set_json(
-            &stateful_set_name,
-            &replicator_app_name,
-            restarted_at_annotation,
-            &replicator_config_map_name,
-            &vector_container_name,
-            &config,
-            &replicator_container_name,
-            replicator_image,
+        let container_environment = create_container_environment_json(
+            &prefix,
             &environment,
-            &postgres_secret_name,
-            &bq_secret_name,
+            replicator_image,
+            DestinationType::BigQuery,
         );
 
-        assert_json_snapshot!(stateful_set_json);
+        let stateful_set_json = create_replicator_stateful_set_json(
+            &prefix,
+            &stateful_set_name,
+            &config,
+            replicator_image,
+            container_environment,
+        );
+
+        assert_json_snapshot!(stateful_set_json, { ".spec.template.metadata.annotations[\"etl.supabase.com/restarted-at\"]" => "[timestamp]"});
+
+        let _stateful_set: StatefulSet = serde_json::from_value(stateful_set_json).unwrap();
+    }
+
+    #[test]
+    fn test_create_iceberg_replicator_stateful_set_json() {
+        let prefix = create_k8s_object_prefix(TENANT_ID, 42);
+        let stateful_set_name = create_stateful_set_name(&prefix);
+        let environment = Environment::Prod;
+        let config = ReplicatorResourceConfig::load(&environment).unwrap();
+        let replicator_image = "ramsup/etl-replicator:2a41356af735f891de37d71c0e1a62864fe4630e";
+
+        let container_environment = create_container_environment_json(
+            &prefix,
+            &environment,
+            replicator_image,
+            DestinationType::Iceberg,
+        );
+
+        let stateful_set_json = create_replicator_stateful_set_json(
+            &prefix,
+            &stateful_set_name,
+            &config,
+            replicator_image,
+            container_environment,
+        );
+
+        assert_json_snapshot!(stateful_set_json, { ".spec.template.metadata.annotations[\"etl.supabase.com/restarted-at\"]" => "[timestamp]"});
 
         let _stateful_set: StatefulSet = serde_json::from_value(stateful_set_json).unwrap();
     }

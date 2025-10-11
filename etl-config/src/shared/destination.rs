@@ -42,6 +42,7 @@ pub enum DestinationConfig {
         max_concurrent_streams: usize,
     },
     Iceberg {
+        #[serde(flatten)]
         config: IcebergConfig,
     },
 }

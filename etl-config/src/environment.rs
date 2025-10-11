@@ -17,7 +17,7 @@ const DEV_ENV_NAME: &str = "dev";
 ///
 /// Used to distinguish between development, staging, and production modes
 /// for configuration loading and feature toggles.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub enum Environment {
     /// Production environment.
     Prod,
