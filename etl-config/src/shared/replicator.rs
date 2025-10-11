@@ -45,6 +45,9 @@ impl Config for ReplicatorConfig {
     const LIST_PARSE_KEYS: &'static [&'static str] = &[];
 }
 
+/// Same as [`ReplicatorConfig`] but without secrets. This type
+/// implements [`Serialize`] because it does not contains secrets
+/// so is safe to serialize.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReplicatorConfigWithoutSecrets {
     /// Configuration for the replication destination.
