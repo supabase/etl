@@ -1,10 +1,10 @@
-use secrecy::ExposeSecret;
+use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use sqlx::postgres::{PgConnectOptions as SqlxConnectOptions, PgSslMode as SqlxSslMode};
 use tokio_postgres::{Config as TokioPgConnectOptions, config::SslMode as TokioPgSslMode};
 
+use crate::Config;
 use crate::shared::ValidationError;
-use crate::{Config, SerializableSecretString};
 
 /// The name identifying the application using this connection.
 const ETL_APPLICATION_NAME: &str = "supabase_etl";
@@ -120,7 +120,10 @@ impl PgConnectionOptions {
 ///
 /// Contains all parameters required to establish a connection to a Postgres
 /// database, including authentication, TLS settings, and connection options.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// This intentionally does not implement [`Serialize`] to avoid accidentally
+/// leaking secrets in the config into serialized forms.
+#[derive(Debug, Clone, Deserialize)]
 pub struct PgConnectionConfig {
     /// Hostname or IP address of the Postgres server.
     pub host: String,
@@ -131,13 +134,42 @@ pub struct PgConnectionConfig {
     /// Username for authenticating with the Postgres server.
     pub username: String,
     /// Password for the specified user. This field is sensitive and redacted in debug output.
-    pub password: Option<SerializableSecretString>,
+    pub password: Option<SecretString>,
     /// TLS configuration for secure connections.
     pub tls: TlsConfig,
 }
 
 impl Config for PgConnectionConfig {
     const LIST_PARSE_KEYS: &'static [&'static str] = &[];
+}
+
+/// Same as [`PgConnectionConfig`] but without secrets. This type
+/// implements [`Serialize`] because it does not contains secrets
+/// so is safe to serialize.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PgConnectionConfigWithoutSecrets {
+    /// Hostname or IP address of the Postgres server.
+    pub host: String,
+    /// Port number on which the Postgres server is listening.
+    pub port: u16,
+    /// Name of the Postgres database to connect to.
+    pub name: String,
+    /// Username for authenticating with the Postgres server.
+    pub username: String,
+    /// TLS configuration for secure connections.
+    pub tls: TlsConfig,
+}
+
+impl From<PgConnectionConfig> for PgConnectionConfigWithoutSecrets {
+    fn from(value: PgConnectionConfig) -> Self {
+        PgConnectionConfigWithoutSecrets {
+            host: value.host,
+            port: value.port,
+            name: value.name,
+            username: value.username,
+            tls: value.tls,
+        }
+    }
 }
 
 /// TLS configuration for secure Postgres connections.
