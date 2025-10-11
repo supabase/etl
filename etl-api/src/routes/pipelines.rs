@@ -5,7 +5,8 @@ use actix_web::{
     web::{Data, Json, Path},
 };
 use etl_config::{
-    shared::{ReplicatorConfig, ReplicatorConfigWithoutSecrets, SupabaseConfig, TlsConfig}, Environment
+    Environment,
+    shared::{ReplicatorConfig, ReplicatorConfigWithoutSecrets, SupabaseConfig, TlsConfig},
 };
 use etl_postgres::replication::{TableLookupError, get_table_name_from_oid, health, lag, state};
 use etl_postgres::types::TableId;
