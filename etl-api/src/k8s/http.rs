@@ -814,12 +814,9 @@ fn get_restarted_at_annotation_value() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use etl_config::{
-        SerializableSecretString,
-        shared::{
-            BatchConfig, DestinationConfig, PgConnectionConfig, PipelineConfig, ReplicatorConfig,
-            TlsConfig,
-        },
+    use etl_config::shared::{
+        BatchConfig, DestinationConfig, PgConnectionConfig, PipelineConfig, ReplicatorConfig,
+        ReplicatorConfigWithoutSecrets, TlsConfig,
     };
     use insta::assert_json_snapshot;
 
@@ -887,7 +884,7 @@ mod tests {
             destination: DestinationConfig::BigQuery {
                 project_id: "project-id".to_string(),
                 dataset_id: "dataset-id".to_string(),
-                service_account_key: SerializableSecretString::from("sa-key".to_string()),
+                service_account_key: "sa-key".into(),
                 max_staleness_mins: None,
                 max_concurrent_streams: 4,
             },
@@ -899,7 +896,7 @@ mod tests {
                     port: 5432,
                     name: "postgres".to_string(),
                     username: "postgres".to_string(),
-                    password: None,
+                    password: Some("password".into()),
                     tls: TlsConfig {
                         trusted_root_certs: "".to_string(),
                         enabled: false,
@@ -916,7 +913,9 @@ mod tests {
             sentry: None,
             supabase: None,
         };
-        let env_config = serde_json::to_string(&replicator_config).unwrap();
+        let replicator_config_without_secrets: ReplicatorConfigWithoutSecrets =
+            replicator_config.into();
+        let env_config = serde_json::to_string(&replicator_config_without_secrets).unwrap();
 
         let config_map_json = create_replicator_config_map_json(
             &replicator_config_map_name,
