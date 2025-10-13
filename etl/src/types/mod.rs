@@ -13,7 +13,7 @@ pub use event::*;
 pub use pipeline::*;
 pub use table_row::*;
 
-pub use crate::conversions::numeric::PgNumeric;
+pub use crate::conversions::numeric::{PgNumeric, Sign};
 
 // Re-exports.
 pub use etl_postgres::types::*;
