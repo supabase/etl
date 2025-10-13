@@ -4,7 +4,7 @@ use sqlx::{PgExecutor, PgPool, Row};
 use std::collections::HashMap;
 use tokio_postgres::types::Type as PgType;
 
-use crate::types::{ColumnSchema, TableId, TableName, TableSchema};
+use crate::types::{ColumnSchema, TableId, TableName, TableSchema, convert_type_oid_to_type};
 
 macro_rules! define_type_mappings {
     (
@@ -14,14 +14,25 @@ macro_rules! define_type_mappings {
     ) => {
         /// Converts a Postgres type name string to a [`PgType`].
         ///
-        /// Maps string representations to their corresponding Postgres types,
-        /// handling common types and falling back to `TEXT` for unknown types.
+        /// Maps string representations to their corresponding Postgres types.
+        /// Parses `unnamed_type(oid)` format produced by `postgres_type_to_string`
+        /// to reconstruct unknown types with their original OIDs.
         pub fn string_to_postgres_type(type_str: &str) -> PgType {
             match type_str {
                 $(
                     $string_name => PgType::$pg_type,
                 )*
-                _ => PgType::TEXT, // Fallback for unknown types
+                _ => {
+                    if let Some(inner) = type_str.strip_prefix("UNKNOWN(").and_then(|s| s.strip_suffix(")")) {
+                        if let Some(oid_str) = inner.strip_prefix("unnamed_type(").and_then(|s| s.strip_suffix(")")) {
+                            if let Ok(oid) = oid_str.parse::<u32>() {
+                                return convert_type_oid_to_type(oid);
+                            }
+                        }
+                    }
+
+                    PgType::TEXT
+                }
             }
         }
 
@@ -151,7 +162,7 @@ pub async fn store_table_schema(
         insert into etl.table_schemas (pipeline_id, table_id, schema_name, table_name)
         values ($1, $2, $3, $4)
         on conflict (pipeline_id, table_id)
-        do update set 
+        do update set
             schema_name = excluded.schema_name,
             table_name = excluded.table_name,
             updated_at = now()
@@ -178,7 +189,7 @@ pub async fn store_table_schema(
 
         sqlx::query(
             r#"
-            insert into etl.table_columns 
+            insert into etl.table_columns
             (table_schema_id, column_name, column_type, type_modifier, nullable, primary_key, column_order)
             values ($1, $2, $3, $4, $5, $6, $7)
             "#,
@@ -356,5 +367,30 @@ mod tests {
         assert_eq!(postgres_type_to_string(&Type::UUID_ARRAY), "UUID_ARRAY");
         assert_eq!(string_to_postgres_type("INT4_RANGE"), Type::INT4_RANGE);
         assert_eq!(postgres_type_to_string(&Type::DATE_RANGE), "DATE_RANGE");
+    }
+
+    #[test]
+    fn test_unnamed_type_roundtrip() {
+        use tokio_postgres::types::Kind;
+
+        // Create an unnamed type (like PostGIS geometry)
+        let postgis_oid = 7805647u32;
+        let unknown_type = Type::new(
+            format!("unnamed_type({postgis_oid})"),
+            postgis_oid,
+            Kind::Simple,
+            "pg_catalog".to_string(),
+        );
+
+        // Convert to string
+        let type_string = postgres_type_to_string(&unknown_type);
+        assert_eq!(type_string, format!("UNKNOWN(unnamed_type({postgis_oid}))"));
+
+        // Convert back to type
+        let reconstructed = string_to_postgres_type(&type_string);
+
+        // Verify the OID is preserved
+        assert_eq!(reconstructed.oid(), postgis_oid);
+        assert_eq!(reconstructed.name(), format!("unnamed_type({postgis_oid})"));
     }
 }
