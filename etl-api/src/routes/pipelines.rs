@@ -6,7 +6,7 @@ use actix_web::{
 };
 use etl_config::{
     Environment,
-    shared::{ReplicatorConfig, SupabaseConfig, TlsConfig},
+    shared::{ReplicatorConfig, ReplicatorConfigWithoutSecrets, SupabaseConfig, TlsConfig},
 };
 use etl_postgres::replication::{TableLookupError, get_table_name_from_oid, health, lag, state};
 use etl_postgres::types::TableId;
@@ -1289,7 +1289,7 @@ async fn create_or_update_pipeline_in_k8s(
     .await?;
 
     create_or_update_secrets(k8s_client, &prefix, secrets).await?;
-    create_or_update_config(k8s_client, &prefix, replicator_config, environment).await?;
+    create_or_update_config(k8s_client, &prefix, replicator_config.into(), environment).await?;
     create_or_update_replicator(
         k8s_client,
         &prefix,
@@ -1477,7 +1477,7 @@ async fn create_or_update_secrets(
 async fn create_or_update_config(
     k8s_client: &dyn K8sClient,
     prefix: &str,
-    config: ReplicatorConfig,
+    config: ReplicatorConfigWithoutSecrets,
     environment: Environment,
 ) -> Result<(), PipelineError> {
     // For now the base config is empty.
