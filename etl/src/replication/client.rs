@@ -768,10 +768,10 @@ impl PgReplicationClient {
 
         for row_filter in row_filters {
             if let SimpleQueryMessage::Row(row) = row_filter {
-                let row_filter = Self::get_row_value::<String>(&row, "row_filter", "gpt").await?;
-                match row_filter.as_str() {
-                    "" => return Ok(None),
-                    _ => return Ok(Some(row_filter)),
+                let row_filter = row.try_get("row_filter").unwrap();
+                match row_filter {
+                    None => return Ok(None),
+                    Some(row_filter) => return Ok(Some(row_filter.to_string())),
                 }
             }
         }
