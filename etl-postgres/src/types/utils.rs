@@ -1,16 +1,11 @@
-use tokio_postgres::types::{Kind, PgLsn, Type};
+use tokio_postgres::types::{PgLsn, Type};
 
 /// Converts a Postgres type OID to a [`Type`] instance.
 ///
-/// Returns a properly constructed [`Type`] for the given OID, or creates an unnamed
+/// Returns a properly constructed [`Type`] for the given OID, or return TEXT
 /// type as fallback if the OID lookup fails.
 pub fn convert_type_oid_to_type(type_oid: u32) -> Type {
-    Type::from_oid(type_oid).unwrap_or(Type::new(
-        format!("unnamed_type({type_oid})"),
-        type_oid,
-        Kind::Simple,
-        "pg_catalog".to_string(),
-    ))
+    Type::from_oid(type_oid).unwrap_or(Type::TEXT)
 }
 
 /// Returns whether the Postgres type is an array type.

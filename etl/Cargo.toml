@@ -8,10 +8,9 @@ repository.workspace = true
 homepage.workspace = true
 
 [features]
-unknown-types-to-bytes = []
 test-utils = ["etl-postgres/test-utils"]
 failpoints = ["fail/failpoints"]
-default = ["unknown-types-to-bytes"]
+default = []
 
 [dependencies]
 etl-config = { workspace = true }

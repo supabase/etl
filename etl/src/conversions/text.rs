@@ -65,19 +65,7 @@ pub fn default_value_for_type(typ: &Type) -> EtlResult<Cell> {
         Type::JSON_ARRAY | Type::JSONB_ARRAY => Ok(Cell::Array(ArrayCell::Json(Vec::default()))),
         Type::OID => Ok(Cell::U32(u32::default())),
         Type::OID_ARRAY => Ok(Cell::Array(ArrayCell::U32(Vec::default()))),
-        #[cfg(feature = "unknown-types-to-bytes")]
         _ => Ok(Cell::String(String::default())),
-        #[cfg(not(feature = "unknown-types-to-bytes"))]
-        _ => {
-            bail!(
-                ErrorKind::ConversionError,
-                "Unsupported type",
-                format!(
-                    "The type {} is not supported, enable 'unknown-types-to-bytes' if you want to treat it as 'string'",
-                    typ.name()
-                )
-            )
-        }
     }
 }
 
@@ -224,19 +212,7 @@ pub fn parse_cell_from_postgres_text(typ: &Type, str: &str) -> EtlResult<Cell> {
         Type::OID_ARRAY => {
             parse_cell_from_postgres_text_array(str, |str| Ok(Some(str.parse()?)), ArrayCell::U32)
         }
-        #[cfg(feature = "unknown-types-to-bytes")]
         _ => Ok(Cell::String(str.to_string())),
-        #[cfg(not(feature = "unknown-types-to-bytes"))]
-        _ => {
-            bail!(
-                ErrorKind::ConversionError,
-                "Unsupported type",
-                format!(
-                    "The type {} is not supported, enable 'unknown-types-to-bytes' if you want to treat it as 'string'",
-                    typ.name()
-                )
-            )
-        }
     }
 }
 
@@ -643,7 +619,6 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "unknown-types-to-bytes")]
     #[test]
     fn unknown_types_to_string() {
         use tokio_postgres::types::Type;
