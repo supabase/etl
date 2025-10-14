@@ -26,6 +26,7 @@ iceberg = [
     "dep:tokio",
     "dep:reqwest",
     "dep:async-trait",
+    "dep:rustls",
     "dep:serde",
     "dep:serde_json",
 ]
