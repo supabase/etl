@@ -555,6 +555,13 @@ where
                 )
                 .await?;
 
+                // After processing each message, we explicitly check for the status update deadline.
+                // This is necessary because message processing time is unbounded, so Postgres could
+                // timeout before we receive a primary keep-alive message in the stream.
+                //
+                // By performing this check here, we minimize the risk of missing the status update.
+                // However, in rare cases where a single message's processing exceeds the timeout,
+                // the error could still occur but this scenario is highly unlikely.
                 if state.status_update_due() {
                     logical_replication_stream
                         .as_mut()
