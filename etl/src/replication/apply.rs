@@ -36,9 +36,11 @@ use crate::store::schema::SchemaStore;
 use crate::types::{Event, PipelineId};
 use crate::{bail, etl_error};
 
-/// The amount of milliseconds that pass between one refresh and the other of the system, in case no
-/// events or shutdown signal are received.
-const REFRESH_INTERVAL: Duration = Duration::from_secs(10);
+/// The minimum interval (in milliseconds) between consecutive status updates.
+///
+/// This value must be less than the `wal_sender_timeout` configured in the Postgres instance.
+/// If set too high, Postgres may timeout before the next status update is sent.
+const STATUS_UPDATE_INTERVAL: Duration = Duration::from_secs(10);
 
 /// Result type for the apply loop execution.
 ///
@@ -344,7 +346,7 @@ impl ApplyLoopState {
             remote_final_lsn: None,
             next_status_update,
             events_batch,
-            status_update_deadline: Instant::now() + REFRESH_INTERVAL,
+            status_update_deadline: Instant::now() + STATUS_UPDATE_INTERVAL,
             current_tx_begin_ts: None,
             current_tx_events: 0,
             shutdown_discarded: false,
@@ -372,7 +374,7 @@ impl ApplyLoopState {
 
     /// Records that a status update was sent and schedules the next refresh deadline.
     fn mark_status_update_sent(&mut self) {
-        self.status_update_deadline = Instant::now() + REFRESH_INTERVAL;
+        self.status_update_deadline = Instant::now() + STATUS_UPDATE_INTERVAL;
     }
 
     /// Returns true when the status update deadline has elapsed.
