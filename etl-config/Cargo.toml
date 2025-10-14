@@ -12,7 +12,7 @@ utoipa = ["dep:utoipa"]
 
 [dependencies]
 config = { workspace = true, features = ["yaml"] }
-secrecy = { workspace = true }
+secrecy = { workspace = true, features = ["serde"] }
 serde = { workspace = true, features = ["derive"] }
 sqlx = { workspace = true, features = ["postgres"] }
 thiserror = { workspace = true }

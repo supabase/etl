@@ -6,7 +6,6 @@ This is the main crate of the ETL system, providing the core functionality for P
 
 | Feature                  | Description                                                   |
 | ------------------------ | ------------------------------------------------------------- |
-| `unknown-types-to-bytes` | Converts unknown Postgres types to bytes (enabled by default) |
 | `test-utils`             | Enables testing utilities and helpers                         |
 | `failpoints`             | Enables failure injection for testing                         |
 

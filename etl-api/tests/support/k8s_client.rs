@@ -5,6 +5,7 @@ use std::collections::BTreeMap;
 use async_trait::async_trait;
 use etl_api::k8s::http::{TRUSTED_ROOT_CERT_CONFIG_MAP_NAME, TRUSTED_ROOT_CERT_KEY_NAME};
 use etl_api::k8s::{K8sClient, K8sError, PodPhase};
+use etl_api::routes::pipelines::DestinationType;
 use etl_config::Environment;
 use k8s_openapi::api::core::v1::ConfigMap;
 
@@ -28,11 +29,25 @@ impl K8sClient for MockK8sClient {
         Ok(())
     }
 
+    async fn create_or_update_iceberg_secret(
+        &self,
+        _prefix: &str,
+        _catalog_token: &str,
+        _s3_access_key_id: &str,
+        _s3_secret_access_key: &str,
+    ) -> Result<(), K8sError> {
+        Ok(())
+    }
+
     async fn delete_postgres_secret(&self, _prefix: &str) -> Result<(), K8sError> {
         Ok(())
     }
 
     async fn delete_bq_secret(&self, _prefix: &str) -> Result<(), K8sError> {
+        Ok(())
+    }
+
+    async fn delete_iceberg_secret(&self, _prefix: &str) -> Result<(), K8sError> {
         Ok(())
     }
 
@@ -71,6 +86,7 @@ impl K8sClient for MockK8sClient {
         _prefix: &str,
         _replicator_image: &str,
         _environment: Environment,
+        _destination_type: DestinationType,
     ) -> Result<(), K8sError> {
         Ok(())
     }

@@ -95,7 +95,6 @@
 //!
 //! # Feature Flags
 //!
-//! - `unknown-types-to-bytes`: Convert unknown Postgres types to byte arrays (default)
 //! - `test-utils`: Enable testing utilities and mock implementations  
 //! - `failpoints`: Enable fault injection for testing error scenarios
 

@@ -81,7 +81,7 @@ impl StoredSourceConfig {
             port: self.port,
             name: self.name,
             username: self.username,
-            password: self.password,
+            password: self.password.map(|p| p.into()),
             // TODO: enable TLS
             tls: TlsConfig {
                 trusted_root_certs: DEFAULT_TLS_TRUSTED_ROOT_CERTS.to_string(),
@@ -96,7 +96,7 @@ impl StoredSourceConfig {
             port: self.port,
             name: self.name,
             username: self.username,
-            password: self.password,
+            password: self.password.map(|p| p.into()),
             tls,
         }
     }

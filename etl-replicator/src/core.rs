@@ -13,8 +13,9 @@ use etl_config::Environment;
 use etl_config::shared::{
     BatchConfig, DestinationConfig, PgConnectionConfig, PipelineConfig, ReplicatorConfig,
 };
+use etl_destinations::encryption::install_crypto_provider;
 use etl_destinations::{
-    bigquery::{BigQueryDestination, install_crypto_provider_for_bigquery},
+    bigquery::BigQueryDestination,
     iceberg::{IcebergClient, IcebergDestination},
 };
 use secrecy::ExposeSecret;
@@ -56,7 +57,7 @@ pub async fn start_replicator_with_config(
             max_staleness_mins,
             max_concurrent_streams,
         } => {
-            install_crypto_provider_for_bigquery();
+            install_crypto_provider();
 
             let destination = BigQueryDestination::new_with_key(
                 project_id.clone(),
@@ -83,6 +84,8 @@ pub async fn start_replicator_with_config(
                     s3_region,
                 },
         } => {
+            install_crypto_provider();
+
             let supabase_domain = match Environment::load()? {
                 Environment::Prod => "supabase.com",
                 Environment::Staging | Environment::Dev => "supabase.red",
