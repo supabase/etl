@@ -402,7 +402,7 @@ async fn test_table_copy_stream_respects_row_filter() {
     // when inserting the range 1..=30 (`insert_generate_series` has an inclusive end)
     // We use (18..30+1) since inclusive ranges don't have a `len` for i32.
     let total_rows_count = 30;
-    let expected_rows_count = (18..1+total_rows_count as i32).len();
+    let expected_rows_count = (18..1 + total_rows_count as i32).len();
 
     database
         .insert_generate_series(test_table_name, &["age"], 1, total_rows_count, 1)

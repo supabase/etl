@@ -755,14 +755,14 @@ impl PgReplicationClient {
         // This uses the same query as the `pg_publication_tables`, but with some minor tweaks (COALESCE, only return the rowfilter,
         // filter on oid and pubname). All of these are available >= Postgres 15.
         let row_filter_query = format!(
-                "select pt.rowfilter as row_filter 
+            "select pt.rowfilter as row_filter 
                 from pg_publication_tables pt 
                 join pg_namespace n on n.nspname = pt.schemaname 
                 join pg_class c on c.relnamespace = n.oid AND c.relname = pt.tablename 
                 where pt.pubname = {} and c.oid = {};",
-                quote_literal(publication),
-                table_id,
-            );
+            quote_literal(publication),
+            table_id,
+        );
 
         let row_filters = self.client.simple_query(&row_filter_query).await?;
 
