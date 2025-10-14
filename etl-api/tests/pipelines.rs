@@ -178,14 +178,14 @@ async fn create_test_table(source_db_pool: &PgPool, table_name: &str) -> Oid {
         .unwrap();
 
     sqlx::query(&format!(
-        "CREATE TABLE IF NOT EXISTS test.{table_name} (id SERIAL PRIMARY KEY, name TEXT)"
+        "create table if not exists test.{table_name} (id serial primary key, name text)"
     ))
     .execute(source_db_pool)
     .await
     .expect("Failed to create test table");
 
     sqlx::query_scalar::<_, Oid>(
-        "SELECT c.oid FROM pg_class c JOIN pg_namespace n ON c.relnamespace = n.oid WHERE c.relname = $1 AND n.nspname = $2"
+        "select c.oid from pg_class c join pg_namespace n on c.relnamespace = n.oid where c.relname = $1 and n.nspname = $2"
     )
     .bind(table_name)
     .bind("test")
@@ -1147,7 +1147,7 @@ async fn rollback_table_state_with_full_reset_succeeds() {
 
     // Verify only one row exists (the reset init state)
     let count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM etl.replication_state WHERE pipeline_id = $1 AND table_id = $2",
+        "select count(*) from etl.replication_state where pipeline_id = $1 and table_id = $2",
     )
     .bind(pipeline_id)
     .bind(table_oid)
@@ -1176,7 +1176,7 @@ async fn deleting_pipeline_removes_replication_state_from_source_database() {
     .await;
 
     let count_before: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM etl.replication_state WHERE pipeline_id = $1")
+        sqlx::query_scalar("select count(*) from etl.replication_state where pipeline_id = $1")
             .bind(pipeline_id)
             .fetch_one(&source_db_pool)
             .await
@@ -1187,7 +1187,7 @@ async fn deleting_pipeline_removes_replication_state_from_source_database() {
     assert_eq!(response.status(), StatusCode::OK);
 
     let count_after: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM etl.replication_state WHERE pipeline_id = $1")
+        sqlx::query_scalar("select count(*) from etl.replication_state where pipeline_id = $1")
             .bind(pipeline_id)
             .fetch_one(&source_db_pool)
             .await
@@ -1225,13 +1225,13 @@ async fn deleting_pipeline_removes_table_schemas_from_source_database() {
 
     // Verify data exists before deletion
     let schema_count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM etl.table_schemas WHERE pipeline_id = $1")
+        sqlx::query_scalar("select count(*) from etl.table_schemas where pipeline_id = $1")
             .bind(pipeline_id)
             .fetch_one(&source_db_pool)
             .await
             .unwrap();
     let column_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM etl.table_columns WHERE table_schema_id IN ($1, $2)",
+        "select count(*) from etl.table_columns where table_schema_id in ($1, $2)",
     )
     .bind(table_schema_id_1)
     .bind(table_schema_id_2)
@@ -1246,13 +1246,13 @@ async fn deleting_pipeline_removes_table_schemas_from_source_database() {
 
     // Verify both schemas and their CASCADE-deleted columns are gone
     let schema_count_after: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM etl.table_schemas WHERE pipeline_id = $1")
+        sqlx::query_scalar("select count(*) from etl.table_schemas where pipeline_id = $1")
             .bind(pipeline_id)
             .fetch_one(&source_db_pool)
             .await
             .unwrap();
     let column_count_after: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM etl.table_columns WHERE table_schema_id IN ($1, $2)",
+        "select count(*) from etl.table_columns where table_schema_id in ($1, $2)",
     )
     .bind(table_schema_id_1)
     .bind(table_schema_id_2)

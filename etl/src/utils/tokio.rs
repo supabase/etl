@@ -259,7 +259,7 @@ mod tests {
 
         tokio::task::spawn(async move { conn.await.map_err(|e| panic!("{e:?}")) });
 
-        let stmt = client.prepare("SELECT 1").await.expect("prepare");
+        let stmt = client.prepare("select 1").await.expect("prepare");
         let _ = client.query(&stmt, &[]).await.expect("query");
     }
 }

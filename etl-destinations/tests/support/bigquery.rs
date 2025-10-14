@@ -135,7 +135,7 @@ impl BigQueryDatabase {
 
         let full_table_path = format!("`{project_id}.{dataset_id}.{table_id}`");
 
-        let query = format!("SELECT * FROM {full_table_path}");
+        let query = format!("select * from {full_table_path}");
         client
             .job()
             .query(project_id, QueryRequest::new(query))
