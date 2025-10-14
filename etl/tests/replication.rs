@@ -383,13 +383,13 @@ async fn test_table_copy_stream_respects_row_filter() {
 
     database
         .run_sql(&format!(
-            "ALTER TABLE {test_table_name} REPLICA IDENTITY FULL"
+            "alter table {test_table_name} replica identity full"
         ))
         .await
         .unwrap();
     database
         .run_sql(&format!(
-            "CREATE PUBLICATION test_pub FOR TABLE {test_table_name} WHERE (age >= 18)"
+            "create publication test_pub for table {test_table_name} where (age >= 18)"
         ))
         .await
         .unwrap();
@@ -398,8 +398,11 @@ async fn test_table_copy_stream_respects_row_filter() {
         .await
         .unwrap();
 
+    // We apply a row filter (age >= 18), so we expect the number of rows post-synchronization to be the numbers 18..=30
+    // when inserting the range 1..=30 (`insert_generate_series` has an inclusive end)
+    // We use (18..30+1) since inclusive ranges don't have a `len` for i32.
     let total_rows_count = 30;
-    let expected_rows_count = (18..1 + total_rows_count as i32).len();
+    let expected_rows_count = (18..1+total_rows_count as i32).len();
 
     database
         .insert_generate_series(test_table_name, &["age"], 1, total_rows_count, 1)

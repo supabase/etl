@@ -748,29 +748,26 @@ impl PgReplicationClient {
         }
         // If we don't have a publication the row filter is implicitly non-existent
         let publication = match publication_name {
-            Some(x) => x,
+            Some(publication) => publication,
             _ => return Ok(None),
         };
 
         // This uses the same query as the `pg_publication_tables`, but with some minor tweaks (COALESCE, only return the rowfilter,
         // filter on oid and pubname). All of these are available >= Postgres 15.
         let row_filter_query = format!(
-                "SELECT
-                    COALESCE(pg_get_expr(gpt.qual, gpt.relid), '') AS row_filter
-                FROM pg_publication p
-                JOIN LATERAL pg_get_publication_tables(p.pubname) AS gpt(pubid, relid, attrs, qual) ON TRUE
-                JOIN pg_class c ON c.oid = gpt.relid
-                JOIN pg_namespace n ON n.oid = c.relnamespace
-                WHERE p.pubname = {} AND c.oid = {};
-                ",
+                "select pt.rowfilter as row_filter 
+                from pg_publication_tables pt 
+                join pg_namespace n on n.nspname = pt.schemaname 
+                join pg_class c on c.relnamespace = n.oid AND c.relname = pt.tablename 
+                where pt.pubname = {} and c.oid = {};",
                 quote_literal(publication),
                 table_id,
             );
 
-        let messages = self.client.simple_query(&row_filter_query).await?;
+        let row_filters = self.client.simple_query(&row_filter_query).await?;
 
-        for message in messages {
-            if let SimpleQueryMessage::Row(row) = message {
+        for row_filter in row_filters {
+            if let SimpleQueryMessage::Row(row) = row_filter {
                 let row_filter = Self::get_row_value::<String>(&row, "row_filter", "gpt").await?;
                 match row_filter.as_str() {
                     "" => return Ok(None),
@@ -801,16 +798,16 @@ impl PgReplicationClient {
         let filter = self.get_row_filter(table_id, publication).await?;
 
         let copy_query = if let Some(pred) = filter {
-            // Use SELECT-form so we can add WHERE. Parenthesize the predicate to be safe.
+            // Use select-form so we can add where.
             format!(
-                r#"COPY (SELECT {} FROM {} WHERE ({})) TO STDOUT WITH (FORMAT text);"#,
+                r#"copy (select {} from {} where {}) to stdout with (format text);"#,
                 column_list,
                 table_name.as_quoted_identifier(),
                 pred,
             )
         } else {
             format!(
-                r#"COPY {} ({}) TO STDOUT WITH (FORMAT text);"#,
+                r#"copy {} ({}) to stdout with (format text);"#,
                 table_name.as_quoted_identifier(),
                 column_list,
             )
