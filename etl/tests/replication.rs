@@ -453,13 +453,13 @@ async fn test_table_copy_stream_no_row_filter() {
 
     database
         .run_sql(&format!(
-            "ALTER TABLE {test_table_name} REPLICA IDENTITY FULL"
+            "alter table {test_table_name} replica identity full"
         ))
         .await
         .unwrap();
     database
         .run_sql(&format!(
-            "CREATE PUBLICATION test_pub FOR TABLE {test_table_name}"
+            "create publication test_pub for table {test_table_name}"
         ))
         .await
         .unwrap();
