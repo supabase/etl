@@ -145,6 +145,7 @@ pub enum ErrorKind {
     // General Errors
     SourceError,
     DestinationError,
+    DestinationSchemaMismatch,
 
     // Unknown / Uncategorized
     Unknown,

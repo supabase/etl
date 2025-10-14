@@ -16,7 +16,6 @@ use gcp_bigquery_client::model::table_cell::TableCell;
 use gcp_bigquery_client::model::table_row::TableRow;
 use std::fmt;
 use std::str::FromStr;
-use tokio::runtime::Handle;
 use uuid::Uuid;
 
 /// Environment variable name for the BigQuery project id.
@@ -204,17 +203,17 @@ impl Drop for BigQueryDatabase {
     fn drop(&mut self) {
         // We take out the client since during destruction we know that the struct won't be used
         // anymore.
-        let Some(client) = self.take_client() else {
-            return;
-        };
-
-        // To use `block_in_place,` we need a multithreaded runtime since when a blocking
-        // task is issued, the runtime will offload existing tasks to another worker.
-        tokio::task::block_in_place(move || {
-            Handle::current().block_on(async move {
-                destroy_bigquery(&client, self.project_id(), self.dataset_id()).await;
-            });
-        });
+        // let Some(client) = self.take_client() else {
+        //     return;
+        // };
+        //
+        // // To use `block_in_place,` we need a multithreaded runtime since when a blocking
+        // // task is issued, the runtime will offload existing tasks to another worker.
+        // tokio::task::block_in_place(move || {
+        //     Handle::current().block_on(async move {
+        //         destroy_bigquery(&client, self.project_id(), self.dataset_id()).await;
+        //     });
+        // });
     }
 }
 
@@ -254,6 +253,43 @@ pub async fn setup_bigquery_connection() -> BigQueryDatabase {
         .unwrap_or_else(|_| panic!("The env variable {BIGQUERY_SA_KEY_PATH_ENV_NAME} must be set to a service account key file path"));
 
     BigQueryDatabase::new_real(sa_key_path).await
+}
+
+impl BigQueryDatabase {
+    /// Fetches primary key column names for a BigQuery table ordered by ordinal position.
+    pub async fn primary_key_columns(&self, table_id: &str) -> Vec<String> {
+        let client = self.client().expect("BigQuery client not available");
+        let project_id = self.project_id();
+        let dataset_id = self.dataset_id();
+
+        let query = format!(
+            "SELECT column_name \
+             FROM `{project_id}.{dataset_id}.INFORMATION_SCHEMA.KEY_COLUMN_USAGE` \
+             WHERE table_name = '{table_id}' AND constraint_name = 'PRIMARY KEY' \
+             ORDER BY ordinal_position"
+        );
+
+        let response = client
+            .job()
+            .query(project_id, QueryRequest::new(query))
+            .await
+            .expect("failed to query BigQuery primary key metadata");
+
+        response
+            .rows
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|row| {
+                row.columns.and_then(|columns| {
+                    columns
+                        .into_iter()
+                        .next()
+                        .and_then(|cell| cell.value)
+                        .and_then(|value| value.as_str().map(|s| s.to_owned()))
+                })
+            })
+            .collect()
+    }
 }
 
 pub fn parse_table_cell<O>(table_cell: TableCell) -> Option<O>
@@ -317,6 +353,38 @@ impl From<TableRow> for BigQueryOrder {
         BigQueryOrder {
             id: parse_table_cell(columns[0].clone()).unwrap(),
             description: parse_table_cell(columns[1].clone()).unwrap(),
+        }
+    }
+}
+
+#[derive(Debug, Eq, PartialEq, Ord, PartialOrd)]
+pub struct BigQueryUserWithTenant {
+    id: i32,
+    name: String,
+    age: i32,
+    tenant_id: i32,
+}
+
+impl BigQueryUserWithTenant {
+    pub fn new(id: i32, name: &str, age: i32, tenant_id: i32) -> Self {
+        Self {
+            id,
+            name: name.to_owned(),
+            age,
+            tenant_id,
+        }
+    }
+}
+
+impl From<TableRow> for BigQueryUserWithTenant {
+    fn from(value: TableRow) -> Self {
+        let columns = value.columns.unwrap();
+
+        BigQueryUserWithTenant {
+            id: parse_table_cell(columns[0].clone()).unwrap(),
+            name: parse_table_cell(columns[1].clone()).unwrap(),
+            age: parse_table_cell(columns[2].clone()).unwrap(),
+            tenant_id: parse_table_cell(columns[3].clone()).unwrap(),
         }
     }
 }

@@ -16,15 +16,9 @@ fn create_sample_table_schema() -> TableSchema {
     let table_id = TableId::new(12345);
     let table_name = TableName::new("public".to_string(), "test_table".to_string());
     let columns = vec![
-        ColumnSchema::new("id".to_string(), PgType::INT4, -1, false, true),
-        ColumnSchema::new("name".to_string(), PgType::TEXT, -1, true, false),
-        ColumnSchema::new(
-            "created_at".to_string(),
-            PgType::TIMESTAMPTZ,
-            -1,
-            false,
-            false,
-        ),
+        ColumnSchema::new("id".to_string(), PgType::INT4, -1, true),
+        ColumnSchema::new("name".to_string(), PgType::TEXT, -1, false),
+        ColumnSchema::new("created_at".to_string(), PgType::TIMESTAMPTZ, -1, false),
     ];
 
     TableSchema::new(table_id, table_name, columns)
@@ -34,8 +28,8 @@ fn create_another_table_schema() -> TableSchema {
     let table_id = TableId::new(67890);
     let table_name = TableName::new("public".to_string(), "another_table".to_string());
     let columns = vec![
-        ColumnSchema::new("id".to_string(), PgType::INT8, -1, false, true),
-        ColumnSchema::new("description".to_string(), PgType::VARCHAR, 255, true, false),
+        ColumnSchema::new("id".to_string(), PgType::INT8, -1, true),
+        ColumnSchema::new("description".to_string(), PgType::VARCHAR, 255, false),
     ];
 
     TableSchema::new(table_id, table_name, columns)
@@ -183,8 +177,8 @@ async fn test_state_store_load_states() {
 
     let database = spawn_source_database_for_store().await;
     let pipeline_id = 1;
-    let table_id1 = TableId::new(12345);
-    let table_id2 = TableId::new(67890);
+    let table_id_1 = TableId::new(12345);
+    let table_id_2 = TableId::new(67890);
 
     let store = PostgresStore::new(pipeline_id, database.config.clone());
 
@@ -193,11 +187,11 @@ async fn test_state_store_load_states() {
     let data_sync_phase = TableReplicationPhase::DataSync;
 
     store
-        .update_table_replication_state(table_id1, init_phase.clone())
+        .update_table_replication_state(table_id_1, init_phase.clone())
         .await
         .unwrap();
     store
-        .update_table_replication_state(table_id2, data_sync_phase.clone())
+        .update_table_replication_state(table_id_2, data_sync_phase.clone())
         .await
         .unwrap();
 
@@ -215,8 +209,8 @@ async fn test_state_store_load_states() {
     // Verify loaded states
     let states = new_store.get_table_replication_states().await.unwrap();
     assert_eq!(states.len(), 2);
-    assert_eq!(states.get(&table_id1), Some(&init_phase));
-    assert_eq!(states.get(&table_id2), Some(&data_sync_phase));
+    assert_eq!(states.get(&table_id_1), Some(&init_phase));
+    assert_eq!(states.get(&table_id_2), Some(&data_sync_phase));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -231,19 +225,22 @@ async fn test_schema_store_operations() {
     let table_id = table_schema.id;
 
     // Test initial state - should be empty
-    let schema = store.get_table_schema(&table_id).await.unwrap();
+    let schema = store.get_table_schema(&table_id, 0).await.unwrap();
     assert!(schema.is_none());
 
-    let all_schemas = store.get_table_schemas().await.unwrap();
+    let all_schemas = store.get_all_table_schemas().await;
     assert!(all_schemas.is_empty());
 
     // Test storing schema
-    store
+    let stored_schema = store
         .store_table_schema(table_schema.clone())
         .await
         .unwrap();
 
-    let schema = store.get_table_schema(&table_id).await.unwrap();
+    let schema = store
+        .get_table_schema(&table_id, stored_schema.version)
+        .await
+        .unwrap();
     assert!(schema.is_some());
     let schema = schema.unwrap();
     assert_eq!(schema.id, table_schema.id);
@@ -253,17 +250,17 @@ async fn test_schema_store_operations() {
         table_schema.column_schemas.len()
     );
 
-    let all_schemas = store.get_table_schemas().await.unwrap();
+    let all_schemas = store.get_all_table_schemas().await;
     assert_eq!(all_schemas.len(), 1);
 
     // Test storing another schema
-    let table_schema2 = create_another_table_schema();
+    let table_schema_2 = create_another_table_schema();
     store
-        .store_table_schema(table_schema2.clone())
+        .store_table_schema(table_schema_2.clone())
         .await
         .unwrap();
 
-    let all_schemas = store.get_table_schemas().await.unwrap();
+    let all_schemas = store.get_all_table_schemas().await;
     assert_eq!(all_schemas.len(), 2);
 }
 
@@ -275,16 +272,16 @@ async fn test_schema_store_load_schemas() {
     let pipeline_id = 1;
 
     let store = PostgresStore::new(pipeline_id, database.config.clone());
-    let table_schema1 = create_sample_table_schema();
-    let table_schema2 = create_another_table_schema();
+    let table_schema_1 = create_sample_table_schema();
+    let table_schema_2 = create_another_table_schema();
 
     // Store schemas
-    store
-        .store_table_schema(table_schema1.clone())
+    let stored_schema_1 = store
+        .store_table_schema(table_schema_1.clone())
         .await
         .unwrap();
-    store
-        .store_table_schema(table_schema2.clone())
+    let stored_schema_2 = store
+        .store_table_schema(table_schema_2.clone())
         .await
         .unwrap();
 
@@ -292,7 +289,7 @@ async fn test_schema_store_load_schemas() {
     let new_store = PostgresStore::new(pipeline_id, database.config.clone());
 
     // Initially empty (not loaded yet)
-    let schemas = new_store.get_table_schemas().await.unwrap();
+    let schemas = new_store.get_all_table_schemas().await;
     assert!(schemas.is_empty());
 
     // Load schemas from database
@@ -300,20 +297,26 @@ async fn test_schema_store_load_schemas() {
     assert_eq!(loaded_count, 2);
 
     // Verify loaded schemas
-    let schemas = new_store.get_table_schemas().await.unwrap();
+    let schemas = new_store.get_all_table_schemas().await;
     assert_eq!(schemas.len(), 2);
 
-    let schema1 = new_store.get_table_schema(&table_schema1.id).await.unwrap();
+    let schema1 = new_store
+        .get_table_schema(&table_schema_1.id, stored_schema_1.version)
+        .await
+        .unwrap();
     assert!(schema1.is_some());
     let schema1 = schema1.unwrap();
-    assert_eq!(schema1.id, table_schema1.id);
-    assert_eq!(schema1.name, table_schema1.name);
+    assert_eq!(schema1.id, table_schema_1.id);
+    assert_eq!(schema1.name, table_schema_1.name);
 
-    let schema2 = new_store.get_table_schema(&table_schema2.id).await.unwrap();
+    let schema2 = new_store
+        .get_table_schema(&table_schema_2.id, stored_schema_2.version)
+        .await
+        .unwrap();
     assert!(schema2.is_some());
     let schema2 = schema2.unwrap();
-    assert_eq!(schema2.id, table_schema2.id);
-    assert_eq!(schema2.name, table_schema2.name);
+    assert_eq!(schema2.id, table_schema_2.id);
+    assert_eq!(schema2.name, table_schema_2.name);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -327,28 +330,39 @@ async fn test_schema_store_update_existing() {
     let mut table_schema = create_sample_table_schema();
 
     // Store initial schema
-    store
+    let stored_schema = store
         .store_table_schema(table_schema.clone())
         .await
         .unwrap();
+
+    // Verify schema
+    let schema = store
+        .get_table_schema(&table_schema.id, stored_schema.version)
+        .await
+        .unwrap();
+    assert!(schema.is_some());
+    let schema = schema.unwrap();
+    assert_eq!(schema.column_schemas.len(), 3);
 
     // Update schema by adding a column
     table_schema.add_column_schema(ColumnSchema::new(
         "updated_at".to_string(),
         PgType::TIMESTAMPTZ,
         -1,
-        true,
         false,
     ));
 
     // Store updated schema
-    store
+    let stored_schema_updated = store
         .store_table_schema(table_schema.clone())
         .await
         .unwrap();
 
     // Verify updated schema
-    let schema = store.get_table_schema(&table_schema.id).await.unwrap();
+    let schema = store
+        .get_table_schema(&table_schema.id, stored_schema_updated.version)
+        .await
+        .unwrap();
     assert!(schema.is_some());
     let schema = schema.unwrap();
     assert_eq!(schema.column_schemas.len(), 4); // Original 3 + 1 new column
@@ -366,55 +380,61 @@ async fn test_multiple_pipelines_isolation() {
     init_test_tracing();
 
     let database = spawn_source_database_for_store().await;
-    let pipeline_id1 = 1;
-    let pipeline_id2 = 2;
+    let pipeline_id_1 = 1;
+    let pipeline_id_2 = 2;
     let table_id = TableId::new(12345);
 
-    let store1 = PostgresStore::new(pipeline_id1, database.config.clone());
-    let store2 = PostgresStore::new(pipeline_id2, database.config.clone());
+    let store_1 = PostgresStore::new(pipeline_id_1, database.config.clone());
+    let store_2 = PostgresStore::new(pipeline_id_2, database.config.clone());
 
     // Add state to pipeline 1
     let init_phase = TableReplicationPhase::Init;
-    store1
+    store_1
         .update_table_replication_state(table_id, init_phase.clone())
         .await
         .unwrap();
 
     // Add different state to pipeline 2 for the same table
     let data_sync_phase = TableReplicationPhase::DataSync;
-    store2
+    store_2
         .update_table_replication_state(table_id, data_sync_phase.clone())
         .await
         .unwrap();
 
     // Verify isolation - each pipeline sees only its own state
-    let state1 = store1.get_table_replication_state(table_id).await.unwrap();
+    let state1 = store_1.get_table_replication_state(table_id).await.unwrap();
     assert_eq!(state1, Some(init_phase));
 
-    let state2 = store2.get_table_replication_state(table_id).await.unwrap();
+    let state2 = store_2.get_table_replication_state(table_id).await.unwrap();
     assert_eq!(state2, Some(data_sync_phase));
 
     // Test schema isolation
-    let table_schema1 = create_sample_table_schema();
-    let table_schema2 = create_another_table_schema();
+    let table_schema_1 = create_sample_table_schema();
+    let table_schema_2 = create_another_table_schema();
 
-    store1
-        .store_table_schema(table_schema1.clone())
+    let stored_schema_1 = store_1
+        .store_table_schema(table_schema_1.clone())
         .await
         .unwrap();
-    store2
-        .store_table_schema(table_schema2.clone())
+    let stored_schema_2 = store_2
+        .store_table_schema(table_schema_2.clone())
         .await
         .unwrap();
 
     // Each pipeline sees only its own schemas
-    let schemas1 = store1.get_table_schemas().await.unwrap();
-    assert_eq!(schemas1.len(), 1);
-    assert_eq!(schemas1[0].id, table_schema1.id);
+    let schemas_1 = store_1.get_all_table_schemas().await;
+    assert_eq!(schemas_1.len(), 1);
+    assert_eq!(
+        schemas_1[&table_schema_1.id][&stored_schema_1.version],
+        stored_schema_1
+    );
 
-    let schemas2 = store2.get_table_schemas().await.unwrap();
-    assert_eq!(schemas2.len(), 1);
-    assert_eq!(schemas2[0].id, table_schema2.id);
+    let schemas_2 = store_2.get_all_table_schemas().await;
+    assert_eq!(schemas_2.len(), 1);
+    assert_eq!(
+        schemas_2[&table_schema_2.id][&stored_schema_2.version],
+        stored_schema_2
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -542,11 +562,11 @@ async fn test_table_mappings_basic_operations() {
 
     let store = PostgresStore::new(pipeline_id, database.config.clone());
 
-    let table_id1 = TableId::new(12345);
-    let table_id2 = TableId::new(67890);
+    let table_id_1 = TableId::new(12345);
+    let table_id_2 = TableId::new(67890);
 
     // Test initial state - should be empty
-    let mapping = store.get_table_mapping(&table_id1).await.unwrap();
+    let mapping = store.get_table_mapping(&table_id_1).await.unwrap();
     assert!(mapping.is_none());
 
     let all_mappings = store.get_table_mappings().await.unwrap();
@@ -554,33 +574,33 @@ async fn test_table_mappings_basic_operations() {
 
     // Test storing and retrieving mappings
     store
-        .store_table_mapping(table_id1, "public_users_1".to_string())
+        .store_table_mapping(table_id_1, "public_users_1".to_string())
         .await
         .unwrap();
 
     store
-        .store_table_mapping(table_id2, "public_orders_2".to_string())
+        .store_table_mapping(table_id_2, "public_orders_2".to_string())
         .await
         .unwrap();
 
     let all_mappings = store.get_table_mappings().await.unwrap();
     assert_eq!(all_mappings.len(), 2);
     assert_eq!(
-        all_mappings.get(&table_id1),
+        all_mappings.get(&table_id_1),
         Some(&"public_users_1".to_string())
     );
     assert_eq!(
-        all_mappings.get(&table_id2),
+        all_mappings.get(&table_id_2),
         Some(&"public_orders_2".to_string())
     );
 
     // Test updating an existing mapping (upsert)
     store
-        .store_table_mapping(table_id1, "public_users_1_updated".to_string())
+        .store_table_mapping(table_id_1, "public_users_1_updated".to_string())
         .await
         .unwrap();
 
-    let mapping = store.get_table_mapping(&table_id1).await.unwrap();
+    let mapping = store.get_table_mapping(&table_id_1).await.unwrap();
     assert_eq!(mapping, Some("public_users_1_updated".to_string()));
 }
 
@@ -632,37 +652,37 @@ async fn test_table_mappings_pipeline_isolation() {
     init_test_tracing();
 
     let database = spawn_source_database_for_store().await;
-    let pipeline_id1 = 1;
-    let pipeline_id2 = 2;
+    let pipeline_id_1 = 1;
+    let pipeline_id_2 = 2;
 
-    let store1 = PostgresStore::new(pipeline_id1, database.config.clone());
-    let store2 = PostgresStore::new(pipeline_id2, database.config.clone());
+    let store_1 = PostgresStore::new(pipeline_id_1, database.config.clone());
+    let store_2 = PostgresStore::new(pipeline_id_2, database.config.clone());
 
     let table_id = TableId::new(12345);
 
     // Store different mappings for the same table ID in different pipelines
-    store1
+    store_1
         .store_table_mapping(table_id, "pipeline1_table".to_string())
         .await
         .unwrap();
 
-    store2
+    store_2
         .store_table_mapping(table_id, "pipeline2_table".to_string())
         .await
         .unwrap();
 
     // Verify isolation - each pipeline sees only its own mapping
-    let mapping1 = store1.get_table_mapping(&table_id).await.unwrap();
+    let mapping1 = store_1.get_table_mapping(&table_id).await.unwrap();
     assert_eq!(mapping1, Some("pipeline1_table".to_string()));
 
-    let mapping2 = store2.get_table_mapping(&table_id).await.unwrap();
+    let mapping2 = store_2.get_table_mapping(&table_id).await.unwrap();
     assert_eq!(mapping2, Some("pipeline2_table".to_string()));
 
     // Verify isolation persists after loading from database
-    let new_store1 = PostgresStore::new(pipeline_id1, database.config.clone());
-    new_store1.load_table_mappings().await.unwrap();
+    let new_store_1 = PostgresStore::new(pipeline_id_1, database.config.clone());
+    new_store_1.load_table_mappings().await.unwrap();
 
-    let loaded_mapping1 = new_store1.get_table_mapping(&table_id).await.unwrap();
+    let loaded_mapping1 = new_store_1.get_table_mapping(&table_id).await.unwrap();
     assert_eq!(loaded_mapping1, Some("pipeline1_table".to_string()));
 }
 
@@ -691,11 +711,11 @@ async fn test_cleanup_deletes_state_schema_and_mapping_for_table() {
         .await
         .unwrap();
 
-    store
+    let stored_schema_1 = store
         .store_table_schema(table_1_schema.clone())
         .await
         .unwrap();
-    store
+    let stored_schema_2 = store
         .store_table_schema(table_2_schema.clone())
         .await
         .unwrap();
@@ -717,7 +737,13 @@ async fn test_cleanup_deletes_state_schema_and_mapping_for_table() {
             .unwrap()
             .is_some()
     );
-    assert!(store.get_table_schema(&table_1_id).await.unwrap().is_some());
+    assert!(
+        store
+            .get_table_schema(&table_1_id, stored_schema_1.version)
+            .await
+            .unwrap()
+            .is_some()
+    );
     assert!(
         store
             .get_table_mapping(&table_1_id)
@@ -737,7 +763,13 @@ async fn test_cleanup_deletes_state_schema_and_mapping_for_table() {
             .unwrap()
             .is_none()
     );
-    assert!(store.get_table_schema(&table_1_id).await.unwrap().is_none());
+    assert!(
+        store
+            .get_table_schema(&table_1_id, stored_schema_1.version)
+            .await
+            .unwrap()
+            .is_none()
+    );
     assert!(
         store
             .get_table_mapping(&table_1_id)
@@ -754,7 +786,13 @@ async fn test_cleanup_deletes_state_schema_and_mapping_for_table() {
             .unwrap()
             .is_some()
     );
-    assert!(store.get_table_schema(&table_2_id).await.unwrap().is_some());
+    assert!(
+        store
+            .get_table_schema(&table_2_id, stored_schema_2.version)
+            .await
+            .unwrap()
+            .is_some()
+    );
     assert!(
         store
             .get_table_mapping(&table_2_id)
@@ -779,7 +817,7 @@ async fn test_cleanup_deletes_state_schema_and_mapping_for_table() {
     );
     assert!(
         new_store
-            .get_table_schema(&table_1_id)
+            .get_table_schema(&table_1_id, stored_schema_1.version)
             .await
             .unwrap()
             .is_none()
@@ -802,7 +840,7 @@ async fn test_cleanup_deletes_state_schema_and_mapping_for_table() {
     );
     assert!(
         new_store
-            .get_table_schema(&table_2_id)
+            .get_table_schema(&table_2_id, stored_schema_2.version)
             .await
             .unwrap()
             .is_some()
@@ -835,7 +873,13 @@ async fn test_cleanup_idempotent_when_no_state_present() {
             .unwrap()
             .is_none()
     );
-    assert!(store.get_table_schema(&table_id).await.unwrap().is_none());
+    assert!(
+        store
+            .get_table_schema(&table_id, 0)
+            .await
+            .unwrap()
+            .is_none()
+    );
     assert!(store.get_table_mapping(&table_id).await.unwrap().is_none());
 
     // Calling cleanup should succeed even if nothing exists
@@ -846,7 +890,7 @@ async fn test_cleanup_idempotent_when_no_state_present() {
         .update_table_replication_state(table_id, TableReplicationPhase::Init)
         .await
         .unwrap();
-    store.store_table_schema(table_schema).await.unwrap();
+    let stored_schema = store.store_table_schema(table_schema).await.unwrap();
     store
         .store_table_mapping(table_id, "dest_table".to_string())
         .await
@@ -862,6 +906,12 @@ async fn test_cleanup_idempotent_when_no_state_present() {
             .unwrap()
             .is_none()
     );
-    assert!(store.get_table_schema(&table_id).await.unwrap().is_none());
+    assert!(
+        store
+            .get_table_schema(&table_id, stored_schema.version)
+            .await
+            .unwrap()
+            .is_none()
+    );
     assert!(store.get_table_mapping(&table_id).await.unwrap().is_none());
 }

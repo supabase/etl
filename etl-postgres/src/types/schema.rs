@@ -7,6 +7,9 @@ use tokio_postgres::types::{FromSql, ToSql, Type};
 /// An object identifier in Postgres.
 type Oid = u32;
 
+/// Version number for a table schema.
+pub type SchemaVersion = u64;
+
 /// A fully qualified Postgres table name consisting of a schema and table name.
 ///
 /// This type represents a table identifier in Postgres, which requires both a schema name
@@ -54,47 +57,30 @@ type TypeModifier = i32;
 /// type modifier, nullability, and whether it's part of the primary key.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct ColumnSchema {
-    /// The name of the column
+    /// The name of the column.
     pub name: String,
-    /// The Postgres data type of the column
+    /// The Postgres data type of the column.
     pub typ: Type,
-    /// Type-specific modifier value (e.g., length for varchar)
+    /// Type-specific modifier value (e.g., length for varchar).
     pub modifier: TypeModifier,
-    /// Whether the column can contain NULL values
+    /// Whether the column can contain NULL values.
     pub nullable: bool,
-    /// Whether the column is part of the table's primary key
+    /// Whether the column is part of the table's primary key.
     pub primary: bool,
 }
 
 impl ColumnSchema {
-    pub fn new(
-        name: String,
-        typ: Type,
-        modifier: TypeModifier,
-        nullable: bool,
-        primary: bool,
-    ) -> ColumnSchema {
+    pub fn new(name: String, typ: Type, modifier: TypeModifier, primary: bool) -> ColumnSchema {
         Self {
             name,
             typ,
             modifier,
-            nullable,
+            // For now, we assume all columns are nullable. The rationale behind this is that we
+            // do not have access to nullability information on relation messages, so to support schema
+            // evolution, we assume all columns are nullable.
+            nullable: true,
             primary,
         }
-    }
-
-    /// Compares two [`ColumnSchema`] instances, excluding the `nullable` field.
-    ///
-    /// Return `true` if all fields except `nullable` are equal, `false` otherwise.
-    ///
-    /// This method is used for comparing table schemas loaded via the initial table sync and the
-    /// relation messages received via CDC. The reason for skipping the `nullable` field is that
-    /// unfortunately Postgres doesn't seem to propagate nullable information of a column via
-    /// relation messages. The reason for skipping the `primary` field is that if the replica
-    /// identity of a table is set to full, the relation message sets all columns as primary
-    /// key, irrespective of what the actual primary key in the table is.
-    fn partial_eq(&self, other: &ColumnSchema) -> bool {
-        self.name == other.name && self.typ == other.typ && self.modifier == other.modifier
     }
 }
 
@@ -185,12 +171,57 @@ impl ToSql for TableId {
 /// This type contains all metadata about a table including its name, OID,
 /// and the schemas of all its columns.
 #[derive(Debug, Clone, Eq, PartialEq)]
-pub struct TableSchema {
+pub struct VersionedTableSchema {
     /// The Postgres OID of the table
     pub id: TableId,
     /// The fully qualified name of the table
     pub name: TableName,
+    /// Monotonically increasing schema version.
+    pub version: SchemaVersion,
     /// The schemas of all columns in the table
+    pub column_schemas: Vec<ColumnSchema>,
+}
+
+impl VersionedTableSchema {
+    pub fn new(
+        id: TableId,
+        name: TableName,
+        version: SchemaVersion,
+        column_schemas: Vec<ColumnSchema>,
+    ) -> Self {
+        Self {
+            id,
+            name,
+            version,
+            column_schemas,
+        }
+    }
+
+    /// Adds a new column schema to this [`VersionedTableSchema`].
+    pub fn add_column_schema(&mut self, column_schema: ColumnSchema) {
+        self.column_schemas.push(column_schema);
+    }
+}
+
+impl PartialOrd for VersionedTableSchema {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for VersionedTableSchema {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.name
+            .cmp(&other.name)
+            .then(self.version.cmp(&other.version))
+    }
+}
+
+/// Draft version of [`VersionedTableSchema`] used before a schema version is assigned.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct TableSchema {
+    pub id: TableId,
+    pub name: TableName,
     pub column_schemas: Vec<ColumnSchema>,
 }
 
@@ -203,7 +234,14 @@ impl TableSchema {
         }
     }
 
-    /// Adds a new column schema to this [`TableSchema`].
+    pub fn with_capacity(id: TableId, name: TableName, capacity: usize) -> Self {
+        Self {
+            id,
+            name,
+            column_schemas: Vec::with_capacity(capacity),
+        }
+    }
+
     pub fn add_column_schema(&mut self, column_schema: ColumnSchema) {
         self.column_schemas.push(column_schema);
     }
@@ -215,29 +253,7 @@ impl TableSchema {
         self.column_schemas.iter().any(|cs| cs.primary)
     }
 
-    /// Compares two [`TableSchema`] instances, excluding the [`ColumnSchema`]'s `nullable` field.
-    ///
-    /// Return `true` if all fields except `nullable` are equal, `false` otherwise.
-    pub fn partial_eq(&self, other: &TableSchema) -> bool {
-        self.id == other.id
-            && self.name == other.name
-            && self.column_schemas.len() == other.column_schemas.len()
-            && self
-                .column_schemas
-                .iter()
-                .zip(other.column_schemas.iter())
-                .all(|(c1, c2)| c1.partial_eq(c2))
-    }
-}
-
-impl PartialOrd for TableSchema {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for TableSchema {
-    fn cmp(&self, other: &Self) -> Ordering {
-        self.name.cmp(&other.name)
+    pub fn into_versioned(self, version: SchemaVersion) -> VersionedTableSchema {
+        VersionedTableSchema::new(self.id, self.name, version, self.column_schemas)
     }
 }

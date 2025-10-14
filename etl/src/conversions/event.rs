@@ -1,17 +1,16 @@
 use core::str;
 use etl_postgres::types::{
-    ColumnSchema, TableId, TableName, TableSchema, convert_type_oid_to_type,
+    ColumnSchema, SchemaVersion, TableId, TableName, TableSchema, VersionedTableSchema,
+    convert_type_oid_to_type,
 };
 use postgres_replication::protocol;
 use std::sync::Arc;
 use tokio_postgres::types::PgLsn;
 
 use crate::conversions::text::{default_value_for_type, parse_cell_from_postgres_text};
-use crate::error::{ErrorKind, EtlResult};
-use crate::store::schema::SchemaStore;
+use crate::error::{ErrorKind, EtlError, EtlResult};
 use crate::types::{
-    BeginEvent, Cell, CommitEvent, DeleteEvent, InsertEvent, RelationEvent, TableRow,
-    TruncateEvent, UpdateEvent,
+    BeginEvent, Cell, CommitEvent, DeleteEvent, InsertEvent, TableRow, TruncateEvent, UpdateEvent,
 };
 use crate::{bail, etl_error};
 
@@ -50,54 +49,58 @@ pub fn parse_event_from_commit_message(
     }
 }
 
-/// Creates a [`RelationEvent`] from Postgres protocol data.
+/// Creates a [`TableSchema`] from Postgres protocol data.
 ///
-/// This method parses the replication protocol relation message and builds
-/// a complete table schema for use in interpreting subsequent data events.
-pub fn parse_event_from_relation_message(
-    start_lsn: PgLsn,
-    commit_lsn: PgLsn,
+/// This method parses the replication protocol relation message and builds the table schema that
+/// it represents.
+pub async fn parse_table_schema_from_relation_message(
     relation_body: &protocol::RelationBody,
-) -> EtlResult<RelationEvent> {
-    let table_name = TableName::new(
-        relation_body.namespace()?.to_string(),
-        relation_body.name()?.to_string(),
-    );
-    let column_schemas = relation_body
+) -> EtlResult<TableSchema> {
+    let table_id = TableId::new(relation_body.rel_id());
+    let schema = relation_body.namespace().map_err(|error| {
+        etl_error!(
+            ErrorKind::InvalidData,
+            "Invalid namespace in relation message",
+            format!(
+                "Failed to decode namespace for relation {}: {error}",
+                relation_body.rel_id()
+            )
+        )
+    })?;
+    let table = relation_body.name().map_err(|error| {
+        etl_error!(
+            ErrorKind::InvalidData,
+            "Invalid table name in relation message",
+            format!(
+                "Failed to decode table name for relation {}: {error}",
+                relation_body.rel_id()
+            )
+        )
+    })?;
+
+    let table_name = TableName::new(schema.to_string(), table.to_string());
+
+    // We construct the new column schemas in order. The order is important since the table schema
+    // relies on the right ordering to interpret the Postgres correctly.
+    let new_column_schemas = relation_body
         .columns()
         .iter()
         .map(build_column_schema)
-        .collect::<Result<Vec<ColumnSchema>, _>>()?;
-    let table_schema = TableSchema::new(
-        TableId::new(relation_body.rel_id()),
-        table_name,
-        column_schemas,
-    );
+        .collect::<Result<Vec<_>, EtlError>>()?;
 
-    Ok(RelationEvent {
-        start_lsn,
-        commit_lsn,
-        table_schema,
-    })
+    Ok(TableSchema::new(table_id, table_name, new_column_schemas))
 }
 
 /// Converts a Postgres insert message into an [`InsertEvent`].
 ///
-/// This function processes an insert operation from the replication stream,
-/// retrieves the table schema from the store, and constructs a complete
-/// insert event with the new row data ready for ETL processing.
-pub async fn parse_event_from_insert_message<S>(
-    schema_store: &S,
+/// This function processes an insert operation from the replication stream
+/// using the supplied table schema version to build the resulting event.
+pub fn parse_event_from_insert_message(
+    table_schema: Arc<VersionedTableSchema>,
     start_lsn: PgLsn,
     commit_lsn: PgLsn,
     insert_body: &protocol::InsertBody,
-) -> EtlResult<InsertEvent>
-where
-    S: SchemaStore,
-{
-    let table_id = insert_body.rel_id();
-    let table_schema = get_table_schema(schema_store, TableId::new(table_id)).await?;
-
+) -> EtlResult<InsertEvent> {
     let table_row = convert_tuple_to_row(
         &table_schema.column_schemas,
         insert_body.tuple().tuple_data(),
@@ -108,7 +111,8 @@ where
     Ok(InsertEvent {
         start_lsn,
         commit_lsn,
-        table_id: TableId::new(table_id),
+        schema_version: table_schema.version,
+        table_id: table_schema.id,
         table_row,
     })
 }
@@ -119,18 +123,12 @@ where
 /// handling both the old and new row data. The old row data may be either
 /// the complete row or just the key columns, depending on the table's
 /// `REPLICA IDENTITY` setting in Postgres.
-pub async fn parse_event_from_update_message<S>(
-    schema_store: &S,
+pub fn parse_event_from_update_message(
+    table_schema: Arc<VersionedTableSchema>,
     start_lsn: PgLsn,
     commit_lsn: PgLsn,
     update_body: &protocol::UpdateBody,
-) -> EtlResult<UpdateEvent>
-where
-    S: SchemaStore,
-{
-    let table_id = update_body.rel_id();
-    let table_schema = get_table_schema(schema_store, TableId::new(table_id)).await?;
-
+) -> EtlResult<UpdateEvent> {
     // We try to extract the old tuple by either taking the entire old tuple or the key of the old
     // tuple.
     let is_key = update_body.old_tuple().is_none();
@@ -158,7 +156,8 @@ where
     Ok(UpdateEvent {
         start_lsn,
         commit_lsn,
-        table_id: TableId::new(table_id),
+        schema_version: table_schema.version,
+        table_id: table_schema.id,
         table_row,
         old_table_row,
     })
@@ -170,18 +169,12 @@ where
 /// extracting the old row data that was deleted. The old row data may be
 /// either the complete row or just the key columns, depending on the table's
 /// `REPLICA IDENTITY` setting in Postgres.
-pub async fn parse_event_from_delete_message<S>(
-    schema_store: &S,
+pub fn parse_event_from_delete_message(
+    table_schema: Arc<VersionedTableSchema>,
     start_lsn: PgLsn,
     commit_lsn: PgLsn,
     delete_body: &protocol::DeleteBody,
-) -> EtlResult<DeleteEvent>
-where
-    S: SchemaStore,
-{
-    let table_id = delete_body.rel_id();
-    let table_schema = get_table_schema(schema_store, TableId::new(table_id)).await?;
-
+) -> EtlResult<DeleteEvent> {
     // We try to extract the old tuple by either taking the entire old tuple or the key of the old
     // tuple.
     let is_key = delete_body.old_tuple().is_none();
@@ -200,7 +193,8 @@ where
     Ok(DeleteEvent {
         start_lsn,
         commit_lsn,
-        table_id: TableId::new(table_id),
+        schema_version: table_schema.version,
+        table_id: table_schema.id,
         old_table_row,
     })
 }
@@ -213,54 +207,31 @@ pub fn parse_event_from_truncate_message(
     start_lsn: PgLsn,
     commit_lsn: PgLsn,
     truncate_body: &protocol::TruncateBody,
-    overridden_rel_ids: Vec<u32>,
+    table_ids: Vec<(TableId, SchemaVersion)>,
 ) -> TruncateEvent {
     TruncateEvent {
         start_lsn,
         commit_lsn,
         options: truncate_body.options(),
-        rel_ids: overridden_rel_ids,
+        table_ids,
     }
 }
 
-/// Retrieves a table schema from the schema store by table ID.
-///
-/// This function looks up the table schema for the specified table ID in the
-/// schema store. If the schema is not found, it returns an error indicating
-/// that the table is missing from the cache.
-async fn get_table_schema<S>(schema_store: &S, table_id: TableId) -> EtlResult<Arc<TableSchema>>
-where
-    S: SchemaStore,
-{
-    schema_store
-        .get_table_schema(&table_id)
-        .await?
-        .ok_or_else(|| {
-            etl_error!(
-                ErrorKind::MissingTableSchema,
-                "Table not found in the schema cache",
-                format!("The table schema for table {table_id} was not found in the cache")
-            )
-        })
-}
-
-/// Constructs a [`ColumnSchema`] from Postgres protocol column data.
+/// Constructs a [`IndexedColumnSchema`] from Postgres protocol column data.
 ///
 /// This helper method extracts column metadata from the replication protocol
 /// and converts it into the internal column schema representation. Some fields
 /// like nullable status have default values due to protocol limitations.
 fn build_column_schema(column: &protocol::Column) -> EtlResult<ColumnSchema> {
-    Ok(ColumnSchema::new(
+    let column_schema = ColumnSchema::new(
         column.name()?.to_string(),
         convert_type_oid_to_type(column.type_id() as u32),
         column.type_modifier(),
-        // We do not have access to this information, so we default it to `false`.
-        // TODO: figure out how to fill this value correctly or how to handle the missing value
-        //  better.
-        false,
         // Currently 1 means that the column is part of the primary key.
         column.flags() == 1,
-    ))
+    );
+
+    Ok(column_schema)
 }
 
 /// Converts Postgres tuple data into a [`TableRow`] using column schemas.
@@ -300,7 +271,7 @@ pub fn convert_tuple_to_row(
                 } else if use_default_for_missing_cols {
                     default_value_for_type(&column_schema.typ)?
                 } else {
-                    // This is protocol level error, so we panic instead of carrying on
+                    // This is a protocol level error, so we panic instead of carrying on
                     // with incorrect data to avoid corruption downstream.
                     panic!(
                         "A required column {} was missing from the tuple",
@@ -311,7 +282,7 @@ pub fn convert_tuple_to_row(
             protocol::TupleData::UnchangedToast => {
                 // For unchanged toast values we try to use the value from the old row if it is present
                 // but only if it is not null. In all other cases we send the default value for
-                // consistency. As a bit of a practical hack we take the value out of the old row and
+                // consistency. As a bit of a practical hack, we take the value out of the old row and
                 // move a null value in its place to avoid a clone because toast values tend to be large.
                 if let Some(row) = old_table_row {
                     let old_row_value = std::mem::replace(&mut row.values[i], Cell::Null);

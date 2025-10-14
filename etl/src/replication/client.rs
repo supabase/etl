@@ -3,8 +3,8 @@ use crate::utils::tokio::MakeRustlsConnect;
 use crate::{bail, etl_error};
 use etl_config::shared::{IntoConnectOptions, PgConnectionConfig};
 use etl_postgres::replication::extract_server_version;
-use etl_postgres::types::convert_type_oid_to_type;
-use etl_postgres::types::{ColumnSchema, TableId, TableName, TableSchema};
+use etl_postgres::types::{ColumnSchema, TableId, TableName};
+use etl_postgres::types::{TableSchema, convert_type_oid_to_type};
 use pg_escape::{quote_identifier, quote_literal};
 use postgres_replication::LogicalReplicationStream;
 use rustls::ClientConfig;
@@ -712,25 +712,18 @@ impl PgReplicationClient {
                 let type_oid = Self::get_row_value::<u32>(&row, "atttypid", "pg_attribute").await?;
                 let modifier =
                     Self::get_row_value::<i32>(&row, "atttypmod", "pg_attribute").await?;
-                let nullable =
-                    Self::get_row_value::<String>(&row, "attnotnull", "pg_attribute").await? == "f";
                 let primary =
                     Self::get_row_value::<String>(&row, "primary", "pg_index").await? == "t";
 
                 let typ = convert_type_oid_to_type(type_oid);
 
-                column_schemas.push(ColumnSchema {
-                    name,
-                    typ,
-                    modifier,
-                    nullable,
-                    primary,
-                })
+                column_schemas.push(ColumnSchema::new(name, typ, modifier, primary))
             }
         }
 
         Ok(column_schemas)
     }
+
     /// Creates a COPY stream for reading data from a table using its OID.
     ///
     /// The stream will include only the specified columns and use text format.

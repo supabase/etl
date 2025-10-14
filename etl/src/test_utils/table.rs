@@ -1,5 +1,14 @@
-use etl_postgres::types::{ColumnSchema, TableId, TableName, TableSchema};
+use etl_postgres::types::{ColumnSchema, TableId, TableName, TableSchema, VersionedTableSchema};
 use std::collections::HashMap;
+
+/// Return the names of the column schema.
+pub fn column_schema_names(table_schema: &VersionedTableSchema) -> Vec<String> {
+    table_schema
+        .column_schemas
+        .iter()
+        .map(|c| c.name.clone())
+        .collect()
+}
 
 /// Asserts that a table schema matches the expected schema.
 ///

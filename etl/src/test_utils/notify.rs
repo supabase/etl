@@ -1,6 +1,9 @@
-use std::{collections::HashMap, fmt, sync::Arc};
-
-use etl_postgres::types::{TableId, TableSchema};
+use etl_postgres::types::{SchemaVersion, TableId, TableSchema, VersionedTableSchema};
+use std::{
+    collections::{BTreeMap, HashMap},
+    fmt,
+    sync::Arc,
+};
 use tokio::sync::{Notify, RwLock};
 
 use crate::error::{ErrorKind, EtlResult};
@@ -29,7 +32,7 @@ type TableStateCondition = (
 struct Inner {
     table_replication_states: HashMap<TableId, TableReplicationPhase>,
     table_state_history: HashMap<TableId, Vec<TableReplicationPhase>>,
-    table_schemas: HashMap<TableId, Arc<TableSchema>>,
+    table_schemas: HashMap<TableId, BTreeMap<SchemaVersion, Arc<VersionedTableSchema>>>,
     table_mappings: HashMap<TableId, String>,
     table_state_type_conditions: Vec<TableStateTypeCondition>,
     table_state_conditions: Vec<TableStateCondition>,
@@ -103,12 +106,17 @@ impl NotifyingStore {
         inner.table_replication_states.clone()
     }
 
-    pub async fn get_table_schemas(&self) -> HashMap<TableId, TableSchema> {
+    pub async fn get_latest_table_schemas(&self) -> HashMap<TableId, VersionedTableSchema> {
         let inner = self.inner.read().await;
         inner
             .table_schemas
             .iter()
-            .map(|(id, schema)| (*id, Arc::as_ref(schema).clone()))
+            .filter_map(|(table_id, table_schemas)| {
+                table_schemas
+                    .iter()
+                    .next_back()
+                    .map(|(_, schema)| (*table_id, schema.as_ref().clone()))
+            })
             .collect()
     }
 
@@ -290,30 +298,60 @@ impl StateStore for NotifyingStore {
 }
 
 impl SchemaStore for NotifyingStore {
-    async fn get_table_schema(&self, table_id: &TableId) -> EtlResult<Option<Arc<TableSchema>>> {
+    async fn get_table_schema(
+        &self,
+        table_id: &TableId,
+        version: SchemaVersion,
+    ) -> EtlResult<Option<Arc<VersionedTableSchema>>> {
         let inner = self.inner.read().await;
 
-        Ok(inner.table_schemas.get(table_id).cloned())
+        Ok(inner
+            .table_schemas
+            .get(table_id)
+            .and_then(|schemas| schemas.get(&version).cloned()))
     }
 
-    async fn get_table_schemas(&self) -> EtlResult<Vec<Arc<TableSchema>>> {
+    async fn get_latest_table_schema(
+        &self,
+        table_id: &TableId,
+    ) -> EtlResult<Option<Arc<VersionedTableSchema>>> {
         let inner = self.inner.read().await;
 
-        Ok(inner.table_schemas.values().cloned().collect())
+        Ok(inner
+            .table_schemas
+            .get(table_id)
+            .and_then(|schemas| schemas.iter().next_back().map(|(_, schema)| schema.clone())))
     }
 
     async fn load_table_schemas(&self) -> EtlResult<usize> {
         let inner = self.inner.read().await;
-        Ok(inner.table_schemas.len())
+        Ok(inner
+            .table_schemas
+            .values()
+            .map(|schemas| schemas.len())
+            .sum())
     }
 
-    async fn store_table_schema(&self, table_schema: TableSchema) -> EtlResult<()> {
+    async fn store_table_schema(
+        &self,
+        table_schema: TableSchema,
+    ) -> EtlResult<Arc<VersionedTableSchema>> {
         let mut inner = self.inner.write().await;
-        inner
+        let schemas = inner
             .table_schemas
-            .insert(table_schema.id, Arc::new(table_schema));
+            .entry(table_schema.id)
+            .or_insert_with(BTreeMap::new);
 
-        Ok(())
+        let next_version = schemas
+            .keys()
+            .next_back()
+            .map(|version| version + 1)
+            .unwrap_or(0);
+
+        let schema = Arc::new(table_schema.into_versioned(next_version));
+        schemas.insert(next_version, Arc::clone(&schema));
+
+        Ok(schema)
     }
 }
 

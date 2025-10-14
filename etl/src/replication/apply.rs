@@ -1,6 +1,6 @@
 use etl_config::shared::PipelineConfig;
 use etl_postgres::replication::worker::WorkerType;
-use etl_postgres::types::TableId;
+use etl_postgres::types::{TableId, VersionedTableSchema};
 use futures::StreamExt;
 use metrics::histogram;
 use postgres_replication::protocol;
@@ -19,8 +19,8 @@ use crate::concurrency::stream::{TimeoutStream, TimeoutStreamResult};
 use crate::conversions::event::{
     parse_event_from_begin_message, parse_event_from_commit_message,
     parse_event_from_delete_message, parse_event_from_insert_message,
-    parse_event_from_relation_message, parse_event_from_truncate_message,
-    parse_event_from_update_message,
+    parse_event_from_truncate_message, parse_event_from_update_message,
+    parse_table_schema_from_relation_message,
 };
 use crate::destination::Destination;
 use crate::error::{ErrorKind, EtlResult};
@@ -31,9 +31,9 @@ use crate::metrics::{
 };
 use crate::replication::client::PgReplicationClient;
 use crate::replication::stream::EventsStream;
-use crate::state::table::{RetryPolicy, TableReplicationError};
+use crate::state::table::TableReplicationError;
 use crate::store::schema::SchemaStore;
-use crate::types::{Event, PipelineId};
+use crate::types::{Event, PipelineId, RelationEvent};
 use crate::{bail, etl_error};
 
 /// The amount of milliseconds that pass between one refresh and the other of the system, in case no
@@ -210,8 +210,6 @@ impl StatusUpdate {
 enum EndBatch {
     /// The batch should include the last processed event and end.
     Inclusive,
-    /// The batch should exclude the last processed event and end.
-    Exclusive,
 }
 
 /// Result returned from `handle_replication_message` and related functions
@@ -283,18 +281,6 @@ impl HandleMessageResult {
     fn return_event(event: Event) -> Self {
         Self {
             event: Some(event),
-            ..Default::default()
-        }
-    }
-
-    /// Creates a result that excludes the current event and requests batch termination.
-    ///
-    /// Used when the current message triggers a recoverable table-level error.
-    /// The error is propagated to be handled by the apply loop hook.
-    fn finish_batch_and_exclude_event(error: TableReplicationError) -> Self {
-        Self {
-            end_batch: Some(EndBatch::Exclusive),
-            table_replication_error: Some(error),
             ..Default::default()
         }
     }
@@ -643,8 +629,8 @@ where
             if state.events_batch.len() >= max_batch_size || result.end_batch.is_some() {
                 // We check if the batch has elements. It can be that a batch has no elements when
                 // the batch is ended prematurely, and it contains only skipped events. In this case,
-                // we don't produce any events to the destination but downstream code treats it as if
-                // those evets are "persisted".
+                // we don't produce any events to the destination, but downstream code treats it as if
+                // those events are "persisted".
                 if !state.events_batch.is_empty() {
                     send_batch(
                         state,
@@ -662,13 +648,13 @@ where
                 // be reprocessed, even the events before the failure will be skipped.
                 //
                 // Usually in the apply loop, errors are propagated upstream and handled based on if
-                // we are in a table sync worker or apply worker, however we have an edge case (for
+                // we are in a table sync worker or apply worker, however, we have an edge case (for
                 // relation messages that change the schema) where we want to mark a table as errored
                 // manually, not propagating the error outside the loop, which is going to be handled
                 // differently based on the worker:
                 // - Apply worker -> will continue the loop skipping the table.
                 // - Table sync worker -> will stop the work (as if it had a normal uncaught error).
-                // Ideally we would get rid of this since it's an anomalous case which adds unnecessary
+                // Ideally, we would get rid of this since it's an anomalous case that adds unnecessary
                 // complexity.
                 if let Some(error) = result.table_replication_error {
                     action = action.merge(hook.mark_table_errored(error).await?);
@@ -704,7 +690,7 @@ where
                 .await?;
             }
 
-            // We perform synchronization, to make sure that tables are synced.
+            // We perform synchronization to make sure that tables are synced.
             synchronize(state, hook).await
         }
     }
@@ -760,6 +746,9 @@ where
     // We tell the stream to reset the timer when it is polled the next time, this way the deadline
     // is restarted.
     events_stream.mark_reset_timer();
+
+    // TODO: once the batch is sent, we should also remove previous schema versions that are not needed
+    //   anymore.
 
     Ok(())
 }
@@ -926,7 +915,7 @@ where
             handle_delete_message(state, start_lsn, delete_body, hook, schema_store).await
         }
         LogicalReplicationMessage::Truncate(truncate_body) => {
-            handle_truncate_message(state, start_lsn, truncate_body, hook).await
+            handle_truncate_message(state, start_lsn, truncate_body, hook, schema_store).await
         }
         LogicalReplicationMessage::Origin(_) => {
             debug!("received unsupported ORIGIN message");
@@ -1115,36 +1104,32 @@ where
         return Ok(HandleMessageResult::no_event());
     }
 
-    // If no table schema is found, it means that something went wrong since we should have schemas
-    // ready before starting the apply loop.
-    let existing_table_schema =
-        schema_store
-            .get_table_schema(&table_id)
-            .await?
-            .ok_or_else(|| {
-                etl_error!(
-                    ErrorKind::MissingTableSchema,
-                    "Table not found in the schema cache",
-                    format!("The table schema for table {table_id} was not found in the cache")
-                )
-            })?;
+    // Parse the relation message columns into column schemas and resolve the table name.
+    let new_table_schema = parse_table_schema_from_relation_message(message).await?;
 
-    // Convert event from the protocol message.
-    let event = parse_event_from_relation_message(start_lsn, remote_final_lsn, message)?;
+    // We load the latest table schema before this relation message, which contains the last known
+    // schema.
+    let old_table_schema = load_latest_table_schema(schema_store, table_id).await?;
 
-    // We compare the table schema from the relation message with the existing schema (if any).
-    // The purpose of this comparison is that we want to throw an error and stop the processing
-    // of any table that incurs in a schema change after the initial table sync is performed.
-    if !existing_table_schema.partial_eq(&event.table_schema) {
-        let error = TableReplicationError::with_solution(
-            table_id,
-            format!("The schema for table {table_id} has changed during streaming"),
-            "ETL doesn't support schema changes at this point in time, rollback the schema",
-            RetryPolicy::ManualRetry,
-        );
-
-        return Ok(HandleMessageResult::finish_batch_and_exclude_event(error));
+    // If the column schemas are the same, we treat the relation message as a no-op. This is pretty
+    // common since Postgres will send a `Relation` message as the first message for every new
+    // connection even if the table schema hasn't changed.
+    if new_table_schema.name == old_table_schema.name
+        && new_table_schema.column_schemas == old_table_schema.column_schemas
+    {
+        return Ok(HandleMessageResult::no_event());
     }
+
+    // We store the new schema in the store and build the final relation event.
+    let new_table_schema = schema_store.store_table_schema(new_table_schema).await?;
+
+    let event = RelationEvent {
+        start_lsn,
+        commit_lsn: remote_final_lsn,
+        table_id,
+        old_table_schema,
+        new_table_schema,
+    };
 
     Ok(HandleMessageResult::return_event(Event::Relation(event)))
 }
@@ -1169,16 +1154,19 @@ where
         );
     };
 
+    let table_id = TableId::new(message.rel_id());
+
     if !hook
-        .should_apply_changes(TableId::new(message.rel_id()), remote_final_lsn)
+        .should_apply_changes(table_id, remote_final_lsn)
         .await?
     {
         return Ok(HandleMessageResult::no_event());
     }
 
     // Convert event from the protocol message.
+    let table_schema = load_latest_table_schema(schema_store, table_id).await?;
     let event =
-        parse_event_from_insert_message(schema_store, start_lsn, remote_final_lsn, message).await?;
+        parse_event_from_insert_message(table_schema, start_lsn, remote_final_lsn, message)?;
 
     Ok(HandleMessageResult::return_event(Event::Insert(event)))
 }
@@ -1203,16 +1191,19 @@ where
         );
     };
 
+    let table_id = TableId::new(message.rel_id());
+
     if !hook
-        .should_apply_changes(TableId::new(message.rel_id()), remote_final_lsn)
+        .should_apply_changes(table_id, remote_final_lsn)
         .await?
     {
         return Ok(HandleMessageResult::no_event());
     }
 
     // Convert event from the protocol message.
+    let table_schema = load_latest_table_schema(schema_store, table_id).await?;
     let event =
-        parse_event_from_update_message(schema_store, start_lsn, remote_final_lsn, message).await?;
+        parse_event_from_update_message(table_schema, start_lsn, remote_final_lsn, message)?;
 
     Ok(HandleMessageResult::return_event(Event::Update(event)))
 }
@@ -1237,16 +1228,19 @@ where
         );
     };
 
+    let table_id = TableId::new(message.rel_id());
+
     if !hook
-        .should_apply_changes(TableId::new(message.rel_id()), remote_final_lsn)
+        .should_apply_changes(table_id, remote_final_lsn)
         .await?
     {
         return Ok(HandleMessageResult::no_event());
     }
 
     // Convert event from the protocol message.
+    let table_schema = load_latest_table_schema(schema_store, table_id).await?;
     let event =
-        parse_event_from_delete_message(schema_store, start_lsn, remote_final_lsn, message).await?;
+        parse_event_from_delete_message(table_schema, start_lsn, remote_final_lsn, message)?;
 
     Ok(HandleMessageResult::return_event(Event::Delete(event)))
 }
@@ -1257,13 +1251,15 @@ where
 /// ensuring transaction context, and filtering the affected table list based on
 /// hook decisions. Since TRUNCATE can affect multiple tables simultaneously,
 /// it evaluates each table individually.
-async fn handle_truncate_message<T>(
+async fn handle_truncate_message<S, T>(
     state: &mut ApplyLoopState,
     start_lsn: PgLsn,
     message: &protocol::TruncateBody,
     hook: &T,
+    schema_store: &S,
 ) -> EtlResult<HandleMessageResult>
 where
+    S: SchemaStore + Clone + Send + 'static,
     T: ApplyLoopHook,
 {
     let Some(remote_final_lsn) = state.remote_final_lsn else {
@@ -1274,24 +1270,56 @@ where
         );
     };
 
-    // We collect only the relation ids for which we are allow to apply changes, thus in this case
+    // We collect only the relation ids for which we are allowed to apply changes, thus in this case
     // the truncation.
-    let mut rel_ids = Vec::with_capacity(message.rel_ids().len());
-    for &table_id in message.rel_ids().iter() {
+    let mut table_ids = Vec::with_capacity(message.rel_ids().len());
+    for table_id in message.rel_ids().iter() {
+        let table_id = TableId::new(*table_id);
         if hook
-            .should_apply_changes(TableId::new(table_id), remote_final_lsn)
+            .should_apply_changes(table_id, remote_final_lsn)
             .await?
         {
-            rel_ids.push(table_id)
+            // We load the last table schema available at the time of the truncation, this way we
+            // can bind the schema version to use when processing the truncation in the destination.
+            let table_schema = load_latest_table_schema(schema_store, table_id).await?;
+            table_ids.push((table_id, table_schema.version));
         }
     }
+
     // If nothing to apply, skip conversion entirely
-    if rel_ids.is_empty() {
+    if table_ids.is_empty() {
         return Ok(HandleMessageResult::no_event());
     }
 
     // Convert event from the protocol message.
-    let event = parse_event_from_truncate_message(start_lsn, remote_final_lsn, message, rel_ids);
+    let event = parse_event_from_truncate_message(start_lsn, remote_final_lsn, message, table_ids);
 
     Ok(HandleMessageResult::return_event(Event::Truncate(event)))
+}
+
+/// Loads the latest table schema for processing a specific event.
+///
+/// The latest table schema is defined as the schema with the highest version at a specific point
+/// of processing the WAL.
+async fn load_latest_table_schema<S>(
+    schema_store: &S,
+    table_id: TableId,
+) -> EtlResult<Arc<VersionedTableSchema>>
+where
+    S: SchemaStore + Clone + Send + 'static,
+{
+    let table_schema = schema_store
+        .get_latest_table_schema(&table_id)
+        .await?
+        .ok_or_else(|| {
+            etl_error!(
+                ErrorKind::MissingTableSchema,
+                "Table not found in the schema store",
+                format!(
+                    "The latest table schema for table {table_id} was not found in the schema store"
+                )
+            )
+        })?;
+
+    Ok(table_schema)
 }

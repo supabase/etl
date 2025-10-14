@@ -115,7 +115,7 @@ async fn update_non_toast_values_with_default_replica_identity() {
             table_name.clone(),
             &[TableModification::AlterColumn {
                 name: "large_text",
-                alteration: "set storage external",
+                params: "set storage external",
             }],
         )
         .await
@@ -237,7 +237,7 @@ async fn update_non_toast_values_with_full_replica_identity() {
             table_name.clone(),
             &[TableModification::AlterColumn {
                 name: "large_text",
-                alteration: "set storage external",
+                params: "set storage external",
             }],
         )
         .await
@@ -370,7 +370,7 @@ async fn update_toast_values_with_default_replica_identity() {
             table_name.clone(),
             &[TableModification::AlterColumn {
                 name: "large_text",
-                alteration: "set storage external",
+                params: "set storage external",
             }],
         )
         .await
@@ -493,7 +493,7 @@ async fn update_non_toast_values_with_none_replica_identity() {
             table_name.clone(),
             &[TableModification::AlterColumn {
                 name: "large_text",
-                alteration: "set storage external",
+                params: "set storage external",
             }],
         )
         .await
@@ -630,7 +630,7 @@ async fn update_non_toast_values_with_unique_index_replica_identity() {
             table_name.clone(),
             &[TableModification::AlterColumn {
                 name: "large_text",
-                alteration: "set storage external",
+                params: "set storage external",
             }],
         )
         .await

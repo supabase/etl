@@ -1,5 +1,5 @@
-use etl_postgres::types::{TableId, TableSchema};
-use std::collections::HashMap;
+use etl_postgres::types::{SchemaVersion, TableId, TableSchema, VersionedTableSchema};
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -10,22 +10,20 @@ use crate::store::cleanup::CleanupStore;
 use crate::store::schema::SchemaStore;
 use crate::store::state::StateStore;
 
+/// The initial schema version number.
+const STARTING_SCHEMA_VERSION: u64 = 0;
+
 /// Inner state of [`MemoryStore`]
 #[derive(Debug)]
 struct Inner {
-    /// Current replication state for each table - this is the authoritative source of truth
-    /// for table states. Every table being replicated must have an entry here.
+    /// Current replication state for each table.
     table_replication_states: HashMap<TableId, TableReplicationPhase>,
-    /// Complete history of state transitions for each table, used for debugging and auditing.
-    /// This is an append-only log that grows over time and provides visibility into
-    /// table state evolution. Entries are chronologically ordered.
+    /// Complete history of state transitions for each table which is used for state rollbacks.
     table_state_history: HashMap<TableId, Vec<TableReplicationPhase>>,
-    /// Cached table schema definitions, reference-counted for efficient sharing.
-    /// Schemas are expensive to fetch from Postgres, so they're cached here
-    /// once retrieved and shared via Arc across the application.
-    table_schemas: HashMap<TableId, Arc<TableSchema>>,
-    /// Mapping from table IDs to human-readable table names for easier debugging
-    /// and logging. These mappings are established during schema discovery.
+    /// Table schema definitions for each table. Each schema has multiple versions which are created
+    /// when new schema changes are detected.
+    table_schemas: HashMap<TableId, BTreeMap<SchemaVersion, Arc<VersionedTableSchema>>>,
+    /// Mappings between source and destination tables.
     table_mappings: HashMap<TableId, String>,
 }
 
@@ -172,31 +170,63 @@ impl StateStore for MemoryStore {
 }
 
 impl SchemaStore for MemoryStore {
-    async fn get_table_schema(&self, table_id: &TableId) -> EtlResult<Option<Arc<TableSchema>>> {
+    async fn get_table_schema(
+        &self,
+        table_id: &TableId,
+        version: SchemaVersion,
+    ) -> EtlResult<Option<Arc<VersionedTableSchema>>> {
         let inner = self.inner.lock().await;
 
-        Ok(inner.table_schemas.get(table_id).cloned())
+        Ok(inner
+            .table_schemas
+            .get(table_id)
+            .and_then(|table_schemas| table_schemas.get(&version).cloned()))
     }
 
-    async fn get_table_schemas(&self) -> EtlResult<Vec<Arc<TableSchema>>> {
+    async fn get_latest_table_schema(
+        &self,
+        table_id: &TableId,
+    ) -> EtlResult<Option<Arc<VersionedTableSchema>>> {
         let inner = self.inner.lock().await;
 
-        Ok(inner.table_schemas.values().cloned().collect())
+        Ok(inner.table_schemas.get(table_id).and_then(|table_schemas| {
+            table_schemas
+                .iter()
+                .next_back()
+                .map(|(_, schema)| schema.clone())
+        }))
     }
 
     async fn load_table_schemas(&self) -> EtlResult<usize> {
         let inner = self.inner.lock().await;
 
-        Ok(inner.table_schemas.len())
+        Ok(inner
+            .table_schemas
+            .values()
+            .map(|table_schemas| table_schemas.len())
+            .sum())
     }
 
-    async fn store_table_schema(&self, table_schema: TableSchema) -> EtlResult<()> {
+    async fn store_table_schema(
+        &self,
+        table_schema: TableSchema,
+    ) -> EtlResult<Arc<VersionedTableSchema>> {
         let mut inner = self.inner.lock().await;
-        inner
+        let table_schemas = inner
             .table_schemas
-            .insert(table_schema.id, Arc::new(table_schema));
+            .entry(table_schema.id)
+            .or_insert_with(BTreeMap::new);
 
-        Ok(())
+        let next_version = table_schemas
+            .keys()
+            .next_back()
+            .map(|version| version + 1)
+            .unwrap_or(STARTING_SCHEMA_VERSION);
+
+        let table_schema = Arc::new(table_schema.into_versioned(next_version));
+        table_schemas.insert(next_version, table_schema.clone());
+
+        Ok(table_schema)
     }
 }
 

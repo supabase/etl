@@ -74,7 +74,7 @@ async fn table_copy_fails_after_data_sync_threw_an_error_with_no_retry() {
     assert!(table_rows.is_empty());
 
     // Verify table schemas were correctly stored.
-    let table_schemas = store.get_table_schemas().await;
+    let table_schemas = store.get_latest_table_schemas().await;
     assert!(table_schemas.is_empty());
 }
 
@@ -144,7 +144,7 @@ async fn table_copy_fails_after_timed_retry_exceeded_max_attempts() {
     assert!(table_rows.is_empty());
 
     // Verify table schemas were correctly stored.
-    let table_schemas = store.get_table_schemas().await;
+    let table_schemas = store.get_latest_table_schemas().await;
     assert!(table_schemas.is_empty());
 }
 
@@ -205,13 +205,14 @@ async fn table_copy_is_consistent_after_data_sync_threw_an_error_with_timed_retr
     assert_eq!(users_table_rows.len(), rows_inserted);
 
     // Verify table schemas were correctly stored.
-    let table_schemas = store.get_table_schemas().await;
+    let table_schemas = store.get_latest_table_schemas().await;
     assert_eq!(table_schemas.len(), 1);
     assert_eq!(
         *table_schemas
             .get(&database_schema.users_schema().id)
             .unwrap(),
-        database_schema.users_schema()
+        // We expect version 0 since the schema is copied only once.
+        database_schema.users_schema().into_versioned(0)
     );
 }
 
@@ -268,12 +269,13 @@ async fn table_copy_is_consistent_during_data_sync_threw_an_error_with_timed_ret
     assert_eq!(users_table_rows.len(), rows_inserted);
 
     // Verify table schemas were correctly stored.
-    let table_schemas = store.get_table_schemas().await;
+    let table_schemas = store.get_latest_table_schemas().await;
     assert_eq!(table_schemas.len(), 1);
     assert_eq!(
         *table_schemas
             .get(&database_schema.users_schema().id)
             .unwrap(),
-        database_schema.users_schema()
+        // We expect version 1 since the schema is copied twice.
+        database_schema.users_schema().into_versioned(1)
     );
 }
