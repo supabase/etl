@@ -77,7 +77,7 @@ fn init_sentry() -> anyhow::Result<Option<sentry::ClientInitGuard>> {
         let guard = sentry::init(sentry::ClientOptions {
             dsn: Some(sentry_config.dsn.parse()?),
             environment: Some(environment.to_string().into()),
-            traces_sample_rate: 1.0,
+            traces_sample_rate: 0.01,
             max_request_body_size: sentry::MaxRequestBodySize::Always,
             integrations: vec![Arc::new(
                 sentry::integrations::panic::PanicIntegration::new(),
