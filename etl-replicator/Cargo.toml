@@ -8,7 +8,7 @@ repository.workspace = true
 homepage.workspace = true
 
 [dependencies]
-etl = { workspace = true, features = ["unknown-types-to-bytes"] }
+etl = { workspace = true }
 etl-config = { workspace = true }
 etl-destinations = { workspace = true, features = ["bigquery", "iceberg"] }
 etl-telemetry = { workspace = true }
