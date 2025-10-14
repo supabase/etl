@@ -274,14 +274,14 @@ pub async fn run(
         let tracing_logger = TracingLogger::<ApiRootSpanBuilder>::new();
         let authentication = HttpAuthentication::bearer(auth_validator);
         let app = App::new()
+            .wrap(actix_metrics.clone())
+            .wrap(tracing_logger)
             .wrap(
                 sentry::integrations::actix::Sentry::builder()
                     .capture_server_errors(true)
                     .start_transaction(true)
                     .finish(),
             )
-            .wrap(actix_metrics.clone())
-            .wrap(tracing_logger)
             .service(health_check)
             .service(metrics)
             .service(
