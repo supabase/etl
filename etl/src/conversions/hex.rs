@@ -18,7 +18,7 @@ pub fn parse_bytea_hex_string(value: &str) -> EtlResult<Vec<u8>> {
     let mut result = Vec::with_capacity((value.len() - 2) / 2);
 
     let value = &value[2..];
-    if value.len() % 2 != 0 {
+    if !value.len().is_multiple_of(2) {
         bail!(
             ErrorKind::ConversionError,
             "Could not convert from bytea hex string to byte array",
