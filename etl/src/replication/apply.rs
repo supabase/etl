@@ -36,9 +36,11 @@ use crate::store::schema::SchemaStore;
 use crate::types::{Event, PipelineId};
 use crate::{bail, etl_error};
 
-/// The amount of milliseconds that pass between one refresh and the other of the system, in case no
-/// events or shutdown signal are received.
-const REFRESH_INTERVAL: Duration = Duration::from_millis(1000);
+/// The minimum interval (in milliseconds) between consecutive status updates.
+///
+/// This value must be less than the `wal_sender_timeout` configured in the Postgres instance.
+/// If set too high, Postgres may timeout before the next status update is sent.
+const STATUS_UPDATE_INTERVAL: Duration = Duration::from_secs(10);
 
 /// Result type for the apply loop execution.
 ///
@@ -318,6 +320,8 @@ struct ApplyLoopState {
     next_status_update: StatusUpdate,
     /// A batch of events to send to the destination.
     events_batch: Vec<Event>,
+    /// Deadline for when the next status update must be dispatched.
+    status_update_deadline: Instant,
     /// Instant from when a transaction began.
     current_tx_begin_ts: Option<Instant>,
     /// Number of events observed in the current transaction (excluding BEGIN/COMMIT).
@@ -342,6 +346,7 @@ impl ApplyLoopState {
             remote_final_lsn: None,
             next_status_update,
             events_batch,
+            status_update_deadline: Instant::now() + STATUS_UPDATE_INTERVAL,
             current_tx_begin_ts: None,
             current_tx_events: 0,
             shutdown_discarded: false,
@@ -365,6 +370,21 @@ impl ApplyLoopState {
             }
             (_, None) => {}
         }
+    }
+
+    /// Records that a status update was sent and schedules the next refresh deadline.
+    fn mark_status_update_sent(&mut self) {
+        self.status_update_deadline = Instant::now() + STATUS_UPDATE_INTERVAL;
+    }
+
+    /// Returns true when the status update deadline has elapsed.
+    fn status_update_due(&self) -> bool {
+        Instant::now() >= self.status_update_deadline
+    }
+
+    /// Returns the deadline for the next status update as a Tokio instant.
+    fn next_status_update_deadline(&self) -> tokio::time::Instant {
+        tokio::time::Instant::from_std(self.status_update_deadline)
     }
 
     /// Returns true if the apply loop is in the middle of processing a transaction, false otherwise.
@@ -536,6 +556,27 @@ where
                     pipeline_id
                 )
                 .await?;
+
+                // After processing each message, we explicitly check for the status update deadline.
+                // This is necessary because message processing time is unbounded, so Postgres could
+                // timeout before we receive a primary keep-alive message in the stream.
+                //
+                // By performing this check here, we minimize the risk of missing the status update.
+                // However, in rare cases where a single message's processing exceeds the timeout,
+                // the error could still occur but this scenario is highly unlikely.
+                if state.status_update_due() {
+                    logical_replication_stream
+                        .as_mut()
+                        .get_inner()
+                        .send_status_update(
+                            state.next_status_update.write_lsn,
+                            state.next_status_update.flush_lsn,
+                            false
+                        )
+                        .await?;
+                    state.mark_status_update_sent();
+                }
+
                 if let Some(result) = action.to_result() {
                     return Ok(result);
                 }
@@ -573,7 +614,7 @@ where
             // 1. Keeps Postgres informed of our processing progress
             // 2. Allows Postgres to clean up old WAL files based on our progress
             // 3. Provides a heartbeat mechanism to detect connection issues
-            _ = tokio::time::sleep(REFRESH_INTERVAL) => {
+            _ = tokio::time::sleep_until(state.next_status_update_deadline()) => {
                 logical_replication_stream
                     .as_mut()
                     .get_inner()
@@ -583,6 +624,7 @@ where
                         false
                     )
                     .await?;
+                state.mark_status_update_sent();
             }
         }
     }
@@ -875,6 +917,8 @@ where
                     message.reply() == 1,
                 )
                 .await?;
+
+            state.mark_status_update_sent();
 
             Ok(HandleMessageResult::no_event())
         }
