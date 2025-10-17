@@ -6,7 +6,7 @@ use etl::{
     types::{ColumnSchema, TableRow},
 };
 use iceberg::{
-    Catalog, NamespaceIdent, TableCreation, TableIdent,
+    Catalog, CatalogBuilder, NamespaceIdent, TableCreation, TableIdent,
     io::{S3_ACCESS_KEY_ID, S3_ENDPOINT, S3_REGION, S3_SECRET_ACCESS_KEY},
     spec::{
         PROPERTY_COMMIT_MAX_RETRY_WAIT_MS, PROPERTY_COMMIT_MIN_RETRY_WAIT_MS,
@@ -23,7 +23,9 @@ use iceberg::{
         },
     },
 };
-use iceberg_catalog_rest::{RestCatalog, RestCatalogConfig};
+use iceberg_catalog_rest::{
+    REST_CATALOG_PROP_URI, REST_CATALOG_PROP_WAREHOUSE, RestCatalogBuilder,
+};
 use parquet::{basic::Compression, file::properties::WriterProperties};
 use tracing::debug;
 
@@ -58,20 +60,20 @@ impl IcebergClient {
     /// This constructor initializes a client that connects to an Iceberg catalog
     /// through the REST catalog protocol. The REST catalog provides a standardized
     /// HTTP-based interface for catalog operations.
-    pub fn new_with_rest_catalog(
+    pub async fn new_with_rest_catalog(
         catalog_uri: String,
         warehouse_name: String,
-        props: HashMap<String, String>,
-    ) -> Self {
-        let catalog_config = RestCatalogConfig::builder()
-            .uri(catalog_uri)
-            .warehouse(warehouse_name)
-            .props(props)
-            .build();
-        let catalog = RestCatalog::new(catalog_config);
-        IcebergClient {
+        mut props: HashMap<String, String>,
+    ) -> Result<Self, iceberg::Error> {
+        props.insert(REST_CATALOG_PROP_URI.to_string(), catalog_uri);
+        props.insert(REST_CATALOG_PROP_WAREHOUSE.to_string(), warehouse_name);
+
+        let builder = RestCatalogBuilder::default();
+        let catalog = builder.load("RestCatalog", props).await?;
+
+        Ok(IcebergClient {
             catalog: Arc::new(catalog),
-        }
+        })
     }
 
     /// Creates a new [`IcebergClient`] configured for Supabase storage integration.
@@ -84,15 +86,15 @@ impl IcebergClient {
     /// The method automatically constructs the catalog URI and S3 endpoint from the
     /// provided project reference and domain, simplifying the configuration process
     /// for Supabase users.
-    pub fn new_with_supabase_catalog(
+    pub async fn new_with_supabase_catalog(
         project_ref: &str,
         supabase_domain: &str,
         catalog_token: String,
-        warehouse: String,
+        warehouse_name: String,
         s3_access_key_id: String,
         s3_secret_access_key: String,
         s3_region: String,
-    ) -> Self {
+    ) -> Result<Self, iceberg::Error> {
         let base_uri = format!("https://{project_ref}.storage.{supabase_domain}/storage");
         let catalog_uri = format!("{base_uri}/v1/iceberg");
         let s3_endpoint = format!("{base_uri}/v1/s3");
@@ -103,20 +105,20 @@ impl IcebergClient {
         props.insert(S3_SECRET_ACCESS_KEY.to_string(), s3_secret_access_key);
         props.insert(S3_ENDPOINT.to_string(), s3_endpoint);
         props.insert(S3_REGION.to_string(), s3_region);
+        props.insert(REST_CATALOG_PROP_URI.to_string(), catalog_uri.clone());
+        props.insert(
+            REST_CATALOG_PROP_WAREHOUSE.to_string(),
+            warehouse_name.clone(),
+        );
 
-        let catalog_config = RestCatalogConfig::builder()
-            .uri(catalog_uri.clone())
-            .warehouse(warehouse.clone())
-            .props(props)
-            .build();
-        let inner = RestCatalog::new(catalog_config);
-        let client = SupabaseClient::new(catalog_uri, warehouse, catalog_token);
-
+        let builder = RestCatalogBuilder::default();
+        let inner = builder.load("SupabaseCatalog", props).await?;
+        let client = SupabaseClient::new(catalog_uri, warehouse_name, catalog_token);
         let catalog = SupabaseCatalog::new(inner, client);
 
-        IcebergClient {
+        Ok(IcebergClient {
             catalog: Arc::new(catalog),
-        }
+        })
     }
 
     /// Creates a namespace if it does not already exist.
@@ -325,6 +327,7 @@ impl IcebergClient {
         let parquet_writer_builder = ParquetWriterBuilder::new(
             writer_props,
             table.metadata().current_schema().clone(),
+            None,
             table.file_io().clone(),
             location_gen,
             file_name_gen,
