@@ -77,11 +77,17 @@ impl From<StoredDestinationConfig> for FullApiDestinationConfig {
                     catalog_uri,
                     warehouse_name,
                     namespace,
+                    s3_access_key_id,
+                    s3_secret_access_key,
+                    s3_endpoint,
                 } => FullApiDestinationConfig::Iceberg {
                     config: FullApiIcebergConfig::Rest {
                         catalog_uri,
                         warehouse_name,
                         namespace,
+                        s3_endpoint,
+                        s3_access_key_id,
+                        s3_secret_access_key,
                     },
                 },
             },
@@ -147,11 +153,17 @@ impl StoredDestinationConfig {
                     catalog_uri,
                     warehouse_name,
                     namespace,
+                    s3_access_key_id,
+                    s3_secret_access_key,
+                    s3_endpoint,
                 } => DestinationConfig::Iceberg {
                     config: IcebergConfig::Rest {
                         catalog_uri,
                         warehouse_name,
                         namespace,
+                        s3_access_key_id: s3_access_key_id.into(),
+                        s3_secret_access_key: s3_secret_access_key.into(),
+                        s3_endpoint,
                     },
                 },
             },
@@ -201,11 +213,17 @@ impl From<FullApiDestinationConfig> for StoredDestinationConfig {
                     catalog_uri,
                     warehouse_name,
                     namespace,
+                    s3_endpoint,
+                    s3_access_key_id,
+                    s3_secret_access_key,
                 } => Self::Iceberg {
                     config: StoredIcebergConfig::Rest {
                         catalog_uri,
                         warehouse_name,
                         namespace,
+                        s3_access_key_id,
+                        s3_secret_access_key,
+                        s3_endpoint,
                     },
                 },
             },
@@ -274,13 +292,27 @@ impl Encrypt<EncryptedStoredDestinationConfig> for StoredDestinationConfig {
                     catalog_uri,
                     warehouse_name,
                     namespace,
-                } => Ok(EncryptedStoredDestinationConfig::Iceberg {
-                    config: EncryptedStoredIcebergConfig::Rest {
-                        catalog_uri,
-                        warehouse_name,
-                        namespace,
-                    },
-                }),
+                    s3_access_key_id,
+                    s3_secret_access_key,
+                    s3_endpoint,
+                } => {
+                    let encrypted_s3_access_key_id =
+                        encrypt_text(s3_access_key_id.expose_secret().to_owned(), encryption_key)?;
+                    let encrypted_s3_secret_access_key = encrypt_text(
+                        s3_secret_access_key.expose_secret().to_owned(),
+                        encryption_key,
+                    )?;
+                    Ok(EncryptedStoredDestinationConfig::Iceberg {
+                        config: EncryptedStoredIcebergConfig::Rest {
+                            catalog_uri,
+                            warehouse_name,
+                            namespace,
+                            s3_access_key_id: encrypted_s3_access_key_id,
+                            s3_secret_access_key: encrypted_s3_secret_access_key,
+                            s3_endpoint,
+                        },
+                    })
+                }
             },
         }
     }
@@ -373,13 +405,31 @@ impl Decrypt<StoredDestinationConfig> for EncryptedStoredDestinationConfig {
                     catalog_uri,
                     warehouse_name,
                     namespace,
-                } => Ok(StoredDestinationConfig::Iceberg {
-                    config: StoredIcebergConfig::Rest {
-                        catalog_uri,
-                        warehouse_name,
-                        namespace,
-                    },
-                }),
+                    s3_access_key_id: encrypted_s3_access_key_id,
+                    s3_secret_access_key: encrypted_s3_secret_access_key,
+                    s3_endpoint,
+                } => {
+                    let s3_access_key_id = SerializableSecretString::from(decrypt_text(
+                        encrypted_s3_access_key_id,
+                        encryption_key,
+                    )?);
+
+                    let s3_secret_access_key = SerializableSecretString::from(decrypt_text(
+                        encrypted_s3_secret_access_key,
+                        encryption_key,
+                    )?);
+
+                    Ok(StoredDestinationConfig::Iceberg {
+                        config: StoredIcebergConfig::Rest {
+                            catalog_uri,
+                            warehouse_name,
+                            namespace,
+                            s3_access_key_id,
+                            s3_secret_access_key,
+                            s3_endpoint,
+                        },
+                    })
+                }
             },
         }
     }
@@ -401,6 +451,9 @@ pub enum StoredIcebergConfig {
         catalog_uri: String,
         warehouse_name: String,
         namespace: String,
+        s3_access_key_id: SerializableSecretString,
+        s3_secret_access_key: SerializableSecretString,
+        s3_endpoint: String,
     },
 }
 
@@ -432,6 +485,12 @@ pub enum FullApiIcebergConfig {
         warehouse_name: String,
         #[schema(example = "my-namespace")]
         namespace: String,
+        #[schema(example = "9156667efc2c70d89af6588da86d2924")]
+        s3_access_key_id: SerializableSecretString,
+        #[schema(example = "ca833e890916d848c69135924bcd75e5909184814a0ebc6c988937ee094120d4")]
+        s3_secret_access_key: SerializableSecretString,
+        #[schema(example = "https://s3.endpoint")]
+        s3_endpoint: String,
     },
 }
 
@@ -451,6 +510,9 @@ pub enum EncryptedStoredIcebergConfig {
         catalog_uri: String,
         warehouse_name: String,
         namespace: String,
+        s3_access_key_id: EncryptedValue,
+        s3_secret_access_key: EncryptedValue,
+        s3_endpoint: String,
     },
 }
 
@@ -576,6 +638,9 @@ mod tests {
                     .to_string(),
                 warehouse_name: "my-warehouse".to_string(),
                 namespace: "my-namespace".to_string(),
+                s3_access_key_id: SerializableSecretString::from("id".to_string()),
+                s3_secret_access_key: SerializableSecretString::from("key".to_string()),
+                s3_endpoint: "http://localhost:8080".to_string(),
             },
         };
 
@@ -590,6 +655,9 @@ mod tests {
                             catalog_uri: p1_catalog_uri,
                             warehouse_name: p1_warehouse_name,
                             namespace: p1_namespace,
+                            s3_access_key_id: p1_s3_access_key_id,
+                            s3_secret_access_key: p1_s3_secret_access_key,
+                            s3_endpoint: p1_s3_endpoint,
                         },
                 },
                 StoredDestinationConfig::Iceberg {
@@ -598,12 +666,24 @@ mod tests {
                             catalog_uri: p2_catalog_uri,
                             warehouse_name: p2_warehouse_name,
                             namespace: p2_namespace,
+                            s3_access_key_id: p2_s3_access_key_id,
+                            s3_secret_access_key: p2_s3_secret_access_key,
+                            s3_endpoint: p2_s3_endpoint,
                         },
                 },
             ) => {
                 assert_eq!(p1_catalog_uri, p2_catalog_uri);
                 assert_eq!(p1_warehouse_name, p2_warehouse_name);
                 assert_eq!(p1_namespace, p2_namespace);
+                assert_eq!(
+                    p1_s3_access_key_id.expose_secret(),
+                    p2_s3_access_key_id.expose_secret()
+                );
+                assert_eq!(
+                    p1_s3_secret_access_key.expose_secret(),
+                    p2_s3_secret_access_key.expose_secret()
+                );
+                assert_eq!(p1_s3_endpoint, p2_s3_endpoint);
             }
             _ => panic!("Config types don't match"),
         }
@@ -734,6 +814,9 @@ mod tests {
                     .to_string(),
                 warehouse_name: "my-warehouse".to_string(),
                 namespace: "my-namespace".to_string(),
+                s3_access_key_id: SerializableSecretString::from("id".to_string()),
+                s3_secret_access_key: SerializableSecretString::from("key".to_string()),
+                s3_endpoint: "http://localhost:8080".to_string(),
             },
         };
 
@@ -753,6 +836,9 @@ mod tests {
                             catalog_uri: p1_catalog_uri,
                             warehouse_name: p1_warehouse_name,
                             namespace: p1_namespace,
+                            s3_access_key_id: p1_s3_access_key_id,
+                            s3_secret_access_key: p1_s3_secret_access_key,
+                            s3_endpoint: p1_s3_endpoint,
                         },
                 },
                 StoredDestinationConfig::Iceberg {
@@ -761,12 +847,24 @@ mod tests {
                             catalog_uri: p2_catalog_uri,
                             warehouse_name: p2_warehouse_name,
                             namespace: p2_namespace,
+                            s3_access_key_id: p2_s3_access_key_id,
+                            s3_secret_access_key: p2_s3_secret_access_key,
+                            s3_endpoint: p2_s3_endpoint,
                         },
                 },
             ) => {
                 assert_eq!(p1_catalog_uri, p2_catalog_uri);
                 assert_eq!(p1_warehouse_name, p2_warehouse_name);
                 assert_eq!(p1_namespace, p2_namespace);
+                assert_eq!(
+                    p1_s3_access_key_id.expose_secret(),
+                    p2_s3_access_key_id.expose_secret()
+                );
+                assert_eq!(
+                    p1_s3_secret_access_key.expose_secret(),
+                    p2_s3_secret_access_key.expose_secret()
+                );
+                assert_eq!(p1_s3_endpoint, p2_s3_endpoint);
             }
             _ => panic!("Config types don't match"),
         }
@@ -893,6 +991,9 @@ mod tests {
                     .to_string(),
                 warehouse_name: "my-warehouse".to_string(),
                 namespace: "my-namespace".to_string(),
+                s3_access_key_id: SerializableSecretString::from("id".to_string()),
+                s3_secret_access_key: SerializableSecretString::from("key".to_string()),
+                s3_endpoint: "http://localhost:8080".to_string(),
             },
         };
 
@@ -907,6 +1008,9 @@ mod tests {
                             catalog_uri: p1_catalog_uri,
                             warehouse_name: p1_warehouse_name,
                             namespace: p1_namespace,
+                            s3_access_key_id: p1_s3_access_key_id,
+                            s3_secret_access_key: p1_s3_secret_access_key,
+                            s3_endpoint: p1_s3_endpoint,
                         },
                 },
                 FullApiDestinationConfig::Iceberg {
@@ -915,12 +1019,24 @@ mod tests {
                             catalog_uri: p2_catalog_uri,
                             warehouse_name: p2_warehouse_name,
                             namespace: p2_namespace,
+                            s3_access_key_id: p2_s3_access_key_id,
+                            s3_secret_access_key: p2_s3_secret_access_key,
+                            s3_endpoint: p2_s3_endpoint,
                         },
                 },
             ) => {
                 assert_eq!(p1_catalog_uri, p2_catalog_uri);
                 assert_eq!(p1_warehouse_name, p2_warehouse_name);
                 assert_eq!(p1_namespace, p2_namespace);
+                assert_eq!(
+                    p1_s3_access_key_id.expose_secret(),
+                    p2_s3_access_key_id.expose_secret()
+                );
+                assert_eq!(
+                    p1_s3_secret_access_key.expose_secret(),
+                    p2_s3_secret_access_key.expose_secret()
+                );
+                assert_eq!(p1_s3_endpoint, p2_s3_endpoint);
             }
             _ => panic!("Config types don't match"),
         }
@@ -1001,6 +1117,9 @@ mod tests {
                 catalog_uri: "https://catalog.example.com/iceberg".to_string(),
                 warehouse_name: "my-warehouse".to_string(),
                 namespace: "my-namespace".to_string(),
+                s3_access_key_id: SerializableSecretString::from("id".to_string()),
+                s3_secret_access_key: SerializableSecretString::from("key".to_string()),
+                s3_endpoint: "http://localhost:8080".to_string(),
             },
         };
 
@@ -1018,6 +1137,9 @@ mod tests {
                             catalog_uri: orig_catalog_uri,
                             warehouse_name: orig_warehouse_name,
                             namespace: orig_namespace,
+                            s3_access_key_id: p1_s3_access_key_id,
+                            s3_secret_access_key: p1_s3_secret_access_key,
+                            s3_endpoint: p1_s3_endpoint,
                         },
                 },
                 FullApiDestinationConfig::Iceberg {
@@ -1026,12 +1148,24 @@ mod tests {
                             catalog_uri: deser_catalog_uri,
                             warehouse_name: deser_warehouse_name,
                             namespace: deser_namespace,
+                            s3_access_key_id: p2_s3_access_key_id,
+                            s3_secret_access_key: p2_s3_secret_access_key,
+                            s3_endpoint: p2_s3_endpoint,
                         },
                 },
             ) => {
                 assert_eq!(orig_catalog_uri, &deser_catalog_uri);
                 assert_eq!(orig_warehouse_name, &deser_warehouse_name);
                 assert_eq!(orig_namespace, &deser_namespace);
+                assert_eq!(
+                    p1_s3_access_key_id.expose_secret(),
+                    p2_s3_access_key_id.expose_secret()
+                );
+                assert_eq!(
+                    p1_s3_secret_access_key.expose_secret(),
+                    p2_s3_secret_access_key.expose_secret()
+                );
+                assert_eq!(p1_s3_endpoint, &p2_s3_endpoint);
             }
             _ => panic!("Deserialization failed or variant mismatch"),
         }
