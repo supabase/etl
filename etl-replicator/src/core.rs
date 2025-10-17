@@ -14,6 +14,7 @@ use etl_config::shared::{
     BatchConfig, DestinationConfig, PgConnectionConfig, PipelineConfig, ReplicatorConfig,
 };
 use etl_destinations::encryption::install_crypto_provider;
+use etl_destinations::iceberg::{S3_ACCESS_KEY_ID, S3_ENDPOINT, S3_SECRET_ACCESS_KEY};
 use etl_destinations::{
     bigquery::BigQueryDestination,
     iceberg::{IcebergClient, IcebergDestination},
@@ -112,12 +113,19 @@ pub async fn start_replicator_with_config(
                     catalog_uri,
                     warehouse_name,
                     namespace,
+                    s3_access_key_id,
+                    s3_secret_access_key,
+                    s3_endpoint,
                 },
         } => {
             let client = IcebergClient::new_with_rest_catalog(
                 catalog_uri.clone(),
                 warehouse_name.clone(),
-                HashMap::new(),
+                create_props(
+                    s3_access_key_id.expose_secret().to_string(),
+                    s3_secret_access_key.expose_secret().to_string(),
+                    s3_endpoint.clone(),
+                ),
             )
             .await?;
             let destination =
@@ -131,6 +139,20 @@ pub async fn start_replicator_with_config(
     info!("replicator service completed");
 
     Ok(())
+}
+
+pub fn create_props(
+    s3_access_key_id: String,
+    s3_secret_access_key: String,
+    s3_endpoint: String,
+) -> HashMap<String, String> {
+    let mut props: HashMap<String, String> = HashMap::new();
+
+    props.insert(S3_ACCESS_KEY_ID.to_string(), s3_access_key_id);
+    props.insert(S3_SECRET_ACCESS_KEY.to_string(), s3_secret_access_key);
+    props.insert(S3_ENDPOINT.to_string(), s3_endpoint);
+
+    props
 }
 
 fn log_config(config: &ReplicatorConfig) {
@@ -181,11 +203,17 @@ fn log_destination_config(config: &DestinationConfig) {
                     catalog_uri,
                     warehouse_name,
                     namespace,
+                    s3_access_key_id: _,
+                    s3_secret_access_key: _,
+                    s3_endpoint,
                 },
         } => {
             debug!(
                 catalog_uri,
-                warehouse_name, namespace, "using generic REST iceberg destination config"
+                warehouse_name,
+                namespace,
+                s3_endpoint,
+                "using generic REST iceberg destination config"
             )
         }
     }
