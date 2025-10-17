@@ -480,6 +480,8 @@ pub fn id_column_schema() -> ColumnSchema {
         modifier: -1,
         nullable: false,
         primary: true,
+        ordinal_position: 1,
+        primary_key_position: Some(1),
     }
 }
 

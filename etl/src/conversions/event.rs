@@ -1,7 +1,5 @@
 use core::str;
-use etl_postgres::types::{
-    ColumnSchema, TableId, TableName, TableSchema, convert_type_oid_to_type,
-};
+use etl_postgres::types::{ColumnSchema, TableId, TableSchema};
 use postgres_replication::protocol;
 use std::sync::Arc;
 use tokio_postgres::types::PgLsn;
@@ -10,8 +8,7 @@ use crate::conversions::text::{default_value_for_type, parse_cell_from_postgres_
 use crate::error::{ErrorKind, EtlResult};
 use crate::store::schema::SchemaStore;
 use crate::types::{
-    BeginEvent, Cell, CommitEvent, DeleteEvent, InsertEvent, RelationEvent, TableRow,
-    TruncateEvent, UpdateEvent,
+    BeginEvent, Cell, CommitEvent, DeleteEvent, InsertEvent, TableRow, TruncateEvent, UpdateEvent,
 };
 use crate::{bail, etl_error};
 
@@ -48,37 +45,6 @@ pub fn parse_event_from_commit_message(
         end_lsn: commit_body.end_lsn(),
         timestamp: commit_body.timestamp(),
     }
-}
-
-/// Creates a [`RelationEvent`] from Postgres protocol data.
-///
-/// This method parses the replication protocol relation message and builds
-/// a complete table schema for use in interpreting subsequent data events.
-pub fn parse_event_from_relation_message(
-    start_lsn: PgLsn,
-    commit_lsn: PgLsn,
-    relation_body: &protocol::RelationBody,
-) -> EtlResult<RelationEvent> {
-    let table_name = TableName::new(
-        relation_body.namespace()?.to_string(),
-        relation_body.name()?.to_string(),
-    );
-    let column_schemas = relation_body
-        .columns()
-        .iter()
-        .map(build_column_schema)
-        .collect::<Result<Vec<ColumnSchema>, _>>()?;
-    let table_schema = TableSchema::new(
-        TableId::new(relation_body.rel_id()),
-        table_name,
-        column_schemas,
-    );
-
-    Ok(RelationEvent {
-        start_lsn,
-        commit_lsn,
-        table_schema,
-    })
 }
 
 /// Converts a Postgres insert message into an [`InsertEvent`].
@@ -249,20 +215,6 @@ where
 /// This helper method extracts column metadata from the replication protocol
 /// and converts it into the internal column schema representation. Some fields
 /// like nullable status have default values due to protocol limitations.
-fn build_column_schema(column: &protocol::Column) -> EtlResult<ColumnSchema> {
-    Ok(ColumnSchema::new(
-        column.name()?.to_string(),
-        convert_type_oid_to_type(column.type_id() as u32),
-        column.type_modifier(),
-        // We do not have access to this information, so we default it to `false`.
-        // TODO: figure out how to fill this value correctly or how to handle the missing value
-        //  better.
-        false,
-        // Currently 1 means that the column is part of the primary key.
-        column.flags() == 1,
-    ))
-}
-
 /// Converts Postgres tuple data into a [`TableRow`] using column schemas.
 ///
 /// This function transforms raw tuple data from the replication protocol into
