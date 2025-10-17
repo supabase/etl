@@ -98,7 +98,8 @@ pub async fn start_replicator_with_config(
                 s3_access_key_id.expose_secret().to_string(),
                 s3_secret_access_key.expose_secret().to_string(),
                 s3_region.clone(),
-            );
+            )
+            .await?;
             let destination =
                 IcebergDestination::new(client, namespace.clone(), state_store.clone());
 
@@ -117,7 +118,8 @@ pub async fn start_replicator_with_config(
                 catalog_uri.clone(),
                 warehouse_name.clone(),
                 HashMap::new(),
-            );
+            )
+            .await?;
             let destination =
                 IcebergDestination::new(client, namespace.clone(), state_store.clone());
 
