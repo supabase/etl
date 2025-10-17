@@ -67,8 +67,10 @@ impl IcebergClient {
     ) -> Result<Self, iceberg::Error> {
         props.insert(REST_CATALOG_PROP_URI.to_string(), catalog_uri);
         props.insert(REST_CATALOG_PROP_WAREHOUSE.to_string(), warehouse_name);
+
         let builder = RestCatalogBuilder::default();
         let catalog = builder.load("RestCatalog", props).await?;
+
         Ok(IcebergClient {
             catalog: Arc::new(catalog),
         })

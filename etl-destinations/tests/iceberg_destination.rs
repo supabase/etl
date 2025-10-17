@@ -41,7 +41,9 @@ async fn table_copy() {
     let lakekeeper_client = LakekeeperClient::new(LAKEKEEPER_URL);
     let (warehouse_name, warehouse_id) = lakekeeper_client.create_warehouse().await.unwrap();
     let client =
-        IcebergClient::new_with_rest_catalog(get_catalog_url(), warehouse_name, create_props());
+        IcebergClient::new_with_rest_catalog(get_catalog_url(), warehouse_name, create_props())
+            .await
+            .unwrap();
 
     let namespace = "test_namespace";
     client.create_namespace_if_missing(namespace).await.unwrap();
@@ -163,7 +165,9 @@ async fn cdc_streaming() {
     let lakekeeper_client = LakekeeperClient::new(LAKEKEEPER_URL);
     let (warehouse_name, warehouse_id) = lakekeeper_client.create_warehouse().await.unwrap();
     let client =
-        IcebergClient::new_with_rest_catalog(get_catalog_url(), warehouse_name, create_props());
+        IcebergClient::new_with_rest_catalog(get_catalog_url(), warehouse_name, create_props())
+            .await
+            .unwrap();
 
     let namespace = "test_namespace";
     client.create_namespace_if_missing(namespace).await.unwrap();
@@ -439,7 +443,9 @@ async fn cdc_streaming_with_truncate() {
     let lakekeeper_client = LakekeeperClient::new(LAKEKEEPER_URL);
     let (warehouse_name, warehouse_id) = lakekeeper_client.create_warehouse().await.unwrap();
     let client =
-        IcebergClient::new_with_rest_catalog(get_catalog_url(), warehouse_name, create_props());
+        IcebergClient::new_with_rest_catalog(get_catalog_url(), warehouse_name, create_props())
+            .await
+            .unwrap();
 
     let namespace = "test_namespace";
     client.create_namespace_if_missing(namespace).await.unwrap();
