@@ -147,7 +147,7 @@ impl From<IcebergConfig> for IcebergConfigWithoutSecrets {
                 catalog_uri,
                 warehouse_name,
                 namespace,
-                s3_endpoint
+                s3_endpoint,
             },
         }
     }
