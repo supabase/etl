@@ -65,7 +65,9 @@ async fn async_main() -> anyhow::Result<()> {
 
 /// Initializes Sentry error tracking and performance monitoring.
 ///
-/// Configures Sentry with environment-specific settings and service tagging.
+/// Configures Sentry with environment-specific settings, service tagging, and a custom
+/// traces sampler that reduces sampling for high-frequency endpoints like `/metrics` and
+/// `/health_check`.
 /// Returns `None` if Sentry configuration is not provided.
 fn init_sentry() -> anyhow::Result<Option<sentry::ClientInitGuard>> {
     if let Ok(config) = load_config::<ApiConfig>()
@@ -77,7 +79,26 @@ fn init_sentry() -> anyhow::Result<Option<sentry::ClientInitGuard>> {
         let guard = sentry::init(sentry::ClientOptions {
             dsn: Some(sentry_config.dsn.parse()?),
             environment: Some(environment.to_string().into()),
-            traces_sample_rate: 0.01,
+            traces_sampler: Some(Arc::new(|ctx: &sentry::TransactionContext| {
+                let transaction_name = ctx.name();
+                let endpoint = transaction_name
+                    .split_once(' ')
+                    .and_then(|(method, path)| {
+                        if path.starts_with('/') && method.chars().all(|c| c.is_ascii_uppercase()) {
+                            Some(path)
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or(transaction_name);
+
+                // Sample verbose endpoints at a much lower rate (0.1%)
+                match endpoint {
+                    "/metrics" | "/health_check" => 0.001,
+                    // All other endpoints sampled at 1%
+                    _ => 0.01,
+                }
+            })),
             max_request_body_size: sentry::MaxRequestBodySize::Always,
             integrations: vec![Arc::new(
                 sentry::integrations::panic::PanicIntegration::new(),
