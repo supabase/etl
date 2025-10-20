@@ -82,6 +82,12 @@ pub enum IcebergConfig {
         warehouse_name: String,
         /// Iceberg catalog namespace where tables will be created
         namespace: String,
+        /// The S3 access key id
+        s3_access_key_id: SecretString,
+        /// The S3 secret access key
+        s3_secret_access_key: SecretString,
+        /// The S3 endpoint
+        s3_endpoint: String,
     },
 }
 
@@ -108,6 +114,8 @@ pub enum IcebergConfigWithoutSecrets {
         warehouse_name: String,
         /// Iceberg catalog namespace where tables will be created
         namespace: String,
+        /// The S3 endpoint
+        s3_endpoint: String,
     },
 }
 
@@ -132,10 +140,14 @@ impl From<IcebergConfig> for IcebergConfigWithoutSecrets {
                 catalog_uri,
                 warehouse_name,
                 namespace,
+                s3_access_key_id: _,
+                s3_secret_access_key: _,
+                s3_endpoint,
             } => IcebergConfigWithoutSecrets::Rest {
                 catalog_uri,
                 warehouse_name,
                 namespace,
+                s3_endpoint,
             },
         }
     }
