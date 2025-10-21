@@ -13,7 +13,8 @@ use etl::types::PipelineId;
 use etl_telemetry::tracing::init_test_tracing;
 use rand::random;
 
-/// The initial copy for a partitioned table (published via root) copies all existing rows.
+/// Tests that initial COPY replicates all rows from a partitioned table.
+/// Only the parent table is tracked, not individual child partitions.
 #[tokio::test(flavor = "multi_thread")]
 async fn partitioned_table_copy_replicates_existing_data() {
     init_test_tracing();
@@ -100,7 +101,8 @@ async fn partitioned_table_copy_replicates_existing_data() {
     );
 }
 
-/// The initial copy completes and CDC streams new rows from newly added partitions.
+/// Tests that CDC streams inserts to partitions created after pipeline startup.
+/// New partitions are automatically included without publication changes.
 #[tokio::test(flavor = "multi_thread")]
 async fn partitioned_table_copy_and_streams_new_data_from_new_partition() {
     init_test_tracing();
@@ -204,7 +206,8 @@ async fn partitioned_table_copy_and_streams_new_data_from_new_partition() {
     assert_eq!(parent_inserts.len(), 1);
 }
 
-/// Dropping a child partition must not emit DELETE/TRUNCATE events.
+/// Tests that detaching and dropping a partition does not emit DELETE or TRUNCATE events.
+/// Partition management is a DDL operation, not DML, so no data events should be generated.
 #[tokio::test(flavor = "multi_thread")]
 async fn partition_drop_does_not_emit_delete_or_truncate() {
     init_test_tracing();
@@ -302,9 +305,9 @@ async fn partition_drop_does_not_emit_delete_or_truncate() {
     );
 }
 
-/// When a partition is detached from a partitioned table with an explicit publication,
-/// inserts into the detached partition should NOT be replicated since only the parent
-/// table is in the publication.
+/// Tests that detached partitions are not replicated with explicit publications.
+/// Once detached, the partition becomes independent and is not in the publication since
+/// only the parent table was explicitly added. Inserts to detached partitions are not replicated.
 #[tokio::test(flavor = "multi_thread")]
 async fn partition_detach_with_explicit_publication_does_not_replicate_detached_inserts() {
     init_test_tracing();
@@ -433,10 +436,9 @@ async fn partition_detach_with_explicit_publication_does_not_replicate_detached_
     );
 }
 
-// TODO: validate.
-/// When a partition is detached from a partitioned table with FOR ALL TABLES publication,
-/// the detached partition becomes a standalone table. However, the running pipeline won't
-/// automatically discover it without re-scanning. This test validates the catalog state.
+/// Tests catalog state when a partition is detached with FOR ALL TABLES publication.
+/// The detached partition appears in pg_publication_tables but is not automatically discovered
+/// by the running pipeline. Table discovery only happens at pipeline startup, not during execution.
 #[tokio::test(flavor = "multi_thread")]
 async fn partition_detach_with_all_tables_publication_catalog_state() {
     init_test_tracing();
@@ -588,10 +590,9 @@ async fn partition_detach_with_all_tables_publication_catalog_state() {
     );
 }
 
-
-// TODO: validate.
-/// When a partition is detached and then the pipeline restarts (simulating table re-discovery),
-/// the detached partition should be discovered as a new standalone table if using FOR ALL TABLES.
+/// Tests that a detached partition is discovered as a new table after pipeline restart.
+/// With FOR ALL TABLES publication, the detached partition is re-discovered during table
+/// scanning at startup and its data is replicated.
 #[tokio::test(flavor = "multi_thread")]
 async fn partition_detach_with_all_tables_and_pipeline_restart_discovers_new_table() {
     init_test_tracing();
