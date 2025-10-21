@@ -116,6 +116,28 @@ CREATE PUBLICATION all_tables FOR ALL TABLES;
 CREATE PUBLICATION inserts_only FOR TABLE users WITH (publish = 'insert');
 ```
 
+#### Partitioned Tables
+
+If you want to replicate partitioned tables, you must use `publish_via_partition_root = true` when creating your publication. This option tells Postgres to treat the [partitioned table as a single table](https://www.postgresql.org/docs/current/sql-createpublication.html#SQL-CREATEPUBLICATION-PARAMS-WITH-PUBLISH-VIA-PARTITION-ROOT) from the replication perspective, rather than replicating each partition individually. All changes to any partition will be published as changes to the parent table:
+
+```sql
+-- Create publication with partitioned table support
+CREATE PUBLICATION my_publication FOR TABLE users, orders WITH (publish_via_partition_root = true);
+
+-- For all tables including partitioned tables
+CREATE PUBLICATION all_tables FOR ALL TABLES WITH (publish_via_partition_root = true);
+```
+
+**Limitation:** If this option is enabled, `TRUNCATE` operations performed directly on individual partitions are not replicated. To replicate a truncate operation, you must execute it on the parent table instead:
+
+```sql
+-- This will NOT be replicated
+TRUNCATE TABLE orders_2024_q1;
+
+-- This WILL be replicated
+TRUNCATE TABLE orders;
+```
+
 ### Managing Publications
 
 ```sql
