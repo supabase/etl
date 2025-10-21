@@ -701,7 +701,7 @@ impl PgReplicationClient {
                         else (a.attnum in (select * from pub_attrs))
                         end
                     )"
-                        .to_string(),
+                    .to_string(),
                 )
             } else {
                 // Postgres 14 or earlier or unknown, fallback to no column-level filtering
