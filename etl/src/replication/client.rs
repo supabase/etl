@@ -417,42 +417,45 @@ impl PgReplicationClient {
     ) -> EtlResult<Vec<TableId>> {
         let query = format!(
             r#"
-            with recursive has_rel as (
-                -- Check if publication uses pg_publication_rel (explicit table list)
-                select exists(
+            with recursive pub_tables as (
+                -- Get explicit tables from publication (for regular publications)
+                select r.prrelid as oid
+                from pg_publication_rel r
+                join pg_publication p on p.oid = r.prpubid
+                where p.pubname = {pub}
+
+                union all
+
+                -- Get tables from pg_publication_tables (for ALL TABLES publications)
+                -- Only executes if pg_publication_rel is empty for this publication
+                select c.oid
+                from pg_publication_tables pt
+                join pg_class c on c.relname = pt.tablename
+                join pg_namespace n on n.oid = c.relnamespace and n.nspname = pt.schemaname
+                where pt.pubname = {pub}
+                and not exists (
                     select 1
                     from pg_publication_rel r
                     join pg_publication p on p.oid = r.prpubid
                     where p.pubname = {pub}
-                ) as has
+                )
             ),
-            pub_tables as (
-                -- If publication has explicit relations, use pg_publication_rel
-                select r.prrelid as oid
-                from pg_publication_rel r
-                join pg_publication p on p.oid = r.prpubid
-                where p.pubname = {pub} and (select has from has_rel)
-                union all
-                -- Otherwise, use pg_publication_tables (for ALL TABLES publications)
-                select c.oid
-                from pg_publication_tables pt
-                join pg_class c on c.relname = pt.tablename
-                where pt.pubname = {pub} and not (select has from has_rel)
-            ),
-            recurse(relid) as (
-                -- Start with all published tables
+            hierarchy(relid) as (
+                -- Start with published tables
                 select oid from pub_tables
-                union all
-                -- Recursively walk up to find parent tables in inheritance hierarchy
+
+                union
+
+                -- Recursively find parent tables in inheritance hierarchy
                 select i.inhparent
                 from pg_inherits i
-                join recurse r on r.relid = i.inhrelid
+                join hierarchy h on h.relid = i.inhrelid
             )
             -- Return only root tables (those without a parent)
             select distinct relid as oid
-            from recurse r
+            from hierarchy
             where not exists (
-                select 1 from pg_inherits i where i.inhrelid = r.relid
+                select 1 from pg_inherits i where i.inhrelid = hierarchy.relid
             );
             "#,
             pub = quote_literal(publication_name)
@@ -687,19 +690,30 @@ impl PgReplicationClient {
                 (
                     format!(
                         "with pub_attrs as (
-                            select unnest(r.prattrs)
+                            select unnest(r.prattrs) as attnum
                             from pg_publication_rel r
-                            left join pg_publication p on r.prpubid = p.oid
+                            join pg_publication p on r.prpubid = p.oid
                             where p.pubname = {publication}
                             and r.prrelid = {table_id}
+                        ),
+                        -- For partitioned tables, also check if parent is in publication
+                        pub_parent as (
+                            select 1 as exists_in_pub
+                            from pg_inherits i
+                            join pg_publication_rel r on r.prrelid = i.inhparent
+                            join pg_publication p on p.oid = r.prpubid
+                            where i.inhrelid = {table_id}
+                            and p.pubname = {publication}
                         )",
                         publication = quote_literal(publication),
                     ),
                     "and (
+                        -- Include column if it's in pub_attrs or if parent table is in publication
                         case (select count(*) from pub_attrs)
                         when 0 then true
-                        else (a.attnum in (select * from pub_attrs))
+                        else (a.attnum in (select attnum from pub_attrs))
                         end
+                        or exists(select 1 from pub_parent)
                     )"
                     .to_string(),
                 )
@@ -710,7 +724,7 @@ impl PgReplicationClient {
                         "with pub_table as (
                             select 1 as exists_in_pub
                             from pg_publication_rel r
-                            left join pg_publication p on r.prpubid = p.oid
+                            join pg_publication p on r.prpubid = p.oid
                             where p.pubname = {publication}
                             and r.prrelid = {table_id}
                         )",

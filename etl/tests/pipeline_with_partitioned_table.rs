@@ -13,7 +13,6 @@ use etl::types::PipelineId;
 use etl_telemetry::tracing::init_test_tracing;
 use rand::random;
 
-/// Initial copy for a partitioned table (published via root) copies all existing rows.
 #[tokio::test(flavor = "multi_thread")]
 async fn partitioned_table_copy_replicates_existing_data() {
     init_test_tracing();
@@ -100,7 +99,6 @@ async fn partitioned_table_copy_replicates_existing_data() {
     );
 }
 
-/// Initial copy completes and CDC streams new rows from newly added partitions.
 #[tokio::test(flavor = "multi_thread")]
 async fn partitioned_table_copy_and_streams_new_data_from_new_partition() {
     init_test_tracing();
@@ -204,7 +202,6 @@ async fn partitioned_table_copy_and_streams_new_data_from_new_partition() {
     assert_eq!(parent_inserts.len(), 1);
 }
 
-/// Dropping a child partition must not emit DELETE/TRUNCATE events.
 #[tokio::test(flavor = "multi_thread")]
 async fn partition_drop_does_not_emit_delete_or_truncate() {
     init_test_tracing();
