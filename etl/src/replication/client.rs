@@ -695,25 +695,14 @@ impl PgReplicationClient {
                             join pg_publication p on r.prpubid = p.oid
                             where p.pubname = {publication}
                             and r.prrelid = {table_id}
-                        ),
-                        -- For partitioned tables, also check if parent is in publication
-                        pub_parent as (
-                            select 1 as exists_in_pub
-                            from pg_inherits i
-                            join pg_publication_rel r on r.prrelid = i.inhparent
-                            join pg_publication p on p.oid = r.prpubid
-                            where i.inhrelid = {table_id}
-                            and p.pubname = {publication}
                         )",
                         publication = quote_literal(publication),
                     ),
                     "and (
-                        -- Include column if it's in pub_attrs or if parent table is in publication
                         case (select count(*) from pub_attrs)
                         when 0 then true
                         else (a.attnum in (select attnum from pub_attrs))
                         end
-                        or exists(select 1 from pub_parent)
                     )"
                     .to_string(),
                 )
