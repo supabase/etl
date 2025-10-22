@@ -3,6 +3,7 @@ use etl_config::shared::PipelineConfig;
 use etl_postgres::replication::slots::EtlReplicationSlot;
 use etl_postgres::replication::worker::WorkerType;
 use etl_postgres::types::TableId;
+use metrics::counter;
 use std::ops::Deref;
 use std::sync::Arc;
 use std::time::Duration;
@@ -15,6 +16,7 @@ use crate::concurrency::shutdown::{ShutdownResult, ShutdownRx};
 use crate::concurrency::signal::SignalTx;
 use crate::destination::Destination;
 use crate::error::{ErrorKind, EtlError, EtlResult};
+use crate::metrics::{ERROR_HANDLED_LABEL, ETL_PIPELINE_ERRORS_TOTAL, PIPELINE_ID_LABEL};
 use crate::replication::apply::{
     ApplyLoopAction, ApplyLoopHook, ApplyLoopResult, start_apply_loop,
 };
@@ -464,6 +466,14 @@ where
                 }
                 Err(err) => {
                     error!("table sync worker failed for table {}: {}", table_id, err);
+
+                    // Record the error metric with handled=true (caught and handled).
+                    counter!(
+                        ETL_PIPELINE_ERRORS_TOTAL,
+                        ERROR_HANDLED_LABEL => "true",
+                        PIPELINE_ID_LABEL => pipeline_id.to_string(),
+                    )
+                    .increment(1);
 
                     // Convert error to table replication error to determine retry policy.
                     let mut table_error =
