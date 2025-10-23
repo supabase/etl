@@ -10,7 +10,6 @@ pub const ETL_TRANSACTION_DURATION_SECONDS: &str = "etl_transaction_duration_sec
 pub const ETL_TRANSACTION_SIZE: &str = "etl_transaction_size";
 pub const ETL_COPIED_TABLE_ROW_SIZE_BYTES: &str = "etl_copied_table_row_size_bytes";
 pub const ETL_TABLE_COPY_DURATION_SECONDS: &str = "etl_table_copy_duration_seconds";
-pub const ETL_PIPELINE_ERRORS_TOTAL: &str = "etl_pipeline_errors_total";
 pub const ETL_EVENTS_RECEIVED_TOTAL: &str = "etl_events_received_total";
 pub const ETL_EVENTS_PROCESSED_TOTAL: &str = "etl_events_processed_total";
 
@@ -24,8 +23,6 @@ pub const ACTION_LABEL: &str = "action";
 pub const DESTINATION_LABEL: &str = "destination";
 /// Label key for pipeline id.
 pub const PIPELINE_ID_LABEL: &str = "pipeline_id";
-/// Label key for whether the error was handled (caught) or unhandled (bubbled up).
-pub const ERROR_HANDLED_LABEL: &str = "handled";
 
 /// Register metrics emitted by etl. This should be called before starting a pipeline.
 /// It is safe to call this method multiple times. It is guaranteed to register the
@@ -66,12 +63,6 @@ pub(crate) fn register_metrics() {
             ETL_TABLE_COPY_DURATION_SECONDS,
             Unit::Seconds,
             "Duration in seconds to complete initial table copy from DataSync to FinishedCopy phase"
-        );
-
-        describe_counter!(
-            ETL_PIPELINE_ERRORS_TOTAL,
-            Unit::Count,
-            "Total number of errors in the pipeline, labeled by error_kind and handled status"
         );
 
         describe_counter!(

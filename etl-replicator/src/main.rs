@@ -4,12 +4,10 @@
 //! and routes data to configured destinations. Includes telemetry, error handling, and
 //! graceful shutdown capabilities.
 
-use etl::metrics::{ERROR_HANDLED_LABEL, ETL_PIPELINE_ERRORS_TOTAL, PIPELINE_ID_LABEL};
 use etl_config::Environment;
 use etl_config::shared::ReplicatorConfig;
 use etl_telemetry::metrics::init_metrics;
 use etl_telemetry::tracing::init_tracing_with_top_level_fields;
-use metrics::counter;
 use std::sync::Arc;
 use tracing::{error, info};
 
@@ -65,18 +63,8 @@ fn main() -> anyhow::Result<()> {
 /// Launches the replicator with the provided configuration and captures any errors
 /// to Sentry before propagating them up.
 async fn async_main(replicator_config: ReplicatorConfig) -> anyhow::Result<()> {
-    let pipeline_id = replicator_config.pipeline.id;
-
     // We start the replicator and catch any errors.
     if let Err(err) = start_replicator_with_config(replicator_config).await {
-        // Record the error metric with handled=false (unhandled, bubbled up).
-        counter!(
-            ETL_PIPELINE_ERRORS_TOTAL,
-            ERROR_HANDLED_LABEL => "false",
-            PIPELINE_ID_LABEL => pipeline_id.to_string(),
-        )
-        .increment(1);
-
         sentry::capture_error(&*err);
         error!("an error occurred in the replicator: {err}");
         return Err(err);
