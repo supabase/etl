@@ -78,6 +78,7 @@ jobs:
           file: ${{ inputs.file }}
           push: ${{ inputs.push }}
           tags: ${{ steps.meta.outputs.tags }}
+          platforms: linux/amd64,linux/arm64
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
