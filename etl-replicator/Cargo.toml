@@ -21,6 +21,6 @@ sqlx = { workspace = true, features = [
     "postgres",
     "migrate",
 ] }
-thiserror = { workspace = true }
+
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal"] }
 tracing = { workspace = true, default-features = true }
