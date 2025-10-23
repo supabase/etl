@@ -3,7 +3,6 @@ use etl_config::shared::PipelineConfig;
 use etl_postgres::replication::slots::EtlReplicationSlot;
 use etl_postgres::replication::worker::WorkerType;
 use etl_postgres::types::TableId;
-use metrics::counter;
 use std::ops::Deref;
 use std::sync::Arc;
 use std::time::Duration;

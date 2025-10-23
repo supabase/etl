@@ -294,7 +294,7 @@ where
                 ETL_TABLE_COPY_DURATION_SECONDS,
                 PIPELINE_ID_LABEL => pipeline_id.to_string(),
             )
-                .record(table_copy_duration);
+            .record(table_copy_duration);
 
             info!(
                 "completed table copy for table {} ({} rows copied)",
