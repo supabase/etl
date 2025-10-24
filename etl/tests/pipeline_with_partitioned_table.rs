@@ -266,7 +266,7 @@ async fn partition_drop_does_not_emit_delete_or_truncate() {
         .map(|v| v.len())
         .unwrap_or(0);
 
-    // Detach and drop one child partition (DDL should not generate DML events)
+    // Detach and drop one child partition (DDL should not generate DML events).
     let child_p1_name = format!("{}_{}", table_name.name, "p1");
     let child_p1_qualified = format!("{}.{}", table_name.schema, child_p1_name);
     database
@@ -323,7 +323,7 @@ async fn partition_detach_with_explicit_publication_does_not_replicate_detached_
 
     let p1_table_id = partition_table_ids[0];
 
-    // Insert initial data into both partitions
+    // Insert initial data into both partitions.
     database
         .run_sql(&format!(
             "insert into {} (data, partition_key) values \
@@ -333,7 +333,7 @@ async fn partition_detach_with_explicit_publication_does_not_replicate_detached_
         .await
         .unwrap();
 
-    // Create explicit publication for parent table only
+    // Create explicit publication for parent table only.
     let publication_name = "test_partitioned_pub_detach".to_string();
     database
         .create_publication(&publication_name, std::slice::from_ref(&table_name))
@@ -359,7 +359,7 @@ async fn partition_detach_with_explicit_publication_does_not_replicate_detached_
     pipeline.start().await.unwrap();
     parent_sync_done.notified().await;
 
-    // Verify initial sync copied both rows
+    // Verify initial sync copied both rows.
     let table_rows = destination.get_table_rows().await;
     assert_eq!(table_rows.len(), 1);
     let parent_rows: usize = table_rows
@@ -371,7 +371,7 @@ async fn partition_detach_with_explicit_publication_does_not_replicate_detached_
         "Parent table should have 2 rows from initial COPY"
     );
 
-    // Detach partition p1 from parent
+    // Detach partition p1 from parent.
     let child_p1_name = format!("{}_{}", table_name.name, "p1");
     let child_p1_qualified = format!("{}.{}", table_name.schema, child_p1_name);
     database
@@ -383,7 +383,7 @@ async fn partition_detach_with_explicit_publication_does_not_replicate_detached_
         .await
         .unwrap();
 
-    // Insert into the detached partition (should NOT be replicated)
+    // Insert into the detached partition (should NOT be replicated).
     database
         .run_sql(&format!(
             "insert into {} (data, partition_key) values ('detached_event', 25)",
@@ -392,7 +392,7 @@ async fn partition_detach_with_explicit_publication_does_not_replicate_detached_
         .await
         .unwrap();
 
-    // Insert into parent table (should be replicated to remaining partition p2)
+    // Insert into the parent table (should be replicated to remaining partition p2).
     database
         .run_sql(&format!(
             "insert into {} (data, partition_key) values ('parent_event', 125)",
@@ -401,7 +401,7 @@ async fn partition_detach_with_explicit_publication_does_not_replicate_detached_
         .await
         .unwrap();
 
-    // Wait for the parent table insert to be replicated
+    // Wait for the parent table insert to be replicated.
     let inserts_notify = destination
         .wait_for_events_count(vec![(EventType::Insert, 1)])
         .await;
@@ -413,7 +413,7 @@ async fn partition_detach_with_explicit_publication_does_not_replicate_detached_
     let events = destination.get_events().await;
     let grouped = group_events_by_type_and_table_id(&events);
 
-    // Parent table should have 1 insert event (the insert after detachment)
+    // Parent table should have 1 insert event (the insert after detachment).
     let parent_inserts = grouped
         .get(&(EventType::Insert, parent_table_id))
         .cloned()
@@ -424,7 +424,7 @@ async fn partition_detach_with_explicit_publication_does_not_replicate_detached_
         "Parent table should have exactly 1 CDC insert event"
     );
 
-    // Detached partition should have NO insert events
+    // Detached partition should have NO insert events.
     let detached_inserts = grouped
         .get(&(EventType::Insert, p1_table_id))
         .cloned()
@@ -454,7 +454,7 @@ async fn partition_detach_with_all_tables_publication_catalog_state() {
 
     let p1_table_id = partition_table_ids[0];
 
-    // Insert initial data
+    // Insert initial data.
     database
         .run_sql(&format!(
             "insert into {} (data, partition_key) values \
@@ -464,7 +464,7 @@ async fn partition_detach_with_all_tables_publication_catalog_state() {
         .await
         .unwrap();
 
-    // Create FOR ALL TABLES publication
+    // Create FOR ALL TABLES publication.
     let publication_name = "test_all_tables_pub_detach".to_string();
     database
         .run_sql(&format!(
@@ -493,7 +493,7 @@ async fn partition_detach_with_all_tables_publication_catalog_state() {
     pipeline.start().await.unwrap();
     parent_sync_done.notified().await;
 
-    // Verify initial state: only parent table is tracked
+    // Verify the initial state. The parent table is the only table tracked.
     let table_states_before = state_store.get_table_replication_states().await;
     assert!(
         table_states_before.contains_key(&parent_table_id),
@@ -504,7 +504,7 @@ async fn partition_detach_with_all_tables_publication_catalog_state() {
         "Child partition p1 should NOT be tracked separately before detachment"
     );
 
-    // Detach partition p1
+    // Detach partition p1.
     let child_p1_name = format!("{}_{}", table_name.name, "p1");
     let child_p1_qualified = format!("{}.{}", table_name.schema, child_p1_name);
     database
@@ -516,8 +516,7 @@ async fn partition_detach_with_all_tables_publication_catalog_state() {
         .await
         .unwrap();
 
-    // Verify catalog state: detached partition is now a standalone table
-    // Check pg_inherits - should no longer have parent relationship
+    // Verify catalog state. The detached partition is now a standalone table.
     let inherits_check = database
         .client
         .as_ref()
@@ -534,7 +533,7 @@ async fn partition_detach_with_all_tables_publication_catalog_state() {
         "Detached partition should have no parent in pg_inherits"
     );
 
-    // Check pg_publication_tables - with FOR ALL TABLES, detached partition should appear
+    // Check pg_publication_tables. With FOR ALL TABLES, the detached partition should appear.
     let pub_tables_check = database
         .client
         .as_ref()
@@ -552,7 +551,7 @@ async fn partition_detach_with_all_tables_publication_catalog_state() {
         "Detached partition should appear in pg_publication_tables for ALL TABLES publication"
     );
 
-    // Insert into detached partition
+    // Insert into detached partition.
     database
         .run_sql(&format!(
             "insert into {} (data, partition_key) values ('detached_event', 25)",
@@ -562,13 +561,13 @@ async fn partition_detach_with_all_tables_publication_catalog_state() {
         .unwrap();
 
     // Note: The running pipeline won't automatically discover the detached partition
-    // without re-scanning for new tables. This is expected behavior - table discovery
+    // without re-scanning for new tables. This is expected behavior, the table discovery
     // happens at pipeline start or explicit refresh.
 
     let _ = pipeline.shutdown_and_wait().await;
 
     // The pipeline state should still only track the parent table (not the detached partition)
-    // because it hasn't re-scanned for new tables
+    // because it hasn't re-scanned for new tables.
     let table_states_after = state_store.get_table_replication_states().await;
     assert!(
         table_states_after.contains_key(&parent_table_id),
@@ -576,7 +575,7 @@ async fn partition_detach_with_all_tables_publication_catalog_state() {
     );
 
     // The detached partition insert should NOT be replicated in this pipeline run
-    // because the pipeline hasn't discovered it as a new table
+    // because the pipeline hasn't discovered it as a new table.
     let events = destination.get_events().await;
     let grouped = group_events_by_type_and_table_id(&events);
     let detached_inserts = grouped
@@ -608,7 +607,7 @@ async fn partition_detach_with_all_tables_and_pipeline_restart_discovers_new_tab
 
     let p1_table_id = partition_table_ids[0];
 
-    // Insert initial data
+    // Insert initial data.
     database
         .run_sql(&format!(
             "insert into {} (data, partition_key) values \
@@ -618,7 +617,7 @@ async fn partition_detach_with_all_tables_and_pipeline_restart_discovers_new_tab
         .await
         .unwrap();
 
-    // Create FOR ALL TABLES publication
+    // Create FOR ALL TABLES publication.
     let publication_name = "test_all_tables_restart".to_string();
     database
         .run_sql(&format!(
@@ -631,7 +630,7 @@ async fn partition_detach_with_all_tables_and_pipeline_restart_discovers_new_tab
     let state_store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
 
-    // Start pipeline and wait for initial sync
+    // Start pipeline and wait for initial sync.
     let parent_sync_done = state_store
         .notify_on_table_state_type(parent_table_id, TableReplicationPhaseType::SyncDone)
         .await;
@@ -648,10 +647,10 @@ async fn partition_detach_with_all_tables_and_pipeline_restart_discovers_new_tab
     pipeline.start().await.unwrap();
     parent_sync_done.notified().await;
 
-    // Shutdown the first pipeline
+    // Shutdown the first pipeline.
     let _ = pipeline.shutdown_and_wait().await;
 
-    // Detach partition p1
+    // Detach partition p1.
     let child_p1_name = format!("{}_{}", table_name.name, "p1");
     let child_p1_qualified = format!("{}.{}", table_name.schema, child_p1_name);
     database
@@ -663,7 +662,7 @@ async fn partition_detach_with_all_tables_and_pipeline_restart_discovers_new_tab
         .await
         .unwrap();
 
-    // Insert into detached partition (while pipeline is stopped)
+    // Insert into detached partition (while pipeline is stopped).
     database
         .run_sql(&format!(
             "insert into {} (data, partition_key) values ('detached_event', 25)",
@@ -672,7 +671,7 @@ async fn partition_detach_with_all_tables_and_pipeline_restart_discovers_new_tab
         .await
         .unwrap();
 
-    // Restart the pipeline - it should now discover the detached partition as a new table
+    // Restart the pipeline. It should now discover the detached partition as a new table.
     let state_store2 = NotifyingStore::new();
     let destination2 = TestDestinationWrapper::wrap(MemoryDestination::new());
 
@@ -691,19 +690,19 @@ async fn partition_detach_with_all_tables_and_pipeline_restart_discovers_new_tab
 
     pipeline2.start().await.unwrap();
 
-    // Wait for detached partition to be synced
+    // Wait for the detached partition to be synced.
     detached_sync_done.notified().await;
 
     let _ = pipeline2.shutdown_and_wait().await;
 
-    // Verify the detached partition was discovered and synced
+    // Verify the detached partition was discovered and synced.
     let table_states = state_store2.get_table_replication_states().await;
     assert!(
         table_states.contains_key(&p1_table_id),
         "Detached partition should be discovered as a standalone table after restart"
     );
 
-    // Verify the data from the detached partition was copied
+    // Verify the data from the detached partition was copied.
     let table_rows = destination2.get_table_rows().await;
     let detached_rows: usize = table_rows
         .get(&p1_table_id)
