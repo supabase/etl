@@ -89,7 +89,9 @@ impl<G: GenericClient> PgDatabase<G> {
                 Some(schema_name) => format!(
                     "create publication {publication_name} for tables in schema {schema_name} with (publish_via_partition_root = true)"
                 ),
-                None => format!("create publication {publication_name} for all tables with (publish_via_partition_root = true)"),
+                None => format!(
+                    "create publication {publication_name} for all tables with (publish_via_partition_root = true)"
+                ),
             };
 
             client.execute(&create_publication_query, &[]).await?;
@@ -115,8 +117,9 @@ impl<G: GenericClient> PgDatabase<G> {
                     }
                 }
                 None => {
-                    let create_publication_query =
-                        format!("create publication {publication_name} for all tables with (publish_via_partition_root = true)");
+                    let create_publication_query = format!(
+                        "create publication {publication_name} for all tables with (publish_via_partition_root = true)"
+                    );
                     client.execute(&create_publication_query, &[]).await?;
                 }
             }
