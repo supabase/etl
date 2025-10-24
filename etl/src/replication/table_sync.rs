@@ -240,6 +240,7 @@ where
                             WORKER_TYPE_LABEL => "table_sync",
                             ACTION_LABEL => "table_copy",
                             PIPELINE_ID_LABEL => pipeline_id.to_string(),
+                            DESTINATION_LABEL => D::name(),
                         )
                         .increment(table_rows_copied_batch as u64);
 

@@ -680,6 +680,7 @@ where
                     WORKER_TYPE_LABEL => "apply",
                     ACTION_LABEL => "table_streaming",
                     PIPELINE_ID_LABEL => pipeline_id.to_string(),
+                    DESTINATION_LABEL => D::name(),
                 )
                 .increment(1);
             }
