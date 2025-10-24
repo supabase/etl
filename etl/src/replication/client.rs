@@ -642,6 +642,7 @@ impl PgReplicationClient {
     ) -> EtlResult<TableSchema> {
         let table_name = self.get_table_name(table_id).await?;
         let column_schemas = self.get_column_schemas(table_id, publication).await?;
+        warn!("COLUMNS SCHEMAS FOR TABLE {:?}: {:?}", table_name, column_schemas);
 
         Ok(TableSchema {
             name: table_name,
@@ -706,20 +707,27 @@ impl PgReplicationClient {
         {
             return PublicationFilter {
                 ctes: format!(
-                    "pub_attrs as (
-                        select unnest(r.prattrs) as attnum
-                        from pg_publication_rel r
-                        join pg_publication p on r.prpubid = p.oid
+                    "pub_info as (
+                        select p.puballtables, r.prattrs
+                        from pg_publication p
+                        left join pg_publication_rel r on r.prpubid = p.oid and r.prrelid = {table_id}
                         where p.pubname = {publication}
-                            and r.prrelid = {table_id}
+                    ),
+                    pub_attrs as (
+                        select unnest(prattrs) as attnum
+                        from pub_info
+                        where prattrs is not null
                     ),",
                     publication = quote_literal(publication_name),
                 ),
                 predicate: "and (
-                        case (select count(*) from pub_attrs)
-                            when 0 then true
-                            else (a.attnum in (select attnum from pub_attrs))
-                        end
+                        (select puballtables from pub_info) = true
+                        or (
+                            case (select count(*) from pub_attrs)
+                                when 0 then true
+                                else (a.attnum in (select attnum from pub_attrs))
+                            end
+                        )
                     )"
                 .to_string(),
             };
@@ -728,7 +736,12 @@ impl PgReplicationClient {
         // Postgres 14 and earlier: table-level filtering only
         PublicationFilter {
             ctes: format!(
-                "pub_table as (
+                "pub_info as (
+                    select p.puballtables
+                    from pg_publication p
+                    where p.pubname = {publication}
+                ),
+                pub_table as (
                     select 1 as exists_in_pub
                     from pg_publication_rel r
                     join pg_publication p on r.prpubid = p.oid
@@ -737,7 +750,7 @@ impl PgReplicationClient {
                 ),",
                 publication = quote_literal(publication_name),
             ),
-            predicate: "and (select count(*) from pub_table) > 0".to_string(),
+            predicate: "and ((select puballtables from pub_info) = true or (select count(*) from pub_table) > 0)".to_string(),
         }
     }
 
