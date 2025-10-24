@@ -440,7 +440,7 @@ async fn partition_detach_with_explicit_publication_does_not_replicate_detached_
 /// The detached partition appears in pg_publication_tables but is not automatically discovered
 /// by the running pipeline. Table discovery only happens at pipeline startup, not during execution.
 #[tokio::test(flavor = "multi_thread")]
-async fn partition_detach_with_all_tables_publication_catalog_state() {
+async fn partition_detach_with_all_tables_publication_does_not_replicate_detached_inserts() {
     init_test_tracing();
     let database = spawn_source_database().await;
 
@@ -593,7 +593,7 @@ async fn partition_detach_with_all_tables_publication_catalog_state() {
 /// With FOR ALL TABLES publication, the detached partition is re-discovered during table
 /// scanning at startup and its data is replicated.
 #[tokio::test(flavor = "multi_thread")]
-async fn partition_detach_with_all_tables_and_pipeline_restart_discovers_new_table() {
+async fn partition_detach_with_all_tables_publication_does_replicate_detached_inserts_on_restart() {
     init_test_tracing();
     let database = spawn_source_database().await;
 
