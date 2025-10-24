@@ -13,6 +13,7 @@ use etl::types::PipelineId;
 use etl::types::TableId;
 use etl_telemetry::tracing::init_test_tracing;
 use rand::random;
+use tokio_postgres::types::Type;
 
 /// Tests that initial COPY replicates all rows from a partitioned table.
 /// Only the parent table is tracked, not individual child partitions.
@@ -70,13 +71,43 @@ async fn partitioned_table_copy_replicates_existing_data() {
 
     let _ = pipeline.shutdown_and_wait().await;
 
+    // Verify table schema was discovered correctly.
+    let table_schemas = state_store.get_table_schemas().await;
+    assert!(table_schemas.contains_key(&parent_table_id));
+
+    let parent_schema = &table_schemas[&parent_table_id];
+    assert_eq!(parent_schema.id, parent_table_id);
+    assert_eq!(parent_schema.name, table_name);
+
+    // Verify columns are correctly discovered.
+    assert_eq!(parent_schema.column_schemas.len(), 3);
+
+    // Check id column (added by default).
+    let id_column = &parent_schema.column_schemas[0];
+    assert_eq!(id_column.name, "id");
+    assert_eq!(id_column.typ, Type::INT8);
+    assert!(!id_column.nullable);
+    assert!(id_column.primary);
+
+    // Check data column.
+    let data_column = &parent_schema.column_schemas[1];
+    assert_eq!(data_column.name, "data");
+    assert_eq!(data_column.typ, Type::TEXT);
+    assert!(!data_column.nullable);
+    assert!(!data_column.primary);
+
+    // Check partition_key column.
+    let partition_key_column = &parent_schema.column_schemas[2];
+    assert_eq!(partition_key_column.name, "partition_key");
+    assert_eq!(partition_key_column.typ, Type::INT4);
+    assert!(!partition_key_column.nullable);
+    assert!(partition_key_column.primary);
+
     let table_rows = destination.get_table_rows().await;
     let total_rows: usize = table_rows.values().map(|rows| rows.len()).sum();
-
     assert_eq!(total_rows, 3);
 
     let table_states = state_store.get_table_replication_states().await;
-
     assert!(table_states.contains_key(&parent_table_id));
     assert_eq!(table_states.len(), 1);
 
@@ -1137,8 +1168,7 @@ async fn nested_partitioned_table_copy_and_cdc() {
     database
         .run_sql(&format!(
             "create table {} partition of {} for values from (1) to (50)",
-            p2_sub1_qualified,
-            p2_qualified
+            p2_sub1_qualified, p2_qualified
         ))
         .await
         .unwrap();
@@ -1148,8 +1178,7 @@ async fn nested_partitioned_table_copy_and_cdc() {
     database
         .run_sql(&format!(
             "create table {} partition of {} for values from (50) to (100)",
-            p2_sub2_qualified,
-            p2_qualified
+            p2_sub2_qualified, p2_qualified
         ))
         .await
         .unwrap();
@@ -1195,6 +1224,45 @@ async fn nested_partitioned_table_copy_and_cdc() {
     pipeline.start().await.unwrap();
 
     parent_sync_done.notified().await;
+
+    // Verify table schema was discovered correctly for nested partitioned table.
+    let table_schemas = state_store.get_table_schemas().await;
+    assert!(table_schemas.contains_key(&parent_table_id));
+
+    let parent_schema = &table_schemas[&parent_table_id];
+    assert_eq!(parent_schema.id, parent_table_id);
+    assert_eq!(parent_schema.name, table_name);
+
+    // Verify columns are correctly discovered (includes sub_partition_key).
+    assert_eq!(parent_schema.column_schemas.len(), 4);
+
+    // Check id column (added by default).
+    let id_column = &parent_schema.column_schemas[0];
+    assert_eq!(id_column.name, "id");
+    assert_eq!(id_column.typ, Type::INT8);
+    assert!(!id_column.nullable);
+    assert!(id_column.primary);
+
+    // Check data column.
+    let data_column = &parent_schema.column_schemas[1];
+    assert_eq!(data_column.name, "data");
+    assert_eq!(data_column.typ, Type::TEXT);
+    assert!(!data_column.nullable);
+    assert!(!data_column.primary);
+
+    // Check partition_key column (part of primary key).
+    let partition_key_column = &parent_schema.column_schemas[2];
+    assert_eq!(partition_key_column.name, "partition_key");
+    assert_eq!(partition_key_column.typ, Type::INT4);
+    assert!(!partition_key_column.nullable);
+    assert!(partition_key_column.primary);
+
+    // Check sub_partition_key column (part of primary key for nested partitioning).
+    let sub_partition_key_column = &parent_schema.column_schemas[3];
+    assert_eq!(sub_partition_key_column.name, "sub_partition_key");
+    assert_eq!(sub_partition_key_column.typ, Type::INT4);
+    assert!(!sub_partition_key_column.nullable);
+    assert!(sub_partition_key_column.primary);
 
     // Verify initial COPY replicated all 3 rows.
     let table_rows = destination.get_table_rows().await;
