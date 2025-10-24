@@ -22,15 +22,20 @@ pub fn group_events_by_type_and_table_id(
     for event in events {
         let event_type = EventType::from(event);
         // This grouping only works on simple DML operations.
-        let table_id = match event {
-            Event::Insert(event) => Some(event.table_id),
-            Event::Update(event) => Some(event.table_id),
-            Event::Delete(event) => Some(event.table_id),
-            _ => None,
+        let table_ids = match event {
+            Event::Insert(event) => vec![event.table_id],
+            Event::Update(event) => vec![event.table_id],
+            Event::Delete(event) => vec![event.table_id],
+            Event::Truncate(event) => event
+                .rel_ids
+                .iter()
+                .map(|rel_id| TableId::new(*rel_id))
+                .collect(),
+            _ => vec![],
         };
-        if let Some(table_id) = table_id {
+        for table_id in table_ids {
             grouped
-                .entry((event_type, table_id))
+                .entry((event_type.clone(), table_id))
                 .or_insert_with(Vec::new)
                 .push(event.clone());
         }

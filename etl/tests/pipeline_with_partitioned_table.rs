@@ -163,6 +163,11 @@ async fn partitioned_table_copy_and_streams_new_data_from_new_partition() {
         .await
         .unwrap();
 
+    // Wait for CDC to deliver the new row.
+    let inserts_notify = destination
+        .wait_for_events_count(vec![(EventType::Insert, 1)])
+        .await;
+
     database
         .run_sql(&format!(
             "insert into {} (data, partition_key) values ('event3', 250)",
@@ -171,10 +176,6 @@ async fn partitioned_table_copy_and_streams_new_data_from_new_partition() {
         .await
         .unwrap();
 
-    // Wait for CDC to deliver the new row.
-    let inserts_notify = destination
-        .wait_for_events_count(vec![(EventType::Insert, 1)])
-        .await;
     inserts_notify.notified().await;
 
     let _ = pipeline.shutdown_and_wait().await;
@@ -305,6 +306,160 @@ async fn partition_drop_does_not_emit_delete_or_truncate() {
     );
 }
 
+/// Tests that issuing a TRUNCATE at the parent table level does emit a TRUNCATE event in the
+/// replication stream.
+#[tokio::test(flavor = "multi_thread")]
+async fn parent_table_truncate_does_emit_truncate_event() {
+    init_test_tracing();
+    let database = spawn_source_database().await;
+
+    let table_name = test_table_name("partitioned_events_truncate");
+    let partition_specs = [("p1", "from (1) to (100)"), ("p2", "from (100) to (200)")];
+
+    let (parent_table_id, _partition_table_ids) =
+        create_partitioned_table(&database, table_name.clone(), &partition_specs)
+            .await
+            .expect("Failed to create partitioned table");
+
+    database
+        .run_sql(&format!(
+            "insert into {} (data, partition_key) values \
+             ('event1', 50), ('event2', 150)",
+            table_name.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+
+    let publication_name = "test_partitioned_pub_truncate".to_string();
+    database
+        .create_publication(&publication_name, std::slice::from_ref(&table_name))
+        .await
+        .expect("Failed to create publication");
+
+    let state_store = NotifyingStore::new();
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
+
+    let parent_sync_done = state_store
+        .notify_on_table_state_type(parent_table_id, TableReplicationPhaseType::SyncDone)
+        .await;
+
+    let pipeline_id: PipelineId = random();
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        publication_name,
+        state_store.clone(),
+        destination.clone(),
+    );
+
+    pipeline.start().await.unwrap();
+
+    parent_sync_done.notified().await;
+
+    // Wait for the parent table truncate to be replicated.
+    let truncate_notify = destination
+        .wait_for_events_count(vec![(EventType::Truncate, 1)])
+        .await;
+
+    // We truncate the parent table.
+    database
+        .run_sql(&format!(
+            "truncate table {}",
+            table_name.as_quoted_identifier(),
+        ))
+        .await
+        .unwrap();
+
+    truncate_notify.notified().await;
+
+    let _ = pipeline.shutdown_and_wait().await;
+
+    let events = destination.get_events().await;
+    let grouped_events = group_events_by_type_and_table_id(&events);
+    let truncate_events = grouped_events
+        .get(&(EventType::Truncate, parent_table_id))
+        .map(|v| v.len())
+        .unwrap_or(0);
+
+    assert_eq!(
+        truncate_events, 1,
+        "Truncate event should be emitted for the parent table"
+    );
+}
+
+/// Tests that issuing a TRUNCATE at the child table level does NOT emit a TRUNCATE event in the
+/// replication stream.
+#[tokio::test(flavor = "multi_thread")]
+async fn child_table_truncate_does_not_emit_truncate_event() {
+    init_test_tracing();
+    let database = spawn_source_database().await;
+
+    let table_name = test_table_name("partitioned_events_truncate");
+    let partition_specs = [("p1", "from (1) to (100)"), ("p2", "from (100) to (200)")];
+
+    let (parent_table_id, _partition_table_ids) =
+        create_partitioned_table(&database, table_name.clone(), &partition_specs)
+            .await
+            .expect("Failed to create partitioned table");
+
+    database
+        .run_sql(&format!(
+            "insert into {} (data, partition_key) values \
+             ('event1', 50), ('event2', 150)",
+            table_name.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+
+    let publication_name = "test_partitioned_pub_truncate".to_string();
+    database
+        .create_publication(&publication_name, std::slice::from_ref(&table_name))
+        .await
+        .expect("Failed to create publication");
+
+    let state_store = NotifyingStore::new();
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
+
+    let parent_sync_done = state_store
+        .notify_on_table_state_type(parent_table_id, TableReplicationPhaseType::SyncDone)
+        .await;
+
+    let pipeline_id: PipelineId = random();
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        publication_name,
+        state_store.clone(),
+        destination.clone(),
+    );
+
+    pipeline.start().await.unwrap();
+
+    parent_sync_done.notified().await;
+
+    // We truncate the child table.
+    let child_p1_name = format!("{}_{}", table_name.name, "p1");
+    let child_p1_qualified = format!("{}.{}", table_name.schema, child_p1_name);
+    database
+        .run_sql(&format!("truncate table {child_p1_qualified}",))
+        .await
+        .unwrap();
+
+    let _ = pipeline.shutdown_and_wait().await;
+
+    let events = destination.get_events().await;
+    let grouped_events = group_events_by_type_and_table_id(&events);
+    let truncate_events = grouped_events
+        .get(&(EventType::Truncate, parent_table_id))
+        .map(|v| v.len())
+        .unwrap_or(0);
+
+    assert_eq!(
+        truncate_events, 0,
+        "Truncate event should be not emitted for the child table"
+    );
+}
+
 /// Tests that detached partitions are not replicated with explicit publications.
 /// Once detached, the partition becomes independent and is not in the publication since
 /// only the parent table was explicitly added. Inserts to detached partitions are not replicated.
@@ -391,6 +546,11 @@ async fn partition_detach_with_explicit_publication_does_not_replicate_detached_
         .await
         .unwrap();
 
+    // Wait for the parent table insert to be replicated.
+    let inserts_notify = destination
+        .wait_for_events_count(vec![(EventType::Insert, 1)])
+        .await;
+
     // Insert into the parent table (should be replicated to remaining partition p2).
     database
         .run_sql(&format!(
@@ -400,10 +560,6 @@ async fn partition_detach_with_explicit_publication_does_not_replicate_detached_
         .await
         .unwrap();
 
-    // Wait for the parent table insert to be replicated.
-    let inserts_notify = destination
-        .wait_for_events_count(vec![(EventType::Insert, 1)])
-        .await;
     inserts_notify.notified().await;
 
     let _ = pipeline.shutdown_and_wait().await;
@@ -831,6 +987,11 @@ async fn partition_detach_with_schema_publication_does_not_replicate_detached_in
         .await
         .unwrap();
 
+    // Wait for the parent table insert to be replicated.
+    let inserts_notify = destination
+        .wait_for_events_count(vec![(EventType::Insert, 1)])
+        .await;
+
     // Insert into parent table (should be replicated).
     database
         .run_sql(&format!(
@@ -840,10 +1001,6 @@ async fn partition_detach_with_schema_publication_does_not_replicate_detached_in
         .await
         .unwrap();
 
-    // Wait for the parent table insert to be replicated.
-    let inserts_notify = destination
-        .wait_for_events_count(vec![(EventType::Insert, 1)])
-        .await;
     inserts_notify.notified().await;
 
     let _ = pipeline.shutdown_and_wait().await;
