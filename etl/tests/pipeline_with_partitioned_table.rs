@@ -10,6 +10,7 @@ use etl::test_utils::test_destination_wrapper::TestDestinationWrapper;
 use etl::test_utils::test_schema::create_partitioned_table;
 use etl::types::EventType;
 use etl::types::PipelineId;
+use etl::types::TableId;
 use etl_telemetry::tracing::init_test_tracing;
 use rand::random;
 
@@ -1063,6 +1064,184 @@ async fn partition_detach_with_schema_publication_does_replicate_detached_insert
         .map(|rows| rows.len())
         .unwrap_or(0);
     assert_eq!(detached_rows, 2);
+}
+
+/// Tests that nested partitions (sub-partitioned tables) work correctly.
+/// Creates a two-level partition hierarchy where one partition is itself partitioned,
+/// and verifies that both initial COPY and CDC streaming work correctly.
+/// Only the top-level parent table should be tracked in the pipeline state.
+#[tokio::test(flavor = "multi_thread")]
+async fn nested_partitioned_table_copy_and_cdc() {
+    init_test_tracing();
+    let database = spawn_source_database().await;
+
+    let table_name = test_table_name("nested_partitioned_events");
+
+    // Create the parent partitioned table (Level 1).
+    // Primary key must include all partitioning columns used at any level.
+    database
+        .run_sql(&format!(
+            "create table {} (
+                id bigserial,
+                data text NOT NULL,
+                partition_key integer NOT NULL,
+                sub_partition_key integer NOT NULL,
+                primary key (id, partition_key, sub_partition_key)
+            ) partition by range (partition_key)",
+            table_name.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+
+    // Get parent table ID.
+    let parent_row = database
+        .client
+        .as_ref()
+        .unwrap()
+        .query_one(
+            "select c.oid from pg_class c join pg_namespace n on n.oid = c.relnamespace
+             where n.nspname = $1 and c.relname = $2",
+            &[&table_name.schema, &table_name.name],
+        )
+        .await
+        .unwrap();
+    let parent_table_id: TableId = parent_row.get(0);
+
+    // Create first partition (simple leaf partition) (Level 2a).
+    let p1_name = format!("{}_{}", table_name.name, "p1");
+    let p1_qualified = format!("{}.{}", table_name.schema, p1_name);
+    database
+        .run_sql(&format!(
+            "create table {} partition of {} for values from (1) to (100)",
+            p1_qualified,
+            table_name.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+
+    // Create second partition that is itself partitioned (Level 2b).
+    let p2_name = format!("{}_{}", table_name.name, "p2");
+    let p2_qualified = format!("{}.{}", table_name.schema, p2_name);
+    database
+        .run_sql(&format!(
+            "create table {} partition of {} for values from (100) to (200) partition by range (sub_partition_key)",
+            p2_qualified,
+            table_name.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+
+    // Create sub-partitions of p2 (Level 3).
+    let p2_sub1_name = format!("{}_{}", p2_name, "sub1");
+    let p2_sub1_qualified = format!("{}.{}", table_name.schema, p2_sub1_name);
+    database
+        .run_sql(&format!(
+            "create table {} partition of {} for values from (1) to (50)",
+            p2_sub1_qualified,
+            p2_qualified
+        ))
+        .await
+        .unwrap();
+
+    let p2_sub2_name = format!("{}_{}", p2_name, "sub2");
+    let p2_sub2_qualified = format!("{}.{}", table_name.schema, p2_sub2_name);
+    database
+        .run_sql(&format!(
+            "create table {} partition of {} for values from (50) to (100)",
+            p2_sub2_qualified,
+            p2_qualified
+        ))
+        .await
+        .unwrap();
+
+    // Insert initial data into different partitions:
+    // - event_p1 goes to the simple leaf partition p1
+    // - event_p2_sub1 goes to nested partition p2 -> p2_sub1
+    // - event_p2_sub2 goes to nested partition p2 -> p2_sub2
+    database
+        .run_sql(&format!(
+            "insert into {} (data, partition_key, sub_partition_key) values
+             ('event_p1', 50, 25),
+             ('event_p2_sub1', 150, 25),
+             ('event_p2_sub2', 150, 75)",
+            table_name.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+
+    let publication_name = "test_nested_partitioned_pub".to_string();
+    database
+        .create_publication(&publication_name, std::slice::from_ref(&table_name))
+        .await
+        .unwrap();
+
+    let state_store = NotifyingStore::new();
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
+
+    // Register notification for initial copy completion.
+    let parent_sync_done = state_store
+        .notify_on_table_state_type(parent_table_id, TableReplicationPhaseType::SyncDone)
+        .await;
+
+    let pipeline_id: PipelineId = random();
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        publication_name,
+        state_store.clone(),
+        destination.clone(),
+    );
+
+    pipeline.start().await.unwrap();
+
+    parent_sync_done.notified().await;
+
+    // Verify initial COPY replicated all 3 rows.
+    let table_rows = destination.get_table_rows().await;
+    let total_rows: usize = table_rows.values().map(|rows| rows.len()).sum();
+    assert_eq!(total_rows, 3);
+
+    // Verify only the parent table is tracked (not intermediate or leaf partitions).
+    let table_states = state_store.get_table_replication_states().await;
+    assert!(table_states.contains_key(&parent_table_id));
+    assert_eq!(table_states.len(), 1);
+
+    // Verify all rows are attributed to the parent table.
+    let parent_table_rows = table_rows
+        .iter()
+        .filter(|(table_id, _)| **table_id == parent_table_id)
+        .map(|(_, rows)| rows.len())
+        .sum::<usize>();
+    assert_eq!(parent_table_rows, 3);
+
+    // Insert new rows into different nested partitions.
+    let inserts_notify = destination
+        .wait_for_events_count(vec![(EventType::Insert, 3)])
+        .await;
+
+    database
+        .run_sql(&format!(
+            "insert into {} (data, partition_key, sub_partition_key) values
+             ('new_event_p1', 75, 30),
+             ('new_event_p2_sub1', 125, 40),
+             ('new_event_p2_sub2', 175, 60)",
+            table_name.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+
+    inserts_notify.notified().await;
+
+    let _ = pipeline.shutdown_and_wait().await;
+
+    // Verify that events were captured for all nested partitions.
+    let events = destination.get_events().await;
+    let grouped = group_events_by_type_and_table_id(&events);
+    let parent_inserts = grouped
+        .get(&(EventType::Insert, parent_table_id))
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(parent_inserts.len(), 3);
 }
 
 /// Tests that the system doesn't crash abruptly `publish_via_partition_root` is set to `false`.
