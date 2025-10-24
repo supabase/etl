@@ -30,12 +30,11 @@ async fn partitioned_table_copy_replicates_existing_data() {
     let (parent_table_id, _partition_table_ids) =
         create_partitioned_table(&database, table_name.clone(), &partition_specs)
             .await
-            .expect("Failed to create partitioned table");
+            .unwrap();
 
     database
         .run_sql(&format!(
-            "insert into {} (data, partition_key) values
-             ('event1', 50), ('event2', 150), ('event3', 250)",
+            "insert into {} (data, partition_key) values ('event1', 50), ('event2', 150), ('event3', 250)",
             table_name.as_quoted_identifier()
         ))
         .await
@@ -45,7 +44,7 @@ async fn partitioned_table_copy_replicates_existing_data() {
     database
         .create_publication(&publication_name, std::slice::from_ref(&table_name))
         .await
-        .expect("Failed to create publication");
+        .unwrap();
 
     let state_store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
@@ -73,32 +72,19 @@ async fn partitioned_table_copy_replicates_existing_data() {
     let table_rows = destination.get_table_rows().await;
     let total_rows: usize = table_rows.values().map(|rows| rows.len()).sum();
 
-    assert_eq!(
-        total_rows, 3,
-        "Expected 3 rows synced (one per partition), but got {total_rows}"
-    );
+    assert_eq!(total_rows, 3);
 
     let table_states = state_store.get_table_replication_states().await;
 
-    assert!(
-        table_states.contains_key(&parent_table_id),
-        "Parent table should be tracked in state"
-    );
-    assert_eq!(
-        table_states.len(),
-        1,
-        "Only the parent table should be tracked in state"
-    );
+    assert!(table_states.contains_key(&parent_table_id));
+    assert_eq!(table_states.len(), 1);
 
     let parent_table_rows = table_rows
         .iter()
         .filter(|(table_id, _)| **table_id == parent_table_id)
         .map(|(_, rows)| rows.len())
         .sum::<usize>();
-    assert_eq!(
-        parent_table_rows, 3,
-        "Parent table should contain all rows when publishing via root"
-    );
+    assert_eq!(parent_table_rows, 3);
 }
 
 /// Tests that CDC streams inserts to partitions created after pipeline startup.
@@ -114,12 +100,11 @@ async fn partitioned_table_copy_and_streams_new_data_from_new_partition() {
     let (parent_table_id, _initial_partition_table_ids) =
         create_partitioned_table(&database, table_name.clone(), &initial_partition_specs)
             .await
-            .expect("Failed to create initial partitioned table");
+            .unwrap();
 
     database
         .run_sql(&format!(
-            "insert into {} (data, partition_key) values \
-             ('event1', 50), ('event2', 150)",
+            "insert into {} (data, partition_key) values ('event1', 50), ('event2', 150)",
             table_name.as_quoted_identifier()
         ))
         .await
@@ -129,7 +114,7 @@ async fn partitioned_table_copy_and_streams_new_data_from_new_partition() {
     database
         .create_publication(&publication_name, std::slice::from_ref(&table_name))
         .await
-        .expect("Failed to create publication");
+        .unwrap();
 
     let state_store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
@@ -182,10 +167,7 @@ async fn partitioned_table_copy_and_streams_new_data_from_new_partition() {
 
     let table_rows = destination.get_table_rows().await;
     let total_rows: usize = table_rows.values().map(|rows| rows.len()).sum();
-    assert_eq!(
-        total_rows, 2,
-        "Expected 2 rows synced from initial copy, got {total_rows}"
-    );
+    assert_eq!(total_rows, 2);
 
     let table_states = state_store.get_table_replication_states().await;
     assert!(table_states.contains_key(&parent_table_id));
@@ -220,12 +202,11 @@ async fn partition_drop_does_not_emit_delete_or_truncate() {
     let (parent_table_id, _partition_table_ids) =
         create_partitioned_table(&database, table_name.clone(), &partition_specs)
             .await
-            .expect("Failed to create partitioned table");
+            .unwrap();
 
     database
         .run_sql(&format!(
-            "insert into {} (data, partition_key) values \
-             ('event1', 50), ('event2', 150)",
+            "insert into {} (data, partition_key) values ('event1', 50), ('event2', 150)",
             table_name.as_quoted_identifier()
         ))
         .await
@@ -235,7 +216,7 @@ async fn partition_drop_does_not_emit_delete_or_truncate() {
     database
         .create_publication(&publication_name, std::slice::from_ref(&table_name))
         .await
-        .expect("Failed to create publication");
+        .unwrap();
 
     let state_store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
@@ -258,28 +239,28 @@ async fn partition_drop_does_not_emit_delete_or_truncate() {
 
     let events_before = destination.get_events().await;
     let grouped_before = group_events_by_type_and_table_id(&events_before);
-    let del_before = grouped_before
+    let delete_count_before = grouped_before
         .get(&(EventType::Delete, parent_table_id))
         .map(|v| v.len())
         .unwrap_or(0);
-    let trunc_before = grouped_before
+    let truncate_count_before = grouped_before
         .get(&(EventType::Truncate, parent_table_id))
         .map(|v| v.len())
         .unwrap_or(0);
 
     // Detach and drop one child partition (DDL should not generate DML events).
-    let child_p1_name = format!("{}_{}", table_name.name, "p1");
-    let child_p1_qualified = format!("{}.{}", table_name.schema, child_p1_name);
+    let partition_p1_name = format!("{}_{}", table_name.name, "p1");
+    let partition_p1_qualified = format!("{}.{}", table_name.schema, partition_p1_name);
     database
         .run_sql(&format!(
             "alter table {} detach partition {}",
             table_name.as_quoted_identifier(),
-            child_p1_qualified
+            partition_p1_qualified
         ))
         .await
         .unwrap();
     database
-        .run_sql(&format!("drop table {child_p1_qualified}"))
+        .run_sql(&format!("drop table {partition_p1_qualified}"))
         .await
         .unwrap();
 
@@ -287,23 +268,17 @@ async fn partition_drop_does_not_emit_delete_or_truncate() {
 
     let events_after = destination.get_events().await;
     let grouped_after = group_events_by_type_and_table_id(&events_after);
-    let del_after = grouped_after
+    let delete_count_after = grouped_after
         .get(&(EventType::Delete, parent_table_id))
         .map(|v| v.len())
         .unwrap_or(0);
-    let trunc_after = grouped_after
+    let truncate_count_after = grouped_after
         .get(&(EventType::Truncate, parent_table_id))
         .map(|v| v.len())
         .unwrap_or(0);
 
-    assert_eq!(
-        del_after, del_before,
-        "Partition drop must not emit DELETE events"
-    );
-    assert_eq!(
-        trunc_after, trunc_before,
-        "Partition drop must not emit TRUNCATE events"
-    );
+    assert_eq!(delete_count_after, delete_count_before);
+    assert_eq!(truncate_count_after, truncate_count_before);
 }
 
 /// Tests that issuing a TRUNCATE at the parent table level does emit a TRUNCATE event in the
@@ -319,12 +294,11 @@ async fn parent_table_truncate_does_emit_truncate_event() {
     let (parent_table_id, _partition_table_ids) =
         create_partitioned_table(&database, table_name.clone(), &partition_specs)
             .await
-            .expect("Failed to create partitioned table");
+            .unwrap();
 
     database
         .run_sql(&format!(
-            "insert into {} (data, partition_key) values \
-             ('event1', 50), ('event2', 150)",
+            "insert into {} (data, partition_key) values ('event1', 50), ('event2', 150)",
             table_name.as_quoted_identifier()
         ))
         .await
@@ -334,7 +308,7 @@ async fn parent_table_truncate_does_emit_truncate_event() {
     database
         .create_publication(&publication_name, std::slice::from_ref(&table_name))
         .await
-        .expect("Failed to create publication");
+        .unwrap();
 
     let state_store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
@@ -376,15 +350,12 @@ async fn parent_table_truncate_does_emit_truncate_event() {
 
     let events = destination.get_events().await;
     let grouped_events = group_events_by_type_and_table_id(&events);
-    let truncate_events = grouped_events
+    let truncate_count = grouped_events
         .get(&(EventType::Truncate, parent_table_id))
         .map(|v| v.len())
         .unwrap_or(0);
 
-    assert_eq!(
-        truncate_events, 1,
-        "Truncate event should be emitted for the parent table"
-    );
+    assert_eq!(truncate_count, 1);
 }
 
 /// Tests that issuing a TRUNCATE at the child table level does NOT emit a TRUNCATE event in the
@@ -400,12 +371,11 @@ async fn child_table_truncate_does_not_emit_truncate_event() {
     let (parent_table_id, _partition_table_ids) =
         create_partitioned_table(&database, table_name.clone(), &partition_specs)
             .await
-            .expect("Failed to create partitioned table");
+            .unwrap();
 
     database
         .run_sql(&format!(
-            "insert into {} (data, partition_key) values \
-             ('event1', 50), ('event2', 150)",
+            "insert into {} (data, partition_key) values ('event1', 50), ('event2', 150)",
             table_name.as_quoted_identifier()
         ))
         .await
@@ -415,7 +385,7 @@ async fn child_table_truncate_does_not_emit_truncate_event() {
     database
         .create_publication(&publication_name, std::slice::from_ref(&table_name))
         .await
-        .expect("Failed to create publication");
+        .unwrap();
 
     let state_store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
@@ -438,10 +408,10 @@ async fn child_table_truncate_does_not_emit_truncate_event() {
     parent_sync_done.notified().await;
 
     // We truncate the child table.
-    let child_p1_name = format!("{}_{}", table_name.name, "p1");
-    let child_p1_qualified = format!("{}.{}", table_name.schema, child_p1_name);
+    let partition_p1_name = format!("{}_{}", table_name.name, "p1");
+    let partition_p1_qualified = format!("{}.{}", table_name.schema, partition_p1_name);
     database
-        .run_sql(&format!("truncate table {child_p1_qualified}",))
+        .run_sql(&format!("truncate table {partition_p1_qualified}"))
         .await
         .unwrap();
 
@@ -449,15 +419,12 @@ async fn child_table_truncate_does_not_emit_truncate_event() {
 
     let events = destination.get_events().await;
     let grouped_events = group_events_by_type_and_table_id(&events);
-    let truncate_events = grouped_events
+    let truncate_count = grouped_events
         .get(&(EventType::Truncate, parent_table_id))
         .map(|v| v.len())
         .unwrap_or(0);
 
-    assert_eq!(
-        truncate_events, 0,
-        "Truncate event should be not emitted for the child table"
-    );
+    assert_eq!(truncate_count, 0);
 }
 
 /// Tests that detached partitions are not replicated with explicit publications.
@@ -474,15 +441,14 @@ async fn partition_detach_with_explicit_publication_does_not_replicate_detached_
     let (parent_table_id, partition_table_ids) =
         create_partitioned_table(&database, table_name.clone(), &partition_specs)
             .await
-            .expect("Failed to create partitioned table");
+            .unwrap();
 
     let p1_table_id = partition_table_ids[0];
 
     // Insert initial data into both partitions.
     database
         .run_sql(&format!(
-            "insert into {} (data, partition_key) values \
-             ('event1', 50), ('event2', 150)",
+            "insert into {} (data, partition_key) values ('event1', 50), ('event2', 150)",
             table_name.as_quoted_identifier()
         ))
         .await
@@ -493,7 +459,7 @@ async fn partition_detach_with_explicit_publication_does_not_replicate_detached_
     database
         .create_publication(&publication_name, std::slice::from_ref(&table_name))
         .await
-        .expect("Failed to create publication");
+        .unwrap();
 
     let state_store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
@@ -521,19 +487,16 @@ async fn partition_detach_with_explicit_publication_does_not_replicate_detached_
         .get(&parent_table_id)
         .map(|rows| rows.len())
         .unwrap_or(0);
-    assert_eq!(
-        parent_rows, 2,
-        "Parent table should have 2 rows from initial COPY"
-    );
+    assert_eq!(parent_rows, 2);
 
     // Detach partition p1 from parent.
-    let child_p1_name = format!("{}_{}", table_name.name, "p1");
-    let child_p1_qualified = format!("{}.{}", table_name.schema, child_p1_name);
+    let partition_p1_name = format!("{}_{}", table_name.name, "p1");
+    let partition_p1_qualified = format!("{}.{}", table_name.schema, partition_p1_name);
     database
         .run_sql(&format!(
             "alter table {} detach partition {}",
             table_name.as_quoted_identifier(),
-            child_p1_qualified
+            partition_p1_qualified
         ))
         .await
         .unwrap();
@@ -541,7 +504,7 @@ async fn partition_detach_with_explicit_publication_does_not_replicate_detached_
     // Insert into the detached partition (should NOT be replicated).
     database
         .run_sql(&format!(
-            "insert into {child_p1_qualified} (data, partition_key) values ('detached_event', 25)"
+            "insert into {partition_p1_qualified} (data, partition_key) values ('detached_event', 25)"
         ))
         .await
         .unwrap();
@@ -573,22 +536,14 @@ async fn partition_detach_with_explicit_publication_does_not_replicate_detached_
         .get(&(EventType::Insert, parent_table_id))
         .cloned()
         .unwrap_or_default();
-    assert_eq!(
-        parent_inserts.len(),
-        1,
-        "Parent table should have exactly 1 CDC insert event"
-    );
+    assert_eq!(parent_inserts.len(), 1);
 
     // Detached partition should have NO insert events.
     let detached_inserts = grouped
         .get(&(EventType::Insert, p1_table_id))
         .cloned()
         .unwrap_or_default();
-    assert_eq!(
-        detached_inserts.len(),
-        0,
-        "Detached partition inserts should NOT be replicated"
-    );
+    assert_eq!(detached_inserts.len(), 0);
 }
 
 /// Tests catalog state when a partition is detached with FOR ALL TABLES publication.
@@ -605,15 +560,14 @@ async fn partition_detach_with_all_tables_publication_does_not_replicate_detache
     let (parent_table_id, partition_table_ids) =
         create_partitioned_table(&database, table_name.clone(), &partition_specs)
             .await
-            .expect("Failed to create partitioned table");
+            .unwrap();
 
     let p1_table_id = partition_table_ids[0];
 
     // Insert initial data.
     database
         .run_sql(&format!(
-            "insert into {} (data, partition_key) values \
-             ('event1', 50), ('event2', 150)",
+            "insert into {} (data, partition_key) values ('event1', 50), ('event2', 150)",
             table_name.as_quoted_identifier()
         ))
         .await
@@ -647,23 +601,17 @@ async fn partition_detach_with_all_tables_publication_does_not_replicate_detache
 
     // Verify the initial state. The parent table is the only table tracked.
     let table_states_before = state_store.get_table_replication_states().await;
-    assert!(
-        table_states_before.contains_key(&parent_table_id),
-        "Parent table should be tracked before detachment"
-    );
-    assert!(
-        !table_states_before.contains_key(&p1_table_id),
-        "Child partition p1 should NOT be tracked separately before detachment"
-    );
+    assert!(table_states_before.contains_key(&parent_table_id));
+    assert!(!table_states_before.contains_key(&p1_table_id));
 
     // Detach partition p1.
-    let child_p1_name = format!("{}_{}", table_name.name, "p1");
-    let child_p1_qualified = format!("{}.{}", table_name.schema, child_p1_name);
+    let partition_p1_name = format!("{}_{}", table_name.name, "p1");
+    let partition_p1_qualified = format!("{}.{}", table_name.schema, partition_p1_name);
     database
         .run_sql(&format!(
             "alter table {} detach partition {}",
             table_name.as_quoted_identifier(),
-            child_p1_qualified
+            partition_p1_qualified
         ))
         .await
         .unwrap();
@@ -680,10 +628,7 @@ async fn partition_detach_with_all_tables_publication_does_not_replicate_detache
         .await
         .unwrap();
     let inherits_count: i64 = inherits_check[0].get("cnt");
-    assert_eq!(
-        inherits_count, 0,
-        "Detached partition should have no parent in pg_inherits"
-    );
+    assert_eq!(inherits_count, 0);
 
     // Check pg_publication_tables. With FOR ALL TABLES, the detached partition should appear.
     let pub_tables_check = database
@@ -693,20 +638,17 @@ async fn partition_detach_with_all_tables_publication_does_not_replicate_detache
         .query(
             "select count(*) as cnt from pg_publication_tables
              where pubname = $1 and tablename = $2",
-            &[&publication_name, &child_p1_name],
+            &[&publication_name, &partition_p1_name],
         )
         .await
         .unwrap();
     let pub_tables_count: i64 = pub_tables_check[0].get("cnt");
-    assert_eq!(
-        pub_tables_count, 1,
-        "Detached partition should appear in pg_publication_tables for ALL TABLES publication"
-    );
+    assert_eq!(pub_tables_count, 1);
 
     // Insert into detached partition.
     database
         .run_sql(&format!(
-            "insert into {child_p1_qualified} (data, partition_key) values ('detached_event', 25)"
+            "insert into {partition_p1_qualified} (data, partition_key) values ('detached_event', 25)"
         ))
         .await
         .unwrap();
@@ -720,10 +662,7 @@ async fn partition_detach_with_all_tables_publication_does_not_replicate_detache
     // The pipeline state should still only track the parent table (not the detached partition)
     // because it hasn't re-scanned for new tables.
     let table_states_after = state_store.get_table_replication_states().await;
-    assert!(
-        table_states_after.contains_key(&parent_table_id),
-        "Parent table should still be tracked after detachment"
-    );
+    assert!(table_states_after.contains_key(&parent_table_id));
 
     // The detached partition insert should NOT be replicated in this pipeline run
     // because the pipeline hasn't discovered it as a new table.
@@ -733,11 +672,7 @@ async fn partition_detach_with_all_tables_publication_does_not_replicate_detache
         .get(&(EventType::Insert, p1_table_id))
         .cloned()
         .unwrap_or_default();
-    assert_eq!(
-        detached_inserts.len(),
-        0,
-        "Detached partition inserts should NOT be replicated without table re-discovery"
-    );
+    assert_eq!(detached_inserts.len(), 0);
 }
 
 /// Tests that a detached partition is discovered as a new table after pipeline restart.
@@ -754,15 +689,14 @@ async fn partition_detach_with_all_tables_publication_does_replicate_detached_in
     let (parent_table_id, partition_table_ids) =
         create_partitioned_table(&database, table_name.clone(), &partition_specs)
             .await
-            .expect("Failed to create partitioned table");
+            .unwrap();
 
     let p1_table_id = partition_table_ids[0];
 
     // Insert initial data.
     database
         .run_sql(&format!(
-            "insert into {} (data, partition_key) values \
-             ('event1', 50), ('event2', 150)",
+            "insert into {} (data, partition_key) values ('event1', 50), ('event2', 150)",
             table_name.as_quoted_identifier()
         ))
         .await
@@ -797,23 +731,17 @@ async fn partition_detach_with_all_tables_publication_does_replicate_detached_in
 
     // Verify the initial state. The parent table is the only table tracked.
     let table_states_before = state_store.get_table_replication_states().await;
-    assert!(
-        table_states_before.contains_key(&parent_table_id),
-        "Parent table should be tracked before detachment"
-    );
-    assert!(
-        !table_states_before.contains_key(&p1_table_id),
-        "Child partition p1 should NOT be tracked separately before detachment"
-    );
+    assert!(table_states_before.contains_key(&parent_table_id));
+    assert!(!table_states_before.contains_key(&p1_table_id));
 
     // Detach partition p1.
-    let child_p1_name = format!("{}_{}", table_name.name, "p1");
-    let child_p1_qualified = format!("{}.{}", table_name.schema, child_p1_name);
+    let partition_p1_name = format!("{}_{}", table_name.name, "p1");
+    let partition_p1_qualified = format!("{}.{}", table_name.schema, partition_p1_name);
     database
         .run_sql(&format!(
             "alter table {} detach partition {}",
             table_name.as_quoted_identifier(),
-            child_p1_qualified
+            partition_p1_qualified
         ))
         .await
         .unwrap();
@@ -821,7 +749,7 @@ async fn partition_detach_with_all_tables_publication_does_replicate_detached_in
     // Insert into detached partition (while pipeline is stopped).
     database
         .run_sql(&format!(
-            "insert into {child_p1_qualified} (data, partition_key) values ('detached_event', 25)"
+            "insert into {partition_p1_qualified} (data, partition_key) values ('detached_event', 25)"
         ))
         .await
         .unwrap();
@@ -851,29 +779,20 @@ async fn partition_detach_with_all_tables_publication_does_replicate_detached_in
 
     // Verify the detached partition was discovered and synced.
     let table_states_after = state_store.get_table_replication_states().await;
-    assert!(
-        table_states_after.contains_key(&p1_table_id),
-        "Detached partition should be discovered as a standalone table after restart"
-    );
+    assert!(table_states_after.contains_key(&p1_table_id));
 
     // Verify the data from the detached partition was copied.
     let table_rows = destination.get_table_rows().await;
     let parent_rows: usize = table_rows
-        .get(&p1_table_id)
+        .get(&parent_table_id)
         .map(|rows| rows.len())
         .unwrap_or(0);
-    assert_eq!(
-        parent_rows, 2,
-        "The parent table should have the initial rows"
-    );
+    assert_eq!(parent_rows, 2);
     let detached_rows: usize = table_rows
         .get(&p1_table_id)
         .map(|rows| rows.len())
         .unwrap_or(0);
-    assert_eq!(
-        detached_rows, 2,
-        "Detached partition should have rows synced after pipeline restart"
-    );
+    assert_eq!(detached_rows, 2);
 }
 
 /// Tests that detached partitions are not automatically discovered with FOR TABLES IN SCHEMA publication.
@@ -899,14 +818,13 @@ async fn partition_detach_with_schema_publication_does_not_replicate_detached_in
     let (parent_table_id, partition_table_ids) =
         create_partitioned_table(&database, table_name.clone(), &partition_specs)
             .await
-            .expect("Failed to create partitioned table");
+            .unwrap();
 
     let p1_table_id = partition_table_ids[0];
 
     database
         .run_sql(&format!(
-            "insert into {} (data, partition_key) values \
-             ('event1', 50), ('event2', 150)",
+            "insert into {} (data, partition_key) values ('event1', 50), ('event2', 150)",
             table_name.as_quoted_identifier()
         ))
         .await
@@ -940,23 +858,17 @@ async fn partition_detach_with_schema_publication_does_not_replicate_detached_in
 
     // Verify initial state.
     let table_states_before = state_store.get_table_replication_states().await;
-    assert!(
-        table_states_before.contains_key(&parent_table_id),
-        "Parent table should be tracked before detachment"
-    );
-    assert!(
-        !table_states_before.contains_key(&p1_table_id),
-        "Child partition p1 should NOT be tracked separately before detachment"
-    );
+    assert!(table_states_before.contains_key(&parent_table_id));
+    assert!(!table_states_before.contains_key(&p1_table_id));
 
     // Detach partition p1.
-    let child_p1_name = format!("{}_{}", table_name.name, "p1");
-    let child_p1_qualified = format!("{}.{}", table_name.schema, child_p1_name);
+    let partition_p1_name = format!("{}_{}", table_name.name, "p1");
+    let partition_p1_qualified = format!("{}.{}", table_name.schema, partition_p1_name);
     database
         .run_sql(&format!(
             "alter table {} detach partition {}",
             table_name.as_quoted_identifier(),
-            child_p1_qualified
+            partition_p1_qualified
         ))
         .await
         .unwrap();
@@ -969,20 +881,17 @@ async fn partition_detach_with_schema_publication_does_not_replicate_detached_in
         .query(
             "select count(*) as cnt from pg_publication_tables
              where pubname = $1 and tablename = $2",
-            &[&publication_name, &child_p1_name],
+            &[&publication_name, &partition_p1_name],
         )
         .await
         .unwrap();
     let pub_tables_count: i64 = pub_tables_check[0].get("cnt");
-    assert_eq!(
-        pub_tables_count, 1,
-        "Detached partition should appear in pg_publication_tables for TABLES IN SCHEMA publication"
-    );
+    assert_eq!(pub_tables_count, 1);
 
     // Insert into detached partition.
     database
         .run_sql(&format!(
-            "insert into {child_p1_qualified} (data, partition_key) values ('detached_event', 25)"
+            "insert into {partition_p1_qualified} (data, partition_key) values ('detached_event', 25)"
         ))
         .await
         .unwrap();
@@ -1007,10 +916,7 @@ async fn partition_detach_with_schema_publication_does_not_replicate_detached_in
 
     // The pipeline state should still only track the parent table.
     let table_states_after = state_store.get_table_replication_states().await;
-    assert!(
-        table_states_after.contains_key(&parent_table_id),
-        "Parent table should still be tracked after detachment"
-    );
+    assert!(table_states_after.contains_key(&parent_table_id));
 
     // Verify events.
     let events = destination.get_events().await;
@@ -1021,22 +927,14 @@ async fn partition_detach_with_schema_publication_does_not_replicate_detached_in
         .get(&(EventType::Insert, parent_table_id))
         .cloned()
         .unwrap_or_default();
-    assert_eq!(
-        parent_inserts.len(),
-        1,
-        "Parent table should have exactly 1 CDC insert event"
-    );
+    assert_eq!(parent_inserts.len(), 1);
 
     // Detached partition inserts should NOT be replicated without table re-discovery.
     let detached_inserts = grouped
         .get(&(EventType::Insert, p1_table_id))
         .cloned()
         .unwrap_or_default();
-    assert_eq!(
-        detached_inserts.len(),
-        0,
-        "Detached partition inserts should NOT be replicated without table re-discovery"
-    );
+    assert_eq!(detached_inserts.len(), 0);
 }
 
 /// Tests that a detached partition is discovered as a new table after pipeline restart
@@ -1062,14 +960,13 @@ async fn partition_detach_with_schema_publication_does_replicate_detached_insert
     let (parent_table_id, partition_table_ids) =
         create_partitioned_table(&database, table_name.clone(), &partition_specs)
             .await
-            .expect("Failed to create partitioned table");
+            .unwrap();
 
     let p1_table_id = partition_table_ids[0];
 
     database
         .run_sql(&format!(
-            "insert into {} (data, partition_key) values \
-             ('event1', 50), ('event2', 150)",
+            "insert into {} (data, partition_key) values ('event1', 50), ('event2', 150)",
             table_name.as_quoted_identifier()
         ))
         .await
@@ -1104,23 +1001,17 @@ async fn partition_detach_with_schema_publication_does_replicate_detached_insert
 
     // Verify initial state.
     let table_states_before = state_store.get_table_replication_states().await;
-    assert!(
-        table_states_before.contains_key(&parent_table_id),
-        "Parent table should be tracked before detachment"
-    );
-    assert!(
-        !table_states_before.contains_key(&p1_table_id),
-        "Child partition p1 should NOT be tracked separately before detachment"
-    );
+    assert!(table_states_before.contains_key(&parent_table_id));
+    assert!(!table_states_before.contains_key(&p1_table_id));
 
     // Detach partition p1.
-    let child_p1_name = format!("{}_{}", table_name.name, "p1");
-    let child_p1_qualified = format!("{}.{}", table_name.schema, child_p1_name);
+    let partition_p1_name = format!("{}_{}", table_name.name, "p1");
+    let partition_p1_qualified = format!("{}.{}", table_name.schema, partition_p1_name);
     database
         .run_sql(&format!(
             "alter table {} detach partition {}",
             table_name.as_quoted_identifier(),
-            child_p1_qualified
+            partition_p1_qualified
         ))
         .await
         .unwrap();
@@ -1128,7 +1019,7 @@ async fn partition_detach_with_schema_publication_does_replicate_detached_insert
     // Insert into detached partition (while pipeline is still running).
     database
         .run_sql(&format!(
-            "insert into {child_p1_qualified} (data, partition_key) values ('detached_event', 25)"
+            "insert into {partition_p1_qualified} (data, partition_key) values ('detached_event', 25)"
         ))
         .await
         .unwrap();
@@ -1158,10 +1049,7 @@ async fn partition_detach_with_schema_publication_does_replicate_detached_insert
 
     // Verify the detached partition was discovered and synced.
     let table_states_after = state_store.get_table_replication_states().await;
-    assert!(
-        table_states_after.contains_key(&p1_table_id),
-        "Detached partition should be discovered as a standalone table after restart"
-    );
+    assert!(table_states_after.contains_key(&p1_table_id));
 
     // Verify the data from the detached partition was copied.
     let table_rows = destination.get_table_rows().await;
@@ -1169,22 +1057,20 @@ async fn partition_detach_with_schema_publication_does_replicate_detached_insert
         .get(&parent_table_id)
         .map(|rows| rows.len())
         .unwrap_or(0);
-    assert_eq!(
-        parent_rows, 2,
-        "Parent table should have the initial 2 rows from first pipeline run"
-    );
+    assert_eq!(parent_rows, 2);
     let detached_rows: usize = table_rows
         .get(&p1_table_id)
         .map(|rows| rows.len())
         .unwrap_or(0);
-    assert_eq!(
-        detached_rows, 2,
-        "Detached partition should have 2 rows synced after pipeline restart (1 from initial data + 1 inserted)"
-    );
+    assert_eq!(detached_rows, 2);
 }
 
-/// Tests that the system gracefully stops in case `publish_via_partition_root` is set to `false`
-/// which is currently not supported.
+/// Tests that the system doesn't crash abruptly `publish_via_partition_root` is set to `false`.
+///
+/// The current behavior is to silently not perform replication, but we might want to refine this behavior
+/// and throw an error when we detect that there are partitioned tables in a publication and the setting
+/// is `false`. This way, we would be able to avoid forcing the user to always set `publish_via_partition_root=true`
+/// when it's unnecessary.
 #[tokio::test(flavor = "multi_thread")]
 async fn partitioned_table_with_publish_via_root_false() {
     init_test_tracing();
@@ -1196,12 +1082,11 @@ async fn partitioned_table_with_publish_via_root_false() {
     let (parent_table_id, _partition_table_ids) =
         create_partitioned_table(&database, table_name.clone(), &partition_specs)
             .await
-            .expect("Failed to create partitioned table");
+            .unwrap();
 
     database
         .run_sql(&format!(
-            "insert into {} (data, partition_key) values
-             ('event1', 50), ('event2', 150)",
+            "insert into {} (data, partition_key) values ('event1', 50), ('event2', 150)",
             table_name.as_quoted_identifier()
         ))
         .await
@@ -1211,7 +1096,7 @@ async fn partitioned_table_with_publish_via_root_false() {
     database
         .create_publication_with_config(&publication_name, std::slice::from_ref(&table_name), false)
         .await
-        .expect("Failed to create publication");
+        .unwrap();
 
     let state_store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
@@ -1249,8 +1134,7 @@ async fn partitioned_table_with_publish_via_root_false() {
 
     database
         .run_sql(&format!(
-            "insert into {} (data, partition_key) values \
-             ('event1', 50)",
+            "insert into {} (data, partition_key) values ('event1', 50)",
             table_name.as_quoted_identifier()
         ))
         .await
@@ -1263,13 +1147,9 @@ async fn partitioned_table_with_publish_via_root_false() {
     // No inserts should be captured for the reasons explained above.
     let events = destination.get_events().await;
     let grouped_events = group_events_by_type_and_table_id(&events);
-    let p1_inserts = grouped_events
+    let parent_inserts = grouped_events
         .get(&(EventType::Insert, parent_table_id))
         .cloned()
         .unwrap_or_default();
-    assert_eq!(
-        p1_inserts.len(),
-        0,
-        "Inserts in partition 'p1' should be skipped because `publish_via_partition_root` is `false`"
-    );
+    assert!(parent_inserts.is_empty());
 }
