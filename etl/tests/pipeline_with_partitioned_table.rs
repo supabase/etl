@@ -1182,3 +1182,94 @@ async fn partition_detach_with_schema_publication_does_replicate_detached_insert
         "Detached partition should have 2 rows synced after pipeline restart (1 from initial data + 1 inserted)"
     );
 }
+
+/// Tests that the system gracefully stops in case `publish_via_partition_root` is set to `false`
+/// which is currently not supported.
+#[tokio::test(flavor = "multi_thread")]
+async fn partitioned_table_with_publish_via_root_false() {
+    init_test_tracing();
+    let database = spawn_source_database().await;
+
+    let table_name = test_table_name("partitioned_events");
+    let partition_specs = [("p1", "from (1) to (100)"), ("p2", "from (100) to (200)")];
+
+    let (parent_table_id, _partition_table_ids) =
+        create_partitioned_table(&database, table_name.clone(), &partition_specs)
+            .await
+            .expect("Failed to create partitioned table");
+
+    database
+        .run_sql(&format!(
+            "insert into {} (data, partition_key) values
+             ('event1', 50), ('event2', 150)",
+            table_name.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+
+    let publication_name = "test_partitioned_pub".to_string();
+    database
+        .create_publication_with_config(&publication_name, std::slice::from_ref(&table_name), false)
+        .await
+        .expect("Failed to create publication");
+
+    let state_store = NotifyingStore::new();
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
+
+    let pipeline_id: PipelineId = random();
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        publication_name,
+        state_store.clone(),
+        destination.clone(),
+    );
+
+    // Wait on the sync done of the parent.
+    let parent_sync_done = state_store
+        .notify_on_table_state_type(parent_table_id, TableReplicationPhaseType::SyncDone)
+        .await;
+
+    pipeline.start().await.unwrap();
+
+    // Wait on the sync done of the parent.
+    parent_sync_done.notified().await;
+
+    // Wait for the COMMIT event of the insert in the parent table. COMMIT events are always
+    // processed unconditionally because they don't contain relation-specific information.
+    //
+    // We use the COMMIT event to verify transaction processing: we can check whether the
+    // transaction's component events were captured. In this case, they should NOT be present
+    // because when `publication_via_partition_root` is `false`, events are tagged with child
+    // table OIDs. Since these child table OIDs are unknown to us (we always try to find the parent oid),
+    // those events are skipped.
+    let commit = destination
+        .wait_for_events_count(vec![(EventType::Commit, 1)])
+        .await;
+
+    database
+        .run_sql(&format!(
+            "insert into {} (data, partition_key) values \
+             ('event1', 50)",
+            table_name.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+
+    commit.notified().await;
+
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    // No inserts should be captured for the reasons explained above.
+    let events = destination.get_events().await;
+    let grouped_events = group_events_by_type_and_table_id(&events);
+    let p1_inserts = grouped_events
+        .get(&(EventType::Insert, parent_table_id))
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(
+        p1_inserts.len(),
+        0,
+        "Inserts in partition 'p1' should be skipped because `publish_via_partition_root` is `false`"
+    );
+}
