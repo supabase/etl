@@ -1167,8 +1167,7 @@ async fn nested_partitioned_table_copy_and_cdc() {
     let p2_sub1_qualified = format!("{}.{}", table_name.schema, p2_sub1_name);
     database
         .run_sql(&format!(
-            "create table {} partition of {} for values from (1) to (50)",
-            p2_sub1_qualified, p2_qualified
+            "create table {p2_sub1_qualified} partition of {p2_qualified} for values from (1) to (50)"
         ))
         .await
         .unwrap();
@@ -1177,8 +1176,7 @@ async fn nested_partitioned_table_copy_and_cdc() {
     let p2_sub2_qualified = format!("{}.{}", table_name.schema, p2_sub2_name);
     database
         .run_sql(&format!(
-            "create table {} partition of {} for values from (50) to (100)",
-            p2_sub2_qualified, p2_qualified
+            "create table {p2_sub2_qualified} partition of {p2_qualified} for values from (50) to (100)"
         ))
         .await
         .unwrap();
