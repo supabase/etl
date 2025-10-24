@@ -386,8 +386,7 @@ async fn partition_detach_with_explicit_publication_does_not_replicate_detached_
     // Insert into the detached partition (should NOT be replicated).
     database
         .run_sql(&format!(
-            "insert into {} (data, partition_key) values ('detached_event', 25)",
-            child_p1_qualified
+            "insert into {child_p1_qualified} (data, partition_key) values ('detached_event', 25)"
         ))
         .await
         .unwrap();
@@ -551,8 +550,7 @@ async fn partition_detach_with_all_tables_publication_does_not_replicate_detache
     // Insert into detached partition.
     database
         .run_sql(&format!(
-            "insert into {} (data, partition_key) values ('detached_event', 25)",
-            child_p1_qualified
+            "insert into {child_p1_qualified} (data, partition_key) values ('detached_event', 25)"
         ))
         .await
         .unwrap();
@@ -667,8 +665,7 @@ async fn partition_detach_with_all_tables_publication_does_replicate_detached_in
     // Insert into detached partition (while pipeline is stopped).
     database
         .run_sql(&format!(
-            "insert into {} (data, partition_key) values ('detached_event', 25)",
-            child_p1_qualified
+            "insert into {child_p1_qualified} (data, partition_key) values ('detached_event', 25)"
         ))
         .await
         .unwrap();
@@ -829,8 +826,7 @@ async fn partition_detach_with_schema_publication_does_not_replicate_detached_in
     // Insert into detached partition.
     database
         .run_sql(&format!(
-            "insert into {} (data, partition_key) values ('detached_event', 25)",
-            child_p1_qualified
+            "insert into {child_p1_qualified} (data, partition_key) values ('detached_event', 25)"
         ))
         .await
         .unwrap();
@@ -975,8 +971,7 @@ async fn partition_detach_with_schema_publication_does_replicate_detached_insert
     // Insert into detached partition (while pipeline is still running).
     database
         .run_sql(&format!(
-            "insert into {} (data, partition_key) values ('detached_event', 25)",
-            child_p1_qualified
+            "insert into {child_p1_qualified} (data, partition_key) values ('detached_event', 25)"
         ))
         .await
         .unwrap();
