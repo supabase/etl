@@ -647,8 +647,16 @@ async fn partition_detach_with_all_tables_and_pipeline_restart_discovers_new_tab
     pipeline.start().await.unwrap();
     parent_sync_done.notified().await;
 
-    // Shutdown the first pipeline.
-    let _ = pipeline.shutdown_and_wait().await;
+    // Verify the initial state. The parent table is the only table tracked.
+    let table_states_before = state_store.get_table_replication_states().await;
+    assert!(
+        table_states_before.contains_key(&parent_table_id),
+        "Parent table should be tracked before detachment"
+    );
+    assert!(
+        !table_states_before.contains_key(&p1_table_id),
+        "Child partition p1 should NOT be tracked separately before detachment"
+    );
 
     // Detach partition p1.
     let child_p1_name = format!("{}_{}", table_name.name, "p1");
@@ -671,45 +679,52 @@ async fn partition_detach_with_all_tables_and_pipeline_restart_discovers_new_tab
         .await
         .unwrap();
 
-    // Restart the pipeline. It should now discover the detached partition as a new table.
-    let state_store2 = NotifyingStore::new();
-    let destination2 = TestDestinationWrapper::wrap(MemoryDestination::new());
+    // Shutdown the pipeline.
+    let _ = pipeline.shutdown_and_wait().await;
 
-    let detached_sync_done = state_store2
+    // Restart the pipeline. It should now discover the detached partition as a new table.
+    let detached_sync_done = state_store
         .notify_on_table_state_type(p1_table_id, TableReplicationPhaseType::SyncDone)
         .await;
 
-    let pipeline_id2: PipelineId = random();
-    let mut pipeline2 = create_pipeline(
+    let mut pipeline = create_pipeline(
         &database.config,
-        pipeline_id2,
+        pipeline_id,
         publication_name.clone(),
-        state_store2.clone(),
-        destination2.clone(),
+        state_store.clone(),
+        destination.clone(),
     );
 
-    pipeline2.start().await.unwrap();
+    pipeline.start().await.unwrap();
 
     // Wait for the detached partition to be synced.
     detached_sync_done.notified().await;
 
-    let _ = pipeline2.shutdown_and_wait().await;
+    let _ = pipeline.shutdown_and_wait().await;
 
     // Verify the detached partition was discovered and synced.
-    let table_states = state_store2.get_table_replication_states().await;
+    let table_states_after = state_store.get_table_replication_states().await;
     assert!(
-        table_states.contains_key(&p1_table_id),
+        table_states_after.contains_key(&p1_table_id),
         "Detached partition should be discovered as a standalone table after restart"
     );
 
     // Verify the data from the detached partition was copied.
-    let table_rows = destination2.get_table_rows().await;
+    let table_rows = destination.get_table_rows().await;
+    let parent_rows: usize = table_rows
+        .get(&p1_table_id)
+        .map(|rows| rows.len())
+        .unwrap_or(0);
+    assert_eq!(
+        parent_rows, 2,
+        "The parent table should have the initial rows"
+    );
     let detached_rows: usize = table_rows
         .get(&p1_table_id)
         .map(|rows| rows.len())
         .unwrap_or(0);
-    assert!(
-        detached_rows > 0,
+    assert_eq!(
+        detached_rows, 2,
         "Detached partition should have rows synced after pipeline restart"
     );
 }

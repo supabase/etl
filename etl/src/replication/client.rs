@@ -720,7 +720,8 @@ impl PgReplicationClient {
                             when 0 then true
                             else (a.attnum in (select attnum from pub_attrs))
                         end
-                    )".to_string(),
+                    )"
+                .to_string(),
             };
         }
 
@@ -750,8 +751,7 @@ impl PgReplicationClient {
         publication: Option<&str>,
     ) -> EtlResult<Vec<ColumnSchema>> {
         // Build publication filter CTEs and predicates based on Postgres version.
-        let publication_filter =
-            self.build_publication_filter_sql(table_id, publication);
+        let publication_filter = self.build_publication_filter_sql(table_id, publication);
 
         let column_info_query = format!(
             r#"
@@ -804,7 +804,7 @@ impl PgReplicationClient {
             publication_ctes = publication_filter.ctes,
             publication_predicate = publication_filter.predicate,
         );
-        
+
         let mut column_schemas = vec![];
         for message in self.client.simple_query(&column_info_query).await? {
             if let SimpleQueryMessage::Row(row) = message {
