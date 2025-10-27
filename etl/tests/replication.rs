@@ -444,6 +444,114 @@ async fn test_table_copy_stream_respects_row_filter() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn test_table_copy_stream_respects_column_filter() {
+    init_test_tracing();
+    let database = spawn_source_database().await;
+
+    // Column filters in publication are only available from Postgres 15+.
+    if below_version!(database.server_version(), POSTGRES_15) {
+        eprintln!("Skipping test: PostgreSQL 15+ required for column filters");
+        return;
+    }
+
+    // We create a table with multiple columns.
+    let test_table_name = test_table_name("table_1");
+    let test_table_id = database
+        .create_table(
+            test_table_name.clone(),
+            true,
+            &[("name", "text"), ("age", "integer"), ("email", "text")],
+        )
+        .await
+        .unwrap();
+
+    database
+        .run_sql(&format!(
+            "alter table {test_table_name} replica identity full"
+        ))
+        .await
+        .unwrap();
+
+    // Create publication with only a subset of columns (excluding 'email').
+    database
+        .run_sql(&format!(
+            "create publication test_pub for table {test_table_name} (id, name, age)"
+        ))
+        .await
+        .unwrap();
+
+    let parent_client = PgReplicationClient::connect(database.config.clone())
+        .await
+        .unwrap();
+
+    // Insert test data with all columns.
+    database
+        .run_sql(&format!(
+            "insert into {test_table_name} (name, age, email) values ('Alice', 25, 'alice@example.com')"
+        ))
+        .await
+        .unwrap();
+    database
+        .run_sql(&format!(
+            "insert into {test_table_name} (name, age, email) values ('Bob', 30, 'bob@example.com')"
+        ))
+        .await
+        .unwrap();
+
+    // Create the slot when the database schema contains the test data.
+    let (transaction, _) = parent_client
+        .create_slot_with_transaction(&test_slot_name("my_slot"))
+        .await
+        .unwrap();
+
+    // Get table schema with the publication - should only include published columns.
+    let table_schemas = transaction
+        .get_table_schemas(&[test_table_id], None)
+        .await
+        .unwrap();
+    assert_table_schema(
+        &table_schemas,
+        test_table_id,
+        test_table_name,
+        &[
+            id_column_schema(),
+            ColumnSchema {
+                name: "name".to_string(),
+                typ: Type::TEXT,
+                modifier: -1,
+                nullable: false,
+                primary: false,
+            },
+            ColumnSchema {
+                name: "name".to_string(),
+                typ: Type::INT4,
+                modifier: -1,
+                nullable: false,
+                primary: false,
+            },
+        ],
+    );
+
+    // Get table copy stream with the publication.
+    let stream = transaction
+        .get_table_copy_stream(
+            test_table_id,
+            &table_schemas[&test_table_id].column_schemas,
+            Some("test_pub"),
+        )
+        .await
+        .unwrap();
+
+    let rows_count = count_stream_rows(stream).await;
+
+    // Transaction should be committed after the copy stream is exhausted.
+    transaction.commit().await.unwrap();
+
+    // We expect to have 2 rows (the ones we inserted).
+    assert_eq!(rows_count, 2);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn test_table_copy_stream_no_row_filter() {
     init_test_tracing();
     let database = spawn_source_database().await;
