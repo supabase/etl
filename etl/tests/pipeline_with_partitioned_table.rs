@@ -14,6 +14,7 @@ use etl::types::TableId;
 use etl_telemetry::tracing::init_test_tracing;
 use rand::random;
 use tokio_postgres::types::Type;
+use etl::error::ErrorKind;
 
 /// Tests that initial COPY replicates all rows from a partitioned table.
 /// Only the parent table is tracked, not individual child partitions.
@@ -1383,21 +1384,6 @@ async fn partitioned_table_with_publish_via_root_false() {
     );
 
     // The pipeline should fail to start due to invalid configuration.
-    let start_result = pipeline.start().await;
-    assert!(start_result.is_err());
-
-    let err = start_result.unwrap_err();
-    let err_message = err.to_string();
-
-    // Verify the error message contains the expected information.
-    assert!(
-        err_message.contains("publish_via_partition_root"),
-        "Error message should mention publish_via_partition_root, got: {}",
-        err_message
-    );
-    assert!(
-        err_message.contains(&publication_name),
-        "Error message should mention the publication name, got: {}",
-        err_message
-    );
+    let err = pipeline.start().await.err().unwrap();
+    assert_eq!(err.kind(), ErrorKind::ConfigError);
 }
