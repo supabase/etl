@@ -46,14 +46,16 @@ impl<G: GenericClient> PgDatabase<G> {
         self.server_version
     }
 
-    /// Creates a Postgres publication for the specified tables.
+    /// Creates a Postgres publication for the specified tables with an optional configuration
+    /// parameter.
     ///
-    /// Sets up logical replication by creating a publication that includes
-    /// the given tables for change data capture.
-    pub async fn create_publication(
+    /// This method is used for specific cases which should mutate the defaults when creating a
+    /// publication which is done only for a small subset of tests.
+    pub async fn create_publication_with_config(
         &self,
         publication_name: &str,
         table_names: &[TableName],
+        publish_via_partition_root: bool,
     ) -> Result<(), tokio_postgres::Error> {
         let table_names = table_names
             .iter()
@@ -61,9 +63,10 @@ impl<G: GenericClient> PgDatabase<G> {
             .collect::<Vec<_>>();
 
         let create_publication_query = format!(
-            "create publication {} for table {}",
+            "create publication {} for table {} with (publish_via_partition_root = {})",
             publication_name,
-            table_names.join(", ")
+            table_names.join(", "),
+            publish_via_partition_root
         );
         self.client
             .as_ref()
@@ -72,6 +75,16 @@ impl<G: GenericClient> PgDatabase<G> {
             .await?;
 
         Ok(())
+    }
+
+    /// Creates a Postgres publication for the specified tables.
+    pub async fn create_publication(
+        &self,
+        publication_name: &str,
+        table_names: &[TableName],
+    ) -> Result<(), tokio_postgres::Error> {
+        self.create_publication_with_config(publication_name, table_names, true)
+            .await
     }
 
     pub async fn create_publication_for_all(
@@ -87,9 +100,11 @@ impl<G: GenericClient> PgDatabase<G> {
             // PostgreSQL 15+ supports FOR ALL TABLES IN SCHEMA syntax
             let create_publication_query = match schema {
                 Some(schema_name) => format!(
-                    "create publication {publication_name} for tables in schema {schema_name}"
+                    "create publication {publication_name} for tables in schema {schema_name} with (publish_via_partition_root = true)"
                 ),
-                None => format!("create publication {publication_name} for all tables"),
+                None => format!(
+                    "create publication {publication_name} for all tables with (publish_via_partition_root = true)"
+                ),
             };
 
             client.execute(&create_publication_query, &[]).await?;
@@ -115,8 +130,9 @@ impl<G: GenericClient> PgDatabase<G> {
                     }
                 }
                 None => {
-                    let create_publication_query =
-                        format!("create publication {publication_name} for all tables");
+                    let create_publication_query = format!(
+                        "create publication {publication_name} for all tables with (publish_via_partition_root = true)"
+                    );
                     client.execute(&create_publication_query, &[]).await?;
                 }
             }
