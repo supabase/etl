@@ -7,9 +7,9 @@ use tokio_postgres::{Client, GenericClient, NoTls, Transaction};
 use tracing::info;
 
 use crate::replication::extract_server_version;
-use crate::version::POSTGRES_15;
 use crate::requires_version;
 use crate::types::{ColumnSchema, TableId, TableName};
+use crate::version::POSTGRES_15;
 
 /// Table modification operations for ALTER TABLE statements.
 pub enum TableModification<'a> {
