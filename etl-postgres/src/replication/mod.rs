@@ -5,6 +5,7 @@ pub mod schema;
 pub mod slots;
 pub mod state;
 pub mod table_mappings;
+pub mod version;
 pub mod worker;
 
 pub use db::*;

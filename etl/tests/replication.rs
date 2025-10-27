@@ -8,6 +8,8 @@ use etl::test_utils::database::{spawn_source_database, test_table_name};
 use etl::test_utils::pipeline::test_slot_name;
 use etl::test_utils::table::assert_table_schema;
 use etl::test_utils::test_schema::create_partitioned_table;
+use etl_postgres::below_version;
+use etl_postgres::replication::version::POSTGRES_15;
 use etl_postgres::tokio::test_utils::{TableModification, id_column_schema};
 use etl_postgres::types::ColumnSchema;
 use etl_telemetry::tracing::init_test_tracing;
@@ -370,11 +372,9 @@ async fn test_table_copy_stream_respects_row_filter() {
     init_test_tracing();
     let database = spawn_source_database().await;
 
-    // Row filters in publication are only available from Postgres 15 and onwards.
-    // As such, we skip the test for versions earlier than 15.
-    if let Some(server_version) = database.server_version()
-        && server_version.get() < 150000
-    {
+    // Row filters in publication are only available from Postgres 15+;
+    if below_version!(database.server_version(), POSTGRES_15) {
+        eprintln!("Skipping test: PostgreSQL 15+ required for row filters");
         return;
     }
     // We create a table and insert one row.

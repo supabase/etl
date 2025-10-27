@@ -48,6 +48,19 @@ ETL is a Rust framework by [Supabase](https://supabase.com) for building high‑
 - 🔧 Extensible: implement custom stores and destinations
 - 🧭 Typed, ergonomic Rust API
 
+## Requirements
+
+**PostgreSQL Version:** ETL officially supports and tests against **PostgreSQL 14, 15, 16, and 17**.
+
+- **PostgreSQL 15+** is recommended for access to advanced publication features including:
+  - Column-level filtering
+  - Row-level filtering with `WHERE` clauses
+  - `FOR ALL TABLES IN SCHEMA` syntax
+
+- **PostgreSQL 14** is supported with table-level publication filtering only.
+
+For detailed configuration instructions, see the [Configure Postgres documentation](https://supabase.github.io/etl/how-to/configure-postgres.html).
+
 ## Get Started
 
 Install via Git while we prepare for a crates.io release:

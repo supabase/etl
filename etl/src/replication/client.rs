@@ -3,8 +3,10 @@ use crate::utils::tokio::MakeRustlsConnect;
 use crate::{bail, etl_error};
 use etl_config::shared::{IntoConnectOptions, PgConnectionConfig};
 use etl_postgres::replication::extract_server_version;
+use etl_postgres::replication::version::POSTGRES_15;
 use etl_postgres::types::convert_type_oid_to_type;
 use etl_postgres::types::{ColumnSchema, TableId, TableName, TableSchema};
+use etl_postgres::{below_version, requires_version};
 use pg_escape::{quote_identifier, quote_literal};
 use postgres_replication::LogicalReplicationStream;
 use rustls::ClientConfig;
@@ -740,9 +742,7 @@ impl PgReplicationClient {
         };
 
         // Postgres 15+ supports column-level filtering via prattrs
-        if let Some(server_version) = self.server_version
-            && server_version.get() >= 150000
-        {
+        if requires_version!(self.server_version, POSTGRES_15) {
             return PublicationFilter {
                 ctes: format!(
                     "pub_info as (
@@ -899,9 +899,7 @@ impl PgReplicationClient {
         publication_name: Option<&str>,
     ) -> EtlResult<Option<String>> {
         // Row filters on publications were added in Postgres 15. For any earlier versions we know that there is no row filter
-        if let Some(server_version) = self.server_version
-            && server_version.get() < 150000
-        {
+        if below_version!(self.server_version, POSTGRES_15) {
             return Ok(None);
         }
         // If we don't have a publication the row filter is implicitly non-existent
