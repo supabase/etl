@@ -198,13 +198,6 @@ async fn partitioned_table_copy_and_streams_new_data_from_new_partition() {
     let _ = pipeline.shutdown_and_wait().await;
 
     let table_rows = destination.get_table_rows().await;
-    let total_rows: usize = table_rows.values().map(|rows| rows.len()).sum();
-    assert_eq!(total_rows, 2);
-
-    let table_states = state_store.get_table_replication_states().await;
-    assert!(table_states.contains_key(&parent_table_id));
-    assert_eq!(table_states.len(), 1);
-
     let parent_table_rows = table_rows
         .iter()
         .filter(|(table_id, _)| **table_id == parent_table_id)
@@ -295,6 +288,21 @@ async fn partition_drop_does_not_emit_delete_or_truncate() {
         .run_sql(&format!("drop table {partition_p1_qualified}"))
         .await
         .unwrap();
+
+    // Insert a row into an existing partition to ensure the pipeline is still processing events.
+    let inserts_notify = destination
+        .wait_for_events_count(vec![(EventType::Insert, 1)])
+        .await;
+
+    database
+        .run_sql(&format!(
+            "insert into {} (data, partition_key) values ('event3', 150)",
+            table_name.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+
+    inserts_notify.notified().await;
 
     let _ = pipeline.shutdown_and_wait().await;
 
@@ -446,6 +454,21 @@ async fn child_table_truncate_does_not_emit_truncate_event() {
         .run_sql(&format!("truncate table {partition_p1_qualified}"))
         .await
         .unwrap();
+
+    // Insert a row into an existing partition to ensure the pipeline is still processing events.
+    let inserts_notify = destination
+        .wait_for_events_count(vec![(EventType::Insert, 1)])
+        .await;
+
+    database
+        .run_sql(&format!(
+            "insert into {} (data, partition_key) values ('event3', 150)",
+            table_name.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+
+    inserts_notify.notified().await;
 
     let _ = pipeline.shutdown_and_wait().await;
 

@@ -426,27 +426,13 @@ impl PgReplicationClient {
         let query = format!(
             r#"
             with recursive pub_tables as (
-                -- Get explicit tables from publication (for regular publications)
-                select r.prrelid as oid
-                from pg_publication_rel r
-                join pg_publication p on p.oid = r.prpubid
-                where p.pubname = {pub}
-
-                union all
-
-                -- Get tables from pg_publication_tables (for ALL TABLES and FOR TABLES IN SCHEMA)
-                -- Only executes if pg_publication_rel is empty for this publication
+                -- Get all tables from publication (pg_publication_tables includes explicit tables,
+                -- ALL TABLES publications, and FOR TABLES IN SCHEMA publications)
                 select c.oid
                 from pg_publication_tables pt
                 join pg_class c on c.relname = pt.tablename
                 join pg_namespace n on n.oid = c.relnamespace and n.nspname = pt.schemaname
                 where pt.pubname = {pub}
-                and not exists (
-                    select 1
-                    from pg_publication_rel r
-                    join pg_publication p on p.oid = r.prpubid
-                    where p.pubname = {pub}
-                )
             ),
             hierarchy(relid) as (
                 -- Start with published tables
