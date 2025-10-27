@@ -8,7 +8,9 @@ use etl::test_utils::event::group_events_by_type_and_table_id;
 use etl::test_utils::notify::NotifyingStore;
 use etl::test_utils::pipeline::create_pipeline;
 use etl::test_utils::test_destination_wrapper::TestDestinationWrapper;
-use etl::test_utils::test_schema::create_partitioned_table;
+use etl::test_utils::test_schema::{
+    TableSelection, create_partitioned_table, setup_test_database_schema,
+};
 use etl::types::EventType;
 use etl::types::PipelineId;
 use etl::types::TableId;
@@ -1345,7 +1347,7 @@ async fn nested_partitioned_table_copy_and_cdc() {
 /// The pipeline validates this configuration at startup and rejects it with a clear error
 /// message instructing the user to enable `publish_via_partition_root`.
 #[tokio::test(flavor = "multi_thread")]
-async fn partitioned_table_with_publish_via_root_false() {
+async fn partitioned_table_with_publish_via_partition_root_false_and_partitioned_tables() {
     init_test_tracing();
     let database = spawn_source_database().await;
 
@@ -1386,4 +1388,45 @@ async fn partitioned_table_with_publish_via_root_false() {
     // The pipeline should fail to start due to invalid configuration.
     let err = pipeline.start().await.err().unwrap();
     assert_eq!(err.kind(), ErrorKind::ConfigError);
+}
+
+/// Tests that the pipeline doesn't throw an error when `publish_via_partition_root=false` and there
+/// are no partitioned tables in the tables of the publication.
+#[tokio::test(flavor = "multi_thread")]
+async fn partitioned_table_with_publish_via_partition_root_false_and_no_partitioned_tables() {
+    init_test_tracing();
+    let database = spawn_source_database().await;
+
+    let table_name = test_table_name("non_partitioned_events");
+    database
+        .create_table(
+            table_name.clone(),
+            true,
+            &[("description", "text not null")],
+        )
+        .await
+        .unwrap();
+
+    let publication_name = "test_non_partitioned_pub".to_string();
+    database
+        .create_publication_with_config(&publication_name, std::slice::from_ref(&table_name), false)
+        .await
+        .unwrap();
+
+    let state_store = NotifyingStore::new();
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
+
+    let pipeline_id: PipelineId = random();
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        publication_name.clone(),
+        state_store.clone(),
+        destination.clone(),
+    );
+
+    // The pipeline should start and stop successfully.
+    pipeline.start().await.unwrap();
+    let result = pipeline.shutdown_and_wait().await;
+    assert!(result.is_ok());
 }
