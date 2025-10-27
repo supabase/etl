@@ -1333,12 +1333,16 @@ async fn nested_partitioned_table_copy_and_cdc() {
     assert_eq!(parent_inserts.len(), 3);
 }
 
-/// Tests that the system doesn't crash abruptly `publish_via_partition_root` is set to `false`.
+/// Tests that the pipeline throws an error during startup when `publish_via_partition_root`
+/// is set to `false` and the publication contains partitioned tables.
 ///
-/// The current behavior is to silently not perform replication, but we might want to refine this behavior
-/// and throw an error when we detect that there are partitioned tables in a publication and the setting
-/// is `false`. This way, we would be able to avoid forcing the user to always set `publish_via_partition_root=true`
-/// when it's unnecessary.
+/// When `publish_via_partition_root = false`, logical replication messages contain child
+/// partition OIDs instead of parent table OIDs. Since the pipeline's schema cache only
+/// tracks parent table IDs, this configuration would cause pipeline failures when relation
+/// messages arrive with unknown child OIDs.
+///
+/// The pipeline validates this configuration at startup and rejects it with a clear error
+/// message instructing the user to enable `publish_via_partition_root`.
 #[tokio::test(flavor = "multi_thread")]
 async fn partitioned_table_with_publish_via_root_false() {
     init_test_tracing();
@@ -1347,7 +1351,7 @@ async fn partitioned_table_with_publish_via_root_false() {
     let table_name = test_table_name("partitioned_events");
     let partition_specs = [("p1", "from (1) to (100)"), ("p2", "from (100) to (200)")];
 
-    let (parent_table_id, _partition_table_ids) =
+    let (_parent_table_id, _partition_table_ids) =
         create_partitioned_table(&database, table_name.clone(), &partition_specs)
             .await
             .unwrap();
@@ -1373,51 +1377,27 @@ async fn partitioned_table_with_publish_via_root_false() {
     let mut pipeline = create_pipeline(
         &database.config,
         pipeline_id,
-        publication_name,
+        publication_name.clone(),
         state_store.clone(),
         destination.clone(),
     );
 
-    // Wait on the sync done of the parent.
-    let parent_sync_done = state_store
-        .notify_on_table_state_type(parent_table_id, TableReplicationPhaseType::SyncDone)
-        .await;
+    // The pipeline should fail to start due to invalid configuration.
+    let start_result = pipeline.start().await;
+    assert!(start_result.is_err());
 
-    pipeline.start().await.unwrap();
+    let err = start_result.unwrap_err();
+    let err_message = err.to_string();
 
-    // Wait on the sync done of the parent.
-    parent_sync_done.notified().await;
-
-    // Wait for the COMMIT event of the insert in the parent table. COMMIT events are always
-    // processed unconditionally because they don't contain relation-specific information.
-    //
-    // We use the COMMIT event to verify transaction processing: we can check whether the
-    // transaction's component events were captured. In this case, they should NOT be present
-    // because when `publication_via_partition_root` is `false`, events are tagged with child
-    // table OIDs. Since these child table OIDs are unknown to us (we always try to find the parent oid),
-    // those events are skipped.
-    let commit = destination
-        .wait_for_events_count(vec![(EventType::Commit, 1)])
-        .await;
-
-    database
-        .run_sql(&format!(
-            "insert into {} (data, partition_key) values ('event1', 50)",
-            table_name.as_quoted_identifier()
-        ))
-        .await
-        .unwrap();
-
-    commit.notified().await;
-
-    pipeline.shutdown_and_wait().await.unwrap();
-
-    // No inserts should be captured for the reasons explained above.
-    let events = destination.get_events().await;
-    let grouped_events = group_events_by_type_and_table_id(&events);
-    let parent_inserts = grouped_events
-        .get(&(EventType::Insert, parent_table_id))
-        .cloned()
-        .unwrap_or_default();
-    assert!(parent_inserts.is_empty());
+    // Verify the error message contains the expected information.
+    assert!(
+        err_message.contains("publish_via_partition_root"),
+        "Error message should mention publish_via_partition_root, got: {}",
+        err_message
+    );
+    assert!(
+        err_message.contains(&publication_name),
+        "Error message should mention the publication name, got: {}",
+        err_message
+    );
 }

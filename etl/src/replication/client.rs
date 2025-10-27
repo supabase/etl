@@ -387,6 +387,60 @@ impl PgReplicationClient {
         Ok(false)
     }
 
+    /// Retrieves the `publish_via_partition_root` setting for a publication.
+    ///
+    /// Returns `true` if the publication is configured to send replication messages using
+    /// the parent table OID, or `false` if it sends them using child partition OIDs.
+    pub async fn get_publish_via_partition_root(&self, publication: &str) -> EtlResult<bool> {
+        let query = format!(
+            "select pubviaroot from pg_publication where pubname = {};",
+            quote_literal(publication)
+        );
+
+        for msg in self.client.simple_query(&query).await? {
+            if let SimpleQueryMessage::Row(row) = msg {
+                let pubviaroot =
+                    Self::get_row_value::<String>(&row, "pubviaroot", "pg_publication").await?;
+                return Ok(pubviaroot == "t");
+            }
+        }
+
+        bail!(
+            ErrorKind::ConfigError,
+            "Publication not found",
+            format!("Publication '{}' not found in database", publication)
+        );
+    }
+
+    /// Checks if any of the provided table IDs are partitioned tables.
+    ///
+    /// A partitioned table is one where `relkind = 'p'` in `pg_class`.
+    /// Returns `true` if at least one table is partitioned, `false` otherwise.
+    pub async fn has_partitioned_tables(&self, table_ids: &[TableId]) -> EtlResult<bool> {
+        if table_ids.is_empty() {
+            return Ok(false);
+        }
+
+        let table_oids_list = table_ids
+            .iter()
+            .map(|id| id.0.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        let query = format!(
+            "select 1 from pg_class where oid in ({}) and relkind = 'p' limit 1;",
+            table_oids_list
+        );
+
+        for msg in self.client.simple_query(&query).await? {
+            if let SimpleQueryMessage::Row(_) = msg {
+                return Ok(true);
+            }
+        }
+
+        Ok(false)
+    }
+
     /// Retrieves the names of all tables included in a publication.
     pub async fn get_publication_table_names(
         &self,

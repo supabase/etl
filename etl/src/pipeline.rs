@@ -300,6 +300,42 @@ where
             publication_table_ids.len()
         );
 
+        // Validate that the publication is configured correctly for partitioned tables.
+        //
+        // When `publish_via_partition_root = false`, logical replication messages contain
+        // child partition OIDs instead of parent table OIDs. Since our schema cache only
+        // contains parent table IDs (from `get_publication_table_ids`), relation messages
+        // with child OIDs would cause pipeline failures.
+        let publish_via_partition_root = replication_client
+            .get_publish_via_partition_root(&self.config.publication_name)
+            .await?;
+
+        if !publish_via_partition_root {
+            let has_partitioned_tables = replication_client
+                .has_partitioned_tables(&publication_table_ids)
+                .await?;
+
+            if has_partitioned_tables {
+                error!(
+                    "publication '{}' has publish_via_partition_root=false but contains partitioned table(s)",
+                    self.config.publication_name
+                );
+
+                bail!(
+                    ErrorKind::ConfigError,
+                    "Invalid publication configuration for partitioned tables",
+                    format!(
+                        "The publication '{}' contains partitioned tables but has publish_via_partition_root=false. \
+                         This configuration causes replication messages to use child partition OIDs, which are not \
+                         tracked by the pipeline and will cause failures. Please recreate the publication with \
+                         publish_via_partition_root=true or use: ALTER PUBLICATION {} SET (publish_via_partition_root = true);",
+                        self.config.publication_name,
+                        self.config.publication_name
+                    )
+                );
+            }
+        }
+
         self.store.load_table_replication_states().await?;
         let table_replication_states = self.store.get_table_replication_states().await?;
 
