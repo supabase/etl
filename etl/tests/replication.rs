@@ -473,9 +473,10 @@ async fn test_table_copy_stream_respects_column_filter() {
         .unwrap();
 
     // Create publication with only a subset of columns (excluding 'email').
+    let publication_name = "test_pub";
     database
         .run_sql(&format!(
-            "create publication test_pub for table {test_table_name} (id, name, age)"
+            "create publication {publication_name} for table {test_table_name} (id, name, age)"
         ))
         .await
         .unwrap();
@@ -506,7 +507,7 @@ async fn test_table_copy_stream_respects_column_filter() {
 
     // Get table schema with the publication - should only include published columns.
     let table_schemas = transaction
-        .get_table_schemas(&[test_table_id], None)
+        .get_table_schemas(&[test_table_id], Some(publication_name))
         .await
         .unwrap();
     assert_table_schema(
