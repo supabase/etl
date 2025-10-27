@@ -15,8 +15,10 @@ use etl::test_utils::test_schema::{
 };
 use etl::types::{EventType, PipelineId};
 use etl_config::shared::BatchConfig;
+use etl_postgres::below_version;
 use etl_postgres::replication::slots::EtlReplicationSlot;
 use etl_postgres::tokio::test_utils::TableModification;
+use etl_postgres::version::POSTGRES_15;
 use etl_telemetry::tracing::init_test_tracing;
 use rand::random;
 use std::time::Duration;
@@ -148,12 +150,8 @@ async fn publication_changes_are_correctly_handled() {
 
     let database = spawn_source_database().await;
 
-    if let Some(server_version) = database.server_version()
-        && server_version.get() <= 150000
-    {
-        println!(
-            "Skipping test for PostgreSQL version <= 15, CREATE PUBLICATION FOR TABLES IN SCHEMA is not supported"
-        );
+    if below_version!(database.server_version(), POSTGRES_15) {
+        eprintln!("Skipping test: PostgreSQL 15+ required for FOR TABLES IN SCHEMA");
         return;
     }
 
@@ -309,12 +307,8 @@ async fn publication_for_all_tables_in_schema_ignores_new_tables_until_restart()
 
     let database = spawn_source_database().await;
 
-    if let Some(server_version) = database.server_version()
-        && server_version.get() <= 150000
-    {
-        println!(
-            "Skipping test for PostgreSQL version <= 15, CREATE PUBLICATION FOR TABLES IN SCHEMA is not supported"
-        );
+    if below_version!(database.server_version(), POSTGRES_15) {
+        eprintln!("Skipping test: PostgreSQL 15+ required for FOR TABLES IN SCHEMA");
         return;
     }
 

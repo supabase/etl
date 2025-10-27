@@ -6,7 +6,9 @@ This guide covers the essential Postgres concepts and configuration needed for l
 
 ## Prerequisites
 
-- Postgres 10 or later
+- **PostgreSQL 14, 15, 16, or 17** (officially supported and tested versions)
+  - PostgreSQL 15+ is recommended for advanced publication filtering features (column-level and row-level filters, `FOR ALL TABLES IN SCHEMA` syntax)
+  - PostgreSQL 14 is supported but has limited publication filtering capabilities
 - Superuser access to the Postgres server
 - Ability to restart Postgres server (for configuration changes)
 
@@ -156,6 +158,44 @@ ALTER PUBLICATION my_publication DROP TABLE products;
 -- Drop publication
 DROP PUBLICATION my_publication;
 ```
+
+## Version-Specific Features
+
+ETL supports PostgreSQL versions 14 through 17, with enhanced features available in newer versions:
+
+### PostgreSQL 15+ Features
+
+**Column-Level Filtering:**
+```sql
+-- Replicate only specific columns from a table
+CREATE PUBLICATION user_basics FOR TABLE users (id, email, created_at);
+```
+
+**Row-Level Filtering:**
+```sql
+-- Replicate only rows that match a condition
+CREATE PUBLICATION active_users FOR TABLE users WHERE (status = 'active');
+```
+
+**Schema-Level Publications:**
+```sql
+-- Replicate all tables in a schema
+CREATE PUBLICATION schema_pub FOR ALL TABLES IN SCHEMA public;
+```
+
+### PostgreSQL 14 Limitations
+
+PostgreSQL 14 supports table-level publication filtering only. Column-level and row-level filters are not available. When using PostgreSQL 14, you'll need to filter data at the application level if selective replication is required.
+
+### Feature Compatibility Matrix
+
+| Feature | PostgreSQL 14 | PostgreSQL 15+ |
+|---------|--------------|----------------|
+| Table-level publication | ✅ | ✅ |
+| Column-level filtering | ❌ | ✅ |
+| Row-level filtering | ❌ | ✅ |
+| `FOR ALL TABLES IN SCHEMA` | ❌ | ✅ |
+| Partitioned table support | ✅ | ✅ |
 
 ## Complete Configuration Example
 

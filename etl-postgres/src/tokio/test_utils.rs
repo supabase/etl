@@ -7,7 +7,9 @@ use tokio_postgres::{Client, GenericClient, NoTls, Transaction};
 use tracing::info;
 
 use crate::replication::extract_server_version;
+use crate::requires_version;
 use crate::types::{ColumnSchema, TableId, TableName};
+use crate::version::POSTGRES_15;
 
 /// Table modification operations for ALTER TABLE statements.
 pub enum TableModification<'a> {
@@ -94,9 +96,7 @@ impl<G: GenericClient> PgDatabase<G> {
     ) -> Result<(), tokio_postgres::Error> {
         let client = self.client.as_ref().unwrap();
 
-        if let Some(server_version) = self.server_version
-            && server_version.get() >= 150000
-        {
+        if requires_version!(self.server_version, POSTGRES_15) {
             // PostgreSQL 15+ supports FOR ALL TABLES IN SCHEMA syntax
             let create_publication_query = match schema {
                 Some(schema_name) => format!(

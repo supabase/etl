@@ -12,6 +12,8 @@ use etl::test_utils::test_schema::create_partitioned_table;
 use etl::types::EventType;
 use etl::types::PipelineId;
 use etl::types::TableId;
+use etl_postgres::below_version;
+use etl_postgres::version::POSTGRES_15;
 use etl_telemetry::tracing::init_test_tracing;
 use rand::random;
 use tokio_postgres::types::Type;
@@ -861,11 +863,9 @@ async fn partition_detach_with_schema_publication_does_not_replicate_detached_in
     let database = spawn_source_database().await;
 
     // Skip test if PostgreSQL version is < 15 (FOR TABLES IN SCHEMA requires 15+).
-    if let Some(version) = database.server_version() {
-        if version.get() < 150000 {
-            eprintln!("Skipping test: PostgreSQL 15+ required for FOR TABLES IN SCHEMA");
-            return;
-        }
+    if below_version!(database.server_version(), POSTGRES_15) {
+        eprintln!("Skipping test: PostgreSQL 15+ required for FOR TABLES IN SCHEMA");
+        return;
     }
 
     let table_name = test_table_name("partitioned_events_schema_detach");
@@ -1003,11 +1003,9 @@ async fn partition_detach_with_schema_publication_does_replicate_detached_insert
     let database = spawn_source_database().await;
 
     // Skip test if PostgreSQL version is < 15 (FOR TABLES IN SCHEMA requires 15+).
-    if let Some(version) = database.server_version() {
-        if version.get() < 150000 {
-            eprintln!("Skipping test: PostgreSQL 15+ required for FOR TABLES IN SCHEMA");
-            return;
-        }
+    if below_version!(database.server_version(), POSTGRES_15) {
+        eprintln!("Skipping test: PostgreSQL 15+ required for FOR TABLES IN SCHEMA");
+        return;
     }
 
     let table_name = test_table_name("partitioned_events_schema_restart");
