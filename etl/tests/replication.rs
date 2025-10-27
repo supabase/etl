@@ -524,7 +524,7 @@ async fn test_table_copy_stream_respects_column_filter() {
                 primary: false,
             },
             ColumnSchema {
-                name: "name".to_string(),
+                name: "age".to_string(),
                 typ: Type::INT4,
                 modifier: -1,
                 nullable: true,
