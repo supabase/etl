@@ -8,9 +8,7 @@ use etl::test_utils::event::group_events_by_type_and_table_id;
 use etl::test_utils::notify::NotifyingStore;
 use etl::test_utils::pipeline::create_pipeline;
 use etl::test_utils::test_destination_wrapper::TestDestinationWrapper;
-use etl::test_utils::test_schema::{
-    TableSelection, create_partitioned_table, setup_test_database_schema,
-};
+use etl::test_utils::test_schema::create_partitioned_table;
 use etl::types::EventType;
 use etl::types::PipelineId;
 use etl::types::TableId;
