@@ -13,7 +13,7 @@ use etl::types::EventType;
 use etl::types::PipelineId;
 use etl::types::TableId;
 use etl_postgres::below_version;
-use etl_postgres::replication::version::POSTGRES_15;
+use etl_postgres::version::POSTGRES_15;
 use etl_telemetry::tracing::init_test_tracing;
 use rand::random;
 use tokio_postgres::types::Type;

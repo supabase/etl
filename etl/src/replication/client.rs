@@ -3,7 +3,7 @@ use crate::utils::tokio::MakeRustlsConnect;
 use crate::{bail, etl_error};
 use etl_config::shared::{IntoConnectOptions, PgConnectionConfig};
 use etl_postgres::replication::extract_server_version;
-use etl_postgres::replication::version::POSTGRES_15;
+use etl_postgres::version::POSTGRES_15;
 use etl_postgres::types::convert_type_oid_to_type;
 use etl_postgres::types::{ColumnSchema, TableId, TableName, TableSchema};
 use etl_postgres::{below_version, requires_version};

@@ -7,7 +7,7 @@ use tokio_postgres::{Client, GenericClient, NoTls, Transaction};
 use tracing::info;
 
 use crate::replication::extract_server_version;
-use crate::replication::version::POSTGRES_15;
+use crate::version::POSTGRES_15;
 use crate::requires_version;
 use crate::types::{ColumnSchema, TableId, TableName};
 

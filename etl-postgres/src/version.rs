@@ -20,7 +20,7 @@ pub const POSTGRES_17: i32 = 170000;
 /// This function handles [`None`] server versions by returning [`false`], making it
 /// safe to use in contexts where version information might not be available.
 pub fn meets_version(server_version: Option<NonZeroI32>, required_version: i32) -> bool {
-    server_version.map_or(false, |v| v.get() >= required_version)
+    server_version.is_some_and(|v| v.get() >= required_version)
 }
 
 /// Checks if the server version meets or exceeds the required version.
@@ -31,7 +31,7 @@ pub fn meets_version(server_version: Option<NonZeroI32>, required_version: i32) 
 #[macro_export]
 macro_rules! requires_version {
     ($server_version:expr, $required:expr) => {
-        $crate::replication::version::meets_version($server_version, $required)
+        $crate::version::meets_version($server_version, $required)
     };
 }
 
@@ -42,7 +42,7 @@ macro_rules! requires_version {
 #[macro_export]
 macro_rules! below_version {
     ($server_version:expr, $required:expr) => {
-        !$crate::replication::version::meets_version($server_version, $required)
+        !$crate::version::meets_version($server_version, $required)
     };
 }
 

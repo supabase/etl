@@ -17,7 +17,7 @@ use etl::types::{EventType, PipelineId};
 use etl_config::shared::BatchConfig;
 use etl_postgres::below_version;
 use etl_postgres::replication::slots::EtlReplicationSlot;
-use etl_postgres::replication::version::POSTGRES_15;
+use etl_postgres::version::POSTGRES_15;
 use etl_postgres::tokio::test_utils::TableModification;
 use etl_telemetry::tracing::init_test_tracing;
 use rand::random;
