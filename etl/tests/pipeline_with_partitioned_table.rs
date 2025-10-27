@@ -1,6 +1,7 @@
 #![cfg(feature = "test-utils")]
 
 use etl::destination::memory::MemoryDestination;
+use etl::error::ErrorKind;
 use etl::state::table::TableReplicationPhaseType;
 use etl::test_utils::database::{spawn_source_database, test_table_name};
 use etl::test_utils::event::group_events_by_type_and_table_id;
@@ -14,7 +15,6 @@ use etl::types::TableId;
 use etl_telemetry::tracing::init_test_tracing;
 use rand::random;
 use tokio_postgres::types::Type;
-use etl::error::ErrorKind;
 
 /// Tests that initial COPY replicates all rows from a partitioned table.
 /// Only the parent table is tracked, not individual child partitions.

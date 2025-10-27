@@ -428,8 +428,7 @@ impl PgReplicationClient {
             .join(", ");
 
         let query = format!(
-            "select 1 from pg_class where oid in ({}) and relkind = 'p' limit 1;",
-            table_oids_list
+            "select 1 from pg_class where oid in ({table_oids_list}) and relkind = 'p' limit 1;"
         );
 
         for msg in self.client.simple_query(&query).await? {

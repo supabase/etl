@@ -329,8 +329,7 @@ where
                          This configuration causes replication messages to use child partition OIDs, which are not \
                          tracked by the pipeline and will cause failures. Please recreate the publication with \
                          publish_via_partition_root=true or use: ALTER PUBLICATION {} SET (publish_via_partition_root = true);",
-                        self.config.publication_name,
-                        self.config.publication_name
+                        self.config.publication_name, self.config.publication_name
                     )
                 );
             }
