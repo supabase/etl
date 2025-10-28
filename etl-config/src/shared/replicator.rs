@@ -2,7 +2,7 @@ use crate::Config;
 use crate::shared::pipeline::PipelineConfig;
 use crate::shared::{
     DestinationConfig, DestinationConfigWithoutSecrets, PipelineConfigWithoutSecrets, SentryConfig,
-    SupabaseConfig, ValidationError,
+    SupabaseConfig, SupabaseConfigWithoutSecrets, ValidationError,
 };
 use serde::{Deserialize, Serialize};
 
@@ -63,7 +63,7 @@ pub struct ReplicatorConfigWithoutSecrets {
     ///
     /// If provided, enables Supabase-specific features or reporting. If `None`, the replicator operates independently of Supabase.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub supabase: Option<SupabaseConfig>,
+    pub supabase: Option<SupabaseConfigWithoutSecrets>,
 }
 
 impl From<ReplicatorConfig> for ReplicatorConfigWithoutSecrets {
@@ -72,7 +72,7 @@ impl From<ReplicatorConfig> for ReplicatorConfigWithoutSecrets {
             destination: value.destination.into(),
             pipeline: value.pipeline.into(),
             sentry: value.sentry,
-            supabase: value.supabase,
+            supabase: value.supabase.map(Into::into),
         }
     }
 }

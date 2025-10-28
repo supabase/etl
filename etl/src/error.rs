@@ -8,6 +8,7 @@ use std::backtrace::Backtrace;
 use std::borrow::Cow;
 use std::error;
 use std::fmt;
+use std::hash::{Hash, Hasher};
 use std::panic::Location;
 use std::sync::Arc;
 
@@ -82,7 +83,7 @@ enum ErrorRepr {
 ///
 /// This enum provides granular error classification to enable appropriate error handling
 /// strategies. Error kinds are organized by functional area and failure mode.
-#[derive(PartialEq, Eq, Copy, Clone, Debug)]
+#[derive(PartialEq, Eq, Copy, Clone, Debug, Hash)]
 #[non_exhaustive]
 pub enum ErrorKind {
     // Connection Errors
@@ -187,6 +188,21 @@ impl EtlError {
         }
     }
 
+    /// Returns the static description string for this error.
+    ///
+    /// The description is always a static string that describes the error category,
+    /// without any dynamic data. This makes it suitable for stable error grouping
+    /// and hashing.
+    ///
+    /// For multiple errors, returns the description of the first error.
+    /// Returns `None` if the error list is empty.
+    pub fn description(&self) -> Option<&str> {
+        match self.repr {
+            ErrorRepr::Single(ref payload) => Some(payload.description.as_ref()),
+            ErrorRepr::Many { ref errors, .. } => errors.first().and_then(|e| e.description()),
+        }
+    }
+
     /// Returns the detailed error information if available.
     ///
     /// For multiple errors, returns the detail of the first error that has one.
@@ -277,6 +293,40 @@ impl PartialEq for EtlError {
                     && errors_a.iter().zip(errors_b.iter()).all(|(a, b)| a == b)
             }
             _ => false,
+        }
+    }
+}
+
+impl Hash for EtlError {
+    /// Hashes the error using only its stable identifying components.
+    ///
+    /// Only hashes the error kind and static description, intentionally excluding:
+    /// - Location information (file, line, column)
+    /// - Detail field (often contains dynamic data like table names, IDs)
+    /// - Source errors
+    /// - Backtrace
+    ///
+    /// This ensures that errors of the same category produce the same hash,
+    /// enabling stable grouping and deduplication across multiple occurrences.
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        match &self.repr {
+            ErrorRepr::Single(payload) => {
+                // Hash the discriminant to distinguish from Many variant.
+                std::mem::discriminant(&self.repr).hash(state);
+                // Hash only the stable components.
+                payload.kind.hash(state);
+                payload.description.hash(state);
+            }
+            ErrorRepr::Many { errors, .. } => {
+                // Hash the discriminant to distinguish from Single variant.
+                std::mem::discriminant(&self.repr).hash(state);
+                // Hash the number of errors for differentiation.
+                errors.len().hash(state);
+                // Hash all errors in the aggregation.
+                for error in errors {
+                    error.hash(state);
+                }
+            }
         }
     }
 }
@@ -1235,5 +1285,143 @@ mod tests {
         let etl_err = EtlError::from(json_err);
         assert_eq!(etl_err.kind(), ErrorKind::DeserializationError);
         assert!(etl_err.detail().is_some());
+    }
+
+    #[test]
+    fn test_description_method() {
+        let err = EtlError::from((
+            ErrorKind::SourceConnectionFailed,
+            "Database connection failed",
+        ));
+        assert_eq!(err.description(), Some("Database connection failed"));
+
+        let err_with_detail = EtlError::from((
+            ErrorKind::SourceQueryFailed,
+            "SQL query failed",
+            "Table not found".to_string(),
+        ));
+        assert_eq!(err_with_detail.description(), Some("SQL query failed"));
+    }
+
+    #[test]
+    fn test_hash_stability() {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        // Same error kind and description should produce same hash.
+        let err1 = EtlError::from((
+            ErrorKind::SourceConnectionFailed,
+            "Database connection failed",
+        ));
+        let err2 = EtlError::from((
+            ErrorKind::SourceConnectionFailed,
+            "Database connection failed",
+        ));
+
+        let mut hasher1 = DefaultHasher::new();
+        err1.hash(&mut hasher1);
+        let hash1 = hasher1.finish();
+
+        let mut hasher2 = DefaultHasher::new();
+        err2.hash(&mut hasher2);
+        let hash2 = hasher2.finish();
+
+        assert_eq!(hash1, hash2);
+    }
+
+    #[test]
+    fn test_hash_ignores_detail() {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        // Same kind and description with different details should produce same hash.
+        let err1 = EtlError::from((
+            ErrorKind::SourceQueryFailed,
+            "Query failed",
+            "Table 'users' not found".to_string(),
+        ));
+        let err2 = EtlError::from((
+            ErrorKind::SourceQueryFailed,
+            "Query failed",
+            "Table 'orders' not found".to_string(),
+        ));
+
+        let mut hasher1 = DefaultHasher::new();
+        err1.hash(&mut hasher1);
+        let hash1 = hasher1.finish();
+
+        let mut hasher2 = DefaultHasher::new();
+        err2.hash(&mut hasher2);
+        let hash2 = hasher2.finish();
+
+        assert_eq!(hash1, hash2, "Hash should ignore detail field");
+    }
+
+    #[test]
+    fn test_hash_distinguishes_different_errors() {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        // Different error kinds should produce different hashes.
+        let err1 = EtlError::from((
+            ErrorKind::SourceConnectionFailed,
+            "Connection failed",
+        ));
+        let err2 = EtlError::from((
+            ErrorKind::SourceQueryFailed,
+            "Query failed",
+        ));
+
+        let mut hasher1 = DefaultHasher::new();
+        err1.hash(&mut hasher1);
+        let hash1 = hasher1.finish();
+
+        let mut hasher2 = DefaultHasher::new();
+        err2.hash(&mut hasher2);
+        let hash2 = hasher2.finish();
+
+        assert_ne!(hash1, hash2, "Different error kinds should have different hashes");
+    }
+
+    #[test]
+    fn test_hash_aggregated_errors() {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        // Aggregated errors should hash all contained errors.
+        let errors1 = vec![
+            EtlError::from((ErrorKind::ValidationError, "Invalid schema")),
+            EtlError::from((ErrorKind::ConversionError, "Type mismatch")),
+        ];
+        let multi_err1: EtlError = errors1.into();
+
+        let errors2 = vec![
+            EtlError::from((ErrorKind::ValidationError, "Invalid schema")),
+            EtlError::from((ErrorKind::ConversionError, "Type mismatch")),
+        ];
+        let multi_err2: EtlError = errors2.into();
+
+        let mut hasher1 = DefaultHasher::new();
+        multi_err1.hash(&mut hasher1);
+        let hash1 = hasher1.finish();
+
+        let mut hasher2 = DefaultHasher::new();
+        multi_err2.hash(&mut hasher2);
+        let hash2 = hasher2.finish();
+
+        assert_eq!(hash1, hash2, "Same aggregated errors should have same hash");
+
+        // Different order or different errors should produce different hash.
+        let errors3 = vec![
+            EtlError::from((ErrorKind::ConversionError, "Type mismatch")),
+            EtlError::from((ErrorKind::ValidationError, "Invalid schema")),
+        ];
+        let multi_err3: EtlError = errors3.into();
+
+        let mut hasher3 = DefaultHasher::new();
+        multi_err3.hash(&mut hasher3);
+        let hash3 = hasher3.finish();
+
+        assert_ne!(hash1, hash3, "Different error order should produce different hash");
     }
 }

@@ -1284,6 +1284,8 @@ async fn create_or_update_pipeline_in_k8s(
         pipeline,
         SupabaseConfig {
             project_ref: tenant_id.to_owned(),
+            api_url: None,
+            api_key: None,
         },
     )
     .await?;
