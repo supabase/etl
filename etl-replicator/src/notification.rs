@@ -29,6 +29,18 @@ pub struct NotificationRequest {
     pub error_hash: String,
 }
 
+/// Response from the error notification API.
+///
+/// Contains information about whether the notification was successfully
+/// processed and if it was deduplicated based on the error hash.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NotificationResponse {
+    /// Success message from the API.
+    pub message: String,
+    /// Whether the notification was deduplicated based on the error hash.
+    pub deduplicated: bool,
+}
+
 /// Client for sending error notifications to Supabase API.
 ///
 /// Provides async methods to notify external systems about errors that occur
@@ -91,9 +103,11 @@ impl ErrorNotificationClient {
         );
 
         match self.send_notification(notification).await {
-            Ok(_) => {
+            Ok(response) => {
                 info!(
                     pipeline_id = %self.pipeline_id,
+                    message = %response.message,
+                    deduplicated = %response.deduplicated,
                     "error notification sent successfully"
                 );
             }
@@ -116,7 +130,7 @@ impl ErrorNotificationClient {
     async fn send_notification(
         &self,
         notification: NotificationRequest,
-    ) -> Result<(), Box<dyn Error>> {
+    ) -> Result<NotificationResponse, Box<dyn Error>> {
         let response = self
             .client
             .post(self.error_notification_url())
@@ -141,7 +155,8 @@ impl ErrorNotificationClient {
             return Err(format!("API returned status {status}: {body}").into());
         }
 
-        Ok(())
+        let notification_response = response.json::<NotificationResponse>().await?;
+        Ok(notification_response)
     }
 }
 
