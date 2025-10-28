@@ -1,0 +1,12 @@
+---
+source: etl-api/src/k8s/http.rs
+expression: tolerations
+---
+[
+  {
+    "effect": "NoSchedule",
+    "key": "nodeType",
+    "operator": "Equal",
+    "value": "workloads"
+  }
+]
