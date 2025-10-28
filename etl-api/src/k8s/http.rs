@@ -43,13 +43,13 @@ const REPLICATOR_CONTAINER_NAME_SUFFIX: &str = "replicator";
 /// Container name suffix for the Vector sidecar.
 const VECTOR_CONTAINER_NAME_SUFFIX: &str = "vector";
 /// Namespace where data-plane resources are created.
-const DATA_PLANE_NAMESPACE: &str = "etl-data-plane";
+pub const DATA_PLANE_NAMESPACE: &str = "etl-data-plane";
 /// Secret storing the Logflare API key.
-const LOGFLARE_SECRET_NAME: &str = "replicator-logflare-api-key";
+pub const LOGFLARE_SECRET_NAME: &str = "replicator-logflare-api-key";
 /// Docker image used for the Vector sidecar.
 const VECTOR_IMAGE_NAME: &str = "timberio/vector:0.46.1-distroless-libc";
 /// ConfigMap name containing the Vector configuration.
-const VECTOR_CONFIG_MAP_NAME: &str = "replicator-vector-config";
+pub const VECTOR_CONFIG_MAP_NAME: &str = "replicator-vector-config";
 /// Volume name for the replicator config file.
 const REPLICATOR_CONFIG_FILE_VOLUME_NAME: &str = "replicator-config-file";
 /// Volume name for the Vector config file.
@@ -117,9 +117,7 @@ impl HttpK8sClient {
     ///
     /// Prefers in-cluster configuration and falls back to the local kubeconfig
     /// when running outside the cluster.
-    pub async fn new() -> Result<HttpK8sClient, K8sError> {
-        let client = Client::try_default().await?;
-
+    pub async fn new(client: Client) -> Result<HttpK8sClient, K8sError> {
         let secrets_api: Api<Secret> = Api::namespaced(client.clone(), DATA_PLANE_NAMESPACE);
         let config_maps_api: Api<ConfigMap> = Api::namespaced(client.clone(), DATA_PLANE_NAMESPACE);
         let stateful_sets_api: Api<StatefulSet> =
