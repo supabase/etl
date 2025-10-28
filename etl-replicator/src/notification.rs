@@ -74,7 +74,7 @@ impl ErrorNotificationClient {
     /// propagate them to avoid disrupting the pipeline. The notification is
     /// sent asynchronously without blocking pipeline operations.
     pub async fn notify_error(&self, error: &EtlError) {
-        let error_message = format!("{}", error);
+        let error_message = format!("{error}");
         let error_hash = compute_error_hash(error);
 
         let notification = NotificationRequest {
@@ -113,10 +113,13 @@ impl ErrorNotificationClient {
     }
 
     /// Sends the notification request to the API endpoint.
-    async fn send_notification(&self, notification: NotificationRequest) -> Result<(), Box<dyn Error>> {
+    async fn send_notification(
+        &self,
+        notification: NotificationRequest,
+    ) -> Result<(), Box<dyn Error>> {
         let response = self
             .client
-            .post(&self.error_notification_url())
+            .post(self.error_notification_url())
             .header("apikey", &self.api_key)
             .header("Content-Type", "application/json")
             .json(&notification)
@@ -125,14 +128,17 @@ impl ErrorNotificationClient {
 
         if !response.status().is_success() {
             let status = response.status();
-            let body = response.text().await.unwrap_or_else(|_| "<unable to read body>".to_string());
+            let body = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "<unable to read body>".to_string());
             error!(
                 status = %status,
                 body = %body,
                 "error notification request failed"
             );
 
-            return Err(format!("API returned status {}: {}", status, body).into());
+            return Err(format!("API returned status {status}: {body}").into());
         }
 
         Ok(())
@@ -152,7 +158,7 @@ pub fn compute_error_hash(error: &EtlError) -> String {
     error.hash(&mut hasher);
     let hash_value = hasher.finish();
 
-    format!("{:016x}", hash_value)
+    format!("{hash_value:016x}")
 }
 
 #[cfg(test)]
@@ -203,10 +209,7 @@ mod tests {
             ErrorKind::SourceConnectionFailed,
             "Database connection failed",
         ));
-        let err2 = EtlError::from((
-            ErrorKind::SourceQueryFailed,
-            "Query execution failed",
-        ));
+        let err2 = EtlError::from((ErrorKind::SourceQueryFailed, "Query execution failed"));
 
         let hash1 = compute_error_hash(&err1);
         let hash2 = compute_error_hash(&err2);

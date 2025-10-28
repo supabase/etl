@@ -9,5 +9,5 @@ pipeline:
   table_error_retry_max_attempts: 5
 supabase:
   project_ref: "abcdefghijklmnopqrst"
-  api_url: "http://localhost:8000"
+  api_url: "http://localhost:8083"
   api_key: "000000000000000000009"

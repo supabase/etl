@@ -1363,14 +1363,8 @@ mod tests {
         use std::hash::{Hash, Hasher};
 
         // Different error kinds should produce different hashes.
-        let err1 = EtlError::from((
-            ErrorKind::SourceConnectionFailed,
-            "Connection failed",
-        ));
-        let err2 = EtlError::from((
-            ErrorKind::SourceQueryFailed,
-            "Query failed",
-        ));
+        let err1 = EtlError::from((ErrorKind::SourceConnectionFailed, "Connection failed"));
+        let err2 = EtlError::from((ErrorKind::SourceQueryFailed, "Query failed"));
 
         let mut hasher1 = DefaultHasher::new();
         err1.hash(&mut hasher1);
@@ -1380,7 +1374,10 @@ mod tests {
         err2.hash(&mut hasher2);
         let hash2 = hasher2.finish();
 
-        assert_ne!(hash1, hash2, "Different error kinds should have different hashes");
+        assert_ne!(
+            hash1, hash2,
+            "Different error kinds should have different hashes"
+        );
     }
 
     #[test]
@@ -1422,6 +1419,9 @@ mod tests {
         multi_err3.hash(&mut hasher3);
         let hash3 = hasher3.finish();
 
-        assert_ne!(hash1, hash3, "Different error order should produce different hash");
+        assert_ne!(
+            hash1, hash3,
+            "Different error order should produce different hash"
+        );
     }
 }

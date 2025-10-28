@@ -90,22 +90,21 @@ fn find_etl_error(err: &anyhow::Error) -> Option<&etl::error::EtlError> {
 /// to Sentry and optionally sends notifications to the Supabase API.
 async fn async_main(replicator_config: ReplicatorConfig) -> anyhow::Result<()> {
     // Create an error notification client if Supabase config is provided with both API URL and API key.
-    let notification_client = replicator_config
-        .supabase
-        .as_ref()
-        .and_then(|supabase_config| {
-            match (&supabase_config.api_url, &supabase_config.api_key) {
-                (Some(api_url), Some(api_key)) => {
-                    Some(ErrorNotificationClient::new(
+    let notification_client =
+        replicator_config
+            .supabase
+            .as_ref()
+            .and_then(|supabase_config| {
+                match (&supabase_config.api_url, &supabase_config.api_key) {
+                    (Some(api_url), Some(api_key)) => Some(ErrorNotificationClient::new(
                         api_url.clone(),
                         api_key.expose_secret().to_string(),
                         supabase_config.project_ref.clone(),
                         replicator_config.pipeline.id.to_string(),
-                    ))
+                    )),
+                    _ => None,
                 }
-                _ => None,
-            }
-        });
+            });
 
     // We start the replicator and catch any errors.
     if let Err(err) = start_replicator_with_config(replicator_config).await {

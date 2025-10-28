@@ -1,3 +1,20 @@
+use crate::config::{ApiConfig, SupabaseApiConfig};
+use crate::configs::destination::{StoredDestinationConfig, StoredIcebergConfig};
+use crate::configs::encryption::EncryptionKey;
+use crate::configs::pipeline::{FullApiPipelineConfig, PartialApiPipelineConfig};
+use crate::configs::source::StoredSourceConfig;
+use crate::db;
+use crate::db::destinations::{Destination, DestinationsDbError, destination_exists};
+use crate::db::images::{Image, ImagesDbError};
+use crate::db::pipelines::{MAX_PIPELINES_PER_TENANT, Pipeline, PipelinesDbError};
+use crate::db::replicators::{Replicator, ReplicatorsDbError};
+use crate::db::sources::{Source, SourcesDbError, source_exists};
+use crate::k8s::http::{TRUSTED_ROOT_CERT_CONFIG_MAP_NAME, TRUSTED_ROOT_CERT_KEY_NAME};
+use crate::k8s::{K8sClient, K8sError, PodPhase};
+use crate::routes::{
+    ErrorMessage, TenantIdError, connect_to_source_database_with_defaults, extract_tenant_id,
+};
+use crate::utils::parse_docker_image_tag;
 use actix_web::{
     HttpRequest, HttpResponse, Responder, ResponseError, delete, get,
     http::{StatusCode, header::ContentType},
@@ -16,23 +33,6 @@ use sqlx::{PgPool, PgTransaction};
 use std::ops::DerefMut;
 use thiserror::Error;
 use utoipa::ToSchema;
-use crate::config::{ApiConfig, SupabaseApiConfig};
-use crate::configs::destination::{StoredDestinationConfig, StoredIcebergConfig};
-use crate::configs::encryption::EncryptionKey;
-use crate::configs::pipeline::{FullApiPipelineConfig, PartialApiPipelineConfig};
-use crate::configs::source::StoredSourceConfig;
-use crate::db;
-use crate::db::destinations::{Destination, DestinationsDbError, destination_exists};
-use crate::db::images::{Image, ImagesDbError};
-use crate::db::pipelines::{MAX_PIPELINES_PER_TENANT, Pipeline, PipelinesDbError};
-use crate::db::replicators::{Replicator, ReplicatorsDbError};
-use crate::db::sources::{Source, SourcesDbError, source_exists};
-use crate::k8s::http::{TRUSTED_ROOT_CERT_CONFIG_MAP_NAME, TRUSTED_ROOT_CERT_KEY_NAME};
-use crate::k8s::{K8sClient, K8sError, PodPhase};
-use crate::routes::{
-    ErrorMessage, TenantIdError, connect_to_source_database_with_defaults, extract_tenant_id,
-};
-use crate::utils::parse_docker_image_tag;
 
 #[derive(Debug, Error)]
 pub enum PipelineError {
@@ -1265,6 +1265,7 @@ impl From<&StoredDestinationConfig> for DestinationType {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn create_or_update_pipeline_in_k8s(
     k8s_client: &dyn K8sClient,
     tenant_id: &str,
