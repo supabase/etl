@@ -97,7 +97,7 @@ async fn async_main(replicator_config: ReplicatorConfig) -> anyhow::Result<()> {
             match (&supabase_config.api_url, &supabase_config.api_key) {
                 (Some(api_url), Some(api_key)) => {
                     Some(ErrorNotificationClient::new(
-                        format!("{}/system/etl/error-notification", api_url),
+                        api_url.clone(),
                         api_key.expose_secret().to_string(),
                         supabase_config.project_ref.clone(),
                         replicator_config.pipeline.id.to_string(),

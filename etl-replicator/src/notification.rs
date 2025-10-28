@@ -1,16 +1,13 @@
-//! Error notification system for sending error reports to Supabase API.
-//!
-//! Provides functionality to notify external systems about errors that occur during
-//! replication. Errors are hashed to provide a stable identifier for grouping and
-//! deduplication purposes.
-
 use etl::error::EtlError;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::collections::hash_map::DefaultHasher;
 use std::error::Error;
 use std::hash::{Hash, Hasher};
+use std::time::Duration;
 use tracing::{error, info, warn};
+
+/// The endpoint of the Supabase API to which error notifications are sent.
+const API_ENDPOINT: &str = "system/etl/error-notification";
 
 /// Request payload for error notifications.
 ///
@@ -18,6 +15,10 @@ use tracing::{error, info, warn};
 /// and monitoring purposes.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NotificationRequest {
+    /// Unique identifier for the pipeline that encountered the error.
+    pub pipeline_id: String,
+    /// Supabase project reference identifier.
+    pub project_ref: String,
     /// Human-readable error message describing the failure.
     pub error_message: String,
     /// Stable hash of the error for grouping and deduplication.
@@ -26,10 +27,6 @@ pub struct NotificationRequest {
     /// provide a consistent identifier across multiple occurrences of the
     /// same error type.
     pub error_hash: String,
-    /// Unique identifier for the pipeline that encountered the error.
-    pub pipeline_id: String,
-    /// Supabase project reference identifier.
-    pub project_ref: String,
 }
 
 /// Client for sending error notifications to Supabase API.
@@ -57,11 +54,13 @@ impl ErrorNotificationClient {
     /// The client is configured with the necessary credentials and endpoints
     /// to send error notifications to the Supabase API.
     pub fn new(api_url: String, api_key: String, project_ref: String, pipeline_id: String) -> Self {
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(10))
+            .build()
+            .unwrap_or_default();
+
         Self {
-            client: reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(10))
-                .build()
-                .unwrap_or_default(),
+            client,
             api_url,
             api_key,
             project_ref,
@@ -79,10 +78,10 @@ impl ErrorNotificationClient {
         let error_hash = compute_error_hash(error);
 
         let notification = NotificationRequest {
-            error_message,
-            error_hash,
             pipeline_id: self.pipeline_id.clone(),
             project_ref: self.project_ref.clone(),
+            error_message,
+            error_hash,
         };
 
         info!(
@@ -98,21 +97,26 @@ impl ErrorNotificationClient {
                     "error notification sent successfully"
                 );
             }
-            Err(e) => {
+            Err(err) => {
                 warn!(
                     pipeline_id = %self.pipeline_id,
-                    error = %e,
+                    error = %err,
                     "failed to send error notification, continuing without notification"
                 );
             }
         }
     }
 
+    /// Returns the URL for the error notification endpoint.
+    fn error_notification_url(&self) -> String {
+        format!("{}/{}", self.api_url, API_ENDPOINT)
+    }
+
     /// Sends the notification request to the API endpoint.
     async fn send_notification(&self, notification: NotificationRequest) -> Result<(), Box<dyn Error>> {
         let response = self
             .client
-            .post(&self.api_url)
+            .post(&self.error_notification_url())
             .header("apikey", &self.api_key)
             .header("Content-Type", "application/json")
             .json(&notification)
@@ -127,6 +131,7 @@ impl ErrorNotificationClient {
                 body = %body,
                 "error notification request failed"
             );
+
             return Err(format!("API returned status {}: {}", status, body).into());
         }
 
@@ -138,20 +143,16 @@ impl ErrorNotificationClient {
 ///
 /// Uses the [`Hash`] trait implementation from [`EtlError`], which hashes only
 /// the error kind and static description (intentionally excluding location and
-/// detail fields). The hash is computed using SHA-256 for stability and consistency.
+/// detail fields).
 ///
 /// This provides a consistent identifier across multiple occurrences of the
 /// same error type, enabling grouping and deduplication in monitoring systems.
 pub fn compute_error_hash(error: &EtlError) -> String {
-    // First compute the hash using EtlError's Hash implementation.
-    let mut std_hasher = DefaultHasher::new();
-    error.hash(&mut std_hasher);
-    let hash_value = std_hasher.finish();
+    let mut hasher = DefaultHasher::new();
+    error.hash(&mut hasher);
+    let hash_value = hasher.finish();
 
-    // Convert to SHA-256 hex string for consistency and to avoid collisions.
-    let mut sha_hasher = Sha256::new();
-    sha_hasher.update(hash_value.to_le_bytes());
-    format!("{:x}", sha_hasher.finalize())
+    format!("{:016x}", hash_value)
 }
 
 #[cfg(test)]
