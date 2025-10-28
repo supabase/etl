@@ -16,7 +16,7 @@ use sqlx::{PgPool, PgTransaction};
 use std::ops::DerefMut;
 use thiserror::Error;
 use utoipa::ToSchema;
-
+use crate::config::{ApiConfig, SupabaseApiConfig};
 use crate::configs::destination::{StoredDestinationConfig, StoredIcebergConfig};
 use crate::configs::encryption::EncryptionKey;
 use crate::configs::pipeline::{FullApiPipelineConfig, PartialApiPipelineConfig};
@@ -688,6 +688,7 @@ pub async fn start_pipeline(
     pool: Data<PgPool>,
     encryption_key: Data<EncryptionKey>,
     k8s_client: Data<dyn K8sClient>,
+    api_config: Data<ApiConfig>,
     pipeline_id: Path<i64>,
 ) -> Result<impl Responder, PipelineError> {
     let tenant_id = extract_tenant_id(&req)?;
@@ -707,6 +708,7 @@ pub async fn start_pipeline(
         image,
         source,
         destination,
+        api_config.supabase_api.as_ref(),
     )
     .await?;
     txn.commit().await?;
@@ -1121,6 +1123,7 @@ pub async fn update_pipeline_version(
     pool: Data<PgPool>,
     encryption_key: Data<EncryptionKey>,
     k8s_client: Data<dyn K8sClient>,
+    api_config: Data<ApiConfig>,
     pipeline_id: Path<i64>,
     update_request: Json<UpdatePipelineVersionRequest>,
 ) -> Result<impl Responder, PipelineError> {
@@ -1175,6 +1178,7 @@ pub async fn update_pipeline_version(
         target_image,
         source,
         destination,
+        api_config.supabase_api.as_ref(),
     )
     .await?;
     txn.commit().await?;
@@ -1269,6 +1273,7 @@ async fn create_or_update_pipeline_in_k8s(
     image: Image,
     source: Source,
     destination: Destination,
+    supabase_api: Option<&SupabaseApiConfig>,
 ) -> Result<(), PipelineError> {
     let prefix = create_k8s_object_prefix(tenant_id, replicator.id);
 
@@ -1284,8 +1289,8 @@ async fn create_or_update_pipeline_in_k8s(
         pipeline,
         SupabaseConfig {
             project_ref: tenant_id.to_owned(),
-            api_url: None,
-            api_key: None,
+            api_url: supabase_api.map(|config| config.url.clone()),
+            api_key: supabase_api.map(|config| config.key.clone()),
         },
     )
     .await?;
