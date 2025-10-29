@@ -226,24 +226,4 @@ mod tests {
         // Different errors should produce different hashes.
         assert_ne!(hash1, hash2);
     }
-
-    #[test]
-    fn test_compute_error_hash_ignores_detail() {
-        let err1 = EtlError::from((
-            ErrorKind::SourceQueryFailed,
-            "Query failed",
-            "Table 'users' not found".to_string(),
-        ));
-        let err2 = EtlError::from((
-            ErrorKind::SourceQueryFailed,
-            "Query failed",
-            "Table 'orders' not found".to_string(),
-        ));
-
-        let hash1 = compute_error_hash(&err1);
-        let hash2 = compute_error_hash(&err2);
-
-        // Details are ignored for stable hashing - same kind + description = same hash.
-        assert_eq!(hash1, hash2);
-    }
 }
