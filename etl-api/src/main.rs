@@ -2,9 +2,9 @@ use anyhow::anyhow;
 use etl_api::{config::ApiConfig, startup::Application};
 use etl_config::{Environment, load_config, shared::PgConnectionConfig};
 use etl_telemetry::tracing::init_tracing;
+use secrecy::ExposeSecret;
 use std::env;
 use std::sync::Arc;
-use secrecy::ExposeSecret;
 use tracing::{error, info};
 
 /// Entry point for the ETL API service.

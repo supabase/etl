@@ -1,5 +1,5 @@
 use secrecy::SecretString;
-use serde::{Deserialize};
+use serde::Deserialize;
 
 /// Sentry error tracking and monitoring configuration.
 ///

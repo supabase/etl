@@ -4,17 +4,17 @@
 //! and routes data to configured destinations. Includes telemetry, error handling, and
 //! graceful shutdown capabilities.
 
+use crate::config::load_replicator_config;
+use crate::core::start_replicator_with_config;
+use crate::notification::ErrorNotificationClient;
+use etl::error::EtlError;
 use etl_config::Environment;
 use etl_config::shared::ReplicatorConfig;
 use etl_telemetry::metrics::init_metrics;
 use etl_telemetry::tracing::init_tracing_with_top_level_fields;
-use std::sync::Arc;
 use secrecy::ExposeSecret;
+use std::sync::Arc;
 use tracing::{error, info};
-use etl::error::EtlError;
-use crate::config::load_replicator_config;
-use crate::core::start_replicator_with_config;
-use crate::notification::ErrorNotificationClient;
 
 mod config;
 mod core;
@@ -95,7 +95,9 @@ async fn async_main(replicator_config: ReplicatorConfig) -> anyhow::Result<()> {
                     client.notify_error(error_message.clone(), err).await;
                 }
                 None => {
-                    client.notify_error(error_message.clone(), error_message).await;
+                    client
+                        .notify_error(error_message.clone(), error_message)
+                        .await;
                 }
             };
         }
