@@ -1,6 +1,5 @@
-use crate::{
-    k8s::{K8sClient, K8sError, PodPhase},
-};
+use crate::k8s::DestinationType;
+use crate::k8s::{K8sClient, K8sError, PodPhase};
 use async_trait::async_trait;
 use base64::{Engine, prelude::BASE64_STANDARD};
 use chrono::Utc;
@@ -15,7 +14,6 @@ use kube::{
 };
 use serde_json::json;
 use tracing::debug;
-use crate::k8s::DestinationType;
 
 /// Secret name suffix for the BigQuery service account key.
 const BQ_SECRET_NAME_SUFFIX: &str = "bq-service-account-key";
@@ -826,12 +824,12 @@ fn get_restarted_at_annotation_value() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::k8s::DestinationType;
     use etl_config::shared::{
         BatchConfig, DestinationConfig, PgConnectionConfig, PipelineConfig, ReplicatorConfig,
         ReplicatorConfigWithoutSecrets, TlsConfig,
     };
     use insta::assert_json_snapshot;
-    use crate::k8s::DestinationType;
 
     const TENANT_ID: &str = "abcdefghijklmnopqrst";
 

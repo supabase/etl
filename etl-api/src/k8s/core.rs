@@ -1,8 +1,5 @@
 use etl_config::Environment;
-use etl_config::shared::{
-    ReplicatorConfigWithoutSecrets, SupabaseConfigWithoutSecrets,
-    TlsConfig,
-};
+use etl_config::shared::{ReplicatorConfigWithoutSecrets, SupabaseConfigWithoutSecrets, TlsConfig};
 use secrecy::ExposeSecret;
 
 use crate::configs::destination::{StoredDestinationConfig, StoredIcebergConfig};
@@ -69,8 +66,7 @@ pub async fn create_or_update_pipeline_resources_in_k8s(
     .await?;
 
     create_or_update_dynamic_replicator_secrets(k8s_client, &prefix, secrets).await?;
-    create_or_update_replicator_config(k8s_client, &prefix, replicator_config, environment)
-        .await?;
+    create_or_update_replicator_config(k8s_client, &prefix, replicator_config, environment).await?;
     create_or_update_replicator_stateful_set(
         k8s_client,
         &prefix,
