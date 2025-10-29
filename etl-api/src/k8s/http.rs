@@ -1,6 +1,5 @@
 use crate::{
     k8s::{K8sClient, K8sError, PodPhase},
-    routes::pipelines::DestinationType,
 };
 use async_trait::async_trait;
 use base64::{Engine, prelude::BASE64_STANDARD};
@@ -16,6 +15,7 @@ use kube::{
 };
 use serde_json::json;
 use tracing::debug;
+use crate::k8s::DestinationType;
 
 /// Secret name suffix for the BigQuery service account key.
 const BQ_SECRET_NAME_SUFFIX: &str = "bq-service-account-key";
@@ -56,6 +56,8 @@ const REPLICATOR_CONFIG_FILE_VOLUME_NAME: &str = "replicator-config-file";
 const VECTOR_CONFIG_FILE_VOLUME_NAME: &str = "vector-config-file";
 /// Secret storing the Sentry DSN.
 const SENTRY_DSN_SECRET_NAME: &str = "replicator-sentry-dsn";
+/// Secret storing the Supabase API key for error notifications.
+const SUPABASE_API_KEY_SECRET_NAME: &str = "supabase-api-key";
 /// EmptyDir volume name used to share logs.
 const LOGS_VOLUME_NAME: &str = "logs";
 /// ConfigMap name providing trusted root certificates.
@@ -564,6 +566,16 @@ fn create_container_environment_json(
             }
           }
         }),
+        json!({
+          "name": "APP_SUPABASE__API_KEY",
+          "valueFrom": {
+            "secretKeyRef": {
+              "name": SUPABASE_API_KEY_SECRET_NAME,
+              "key": "api-key",
+              "optional": true
+            }
+          }
+        }),
     ];
     match destination_type {
         DestinationType::Memory => {}
@@ -819,6 +831,7 @@ mod tests {
         ReplicatorConfigWithoutSecrets, TlsConfig,
     };
     use insta::assert_json_snapshot;
+    use crate::k8s::DestinationType;
 
     const TENANT_ID: &str = "abcdefghijklmnopqrst";
 

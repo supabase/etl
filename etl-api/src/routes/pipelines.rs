@@ -1,38 +1,35 @@
-use crate::config::{ApiConfig, SupabaseApiConfig};
-use crate::configs::destination::{StoredDestinationConfig, StoredIcebergConfig};
-use crate::configs::encryption::EncryptionKey;
-use crate::configs::pipeline::{FullApiPipelineConfig, PartialApiPipelineConfig};
-use crate::configs::source::StoredSourceConfig;
-use crate::db;
-use crate::db::destinations::{Destination, DestinationsDbError, destination_exists};
-use crate::db::images::{Image, ImagesDbError};
-use crate::db::pipelines::{MAX_PIPELINES_PER_TENANT, Pipeline, PipelinesDbError};
-use crate::db::replicators::{Replicator, ReplicatorsDbError};
-use crate::db::sources::{Source, SourcesDbError, source_exists};
-use crate::k8s::http::{TRUSTED_ROOT_CERT_CONFIG_MAP_NAME, TRUSTED_ROOT_CERT_KEY_NAME};
-use crate::k8s::{K8sClient, K8sError, PodPhase};
-use crate::routes::{
-    ErrorMessage, TenantIdError, connect_to_source_database_with_defaults, extract_tenant_id,
-};
-use crate::utils::parse_docker_image_tag;
 use actix_web::{
     HttpRequest, HttpResponse, Responder, ResponseError, delete, get,
     http::{StatusCode, header::ContentType},
     post,
     web::{Data, Json, Path},
 };
-use etl_config::{
-    Environment,
-    shared::{ReplicatorConfig, ReplicatorConfigWithoutSecrets, SupabaseConfig, TlsConfig},
-};
 use etl_postgres::replication::{TableLookupError, get_table_name_from_oid, health, lag, state};
 use etl_postgres::types::TableId;
-use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
-use sqlx::{PgPool, PgTransaction};
+use sqlx::PgPool;
 use std::ops::DerefMut;
 use thiserror::Error;
 use utoipa::ToSchema;
+
+use crate::config::ApiConfig;
+use crate::configs::encryption::EncryptionKey;
+use crate::configs::pipeline::{FullApiPipelineConfig, PartialApiPipelineConfig};
+use crate::db;
+use crate::db::destinations::{DestinationsDbError, destination_exists};
+use crate::db::images::ImagesDbError;
+use crate::db::pipelines::{MAX_PIPELINES_PER_TENANT, PipelinesDbError, read_pipeline_components};
+use crate::db::replicators::ReplicatorsDbError;
+use crate::db::sources::{SourcesDbError, source_exists};
+use crate::k8s::core::{
+    create_k8s_object_prefix, create_or_update_pipeline_resources_in_k8s,
+    delete_pipeline_resources_in_k8s,
+};
+use crate::k8s::{K8sClient, K8sError, PodPhase};
+use crate::routes::{
+    ErrorMessage, TenantIdError, connect_to_source_database_with_defaults, extract_tenant_id,
+};
+use crate::utils::parse_docker_image_tag;
 
 #[derive(Debug, Error)]
 pub enum PipelineError {
@@ -697,10 +694,10 @@ pub async fn start_pipeline(
 
     let mut txn = pool.begin().await?;
     let (pipeline, replicator, image, source, destination) =
-        read_all_required_data(&mut txn, tenant_id, pipeline_id, &encryption_key).await?;
+        read_pipeline_components(&mut txn, tenant_id, pipeline_id, &encryption_key).await?;
 
     // We update the pipeline in K8s.
-    create_or_update_pipeline_in_k8s(
+    create_or_update_pipeline_resources_in_k8s(
         k8s_client.as_ref(),
         tenant_id,
         pipeline,
@@ -708,7 +705,7 @@ pub async fn start_pipeline(
         image,
         source,
         destination,
-        api_config.supabase_api.as_ref(),
+        api_config.supabase_api_url.as_deref(),
     )
     .await?;
     txn.commit().await?;
@@ -746,7 +743,7 @@ pub async fn stop_pipeline(
             .await?
             .ok_or(PipelineError::ReplicatorNotFound(pipeline_id))?;
 
-    delete_pipeline_in_k8s(k8s_client.as_ref(), tenant_id, replicator).await?;
+    delete_pipeline_resources_in_k8s(k8s_client.as_ref(), tenant_id, replicator).await?;
     txn.commit().await?;
 
     Ok(HttpResponse::Ok().finish())
@@ -776,7 +773,7 @@ pub async fn stop_all_pipelines(
     let mut txn = pool.begin().await?;
     let replicators = db::replicators::read_replicators(txn.deref_mut(), tenant_id).await?;
     for replicator in replicators {
-        delete_pipeline_in_k8s(k8s_client.as_ref(), tenant_id, replicator).await?;
+        delete_pipeline_resources_in_k8s(k8s_client.as_ref(), tenant_id, replicator).await?;
     }
     txn.commit().await?;
 
@@ -1134,7 +1131,7 @@ pub async fn update_pipeline_version(
 
     let mut txn = pool.begin().await?;
     let (pipeline, replicator, current_image, source, destination) =
-        read_all_required_data(&mut txn, tenant_id, pipeline_id, &encryption_key).await?;
+        read_pipeline_components(&mut txn, tenant_id, pipeline_id, &encryption_key).await?;
 
     // Only allow updating to the current default image. The client must provide the version id and
     // it must match the default version id. If it does not, we consider this a race condition and we
@@ -1170,7 +1167,7 @@ pub async fn update_pipeline_version(
     }
 
     // We update the pipeline in K8s if client is available.
-    create_or_update_pipeline_in_k8s(
+    create_or_update_pipeline_resources_in_k8s(
         k8s_client.as_ref(),
         tenant_id,
         pipeline,
@@ -1178,7 +1175,7 @@ pub async fn update_pipeline_version(
         target_image,
         source,
         destination,
-        api_config.supabase_api.as_ref(),
+        api_config.supabase_api_url.as_deref(),
     )
     .await?;
     txn.commit().await?;
@@ -1231,310 +1228,4 @@ pub async fn update_pipeline_config(
     };
 
     Ok(Json(response))
-}
-
-#[derive(Debug)]
-enum Secrets {
-    None,
-    BigQuery {
-        postgres_password: String,
-        big_query_service_account_key: String,
-    },
-    Iceberg {
-        postgres_password: String,
-        catalog_token: String,
-        s3_access_key_id: String,
-        s3_secret_access_key: String,
-    },
-}
-
-#[derive(Debug, Clone, Copy)]
-pub enum DestinationType {
-    Memory,
-    BigQuery,
-    Iceberg,
-}
-
-impl From<&StoredDestinationConfig> for DestinationType {
-    fn from(value: &StoredDestinationConfig) -> DestinationType {
-        match value {
-            StoredDestinationConfig::Memory => DestinationType::Memory,
-            StoredDestinationConfig::BigQuery { .. } => DestinationType::BigQuery,
-            StoredDestinationConfig::Iceberg { .. } => DestinationType::Iceberg,
-        }
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn create_or_update_pipeline_in_k8s(
-    k8s_client: &dyn K8sClient,
-    tenant_id: &str,
-    pipeline: Pipeline,
-    replicator: Replicator,
-    image: Image,
-    source: Source,
-    destination: Destination,
-    supabase_api: Option<&SupabaseApiConfig>,
-) -> Result<(), PipelineError> {
-    let prefix = create_k8s_object_prefix(tenant_id, replicator.id);
-
-    let secrets = build_secrets(&source.config, &destination.config);
-
-    let environment = Environment::load().map_err(|_| PipelineError::MissingEnvironment)?;
-
-    let destination_type = (&destination.config).into();
-    let replicator_config = build_replicator_config(
-        k8s_client,
-        source.config,
-        destination.config,
-        pipeline,
-        SupabaseConfig {
-            project_ref: tenant_id.to_owned(),
-            api_url: supabase_api.map(|config| config.url.clone()),
-            api_key: supabase_api.map(|config| config.key.clone()),
-        },
-    )
-    .await?;
-
-    create_or_update_secrets(k8s_client, &prefix, secrets).await?;
-    create_or_update_config(k8s_client, &prefix, replicator_config.into(), environment).await?;
-    create_or_update_replicator(
-        k8s_client,
-        &prefix,
-        image.name,
-        environment,
-        destination_type,
-    )
-    .await?;
-
-    Ok(())
-}
-
-async fn delete_pipeline_in_k8s(
-    k8s_client: &dyn K8sClient,
-    tenant_id: &str,
-    replicator: Replicator,
-) -> Result<(), PipelineError> {
-    let prefix = create_k8s_object_prefix(tenant_id, replicator.id);
-
-    delete_secrets(k8s_client, &prefix).await?;
-    delete_config(k8s_client, &prefix).await?;
-    delete_replicator(k8s_client, &prefix).await?;
-
-    Ok(())
-}
-
-async fn read_all_required_data(
-    txn: &mut PgTransaction<'_>,
-    tenant_id: &str,
-    pipeline_id: i64,
-    encryption_key: &EncryptionKey,
-) -> Result<(Pipeline, Replicator, Image, Source, Destination), PipelineError> {
-    let pipeline = db::pipelines::read_pipeline(txn.deref_mut(), tenant_id, pipeline_id)
-        .await?
-        .ok_or(PipelineError::PipelineNotFound(pipeline_id))?;
-
-    let replicator =
-        db::replicators::read_replicator_by_pipeline_id(txn.deref_mut(), tenant_id, pipeline_id)
-            .await?
-            .ok_or(PipelineError::ReplicatorNotFound(pipeline_id))?;
-
-    let image = db::images::read_image_by_replicator_id(txn.deref_mut(), replicator.id)
-        .await?
-        .ok_or(PipelineError::ImageNotFound(replicator.id))?;
-
-    let source_id = pipeline.source_id;
-    let source = db::sources::read_source(txn.deref_mut(), tenant_id, source_id, encryption_key)
-        .await?
-        .ok_or(PipelineError::SourceNotFound(source_id))?;
-
-    let destination_id = pipeline.destination_id;
-    let destination = db::destinations::read_destination(
-        txn.deref_mut(),
-        tenant_id,
-        destination_id,
-        encryption_key,
-    )
-    .await?
-    .ok_or(PipelineError::DestinationNotFound(destination_id))?;
-
-    Ok((pipeline, replicator, image, source, destination))
-}
-
-fn build_secrets(
-    source_config: &StoredSourceConfig,
-    destination_config: &StoredDestinationConfig,
-) -> Secrets {
-    let postgres_password = source_config
-        .password
-        .as_ref()
-        .map(|p| p.expose_secret().to_owned())
-        .unwrap_or_default();
-
-    match destination_config {
-        StoredDestinationConfig::Memory => Secrets::None,
-        StoredDestinationConfig::BigQuery {
-            service_account_key,
-            ..
-        } => Secrets::BigQuery {
-            postgres_password,
-            big_query_service_account_key: service_account_key.expose_secret().to_string(),
-        },
-        StoredDestinationConfig::Iceberg {
-            config: StoredIcebergConfig::Rest { .. },
-        } => Secrets::None,
-        StoredDestinationConfig::Iceberg {
-            config:
-                StoredIcebergConfig::Supabase {
-                    catalog_token,
-                    s3_access_key_id,
-                    s3_secret_access_key,
-                    ..
-                },
-        } => Secrets::Iceberg {
-            postgres_password,
-            catalog_token: catalog_token.expose_secret().to_string(),
-            s3_access_key_id: s3_access_key_id.expose_secret().to_string(),
-            s3_secret_access_key: s3_secret_access_key.expose_secret().to_string(),
-        },
-    }
-}
-
-async fn build_replicator_config(
-    k8s_client: &dyn K8sClient,
-    source_config: StoredSourceConfig,
-    destination_config: StoredDestinationConfig,
-    pipeline: Pipeline,
-    supabase_config: SupabaseConfig,
-) -> Result<ReplicatorConfig, PipelineError> {
-    let trusted_root_certs = k8s_client
-        .get_config_map(TRUSTED_ROOT_CERT_CONFIG_MAP_NAME)
-        .await?
-        .data
-        .ok_or(PipelineError::TrustedRootCertsConfigMissing)?
-        .get(TRUSTED_ROOT_CERT_KEY_NAME)
-        .ok_or(PipelineError::TrustedRootCertsConfigMissing)?
-        .clone();
-    let tls_config = TlsConfig {
-        trusted_root_certs,
-        enabled: true,
-    };
-    let pg_connection = source_config.into_connection_config_with_tls(tls_config);
-
-    let config = ReplicatorConfig {
-        destination: destination_config.into_etl_config(),
-        // We are safe to perform this conversion, since the i64 -> u64 conversion performs wrap
-        // around, and we won't have two different values map to the same u64, since the domain size
-        // is the same.
-        pipeline: pipeline
-            .config
-            .into_etl_config(pipeline.id as u64, pg_connection),
-        // The Sentry config will be injected via env variables for security purposes.
-        sentry: None,
-        supabase: Some(supabase_config),
-    };
-
-    Ok(config)
-}
-
-fn create_k8s_object_prefix(tenant_id: &str, replicator_id: i64) -> String {
-    format!("{tenant_id}-{replicator_id}")
-}
-
-async fn create_or_update_secrets(
-    k8s_client: &dyn K8sClient,
-    prefix: &str,
-    secrets: Secrets,
-) -> Result<(), PipelineError> {
-    match secrets {
-        Secrets::None => {}
-        Secrets::BigQuery {
-            postgres_password,
-            big_query_service_account_key,
-        } => {
-            k8s_client
-                .create_or_update_postgres_secret(prefix, &postgres_password)
-                .await?;
-            k8s_client
-                .create_or_update_bq_secret(prefix, &big_query_service_account_key)
-                .await?;
-        }
-        Secrets::Iceberg {
-            postgres_password,
-            catalog_token,
-            s3_access_key_id,
-            s3_secret_access_key,
-        } => {
-            k8s_client
-                .create_or_update_postgres_secret(prefix, &postgres_password)
-                .await?;
-            k8s_client
-                .create_or_update_iceberg_secret(
-                    prefix,
-                    &catalog_token,
-                    &s3_access_key_id,
-                    &s3_secret_access_key,
-                )
-                .await?;
-        }
-    }
-
-    Ok(())
-}
-
-async fn create_or_update_config(
-    k8s_client: &dyn K8sClient,
-    prefix: &str,
-    config: ReplicatorConfigWithoutSecrets,
-    environment: Environment,
-) -> Result<(), PipelineError> {
-    // For now the base config is empty.
-    let base_config = "";
-    let env_config = serde_json::to_string(&config)?;
-    k8s_client
-        .create_or_update_config_map(prefix, base_config, &env_config, environment)
-        .await?;
-
-    Ok(())
-}
-
-async fn create_or_update_replicator(
-    k8s_client: &dyn K8sClient,
-    prefix: &str,
-    replicator_image: String,
-    environment: Environment,
-    destination_type: DestinationType,
-) -> Result<(), PipelineError> {
-    k8s_client
-        .create_or_update_stateful_set(prefix, &replicator_image, environment, destination_type)
-        .await?;
-
-    Ok(())
-}
-
-async fn delete_secrets(k8s_client: &dyn K8sClient, prefix: &str) -> Result<(), PipelineError> {
-    k8s_client.delete_postgres_secret(prefix).await?;
-
-    // Although it won't happen that there are both bq and iceberg secrets at the same time
-    // we delete them both here because the state in the db might not be the same as that
-    // running in the k8s cluster. E.g. if a pipeline is updated from bq to iceberg or vice-versa
-    // then there's a risk of wrong secret type being attempted for deletion which might leave
-    // the actual secret behind. So for simplicty we just delete both kinds of secrets. The
-    // one which doesn't exist will be safely ignored.
-    k8s_client.delete_bq_secret(prefix).await?;
-    k8s_client.delete_iceberg_secret(prefix).await?;
-
-    Ok(())
-}
-
-async fn delete_config(k8s_client: &dyn K8sClient, prefix: &str) -> Result<(), PipelineError> {
-    k8s_client.delete_config_map(prefix).await?;
-
-    Ok(())
-}
-
-async fn delete_replicator(k8s_client: &dyn K8sClient, prefix: &str) -> Result<(), PipelineError> {
-    k8s_client.delete_stateful_set(prefix).await?;
-
-    Ok(())
 }

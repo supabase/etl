@@ -4,8 +4,7 @@ use std::collections::BTreeMap;
 
 use async_trait::async_trait;
 use etl_api::k8s::http::{TRUSTED_ROOT_CERT_CONFIG_MAP_NAME, TRUSTED_ROOT_CERT_KEY_NAME};
-use etl_api::k8s::{K8sClient, K8sError, PodPhase};
-use etl_api::routes::pipelines::DestinationType;
+use etl_api::k8s::{DestinationType, K8sClient, K8sError, PodPhase};
 use etl_config::Environment;
 use k8s_openapi::api::core::v1::ConfigMap;
 

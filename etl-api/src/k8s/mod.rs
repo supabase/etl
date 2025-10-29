@@ -13,6 +13,7 @@
 //! See [`base`] for errors, pod phase mapping, and the client trait.
 
 mod base;
+pub mod core;
 pub mod http;
 
 pub use base::*;

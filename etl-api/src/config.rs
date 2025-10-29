@@ -1,7 +1,6 @@
 use base64::{Engine, prelude::BASE64_STANDARD};
 use etl_config::Config;
 use etl_config::shared::{PgConnectionConfig, SentryConfig};
-use secrecy::SecretString;
 use serde::de::{MapAccess, Visitor};
 use serde::{Deserialize, Deserializer, de};
 use std::fmt;
@@ -28,28 +27,17 @@ pub struct ApiConfig {
     pub api_keys: Vec<String>,
     /// Optional Sentry configuration for error tracking.
     pub sentry: Option<SentryConfig>,
-    /// Optional Supabase API configuration for error notifications.
+    /// Optional Supabase API URL for error notifications.
     ///
-    /// When provided, this configuration is passed to replicators to enable
-    /// error notifications to the Supabase API.
+    /// When provided, this URL is passed to replicators to enable
+    /// error notifications to the Supabase API. The API key will be
+    /// injected as a Kubernetes secret named `supabase_api_key`.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub supabase_api: Option<SupabaseApiConfig>,
+    pub supabase_api_url: Option<String>,
 }
 
 impl Config for ApiConfig {
     const LIST_PARSE_KEYS: &'static [&'static str] = &["api_keys"];
-}
-
-/// Supabase API configuration for error notifications.
-///
-/// Contains the URL and authentication key for sending error notifications
-/// from replicators to the Supabase API.
-#[derive(Debug, Clone, Deserialize)]
-pub struct SupabaseApiConfig {
-    /// Supabase API URL (e.g., https://api.supabase.green for staging).
-    pub url: String,
-    /// Supabase API key for authentication.
-    pub key: SecretString,
 }
 
 /// HTTP server configuration settings.
