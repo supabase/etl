@@ -1,3 +1,9 @@
+//! Core Kubernetes resource management for ETL pipeline infrastructure.
+//!
+//! This module provides high-level operations for creating, updating, and deleting
+//! Kubernetes resources required to run ETL replicator pipelines, including secrets,
+//! config maps, and stateful sets.
+
 use etl_config::Environment;
 use etl_config::shared::{ReplicatorConfigWithoutSecrets, SupabaseConfigWithoutSecrets, TlsConfig};
 use secrecy::ExposeSecret;
@@ -14,21 +20,46 @@ use crate::k8s::http::{TRUSTED_ROOT_CERT_CONFIG_MAP_NAME, TRUSTED_ROOT_CERT_KEY_
 use crate::k8s::{DestinationType, K8sClient};
 use crate::routes::pipelines::PipelineError;
 
+/// Secret types required by different destination configurations.
+///
+/// This enum encapsulates the various credential combinations needed for different
+/// replicator destinations, ensuring type-safe secret management.
 #[derive(Debug)]
 pub enum Secrets {
+    /// No secrets required for the destination.
     None,
+    /// Credentials for BigQuery destinations.
     BigQuery {
+        /// PostgreSQL source database password.
         postgres_password: String,
+        /// Google Cloud service account key JSON for BigQuery authentication.
         big_query_service_account_key: String,
     },
+    /// Credentials for Iceberg destinations.
     Iceberg {
+        /// PostgreSQL source database password.
         postgres_password: String,
+        /// Authentication token for the Iceberg catalog.
         catalog_token: String,
+        /// AWS S3 access key ID for object storage.
         s3_access_key_id: String,
+        /// AWS S3 secret access key for object storage.
         s3_secret_access_key: String,
     },
 }
 
+/// Creates or updates all Kubernetes resources required for a pipeline.
+///
+/// This function orchestrates the creation or update of secrets, config maps, and stateful
+/// sets needed to run a replicator pipeline in Kubernetes. It extracts credentials from the
+/// source and destination configurations, builds the replicator configuration, and applies
+/// all resources to the cluster.
+///
+/// # Errors
+///
+/// Returns [`PipelineError::MissingEnvironment`] if the environment configuration cannot be loaded.
+/// Returns [`PipelineError::TrustedRootCertsConfigMissing`] if the trusted root certificates config map is not found.
+/// Returns [`PipelineError`] variants if any Kubernetes resource operations fail.
 #[allow(clippy::too_many_arguments)]
 pub async fn create_or_update_pipeline_resources_in_k8s(
     k8s_client: &dyn K8sClient,
@@ -79,6 +110,15 @@ pub async fn create_or_update_pipeline_resources_in_k8s(
     Ok(())
 }
 
+/// Deletes all Kubernetes resources associated with a pipeline.
+///
+/// This function removes all secrets, config maps, and stateful sets created for a
+/// replicator pipeline. It uses the tenant ID and replicator ID to identify and delete
+/// the correct resources.
+///
+/// # Errors
+///
+/// Returns [`PipelineError`] variants if any Kubernetes resource deletion operations fail.
 pub async fn delete_pipeline_resources_in_k8s(
     k8s_client: &dyn K8sClient,
     tenant_id: &str,
@@ -93,6 +133,11 @@ pub async fn delete_pipeline_resources_in_k8s(
     Ok(())
 }
 
+/// Extracts and combines credentials from source and destination configurations.
+///
+/// This function determines which credentials are needed based on the destination type
+/// and extracts them from the provided configurations, exposing secrets as plain strings
+/// for Kubernetes secret creation.
 fn build_secrets_from_configs(
     source_config: &StoredSourceConfig,
     destination_config: &StoredDestinationConfig,
@@ -132,6 +177,18 @@ fn build_secrets_from_configs(
     }
 }
 
+/// Builds a replicator configuration with credentials omitted.
+///
+/// This function constructs a [`ReplicatorConfigWithoutSecrets`] by combining pipeline,
+/// source, and destination configurations. It fetches trusted root certificates from
+/// Kubernetes and configures TLS for the PostgreSQL connection. Secrets are managed
+/// separately through Kubernetes secret resources.
+///
+/// # Errors
+///
+/// Returns [`PipelineError::TrustedRootCertsConfigMissing`] if the trusted root certificates
+/// config map or its data is not found.
+/// Returns [`PipelineError`] variants if Kubernetes operations fail.
 async fn build_replicator_config_without_secrets(
     k8s_client: &dyn K8sClient,
     pipeline_id: u64,
@@ -164,10 +221,24 @@ async fn build_replicator_config_without_secrets(
     Ok(config)
 }
 
+/// Creates a consistent naming prefix for Kubernetes resources.
+///
+/// This function generates a prefix string by combining the tenant ID and replicator ID,
+/// which is used to name all Kubernetes resources (secrets, config maps, stateful sets)
+/// associated with a specific pipeline instance.
 pub fn create_k8s_object_prefix(tenant_id: &str, replicator_id: i64) -> String {
     format!("{tenant_id}-{replicator_id}")
 }
 
+/// Creates or updates Kubernetes secrets based on the destination type.
+///
+/// This function creates different sets of secrets depending on the [`Secrets`] variant,
+/// handling PostgreSQL credentials and destination-specific authentication credentials.
+/// For [`Secrets::None`], no secrets are created.
+///
+/// # Errors
+///
+/// Returns [`PipelineError`] variants if any Kubernetes secret creation operations fail.
 async fn create_or_update_dynamic_replicator_secrets(
     k8s_client: &dyn K8sClient,
     prefix: &str,
@@ -209,6 +280,15 @@ async fn create_or_update_dynamic_replicator_secrets(
     Ok(())
 }
 
+/// Creates or updates the replicator configuration in a Kubernetes config map.
+///
+/// This function serializes the [`ReplicatorConfigWithoutSecrets`] to JSON and stores it
+/// in a Kubernetes config map. The replicator pods mount this config map to access their
+/// runtime configuration.
+///
+/// # Errors
+///
+/// Returns [`PipelineError`] variants if JSON serialization or Kubernetes config map operations fail.
 async fn create_or_update_replicator_config(
     k8s_client: &dyn K8sClient,
     prefix: &str,
@@ -225,6 +305,15 @@ async fn create_or_update_replicator_config(
     Ok(())
 }
 
+/// Creates or updates the Kubernetes stateful set for the replicator.
+///
+/// This function creates a stateful set that runs the replicator container with the
+/// specified image. The stateful set is configured with environment-specific settings
+/// and destination-type-specific resource requirements.
+///
+/// # Errors
+///
+/// Returns [`PipelineError`] variants if Kubernetes stateful set operations fail.
 async fn create_or_update_replicator_stateful_set(
     k8s_client: &dyn K8sClient,
     prefix: &str,
@@ -239,6 +328,16 @@ async fn create_or_update_replicator_stateful_set(
     Ok(())
 }
 
+/// Deletes all Kubernetes secrets associated with a replicator.
+///
+/// This function deletes PostgreSQL, BigQuery, and Iceberg secrets for the given prefix.
+/// It attempts to delete all secret types regardless of which were actually created,
+/// safely handling cases where secrets don't exist. This approach prevents orphaned
+/// secrets when a pipeline's destination type is changed.
+///
+/// # Errors
+///
+/// Returns [`PipelineError`] variants if Kubernetes secret deletion operations fail.
 async fn delete_dynamic_replicator_secrets(
     k8s_client: &dyn K8sClient,
     prefix: &str,
@@ -257,6 +356,11 @@ async fn delete_dynamic_replicator_secrets(
     Ok(())
 }
 
+/// Deletes the Kubernetes config map containing replicator configuration.
+///
+/// # Errors
+///
+/// Returns [`PipelineError`] variants if Kubernetes config map deletion operations fail.
 async fn delete_replicator_config(
     k8s_client: &dyn K8sClient,
     prefix: &str,
@@ -266,6 +370,11 @@ async fn delete_replicator_config(
     Ok(())
 }
 
+/// Deletes the Kubernetes stateful set running the replicator.
+///
+/// # Errors
+///
+/// Returns [`PipelineError`] variants if Kubernetes stateful set deletion operations fail.
 async fn delete_replicator_stateful_set(
     k8s_client: &dyn K8sClient,
     prefix: &str,
