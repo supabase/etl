@@ -556,16 +556,26 @@ fn create_container_environment_json(
             //TODO: set APP_VERSION to proper version instead of the replicator image name
             "value": replicator_image
         }),
-        json!({
-          "name": "APP_SENTRY__DSN",
-          "valueFrom": {
-            "secretKeyRef": {
-              "name": SENTRY_DSN_SECRET_NAME,
-              "key": "dsn"
-            }
-          }
-        }),
     ];
+
+    match environment {
+        Environment::Dev => {
+            // We do not configure sentry for dev environments
+        }
+        Environment::Staging | Environment::Prod => {
+            //
+            container_environment.push(json!({
+              "name": "APP_SENTRY__DSN",
+              "valueFrom": {
+                "secretKeyRef": {
+                  "name": SENTRY_DSN_SECRET_NAME,
+                  "key": "dsn"
+                }
+              }
+            }));
+        }
+    }
+
     match destination_type {
         DestinationType::Memory => {}
         DestinationType::BigQuery => {
@@ -1010,16 +1020,30 @@ mod tests {
     #[test]
     fn test_create_iceberg_container_environment() {
         let prefix = create_k8s_object_prefix(TENANT_ID, 42);
-        let environment = Environment::Prod;
         let replicator_image = "ramsup/etl-replicator:2a41356af735f891de37d71c0e1a62864fe4630e";
 
         let container_environment = create_container_environment_json(
             &prefix,
-            &environment,
+            &Environment::Dev,
             replicator_image,
             DestinationType::Iceberg,
         );
+        assert_json_snapshot!(container_environment);
 
+        let container_environment = create_container_environment_json(
+            &prefix,
+            &Environment::Staging,
+            replicator_image,
+            DestinationType::Iceberg,
+        );
+        assert_json_snapshot!(container_environment);
+
+        let container_environment = create_container_environment_json(
+            &prefix,
+            &Environment::Prod,
+            replicator_image,
+            DestinationType::Iceberg,
+        );
         assert_json_snapshot!(container_environment);
     }
 
