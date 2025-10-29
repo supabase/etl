@@ -1,4 +1,3 @@
-use etl::error::EtlError;
 use serde::{Deserialize, Serialize};
 use std::collections::hash_map::DefaultHasher;
 use std::error::Error;
@@ -174,7 +173,7 @@ pub fn compute_error_hash<H: Hash>(error_hash: H) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use etl::error::ErrorKind;
+    use etl::error::{ErrorKind, EtlError};
 
     #[test]
     fn test_compute_error_hash_stability() {

@@ -48,7 +48,7 @@ impl Config for ReplicatorConfig {
 
 /// Same as [`ReplicatorConfig`] but without secrets.
 ///
-/// This type implements [`Serialize`] because it does not contain secrets
+/// This type implements [`Serialize`] because it does not contain secrets.
 /// so is safe to serialize.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReplicatorConfigWithoutSecrets {

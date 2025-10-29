@@ -9,6 +9,7 @@ use etl_config::shared::ReplicatorConfig;
 use etl_telemetry::metrics::init_metrics;
 use etl_telemetry::tracing::init_tracing_with_top_level_fields;
 use std::sync::Arc;
+use secrecy::ExposeSecret;
 use tracing::{error, info};
 use etl::error::EtlError;
 use crate::config::load_replicator_config;
@@ -73,7 +74,7 @@ async fn async_main(replicator_config: ReplicatorConfig) -> anyhow::Result<()> {
                 match (&supabase_config.api_url, &supabase_config.api_key) {
                     (Some(api_url), Some(api_key)) => Some(ErrorNotificationClient::new(
                         api_url.clone(),
-                        api_key.clone(),
+                        api_key.expose_secret().to_owned(),
                         supabase_config.project_ref.clone(),
                         replicator_config.pipeline.id.to_string(),
                     )),
@@ -118,7 +119,7 @@ fn init_sentry() -> anyhow::Result<Option<sentry::ClientInitGuard>> {
 
         let environment = Environment::load()?;
         let guard = sentry::init(sentry::ClientOptions {
-            dsn: Some(sentry_config.dsn.parse()?),
+            dsn: Some(sentry_config.dsn.expose_secret().parse()?),
             environment: Some(environment.to_string().into()),
             integrations: vec![Arc::new(
                 sentry::integrations::panic::PanicIntegration::new(),

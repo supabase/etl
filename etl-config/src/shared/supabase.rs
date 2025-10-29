@@ -1,3 +1,4 @@
+use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 
 /// Supabase integration configuration.
@@ -19,7 +20,7 @@ pub struct SupabaseConfig {
     /// This API key is used to authenticate requests to the Supabase API.
     /// Required when `api_url` is provided.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub api_key: Option<String>,
+    pub api_key: Option<SecretString>,
 }
 
 /// Supabase integration configuration without secrets.

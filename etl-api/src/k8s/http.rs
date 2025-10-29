@@ -824,7 +824,7 @@ fn get_restarted_at_annotation_value() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::k8s::DestinationType;
+    
     use etl_config::shared::{
         BatchConfig, DestinationConfig, PgConnectionConfig, PipelineConfig, ReplicatorConfig,
         ReplicatorConfigWithoutSecrets, TlsConfig,
