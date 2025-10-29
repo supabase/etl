@@ -329,12 +329,15 @@ impl K8sClient for HttpK8sClient {
             destination_type,
         );
 
+        let node_selector = create_node_selector_json(&environment);
+
         let stateful_set_json = create_replicator_stateful_set_json(
             prefix,
             &stateful_set_name,
             &config,
             replicator_image,
             container_environment,
+            node_selector,
         );
 
         let stateful_set: StatefulSet = serde_json::from_value(stateful_set_json)?;
@@ -599,6 +602,16 @@ fn create_container_environment_json(
     container_environment
 }
 
+fn create_node_selector_json(environment: &Environment) -> serde_json::Value {
+    // In staging and prod, pin pods to nodes labeled with `nodeType=workloads`.
+    match environment {
+        Environment::Dev => json!({}),
+        Environment::Staging | Environment::Prod => json!({
+            "nodeType": "workloads"
+        }),
+    }
+}
+
 fn create_postgres_secret_env_var_json(postgres_secret_name: &str) -> serde_json::Value {
     json!({
       "name": "APP_PIPELINE__PG_CONNECTION__PASSWORD",
@@ -667,6 +680,7 @@ fn create_replicator_stateful_set_json(
     config: &ReplicatorResourceConfig,
     replicator_image: &str,
     container_environment: Vec<serde_json::Value>,
+    node_selector: serde_json::Value,
 ) -> serde_json::Value {
     let replicator_app_name = create_replicator_app_name(prefix);
     let restarted_at_annotation = get_restarted_at_annotation_value();
@@ -727,10 +741,7 @@ fn create_replicator_stateful_set_json(
                 "effect": "NoSchedule"
               }
             ],
-            // Pin pods to nodes labeled with `nodeType=workloads`.
-            "nodeSelector": {
-              "nodeType": "workloads"
-            },
+            "nodeSelector": node_selector,
             // We want to wait at most 5 minutes before K8S sends a `SIGKILL` to the containers,
             // this way we let the system finish any in-flight transaction, if there are any.
             "terminationGracePeriodSeconds": 300,
@@ -1013,6 +1024,18 @@ mod tests {
     }
 
     #[test]
+    fn test_create_node_selector() {
+        let node_selector = create_node_selector_json(&Environment::Dev);
+        assert_json_snapshot!(node_selector);
+
+        let node_selector = create_node_selector_json(&Environment::Staging);
+        assert_json_snapshot!(node_selector);
+
+        let node_selector = create_node_selector_json(&Environment::Prod);
+        assert_json_snapshot!(node_selector);
+    }
+
+    #[test]
     fn test_create_bq_replicator_stateful_set_json() {
         let prefix = create_k8s_object_prefix(TENANT_ID, 42);
         let stateful_set_name = create_stateful_set_name(&prefix);
@@ -1027,12 +1050,15 @@ mod tests {
             DestinationType::BigQuery,
         );
 
+        let node_selector = create_node_selector_json(&environment);
+
         let stateful_set_json = create_replicator_stateful_set_json(
             &prefix,
             &stateful_set_name,
             &config,
             replicator_image,
             container_environment,
+            node_selector,
         );
 
         assert_json_snapshot!(stateful_set_json, { ".spec.template.metadata.annotations[\"etl.supabase.com/restarted-at\"]" => "[timestamp]"});
@@ -1055,12 +1081,15 @@ mod tests {
             DestinationType::Iceberg,
         );
 
+        let node_selector = create_node_selector_json(&environment);
+
         let stateful_set_json = create_replicator_stateful_set_json(
             &prefix,
             &stateful_set_name,
             &config,
             replicator_image,
             container_environment,
+            node_selector,
         );
 
         assert_json_snapshot!(stateful_set_json, { ".spec.template.metadata.annotations[\"etl.supabase.com/restarted-at\"]" => "[timestamp]"});
