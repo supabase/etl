@@ -1,5 +1,0 @@
----
-source: etl-api/src/k8s/http.rs
-expression: tolerations
----
-[]

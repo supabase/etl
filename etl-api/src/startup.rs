@@ -8,7 +8,7 @@ use base64::{Engine, prelude::BASE64_STANDARD};
 use etl_config::Environment;
 use etl_config::shared::{IntoConnectOptions, PgConnectionConfig};
 use etl_telemetry::metrics::init_metrics_handle;
-use k8s_openapi::api::core::v1::{ConfigMap, Namespace};
+use k8s_openapi::api::core::v1::{ConfigMap, Namespace, Secret};
 use kube::Api;
 use kube::api::{Patch, PatchParams};
 use kube::config::KubeConfigOptions;
@@ -20,8 +20,8 @@ use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
 
 use crate::k8s::http::{
-    DATA_PLANE_NAMESPACE, HttpK8sClient, TRUSTED_ROOT_CERT_CONFIG_MAP_NAME,
-    TRUSTED_ROOT_CERT_KEY_NAME,
+    DATA_PLANE_NAMESPACE, HttpK8sClient, LOGFLARE_SECRET_NAME, TRUSTED_ROOT_CERT_CONFIG_MAP_NAME,
+    TRUSTED_ROOT_CERT_KEY_NAME, VECTOR_CONFIG_MAP_NAME,
 };
 use crate::k8s::{K8sClient, K8sError};
 use crate::{
@@ -180,8 +180,8 @@ async fn prepare_dev_env(client: &kube::Client) -> Result<(), K8sError> {
     create_etl_data_plane_ns_if_missing(client).await?;
     create_trusted_root_certs_cm_if_missing(client).await?;
     // label_node_if_missing(client).await?;
-    // create_vector_cm_if_missing(client).await?;
-    // create_logflare_secret_if_missing(client).await?;
+    create_vector_cm_if_missing(client).await?;
+    create_logflare_secret_if_missing(client).await?;
 
     Ok(())
 }
@@ -309,126 +309,126 @@ fn create_trusted_root_certs_cm_json() -> serde_json::Value {
 //         }
 //     })
 // }
-// async fn create_vector_cm_if_missing(client: &kube::Client) -> Result<(), K8sError> {
-//     let api: Api<ConfigMap> = Api::namespaced(client.clone(), DATA_PLANE_NAMESPACE);
+async fn create_vector_cm_if_missing(client: &kube::Client) -> Result<(), K8sError> {
+    let api: Api<ConfigMap> = Api::namespaced(client.clone(), DATA_PLANE_NAMESPACE);
 
-//     if api.get_opt(VECTOR_CONFIG_MAP_NAME).await?.is_none() {
-//         let vector_cm = create_vector_cm_json();
-//         let cm: ConfigMap = serde_json::from_value(vector_cm)?;
-//         let pp = PatchParams::apply(VECTOR_CONFIG_MAP_NAME);
-//         api.patch(VECTOR_CONFIG_MAP_NAME, &pp, &Patch::Apply(cm))
-//             .await?;
-//     }
+    if api.get_opt(VECTOR_CONFIG_MAP_NAME).await?.is_none() {
+        let vector_cm = create_vector_cm_json();
+        let cm: ConfigMap = serde_json::from_value(vector_cm)?;
+        let pp = PatchParams::apply(VECTOR_CONFIG_MAP_NAME);
+        api.patch(VECTOR_CONFIG_MAP_NAME, &pp, &Patch::Apply(cm))
+            .await?;
+    }
 
-//     Ok(())
-// }
+    Ok(())
+}
 
-// fn create_vector_cm_json() -> serde_json::Value {
-//     json!({
-//         "apiVersion": "v1",
-//         "kind": "ConfigMap",
-//         "metadata": {
-//             "name": VECTOR_CONFIG_MAP_NAME,
-//             "namespace": DATA_PLANE_NAMESPACE
-//         },
-//         "data": {
-//         "vector.yaml":
-//             r#"
-//             data_dir: "/var/lib/vector"
-//             sources:
-//                 replicator_logs:
-//                     type: "file"
-//                     ignore_older_secs: 600
-//                     include: ["/var/log/*.log"]
-//                     read_from: "beginning"
+fn create_vector_cm_json() -> serde_json::Value {
+    json!({
+        "apiVersion": "v1",
+        "kind": "ConfigMap",
+        "metadata": {
+            "name": VECTOR_CONFIG_MAP_NAME,
+            "namespace": DATA_PLANE_NAMESPACE
+        },
+        "data": {
+        "vector.yaml":
+            r#"
+            data_dir: "/var/lib/vector"
+            sources:
+                replicator_logs:
+                    type: "file"
+                    ignore_older_secs: 600
+                    include: ["/var/log/*.log"]
+                    read_from: "beginning"
 
-//             transforms:
-//                 transform_replicator_logs:
-//                     inputs: ["replicator_logs"]
-//                     type: "remap"
-//                     source: |
-//                         # parse the message field as json or assign a default
-//                         message = parse_json(.message) ?? {"fields":{"message":"<missing>"},"timestamp":now(),"level":"info","span":{}}
+            transforms:
+                transform_replicator_logs:
+                    inputs: ["replicator_logs"]
+                    type: "remap"
+                    source: |
+                        # parse the message field as json or assign a default
+                        message = parse_json(.message) ?? {"fields":{"message":"<missing>"},"timestamp":now(),"level":"info","span":{}}
 
-//                         .message = message.fields.message
-//                         del(message.fields.message)
-//                         .timestamp = message.timestamp
+                        .message = message.fields.message
+                        del(message.fields.message)
+                        .timestamp = message.timestamp
 
-//                         if exists(message.project) {
-//                             .project = message.project
-//                             del(message.project)
-//                         }
+                        if exists(message.project) {
+                            .project = message.project
+                            del(message.project)
+                        }
+                    
+                        if exists(message.pipeline_id) {
+                            .pipeline_id = message.pipeline_id
+                            del(message.pipeline_id)
+                        }
 
-//                         if exists(message.pipeline_id) {
-//                             .pipeline_id = message.pipeline_id
-//                             del(message.pipeline_id)
-//                         }
+                        .fields = message.fields
+                        .level = message.level
+                        .span = message.span
+                        .spans = message.spans
+                        .vector_file = .file
+                        .vector_host = .host
+                        .vector_timestamp = .timestamp
 
-//                         .fields = message.fields
-//                         .level = message.level
-//                         .span = message.span
-//                         .spans = message.spans
-//                         .vector_file = .file
-//                         .vector_host = .host
-//                         .vector_timestamp = .timestamp
+                        # delete top-level fields which are not required
+                        del(.file)
+                        del(.host)
+                        del(.source_type)
 
-//                         # delete top-level fields which are not required
-//                         del(.file)
-//                         del(.host)
-//                         del(.source_type)
+                # Split logs into two based on whether or not it is an egress metric
+                split_route:
+                    inputs: ["transform_replicator_logs"]
+                    type: "route"
+                    route:
+                        egress_logs: '.fields.egress_metric == true'
+                        non_egress_logs: '.fields.egress_metric != true'
 
-//                 # Split logs into two based on whether or not it is an egress metric
-//                 split_route:
-//                     inputs: ["transform_replicator_logs"]
-//                     type: "route"
-//                     route:
-//                         egress_logs: '.fields.egress_metric == true'
-//                         non_egress_logs: '.fields.egress_metric != true'
+            sinks:
+                logflare_non_egress:
+                    type: "console"
+                    inputs: ["split_route.non_egress_logs"]
+                    encoding:
+                        codec: "json"
+                logflare_egress:
+                    type: "http"
+                    inputs: ["split_route.egress_logs"]
+                    encoding:
+                        codec: "json"
+            "#
+        }
+    })
+}
 
-//             sinks:
-//                 logflare_non_egress:
-//                     type: "console"
-//                     inputs: ["split_route.non_egress_logs"]
-//                     encoding:
-//                         codec: "json"
-//                 logflare_egress:
-//                     type: "http"
-//                     inputs: ["split_route.egress_logs"]
-//                     encoding:
-//                         codec: "json"
-//             "#
-//         }
-//     })
-// }
+async fn create_logflare_secret_if_missing(client: &kube::Client) -> Result<(), K8sError> {
+    let api: Api<Secret> = Api::namespaced(client.clone(), DATA_PLANE_NAMESPACE);
 
-// async fn create_logflare_secret_if_missing(client: &kube::Client) -> Result<(), K8sError> {
-//     let api: Api<Secret> = Api::namespaced(client.clone(), DATA_PLANE_NAMESPACE);
+    if api.get_opt(LOGFLARE_SECRET_NAME).await?.is_none() {
+        let logflare_secret = create_logflare_api_key_secret_json();
+        let secret: Secret = serde_json::from_value(logflare_secret)?;
+        let pp = PatchParams::apply(LOGFLARE_SECRET_NAME);
+        api.patch(LOGFLARE_SECRET_NAME, &pp, &Patch::Apply(secret))
+            .await?;
+    }
 
-//     if api.get_opt(LOGFLARE_SECRET_NAME).await?.is_none() {
-//         let logflare_secret = create_logflare_api_key_secret_json();
-//         let secret: Secret = serde_json::from_value(logflare_secret)?;
-//         let pp = PatchParams::apply(LOGFLARE_SECRET_NAME);
-//         api.patch(LOGFLARE_SECRET_NAME, &pp, &Patch::Apply(secret))
-//             .await?;
-//     }
+    Ok(())
+}
 
-//     Ok(())
-// }
-
-// fn create_logflare_api_key_secret_json() -> serde_json::Value {
-//     json!({
-//         "apiVersion": "v1",
-//         "data": {
-//             "key": "bm90LWEta2V5"
-//         },
-//         "kind": "Secret",
-//         "metadata": {
-//             "name": LOGFLARE_SECRET_NAME,
-//             "namespace": DATA_PLANE_NAMESPACE,
-//         },
-//         "type": "Opaque"
-//     })
-// }
+fn create_logflare_api_key_secret_json() -> serde_json::Value {
+    json!({
+        "apiVersion": "v1",
+        "data": {
+            "key": "bm90LWEta2V5"
+        },
+        "kind": "Secret",
+        "metadata": {
+            "name": LOGFLARE_SECRET_NAME,
+            "namespace": DATA_PLANE_NAMESPACE,
+        },
+        "type": "Opaque"
+    })
+}
 
 /// Creates a Postgres connection pool from the provided configuration.
 pub fn get_connection_pool(config: &PgConnectionConfig) -> PgPool {

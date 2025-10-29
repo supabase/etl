@@ -329,15 +329,12 @@ impl K8sClient for HttpK8sClient {
             destination_type,
         );
 
-        let tolerations = create_tolerations_json(&environment);
-
         let stateful_set_json = create_replicator_stateful_set_json(
             prefix,
             &stateful_set_name,
             &config,
             replicator_image,
             container_environment,
-            tolerations,
         );
 
         let stateful_set: StatefulSet = serde_json::from_value(stateful_set_json)?;
@@ -602,20 +599,6 @@ fn create_container_environment_json(
     container_environment
 }
 
-fn create_tolerations_json(environment: &Environment) -> Vec<serde_json::Value> {
-    match environment {
-        Environment::Dev => vec![],
-        Environment::Staging | Environment::Prod => {
-            vec![json!({
-              "key": "nodeType",
-              "operator": "Equal",
-              "value": "workloads",
-              "effect": "NoSchedule"
-            })]
-        }
-    }
-}
-
 fn create_postgres_secret_env_var_json(postgres_secret_name: &str) -> serde_json::Value {
     json!({
       "name": "APP_PIPELINE__PG_CONNECTION__PASSWORD",
@@ -684,7 +667,6 @@ fn create_replicator_stateful_set_json(
     config: &ReplicatorResourceConfig,
     replicator_image: &str,
     container_environment: Vec<serde_json::Value>,
-    tolerations: Vec<serde_json::Value>,
 ) -> serde_json::Value {
     let replicator_app_name = create_replicator_app_name(prefix);
     let restarted_at_annotation = get_restarted_at_annotation_value();
@@ -737,7 +719,14 @@ fn create_replicator_stateful_set_json(
               }
             ],
             // Allow scheduling onto nodes tainted with `nodeType=workloads`.
-            "tolerations": tolerations,
+            "tolerations": [
+              {
+                "key": "nodeType",
+                "operator": "Equal",
+                "value": "workloads",
+                "effect": "NoSchedule"
+              }
+            ],
             // Pin pods to nodes labeled with `nodeType=workloads`.
             "nodeSelector": {
               "nodeType": "workloads"
@@ -1024,18 +1013,6 @@ mod tests {
     }
 
     #[test]
-    fn test_create_tolerations() {
-        let tolerations = create_tolerations_json(&Environment::Dev);
-        assert_json_snapshot!(tolerations);
-
-        let tolerations = create_tolerations_json(&Environment::Staging);
-        assert_json_snapshot!(tolerations);
-
-        let tolerations = create_tolerations_json(&Environment::Prod);
-        assert_json_snapshot!(tolerations);
-    }
-
-    #[test]
     fn test_create_bq_replicator_stateful_set_json() {
         let prefix = create_k8s_object_prefix(TENANT_ID, 42);
         let stateful_set_name = create_stateful_set_name(&prefix);
@@ -1050,15 +1027,12 @@ mod tests {
             DestinationType::BigQuery,
         );
 
-        let tolerations = create_tolerations_json(&Environment::Prod);
-
         let stateful_set_json = create_replicator_stateful_set_json(
             &prefix,
             &stateful_set_name,
             &config,
             replicator_image,
             container_environment,
-            tolerations,
         );
 
         assert_json_snapshot!(stateful_set_json, { ".spec.template.metadata.annotations[\"etl.supabase.com/restarted-at\"]" => "[timestamp]"});
@@ -1081,15 +1055,12 @@ mod tests {
             DestinationType::Iceberg,
         );
 
-        let tolerations = create_tolerations_json(&Environment::Prod);
-
         let stateful_set_json = create_replicator_stateful_set_json(
             &prefix,
             &stateful_set_name,
             &config,
             replicator_image,
             container_environment,
-            tolerations,
         );
 
         assert_json_snapshot!(stateful_set_json, { ".spec.template.metadata.annotations[\"etl.supabase.com/restarted-at\"]" => "[timestamp]"});
