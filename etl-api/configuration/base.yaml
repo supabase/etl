@@ -1,2 +1,1 @@
-supabase_api:
-  url: "http://localhost:8080"
+supabase_api_url: "http://localhost:8080"
