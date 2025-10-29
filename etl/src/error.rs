@@ -188,21 +188,6 @@ impl EtlError {
         }
     }
 
-    /// Returns the static description string for this error.
-    ///
-    /// The description is always a static string that describes the error category,
-    /// without any dynamic data. This makes it suitable for stable error grouping
-    /// and hashing.
-    ///
-    /// For multiple errors, returns the description of the first error.
-    /// Returns `None` if the error list is empty.
-    pub fn description(&self) -> Option<&str> {
-        match self.repr {
-            ErrorRepr::Single(ref payload) => Some(payload.description.as_ref()),
-            ErrorRepr::Many { ref errors, .. } => errors.first().and_then(|e| e.description()),
-        }
-    }
-
     /// Returns the detailed error information if available.
     ///
     /// For multiple errors, returns the detail of the first error that has one.
@@ -1285,22 +1270,6 @@ mod tests {
         let etl_err = EtlError::from(json_err);
         assert_eq!(etl_err.kind(), ErrorKind::DeserializationError);
         assert!(etl_err.detail().is_some());
-    }
-
-    #[test]
-    fn test_description_method() {
-        let err = EtlError::from((
-            ErrorKind::SourceConnectionFailed,
-            "Database connection failed",
-        ));
-        assert_eq!(err.description(), Some("Database connection failed"));
-
-        let err_with_detail = EtlError::from((
-            ErrorKind::SourceQueryFailed,
-            "SQL query failed",
-            "Table not found".to_string(),
-        ));
-        assert_eq!(err_with_detail.description(), Some("SQL query failed"));
     }
 
     #[test]

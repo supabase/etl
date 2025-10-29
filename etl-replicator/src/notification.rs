@@ -85,9 +85,8 @@ impl ErrorNotificationClient {
     /// This method is fire-and-forget - it logs any failures but does not
     /// propagate them to avoid disrupting the pipeline. The notification is
     /// sent asynchronously without blocking pipeline operations.
-    pub async fn notify_error(&self, error: &EtlError) {
-        let error_message = format!("{error}");
-        let error_hash = compute_error_hash(error);
+    pub async fn notify_error<H: Hash>(&self, error_message: String, error_hash: H) {
+        let error_hash = compute_error_hash(error_hash);
 
         let notification = NotificationRequest {
             pipeline_id: self.pipeline_id.clone(),
@@ -162,15 +161,11 @@ impl ErrorNotificationClient {
 
 /// Computes a stable hash for an error.
 ///
-/// Uses the [`Hash`] trait implementation from [`EtlError`], which hashes only
-/// the error kind and static description (intentionally excluding location and
-/// detail fields).
-///
 /// This provides a consistent identifier across multiple occurrences of the
 /// same error type, enabling grouping and deduplication in monitoring systems.
-pub fn compute_error_hash(error: &EtlError) -> String {
+pub fn compute_error_hash<H: Hash>(error_hash: H) -> String {
     let mut hasher = DefaultHasher::new();
-    error.hash(&mut hasher);
+    error_hash.hash(&mut hasher);
     let hash_value = hasher.finish();
 
     format!("{hash_value:016x}")

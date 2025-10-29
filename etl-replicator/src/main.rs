@@ -10,7 +10,7 @@ use etl_telemetry::metrics::init_metrics;
 use etl_telemetry::tracing::init_tracing_with_top_level_fields;
 use std::sync::Arc;
 use tracing::{error, info};
-
+use etl::error::EtlError;
 use crate::config::load_replicator_config;
 use crate::core::start_replicator_with_config;
 use crate::notification::ErrorNotificationClient;
@@ -60,36 +60,11 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Searches through an error chain to find an [`etl::error::EtlError`].
-///
-/// Walks through the error's source chain using [`std::error::Error::source`]
-/// and attempts to downcast each error to [`etl::error::EtlError`]. Returns
-/// the first [`EtlError`] found, or [`None`] if none exists in the chain.
-fn find_etl_error(err: &anyhow::Error) -> Option<&etl::error::EtlError> {
-    // First, try direct downcast (most common case).
-    if let Some(etl_err) = err.downcast_ref::<etl::error::EtlError>() {
-        return Some(etl_err);
-    }
-
-    // Walk through the error source chain.
-    let mut source = err.source();
-    while let Some(err) = source {
-        if let Some(etl_err) = err.downcast_ref::<etl::error::EtlError>() {
-            return Some(etl_err);
-        }
-        source = err.source();
-    }
-
-    None
-}
-
 /// Main async entry point that starts the replicator pipeline.
 ///
 /// Launches the replicator with the provided configuration and captures any errors
 /// to Sentry and optionally sends notifications to the Supabase API.
 async fn async_main(replicator_config: ReplicatorConfig) -> anyhow::Result<()> {
-    // Create an error notification client if Supabase config is provided with API URL.
-    // The API key is read from the APP_SUPABASE__API_KEY environment variable (injected as a K8s secret).
     let notification_client =
         replicator_config
             .supabase
@@ -113,12 +88,15 @@ async fn async_main(replicator_config: ReplicatorConfig) -> anyhow::Result<()> {
 
         // Send an error notification if a client is available.
         if let Some(client) = notification_client {
-            // Try to extract EtlError from the error chain.
-            // anyhow preserves the original error type, so downcast_ref should work
-            // for the top-level error or we can search through the chain.
-            if let Some(etl_err) = find_etl_error(&err) {
-                client.notify_error(etl_err).await;
-            }
+            let error_message = format!("{err}");
+            match err.downcast_ref::<EtlError>() {
+                Some(err) => {
+                    client.notify_error(error_message.clone(), err).await;
+                }
+                None => {
+                    client.notify_error(error_message.clone(), error_message).await;
+                }
+            };
         }
 
         return Err(err);
