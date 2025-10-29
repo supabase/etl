@@ -1127,9 +1127,11 @@ mod tests {
     fn test_create_iceberg_replicator_stateful_set_json() {
         let prefix = create_k8s_object_prefix(TENANT_ID, 42);
         let stateful_set_name = create_stateful_set_name(&prefix);
-        let environment = Environment::Prod;
-        let config = ReplicatorResourceConfig::load(&environment).unwrap();
         let replicator_image = "ramsup/etl-replicator:2a41356af735f891de37d71c0e1a62864fe4630e";
+
+        // Dev env
+        let environment = Environment::Dev;
+        let config = ReplicatorResourceConfig::load(&environment).unwrap();
 
         let container_environment = create_container_environment_json(
             &prefix,
@@ -1151,7 +1153,58 @@ mod tests {
         );
 
         assert_json_snapshot!(stateful_set_json, { ".spec.template.metadata.annotations[\"etl.supabase.com/restarted-at\"]" => "[timestamp]"});
+        let _stateful_set: StatefulSet = serde_json::from_value(stateful_set_json).unwrap();
 
+        // Staging env
+        let environment = Environment::Staging;
+        let config = ReplicatorResourceConfig::load(&environment).unwrap();
+
+        let container_environment = create_container_environment_json(
+            &prefix,
+            &environment,
+            replicator_image,
+            DestinationType::Iceberg,
+        );
+
+        let node_selector = create_node_selector_json(&environment);
+        let init_containers = create_init_containers_json(&prefix, &environment, &config);
+
+        let stateful_set_json = create_replicator_stateful_set_json(
+            &prefix,
+            &stateful_set_name,
+            replicator_image,
+            container_environment,
+            node_selector,
+            init_containers,
+        );
+
+        assert_json_snapshot!(stateful_set_json, { ".spec.template.metadata.annotations[\"etl.supabase.com/restarted-at\"]" => "[timestamp]"});
+        let _stateful_set: StatefulSet = serde_json::from_value(stateful_set_json).unwrap();
+
+        // Prod env
+        let environment = Environment::Prod;
+        let config = ReplicatorResourceConfig::load(&environment).unwrap();
+
+        let container_environment = create_container_environment_json(
+            &prefix,
+            &environment,
+            replicator_image,
+            DestinationType::Iceberg,
+        );
+
+        let node_selector = create_node_selector_json(&environment);
+        let init_containers = create_init_containers_json(&prefix, &environment, &config);
+
+        let stateful_set_json = create_replicator_stateful_set_json(
+            &prefix,
+            &stateful_set_name,
+            replicator_image,
+            container_environment,
+            node_selector,
+            init_containers,
+        );
+
+        assert_json_snapshot!(stateful_set_json, { ".spec.template.metadata.annotations[\"etl.supabase.com/restarted-at\"]" => "[timestamp]"});
         let _stateful_set: StatefulSet = serde_json::from_value(stateful_set_json).unwrap();
     }
 }
