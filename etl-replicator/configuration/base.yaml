@@ -10,3 +10,4 @@ pipeline:
 supabase:
   project_ref: "kmyteidzebxsnnlusdlq"
   api_url: "http://localhost:8080"
+  api_key: "000000000000000000009"
