@@ -330,14 +330,15 @@ impl K8sClient for HttpK8sClient {
         );
 
         let node_selector = create_node_selector_json(&environment);
+        let init_containers = create_init_containers_json(prefix, &environment, &config);
 
         let stateful_set_json = create_replicator_stateful_set_json(
             prefix,
             &stateful_set_name,
-            &config,
             replicator_image,
             container_environment,
             node_selector,
+            init_containers,
         );
 
         let stateful_set: StatefulSet = serde_json::from_value(stateful_set_json)?;
@@ -622,6 +623,55 @@ fn create_node_selector_json(environment: &Environment) -> serde_json::Value {
     }
 }
 
+fn create_init_containers_json(
+    prefix: &str,
+    environment: &Environment,
+    config: &ReplicatorResourceConfig,
+) -> serde_json::Value {
+    let vector_container_name = create_vector_container_name(prefix);
+    match environment {
+        Environment::Dev => json!([]),
+        Environment::Staging | Environment::Prod => json!([
+          {
+            "name": vector_container_name,
+            "image": VECTOR_IMAGE_NAME,
+            "restartPolicy": "Always",
+            "env": [
+              {
+                "name": "LOGFLARE_API_KEY",
+                "valueFrom": {
+                  "secretKeyRef": {
+                    "name": LOGFLARE_SECRET_NAME,
+                    "key": "key"
+                  }
+                }
+              }
+            ],
+            "resources": {
+              "limits": {
+                "memory": config.max_memory,
+                "cpu": config.max_cpu,
+              },
+              "requests": {
+                "memory": config.max_memory,
+                "cpu": config.max_cpu,
+              }
+            },
+            "volumeMounts": [
+              {
+                "name": VECTOR_CONFIG_FILE_VOLUME_NAME,
+                "mountPath": "/etc/vector"
+              },
+              {
+                "name": LOGS_VOLUME_NAME,
+                "mountPath": "/var/log"
+              }
+            ]
+          }
+        ]),
+    }
+}
+
 fn create_postgres_secret_env_var_json(postgres_secret_name: &str) -> serde_json::Value {
     json!({
       "name": "APP_PIPELINE__PG_CONNECTION__PASSWORD",
@@ -687,15 +737,14 @@ fn create_iceberg_s3_secret_access_key_env_var_json(
 fn create_replicator_stateful_set_json(
     prefix: &str,
     stateful_set_name: &str,
-    config: &ReplicatorResourceConfig,
     replicator_image: &str,
     container_environment: Vec<serde_json::Value>,
     node_selector: serde_json::Value,
+    init_containers: serde_json::Value,
 ) -> serde_json::Value {
     let replicator_app_name = create_replicator_app_name(prefix);
     let restarted_at_annotation = get_restarted_at_annotation_value();
     let replicator_config_map_name = create_replicator_config_map_name(prefix);
-    let vector_container_name = create_vector_container_name(prefix);
     let replicator_container_name = create_replicator_container_name(prefix);
 
     json!({
@@ -755,44 +804,7 @@ fn create_replicator_stateful_set_json(
             // We want to wait at most 5 minutes before K8S sends a `SIGKILL` to the containers,
             // this way we let the system finish any in-flight transaction, if there are any.
             "terminationGracePeriodSeconds": 300,
-            "initContainers": [
-              {
-                "name": vector_container_name,
-                "image": VECTOR_IMAGE_NAME,
-                "restartPolicy": "Always",
-                "env": [
-                  {
-                    "name": "LOGFLARE_API_KEY",
-                    "valueFrom": {
-                      "secretKeyRef": {
-                        "name": LOGFLARE_SECRET_NAME,
-                        "key": "key"
-                      }
-                    }
-                  }
-                ],
-                "resources": {
-                  "limits": {
-                    "memory": config.max_memory,
-                    "cpu": config.max_cpu,
-                  },
-                  "requests": {
-                    "memory": config.max_memory,
-                    "cpu": config.max_cpu,
-                  }
-                },
-                "volumeMounts": [
-                  {
-                    "name": VECTOR_CONFIG_FILE_VOLUME_NAME,
-                    "mountPath": "/etc/vector"
-                  },
-                  {
-                    "name": LOGS_VOLUME_NAME,
-                    "mountPath": "/var/log"
-                  }
-                ]
-              }
-            ],
+            "initContainers": init_containers,
             "containers": [
               {
                 "name": replicator_container_name,
@@ -1060,6 +1072,26 @@ mod tests {
     }
 
     #[test]
+    fn test_create_init_containers() {
+        let prefix = create_k8s_object_prefix(TENANT_ID, 42);
+
+        let environment = Environment::Dev;
+        let config = ReplicatorResourceConfig::load(&environment).unwrap();
+        let node_selector = create_init_containers_json(&prefix, &environment, &config);
+        assert_json_snapshot!(node_selector);
+
+        let environment = Environment::Staging;
+        let config = ReplicatorResourceConfig::load(&environment).unwrap();
+        let node_selector = create_init_containers_json(&prefix, &environment, &config);
+        assert_json_snapshot!(node_selector);
+
+        let environment = Environment::Prod;
+        let config = ReplicatorResourceConfig::load(&environment).unwrap();
+        let node_selector = create_init_containers_json(&prefix, &environment, &config);
+        assert_json_snapshot!(node_selector);
+    }
+
+    #[test]
     fn test_create_bq_replicator_stateful_set_json() {
         let prefix = create_k8s_object_prefix(TENANT_ID, 42);
         let stateful_set_name = create_stateful_set_name(&prefix);
@@ -1075,14 +1107,15 @@ mod tests {
         );
 
         let node_selector = create_node_selector_json(&environment);
+        let init_containers = create_init_containers_json(&prefix, &environment, &config);
 
         let stateful_set_json = create_replicator_stateful_set_json(
             &prefix,
             &stateful_set_name,
-            &config,
             replicator_image,
             container_environment,
             node_selector,
+            init_containers,
         );
 
         assert_json_snapshot!(stateful_set_json, { ".spec.template.metadata.annotations[\"etl.supabase.com/restarted-at\"]" => "[timestamp]"});
@@ -1106,14 +1139,15 @@ mod tests {
         );
 
         let node_selector = create_node_selector_json(&environment);
+        let init_containers = create_init_containers_json(&prefix, &environment, &config);
 
         let stateful_set_json = create_replicator_stateful_set_json(
             &prefix,
             &stateful_set_name,
-            &config,
             replicator_image,
             container_environment,
             node_selector,
+            init_containers,
         );
 
         assert_json_snapshot!(stateful_set_json, { ".spec.template.metadata.annotations[\"etl.supabase.com/restarted-at\"]" => "[timestamp]"});
