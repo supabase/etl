@@ -147,10 +147,6 @@ digraph ETL_Dependencies {
                     <td align="left">Top = Crate name &amp; purpose<br/>Middle = Internal workspace deps<br/>Bottom = External dependencies</td>
                 </tr>
                 <tr>
-                    <td align="left"><b>Colors:</b></td>
-                    <td align="left">Blue = Foundation | Green = Infrastructure<br/>Yellow = Core | Orange = Integration<br/>Purple = Applications | Gray = Tooling</td>
-                </tr>
-                <tr>
                     <td align="left"><b>Arrows:</b></td>
                     <td align="left">Thick colored = Workspace dependency<br/>Dashed = Dev dependency</td>
                 </tr>
