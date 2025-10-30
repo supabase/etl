@@ -16,13 +16,20 @@ use gcp_bigquery_client::model::table_cell::TableCell;
 use gcp_bigquery_client::model::table_row::TableRow;
 use std::fmt;
 use std::str::FromStr;
+use std::time::Duration;
 use tokio::runtime::Handle;
+use tokio::time::sleep;
 use uuid::Uuid;
 
 /// Environment variable name for the BigQuery project id.
 const BIGQUERY_PROJECT_ID_ENV_NAME: &str = "TESTS_BIGQUERY_PROJECT_ID";
 /// Environment variable name for the BigQuery service account key path.
 const BIGQUERY_SA_KEY_PATH_ENV_NAME: &str = "TESTS_BIGQUERY_SA_KEY_PATH";
+/// Maximum number of times we re-run a verification query to account for BigQuery's
+/// eventual consistency on streamed inserts.
+const BIGQUERY_QUERY_MAX_ATTEMPTS: u32 = 30;
+/// Delay in milliseconds between verification attempts when querying BigQuery.
+const BIGQUERY_QUERY_RETRY_DELAY_MS: u64 = 500;
 
 /// Generates a unique dataset ID for test isolation.
 ///
@@ -124,8 +131,10 @@ impl BigQueryDatabase {
 
     /// Executes a SELECT * query against the specified table.
     ///
-    /// Returns all rows from the table in the test dataset. Useful for
-    /// verifying data after ETL operations in tests.
+    /// Returns all rows from the table in the test dataset, polling until BigQuery
+    /// surfaces the streamed data or a short retry budget is exhausted.
+    /// Useful for verifying data after ETL operations in tests where writes are
+    /// acknowledged before they become queryable.
     pub async fn query_table(&self, table_name: TableName) -> Option<Vec<TableRow>> {
         let client = self.client().unwrap();
 
@@ -136,12 +145,23 @@ impl BigQueryDatabase {
         let full_table_path = format!("`{project_id}.{dataset_id}.{table_id}`");
 
         let query = format!("select * from {full_table_path}");
-        client
-            .job()
-            .query(project_id, QueryRequest::new(query))
-            .await
-            .unwrap()
-            .rows
+        let mut attempts_remaining = BIGQUERY_QUERY_MAX_ATTEMPTS;
+
+        loop {
+            let rows = client
+                .job()
+                .query(project_id, QueryRequest::new(query.clone()))
+                .await
+                .unwrap()
+                .rows;
+
+            if rows.is_some() || attempts_remaining == 1 {
+                return rows;
+            }
+
+            attempts_remaining -= 1;
+            sleep(Duration::from_millis(BIGQUERY_QUERY_RETRY_DELAY_MS)).await;
+        }
     }
 
     /// Manually creates a table in the test dataset using column definitions.
