@@ -342,7 +342,7 @@ where
         }
     }
 
-    // We also wait to be signaled to catchup with the main apply worker up to a specific lsn.
+    // We also wait to be signaled to catch up with the main apply worker up to a specific lsn.
     let result = table_sync_worker_state
         .wait_for_phase_type(TableReplicationPhaseType::Catchup, shutdown_rx.clone())
         .await;
