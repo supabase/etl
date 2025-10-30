@@ -25,8 +25,7 @@ use uuid::Uuid;
 const BIGQUERY_PROJECT_ID_ENV_NAME: &str = "TESTS_BIGQUERY_PROJECT_ID";
 /// Environment variable name for the BigQuery service account key path.
 const BIGQUERY_SA_KEY_PATH_ENV_NAME: &str = "TESTS_BIGQUERY_SA_KEY_PATH";
-/// Maximum number of times we re-run a verification query to account for BigQuery's
-/// eventual consistency on streamed inserts.
+/// Maximum number of times we re-run a verification query.
 const BIGQUERY_QUERY_MAX_ATTEMPTS: u32 = 30;
 /// Delay in milliseconds between verification attempts when querying BigQuery.
 const BIGQUERY_QUERY_RETRY_DELAY_MS: u64 = 500;
@@ -133,8 +132,6 @@ impl BigQueryDatabase {
     ///
     /// Returns all rows from the table in the test dataset, polling until BigQuery
     /// surfaces the streamed data or a short retry budget is exhausted.
-    /// Useful for verifying data after ETL operations in tests where writes are
-    /// acknowledged before they become queryable.
     pub async fn query_table(&self, table_name: TableName) -> Option<Vec<TableRow>> {
         let client = self.client().unwrap();
 
