@@ -34,10 +34,10 @@ iceberg = [
 [dependencies]
 etl = { workspace = true }
 
-chrono = { workspace = true }
 arrow = { workspace = true, optional = true }
 async-trait = { workspace = true, optional = true }
 base64 = { workspace = true, optional = true }
+chrono = { workspace = true }
 gcp-bigquery-client = { workspace = true, optional = true, features = [
     "rust-tls",
     "aws-lc-rs",
