@@ -878,7 +878,7 @@ where
         table_replication_error: TableReplicationError,
     ) -> EtlResult<ApplyLoopAction> {
         if self.table_id != table_replication_error.table_id() {
-            // If the table is not the same as the one handled by this table sync worker, marking
+            // If the table is different from the one handled by this table sync worker, marking
             // the table will be a noop, and we want to continue the loop.
             return Ok(ApplyLoopAction::Continue);
         }
@@ -891,7 +891,7 @@ where
             .await?;
 
         // If a table is marked as errored, this worker should stop processing immediately since there
-        // is no need to continue and for this we mark the loop as completed.
+        // is no need to continue, and for this we mark the loop as completed.
         Ok(ApplyLoopAction::Complete)
     }
 
