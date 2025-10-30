@@ -1,12 +1,3 @@
-// ETL Complete Dependency Map - Clean Record Layout
-// Generated: 2025-10-30
-// Total Dependencies: 695 unique crates
-// Workspace Crates: 9
-//
-// Render with:
-//   dot -Tpng dependencies.dot -o dependencies.png
-//   dot -Tsvg dependencies.dot -o dependencies.svg
-
 digraph ETL_Dependencies {
     rankdir=TB;
     splines=true;
@@ -106,6 +97,7 @@ digraph ETL_Dependencies {
     // ================================================================
 
     "etl-postgres" -> "etl-config" [color="#2196f3", penwidth=3];
+
     "etl-telemetry" -> "etl-config" [color="#2196f3", penwidth=3];
 
     "etl" -> "etl-config" [color="#2196f3", penwidth=3];
