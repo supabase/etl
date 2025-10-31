@@ -101,18 +101,18 @@ pub struct IcebergDestination<S> {
 
 /// Namespace in the destination where the tables will be copied
 #[derive(Debug)]
-enum DestinationNamespace {
+pub enum DestinationNamespace {
     /// A single namespace for all tables in the source
     Single(String),
-    // // One namespace for each schema in the source
-    // OnePerSchema,
+    // One namespace for each schema in the source
+    OnePerSchema,
 }
 
 impl DestinationNamespace {
-    fn get<'a>(&'a self, _table_namespace: &'a str) -> &'a str {
+    fn get<'a>(&'a self, table_namespace: &'a str) -> &'a str {
         match self {
             DestinationNamespace::Single(ns) => ns,
-            // DestinationNamespace::OnePerSchema => table_namespace,
+            DestinationNamespace::OnePerSchema => table_namespace,
         }
     }
 }
@@ -147,14 +147,18 @@ where
     /// Initializes the destination with an Iceberg client, target namespace,
     /// and state/schema store. The destination starts with an empty table
     /// creation cache and is ready to handle streaming operations.
-    pub fn new(client: IcebergClient, namespace: String, store: S) -> IcebergDestination<S> {
+    pub fn new(
+        client: IcebergClient,
+        namespace: DestinationNamespace,
+        store: S,
+    ) -> IcebergDestination<S> {
         IcebergDestination {
             client,
             store,
             inner: Arc::new(Mutex::new(Inner {
                 created_tables: HashSet::new(),
                 created_namespaces: HashSet::new(),
-                namespace: DestinationNamespace::Single(namespace),
+                namespace,
             })),
         }
     }

@@ -8,7 +8,8 @@ use etl::test_utils::test_destination_wrapper::TestDestinationWrapper;
 use etl::test_utils::test_schema::{TableSelection, insert_mock_data, setup_test_database_schema};
 use etl::types::{Cell, EventType, PipelineId, TableRow};
 use etl_destinations::iceberg::{
-    IcebergClient, IcebergDestination, IcebergOperationType, table_name_to_iceberg_table_name,
+    DestinationNamespace, IcebergClient, IcebergDestination, IcebergOperationType,
+    table_name_to_iceberg_table_name,
 };
 use etl_telemetry::tracing::init_test_tracing;
 use rand::random;
@@ -48,8 +49,11 @@ async fn table_copy() {
     let namespace = "test_namespace";
     client.create_namespace_if_missing(namespace).await.unwrap();
 
-    let raw_destination =
-        IcebergDestination::new(client.clone(), namespace.to_string(), store.clone());
+    let raw_destination = IcebergDestination::new(
+        client.clone(),
+        DestinationNamespace::Single(namespace.to_string()),
+        store.clone(),
+    );
     // let raw_destination = bigquery_database.build_destination(store.clone()).await;
     let destination = TestDestinationWrapper::wrap(raw_destination);
 
@@ -172,8 +176,11 @@ async fn cdc_streaming() {
     let namespace = "test_namespace";
     client.create_namespace_if_missing(namespace).await.unwrap();
 
-    let raw_destination =
-        IcebergDestination::new(client.clone(), namespace.to_string(), store.clone());
+    let raw_destination = IcebergDestination::new(
+        client.clone(),
+        DestinationNamespace::Single(namespace.to_string()),
+        store.clone(),
+    );
     let destination = TestDestinationWrapper::wrap(raw_destination);
 
     // Start pipeline from scratch (no initial data). We'll stream CDC events only.
@@ -450,8 +457,11 @@ async fn cdc_streaming_with_truncate() {
     let namespace = "test_namespace";
     client.create_namespace_if_missing(namespace).await.unwrap();
 
-    let raw_destination =
-        IcebergDestination::new(client.clone(), namespace.to_string(), store.clone());
+    let raw_destination = IcebergDestination::new(
+        client.clone(),
+        DestinationNamespace::Single(namespace.to_string()),
+        store.clone(),
+    );
     let destination = TestDestinationWrapper::wrap(raw_destination);
 
     // Start pipeline from scratch (no initial data). We'll stream CDC events only.
