@@ -95,7 +95,6 @@ pub fn table_name_to_iceberg_table_name(table_name: &TableName) -> IcebergTableN
 #[derive(Debug, Clone)]
 pub struct IcebergDestination<S> {
     client: IcebergClient,
-    namespace: String,
     store: S,
     inner: Arc<Mutex<Inner>>,
 }
@@ -112,6 +111,7 @@ struct Inner {
     /// Prevents redundant table existence checks and creation attempts.
     /// Tables are added to this cache after successful creation or verification.
     created_tables: HashSet<IcebergTableName>,
+    namespace: String,
 }
 
 impl<S> IcebergDestination<S>
@@ -126,10 +126,10 @@ where
     pub fn new(client: IcebergClient, namespace: String, store: S) -> IcebergDestination<S> {
         IcebergDestination {
             client,
-            namespace,
             store,
             inner: Arc::new(Mutex::new(Inner {
                 created_tables: HashSet::new(),
+                namespace,
             })),
         }
     }
@@ -144,7 +144,7 @@ where
 
         if let Some(iceberg_table_name) = self.store.get_table_mapping(&table_id).await? {
             self.client
-                .drop_table(&self.namespace, iceberg_table_name.clone())
+                .drop_table(&inner.namespace, iceberg_table_name.clone())
                 .await
                 .map_err(iceberg_error_to_etl_error)?;
 
@@ -176,8 +176,12 @@ where
             row.values.push(Cell::String(sequence_number));
         }
 
+        let inner = self.inner.lock().await;
+        let namespace = inner.namespace.clone();
+        drop(inner);
+
         self.client
-            .insert_rows(self.namespace.clone(), iceberg_table_name, table_rows)
+            .insert_rows(namespace, iceberg_table_name, table_rows)
             .await?;
 
         Ok(())
@@ -269,7 +273,9 @@ where
                                 format!("The table mapping for table {table_id} was not found")
                             ))?;
 
-                    let namespace = self.namespace.clone();
+                    let inner = self.inner.lock().await;
+                    let namespace = inner.namespace.clone();
+                    drop(inner);
                     let client = self.client.clone();
 
                     join_set.spawn(async move {
@@ -357,7 +363,7 @@ where
 
         self.client
             .create_table_if_missing(
-                &self.namespace,
+                &inner.namespace,
                 iceberg_table_name.clone(),
                 &table_schema.column_schemas,
             )
