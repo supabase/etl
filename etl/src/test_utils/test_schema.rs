@@ -4,7 +4,7 @@ use std::ops::RangeInclusive;
 use tokio_postgres::types::{PgLsn, Type};
 use tokio_postgres::{Client, GenericClient};
 
-use crate::test_utils::database::test_table_name;
+use crate::test_utils::database::{TEST_DATABASE_SCHEMA, test_table_name};
 use crate::test_utils::test_destination_wrapper::TestDestinationWrapper;
 use crate::types::{Cell, Event, InsertEvent, TableRow};
 
@@ -37,6 +37,10 @@ impl TestDatabaseSchema {
         self.orders_table_schema
             .clone()
             .expect("Orders table schema not found")
+    }
+
+    pub fn schema() -> &'static str {
+        TEST_DATABASE_SCHEMA
     }
 }
 
