@@ -1,0 +1,11 @@
+[target.aarch64-unknown-linux-gnu]
+# Fast, portable linking
+linker = "clang"
+rustflags = [
+    # Use the lld linker instead of the system default
+    "-Clink-arg=-fuse-ld=lld",
+    # Tune for Graviton4 (Neoverse-V2)
+    "-Ctarget-cpu=neoverse-v2",
+    # Use LSE atomics directly (minor win, drops portability)
+    "-Ctarget-feature=+lse",
+]
