@@ -137,7 +137,7 @@ struct Inner {
     created_namespaces: HashSet<String>,
 
     /// Namespace where the tables will be replicated. Depending on the variant either
-    /// all tables will go in one namespace or there will be one namespace per 
+    /// all tables will go in one namespace or there will be one namespace per
     /// source schema.
     namespace: DestinationNamespace,
 }
