@@ -99,6 +99,24 @@ pub struct IcebergDestination<S> {
     inner: Arc<Mutex<Inner>>,
 }
 
+/// Namespace in the destination where the tables will be copied
+#[derive(Debug)]
+enum DestinationNamespace {
+    /// A single namespace for all tables in the source
+    Single(String),
+    // // One namespace for each schema in the source
+    // OnePerSchema,
+}
+
+impl DestinationNamespace {
+    fn get<'a>(&'a self, _table_namespace: &'a str) -> &'a str {
+        match self {
+            DestinationNamespace::Single(ns) => ns,
+            // DestinationNamespace::OnePerSchema => table_namespace,
+        }
+    }
+}
+
 /// Internal state for the Iceberg destination.
 ///
 /// Contains mutable state that requires synchronization across concurrent operations.
@@ -117,7 +135,7 @@ struct Inner {
     /// Namespaces are added to this cache after successful creation or verification.
     created_namespaces: HashSet<String>,
 
-    namespace: String,
+    namespace: DestinationNamespace,
 }
 
 impl<S> IcebergDestination<S>
@@ -136,7 +154,7 @@ where
             inner: Arc::new(Mutex::new(Inner {
                 created_tables: HashSet::new(),
                 created_namespaces: HashSet::new(),
-                namespace,
+                namespace: DestinationNamespace::Single(namespace),
             })),
         }
     }
@@ -149,9 +167,13 @@ where
     async fn truncate_table(&self, table_id: TableId) -> EtlResult<()> {
         let mut inner = self.inner.lock().await;
 
-        if let Some(iceberg_table_name) = self.store.get_table_mapping(&table_id).await? {
+        if let (Some(iceberg_table_name), Some(table_schema)) = (
+            self.store.get_table_mapping(&table_id).await?,
+            self.store.get_table_schema(&table_id).await?,
+        ) {
+            let namespace = inner.namespace.get(&table_schema.name.schema);
             self.client
-                .drop_table(&inner.namespace, iceberg_table_name.clone())
+                .drop_table(namespace, iceberg_table_name.clone())
                 .await
                 .map_err(iceberg_error_to_etl_error)?;
 
@@ -175,17 +197,13 @@ where
         table_id: TableId,
         mut table_rows: Vec<TableRow>,
     ) -> EtlResult<()> {
-        let iceberg_table_name = self.prepare_table_for_streaming(table_id).await?;
+        let (namespace, iceberg_table_name) = self.prepare_table_for_streaming(table_id).await?;
 
         for row in &mut table_rows {
             let sequence_number = generate_sequence_number(0.into(), 0.into());
             row.values.push(IcebergOperationType::Insert.into());
             row.values.push(Cell::String(sequence_number));
         }
-
-        let inner = self.inner.lock().await;
-        let namespace = inner.namespace.clone();
-        drop(inner);
 
         self.client
             .insert_rows(namespace, iceberg_table_name, table_rows)
@@ -269,20 +287,9 @@ where
                 let mut join_set = JoinSet::new();
 
                 for (table_id, table_rows) in table_id_to_table_rows {
-                    self.prepare_table_for_streaming(table_id).await?;
-                    let iceberg_table_name =
-                        self.store
-                            .get_table_mapping(&table_id)
-                            .await?
-                            .ok_or(etl_error!(
-                                ErrorKind::MissingTableMapping,
-                                "Table mapping not found",
-                                format!("The table mapping for table {table_id} was not found")
-                            ))?;
+                    let (namespace, iceberg_table_name) =
+                        self.prepare_table_for_streaming(table_id).await?;
 
-                    let inner = self.inner.lock().await;
-                    let namespace = inner.namespace.clone();
-                    drop(inner);
                     let client = self.client.clone();
 
                     join_set.spawn(async move {
@@ -340,22 +347,15 @@ where
     /// and ensures the corresponding Iceberg table exists in the namespace.
     /// Uses caching to avoid redundant table creation checks and holds a lock
     /// during the entire preparation to prevent race conditions.
-    async fn prepare_table_for_streaming(&self, table_id: TableId) -> EtlResult<IcebergTableName> {
+    async fn prepare_table_for_streaming(
+        &self,
+        table_id: TableId,
+    ) -> EtlResult<(String, IcebergTableName)> {
         // We hold the lock for the entire preparation to avoid race conditions since the consistency
         // of this code path is critical.
         let mut inner = self.inner.lock().await;
 
-        let table_schema = self
-            .store
-            .get_table_schema(&table_id)
-            .await?
-            .ok_or_else(|| {
-                etl_error!(
-                    ErrorKind::MissingTableSchema,
-                    "Table schema not found",
-                    format!("No schema found for table {table_id}")
-                )
-            })?;
+        let table_schema = self.get_table_schema(table_id).await?;
 
         let table_schema = Self::add_cdc_columns(&table_schema);
 
@@ -364,15 +364,28 @@ where
             .get_or_create_iceberg_table_name(&table_id, iceberg_table_name)
             .await?;
 
-        let namespace = inner.namespace.clone();
-        self.create_namespace_if_missing(&mut inner, namespace)
+        let namespace = inner.namespace.get(&table_schema.name.schema).to_string();
+        self.create_namespace_if_missing(&mut inner, namespace.clone())
             .await?;
 
         let iceberg_table_name = self
-            .create_table_if_missing(&mut inner, iceberg_table_name, &table_schema)
+            .create_table_if_missing(&mut inner, iceberg_table_name, &namespace, &table_schema)
             .await?;
 
-        Ok(iceberg_table_name)
+        Ok((namespace, iceberg_table_name))
+    }
+
+    async fn get_table_schema(&self, table_id: TableId) -> EtlResult<Arc<TableSchema>> {
+        self.store
+            .get_table_schema(&table_id)
+            .await?
+            .ok_or_else(|| {
+                etl_error!(
+                    ErrorKind::MissingTableSchema,
+                    "Table schema not found",
+                    format!("No schema found for table {table_id}")
+                )
+            })
     }
 
     async fn create_namespace_if_missing(
@@ -398,6 +411,7 @@ where
         &self,
         inner: &mut Inner,
         iceberg_table_name: String,
+        namespace: &str,
         table_schema: &TableSchema,
     ) -> EtlResult<String> {
         if inner.created_tables.contains(&iceberg_table_name) {
@@ -406,7 +420,7 @@ where
 
         self.client
             .create_table_if_missing(
-                &inner.namespace,
+                namespace,
                 iceberg_table_name.clone(),
                 &table_schema.column_schemas,
             )
