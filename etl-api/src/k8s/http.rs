@@ -560,7 +560,8 @@ fn create_container_environment_json(
           "valueFrom": {
             "secretKeyRef": {
               "name": SENTRY_DSN_SECRET_NAME,
-              "key": "dsn"
+              "key": "dsn",
+              "optional": true
             }
           }
         }),
@@ -569,7 +570,7 @@ fn create_container_environment_json(
           "valueFrom": {
             "secretKeyRef": {
               "name": SUPABASE_API_KEY_SECRET_NAME,
-              "key": "api-key",
+              "key": "key",
               "optional": true
             }
           }
