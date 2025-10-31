@@ -74,7 +74,7 @@ pub mod destinations {
             config: FullApiIcebergConfig::Supabase {
                 project_ref: "abcdefghijklmnopqrst".to_string(),
                 warehouse_name: "my-warehouse".to_string(),
-                namespace: "my-namespace".to_string(),
+                namespace: Some("my-namespace".to_string()),
                 catalog_token: SerializableSecretString::from(
                     "eyJ0eXAiOiJKV1QiLCJhbGciOiJFUzI1NiIsImtpZCI6IjFkNzFjMGEyNmIxMDFjODQ5ZTkxZmQ1NjdjYjA5NTJmIn0.eyJleHAiOjIwNzA3MTcxNjAsImlhdCI6MTc1NjE0NTE1MCwiaXNzIjoic3VwYWJhc2UiLCJyZWYiOiJhYmNkZWZnaGlqbGttbm9wcXJzdCIsInJvbGUiOiJzZXJ2aWNlX3JvbGUifQ.YdTWkkIvwjSkXot3NC07xyjPjGWQMNzLq5EPzumzrdLzuHrj-zuzI-nlyQtQ5V7gZauysm-wGwmpztRXfPc3AQ".to_string()
                 ),
@@ -95,7 +95,7 @@ pub mod destinations {
             config: FullApiIcebergConfig::Supabase {
                 project_ref: "tsrqponmlkjihgfedcba".to_string(),
                 warehouse_name: "my-updated-warehouse".to_string(),
-                namespace: "my-updated-namespace".to_string(),
+                namespace: Some("my-updated-namespace".to_string()),
                 catalog_token: SerializableSecretString::from(
                     "eyJ0eXAiOiJKV1QiLCJhbGciOiJFUzI1NiIsImtpZCI6IjJlOGQxZDNjN2MyMTJkOTU4ZmEyOGU2ZDhjZDEwYTMzIn0.eyJleHAiOjIwNzA3MTcxNjAsImlhdCI6MTc1NjE0NTE1MCwiaXNzIjoic3VwYWJhc2UiLCJyZWYiOiJ0c3JxcG9ubWxramloZ2ZlZGNiYSIsInJvbGUiOiJzZXJ2aWNlX3JvbGUifQ.UpdatedTokenSignatureForTesting".to_string()
                 ),

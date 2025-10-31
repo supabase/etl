@@ -441,7 +441,7 @@ pub enum StoredIcebergConfig {
     Supabase {
         project_ref: String,
         warehouse_name: String,
-        namespace: String,
+        namespace: Option<String>,
         catalog_token: SerializableSecretString,
         s3_access_key_id: SerializableSecretString,
         s3_secret_access_key: SerializableSecretString,
@@ -450,7 +450,7 @@ pub enum StoredIcebergConfig {
     Rest {
         catalog_uri: String,
         warehouse_name: String,
-        namespace: String,
+        namespace: Option<String>,
         s3_access_key_id: SerializableSecretString,
         s3_secret_access_key: SerializableSecretString,
         s3_endpoint: String,
@@ -466,7 +466,7 @@ pub enum FullApiIcebergConfig {
         #[schema(example = "my-warehouse")]
         warehouse_name: String,
         #[schema(example = "my-namespace")]
-        namespace: String,
+        namespace: Option<String>,
         #[schema(
             example = "eyJ0eXAiOiJKV1QiLCJhbGciOiJFUzI1NiIsImtpZCI6IjFkNzFjMGEyNmIxMDFjODQ5ZTkxZmQ1NjdjYjA5NTJmIn0.eyJleHAiOjIwNzA3MTcxNjAsImlhdCI6MTc1NjE0NTE1MCwiaXNzIjoic3VwYWJhc2UiLCJyZWYiOiJhYmNkZWZnaGlqbGttbm9wcXJzdCIsInJvbGUiOiJzZXJ2aWNlX3JvbGUifQ.YdTWkkIvwjSkXot3NC07xyjPjGWQMNzLq5EPzumzrdLzuHrj-zuzI-nlyQtQ5V7gZauysm-wGwmpztRXfPc3AQ"
         )]
@@ -484,7 +484,7 @@ pub enum FullApiIcebergConfig {
         #[schema(example = "my-warehouse")]
         warehouse_name: String,
         #[schema(example = "my-namespace")]
-        namespace: String,
+        namespace: Option<String>,
         #[schema(example = "9156667efc2c70d89af6588da86d2924")]
         s3_access_key_id: SerializableSecretString,
         #[schema(example = "ca833e890916d848c69135924bcd75e5909184814a0ebc6c988937ee094120d4")]
@@ -500,7 +500,7 @@ pub enum EncryptedStoredIcebergConfig {
     Supabase {
         project_ref: String,
         warehouse_name: String,
-        namespace: String,
+        namespace: Option<String>,
         catalog_token: EncryptedValue,
         s3_access_key_id: EncryptedValue,
         s3_secret_access_key: EncryptedValue,
@@ -509,7 +509,7 @@ pub enum EncryptedStoredIcebergConfig {
     Rest {
         catalog_uri: String,
         warehouse_name: String,
-        namespace: String,
+        namespace: Option<String>,
         s3_access_key_id: EncryptedValue,
         s3_secret_access_key: EncryptedValue,
         s3_endpoint: String,
@@ -571,7 +571,7 @@ mod tests {
             config: StoredIcebergConfig::Supabase {
                 project_ref: "abcdefghijklmnopqrst".to_string(),
                 warehouse_name: "my-warehouse".to_string(),
-                namespace: "my-namespace".to_string(),
+                namespace: Some("my-namespace".to_string()),
                 catalog_token: SerializableSecretString::from("eyJ0eXAiOiJKV1QiLCJhbGciOiJFUzI1NiIsImtpZCI6IjFkNzFjMGEyNmIxMDFjODQ5ZTkxZmQ1NjdjYjA5NTJmIn0.eyJleHAiOjIwNzA3MTcxNjAsImlhdCI6MTc1NjE0NTE1MCwiaXNzIjoic3VwYWJhc2UiLCJyZWYiOiJhYmNkZWZnaGlqbGttbm9wcXJzdCIsInJvbGUiOiJzZXJ2aWNlX3JvbGUifQ.YdTWkkIvwjSkXot3NC07xyjPjGWQMNzLq5EPzumzrdLzuHrj-zuzI-nlyQtQ5V7gZauysm-wGwmpztRXfPc3AQ".to_string()),
                 s3_access_key_id: SerializableSecretString::from("9156667efc2c70d89af6588da86d2924".to_string()),
                 s3_secret_access_key: SerializableSecretString::from("ca833e890916d848c69135924bcd75e5909184814a0ebc6c988937ee094120d4".to_string()),
@@ -637,7 +637,7 @@ mod tests {
                 catalog_uri: "https://abcdefghijklmnopqrst.storage.supabase.com/storage/v1/iceberg"
                     .to_string(),
                 warehouse_name: "my-warehouse".to_string(),
-                namespace: "my-namespace".to_string(),
+                namespace: Some("my-namespace".to_string()),
                 s3_access_key_id: SerializableSecretString::from("id".to_string()),
                 s3_secret_access_key: SerializableSecretString::from("key".to_string()),
                 s3_endpoint: "http://localhost:8080".to_string(),
@@ -741,7 +741,7 @@ mod tests {
             config: StoredIcebergConfig::Supabase {
                 project_ref: "abcdefghijklmnopqrst".to_string(),
                 warehouse_name: "my-warehouse".to_string(),
-                namespace: "my-namespace".to_string(),
+                namespace: Some("my-namespace".to_string()),
                 catalog_token: SerializableSecretString::from("eyJ0eXAiOiJKV1QiLCJhbGciOiJFUzI1NiIsImtpZCI6IjFkNzFjMGEyNmIxMDFjODQ5ZTkxZmQ1NjdjYjA5NTJmIn0.eyJleHAiOjIwNzA3MTcxNjAsImlhdCI6MTc1NjE0NTE1MCwiaXNzIjoic3VwYWJhc2UiLCJyZWYiOiJhYmNkZWZnaGlqbGttbm9wcXJzdCIsInJvbGUiOiJzZXJ2aWNlX3JvbGUifQ.YdTWkkIvwjSkXot3NC07xyjPjGWQMNzLq5EPzumzrdLzuHrj-zuzI-nlyQtQ5V7gZauysm-wGwmpztRXfPc3AQ".to_string()),
                 s3_access_key_id: SerializableSecretString::from("9156667efc2c70d89af6588da86d2924".to_string()),
                 s3_secret_access_key: SerializableSecretString::from("ca833e890916d848c69135924bcd75e5909184814a0ebc6c988937ee094120d4".to_string()),
@@ -813,7 +813,7 @@ mod tests {
                 catalog_uri: "https://abcdefghijklmnopqrst.storage.supabase.com/storage/v1/iceberg"
                     .to_string(),
                 warehouse_name: "my-warehouse".to_string(),
-                namespace: "my-namespace".to_string(),
+                namespace: Some("my-namespace".to_string()),
                 s3_access_key_id: SerializableSecretString::from("id".to_string()),
                 s3_secret_access_key: SerializableSecretString::from("key".to_string()),
                 s3_endpoint: "http://localhost:8080".to_string(),
@@ -924,7 +924,7 @@ mod tests {
             config: FullApiIcebergConfig::Supabase {
                 project_ref: "abcdefghijklmnopqrst".to_string(),
                 warehouse_name: "my-warehouse".to_string(),
-                namespace: "my-namespace".to_string(),
+                namespace: Some("my-namespace".to_string()),
                 catalog_token: SerializableSecretString::from("eyJ0eXAiOiJKV1QiLCJhbGciOiJFUzI1NiIsImtpZCI6IjFkNzFjMGEyNmIxMDFjODQ5ZTkxZmQ1NjdjYjA5NTJmIn0.eyJleHAiOjIwNzA3MTcxNjAsImlhdCI6MTc1NjE0NTE1MCwiaXNzIjoic3VwYWJhc2UiLCJyZWYiOiJhYmNkZWZnaGlqbGttbm9wcXJzdCIsInJvbGUiOiJzZXJ2aWNlX3JvbGUifQ.YdTWkkIvwjSkXot3NC07xyjPjGWQMNzLq5EPzumzrdLzuHrj-zuzI-nlyQtQ5V7gZauysm-wGwmpztRXfPc3AQ".to_string()),
                 s3_access_key_id: SerializableSecretString::from("9156667efc2c70d89af6588da86d2924".to_string()),
                 s3_secret_access_key: SerializableSecretString::from("ca833e890916d848c69135924bcd75e5909184814a0ebc6c988937ee094120d4".to_string()),
@@ -990,7 +990,7 @@ mod tests {
                 catalog_uri: "https://abcdefghijklmnopqrst.storage.supabase.com/storage/v1/iceberg"
                     .to_string(),
                 warehouse_name: "my-warehouse".to_string(),
-                namespace: "my-namespace".to_string(),
+                namespace: Some("my-namespace".to_string()),
                 s3_access_key_id: SerializableSecretString::from("id".to_string()),
                 s3_secret_access_key: SerializableSecretString::from("key".to_string()),
                 s3_endpoint: "http://localhost:8080".to_string(),
@@ -1048,7 +1048,7 @@ mod tests {
             config: FullApiIcebergConfig::Supabase {
                 project_ref: "abcdefghijklmnopqrst".to_string(),
                 warehouse_name: "my-warehouse".to_string(),
-                namespace: "my-namespace".to_string(),
+                namespace: Some("my-namespace".to_string()),
                 catalog_token: SerializableSecretString::from("token123".to_string()),
                 s3_access_key_id: SerializableSecretString::from("access_key_123".to_string()),
                 s3_secret_access_key: SerializableSecretString::from("secret123".to_string()),
@@ -1116,7 +1116,7 @@ mod tests {
             config: FullApiIcebergConfig::Rest {
                 catalog_uri: "https://catalog.example.com/iceberg".to_string(),
                 warehouse_name: "my-warehouse".to_string(),
-                namespace: "my-namespace".to_string(),
+                namespace: Some("my-namespace".to_string()),
                 s3_access_key_id: SerializableSecretString::from("id".to_string()),
                 s3_secret_access_key: SerializableSecretString::from("key".to_string()),
                 s3_endpoint: "http://localhost:8080".to_string(),
