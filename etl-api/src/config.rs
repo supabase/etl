@@ -27,6 +27,13 @@ pub struct ApiConfig {
     pub api_keys: Vec<String>,
     /// Optional Sentry configuration for error tracking.
     pub sentry: Option<SentryConfig>,
+    /// Optional Supabase API URL for error notifications.
+    ///
+    /// When provided, this URL is passed to replicators to enable
+    /// error notifications to the Supabase API. The API key will be
+    /// injected as a Kubernetes secret named `supabase_api_key`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub supabase_api_url: Option<String>,
 }
 
 impl Config for ApiConfig {

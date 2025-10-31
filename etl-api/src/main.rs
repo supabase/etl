@@ -2,6 +2,7 @@ use anyhow::anyhow;
 use etl_api::{config::ApiConfig, startup::Application};
 use etl_config::{Environment, load_config, shared::PgConnectionConfig};
 use etl_telemetry::tracing::init_tracing;
+use secrecy::ExposeSecret;
 use std::env;
 use std::sync::Arc;
 use tracing::{error, info};
@@ -77,7 +78,7 @@ fn init_sentry() -> anyhow::Result<Option<sentry::ClientInitGuard>> {
 
         let environment = Environment::load()?;
         let guard = sentry::init(sentry::ClientOptions {
-            dsn: Some(sentry_config.dsn.parse()?),
+            dsn: Some(sentry_config.dsn.expose_secret().parse()?),
             environment: Some(environment.to_string().into()),
             traces_sampler: Some(Arc::new(|ctx: &sentry::TransactionContext| {
                 let transaction_name = ctx.name();

@@ -4,19 +4,22 @@
 //! and routes data to configured destinations. Includes telemetry, error handling, and
 //! graceful shutdown capabilities.
 
+use crate::config::load_replicator_config;
+use crate::core::start_replicator_with_config;
+use crate::notification::ErrorNotificationClient;
+use etl::error::EtlError;
 use etl_config::Environment;
 use etl_config::shared::ReplicatorConfig;
 use etl_telemetry::metrics::init_metrics;
 use etl_telemetry::tracing::init_tracing_with_top_level_fields;
+use secrecy::ExposeSecret;
 use std::sync::Arc;
 use tracing::{error, info};
-
-use crate::config::load_replicator_config;
-use crate::core::start_replicator_with_config;
 
 mod config;
 mod core;
 mod migrations;
+mod notification;
 
 /// The name of the environment variable which contains version information for this replicator.
 const APP_VERSION_ENV_NAME: &str = "APP_VERSION";
@@ -61,12 +64,44 @@ fn main() -> anyhow::Result<()> {
 /// Main async entry point that starts the replicator pipeline.
 ///
 /// Launches the replicator with the provided configuration and captures any errors
-/// to Sentry before propagating them up.
+/// to Sentry and optionally sends notifications to the Supabase API.
 async fn async_main(replicator_config: ReplicatorConfig) -> anyhow::Result<()> {
+    let notification_client =
+        replicator_config
+            .supabase
+            .as_ref()
+            .and_then(|supabase_config| {
+                match (&supabase_config.api_url, &supabase_config.api_key) {
+                    (Some(api_url), Some(api_key)) => Some(ErrorNotificationClient::new(
+                        api_url.clone(),
+                        api_key.expose_secret().to_owned(),
+                        supabase_config.project_ref.clone(),
+                        replicator_config.pipeline.id.to_string(),
+                    )),
+                    _ => None,
+                }
+            });
+
     // We start the replicator and catch any errors.
     if let Err(err) = start_replicator_with_config(replicator_config).await {
         sentry::capture_error(&*err);
         error!("an error occurred in the replicator: {err}");
+
+        // Send an error notification if a client is available.
+        if let Some(client) = notification_client {
+            let error_message = format!("{err}");
+            match err.downcast_ref::<EtlError>() {
+                Some(err) => {
+                    client.notify_error(error_message.clone(), err).await;
+                }
+                None => {
+                    client
+                        .notify_error(error_message.clone(), error_message)
+                        .await;
+                }
+            };
+        }
+
         return Err(err);
     }
 
@@ -86,7 +121,7 @@ fn init_sentry() -> anyhow::Result<Option<sentry::ClientInitGuard>> {
 
         let environment = Environment::load()?;
         let guard = sentry::init(sentry::ClientOptions {
-            dsn: Some(sentry_config.dsn.parse()?),
+            dsn: Some(sentry_config.dsn.expose_secret().parse()?),
             environment: Some(environment.to_string().into()),
             integrations: vec![Arc::new(
                 sentry::integrations::panic::PanicIntegration::new(),

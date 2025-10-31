@@ -3,7 +3,7 @@ use etl_config::Environment;
 use k8s_openapi::api::core::v1::ConfigMap;
 use thiserror::Error;
 
-use crate::routes::pipelines::DestinationType;
+use crate::configs::destination::StoredDestinationConfig;
 
 /// Errors emitted by the Kubernetes integration.
 ///
@@ -20,10 +20,28 @@ pub enum K8sError {
     Kube(#[from] kube::Error),
 }
 
+#[derive(Debug, Clone, Copy)]
+pub enum DestinationType {
+    Memory,
+    BigQuery,
+    Iceberg,
+}
+
+impl From<&StoredDestinationConfig> for DestinationType {
+    fn from(value: &StoredDestinationConfig) -> DestinationType {
+        match value {
+            StoredDestinationConfig::Memory => DestinationType::Memory,
+            StoredDestinationConfig::BigQuery { .. } => DestinationType::BigQuery,
+            StoredDestinationConfig::Iceberg { .. } => DestinationType::Iceberg,
+        }
+    }
+}
+
 /// A simplified view of a pod phase.
 ///
 /// This mirrors the string phases reported by Kubernetes but only tracks the
 /// states needed by the API. Unknown values map to [`PodPhase::Unknown`].
+#[derive(Debug)]
 pub enum PodPhase {
     Pending,
     Running,
