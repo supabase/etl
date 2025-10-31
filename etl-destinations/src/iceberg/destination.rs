@@ -129,12 +129,16 @@ struct Inner {
     /// Prevents redundant table existence checks and creation attempts.
     /// Tables are added to this cache after successful creation or verification.
     created_tables: HashSet<IcebergTableName>,
+
     /// Cache of namespaces we already created/verified in the destination
     ///
     /// Prevents redundant namespace existence checks and creation attempts.
     /// Namespaces are added to this cache after successful creation or verification.
     created_namespaces: HashSet<String>,
 
+    /// Namespace where the tables will be replicated. Depending on the variant either
+    /// all tables will go in one namespace or there will be one namespace per 
+    /// source schema.
     namespace: DestinationNamespace,
 }
 
