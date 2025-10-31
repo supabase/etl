@@ -111,6 +111,12 @@ struct Inner {
     /// Prevents redundant table existence checks and creation attempts.
     /// Tables are added to this cache after successful creation or verification.
     created_tables: HashSet<IcebergTableName>,
+    /// Cache of namespaces we already created/verified in the destination
+    ///
+    /// Prevents redundant namespace existence checks and creation attempts.
+    /// Namespaces are added to this cache after successful creation or verification.
+    created_namespaces: HashSet<String>,
+
     namespace: String,
 }
 
@@ -129,6 +135,7 @@ where
             store,
             inner: Arc::new(Mutex::new(Inner {
                 created_tables: HashSet::new(),
+                created_namespaces: HashSet::new(),
                 namespace,
             })),
         }
@@ -357,6 +364,42 @@ where
             .get_or_create_iceberg_table_name(&table_id, iceberg_table_name)
             .await?;
 
+        let namespace = inner.namespace.clone();
+        self.create_namespace_if_missing(&mut inner, namespace)
+            .await?;
+
+        let iceberg_table_name = self
+            .create_table_if_missing(&mut inner, iceberg_table_name, &table_schema)
+            .await?;
+
+        Ok(iceberg_table_name)
+    }
+
+    async fn create_namespace_if_missing(
+        &self,
+        inner: &mut Inner,
+        namespace: String,
+    ) -> EtlResult<()> {
+        if inner.created_namespaces.contains(&namespace) {
+            return Ok(());
+        }
+
+        self.client
+            .create_namespace_if_missing(&namespace)
+            .await
+            .map_err(iceberg_error_to_etl_error)?;
+
+        inner.created_namespaces.insert(namespace);
+
+        Ok(())
+    }
+
+    async fn create_table_if_missing(
+        &self,
+        inner: &mut Inner,
+        iceberg_table_name: String,
+        table_schema: &TableSchema,
+    ) -> EtlResult<String> {
         if inner.created_tables.contains(&iceberg_table_name) {
             return Ok(iceberg_table_name);
         }
@@ -370,7 +413,7 @@ where
             .await
             .map_err(iceberg_error_to_etl_error)?;
 
-        Self::add_to_created_tables_cache(&mut inner, &iceberg_table_name);
+        inner.created_tables.insert(iceberg_table_name.clone());
 
         Ok(iceberg_table_name)
     }
@@ -408,19 +451,6 @@ where
             primary: false,
         });
         final_schema
-    }
-
-    /// Adds a table to the creation cache to avoid redundant existence checks.
-    ///
-    /// Updates the internal cache to mark a table as created or verified.
-    /// This optimization prevents unnecessary table existence checks and creation
-    /// attempts for tables that are already known to exist in the namespace.
-    fn add_to_created_tables_cache(inner: &mut Inner, table_name: &IcebergTableName) {
-        if inner.created_tables.contains(table_name) {
-            return;
-        }
-
-        inner.created_tables.insert(table_name.clone());
     }
 
     /// Retrieves or creates a table mapping for the Iceberg table name.
