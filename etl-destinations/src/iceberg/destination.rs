@@ -592,7 +592,7 @@ fn schema_to_namespace(schema: &str) -> String {
 
     // S3 Tables namespaces must not start with 'aws'.
     if namespace.starts_with("aws") {
-        namespace = format!("s_{}", namespace);
+        namespace = format!("s_{namespace}");
     }
 
     // Ensure namespace starts with a letter or number.
@@ -600,7 +600,7 @@ fn schema_to_namespace(schema: &str) -> String {
         && !first_char.is_ascii_lowercase()
         && !first_char.is_ascii_digit()
     {
-        namespace = format!("s{}", namespace);
+        namespace = format!("s{namespace}");
     }
 
     // Ensure namespace ends with a letter or number.
@@ -608,7 +608,7 @@ fn schema_to_namespace(schema: &str) -> String {
         && !last_char.is_ascii_lowercase()
         && !last_char.is_ascii_digit()
     {
-        namespace = format!("{}e", namespace);
+        namespace = format!("{namespace}e");
     }
 
     namespace
