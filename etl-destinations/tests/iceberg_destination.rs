@@ -5,7 +5,9 @@ use etl::test_utils::database::spawn_source_database;
 use etl::test_utils::notify::NotifyingStore;
 use etl::test_utils::pipeline::create_pipeline;
 use etl::test_utils::test_destination_wrapper::TestDestinationWrapper;
-use etl::test_utils::test_schema::{TableSelection, insert_mock_data, setup_test_database_schema};
+use etl::test_utils::test_schema::{
+    TableSelection, TestDatabaseSchema, insert_mock_data, setup_test_database_schema,
+};
 use etl::types::{Cell, EventType, PipelineId, TableRow};
 use etl_destinations::iceberg::{
     DestinationNamespace, IcebergClient, IcebergDestination, IcebergOperationType,
@@ -21,6 +23,11 @@ mod support;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn table_copy() {
+    run_table_copy_test(DestinationNamespace::Single("test_namespace".to_string())).await;
+    run_table_copy_test(DestinationNamespace::OnePerSchema).await;
+}
+
+async fn run_table_copy_test(destination_namespace: DestinationNamespace) {
     init_test_tracing();
 
     let mut database = spawn_source_database().await;
@@ -46,14 +53,16 @@ async fn table_copy() {
             .await
             .unwrap();
 
-    let namespace = "test_namespace";
-    client.create_namespace_if_missing(namespace).await.unwrap();
+    let namespace = match destination_namespace {
+        DestinationNamespace::Single(ref ns) => {
+            client.create_namespace_if_missing(ns).await.unwrap();
+            ns.to_string()
+        }
+        DestinationNamespace::OnePerSchema => TestDatabaseSchema::schema().to_string(),
+    };
 
-    let raw_destination = IcebergDestination::new(
-        client.clone(),
-        DestinationNamespace::Single(namespace.to_string()),
-        store.clone(),
-    );
+    let raw_destination =
+        IcebergDestination::new(client.clone(), destination_namespace, store.clone());
     // let raw_destination = bigquery_database.build_destination(store.clone()).await;
     let destination = TestDestinationWrapper::wrap(raw_destination);
 
@@ -147,9 +156,9 @@ async fn table_copy() {
     // This feature is planned for future releases. We'll start to use it when it becomes available.
     // The cleanup is not in a Drop impl because each test has different number of object specitic to
     // that test.
-    client.drop_table(namespace, users_table).await.unwrap();
-    client.drop_table(namespace, orders_table).await.unwrap();
-    client.drop_namespace(namespace).await.unwrap();
+    client.drop_table(&namespace, users_table).await.unwrap();
+    client.drop_table(&namespace, orders_table).await.unwrap();
+    client.drop_namespace(&namespace).await.unwrap();
     lakekeeper_client
         .drop_warehouse(warehouse_id)
         .await
@@ -158,6 +167,11 @@ async fn table_copy() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn cdc_streaming() {
+    run_cdc_streaming_test(DestinationNamespace::Single("test_namespace".to_string())).await;
+    run_cdc_streaming_test(DestinationNamespace::OnePerSchema).await;
+}
+
+async fn run_cdc_streaming_test(destination_namespace: DestinationNamespace) {
     init_test_tracing();
 
     let mut database = spawn_source_database().await;
@@ -173,14 +187,16 @@ async fn cdc_streaming() {
             .await
             .unwrap();
 
-    let namespace = "test_namespace";
-    client.create_namespace_if_missing(namespace).await.unwrap();
+    let namespace = match destination_namespace {
+        DestinationNamespace::Single(ref ns) => {
+            client.create_namespace_if_missing(ns).await.unwrap();
+            ns.to_string()
+        }
+        DestinationNamespace::OnePerSchema => TestDatabaseSchema::schema().to_string(),
+    };
 
-    let raw_destination = IcebergDestination::new(
-        client.clone(),
-        DestinationNamespace::Single(namespace.to_string()),
-        store.clone(),
-    );
+    let raw_destination =
+        IcebergDestination::new(client.clone(), destination_namespace, store.clone());
     let destination = TestDestinationWrapper::wrap(raw_destination);
 
     // Start pipeline from scratch (no initial data). We'll stream CDC events only.
@@ -428,9 +444,9 @@ async fn cdc_streaming() {
     pipeline.shutdown_and_wait().await.unwrap();
 
     // Cleanup: drop CDC tables, namespace, and warehouse.
-    client.drop_table(namespace, users_table).await.unwrap();
-    client.drop_table(namespace, orders_table).await.unwrap();
-    client.drop_namespace(namespace).await.unwrap();
+    client.drop_table(&namespace, users_table).await.unwrap();
+    client.drop_table(&namespace, orders_table).await.unwrap();
+    client.drop_namespace(&namespace).await.unwrap();
     lakekeeper_client
         .drop_warehouse(warehouse_id)
         .await
@@ -439,6 +455,14 @@ async fn cdc_streaming() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn cdc_streaming_with_truncate() {
+    run_cdc_streaming_with_truncate_test(DestinationNamespace::Single(
+        "test_namespace".to_string(),
+    ))
+    .await;
+    run_cdc_streaming_with_truncate_test(DestinationNamespace::OnePerSchema).await;
+}
+
+async fn run_cdc_streaming_with_truncate_test(destination_namespace: DestinationNamespace) {
     init_test_tracing();
 
     let mut database = spawn_source_database().await;
@@ -454,14 +478,16 @@ async fn cdc_streaming_with_truncate() {
             .await
             .unwrap();
 
-    let namespace = "test_namespace";
-    client.create_namespace_if_missing(namespace).await.unwrap();
+    let namespace = match destination_namespace {
+        DestinationNamespace::Single(ref ns) => {
+            client.create_namespace_if_missing(ns).await.unwrap();
+            ns.to_string()
+        }
+        DestinationNamespace::OnePerSchema => TestDatabaseSchema::schema().to_string(),
+    };
 
-    let raw_destination = IcebergDestination::new(
-        client.clone(),
-        DestinationNamespace::Single(namespace.to_string()),
-        store.clone(),
-    );
+    let raw_destination =
+        IcebergDestination::new(client.clone(), destination_namespace, store.clone());
     let destination = TestDestinationWrapper::wrap(raw_destination);
 
     // Start pipeline from scratch (no initial data). We'll stream CDC events only.
@@ -615,9 +641,9 @@ async fn cdc_streaming_with_truncate() {
     pipeline.shutdown_and_wait().await.unwrap();
 
     // Cleanup: drop CDC tables, namespace, and warehouse.
-    client.drop_table(namespace, users_table).await.unwrap();
-    client.drop_table(namespace, orders_table).await.unwrap();
-    client.drop_namespace(namespace).await.unwrap();
+    client.drop_table(&namespace, users_table).await.unwrap();
+    client.drop_table(&namespace, orders_table).await.unwrap();
+    client.drop_namespace(&namespace).await.unwrap();
     lakekeeper_client
         .drop_warehouse(warehouse_id)
         .await
