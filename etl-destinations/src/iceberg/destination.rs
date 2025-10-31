@@ -369,7 +369,8 @@ where
             .await?;
 
         let namespace = inner.namespace.get(&table_schema.name.schema).to_string();
-        self.create_namespace_if_missing(&mut inner, namespace.clone())
+        let namespace = self
+            .create_namespace_if_missing(&mut inner, namespace)
             .await?;
 
         let iceberg_table_name = self
@@ -392,13 +393,16 @@ where
             })
     }
 
+    /// Creates a namespace if it is missing in the destination.
+    /// Once created adds it to the created_namesapces HashMap to
+    /// avoid creating it again.
     async fn create_namespace_if_missing(
         &self,
         inner: &mut Inner,
         namespace: String,
-    ) -> EtlResult<()> {
+    ) -> EtlResult<String> {
         if inner.created_namespaces.contains(&namespace) {
-            return Ok(());
+            return Ok(namespace);
         }
 
         self.client
@@ -406,11 +410,14 @@ where
             .await
             .map_err(iceberg_error_to_etl_error)?;
 
-        inner.created_namespaces.insert(namespace);
+        inner.created_namespaces.insert(namespace.clone());
 
-        Ok(())
+        Ok(namespace)
     }
 
+    /// Creates a table if it is missing in the destination.
+    /// Once created adds it to the created_trees HashMap to
+    /// avoid creating it again.
     async fn create_table_if_missing(
         &self,
         inner: &mut Inner,
