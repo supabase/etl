@@ -14,7 +14,7 @@ use etl_telemetry::metrics::init_metrics;
 use etl_telemetry::tracing::init_tracing_with_top_level_fields;
 use secrecy::ExposeSecret;
 use std::sync::Arc;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 mod config;
 mod core;
@@ -78,7 +78,10 @@ async fn async_main(replicator_config: ReplicatorConfig) -> anyhow::Result<()> {
                         supabase_config.project_ref.clone(),
                         replicator_config.pipeline.id.to_string(),
                     )),
-                    _ => None,
+                    _ => {
+                        warn!("missing supabase api url and/or key, failure notifications will not be sent");
+                        None
+                    },
                 }
             });
 
