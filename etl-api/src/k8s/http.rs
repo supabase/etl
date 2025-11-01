@@ -41,13 +41,13 @@ const REPLICATOR_CONTAINER_NAME_SUFFIX: &str = "replicator";
 /// Container name suffix for the Vector sidecar.
 const VECTOR_CONTAINER_NAME_SUFFIX: &str = "vector";
 /// Namespace where data-plane resources are created.
-pub const DATA_PLANE_NAMESPACE: &str = "etl-data-plane";
+const DATA_PLANE_NAMESPACE: &str = "etl-data-plane";
 /// Secret storing the Logflare API key.
-pub const LOGFLARE_SECRET_NAME: &str = "replicator-logflare-api-key";
+const LOGFLARE_SECRET_NAME: &str = "replicator-logflare-api-key";
 /// Docker image used for the Vector sidecar.
 const VECTOR_IMAGE_NAME: &str = "timberio/vector:0.46.1-distroless-libc";
 /// ConfigMap name containing the Vector configuration.
-pub const VECTOR_CONFIG_MAP_NAME: &str = "replicator-vector-config";
+const VECTOR_CONFIG_MAP_NAME: &str = "replicator-vector-config";
 /// Volume name for the replicator config file.
 const REPLICATOR_CONFIG_FILE_VOLUME_NAME: &str = "replicator-config-file";
 /// Volume name for the Vector config file.
