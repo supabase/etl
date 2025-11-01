@@ -23,7 +23,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        check: [fmt, clippy]
+        check: [fmt, clippy, sort]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -38,6 +38,10 @@ jobs:
         with:
           key: ${{ matrix.check }}
 
+      - name: Install cargo-sort
+        if: matrix.check == 'sort'
+        run: cargo install cargo-sort
+
       - name: Run Cargo Fmt
         if: matrix.check == 'fmt'
         run: cargo fmt --check
@@ -45,6 +49,10 @@ jobs:
       - name: Run Cargo Clippy
         if: matrix.check == 'clippy'
         run: cargo clippy --all-targets --all-features --no-deps -- -D warnings
+
+      - name: Run Cargo Sort
+        if: matrix.check == 'sort'
+        run: cargo sort --workspace --grouped --check
 
   test-partial:
     name: Tests (Partial)

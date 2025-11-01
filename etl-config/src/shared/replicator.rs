@@ -1,10 +1,11 @@
+use serde::{Deserialize, Serialize};
+
 use crate::Config;
 use crate::shared::pipeline::PipelineConfig;
 use crate::shared::{
     DestinationConfig, DestinationConfigWithoutSecrets, PipelineConfigWithoutSecrets, SentryConfig,
-    SupabaseConfig, ValidationError,
+    SupabaseConfig, SupabaseConfigWithoutSecrets, ValidationError,
 };
-use serde::{Deserialize, Serialize};
 
 /// Complete configuration for the replicator service.
 ///
@@ -45,8 +46,9 @@ impl Config for ReplicatorConfig {
     const LIST_PARSE_KEYS: &'static [&'static str] = &[];
 }
 
-/// Same as [`ReplicatorConfig`] but without secrets. This type
-/// implements [`Serialize`] because it does not contains secrets
+/// Same as [`ReplicatorConfig`] but without secrets.
+///
+/// This type implements [`Serialize`] because it does not contain secrets.
 /// so is safe to serialize.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReplicatorConfigWithoutSecrets {
@@ -54,16 +56,11 @@ pub struct ReplicatorConfigWithoutSecrets {
     pub destination: DestinationConfigWithoutSecrets,
     /// Configuration for the replication pipeline.
     pub pipeline: PipelineConfigWithoutSecrets,
-    /// Optional Sentry configuration for error tracking.
-    ///
-    /// If provided, enables Sentry error reporting and performance monitoring. If `None`, the replicator operates without Sentry integration.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub sentry: Option<SentryConfig>,
     /// Optional Supabase-specific configuration.
     ///
     /// If provided, enables Supabase-specific features or reporting. If `None`, the replicator operates independently of Supabase.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub supabase: Option<SupabaseConfig>,
+    pub supabase: Option<SupabaseConfigWithoutSecrets>,
 }
 
 impl From<ReplicatorConfig> for ReplicatorConfigWithoutSecrets {
@@ -71,8 +68,7 @@ impl From<ReplicatorConfig> for ReplicatorConfigWithoutSecrets {
         ReplicatorConfigWithoutSecrets {
             destination: value.destination.into(),
             pipeline: value.pipeline.into(),
-            sentry: value.sentry,
-            supabase: value.supabase,
+            supabase: value.supabase.map(Into::into),
         }
     }
 }

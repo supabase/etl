@@ -8,4 +8,6 @@ pipeline:
   table_error_retry_delay_ms: 1000
   table_error_retry_max_attempts: 5
 supabase:
-  project_ref: "abcdefghijklmnopqrst"
+  project_ref: "kmyteidzebxsnnlusdlq"
+  api_url: "http://localhost:8080"
+  api_key: "000000000000000000009"

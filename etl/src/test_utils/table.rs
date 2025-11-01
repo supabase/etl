@@ -18,7 +18,6 @@ pub fn assert_table_schema(
     expected_columns: &[ColumnSchema],
 ) {
     let table_schema = table_schemas.get(&table_id).unwrap();
-
     assert_eq!(table_schema.id, table_id);
     assert_eq!(table_schema.name, expected_table_name);
 

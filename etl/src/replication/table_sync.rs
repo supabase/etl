@@ -240,6 +240,7 @@ where
                             WORKER_TYPE_LABEL => "table_sync",
                             ACTION_LABEL => "table_copy",
                             PIPELINE_ID_LABEL => pipeline_id.to_string(),
+                            DESTINATION_LABEL => D::name(),
                         )
                         .increment(table_rows_copied_batch as u64);
 
@@ -341,7 +342,7 @@ where
         }
     }
 
-    // We also wait to be signaled to catchup with the main apply worker up to a specific lsn.
+    // We also wait to be signaled to catch up with the main apply worker up to a specific lsn.
     let result = table_sync_worker_state
         .wait_for_phase_type(TableReplicationPhaseType::Catchup, shutdown_rx.clone())
         .await;

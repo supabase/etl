@@ -14,7 +14,9 @@ use etl_config::shared::{
     BatchConfig, DestinationConfig, PgConnectionConfig, PipelineConfig, ReplicatorConfig,
 };
 use etl_destinations::encryption::install_crypto_provider;
-use etl_destinations::iceberg::{S3_ACCESS_KEY_ID, S3_ENDPOINT, S3_SECRET_ACCESS_KEY};
+use etl_destinations::iceberg::{
+    DestinationNamespace, S3_ACCESS_KEY_ID, S3_ENDPOINT, S3_SECRET_ACCESS_KEY,
+};
 use etl_destinations::{
     bigquery::BigQueryDestination,
     iceberg::{IcebergClient, IcebergDestination},
@@ -101,8 +103,11 @@ pub async fn start_replicator_with_config(
                 s3_region.clone(),
             )
             .await?;
-            let destination =
-                IcebergDestination::new(client, namespace.clone(), state_store.clone());
+            let namespace = match namespace {
+                Some(ns) => DestinationNamespace::Single(ns.to_string()),
+                None => DestinationNamespace::OnePerSchema,
+            };
+            let destination = IcebergDestination::new(client, namespace, state_store.clone());
 
             let pipeline = Pipeline::new(replicator_config.pipeline, state_store, destination);
             start_pipeline(pipeline).await?;
@@ -128,8 +133,11 @@ pub async fn start_replicator_with_config(
                 ),
             )
             .await?;
-            let destination =
-                IcebergDestination::new(client, namespace.clone(), state_store.clone());
+            let namespace = match namespace {
+                Some(ns) => DestinationNamespace::Single(ns.to_string()),
+                None => DestinationNamespace::OnePerSchema,
+            };
+            let destination = IcebergDestination::new(client, namespace, state_store.clone());
 
             let pipeline = Pipeline::new(replicator_config.pipeline, state_store, destination);
             start_pipeline(pipeline).await?;

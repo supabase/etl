@@ -507,7 +507,7 @@ where
 
     pin!(logical_replication_stream);
 
-    // We initialize the shared state that is used throughout the loop to track progress.
+    // We initialize the shared state used throughout the loop to track progress.
     let mut state = ApplyLoopState::new(
         first_status_update,
         Vec::with_capacity(config.batch.max_size),
@@ -592,19 +592,17 @@ where
                 }
             }, if force_syncing_tables_rx.is_some() => {
                 // Table state transitions can only occur at transaction boundaries to maintain consistency.
-                // If we're in the middle of processing a transaction (remote_final_lsn is set),
+                // If we're in the middle of processing a transaction (`remote_final_lsn` is set),
                 // we defer the sync processing until the current transaction completes.
                 if !state.handling_transaction() {
                     debug!("forcefully processing syncing tables");
 
-                    // Delegate to hook for actual table sync processing
-                    // Pass current flush LSN to ensure sync operations use consistent state
                     let action = hook.process_syncing_tables(state.next_status_update.flush_lsn, true).await?;
                     if let Some(result) = action.to_result() {
                         return Ok(result);
                     }
                 } else {
-                    debug!("skipping table sync processing - transaction in progress");
+                    debug!("skipping forced table sync processing because of in progress transaction");
                 }
             }
 
@@ -680,6 +678,7 @@ where
                     WORKER_TYPE_LABEL => "apply",
                     ACTION_LABEL => "table_streaming",
                     PIPELINE_ID_LABEL => pipeline_id.to_string(),
+                    DESTINATION_LABEL => D::name(),
                 )
                 .increment(1);
             }
@@ -754,7 +753,7 @@ where
                 .await?;
             }
 
-            // We perform synchronization, to make sure that tables are synced.
+            // We perform synchronization to make sure that tables are synced.
             synchronize(state, hook).await
         }
     }

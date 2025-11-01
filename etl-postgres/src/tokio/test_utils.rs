@@ -7,7 +7,9 @@ use tokio_postgres::{Client, GenericClient, NoTls, Transaction};
 use tracing::info;
 
 use crate::replication::extract_server_version;
+use crate::requires_version;
 use crate::types::{ColumnSchema, TableId, TableName};
+use crate::version::POSTGRES_15;
 
 /// Table modification operations for ALTER TABLE statements.
 pub enum TableModification<'a> {
@@ -46,14 +48,16 @@ impl<G: GenericClient> PgDatabase<G> {
         self.server_version
     }
 
-    /// Creates a Postgres publication for the specified tables.
+    /// Creates a Postgres publication for the specified tables with an optional configuration
+    /// parameter.
     ///
-    /// Sets up logical replication by creating a publication that includes
-    /// the given tables for change data capture.
-    pub async fn create_publication(
+    /// This method is used for specific cases which should mutate the defaults when creating a
+    /// publication which is done only for a small subset of tests.
+    pub async fn create_publication_with_config(
         &self,
         publication_name: &str,
         table_names: &[TableName],
+        publish_via_partition_root: bool,
     ) -> Result<(), tokio_postgres::Error> {
         let table_names = table_names
             .iter()
@@ -61,9 +65,10 @@ impl<G: GenericClient> PgDatabase<G> {
             .collect::<Vec<_>>();
 
         let create_publication_query = format!(
-            "create publication {} for table {}",
+            "create publication {} for table {} with (publish_via_partition_root = {})",
             publication_name,
-            table_names.join(", ")
+            table_names.join(", "),
+            publish_via_partition_root
         );
         self.client
             .as_ref()
@@ -74,6 +79,16 @@ impl<G: GenericClient> PgDatabase<G> {
         Ok(())
     }
 
+    /// Creates a Postgres publication for the specified tables.
+    pub async fn create_publication(
+        &self,
+        publication_name: &str,
+        table_names: &[TableName],
+    ) -> Result<(), tokio_postgres::Error> {
+        self.create_publication_with_config(publication_name, table_names, true)
+            .await
+    }
+
     pub async fn create_publication_for_all(
         &self,
         publication_name: &str,
@@ -81,15 +96,15 @@ impl<G: GenericClient> PgDatabase<G> {
     ) -> Result<(), tokio_postgres::Error> {
         let client = self.client.as_ref().unwrap();
 
-        if let Some(server_version) = self.server_version
-            && server_version.get() >= 150000
-        {
+        if requires_version!(self.server_version, POSTGRES_15) {
             // PostgreSQL 15+ supports FOR ALL TABLES IN SCHEMA syntax
             let create_publication_query = match schema {
                 Some(schema_name) => format!(
-                    "create publication {publication_name} for tables in schema {schema_name}"
+                    "create publication {publication_name} for tables in schema {schema_name} with (publish_via_partition_root = true)"
                 ),
-                None => format!("create publication {publication_name} for all tables"),
+                None => format!(
+                    "create publication {publication_name} for all tables with (publish_via_partition_root = true)"
+                ),
             };
 
             client.execute(&create_publication_query, &[]).await?;
@@ -115,8 +130,9 @@ impl<G: GenericClient> PgDatabase<G> {
                     }
                 }
                 None => {
-                    let create_publication_query =
-                        format!("create publication {publication_name} for all tables");
+                    let create_publication_query = format!(
+                        "create publication {publication_name} for all tables with (publish_via_partition_root = true)"
+                    );
                     client.execute(&create_publication_query, &[]).await?;
                 }
             }
@@ -586,20 +602,23 @@ pub async fn drop_pg_database(config: &PgConnectionConfig) {
         .await
         .expect("Failed to terminate database connections");
 
-    // Drop any replication slots on this database
+    // Give PostgreSQL time to mark slots as inactive after terminating connections.
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    // Drop any inactive replication slots on this database.
     client
         .execute(
             &format!(
                 r#"
                 select pg_drop_replication_slot(slot_name)
                 from pg_replication_slots
-                where database = '{}';"#,
+                where database = '{}' and active = false;"#,
                 config.name
             ),
             &[],
         )
         .await
-        .expect("Failed to drop test replication slots");
+        .expect("Failed to drop inactive test replication slots");
 
     // Drop the database
     client

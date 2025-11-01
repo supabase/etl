@@ -1,8 +1,4 @@
-use etl_postgres::replication::{health, schema, slots, state, table_mappings};
-use sqlx::{PgExecutor, PgTransaction};
-use std::ops::DerefMut;
-use thiserror::Error;
-
+use crate::configs::encryption::EncryptionKey;
 use crate::configs::pipeline::{
     FullApiPipelineConfig, PartialApiPipelineConfig, StoredPipelineConfig,
 };
@@ -11,9 +7,15 @@ use crate::configs::serde::{
 };
 use crate::db;
 use crate::db::destinations::{Destination, DestinationsDbError};
-use crate::db::replicators::{ReplicatorsDbError, create_replicator};
+use crate::db::images::Image;
+use crate::db::replicators::{Replicator, ReplicatorsDbError, create_replicator};
 use crate::db::sources::Source;
 use crate::routes::connect_to_source_database_with_defaults;
+use crate::routes::pipelines::PipelineError;
+use etl_postgres::replication::{health, schema, slots, state, table_mappings};
+use sqlx::{PgExecutor, PgTransaction};
+use std::ops::DerefMut;
+use thiserror::Error;
 
 /// Maximum number of pipelines allowed per tenant.
 pub const MAX_PIPELINES_PER_TENANT: i64 = 3;
@@ -369,4 +371,41 @@ pub async fn update_pipeline_config(
         }
         None => Ok(None),
     }
+}
+
+pub async fn read_pipeline_components(
+    txn: &mut PgTransaction<'_>,
+    tenant_id: &str,
+    pipeline_id: i64,
+    encryption_key: &EncryptionKey,
+) -> Result<(Pipeline, Replicator, Image, Source, Destination), PipelineError> {
+    let pipeline = read_pipeline(txn.deref_mut(), tenant_id, pipeline_id)
+        .await?
+        .ok_or(PipelineError::PipelineNotFound(pipeline_id))?;
+
+    let replicator =
+        db::replicators::read_replicator_by_pipeline_id(txn.deref_mut(), tenant_id, pipeline_id)
+            .await?
+            .ok_or(PipelineError::ReplicatorNotFound(pipeline_id))?;
+
+    let image = db::images::read_image_by_replicator_id(txn.deref_mut(), replicator.id)
+        .await?
+        .ok_or(PipelineError::ImageNotFound(replicator.id))?;
+
+    let source_id = pipeline.source_id;
+    let source = db::sources::read_source(txn.deref_mut(), tenant_id, source_id, encryption_key)
+        .await?
+        .ok_or(PipelineError::SourceNotFound(source_id))?;
+
+    let destination_id = pipeline.destination_id;
+    let destination = db::destinations::read_destination(
+        txn.deref_mut(),
+        tenant_id,
+        destination_id,
+        encryption_key,
+    )
+    .await?
+    .ok_or(PipelineError::DestinationNotFound(destination_id))?;
+
+    Ok((pipeline, replicator, image, source, destination))
 }

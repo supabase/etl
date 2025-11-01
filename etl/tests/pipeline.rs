@@ -13,10 +13,12 @@ use etl::test_utils::test_schema::{
     build_expected_users_inserts, get_n_integers_sum, get_users_age_sum_from_rows,
     insert_mock_data, insert_users_data, setup_test_database_schema,
 };
-use etl::types::{EventType, PipelineId};
+use etl::types::{Event, EventType, InsertEvent, PipelineId};
 use etl_config::shared::BatchConfig;
+use etl_postgres::below_version;
 use etl_postgres::replication::slots::EtlReplicationSlot;
 use etl_postgres::tokio::test_utils::TableModification;
+use etl_postgres::version::POSTGRES_15;
 use etl_telemetry::tracing::init_test_tracing;
 use rand::random;
 use std::time::Duration;
@@ -148,12 +150,8 @@ async fn publication_changes_are_correctly_handled() {
 
     let database = spawn_source_database().await;
 
-    if let Some(server_version) = database.server_version()
-        && server_version.get() <= 150000
-    {
-        println!(
-            "Skipping test for PostgreSQL version <= 15, CREATE PUBLICATION FOR TABLES IN SCHEMA is not supported"
-        );
+    if below_version!(database.server_version(), POSTGRES_15) {
+        eprintln!("Skipping test: PostgreSQL 15+ required for FOR TABLES IN SCHEMA");
         return;
     }
 
@@ -309,12 +307,8 @@ async fn publication_for_all_tables_in_schema_ignores_new_tables_until_restart()
 
     let database = spawn_source_database().await;
 
-    if let Some(server_version) = database.server_version()
-        && server_version.get() <= 150000
-    {
-        println!(
-            "Skipping test for PostgreSQL version <= 15, CREATE PUBLICATION FOR TABLES IN SCHEMA is not supported"
-        );
+    if below_version!(database.server_version(), POSTGRES_15) {
+        eprintln!("Skipping test: PostgreSQL 15+ required for FOR TABLES IN SCHEMA");
         return;
     }
 
@@ -992,4 +986,110 @@ async fn table_without_primary_key_is_errored() {
     // We expect no events to be saved.
     let events = destination.get_events().await;
     assert!(events.is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn pipeline_respects_column_level_publication() {
+    init_test_tracing();
+    let database = spawn_source_database().await;
+
+    // Column filters in publication are only available from Postgres 15+.
+    if below_version!(database.server_version(), POSTGRES_15) {
+        eprintln!("Skipping test: PostgreSQL 15+ required for column filters");
+        return;
+    }
+
+    // Create a table with multiple columns including a sensitive 'email' column.
+    let table_name = test_table_name("users");
+    let table_id = database
+        .create_table(
+            table_name.clone(),
+            true,
+            &[
+                ("name", "text not null"),
+                ("age", "integer not null"),
+                ("email", "text not null"),
+            ],
+        )
+        .await
+        .unwrap();
+
+    // Create publication with only a subset of columns (excluding 'email').
+    let publication_name = "test_pub".to_string();
+    database
+        .run_sql(&format!(
+            "create publication {publication_name} for table {} (id, name, age)",
+            table_name.as_quoted_identifier()
+        ))
+        .await
+        .expect("Failed to create publication with column filter");
+
+    let state_store = NotifyingStore::new();
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
+
+    let pipeline_id: PipelineId = random();
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        publication_name.clone(),
+        state_store.clone(),
+        destination.clone(),
+    );
+
+    // Wait for the table to finish syncing.
+    let sync_done_notify = state_store
+        .notify_on_table_state_type(table_id, TableReplicationPhaseType::SyncDone)
+        .await;
+
+    pipeline.start().await.unwrap();
+
+    sync_done_notify.notified().await;
+
+    // Wait for two insert events to be processed.
+    let insert_events_notify = destination
+        .wait_for_events_count(vec![(EventType::Insert, 2)])
+        .await;
+
+    // Insert test data with all columns (including email).
+    database
+        .run_sql(&format!(
+            "insert into {} (name, age, email) values ('Alice', 25, 'alice@example.com'), ('Bob', 30, 'bob@example.com')",
+            table_name.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+
+    insert_events_notify.notified().await;
+
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    // Verify the events and check that only published columns are included.
+    let events = destination.get_events().await;
+    let grouped_events = group_events_by_type_and_table_id(&events);
+    let insert_events = grouped_events.get(&(EventType::Insert, table_id)).unwrap();
+    assert_eq!(insert_events.len(), 2);
+
+    // Check that each insert event contains only the published columns (id, name, age).
+    // Since Cell values don't include column names, we verify by checking the count.
+    for event in insert_events {
+        if let Event::Insert(InsertEvent { table_row, .. }) = event {
+            // Verify exactly 3 columns (id, name, age).
+            // If email was included, there would be 4 values.
+            assert_eq!(table_row.values.len(), 3);
+        }
+    }
+
+    // Also verify the stored table schema only includes published columns.
+    let table_schemas = state_store.get_table_schemas().await;
+    let stored_schema = table_schemas.get(&table_id).unwrap();
+    let column_names: Vec<&str> = stored_schema
+        .column_schemas
+        .iter()
+        .map(|c| c.name.as_str())
+        .collect();
+    assert!(column_names.contains(&"id"));
+    assert!(column_names.contains(&"name"));
+    assert!(column_names.contains(&"age"));
+    assert!(!column_names.contains(&"email"));
+    assert_eq!(stored_schema.column_schemas.len(), 3);
 }

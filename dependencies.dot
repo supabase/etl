@@ -1,0 +1,156 @@
+digraph ETL_Dependencies {
+    rankdir=TB;
+    splines=true;
+    nodesep=1.0;
+    ranksep=1.5;
+
+    node [fontname="Arial", fontsize=10];
+    edge [fontsize=9, color="#666666"];
+
+    // ================================================================
+    // WORKSPACE CRATES
+    // ================================================================
+
+    "etl-config" [
+        shape=record,
+        label="{etl-config | Configuration|Internal: —|External:\lconfig · secrecy · serde · sqlx · thiserror\ltokio-postgres · utoipa(opt)\l}",
+        fillcolor="#2196f3",
+        style=filled,
+        fontcolor=white,
+        fontsize=12
+    ];
+
+    "etl-postgres" [
+        shape=record,
+        label="{etl-postgres | PostgreSQL Integration|Internal:\letl-config\l|External:\lbytes · chrono · pg_escape · serde · serde_json\lsqlx · thiserror · tokio · tracing\ltokio-postgres (Materialize)\l}",
+        fillcolor="#4caf50",
+        style=filled,
+        fontcolor=white,
+        fontsize=12
+    ];
+
+    "etl-telemetry" [
+        shape=record,
+        label="{etl-telemetry | Observability|Internal:\letl-config\l|External:\lmetrics-exporter-prometheus · serde_json\lthiserror · tokio · tracing · tracing-appender\ltracing-log · tracing-subscriber\l}",
+        fillcolor="#66bb6a",
+        style=filled,
+        fontcolor=white,
+        fontsize=12
+    ];
+
+    "etl" [
+        shape=record,
+        label="{etl | Core Library|Internal:\letl-config · etl-postgres\l|External:\lbyteorder · bytes · chrono · const-oid · fail\lfutures · metrics · pg_escape · pin-project-lite\lpostgres-replication (Materialize) · ring\lrustls · rustls-pemfile · serde_json · sqlx\ltokio · tokio-postgres (Materialize)\ltokio-rustls · tracing · uuid · x509-cert\l}",
+        fillcolor="#fdd835",
+        style=filled,
+        fontsize=12
+    ];
+
+    "etl-destinations" [
+        shape=record,
+        label="{etl-destinations | Cloud Destinations|Internal:\letl\l|External:\lgcp-bigquery-client · prost · base64 (BigQuery)\liceberg · iceberg-catalog-rest · arrow\lparquet · reqwest (Iceberg)\lchrono · async-trait · rustls · serde\lserde_json · tokio · tracing · uuid\l}",
+        fillcolor="#ff7043",
+        style=filled,
+        fontcolor=white,
+        fontsize=12
+    ];
+
+    "etl-api" [
+        shape=record,
+        label="{etl-api | REST API Server|Internal:\letl-config · etl-postgres · etl-telemetry\l|External:\lactix-web · actix-web-httpauth\lactix-web-metrics · tracing-actix-web (Web)\lutoipa · utoipa-swagger-ui (Docs)\lkube · k8s-openapi (K8s)\lanyhow · async-trait · aws-lc-rs · base64\lchrono · constant_time_eq\lmetrics-exporter-prometheus · pg_escape\lrand · reqwest · secrecy · sentry · serde\lserde_json · sqlx · thiserror · tokio\ltracing · uuid · insta(dev)\l}",
+        fillcolor="#7e57c2",
+        style=filled,
+        fontcolor=white,
+        fontsize=12
+    ];
+
+    "etl-replicator" [
+        shape=record,
+        label="{etl-replicator ⚙ | Main Binary|Internal:\letl · etl-config · etl-destinations · etl-telemetry\l|External:\lanyhow · secrecy · sentry · sqlx · tokio · tracing\l}",
+        fillcolor="#5e35b1",
+        style=filled,
+        fontcolor=white,
+        fontsize=12,
+        penwidth=3
+    ];
+
+    "etl-examples" [
+        shape=record,
+        label="{etl-examples | Usage Examples|Internal:\letl · etl-destinations\l|External:\lclap · tokio · tracing · tracing-subscriber\l}",
+        fillcolor="#9e9e9e",
+        style=filled,
+        fontcolor=white,
+        fontsize=12
+    ];
+
+    "etl-benchmarks" [
+        shape=record,
+        label="{etl-benchmarks | Performance Tests|Internal (dev):\letl · etl-config · etl-destinations\letl-postgres · etl-telemetry\l|External (dev):\lclap · sqlx · tokio · tracing\l}",
+        fillcolor="#757575",
+        style=filled,
+        fontcolor=white,
+        fontsize=12
+    ];
+
+    // ================================================================
+    // INTERNAL WORKSPACE DEPENDENCIES
+    // ================================================================
+
+    "etl-postgres" -> "etl-config" [color="#2196f3", penwidth=3];
+
+    "etl-telemetry" -> "etl-config" [color="#2196f3", penwidth=3];
+
+    "etl" -> "etl-config" [color="#2196f3", penwidth=3];
+    "etl" -> "etl-postgres" [color="#4caf50", penwidth=3];
+
+    "etl-destinations" -> "etl" [color="#fdd835", penwidth=3];
+
+    "etl-api" -> "etl-config" [color="#2196f3", penwidth=3];
+    "etl-api" -> "etl-postgres" [color="#4caf50", penwidth=3];
+    "etl-api" -> "etl-telemetry" [color="#66bb6a", penwidth=3];
+
+    "etl-replicator" -> "etl" [color="#fdd835", penwidth=3];
+    "etl-replicator" -> "etl-config" [color="#2196f3", penwidth=3];
+    "etl-replicator" -> "etl-destinations" [color="#ff7043", penwidth=3];
+    "etl-replicator" -> "etl-telemetry" [color="#66bb6a", penwidth=3];
+
+    "etl-examples" -> "etl" [color="#fdd835", penwidth=3];
+    "etl-examples" -> "etl-destinations" [color="#ff7043", penwidth=3];
+
+    "etl-benchmarks" -> "etl" [color="#fdd835", penwidth=2, style=dashed];
+    "etl-benchmarks" -> "etl-config" [color="#2196f3", penwidth=2, style=dashed];
+    "etl-benchmarks" -> "etl-destinations" [color="#ff7043", penwidth=2, style=dashed];
+    "etl-benchmarks" -> "etl-postgres" [color="#4caf50", penwidth=2, style=dashed];
+    "etl-benchmarks" -> "etl-telemetry" [color="#66bb6a", penwidth=2, style=dashed];
+
+    // ================================================================
+    // LEGEND
+    // ================================================================
+
+    legend [
+        shape=plaintext,
+        label=<
+            <table border="0" cellborder="1" cellspacing="0" cellpadding="8">
+                <tr>
+                    <td colspan="2" bgcolor="#e0e0e0"><b>Legend</b></td>
+                </tr>
+                <tr>
+                    <td align="left"><b>Box Structure:</b></td>
+                    <td align="left">Top = Crate name &amp; purpose<br/>Middle = Internal workspace deps<br/>Bottom = External dependencies</td>
+                </tr>
+                <tr>
+                    <td align="left"><b>Arrows:</b></td>
+                    <td align="left">Thick colored = Workspace dependency<br/>Dashed = Dev dependency</td>
+                </tr>
+                <tr>
+                    <td align="left"><b>Symbols:</b></td>
+                    <td align="left">⚙ = Main binary | (opt) = Optional<br/>(dev) = Dev only | (Materialize) = Git fork<br/>— = No dependencies | · = Separator</td>
+                </tr>
+                <tr>
+                    <td align="left"><b>Stats:</b></td>
+                    <td align="left">9 workspace crates | ~90 direct external<br/>695 total with transitive</td>
+                </tr>
+            </table>
+        >
+    ];
+}

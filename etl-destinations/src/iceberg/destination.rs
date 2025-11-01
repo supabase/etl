@@ -95,9 +95,26 @@ pub fn table_name_to_iceberg_table_name(table_name: &TableName) -> IcebergTableN
 #[derive(Debug, Clone)]
 pub struct IcebergDestination<S> {
     client: IcebergClient,
-    namespace: String,
     store: S,
     inner: Arc<Mutex<Inner>>,
+}
+
+/// Namespace in the destination where the tables will be copied
+#[derive(Debug)]
+pub enum DestinationNamespace {
+    /// A single namespace for all tables in the source
+    Single(String),
+    // One namespace for each schema in the source
+    OnePerSchema,
+}
+
+impl DestinationNamespace {
+    fn get<'a>(&'a self, table_namespace: &'a str) -> &'a str {
+        match self {
+            DestinationNamespace::Single(ns) => ns,
+            DestinationNamespace::OnePerSchema => table_namespace,
+        }
+    }
 }
 
 /// Internal state for the Iceberg destination.
@@ -112,6 +129,17 @@ struct Inner {
     /// Prevents redundant table existence checks and creation attempts.
     /// Tables are added to this cache after successful creation or verification.
     created_tables: HashSet<IcebergTableName>,
+
+    /// Cache of namespaces we already created/verified in the destination
+    ///
+    /// Prevents redundant namespace existence checks and creation attempts.
+    /// Namespaces are added to this cache after successful creation or verification.
+    created_namespaces: HashSet<String>,
+
+    /// Namespace where the tables will be replicated. Depending on the variant either
+    /// all tables will go in one namespace or there will be one namespace per
+    /// source schema.
+    namespace: DestinationNamespace,
 }
 
 impl<S> IcebergDestination<S>
@@ -123,13 +151,18 @@ where
     /// Initializes the destination with an Iceberg client, target namespace,
     /// and state/schema store. The destination starts with an empty table
     /// creation cache and is ready to handle streaming operations.
-    pub fn new(client: IcebergClient, namespace: String, store: S) -> IcebergDestination<S> {
+    pub fn new(
+        client: IcebergClient,
+        namespace: DestinationNamespace,
+        store: S,
+    ) -> IcebergDestination<S> {
         IcebergDestination {
             client,
-            namespace,
             store,
             inner: Arc::new(Mutex::new(Inner {
                 created_tables: HashSet::new(),
+                created_namespaces: HashSet::new(),
+                namespace,
             })),
         }
     }
@@ -142,9 +175,14 @@ where
     async fn truncate_table(&self, table_id: TableId) -> EtlResult<()> {
         let mut inner = self.inner.lock().await;
 
-        if let Some(iceberg_table_name) = self.store.get_table_mapping(&table_id).await? {
+        if let (Some(iceberg_table_name), Some(table_schema)) = (
+            self.store.get_table_mapping(&table_id).await?,
+            self.store.get_table_schema(&table_id).await?,
+        ) {
+            let namespace = schema_to_namespace(&table_schema.name.schema);
+            let namespace = inner.namespace.get(&namespace);
             self.client
-                .drop_table(&self.namespace, iceberg_table_name.clone())
+                .drop_table(namespace, iceberg_table_name.clone())
                 .await
                 .map_err(iceberg_error_to_etl_error)?;
 
@@ -168,7 +206,7 @@ where
         table_id: TableId,
         mut table_rows: Vec<TableRow>,
     ) -> EtlResult<()> {
-        let iceberg_table_name = self.prepare_table_for_streaming(table_id).await?;
+        let (namespace, iceberg_table_name) = self.prepare_table_for_streaming(table_id).await?;
 
         for row in &mut table_rows {
             let sequence_number = generate_sequence_number(0.into(), 0.into());
@@ -177,7 +215,7 @@ where
         }
 
         self.client
-            .insert_rows(self.namespace.clone(), iceberg_table_name, table_rows)
+            .insert_rows(namespace, iceberg_table_name, table_rows)
             .await?;
 
         Ok(())
@@ -258,18 +296,9 @@ where
                 let mut join_set = JoinSet::new();
 
                 for (table_id, table_rows) in table_id_to_table_rows {
-                    self.prepare_table_for_streaming(table_id).await?;
-                    let iceberg_table_name =
-                        self.store
-                            .get_table_mapping(&table_id)
-                            .await?
-                            .ok_or(etl_error!(
-                                ErrorKind::MissingTableMapping,
-                                "Table mapping not found",
-                                format!("The table mapping for table {table_id} was not found")
-                            ))?;
+                    let (namespace, iceberg_table_name) =
+                        self.prepare_table_for_streaming(table_id).await?;
 
-                    let namespace = self.namespace.clone();
                     let client = self.client.clone();
 
                     join_set.spawn(async move {
@@ -327,22 +356,15 @@ where
     /// and ensures the corresponding Iceberg table exists in the namespace.
     /// Uses caching to avoid redundant table creation checks and holds a lock
     /// during the entire preparation to prevent race conditions.
-    async fn prepare_table_for_streaming(&self, table_id: TableId) -> EtlResult<IcebergTableName> {
+    async fn prepare_table_for_streaming(
+        &self,
+        table_id: TableId,
+    ) -> EtlResult<(String, IcebergTableName)> {
         // We hold the lock for the entire preparation to avoid race conditions since the consistency
         // of this code path is critical.
         let mut inner = self.inner.lock().await;
 
-        let table_schema = self
-            .store
-            .get_table_schema(&table_id)
-            .await?
-            .ok_or_else(|| {
-                etl_error!(
-                    ErrorKind::MissingTableSchema,
-                    "Table schema not found",
-                    format!("No schema found for table {table_id}")
-                )
-            })?;
+        let table_schema = self.get_table_schema(table_id).await?;
 
         let table_schema = Self::add_cdc_columns(&table_schema);
 
@@ -351,20 +373,78 @@ where
             .get_or_create_iceberg_table_name(&table_id, iceberg_table_name)
             .await?;
 
+        let namespace = schema_to_namespace(&table_schema.name.schema);
+        let namespace = inner.namespace.get(&namespace).to_string();
+        let namespace = self
+            .create_namespace_if_missing(&mut inner, namespace)
+            .await?;
+
+        let iceberg_table_name = self
+            .create_table_if_missing(&mut inner, iceberg_table_name, &namespace, &table_schema)
+            .await?;
+
+        Ok((namespace, iceberg_table_name))
+    }
+
+    async fn get_table_schema(&self, table_id: TableId) -> EtlResult<Arc<TableSchema>> {
+        self.store
+            .get_table_schema(&table_id)
+            .await?
+            .ok_or_else(|| {
+                etl_error!(
+                    ErrorKind::MissingTableSchema,
+                    "Table schema not found",
+                    format!("No schema found for table {table_id}")
+                )
+            })
+    }
+
+    /// Creates a namespace if it is missing in the destination.
+    /// Once created adds it to the created_namesapces HashMap to
+    /// avoid creating it again.
+    async fn create_namespace_if_missing(
+        &self,
+        inner: &mut Inner,
+        namespace: String,
+    ) -> EtlResult<String> {
+        if inner.created_namespaces.contains(&namespace) {
+            return Ok(namespace);
+        }
+
+        self.client
+            .create_namespace_if_missing(&namespace)
+            .await
+            .map_err(iceberg_error_to_etl_error)?;
+
+        inner.created_namespaces.insert(namespace.clone());
+
+        Ok(namespace)
+    }
+
+    /// Creates a table if it is missing in the destination.
+    /// Once created adds it to the created_trees HashMap to
+    /// avoid creating it again.
+    async fn create_table_if_missing(
+        &self,
+        inner: &mut Inner,
+        iceberg_table_name: String,
+        namespace: &str,
+        table_schema: &TableSchema,
+    ) -> EtlResult<String> {
         if inner.created_tables.contains(&iceberg_table_name) {
             return Ok(iceberg_table_name);
         }
 
         self.client
             .create_table_if_missing(
-                &self.namespace,
+                namespace,
                 iceberg_table_name.clone(),
                 &table_schema.column_schemas,
             )
             .await
             .map_err(iceberg_error_to_etl_error)?;
 
-        Self::add_to_created_tables_cache(&mut inner, &iceberg_table_name);
+        inner.created_tables.insert(iceberg_table_name.clone());
 
         Ok(iceberg_table_name)
     }
@@ -402,19 +482,6 @@ where
             primary: false,
         });
         final_schema
-    }
-
-    /// Adds a table to the creation cache to avoid redundant existence checks.
-    ///
-    /// Updates the internal cache to mark a table as created or verified.
-    /// This optimization prevents unnecessary table existence checks and creation
-    /// attempts for tables that are already known to exist in the namespace.
-    fn add_to_created_tables_cache(inner: &mut Inner, table_name: &IcebergTableName) {
-        if inner.created_tables.contains(table_name) {
-            return;
-        }
-
-        inner.created_tables.insert(table_name.clone());
     }
 
     /// Retrieves or creates a table mapping for the Iceberg table name.
@@ -510,11 +577,54 @@ fn find_unique_column_name(column_schemas: &[ColumnSchema], new_column_name: &st
     }
 }
 
+/// Converts a Postgres schema name to an s3tables namespace
+/// such that the naming rules of the namespace are followed.
+fn schema_to_namespace(schema: &str) -> String {
+    // Convert to lowercase and replace invalid characters with underscores.
+    // S3 Tables namespaces can only contain lowercase letters, numbers, and underscores.
+    let mut namespace: String = schema
+        .to_lowercase()
+        .chars()
+        .map(|c| {
+            if c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+
+    // S3 Tables namespaces must not start with 'aws'.
+    if namespace.starts_with("aws") {
+        namespace = format!("s_{namespace}");
+    }
+
+    // Ensure namespace starts with a letter or number.
+    if let Some(first_char) = namespace.chars().next()
+        && !first_char.is_ascii_lowercase()
+        && !first_char.is_ascii_digit()
+    {
+        namespace = format!("s{namespace}");
+    }
+
+    // Ensure namespace ends with a letter or number.
+    if let Some(last_char) = namespace.chars().last()
+        && !last_char.is_ascii_lowercase()
+        && !last_char.is_ascii_digit()
+    {
+        namespace = format!("{namespace}e");
+    }
+
+    namespace
+}
+
 #[cfg(test)]
 mod tests {
     use etl::types::{ColumnSchema, Type};
 
-    use crate::iceberg::destination::{CDC_OPERATION_COLUMN_NAME, find_unique_column_name};
+    use crate::iceberg::destination::{
+        CDC_OPERATION_COLUMN_NAME, find_unique_column_name, schema_to_namespace,
+    };
 
     #[test]
     fn can_find_unique_column_name() {
@@ -576,5 +686,155 @@ mod tests {
         ];
         let col_name = find_unique_column_name(&column_schemas, CDC_OPERATION_COLUMN_NAME);
         assert_eq!(col_name, format!("{CDC_OPERATION_COLUMN_NAME}_2"));
+    }
+
+    #[test]
+    fn schema_to_namespace_valid_names() {
+        // Valid names that don't need transformation.
+        assert_eq!(schema_to_namespace("public"), "public");
+        assert_eq!(schema_to_namespace("my_schema"), "my_schema");
+        assert_eq!(schema_to_namespace("schema123"), "schema123");
+        assert_eq!(schema_to_namespace("a"), "a");
+        assert_eq!(schema_to_namespace("test_123_schema"), "test_123_schema");
+    }
+
+    #[test]
+    fn schema_to_namespace_case_conversion() {
+        // PostgreSQL unquoted identifiers are case-insensitive and folded to lowercase.
+        assert_eq!(schema_to_namespace("UserSchema"), "userschema");
+        assert_eq!(schema_to_namespace("MYSCHEMA"), "myschema");
+        assert_eq!(schema_to_namespace("MixedCase"), "mixedcase");
+        assert_eq!(schema_to_namespace("CamelCaseSchema"), "camelcaseschema");
+    }
+
+    #[test]
+    fn schema_to_namespace_invalid_chars_replaced() {
+        // Invalid characters should be replaced with underscores.
+        assert_eq!(schema_to_namespace("my-schema"), "my_schema");
+        assert_eq!(schema_to_namespace("data$store"), "data_store");
+        assert_eq!(schema_to_namespace("user schema"), "user_schema");
+        assert_eq!(schema_to_namespace("schema.name"), "schema_name");
+        assert_eq!(schema_to_namespace("test@schema"), "test_schema");
+        assert_eq!(schema_to_namespace("schema#1"), "schema_1");
+        assert_eq!(
+            schema_to_namespace("my-complex.schema$name"),
+            "my_complex_schema_name"
+        );
+    }
+
+    #[test]
+    fn schema_to_namespace_non_ascii_replaced() {
+        // Non-ASCII characters should be replaced with underscores (one char = one underscore).
+        assert_eq!(schema_to_namespace("schémas"), "sch_mas");
+        // All non-ASCII becomes underscores, then fixed to start/end with letter/number.
+        assert_eq!(schema_to_namespace("データ"), "s___e");
+        assert_eq!(schema_to_namespace("test_α_beta"), "test___beta");
+    }
+
+    #[test]
+    fn schema_to_namespace_starts_with_underscore() {
+        // Names starting with underscore should be prefixed with 's'.
+        assert_eq!(schema_to_namespace("_private"), "s_private");
+        assert_eq!(schema_to_namespace("_temp"), "s_temp");
+        assert_eq!(schema_to_namespace("__double"), "s__double");
+        assert_eq!(schema_to_namespace("___triple"), "s___triple");
+    }
+
+    #[test]
+    fn schema_to_namespace_ends_with_underscore() {
+        // Names ending with underscore should be suffixed with 'e'.
+        assert_eq!(schema_to_namespace("temp_"), "temp_e");
+        assert_eq!(schema_to_namespace("schema__"), "schema__e");
+        assert_eq!(schema_to_namespace("test___"), "test___e");
+    }
+
+    #[test]
+    fn schema_to_namespace_starts_and_ends_with_underscore() {
+        // Names both starting and ending with underscore.
+        assert_eq!(schema_to_namespace("_temp_"), "s_temp_e");
+        assert_eq!(schema_to_namespace("__test__"), "s__test__e");
+        assert_eq!(schema_to_namespace("_schema_name_"), "s_schema_name_e");
+    }
+
+    #[test]
+    fn schema_to_namespace_starts_with_aws() {
+        // Names starting with 'aws' should be prefixed with 's_'.
+        assert_eq!(schema_to_namespace("aws_internal"), "s_aws_internal");
+        assert_eq!(schema_to_namespace("aws"), "s_aws");
+        assert_eq!(schema_to_namespace("awsschema"), "s_awsschema");
+        assert_eq!(schema_to_namespace("AWS"), "s_aws");
+    }
+
+    #[test]
+    fn schema_to_namespace_starts_with_underscore_and_aws() {
+        // Names starting with underscore followed by 'aws'.
+        assert_eq!(schema_to_namespace("_aws_internal"), "s_aws_internal");
+        assert_eq!(schema_to_namespace("_aws"), "s_aws");
+        // After removing leading underscore, it becomes 'aws', so needs 's_' prefix.
+        assert_eq!(schema_to_namespace("__aws"), "s__aws");
+    }
+
+    #[test]
+    fn schema_to_namespace_all_underscores() {
+        // Schema names that become all underscores after transformation.
+        assert_eq!(schema_to_namespace("___"), "s___e");
+        assert_eq!(schema_to_namespace("____"), "s____e");
+    }
+
+    #[test]
+    fn schema_to_namespace_only_invalid_chars_at_edges() {
+        // Invalid characters only at start/end.
+        assert_eq!(schema_to_namespace("-schema"), "s_schema");
+        assert_eq!(schema_to_namespace("schema-"), "schema_e");
+        assert_eq!(schema_to_namespace("-schema-"), "s_schema_e");
+        assert_eq!(schema_to_namespace("$test$"), "s_test_e");
+    }
+
+    #[test]
+    fn schema_to_namespace_numeric_start() {
+        // PostgreSQL allows identifiers starting with numbers in quoted form.
+        // These are valid and should pass through.
+        assert_eq!(schema_to_namespace("123schema"), "123schema");
+        assert_eq!(schema_to_namespace("42"), "42");
+        assert_eq!(schema_to_namespace("1_test"), "1_test");
+    }
+
+    #[test]
+    fn schema_to_namespace_consecutive_underscores() {
+        // Consecutive underscores should be preserved.
+        assert_eq!(schema_to_namespace("test__schema"), "test__schema");
+        assert_eq!(schema_to_namespace("a___b"), "a___b");
+        assert_eq!(schema_to_namespace("my____schema"), "my____schema");
+    }
+
+    #[test]
+    fn schema_to_namespace_multiple_invalid_chars_consecutive() {
+        // Multiple consecutive invalid characters become multiple underscores.
+        assert_eq!(schema_to_namespace("test---schema"), "test___schema");
+        assert_eq!(schema_to_namespace("my...schema"), "my___schema");
+        assert_eq!(schema_to_namespace("data$$$store"), "data___store");
+    }
+
+    #[test]
+    fn schema_to_namespace_max_length() {
+        // PostgreSQL max identifier length is 63 bytes (NAMEDATALEN-1).
+        // Test with a 63-character schema name.
+        let long_schema = "a".repeat(63);
+        let result = schema_to_namespace(&long_schema);
+        assert_eq!(result, long_schema);
+        assert_eq!(result.len(), 63);
+    }
+
+    #[test]
+    fn schema_to_namespace_common_patterns() {
+        // Common real-world schema naming patterns.
+        assert_eq!(schema_to_namespace("auth"), "auth");
+        assert_eq!(schema_to_namespace("realtime"), "realtime");
+        assert_eq!(schema_to_namespace("storage"), "storage");
+        assert_eq!(schema_to_namespace("pg_catalog"), "pg_catalog");
+        assert_eq!(
+            schema_to_namespace("information_schema"),
+            "information_schema"
+        );
     }
 }

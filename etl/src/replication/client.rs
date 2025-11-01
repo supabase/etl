@@ -5,6 +5,8 @@ use etl_config::shared::{IntoConnectOptions, PgConnectionConfig};
 use etl_postgres::replication::extract_server_version;
 use etl_postgres::types::convert_type_oid_to_type;
 use etl_postgres::types::{ColumnSchema, TableId, TableName, TableSchema};
+use etl_postgres::version::POSTGRES_15;
+use etl_postgres::{below_version, requires_version};
 use pg_escape::{quote_identifier, quote_literal};
 use postgres_replication::LogicalReplicationStream;
 use rustls::ClientConfig;
@@ -158,6 +160,14 @@ impl PgReplicationSlotTransaction {
     pub async fn rollback(self) -> EtlResult<()> {
         self.client.rollback_tx().await
     }
+}
+
+/// Result of building publication filter SQL components.
+struct PublicationFilter {
+    /// CTEs to include in the WITH clause (empty string if no publication filtering).
+    ctes: String,
+    /// Predicate to include in the WHERE clause (empty string if no publication filtering).
+    predicate: String,
 }
 
 /// A client for interacting with Postgres's logical replication features.
@@ -379,6 +389,59 @@ impl PgReplicationClient {
         Ok(false)
     }
 
+    /// Retrieves the `publish_via_partition_root` setting for a publication.
+    ///
+    /// Returns `true` if the publication is configured to send replication messages using
+    /// the parent table OID, or `false` if it sends them using child partition OIDs.
+    pub async fn get_publish_via_partition_root(&self, publication: &str) -> EtlResult<bool> {
+        let query = format!(
+            "select pubviaroot from pg_publication where pubname = {};",
+            quote_literal(publication)
+        );
+
+        for msg in self.client.simple_query(&query).await? {
+            if let SimpleQueryMessage::Row(row) = msg {
+                let pubviaroot =
+                    Self::get_row_value::<String>(&row, "pubviaroot", "pg_publication").await?;
+                return Ok(pubviaroot == "t");
+            }
+        }
+
+        bail!(
+            ErrorKind::ConfigError,
+            "Publication not found",
+            format!("Publication '{}' not found in database", publication)
+        );
+    }
+
+    /// Checks if any of the provided table IDs are partitioned tables.
+    ///
+    /// A partitioned table is one where `relkind = 'p'` in `pg_class`.
+    /// Returns `true` if at least one table is partitioned, `false` otherwise.
+    pub async fn has_partitioned_tables(&self, table_ids: &[TableId]) -> EtlResult<bool> {
+        if table_ids.is_empty() {
+            return Ok(false);
+        }
+
+        let table_oids_list = table_ids
+            .iter()
+            .map(|id| id.0.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        let query = format!(
+            "select 1 from pg_class where oid in ({table_oids_list}) and relkind = 'p' limit 1;"
+        );
+
+        for msg in self.client.simple_query(&query).await? {
+            if let SimpleQueryMessage::Row(_) = msg {
+                return Ok(true);
+            }
+        }
+
+        Ok(false)
+    }
+
     /// Retrieves the names of all tables included in a publication.
     pub async fn get_publication_table_names(
         &self,
@@ -407,28 +470,55 @@ impl PgReplicationClient {
     }
 
     /// Retrieves the OIDs of all tables included in a publication.
+    ///
+    /// For partitioned tables with `publish_via_partition_root=true`, this returns only the parent
+    /// table OID. The query uses a recursive CTE to walk up the partition inheritance hierarchy
+    /// and identify root tables that have no parent themselves.
     pub async fn get_publication_table_ids(
         &self,
         publication_name: &str,
     ) -> EtlResult<Vec<TableId>> {
-        let publication_query = format!(
-            "select c.oid from pg_publication_tables pt 
-         join pg_class c on c.relname = pt.tablename 
-         join pg_namespace n on n.oid = c.relnamespace AND n.nspname = pt.schemaname 
-         where pt.pubname = {};",
-            quote_literal(publication_name)
+        let query = format!(
+            r#"
+            with recursive pub_tables as (
+                -- Get all tables from publication (pg_publication_tables includes explicit tables,
+                -- ALL TABLES publications, and FOR TABLES IN SCHEMA publications)
+                select c.oid
+                from pg_publication_tables pt
+                join pg_class c on c.relname = pt.tablename
+                join pg_namespace n on n.oid = c.relnamespace and n.nspname = pt.schemaname
+                where pt.pubname = {pub}
+            ),
+            hierarchy(relid) as (
+                -- Start with published tables
+                select oid from pub_tables
+
+                union
+
+                -- Recursively find parent tables in inheritance hierarchy
+                select i.inhparent
+                from pg_inherits i
+                join hierarchy h on h.relid = i.inhrelid
+            )
+            -- Return only root tables (those without a parent)
+            select distinct relid as oid
+            from hierarchy
+            where not exists (
+                select 1 from pg_inherits i where i.inhrelid = hierarchy.relid
+            );
+            "#,
+            pub = quote_literal(publication_name)
         );
 
-        let mut table_ids = vec![];
-        for msg in self.client.simple_query(&publication_query).await? {
+        let mut roots = vec![];
+        for msg in self.client.simple_query(&query).await? {
             if let SimpleQueryMessage::Row(row) = msg {
-                // For the sake of simplicity, we refer to the table oid as table id.
                 let table_id = Self::get_row_value::<TableId>(&row, "oid", "pg_class").await?;
-                table_ids.push(table_id);
+                roots.push(table_id);
             }
         }
 
-        Ok(table_ids)
+        Ok(roots)
     }
 
     /// Starts a logical replication stream from the specified publication and slot.
@@ -633,6 +723,83 @@ impl PgReplicationClient {
         );
     }
 
+    /// Builds SQL fragments for filtering columns based on publication settings.
+    ///
+    /// Returns CTEs and predicates that filter columns according to:
+    /// - Postgres 15+: Column-level filtering using `prattrs`
+    /// - Postgres 14 and earlier: Table-level filtering only
+    /// - No publication: No filtering (empty strings)
+    fn build_publication_filter_sql(
+        &self,
+        table_id: TableId,
+        publication_name: Option<&str>,
+    ) -> PublicationFilter {
+        let Some(publication_name) = publication_name else {
+            return PublicationFilter {
+                ctes: String::new(),
+                predicate: String::new(),
+            };
+        };
+
+        // Postgres 15+ supports column-level filtering via prattrs
+        if requires_version!(self.server_version, POSTGRES_15) {
+            return PublicationFilter {
+                ctes: format!(
+                    "pub_info as (
+                        select p.oid as puboid, p.puballtables, r.prattrs
+                        from pg_publication p
+                        left join pg_publication_rel r on r.prpubid = p.oid and r.prrelid = {table_id}
+                        where p.pubname = {publication}
+                    ),
+                    pub_attrs as (
+                        select unnest(prattrs) as attnum
+                        from pub_info
+                        where prattrs is not null
+                    ),
+                    pub_schema as (
+                        select 1 as exists_in_schema_pub
+                        from pub_info
+                        join pg_publication_namespace pn on pn.pnpubid = pub_info.puboid
+                        join pg_class c on c.relnamespace = pn.pnnspid
+                        where c.oid = {table_id}
+                    ),",
+                    publication = quote_literal(publication_name),
+                ),
+                predicate: "and (
+                        (select puballtables from pub_info) = true
+                        or (select count(*) from pub_schema) > 0
+                        or (
+                            case (select count(*) from pub_attrs)
+                                when 0 then true
+                                else (a.attnum in (select attnum from pub_attrs))
+                            end
+                        )
+                    )"
+                .to_string(),
+            };
+        }
+
+        // Postgres 14 and earlier: table-level filtering only
+        PublicationFilter {
+            ctes: format!(
+                "pub_info as (
+                    select p.puballtables
+                    from pg_publication p
+                    where p.pubname = {publication}
+                ),
+                pub_table as (
+                    select 1 as exists_in_pub
+                    from pg_publication_rel r
+                    join pg_publication p on r.prpubid = p.oid
+                    where p.pubname = {publication}
+                        and r.prrelid = {table_id}
+                ),",
+                publication = quote_literal(publication_name),
+            ),
+            predicate: "and ((select puballtables from pub_info) = true or (select count(*) from pub_table) > 0)".to_string(),
+        }
+    }
+
     /// Retrieves schema information for all columns in a table.
     ///
     /// If a publication is specified, only columns included in that publication
@@ -642,71 +809,62 @@ impl PgReplicationClient {
         table_id: TableId,
         publication: Option<&str>,
     ) -> EtlResult<Vec<ColumnSchema>> {
-        let (pub_cte, pub_pred) = if let Some(publication) = publication {
-            if let Some(server_version) = self.server_version
-                && server_version.get() >= 150000
-            {
-                (
-                    format!(
-                        "with pub_attrs as (
-                            select unnest(r.prattrs)
-                            from pg_publication_rel r
-                            left join pg_publication p on r.prpubid = p.oid
-                            where p.pubname = {publication}
-                            and r.prrelid = {table_id}
-                        )",
-                        publication = quote_literal(publication),
-                    ),
-                    "and (
-                        case (select count(*) from pub_attrs)
-                        when 0 then true
-                        else (a.attnum in (select * from pub_attrs))
-                        end
-                    )",
-                )
-            } else {
-                // Postgres 14 or earlier or unknown, fallback to no column-level filtering
-                (
-                    format!(
-                        "with pub_table as (
-                            select 1 as exists_in_pub
-                            from pg_publication_rel r
-                            left join pg_publication p on r.prpubid = p.oid
-                            where p.pubname = {publication}
-                            and r.prrelid = {table_id}
-                        )",
-                        publication = quote_literal(publication),
-                    ),
-                    "and (select count(*) from pub_table) > 0",
-                )
-            }
-        } else {
-            ("".into(), "")
-        };
+        // Build publication filter CTEs and predicates based on Postgres version.
+        let publication_filter = self.build_publication_filter_sql(table_id, publication);
 
         let column_info_query = format!(
-            "{pub_cte}
-            select a.attname,
+            r#"
+            with {publication_ctes}
+            -- Find the direct parent table (for child partitions)
+            direct_parent as (
+                select i.inhparent as parent_oid
+                from pg_inherits i
+                where i.inhrelid = {table_id}
+                limit 1
+            ),
+            -- Extract primary key column names from the parent table
+            parent_pk_cols as (
+                select array_agg(a.attname order by x.n) as pk_column_names
+                from pg_constraint con
+                join unnest(con.conkey) with ordinality as x(attnum, n) on true
+                join pg_attribute a on a.attrelid = con.conrelid and a.attnum = x.attnum
+                join direct_parent dp on con.conrelid = dp.parent_oid
+                where con.contype = 'p'
+                group by con.conname
+            )
+            select
+                a.attname,
                 a.atttypid,
                 a.atttypmod,
                 a.attnotnull,
-                coalesce(i.indisprimary, false) as primary
+                case
+                    -- Check if column has a direct primary key index
+                    when coalesce(i.indisprimary, false) = true then true
+                    -- Check if column name matches parent's primary key (for partitions)
+                    when exists (
+                        select 1
+                        from parent_pk_cols pk
+                        where a.attname = any(pk.pk_column_names)
+                    ) then true
+                    else false
+                end as primary
             from pg_attribute a
             left join pg_index i
                 on a.attrelid = i.indrelid
                 and a.attnum = any(i.indkey)
                 and i.indisprimary = true
             where a.attnum > 0::int2
-            and not a.attisdropped
-            and a.attgenerated = ''
-            and a.attrelid = {table_id}
-            {pub_pred}
+                and not a.attisdropped
+                and a.attgenerated = ''
+                and a.attrelid = {table_id}
+                {publication_predicate}
             order by a.attnum
-            ",
+            "#,
+            publication_ctes = publication_filter.ctes,
+            publication_predicate = publication_filter.predicate,
         );
 
         let mut column_schemas = vec![];
-
         for message in self.client.simple_query(&column_info_query).await? {
             if let SimpleQueryMessage::Row(row) = message {
                 let name = Self::get_row_value::<String>(&row, "attname", "pg_attribute").await?;
@@ -741,9 +899,7 @@ impl PgReplicationClient {
         publication_name: Option<&str>,
     ) -> EtlResult<Option<String>> {
         // Row filters on publications were added in Postgres 15. For any earlier versions we know that there is no row filter
-        if let Some(server_version) = self.server_version
-            && server_version.get() < 150000
-        {
+        if below_version!(self.server_version, POSTGRES_15) {
             return Ok(None);
         }
         // If we don't have a publication the row filter is implicitly non-existent
@@ -807,9 +963,9 @@ impl PgReplicationClient {
             )
         } else {
             format!(
-                r#"copy {} ({}) to stdout with (format text);"#,
-                table_name.as_quoted_identifier(),
+                r#"copy (select {} from {}) to stdout with (format text);"#,
                 column_list,
+                table_name.as_quoted_identifier(),
             )
         };
 

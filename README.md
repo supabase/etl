@@ -42,11 +42,22 @@ ETL is a Rust framework by [Supabase](https://supabase.com) for building high‑
 
 ## Highlights
 
-- 🚀 Real‑time replication: stream changes as they happen
-- ⚡ High performance: batching and parallel workers
-- 🛡️ Fault tolerant: retries and recovery built in
-- 🔧 Extensible: implement custom stores and destinations
-- 🧭 Typed, ergonomic Rust API
+- **Real‑time replication**: stream changes in real time to your own destinations.
+- **High performance**: configurable batching and parallelism to maximize throughput.
+- **Fault-tolerant**: robust error handling and retry logic built-in.
+- **Extensible**: implement your own custom destinations and state/schema stores.
+- **Rust native**: typed and ergonomic Rust API.
+
+## Requirements
+
+**PostgreSQL Version:** ETL officially supports and tests against **PostgreSQL 14, 15, 16, and 17**.
+
+- **PostgreSQL 15+** is recommended for access to advanced publication features including:
+  - Column-level filtering
+  - Row-level filtering with `WHERE` clauses
+  - `FOR ALL TABLES IN SCHEMA` syntax
+
+For detailed configuration instructions, see the [Configure Postgres documentation](https://supabase.github.io/etl/how-to/configure-postgres/).
 
 ## Get Started
 

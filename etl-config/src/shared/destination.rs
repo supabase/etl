@@ -64,8 +64,10 @@ pub enum IcebergConfig {
         project_ref: String,
         /// Name of the warehouse in the catalog
         warehouse_name: String,
-        /// Iceberg catalog namespace where tables will be created
-        namespace: String,
+        /// If present, the iceberg catalog namespace where tables will be created.
+        /// If missing, multiple catlog namespaces will be created, one per source
+        /// schema.
+        namespace: Option<String>,
         /// Catalog authentication token
         catalog_token: SecretString,
         /// The S3 access key id
@@ -80,8 +82,10 @@ pub enum IcebergConfig {
         catalog_uri: String,
         /// Name of the warehouse in the catalog
         warehouse_name: String,
-        /// Iceberg catalog namespace where tables will be created
-        namespace: String,
+        /// If present, the iceberg catalog namespace where tables will be created.
+        /// If missing, multiple catlog namespaces will be created, one per source
+        /// schema.
+        namespace: Option<String>,
         /// The S3 access key id
         s3_access_key_id: SecretString,
         /// The S3 secret access key
@@ -102,8 +106,10 @@ pub enum IcebergConfigWithoutSecrets {
         project_ref: String,
         /// Name of the warehouse in the catalog
         warehouse_name: String,
-        /// Iceberg catalog namespace where tables will be created
-        namespace: String,
+        /// If present, the iceberg catalog namespace where tables will be created.
+        /// If missing, multiple catlog namespaces will be created, one per source
+        /// schema.
+        namespace: Option<String>,
         /// The S3 region
         s3_region: String,
     },
@@ -113,7 +119,7 @@ pub enum IcebergConfigWithoutSecrets {
         /// Name of the warehouse in the catalog
         warehouse_name: String,
         /// Iceberg catalog namespace where tables will be created
-        namespace: String,
+        namespace: Option<String>,
         /// The S3 endpoint
         s3_endpoint: String,
     },

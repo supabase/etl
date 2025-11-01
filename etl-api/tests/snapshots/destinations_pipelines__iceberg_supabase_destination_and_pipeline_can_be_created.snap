@@ -6,7 +6,9 @@ Iceberg {
     config: Supabase {
         project_ref: "abcdefghijklmnopqrst",
         warehouse_name: "my-warehouse",
-        namespace: "my-namespace",
+        namespace: Some(
+            "my-namespace",
+        ),
         catalog_token: SerializableSecretString(
             SecretBox<str>([REDACTED]),
         ),

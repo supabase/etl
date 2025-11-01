@@ -1,12 +1,17 @@
 #![cfg(feature = "test-utils")]
 
+use std::collections::HashSet;
+
 use etl::error::ErrorKind;
 use etl::replication::client::PgReplicationClient;
 use etl::test_utils::database::{spawn_source_database, test_table_name};
 use etl::test_utils::pipeline::test_slot_name;
 use etl::test_utils::table::assert_table_schema;
+use etl::test_utils::test_schema::create_partitioned_table;
+use etl_postgres::below_version;
 use etl_postgres::tokio::test_utils::{TableModification, id_column_schema};
 use etl_postgres::types::ColumnSchema;
+use etl_postgres::version::POSTGRES_15;
 use etl_telemetry::tracing::init_test_tracing;
 use futures::StreamExt;
 use postgres_replication::LogicalReplicationStream;
@@ -367,11 +372,9 @@ async fn test_table_copy_stream_respects_row_filter() {
     init_test_tracing();
     let database = spawn_source_database().await;
 
-    // Row filters in publication are only available from Postgres 15 and onwards.
-    // As such, we skip the test for versions earlier than 15.
-    if let Some(server_version) = database.server_version()
-        && server_version.get() < 150000
-    {
+    // Row filters in publication are only available from Postgres 15+;
+    if below_version!(database.server_version(), POSTGRES_15) {
+        eprintln!("Skipping test: PostgreSQL 15+ required for row filters");
         return;
     }
     // We create a table and insert one row.
@@ -438,6 +441,115 @@ async fn test_table_copy_stream_respects_row_filter() {
 
     // We expect to have the inserted number of rows.
     assert_eq!(rows_count, expected_rows_count as u64);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_table_copy_stream_respects_column_filter() {
+    init_test_tracing();
+    let database = spawn_source_database().await;
+
+    // Column filters in publication are only available from Postgres 15+.
+    if below_version!(database.server_version(), POSTGRES_15) {
+        eprintln!("Skipping test: PostgreSQL 15+ required for column filters");
+        return;
+    }
+
+    // We create a table with multiple columns.
+    let test_table_name = test_table_name("table_1");
+    let test_table_id = database
+        .create_table(
+            test_table_name.clone(),
+            true,
+            &[("name", "text"), ("age", "integer"), ("email", "text")],
+        )
+        .await
+        .unwrap();
+
+    database
+        .run_sql(&format!(
+            "alter table {test_table_name} replica identity full"
+        ))
+        .await
+        .unwrap();
+
+    // Create publication with only a subset of columns (excluding 'email').
+    let publication_name = "test_pub";
+    database
+        .run_sql(&format!(
+            "create publication {publication_name} for table {test_table_name} (id, name, age)"
+        ))
+        .await
+        .unwrap();
+
+    let parent_client = PgReplicationClient::connect(database.config.clone())
+        .await
+        .unwrap();
+
+    // Insert test data with all columns.
+    database
+        .run_sql(&format!(
+            "insert into {test_table_name} (name, age, email) values ('Alice', 25, 'alice@example.com')"
+        ))
+        .await
+        .unwrap();
+    database
+        .run_sql(&format!(
+            "insert into {test_table_name} (name, age, email) values ('Bob', 30, 'bob@example.com')"
+        ))
+        .await
+        .unwrap();
+
+    // Create the slot when the database schema contains the test data.
+    let (transaction, _) = parent_client
+        .create_slot_with_transaction(&test_slot_name("my_slot"))
+        .await
+        .unwrap();
+
+    // Get table schema with the publication - should only include published columns.
+    let table_schemas = transaction
+        .get_table_schemas(&[test_table_id], Some(publication_name))
+        .await
+        .unwrap();
+    assert_table_schema(
+        &table_schemas,
+        test_table_id,
+        test_table_name,
+        &[
+            id_column_schema(),
+            ColumnSchema {
+                name: "name".to_string(),
+                typ: Type::TEXT,
+                modifier: -1,
+                nullable: true,
+                primary: false,
+            },
+            ColumnSchema {
+                name: "age".to_string(),
+                typ: Type::INT4,
+                modifier: -1,
+                nullable: true,
+                primary: false,
+            },
+        ],
+    );
+
+    // Get table copy stream with the publication.
+    let stream = transaction
+        .get_table_copy_stream(
+            test_table_id,
+            &table_schemas[&test_table_id].column_schemas,
+            Some("test_pub"),
+        )
+        .await
+        .unwrap();
+
+    let rows_count = count_stream_rows(stream).await;
+
+    // Transaction should be committed after the copy stream is exhausted.
+    transaction.commit().await.unwrap();
+
+    // We expect to have 2 rows (the ones we inserted).
+    assert_eq!(rows_count, 2);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -550,11 +662,47 @@ async fn test_publication_creation_and_check() {
     );
 
     // We check the table ids of the tables in the publication.
-    let table_ids = parent_client
+    let table_ids: HashSet<_> = parent_client
         .get_publication_table_ids("my_publication")
         .await
+        .unwrap()
+        .into_iter()
+        .collect();
+    assert_eq!(table_ids, HashSet::from([table_1_id, table_2_id]));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_publication_table_ids_collapse_partitioned_root() {
+    init_test_tracing();
+    let database = spawn_source_database().await;
+
+    let client = PgReplicationClient::connect(database.config.clone())
+        .await
         .unwrap();
-    assert_eq!(table_ids, vec![table_1_id, table_2_id]);
+
+    // We create a partitioned parent with two child partitions.
+    let table_name = test_table_name("part_parent");
+    let (parent_table_id, _children) = create_partitioned_table(
+        &database,
+        table_name.clone(),
+        &[("p1", "from (1) to (100)"), ("p2", "from (100) to (200)")],
+    )
+    .await
+    .unwrap();
+
+    let publication_name = "pub_part_root";
+    database
+        .create_publication(publication_name, std::slice::from_ref(&table_name))
+        .await
+        .unwrap();
+
+    let id = client
+        .get_publication_table_ids(publication_name)
+        .await
+        .unwrap();
+
+    // We expect to get only the parent table id.
+    assert_eq!(id, vec![parent_table_id]);
 }
 
 #[tokio::test(flavor = "multi_thread")]

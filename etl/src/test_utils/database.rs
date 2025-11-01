@@ -9,7 +9,7 @@ use uuid::Uuid;
 ///
 /// This constant defines the default schema where test tables are created,
 /// providing isolation from other database objects.
-const TEST_DATABASE_SCHEMA: &str = "test";
+pub const TEST_DATABASE_SCHEMA: &str = "test";
 
 /// Creates a [`TableName`] in the test schema.
 ///
