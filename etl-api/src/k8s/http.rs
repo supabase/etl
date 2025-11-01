@@ -627,6 +627,7 @@ fn create_init_containers_json(
     config: &ReplicatorResourceConfig,
 ) -> serde_json::Value {
     let vector_container_name = create_vector_container_name(prefix);
+    // In staging and prod, run vector init container to collect logs
     match environment {
         Environment::Dev => json!([]),
         Environment::Staging | Environment::Prod => json!([
