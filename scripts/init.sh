@@ -13,6 +13,13 @@ if ! [ -x "$(command -v docker-compose)" ]; then
   exit 1
 fi
 
+# kubectl check
+if ! [ -x "$(command -v kubectl)" ]; then
+  echo >&2 "❌ Error: kubectl is not installed."
+  echo >&2 "Please install kubectl: https://kubernetes.io/docs/tasks/tools/"
+  exit 1
+fi
+
 # Database configuration
 echo "🔧 Configuring database settings..."
 DB_USER="${POSTGRES_USER:=postgres}"
@@ -66,8 +73,21 @@ bash "${SCRIPT_DIR}/../etl-api/scripts/run_migrations.sh"
 
 # Seed default replicator image (idempotent).
 echo "🖼️ Seeding default replicator image..."
+DEFAULT_REPLICATOR_IMAGE="${REPLICATOR_IMAGE:-ramsup/replicator:0.0.22}"
 psql "${DATABASE_URL}" -v ON_ERROR_STOP=1 -c "\
-insert into app.images (name, is_default)\
-values ('ramsup/replicator:0.0.22', true);"
+insert into app.images (name, is_default) \
+select '${DEFAULT_REPLICATOR_IMAGE}', true \
+where not exists (select 1 from app.images where name = '${DEFAULT_REPLICATOR_IMAGE}');"
+
+# Ensure OrbStack Kubernetes context is available
+if ! kubectl config get-contexts -o name | grep -qx "orbstack"; then
+  echo >&2 "❌ Error: Kubernetes context 'orbstack' not found."
+  echo >&2 "Please install OrbStack (https://orbstack.dev) and enable Kubernetes in its settings."
+  exit 1
+fi
+
+echo "☸️ Configuring Kubernetes environment..."
+kubectl --context orbstack apply -f "${SCRIPT_DIR}/etl-data-plane.yaml"
+kubectl --context orbstack apply -f "${SCRIPT_DIR}/trusted-root-certs-config.yaml"
 
 echo "✨ Complete development environment setup finished! Ready to go!"
