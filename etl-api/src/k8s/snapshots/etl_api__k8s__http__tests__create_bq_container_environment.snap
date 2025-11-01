@@ -21,16 +21,6 @@ expression: container_environment
     }
   },
   {
-    "name": "APP_SUPABASE__API_KEY",
-    "valueFrom": {
-      "secretKeyRef": {
-        "key": "api-key",
-        "name": "supabase-api-key",
-        "optional": true
-      }
-    }
-  },
-  {
     "name": "APP_PIPELINE__PG_CONNECTION__PASSWORD",
     "valueFrom": {
       "secretKeyRef": {

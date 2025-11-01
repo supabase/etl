@@ -32,11 +32,20 @@ expression: stateful_set_json
             "env": [
               {
                 "name": "APP_ENVIRONMENT",
-                "value": "dev"
+                "value": "prod"
               },
               {
                 "name": "APP_VERSION",
                 "value": "ramsup/etl-replicator:2a41356af735f891de37d71c0e1a62864fe4630e"
+              },
+              {
+                "name": "APP_SENTRY__DSN",
+                "valueFrom": {
+                  "secretKeyRef": {
+                    "key": "dsn",
+                    "name": "replicator-sentry-dsn"
+                  }
+                }
               },
               {
                 "name": "APP_PIPELINE__PG_CONNECTION__PASSWORD",
@@ -48,11 +57,29 @@ expression: stateful_set_json
                 }
               },
               {
-                "name": "APP_DESTINATION__BIG_QUERY__SERVICE_ACCOUNT_KEY",
+                "name": "APP_DESTINATION__ICEBERG__SUPABASE__CATALOG_TOKEN",
                 "valueFrom": {
                   "secretKeyRef": {
-                    "key": "service-account-key",
-                    "name": "abcdefghijklmnopqrst-42-bq-service-account-key"
+                    "key": "catalog-token",
+                    "name": "abcdefghijklmnopqrst-42-iceberg"
+                  }
+                }
+              },
+              {
+                "name": "APP_DESTINATION__ICEBERG__SUPABASE__S3_ACCESS_KEY_ID",
+                "valueFrom": {
+                  "secretKeyRef": {
+                    "key": "s3-access-key-id",
+                    "name": "abcdefghijklmnopqrst-42-iceberg"
+                  }
+                }
+              },
+              {
+                "name": "APP_DESTINATION__ICEBERG__SUPABASE__S3_SECRET_ACCESS_KEY",
+                "valueFrom": {
+                  "secretKeyRef": {
+                    "key": "s3-secret-access-key",
+                    "name": "abcdefghijklmnopqrst-42-iceberg"
                   }
                 }
               }
@@ -78,8 +105,47 @@ expression: stateful_set_json
             ]
           }
         ],
-        "initContainers": [],
-        "nodeSelector": {},
+        "initContainers": [
+          {
+            "env": [
+              {
+                "name": "LOGFLARE_API_KEY",
+                "valueFrom": {
+                  "secretKeyRef": {
+                    "key": "key",
+                    "name": "replicator-logflare-api-key"
+                  }
+                }
+              }
+            ],
+            "image": "timberio/vector:0.46.1-distroless-libc",
+            "name": "abcdefghijklmnopqrst-42-vector",
+            "resources": {
+              "limits": {
+                "cpu": "100m",
+                "memory": "500Mi"
+              },
+              "requests": {
+                "cpu": "100m",
+                "memory": "500Mi"
+              }
+            },
+            "restartPolicy": "Always",
+            "volumeMounts": [
+              {
+                "mountPath": "/etc/vector",
+                "name": "vector-config-file"
+              },
+              {
+                "mountPath": "/var/log",
+                "name": "logs"
+              }
+            ]
+          }
+        ],
+        "nodeSelector": {
+          "nodeType": "workloads"
+        },
         "terminationGracePeriodSeconds": 300,
         "tolerations": [
           {
