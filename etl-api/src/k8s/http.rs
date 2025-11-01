@@ -54,8 +54,6 @@ const REPLICATOR_CONFIG_FILE_VOLUME_NAME: &str = "replicator-config-file";
 const VECTOR_CONFIG_FILE_VOLUME_NAME: &str = "vector-config-file";
 /// Secret storing the Sentry DSN.
 const SENTRY_DSN_SECRET_NAME: &str = "replicator-sentry-dsn";
-/// Secret storing the Supabase API key for error notifications.
-const SUPABASE_API_KEY_SECRET_NAME: &str = "supabase-api-key";
 /// EmptyDir volume name used to share logs.
 const LOGS_VOLUME_NAME: &str = "logs";
 /// ConfigMap name providing trusted root certificates.

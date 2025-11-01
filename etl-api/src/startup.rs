@@ -8,7 +8,7 @@ use base64::{Engine, prelude::BASE64_STANDARD};
 use etl_config::Environment;
 use etl_config::shared::{IntoConnectOptions, PgConnectionConfig};
 use etl_telemetry::metrics::init_metrics_handle;
-use k8s_openapi::api::core::v1::{ConfigMap, Namespace, Secret};
+use k8s_openapi::api::core::v1::{ConfigMap, Namespace};
 use kube::Api;
 use kube::api::{Patch, PatchParams};
 use kube::config::KubeConfigOptions;
@@ -20,8 +20,8 @@ use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
 
 use crate::k8s::http::{
-    DATA_PLANE_NAMESPACE, HttpK8sClient, LOGFLARE_SECRET_NAME, TRUSTED_ROOT_CERT_CONFIG_MAP_NAME,
-    TRUSTED_ROOT_CERT_KEY_NAME, VECTOR_CONFIG_MAP_NAME,
+    DATA_PLANE_NAMESPACE, HttpK8sClient, TRUSTED_ROOT_CERT_CONFIG_MAP_NAME,
+    TRUSTED_ROOT_CERT_KEY_NAME,
 };
 use crate::k8s::{K8sClient, K8sError};
 use crate::{
@@ -180,8 +180,8 @@ async fn prepare_dev_env(client: &kube::Client) -> Result<(), K8sError> {
     create_etl_data_plane_ns_if_missing(client).await?;
     create_trusted_root_certs_cm_if_missing(client).await?;
     // label_node_if_missing(client).await?;
-    create_vector_cm_if_missing(client).await?;
-    create_logflare_secret_if_missing(client).await?;
+    // create_vector_cm_if_missing(client).await?;
+    // create_logflare_secret_if_missing(client).await?;
 
     Ok(())
 }
@@ -257,29 +257,29 @@ fn create_trusted_root_certs_cm_json() -> serde_json::Value {
         },
         "data": {
         TRUSTED_ROOT_CERT_KEY_NAME:
-            r#"-----BEGIN CERTIFICATE-----
-            MIID1DCCArygAwIBAgIUbYRdq/8/uNq8G9stMCdOFSBgA2MwDQYJKoZIhvcNAQEL
-            BQAwczELMAkGA1UEBhMCVVMxEDAOBgNVBAgMB0RlbHdhcmUxEzARBgNVBAcMCk5l
-            dyBDYXN0bGUxFTATBgNVBAoMDFN1cGFiYXNlIEluYzEmMCQGA1UEAwwdU3VwYWJh
-            c2UgU3RhZ2luZyBSb290IDIwMjEgQ0EwHhcNMjEwNDI4MTAzNjEzWhcNMzEwNDI2
-            MTAzNjEzWjBzMQswCQYDVQQGEwJVUzEQMA4GA1UECAwHRGVsd2FyZTETMBEGA1UE
-            BwwKTmV3IENhc3RsZTEVMBMGA1UECgwMU3VwYWJhc2UgSW5jMSYwJAYDVQQDDB1T
-            dXBhYmFzZSBTdGFnaW5nIFJvb3QgMjAyMSBDQTCCASIwDQYJKoZIhvcNAQEBBQAD
-            ggEPADCCAQoCggEBAN0AKRE8a56O8LaZxiOAcHFUFnwiKUvPoXPq26Ifw+Nv+7zg
-            N2V5WnMZbbw24q61Os60ZUn0XmbVtuIeJ+stPHsO7qxxuL+bmPR+qU5tkDrIOyEe
-            YD/2u8/q6ssVv42k4XcXbhM6RVz7CkCDY0TiBm1bMtRZso3xB6E9wAjxDf43XfV5
-            PAGs3JI+Zo/vyqCDlN0hHOrB/aBl01JXqQWI84Gia5ooucq4SjA1CyawBcQ2IAvG
-            rXuy1BouY+xM3zRuNvtfFP6rb5Mta+jCYEMh1AZ8yP8sYUWAyhxX6k9EbOb009wQ
-            aZljbUCh/UglGWuBxdzePavx+zPjzWXB1NyVkpkCAwEAAaNgMF4wCwYDVR0PBAQD
-            AgEGMB0GA1UdDgQWBBQFx+PHLf27iIo/PMfIfGqXF7Zb+DAfBgNVHSMEGDAWgBQF
-            x+PHLf27iIo/PMfIfGqXF7Zb+DAPBgNVHRMBAf8EBTADAQH/MA0GCSqGSIb3DQEB
-            CwUAA4IBAQB/xIiz5dDqzGXjqYqXZYx4iSfSxsVayeOPDMfmaiCfSMJEUG4cUiwG
-            OvMPGztaUEYeip5SCvSKuAAjVkXyP7ahKR7t7lZ9mErVXyxSZoVLbOd578CuYiZk
-            OgT17UjPv66WMzEKEr8wGpomTYWWfEkuqt8ENdiM1Z4LNFahdKj36+jm6/a+9R8K
-            25VIL68DTaQpBxFWG6ixC1HRMHJ12lDhKsshIi099BVpkGibESlxPrQOdKKqBB/J
-            vIX+/Hb+mS4H5zYMeK2wX0onp+GBcD6X9L1UJuXMVd+BRan8RFidXL5s3++xXjQq
-            Nzbc6lnA69urKffvcT07YwMsY/OmHzVa
-            -----END CERTIFICATE-----"#
+r#"-----BEGIN CERTIFICATE-----
+MIID1DCCArygAwIBAgIUbYRdq/8/uNq8G9stMCdOFSBgA2MwDQYJKoZIhvcNAQEL
+BQAwczELMAkGA1UEBhMCVVMxEDAOBgNVBAgMB0RlbHdhcmUxEzARBgNVBAcMCk5l
+dyBDYXN0bGUxFTATBgNVBAoMDFN1cGFiYXNlIEluYzEmMCQGA1UEAwwdU3VwYWJh
+c2UgU3RhZ2luZyBSb290IDIwMjEgQ0EwHhcNMjEwNDI4MTAzNjEzWhcNMzEwNDI2
+MTAzNjEzWjBzMQswCQYDVQQGEwJVUzEQMA4GA1UECAwHRGVsd2FyZTETMBEGA1UE
+BwwKTmV3IENhc3RsZTEVMBMGA1UECgwMU3VwYWJhc2UgSW5jMSYwJAYDVQQDDB1T
+dXBhYmFzZSBTdGFnaW5nIFJvb3QgMjAyMSBDQTCCASIwDQYJKoZIhvcNAQEBBQAD
+ggEPADCCAQoCggEBAN0AKRE8a56O8LaZxiOAcHFUFnwiKUvPoXPq26Ifw+Nv+7zg
+N2V5WnMZbbw24q61Os60ZUn0XmbVtuIeJ+stPHsO7qxxuL+bmPR+qU5tkDrIOyEe
+YD/2u8/q6ssVv42k4XcXbhM6RVz7CkCDY0TiBm1bMtRZso3xB6E9wAjxDf43XfV5
+PAGs3JI+Zo/vyqCDlN0hHOrB/aBl01JXqQWI84Gia5ooucq4SjA1CyawBcQ2IAvG
+rXuy1BouY+xM3zRuNvtfFP6rb5Mta+jCYEMh1AZ8yP8sYUWAyhxX6k9EbOb009wQ
+aZljbUCh/UglGWuBxdzePavx+zPjzWXB1NyVkpkCAwEAAaNgMF4wCwYDVR0PBAQD
+AgEGMB0GA1UdDgQWBBQFx+PHLf27iIo/PMfIfGqXF7Zb+DAfBgNVHSMEGDAWgBQF
+x+PHLf27iIo/PMfIfGqXF7Zb+DAPBgNVHRMBAf8EBTADAQH/MA0GCSqGSIb3DQEB
+CwUAA4IBAQB/xIiz5dDqzGXjqYqXZYx4iSfSxsVayeOPDMfmaiCfSMJEUG4cUiwG
+OvMPGztaUEYeip5SCvSKuAAjVkXyP7ahKR7t7lZ9mErVXyxSZoVLbOd578CuYiZk
+OgT17UjPv66WMzEKEr8wGpomTYWWfEkuqt8ENdiM1Z4LNFahdKj36+jm6/a+9R8K
+25VIL68DTaQpBxFWG6ixC1HRMHJ12lDhKsshIi099BVpkGibESlxPrQOdKKqBB/J
+vIX+/Hb+mS4H5zYMeK2wX0onp+GBcD6X9L1UJuXMVd+BRan8RFidXL5s3++xXjQq
+Nzbc6lnA69urKffvcT07YwMsY/OmHzVa
+-----END CERTIFICATE-----"#
         }
     })
 }
@@ -309,126 +309,126 @@ fn create_trusted_root_certs_cm_json() -> serde_json::Value {
 //         }
 //     })
 // }
-async fn create_vector_cm_if_missing(client: &kube::Client) -> Result<(), K8sError> {
-    let api: Api<ConfigMap> = Api::namespaced(client.clone(), DATA_PLANE_NAMESPACE);
+// async fn create_vector_cm_if_missing(client: &kube::Client) -> Result<(), K8sError> {
+//     let api: Api<ConfigMap> = Api::namespaced(client.clone(), DATA_PLANE_NAMESPACE);
 
-    if api.get_opt(VECTOR_CONFIG_MAP_NAME).await?.is_none() {
-        let vector_cm = create_vector_cm_json();
-        let cm: ConfigMap = serde_json::from_value(vector_cm)?;
-        let pp = PatchParams::apply(VECTOR_CONFIG_MAP_NAME);
-        api.patch(VECTOR_CONFIG_MAP_NAME, &pp, &Patch::Apply(cm))
-            .await?;
-    }
+//     if api.get_opt(VECTOR_CONFIG_MAP_NAME).await?.is_none() {
+//         let vector_cm = create_vector_cm_json();
+//         let cm: ConfigMap = serde_json::from_value(vector_cm)?;
+//         let pp = PatchParams::apply(VECTOR_CONFIG_MAP_NAME);
+//         api.patch(VECTOR_CONFIG_MAP_NAME, &pp, &Patch::Apply(cm))
+//             .await?;
+//     }
 
-    Ok(())
-}
+//     Ok(())
+// }
 
-fn create_vector_cm_json() -> serde_json::Value {
-    json!({
-        "apiVersion": "v1",
-        "kind": "ConfigMap",
-        "metadata": {
-            "name": VECTOR_CONFIG_MAP_NAME,
-            "namespace": DATA_PLANE_NAMESPACE
-        },
-        "data": {
-        "vector.yaml":
-            r#"
-            data_dir: "/var/lib/vector"
-            sources:
-                replicator_logs:
-                    type: "file"
-                    ignore_older_secs: 600
-                    include: ["/var/log/*.log"]
-                    read_from: "beginning"
+// fn create_vector_cm_json() -> serde_json::Value {
+//     json!({
+//         "apiVersion": "v1",
+//         "kind": "ConfigMap",
+//         "metadata": {
+//             "name": VECTOR_CONFIG_MAP_NAME,
+//             "namespace": DATA_PLANE_NAMESPACE
+//         },
+//         "data": {
+//         "vector.yaml":
+//             r#"
+//             data_dir: "/var/lib/vector"
+//             sources:
+//                 replicator_logs:
+//                     type: "file"
+//                     ignore_older_secs: 600
+//                     include: ["/var/log/*.log"]
+//                     read_from: "beginning"
 
-            transforms:
-                transform_replicator_logs:
-                    inputs: ["replicator_logs"]
-                    type: "remap"
-                    source: |
-                        # parse the message field as json or assign a default
-                        message = parse_json(.message) ?? {"fields":{"message":"<missing>"},"timestamp":now(),"level":"info","span":{}}
+//             transforms:
+//                 transform_replicator_logs:
+//                     inputs: ["replicator_logs"]
+//                     type: "remap"
+//                     source: |
+//                         # parse the message field as json or assign a default
+//                         message = parse_json(.message) ?? {"fields":{"message":"<missing>"},"timestamp":now(),"level":"info","span":{}}
 
-                        .message = message.fields.message
-                        del(message.fields.message)
-                        .timestamp = message.timestamp
+//                         .message = message.fields.message
+//                         del(message.fields.message)
+//                         .timestamp = message.timestamp
 
-                        if exists(message.project) {
-                            .project = message.project
-                            del(message.project)
-                        }
-                    
-                        if exists(message.pipeline_id) {
-                            .pipeline_id = message.pipeline_id
-                            del(message.pipeline_id)
-                        }
+//                         if exists(message.project) {
+//                             .project = message.project
+//                             del(message.project)
+//                         }
 
-                        .fields = message.fields
-                        .level = message.level
-                        .span = message.span
-                        .spans = message.spans
-                        .vector_file = .file
-                        .vector_host = .host
-                        .vector_timestamp = .timestamp
+//                         if exists(message.pipeline_id) {
+//                             .pipeline_id = message.pipeline_id
+//                             del(message.pipeline_id)
+//                         }
 
-                        # delete top-level fields which are not required
-                        del(.file)
-                        del(.host)
-                        del(.source_type)
+//                         .fields = message.fields
+//                         .level = message.level
+//                         .span = message.span
+//                         .spans = message.spans
+//                         .vector_file = .file
+//                         .vector_host = .host
+//                         .vector_timestamp = .timestamp
 
-                # Split logs into two based on whether or not it is an egress metric
-                split_route:
-                    inputs: ["transform_replicator_logs"]
-                    type: "route"
-                    route:
-                        egress_logs: '.fields.egress_metric == true'
-                        non_egress_logs: '.fields.egress_metric != true'
+//                         # delete top-level fields which are not required
+//                         del(.file)
+//                         del(.host)
+//                         del(.source_type)
 
-            sinks:
-                logflare_non_egress:
-                    type: "console"
-                    inputs: ["split_route.non_egress_logs"]
-                    encoding:
-                        codec: "json"
-                logflare_egress:
-                    type: "http"
-                    inputs: ["split_route.egress_logs"]
-                    encoding:
-                        codec: "json"
-            "#
-        }
-    })
-}
+//                 # Split logs into two based on whether or not it is an egress metric
+//                 split_route:
+//                     inputs: ["transform_replicator_logs"]
+//                     type: "route"
+//                     route:
+//                         egress_logs: '.fields.egress_metric == true'
+//                         non_egress_logs: '.fields.egress_metric != true'
 
-async fn create_logflare_secret_if_missing(client: &kube::Client) -> Result<(), K8sError> {
-    let api: Api<Secret> = Api::namespaced(client.clone(), DATA_PLANE_NAMESPACE);
+//             sinks:
+//                 logflare_non_egress:
+//                     type: "console"
+//                     inputs: ["split_route.non_egress_logs"]
+//                     encoding:
+//                         codec: "json"
+//                 logflare_egress:
+//                     type: "http"
+//                     inputs: ["split_route.egress_logs"]
+//                     encoding:
+//                         codec: "json"
+//             "#
+//         }
+//     })
+// }
 
-    if api.get_opt(LOGFLARE_SECRET_NAME).await?.is_none() {
-        let logflare_secret = create_logflare_api_key_secret_json();
-        let secret: Secret = serde_json::from_value(logflare_secret)?;
-        let pp = PatchParams::apply(LOGFLARE_SECRET_NAME);
-        api.patch(LOGFLARE_SECRET_NAME, &pp, &Patch::Apply(secret))
-            .await?;
-    }
+// async fn create_logflare_secret_if_missing(client: &kube::Client) -> Result<(), K8sError> {
+//     let api: Api<Secret> = Api::namespaced(client.clone(), DATA_PLANE_NAMESPACE);
 
-    Ok(())
-}
+//     if api.get_opt(LOGFLARE_SECRET_NAME).await?.is_none() {
+//         let logflare_secret = create_logflare_api_key_secret_json();
+//         let secret: Secret = serde_json::from_value(logflare_secret)?;
+//         let pp = PatchParams::apply(LOGFLARE_SECRET_NAME);
+//         api.patch(LOGFLARE_SECRET_NAME, &pp, &Patch::Apply(secret))
+//             .await?;
+//     }
 
-fn create_logflare_api_key_secret_json() -> serde_json::Value {
-    json!({
-        "apiVersion": "v1",
-        "data": {
-            "key": "bm90LWEta2V5"
-        },
-        "kind": "Secret",
-        "metadata": {
-            "name": LOGFLARE_SECRET_NAME,
-            "namespace": DATA_PLANE_NAMESPACE,
-        },
-        "type": "Opaque"
-    })
-}
+//     Ok(())
+// }
+
+// fn create_logflare_api_key_secret_json() -> serde_json::Value {
+//     json!({
+//         "apiVersion": "v1",
+//         "data": {
+//             "key": "bm90LWEta2V5"
+//         },
+//         "kind": "Secret",
+//         "metadata": {
+//             "name": LOGFLARE_SECRET_NAME,
+//             "namespace": DATA_PLANE_NAMESPACE,
+//         },
+//         "type": "Opaque"
+//     })
+// }
 
 /// Creates a Postgres connection pool from the provided configuration.
 pub fn get_connection_pool(config: &PgConnectionConfig) -> PgPool {
