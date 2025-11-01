@@ -64,4 +64,10 @@ echo "🔄 Running database migrations..."
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 bash "${SCRIPT_DIR}/../etl-api/scripts/run_migrations.sh"
 
+# Seed default replicator image (idempotent).
+echo "🖼️ Seeding default replicator image..."
+psql "${DATABASE_URL}" -v ON_ERROR_STOP=1 -c "\
+insert into app.images (name, is_default)\
+values ('ramsup/replicator:0.0.22', true);"
+
 echo "✨ Complete development environment setup finished! Ready to go!"
