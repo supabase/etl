@@ -113,16 +113,6 @@ expression: stateful_set_json
               "name": "abcdefghijklmnopqrst-42-replicator-config"
             },
             "name": "replicator-config-file"
-          },
-          {
-            "configMap": {
-              "name": "replicator-vector-config"
-            },
-            "name": "vector-config-file"
-          },
-          {
-            "emptyDir": {},
-            "name": "logs"
           }
         ]
       }

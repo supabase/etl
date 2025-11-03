@@ -329,6 +329,7 @@ impl K8sClient for HttpK8sClient {
 
         let node_selector = create_node_selector_json(&environment);
         let init_containers = create_init_containers_json(prefix, &environment, &config);
+        let volumes = create_volumes_json(prefix, &environment);
 
         let stateful_set_json = create_replicator_stateful_set_json(
             prefix,
@@ -337,6 +338,7 @@ impl K8sClient for HttpK8sClient {
             container_environment,
             node_selector,
             init_containers,
+            volumes,
         );
 
         let stateful_set: StatefulSet = serde_json::from_value(stateful_set_json)?;
@@ -562,7 +564,6 @@ fn create_container_environment_json(
             // We do not configure sentry for dev environments
         }
         Environment::Staging | Environment::Prod => {
-            //
             container_environment.push(json!({
               "name": "APP_SENTRY__DSN",
               "valueFrom": {
@@ -671,6 +672,40 @@ fn create_init_containers_json(
     }
 }
 
+fn create_volumes_json(prefix: &str, environment: &Environment) -> Vec<serde_json::Value> {
+    let replicator_config_map_name = create_replicator_config_map_name(prefix);
+    let mut volumes = vec![json!(
+      {
+        "name": REPLICATOR_CONFIG_FILE_VOLUME_NAME,
+        "configMap": {
+          "name": replicator_config_map_name
+        }
+      }
+    )];
+
+    match environment {
+        Environment::Dev => {
+            // We do not configure sentry for dev environments
+        }
+        Environment::Staging | Environment::Prod => {
+            volumes.push(json!(
+            {
+              "name": VECTOR_CONFIG_FILE_VOLUME_NAME,
+              "configMap": {
+                "name": VECTOR_CONFIG_MAP_NAME
+              }
+            }
+                  ));
+            volumes.push(json!({
+              "name": LOGS_VOLUME_NAME,
+              "emptyDir": {}
+            }));
+        }
+    }
+
+    volumes
+}
+
 fn create_postgres_secret_env_var_json(postgres_secret_name: &str) -> serde_json::Value {
     json!({
       "name": "APP_PIPELINE__PG_CONNECTION__PASSWORD",
@@ -740,10 +775,10 @@ fn create_replicator_stateful_set_json(
     container_environment: Vec<serde_json::Value>,
     node_selector: serde_json::Value,
     init_containers: serde_json::Value,
+    volumes: Vec<serde_json::Value>,
 ) -> serde_json::Value {
     let replicator_app_name = create_replicator_app_name(prefix);
     let restarted_at_annotation = get_restarted_at_annotation_value();
-    let replicator_config_map_name = create_replicator_config_map_name(prefix);
     let replicator_container_name = create_replicator_container_name(prefix);
 
     json!({
@@ -772,24 +807,7 @@ fn create_replicator_stateful_set_json(
             }
           },
           "spec": {
-            "volumes": [
-              {
-                "name": REPLICATOR_CONFIG_FILE_VOLUME_NAME,
-                "configMap": {
-                  "name": replicator_config_map_name
-                }
-              },
-              {
-                "name": VECTOR_CONFIG_FILE_VOLUME_NAME,
-                "configMap": {
-                  "name": VECTOR_CONFIG_MAP_NAME
-                }
-              },
-              {
-                "name": LOGS_VOLUME_NAME,
-                "emptyDir": {}
-              }
-            ],
+            "volumes": volumes,
             // Allow scheduling onto nodes tainted with `nodeType=workloads`.
             "tolerations": [
               {
@@ -1092,6 +1110,23 @@ mod tests {
     }
 
     #[test]
+    fn test_create_volumes() {
+        let prefix = create_k8s_object_prefix(TENANT_ID, 42);
+
+        let environment = Environment::Dev;
+        let volumes = create_volumes_json(&prefix, &environment);
+        assert_json_snapshot!(volumes);
+
+        let environment = Environment::Staging;
+        let volumes = create_volumes_json(&prefix, &environment);
+        assert_json_snapshot!(volumes);
+
+        let environment = Environment::Prod;
+        let volumes = create_volumes_json(&prefix, &environment);
+        assert_json_snapshot!(volumes);
+    }
+
+    #[test]
     fn test_create_bq_replicator_stateful_set_json() {
         let prefix = create_k8s_object_prefix(TENANT_ID, 42);
         let stateful_set_name = create_stateful_set_name(&prefix);
@@ -1110,6 +1145,7 @@ mod tests {
 
         let node_selector = create_node_selector_json(&environment);
         let init_containers = create_init_containers_json(&prefix, &environment, &config);
+        let volumes = create_volumes_json(&prefix, &environment);
 
         let stateful_set_json = create_replicator_stateful_set_json(
             &prefix,
@@ -1118,6 +1154,7 @@ mod tests {
             container_environment,
             node_selector,
             init_containers,
+            volumes,
         );
 
         assert_json_snapshot!(stateful_set_json, { ".spec.template.metadata.annotations[\"etl.supabase.com/restarted-at\"]" => "[timestamp]"});
@@ -1136,6 +1173,7 @@ mod tests {
 
         let node_selector = create_node_selector_json(&environment);
         let init_containers = create_init_containers_json(&prefix, &environment, &config);
+        let volumes = create_volumes_json(&prefix, &environment);
 
         let stateful_set_json = create_replicator_stateful_set_json(
             &prefix,
@@ -1144,6 +1182,7 @@ mod tests {
             container_environment,
             node_selector,
             init_containers,
+            volumes,
         );
 
         assert_json_snapshot!(stateful_set_json, { ".spec.template.metadata.annotations[\"etl.supabase.com/restarted-at\"]" => "[timestamp]"});
@@ -1162,6 +1201,7 @@ mod tests {
 
         let node_selector = create_node_selector_json(&environment);
         let init_containers = create_init_containers_json(&prefix, &environment, &config);
+        let volumes = create_volumes_json(&prefix, &environment);
 
         let stateful_set_json = create_replicator_stateful_set_json(
             &prefix,
@@ -1170,6 +1210,7 @@ mod tests {
             container_environment,
             node_selector,
             init_containers,
+            volumes,
         );
 
         assert_json_snapshot!(stateful_set_json, { ".spec.template.metadata.annotations[\"etl.supabase.com/restarted-at\"]" => "[timestamp]"});
@@ -1195,6 +1236,7 @@ mod tests {
 
         let node_selector = create_node_selector_json(&environment);
         let init_containers = create_init_containers_json(&prefix, &environment, &config);
+        let volumes = create_volumes_json(&prefix, &environment);
 
         let stateful_set_json = create_replicator_stateful_set_json(
             &prefix,
@@ -1203,6 +1245,7 @@ mod tests {
             container_environment,
             node_selector,
             init_containers,
+            volumes,
         );
 
         assert_json_snapshot!(stateful_set_json, { ".spec.template.metadata.annotations[\"etl.supabase.com/restarted-at\"]" => "[timestamp]"});
@@ -1221,6 +1264,7 @@ mod tests {
 
         let node_selector = create_node_selector_json(&environment);
         let init_containers = create_init_containers_json(&prefix, &environment, &config);
+        let volumes = create_volumes_json(&prefix, &environment);
 
         let stateful_set_json = create_replicator_stateful_set_json(
             &prefix,
@@ -1229,6 +1273,7 @@ mod tests {
             container_environment,
             node_selector,
             init_containers,
+            volumes,
         );
 
         assert_json_snapshot!(stateful_set_json, { ".spec.template.metadata.annotations[\"etl.supabase.com/restarted-at\"]" => "[timestamp]"});
@@ -1247,6 +1292,7 @@ mod tests {
 
         let node_selector = create_node_selector_json(&environment);
         let init_containers = create_init_containers_json(&prefix, &environment, &config);
+        let volumes = create_volumes_json(&prefix, &environment);
 
         let stateful_set_json = create_replicator_stateful_set_json(
             &prefix,
@@ -1255,6 +1301,7 @@ mod tests {
             container_environment,
             node_selector,
             init_containers,
+            volumes,
         );
 
         assert_json_snapshot!(stateful_set_json, { ".spec.template.metadata.annotations[\"etl.supabase.com/restarted-at\"]" => "[timestamp]"});
