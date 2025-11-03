@@ -13,17 +13,24 @@ ARG TARGETPLATFORM
 ARG BUILDPLATFORM
 RUN echo "Running on $BUILDPLATFORM, building for $TARGETPLATFORM"
 # TODO: remove protobuf-compiler once the upstream gcp-bigquery-client remove it from its deps
-RUN apt-get update && apt-get install -y \
+RUN dpkg --add-architecture arm64 && \
+    apt-get update && apt-get install -y --no-install-recommends \
     pkg-config \
     libssl-dev \
+    zlib1g-dev \
     protobuf-compiler \
     clang \
     lld \
     gcc-aarch64-linux-gnu \
     g++-aarch64-linux-gnu \
     libc6-dev-arm64-cross \
-    binutils-aarch64-linux-gnu \
-    && rm -rf /var/lib/apt/lists/*
+    binutils-aarch64-linux-gnu && \
+    if [ "$TARGETPLATFORM" = "linux/arm64" ]; then \
+      apt-get install -y --no-install-recommends \
+        libssl-dev:arm64 \
+        zlib1g-dev:arm64; \
+    fi && \
+    rm -rf /var/lib/apt/lists/*
 RUN case "$TARGETPLATFORM" in \
       "linux/amd64") TARGET_TRIPLE="x86_64-unknown-linux-gnu" ;; \
       "linux/arm64") TARGET_TRIPLE="aarch64-unknown-linux-gnu" ;; \
@@ -33,12 +40,28 @@ RUN case "$TARGETPLATFORM" in \
     echo "$TARGET_TRIPLE" > /tmp/target-triple
 COPY --from=planner /app/recipe.json recipe.json
 RUN TARGET_TRIPLE=$(cat /tmp/target-triple) && \
+    if [ "$TARGET_TRIPLE" = "aarch64-unknown-linux-gnu" ]; then \
+      export PKG_CONFIG_ALLOW_CROSS=1 \
+        PKG_CONFIG_LIBDIR=/usr/lib/aarch64-linux-gnu/pkgconfig:/usr/share/pkgconfig \
+        PKG_CONFIG_SYSROOT_DIR=/usr/aarch64-linux-gnu \
+        OPENSSL_DIR=/usr/aarch64-linux-gnu \
+        OPENSSL_LIB_DIR=/usr/lib/aarch64-linux-gnu \
+        OPENSSL_INCLUDE_DIR=/usr/include/aarch64-linux-gnu; \
+    fi && \
     cargo chef cook --release --target "$TARGET_TRIPLE" --recipe-path recipe.json
 
 # Build application
 COPY . .
 RUN TARGET_TRIPLE=$(cat /tmp/target-triple) && \
     mkdir -p target/release && \
+    if [ "$TARGET_TRIPLE" = "aarch64-unknown-linux-gnu" ]; then \
+      export PKG_CONFIG_ALLOW_CROSS=1 \
+        PKG_CONFIG_LIBDIR=/usr/lib/aarch64-linux-gnu/pkgconfig:/usr/share/pkgconfig \
+        PKG_CONFIG_SYSROOT_DIR=/usr/aarch64-linux-gnu \
+        OPENSSL_DIR=/usr/aarch64-linux-gnu \
+        OPENSSL_LIB_DIR=/usr/lib/aarch64-linux-gnu \
+        OPENSSL_INCLUDE_DIR=/usr/include/aarch64-linux-gnu; \
+    fi && \
     RUSTFLAGS="-C panic=abort" cargo build --release --target "$TARGET_TRIPLE" -p etl-replicator && \
     if [ "$TARGET_TRIPLE" = "aarch64-unknown-linux-gnu" ]; then \
       STRIP_TOOL="aarch64-linux-gnu-strip"; \
