@@ -38,8 +38,8 @@ pub fn etl_fail_point(name: &str) -> EtlResult<()> {
 
         bail!(
             error_kind,
-            "An error occurred in a fail point",
-            format!("The failpoint '{name}' returned an error")
+            "Failpoint triggered an error",
+            format!("Failpoint '{}' returned an error", name)
         );
     });
 

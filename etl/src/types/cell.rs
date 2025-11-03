@@ -10,9 +10,9 @@ macro_rules! convert_array_variant {
         if $vec.iter().any(|v| v.is_none()) {
             bail!(
                 ErrorKind::NullValuesNotSupportedInArrayInDestination,
-                "NULL values in arrays are not supported in the destination",
+                "NULL values in arrays not supported in this destination",
                 format!(
-                    "The array {:?} contains NULL values which are not supported in the destination",
+                    "Array {:?} contains NULL values which are not supported in this destination",
                     $vec
                 )
             )
@@ -363,7 +363,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("NULL values in arrays are not supported")
+                .contains("NULL values in arrays not supported in this destination")
         );
     }
 

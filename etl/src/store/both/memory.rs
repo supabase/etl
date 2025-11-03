@@ -127,7 +127,7 @@ impl StateStore for MemoryStore {
             .ok_or_else(|| {
                 etl_error!(
                     ErrorKind::StateRollbackError,
-                    "There is no state in memory to rollback to"
+                    "No previous state available to roll back to"
                 )
             })?;
 

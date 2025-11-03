@@ -195,8 +195,8 @@ where
             if !table_schema.has_primary_keys() {
                 bail!(
                     ErrorKind::SourceSchemaError,
-                    "Missing primary key",
-                    format!("table {} has no primary key", table_schema.name)
+                    "Primary key not found",
+                    format!("Table '{}' has no primary key", table_schema.name)
                 );
             }
 

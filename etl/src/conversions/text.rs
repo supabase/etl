@@ -231,14 +231,11 @@ where
     M: FnOnce(Vec<Option<T>>) -> ArrayCell,
 {
     if str.len() < 2 {
-        bail!(ErrorKind::ConversionError, "The array input is too short");
+        bail!(ErrorKind::ConversionError, "Array input too short");
     }
 
     if !str.starts_with('{') || !str.ends_with('}') {
-        bail!(
-            ErrorKind::ConversionError,
-            "The array input is missing braces"
-        );
+        bail!(ErrorKind::ConversionError, "Array input missing braces");
     }
 
     let mut res = vec![];

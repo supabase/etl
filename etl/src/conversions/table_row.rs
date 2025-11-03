@@ -84,7 +84,10 @@ pub fn parse_table_row_from_postgres_copy_bytes(
                 None => {
                     // Validate that row was properly terminated with newline
                     if !row_terminated {
-                        bail!(ErrorKind::ConversionError, "The row is not terminated");
+                        bail!(
+                            ErrorKind::ConversionError,
+                            "Row data not properly terminated"
+                        );
                     }
                     done = true;
 
@@ -99,9 +102,9 @@ pub fn parse_table_row_from_postgres_copy_bytes(
             let Some(column_schema) = column_schemas_iter.next() else {
                 bail!(
                     ErrorKind::ConversionError,
-                    "The number of columns in the schema and row is mismatched",
+                    "Column count mismatch between schema and row",
                     format!(
-                        "The number of columns is the schema [{}] does not match the columns in the row [{}]",
+                        "Schema has {} columns but row has {} columns",
                         column_schemas.len(),
                         values.len()
                     )
@@ -143,9 +146,9 @@ pub fn parse_table_row_from_postgres_copy_bytes(
     if column_schemas_iter.next().is_some() {
         bail!(
             ErrorKind::ConversionError,
-            "The number of columns in the schema and row is mismatched",
+            "Column count mismatch between schema and row",
             format!(
-                "The number of columns is the schema [{}] does not match the columns in the row [{}]",
+                "Schema has {} columns but row has {} columns",
                 column_schemas.len(),
                 values.len()
             )
@@ -254,7 +257,7 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(matches!(err.kind(), ErrorKind::ConversionError));
-        assert!(err.to_string().contains("row is not terminated"));
+        assert!(err.to_string().contains("Row data not properly terminated"));
     }
 
     #[test]

@@ -638,7 +638,7 @@ impl PgReplicationClient {
 
         Err(etl_error!(
             ErrorKind::ReplicationSlotNotCreated,
-            "Failed to create replication slot"
+            "Replication slot creation failed"
         ))
     }
 
@@ -718,8 +718,8 @@ impl PgReplicationClient {
 
         bail!(
             ErrorKind::SourceSchemaError,
-            "Table not found",
-            format!("Table not found in database (table id: {})", table_id)
+            "Table not found in source database",
+            format!("Table with ID {} not found in database", table_id)
         );
     }
 
@@ -987,7 +987,7 @@ impl PgReplicationClient {
     {
         let value = row.try_get(column_name)?.ok_or(etl_error!(
             ErrorKind::SourceSchemaError,
-            "Column not found",
+            "Column not found in source table",
             format!(
                 "Column '{}' not found in table '{}'",
                 column_name, table_name

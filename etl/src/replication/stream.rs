@@ -157,7 +157,7 @@ impl EventsStream {
             .map_err(|e| {
                 etl_error!(
                     ErrorKind::InvalidState,
-                    "Invalid Postgres epoch",
+                    "Invalid PostgreSQL epoch",
                     e.to_string()
                 )
             })?
