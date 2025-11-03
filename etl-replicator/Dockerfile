@@ -1,3 +1,5 @@
+# syntax=docker/dockerfile:1.6
+
 # Build stage with cargo-chef for better layer caching
 FROM --platform=$BUILDPLATFORM lukemathwalker/cargo-chef:latest-rust-1.88.0-slim-bookworm AS chef
 WORKDIR /app
@@ -13,23 +15,20 @@ ARG TARGETPLATFORM
 ARG BUILDPLATFORM
 RUN echo "Running on $BUILDPLATFORM, building for $TARGETPLATFORM"
 # TODO: remove protobuf-compiler once the upstream gcp-bigquery-client remove it from its deps
-RUN dpkg --add-architecture arm64 && \
-    apt-get update && apt-get install -y --no-install-recommends \
-    pkg-config \
-    libssl-dev \
-    zlib1g-dev \
-    protobuf-compiler \
-    clang \
-    lld \
-    gcc-aarch64-linux-gnu \
-    g++-aarch64-linux-gnu \
-    libc6-dev-arm64-cross \
-    binutils-aarch64-linux-gnu && \
-    if [ "$TARGETPLATFORM" = "linux/arm64" ]; then \
-      apt-get install -y --no-install-recommends \
-        libssl-dev:arm64 \
-        zlib1g-dev:arm64; \
-    fi && \
+RUN if [ "$TARGETPLATFORM" = "linux/arm64" ]; then dpkg --add-architecture arm64; fi && \
+    apt-get update && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      pkg-config \
+      libssl-dev \
+      zlib1g-dev \
+      protobuf-compiler \
+      clang \
+      lld \
+      gcc-aarch64-linux-gnu \
+      g++-aarch64-linux-gnu \
+      libc6-dev-arm64-cross \
+      binutils-aarch64-linux-gnu \
+      $(if [ "$TARGETPLATFORM" = "linux/arm64" ]; then printf '%s ' "libssl-dev:arm64" "zlib1g-dev:arm64"; fi) && \
     rm -rf /var/lib/apt/lists/*
 RUN case "$TARGETPLATFORM" in \
       "linux/amd64") TARGET_TRIPLE="x86_64-unknown-linux-gnu" ;; \
@@ -38,31 +37,34 @@ RUN case "$TARGETPLATFORM" in \
     esac && \
     rustup target add "$TARGET_TRIPLE" && \
     echo "$TARGET_TRIPLE" > /tmp/target-triple
+RUN cat <<'EOF' >/usr/local/bin/with-cross-env
+#!/usr/bin/env bash
+set -euo pipefail
+target="$(cat /tmp/target-triple 2>/dev/null || true)"
+if [ "$target" = "aarch64-unknown-linux-gnu" ]; then
+  export PKG_CONFIG_ALLOW_CROSS=1
+  export PKG_CONFIG_LIBDIR=/usr/lib/aarch64-linux-gnu/pkgconfig:/usr/share/pkgconfig
+  export PKG_CONFIG_SYSROOT_DIR=/usr/aarch64-linux-gnu
+  export OPENSSL_DIR=/usr/aarch64-linux-gnu
+  export OPENSSL_LIB_DIR=/usr/lib/aarch64-linux-gnu
+  export OPENSSL_INCLUDE_DIR=/usr/include/aarch64-linux-gnu
+fi
+exec "$@"
+EOF
+RUN chmod +x /usr/local/bin/with-cross-env
 COPY --from=planner /app/recipe.json recipe.json
-RUN TARGET_TRIPLE=$(cat /tmp/target-triple) && \
-    if [ "$TARGET_TRIPLE" = "aarch64-unknown-linux-gnu" ]; then \
-      export PKG_CONFIG_ALLOW_CROSS=1 \
-        PKG_CONFIG_LIBDIR=/usr/lib/aarch64-linux-gnu/pkgconfig:/usr/share/pkgconfig \
-        PKG_CONFIG_SYSROOT_DIR=/usr/aarch64-linux-gnu \
-        OPENSSL_DIR=/usr/aarch64-linux-gnu \
-        OPENSSL_LIB_DIR=/usr/lib/aarch64-linux-gnu \
-        OPENSSL_INCLUDE_DIR=/usr/include/aarch64-linux-gnu; \
-    fi && \
-    cargo chef cook --release --target "$TARGET_TRIPLE" --recipe-path recipe.json
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    TARGET_TRIPLE=$(cat /tmp/target-triple) && \
+    with-cross-env cargo chef cook --release --target "$TARGET_TRIPLE" --locked --recipe-path recipe.json
 
 # Build application
 COPY . .
-RUN TARGET_TRIPLE=$(cat /tmp/target-triple) && \
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    TARGET_TRIPLE=$(cat /tmp/target-triple) && \
     mkdir -p target/release && \
-    if [ "$TARGET_TRIPLE" = "aarch64-unknown-linux-gnu" ]; then \
-      export PKG_CONFIG_ALLOW_CROSS=1 \
-        PKG_CONFIG_LIBDIR=/usr/lib/aarch64-linux-gnu/pkgconfig:/usr/share/pkgconfig \
-        PKG_CONFIG_SYSROOT_DIR=/usr/aarch64-linux-gnu \
-        OPENSSL_DIR=/usr/aarch64-linux-gnu \
-        OPENSSL_LIB_DIR=/usr/lib/aarch64-linux-gnu \
-        OPENSSL_INCLUDE_DIR=/usr/include/aarch64-linux-gnu; \
-    fi && \
-    RUSTFLAGS="-C panic=abort" cargo build --release --target "$TARGET_TRIPLE" -p etl-replicator && \
+    RUSTFLAGS="-C panic=abort" with-cross-env cargo build --release --target "$TARGET_TRIPLE" --locked -p etl-replicator && \
     if [ "$TARGET_TRIPLE" = "aarch64-unknown-linux-gnu" ]; then \
       STRIP_TOOL="aarch64-linux-gnu-strip"; \
     else \
