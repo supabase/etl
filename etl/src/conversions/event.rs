@@ -238,8 +238,8 @@ where
         .ok_or_else(|| {
             etl_error!(
                 ErrorKind::MissingTableSchema,
-                "Table not found in the schema cache",
-                format!("The table schema for table {table_id} was not found in the cache")
+                "Table schema not found in cache",
+                format!("Table schema for table {} not found in cache", table_id)
             )
         })
 }
@@ -289,7 +289,7 @@ pub fn convert_tuple_to_row(
         let Some(tuple_data) = &tuple_data.get(i) else {
             bail!(
                 ErrorKind::ConversionError,
-                "Tuple data does not contain data at the specified index"
+                "Tuple data missing value at index"
             );
         };
 
@@ -327,7 +327,7 @@ pub fn convert_tuple_to_row(
             protocol::TupleData::Binary(_) => {
                 bail!(
                     ErrorKind::ConversionError,
-                    "Binary format is not supported in tuple data"
+                    "Binary format not supported in tuple data"
                 );
             }
             protocol::TupleData::Text(bytes) => {

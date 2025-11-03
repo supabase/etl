@@ -1046,8 +1046,8 @@ where
     let Some(remote_final_lsn) = state.remote_final_lsn.take() else {
         bail!(
             ErrorKind::InvalidState,
-            "Invalid transaction",
-            "A transaction should have started for handle_commit_message to be performed"
+            "Invalid transaction state",
+            "Transaction must be active before processing COMMIT message"
         );
     };
 
@@ -1152,8 +1152,8 @@ where
     let Some(remote_final_lsn) = state.remote_final_lsn else {
         bail!(
             ErrorKind::InvalidState,
-            "Invalid transaction",
-            "A transaction should have started for handle_relation_message to be performed"
+            "Invalid transaction state",
+            "Transaction must be active before processing RELATION message"
         );
     };
 
@@ -1175,8 +1175,8 @@ where
             .ok_or_else(|| {
                 etl_error!(
                     ErrorKind::MissingTableSchema,
-                    "Table not found in the schema cache",
-                    format!("The table schema for table {table_id} was not found in the cache")
+                    "Table schema not found in cache",
+                    format!("Table schema for table {} not found in cache", table_id)
                 )
             })?;
 
@@ -1215,8 +1215,8 @@ where
     let Some(remote_final_lsn) = state.remote_final_lsn else {
         bail!(
             ErrorKind::InvalidState,
-            "Invalid transaction",
-            "A transaction should have started for handle_insert_message to be performed"
+            "Invalid transaction state",
+            "Transaction must be active before processing INSERT message"
         );
     };
 
@@ -1249,8 +1249,8 @@ where
     let Some(remote_final_lsn) = state.remote_final_lsn else {
         bail!(
             ErrorKind::InvalidState,
-            "Invalid transaction",
-            "A transaction should have started for handle_update_message to be performed"
+            "Invalid transaction state",
+            "Transaction must be active before processing UPDATE message"
         );
     };
 
@@ -1283,8 +1283,8 @@ where
     let Some(remote_final_lsn) = state.remote_final_lsn else {
         bail!(
             ErrorKind::InvalidState,
-            "Invalid transaction",
-            "A transaction should have started for handle_delete_message to be performed"
+            "Invalid transaction state",
+            "Transaction must be active before processing DELETE message"
         );
     };
 
@@ -1320,8 +1320,8 @@ where
     let Some(remote_final_lsn) = state.remote_final_lsn else {
         bail!(
             ErrorKind::InvalidState,
-            "Invalid transaction",
-            "A transaction should have started for handle_truncate_message to be performed"
+            "Invalid transaction state",
+            "Transaction must be active before processing TRUNCATE message"
         );
     };
 

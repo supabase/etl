@@ -10,8 +10,8 @@ pub fn parse_bytea_hex_string(value: &str) -> EtlResult<Vec<u8>> {
     if value.len() < 2 || &value[..2] != "\\x" {
         bail!(
             ErrorKind::ConversionError,
-            "Could not convert from bytea hex string to byte array",
-            "The prefix '\\x' is missing"
+            "Bytea hex string conversion failed",
+            "Missing '\\x' prefix"
         );
     }
 
@@ -21,8 +21,8 @@ pub fn parse_bytea_hex_string(value: &str) -> EtlResult<Vec<u8>> {
     if !value.len().is_multiple_of(2) {
         bail!(
             ErrorKind::ConversionError,
-            "Could not convert from bytea hex string to byte array",
-            "The number of digits is odd"
+            "Bytea hex string conversion failed",
+            "Odd number of hexadecimal digits"
         );
     }
 
@@ -87,7 +87,7 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(matches!(err.kind(), ErrorKind::ConversionError));
-        assert!(err.to_string().contains("prefix '\\x' is missing"));
+        assert!(err.to_string().contains("Missing '\\x' prefix"));
     }
 
     #[test]
@@ -96,7 +96,7 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(matches!(err.kind(), ErrorKind::ConversionError));
-        assert!(err.to_string().contains("prefix '\\x' is missing"));
+        assert!(err.to_string().contains("Missing '\\x' prefix"));
     }
 
     #[test]
@@ -105,7 +105,7 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(matches!(err.kind(), ErrorKind::ConversionError));
-        assert!(err.to_string().contains("prefix '\\x' is missing"));
+        assert!(err.to_string().contains("Missing '\\x' prefix"));
     }
 
     #[test]
@@ -114,7 +114,7 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(matches!(err.kind(), ErrorKind::ConversionError));
-        assert!(err.to_string().contains("prefix '\\x' is missing"));
+        assert!(err.to_string().contains("Missing '\\x' prefix"));
     }
 
     #[test]
@@ -123,7 +123,7 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(matches!(err.kind(), ErrorKind::ConversionError));
-        assert!(err.to_string().contains("number of digits is odd"));
+        assert!(err.to_string().contains("Odd number of hexadecimal digits"));
     }
 
     #[test]
@@ -132,7 +132,7 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(matches!(err.kind(), ErrorKind::ConversionError));
-        assert!(err.to_string().contains("number of digits is odd"));
+        assert!(err.to_string().contains("Odd number of hexadecimal digits"));
     }
 
     #[test]

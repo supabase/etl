@@ -59,8 +59,8 @@ impl TryFrom<TableReplicationPhase> for state::TableReplicationState {
             TableReplicationPhase::SyncWait | TableReplicationPhase::Catchup { .. } => {
                 bail!(
                     ErrorKind::InvalidState,
-                    "In-memory phase error",
-                    "In-memory table replication phase can't be saved in the state store"
+                    "In-memory replication phase cannot be persisted",
+                    "In-memory table replication phases (SyncWait, Catchup) cannot be saved to state store"
                 );
             }
         }
@@ -81,17 +81,17 @@ impl TryFrom<state::TableReplicationStateRow> for TableReplicationPhase {
         let Some(table_replication_state) = value.deserialize_metadata().map_err(|err| {
             etl_error!(
                 ErrorKind::DeserializationError,
-                "Failed to deserialize table replication state",
+                "Table replication state deserialization failed",
                 format!(
-                    "Failed to deserialize table replication state from metadata column in Postgres: {err}"
+                    "Failed to deserialize table replication state from metadata column in PostgreSQL: {}", err
                 )
             )
         })?
         else {
             bail!(
                 ErrorKind::InvalidState,
-                "The table replication state does not exist",
-                "The table replication state does not exist in the metadata column in Postgres"
+                "Table replication state not found",
+                "Table replication state does not exist in metadata column in PostgreSQL"
             );
         };
 
@@ -398,8 +398,8 @@ impl StateStore for PostgresStore {
             }
             None => Err(etl_error!(
                 ErrorKind::StateRollbackError,
-                "No previous state found",
-                "There is no previous state to rollback to for this table"
+                "Previous table state not found",
+                "No previous state available to roll back to for this table"
             )),
         }
     }
@@ -442,8 +442,8 @@ impl StateStore for PostgresStore {
             .map_err(|err| {
                 etl_error!(
                     ErrorKind::SourceQueryFailed,
-                    "Failed to load table mappings",
-                    format!("Failed to load table mappings from postgres: {err}")
+                    "Table mappings loading failed",
+                    format!("Failed to load table mappings from PostgreSQL: {}", err)
                 )
             })?;
         let table_mappings_len = table_mappings.len();
@@ -488,8 +488,8 @@ impl StateStore for PostgresStore {
         .map_err(|err| {
             etl_error!(
                 ErrorKind::SourceQueryFailed,
-                "Failed to store table mapping",
-                format!("Failed to store table mapping in postgres: {err}")
+                "Table mapping storage failed",
+                format!("Failed to store table mapping in PostgreSQL: {}", err)
             )
         })?;
         inner
@@ -539,8 +539,8 @@ impl SchemaStore for PostgresStore {
             .map_err(|err| {
                 etl_error!(
                     ErrorKind::SourceQueryFailed,
-                    "Failed to load table schemas",
-                    format!("Failed to load table schemas from postgres: {err}")
+                    "Table schemas loading failed",
+                    format!("Failed to load table schemas from PostgreSQL: {}", err)
                 )
             })?;
         let table_schemas_len = table_schemas.len();
@@ -580,8 +580,8 @@ impl SchemaStore for PostgresStore {
             .map_err(|err| {
                 etl_error!(
                     ErrorKind::SourceQueryFailed,
-                    "Failed to store table schema",
-                    format!("Failed to store table schema in postgres: {err}")
+                    "Table schema storage failed",
+                    format!("Failed to store table schema in PostgreSQL: {}", err)
                 )
             })?;
         inner
@@ -608,8 +608,8 @@ impl CleanupStore for PostgresStore {
         .map_err(|err| {
             etl_error!(
                 ErrorKind::SourceQueryFailed,
-                "Failed to delete table mapping",
-                format!("Failed to delete table mapping in postgres: {err}")
+                "Table mapping deletion failed",
+                format!("Failed to delete table mapping in PostgreSQL: {}", err)
             )
         })?;
 
@@ -618,8 +618,8 @@ impl CleanupStore for PostgresStore {
             .map_err(|err| {
                 etl_error!(
                     ErrorKind::SourceQueryFailed,
-                    "Failed to delete table schema",
-                    format!("Failed to delete table schema in postgres: {err}")
+                    "Table schema deletion failed",
+                    format!("Failed to delete table schema in PostgreSQL: {}", err)
                 )
             })?;
 

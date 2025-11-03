@@ -339,7 +339,7 @@ impl WorkerHandle<TableSyncWorkerState> for TableSyncWorkerHandle {
         handle.await.map_err(|err| {
             etl_error!(
                 ErrorKind::TableSyncWorkerPanic,
-                "A panic occurred in the table sync worker",
+                "Table sync worker panicked",
                 err
             )
         })??;
@@ -712,9 +712,9 @@ where
 
             bail!(
                 ErrorKind::InvalidState,
-                "Replication state missing",
+                "Table replication state not found",
                 format!(
-                    "The replication state is missing for table {}",
+                    "Replication state missing for table {}",
                     self.table_id
                 )
             );
