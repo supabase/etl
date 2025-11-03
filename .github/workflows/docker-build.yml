@@ -100,7 +100,7 @@ jobs:
         run: |
           mkdir -p /tmp/digests
           digest="${{ steps.build.outputs.digest }}"
-          touch "/tmp/digests/${digest#sha256:}"
+          echo "$digest" > "/tmp/digests/${{ matrix.arch }}.txt"
           echo "digest-${{ matrix.arch }}=$digest" >> "$GITHUB_OUTPUT"
 
       - name: Upload Digest
@@ -159,8 +159,8 @@ jobs:
 
           # Prepare digest list for imagetools
           DIGEST_LIST=""
-          for digest_file in /tmp/digests/*; do
-            digest="sha256:$(basename "$digest_file")"
+          for digest_file in /tmp/digests/*.txt; do
+            digest=$(cat "$digest_file")
             DIGEST_LIST="${DIGEST_LIST} ${IMAGE}@${digest}"
           done
 
