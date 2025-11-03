@@ -1,12 +1,26 @@
-# Use mold linker on Linux for significantly faster linking (3-5x faster)
-# mold must be installed: https://github.com/rui314/mold
+# Linker Configuration
+# Using lld as default (widely available, 1.5-2x faster than ld)
+# Upgrade to mold for 3-5x faster linking if available on your system
+
 [target.x86_64-unknown-linux-gnu]
 linker = "clang"
-rustflags = ["-C", "link-arg=-fuse-ld=mold"]
+rustflags = ["-C", "link-arg=-fuse-ld=lld"]
 
 [target.aarch64-unknown-linux-gnu]
 linker = "clang"
-rustflags = ["-C", "link-arg=-fuse-ld=mold"]
+rustflags = ["-C", "link-arg=-fuse-ld=lld"]
+
+# Optional: Upgrade to mold linker (fastest, but requires installation)
+# Uncomment these sections and comment out lld sections above if mold is installed
+# Install: https://github.com/rui314/mold
+#
+# [target.x86_64-unknown-linux-gnu]
+# linker = "clang"
+# rustflags = ["-C", "link-arg=-fuse-ld=mold"]
+#
+# [target.aarch64-unknown-linux-gnu]
+# linker = "clang"
+# rustflags = ["-C", "link-arg=-fuse-ld=mold"]
 
 # Increase incremental compilation cache (speeds up rebuilds)
 incremental = true

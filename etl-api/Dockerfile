@@ -20,11 +20,13 @@ RUN apt-get update && \
     pkg-config \
     libssl-dev \
     clang \
+    lld \
     mold && \
     rm -rf /var/lib/apt/lists/*
 
-# Copy cargo config for build optimizations (mold linker, etc.)
+# Copy cargo config and override linker to use mold (fastest option in controlled Docker environment)
 COPY .cargo/config.toml /app/.cargo/config.toml
+RUN sed -i 's/link-arg=-fuse-ld=lld/link-arg=-fuse-ld=mold/g' /app/.cargo/config.toml
 
 COPY --from=planner /app/recipe.json recipe.json
 RUN cargo chef cook --release --recipe-path recipe.json
