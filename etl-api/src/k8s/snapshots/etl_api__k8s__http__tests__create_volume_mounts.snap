@@ -1,0 +1,10 @@
+---
+source: etl-api/src/k8s/http.rs
+expression: volume_mounts
+---
+[
+  {
+    "mountPath": "/app/configuration",
+    "name": "replicator-config-file"
+  }
+]

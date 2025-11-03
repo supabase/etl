@@ -70,10 +70,6 @@ expression: stateful_set_json
               {
                 "mountPath": "/app/configuration",
                 "name": "replicator-config-file"
-              },
-              {
-                "mountPath": "/app/logs",
-                "name": "logs"
               }
             ]
           }
