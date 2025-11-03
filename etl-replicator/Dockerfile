@@ -55,7 +55,7 @@ exec "$@"
 EOF
 RUN chmod +x /usr/local/bin/with-cross-env
 COPY --from=planner /app/recipe.json recipe.json
-COPY --from=planner /app/Cargo.lock Cargo.lock
+COPY Cargo.lock Cargo.lock
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     TARGET_TRIPLE=$(cat /tmp/target-triple) && \
