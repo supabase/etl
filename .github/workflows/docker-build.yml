@@ -52,7 +52,15 @@ jobs:
     outputs:
       digest-amd64: ${{ steps.export-digest.outputs.digest-amd64 }}
       digest-arm64: ${{ steps.export-digest.outputs.digest-arm64 }}
+      image-name: ${{ steps.extract-name.outputs.name }}
     steps:
+      - name: Extract Image Name
+        id: extract-name
+        run: |
+          IMAGE="${{ inputs.image }}"
+          NAME="${IMAGE##*/}"
+          echo "name=$NAME" >> "$GITHUB_OUTPUT"
+
       - name: Checkout (specific ref)
         if: inputs.checkout_ref != ''
         uses: actions/checkout@v4
@@ -99,7 +107,7 @@ jobs:
         if: inputs.push == true
         uses: actions/upload-artifact@v4
         with:
-          name: digests-${{ matrix.arch }}
+          name: digests-${{ steps.extract-name.outputs.name }}-${{ matrix.arch }}
           path: /tmp/digests/*
           if-no-files-found: error
           retention-days: 1
@@ -111,11 +119,18 @@ jobs:
     runs-on: ubuntu-latest
     if: inputs.push == true
     steps:
+      - name: Extract Image Name
+        id: extract-name
+        run: |
+          IMAGE="${{ inputs.image }}"
+          NAME="${IMAGE##*/}"
+          echo "name=$NAME" >> "$GITHUB_OUTPUT"
+
       - name: Download Digests
         uses: actions/download-artifact@v4
         with:
           path: /tmp/digests
-          pattern: digests-*
+          pattern: digests-${{ steps.extract-name.outputs.name }}-*
           merge-multiple: true
 
       - name: Set up Docker Buildx
