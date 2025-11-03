@@ -56,7 +56,7 @@ COPY --from=planner /app/recipe.json recipe.json
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     TARGET_TRIPLE=$(cat /tmp/target-triple) && \
-    with-cross-env cargo chef cook --release --target "$TARGET_TRIPLE" --recipe-path recipe.json
+    with-cross-env cargo chef cook --locked --release --target "$TARGET_TRIPLE" --recipe-path recipe.json
 
 # Build application
 COPY . .
@@ -64,7 +64,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     TARGET_TRIPLE=$(cat /tmp/target-triple) && \
     mkdir -p target/release && \
-    RUSTFLAGS="-C panic=abort" with-cross-env cargo build --release --target "$TARGET_TRIPLE" --locked -p etl-replicator && \
+    RUSTFLAGS="-C panic=abort" with-cross-env cargo build --release --target "$TARGET_TRIPLE" -p etl-replicator && \
     if [ "$TARGET_TRIPLE" = "aarch64-unknown-linux-gnu" ]; then \
       STRIP_TOOL="aarch64-linux-gnu-strip"; \
     else \
