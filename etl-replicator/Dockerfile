@@ -1,5 +1,6 @@
 # Build stage with cargo-chef for better layer caching
-FROM --platform=$BUILDPLATFORM lukemathwalker/cargo-chef:latest-rust-1.88.0-slim-bookworm AS chef
+# Native build: each runner builds for its own architecture
+FROM lukemathwalker/cargo-chef:latest-rust-1.88.0-slim-bookworm AS chef
 WORKDIR /app
 
 # Install system dependencies
@@ -11,7 +12,7 @@ RUN cargo chef prepare --recipe-path recipe.json
 FROM chef AS builder
 ARG TARGETPLATFORM
 ARG BUILDPLATFORM
-RUN echo "Running on $BUILDPLATFORM, building for $TARGETPLATFORM"
+RUN echo "Native build on $BUILDPLATFORM for $TARGETPLATFORM"
 # TODO: remove protobuf-compiler once the upstream gcp-bigquery-client remove it from its deps
 RUN apt-get update && apt-get install -y pkg-config libssl-dev protobuf-compiler clang && rm -rf /var/lib/apt/lists/*
 COPY --from=planner /app/recipe.json recipe.json
