@@ -43,7 +43,8 @@ expression: stateful_set_json
                 "valueFrom": {
                   "secretKeyRef": {
                     "key": "dsn",
-                    "name": "replicator-sentry-dsn"
+                    "name": "replicator-sentry-dsn",
+                    "optional": true
                   }
                 }
               },
@@ -51,7 +52,7 @@ expression: stateful_set_json
                 "name": "APP_SUPABASE__API_KEY",
                 "valueFrom": {
                   "secretKeyRef": {
-                    "key": "api-key",
+                    "key": "key",
                     "name": "supabase-api-key",
                     "optional": true
                   }
