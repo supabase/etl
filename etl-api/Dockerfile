@@ -14,19 +14,17 @@ ARG TARGETPLATFORM
 ARG BUILDPLATFORM
 RUN echo "Native build on $BUILDPLATFORM for $TARGETPLATFORM"
 
-# Install build dependencies including mold linker for faster linking
+# Install build dependencies including lld linker for faster linking
 RUN apt-get update && \
     apt-get install -y \
     pkg-config \
     libssl-dev \
     clang \
-    lld \
-    mold && \
+    lld && \
     rm -rf /var/lib/apt/lists/*
 
-# Copy cargo config and override linker to use mold (fastest option in controlled Docker environment)
+# Copy cargo config for build optimizations (lld linker, etc.)
 COPY .cargo/config.toml /app/.cargo/config.toml
-RUN sed -i 's/link-arg=-fuse-ld=lld/link-arg=-fuse-ld=mold/g' /app/.cargo/config.toml
 
 COPY --from=planner /app/recipe.json recipe.json
 RUN cargo chef cook --release --recipe-path recipe.json
