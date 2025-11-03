@@ -107,7 +107,7 @@ jobs:
 
       - name: Build and Push Image (${{ matrix.arch }})
         id: build
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v6
         with:
           context: ${{ inputs.context }}
           file: ${{ inputs.file }}
@@ -117,6 +117,24 @@ jobs:
           platforms: linux/${{ matrix.arch }}
           cache-from: type=gha,scope=${{ inputs.image }}-${{ matrix.arch }}
           cache-to: type=gha,scope=${{ inputs.image }}-${{ matrix.arch }},mode=max
+          outputs: type=image,name=${{ inputs.image }},push=${{ inputs.push }},push-by-digest=${{ inputs.push }},name-canonical=true
+
+      - name: Export Digest (${{ matrix.arch }})
+        if: inputs.push == true
+        run: |
+          set -euo pipefail
+          mkdir -p "${{ runner.temp }}/digests"
+          digest="${{ steps.build.outputs.digest }}"
+          touch "${{ runner.temp }}/digests/${digest#sha256:}"
+
+      - name: Upload Digest Artifact (${{ matrix.arch }})
+        if: inputs.push == true
+        uses: actions/upload-artifact@v4
+        with:
+          name: digests-linux-${{ matrix.arch }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
 
   manifest:
     name: Publish Multi-Arch Manifest
@@ -133,19 +151,31 @@ jobs:
           username: ${{ vars.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
+      - name: Download Digests
+        uses: actions/download-artifact@v4
+        with:
+          path: ${{ runner.temp }}/digests
+          pattern: digests-*
+          merge-multiple: true
+
       - name: Create Multi-Architecture Manifests
         shell: bash
         run: |
           set -euo pipefail
           tags="${{ needs.metadata.outputs.tags }}"
+          image="${{ inputs.image }}"
+          refs=""
+          for digest_file in "${{ runner.temp }}/digests"/*; do
+            digest="$(basename "$digest_file")"
+            refs="$refs ${image}@sha256:${digest}"
+          done
           while IFS= read -r tag; do
             if [ -z "$tag" ]; then
               continue
             fi
             docker buildx imagetools create \
               --tag "$tag" \
-              "${tag}-amd64" \
-              "${tag}-arm64"
+              $refs
           done <<< "$tags"
 
       - name: Output Image Information

@@ -37,6 +37,8 @@ RUN case "$TARGETPLATFORM" in \
     esac && \
     rustup target add "$TARGET_TRIPLE" && \
     echo "$TARGET_TRIPLE" > /tmp/target-triple
+ENV CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=/usr/bin/clang \
+    CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=/usr/bin/aarch64-linux-gnu-gcc
 RUN cat <<'EOF' >/usr/local/bin/with-cross-env
 #!/usr/bin/env bash
 set -euo pipefail
@@ -53,10 +55,11 @@ exec "$@"
 EOF
 RUN chmod +x /usr/local/bin/with-cross-env
 COPY --from=planner /app/recipe.json recipe.json
+COPY --from=planner /app/Cargo.lock Cargo.lock
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     TARGET_TRIPLE=$(cat /tmp/target-triple) && \
-    with-cross-env cargo chef cook --locked --release --target "$TARGET_TRIPLE" --recipe-path recipe.json
+    with-cross-env cargo chef cook --release --target "$TARGET_TRIPLE" --recipe-path recipe.json
 
 # Build application
 COPY . .
