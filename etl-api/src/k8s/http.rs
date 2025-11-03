@@ -1249,7 +1249,7 @@ mod tests {
             node_selector,
             init_containers,
             volumes,
-            volume_mounts
+            volume_mounts,
         );
 
         assert_json_snapshot!(stateful_set_json, { ".spec.template.metadata.annotations[\"etl.supabase.com/restarted-at\"]" => "[timestamp]"});
@@ -1286,7 +1286,7 @@ mod tests {
             node_selector,
             init_containers,
             volumes,
-            volume_mounts
+            volume_mounts,
         );
 
         assert_json_snapshot!(stateful_set_json, { ".spec.template.metadata.annotations[\"etl.supabase.com/restarted-at\"]" => "[timestamp]"});
@@ -1316,7 +1316,7 @@ mod tests {
             node_selector,
             init_containers,
             volumes,
-            volume_mounts
+            volume_mounts,
         );
 
         assert_json_snapshot!(stateful_set_json, { ".spec.template.metadata.annotations[\"etl.supabase.com/restarted-at\"]" => "[timestamp]"});
@@ -1346,7 +1346,7 @@ mod tests {
             node_selector,
             init_containers,
             volumes,
-            volume_mounts
+            volume_mounts,
         );
 
         assert_json_snapshot!(stateful_set_json, { ".spec.template.metadata.annotations[\"etl.supabase.com/restarted-at\"]" => "[timestamp]"});
