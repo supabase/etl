@@ -13,15 +13,27 @@ FROM chef AS builder
 ARG TARGETPLATFORM
 ARG BUILDPLATFORM
 RUN echo "Native build on $BUILDPLATFORM for $TARGETPLATFORM"
-RUN apt-get update && apt-get install -y pkg-config libssl-dev && rm -rf /var/lib/apt/lists/*
+
+# Install build dependencies including mold linker for faster linking
+RUN apt-get update && \
+    apt-get install -y \
+    pkg-config \
+    libssl-dev \
+    clang \
+    mold && \
+    rm -rf /var/lib/apt/lists/*
+
+# Copy cargo config for build optimizations (mold linker, etc.)
+COPY .cargo/config.toml /app/.cargo/config.toml
+
 COPY --from=planner /app/recipe.json recipe.json
 RUN cargo chef cook --release --recipe-path recipe.json
 
-# Build application
+# Build application with optimizations
+# The release profile in Cargo.toml handles: thin LTO, strip, opt-level=3
 COPY . .
 ENV SQLX_OFFLINE=true
-RUN cargo build --release -p etl-api && \
-    strip target/release/etl-api
+RUN cargo build --release -p etl-api
 
 # Runtime stage with distroless for security
 FROM gcr.io/distroless/cc-debian12:nonroot

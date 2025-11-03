@@ -49,6 +49,9 @@ jobs:
           - platform: linux/arm64
             runner: ubuntu-24.04-arm
             arch: arm64
+    outputs:
+      digest-amd64: ${{ steps.export-digest.outputs.digest-amd64 }}
+      digest-arm64: ${{ steps.export-digest.outputs.digest-arm64 }}
     steps:
       - name: Checkout (specific ref)
         if: inputs.checkout_ref != ''
@@ -70,16 +73,6 @@ jobs:
           username: ${{ vars.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Docker Metadata
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ inputs.image }}
-          tags: |
-            type=raw,value=latest-${{ matrix.arch }}
-            type=sha,format=long,prefix=,suffix=-${{ matrix.arch }}
-            ${{ inputs.tag_with_version && format('type=raw,value=v{0}-{1}', inputs.version, matrix.arch) || '' }}
-
       - name: Build and Push Single-Platform Image
         id: build
         uses: docker/build-push-action@v5
@@ -87,11 +80,29 @@ jobs:
           context: ${{ inputs.context }}
           file: ${{ inputs.file }}
           push: ${{ inputs.push }}
-          tags: ${{ steps.meta.outputs.tags }}
           platforms: ${{ matrix.platform }}
           cache-from: type=gha,scope=${{ matrix.arch }}
           cache-to: type=gha,mode=max,scope=${{ matrix.arch }}
           provenance: false
+          outputs: type=image,name=${{ inputs.image }},push-by-digest=true,name-canonical=true
+
+      - name: Export Digest
+        id: export-digest
+        if: inputs.push == true
+        run: |
+          mkdir -p /tmp/digests
+          digest="${{ steps.build.outputs.digest }}"
+          touch "/tmp/digests/${digest#sha256:}"
+          echo "digest-${{ matrix.arch }}=$digest" >> "$GITHUB_OUTPUT"
+
+      - name: Upload Digest
+        if: inputs.push == true
+        uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ matrix.arch }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
 
   # Create multi-arch manifest combining both platforms
   create-manifest:
@@ -100,15 +111,12 @@ jobs:
     runs-on: ubuntu-latest
     if: inputs.push == true
     steps:
-      - name: Checkout (specific ref)
-        if: inputs.checkout_ref != ''
-        uses: actions/checkout@v4
+      - name: Download Digests
+        uses: actions/download-artifact@v4
         with:
-          ref: ${{ inputs.checkout_ref }}
-
-      - name: Checkout (default)
-        if: inputs.checkout_ref == ''
-        uses: actions/checkout@v4
+          path: /tmp/digests
+          pattern: digests-*
+          merge-multiple: true
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -119,26 +127,37 @@ jobs:
           username: ${{ vars.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
+      - name: Checkout (specific ref)
+        if: inputs.checkout_ref != ''
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.checkout_ref }}
+
+      - name: Checkout (default)
+        if: inputs.checkout_ref == ''
+        uses: actions/checkout@v4
+
       - name: Create and Push Multi-Arch Manifest
         run: |
           IMAGE="${{ inputs.image }}"
           FULL_SHA=$(git rev-parse HEAD)
 
+          # Prepare digest list for imagetools
+          DIGEST_LIST=""
+          for digest_file in /tmp/digests/*; do
+            digest="sha256:$(basename "$digest_file")"
+            DIGEST_LIST="${DIGEST_LIST} ${IMAGE}@${digest}"
+          done
+
           # Create manifest for latest
-          docker buildx imagetools create -t "${IMAGE}:latest" \
-            "${IMAGE}:latest-amd64" \
-            "${IMAGE}:latest-arm64"
+          docker buildx imagetools create -t "${IMAGE}:latest" ${DIGEST_LIST}
 
           # Create manifest for SHA
-          docker buildx imagetools create -t "${IMAGE}:${FULL_SHA}" \
-            "${IMAGE}:${FULL_SHA}-amd64" \
-            "${IMAGE}:${FULL_SHA}-arm64"
+          docker buildx imagetools create -t "${IMAGE}:${FULL_SHA}" ${DIGEST_LIST}
 
           # Create manifest for version if needed
           if [ "${{ inputs.tag_with_version }}" = "true" ] && [ -n "${{ inputs.version }}" ]; then
-            docker buildx imagetools create -t "${IMAGE}:v${{ inputs.version }}" \
-              "${IMAGE}:v${{ inputs.version }}-amd64" \
-              "${IMAGE}:v${{ inputs.version }}-arm64"
+            docker buildx imagetools create -t "${IMAGE}:v${{ inputs.version }}" ${DIGEST_LIST}
           fi
 
       - name: Output Image Information
