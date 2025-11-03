@@ -1052,16 +1052,33 @@ mod tests {
     #[test]
     fn test_create_bq_container_environment() {
         let prefix = create_k8s_object_prefix(TENANT_ID, 42);
-        let environment = Environment::Prod;
         let replicator_image = "ramsup/etl-replicator:2a41356af735f891de37d71c0e1a62864fe4630e";
 
+        let environment = Environment::Dev;
         let container_environment = create_container_environment_json(
             &prefix,
             &environment,
             replicator_image,
             DestinationType::BigQuery,
         );
+        assert_json_snapshot!(container_environment);
 
+        let environment = Environment::Staging;
+        let container_environment = create_container_environment_json(
+            &prefix,
+            &environment,
+            replicator_image,
+            DestinationType::BigQuery,
+        );
+        assert_json_snapshot!(container_environment);
+
+        let environment = Environment::Prod;
+        let container_environment = create_container_environment_json(
+            &prefix,
+            &environment,
+            replicator_image,
+            DestinationType::BigQuery,
+        );
         assert_json_snapshot!(container_environment);
     }
 
