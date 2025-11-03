@@ -713,10 +713,7 @@ where
             bail!(
                 ErrorKind::InvalidState,
                 "Table replication state not found",
-                format!(
-                    "Replication state missing for table {}",
-                    self.table_id
-                )
+                format!("Replication state missing for table {}", self.table_id)
             );
         };
 

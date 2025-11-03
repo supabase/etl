@@ -84,7 +84,10 @@ pub fn parse_table_row_from_postgres_copy_bytes(
                 None => {
                     // Validate that row was properly terminated with newline
                     if !row_terminated {
-                        bail!(ErrorKind::ConversionError, "Row data not properly terminated");
+                        bail!(
+                            ErrorKind::ConversionError,
+                            "Row data not properly terminated"
+                        );
                     }
                     done = true;
 

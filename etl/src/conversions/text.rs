@@ -235,10 +235,7 @@ where
     }
 
     if !str.starts_with('{') || !str.ends_with('}') {
-        bail!(
-            ErrorKind::ConversionError,
-            "Array input missing braces"
-        );
+        bail!(ErrorKind::ConversionError, "Array input missing braces");
     }
 
     let mut res = vec![];

@@ -56,11 +56,7 @@ impl WorkerHandle<()> for ApplyWorkerHandle {
         };
 
         handle.await.map_err(|err| {
-            etl_error!(
-                ErrorKind::ApplyWorkerPanic,
-                "Apply worker panicked",
-                err
-            )
+            etl_error!(ErrorKind::ApplyWorkerPanic, "Apply worker panicked", err)
         })??;
 
         Ok(())

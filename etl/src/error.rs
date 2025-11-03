@@ -609,18 +609,20 @@ impl From<tokio_postgres::Error> for EtlError {
                     | SqlState::NOT_NULL_VIOLATION
                     | SqlState::FOREIGN_KEY_VIOLATION
                     | SqlState::UNIQUE_VIOLATION
-                    | SqlState::CHECK_VIOLATION => {
-                        (ErrorKind::ValidationError, "PostgreSQL constraint violation")
-                    }
+                    | SqlState::CHECK_VIOLATION => (
+                        ErrorKind::ValidationError,
+                        "PostgreSQL constraint violation",
+                    ),
 
                     // Data conversion errors (22xxx)
                     SqlState::DATA_EXCEPTION
                     | SqlState::INVALID_TEXT_REPRESENTATION
                     | SqlState::INVALID_DATETIME_FORMAT
                     | SqlState::NUMERIC_VALUE_OUT_OF_RANGE
-                    | SqlState::DIVISION_BY_ZERO => {
-                        (ErrorKind::ConversionError, "PostgreSQL data conversion failed")
-                    }
+                    | SqlState::DIVISION_BY_ZERO => (
+                        ErrorKind::ConversionError,
+                        "PostgreSQL data conversion failed",
+                    ),
 
                     // Schema/object not found errors (42xxx)
                     SqlState::UNDEFINED_TABLE
@@ -670,12 +672,14 @@ impl From<tokio_postgres::Error> for EtlError {
                         ErrorKind::SourceOperationCanceled,
                         "PostgreSQL query canceled",
                     ),
-                    SqlState::ADMIN_SHUTDOWN => {
-                        (ErrorKind::SourceDatabaseShutdown, "PostgreSQL administrative shutdown")
-                    }
-                    SqlState::CRASH_SHUTDOWN => {
-                        (ErrorKind::SourceDatabaseShutdown, "PostgreSQL crash shutdown")
-                    }
+                    SqlState::ADMIN_SHUTDOWN => (
+                        ErrorKind::SourceDatabaseShutdown,
+                        "PostgreSQL administrative shutdown",
+                    ),
+                    SqlState::CRASH_SHUTDOWN => (
+                        ErrorKind::SourceDatabaseShutdown,
+                        "PostgreSQL crash shutdown",
+                    ),
                     SqlState::CANNOT_CONNECT_NOW => (
                         ErrorKind::SourceDatabaseInRecovery,
                         "PostgreSQL database in recovery",
@@ -693,10 +697,13 @@ impl From<tokio_postgres::Error> for EtlError {
                         ErrorKind::InvalidState,
                         "PostgreSQL object not in prerequisite state",
                     ),
-                    SqlState::OBJECT_IN_USE => (ErrorKind::InvalidState, "PostgreSQL object in use"),
-                    SqlState::LOCK_NOT_AVAILABLE => {
-                        (ErrorKind::SourceLockTimeout, "PostgreSQL lock not available")
+                    SqlState::OBJECT_IN_USE => {
+                        (ErrorKind::InvalidState, "PostgreSQL object in use")
                     }
+                    SqlState::LOCK_NOT_AVAILABLE => (
+                        ErrorKind::SourceLockTimeout,
+                        "PostgreSQL lock not available",
+                    ),
 
                     // Program limit errors (54xxx)
                     SqlState::PROGRAM_LIMIT_EXCEEDED
@@ -718,9 +725,10 @@ impl From<tokio_postgres::Error> for EtlError {
                     SqlState::ACTIVE_SQL_TRANSACTION
                     | SqlState::NO_ACTIVE_SQL_TRANSACTION
                     | SqlState::IN_FAILED_SQL_TRANSACTION
-                    | SqlState::IDLE_IN_TRANSACTION_SESSION_TIMEOUT => {
-                        (ErrorKind::InvalidState, "PostgreSQL transaction state error")
-                    }
+                    | SqlState::IDLE_IN_TRANSACTION_SESSION_TIMEOUT => (
+                        ErrorKind::InvalidState,
+                        "PostgreSQL transaction state error",
+                    ),
 
                     // Cursor errors (24xxx, 34xxx)
                     SqlState::INVALID_CURSOR_STATE | SqlState::INVALID_CURSOR_NAME => {
@@ -751,9 +759,10 @@ impl From<tokio_postgres::Error> for EtlError {
 
                     // Dependent objects errors (2Bxxx)
                     SqlState::DEPENDENT_PRIVILEGE_DESCRIPTORS_STILL_EXIST
-                    | SqlState::DEPENDENT_OBJECTS_STILL_EXIST => {
-                        (ErrorKind::InvalidState, "PostgreSQL dependent objects exist")
-                    }
+                    | SqlState::DEPENDENT_OBJECTS_STILL_EXIST => (
+                        ErrorKind::InvalidState,
+                        "PostgreSQL dependent objects exist",
+                    ),
 
                     // SQL routine errors (2Fxxx)
                     SqlState::SQL_ROUTINE_EXCEPTION
@@ -825,14 +834,16 @@ impl From<tokio_postgres::Error> for EtlError {
                     | SqlState::FDW_OPTION_NAME_NOT_FOUND
                     | SqlState::FDW_REPLY_HANDLE
                     | SqlState::FDW_UNABLE_TO_CREATE_EXECUTION
-                    | SqlState::FDW_UNABLE_TO_CREATE_REPLY => {
-                        (ErrorKind::SourceQueryFailed, "PostgreSQL FDW operation error")
-                    }
+                    | SqlState::FDW_UNABLE_TO_CREATE_REPLY => (
+                        ErrorKind::SourceQueryFailed,
+                        "PostgreSQL FDW operation error",
+                    ),
 
                     // Snapshot errors (72xxx) - important for replication consistency
-                    SqlState::SNAPSHOT_TOO_OLD => {
-                        (ErrorKind::SourceSnapshotTooOld, "PostgreSQL snapshot too old")
-                    }
+                    SqlState::SNAPSHOT_TOO_OLD => (
+                        ErrorKind::SourceSnapshotTooOld,
+                        "PostgreSQL snapshot too old",
+                    ),
 
                     // Array errors - relevant for replication data handling
                     SqlState::ARRAY_ELEMENT_ERROR => {
