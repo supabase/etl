@@ -1,7 +1,2 @@
 [target.aarch64-unknown-linux-gnu]
-# Fast, portable linking
-linker = "clang"
-rustflags = [
-    # Use the lld linker instead of the system default
-    "-Clink-arg=-fuse-ld=lld",
-]
+linker = "aarch64-linux-gnu-gcc"
