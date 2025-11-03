@@ -32,11 +32,30 @@ expression: stateful_set_json
             "env": [
               {
                 "name": "APP_ENVIRONMENT",
-                "value": "dev"
+                "value": "staging"
               },
               {
                 "name": "APP_VERSION",
                 "value": "ramsup/etl-replicator:2a41356af735f891de37d71c0e1a62864fe4630e"
+              },
+              {
+                "name": "APP_SENTRY__DSN",
+                "valueFrom": {
+                  "secretKeyRef": {
+                    "key": "dsn",
+                    "name": "replicator-sentry-dsn"
+                  }
+                }
+              },
+              {
+                "name": "APP_SUPABASE__API_KEY",
+                "valueFrom": {
+                  "secretKeyRef": {
+                    "key": "key",
+                    "name": "supabase-api-key",
+                    "optional": true
+                  }
+                }
               },
               {
                 "name": "APP_PIPELINE__PG_CONNECTION__PASSWORD",
@@ -88,12 +107,55 @@ expression: stateful_set_json
               {
                 "mountPath": "/app/configuration",
                 "name": "replicator-config-file"
+              },
+              {
+                "mountPath": "/app/logs",
+                "name": "logs"
               }
             ]
           }
         ],
-        "initContainers": [],
-        "nodeSelector": {},
+        "initContainers": [
+          {
+            "env": [
+              {
+                "name": "LOGFLARE_API_KEY",
+                "valueFrom": {
+                  "secretKeyRef": {
+                    "key": "key",
+                    "name": "replicator-logflare-api-key"
+                  }
+                }
+              }
+            ],
+            "image": "timberio/vector:0.46.1-distroless-libc",
+            "name": "abcdefghijklmnopqrst-42-vector",
+            "resources": {
+              "limits": {
+                "cpu": "100m",
+                "memory": "100Mi"
+              },
+              "requests": {
+                "cpu": "100m",
+                "memory": "100Mi"
+              }
+            },
+            "restartPolicy": "Always",
+            "volumeMounts": [
+              {
+                "mountPath": "/etc/vector",
+                "name": "vector-config-file"
+              },
+              {
+                "mountPath": "/var/log",
+                "name": "logs"
+              }
+            ]
+          }
+        ],
+        "nodeSelector": {
+          "nodeType": "workloads"
+        },
         "terminationGracePeriodSeconds": 300,
         "tolerations": [
           {
@@ -109,6 +171,16 @@ expression: stateful_set_json
               "name": "abcdefghijklmnopqrst-42-replicator-config"
             },
             "name": "replicator-config-file"
+          },
+          {
+            "configMap": {
+              "name": "replicator-vector-config"
+            },
+            "name": "vector-config-file"
+          },
+          {
+            "emptyDir": {},
+            "name": "logs"
           }
         ]
       }

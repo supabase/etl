@@ -1,0 +1,12 @@
+---
+source: etl-api/src/k8s/http.rs
+expression: volumes
+---
+[
+  {
+    "configMap": {
+      "name": "abcdefghijklmnopqrst-42-replicator-config"
+    },
+    "name": "replicator-config-file"
+  }
+]

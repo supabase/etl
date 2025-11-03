@@ -1,0 +1,7 @@
+---
+source: etl-api/src/k8s/http.rs
+expression: node_selector
+---
+{
+  "nodeType": "workloads"
+}

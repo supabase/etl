@@ -5,16 +5,18 @@ use actix_web_httpauth::middleware::HttpAuthentication;
 use actix_web_metrics::ActixWebMetricsBuilder;
 use aws_lc_rs::aead::{AES_256_GCM, RandomizedNonceKey};
 use base64::{Engine, prelude::BASE64_STANDARD};
+use etl_config::Environment;
 use etl_config::shared::{IntoConnectOptions, PgConnectionConfig};
 use etl_telemetry::metrics::init_metrics_handle;
+use kube::config::KubeConfigOptions;
 use sqlx::{PgPool, postgres::PgPoolOptions};
-use tracing::warn;
+use tracing::{error, info, warn};
 use tracing_actix_web::TracingLogger;
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
 
-use crate::k8s::K8sClient;
 use crate::k8s::http::HttpK8sClient;
+use crate::k8s::{K8sClient, K8sError};
 use crate::{
     authentication::auth_validator,
     config::ApiConfig,
@@ -99,7 +101,24 @@ impl Application {
             key,
         };
 
-        let k8s_client = match HttpK8sClient::new().await {
+        let kube_client = match Environment::load()? {
+            Environment::Staging | Environment::Prod => kube::Client::try_default().await?,
+            Environment::Dev => {
+                let options = KubeConfigOptions {
+                    context: Some("orbstack".to_string()),
+                    cluster: Some("orbstack".to_string()),
+                    user: Some("orbstack".to_string()),
+                };
+                let kube_config = kube::config::Config::from_kubeconfig(&options).await?;
+                let kube_client: kube::Client = kube_config.try_into()?;
+
+                test_orbstack_connection(&kube_client).await?;
+
+                kube_client
+            }
+        };
+
+        let k8s_client = match HttpK8sClient::new(kube_client).await {
             Ok(client) => Some(Arc::new(client) as Arc<dyn K8sClient>),
             Err(e) => {
                 warn!(
@@ -142,6 +161,25 @@ impl Application {
     pub async fn run_until_stopped(self) -> Result<(), std::io::Error> {
         self.server.await
     }
+}
+
+async fn test_orbstack_connection(client: &kube::Client) -> Result<(), K8sError> {
+    match client.apiserver_version().await {
+        Ok(version) => {
+            info!(
+                "successfully connected to orbstack kubernetes api server version: {}.{}",
+                version.major, version.minor
+            );
+        }
+        Err(e) => {
+            error!(
+                "failed to connect to orbstack, make sure you have orbstack installed and kubernetes enabled in it."
+            );
+            return Err(e.into());
+        }
+    }
+
+    Ok(())
 }
 
 /// Creates a Postgres connection pool from the provided configuration.
