@@ -29,14 +29,21 @@ RUN if [ "$TARGETPLATFORM" = "linux/arm64" ]; then dpkg --add-architecture arm64
       $(if [ "$TARGETPLATFORM" = "linux/arm64" ]; then printf '%s ' "libssl-dev:arm64" "zlib1g-dev:arm64"; fi) && \
     rm -rf /var/lib/apt/lists/*
 RUN case "$TARGETPLATFORM" in \
-      "linux/amd64") TARGET_TRIPLE="x86_64-unknown-linux-gnu" ;; \
-      "linux/arm64") TARGET_TRIPLE="aarch64-unknown-linux-gnu" ;; \
+      "linux/amd64") TARGET_TRIPLE="x86_64-unknown-linux-gnu"; LIB_ARCH="x86_64-linux-gnu" ;; \
+      "linux/arm64") TARGET_TRIPLE="aarch64-unknown-linux-gnu"; LIB_ARCH="aarch64-linux-gnu" ;; \
       *) echo "Unsupported TARGETPLATFORM: $TARGETPLATFORM" >&2; exit 1 ;; \
     esac && \
     rustup target add "$TARGET_TRIPLE" && \
-    echo "$TARGET_TRIPLE" > /tmp/target-triple
+    echo "$TARGET_TRIPLE" > /tmp/target-triple && \
+    echo "$LIB_ARCH" > /tmp/lib-arch
 ENV CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=/usr/bin/clang \
-    CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=/usr/bin/aarch64-linux-gnu-gcc
+    CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=/usr/bin/aarch64-linux-gnu-gcc \
+    CC_x86_64_unknown_linux_gnu=/usr/bin/clang \
+    CXX_x86_64_unknown_linux_gnu=/usr/bin/clang++ \
+    AR_x86_64_unknown_linux_gnu=/usr/bin/ar \
+    CC_aarch64_unknown_linux_gnu=/usr/bin/aarch64-linux-gnu-gcc \
+    CXX_aarch64_unknown_linux_gnu=/usr/bin/aarch64-linux-gnu-g++ \
+    AR_aarch64_unknown_linux_gnu=/usr/bin/aarch64-linux-gnu-ar
 RUN cat <<'EOF' >/usr/local/bin/with-cross-env
 #!/usr/bin/env bash
 set -euo pipefail
@@ -48,6 +55,7 @@ if [ "$target" = "aarch64-unknown-linux-gnu" ]; then
   export OPENSSL_DIR=/usr/aarch64-linux-gnu
   export OPENSSL_LIB_DIR=/usr/lib/aarch64-linux-gnu
   export OPENSSL_INCLUDE_DIR=/usr/include/aarch64-linux-gnu
+  export PKG_CONFIG_PATH=/usr/lib/aarch64-linux-gnu/pkgconfig
 fi
 exec "$@"
 EOF
@@ -75,6 +83,18 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     "$STRIP_TOOL" "target/${TARGET_TRIPLE}/release/etl-api" && \
     cp "target/${TARGET_TRIPLE}/release/etl-api" target/release/etl-api
 
+FROM builder AS runtime-deps
+RUN set -euo pipefail; \
+    LIB_ARCH="$(cat /tmp/lib-arch)"; \
+    mkdir -p "/runtime-libs/usr/lib/${LIB_ARCH}" "/runtime-libs/lib/${LIB_ARCH}"; \
+    cp "/usr/lib/${LIB_ARCH}/libssl.so.3" "/runtime-libs/usr/lib/${LIB_ARCH}/"; \
+    cp "/usr/lib/${LIB_ARCH}/libcrypto.so.3" "/runtime-libs/usr/lib/${LIB_ARCH}/"; \
+    if [ -f "/usr/lib/${LIB_ARCH}/libz.so.1" ]; then \
+      cp "/usr/lib/${LIB_ARCH}/libz.so.1" "/runtime-libs/usr/lib/${LIB_ARCH}/"; \
+    else \
+      cp "/lib/${LIB_ARCH}/libz.so.1" "/runtime-libs/lib/${LIB_ARCH}/"; \
+    fi
+
 # Runtime stage with distroless for security
 FROM gcr.io/distroless/cc-debian12:nonroot
 WORKDIR /app
@@ -84,6 +104,7 @@ USER nonroot:nonroot
 
 # Copy binary and configuration
 COPY --from=builder /app/target/release/etl-api ./etl-api
+COPY --from=runtime-deps /runtime-libs/ /
 COPY --chown=nonroot:nonroot etl-api/configuration ./configuration
 
 # Use exec form for proper signal handling
