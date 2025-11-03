@@ -54,7 +54,7 @@ COPY --from=planner /app/recipe.json recipe.json
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     TARGET_TRIPLE=$(cat /tmp/target-triple) && \
-    with-cross-env cargo chef cook --release --target "$TARGET_TRIPLE" --locked --recipe-path recipe.json
+    with-cross-env cargo chef cook --release --target "$TARGET_TRIPLE" --recipe-path recipe.json
 
 # Build application
 COPY . .
