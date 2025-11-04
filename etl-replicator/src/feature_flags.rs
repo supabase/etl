@@ -9,6 +9,7 @@ pub fn init_feature_flags(sdk_key: Option<&str>) -> Option<Client> {
     match sdk_key {
         Some(key) => {
             info!("initializing configcat with supplied sdk key");
+
             match Client::new(key) {
                 Ok(client) => Some(client),
                 Err(err) => {
