@@ -16,7 +16,8 @@ expression: container_environment
     "valueFrom": {
       "secretKeyRef": {
         "key": "dsn",
-        "name": "replicator-sentry-dsn"
+        "name": "replicator-sentry-dsn",
+        "optional": true
       }
     }
   },
@@ -26,6 +27,16 @@ expression: container_environment
       "secretKeyRef": {
         "key": "key",
         "name": "supabase-api-key",
+        "optional": true
+      }
+    }
+  },
+  {
+    "name": "APP_SUPABASE__CONFIGCAT_SDK_KEY",
+    "valueFrom": {
+      "secretKeyRef": {
+        "key": "key",
+        "name": "replicator-configcat-sdk-key",
         "optional": true
       }
     }
