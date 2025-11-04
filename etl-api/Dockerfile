@@ -33,7 +33,8 @@ RUN cargo chef cook --release --recipe-path recipe.json
 # The release profile in Cargo.toml handles: thin LTO, strip, opt-level=3
 COPY . .
 ENV SQLX_OFFLINE=true
-RUN cargo build --release -p etl-api
+RUN cargo build --release -p etl-api && \
+    strip target/release/etl-api
 
 # Runtime stage with distroless for security
 FROM gcr.io/distroless/cc-debian12:nonroot
