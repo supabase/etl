@@ -73,7 +73,7 @@ bash "${SCRIPT_DIR}/../etl-api/scripts/run_migrations.sh"
 
 # Seed default replicator image (idempotent).
 echo "🖼️ Seeding default replicator image..."
-DEFAULT_REPLICATOR_IMAGE="${REPLICATOR_IMAGE:-ramsup/etl-replicator:746f90a33c284a645fe8d31543c6e12af2684015}"
+DEFAULT_REPLICATOR_IMAGE="${REPLICATOR_IMAGE:-ramsup/etl-replicator:latest}"
 psql "${DATABASE_URL}" -v ON_ERROR_STOP=1 -c "\
 insert into app.images (name, is_default) \
 select '${DEFAULT_REPLICATOR_IMAGE}', true \
