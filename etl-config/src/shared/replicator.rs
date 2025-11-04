@@ -40,6 +40,14 @@ impl ReplicatorConfig {
     pub fn validate(&self) -> Result<(), ValidationError> {
         self.pipeline.validate()
     }
+    
+    /// Returns a reference to the project ref of this configuration.
+    pub fn project_ref(&self) -> Option<&str> {
+        self
+            .supabase
+            .as_ref()
+            .map(|s| s.project_ref.as_ref())
+    }
 }
 
 impl Config for ReplicatorConfig {

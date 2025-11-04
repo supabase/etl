@@ -34,33 +34,18 @@ fn main() -> anyhow::Result<()> {
     // Load replicator config
     let replicator_config = load_replicator_config()?;
 
-    // Extract project reference to use in logs
-    let project_ref = replicator_config
-        .supabase
-        .as_ref()
-        .map(|s| s.project_ref.clone());
-
     // Initialize tracing with project reference
     let _log_flusher = init_tracing_with_top_level_fields(
         env!("CARGO_BIN_NAME"),
-        project_ref.clone(),
+        replicator_config.project_ref(),
         Some(replicator_config.pipeline.id),
     )?;
 
     // Initialize Sentry before the async runtime starts
     let _sentry_guard = init_sentry()?;
 
-    // Initialize ConfigCat feature flags
-    let _feature_flags_client = feature_flags::init_feature_flags(
-        replicator_config
-            .supabase
-            .as_ref()
-            .and_then(|c| c.configcat_sdk_key.as_deref()),
-        project_ref.as_deref(),
-    );
-
     // Initialize metrics collection
-    init_metrics(project_ref)?;
+    init_metrics(replicator_config.project_ref())?;
 
     // We start the runtime.
     tokio::runtime::Builder::new_multi_thread()
@@ -92,6 +77,21 @@ async fn async_main(replicator_config: ReplicatorConfig) -> anyhow::Result<()> {
             }
         },
     );
+
+    // Initialize ConfigCat feature flags if supplied
+    let configcat_sdk_key = replicator_config
+        .supabase
+        .as_ref()
+        .and_then(|s| s.configcat_sdk_key.as_deref());
+    let _feature_flags_client = if let Some(configcat_sdk_key) = configcat_sdk_key {
+        Some(feature_flags::init_feature_flags(
+            configcat_sdk_key,
+            replicator_config.project_ref(),
+        )?)
+    } else {
+        info!("configcat not configured for replicator, skipping initialization");
+        None
+    };
 
     // We start the replicator and catch any errors.
     if let Err(err) = start_replicator_with_config(replicator_config).await {

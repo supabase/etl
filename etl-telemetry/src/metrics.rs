@@ -75,7 +75,7 @@ pub fn init_metrics_handle() -> Result<PrometheusHandle, BuildError> {
 /// - Expose metrics from a standalone service (e.g., etl-replicator).
 /// - Automatically start a dedicated metrics endpoint without custom routing.
 /// - Let Prometheus scrape metrics directly from a fixed port.
-pub fn init_metrics(project_ref: Option<String>) -> Result<(), BuildError> {
+pub fn init_metrics(project_ref: Option<&str>) -> Result<(), BuildError> {
     let mut builder = PrometheusBuilder::new().with_http_listener(std::net::SocketAddr::new(
         std::net::IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED),
         9000,
