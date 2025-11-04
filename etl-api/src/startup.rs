@@ -88,7 +88,7 @@ impl Application {
     ///
     /// Sets up database connections, encryption, Kubernetes client, and HTTP server
     /// with all routes and middleware configured.
-    pub async fn build(config: ApiConfig) -> Result<Self, anyhow::Error> {
+    pub async fn build(config: ApiConfig) -> anyhow::Result<Self> {
         let connection_pool = get_connection_pool(&config.database);
 
         let address = format!("{}:{}", config.application.host, config.application.port);
@@ -130,7 +130,7 @@ impl Application {
             }
         };
 
-        let feature_flags_client = init_feature_flags(config.configcat_sdk_key.as_deref());
+        let feature_flags_client = init_feature_flags(config.configcat_sdk_key.as_deref())?;
 
         let server = run(
             config,
