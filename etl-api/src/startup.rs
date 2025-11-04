@@ -194,7 +194,7 @@ pub fn get_connection_pool(config: &PgConnectionConfig) -> PgPool {
 /// Creates and configures the HTTP server with all routes and middleware.
 ///
 /// Sets up authentication, tracing, Swagger UI, and all API endpoints.
-/// The Kubernetes client and feature flags client are optional to support testing scenarios.
+/// The Kubernetes client is optional to support testing scenarios.
 pub async fn run(
     config: ApiConfig,
     listener: TcpListener,
