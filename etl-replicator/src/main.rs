@@ -55,7 +55,10 @@ fn main() -> anyhow::Result<()> {
 
     // Initialize ConfigCat feature flags
     let _feature_flags_client = feature_flags::init_feature_flags(
-        replicator_config.configcat_sdk_key.as_deref(),
+        replicator_config
+            .supabase
+            .as_ref()
+            .and_then(|c| c.configcat_sdk_key.as_deref()),
     );
 
     // We start the runtime.
