@@ -84,3 +84,12 @@ x509-cert = { version = "0.2.2", default-features = false }
 
 [profile.bench]
 debug = true
+
+[profile.release]
+# Link-time optimization: enables better cross-crate optimizations
+# "thin" provides ~80-90% of "fat" benefits with much faster compile times
+lto = "thin"
+# Default codegen-units for balanced build time and performance
+codegen-units = 16
+# Maximum optimization level for best runtime performance
+opt-level = 3

@@ -34,12 +34,34 @@ on:
 
 permissions:
   contents: read
+  actions: write
 
 jobs:
-  docker:
-    name: Build Docker Image
-    runs-on: ubuntu-latest
+  # Build each platform natively on its own runner
+  build-platform:
+    name: Build ${{ matrix.platform }} Image
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-latest
+            arch: amd64
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+            arch: arm64
+    outputs:
+      digest-amd64: ${{ steps.export-digest.outputs.digest-amd64 }}
+      digest-arm64: ${{ steps.export-digest.outputs.digest-arm64 }}
+      image-name: ${{ steps.extract-name.outputs.name }}
     steps:
+      - name: Extract Image Name
+        id: extract-name
+        run: |
+          IMAGE="${{ inputs.image }}"
+          NAME="${IMAGE##*/}"
+          echo "name=$NAME" >> "$GITHUB_OUTPUT"
+
       - name: Checkout (specific ref)
         if: inputs.checkout_ref != ''
         uses: actions/checkout@v4
@@ -60,39 +82,111 @@ jobs:
           username: ${{ vars.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Docker Metadata
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ inputs.image }}
-          tags: |
-            type=raw,value=latest
-            type=sha,format=long,prefix=
-            ${{ inputs.tag_with_version && format('type=raw,value=v{0}', inputs.version) || '' }}
-
-      - name: Build and Push Image
+      - name: Build and Push Single-Platform Image
         id: build
         uses: docker/build-push-action@v5
         with:
           context: ${{ inputs.context }}
           file: ${{ inputs.file }}
           push: ${{ inputs.push }}
-          tags: ${{ steps.meta.outputs.tags }}
-          platforms: linux/amd64,linux/arm64
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          platforms: ${{ matrix.platform }}
+          cache-from: type=gha,scope=${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.arch }}
+          provenance: false
+          outputs: type=image,name=${{ inputs.image }},push-by-digest=true,name-canonical=true
+
+      - name: Export Digest
+        id: export-digest
+        if: inputs.push == true
+        run: |
+          mkdir -p /tmp/digests
+          digest="${{ steps.build.outputs.digest }}"
+          echo "$digest" > "/tmp/digests/${{ matrix.arch }}.txt"
+          echo "digest-${{ matrix.arch }}=$digest" >> "$GITHUB_OUTPUT"
+
+      - name: Upload Digest
+        if: inputs.push == true
+        uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ steps.extract-name.outputs.name }}-${{ matrix.arch }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  # Create multi-arch manifest combining both platforms
+  create-manifest:
+    name: Create Multi-Arch Manifest
+    needs: build-platform
+    runs-on: ubuntu-latest
+    if: inputs.push == true
+    steps:
+      - name: Extract Image Name
+        id: extract-name
+        run: |
+          IMAGE="${{ inputs.image }}"
+          NAME="${IMAGE##*/}"
+          echo "name=$NAME" >> "$GITHUB_OUTPUT"
+
+      - name: Download Digests
+        uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests
+          pattern: digests-${{ steps.extract-name.outputs.name }}-*
+          merge-multiple: true
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ vars.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Checkout (specific ref)
+        if: inputs.checkout_ref != ''
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.checkout_ref }}
+
+      - name: Checkout (default)
+        if: inputs.checkout_ref == ''
+        uses: actions/checkout@v4
+
+      - name: Create and Push Multi-Arch Manifest
+        run: |
+          IMAGE="${{ inputs.image }}"
+          FULL_SHA=$(git rev-parse HEAD)
+
+          # Prepare digest list for imagetools
+          DIGEST_LIST=""
+          for digest_file in /tmp/digests/*.txt; do
+            digest=$(cat "$digest_file")
+            DIGEST_LIST="${DIGEST_LIST} ${IMAGE}@${digest}"
+          done
+
+          # Create manifest for latest
+          docker buildx imagetools create -t "${IMAGE}:latest" ${DIGEST_LIST}
+
+          # Create manifest for SHA
+          docker buildx imagetools create -t "${IMAGE}:${FULL_SHA}" ${DIGEST_LIST}
+
+          # Create manifest for version if needed
+          if [ "${{ inputs.tag_with_version }}" = "true" ] && [ -n "${{ inputs.version }}" ]; then
+            docker buildx imagetools create -t "${IMAGE}:v${{ inputs.version }}" ${DIGEST_LIST}
+          fi
 
       - name: Output Image Information
         run: |
           IMAGE="${{ inputs.image }}"
           NAME="${IMAGE##*/}"
-          # Derive SHA from the checked-out ref to ensure correctness.
           FULL_SHA=$(git rev-parse HEAD)
           TAGS="latest, ${FULL_SHA}"
           if [ "${{ inputs.tag_with_version }}" = "true" ] && [ -n "${{ inputs.version }}" ]; then
             TAGS="${TAGS}, v${{ inputs.version }}"
           fi
           HUB_PATH=$(echo "${IMAGE}" | sed -E 's@^docker\.io/@@')
-          echo "✅ Successfully built and pushed ${NAME} image"
+          echo "✅ Successfully built and pushed ${NAME} multi-arch image"
           echo "🏷️ Tags: ${TAGS}"
+          echo "🏗️ Platforms: linux/amd64, linux/arm64"
           echo "🔗 View at: https://hub.docker.com/r/${HUB_PATH}"
