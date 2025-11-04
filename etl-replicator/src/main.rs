@@ -18,6 +18,7 @@ use tracing::{error, info, warn};
 
 mod config;
 mod core;
+mod feature_flags;
 mod migrations;
 mod notification;
 
@@ -51,6 +52,11 @@ fn main() -> anyhow::Result<()> {
 
     // Initialize metrics collection
     init_metrics(project_ref)?;
+
+    // Initialize ConfigCat feature flags
+    let _feature_flags_client = feature_flags::init_feature_flags(
+        replicator_config.configcat_sdk_key.as_deref(),
+    );
 
     // We start the runtime.
     tokio::runtime::Builder::new_multi_thread()

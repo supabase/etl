@@ -15,6 +15,7 @@ use tracing_actix_web::TracingLogger;
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
 
+use crate::feature_flags::init_feature_flags;
 use crate::k8s::http::HttpK8sClient;
 use crate::k8s::{K8sClient, K8sError};
 use crate::{
@@ -129,12 +130,15 @@ impl Application {
             }
         };
 
+        let feature_flags_client = init_feature_flags(config.configcat_sdk_key.as_deref());
+
         let server = run(
             config,
             listener,
             connection_pool,
             encryption_key,
             k8s_client,
+            feature_flags_client,
         )
         .await?;
 
@@ -190,19 +194,21 @@ pub fn get_connection_pool(config: &PgConnectionConfig) -> PgPool {
 /// Creates and configures the HTTP server with all routes and middleware.
 ///
 /// Sets up authentication, tracing, Swagger UI, and all API endpoints.
-/// The Kubernetes client is optional to support testing scenarios.
+/// The Kubernetes client and feature flags client are optional to support testing scenarios.
 pub async fn run(
     config: ApiConfig,
     listener: TcpListener,
     connection_pool: PgPool,
     encryption_key: encryption::EncryptionKey,
     http_k8s_client: Option<Arc<dyn K8sClient>>,
+    feature_flags_client: Option<configcat::Client>,
 ) -> Result<Server, anyhow::Error> {
     let prometheus_handle = web::ThinData(init_metrics_handle()?);
     let config = web::Data::new(config);
     let connection_pool = web::Data::new(connection_pool);
     let encryption_key = web::Data::new(encryption_key);
     let k8s_client: Option<web::Data<dyn K8sClient>> = http_k8s_client.map(Into::into);
+    let feature_flags_client = feature_flags_client.map(web::Data::new);
 
     #[derive(OpenApi)]
     #[openapi(
@@ -388,8 +394,14 @@ pub async fn run(
             .app_data(connection_pool.clone())
             .app_data(encryption_key.clone());
 
-        if let Some(k8s_client) = k8s_client.clone() {
+        let app = if let Some(k8s_client) = k8s_client.clone() {
             app.app_data(k8s_client.clone())
+        } else {
+            app
+        };
+
+        if let Some(feature_flags_client) = feature_flags_client.clone() {
+            app.app_data(feature_flags_client.clone())
         } else {
             app
         }

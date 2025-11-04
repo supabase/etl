@@ -14,6 +14,7 @@ etl-destinations = { workspace = true, features = ["bigquery", "iceberg"] }
 etl-telemetry = { workspace = true }
 
 anyhow = { workspace = true, features = ["std"] }
+configcat = { workspace = true }
 reqwest = { workspace = true, features = ["rustls-tls", "json"] }
 secrecy = { workspace = true }
 sentry = { workspace = true }

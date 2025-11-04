@@ -31,6 +31,11 @@ pub struct ReplicatorConfig {
     /// If provided, enables Supabase-specific features or reporting. If `None`, the replicator operates independently of Supabase.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub supabase: Option<SupabaseConfig>,
+    /// Optional ConfigCat SDK key for feature flag integration.
+    ///
+    /// If provided, enables ConfigCat feature flag evaluation. If `None`, the replicator operates without feature flag support.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub configcat_sdk_key: Option<String>,
 }
 
 impl ReplicatorConfig {
