@@ -71,6 +71,7 @@ pub async fn create_or_update_pipeline_resources_in_k8s(
         project_ref: tenant_id.to_owned(),
         api_url: supabase_api_url.map(|url| url.to_owned()),
     };
+
     let replicator_config = build_replicator_config_without_secrets(
         k8s_client,
         // We are safe to perform this conversion, since the i64 -> u64 conversion performs wrap

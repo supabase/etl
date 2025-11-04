@@ -50,16 +50,17 @@ fn main() -> anyhow::Result<()> {
     // Initialize Sentry before the async runtime starts
     let _sentry_guard = init_sentry()?;
 
-    // Initialize metrics collection
-    init_metrics(project_ref)?;
-
     // Initialize ConfigCat feature flags
     let _feature_flags_client = feature_flags::init_feature_flags(
         replicator_config
             .supabase
             .as_ref()
             .and_then(|c| c.configcat_sdk_key.as_deref()),
+        project_ref.as_deref(),
     );
+
+    // Initialize metrics collection
+    init_metrics(project_ref)?;
 
     // We start the runtime.
     tokio::runtime::Builder::new_multi_thread()
