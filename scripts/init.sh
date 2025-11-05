@@ -73,11 +73,8 @@ bash "${SCRIPT_DIR}/../etl-api/scripts/run_migrations.sh"
 
 # Seed default replicator image (idempotent).
 echo "🖼️ Seeding default replicator image..."
-DEFAULT_REPLICATOR_IMAGE="${REPLICATOR_IMAGE:-ramsup/replicator:0.0.22}"
-psql "${DATABASE_URL}" -v ON_ERROR_STOP=1 -c "\
-insert into app.images (name, is_default) \
-select '${DEFAULT_REPLICATOR_IMAGE}', true \
-where not exists (select 1 from app.images where name = '${DEFAULT_REPLICATOR_IMAGE}');"
+DEFAULT_REPLICATOR_IMAGE="${REPLICATOR_IMAGE:-ramsup/etl-replicator:latest}"
+psql "${DATABASE_URL}" -v ON_ERROR_STOP=1 -c "select app.update_default_image('${DEFAULT_REPLICATOR_IMAGE}');"
 
 # Ensure OrbStack Kubernetes context is available
 if ! kubectl config get-contexts -o name | grep -qx "orbstack"; then
