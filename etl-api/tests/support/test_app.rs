@@ -540,6 +540,7 @@ pub async fn spawn_test_app() -> TestApp {
         api_db_pool,
         encryption_key,
         k8s_client,
+        None,
     )
     .await
     .expect("failed to bind address");

@@ -56,6 +56,8 @@ const VECTOR_CONFIG_FILE_VOLUME_NAME: &str = "vector-config-file";
 const SENTRY_DSN_SECRET_NAME: &str = "replicator-sentry-dsn";
 /// Secret storing the Supabase API key for error notifications.
 const SUPABASE_API_KEY_SECRET_NAME: &str = "supabase-api-key";
+/// Secret storing the ConfigCat API key for the replicator feature flags.
+const CONFIGCAT_SDK_KEY: &str = "replicator-configcat-sdk-key";
 /// EmptyDir volume name used to share logs.
 const LOGS_VOLUME_NAME: &str = "logs";
 /// ConfigMap name providing trusted root certificates.
@@ -573,7 +575,8 @@ fn create_container_environment_json(
               "valueFrom": {
                 "secretKeyRef": {
                   "name": SENTRY_DSN_SECRET_NAME,
-                  "key": "dsn"
+                  "key": "dsn",
+                  "optional": true
                 }
               }
             }));
@@ -582,6 +585,16 @@ fn create_container_environment_json(
               "valueFrom": {
                 "secretKeyRef": {
                   "name": SUPABASE_API_KEY_SECRET_NAME,
+                  "key": "key",
+                  "optional": true
+                }
+              }
+            }));
+            container_environment.push(json!({
+              "name": "APP_SUPABASE__CONFIGCAT_SDK_KEY",
+              "valueFrom": {
+                "secretKeyRef": {
+                  "name": CONFIGCAT_SDK_KEY,
                   "key": "key",
                   "optional": true
                 }

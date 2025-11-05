@@ -21,6 +21,12 @@ pub struct SupabaseConfig {
     /// Required when `api_url` is provided.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub api_key: Option<SecretString>,
+    /// Optional ConfigCat SDK key for feature flag integration used at Supabase.
+    ///
+    /// If provided, enables ConfigCat feature flag evaluation.
+    /// If `None`, the replicator operates without feature flag support.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub configcat_sdk_key: Option<String>,
 }
 
 /// Supabase integration configuration without secrets.

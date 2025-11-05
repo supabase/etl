@@ -79,8 +79,8 @@ static PIPELINE_ID: OnceLock<u64> = OnceLock::new();
 ///
 /// The project reference will be injected into all structured log entries
 /// for identification and filtering purposes.
-pub fn set_global_project_ref(project_ref: String) {
-    let _ = PROJECT_REF.set(project_ref);
+pub fn set_global_project_ref(project_ref: &str) {
+    let _ = PROJECT_REF.set(project_ref.into());
 }
 
 /// Returns the current global project reference.
@@ -205,12 +205,12 @@ pub fn init_tracing(app_name: &str) -> Result<LogFlusher, TracingError> {
 /// log entry.
 pub fn init_tracing_with_top_level_fields(
     app_name: &str,
-    project_ref: Option<String>,
+    project_ref: Option<&str>,
     pipeline_id: Option<u64>,
 ) -> Result<LogFlusher, TracingError> {
-    // Set global project reference if provided.
-    if let Some(ref project) = project_ref {
-        set_global_project_ref(project.clone());
+    // Set a global project reference if provided.
+    if let Some(project) = project_ref {
+        set_global_project_ref(project);
     }
 
     // Set global pipeline id if provided.
