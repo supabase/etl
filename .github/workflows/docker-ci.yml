@@ -34,7 +34,7 @@ jobs:
           EVENT_NAME="${GITHUB_EVENT_NAME}"
           MERGE_SHA=$(jq -r '.pull_request.merge_commit_sha // empty' "$GITHUB_EVENT_PATH")
           INPUT_REF=$(jq -r '.inputs.ref // empty' "$GITHUB_EVENT_PATH")
-          
+
           if [[ "$EVENT_NAME" == "pull_request" && -n "$MERGE_SHA" ]]; then
             REF="$MERGE_SHA"
           elif [[ -n "$INPUT_REF" ]]; then
@@ -43,18 +43,59 @@ jobs:
             echo "Error: no merge commit or input ref provided" >&2
             exit 1
           fi
-          
+
           echo "ref=$REF" >> "$GITHUB_OUTPUT"
+
+  validate-experimental:
+    name: Validate Experimental Build
+    needs: resolve-ref
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' && inputs.experimental == true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve-ref.outputs.ref }}
+          fetch-depth: 0
+
+      - name: Check if building from main branch
+        run: |
+          set -euo pipefail
+
+          # Get the current commit SHA
+          CURRENT_SHA=$(git rev-parse HEAD)
+
+          # Get the main branch SHA
+          MAIN_SHA=$(git rev-parse origin/main)
+
+          # Check if we're on main
+          if [[ "$CURRENT_SHA" == "$MAIN_SHA" ]]; then
+            echo "❌ Error: Cannot build experimental images from the main branch"
+            echo "Experimental images are meant for pre-merge testing only"
+            exit 1
+          fi
+
+          # Also check if the ref input was explicitly 'main'
+          INPUT_REF=$(jq -r '.inputs.ref // empty' "$GITHUB_EVENT_PATH")
+          if [[ "$INPUT_REF" == "main" ]]; then
+            echo "❌ Error: Cannot build experimental images from 'main' ref"
+            echo "Experimental images are meant for pre-merge testing only"
+            exit 1
+          fi
+
+          echo "✅ Validation passed: building experimental image from non-main branch"
 
   build:
     name: Build and Push Images
-    needs: resolve-ref
+    needs: [resolve-ref, validate-experimental]
     # Run only when the PR is merged and is NOT a release PR, or manual run.
     if: |
-      github.event_name == 'workflow_dispatch' || (
-        github.event_name == 'pull_request' &&
-        github.event.pull_request.merged == true &&
-        !contains(github.event.pull_request.labels.*.name, 'release')
+      (success() || needs.validate-experimental.result == 'skipped') && (
+        github.event_name == 'workflow_dispatch' || (
+          github.event_name == 'pull_request' &&
+          github.event.pull_request.merged == true &&
+          !contains(github.event.pull_request.labels.*.name, 'release')
+        )
       )
     strategy:
       matrix:
