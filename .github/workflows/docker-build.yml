@@ -31,6 +31,10 @@ on:
         description: "Version to tag when tag_with_version=true"
         type: string
         required: false
+      experimental:
+        description: "Build experimental image (tagged as commithash-experimental only)"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -165,15 +169,18 @@ jobs:
             DIGEST_LIST="${DIGEST_LIST} ${IMAGE}@${digest}"
           done
 
-          # Create manifest for latest
-          docker buildx imagetools create -t "${IMAGE}:latest" ${DIGEST_LIST}
+          if [ "${{ inputs.experimental }}" = "true" ]; then
+            # Experimental mode: only tag with commithash-experimental
+            docker buildx imagetools create -t "${IMAGE}:${FULL_SHA}-experimental" ${DIGEST_LIST}
+          else
+            # Standard mode: tag with latest and SHA
+            docker buildx imagetools create -t "${IMAGE}:latest" ${DIGEST_LIST}
+            docker buildx imagetools create -t "${IMAGE}:${FULL_SHA}" ${DIGEST_LIST}
 
-          # Create manifest for SHA
-          docker buildx imagetools create -t "${IMAGE}:${FULL_SHA}" ${DIGEST_LIST}
-
-          # Create manifest for version if needed
-          if [ "${{ inputs.tag_with_version }}" = "true" ] && [ -n "${{ inputs.version }}" ]; then
-            docker buildx imagetools create -t "${IMAGE}:v${{ inputs.version }}" ${DIGEST_LIST}
+            # Create manifest for version if needed
+            if [ "${{ inputs.tag_with_version }}" = "true" ] && [ -n "${{ inputs.version }}" ]; then
+              docker buildx imagetools create -t "${IMAGE}:v${{ inputs.version }}" ${DIGEST_LIST}
+            fi
           fi
 
       - name: Output Image Information
@@ -181,12 +188,18 @@ jobs:
           IMAGE="${{ inputs.image }}"
           NAME="${IMAGE##*/}"
           FULL_SHA=$(git rev-parse HEAD)
-          TAGS="latest, ${FULL_SHA}"
-          if [ "${{ inputs.tag_with_version }}" = "true" ] && [ -n "${{ inputs.version }}" ]; then
-            TAGS="${TAGS}, v${{ inputs.version }}"
+          if [ "${{ inputs.experimental }}" = "true" ]; then
+            TAGS="${FULL_SHA}-experimental"
+            MODE="experimental"
+          else
+            TAGS="latest, ${FULL_SHA}"
+            MODE="standard"
+            if [ "${{ inputs.tag_with_version }}" = "true" ] && [ -n "${{ inputs.version }}" ]; then
+              TAGS="${TAGS}, v${{ inputs.version }}"
+            fi
           fi
           HUB_PATH=$(echo "${IMAGE}" | sed -E 's@^docker\.io/@@')
-          echo "✅ Successfully built and pushed ${NAME} multi-arch image"
+          echo "✅ Successfully built and pushed ${NAME} multi-arch image (${MODE} mode)"
           echo "🏷️ Tags: ${TAGS}"
           echo "🏗️ Platforms: linux/amd64, linux/arm64"
           echo "🔗 View at: https://hub.docker.com/r/${HUB_PATH}"

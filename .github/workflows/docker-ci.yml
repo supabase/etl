@@ -9,6 +9,11 @@ on:
         description: "Git ref to build (branch, tag, or SHA)"
         type: string
         required: false
+      experimental:
+        description: "Build experimental image (tagged as commithash-experimental only)"
+        type: boolean
+        required: false
+        default: false
 
 permissions:
   contents: read
@@ -62,5 +67,6 @@ jobs:
       file: ./${{ matrix.image }}/Dockerfile
       push: true
       tag_with_version: false
+      experimental: ${{ github.event_name == 'workflow_dispatch' && inputs.experimental || false }}
       # Build from the resolved ref: merge commit for PRs, or provided ref, fallback to current SHA.
       checkout_ref: ${{ needs.resolve-ref.outputs.ref }}
