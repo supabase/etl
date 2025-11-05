@@ -32,12 +32,12 @@ databend://<user>:<password>@<host>:<port>/<database>?<params>
 
 **Self-hosted Databend:**
 ```rust
-let dsn = "databend://root:password@localhost:8000/my_database";
+let dsn = "databend://root:password@localhost:8000?sslmode=disable/my_database";
 ```
 
 **Databend Cloud:**
 ```rust
-let dsn = "databend+http://user:password@tenant.databend.cloud:443/database?warehouse=my_warehouse";
+let dsn = "databend://user:password@tenant.databend.cloud:443/database?warehouse=my_warehouse";
 ```
 
 ## Basic Usage
