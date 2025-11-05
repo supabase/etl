@@ -48,6 +48,10 @@ then
     echo "📁 No storage path specified, using default Docker volume"
   fi
 
+  # Pull latest images before starting services
+  echo "📥 Pulling latest images..."
+  docker-compose -f ./scripts/docker-compose.yaml pull
+
   # Start all services using docker-compose
   docker-compose -f ./scripts/docker-compose.yaml up -d
   echo "✅ All services started"
