@@ -16,6 +16,15 @@ bigquery = [
     "dep:tokio",
     "dep:base64",
 ]
+databend = [
+    "dep:databend-driver",
+    "dep:tracing",
+    "dep:tokio",
+    "dep:async-trait",
+    "dep:serde",
+    "dep:serde_json",
+    "dep:hex",
+]
 iceberg = [
     "dep:iceberg",
     "dep:iceberg-catalog-rest",
@@ -38,10 +47,12 @@ arrow = { workspace = true, optional = true }
 async-trait = { workspace = true, optional = true }
 base64 = { workspace = true, optional = true }
 chrono = { workspace = true }
+databend-driver = { version = "0.23", optional = true, default-features = false, features = ["flight-sql"] }
 gcp-bigquery-client = { workspace = true, optional = true, features = [
     "rust-tls",
     "aws-lc-rs",
 ] }
+hex = { version = "0.4", optional = true }
 iceberg = { workspace = true, optional = true }
 iceberg-catalog-rest = { workspace = true, optional = true }
 parquet = { workspace = true, optional = true, features = ["async", "arrow"] }
