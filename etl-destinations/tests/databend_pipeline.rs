@@ -1,14 +1,13 @@
 #![cfg(feature = "databend")]
 
 use etl::config::BatchConfig;
-use etl::error::ErrorKind;
 use etl::state::table::TableReplicationPhaseType;
-use etl::test_utils::database::{spawn_source_database, test_table_name};
+use etl::test_utils::database::spawn_source_database;
 use etl::test_utils::notify::NotifyingStore;
 use etl::test_utils::pipeline::{create_pipeline, create_pipeline_with};
 use etl::test_utils::test_destination_wrapper::TestDestinationWrapper;
 use etl::test_utils::test_schema::{TableSelection, insert_mock_data, setup_test_database_schema};
-use etl::types::{EventType, PgNumeric, PipelineId};
+use etl::types::{EventType, PipelineId};
 use etl_destinations::encryption::install_crypto_provider;
 use etl_telemetry::tracing::init_test_tracing;
 use rand::random;
@@ -77,6 +76,8 @@ async fn table_copy_and_streaming_with_restart() {
     pipeline.shutdown_and_wait().await.unwrap();
 
     // Query Databend directly to get the data
+    // Note: Data inserted BEFORE pipeline starts is only in table copy,
+    // CDC doesn't capture it because replication slot is created after
     let users_rows = databend_database
         .query_table(database_schema.users_schema().name.clone())
         .await
@@ -134,6 +135,7 @@ async fn table_copy_and_streaming_with_restart() {
     pipeline.shutdown_and_wait().await.unwrap();
 
     // Query Databend to verify all data
+    // Expected: 2 records from initial table copy + 2 new records from CDC
     let users_rows = databend_database
         .query_table(database_schema.users_schema().name.clone())
         .await
@@ -208,24 +210,28 @@ async fn table_insert_update_delete() {
 
     database
         .client
+        .as_ref()
+        .unwrap()
         .execute(
             &format!(
                 "INSERT INTO {} (id, name, age) VALUES ($1, $2, $3)",
                 database_schema.users_schema().name
             ),
-            &[&1i32, &"Alice", &30i32],
+            &[&1i64, &"Alice", &30i32],
         )
         .await
         .unwrap();
 
     database
         .client
+        .as_ref()
+        .unwrap()
         .execute(
             &format!(
                 "INSERT INTO {} (id, name, age) VALUES ($1, $2, $3)",
                 database_schema.users_schema().name
             ),
-            &[&2i32, &"Bob", &25i32],
+            &[&2i64, &"Bob", &25i32],
         )
         .await
         .unwrap();
@@ -253,12 +259,14 @@ async fn table_insert_update_delete() {
 
     database
         .client
+        .as_ref()
+        .unwrap()
         .execute(
             &format!(
                 "UPDATE {} SET age = $1 WHERE id = $2",
                 database_schema.users_schema().name
             ),
-            &[&31i32, &1i32],
+            &[&31i32, &1i64],
         )
         .await
         .unwrap();
@@ -280,9 +288,11 @@ async fn table_insert_update_delete() {
 
     database
         .client
+        .as_ref()
+        .unwrap()
         .execute(
             &format!("DELETE FROM {} WHERE id = $1", database_schema.users_schema().name),
-            &[&2i32],
+            &[&2i64],
         )
         .await
         .unwrap();
@@ -305,20 +315,39 @@ async fn table_truncate() {
     init_test_tracing();
     install_crypto_provider();
 
-    let mut database = spawn_source_database().await;
+    let database = spawn_source_database().await;
     let database_schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
 
     let databend_database = setup_databend_connection().await;
 
-    // Insert initial test data
-    insert_mock_data(
-        &mut database,
-        &database_schema.users_schema().name,
-        &database_schema.orders_schema().name,
-        1..=2,
-        false,
-    )
-    .await;
+    // Insert initial test data manually (since we only have users table)
+    database
+        .client
+        .as_ref()
+        .unwrap()
+        .execute(
+            &format!(
+                "INSERT INTO {} (id, name, age) VALUES ($1, $2, $3)",
+                database_schema.users_schema().name
+            ),
+            &[&1i64, &"user_1", &1i32],
+        )
+        .await
+        .unwrap();
+
+    database
+        .client
+        .as_ref()
+        .unwrap()
+        .execute(
+            &format!(
+                "INSERT INTO {} (id, name, age) VALUES ($1, $2, $3)",
+                database_schema.users_schema().name
+            ),
+            &[&2i64, &"user_2", &2i32],
+        )
+        .await
+        .unwrap();
 
     let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();
@@ -359,6 +388,8 @@ async fn table_truncate() {
 
     database
         .client
+        .as_ref()
+        .unwrap()
         .execute(
             &format!("TRUNCATE TABLE {}", database_schema.users_schema().name),
             &[],
@@ -385,12 +416,14 @@ async fn table_truncate() {
 
     database
         .client
+        .as_ref()
+        .unwrap()
         .execute(
             &format!(
                 "INSERT INTO {} (id, name, age) VALUES ($1, $2, $3)",
                 database_schema.users_schema().name
             ),
-            &[&5i32, &"Charlie", &35i32],
+            &[&5i64, &"Charlie", &35i32],
         )
         .await
         .unwrap();
@@ -440,13 +473,10 @@ async fn concurrent_table_operations() {
         database_schema.publication_name(),
         store.clone(),
         destination.clone(),
-        BatchConfig {
+        Some(BatchConfig {
             max_size: 1000,
             max_fill_ms: 5000,
-        },
-        10000,
-        5,
-        4, // Multiple sync workers for concurrency
+        }),
     );
 
     let users_state_notify = store

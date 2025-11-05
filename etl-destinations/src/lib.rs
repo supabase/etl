@@ -7,6 +7,7 @@
 pub mod bigquery;
 #[cfg(feature = "databend")]
 pub mod databend;
+#[cfg(any(feature = "bigquery", feature = "databend"))]
 pub mod encryption;
 #[cfg(feature = "iceberg")]
 pub mod iceberg;

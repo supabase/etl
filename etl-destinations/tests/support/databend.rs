@@ -68,16 +68,18 @@ impl DatabendDatabase {
 
     /// Executes a SELECT * query against the specified table.
     pub async fn query_table(&self, table_name: TableName) -> Option<Vec<DatabendRow>> {
+        use futures::stream::StreamExt;
+
         let client = self.client.as_ref().unwrap();
         let table_id = table_name_to_databend_table_id(&table_name);
 
         let query = format!("SELECT * FROM `{}`.`{}`", self.database, table_id);
 
         let conn = client.get_conn().await.unwrap();
-        let rows = conn.query_iter(&query).await.ok()?;
+        let mut rows = conn.query_iter(&query).await.ok()?;
 
         let mut results = Vec::new();
-        for row in rows {
+        while let Some(row) = rows.next().await {
             let row = row.unwrap();
             results.push(DatabendRow { row });
         }
@@ -146,12 +148,15 @@ impl DatabendRow {
         T: FromStr,
         <T as FromStr>::Err: fmt::Debug,
     {
-        self.row.get::<String>(index).and_then(|s| s.parse().ok())
+        let value = self.row.values().get(index)?;
+        let string_value = value.to_string();
+        string_value.parse().ok()
     }
 
     /// Gets a string value from the row by index.
     pub fn get_string(&self, index: usize) -> Option<String> {
-        self.row.get(index)
+        let value = self.row.values().get(index)?;
+        Some(value.to_string())
     }
 
     /// Gets an optional value from the row by index.
@@ -160,10 +165,11 @@ impl DatabendRow {
         T: FromStr,
         <T as FromStr>::Err: fmt::Debug,
     {
-        match self.row.get::<Option<String>>(index) {
-            Some(Some(s)) => Some(s.parse().ok()),
-            Some(None) => Some(None),
-            None => None,
+        let value = self.row.values().get(index)?;
+        if value.to_string() == "NULL" || value.to_string().is_empty() {
+            Some(None)
+        } else {
+            Some(value.to_string().parse().ok())
         }
     }
 }

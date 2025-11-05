@@ -2,6 +2,7 @@ use databend_driver::Client as DatabendDriverClient;
 use etl::error::{ErrorKind, EtlError, EtlResult};
 use etl::etl_error;
 use etl::types::{ColumnSchema, TableRow};
+use futures::stream::StreamExt;
 use std::sync::Arc;
 use tracing::{debug, info};
 
@@ -29,6 +30,16 @@ pub struct DatabendClient {
     pub(crate) dsn: DatabendDsn,
     pub(crate) database: DatabendDatabase,
     pub(crate) client: Arc<DatabendDriverClient>,
+}
+
+impl std::fmt::Debug for DatabendClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DatabendClient")
+            .field("dsn", &"<redacted>")
+            .field("database", &self.database)
+            .field("client", &"<DatabendDriverClient>")
+            .finish()
+    }
 }
 
 impl DatabendClient {
@@ -171,13 +182,13 @@ impl DatabendClient {
             self.database, table_id
         );
 
-        let conn = self.client.get_conn().await.map_err(databend_error_to_etl_error)?;
-        let rows = conn
+        let conn = self.client.as_ref().get_conn().await.map_err(databend_error_to_etl_error)?;
+        let mut rows = conn
             .query_iter(&query)
             .await
             .map_err(databend_error_to_etl_error)?;
 
-        let has_rows = rows.count().await > 0;
+        let has_rows = rows.next().await.is_some();
         Ok(has_rows)
     }
 
@@ -215,9 +226,9 @@ impl DatabendClient {
     }
 
     /// Executes a query that doesn't return results.
-    async fn execute(&self, query: &str) -> EtlResult<()> {
-        let conn = self.client.get_conn().await.map_err(databend_error_to_etl_error)?;
-        conn.exec(query).await.map_err(databend_error_to_etl_error)?;
+    async fn execute(&self, query: impl AsRef<str>) -> EtlResult<()> {
+        let conn = self.client.as_ref().get_conn().await.map_err(databend_error_to_etl_error)?;
+        conn.exec(query.as_ref()).await.map_err(databend_error_to_etl_error)?;
         Ok(())
     }
 
@@ -227,7 +238,7 @@ impl DatabendClient {
             .iter()
             .map(|col| {
                 let databend_type = postgres_type_to_databend_type(&col.typ);
-                let nullable = if col.optional { "" } else { " NOT NULL" };
+                let nullable = if col.nullable { "" } else { " NOT NULL" };
                 format!("`{}` {}{}", col.name, databend_type, nullable)
             })
             .collect();
@@ -239,9 +250,9 @@ impl DatabendClient {
 /// Converts a Databend error to an [`EtlError`].
 fn databend_error_to_etl_error(err: databend_driver::Error) -> EtlError {
     etl_error!(
-        ErrorKind::DestinationWriteFailed,
+        ErrorKind::DestinationQueryFailed,
         "Databend operation failed",
-        err.to_string()
+        source: err
     )
 }
 
@@ -251,58 +262,58 @@ fn postgres_type_to_databend_type(pg_type: &etl::types::Type) -> &'static str {
 
     match pg_type {
         // Boolean
-        Type::Bool => "BOOLEAN",
+        &Type::BOOL => "BOOLEAN",
 
         // Integer types
-        Type::Int2 => "SMALLINT",
-        Type::Int4 => "INT",
-        Type::Int8 => "BIGINT",
+        &Type::INT2 => "SMALLINT",
+        &Type::INT4 => "INT",
+        &Type::INT8 => "BIGINT",
 
         // Floating point types
-        Type::Float4 => "FLOAT",
-        Type::Float8 => "DOUBLE",
+        &Type::FLOAT4 => "FLOAT",
+        &Type::FLOAT8 => "DOUBLE",
 
         // Numeric/Decimal
-        Type::Numeric => "DECIMAL(38, 18)",
+        &Type::NUMERIC => "DECIMAL(38, 18)",
 
         // Text types
-        Type::Text | Type::Varchar | Type::Bpchar | Type::Name => "STRING",
+        &Type::TEXT | &Type::VARCHAR | &Type::BPCHAR | &Type::NAME => "STRING",
 
         // Binary data
-        Type::Bytea => "BINARY",
+        &Type::BYTEA => "BINARY",
 
         // Date and time types
-        Type::Date => "DATE",
-        Type::Time => "STRING", // Databend doesn't have TIME type, use STRING
-        Type::Timestamp => "TIMESTAMP",
-        Type::Timestamptz => "TIMESTAMP",
+        &Type::DATE => "DATE",
+        &Type::TIME => "STRING", // Databend doesn't have TIME type, use STRING
+        &Type::TIMESTAMP => "TIMESTAMP",
+        &Type::TIMESTAMPTZ => "TIMESTAMP",
 
         // UUID
-        Type::Uuid => "STRING", // Store UUID as STRING
+        &Type::UUID => "STRING", // Store UUID as STRING
 
         // JSON types
-        Type::Json | Type::Jsonb => "VARIANT",
+        &Type::JSON | &Type::JSONB => "VARIANT",
 
         // OID
-        Type::Oid => "BIGINT",
+        &Type::OID => "BIGINT",
 
         // Array types - map to ARRAY<type>
-        Type::BoolArray => "ARRAY(BOOLEAN)",
-        Type::Int2Array => "ARRAY(SMALLINT)",
-        Type::Int4Array => "ARRAY(INT)",
-        Type::Int8Array => "ARRAY(BIGINT)",
-        Type::Float4Array => "ARRAY(FLOAT)",
-        Type::Float8Array => "ARRAY(DOUBLE)",
-        Type::NumericArray => "ARRAY(DECIMAL(38, 18))",
-        Type::TextArray | Type::VarcharArray | Type::BpcharArray => "ARRAY(STRING)",
-        Type::ByteaArray => "ARRAY(BINARY)",
-        Type::DateArray => "ARRAY(DATE)",
-        Type::TimeArray => "ARRAY(STRING)",
-        Type::TimestampArray => "ARRAY(TIMESTAMP)",
-        Type::TimestamptzArray => "ARRAY(TIMESTAMP)",
-        Type::UuidArray => "ARRAY(STRING)",
-        Type::JsonArray | Type::JsonbArray => "ARRAY(VARIANT)",
-        Type::OidArray => "ARRAY(BIGINT)",
+        &Type::BOOL_ARRAY => "ARRAY(BOOLEAN)",
+        &Type::INT2_ARRAY => "ARRAY(SMALLINT)",
+        &Type::INT4_ARRAY => "ARRAY(INT)",
+        &Type::INT8_ARRAY => "ARRAY(BIGINT)",
+        &Type::FLOAT4_ARRAY => "ARRAY(FLOAT)",
+        &Type::FLOAT8_ARRAY => "ARRAY(DOUBLE)",
+        &Type::NUMERIC_ARRAY => "ARRAY(DECIMAL(38, 18))",
+        &Type::TEXT_ARRAY | &Type::VARCHAR_ARRAY | &Type::BPCHAR_ARRAY => "ARRAY(STRING)",
+        &Type::BYTEA_ARRAY => "ARRAY(BINARY)",
+        &Type::DATE_ARRAY => "ARRAY(DATE)",
+        &Type::TIME_ARRAY => "ARRAY(STRING)",
+        &Type::TIMESTAMP_ARRAY => "ARRAY(TIMESTAMP)",
+        &Type::TIMESTAMPTZ_ARRAY => "ARRAY(TIMESTAMP)",
+        &Type::UUID_ARRAY => "ARRAY(STRING)",
+        &Type::JSON_ARRAY | &Type::JSONB_ARRAY => "ARRAY(VARIANT)",
+        &Type::OID_ARRAY => "ARRAY(BIGINT)",
 
         // Other types - default to STRING for safety
         _ => "STRING",
@@ -316,15 +327,15 @@ mod tests {
 
     #[test]
     fn test_postgres_type_to_databend_type() {
-        assert_eq!(postgres_type_to_databend_type(&Type::Bool), "BOOLEAN");
-        assert_eq!(postgres_type_to_databend_type(&Type::Int4), "INT");
-        assert_eq!(postgres_type_to_databend_type(&Type::Int8), "BIGINT");
-        assert_eq!(postgres_type_to_databend_type(&Type::Float8), "DOUBLE");
-        assert_eq!(postgres_type_to_databend_type(&Type::Text), "STRING");
-        assert_eq!(postgres_type_to_databend_type(&Type::Timestamp), "TIMESTAMP");
-        assert_eq!(postgres_type_to_databend_type(&Type::Json), "VARIANT");
-        assert_eq!(postgres_type_to_databend_type(&Type::Int4Array), "ARRAY(INT)");
-        assert_eq!(postgres_type_to_databend_type(&Type::TextArray), "ARRAY(STRING)");
+        assert_eq!(postgres_type_to_databend_type(&Type::BOOL), "BOOLEAN");
+        assert_eq!(postgres_type_to_databend_type(&Type::INT4), "INT");
+        assert_eq!(postgres_type_to_databend_type(&Type::INT8), "BIGINT");
+        assert_eq!(postgres_type_to_databend_type(&Type::FLOAT8), "DOUBLE");
+        assert_eq!(postgres_type_to_databend_type(&Type::TEXT), "STRING");
+        assert_eq!(postgres_type_to_databend_type(&Type::TIMESTAMP), "TIMESTAMP");
+        assert_eq!(postgres_type_to_databend_type(&Type::JSON), "VARIANT");
+        assert_eq!(postgres_type_to_databend_type(&Type::INT4_ARRAY), "ARRAY(INT)");
+        assert_eq!(postgres_type_to_databend_type(&Type::TEXT_ARRAY), "ARRAY(STRING)");
     }
 
     #[test]
@@ -332,18 +343,24 @@ mod tests {
         let column_schemas = vec![
             ColumnSchema {
                 name: "id".to_string(),
-                typ: Type::Int4,
-                optional: false,
+                typ: Type::INT4,
+                modifier: -1,
+                nullable: false,
+                primary: true,
             },
             ColumnSchema {
                 name: "name".to_string(),
-                typ: Type::Text,
-                optional: true,
+                typ: Type::TEXT,
+                modifier: -1,
+                nullable: true,
+                primary: false,
             },
             ColumnSchema {
                 name: "created_at".to_string(),
-                typ: Type::Timestamp,
-                optional: false,
+                typ: Type::TIMESTAMP,
+                modifier: -1,
+                nullable: false,
+                primary: false,
             },
         ];
 
@@ -368,7 +385,7 @@ mod tests {
         };
 
         assert_eq!(
-            client.full_table_name("users"),
+            client.full_table_name(&"users".to_string()),
             "`test_db`.`users`"
         );
     }

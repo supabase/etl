@@ -206,9 +206,13 @@ where
         table_id: &TableId,
         with_cdc_columns: bool,
     ) -> EtlResult<SequencedDatabendTableId> {
+        info!("prepare_table_for_operations called for table_id: {}, with_cdc_columns: {}", table_id, with_cdc_columns);
+        info!("prepare_table_for_operations: acquiring lock on inner");
         let mut inner = self.inner.lock().await;
+        info!("prepare_table_for_operations: lock acquired");
 
         // Load the schema of the table
+        info!("prepare_table_for_operations: getting table schema from store");
         let table_schema = self
             .store
             .get_table_schema(table_id)
@@ -222,55 +226,70 @@ where
                     )
                 )
             })?;
+        info!("prepare_table_for_operations: got table schema: {}", table_schema.name);
 
         // Determine the Databend table ID with the current sequence number
         let databend_table_id = table_name_to_databend_table_id(&table_schema.name);
+        info!("prepare_table_for_operations: databend_table_id: {}", databend_table_id);
+
+        info!("prepare_table_for_operations: getting or creating sequenced table ID");
         let sequenced_databend_table_id = self
             .get_or_create_sequenced_databend_table_id(table_id, &databend_table_id)
             .await?;
+        info!("prepare_table_for_operations: got sequenced_databend_table_id: {}", sequenced_databend_table_id);
 
         // Skip table creation if we've already seen this sequenced table
         if !inner.created_tables.contains(&sequenced_databend_table_id) {
+            info!("prepare_table_for_operations: table not in cache, creating table");
             // Prepare column schemas with CDC columns if needed
             let mut column_schemas = table_schema.column_schemas.clone();
             if with_cdc_columns {
                 column_schemas.push(etl::types::ColumnSchema {
                     name: DATABEND_CDC_OPERATION_COLUMN.to_string(),
-                    typ: etl::types::Type::Text,
-                    optional: false,
+                    typ: etl::types::Type::TEXT,
+                    modifier: -1,
+                    nullable: false,
+                    primary: false,
                 });
                 column_schemas.push(etl::types::ColumnSchema {
                     name: DATABEND_CDC_SEQUENCE_COLUMN.to_string(),
-                    typ: etl::types::Type::Text,
-                    optional: false,
+                    typ: etl::types::Type::TEXT,
+                    modifier: -1,
+                    nullable: false,
+                    primary: false,
                 });
             }
 
+            info!("prepare_table_for_operations: calling create_table_if_missing");
             self.client
                 .create_table_if_missing(
                     &sequenced_databend_table_id.to_string(),
                     &column_schemas,
                 )
                 .await?;
+            info!("prepare_table_for_operations: create_table_if_missing completed");
 
             Self::add_to_created_tables_cache(&mut inner, &sequenced_databend_table_id);
 
             debug!("sequenced table {} added to creation cache", sequenced_databend_table_id);
         } else {
-            debug!(
+            info!(
                 "sequenced table {} found in creation cache, skipping existence check",
                 sequenced_databend_table_id
             );
         }
 
         // Ensure view points to this sequenced table
+        info!("prepare_table_for_operations: calling ensure_view_points_to_table");
         self.ensure_view_points_to_table(
             &mut inner,
             &databend_table_id,
             &sequenced_databend_table_id,
         )
         .await?;
+        info!("prepare_table_for_operations: ensure_view_points_to_table completed");
 
+        info!("prepare_table_for_operations: completed successfully");
         Ok(sequenced_databend_table_id)
     }
 
@@ -337,7 +356,7 @@ where
         }
 
         // Create a view using CREATE OR REPLACE VIEW
-        let view_full_name = self.client.full_table_name(view_name);
+        let view_full_name = self.client.full_table_name(&view_name.to_string());
         let target_full_name = self.client.full_table_name(&target_table_id.to_string());
 
         let query = format!(
@@ -350,7 +369,7 @@ where
         let conn_result = databend_driver::Client::new(self.client.dsn.clone()).get_conn().await;
         let conn = conn_result.map_err(|e| {
             etl_error!(
-                ErrorKind::DestinationWriteFailed,
+                ErrorKind::DestinationQueryFailed,
                 "Failed to get Databend connection",
                 e.to_string()
             )
@@ -358,7 +377,7 @@ where
 
         conn.exec(&query).await.map_err(|e| {
             etl_error!(
-                ErrorKind::DestinationWriteFailed,
+                ErrorKind::DestinationQueryFailed,
                 "Failed to create or replace view",
                 e.to_string()
             )
@@ -382,11 +401,16 @@ where
         table_id: TableId,
         table_rows: Vec<TableRow>,
     ) -> EtlResult<()> {
+        info!("write_table_rows (inherent) called for table_id: {}, rows: {}", table_id, table_rows.len());
+
         if table_rows.is_empty() {
+            info!("write_table_rows: table_rows is empty, returning early");
             return Ok(());
         }
 
+        info!("write_table_rows: calling prepare_table_for_operations");
         let sequenced_databend_table_id = self.prepare_table_for_operations(&table_id, false).await?;
+        info!("write_table_rows: prepare_table_for_operations completed, table_id: {}", sequenced_databend_table_id);
 
         let table_schema = self
             .store
@@ -504,13 +528,17 @@ where
                     let mut column_schemas = table_schema.column_schemas.clone();
                     column_schemas.push(etl::types::ColumnSchema {
                         name: DATABEND_CDC_OPERATION_COLUMN.to_string(),
-                        typ: etl::types::Type::Text,
-                        optional: false,
+                        typ: etl::types::Type::TEXT,
+                        modifier: -1,
+                        nullable: false,
+                        primary: false,
                     });
                     column_schemas.push(etl::types::ColumnSchema {
                         name: DATABEND_CDC_SEQUENCE_COLUMN.to_string(),
-                        typ: etl::types::Type::Text,
-                        optional: false,
+                        typ: etl::types::Type::TEXT,
+                        modifier: -1,
+                        nullable: false,
+                        primary: false,
                     });
 
                     self.client
@@ -660,8 +688,10 @@ where
     }
 
     async fn truncate_table(&self, table_id: TableId) -> EtlResult<()> {
-        self.process_truncate_for_table_ids(iter::once(table_id), false)
-            .await
+        info!("Destination::truncate_table called for table_id: {}", table_id);
+        let result = self.process_truncate_for_table_ids(iter::once(table_id), false).await;
+        info!("Destination::truncate_table completed for table_id: {}", table_id);
+        result
     }
 
     async fn write_table_rows(
@@ -669,7 +699,9 @@ where
         table_id: TableId,
         table_rows: Vec<TableRow>,
     ) -> EtlResult<()> {
+        info!("Destination::write_table_rows called for table_id: {}, rows: {}", table_id, table_rows.len());
         self.write_table_rows(table_id, table_rows).await?;
+        info!("Destination::write_table_rows completed for table_id: {}", table_id);
 
         Ok(())
     }

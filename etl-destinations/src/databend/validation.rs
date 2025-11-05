@@ -1,4 +1,4 @@
-use etl::error::{ErrorKind, EtlError, EtlResult};
+use etl::error::{ErrorKind, EtlResult};
 use etl::etl_error;
 use etl::types::ColumnSchema;
 
@@ -9,7 +9,7 @@ use etl::types::ColumnSchema;
 pub fn validate_column_schemas(column_schemas: &[ColumnSchema]) -> EtlResult<()> {
     if column_schemas.is_empty() {
         return Err(etl_error!(
-            ErrorKind::DestinationValidationFailed,
+            ErrorKind::ValidationError,
             "Empty column schemas",
             "Table must have at least one column"
         ));
@@ -31,7 +31,7 @@ pub fn validate_column_schemas(column_schemas: &[ColumnSchema]) -> EtlResult<()>
 fn validate_column_name(name: &str) -> EtlResult<()> {
     if name.is_empty() {
         return Err(etl_error!(
-            ErrorKind::DestinationValidationFailed,
+            ErrorKind::ValidationError,
             "Invalid column name",
             "Column name cannot be empty"
         ));
@@ -48,7 +48,7 @@ fn validate_column_name(name: &str) -> EtlResult<()> {
 pub fn validate_table_name(name: &str) -> EtlResult<()> {
     if name.is_empty() {
         return Err(etl_error!(
-            ErrorKind::DestinationValidationFailed,
+            ErrorKind::ValidationError,
             "Invalid table name",
             "Table name cannot be empty"
         ));
@@ -57,7 +57,7 @@ pub fn validate_table_name(name: &str) -> EtlResult<()> {
     // Check for extremely long names (Databend has a limit)
     if name.len() > 255 {
         return Err(etl_error!(
-            ErrorKind::DestinationValidationFailed,
+            ErrorKind::ValidationError,
             "Invalid table name",
             format!("Table name too long: {} characters (max 255)", name.len())
         ));
@@ -85,7 +85,7 @@ mod tests {
         let result = validate_column_name("");
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert_eq!(err.kind(), ErrorKind::DestinationValidationFailed);
+        assert_eq!(err.kind(), ErrorKind::ValidationError);
     }
 
     #[test]
@@ -100,7 +100,7 @@ mod tests {
         let result = validate_table_name("");
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert_eq!(err.kind(), ErrorKind::DestinationValidationFailed);
+        assert_eq!(err.kind(), ErrorKind::ValidationError);
     }
 
     #[test]
@@ -109,7 +109,7 @@ mod tests {
         let result = validate_table_name(&long_name);
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert_eq!(err.kind(), ErrorKind::DestinationValidationFailed);
+        assert_eq!(err.kind(), ErrorKind::ValidationError);
     }
 
     #[test]
@@ -117,13 +117,17 @@ mod tests {
         let schemas = vec![
             ColumnSchema {
                 name: "id".to_string(),
-                typ: Type::Int4,
-                optional: false,
+                typ: Type::INT4,
+                modifier: -1,
+                nullable: false,
+                primary: true,
             },
             ColumnSchema {
                 name: "name".to_string(),
-                typ: Type::Text,
-                optional: true,
+                typ: Type::TEXT,
+                modifier: -1,
+                nullable: true,
+                primary: false,
             },
         ];
 
@@ -136,7 +140,7 @@ mod tests {
         let result = validate_column_schemas(&schemas);
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert_eq!(err.kind(), ErrorKind::DestinationValidationFailed);
+        assert_eq!(err.kind(), ErrorKind::ValidationError);
     }
 
     #[test]
@@ -144,19 +148,23 @@ mod tests {
         let schemas = vec![
             ColumnSchema {
                 name: "id".to_string(),
-                typ: Type::Int4,
-                optional: false,
+                typ: Type::INT4,
+                modifier: -1,
+                nullable: false,
+                primary: true,
             },
             ColumnSchema {
                 name: "".to_string(), // Invalid: empty name
-                typ: Type::Text,
-                optional: true,
+                typ: Type::TEXT,
+                modifier: -1,
+                nullable: true,
+                primary: false,
             },
         ];
 
         let result = validate_column_schemas(&schemas);
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert_eq!(err.kind(), ErrorKind::DestinationValidationFailed);
+        assert_eq!(err.kind(), ErrorKind::ValidationError);
     }
 }
