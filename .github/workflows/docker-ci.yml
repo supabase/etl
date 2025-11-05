@@ -10,7 +10,7 @@ on:
         type: string
         required: false
       experimental:
-        description: "Build experimental image (tagged as commithash-experimental only)"
+        description: "Build experimental image (main branch excluded)"
         type: boolean
         required: false
         default: false
