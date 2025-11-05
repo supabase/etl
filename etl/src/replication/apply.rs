@@ -407,7 +407,9 @@ impl ApplyLoopState {
     /// the PostgreSQL server.
     fn flush_lsn(&self) -> PgLsn {
         if !self.handling_transaction() && self.events_batch.is_empty() {
-            // Report write_lsn as flush_lsn when idle to prevent WAL buildup.
+            // Report write_lsn as flush_lsn when idle to prevent WAL buildup. Since the `send_status_update`
+            // method tracks the last sent data, we should not worry about the LSN being reported first at
+            // a higher position and then later at a lower position.
             self.next_status_update.write_lsn
         } else {
             self.next_status_update.flush_lsn
