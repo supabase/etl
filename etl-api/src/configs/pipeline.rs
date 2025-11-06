@@ -77,6 +77,8 @@ pub struct PartialApiPipelineConfig {
     #[schema(example = 4)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_table_sync_workers: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub log_level: Option<LogLevel>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -132,6 +134,8 @@ impl StoredPipelineConfig {
         if let Some(value) = partial.max_table_sync_workers {
             self.max_table_sync_workers = value;
         }
+
+        self.log_level = partial.log_level
     }
 }
 
@@ -274,6 +278,7 @@ mod tests {
             table_error_retry_delay_ms: Some(5000),
             table_error_retry_max_attempts: Some(9),
             max_table_sync_workers: None,
+            log_level: None,
         };
 
         stored.merge(partial);
