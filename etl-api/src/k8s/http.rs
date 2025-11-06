@@ -162,7 +162,10 @@ impl K8sClient for HttpK8sClient {
             create_postgres_secret_json(&postgres_secret_name, &encoded_postgres_password);
         let secret: Secret = serde_json::from_value(postgres_secret_json)?;
 
-        let pp = PatchParams::apply(&postgres_secret_name);
+        // We are forcing the update since we are the field manager that should own the fields. If
+        // there is an override (likely during an incident or SREs intervention), we want to override
+        // their changes. The API database is the source of truth for credentials.
+        let pp = PatchParams::apply(&postgres_secret_name).force();
         self.secrets_api
             .patch(&postgres_secret_name, &pp, &Patch::Apply(secret))
             .await?;
@@ -185,7 +188,10 @@ impl K8sClient for HttpK8sClient {
         );
         let secret: Secret = serde_json::from_value(bq_secret_json)?;
 
-        let pp = PatchParams::apply(&bq_secret_name);
+        // We are forcing the update since we are the field manager that should own the fields. If
+        // there is an override (likely during an incident or SREs intervention), we want to override
+        // their changes. The API database is the source of truth for credentials.
+        let pp = PatchParams::apply(&bq_secret_name).force();
         self.secrets_api
             .patch(&bq_secret_name, &pp, &Patch::Apply(secret))
             .await?;
@@ -215,7 +221,10 @@ impl K8sClient for HttpK8sClient {
         );
         let secret: Secret = serde_json::from_value(iceberg_secret_json)?;
 
-        let pp = PatchParams::apply(&iceberg_secret_name);
+        // We are forcing the update since we are the field manager that should own the fields. If
+        // there is an override (likely during an incident or SREs intervention), we want to override
+        // their changes. The API database is the source of truth for credentials.
+        let pp = PatchParams::apply(&iceberg_secret_name).force();
         self.secrets_api
             .patch(&iceberg_secret_name, &pp, &Patch::Apply(secret))
             .await?;
@@ -289,7 +298,10 @@ impl K8sClient for HttpK8sClient {
         );
         let config_map: ConfigMap = serde_json::from_value(config_map_json)?;
 
-        let pp = PatchParams::apply(&replicator_config_map_name);
+        // We are forcing the update since we are the field manager that should own the fields. If
+        // there is an override (likely during an incident or SREs intervention), we want to override
+        // their changes. The API database is the source of truth for configuration.
+        let pp = PatchParams::apply(&replicator_config_map_name).force();
         self.config_maps_api
             .patch(&replicator_config_map_name, &pp, &Patch::Apply(config_map))
             .await?;
@@ -349,7 +361,10 @@ impl K8sClient for HttpK8sClient {
 
         let stateful_set: StatefulSet = serde_json::from_value(stateful_set_json)?;
 
-        let pp = PatchParams::apply(&stateful_set_name);
+        // We are forcing the update since we are the field manager that should own the fields. If
+        // there is an override (likely during an incident or SREs intervention), we want to override
+        // their changes.
+        let pp = PatchParams::apply(&stateful_set_name).force();
         self.stateful_sets_api
             .patch(&stateful_set_name, &pp, &Patch::Apply(stateful_set))
             .await?;
