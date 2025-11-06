@@ -73,7 +73,7 @@ pub async fn create_or_update_pipeline_resources_in_k8s(
         api_url: supabase_api_url.map(|url| url.to_owned()),
     };
 
-    let log_level = pipeline.config.log_level.clone().unwrap_or(LogLevel::Info);
+    let log_level = pipeline.config.log_level.clone().unwrap_or_default();
 
     let replicator_config = build_replicator_config_without_secrets(
         k8s_client,

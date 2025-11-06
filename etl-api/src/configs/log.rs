@@ -3,7 +3,7 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, Default)]
 pub enum LogLevel {
     /// The "trace" level.
     ///
@@ -16,6 +16,7 @@ pub enum LogLevel {
     /// The "info" level.
     ///
     /// Designates useful information.
+    #[default]
     Info,
     /// The "warn" level.
     ///
