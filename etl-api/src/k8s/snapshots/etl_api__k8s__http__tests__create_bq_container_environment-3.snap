@@ -12,6 +12,10 @@ expression: container_environment
     "value": "ramsup/etl-replicator:2a41356af735f891de37d71c0e1a62864fe4630e"
   },
   {
+    "name": "RUST_LOG",
+    "value": "info"
+  },
+  {
     "name": "APP_SENTRY__DSN",
     "valueFrom": {
       "secretKeyRef": {

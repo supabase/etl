@@ -3,7 +3,7 @@ use etl_config::Environment;
 use k8s_openapi::api::core::v1::ConfigMap;
 use thiserror::Error;
 
-use crate::configs::destination::StoredDestinationConfig;
+use crate::configs::{destination::StoredDestinationConfig, log::LogLevel};
 
 /// Errors emitted by the Kubernetes integration.
 ///
@@ -143,6 +143,7 @@ pub trait K8sClient: Send + Sync {
         replicator_image: &str,
         environment: Environment,
         destination_type: DestinationType,
+        log_level: LogLevel,
     ) -> Result<(), K8sError>;
 
     /// Deletes the replicator [`StatefulSet`] if it exists.

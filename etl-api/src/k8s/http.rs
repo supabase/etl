@@ -1,3 +1,4 @@
+use crate::configs::log::LogLevel;
 use crate::k8s::DestinationType;
 use crate::k8s::{K8sClient, K8sError, PodPhase};
 use async_trait::async_trait;
@@ -329,6 +330,7 @@ impl K8sClient for HttpK8sClient {
         replicator_image: &str,
         environment: Environment,
         destination_type: DestinationType,
+        log_level: LogLevel,
     ) -> Result<(), K8sError> {
         debug!("patching stateful set");
 
@@ -341,6 +343,7 @@ impl K8sClient for HttpK8sClient {
             &environment,
             replicator_image,
             destination_type,
+            log_level,
         );
 
         let node_selector = create_node_selector_json(&environment);
@@ -567,6 +570,7 @@ fn create_container_environment_json(
     environment: &Environment,
     replicator_image: &str,
     destination_type: DestinationType,
+    log_level: LogLevel,
 ) -> Vec<serde_json::Value> {
     let mut container_environment = vec![
         json!({
@@ -577,6 +581,10 @@ fn create_container_environment_json(
             "name": "APP_VERSION",
             //TODO: set APP_VERSION to proper version instead of the replicator image name
             "value": replicator_image
+        }),
+        json!({
+            "name": "RUST_LOG",
+            "value": log_level.to_string()
         }),
     ];
 
@@ -1100,6 +1108,7 @@ mod tests {
             &environment,
             replicator_image,
             DestinationType::BigQuery,
+            LogLevel::Info,
         );
         assert_json_snapshot!(container_environment);
 
@@ -1109,6 +1118,7 @@ mod tests {
             &environment,
             replicator_image,
             DestinationType::BigQuery,
+            LogLevel::Info,
         );
         assert_json_snapshot!(container_environment);
 
@@ -1118,6 +1128,7 @@ mod tests {
             &environment,
             replicator_image,
             DestinationType::BigQuery,
+            LogLevel::Info,
         );
         assert_json_snapshot!(container_environment);
     }
@@ -1132,6 +1143,7 @@ mod tests {
             &Environment::Dev,
             replicator_image,
             DestinationType::Iceberg,
+            LogLevel::Info,
         );
         assert_json_snapshot!(container_environment);
 
@@ -1140,6 +1152,7 @@ mod tests {
             &Environment::Staging,
             replicator_image,
             DestinationType::Iceberg,
+            LogLevel::Info,
         );
         assert_json_snapshot!(container_environment);
 
@@ -1148,6 +1161,7 @@ mod tests {
             &Environment::Prod,
             replicator_image,
             DestinationType::Iceberg,
+            LogLevel::Info,
         );
         assert_json_snapshot!(container_environment);
     }
@@ -1231,6 +1245,7 @@ mod tests {
             &environment,
             replicator_image,
             DestinationType::BigQuery,
+            LogLevel::Info,
         );
 
         let node_selector = create_node_selector_json(&environment);
@@ -1261,6 +1276,7 @@ mod tests {
             &environment,
             replicator_image,
             DestinationType::BigQuery,
+            LogLevel::Info,
         );
 
         let node_selector = create_node_selector_json(&environment);
@@ -1291,6 +1307,7 @@ mod tests {
             &environment,
             replicator_image,
             DestinationType::BigQuery,
+            LogLevel::Info,
         );
 
         let node_selector = create_node_selector_json(&environment);
@@ -1328,6 +1345,7 @@ mod tests {
             &environment,
             replicator_image,
             DestinationType::Iceberg,
+            LogLevel::Info,
         );
 
         let node_selector = create_node_selector_json(&environment);
@@ -1358,6 +1376,7 @@ mod tests {
             &environment,
             replicator_image,
             DestinationType::Iceberg,
+            LogLevel::Info,
         );
 
         let node_selector = create_node_selector_json(&environment);
@@ -1388,6 +1407,7 @@ mod tests {
             &environment,
             replicator_image,
             DestinationType::Iceberg,
+            LogLevel::Info,
         );
 
         let node_selector = create_node_selector_json(&environment);
