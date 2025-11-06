@@ -36,6 +36,6 @@ impl fmt::Display for LogLevel {
             LogLevel::Warn => "warn",
             LogLevel::Error => "error",
         };
-        write!(f, "{}", s)
+        write!(f, "{s}")
     }
 }
