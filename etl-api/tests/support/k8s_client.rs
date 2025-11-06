@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 
 use async_trait::async_trait;
+use etl_api::configs::log::LogLevel;
 use etl_api::k8s::http::{TRUSTED_ROOT_CERT_CONFIG_MAP_NAME, TRUSTED_ROOT_CERT_KEY_NAME};
 use etl_api::k8s::{DestinationType, K8sClient, K8sError, PodPhase};
 use etl_config::Environment;
@@ -86,6 +87,7 @@ impl K8sClient for MockK8sClient {
         _replicator_image: &str,
         _environment: Environment,
         _destination_type: DestinationType,
+        _log_level: LogLevel,
     ) -> Result<(), K8sError> {
         Ok(())
     }

@@ -2,7 +2,7 @@ use etl_config::shared::{BatchConfig, PgConnectionConfig, PipelineConfig};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
-use crate::configs::store::Store;
+use crate::configs::{log::LogLevel, store::Store};
 
 const DEFAULT_BATCH_MAX_SIZE: usize = 100000;
 const DEFAULT_BATCH_MAX_FILL_MS: u64 = 10000;
@@ -41,6 +41,7 @@ pub struct FullApiPipelineConfig {
     #[schema(example = 4)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_table_sync_workers: Option<u16>,
+    pub log_level: Option<LogLevel>,
 }
 
 impl From<StoredPipelineConfig> for FullApiPipelineConfig {
@@ -54,6 +55,7 @@ impl From<StoredPipelineConfig> for FullApiPipelineConfig {
             table_error_retry_delay_ms: Some(value.table_error_retry_delay_ms),
             table_error_retry_max_attempts: Some(value.table_error_retry_max_attempts),
             max_table_sync_workers: Some(value.max_table_sync_workers),
+            log_level: value.log_level,
         }
     }
 }
@@ -85,6 +87,7 @@ pub struct StoredPipelineConfig {
     #[serde(default = "default_table_error_retry_max_attempts")]
     pub table_error_retry_max_attempts: u32,
     pub max_table_sync_workers: u16,
+    pub log_level: Option<LogLevel>,
 }
 
 impl StoredPipelineConfig {
@@ -159,6 +162,7 @@ impl From<FullApiPipelineConfig> for StoredPipelineConfig {
             max_table_sync_workers: value
                 .max_table_sync_workers
                 .unwrap_or(DEFAULT_MAX_TABLE_SYNC_WORKERS),
+            log_level: value.log_level,
         }
     }
 }
@@ -179,6 +183,7 @@ mod tests {
             table_error_retry_delay_ms: 2000,
             table_error_retry_max_attempts: 7,
             max_table_sync_workers: 4,
+            log_level: None,
         };
 
         let json = serde_json::to_string(&config).unwrap();
@@ -208,6 +213,7 @@ mod tests {
             table_error_retry_delay_ms: None,
             table_error_retry_max_attempts: None,
             max_table_sync_workers: None,
+            log_level: Some(LogLevel::Debug),
         };
 
         let stored: StoredPipelineConfig = full_config.clone().into();
@@ -224,6 +230,7 @@ mod tests {
             table_error_retry_delay_ms: None,
             table_error_retry_max_attempts: None,
             max_table_sync_workers: None,
+            log_level: None
         };
 
         let stored: StoredPipelineConfig = full_config.into();
@@ -255,6 +262,7 @@ mod tests {
             table_error_retry_delay_ms: 1000,
             table_error_retry_max_attempts: 3,
             max_table_sync_workers: 2,
+            log_level: None,
         };
 
         let partial = PartialApiPipelineConfig {

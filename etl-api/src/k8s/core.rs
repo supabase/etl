@@ -3,6 +3,7 @@ use etl_config::shared::{ReplicatorConfigWithoutSecrets, SupabaseConfigWithoutSe
 use secrecy::ExposeSecret;
 
 use crate::configs::destination::{StoredDestinationConfig, StoredIcebergConfig};
+use crate::configs::log::LogLevel;
 use crate::configs::pipeline::StoredPipelineConfig;
 use crate::configs::source::StoredSourceConfig;
 use crate::db::destinations::Destination;
@@ -72,6 +73,8 @@ pub async fn create_or_update_pipeline_resources_in_k8s(
         api_url: supabase_api_url.map(|url| url.to_owned()),
     };
 
+    let log_level = pipeline.config.log_level.clone().unwrap_or(LogLevel::Info);
+
     let replicator_config = build_replicator_config_without_secrets(
         k8s_client,
         // We are safe to perform this conversion, since the i64 -> u64 conversion performs wrap
@@ -93,6 +96,7 @@ pub async fn create_or_update_pipeline_resources_in_k8s(
         image.name,
         environment,
         destination_type,
+        log_level,
     )
     .await?;
 
@@ -287,9 +291,16 @@ async fn create_or_update_replicator_stateful_set(
     replicator_image: String,
     environment: Environment,
     destination_type: DestinationType,
+    log_level: LogLevel,
 ) -> Result<(), PipelineError> {
     k8s_client
-        .create_or_update_stateful_set(prefix, &replicator_image, environment, destination_type)
+        .create_or_update_stateful_set(
+            prefix,
+            &replicator_image,
+            environment,
+            destination_type,
+            log_level,
+        )
         .await?;
 
     Ok(())

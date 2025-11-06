@@ -224,7 +224,7 @@ pub mod tenants {
 /// Pipeline config helpers.
 pub mod pipelines {
     use super::*;
-    use etl_api::configs::pipeline::ApiBatchConfig;
+    use etl_api::configs::{log::LogLevel, pipeline::ApiBatchConfig};
 
     /// Returns a default pipeline config.
     pub fn new_pipeline_config() -> FullApiPipelineConfig {
@@ -237,6 +237,7 @@ pub mod pipelines {
             table_error_retry_delay_ms: Some(10000),
             table_error_retry_max_attempts: Some(5),
             max_table_sync_workers: Some(2),
+            log_level: Some(LogLevel::Info),
         }
     }
 
@@ -251,6 +252,7 @@ pub mod pipelines {
             table_error_retry_delay_ms: Some(20000),
             table_error_retry_max_attempts: Some(10),
             max_table_sync_workers: Some(4),
+            log_level: Some(LogLevel::Info),
         }
     }
 

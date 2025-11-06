@@ -23,4 +23,7 @@ FullApiPipelineConfig {
     max_table_sync_workers: Some(
         4,
     ),
+    log_level: Some(
+        Info,
+    ),
 }
