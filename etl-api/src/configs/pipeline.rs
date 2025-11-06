@@ -230,7 +230,7 @@ mod tests {
             table_error_retry_delay_ms: None,
             table_error_retry_max_attempts: None,
             max_table_sync_workers: None,
-            log_level: None
+            log_level: None,
         };
 
         let stored: StoredPipelineConfig = full_config.into();
