@@ -49,10 +49,10 @@ jobs:
       matrix:
         include:
           - platform: linux/amd64
-            runner: ubuntu-latest
+            runner: blacksmith-2vcpu-ubuntu-2404
             arch: amd64
           - platform: linux/arm64
-            runner: ubuntu-24.04-arm
+            runner: blacksmith-2vcpu-ubuntu-2404-arm
             arch: arm64
     outputs:
       digest-amd64: ${{ steps.export-digest.outputs.digest-amd64 }}
@@ -121,7 +121,7 @@ jobs:
   create-manifest:
     name: Create Multi-Arch Manifest
     needs: build-platform
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     if: inputs.push == true
     steps:
       - name: Extract Image Name

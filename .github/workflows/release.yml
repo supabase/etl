@@ -22,7 +22,7 @@ permissions:
 jobs:
   version:
     name: Determine Version
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     # Gate: manual dispatch OR merged PRs labeled 'release'.
     if: |
       github.event_name == 'workflow_dispatch' || (
@@ -69,7 +69,7 @@ jobs:
     name: Create Tag
     needs: version
     if: needs.version.outputs.is_pr_merge == 'true' || github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     permissions:
       contents: write
     steps:
@@ -119,7 +119,7 @@ jobs:
   github-release:
     name: Create GitHub Release
     needs: [version, create-tag, build-and-push]
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     steps:
       - name: Generate Release Notes
         id: notes
