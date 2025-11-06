@@ -605,20 +605,20 @@ pub async fn drop_pg_database(config: &PgConnectionConfig) {
     // Give PostgreSQL time to mark slots as inactive after terminating connections.
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
-    // Drop any inactive replication slots on this database.
+    // Drop any replication slots on this database.
     client
         .execute(
             &format!(
                 r#"
                 select pg_drop_replication_slot(slot_name)
                 from pg_replication_slots
-                where database = '{}' and active = false;"#,
+                where database = '{}'"#,
                 config.name
             ),
             &[],
         )
         .await
-        .expect("Failed to drop inactive test replication slots");
+        .expect("Failed to drop test replication slots");
 
     // Drop the database
     client

@@ -372,6 +372,50 @@ impl ApplyLoopState {
         }
     }
 
+    /// Returns the LSN that should be reported as written to the PostgresSQL server.
+    fn write_lsn(&self) -> PgLsn {
+        self.next_status_update.write_lsn
+    }
+
+    /// Returns the LSN that should be reported as flushed to the PostgreSQL server.
+    ///
+    /// This method determines the appropriate flush LSN based on the current replication state.
+    /// When no transaction is being processed and no events are pending, it advances the flush
+    /// LSN to match the write LSN, preventing WAL buildup on idle replicated tables.
+    ///
+    /// # WAL Advancement for Idle Tables
+    ///
+    /// When there are no outstanding transactions to flush (i.e., we're not inside a transaction
+    /// and have no pending events), we advance flush_lsn to match write_lsn. This allows the
+    /// replication slot's restart_lsn to advance even when replicated tables are idle.
+    ///
+    /// Without this advancement, consider a scenario where:
+    /// - Table A (replicated): idle, receiving no writes
+    /// - Table B (not replicated): actively receiving writes
+    ///
+    /// The restart_lsn would remain stalled at Table A's position despite Table B generating
+    /// new WAL entries. This stall could cause:
+    /// 1. WAL accumulation on the primary
+    /// 2. Potential slot invalidation if WAL exceeds `max_slot_wal_keep_size`
+    ///
+    /// By advancing flush_lsn, we signal that all replicated data up to write_lsn has been
+    /// processed, allowing PostgreSQL to safely advance restart_lsn and reclaim WAL.
+    ///
+    /// # Returns
+    ///
+    /// The LSN up to which all changes have been flushed and can be safely discarded by
+    /// the PostgreSQL server.
+    fn flush_lsn(&self) -> PgLsn {
+        if !self.handling_transaction() && self.events_batch.is_empty() {
+            // Report write_lsn as flush_lsn when idle to prevent WAL buildup. Since the `send_status_update`
+            // method tracks the last sent data, we should not worry about the LSN being reported first at
+            // a higher position and then later at a lower position.
+            self.next_status_update.write_lsn
+        } else {
+            self.next_status_update.flush_lsn
+        }
+    }
+
     /// Records that a status update was sent and schedules the next refresh deadline.
     fn mark_status_update_sent(&mut self) {
         self.status_update_deadline = Instant::now() + STATUS_UPDATE_INTERVAL;
@@ -569,8 +613,8 @@ where
                         .as_mut()
                         .get_inner()
                         .send_status_update(
-                            state.next_status_update.write_lsn,
-                            state.next_status_update.flush_lsn,
+                            state.write_lsn(),
+                            state.flush_lsn(),
                             false
                         )
                         .await?;
@@ -617,8 +661,8 @@ where
                     .as_mut()
                     .get_inner()
                     .send_status_update(
-                        state.next_status_update.write_lsn,
-                        state.next_status_update.flush_lsn,
+                        state.write_lsn(),
+                        state.flush_lsn(),
                         false
                     )
                     .await?;
@@ -918,11 +962,7 @@ where
 
             events_stream
                 .get_inner()
-                .send_status_update(
-                    state.next_status_update.write_lsn,
-                    state.next_status_update.flush_lsn,
-                    message.reply() == 1,
-                )
+                .send_status_update(state.write_lsn(), state.flush_lsn(), message.reply() == 1)
                 .await?;
 
             state.mark_status_update_sent();

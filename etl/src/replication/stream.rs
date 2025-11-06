@@ -125,10 +125,18 @@ impl EventsStream {
     pub async fn send_status_update(
         self: Pin<&mut Self>,
         write_lsn: PgLsn,
-        flush_lsn: PgLsn,
+        mut flush_lsn: PgLsn,
         force: bool,
     ) -> EtlResult<()> {
         let this = self.project();
+
+        // If the new LSN is less than the last one, we can safely ignore it, since we only want
+        // to report monotonically increasing LSN values.
+        if let Some(last_flush_lsn) = this.last_flush_lsn {
+            if flush_lsn < *last_flush_lsn {
+                flush_lsn = *last_flush_lsn;
+            }
+        }
 
         // If we are not forced to send an update, we can willingly do so based on a set of conditions.
         if !force
@@ -137,8 +145,8 @@ impl EventsStream {
         {
             // The reason for only checking `flush_lsn` and `apply_lsn` is that if we are not
             // forced to send a status update to Postgres (when reply is requested), we want to just
-            // notify it in case we actually durably flushed and persisted events, which is signalled via
-            // the two aforementioned fields. The `write_lsn` field is mostly used by Postgres for
+            // notify it in case we actually durably flushed and persisted events, which is signaled via
+            // the two aforementioned fields. Postgres mostly uses the 'write_lsn' field for
             // tracking what was received by the replication client but not what the client actually
             // safely stored.
             //
