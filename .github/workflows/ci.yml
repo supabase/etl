@@ -114,7 +114,7 @@ jobs:
 
   test-full:
     name: Tests (Full)
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     # Run on non-forks.
     if: github.event.pull_request.head.repo.fork == false
     permissions:
@@ -124,19 +124,6 @@ jobs:
       matrix:
         postgres_version: [17, 16, 15, 14]
     steps:
-      # Free some disk space based on this article: https://carlosbecker.com/posts/github-actions-disk-space/
-      - name: Print Free Disk Space
-        run: df -h
-
-      - name: Cleanup Disk
-        run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
-          sudo docker image prune --all --force
-          sudo docker builder prune -a --force
-
-      - name: Print Free Disk Space
-        run: df -h
-
       - name: Checkout
         uses: actions/checkout@v4
 
