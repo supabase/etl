@@ -169,6 +169,7 @@ expression: stateful_set_json
           }
         ],
         "nodeSelector": {
+          "etl.supabase.com/node-role": "workloads",
           "nodeType": "workloads"
         },
         "terminationGracePeriodSeconds": 300,
@@ -176,6 +177,12 @@ expression: stateful_set_json
           {
             "effect": "NoSchedule",
             "key": "nodeType",
+            "operator": "Equal",
+            "value": "workloads"
+          },
+          {
+            "effect": "NoSchedule",
+            "key": "etl.supabase.com/node-role",
             "operator": "Equal",
             "value": "workloads"
           }
