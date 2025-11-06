@@ -667,7 +667,8 @@ fn create_node_selector_json(environment: &Environment) -> serde_json::Value {
     match environment {
         Environment::Dev => json!({}),
         Environment::Staging | Environment::Prod => json!({
-            "nodeType": "workloads"
+            "nodeType": "workloads",
+            "etl.supabase.com/node-role": "workloads"
         }),
     }
 }
@@ -883,10 +884,16 @@ fn create_replicator_stateful_set_json(
           },
           "spec": {
             "volumes": volumes,
-            // Allow scheduling onto nodes tainted with `nodeType=workloads`.
+            // Allow scheduling onto nodes tainted with the right node role.
             "tolerations": [
               {
                 "key": "nodeType",
+                "operator": "Equal",
+                "value": "workloads",
+                "effect": "NoSchedule"
+              },
+              {
+                "key": "etl.supabase.com/node-role",
                 "operator": "Equal",
                 "value": "workloads",
                 "effect": "NoSchedule"
