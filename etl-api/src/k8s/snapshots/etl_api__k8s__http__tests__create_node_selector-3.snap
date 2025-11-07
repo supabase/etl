@@ -3,6 +3,5 @@ source: etl-api/src/k8s/http.rs
 expression: node_selector
 ---
 {
-  "etl.supabase.com/node-role": "workloads",
-  "nodeType": "workloads"
+  "etl.supabase.com/node-role": "workloads"
 }
