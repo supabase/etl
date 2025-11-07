@@ -65,8 +65,6 @@ const LOGS_VOLUME_NAME: &str = "logs";
 pub const TRUSTED_ROOT_CERT_CONFIG_MAP_NAME: &str = "trusted-root-certs-config";
 /// Key inside the trusted root certificates ConfigMap.
 pub const TRUSTED_ROOT_CERT_KEY_NAME: &str = "trusted_root_certs";
-/// Pod template annotation used to trigger rolling restarts.
-const RESTARTED_AT_ANNOTATION_KEY: &str = "etl.supabase.com/restarted-at";
 /// Label used to identify replicator pods.
 const REPLICATOR_APP_LABEL: &str = "etl-replicator-app";
 
@@ -868,18 +866,18 @@ fn create_replicator_stateful_set_json(
         "replicas": 1,
         "selector": {
           "matchLabels": {
-            "app-name": replicator_app_name,
+            "etl.supabase.com/app-name": replicator_app_name,
           }
         },
         "template": {
           "metadata": {
             "labels": {
-              "app-name": replicator_app_name,
-              "app": REPLICATOR_APP_LABEL
+              "etl.supabase.com/app-name": replicator_app_name,
+              "etl.supabase.com/app-type": REPLICATOR_APP_LABEL
             },
             "annotations": {
               // Attach template annotations (e.g., restart checksum) to trigger a rolling restart
-              RESTARTED_AT_ANNOTATION_KEY: restarted_at_annotation,
+              "etl.supabase.com/restarted-at": restarted_at_annotation,
             }
           },
           "spec": {
@@ -897,6 +895,29 @@ fn create_replicator_stateful_set_json(
                 "operator": "Equal",
                 "value": "workloads",
                 "effect": "NoSchedule"
+              }
+            ],
+            // Distribute pods evenly across nodes and availability zones.
+            "topologySpreadConstraints": [
+              {
+                "maxSkew": 1,
+                "topologyKey": "kubernetes.io/hostname",
+                "whenUnsatisfiable": "ScheduleAnyway",
+                "labelSelector": {
+                  "matchLabels": {
+                    "etl.supabase.com/app-type": REPLICATOR_APP_LABEL
+                  }
+                }
+              },
+              {
+                "maxSkew": 1,
+                "topologyKey": "topology.kubernetes.io/zone",
+                "whenUnsatisfiable": "ScheduleAnyway",
+                "labelSelector": {
+                  "matchLabels": {
+                    "etl.supabase.com/app-type": REPLICATOR_APP_LABEL
+                  }
+                }
               }
             ],
             "nodeSelector": node_selector,
