@@ -105,6 +105,12 @@ expression: stateful_set_json
             "key": "nodeType",
             "operator": "Equal",
             "value": "workloads"
+          },
+          {
+            "effect": "NoSchedule",
+            "key": "etl.supabase.com/node-role",
+            "operator": "Equal",
+            "value": "workloads"
           }
         ],
         "volumes": [
