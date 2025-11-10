@@ -53,7 +53,7 @@ impl fmt::Display for IcebergOperationType {
 /// Type alias for Iceberg table names.
 type IcebergTableName = String;
 
-/// Delimiter separating schema from table name in BigQuery table identifiers.
+/// Delimiter separating schema from table name in iceberg table identifiers.
 const ICEBERG_TABLE_ID_DELIMITER: &str = "_";
 /// Replacement string for escaping underscores in Postgres names.
 const ICEBERG_TABLE_ID_DELIMITER_ESCAPE_REPLACEMENT: &str = "__";
@@ -70,17 +70,24 @@ const SEQUENCE_NUMBER_COLUMN_NAME: &str = "sequence_number";
 /// Creates a standardized naming convention for Iceberg tables by combining
 /// the schema and table name with a `_changelog` suffix to distinguish
 /// CDC tables from regular data tables.
-pub fn table_name_to_iceberg_table_name(table_name: &TableName) -> IcebergTableName {
-    let escaped_schema = table_name.schema.replace(
-        ICEBERG_TABLE_ID_DELIMITER,
-        ICEBERG_TABLE_ID_DELIMITER_ESCAPE_REPLACEMENT,
-    );
-    let escaped_table = table_name.name.replace(
-        ICEBERG_TABLE_ID_DELIMITER,
-        ICEBERG_TABLE_ID_DELIMITER_ESCAPE_REPLACEMENT,
-    );
+pub fn table_name_to_iceberg_table_name(
+    table_name: &TableName,
+    single_destination_namespace: bool,
+) -> IcebergTableName {
+    if single_destination_namespace {
+        let escaped_schema = table_name.schema.replace(
+            ICEBERG_TABLE_ID_DELIMITER,
+            ICEBERG_TABLE_ID_DELIMITER_ESCAPE_REPLACEMENT,
+        );
+        let escaped_table = table_name.name.replace(
+            ICEBERG_TABLE_ID_DELIMITER,
+            ICEBERG_TABLE_ID_DELIMITER_ESCAPE_REPLACEMENT,
+        );
 
-    format!("{escaped_schema}_{escaped_table}_{ICEBERG_CHANGELOG_TABLE_SUFFIX}")
+        format!("{escaped_schema}_{escaped_table}_{ICEBERG_CHANGELOG_TABLE_SUFFIX}")
+    } else {
+        format!("{}_{ICEBERG_CHANGELOG_TABLE_SUFFIX}", table_name.name)
+    }
 }
 
 /// An iceberg destination that implements the ETL [`Destination`] trait.
@@ -113,6 +120,13 @@ impl DestinationNamespace {
         match self {
             DestinationNamespace::Single(ns) => ns,
             DestinationNamespace::OnePerSchema => table_namespace,
+        }
+    }
+
+    pub fn is_single(&self) -> bool {
+        match self {
+            DestinationNamespace::Single(_) => true,
+            DestinationNamespace::OnePerSchema => false,
         }
     }
 }
@@ -368,7 +382,8 @@ where
 
         let table_schema = Self::add_cdc_columns(&table_schema);
 
-        let iceberg_table_name = table_name_to_iceberg_table_name(&table_schema.name);
+        let iceberg_table_name =
+            table_name_to_iceberg_table_name(&table_schema.name, inner.namespace.is_single());
         let iceberg_table_name = self
             .get_or_create_iceberg_table_name(&table_id, iceberg_table_name)
             .await?;

@@ -61,6 +61,7 @@ async fn run_table_copy_test(destination_namespace: DestinationNamespace) {
         DestinationNamespace::OnePerSchema => TestDatabaseSchema::schema().to_string(),
     };
 
+    let single_destination_namespace = destination_namespace.is_single();
     let raw_destination =
         IcebergDestination::new(client.clone(), destination_namespace, store.clone());
     // let raw_destination = bigquery_database.build_destination(store.clone()).await;
@@ -96,8 +97,14 @@ async fn run_table_copy_test(destination_namespace: DestinationNamespace) {
 
     pipeline.shutdown_and_wait().await.unwrap();
 
-    let users_table = table_name_to_iceberg_table_name(&database_schema.users_schema().name);
-    let orders_table = table_name_to_iceberg_table_name(&database_schema.orders_schema().name);
+    let users_table = table_name_to_iceberg_table_name(
+        &database_schema.users_schema().name,
+        single_destination_namespace,
+    );
+    let orders_table = table_name_to_iceberg_table_name(
+        &database_schema.orders_schema().name,
+        single_destination_namespace,
+    );
 
     let mut actual_users = read_all_rows(&client, namespace.to_string(), users_table.clone()).await;
 
@@ -195,6 +202,7 @@ async fn run_cdc_streaming_test(destination_namespace: DestinationNamespace) {
         DestinationNamespace::OnePerSchema => TestDatabaseSchema::schema().to_string(),
     };
 
+    let single_destination_namespace = destination_namespace.is_single();
     let raw_destination =
         IcebergDestination::new(client.clone(), destination_namespace, store.clone());
     let destination = TestDestinationWrapper::wrap(raw_destination);
@@ -310,8 +318,14 @@ async fn run_cdc_streaming_test(destination_namespace: DestinationNamespace) {
     event_notify.notified().await;
 
     // base table names
-    let users_table = table_name_to_iceberg_table_name(&database_schema.users_schema().name);
-    let orders_table = table_name_to_iceberg_table_name(&database_schema.orders_schema().name);
+    let users_table = table_name_to_iceberg_table_name(
+        &database_schema.users_schema().name,
+        single_destination_namespace,
+    );
+    let orders_table = table_name_to_iceberg_table_name(
+        &database_schema.orders_schema().name,
+        single_destination_namespace,
+    );
 
     let mut actual_users = read_all_rows(&client, namespace.to_string(), users_table.clone()).await;
 
@@ -486,6 +500,7 @@ async fn run_cdc_streaming_with_truncate_test(destination_namespace: Destination
         DestinationNamespace::OnePerSchema => TestDatabaseSchema::schema().to_string(),
     };
 
+    let single_destination_namespace = destination_namespace.is_single();
     let raw_destination =
         IcebergDestination::new(client.clone(), destination_namespace, store.clone());
     let destination = TestDestinationWrapper::wrap(raw_destination);
@@ -557,8 +572,14 @@ async fn run_cdc_streaming_with_truncate_test(destination_namespace: Destination
     destination.clear_events().await;
 
     // base table names
-    let users_table = table_name_to_iceberg_table_name(&database_schema.users_schema().name);
-    let orders_table = table_name_to_iceberg_table_name(&database_schema.orders_schema().name);
+    let users_table = table_name_to_iceberg_table_name(
+        &database_schema.users_schema().name,
+        single_destination_namespace,
+    );
+    let orders_table = table_name_to_iceberg_table_name(
+        &database_schema.orders_schema().name,
+        single_destination_namespace,
+    );
 
     let actual_users = read_all_rows(&client, namespace.to_string(), users_table.clone()).await;
     let actual_orders = read_all_rows(&client, namespace.to_string(), users_table.clone()).await;
