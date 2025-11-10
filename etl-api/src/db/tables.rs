@@ -25,10 +25,8 @@ pub async fn get_tables(pool: &PgPool) -> Result<Vec<Table>, TablesDbError> {
             left join pg_catalog.pg_am am on am.oid = c.relam
         where
            	c.relkind = 'r'
-           	and n.nspname <> 'pg_catalog'
+           	and n.nspname not in ('pg_catalog', 'information_schema', 'auth', 'etl', 'extensions', 'graphql', 'pgtle', 'pgsodium', 'relatime', 'storage', 'vault')
             and n.nspname !~ '^pg_toast'
-            and n.nspname <> 'information_schema'
-           	and pg_catalog.pg_table_is_visible(c.oid)
         order by schema, name;
         "#;
 
