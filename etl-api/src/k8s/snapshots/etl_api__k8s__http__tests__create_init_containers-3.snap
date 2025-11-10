@@ -20,11 +20,11 @@ expression: node_selector
     "resources": {
       "limits": {
         "cpu": "100m",
-        "memory": "100Mi"
+        "memory": "120Mi"
       },
       "requests": {
         "cpu": "50m",
-        "memory": "83Mi"
+        "memory": "100Mi"
       }
     },
     "restartPolicy": "Always",

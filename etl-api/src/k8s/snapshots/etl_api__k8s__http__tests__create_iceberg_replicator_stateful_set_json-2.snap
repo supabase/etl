@@ -121,11 +121,11 @@ expression: stateful_set_json
             "resources": {
               "limits": {
                 "cpu": "250m",
-                "memory": "511Mi"
+                "memory": "300Mi"
               },
               "requests": {
                 "cpu": "125m",
-                "memory": "426Mi"
+                "memory": "250Mi"
               }
             },
             "volumeMounts": [
@@ -158,11 +158,11 @@ expression: stateful_set_json
             "resources": {
               "limits": {
                 "cpu": "100m",
-                "memory": "100Mi"
+                "memory": "120Mi"
               },
               "requests": {
                 "cpu": "50m",
-                "memory": "83Mi"
+                "memory": "100Mi"
               }
             },
             "restartPolicy": "Always",
