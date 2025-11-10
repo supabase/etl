@@ -145,6 +145,7 @@ impl HttpK8sClient {
         }
     }
 
+    /// Returns true if the replicator container in the pod has terminated with error code
     fn has_replicator_container_error(pod: &Pod, replicator_container_name: &str) -> bool {
         // Find the replicator container status
         let container_status = pod.status.as_ref().and_then(|status| {

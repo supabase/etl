@@ -66,7 +66,8 @@ impl From<&str> for PodPhase {
 }
 
 /// A pod's status which takes into account whether a deletion has been
-/// requested or are there any errors etc. to determine the its current state
+/// requested, the pod's actual status and if the pod exited with an error
+/// to determine the its current state
 pub enum PodStatus {
     Stopped,
     Starting,
