@@ -68,36 +68,75 @@ pub const TRUSTED_ROOT_CERT_KEY_NAME: &str = "trusted_root_certs";
 /// Label used to identify replicator pods.
 const REPLICATOR_APP_LABEL: &str = "etl-replicator-app";
 
-/// Replicator memory limit tuned for `c6in.4xlarge` instances.
-const REPLICATOR_MAX_MEMORY_PROD: &str = "500Mi";
-/// Replicator CPU limit tuned for `c6in.4xlarge` instances.
-const REPLICATOR_MAX_CPU_PROD: &str = "100m";
-/// Replicator memory limit tuned for `t3.small` instances.
-const REPLICATOR_MAX_MEMORY_STAGING: &str = "100Mi";
-/// Replicator CPU limit tuned for `t3.small` instances.
-const REPLICATOR_MAX_CPU_STAGING: &str = "100m";
+/// Replicator memory request tuned for `c8gn.4xlarge` instances in prod.
+const REPLICATOR_MEMORY_REQUEST_PROD: i32 = 500;
+/// Replicator CPU request tuned for `c8gn.4xlarge` instances in prod.
+const REPLICATOR_CPU_REQUEST_PROD: i32 = 250;
+
+/// Replicator memory request tuned for `c8gn.medium` instances in staging.
+const REPLICATOR_MEMORY_REQUEST_STAGING: i32 = 250;
+/// Replicator CPU request tuned for `c8gn.medium` instances in staging.
+const REPLICATOR_CPU_REQUEST_STAGING: i32 = 125;
+
+/// Vector memory request for init container.
+const VECTOR_MEMORY_REQUEST: i32 = 100;
+/// Vector CPU request for init container.
+const VECTOR_CPU_REQUEST: i32 = 50;
+
+/// Memory limit multiplier (request × 1.2 = limit).
+///
+/// We want to have 20% leeway in case of a memory usage spike.
+const MEMORY_LIMIT_MULTIPLIER: f32 = 1.2;
+/// CPU limit multiplier (request × 2.0 = limit).
+///
+/// CPU can be throttled, so the limits can be put higher.
+const CPU_LIMIT_MULTIPLIER: f32 = 2.0;
 
 /// Resource limits for a replicator pod.
 struct ReplicatorResourceConfig {
-    max_memory: &'static str,
-    max_cpu: &'static str,
+    replicator_memory_limit: String,
+    replicator_memory_request: String,
+    replicator_cpu_limit: String,
+    replicator_cpu_request: String,
+    vector_memory_limit: String,
+    vector_memory_request: String,
+    vector_cpu_limit: String,
+    vector_cpu_request: String,
 }
 
 impl ReplicatorResourceConfig {
     /// Loads the runtime limits for the current environment.
+    ///
+    /// Limits are computed from requests using multipliers:
+    /// - Memory: request × 1.2 = limit
+    /// - CPU: request × 2.0 = limit
     fn load(environment: &Environment) -> Result<Self, K8sError> {
-        let config = match environment {
-            Environment::Prod => Self {
-                max_memory: REPLICATOR_MAX_MEMORY_PROD,
-                max_cpu: REPLICATOR_MAX_CPU_PROD,
-            },
-            _ => Self {
-                max_memory: REPLICATOR_MAX_MEMORY_STAGING,
-                max_cpu: REPLICATOR_MAX_CPU_STAGING,
-            },
+        let (replicator_memory_request, replicator_cpu_request) = match environment {
+            Environment::Prod => (REPLICATOR_MEMORY_REQUEST_PROD, REPLICATOR_CPU_REQUEST_PROD),
+            _ => (
+                REPLICATOR_MEMORY_REQUEST_STAGING,
+                REPLICATOR_CPU_REQUEST_STAGING,
+            ),
         };
 
-        Ok(config)
+        let replicator_memory_limit =
+            ((replicator_memory_request as f32) * MEMORY_LIMIT_MULTIPLIER).round() as i32;
+        let replicator_cpu_limit =
+            ((replicator_cpu_request as f32) * CPU_LIMIT_MULTIPLIER).round() as i32;
+        let vector_memory_limit =
+            ((VECTOR_MEMORY_REQUEST as f32) * MEMORY_LIMIT_MULTIPLIER).round() as i32;
+        let vector_cpu_limit = ((VECTOR_CPU_REQUEST as f32) * CPU_LIMIT_MULTIPLIER).round() as i32;
+
+        Ok(Self {
+            replicator_memory_limit: format!("{replicator_memory_limit}Mi"),
+            replicator_memory_request: format!("{replicator_memory_request}Mi"),
+            replicator_cpu_limit: format!("{replicator_cpu_limit}m"),
+            replicator_cpu_request: format!("{replicator_cpu_request}m"),
+            vector_memory_limit: format!("{vector_memory_limit}Mi"),
+            vector_memory_request: format!("{VECTOR_MEMORY_REQUEST}Mi"),
+            vector_cpu_limit: format!("{vector_cpu_limit}m"),
+            vector_cpu_request: format!("{VECTOR_CPU_REQUEST}m"),
+        })
     }
 }
 
@@ -387,6 +426,7 @@ impl K8sClient for HttpK8sClient {
             init_containers,
             volumes,
             volume_mounts,
+            &config,
         );
 
         let stateful_set: StatefulSet = serde_json::from_value(stateful_set_json)?;
@@ -706,12 +746,12 @@ fn create_init_containers_json(
             ],
             "resources": {
               "limits": {
-                "memory": config.max_memory,
-                "cpu": config.max_cpu,
+                "memory": config.vector_memory_limit,
+                "cpu": config.vector_cpu_limit,
               },
               "requests": {
-                "memory": config.max_memory,
-                "cpu": config.max_cpu,
+                "memory": config.vector_memory_request,
+                "cpu": config.vector_cpu_request,
               }
             },
             "volumeMounts": [
@@ -858,6 +898,7 @@ fn create_replicator_stateful_set_json(
     init_containers: serde_json::Value,
     volumes: Vec<serde_json::Value>,
     volume_mounts: Vec<serde_json::Value>,
+    config: &ReplicatorResourceConfig,
 ) -> serde_json::Value {
     let replicator_app_name = create_replicator_app_name(prefix);
     let restarted_at_annotation = get_restarted_at_annotation_value();
@@ -916,7 +957,17 @@ fn create_replicator_stateful_set_json(
                   }
                 ],
                 "env": container_environment,
-                "volumeMounts": volume_mounts
+                "volumeMounts": volume_mounts,
+                "resources": {
+                  "limits": {
+                    "memory": config.replicator_memory_limit,
+                    "cpu": config.replicator_cpu_limit,
+                  },
+                  "requests": {
+                    "memory": config.replicator_memory_request,
+                    "cpu": config.replicator_cpu_request,
+                  }
+                }
               }
             ]
           }
@@ -1269,6 +1320,7 @@ mod tests {
             init_containers,
             volumes,
             volume_mounts,
+            &config,
         );
 
         assert_json_snapshot!(stateful_set_json, { ".spec.template.metadata.annotations[\"etl.supabase.com/restarted-at\"]" => "[timestamp]"});
@@ -1300,6 +1352,7 @@ mod tests {
             init_containers,
             volumes,
             volume_mounts,
+            &config,
         );
 
         assert_json_snapshot!(stateful_set_json, { ".spec.template.metadata.annotations[\"etl.supabase.com/restarted-at\"]" => "[timestamp]"});
@@ -1331,6 +1384,7 @@ mod tests {
             init_containers,
             volumes,
             volume_mounts,
+            &config,
         );
 
         assert_json_snapshot!(stateful_set_json, { ".spec.template.metadata.annotations[\"etl.supabase.com/restarted-at\"]" => "[timestamp]"});
@@ -1369,6 +1423,7 @@ mod tests {
             init_containers,
             volumes,
             volume_mounts,
+            &config,
         );
 
         assert_json_snapshot!(stateful_set_json, { ".spec.template.metadata.annotations[\"etl.supabase.com/restarted-at\"]" => "[timestamp]"});
@@ -1400,6 +1455,7 @@ mod tests {
             init_containers,
             volumes,
             volume_mounts,
+            &config,
         );
 
         assert_json_snapshot!(stateful_set_json, { ".spec.template.metadata.annotations[\"etl.supabase.com/restarted-at\"]" => "[timestamp]"});
@@ -1431,6 +1487,7 @@ mod tests {
             init_containers,
             volumes,
             volume_mounts,
+            &config,
         );
 
         assert_json_snapshot!(stateful_set_json, { ".spec.template.metadata.annotations[\"etl.supabase.com/restarted-at\"]" => "[timestamp]"});

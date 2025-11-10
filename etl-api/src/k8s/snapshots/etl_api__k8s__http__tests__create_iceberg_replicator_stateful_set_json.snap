@@ -88,6 +88,16 @@ expression: stateful_set_json
                 "protocol": "TCP"
               }
             ],
+            "resources": {
+              "limits": {
+                "cpu": "250m",
+                "memory": "300Mi"
+              },
+              "requests": {
+                "cpu": "125m",
+                "memory": "250Mi"
+              }
+            },
             "volumeMounts": [
               {
                 "mountPath": "/app/configuration",
