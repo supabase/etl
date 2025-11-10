@@ -113,12 +113,18 @@ impl ReplicatorResourceConfig {
     fn load(environment: &Environment) -> Result<Self, K8sError> {
         let (replicator_memory_request, replicator_cpu_request) = match environment {
             Environment::Prod => (REPLICATOR_MEMORY_REQUEST_PROD, REPLICATOR_CPU_REQUEST_PROD),
-            _ => (REPLICATOR_MEMORY_REQUEST_STAGING, REPLICATOR_CPU_REQUEST_STAGING),
+            _ => (
+                REPLICATOR_MEMORY_REQUEST_STAGING,
+                REPLICATOR_CPU_REQUEST_STAGING,
+            ),
         };
 
-        let replicator_memory_limit = ((replicator_memory_request as f32) * MEMORY_LIMIT_MULTIPLIER).round() as i32;
-        let replicator_cpu_limit = ((replicator_cpu_request as f32) * CPU_LIMIT_MULTIPLIER).round() as i32;
-        let vector_memory_limit = ((VECTOR_MEMORY_REQUEST as f32) * MEMORY_LIMIT_MULTIPLIER).round() as i32;
+        let replicator_memory_limit =
+            ((replicator_memory_request as f32) * MEMORY_LIMIT_MULTIPLIER).round() as i32;
+        let replicator_cpu_limit =
+            ((replicator_cpu_request as f32) * CPU_LIMIT_MULTIPLIER).round() as i32;
+        let vector_memory_limit =
+            ((VECTOR_MEMORY_REQUEST as f32) * MEMORY_LIMIT_MULTIPLIER).round() as i32;
         let vector_cpu_limit = ((VECTOR_CPU_REQUEST as f32) * CPU_LIMIT_MULTIPLIER).round() as i32;
 
         Ok(Self {
