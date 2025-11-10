@@ -32,8 +32,12 @@ pub trait Destination {
     ///
     /// This method is used during initial table synchronization to bulk load existing
     /// data. Rows are provided as [`TableRow`] instances with typed cell values.
-    /// Implementations should optimize for batch insertion performance while maintaining
+    /// Implementations should optimize batch insertion performance while maintaining
     /// data consistency.
+    ///
+    /// Note that this method will be called even if the source table has no data. In that case it
+    /// will supply an empty list of rows. This is done by design so that the destination can already
+    /// prepare the initial tables before starting streaming.
     fn write_table_rows(
         &self,
         table_id: TableId,

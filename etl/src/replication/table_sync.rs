@@ -225,6 +225,7 @@ where
 
             let table_copy_start = Instant::now();
             let mut total_rows_copied = 0;
+            let mut table_rows_written = false;
 
             // We start consuming the table stream. If any error occurs, we will bail the entire copy since
             // we want to be fully consistent.
@@ -247,6 +248,7 @@ where
                         let before_sending = Instant::now();
 
                         destination.write_table_rows(table_id, table_rows).await?;
+                        table_rows_written = true;
 
                         metrics::counter!(
                             ETL_EVENTS_PROCESSED_TOTAL,
@@ -283,6 +285,16 @@ where
                         return Ok(TableSyncResult::SyncStopped);
                     }
                 }
+            }
+
+            // If no table rows were written, we call the method nonetheless with no rows, to kickstart
+            // table creation.
+            if !table_rows_written {
+                destination.write_table_rows(table_id, vec![]).await?;
+                info!(
+                    "writing empty table rows since table {} was empty",
+                    table_id
+                );
             }
 
             // We commit the transaction before starting the apply loop, otherwise it will fail
