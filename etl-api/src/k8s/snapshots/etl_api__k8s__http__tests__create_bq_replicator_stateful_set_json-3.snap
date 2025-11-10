@@ -100,6 +100,16 @@ expression: stateful_set_json
                 "protocol": "TCP"
               }
             ],
+            "resources": {
+              "limits": {
+                "cpu": "1000m",
+                "memory": "2047Mi"
+              },
+              "requests": {
+                "cpu": "500m",
+                "memory": "1706Mi"
+              }
+            },
             "volumeMounts": [
               {
                 "mountPath": "/app/configuration",
@@ -130,11 +140,11 @@ expression: stateful_set_json
             "resources": {
               "limits": {
                 "cpu": "100m",
-                "memory": "500Mi"
+                "memory": "100Mi"
               },
               "requests": {
-                "cpu": "100m",
-                "memory": "500Mi"
+                "cpu": "50m",
+                "memory": "83Mi"
               }
             },
             "restartPolicy": "Always",

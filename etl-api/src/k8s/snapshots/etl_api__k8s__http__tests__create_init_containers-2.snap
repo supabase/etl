@@ -23,8 +23,8 @@ expression: node_selector
         "memory": "100Mi"
       },
       "requests": {
-        "cpu": "100m",
-        "memory": "100Mi"
+        "cpu": "50m",
+        "memory": "83Mi"
       }
     },
     "restartPolicy": "Always",
