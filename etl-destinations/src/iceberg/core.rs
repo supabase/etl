@@ -228,9 +228,11 @@ where
             row.values.push(Cell::String(sequence_number));
         }
 
-        self.client
-            .insert_rows(namespace, iceberg_table_name, table_rows)
-            .await?;
+        if !table_rows.is_empty() {
+            self.client
+                .insert_rows(namespace, iceberg_table_name, table_rows)
+                .await?;
+        }
 
         Ok(())
     }
@@ -637,7 +639,7 @@ fn schema_to_namespace(schema: &str) -> String {
 mod tests {
     use etl::types::{ColumnSchema, Type};
 
-    use crate::iceberg::destination::{
+    use crate::iceberg::core::{
         CDC_OPERATION_COLUMN_NAME, find_unique_column_name, schema_to_namespace,
     };
 

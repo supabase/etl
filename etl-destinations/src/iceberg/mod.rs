@@ -1,12 +1,12 @@
 mod catalog;
 mod client;
-mod destination;
+mod core;
 mod encoding;
 mod error;
 mod schema;
 
 pub use client::IcebergClient;
-pub use destination::{
+pub use core::{
     DestinationNamespace, IcebergDestination, IcebergOperationType,
     table_name_to_iceberg_table_name,
 };
