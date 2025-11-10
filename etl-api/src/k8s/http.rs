@@ -899,29 +899,6 @@ fn create_replicator_stateful_set_json(
                 "effect": "NoSchedule"
               }
             ],
-            // Distribute pods evenly across nodes and availability zones.
-            "topologySpreadConstraints": [
-              {
-                "maxSkew": 1,
-                "topologyKey": "kubernetes.io/hostname",
-                "whenUnsatisfiable": "ScheduleAnyway",
-                "labelSelector": {
-                  "matchLabels": {
-                    "etl.supabase.com/app-type": REPLICATOR_APP_LABEL
-                  }
-                }
-              },
-              {
-                "maxSkew": 1,
-                "topologyKey": "topology.kubernetes.io/zone",
-                "whenUnsatisfiable": "ScheduleAnyway",
-                "labelSelector": {
-                  "matchLabels": {
-                    "etl.supabase.com/app-type": REPLICATOR_APP_LABEL
-                  }
-                }
-              }
-            ],
             "nodeSelector": node_selector,
             // We want to wait at most 5 minutes before K8S sends a `SIGKILL` to the containers,
             // this way we let the system finish any in-flight transaction, if there are any.

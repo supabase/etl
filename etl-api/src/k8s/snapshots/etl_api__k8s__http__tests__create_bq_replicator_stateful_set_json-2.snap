@@ -162,28 +162,6 @@ expression: stateful_set_json
             "value": "workloads"
           }
         ],
-        "topologySpreadConstraints": [
-          {
-            "labelSelector": {
-              "matchLabels": {
-                "etl.supabase.com/app-type": "etl-replicator-app"
-              }
-            },
-            "maxSkew": 1,
-            "topologyKey": "kubernetes.io/hostname",
-            "whenUnsatisfiable": "ScheduleAnyway"
-          },
-          {
-            "labelSelector": {
-              "matchLabels": {
-                "etl.supabase.com/app-type": "etl-replicator-app"
-              }
-            },
-            "maxSkew": 1,
-            "topologyKey": "topology.kubernetes.io/zone",
-            "whenUnsatisfiable": "ScheduleAnyway"
-          }
-        ],
         "volumes": [
           {
             "configMap": {
