@@ -13,7 +13,7 @@ expression: stateful_set_json
     "replicas": 1,
     "selector": {
       "matchLabels": {
-        "app-name": "abcdefghijklmnopqrst-42-replicator-app"
+        "etl.supabase.com/app-name": "abcdefghijklmnopqrst-42-replicator-app"
       }
     },
     "template": {
@@ -22,8 +22,8 @@ expression: stateful_set_json
           "etl.supabase.com/restarted-at": "[timestamp]"
         },
         "labels": {
-          "app": "etl-replicator-app",
-          "app-name": "abcdefghijklmnopqrst-42-replicator-app"
+          "etl.supabase.com/app-name": "abcdefghijklmnopqrst-42-replicator-app",
+          "etl.supabase.com/app-type": "etl-replicator-app"
         }
       },
       "spec": {
@@ -178,6 +178,28 @@ expression: stateful_set_json
             "key": "etl.supabase.com/node-role",
             "operator": "Equal",
             "value": "workloads"
+          }
+        ],
+        "topologySpreadConstraints": [
+          {
+            "labelSelector": {
+              "matchLabels": {
+                "etl.supabase.com/app-type": "etl-replicator-app"
+              }
+            },
+            "maxSkew": 1,
+            "topologyKey": "kubernetes.io/hostname",
+            "whenUnsatisfiable": "ScheduleAnyway"
+          },
+          {
+            "labelSelector": {
+              "matchLabels": {
+                "etl.supabase.com/app-type": "etl-replicator-app"
+              }
+            },
+            "maxSkew": 1,
+            "topologyKey": "topology.kubernetes.io/zone",
+            "whenUnsatisfiable": "ScheduleAnyway"
           }
         ],
         "volumes": [
