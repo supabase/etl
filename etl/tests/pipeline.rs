@@ -7,17 +7,19 @@ use etl::test_utils::database::{spawn_source_database, test_table_name};
 use etl::test_utils::event::group_events_by_type_and_table_id;
 use etl::test_utils::notify::NotifyingStore;
 use etl::test_utils::pipeline::{create_pipeline, create_pipeline_with};
+use etl::test_utils::table::assert_table_schema;
 use etl::test_utils::test_destination_wrapper::TestDestinationWrapper;
 use etl::test_utils::test_schema::{
     TableSelection, assert_events_equal, build_expected_orders_inserts,
     build_expected_users_inserts, get_n_integers_sum, get_users_age_sum_from_rows,
     insert_mock_data, insert_users_data, setup_test_database_schema,
 };
-use etl::types::{Event, EventType, InsertEvent, PipelineId};
+use etl::types::{Event, EventType, InsertEvent, PipelineId, Type};
 use etl_config::shared::BatchConfig;
 use etl_postgres::below_version;
 use etl_postgres::replication::slots::EtlReplicationSlot;
-use etl_postgres::tokio::test_utils::TableModification;
+use etl_postgres::tokio::test_utils::{TableModification, id_column_schema};
+use etl_postgres::types::ColumnSchema;
 use etl_postgres::version::POSTGRES_15;
 use etl_telemetry::tracing::init_test_tracing;
 use rand::random;
@@ -1092,4 +1094,90 @@ async fn pipeline_respects_column_level_publication() {
     assert!(column_names.contains(&"age"));
     assert!(!column_names.contains(&"email"));
     assert_eq!(stored_schema.column_schemas.len(), 3);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn empty_tables_are_created_at_destination() {
+    init_test_tracing();
+    let database = spawn_source_database().await;
+
+    // Create an empty table with a primary key.
+    let table_name = test_table_name("empty_table");
+    let table_id = database
+        .create_table(
+            table_name.clone(),
+            true,
+            &[("name", "text"), ("created_at", "timestamp")],
+        )
+        .await
+        .unwrap();
+
+    // Create publication for the table.
+    let publication_name = format!("pub_{}", random::<u32>());
+    database
+        .run_sql(&format!(
+            "create publication {} for table {}",
+            publication_name,
+            table_name.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+
+    let state_store = NotifyingStore::new();
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
+
+    // Start the pipeline.
+    let pipeline_id: PipelineId = random();
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        publication_name,
+        state_store.clone(),
+        destination.clone(),
+    );
+
+    pipeline.start().await.unwrap();
+
+    // Wait for the table to be synced.
+    let table_synced_notify = state_store
+        .notify_on_table_state_type(table_id, TableReplicationPhaseType::SyncDone)
+        .await;
+
+    table_synced_notify.notified().await;
+
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    // Verify the table schema was stored.
+    let table_schemas = state_store.get_table_schemas().await;
+    assert_table_schema(
+        &table_schemas,
+        table_id,
+        table_name,
+        &[
+            id_column_schema(),
+            ColumnSchema {
+                name: "name".to_string(),
+                typ: Type::TEXT,
+                modifier: -1,
+                nullable: true,
+                primary: false,
+            },
+            ColumnSchema {
+                name: "created_at".to_string(),
+                typ: Type::TIMESTAMP,
+                modifier: -1,
+                nullable: true,
+                primary: false,
+            },
+        ],
+    );
+
+    // Verify no rows were written (table was empty).
+    let all_table_rows = destination.get_table_rows().await;
+    let empty_vec = vec![];
+    let table_rows = all_table_rows.get(&table_id).unwrap_or(&empty_vec);
+    assert!(table_rows.is_empty());
+
+    // Verify that the write table rows method was called nonetheless.
+    assert_eq!(destination.write_table_rows_called().await, 1);
 }

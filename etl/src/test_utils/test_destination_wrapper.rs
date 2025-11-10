@@ -19,6 +19,7 @@ struct Inner<D> {
     table_rows: HashMap<TableId, Vec<TableRow>>,
     event_conditions: Vec<(EventCondition, Arc<Notify>)>,
     table_row_conditions: Vec<(TableRowCondition, Arc<Notify>)>,
+    write_table_rows_called: u64,
 }
 
 impl<D> Inner<D> {
@@ -83,6 +84,7 @@ impl<D> TestDestinationWrapper<D> {
             table_rows: HashMap::new(),
             event_conditions: Vec::new(),
             table_row_conditions: Vec::new(),
+            write_table_rows_called: 0,
         };
 
         Self {
@@ -142,6 +144,10 @@ impl<D> TestDestinationWrapper<D> {
         let mut inner = self.inner.write().await;
         inner.events.clear();
     }
+
+    pub async fn write_table_rows_called(&self) -> u64 {
+        self.inner.read().await.write_table_rows_called
+    }
 }
 
 impl<D> Destination for TestDestinationWrapper<D>
@@ -192,7 +198,8 @@ where
         table_rows: Vec<TableRow>,
     ) -> EtlResult<()> {
         let destination = {
-            let inner = self.inner.read().await;
+            let mut inner = self.inner.write().await;
+            inner.write_table_rows_called += 1;
             inner.wrapped_destination.clone()
         };
 
