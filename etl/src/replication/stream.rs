@@ -132,10 +132,10 @@ impl EventsStream {
 
         // If the new LSN is less than the last one, we can safely ignore it, since we only want
         // to report monotonically increasing LSN values.
-        if let Some(last_flush_lsn) = this.last_flush_lsn {
-            if flush_lsn < *last_flush_lsn {
-                flush_lsn = *last_flush_lsn;
-            }
+        if let Some(last_flush_lsn) = this.last_flush_lsn
+            && flush_lsn < *last_flush_lsn
+        {
+            flush_lsn = *last_flush_lsn;
         }
 
         // If we are not forced to send an update, we can willingly do so based on a set of conditions.
