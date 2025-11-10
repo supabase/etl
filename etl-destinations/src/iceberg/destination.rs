@@ -86,10 +86,7 @@ pub fn table_name_to_iceberg_table_name(
 
         format!("{escaped_schema}_{escaped_table}_{ICEBERG_CHANGELOG_TABLE_SUFFIX}")
     } else {
-        format!(
-            "{}_{}_{ICEBERG_CHANGELOG_TABLE_SUFFIX}",
-            table_name.schema, table_name.name
-        )
+        format!("{}_{ICEBERG_CHANGELOG_TABLE_SUFFIX}", table_name.name)
     }
 }
 
