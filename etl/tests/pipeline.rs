@@ -1147,7 +1147,7 @@ async fn empty_tables_are_created_at_destination() {
 
     pipeline.shutdown_and_wait().await.unwrap();
 
-    // Verify the table schema was stored even though no rows were copied.
+    // Verify the table schema was stored.
     let table_schemas = state_store.get_table_schemas().await;
     assert_table_schema(
         &table_schemas,
@@ -1177,4 +1177,7 @@ async fn empty_tables_are_created_at_destination() {
     let empty_vec = vec![];
     let table_rows = all_table_rows.get(&table_id).unwrap_or(&empty_vec);
     assert!(table_rows.is_empty());
+
+    // Verify that the write table rows method was called nonetheless.
+    assert_eq!(destination.write_table_rows_called().await, 1);
 }
