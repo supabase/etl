@@ -128,14 +128,14 @@ impl ReplicatorResourceConfig {
         let vector_cpu_limit = ((VECTOR_CPU_REQUEST as f32) * CPU_LIMIT_MULTIPLIER).round() as i32;
 
         Ok(Self {
-            replicator_memory_limit: format!("{}Mi", replicator_memory_limit),
-            replicator_memory_request: format!("{}Mi", replicator_memory_request),
-            replicator_cpu_limit: format!("{}m", replicator_cpu_limit),
-            replicator_cpu_request: format!("{}m", replicator_cpu_request),
-            vector_memory_limit: format!("{}Mi", vector_memory_limit),
-            vector_memory_request: format!("{}Mi", VECTOR_MEMORY_REQUEST),
-            vector_cpu_limit: format!("{}m", vector_cpu_limit),
-            vector_cpu_request: format!("{}m", VECTOR_CPU_REQUEST),
+            replicator_memory_limit: format!("{replicator_memory_limit}Mi"),
+            replicator_memory_request: format!("{replicator_memory_request}Mi"),
+            replicator_cpu_limit: format!("{replicator_cpu_limit}m"),
+            replicator_cpu_request: format!("{replicator_cpu_request}m"),
+            vector_memory_limit: format!("{vector_memory_limit}Mi"),
+            vector_memory_request: format!("{VECTOR_MEMORY_REQUEST}Mi"),
+            vector_cpu_limit: format!("{vector_cpu_limit}m"),
+            vector_cpu_request: format!("{VECTOR_CPU_REQUEST}m"),
         })
     }
 }
