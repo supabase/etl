@@ -65,6 +65,18 @@ impl From<&str> for PodPhase {
     }
 }
 
+/// A pod's status which takes into account whether a deletion has been
+/// requested, the pod's actual status and if the pod exited with an error
+/// to determine the its current state
+pub enum PodStatus {
+    Stopped,
+    Starting,
+    Started,
+    Stopping,
+    Failed,
+    Unknown,
+}
+
 /// Client interface describing the Kubernetes operations used by the API.
 ///
 /// Implementations are expected to be idempotent where possible by issuing
@@ -149,10 +161,6 @@ pub trait K8sClient: Send + Sync {
     /// Deletes the replicator [`StatefulSet`] if it exists.
     async fn delete_stateful_set(&self, prefix: &str) -> Result<(), K8sError>;
 
-    /// Returns the phase of the replicator pod.
-    async fn get_pod_phase(&self, prefix: &str) -> Result<PodPhase, K8sError>;
-
-    /// Reports whether the replicator container terminated with a non-zero exit
-    /// code.
-    async fn has_replicator_container_error(&self, prefix: &str) -> Result<bool, K8sError>;
+    /// Returns the status of the replicator pod.
+    async fn get_pod_status(&self, prefix: &str) -> Result<PodStatus, K8sError>;
 }

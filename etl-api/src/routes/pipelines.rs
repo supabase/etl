@@ -12,7 +12,6 @@ use std::ops::DerefMut;
 use thiserror::Error;
 use utoipa::ToSchema;
 
-use crate::config::ApiConfig;
 use crate::configs::encryption::EncryptionKey;
 use crate::configs::pipeline::{FullApiPipelineConfig, PartialApiPipelineConfig};
 use crate::db;
@@ -25,11 +24,12 @@ use crate::k8s::core::{
     create_k8s_object_prefix, create_or_update_pipeline_resources_in_k8s,
     delete_pipeline_resources_in_k8s,
 };
-use crate::k8s::{K8sClient, K8sError, PodPhase};
+use crate::k8s::{K8sClient, K8sError};
 use crate::routes::{
     ErrorMessage, TenantIdError, connect_to_source_database_with_defaults, extract_tenant_id,
 };
 use crate::utils::parse_docker_image_tag;
+use crate::{config::ApiConfig, k8s::PodStatus};
 
 #[derive(Debug, Error)]
 pub enum PipelineError {
@@ -407,8 +407,22 @@ pub enum PipelineStatus {
     Stopped,
     Starting,
     Started,
-    Unknown,
+    Stopping,
     Failed,
+    Unknown,
+}
+
+impl From<PodStatus> for PipelineStatus {
+    fn from(value: PodStatus) -> Self {
+        match value {
+            PodStatus::Stopped => PipelineStatus::Stopped,
+            PodStatus::Starting => PipelineStatus::Starting,
+            PodStatus::Started => PipelineStatus::Started,
+            PodStatus::Stopping => PipelineStatus::Stopping,
+            PodStatus::Failed => PipelineStatus::Failed,
+            PodStatus::Unknown => PipelineStatus::Unknown,
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
@@ -871,26 +885,8 @@ pub async fn get_pipeline_status(
 
     let prefix = create_k8s_object_prefix(tenant_id, replicator.id);
 
-    // We load the pod phase.
-    let pod_phase = k8s_client.get_pod_phase(&prefix).await?;
-
-    // Check if there's a container error.
-    //
-    // We are not exposing the error to not leak any internal information of the pod and because we
-    // will expose it through logs.
-    let has_container_error = k8s_client.has_replicator_container_error(&prefix).await?;
-
-    let status = if has_container_error {
-        PipelineStatus::Failed
-    } else {
-        match pod_phase {
-            PodPhase::Pending => PipelineStatus::Starting,
-            PodPhase::Running => PipelineStatus::Started,
-            PodPhase::Succeeded => PipelineStatus::Stopped,
-            PodPhase::Failed => PipelineStatus::Failed,
-            PodPhase::Unknown => PipelineStatus::Unknown,
-        }
-    };
+    let pod_status = k8s_client.get_pod_status(&prefix).await?;
+    let status = pod_status.into();
 
     let response = GetPipelineStatusResponse {
         pipeline_id,

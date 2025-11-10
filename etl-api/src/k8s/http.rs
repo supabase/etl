@@ -1,5 +1,5 @@
 use crate::configs::log::LogLevel;
-use crate::k8s::DestinationType;
+use crate::k8s::{DestinationType, PodStatus};
 use crate::k8s::{K8sClient, K8sError, PodPhase};
 use async_trait::async_trait;
 use base64::{Engine, prelude::BASE64_STANDARD};
@@ -143,6 +143,35 @@ impl HttpK8sClient {
             Err(kube::Error::Api(er)) if er.code == 404 => Ok(()),
             Err(e) => Err(e.into()),
         }
+    }
+
+    /// Returns true if the replicator container in the pod has terminated with error code
+    fn has_replicator_container_error(pod: &Pod, replicator_container_name: &str) -> bool {
+        // Find the replicator container status
+        let container_status = pod.status.as_ref().and_then(|status| {
+            status
+                .container_statuses
+                .as_ref()
+                .and_then(|container_statuses| {
+                    container_statuses
+                        .iter()
+                        .find(|cs| cs.name == replicator_container_name)
+                        .cloned()
+                })
+        });
+
+        let Some(container_status) = container_status else {
+            return false;
+        };
+
+        // Check last terminated state for non-zero exit code
+        if let Some(last_state) = &container_status.last_state
+            && let Some(terminated) = &last_state.terminated
+        {
+            return terminated.exit_code != 0;
+        }
+
+        false
     }
 }
 
@@ -385,15 +414,25 @@ impl K8sClient for HttpK8sClient {
         Ok(())
     }
 
-    async fn get_pod_phase(&self, prefix: &str) -> Result<PodPhase, K8sError> {
+    async fn get_pod_status(&self, prefix: &str) -> Result<PodStatus, K8sError> {
         debug!("getting pod status");
 
         let pod_name = create_pod_name(prefix);
         let pod = match self.pods_api.get(&pod_name).await {
             Ok(pod) => pod,
-            Err(kube::Error::Api(er)) if er.code == 404 => return Ok(PodPhase::Succeeded),
+            Err(kube::Error::Api(er)) if er.code == 404 => return Ok(PodStatus::Stopped),
             Err(e) => return Err(e.into()),
         };
+
+        let replicator_container_name = create_replicator_container_name(prefix);
+
+        if Self::has_replicator_container_error(&pod, &replicator_container_name) {
+            return Ok(PodStatus::Failed);
+        }
+
+        if pod.metadata.deletion_timestamp.is_some() {
+            return Ok(PodStatus::Stopping);
+        }
 
         let phase = pod
             .status
@@ -409,43 +448,13 @@ impl K8sClient for HttpK8sClient {
             })
             .unwrap_or(PodPhase::Unknown);
 
-        Ok(phase)
-    }
-
-    async fn has_replicator_container_error(&self, prefix: &str) -> Result<bool, K8sError> {
-        debug!("checking for replicator container error");
-
-        let pod_name = create_pod_name(prefix);
-        let pod = match self.pods_api.get(&pod_name).await {
-            Ok(pod) => pod,
-            Err(kube::Error::Api(er)) if er.code == 404 => return Ok(false),
-            Err(e) => return Err(e.into()),
-        };
-
-        let replicator_container_name = create_replicator_container_name(prefix);
-
-        // Find the replicator container status
-        let container_status = pod.status.and_then(|status| {
-            status.container_statuses.and_then(|container_statuses| {
-                container_statuses
-                    .iter()
-                    .find(|cs| cs.name == replicator_container_name)
-                    .cloned()
-            })
-        });
-
-        let Some(container_status) = container_status else {
-            return Ok(false);
-        };
-
-        // Check last terminated state for non-zero exit code
-        if let Some(last_state) = &container_status.last_state
-            && let Some(terminated) = &last_state.terminated
-        {
-            return Ok(terminated.exit_code != 0);
-        }
-
-        Ok(false)
+        Ok(match phase {
+            PodPhase::Pending => PodStatus::Starting,
+            PodPhase::Running => PodStatus::Started,
+            PodPhase::Succeeded => PodStatus::Stopped,
+            PodPhase::Failed => PodStatus::Failed,
+            PodPhase::Unknown => PodStatus::Unknown,
+        })
     }
 }
 
