@@ -120,12 +120,12 @@ expression: stateful_set_json
             ],
             "resources": {
               "limits": {
-                "cpu": "500m",
-                "memory": "600Mi"
+                "cpu": "1000m",
+                "memory": "2400Mi"
               },
               "requests": {
-                "cpu": "250m",
-                "memory": "500Mi"
+                "cpu": "500m",
+                "memory": "2000Mi"
               }
             },
             "volumeMounts": [
