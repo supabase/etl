@@ -6,6 +6,10 @@ expression: stateful_set_json
   "apiVersion": "apps/v1",
   "kind": "StatefulSet",
   "metadata": {
+    "labels": {
+      "etl.supabase.com/app-name": "abcdefghijklmnopqrst-42-replicator-app",
+      "etl.supabase.com/app-type": "etl-replicator-app"
+    },
     "name": "abcdefghijklmnopqrst-42-replicator-stateful-set",
     "namespace": "etl-data-plane"
   },
@@ -13,7 +17,8 @@ expression: stateful_set_json
     "replicas": 1,
     "selector": {
       "matchLabels": {
-        "etl.supabase.com/app-name": "abcdefghijklmnopqrst-42-replicator-app"
+        "etl.supabase.com/app-name": "abcdefghijklmnopqrst-42-replicator-app",
+        "etl.supabase.com/app-type": "etl-replicator-app"
       }
     },
     "template": {

@@ -225,8 +225,12 @@ impl K8sClient for HttpK8sClient {
 
         let encoded_postgres_password = BASE64_STANDARD.encode(postgres_password);
         let postgres_secret_name = create_postgres_secret_name(prefix);
-        let postgres_secret_json =
-            create_postgres_secret_json(&postgres_secret_name, &encoded_postgres_password);
+        let replicator_app_name = create_replicator_app_name(prefix);
+        let postgres_secret_json = create_postgres_secret_json(
+            &postgres_secret_name,
+            &replicator_app_name,
+            &encoded_postgres_password,
+        );
         let secret: Secret = serde_json::from_value(postgres_secret_json)?;
 
         // We are forcing the update since we are the field manager that should own the fields. If
@@ -249,8 +253,10 @@ impl K8sClient for HttpK8sClient {
 
         let encoded_bq_service_account_key = BASE64_STANDARD.encode(bq_service_account_key);
         let bq_secret_name = create_bq_secret_name(prefix);
+        let replicator_app_name = create_replicator_app_name(prefix);
         let bq_secret_json = create_bq_service_account_key_secret_json(
             &bq_secret_name,
+            &replicator_app_name,
             &encoded_bq_service_account_key,
         );
         let secret: Secret = serde_json::from_value(bq_secret_json)?;
@@ -280,8 +286,10 @@ impl K8sClient for HttpK8sClient {
         let encoded_s3_secret_access_key = BASE64_STANDARD.encode(s3_secret_access_key);
 
         let iceberg_secret_name = create_iceberg_secret_name(prefix);
+        let replicator_app_name = create_replicator_app_name(prefix);
         let iceberg_secret_json = create_iceberg_secret_json(
             &iceberg_secret_name,
+            &replicator_app_name,
             &encoded_catalog_token,
             &encoded_s3_access_key_id,
             &encoded_s3_secret_access_key,
@@ -357,8 +365,10 @@ impl K8sClient for HttpK8sClient {
 
         let env_config_file = format!("{environment}.yaml");
         let replicator_config_map_name = create_replicator_config_map_name(prefix);
+        let replicator_app_name = create_replicator_app_name(prefix);
         let config_map_json = create_replicator_config_map_json(
             &replicator_config_map_name,
+            &replicator_app_name,
             base_config,
             &env_config_file,
             env_config,
@@ -536,6 +546,7 @@ fn create_vector_container_name(prefix: &str) -> String {
 
 fn create_postgres_secret_json(
     secret_name: &str,
+    replicator_app_name: &str,
     encoded_postgres_password: &str,
 ) -> serde_json::Value {
     json!({
@@ -544,6 +555,10 @@ fn create_postgres_secret_json(
       "metadata": {
         "name": secret_name,
         "namespace": DATA_PLANE_NAMESPACE,
+        "labels": {
+          "etl.supabase.com/app-name": replicator_app_name,
+          "etl.supabase.com/app-type": REPLICATOR_APP_LABEL,
+        }
       },
       "type": "Opaque",
       "data": {
@@ -554,6 +569,7 @@ fn create_postgres_secret_json(
 
 fn create_bq_service_account_key_secret_json(
     secret_name: &str,
+    replicator_app_name: &str,
     encoded_bq_service_account_key: &str,
 ) -> serde_json::Value {
     json!({
@@ -562,6 +578,10 @@ fn create_bq_service_account_key_secret_json(
       "metadata": {
         "name": secret_name,
         "namespace": DATA_PLANE_NAMESPACE,
+        "labels": {
+          "etl.supabase.com/app-name": replicator_app_name,
+          "etl.supabase.com/app-type": REPLICATOR_APP_LABEL,
+        }
       },
       "type": "Opaque",
       "data": {
@@ -572,6 +592,7 @@ fn create_bq_service_account_key_secret_json(
 
 fn create_iceberg_secret_json(
     secret_name: &str,
+    replicator_app_name: &str,
     encoded_catalog_token: &str,
     encoded_s3_access_key_id: &str,
     encoded_s3_secret_access_key: &str,
@@ -582,6 +603,10 @@ fn create_iceberg_secret_json(
       "metadata": {
         "name": secret_name,
         "namespace": DATA_PLANE_NAMESPACE,
+        "labels": {
+          "etl.supabase.com/app-name": replicator_app_name,
+          "etl.supabase.com/app-type": REPLICATOR_APP_LABEL,
+        }
       },
       "type": "Opaque",
       "data": {
@@ -594,6 +619,7 @@ fn create_iceberg_secret_json(
 
 fn create_replicator_config_map_json(
     config_map_name: &str,
+    replicator_app_name: &str,
     base_config: &str,
     env_config_file: &str,
     env_config: &str,
@@ -604,6 +630,10 @@ fn create_replicator_config_map_json(
       "metadata": {
         "name": config_map_name,
         "namespace": DATA_PLANE_NAMESPACE,
+        "labels": {
+          "etl.supabase.com/app-name": replicator_app_name,
+          "etl.supabase.com/app-type": REPLICATOR_APP_LABEL,
+        }
       },
       "data": {
         "base.yaml": base_config,
@@ -910,12 +940,17 @@ fn create_replicator_stateful_set_json(
       "metadata": {
         "name": stateful_set_name,
         "namespace": DATA_PLANE_NAMESPACE,
+        "labels": {
+          "etl.supabase.com/app-name": replicator_app_name,
+          "etl.supabase.com/app-type": REPLICATOR_APP_LABEL
+        },
       },
       "spec": {
         "replicas": 1,
         "selector": {
           "matchLabels": {
             "etl.supabase.com/app-name": replicator_app_name,
+            "etl.supabase.com/app-type": REPLICATOR_APP_LABEL
           }
         },
         "template": {
@@ -1003,9 +1038,14 @@ mod tests {
     fn test_create_postgres_secret_json() {
         let prefix = create_k8s_object_prefix(TENANT_ID, 42);
         let secret_name = &create_postgres_secret_name(&prefix);
+        let replicator_app_name = create_replicator_app_name(&prefix);
         let encoded_postgres_password = "dGVzdC1wYXNzd29yZA==";
 
-        let secret_json = create_postgres_secret_json(secret_name, encoded_postgres_password);
+        let secret_json = create_postgres_secret_json(
+            secret_name,
+            &replicator_app_name,
+            encoded_postgres_password,
+        );
 
         assert_json_snapshot!(secret_json);
 
@@ -1016,10 +1056,14 @@ mod tests {
     fn test_create_bq_service_account_key_secret_json() {
         let prefix = create_k8s_object_prefix(TENANT_ID, 42);
         let secret_name = &create_bq_secret_name(&prefix);
+        let replicator_app_name = create_replicator_app_name(&prefix);
         let encoded_bq_service_account_key = "ewogICJrZXkiOiAidmFsdWUiCn0=";
 
-        let secret_json =
-            create_bq_service_account_key_secret_json(secret_name, encoded_bq_service_account_key);
+        let secret_json = create_bq_service_account_key_secret_json(
+            secret_name,
+            &replicator_app_name,
+            encoded_bq_service_account_key,
+        );
 
         assert_json_snapshot!(secret_json);
 
@@ -1030,12 +1074,14 @@ mod tests {
     fn test_create_iceberg_secret_json() {
         let prefix = create_k8s_object_prefix(TENANT_ID, 42);
         let secret_name = &&create_iceberg_secret_name(&prefix);
+        let replicator_app_name = create_replicator_app_name(&prefix);
         let encoded_catalog_token = "ZXlKMGVYQWlPaUpLVjFRaUxDSmhiR2NpT2lKRlV6STFOaUlzSW10cFpDSTZJakZrTnpGak1HRXlObUl4TURGak9EUTVaVGt4Wm1RMU5qZGpZakE1TlRKbUluMC5leUpsZUhBaU9qSXdOekEzTVRjeE5qQXNJbWxoZENJNk1UYzFOakUwTlRFMU1Dd2lhWE56SWpvaWMzVndZV0poYzJVaUxDSnlaV1lpT2lKaFltTmtaV1puYUdscWJHdHRibTl3Y1hKemRDSXNJbkp2YkdVaU9pSnpaWEoyYVdObFgzSnZiR1VpZlEuWWRUV2trSXZ3alNrWG90M05DMDd4eWpQakdXUU1OekxxNUVQenVtenJkTHp1SHJqLXp1ekktbmx5UXRRNVY3Z1phdXlzbS13R3dtcHp0UlhmUGMzQVE=";
         let encoded_s3_access_key_id = "Y2FlNGY0NjliNTY5MjJhMTNmMzNiNjM3YTNjMWU2ZjI=";
         let encoded_s3_secret_access_key = "NDUyOWE3ZmMwNzY2NDBjODRiZTgzZGJiNGMyNDI3MTNhOTk0MzE5OTBjYzJmMzIzMGM4MzVjOGJmZjAzYWE2ZQ==";
 
         let secret_json = create_iceberg_secret_json(
             secret_name,
+            &replicator_app_name,
             encoded_catalog_token,
             encoded_s3_access_key_id,
             encoded_s3_secret_access_key,
@@ -1050,6 +1096,7 @@ mod tests {
     fn test_create_replicator_config_map_json() {
         let prefix = create_k8s_object_prefix(TENANT_ID, 42);
         let replicator_config_map_name = create_replicator_config_map_name(&prefix);
+        let replicator_app_name = create_replicator_app_name(&prefix);
         let environment = Environment::Prod;
         let env_config_file = format!("{environment}.yaml");
         let base_config = "";
@@ -1092,6 +1139,7 @@ mod tests {
 
         let config_map_json = create_replicator_config_map_json(
             &replicator_config_map_name,
+            &replicator_app_name,
             base_config,
             &env_config_file,
             &env_config,

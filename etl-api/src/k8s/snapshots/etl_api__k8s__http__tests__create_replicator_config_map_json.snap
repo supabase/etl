@@ -10,6 +10,10 @@ expression: config_map_json
   },
   "kind": "ConfigMap",
   "metadata": {
+    "labels": {
+      "etl.supabase.com/app-name": "abcdefghijklmnopqrst-42-replicator-app",
+      "etl.supabase.com/app-type": "etl-replicator-app"
+    },
     "name": "abcdefghijklmnopqrst-42-replicator-config",
     "namespace": "etl-data-plane"
   }
