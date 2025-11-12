@@ -69,9 +69,9 @@ pub const TRUSTED_ROOT_CERT_KEY_NAME: &str = "trusted_root_certs";
 const REPLICATOR_APP_LABEL: &str = "etl-replicator-app";
 
 /// Replicator memory request tuned for `c8gn.4xlarge` instances in prod.
-const REPLICATOR_MEMORY_REQUEST_PROD: i32 = 500;
+const REPLICATOR_MEMORY_REQUEST_PROD: i32 = 2000;
 /// Replicator CPU request tuned for `c8gn.4xlarge` instances in prod.
-const REPLICATOR_CPU_REQUEST_PROD: i32 = 250;
+const REPLICATOR_CPU_REQUEST_PROD: i32 = 500;
 
 /// Replicator memory request tuned for `c8gn.medium` instances in staging.
 const REPLICATOR_MEMORY_REQUEST_STAGING: i32 = 250;
