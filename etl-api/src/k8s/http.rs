@@ -226,12 +226,11 @@ impl K8sClient for HttpK8sClient {
         let encoded_postgres_password = BASE64_STANDARD.encode(postgres_password);
         let postgres_secret_name = create_postgres_secret_name(prefix);
         let replicator_app_name = create_replicator_app_name(prefix);
-        let postgres_secret_json =
-            create_postgres_secret_json(
-                &postgres_secret_name,
-                &replicator_app_name,
-                &encoded_postgres_password,
-            );
+        let postgres_secret_json = create_postgres_secret_json(
+            &postgres_secret_name,
+            &replicator_app_name,
+            &encoded_postgres_password,
+        );
         let secret: Secret = serde_json::from_value(postgres_secret_json)?;
 
         // We are forcing the update since we are the field manager that should own the fields. If
