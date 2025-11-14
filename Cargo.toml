@@ -7,6 +7,7 @@ members = [
     "etl-config",
     "etl-destinations",
     "etl-examples",
+    "etl-mysql",
     "etl-postgres",
     "etl-replicator",
     "etl-telemetry",
@@ -24,6 +25,7 @@ etl = { path = "etl", default-features = false }
 etl-api = { path = "etl-api", default-features = false }
 etl-config = { path = "etl-config", default-features = false }
 etl-destinations = { path = "etl-destinations", default-features = false }
+etl-mysql = { path = "etl-mysql", default-features = false }
 etl-postgres = { path = "etl-postgres", default-features = false }
 etl-replicator = { path = "etl-replicator", default-features = false }
 etl-telemetry = { path = "etl-telemetry", default-features = false }
