@@ -9,7 +9,7 @@ homepage.workspace = true
 
 [dependencies]
 etl = { workspace = true }
-etl-destinations = { workspace = true, features = ["bigquery"] }
+etl-destinations = { workspace = true, features = ["bigquery", "redis"] }
 
 clap = { workspace = true, default-features = true, features = [
     "std",
@@ -18,3 +18,9 @@ clap = { workspace = true, default-features = true, features = [
 tokio = { workspace = true, features = ["macros", "signal"] }
 tracing = { workspace = true, default-features = true }
 tracing-subscriber = { workspace = true, default-features = true, features = ["env-filter"] }
+
+[[bin]]
+name = "bigquery"
+
+[[bin]]
+name = "redis"

@@ -8,6 +8,10 @@ x-lakekeeper-env: &lakekeeper-env
 name: etl-pg-${POSTGRES_VERSION:-17}
 
 services:
+  redis:
+    image: redis:latest
+    ports:
+      - 6379:6379
   # Start Postgres
   postgres:
     image: postgres:${POSTGRES_VERSION:-17}
@@ -33,19 +37,23 @@ services:
       retries: 5
 
   lakekeeper-postgres:
-      image: postgres:17
-      environment:
-        POSTGRES_USER: ${LAKEKEEPER_POSTGRES_USER:-lakekeeper-postgres}
-        POSTGRES_PASSWORD: ${LAKEKEEPER_POSTGRES_PASSWORD:-lakekeeper-postgres}
-        POSTGRES_DB: ${LAKEKEEPER_POSTGRES_DB:-iceberg-catalog}
-      volumes:
-        - ${LAKEKEEPER_POSTGRES_DATA_VOLUME:-lakekeeper_postgres_data}:/var/lib/postgresql/data
-      restart: unless-stopped
-      healthcheck:
-        test: ["CMD-SHELL", "pg_isready -U ${LAKEKEEPER_POSTGRES_USER:-lakekeeper-postgres} -d ${LAKEKEEPER_POSTGRES_DB:-iceberg-catalog}"]
-        interval: 5s
-        timeout: 5s
-        retries: 5
+    image: postgres:17
+    environment:
+      POSTGRES_USER: ${LAKEKEEPER_POSTGRES_USER:-lakekeeper-postgres}
+      POSTGRES_PASSWORD: ${LAKEKEEPER_POSTGRES_PASSWORD:-lakekeeper-postgres}
+      POSTGRES_DB: ${LAKEKEEPER_POSTGRES_DB:-iceberg-catalog}
+    volumes:
+      - ${LAKEKEEPER_POSTGRES_DATA_VOLUME:-lakekeeper_postgres_data}:/var/lib/postgresql/data
+    restart: unless-stopped
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U ${LAKEKEEPER_POSTGRES_USER:-lakekeeper-postgres} -d ${LAKEKEEPER_POSTGRES_DB:-iceberg-catalog}",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 5
 
   # Start MinIO for S3-compatible object storage
   minio:

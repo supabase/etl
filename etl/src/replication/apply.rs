@@ -61,9 +61,10 @@ pub enum ApplyLoopResult {
 /// Action that should be taken during the apply loop.
 ///
 /// An action defines what to do after one iteration of the apply loop.
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, Default)]
 pub enum ApplyLoopAction {
     /// The apply loop can continue on the next element.
+    #[default]
     Continue,
     /// The apply loop should pause processing.
     Pause,
@@ -126,12 +127,6 @@ impl ApplyLoopAction {
                 }
             }
         }
-    }
-}
-
-impl Default for ApplyLoopAction {
-    fn default() -> Self {
-        Self::Continue
     }
 }
 
