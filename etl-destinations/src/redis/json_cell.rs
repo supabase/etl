@@ -39,14 +39,20 @@ impl<'a> Serialize for JsonCell<'a> {
                     Sign::Positive => pg_numeric
                         .to_string()
                         .parse::<u64>()
-                        .unwrap() //FIXME
-                        // .map_err(|err| format!("cannot parse pg numeric to u64: {err}"))?
+                        .map_err(|err| {
+                            serde::ser::Error::custom(format!(
+                                "cannot parse pg numeric to u64: {err}"
+                            ))
+                        })?
                         .serialize(serializer),
                     Sign::Negative => pg_numeric
                         .to_string()
                         .parse::<i64>()
-                        .unwrap() //FIXME
-                        // .map_err(|err| format!("cannot parse pg numeric to i64: {err}"))?
+                        .map_err(|err| {
+                            serde::ser::Error::custom(format!(
+                                "cannot parse pg numeric to i64: {err}"
+                            ))
+                        })?
                         .serialize(serializer),
                 },
             },
@@ -78,18 +84,24 @@ impl<'a> Serialize for JsonCell<'a> {
                             Some(PgNumeric::Value { sign, .. }) => match sign {
                                 Sign::Positive => {
                                     seq.serialize_element(
-                                        &elt.as_ref().unwrap().to_string().parse::<u64>().unwrap(), // FIXME
-                                                                                                    //     .map_err(
-                                                                                                    //     |err| format!("cannot parse pg numeric to u64: {err}"),
-                                                                                                    // )?
+                                        &elt.as_ref().unwrap().to_string().parse::<u64>().map_err(
+                                            |err| {
+                                                serde::ser::Error::custom(format!(
+                                                    "cannot parse pg numeric to u64: {err}"
+                                                ))
+                                            },
+                                        )?,
                                     )?;
                                 }
                                 Sign::Negative => {
                                     seq.serialize_element(
-                                        &elt.as_ref().unwrap().to_string().parse::<i64>().unwrap(), //FIXME
-                                                                                                    //     .map_err(
-                                                                                                    //     |err| format!("cannot parse pg numeric to i64: {err}"),
-                                                                                                    // )?,
+                                        &elt.as_ref().unwrap().to_string().parse::<i64>().map_err(
+                                            |err| {
+                                                serde::ser::Error::custom(format!(
+                                                    "cannot parse pg numeric to i64: {err}"
+                                                ))
+                                            },
+                                        )?,
                                     )?;
                                 }
                             },
