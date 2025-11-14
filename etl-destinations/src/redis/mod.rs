@@ -14,11 +14,14 @@ use crate::redis::client::{RedisClient, RedisKey};
 use crate::redis::json_cell::JsonCell;
 
 pub type MapFunction = Arc<dyn Fn(Cell, &TableSchema, &ColumnSchema) -> Cell + Send + Sync>;
+pub type FilterFunction = Arc<dyn Fn(&TableRow, &TableSchema) -> bool + Send + Sync>;
 
 #[derive(Clone)]
 pub struct RedisDestination<S> {
     redis_client: RedisClient,
     store: S,
+    /// If you want to change data before inserting it in Redis
+    filter: Option<FilterFunction>,
     /// If you want to change data before inserting it in Redis
     map_insert: Option<MapFunction>,
     /// If you want to change data before updating it in Redis
@@ -56,9 +59,19 @@ where
         Ok(Self {
             redis_client,
             store,
+            filter: None,
             map_insert: None,
             map_update: None,
         })
+    }
+
+    /// Filter the table row to insert/update
+    pub fn filter<F>(mut self, f: F) -> Self
+    where
+        F: Fn(&TableRow, &TableSchema) -> bool + Send + Sync + 'static,
+    {
+        self.filter = Some(Arc::new(f));
+        self
     }
 
     /// If you want to change data before inserting it in Redis
@@ -96,6 +109,12 @@ where
         debug!("writing a batch of {} table rows:", table_rows.len());
         let pipeline = self.redis_client.pipeline();
         for table_row in table_rows {
+            if let Some(filter) = &self.filter
+                && !filter(&table_row, &table_schema)
+            {
+                debug!("skipping table row");
+                continue;
+            }
             let key = RedisKey::new(table_schema.as_ref(), &table_row);
             let map: HashMap<String, JsonCell> = table_row
                 .values

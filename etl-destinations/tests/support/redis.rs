@@ -9,6 +9,7 @@ use fred::types::config::UnresponsiveConfig;
 use futures::future::join_all;
 use std::time::Duration;
 
+#[allow(dead_code)]
 pub async fn create_redis_connection(config: RedisConfig) -> FredResult<Pool> {
     let pooled_client = Builder::default_centralized()
         .with_config(|redis_config| {
