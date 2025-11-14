@@ -8,3 +8,5 @@ pub mod bigquery;
 pub mod encryption;
 #[cfg(feature = "iceberg")]
 pub mod iceberg;
+#[cfg(feature = "redis")]
+pub mod redis;

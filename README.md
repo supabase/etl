@@ -126,6 +126,18 @@ etl = { git = "https://github.com/supabase/etl" }
 etl-destinations = { git = "https://github.com/supabase/etl", features = ["bigquery"] }
 ```
 
+- Redis
+
+Out-of-the-box destinations are available in the `etl-destinations` crate:
+
+```toml
+[dependencies]
+etl = { git = "https://github.com/supabase/etl" }
+etl-destinations = { git = "https://github.com/supabase/etl", features = ["redis"] }
+```
+
+> Current limitation: doesn't support Redis in cluster mode yet.
+
 ## License
 
 Apache‑2.0. See `LICENSE` for details.
