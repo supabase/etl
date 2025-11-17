@@ -55,3 +55,27 @@ async fn tenant_and_source_can_be_created() {
     assert_eq!(response.name, tenant_source.source_name);
     insta::assert_debug_snapshot!(response.config);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn creating_same_tenant_source_twice_returns_409() {
+    init_test_tracing();
+    // Arrange
+    let app = spawn_test_app().await;
+
+    let tenant_source = CreateTenantSourceRequest {
+        tenant_id: "abcdefghijklmnopqrst".to_string(),
+        tenant_name: "DuplicateTenant".to_string(),
+        source_name: new_name(),
+        source_config: new_source_config(),
+    };
+
+    // Act - Create the tenant source the first time
+    let response = app.create_tenant_source(&tenant_source).await;
+    assert!(response.status().is_success());
+
+    // Act - Create the same tenant source again
+    let response = app.create_tenant_source(&tenant_source).await;
+
+    // Assert - Second attempt should return 409 Conflict
+    assert_eq!(response.status().as_u16(), 409);
+}

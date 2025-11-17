@@ -3,6 +3,9 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum TenantsDbError {
+    #[error("A tenant with id {0} already exists")]
+    Conflict(String),
+
     #[error("Error while interacting with Postgres for tenants: {0}")]
     Database(#[from] sqlx::Error),
 }
@@ -30,7 +33,15 @@ where
         tenant_name,
     )
     .fetch_one(executor)
-    .await?;
+    .await
+    .map_err(|e| {
+        if let sqlx::Error::Database(db_err) = &e
+            && db_err.is_unique_violation()
+        {
+            return TenantsDbError::Conflict(tenant_id.to_string());
+        }
+        TenantsDbError::Database(e)
+    })?;
 
     Ok(record.id)
 }
