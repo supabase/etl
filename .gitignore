@@ -33,3 +33,6 @@ pyvenv.cfg
 
 # Log files
 *.log
+
+# Bin examples
+!etl-examples/src/bin
