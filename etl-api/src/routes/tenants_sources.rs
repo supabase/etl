@@ -10,11 +10,11 @@ use thiserror::Error;
 use tracing_actix_web::RootSpan;
 use utoipa::ToSchema;
 
-use crate::configs::encryption::EncryptionKey;
 use crate::configs::source::FullApiSourceConfig;
 use crate::db;
 use crate::db::tenants_sources::TenantSourceDbError;
 use crate::routes::ErrorMessage;
+use crate::{configs::encryption::EncryptionKey, db::tenants::TenantsDbError};
 
 #[derive(Debug, Error)]
 enum TenantSourceError {
@@ -40,6 +40,9 @@ impl TenantSourceError {
 impl ResponseError for TenantSourceError {
     fn status_code(&self) -> StatusCode {
         match self {
+            TenantSourceError::TenantSourceDb(TenantSourceDbError::Tenants(
+                TenantsDbError::Conflict(_),
+            )) => StatusCode::CONFLICT,
             TenantSourceError::TenantSourceDb(_) | TenantSourceError::Database(_) => {
                 StatusCode::INTERNAL_SERVER_ERROR
             }

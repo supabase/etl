@@ -39,6 +39,7 @@ impl TenantError {
 impl ResponseError for TenantError {
     fn status_code(&self) -> StatusCode {
         match self {
+            TenantError::TenantsDb(TenantsDbError::Conflict(_)) => StatusCode::CONFLICT,
             TenantError::TenantsDb(_) => StatusCode::INTERNAL_SERVER_ERROR,
             TenantError::TenantNotFound(_) => StatusCode::NOT_FOUND,
         }

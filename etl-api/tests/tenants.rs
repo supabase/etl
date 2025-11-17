@@ -43,6 +43,28 @@ async fn tenant_can_be_created() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn creating_duplicate_tenant_returns_409() {
+    init_test_tracing();
+    // Arrange
+    let app = spawn_test_app().await;
+
+    let tenant = CreateTenantRequest {
+        id: "abcdefghijklmnopqrst".to_string(),
+        name: "DuplicateTenant".to_string(),
+    };
+
+    // Act - Create the tenant the first time
+    let response = app.create_tenant(&tenant).await;
+    assert!(response.status().is_success());
+
+    // Act - Create the same tenant again
+    let response = app.create_tenant(&tenant).await;
+
+    // Assert - Second attempt should return 409 Conflict
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn create_or_update_tenant_creates_a_new_tenant() {
     init_test_tracing();
     // Arrange
