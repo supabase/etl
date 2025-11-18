@@ -114,17 +114,25 @@ For tutorials and deeper guidance, see the [Documentation](https://supabase.gith
 
 ## Destinations
 
-ETL is designed to be extensible. You can implement your own destinations to send data to any destination you like, however it comes with a few built in destinations:
+ETL is designed to be extensible. You can implement your own destinations, and the project currently ships with the following maintained options:
 
-- BigQuery
+- **BigQuery** – full CRUD-capable replication for analytics workloads.
+- **Apache Iceberg** – append-only log of operations today (no in-place updates yet).
 
-Out-of-the-box destinations are available in the `etl-destinations` crate:
+Enable the destinations you need through the `etl-destinations` crate:
 
 ```toml
 [dependencies]
 etl = { git = "https://github.com/supabase/etl" }
-etl-destinations = { git = "https://github.com/supabase/etl", features = ["bigquery"] }
+etl-destinations = { git = "https://github.com/supabase/etl", features = ["bigquery", "iceberg"] }
 ```
+
+## Contributing
+
+We welcome pull requests and GitHub issues. That said, we currently cannot accept new custom destinations unless there 
+is significant community demand. Each destination carries a high long-term maintenance cost, and we are prioritizing core stability, 
+observability, and ergonomics. If you need a destination that is not yet supported, please start a discussion or issue so we can gauge demand 
+before proposing an implementation.
 
 ## License
 

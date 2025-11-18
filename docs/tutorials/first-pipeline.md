@@ -213,7 +213,7 @@ DELETE FROM users WHERE email = 'bob@example.com';
 
 ## Step 6: Verify Data Replication
 
-The data is now replicated in your memory destination. While this tutorial uses memory (perfect for testing), the same pattern works with BigQuery, DuckDB, or custom destinations.
+The data is now replicated in your memory destination. While this tutorial uses memory (perfect for testing), the same pattern works with any destination.
 
 **Checkpoint:** You've successfully built and tested a complete ETL pipeline!
 

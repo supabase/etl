@@ -12,6 +12,12 @@ Set up Postgres with the correct settings, and publications for ETL pipelines.
 
 **When to use:** Setting up a new Postgres source for replication.
 
+### [Apply Postgres State Store Migrations](postgres-state-store.md)
+
+Create the `etl` schema, replication state tables, and related objects required by `PostgresStore`.
+
+**When to use:** Before running a pipeline that uses the Postgres-backed state or schema stores.
+
 ## Next Steps
 
 After solving your immediate problem:

@@ -33,11 +33,11 @@ Read our **[Explanations](explanation/index.md)** for deeper insights:
 
 **Postgres Logical Replication** streams data changes from Postgres databases in real-time using the Write-Ahead Log (WAL). ETL builds on this foundation to provide:
 
-- 🚀 **Real-time replication** - Stream changes as they happen
-- 🔄 **Multiple destinations** - BigQuery and more coming soon
-- 🛡️ **Fault tolerance** - Built-in error handling and recovery
-- ⚡ **High performance** - Efficient batching and parallel processing
-- 🔧 **Extensible** - Plugin architecture for custom destinations
+- **Real-time replication** - Stream changes as they happen
+- **Multiple destinations** - BigQuery and Apache Iceberg officially supported
+- **Fault tolerance** - Built-in error handling and recovery
+- **High performance** - Efficient batching and parallel processing
+- **Extensible** - Plugin architecture for custom destinations
 
 ## Quick Example
 
@@ -91,5 +91,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 - **First time using ETL?** → Start with [Build your first pipeline](tutorials/first-pipeline.md)
 - **Need Postgres setup help?** → Check [Configure Postgres for Replication](how-to/configure-postgres.md)
+- **Using Postgres for state storage?** → Follow [Apply Postgres state store migrations](how-to/postgres-state-store.md)
 - **Need technical details?** → Check the [Reference](reference/index.md)
 - **Want to understand the architecture?** → Read [ETL Architecture](explanation/architecture.md)
+
+## Contributing
+
+Contributions and bug reports are welcome in the GitHub repository. At the moment we cannot accept new custom destination implementations unless a large portion of the community requests them, because every destination adds a long-lived maintenance burden and we are focusing engineering time on stability, observability, and ergonomics. Please open an issue or discussion first if you believe a new destination should be prioritized.

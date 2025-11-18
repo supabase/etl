@@ -15,6 +15,7 @@ nav:
   - How-to Guides:
       - Overview: how-to/index.md
       - Configure Postgres: how-to/configure-postgres.md
+      - Apply Postgres State Store Migrations: how-to/postgres-state-store.md
   - Reference:
       - Overview: reference/index.md
   - Explanation:
