@@ -227,12 +227,33 @@ APP_ENVIRONMENT=dev APP_DATABASE__URL=postgres://localhost/mydb cargo run
 
 ### ETL API
 
+#### Running from Source
+
 ```bash
 cd etl-api
 APP_ENVIRONMENT=dev cargo run
 ```
 
 The API loads configuration from `etl-api/configuration/{environment}.yaml`. See `etl-api/README.md` for available configuration options.
+
+#### Running with Docker
+
+Docker images are available for the etl-api. You must mount the configuration files and can override settings via environment variables:
+
+```bash
+docker run \
+  -v $(pwd)/etl-api/configuration/base.yaml:/app/configuration/base.yaml \
+  -v $(pwd)/etl-api/configuration/dev.yaml:/app/configuration/dev.yaml \
+  -e APP_ENVIRONMENT=dev \
+  -e APP_DATABASE__URL=postgres://host.docker.internal:5432/mydb \
+  -p 8080:8080 \
+  ramsup/etl-api:latest
+```
+
+**Configuration requirements:**
+- Mount both `base.yaml` and your environment-specific config file (e.g., `dev.yaml`)
+- Set `APP_ENVIRONMENT` to match your mounted environment file
+- Override specific values using `APP_` prefixed environment variables
 
 #### Kubernetes Setup (ETL API Only)
 
@@ -261,7 +282,9 @@ kubectl --context orbstack apply -f scripts/trusted-root-certs-config.yaml
 
 ### ETL Replicator
 
-The replicator can run as a standalone binary without Kubernetes:
+The replicator can run as a standalone binary without Kubernetes.
+
+#### Running from Source
 
 ```bash
 cd etl-replicator
@@ -269,6 +292,25 @@ APP_ENVIRONMENT=dev cargo run
 ```
 
 The replicator loads configuration from `etl-replicator/configuration/{environment}.yaml`.
+
+#### Running with Docker
+
+Docker images are available for the etl-replicator. You must mount the configuration files and can override settings via environment variables:
+
+```bash
+docker run \
+  -v $(pwd)/etl-replicator/configuration/base.yaml:/app/configuration/base.yaml \
+  -v $(pwd)/etl-replicator/configuration/dev.yaml:/app/configuration/dev.yaml \
+  -e APP_ENVIRONMENT=dev \
+  -e APP_SOURCE__HOST=host.docker.internal \
+  -e APP_SOURCE__PASSWORD=mysecret \
+  etl-replicator:latest
+```
+
+**Configuration requirements:**
+- Mount both `base.yaml` and your environment-specific config file (e.g., `dev.yaml`)
+- Set `APP_ENVIRONMENT` to match your mounted environment file
+- Override specific values using `APP_` prefixed environment variables
 
 **Note:** While the replicator is typically deployed as a Kubernetes pod managed by the etl-api, it does not require Kubernetes to function. You can run it as a standalone process on any machine with the appropriate configuration.
 
