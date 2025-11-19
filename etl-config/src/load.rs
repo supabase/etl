@@ -78,7 +78,7 @@ where
         // Add in settings from the base configuration file.
         .add_source(config::File::from(
             configuration_directory.join(BASE_CONFIG_FILE),
-        ).format(config::FileFormat::Yaml))
+        ))
         // Add in settings from the environment-specific file.
         .add_source(config::File::from(
             configuration_directory.join(environment_filename),
