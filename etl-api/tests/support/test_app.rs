@@ -17,11 +17,7 @@ use etl_api::routes::tenants::{
     CreateOrUpdateTenantRequest, CreateTenantRequest, UpdateTenantRequest,
 };
 use etl_api::routes::tenants_sources::CreateTenantSourceRequest;
-use etl_api::{
-    config::ApiConfig,
-    configs::encryption::{self, generate_random_key},
-    startup::run,
-};
+use etl_api::{config::ApiConfig, configs::encryption, startup::run};
 use etl_config::shared::PgConnectionConfig;
 use etl_config::{Environment, load_config};
 use etl_postgres::sqlx::test_utils::drop_pg_database;
@@ -529,6 +525,53 @@ impl TestApp {
         ))
         .header("tenant_id", tenant_id)
         .json(publication)
+        .send()
+        .await
+        .expect("failed to execute request")
+    }
+
+    pub async fn read_publication(
+        &self,
+        tenant_id: &str,
+        source_id: i64,
+        publication_name: &str,
+    ) -> reqwest::Response {
+        self.get_authenticated(format!(
+            "{}/v1/sources/{}/publications/{}",
+            &self.address, source_id, publication_name
+        ))
+        .header("tenant_id", tenant_id)
+        .send()
+        .await
+        .expect("failed to execute request")
+    }
+
+    pub async fn read_all_publications(
+        &self,
+        tenant_id: &str,
+        source_id: i64,
+    ) -> reqwest::Response {
+        self.get_authenticated(format!(
+            "{}/v1/sources/{}/publications",
+            &self.address, source_id
+        ))
+        .header("tenant_id", tenant_id)
+        .send()
+        .await
+        .expect("failed to execute request")
+    }
+
+    pub async fn delete_publication(
+        &self,
+        tenant_id: &str,
+        source_id: i64,
+        publication_name: &str,
+    ) -> reqwest::Response {
+        self.delete_authenticated(format!(
+            "{}/v1/sources/{}/publications/{}",
+            &self.address, source_id, publication_name
+        ))
+        .header("tenant_id", tenant_id)
         .send()
         .await
         .expect("failed to execute request")

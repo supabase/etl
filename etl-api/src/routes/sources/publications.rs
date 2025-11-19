@@ -25,6 +25,9 @@ enum PublicationError {
     #[error("The publication with name {0} was not found")]
     PublicationNotFound(String),
 
+    #[error("Invalid publication request: {0}")]
+    InvalidPublication(String),
+
     #[error(transparent)]
     TenantId(#[from] TenantIdError),
 
@@ -70,13 +73,12 @@ impl ResponseError for PublicationError {
             PublicationError::PublicationsDb(PublicationsDbError::Database(_)) => {
                 StatusCode::INTERNAL_SERVER_ERROR
             }
-            PublicationError::PublicationsDb(PublicationsDbError::UnsupportedColumnTypes(_)) => {
-                StatusCode::BAD_REQUEST
-            }
+            PublicationError::PublicationsDb(PublicationsDbError::UnsupportedColumnTypes(_))
+            | PublicationError::InvalidPublication(_)
+            | PublicationError::TenantId(_) => StatusCode::BAD_REQUEST,
             PublicationError::SourceNotFound(_) | PublicationError::PublicationNotFound(_) => {
                 StatusCode::NOT_FOUND
             }
-            PublicationError::TenantId(_) => StatusCode::BAD_REQUEST,
         }
     }
 
@@ -140,14 +142,16 @@ pub async fn create_publication(
         .map(|s| s.config)
         .ok_or(PublicationError::SourceNotFound(source_id))?;
 
-    let source_pool =
-        connect_to_source_database_with_defaults(&config.into_connection_config()).await?;
-
     let publication = publication.into_inner();
     let publication = Publication {
         name: publication.name,
         tables: publication.tables,
     };
+
+    validate_publication(&publication)?;
+
+    let source_pool =
+        connect_to_source_database_with_defaults(&config.into_connection_config()).await?;
 
     db::publications::validate_publication_column_types(&publication, &source_pool).await?;
     db::publications::create_publication(&publication, &source_pool).await?;
@@ -224,13 +228,16 @@ pub async fn update_publication(
         .map(|s| s.config)
         .ok_or(PublicationError::SourceNotFound(source_id))?;
 
-    let source_pool =
-        connect_to_source_database_with_defaults(&config.into_connection_config()).await?;
     let publication = publication.into_inner();
     let publication = Publication {
         name: publication_name,
         tables: publication.tables,
     };
+
+    validate_publication(&publication)?;
+
+    let source_pool =
+        connect_to_source_database_with_defaults(&config.into_connection_config()).await?;
 
     db::publications::validate_publication_column_types(&publication, &source_pool).await?;
     db::publications::update_publication(&publication, &source_pool).await?;
@@ -307,4 +314,31 @@ pub async fn read_all_publications(
     let response = ReadPublicationsResponse { publications };
 
     Ok(Json(response))
+}
+
+fn validate_publication(publication: &Publication) -> Result<(), PublicationError> {
+    let mut errors: Vec<String> = Vec::new();
+
+    if publication.name.trim().is_empty() {
+        errors.push("name cannot be empty".to_string());
+    }
+
+    if publication.tables.is_empty() {
+        errors.push("tables cannot be empty".to_string());
+    } else {
+        for (i, table) in publication.tables.iter().enumerate() {
+            if table.schema.trim().is_empty() {
+                errors.push(format!("table[{}]: schema cannot be empty", i));
+            }
+            if table.name.trim().is_empty() {
+                errors.push(format!("table[{}]: name cannot be empty", i));
+            }
+        }
+    }
+
+    if !errors.is_empty() {
+        return Err(PublicationError::InvalidPublication(errors.join(", ")));
+    }
+
+    Ok(())
 }
