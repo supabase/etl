@@ -2,7 +2,7 @@
 
 ## Project Structure & Modules
 - Rust workspace (`Cargo.toml`) with crates: `etl/` (core), `etl-api/` (HTTP API), `etl-postgres/`, `etl-destinations/`, `etl-replicator/`, `etl-config/`, `etl-telemetry/`, `etl-examples/`, `etl-benchmarks/`.
-- Docs in `docs/`; ops tooling in `scripts/` (Docker Compose, DB init, migrations).
+- Docs in `docs/`; development setup in `DEVELOPMENT.md`; ops tooling in `scripts/` (Docker Compose, DB init, migrations).
 - Tests live per crate (`src` unit tests, `tests` integration); benches in `etl-benchmarks/benches/`.
 
 ## Build and Test

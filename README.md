@@ -40,13 +40,14 @@
 
 ETL is a Rust framework by [Supabase](https://supabase.com) for building high‑performance, real‑time data replication apps on Postgres. It sits on top of Postgres [logical replication](https://www.postgresql.org/docs/current/protocol-logical-replication.html) and gives you a clean, Rust‑native API for streaming changes to your own destinations.
 
-## Highlights
+## Features
 
-- **Real‑time replication**: stream changes in real time to your own destinations.
-- **High performance**: configurable batching and parallelism to maximize throughput.
-- **Fault-tolerant**: robust error handling and retry logic built-in.
-- **Extensible**: implement your own custom destinations and state/schema stores.
-- **Rust native**: typed and ergonomic Rust API.
+- **Real‑time replication**: stream changes in real time to your own destinations
+- **High performance**: configurable batching and parallelism to maximize throughput
+- **Fault-tolerant**: robust error handling and retry logic built-in
+- **Extensible**: implement your own custom destinations and state/schema stores
+- **Production destinations**: BigQuery and Apache Iceberg officially supported
+- **Type-safe**: fully typed Rust API with compile-time guarantees
 
 ## Requirements
 
@@ -102,9 +103,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         max_table_sync_workers: 4,
     };
 
+    // Start the pipeline.
     let mut pipeline = Pipeline::new(config, store, destination);
     pipeline.start().await?;
-    // pipeline.wait().await?; // Optional: block until completion
+  
+    // Wait for the pipeline indefinitely.
+    pipeline.wait().await?;
 
     Ok(())
 }
@@ -114,17 +118,26 @@ For tutorials and deeper guidance, see the [Documentation](https://supabase.gith
 
 ## Destinations
 
-ETL is designed to be extensible. You can implement your own destinations to send data to any destination you like, however it comes with a few built in destinations:
+ETL is designed to be extensible. You can implement your own destinations, and the project currently ships with the following maintained options:
 
-- BigQuery
+- **BigQuery** – full CRUD-capable replication for analytics workloads
+- **Apache Iceberg** – append-only log of operations (updates coming soon)
 
-Out-of-the-box destinations are available in the `etl-destinations` crate:
+Enable the destinations you need through the `etl-destinations` crate:
 
 ```toml
 [dependencies]
 etl = { git = "https://github.com/supabase/etl" }
 etl-destinations = { git = "https://github.com/supabase/etl", features = ["bigquery"] }
 ```
+
+## Development
+
+See [DEVELOPMENT.md](DEVELOPMENT.md) for setup instructions, migration workflows, and development guidelines.
+
+## Contributing
+
+We welcome pull requests and GitHub issues. We currently cannot accept new custom destinations unless there is significant community demand, as each destination carries a long-term maintenance cost. We are prioritizing core stability, observability, and ergonomics. If you need a destination that is not yet supported, please start a discussion or issue so we can gauge demand before proposing an implementation.
 
 ## License
 

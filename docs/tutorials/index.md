@@ -18,7 +18,7 @@ _What you'll build:_ A working pipeline that streams changes from a sample Postg
 
 ### [Build Custom Stores and Destinations](custom-implementations.md)
 
-**45 minutes** • **Advanced**
+**30 minutes** • **Advanced**
 
 Implement production-ready custom stores and destinations. Learn ETL's design patterns, build persistent storage, implement cleanup primitives for safe table removal, and create HTTP-based destinations with retry logic.
 
@@ -52,4 +52,4 @@ If you get stuck:
 1. Double-check the prerequisites
 2. Ensure your Postgres setup matches the requirements
 3. Check the [Postgres configuration guide](../how-to/configure-postgres.md)
-4. [Open an issue](https://github.com/supabase/etl/issues) with your specific problem
+4. [Open an issue](https://github.com/supabase/etl/issues/new) with your specific problem

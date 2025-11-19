@@ -704,7 +704,7 @@ You now have working custom ETL components:
 
 - **Connect to real Postgres** → [Configure Postgres for Replication](../how-to/configure-postgres.md)
 - **Understand the architecture** → [ETL Architecture](../explanation/architecture.md)
-- **Contribute to ETL** → [Open an issue](https://github.com/supabase/etl/issues) with your custom implementations
+- **Contribute thoughtfully** → [Open an issue](https://github.com/supabase/etl/issues) before proposing a new destination; we currently accept new destinations only when there is clear, broad demand due to the maintenance cost.
 
 ## See Also
 
