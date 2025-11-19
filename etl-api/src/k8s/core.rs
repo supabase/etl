@@ -13,7 +13,7 @@ use crate::db::pipelines::Pipeline;
 use crate::db::replicators::Replicator;
 use crate::db::sources::Source;
 use crate::k8s::http::{TRUSTED_ROOT_CERT_CONFIG_MAP_NAME, TRUSTED_ROOT_CERT_KEY_NAME};
-use crate::k8s::{DestinationType, K8sClient};
+use crate::k8s::{DestinationType, K8sClient, ReplicatorConfigMapFile};
 use crate::routes::pipelines::PipelineError;
 
 /// Secret types required by different destination configurations.
@@ -271,11 +271,23 @@ async fn create_or_update_replicator_config(
     config: ReplicatorConfigWithoutSecrets,
     environment: Environment,
 ) -> Result<(), PipelineError> {
-    // For now the base config is empty.
-    let base_config = "";
     let env_config = serde_yaml::to_string(&config)?;
+
+    let files = vec![
+        ReplicatorConfigMapFile {
+            filename: "base.yaml".to_string(),
+            // For our setup, we don't need to add config params to the base config file; everything
+            // is added directly in the environment-specific config file.
+            content: String::new(),
+        },
+        ReplicatorConfigMapFile {
+            filename: format!("{environment}.yaml"),
+            content: env_config,
+        },
+    ];
+
     k8s_client
-        .create_or_update_replicator_config_map(prefix, base_config, &env_config, environment)
+        .create_or_update_replicator_config_map(prefix, files)
         .await?;
 
     Ok(())

@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use async_trait::async_trait;
 use etl_api::configs::log::LogLevel;
 use etl_api::k8s::http::{TRUSTED_ROOT_CERT_CONFIG_MAP_NAME, TRUSTED_ROOT_CERT_KEY_NAME};
-use etl_api::k8s::{DestinationType, K8sClient, K8sError, PodStatus};
+use etl_api::k8s::{DestinationType, K8sClient, K8sError, PodStatus, ReplicatorConfigMapFile};
 use etl_config::Environment;
 use k8s_openapi::api::core::v1::ConfigMap;
 
@@ -70,9 +70,7 @@ impl K8sClient for MockK8sClient {
     async fn create_or_update_replicator_config_map(
         &self,
         _prefix: &str,
-        _base_config: &str,
-        _prod_config: &str,
-        _environment: Environment,
+        _files: Vec<ReplicatorConfigMapFile>,
     ) -> Result<(), K8sError> {
         Ok(())
     }

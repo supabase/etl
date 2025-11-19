@@ -19,6 +19,17 @@ pub enum K8sError {
     Kube(#[from] kube::Error),
 }
 
+/// A file to be stored in a [`ConfigMap`] that is used to configure a replicator.
+///
+/// Each file becomes a key-value pair in the config map's data section.
+#[derive(Debug, Clone)]
+pub struct ReplicatorConfigMapFile {
+    /// The filename to use as the key in the config map.
+    pub filename: String,
+    /// The file content to store.
+    pub content: String,
+}
+
 /// The type of destination storage system for replication.
 ///
 /// Determines which destination-specific resources and configurations are created
@@ -152,14 +163,13 @@ pub trait K8sClient: Send + Sync {
 
     /// Creates or updates the replicator configuration [`ConfigMap`].
     ///
-    /// Stores both a base configuration and an environment-specific configuration.
+    /// Accepts a list of files to store in the config map. Each file's filename
+    /// becomes a key in the config map's data section with the content as its value.
     /// The config map name is derived from `prefix`.
     async fn create_or_update_replicator_config_map(
         &self,
         prefix: &str,
-        base_config: &str,
-        env_config: &str,
-        environment: Environment,
+        files: Vec<ReplicatorConfigMapFile>,
     ) -> Result<(), K8sError>;
 
     /// Deletes the replicator configuration [`ConfigMap`].
