@@ -24,10 +24,12 @@ use crate::{
     configs::encryption,
     db::publications::Publication,
     routes::{
+        TestConnectionResponse,
         destinations::{
             CreateDestinationRequest, CreateDestinationResponse, ReadDestinationResponse,
             ReadDestinationsResponse, UpdateDestinationRequest, create_destination,
-            delete_destination, read_all_destinations, read_destination, update_destination,
+            delete_destination, read_all_destinations, read_destination,
+            test_destination_connection, update_destination,
         },
         destinations_pipelines::{
             CreateDestinationPipelineRequest, CreateDestinationPipelineResponse,
@@ -60,7 +62,7 @@ use crate::{
             },
             read_all_sources, read_source,
             tables::read_table_names,
-            update_source,
+            test_source_connection, update_source,
         },
         tenants::{
             CreateOrUpdateTenantRequest, CreateOrUpdateTenantResponse, CreateTenantRequest,
@@ -242,6 +244,7 @@ pub async fn run(
             ReadTenantsResponse,
             CreateSourceRequest,
             CreateSourceResponse,
+            TestConnectionResponse,
             UpdateSourceRequest,
             ReadSourceResponse,
             ReadSourcesResponse,
@@ -293,6 +296,7 @@ pub async fn run(
         crate::routes::sources::update_source,
         crate::routes::sources::delete_source,
         crate::routes::sources::read_all_sources,
+        crate::routes::sources::test_source_connection,
         crate::routes::sources::publications::create_publication,
         crate::routes::sources::publications::read_publication,
         crate::routes::sources::publications::update_publication,
@@ -304,6 +308,7 @@ pub async fn run(
         crate::routes::destinations::update_destination,
         crate::routes::destinations::delete_destination,
         crate::routes::destinations::read_all_destinations,
+        crate::routes::destinations::test_destination_connection,
         crate::routes::tenants_sources::create_tenant_and_source,
         crate::routes::destinations_pipelines::create_destination_and_pipeline,
         crate::routes::destinations_pipelines::update_destination_and_pipeline,
@@ -347,12 +352,14 @@ pub async fn run(
                     .service(update_source)
                     .service(delete_source)
                     .service(read_all_sources)
+                    .service(test_source_connection)
                     //destinations
                     .service(create_destination)
                     .service(read_destination)
                     .service(update_destination)
                     .service(delete_destination)
                     .service(read_all_destinations)
+                    .service(test_destination_connection)
                     //pipelines
                     .service(create_pipeline)
                     .service(read_pipeline)
