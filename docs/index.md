@@ -2,7 +2,7 @@
 
 **Build real-time Postgres replication applications in Rust**
 
-ETL is a Rust framework by [Supabase](https://supabase.com) that enables you to build high-performance, real-time data replication applications for Postgres. Whether you're creating ETL pipelines, implementing CDC (Change Data Capture), or building custom data synchronization solutions, ETL provides the building blocks you need.
+ETL is a Rust framework by [Supabase](https://supabase.com) for building high‑performance, real‑time data replication apps on Postgres. It sits on top of Postgres logical replication and gives you a clean, Rust‑native API for streaming changes to your own destinations.
 
 ## Getting Started
 
@@ -29,15 +29,14 @@ Read our **[Explanations](explanation/index.md)** for deeper insights:
 - [ETL architecture overview](explanation/architecture.md)
 - More explanations coming soon
 
-## Core Concepts
+## Features
 
-**Postgres Logical Replication** streams data changes from Postgres databases in real-time using the Write-Ahead Log (WAL). ETL builds on this foundation to provide:
-
-- **Real-time replication** - Stream changes as they happen
-- **Multiple destinations** - BigQuery and Apache Iceberg officially supported
-- **Fault tolerance** - Built-in error handling and recovery
-- **High performance** - Efficient batching and parallel processing
-- **Extensible** - Plugin architecture for custom destinations
+- **Real‑time replication**: stream changes in real time to your own destinations
+- **High performance**: configurable batching and parallelism to maximize throughput
+- **Fault-tolerant**: robust error handling and retry logic built-in
+- **Extensible**: implement your own custom destinations and state/schema stores
+- **Production destinations**: BigQuery and Apache Iceberg officially supported
+- **Type-safe**: fully typed Rust API with compile-time guarantees
 
 ## Quick Example
 
@@ -51,36 +50,33 @@ use etl::{
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Configure Postgres connection
-    let pg_config = PgConnectionConfig {
-        host: "localhost".to_string(),
+    let pg = PgConnectionConfig {
+        host: "localhost".into(),
         port: 5432,
-        name: "mydb".to_string(),
-        username: "postgres".to_string(),
-        password: Some("password".to_string().into()),
+        name: "mydb".into(),
+        username: "postgres".into(),
+        password: Some("password".into()),
         tls: TlsConfig { enabled: false, trusted_root_certs: String::new() },
     };
 
-    // Create memory-based store and destination for testing
     let store = MemoryStore::new();
     let destination = MemoryDestination::new();
 
-    // Configure the pipeline
     let config = PipelineConfig {
         id: 1,
-        publication_name: "my_publication".to_string(),
-        pg_connection: pg_config,
+        publication_name: "my_publication".into(),
+        pg_connection: pg,
         batch: BatchConfig { max_size: 1000, max_fill_ms: 5000 },
-        table_error_retry_delay_ms: 10000,
+        table_error_retry_delay_ms: 10_000,
         table_error_retry_max_attempts: 5,
         max_table_sync_workers: 4,
     };
 
-    // Create and start the pipeline
+    // Start the pipeline.
     let mut pipeline = Pipeline::new(config, store, destination);
     pipeline.start().await?;
 
-    // Pipeline will run until stopped
+    // Wait for the pipeline indefinitely.
     pipeline.wait().await?;
 
     Ok(())
@@ -96,4 +92,4 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ## Contributing
 
-Contributions and bug reports are welcome in the GitHub repository. At the moment we cannot accept new custom destination implementations unless a large portion of the community requests them, because every destination adds a long-lived maintenance burden and we are focusing engineering time on stability, observability, and ergonomics. Please open an issue or discussion first if you believe a new destination should be prioritized.
+We welcome pull requests and GitHub issues. We currently cannot accept new custom destinations unless there is significant community demand, as each destination carries a long-term maintenance cost. We are prioritizing core stability, observability, and ergonomics. If you need a destination that is not yet supported, please start a discussion or issue so we can gauge demand before proposing an implementation.
