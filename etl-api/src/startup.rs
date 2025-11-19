@@ -348,18 +348,18 @@ pub async fn run(
                     .service(read_all_tenants)
                     //sources
                     .service(create_source)
+                    .service(read_all_sources)
+                    .service(test_source_connection)
                     .service(read_source)
                     .service(update_source)
                     .service(delete_source)
-                    .service(read_all_sources)
-                    .service(test_source_connection)
                     //destinations
                     .service(create_destination)
+                    .service(read_all_destinations)
+                    .service(test_destination_connection)
                     .service(read_destination)
                     .service(update_destination)
                     .service(delete_destination)
-                    .service(read_all_destinations)
-                    .service(test_destination_connection)
                     //pipelines
                     .service(create_pipeline)
                     .service(read_pipeline)

@@ -248,6 +248,28 @@ impl TestApp {
             .expect("failed to execute request")
     }
 
+    pub async fn test_source_connection(
+        &self,
+        config: &etl_api::configs::source::FullApiSourceConfig,
+    ) -> reqwest::Response {
+        self.post_authenticated(format!("{}/v1/sources/test-connection", &self.address))
+            .json(config)
+            .send()
+            .await
+            .expect("Failed to execute request.")
+    }
+
+    pub async fn test_destination_connection(
+        &self,
+        config: &etl_api::configs::destination::FullApiDestinationConfig,
+    ) -> reqwest::Response {
+        self.post_authenticated(format!("{}/v1/destinations/test-connection", &self.address))
+            .json(config)
+            .send()
+            .await
+            .expect("Failed to execute request.")
+    }
+
     pub async fn create_pipeline(
         &self,
         tenant_id: &str,
@@ -501,12 +523,21 @@ impl Drop for TestApp {
         // First, abort the server task to ensure it's terminated.
         self.server_handle.abort();
 
+        // Clone the config to avoid move issues
+        let db_config = self.config.database.clone();
+
         // To use `block_in_place,` we need a multithreaded runtime since when a blocking
         // task is issued, the runtime will offload existing tasks to another worker.
-        tokio::task::block_in_place(move || {
-            Handle::current()
-                .block_on(async move { drop_pg_database(&self.config.database).await });
-        });
+        // Wrap in catch_unwind to ensure panics during cleanup don't propagate
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            tokio::task::block_in_place(|| {
+                Handle::current().block_on(async {
+                    // Give server time to shut down gracefully
+                    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                    drop_pg_database(&db_config).await;
+                });
+            });
+        }));
     }
 }
 
