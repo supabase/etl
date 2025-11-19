@@ -184,14 +184,37 @@ sqlx migrate add <migration_name>
 
 ## Running the Services
 
+Both `etl-api` and `etl-replicator` binaries use hierarchical configuration loading from the `configuration/` directory within each crate. Configuration is loaded in this order:
+
+1. **Base configuration**: `configuration/base.yaml` (always loaded)
+2. **Environment-specific**: `configuration/{environment}.yaml` (e.g., `dev.yaml`, `prod.yaml`)
+3. **Environment variable overrides**: Prefixed with `APP_` (e.g., `APP_DATABASE__URL`)
+
+**Environment Selection:**
+
+The environment is determined by the `APP_ENVIRONMENT` variable:
+- **Default**: `prod` (if `APP_ENVIRONMENT` is not set)
+- **Available**: `dev`, `staging`, `prod`
+
+```bash
+# Run with dev environment
+APP_ENVIRONMENT=dev cargo run
+
+# Run with production environment (default)
+cargo run
+
+# Override specific config values
+APP_ENVIRONMENT=dev APP_DATABASE__URL=postgres://localhost/mydb cargo run
+```
+
 ### ETL API
 
 ```bash
 cd etl-api
-cargo run
+APP_ENVIRONMENT=dev cargo run
 ```
 
-The API requires the `DATABASE_URL` environment variable and a valid configuration file. See `etl-api/README.md` for configuration details.
+The API loads configuration from `etl-api/configuration/{environment}.yaml`. See `etl-api/README.md` for available configuration options.
 
 ### ETL Replicator
 
@@ -199,8 +222,10 @@ The replicator is typically deployed as a Kubernetes pod, but can be run locally
 
 ```bash
 cd etl-replicator
-cargo run
+APP_ENVIRONMENT=dev cargo run
 ```
+
+The replicator loads configuration from `etl-replicator/configuration/{environment}.yaml`.
 
 ## Kubernetes Setup
 
