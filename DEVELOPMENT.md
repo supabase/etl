@@ -164,11 +164,16 @@ psql $DATABASE_URL -c "create schema if not exists etl;"
 sqlx migrate run --source etl-replicator/migrations --database-url "${DATABASE_URL}?options=-csearch_path%3Detl"
 ```
 
-**Note:** The replicator migrations are also run automatically when the replicator starts (see `etl-replicator/src/migrations.rs:16`). The script is useful for:
-- Pre-creating the state store schema
+**Important:** Migrations are run automatically when using the `etl-replicator` binary (see `etl-replicator/src/migrations.rs:16`). However, if you integrate the `etl` crate directly into your own application as a library, you should run these migrations manually before starting your pipeline. This design decision ensures:
+- The standalone replicator binary works out-of-the-box
+- Library users have explicit control over when migrations run
+- CI/CD pipelines can pre-apply migrations independently
+
+**When to run migrations manually:**
+- Integrating `etl` as a library in your own application
+- Pre-creating the state store schema before deployment
 - Testing migrations independently
-- CI/CD pipelines
-- Setting up replicator state on new databases
+- CI/CD pipelines that separate migration and deployment steps
 
 **Creating a new replicator migration:**
 
