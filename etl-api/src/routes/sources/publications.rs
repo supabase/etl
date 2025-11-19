@@ -46,6 +46,15 @@ impl PublicationError {
             | PublicationError::PublicationsDb(PublicationsDbError::Database(_)) => {
                 "internal server error".to_string()
             }
+            // Validation errors are safe to expose - they help users fix their input
+            PublicationError::PublicationsDb(PublicationsDbError::UnsupportedColumnTypes(
+                details,
+            )) => {
+                format!(
+                    "Publication contains tables with unsupported column types: {}",
+                    details
+                )
+            }
             // Every other message is ok, as they do not divulge sensitive information
             e => e.to_string(),
         }
@@ -55,9 +64,15 @@ impl PublicationError {
 impl ResponseError for PublicationError {
     fn status_code(&self) -> StatusCode {
         match self {
-            PublicationError::SourcesDb(_)
-            | PublicationError::PublicationsDb(_)
-            | PublicationError::Database(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            PublicationError::SourcesDb(_) | PublicationError::Database(_) => {
+                StatusCode::INTERNAL_SERVER_ERROR
+            }
+            PublicationError::PublicationsDb(PublicationsDbError::Database(_)) => {
+                StatusCode::INTERNAL_SERVER_ERROR
+            }
+            PublicationError::PublicationsDb(PublicationsDbError::UnsupportedColumnTypes(_)) => {
+                StatusCode::BAD_REQUEST
+            }
             PublicationError::SourceNotFound(_) | PublicationError::PublicationNotFound(_) => {
                 StatusCode::NOT_FOUND
             }
@@ -77,18 +92,18 @@ impl ResponseError for PublicationError {
     }
 }
 
-#[derive(Deserialize, ToSchema)]
+#[derive(Deserialize, Serialize, ToSchema)]
 pub struct CreatePublicationRequest {
     #[schema(example = "my_publication", required = true)]
-    name: String,
+    pub name: String,
     #[schema(required = true)]
-    tables: Vec<Table>,
+    pub tables: Vec<Table>,
 }
 
-#[derive(Deserialize, ToSchema)]
+#[derive(Deserialize, Serialize, ToSchema)]
 pub struct UpdatePublicationRequest {
     #[schema(required = true)]
-    tables: Vec<Table>,
+    pub tables: Vec<Table>,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -127,11 +142,14 @@ pub async fn create_publication(
 
     let source_pool =
         connect_to_source_database_with_defaults(&config.into_connection_config()).await?;
-    let publication = publication.0;
+
+    let publication = publication.into_inner();
     let publication = Publication {
         name: publication.name,
         tables: publication.tables,
     };
+
+    db::publications::validate_publication_column_types(&publication, &source_pool).await?;
     db::publications::create_publication(&publication, &source_pool).await?;
 
     Ok(HttpResponse::Ok().finish())
@@ -208,11 +226,13 @@ pub async fn update_publication(
 
     let source_pool =
         connect_to_source_database_with_defaults(&config.into_connection_config()).await?;
-    let publication = publication.0;
+    let publication = publication.into_inner();
     let publication = Publication {
         name: publication_name,
         tables: publication.tables,
     };
+
+    db::publications::validate_publication_column_types(&publication, &source_pool).await?;
     db::publications::update_publication(&publication, &source_pool).await?;
 
     Ok(HttpResponse::Ok().finish())

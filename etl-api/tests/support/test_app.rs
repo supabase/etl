@@ -1,6 +1,8 @@
 #![allow(dead_code)]
 
+use etl_api::db;
 use etl_api::k8s::K8sClient;
+use etl_api::routes::connect_to_source_database_with_defaults;
 use etl_api::routes::destinations::{CreateDestinationRequest, UpdateDestinationRequest};
 use etl_api::routes::destinations_pipelines::{
     CreateDestinationPipelineRequest, UpdateDestinationPipelineRequest,
@@ -39,6 +41,8 @@ pub struct TestApp {
     pub api_client: reqwest::Client,
     pub api_key: String,
     config: ApiConfig,
+    pool: sqlx::PgPool,
+    encryption_key: encryption::EncryptionKey,
     server_handle: tokio::task::JoinHandle<io::Result<()>>,
 }
 
@@ -494,6 +498,53 @@ impl TestApp {
         .await
         .expect("failed to execute request")
     }
+
+    pub async fn create_publication(
+        &self,
+        tenant_id: &str,
+        source_id: i64,
+        publication: &etl_api::routes::sources::publications::CreatePublicationRequest,
+    ) -> reqwest::Response {
+        self.post_authenticated(format!(
+            "{}/v1/sources/{}/publications",
+            &self.address, source_id
+        ))
+        .header("tenant_id", tenant_id)
+        .json(publication)
+        .send()
+        .await
+        .expect("failed to execute request")
+    }
+
+    pub async fn update_publication(
+        &self,
+        tenant_id: &str,
+        source_id: i64,
+        publication_name: &str,
+        publication: &etl_api::routes::sources::publications::UpdatePublicationRequest,
+    ) -> reqwest::Response {
+        self.post_authenticated(format!(
+            "{}/v1/sources/{}/publications/{}",
+            &self.address, source_id, publication_name
+        ))
+        .header("tenant_id", tenant_id)
+        .json(publication)
+        .send()
+        .await
+        .expect("failed to execute request")
+    }
+
+    pub async fn get_source_pool(&self, tenant_id: &str, source_id: i64) -> sqlx::PgPool {
+        let source =
+            db::sources::read_source(&self.pool, tenant_id, source_id, &self.encryption_key)
+                .await
+                .expect("failed to read source")
+                .expect("source not found");
+
+        connect_to_source_database_with_defaults(&source.config.into_connection_config())
+            .await
+            .expect("failed to connect to source database")
+    }
 }
 
 impl Drop for TestApp {
@@ -525,8 +576,25 @@ pub async fn spawn_test_app() -> TestApp {
 
     let api_db_pool = create_etl_api_database(&config.database).await;
 
-    let key = generate_random_key::<32>().expect("failed to generate random key");
-    let encryption_key = encryption::EncryptionKey { id: 0, key };
+    // Generate a single random key and create two RandomizedNonceKey instances
+    // (RandomizedNonceKey doesn't implement Clone, but we can create two from the same bytes)
+    let mut key_bytes = [0u8; 32];
+    aws_lc_rs::rand::fill(&mut key_bytes).expect("failed to generate random bytes");
+    let test_key =
+        aws_lc_rs::aead::RandomizedNonceKey::new(&aws_lc_rs::aead::AES_256_GCM, &key_bytes)
+            .expect("failed to create test encryption key");
+    let server_key =
+        aws_lc_rs::aead::RandomizedNonceKey::new(&aws_lc_rs::aead::AES_256_GCM, &key_bytes)
+            .expect("failed to create server encryption key");
+
+    let encryption_key = encryption::EncryptionKey {
+        id: 0,
+        key: test_key,
+    };
+    let server_encryption_key = encryption::EncryptionKey {
+        id: 0,
+        key: server_key,
+    };
 
     // We choose a random API key from the ones configured to show that rotation works.
     let api_key_index = random_range(0..config.api_keys.len());
@@ -537,8 +605,8 @@ pub async fn spawn_test_app() -> TestApp {
     let server = run(
         config.clone(),
         listener,
-        api_db_pool,
-        encryption_key,
+        api_db_pool.clone(),
+        server_encryption_key,
         k8s_client,
         None,
     )
@@ -552,6 +620,8 @@ pub async fn spawn_test_app() -> TestApp {
         api_client: reqwest::Client::new(),
         api_key,
         config,
+        pool: api_db_pool,
+        encryption_key,
         server_handle,
     }
 }
