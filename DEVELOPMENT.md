@@ -245,7 +245,6 @@ docker run \
   -v $(pwd)/etl-api/configuration/base.yaml:/app/configuration/base.yaml \
   -v $(pwd)/etl-api/configuration/dev.yaml:/app/configuration/dev.yaml \
   -e APP_ENVIRONMENT=dev \
-  -e APP_DATABASE__URL=postgres://host.docker.internal:5432/mydb \
   -p 8080:8080 \
   ramsup/etl-api:latest
 ```
@@ -302,8 +301,6 @@ docker run \
   -v $(pwd)/etl-replicator/configuration/base.yaml:/app/configuration/base.yaml \
   -v $(pwd)/etl-replicator/configuration/dev.yaml:/app/configuration/dev.yaml \
   -e APP_ENVIRONMENT=dev \
-  -e APP_SOURCE__HOST=host.docker.internal \
-  -e APP_SOURCE__PASSWORD=mysecret \
   etl-replicator:latest
 ```
 
