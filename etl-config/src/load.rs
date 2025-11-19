@@ -1,10 +1,9 @@
 use std::{
     borrow::Cow,
-    fmt, io,
+    io,
     path::{Path, PathBuf},
 };
 
-use config::builder::{ConfigBuilder, DefaultState};
 use serde::de::DeserializeOwned;
 use thiserror::Error;
 
@@ -50,13 +49,14 @@ impl ConfigFileKind {
             ConfigFileKind::Environment(env) => Cow::Owned(env.to_string()),
         }
     }
-}
 
-impl fmt::Display for ConfigFileKind {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    /// Returns a static string describing this configuration file kind for error messages.
+    fn as_str(&self) -> &'static str {
         match self {
-            ConfigFileKind::Base => f.write_str("base configuration"),
-            ConfigFileKind::Environment(env) => write!(f, "{env} environment configuration"),
+            ConfigFileKind::Base => "base",
+            ConfigFileKind::Environment(Environment::Dev) => "dev",
+            ConfigFileKind::Environment(Environment::Staging) => "staging",
+            ConfigFileKind::Environment(Environment::Prod) => "prod",
         }
     }
 }
@@ -65,7 +65,7 @@ impl fmt::Display for ConfigFileKind {
 #[derive(Debug, Error)]
 pub enum LoadConfigError {
     /// Failed to determine the current working directory.
-    #[error("failed to determine the current directory: {0}")]
+    #[error("failed to determine the current directory")]
     CurrentDir(#[source] io::Error),
 
     /// The configured `configuration` directory does not exist.
@@ -73,35 +73,27 @@ pub enum LoadConfigError {
     MissingConfigurationDirectory(PathBuf),
 
     /// Could not locate one of the required configuration files.
-    #[error("could not locate {kind_description} in `{directory}`; attempted: {attempted}")]
+    #[error("could not locate {kind} configuration in `{directory}`; attempted: {attempted}")]
     ConfigurationFileMissing {
-        kind_description: String,
+        kind: &'static str,
         directory: PathBuf,
         attempted: String,
     },
 
-    /// A configuration file existed but could not be parsed.
-    #[error("failed to load {kind_description} from `{path}`: {source}")]
-    ConfigurationFileLoad {
-        kind_description: String,
-        path: PathBuf,
-        source: config::ConfigError,
-    },
-
     /// Environment variable overrides failed to merge into the configuration.
-    #[error("failed to load configuration from environment variables: {0}")]
+    #[error("failed to load configuration from environment variables")]
     EnvironmentVariables(#[source] config::ConfigError),
 
     /// The configuration files were parsed but deserialization failed.
-    #[error("failed to deserialize configuration: {0}")]
+    #[error("failed to deserialize configuration")]
     Deserialization(#[source] config::ConfigError),
 
     /// Failed to determine the runtime environment (`APP_ENVIRONMENT`).
-    #[error("failed to determine runtime environment: {0}")]
-    Environment(#[from] io::Error),
+    #[error("failed to determine runtime environment")]
+    Environment(#[source] io::Error),
 
     /// Failed to initialize the configuration builder.
-    #[error("failed to initialize configuration builder: {0}")]
+    #[error("failed to initialize configuration builder")]
     Builder(#[source] config::ConfigError),
 }
 
@@ -109,6 +101,7 @@ pub enum LoadConfigError {
 ///
 /// Loads files from `configuration/base.(yaml|yml|json)` and `configuration/{environment}.{yaml|yml|json}`
 /// before applying overrides from `APP_`-prefixed environment variables.
+///
 /// Nested keys use double underscores (`APP_SERVICE__HOST`), and list values are comma-separated.
 pub fn load_config<T>() -> Result<T, LoadConfigError>
 where
@@ -145,20 +138,13 @@ where
         }
     }
 
-    let base_source = config::File::from(base_file.clone());
+    let base_file_source = config::File::from(base_file.clone());
     let environment_file_source = config::File::from(environment_file.clone());
 
-    let builder = config::Config::builder().add_source(base_source);
-    validate_configuration_source(&builder, ConfigFileKind::Base, &base_file)?;
-
-    let builder = builder.add_source(environment_file_source);
-    validate_configuration_source(
-        &builder,
-        ConfigFileKind::Environment(environment),
-        &environment_file,
-    )?;
-
-    let builder = builder.add_source(environment_source);
+    let builder = config::Config::builder()
+        .add_source(base_file_source)
+        .add_source(environment_file_source)
+        .add_source(environment_source);
 
     let settings = builder.build().map_err(LoadConfigError::Builder)?;
 
@@ -191,24 +177,8 @@ fn find_configuration_file(
         .join(", ");
 
     Err(LoadConfigError::ConfigurationFileMissing {
-        kind_description: kind.to_string(),
+        kind: kind.as_str(),
         directory: directory.to_path_buf(),
         attempted,
     })
-}
-
-fn validate_configuration_source(
-    builder: &ConfigBuilder<DefaultState>,
-    kind: ConfigFileKind,
-    path: &Path,
-) -> Result<(), LoadConfigError> {
-    builder
-        .clone()
-        .build()
-        .map_err(|source| LoadConfigError::ConfigurationFileLoad {
-            kind_description: kind.to_string(),
-            path: path.to_path_buf(),
-            source,
-        })
-        .map(|_| ())
 }
