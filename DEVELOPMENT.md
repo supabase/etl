@@ -31,7 +31,7 @@ Before starting, ensure you have the following installed:
 Install SQLx CLI:
 
 ```bash
-cargo install --version='~0.7' sqlx-cli --no-default-features --features rustls,postgres
+cargo install --version='~0.8.6' sqlx-cli --no-default-features --features rustls,postgres
 ```
 
 ### Optional Tools
@@ -92,23 +92,41 @@ POSTGRES_DATA_VOLUME=/path/to/data ./scripts/init.sh
 
 If you prefer manual setup or have an existing PostgreSQL instance:
 
-1. **Set the database URL:**
+**Important:** The etl-api and etl-replicator migrations can run on **separate databases**. You might have:
+- The etl-api using its own dedicated Postgres instance for the control plane
+- The etl-replicator state store on the same database you're replicating from (source database)
+- Or both on the same database (for simpler local development setups)
+
+#### Single Database Setup
+
+If using one database for both the API and replicator state:
 
 ```bash
 export DATABASE_URL=postgres://USER:PASSWORD@HOST:PORT/DB
-```
 
-2. **Run etl-api migrations:**
-
-```bash
+# Run both migrations on the same database
 ./etl-api/scripts/run_migrations.sh
-```
-
-3. **Run etl-replicator migrations:**
-
-```bash
 ./etl-replicator/scripts/run_migrations.sh
 ```
+
+#### Separate Database Setup
+
+If using separate databases (recommended for production):
+
+```bash
+# API migrations on the control plane database
+export DATABASE_URL=postgres://USER:PASSWORD@API_HOST:PORT/API_DB
+./etl-api/scripts/run_migrations.sh
+
+# Replicator migrations on the source database
+export DATABASE_URL=postgres://USER:PASSWORD@SOURCE_HOST:PORT/SOURCE_DB
+./etl-replicator/scripts/run_migrations.sh
+```
+
+This separation allows you to:
+- Scale the control plane independently from replication workloads
+- Keep the replicator state close to the source data
+- Isolate concerns between infrastructure management and data replication
 
 ## Database Migrations
 
@@ -216,9 +234,34 @@ APP_ENVIRONMENT=dev cargo run
 
 The API loads configuration from `etl-api/configuration/{environment}.yaml`. See `etl-api/README.md` for available configuration options.
 
+#### Kubernetes Setup (ETL API Only)
+
+The etl-api manages replicator deployments on Kubernetes by dynamically creating StatefulSets, Secrets, and ConfigMaps. The etl-api requires Kubernetes, but the **etl-replicator binary can run independently without any Kubernetes setup**.
+
+**Prerequisites:**
+- OrbStack with Kubernetes enabled (or another local Kubernetes cluster)
+- `kubectl` configured with the `orbstack` context
+- Pre-defined Kubernetes resources (see below)
+
+**Required Pre-Defined Resources:**
+
+The etl-api expects these resources to exist before it can deploy replicators:
+
+1. **Namespace**: `etl-data-plane` - Where all replicator pods and related resources are created
+2. **ConfigMap**: `trusted-root-certs-config` - Provides trusted root certificates for TLS connections
+
+These are defined in `scripts/` and should be applied before running the API:
+
+```bash
+kubectl --context orbstack apply -f scripts/etl-data-plane.yaml
+kubectl --context orbstack apply -f scripts/trusted-root-certs-config.yaml
+```
+
+**Note:** For the complete list of expected Kubernetes resources and their specifications, refer to the constants and resource creation logic in `etl-api/src/k8s/http.rs`.
+
 ### ETL Replicator
 
-The replicator is typically deployed as a Kubernetes pod, but can be run locally for testing:
+The replicator can run as a standalone binary without Kubernetes:
 
 ```bash
 cd etl-replicator
@@ -227,33 +270,7 @@ APP_ENVIRONMENT=dev cargo run
 
 The replicator loads configuration from `etl-replicator/configuration/{environment}.yaml`.
 
-## Kubernetes Setup
-
-The project uses Kubernetes for deploying replicators. The setup script configures the necessary resources.
-
-**Prerequisites:**
-- OrbStack with Kubernetes enabled (or another local Kubernetes cluster)
-- `kubectl` configured with the `orbstack` context
-
-**Manual Kubernetes setup:**
-
-```bash
-kubectl --context orbstack apply -f scripts/etl-data-plane.yaml
-kubectl --context orbstack apply -f scripts/trusted-root-certs-config.yaml
-```
-
-**Checking deployed resources:**
-
-```bash
-# List replicator pods
-kubectl get pods -n etl-control-plane -l app=etl-api
-
-# View logs
-kubectl logs -n etl-control-plane -l app=etl-api --tail=100
-
-# Describe a specific pod
-kubectl describe pod <pod-name> -n etl-control-plane
-```
+**Note:** While the replicator is typically deployed as a Kubernetes pod managed by the etl-api, it does not require Kubernetes to function. You can run it as a standalone process on any machine with the appropriate configuration.
 
 ## Troubleshooting
 
