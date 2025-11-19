@@ -25,7 +25,7 @@ flowchart LR
     end
 
     subgraph Destination[Destination]
-        Dest["BigQuery<br>Apache Iceberg<br>Custom API"]
+        Dest["BigQuery<br>Apache Iceberg<br>Custom"]
     end
 
     subgraph Store[Store]
