@@ -91,7 +91,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 - **First time using ETL?** → Start with [Build your first pipeline](tutorials/first-pipeline.md)
 - **Need Postgres setup help?** → Check [Configure Postgres for Replication](how-to/configure-postgres.md)
-- **Using Postgres for state storage?** → Follow [Apply Postgres state store migrations](how-to/postgres-state-store.md)
 - **Need technical details?** → Check the [Reference](reference/index.md)
 - **Want to understand the architecture?** → Read [ETL Architecture](explanation/architecture.md)
 
