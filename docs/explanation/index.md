@@ -33,4 +33,4 @@ After building a conceptual understanding:
 ## Contributing to Explanations
 
 Found gaps in these explanations? See something that could be clearer?
-[Open an issue](https://github.com/supabase/etl/issues) or contribute improvements to help other users build better mental models of ETL.
+[Open an issue](https://github.com/supabase/etl/issues/new) or contribute improvements to help other users build better mental models of ETL.
