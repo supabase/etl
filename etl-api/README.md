@@ -46,6 +46,12 @@ export DATABASE_URL=postgres://USER:PASSWORD@HOST:PORT/DB
 sqlx migrate run --source etl-api/migrations
 ```
 
+## Configuration
+
+- Configuration roots are `configuration/base.(yaml|yml|json)` and `configuration/{environment}.(yaml|yml|json)` relative to the binary. The running environment defaults to `prod` unless `APP_ENVIRONMENT` is set to `dev`, `staging`, or `prod`.
+- Additional overrides come from `APP_`-prefixed environment variables (nested keys use `__`, lists split on `,`).
+- The Docker image does not bundle any repository configuration files; mount a configuration directory or rely on environment overrides when you run the container.
+
 ## Development
 
 ### Database Migrations

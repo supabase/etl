@@ -244,7 +244,7 @@ impl K8sClient for HttpK8sClient {
         Ok(())
     }
 
-    async fn create_or_update_bq_secret(
+    async fn create_or_update_bigquery_secret(
         &self,
         prefix: &str,
         bq_service_account_key: &str,
@@ -319,7 +319,7 @@ impl K8sClient for HttpK8sClient {
         Ok(())
     }
 
-    async fn delete_bq_secret(&self, prefix: &str) -> Result<(), K8sError> {
+    async fn delete_bigquery_secret(&self, prefix: &str) -> Result<(), K8sError> {
         debug!("deleting bq secret");
 
         let bq_secret_name = create_bq_secret_name(prefix);
@@ -354,7 +354,7 @@ impl K8sClient for HttpK8sClient {
         Ok(config_map)
     }
 
-    async fn create_or_update_config_map(
+    async fn create_or_update_replicator_config_map(
         &self,
         prefix: &str,
         base_config: &str,
@@ -386,7 +386,7 @@ impl K8sClient for HttpK8sClient {
         Ok(())
     }
 
-    async fn delete_config_map(&self, prefix: &str) -> Result<(), K8sError> {
+    async fn delete_replicator_config_map(&self, prefix: &str) -> Result<(), K8sError> {
         debug!("deleting config map");
 
         let replicator_config_map_name = create_replicator_config_map_name(prefix);
@@ -400,7 +400,7 @@ impl K8sClient for HttpK8sClient {
         Ok(())
     }
 
-    async fn create_or_update_stateful_set(
+    async fn create_or_update_replicator_stateful_set(
         &self,
         prefix: &str,
         replicator_image: &str,
@@ -452,7 +452,7 @@ impl K8sClient for HttpK8sClient {
         Ok(())
     }
 
-    async fn delete_stateful_set(&self, prefix: &str) -> Result<(), K8sError> {
+    async fn delete_replicator_stateful_set(&self, prefix: &str) -> Result<(), K8sError> {
         debug!("deleting stateful set");
 
         let stateful_set_name = create_stateful_set_name(prefix);
@@ -464,7 +464,7 @@ impl K8sClient for HttpK8sClient {
         Ok(())
     }
 
-    async fn get_pod_status(&self, prefix: &str) -> Result<PodStatus, K8sError> {
+    async fn get_replicator_pod_status(&self, prefix: &str) -> Result<PodStatus, K8sError> {
         debug!("getting pod status");
 
         let pod_name = create_pod_name(prefix);
@@ -1135,7 +1135,7 @@ mod tests {
         };
         let replicator_config_without_secrets: ReplicatorConfigWithoutSecrets =
             replicator_config.into();
-        let env_config = serde_json::to_string(&replicator_config_without_secrets).unwrap();
+        let env_config = serde_yaml::to_string(&replicator_config_without_secrets).unwrap();
 
         let config_map_json = create_replicator_config_map_json(
             &replicator_config_map_name,

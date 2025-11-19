@@ -1,6 +1,7 @@
 use etl_config::Environment;
 use etl_config::shared::{ReplicatorConfigWithoutSecrets, SupabaseConfigWithoutSecrets, TlsConfig};
 use secrecy::ExposeSecret;
+use serde_yaml;
 
 use crate::configs::destination::{StoredDestinationConfig, StoredIcebergConfig};
 use crate::configs::log::LogLevel;
@@ -233,7 +234,7 @@ async fn create_or_update_dynamic_replicator_secrets(
                 .create_or_update_postgres_secret(prefix, &postgres_password)
                 .await?;
             k8s_client
-                .create_or_update_bq_secret(prefix, &big_query_service_account_key)
+                .create_or_update_bigquery_secret(prefix, &big_query_service_account_key)
                 .await?;
         }
         Secrets::Iceberg {
@@ -261,7 +262,7 @@ async fn create_or_update_dynamic_replicator_secrets(
 
 /// Creates or updates the replicator configuration in a Kubernetes config map.
 ///
-/// This function serializes the [`ReplicatorConfigWithoutSecrets`] to JSON and stores it
+/// This function serializes the [`ReplicatorConfigWithoutSecrets`] to YAML and stores it
 /// in a Kubernetes config map. The replicator pods mount this config map to access their
 /// runtime configuration.
 async fn create_or_update_replicator_config(
@@ -272,9 +273,9 @@ async fn create_or_update_replicator_config(
 ) -> Result<(), PipelineError> {
     // For now the base config is empty.
     let base_config = "";
-    let env_config = serde_json::to_string(&config)?;
+    let env_config = serde_yaml::to_string(&config)?;
     k8s_client
-        .create_or_update_config_map(prefix, base_config, &env_config, environment)
+        .create_or_update_replicator_config_map(prefix, base_config, &env_config, environment)
         .await?;
 
     Ok(())
@@ -294,7 +295,7 @@ async fn create_or_update_replicator_stateful_set(
     log_level: LogLevel,
 ) -> Result<(), PipelineError> {
     k8s_client
-        .create_or_update_stateful_set(
+        .create_or_update_replicator_stateful_set(
             prefix,
             &replicator_image,
             environment,
@@ -324,7 +325,7 @@ async fn delete_dynamic_replicator_secrets(
     // then there's a risk of wrong secret type being attempted for deletion which might leave
     // the actual secret behind. So for simplicty we just delete both kinds of secrets. The
     // one which doesn't exist will be safely ignored.
-    k8s_client.delete_bq_secret(prefix).await?;
+    k8s_client.delete_bigquery_secret(prefix).await?;
     k8s_client.delete_iceberg_secret(prefix).await?;
 
     Ok(())
@@ -335,7 +336,7 @@ async fn delete_replicator_config(
     k8s_client: &dyn K8sClient,
     prefix: &str,
 ) -> Result<(), PipelineError> {
-    k8s_client.delete_config_map(prefix).await?;
+    k8s_client.delete_replicator_config_map(prefix).await?;
 
     Ok(())
 }
@@ -345,7 +346,7 @@ async fn delete_replicator_stateful_set(
     k8s_client: &dyn K8sClient,
     prefix: &str,
 ) -> Result<(), PipelineError> {
-    k8s_client.delete_stateful_set(prefix).await?;
+    k8s_client.delete_replicator_stateful_set(prefix).await?;
 
     Ok(())
 }

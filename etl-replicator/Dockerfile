@@ -44,9 +44,8 @@ WORKDIR /app
 # Create non-root user (distroless already has nonroot user)
 USER nonroot:nonroot
 
-# Copy binary and configuration
+# Copy binary; configuration must be provided at runtime via mounted volume or environment overrides
 COPY --from=builder /app/target/release/etl-replicator ./etl-replicator
-COPY --chown=nonroot:nonroot etl-replicator/configuration ./configuration
 
 # Use exec form for proper signal handling
 ENTRYPOINT ["./etl-replicator"]

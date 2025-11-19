@@ -44,6 +44,7 @@ secrecy = { workspace = true }
 sentry = { workspace = true, features = ["actix"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true, features = ["std"] }
+serde_yaml = { workspace = true }
 sqlx = { workspace = true, features = [
     "runtime-tokio-rustls",
     "macros",

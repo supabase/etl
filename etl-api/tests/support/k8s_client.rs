@@ -21,7 +21,7 @@ impl K8sClient for MockK8sClient {
         Ok(())
     }
 
-    async fn create_or_update_bq_secret(
+    async fn create_or_update_bigquery_secret(
         &self,
         _prefix: &str,
         _bq_service_account_key: &str,
@@ -43,7 +43,7 @@ impl K8sClient for MockK8sClient {
         Ok(())
     }
 
-    async fn delete_bq_secret(&self, _prefix: &str) -> Result<(), K8sError> {
+    async fn delete_bigquery_secret(&self, _prefix: &str) -> Result<(), K8sError> {
         Ok(())
     }
 
@@ -67,7 +67,7 @@ impl K8sClient for MockK8sClient {
         }
     }
 
-    async fn create_or_update_config_map(
+    async fn create_or_update_replicator_config_map(
         &self,
         _prefix: &str,
         _base_config: &str,
@@ -77,11 +77,11 @@ impl K8sClient for MockK8sClient {
         Ok(())
     }
 
-    async fn delete_config_map(&self, _prefix: &str) -> Result<(), K8sError> {
+    async fn delete_replicator_config_map(&self, _prefix: &str) -> Result<(), K8sError> {
         Ok(())
     }
 
-    async fn create_or_update_stateful_set(
+    async fn create_or_update_replicator_stateful_set(
         &self,
         _prefix: &str,
         _replicator_image: &str,
@@ -92,11 +92,11 @@ impl K8sClient for MockK8sClient {
         Ok(())
     }
 
-    async fn delete_stateful_set(&self, _prefix: &str) -> Result<(), K8sError> {
+    async fn delete_replicator_stateful_set(&self, _prefix: &str) -> Result<(), K8sError> {
         Ok(())
     }
 
-    async fn get_pod_status(&self, _prefix: &str) -> Result<PodStatus, K8sError> {
+    async fn get_replicator_pod_status(&self, _prefix: &str) -> Result<PodStatus, K8sError> {
         Ok(PodStatus::Started)
     }
 }

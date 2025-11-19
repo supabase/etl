@@ -1,4 +1,4 @@
-use anyhow::anyhow;
+use anyhow::{Context, anyhow};
 use etl_api::{config::ApiConfig, startup::Application};
 use etl_config::{Environment, load_config, shared::PgConnectionConfig};
 use etl_telemetry::tracing::init_tracing;
@@ -32,7 +32,8 @@ async fn async_main() -> anyhow::Result<()> {
     match args.len() {
         // Run the application server
         1 => {
-            let config = load_config::<ApiConfig>()?;
+            let config = load_config::<ApiConfig>()
+                .context("loading API configuration for server startup")?;
             log_pg_connection_config(&config.database);
             let application = Application::build(config.clone()).await?;
             application.run_until_stopped().await?;
@@ -42,7 +43,8 @@ async fn async_main() -> anyhow::Result<()> {
             let command = args.nth(1).unwrap();
             match command.as_str() {
                 "migrate" => {
-                    let config = load_config::<PgConnectionConfig>()?;
+                    let config = load_config::<PgConnectionConfig>()
+                        .context("loading database configuration for migrations")?;
                     log_pg_connection_config(&config);
                     Application::migrate_database(config).await?;
                     info!("database migrated successfully");
