@@ -112,6 +112,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 For tutorials and deeper guidance, see the [Documentation](https://supabase.github.io/etl) or jump into the [examples](etl-examples/README.md).
 
+## Development
+
+See [DEVELOPMENT.md](DEVELOPMENT.md) for setup instructions, migration workflows, and development guidelines.
+
 ## Destinations
 
 ETL is designed to be extensible. You can implement your own destinations, and the project currently ships with the following maintained options:
