@@ -68,7 +68,7 @@ secrecy = { version = "0.10.3", default-features = false }
 sentry = { version = "0.42.0" }
 serde = { version = "1.0.219", default-features = false }
 serde_json = { version = "1.0.141", default-features = false }
-serde_yaml = { version = "0.9.33", default-features = false}
+serde_yaml = { version = "0.9.34", default-features = false}
 sqlx = { version = "0.8.6", default-features = false }
 thiserror = "2.0.12"
 tempfile = { version = "3.23.0", default-features = false }
