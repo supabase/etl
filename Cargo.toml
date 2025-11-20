@@ -68,8 +68,10 @@ secrecy = { version = "0.10.3", default-features = false }
 sentry = { version = "0.42.0" }
 serde = { version = "1.0.219", default-features = false }
 serde_json = { version = "1.0.141", default-features = false }
+serde_yaml = { version = "0.9.33", default-features = false}
 sqlx = { version = "0.8.6", default-features = false }
 thiserror = "2.0.12"
+tempfile = { version = "3.23.0", default-features = false }
 tokio = { version = "1.47.0", default-features = false }
 tokio-postgres = { git = "https://github.com/MaterializeInc/rust-postgres", default-features = false, rev = "c4b473b478b3adfbf8667d2fbe895d8423f1290b" }
 tokio-rustls = { version = "0.26.2", default-features = false }

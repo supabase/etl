@@ -18,3 +18,8 @@ sqlx = { workspace = true, features = ["postgres"] }
 thiserror = { workspace = true }
 tokio-postgres = { workspace = true }
 utoipa = { workspace = true, optional = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+tempfile = { workspace = true }

@@ -9,7 +9,7 @@ use thiserror::Error;
 
 use crate::environment::Environment;
 
-/// Directory containing configuration files relative to application root.
+/// Directory containing configuration files relative to the application root.
 const CONFIGURATION_DIR: &str = "configuration";
 
 /// Supported extensions for base and environment configuration files.
@@ -181,4 +181,112 @@ fn find_configuration_file(
         directory: directory.to_path_buf(),
         attempted,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde::{Deserialize, Serialize};
+    use std::fs;
+    use tempfile::TempDir;
+
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    struct ApplicationConfig {
+        /// Application name.
+        name: String,
+        /// Storage mode configuration.
+        mode: StorageMode,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    #[serde(rename_all = "snake_case")]
+    enum StorageMode {
+        Memory,
+        Disk { path: String, max_size: u64 },
+    }
+
+    impl Config for ApplicationConfig {
+        const LIST_PARSE_KEYS: &'static [&'static str] = &[];
+    }
+
+    fn create_mock_config() -> ApplicationConfig {
+        ApplicationConfig {
+            name: "test-app".to_string(),
+            mode: StorageMode::Disk {
+                path: "/tmp/data".to_string(),
+                max_size: 1024,
+            },
+        }
+    }
+
+    fn test_roundtrip_with_extension(extension: &str) {
+        let temp_dir = TempDir::new().unwrap();
+        let config_dir = temp_dir.path().join("configuration");
+        fs::create_dir(&config_dir).unwrap();
+
+        let original_config = create_mock_config();
+
+        // Write base file (empty)
+        let base_file = config_dir.join(format!("base.{}", extension));
+        let base_content = match extension {
+            "json" => "{}",
+            "yaml" | "yml" => "",
+            _ => panic!("Unsupported extension: {}", extension),
+        };
+        fs::write(&base_file, base_content).unwrap();
+
+        // Write environment file with actual config
+        let env_file = config_dir.join(format!("prod.{}", extension));
+        let env_content = match extension {
+            "json" => serde_json::to_string_pretty(&original_config).unwrap(),
+            "yaml" | "yml" => serde_yaml::to_string(&original_config).unwrap(),
+            _ => panic!("Unsupported extension: {}", extension),
+        };
+        fs::write(&env_file, env_content).unwrap();
+
+        // Set environment and working directory
+        unsafe { std::env::set_var("APP_ENVIRONMENT", "prod"); }
+        std::env::set_current_dir(temp_dir.path()).unwrap();
+
+        // Load config
+        let loaded_config: ApplicationConfig = load_config().unwrap();
+
+        // Verify the loaded config matches the original exactly
+        assert_eq!(loaded_config, original_config);
+    }
+
+    #[test]
+    fn test_roundtrip_json() {
+        test_roundtrip_with_extension("json");
+    }
+
+    #[test]
+    fn test_roundtrip_yaml() {
+        test_roundtrip_with_extension("yaml");
+    }
+
+    #[test]
+    fn test_roundtrip_yml() {
+        test_roundtrip_with_extension("yml");
+    }
+
+    #[test]
+    fn test_all_supported_extensions_detected() {
+        let temp_dir = TempDir::new().unwrap();
+        let config_dir = temp_dir.path().join("configuration");
+        fs::create_dir(&config_dir).unwrap();
+
+        // Test each supported extension is correctly detected
+        for extension in CONFIG_FILE_EXTENSIONS {
+            let test_file = config_dir.join(format!("base.{}", extension));
+            fs::write(&test_file, "{}").unwrap();
+
+            let result = find_configuration_file(&config_dir, ConfigFileKind::Base);
+            assert!(result.is_ok());
+            assert_eq!(result.unwrap(), test_file);
+
+            // Clean up for next iteration
+            fs::remove_file(&test_file).unwrap();
+        }
+    }
 }
