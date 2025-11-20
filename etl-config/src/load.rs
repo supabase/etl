@@ -245,7 +245,9 @@ mod tests {
         fs::write(&env_file, env_content).unwrap();
 
         // Set environment and working directory
-        unsafe { std::env::set_var("APP_ENVIRONMENT", "prod"); }
+        unsafe {
+            std::env::set_var("APP_ENVIRONMENT", "prod");
+        }
         std::env::set_current_dir(temp_dir.path()).unwrap();
 
         // Load config
