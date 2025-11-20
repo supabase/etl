@@ -277,7 +277,7 @@ async fn create_or_update_replicator_config(
             filename: "base.json".to_string(),
             // For our setup, we don't need to add config params to the base config file; everything
             // is added directly in the environment-specific config file.
-            content: String::new(),
+            content: "{}".to_owned(),
         },
         ReplicatorConfigMapFile {
             filename: format!("{environment}.json"),
