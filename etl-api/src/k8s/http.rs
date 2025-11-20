@@ -1130,15 +1130,15 @@ mod tests {
         };
         let replicator_config_without_secrets: ReplicatorConfigWithoutSecrets =
             replicator_config.into();
-        let env_config = serde_yaml::to_string(&replicator_config_without_secrets).unwrap();
+        let env_config = serde_json::to_string(&replicator_config_without_secrets).unwrap();
 
         let files = vec![
             ReplicatorConfigMapFile {
-                filename: "base.yaml".to_string(),
+                filename: "base.json".to_string(),
                 content: base_config.to_string(),
             },
             ReplicatorConfigMapFile {
-                filename: format!("{environment}.yaml"),
+                filename: format!("{environment}.json"),
                 content: env_config,
             },
         ];

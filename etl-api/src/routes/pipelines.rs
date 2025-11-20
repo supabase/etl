@@ -69,9 +69,6 @@ pub enum PipelineError {
     #[error("invalid destination config")]
     InvalidConfig(#[from] serde_json::Error),
 
-    #[error("invalid replicator configuration")]
-    InvalidReplicatorConfig(#[from] serde_yaml::Error),
-
     #[error("A K8s error occurred: {0}")]
     K8s(#[from] K8sError),
 
@@ -154,7 +151,6 @@ impl ResponseError for PipelineError {
             | PipelineError::ReplicatorsDb(_)
             | PipelineError::ImagesDb(_)
             | PipelineError::K8s(_)
-            | PipelineError::InvalidReplicatorConfig(_)
             | PipelineError::TrustedRootCertsConfigMissing
             | PipelineError::Database(_)
             | PipelineError::TableLookup(_)

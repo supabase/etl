@@ -1,7 +1,6 @@
 use etl_config::Environment;
 use etl_config::shared::{ReplicatorConfigWithoutSecrets, SupabaseConfigWithoutSecrets, TlsConfig};
 use secrecy::ExposeSecret;
-use serde_yaml;
 
 use crate::configs::destination::{StoredDestinationConfig, StoredIcebergConfig};
 use crate::configs::log::LogLevel;
@@ -262,7 +261,7 @@ async fn create_or_update_dynamic_replicator_secrets(
 
 /// Creates or updates the replicator configuration in a Kubernetes config map.
 ///
-/// This function serializes the [`ReplicatorConfigWithoutSecrets`] to YAML and stores it
+/// This function serializes the [`ReplicatorConfigWithoutSecrets`] to JSON and stores it
 /// in a Kubernetes config map. The replicator pods mount this config map to access their
 /// runtime configuration.
 async fn create_or_update_replicator_config(
@@ -271,17 +270,17 @@ async fn create_or_update_replicator_config(
     config: ReplicatorConfigWithoutSecrets,
     environment: Environment,
 ) -> Result<(), PipelineError> {
-    let env_config = serde_yaml::to_string(&config)?;
+    let env_config = serde_json::to_string(&config)?;
 
     let files = vec![
         ReplicatorConfigMapFile {
-            filename: "base.yaml".to_string(),
+            filename: "base.json".to_string(),
             // For our setup, we don't need to add config params to the base config file; everything
             // is added directly in the environment-specific config file.
             content: String::new(),
         },
         ReplicatorConfigMapFile {
-            filename: format!("{environment}.yaml"),
+            filename: format!("{environment}.json"),
             content: env_config,
         },
     ];
