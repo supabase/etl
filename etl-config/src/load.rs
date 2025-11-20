@@ -227,20 +227,20 @@ mod tests {
         let original_config = create_mock_config();
 
         // Write base file (empty)
-        let base_file = config_dir.join(format!("base.{}", extension));
+        let base_file = config_dir.join(format!("base.{extension}"));
         let base_content = match extension {
             "json" => "{}",
             "yaml" | "yml" => "",
-            _ => panic!("Unsupported extension: {}", extension),
+            _ => panic!("Unsupported extension: {extension}"),
         };
         fs::write(&base_file, base_content).unwrap();
 
         // Write environment file with actual config
-        let env_file = config_dir.join(format!("prod.{}", extension));
+        let env_file = config_dir.join(format!("prod.{extension}"));
         let env_content = match extension {
             "json" => serde_json::to_string_pretty(&original_config).unwrap(),
             "yaml" | "yml" => serde_yaml::to_string(&original_config).unwrap(),
-            _ => panic!("Unsupported extension: {}", extension),
+            _ => panic!("Unsupported extension: {extension}"),
         };
         fs::write(&env_file, env_content).unwrap();
 
@@ -280,7 +280,7 @@ mod tests {
 
         // Test each supported extension is correctly detected
         for extension in CONFIG_FILE_EXTENSIONS {
-            let test_file = config_dir.join(format!("base.{}", extension));
+            let test_file = config_dir.join(format!("base.{extension}"));
             fs::write(&test_file, "{}").unwrap();
 
             let result = find_configuration_file(&config_dir, ConfigFileKind::Base);
