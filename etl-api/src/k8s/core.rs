@@ -12,7 +12,7 @@ use crate::db::pipelines::Pipeline;
 use crate::db::replicators::Replicator;
 use crate::db::sources::Source;
 use crate::k8s::http::{TRUSTED_ROOT_CERT_CONFIG_MAP_NAME, TRUSTED_ROOT_CERT_KEY_NAME};
-use crate::k8s::{DestinationType, K8sClient};
+use crate::k8s::{DestinationType, K8sClient, ReplicatorConfigMapFile};
 use crate::routes::pipelines::PipelineError;
 
 /// Secret types required by different destination configurations.
@@ -233,7 +233,7 @@ async fn create_or_update_dynamic_replicator_secrets(
                 .create_or_update_postgres_secret(prefix, &postgres_password)
                 .await?;
             k8s_client
-                .create_or_update_bq_secret(prefix, &big_query_service_account_key)
+                .create_or_update_bigquery_secret(prefix, &big_query_service_account_key)
                 .await?;
         }
         Secrets::Iceberg {
@@ -270,11 +270,23 @@ async fn create_or_update_replicator_config(
     config: ReplicatorConfigWithoutSecrets,
     environment: Environment,
 ) -> Result<(), PipelineError> {
-    // For now the base config is empty.
-    let base_config = "";
     let env_config = serde_json::to_string(&config)?;
+
+    let files = vec![
+        ReplicatorConfigMapFile {
+            filename: "base.json".to_string(),
+            // For our setup, we don't need to add config params to the base config file; everything
+            // is added directly in the environment-specific config file.
+            content: "{}".to_owned(),
+        },
+        ReplicatorConfigMapFile {
+            filename: format!("{environment}.json"),
+            content: env_config,
+        },
+    ];
+
     k8s_client
-        .create_or_update_config_map(prefix, base_config, &env_config, environment)
+        .create_or_update_replicator_config_map(prefix, files)
         .await?;
 
     Ok(())
@@ -294,7 +306,7 @@ async fn create_or_update_replicator_stateful_set(
     log_level: LogLevel,
 ) -> Result<(), PipelineError> {
     k8s_client
-        .create_or_update_stateful_set(
+        .create_or_update_replicator_stateful_set(
             prefix,
             &replicator_image,
             environment,
@@ -324,7 +336,7 @@ async fn delete_dynamic_replicator_secrets(
     // then there's a risk of wrong secret type being attempted for deletion which might leave
     // the actual secret behind. So for simplicty we just delete both kinds of secrets. The
     // one which doesn't exist will be safely ignored.
-    k8s_client.delete_bq_secret(prefix).await?;
+    k8s_client.delete_bigquery_secret(prefix).await?;
     k8s_client.delete_iceberg_secret(prefix).await?;
 
     Ok(())
@@ -335,7 +347,7 @@ async fn delete_replicator_config(
     k8s_client: &dyn K8sClient,
     prefix: &str,
 ) -> Result<(), PipelineError> {
-    k8s_client.delete_config_map(prefix).await?;
+    k8s_client.delete_replicator_config_map(prefix).await?;
 
     Ok(())
 }
@@ -345,7 +357,7 @@ async fn delete_replicator_stateful_set(
     k8s_client: &dyn K8sClient,
     prefix: &str,
 ) -> Result<(), PipelineError> {
-    k8s_client.delete_stateful_set(prefix).await?;
+    k8s_client.delete_replicator_stateful_set(prefix).await?;
 
     Ok(())
 }

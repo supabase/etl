@@ -11,10 +11,15 @@ homepage.workspace = true
 utoipa = ["dep:utoipa"]
 
 [dependencies]
-config = { workspace = true, features = ["yaml"] }
+config = { workspace = true, features = ["yaml", "json"] }
 secrecy = { workspace = true, features = ["serde"] }
 serde = { workspace = true, features = ["derive"] }
 sqlx = { workspace = true, features = ["postgres"] }
 thiserror = { workspace = true }
 tokio-postgres = { workspace = true }
 utoipa = { workspace = true, optional = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+tempfile = { workspace = true }

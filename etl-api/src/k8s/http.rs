@@ -1,5 +1,5 @@
 use crate::configs::log::LogLevel;
-use crate::k8s::{DestinationType, PodStatus};
+use crate::k8s::{DestinationType, PodStatus, ReplicatorConfigMapFile};
 use crate::k8s::{K8sClient, K8sError, PodPhase};
 use async_trait::async_trait;
 use base64::{Engine, prelude::BASE64_STANDARD};
@@ -244,7 +244,7 @@ impl K8sClient for HttpK8sClient {
         Ok(())
     }
 
-    async fn create_or_update_bq_secret(
+    async fn create_or_update_bigquery_secret(
         &self,
         prefix: &str,
         bq_service_account_key: &str,
@@ -319,7 +319,7 @@ impl K8sClient for HttpK8sClient {
         Ok(())
     }
 
-    async fn delete_bq_secret(&self, prefix: &str) -> Result<(), K8sError> {
+    async fn delete_bigquery_secret(&self, prefix: &str) -> Result<(), K8sError> {
         debug!("deleting bq secret");
 
         let bq_secret_name = create_bq_secret_name(prefix);
@@ -354,24 +354,20 @@ impl K8sClient for HttpK8sClient {
         Ok(config_map)
     }
 
-    async fn create_or_update_config_map(
+    async fn create_or_update_replicator_config_map(
         &self,
         prefix: &str,
-        base_config: &str,
-        env_config: &str,
-        environment: Environment,
+        files: Vec<ReplicatorConfigMapFile>,
     ) -> Result<(), K8sError> {
         debug!("patching config map");
 
-        let env_config_file = format!("{environment}.yaml");
         let replicator_config_map_name = create_replicator_config_map_name(prefix);
         let replicator_app_name = create_replicator_app_name(prefix);
+
         let config_map_json = create_replicator_config_map_json(
             &replicator_config_map_name,
             &replicator_app_name,
-            base_config,
-            &env_config_file,
-            env_config,
+            files,
         );
         let config_map: ConfigMap = serde_json::from_value(config_map_json)?;
 
@@ -386,7 +382,7 @@ impl K8sClient for HttpK8sClient {
         Ok(())
     }
 
-    async fn delete_config_map(&self, prefix: &str) -> Result<(), K8sError> {
+    async fn delete_replicator_config_map(&self, prefix: &str) -> Result<(), K8sError> {
         debug!("deleting config map");
 
         let replicator_config_map_name = create_replicator_config_map_name(prefix);
@@ -400,7 +396,7 @@ impl K8sClient for HttpK8sClient {
         Ok(())
     }
 
-    async fn create_or_update_stateful_set(
+    async fn create_or_update_replicator_stateful_set(
         &self,
         prefix: &str,
         replicator_image: &str,
@@ -452,7 +448,7 @@ impl K8sClient for HttpK8sClient {
         Ok(())
     }
 
-    async fn delete_stateful_set(&self, prefix: &str) -> Result<(), K8sError> {
+    async fn delete_replicator_stateful_set(&self, prefix: &str) -> Result<(), K8sError> {
         debug!("deleting stateful set");
 
         let stateful_set_name = create_stateful_set_name(prefix);
@@ -464,7 +460,7 @@ impl K8sClient for HttpK8sClient {
         Ok(())
     }
 
-    async fn get_pod_status(&self, prefix: &str) -> Result<PodStatus, K8sError> {
+    async fn get_replicator_pod_status(&self, prefix: &str) -> Result<PodStatus, K8sError> {
         debug!("getting pod status");
 
         let pod_name = create_pod_name(prefix);
@@ -620,10 +616,13 @@ fn create_iceberg_secret_json(
 fn create_replicator_config_map_json(
     config_map_name: &str,
     replicator_app_name: &str,
-    base_config: &str,
-    env_config_file: &str,
-    env_config: &str,
+    files: Vec<ReplicatorConfigMapFile>,
 ) -> serde_json::Value {
+    let mut data = serde_json::Map::new();
+    for file in files {
+        data.insert(file.filename, serde_json::Value::String(file.content));
+    }
+
     json!({
       "kind": "ConfigMap",
       "apiVersion": "v1",
@@ -635,10 +634,7 @@ fn create_replicator_config_map_json(
           "etl.supabase.com/app-type": REPLICATOR_APP_LABEL,
         }
       },
-      "data": {
-        "base.yaml": base_config,
-        env_config_file: env_config,
-      }
+      "data": data
     })
 }
 
@@ -1098,7 +1094,6 @@ mod tests {
         let replicator_config_map_name = create_replicator_config_map_name(&prefix);
         let replicator_app_name = create_replicator_app_name(&prefix);
         let environment = Environment::Prod;
-        let env_config_file = format!("{environment}.yaml");
         let base_config = "";
         let replicator_config = ReplicatorConfig {
             destination: DestinationConfig::BigQuery {
@@ -1137,12 +1132,21 @@ mod tests {
             replicator_config.into();
         let env_config = serde_json::to_string(&replicator_config_without_secrets).unwrap();
 
+        let files = vec![
+            ReplicatorConfigMapFile {
+                filename: "base.json".to_string(),
+                content: base_config.to_string(),
+            },
+            ReplicatorConfigMapFile {
+                filename: format!("{environment}.json"),
+                content: env_config,
+            },
+        ];
+
         let config_map_json = create_replicator_config_map_json(
             &replicator_config_map_name,
             &replicator_app_name,
-            base_config,
-            &env_config_file,
-            &env_config,
+            files,
         );
 
         assert_json_snapshot!(config_map_json);

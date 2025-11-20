@@ -885,7 +885,7 @@ pub async fn get_pipeline_status(
 
     let prefix = create_k8s_object_prefix(tenant_id, replicator.id);
 
-    let pod_status = k8s_client.get_pod_status(&prefix).await?;
+    let pod_status = k8s_client.get_replicator_pod_status(&prefix).await?;
     let status = pod_status.into();
 
     let response = GetPipelineStatusResponse {
