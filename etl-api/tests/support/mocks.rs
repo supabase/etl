@@ -8,6 +8,7 @@ use etl_api::routes::images::{CreateImageRequest, CreateImageResponse};
 use etl_api::routes::pipelines::{CreatePipelineRequest, CreatePipelineResponse};
 use etl_api::routes::sources::{CreateSourceRequest, CreateSourceResponse};
 use etl_config::SerializableSecretString;
+use secrecy::ExposeSecret;
 
 use crate::support::test_app::TestApp;
 
@@ -191,6 +192,28 @@ pub mod sources {
             .await
             .expect("failed to deserialize response");
         response.id
+    }
+
+    /// Returns a source config pointing to the test database itself.
+    /// Useful for publication tests where you need to create tables in the source.
+    pub fn test_db_source_config(app: &TestApp) -> FullApiSourceConfig {
+        let db_config = app.database_config();
+        FullApiSourceConfig {
+            host: db_config.host.clone(),
+            port: db_config.port,
+            name: db_config.name.clone(),
+            username: db_config.username.clone(),
+            password: db_config
+                .password
+                .as_ref()
+                .map(|p| p.expose_secret().to_string().into()),
+        }
+    }
+
+    /// Creates a source pointing to the test database and returns its id.
+    /// Useful for publication tests where you need to create tables in the source.
+    pub async fn create_test_db_source(app: &TestApp, tenant_id: &str) -> i64 {
+        create_source_with_config(app, tenant_id, new_name(), test_db_source_config(app)).await
     }
 }
 
