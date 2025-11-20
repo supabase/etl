@@ -22,6 +22,12 @@ const MIN_POOL_CONNECTIONS: u32 = 1;
 const MAX_POOL_CONNECTIONS: u32 = 1;
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct TestConnectionResponse {
+    #[schema(example = true)]
+    pub valid: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct ErrorMessage {
     #[schema(example = "an error occurred in the api")]
     pub error: String,

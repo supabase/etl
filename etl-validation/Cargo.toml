@@ -1,0 +1,28 @@
+[package]
+name = "etl-validation"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+etl-config = { workspace = true }
+async-trait = { workspace = true }
+thiserror = { workspace = true }
+sqlx = { workspace = true, features = ["runtime-tokio-rustls", "postgres"] }
+tokio = { workspace = true, features = ["time"] }
+secrecy = { workspace = true }
+gcp-bigquery-client = { workspace = true, features = ["aws-lc-rs"] }
+iceberg = { workspace = true }
+iceberg-catalog-rest = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+etl-postgres = { workspace = true, features = ["sqlx", "test-utils"] }
+etl-telemetry = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
+uuid = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }

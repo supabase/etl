@@ -1,19 +1,20 @@
+use crate::configs::destination::FullApiDestinationConfig;
+use crate::configs::encryption::EncryptionKey;
+use crate::db;
+use crate::db::destinations::DestinationsDbError;
+use crate::routes::{ErrorMessage, TenantIdError, TestConnectionResponse, extract_tenant_id};
 use actix_web::{
     HttpRequest, HttpResponse, Responder, ResponseError, delete, get,
     http::{StatusCode, header::ContentType},
     post,
     web::{Data, Json, Path},
 };
+use etl_config::shared::DestinationConfig;
+use etl_validation::DestinationValidator;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use thiserror::Error;
 use utoipa::ToSchema;
-
-use crate::configs::destination::FullApiDestinationConfig;
-use crate::configs::encryption::EncryptionKey;
-use crate::db;
-use crate::db::destinations::DestinationsDbError;
-use crate::routes::{ErrorMessage, TenantIdError, extract_tenant_id};
 
 #[derive(Debug, Error)]
 pub enum DestinationError {
@@ -282,4 +283,31 @@ pub async fn read_all_destinations(
     let response = ReadDestinationsResponse { destinations };
 
     Ok(Json(response))
+}
+
+#[utoipa::path(
+    summary = "Test a destination connection (pre-creation)",
+    description = "Tests a destination connection without creating a resource. Validates connectivity, permissions, and configuration for BigQuery or Iceberg destinations. Useful for validating credentials before creating a destination.",
+    request_body = FullApiDestinationConfig,
+    responses(
+        (status = 200, description = "Connection test successful", body = TestConnectionResponse),
+        (status = 400, description = "Bad request or connection test failed", body = ErrorMessage),
+        (status = 500, description = "Internal server error", body = ErrorMessage),
+    ),
+    tag = "Destinations"
+)]
+#[post("/destinations/test-connection")]
+pub async fn test_destination_connection(
+    config: Json<FullApiDestinationConfig>,
+) -> Result<impl Responder, DestinationError> {
+    let destination_config: DestinationConfig = config.into_inner().into();
+
+    destination_config.validate().await.map_err(|e| {
+        DestinationsDbError::Database(sqlx::Error::Configuration(Box::new(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            e,
+        ))))
+    })?;
+
+    Ok(Json(TestConnectionResponse { valid: true }))
 }

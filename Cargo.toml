@@ -10,6 +10,7 @@ members = [
     "etl-postgres",
     "etl-replicator",
     "etl-telemetry",
+    "etl-validation",
 ]
 
 [workspace.package]
@@ -27,6 +28,7 @@ etl-destinations = { path = "etl-destinations", default-features = false }
 etl-postgres = { path = "etl-postgres", default-features = false }
 etl-replicator = { path = "etl-replicator", default-features = false }
 etl-telemetry = { path = "etl-telemetry", default-features = false }
+etl-validation = { path = "etl-validation", default-features = false }
 
 actix-web = { version = "4.11.0", default-features = false }
 actix-web-httpauth = { version = "0.8.2", default-features = false }

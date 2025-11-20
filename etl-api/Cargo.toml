@@ -18,6 +18,7 @@ name = "etl-api"
 etl-config = { workspace = true, features = ["utoipa"] }
 etl-postgres = { workspace = true, features = ["replication"] }
 etl-telemetry = { workspace = true }
+etl-validation = { workspace = true }
 
 actix-web = { workspace = true, features = ["macros", "http2"] }
 actix-web-httpauth = { workspace = true }

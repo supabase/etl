@@ -171,6 +171,13 @@ impl StoredDestinationConfig {
     }
 }
 
+impl From<FullApiDestinationConfig> for DestinationConfig {
+    fn from(value: FullApiDestinationConfig) -> Self {
+        let stored_config: StoredDestinationConfig = value.into();
+        stored_config.into_etl_config()
+    }
+}
+
 impl From<FullApiDestinationConfig> for StoredDestinationConfig {
     fn from(value: FullApiDestinationConfig) -> Self {
         match value {

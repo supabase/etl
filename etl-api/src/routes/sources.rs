@@ -1,14 +1,15 @@
 use crate::configs::encryption::EncryptionKey;
-use crate::configs::source::{FullApiSourceConfig, StrippedApiSourceConfig};
+use crate::configs::source::{FullApiSourceConfig, StoredSourceConfig, StrippedApiSourceConfig};
 use crate::db;
 use crate::db::sources::SourcesDbError;
-use crate::routes::{ErrorMessage, TenantIdError, extract_tenant_id};
+use crate::routes::{ErrorMessage, TenantIdError, TestConnectionResponse, extract_tenant_id};
 use actix_web::{
     HttpRequest, HttpResponse, Responder, ResponseError, delete, get,
     http::{StatusCode, header::ContentType},
     post,
     web::{Data, Json, Path},
 };
+use etl_validation::SourceValidator;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use thiserror::Error;
@@ -281,4 +282,31 @@ pub async fn read_all_sources(
     let response = ReadSourcesResponse { sources };
 
     Ok(Json(response))
+}
+
+#[utoipa::path(
+    summary = "Test a source connection (pre-creation)",
+    description = "Tests a PostgreSQL source connection without creating a resource. Validates connectivity, version, WAL level, permissions, and replication slot availability. Useful for validating credentials before creating a source.",
+    request_body = FullApiSourceConfig,
+    responses(
+        (status = 200, description = "Connection test successful", body = TestConnectionResponse),
+        (status = 400, description = "Bad request or connection test failed", body = ErrorMessage),
+        (status = 500, description = "Internal server error", body = ErrorMessage),
+    ),
+    tag = "Sources"
+)]
+#[post("/sources/test-connection")]
+pub async fn test_source_connection(
+    config: Json<FullApiSourceConfig>,
+) -> Result<impl Responder, SourceError> {
+    let config = config.into_inner();
+    let stored_config: StoredSourceConfig = config.into();
+    let pg_config = stored_config.into_connection_config();
+
+    pg_config
+        .validate()
+        .await
+        .map_err(|e| SourcesDbError::Database(sqlx::Error::Configuration(Box::new(e))))?;
+
+    Ok(Json(TestConnectionResponse { valid: true }))
 }
