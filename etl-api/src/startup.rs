@@ -18,6 +18,7 @@ use utoipa_swagger_ui::SwaggerUi;
 use crate::feature_flags::init_feature_flags;
 use crate::k8s::http::HttpK8sClient;
 use crate::k8s::{K8sClient, K8sError};
+use crate::rate_limiting::{RateLimiter, RateLimiterConfig, RateLimitingMiddleware};
 use crate::{
     authentication::auth_validator,
     config::ApiConfig,
@@ -313,11 +314,16 @@ pub async fn run(
 
     let openapi = ApiDoc::openapi();
 
+    // Initialize rate limiter with default configuration
+    let rate_limiter = Arc::new(RateLimiter::new(RateLimiterConfig::default()));
+
     let server = HttpServer::new(move || {
+        let rate_limiter_middleware = RateLimitingMiddleware::new(rate_limiter.clone());
         let actix_metrics = ActixWebMetricsBuilder::new().build();
         let tracing_logger = TracingLogger::<ApiRootSpanBuilder>::new();
         let authentication = HttpAuthentication::bearer(auth_validator);
         let app = App::new()
+            .wrap(rate_limiter_middleware)
             .wrap(actix_metrics.clone())
             .wrap(tracing_logger)
             .wrap(
@@ -392,7 +398,8 @@ pub async fn run(
             .app_data(prometheus_handle.clone())
             .app_data(config.clone())
             .app_data(connection_pool.clone())
-            .app_data(encryption_key.clone());
+            .app_data(encryption_key.clone())
+            .app_data(web::Data::new(rate_limiter.clone()));
 
         let app = if let Some(k8s_client) = k8s_client.clone() {
             app.app_data(k8s_client.clone())

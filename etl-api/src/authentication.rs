@@ -1,3 +1,6 @@
+use std::net::IpAddr;
+use std::sync::Arc;
+
 use actix_web::{Error, dev::ServiceRequest, web::Data};
 use actix_web_httpauth::extractors::{
     AuthenticationError,
@@ -6,6 +9,7 @@ use actix_web_httpauth::extractors::{
 use constant_time_eq::constant_time_eq_n;
 
 use crate::config::{ApiConfig, ApiKey};
+use crate::rate_limiting::RateLimiter;
 
 /// Validates bearer token authentication for API requests.
 ///
@@ -58,6 +62,19 @@ pub async fn auth_validator(
     }
 
     if !valid {
+        // Extract client IP and record authentication failure
+        let client_ip = req
+            .connection_info()
+            .peer_addr()
+            .and_then(|addr| addr.split(':').next())
+            .and_then(|ip| ip.parse().ok())
+            .unwrap_or(IpAddr::from([127, 0, 0, 1])); // fallback to localhost
+
+        // Record authentication failure if rate limiter is available
+        if let Some(rate_limiter) = req.app_data::<Data<Arc<RateLimiter>>>() {
+            rate_limiter.record_auth_failure(&client_ip);
+        }
+
         return Err((AuthenticationError::from(config).into(), req));
     }
 
