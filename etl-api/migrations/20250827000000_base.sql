@@ -4,7 +4,7 @@
 create schema if not exists app;
 
 -- Tenants
-create table app.tenants (
+create table if not exists app.tenants (
     id text primary key,
     name text not null,
     created_at timestamptz not null default now(),
@@ -12,7 +12,7 @@ create table app.tenants (
 );
 
 -- Images
-create table app.images (
+create table if not exists app.images (
     id bigint generated always as identity primary key,
     name text not null,
     is_default boolean not null,
@@ -22,12 +22,12 @@ create table app.images (
 );
 
 -- Ensure at most one default image exists
-create unique index images_one_default_idx
+create unique index if not exists images_one_default_idx
     on app.images (is_default)
     where is_default = true;
 
 -- Destinations
-create table app.destinations (
+create table if not exists app.destinations (
     id bigint generated always as identity primary key,
     tenant_id text not null references app.tenants (id) on delete cascade,
     name text not null,
@@ -36,10 +36,10 @@ create table app.destinations (
     updated_at timestamptz not null default now()
 );
 
-create index idx_destinations_tenant_id_id on app.destinations (tenant_id, id);
+create index if not exists idx_destinations_tenant_id_id on app.destinations (tenant_id, id);
 
 -- Sources
-create table app.sources (
+create table if not exists app.sources (
     id bigint generated always as identity primary key,
     tenant_id text not null references app.tenants (id) on delete cascade,
     name text not null,
@@ -48,10 +48,10 @@ create table app.sources (
     updated_at timestamptz not null default now()
 );
 
-create index idx_sources_tenant_id_id on app.sources (tenant_id, id);
+create index if not exists idx_sources_tenant_id_id on app.sources (tenant_id, id);
 
 -- Replicators
-create table app.replicators (
+create table if not exists app.replicators (
     id bigint generated always as identity primary key,
     tenant_id text not null references app.tenants (id) on delete cascade,
     image_id bigint not null references app.images (id),
@@ -59,10 +59,10 @@ create table app.replicators (
     updated_at timestamptz not null default now()
 );
 
-create index idx_replicators_tenant_id_id on app.replicators (tenant_id, id);
+create index if not exists idx_replicators_tenant_id_id on app.replicators (tenant_id, id);
 
 -- Pipelines
-create table app.pipelines (
+create table if not exists app.pipelines (
     id bigint generated always as identity primary key,
     tenant_id text not null references app.tenants (id) on delete cascade,
     source_id bigint not null references app.sources (id),
@@ -74,4 +74,4 @@ create table app.pipelines (
     unique (tenant_id, source_id, destination_id)
 );
 
-create index idx_pipelines_tenant_id_id on app.pipelines (tenant_id, id);
+create index if not exists idx_pipelines_tenant_id_id on app.pipelines (tenant_id, id);

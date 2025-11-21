@@ -1,20 +1,30 @@
--- Base schema for etl-replicator store (applied on the source DB)
 
 -- Ensure etl schema exists (also set by runtime, but safe here)
 create schema if not exists etl;
 
 -- Enum for table replication state
-create type etl.table_state as enum (
-    'init',
-    'data_sync',
-    'finished_copy',
-    'sync_done',
-    'ready',
-    'errored'
-);
+do $$
+begin
+    if not exists (
+        select 1
+        from pg_type t
+        join pg_namespace n on n.oid = t.typnamespace
+        where t.typname = 'table_state' and n.nspname = 'etl'
+    ) then
+        create type etl.table_state as enum (
+            'init',
+            'data_sync',
+            'finished_copy',
+            'sync_done',
+            'ready',
+            'errored'
+        );
+    end if;
+end
+$$;
 
 -- Replication state
-create table etl.replication_state (
+create table if not exists etl.replication_state (
     id bigint generated always as identity primary key,
     pipeline_id bigint not null,
     table_id oid not null,
@@ -27,12 +37,12 @@ create table etl.replication_state (
 );
 
 -- Ensures that there is only one current state per pipeline/table
-create unique index uq_replication_state_current_true
+create unique index if not exists uq_replication_state_current_true
     on etl.replication_state (pipeline_id, table_id)
     where is_current = true;
 
 -- Table schemas (per pipeline, per table)
-create table etl.table_schemas (
+create table if not exists etl.table_schemas (
     id bigint generated always as identity primary key,
     pipeline_id bigint not null,
     table_id oid not null,
@@ -43,11 +53,11 @@ create table etl.table_schemas (
     unique (pipeline_id, table_id)
 );
 
-create index idx_table_schemas_pipeline_table
+create index if not exists idx_table_schemas_pipeline_table
     on etl.table_schemas (pipeline_id, table_id);
 
 -- Columns for stored schemas
-create table etl.table_columns (
+create table if not exists etl.table_columns (
     id bigint generated always as identity primary key,
     table_schema_id bigint not null references etl.table_schemas(id) on delete cascade,
     column_name text not null,
@@ -61,11 +71,11 @@ create table etl.table_columns (
     unique (table_schema_id, column_order)
 );
 
-create index idx_table_columns_order
+create index if not exists idx_table_columns_order
     on etl.table_columns (table_schema_id);
 
 -- Source-to-destination table id mappings
-create table etl.table_mappings (
+create table if not exists etl.table_mappings (
     id bigint generated always as identity primary key,
     pipeline_id bigint not null,
     source_table_id oid not null,
