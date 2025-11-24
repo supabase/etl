@@ -271,7 +271,6 @@ pub async fn delete_publication(
         .map(|s| s.config)
         .ok_or(PublicationError::SourceNotFound(source_id))?;
 
-    // Check if any pipelines are using this publication
     let pipelines = db::pipelines::find_pipelines_by_publication(
         &**pool,
         tenant_id,
@@ -354,13 +353,11 @@ pub async fn list_pipelines_for_publication(
     let tenant_id = extract_tenant_id(&req)?;
     let (source_id, publication_name) = source_id_and_pub_name.into_inner();
 
-    // Verify source exists
-    let _config = db::sources::read_source(&**pool, tenant_id, source_id, &encryption_key)
+    db::sources::read_source(&**pool, tenant_id, source_id, &encryption_key)
         .await?
-        .map(|s| s.config)
+        .map(|_| ())
         .ok_or(PublicationError::SourceNotFound(source_id))?;
 
-    // Find all pipelines using this publication
     let pipelines = db::pipelines::find_pipelines_by_publication(
         &**pool,
         tenant_id,
