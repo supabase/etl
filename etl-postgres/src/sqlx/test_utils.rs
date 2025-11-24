@@ -29,16 +29,21 @@ pub async fn create_pg_database(config: &PgConnectionConfig) -> PgPool {
 /// Connects to Postgres server, forcefully terminates active connections
 /// to the target database, and drops it if it exists. Used for test cleanup.
 ///
-/// # Panics
-/// Panics if any database operation fails.
+/// This function will not panic on errors - it logs them and continues.
+/// This ensures test cleanup doesn't fail when databases are already gone
+/// or connections can't be established.
 pub async fn drop_pg_database(config: &PgConnectionConfig) {
     // Connect to the default database.
-    let mut connection = PgConnection::connect_with(&config.without_db())
-        .await
-        .expect("Failed to connect to Postgres");
+    let mut connection = match PgConnection::connect_with(&config.without_db()).await {
+        Ok(conn) => conn,
+        Err(e) => {
+            eprintln!("warning: failed to connect to Postgres for cleanup: {e}");
+            return;
+        }
+    };
 
     // Forcefully terminate any remaining connections to the database.
-    connection
+    if let Err(e) = connection
         .execute(&*format!(
             r#"
             select pg_terminate_backend(pg_stat_activity.pid)
@@ -48,11 +53,18 @@ pub async fn drop_pg_database(config: &PgConnectionConfig) {
             config.name
         ))
         .await
-        .expect("Failed to terminate database connections");
+    {
+        eprintln!(
+            "warning: failed to terminate connections for database {}: {}",
+            config.name, e
+        );
+    }
 
     // Drop the database.
-    connection
+    if let Err(e) = connection
         .execute(&*format!(r#"drop database if exists "{}";"#, config.name))
         .await
-        .expect("Failed to destroy database");
+    {
+        eprintln!("warning: failed to drop database {}: {}", config.name, e);
+    }
 }

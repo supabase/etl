@@ -450,8 +450,17 @@ impl PgDatabase<Client> {
     ///
     /// Returns a [`PgDatabase`] wrapping a [`Transaction`] for executing queries
     /// within a transaction context. The transaction must be committed or rolled back.
+    ///
+    /// # Panics
+    /// Panics if the client is not available or if starting the transaction fails.
     pub async fn begin_transaction(&mut self) -> PgDatabase<Transaction<'_>> {
-        let transaction = self.client.as_mut().unwrap().transaction().await.unwrap();
+        let transaction = self
+            .client
+            .as_mut()
+            .expect("client not available")
+            .transaction()
+            .await
+            .expect("failed to begin transaction");
 
         PgDatabase {
             config: self.config.clone(),
@@ -466,9 +475,14 @@ impl PgDatabase<Transaction<'_>> {
     /// Commits the current transaction.
     ///
     /// Finalizes all changes made within the transaction and releases the transaction.
+    ///
+    /// This function will not panic on errors - it logs them and continues.
+    /// This ensures transaction cleanup doesn't fail unexpectedly.
     pub async fn commit_transaction(mut self) {
         if let Some(client) = self.client.take() {
-            client.commit().await.unwrap();
+            if let Err(e) = client.commit().await {
+                eprintln!("warning: failed to commit transaction: {e}");
+            }
         }
     }
 }
@@ -478,9 +492,11 @@ impl<G> Drop for PgDatabase<G> {
         if self.destroy_on_drop {
             // To use `block_in_place,` we need a multithreaded runtime since when a blocking
             // task is issued, the runtime will offload existing tasks to another worker.
-            tokio::task::block_in_place(move || {
-                Handle::current().block_on(async move { drop_pg_database(&self.config).await });
-            });
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                tokio::task::block_in_place(move || {
+                    Handle::current().block_on(async move { drop_pg_database(&self.config).await });
+                });
+            }));
         }
     }
 }
@@ -513,7 +529,7 @@ pub async fn create_pg_database(config: &PgConnectionConfig) -> (Client, Option<
         config
             .connect(NoTls)
             .await
-            .expect("Failed to connect to Postgres")
+            .expect("failed to connect to Postgres")
     };
 
     // Spawn the connection on a new task
@@ -527,7 +543,7 @@ pub async fn create_pg_database(config: &PgConnectionConfig) -> (Client, Option<
     client
         .execute(&*format!(r#"create database "{}";"#, config.name), &[])
         .await
-        .expect("Failed to create database");
+        .expect("failed to create database");
 
     // Connects to the actual Postgres database
     let (client, server_version) = connect_to_pg_database(config).await;
@@ -539,6 +555,9 @@ pub async fn create_pg_database(config: &PgConnectionConfig) -> (Client, Option<
 ///
 /// Establishes a client connection to the database specified in the configuration.
 /// Assumes the database already exists.
+///
+/// # Panics
+/// Panics if connection fails.
 pub async fn connect_to_pg_database(config: &PgConnectionConfig) -> (Client, Option<NonZeroI32>) {
     // Create a new client connected to the created database
     let (client, connection) = {
@@ -546,7 +565,7 @@ pub async fn connect_to_pg_database(config: &PgConnectionConfig) -> (Client, Opt
         config
             .connect(NoTls)
             .await
-            .expect("Failed to connect to Postgres")
+            .expect("failed to connect to Postgres")
     };
     let server_version = connection
         .parameter("server_version")
@@ -567,16 +586,20 @@ pub async fn connect_to_pg_database(config: &PgConnectionConfig) -> (Client, Opt
 /// Terminates all active connections, drops replication slots, and removes
 /// the database. Used for thorough cleanup of test databases.
 ///
-/// # Panics
-/// Panics if any database operation fails.
+/// This function will not panic on errors - it logs them and continues.
+/// This ensures test cleanup doesn't fail when databases are already gone
+/// or connections can't be established.
 pub async fn drop_pg_database(config: &PgConnectionConfig) {
     // Connect to the default database
     let (client, connection) = {
         let config: tokio_postgres::Config = config.without_db();
-        config
-            .connect(NoTls)
-            .await
-            .expect("Failed to connect to Postgres")
+        match config.connect(NoTls).await {
+            Ok(conn) => conn,
+            Err(e) => {
+                eprintln!("warning: failed to connect to Postgres for cleanup: {e}");
+                return;
+            }
+        }
     };
 
     // Spawn the connection on a new task
@@ -587,7 +610,7 @@ pub async fn drop_pg_database(config: &PgConnectionConfig) {
     });
 
     // Forcefully terminate any remaining connections to the database
-    client
+    if let Err(e) = client
         .execute(
             &format!(
                 r#"
@@ -600,13 +623,18 @@ pub async fn drop_pg_database(config: &PgConnectionConfig) {
             &[],
         )
         .await
-        .expect("Failed to terminate database connections");
+    {
+        eprintln!(
+            "warning: failed to terminate connections for database {}: {}",
+            config.name, e
+        );
+    }
 
     // Give PostgreSQL time to mark slots as inactive after terminating connections.
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
     // Drop any replication slots on this database.
-    client
+    if let Err(e) = client
         .execute(
             &format!(
                 r#"
@@ -618,14 +646,21 @@ pub async fn drop_pg_database(config: &PgConnectionConfig) {
             &[],
         )
         .await
-        .expect("Failed to drop test replication slots");
+    {
+        eprintln!(
+            "warning: failed to drop replication slots for database {}: {}",
+            config.name, e
+        );
+    }
 
     // Drop the database
-    client
+    if let Err(e) = client
         .execute(
             &format!(r#"drop database if exists "{}";"#, config.name),
             &[],
         )
         .await
-        .expect("Failed to destroy database");
+    {
+        eprintln!("warning: failed to drop database {}: {}", config.name, e);
+    }
 }

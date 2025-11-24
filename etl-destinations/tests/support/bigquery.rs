@@ -227,11 +227,13 @@ impl Drop for BigQueryDatabase {
 
         // To use `block_in_place,` we need a multithreaded runtime since when a blocking
         // task is issued, the runtime will offload existing tasks to another worker.
-        tokio::task::block_in_place(move || {
-            Handle::current().block_on(async move {
-                destroy_bigquery(&client, self.project_id(), self.dataset_id()).await;
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            tokio::task::block_in_place(move || {
+                Handle::current().block_on(async move {
+                    destroy_bigquery(&client, self.project_id(), self.dataset_id()).await;
+                });
             });
-        });
+        }));
     }
 }
 
@@ -248,12 +250,14 @@ async fn initialize_bigquery(client: &Client, project_id: &str, dataset_id: &str
 ///
 /// Removes the test dataset and all tables within it to clean up
 /// resources after testing.
+///
+/// This function will not panic on errors - it logs them and continues.
+/// This ensures test cleanup doesn't fail when datasets are already gone
+/// or connections can't be established.
 async fn destroy_bigquery(client: &Client, project_id: &str, dataset_id: &str) {
-    client
-        .dataset()
-        .delete(project_id, dataset_id, true)
-        .await
-        .unwrap();
+    if let Err(e) = client.dataset().delete(project_id, dataset_id, true).await {
+        eprintln!("warning: failed to delete BigQuery dataset {dataset_id}: {e}");
+    }
 }
 
 /// Sets up a BigQuery database connection for testing.

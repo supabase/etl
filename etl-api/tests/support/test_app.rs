@@ -28,7 +28,9 @@ use reqwest::{IntoUrl, RequestBuilder};
 use std::io;
 use std::net::TcpListener;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::runtime::Handle;
+use tokio::time::sleep;
 use uuid::Uuid;
 
 use crate::support::database::create_etl_api_database;
@@ -503,10 +505,16 @@ impl Drop for TestApp {
 
         // To use `block_in_place,` we need a multithreaded runtime since when a blocking
         // task is issued, the runtime will offload existing tasks to another worker.
-        tokio::task::block_in_place(move || {
-            Handle::current()
-                .block_on(async move { drop_pg_database(&self.config.database).await });
-        });
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            tokio::task::block_in_place(|| {
+                Handle::current().block_on(async {
+                    // Give server time to shut down gracefully.
+                    sleep(Duration::from_millis(100)).await;
+
+                    drop_pg_database(&self.config.database).await;
+                });
+            });
+        }));
     }
 }
 
