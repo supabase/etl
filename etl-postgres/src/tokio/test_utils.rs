@@ -478,9 +478,11 @@ impl<G> Drop for PgDatabase<G> {
         if self.destroy_on_drop {
             // To use `block_in_place,` we need a multithreaded runtime since when a blocking
             // task is issued, the runtime will offload existing tasks to another worker.
-            tokio::task::block_in_place(move || {
-                Handle::current().block_on(async move { drop_pg_database(&self.config).await });
-            });
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                tokio::task::block_in_place(move || {
+                    Handle::current().block_on(async move { drop_pg_database(&self.config).await });
+                });
+            }));
         }
     }
 }
@@ -567,16 +569,20 @@ pub async fn connect_to_pg_database(config: &PgConnectionConfig) -> (Client, Opt
 /// Terminates all active connections, drops replication slots, and removes
 /// the database. Used for thorough cleanup of test databases.
 ///
-/// # Panics
-/// Panics if any database operation fails.
+/// This function will not panic on errors - it logs them and continues.
+/// This ensures test cleanup doesn't fail when databases are already gone
+/// or connections can't be established.
 pub async fn drop_pg_database(config: &PgConnectionConfig) {
     // Connect to the default database
     let (client, connection) = {
         let config: tokio_postgres::Config = config.without_db();
-        config
-            .connect(NoTls)
-            .await
-            .expect("Failed to connect to Postgres")
+        match config.connect(NoTls).await {
+            Ok(conn) => conn,
+            Err(e) => {
+                eprintln!("warning: failed to connect to Postgres for cleanup: {}", e);
+                return;
+            }
+        }
     };
 
     // Spawn the connection on a new task
@@ -587,7 +593,7 @@ pub async fn drop_pg_database(config: &PgConnectionConfig) {
     });
 
     // Forcefully terminate any remaining connections to the database
-    client
+    if let Err(e) = client
         .execute(
             &format!(
                 r#"
@@ -600,13 +606,18 @@ pub async fn drop_pg_database(config: &PgConnectionConfig) {
             &[],
         )
         .await
-        .expect("Failed to terminate database connections");
+    {
+        eprintln!(
+            "warning: failed to terminate connections for database {}: {}",
+            config.name, e
+        );
+    }
 
     // Give PostgreSQL time to mark slots as inactive after terminating connections.
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
     // Drop any replication slots on this database.
-    client
+    if let Err(e) = client
         .execute(
             &format!(
                 r#"
@@ -618,14 +629,21 @@ pub async fn drop_pg_database(config: &PgConnectionConfig) {
             &[],
         )
         .await
-        .expect("Failed to drop test replication slots");
+    {
+        eprintln!(
+            "warning: failed to drop replication slots for database {}: {}",
+            config.name, e
+        );
+    }
 
     // Drop the database
-    client
+    if let Err(e) = client
         .execute(
             &format!(r#"drop database if exists "{}";"#, config.name),
             &[],
         )
         .await
-        .expect("Failed to destroy database");
+    {
+        eprintln!("warning: failed to drop database {}: {}", config.name, e);
+    }
 }
