@@ -430,13 +430,14 @@ async fn read_publication_succeeds() {
         }],
     };
 
-    app.create_publication(&tenant_id, source_id, &publication)
+    let response = app
+        .create_publication(&tenant_id, source_id, &publication)
         .await;
+    assert_eq!(response.status(), StatusCode::OK);
 
     let response = app
         .read_publication(&tenant_id, source_id, "test_publication")
         .await;
-
     assert_eq!(response.status(), StatusCode::OK);
 
     let body: serde_json::Value = response.json().await.expect("failed to parse json");
@@ -514,7 +515,8 @@ async fn read_all_publications_with_multiple_publications_succeeds() {
             name: "table1".to_string(),
         }],
     };
-    app.create_publication(&tenant_id, source_id, &pub1).await;
+    let response = app.create_publication(&tenant_id, source_id, &pub1).await;
+    assert_eq!(response.status(), StatusCode::OK);
 
     let pub2 = CreatePublicationRequest {
         name: "publication_2".to_string(),
@@ -523,7 +525,8 @@ async fn read_all_publications_with_multiple_publications_succeeds() {
             name: "table2".to_string(),
         }],
     };
-    app.create_publication(&tenant_id, source_id, &pub2).await;
+    let response = app.create_publication(&tenant_id, source_id, &pub2).await;
+    assert_eq!(response.status(), StatusCode::OK);
 
     let response = app.read_all_publications(&tenant_id, source_id).await;
 
@@ -609,8 +612,11 @@ async fn update_publication_succeeds() {
             name: "table1".to_string(),
         }],
     };
-    app.create_publication(&tenant_id, source_id, &publication)
+
+    let response = app
+        .create_publication(&tenant_id, source_id, &publication)
         .await;
+    assert_eq!(response.status(), StatusCode::OK);
 
     let updated_publication = UpdatePublicationRequest {
         tables: vec![
@@ -713,23 +719,40 @@ async fn delete_publication_succeeds() {
     let tenant_id = create_tenant(&app).await;
     let source_id = create_test_db_source(&app, &tenant_id).await;
 
+    let source_pool = app.get_source_pool(&tenant_id, source_id).await;
+
+    sqlx::query(
+        r#"
+        create table test_table (
+            id integer primary key
+        )
+        "#,
+    )
+    .execute(&source_pool)
+    .await
+    .expect("failed to create table");
+
     let publication = CreatePublicationRequest {
         name: "test_publication".to_string(),
-        tables: vec![],
+        tables: vec![Table {
+            schema: "public".to_string(),
+            name: "test_table".to_string(),
+        }],
     };
-    app.create_publication(&tenant_id, source_id, &publication)
+
+    let response = app
+        .create_publication(&tenant_id, source_id, &publication)
         .await;
+    assert_eq!(response.status(), StatusCode::OK);
 
     let response = app
         .delete_publication(&tenant_id, source_id, "test_publication")
         .await;
-
     assert_eq!(response.status(), StatusCode::OK);
 
     let response = app
         .read_publication(&tenant_id, source_id, "test_publication")
         .await;
-
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
