@@ -481,7 +481,7 @@ impl PgDatabase<Transaction<'_>> {
     pub async fn commit_transaction(mut self) {
         if let Some(client) = self.client.take() {
             if let Err(e) = client.commit().await {
-                eprintln!("warning: failed to commit transaction: {}", e);
+                eprintln!("warning: failed to commit transaction: {e}");
             }
         }
     }
@@ -596,7 +596,7 @@ pub async fn drop_pg_database(config: &PgConnectionConfig) {
         match config.connect(NoTls).await {
             Ok(conn) => conn,
             Err(e) => {
-                eprintln!("warning: failed to connect to Postgres for cleanup: {}", e);
+                eprintln!("warning: failed to connect to Postgres for cleanup: {e}");
                 return;
             }
         }

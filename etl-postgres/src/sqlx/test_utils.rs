@@ -37,7 +37,7 @@ pub async fn drop_pg_database(config: &PgConnectionConfig) {
     let mut connection = match PgConnection::connect_with(&config.without_db()).await {
         Ok(conn) => conn,
         Err(e) => {
-            eprintln!("warning: failed to connect to Postgres for cleanup: {}", e);
+            eprintln!("warning: failed to connect to Postgres for cleanup: {e}");
             return;
         }
     };

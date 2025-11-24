@@ -505,11 +505,10 @@ impl Drop for TestApp {
 
         // To use `block_in_place,` we need a multithreaded runtime since when a blocking
         // task is issued, the runtime will offload existing tasks to another worker.
-        // Wrap in catch_unwind to ensure panics during cleanup don't propagate
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             tokio::task::block_in_place(|| {
                 Handle::current().block_on(async {
-                    // Give server time to shut down gracefully
+                    // Give server time to shut down gracefully.
                     sleep(Duration::from_millis(100)).await;
 
                     drop_pg_database(&self.config.database).await;
