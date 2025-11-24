@@ -451,47 +451,6 @@ pub struct GetPipelineVersionResponse {
     pub new_version: Option<PipelineVersion>,
 }
 
-/// Validates pipeline inputs: checks source/destination existence and publication validity.
-///
-/// Returns the source pool for the validated source.
-async fn validate_pipeline_inputs(
-    txn: &mut sqlx::PgTransaction<'_>,
-    tenant_id: &str,
-    source_id: i64,
-    destination_id: i64,
-    publication_name: &str,
-    encryption_key: &EncryptionKey,
-) -> Result<PgPool, PipelineError> {
-    // Check source exists
-    if !source_exists(txn.deref_mut(), tenant_id, source_id).await? {
-        return Err(PipelineError::SourceNotFound(source_id));
-    }
-
-    // Check destination exists
-    if !destination_exists(txn.deref_mut(), tenant_id, destination_id).await? {
-        return Err(PipelineError::DestinationNotFound(destination_id));
-    }
-
-    // Read source configuration
-    let source = db::sources::read_source(txn.deref_mut(), tenant_id, source_id, encryption_key)
-        .await?
-        .ok_or(PipelineError::SourceNotFound(source_id))?;
-
-    // Connect to source database
-    let source_pool =
-        connect_to_source_database_with_defaults(&source.config.into_connection_config()).await?;
-
-    // Validate publication exists on source database
-    let exists = db::publications::publication_exists(&source_pool, publication_name).await?;
-    if !exists {
-        return Err(PipelineError::PublicationNotFound(
-            publication_name.to_string(),
-        ));
-    }
-
-    Ok(source_pool)
-}
-
 #[utoipa::path(
     summary = "Create a pipeline",
     description = "Creates a pipeline linking a source to a destination.",
@@ -518,8 +477,7 @@ pub async fn create_pipeline(
 
     let mut txn = pool.begin().await?;
 
-    // Validate source, destination, and publication
-    let _source_pool = validate_pipeline_inputs(
+    validate_pipeline_inputs(
         &mut txn,
         tenant_id,
         pipeline.source_id,
@@ -631,8 +589,7 @@ pub async fn update_pipeline(
 
     let mut txn = pool.begin().await?;
 
-    // Validate source, destination, and publication
-    let _source_pool = validate_pipeline_inputs(
+    validate_pipeline_inputs(
         &mut txn,
         tenant_id,
         pipeline.source_id,
@@ -1284,4 +1241,38 @@ pub async fn update_pipeline_config(
     };
 
     Ok(Json(response))
+}
+
+/// Validates pipeline inputs: checks source/destination existence and publication validity.
+async fn validate_pipeline_inputs(
+    txn: &mut sqlx::PgTransaction<'_>,
+    tenant_id: &str,
+    source_id: i64,
+    destination_id: i64,
+    publication_name: &str,
+    encryption_key: &EncryptionKey,
+) -> Result<(), PipelineError> {
+    if !source_exists(txn.deref_mut(), tenant_id, source_id).await? {
+        return Err(PipelineError::SourceNotFound(source_id));
+    }
+
+    if !destination_exists(txn.deref_mut(), tenant_id, destination_id).await? {
+        return Err(PipelineError::DestinationNotFound(destination_id));
+    }
+
+    let source = db::sources::read_source(txn.deref_mut(), tenant_id, source_id, encryption_key)
+        .await?
+        .ok_or(PipelineError::SourceNotFound(source_id))?;
+
+    let source_pool =
+        connect_to_source_database_with_defaults(&source.config.into_connection_config()).await?;
+
+    let exists = db::publications::publication_exists(&source_pool, publication_name).await?;
+    if !exists {
+        return Err(PipelineError::PublicationNotFound(
+            publication_name.to_string(),
+        ));
+    }
+
+    Ok(())
 }
