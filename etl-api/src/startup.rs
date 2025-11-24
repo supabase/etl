@@ -55,8 +55,10 @@ use crate::{
             CreateSourceRequest, CreateSourceResponse, ReadSourceResponse, ReadSourcesResponse,
             UpdateSourceRequest, create_source, delete_source,
             publications::{
-                CreatePublicationRequest, UpdatePublicationRequest, create_publication,
-                delete_publication, read_all_publications, read_publication, update_publication,
+                CreatePublicationRequest, ListPipelinesForPublicationResponse, PipelineInfo,
+                UpdatePublicationRequest, create_publication, delete_publication,
+                list_pipelines_for_publication, read_all_publications, read_publication,
+                update_publication,
             },
             read_all_sources, read_source,
             tables::read_table_names,
@@ -248,6 +250,8 @@ pub async fn run(
             CreatePublicationRequest,
             UpdatePublicationRequest,
             Publication,
+            PipelineInfo,
+            ListPipelinesForPublicationResponse,
             CreateDestinationRequest,
             CreateDestinationResponse,
             UpdateDestinationRequest,
@@ -298,6 +302,7 @@ pub async fn run(
         crate::routes::sources::publications::update_publication,
         crate::routes::sources::publications::delete_publication,
         crate::routes::sources::publications::read_all_publications,
+        crate::routes::sources::publications::list_pipelines_for_publication,
         crate::routes::sources::tables::read_table_names,
         crate::routes::destinations::create_destination,
         crate::routes::destinations::read_destination,
@@ -376,6 +381,7 @@ pub async fn run(
                     .service(update_publication)
                     .service(delete_publication)
                     .service(read_all_publications)
+                    .service(list_pipelines_for_publication)
                     //images
                     .service(create_image)
                     .service(read_image)
