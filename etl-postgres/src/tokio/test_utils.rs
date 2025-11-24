@@ -2,7 +2,7 @@ use std::num::NonZeroI32;
 
 use etl_config::shared::{IntoConnectOptions, PgConnectionConfig};
 use tokio::runtime::Handle;
-use tokio_postgres::types::{ToSql, Type};
+use tokio_postgres::types::{FromSql, ToSql, Type};
 use tokio_postgres::{Client, GenericClient, NoTls, Transaction};
 use tracing::info;
 
@@ -240,7 +240,7 @@ impl<G: GenericClient> PgDatabase<G> {
         &self,
         table_name: TableName,
         columns: &[&str],
-        values: &[&(dyn tokio_postgres::types::ToSql + Sync)],
+        values: &[&(dyn ToSql + Sync)],
     ) -> Result<u64, tokio_postgres::Error> {
         let columns_str = columns.join(", ");
         let placeholders: Vec<String> = (1..=values.len()).map(|i| format!("${i}")).collect();
@@ -362,7 +362,7 @@ impl<G: GenericClient> PgDatabase<G> {
         where_clause: Option<&str>,
     ) -> Result<Vec<T>, tokio_postgres::Error>
     where
-        T: for<'a> tokio_postgres::types::FromSql<'a>,
+        T: for<'a> FromSql<'a>,
     {
         let where_str = where_clause.map_or(String::new(), |w| format!("where {w}"));
         let query = format!(

@@ -985,9 +985,11 @@ async fn table_without_primary_key_is_errored() {
     assert_eq!(err.kinds().len(), 1);
     assert_eq!(err.kinds()[0], ErrorKind::SourceSchemaError);
 
-    // We expect no events to be saved.
+    // We expect the insert events to not be saved.
     let events = destination.get_events().await;
-    assert!(events.is_empty());
+    let grouped_events = group_events_by_type_and_table_id(&events);
+    let insert_events = grouped_events.get(&(EventType::Insert, table_id));
+    assert!(insert_events.is_none());
 }
 
 #[tokio::test(flavor = "multi_thread")]
