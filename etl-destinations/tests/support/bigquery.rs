@@ -255,12 +255,11 @@ async fn initialize_bigquery(client: &Client, project_id: &str, dataset_id: &str
 /// This ensures test cleanup doesn't fail when datasets are already gone
 /// or connections can't be established.
 async fn destroy_bigquery(client: &Client, project_id: &str, dataset_id: &str) {
-    if let Err(e) = client
-        .dataset()
-        .delete(project_id, dataset_id, true)
-        .await
-    {
-        eprintln!("warning: failed to delete BigQuery dataset {}: {}", dataset_id, e);
+    if let Err(e) = client.dataset().delete(project_id, dataset_id, true).await {
+        eprintln!(
+            "warning: failed to delete BigQuery dataset {}: {}",
+            dataset_id, e
+        );
     }
 }
 

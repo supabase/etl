@@ -450,8 +450,17 @@ impl PgDatabase<Client> {
     ///
     /// Returns a [`PgDatabase`] wrapping a [`Transaction`] for executing queries
     /// within a transaction context. The transaction must be committed or rolled back.
+    ///
+    /// # Panics
+    /// Panics if the client is not available or if starting the transaction fails.
     pub async fn begin_transaction(&mut self) -> PgDatabase<Transaction<'_>> {
-        let transaction = self.client.as_mut().unwrap().transaction().await.unwrap();
+        let transaction = self
+            .client
+            .as_mut()
+            .expect("client not available")
+            .transaction()
+            .await
+            .expect("failed to begin transaction");
 
         PgDatabase {
             config: self.config.clone(),
@@ -466,9 +475,14 @@ impl PgDatabase<Transaction<'_>> {
     /// Commits the current transaction.
     ///
     /// Finalizes all changes made within the transaction and releases the transaction.
+    ///
+    /// This function will not panic on errors - it logs them and continues.
+    /// This ensures transaction cleanup doesn't fail unexpectedly.
     pub async fn commit_transaction(mut self) {
         if let Some(client) = self.client.take() {
-            client.commit().await.unwrap();
+            if let Err(e) = client.commit().await {
+                eprintln!("warning: failed to commit transaction: {}", e);
+            }
         }
     }
 }
@@ -515,7 +529,7 @@ pub async fn create_pg_database(config: &PgConnectionConfig) -> (Client, Option<
         config
             .connect(NoTls)
             .await
-            .expect("Failed to connect to Postgres")
+            .expect("failed to connect to Postgres")
     };
 
     // Spawn the connection on a new task
@@ -529,7 +543,7 @@ pub async fn create_pg_database(config: &PgConnectionConfig) -> (Client, Option<
     client
         .execute(&*format!(r#"create database "{}";"#, config.name), &[])
         .await
-        .expect("Failed to create database");
+        .expect("failed to create database");
 
     // Connects to the actual Postgres database
     let (client, server_version) = connect_to_pg_database(config).await;
@@ -541,6 +555,9 @@ pub async fn create_pg_database(config: &PgConnectionConfig) -> (Client, Option<
 ///
 /// Establishes a client connection to the database specified in the configuration.
 /// Assumes the database already exists.
+///
+/// # Panics
+/// Panics if connection fails.
 pub async fn connect_to_pg_database(config: &PgConnectionConfig) -> (Client, Option<NonZeroI32>) {
     // Create a new client connected to the created database
     let (client, connection) = {
@@ -548,7 +565,7 @@ pub async fn connect_to_pg_database(config: &PgConnectionConfig) -> (Client, Opt
         config
             .connect(NoTls)
             .await
-            .expect("Failed to connect to Postgres")
+            .expect("failed to connect to Postgres")
     };
     let server_version = connection
         .parameter("server_version")

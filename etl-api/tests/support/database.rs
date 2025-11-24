@@ -63,28 +63,35 @@ pub async fn create_test_source_database(
     (source_pool, response.id, source_db_config)
 }
 
+/// Runs ETL migrations on the source database.
+///
+/// Sets up the `etl` schema and runs replicator migrations to create the state
+/// store tables needed for ETL operations.
+///
+/// # Panics
+/// Panics if database connection fails, schema creation fails, or migrations fail.
 pub async fn run_etl_migrations_on_source_database(source_db_config: &PgConnectionConfig) {
     // We create a pool just for the migrations.
     let source_pool = connect_to_source_database(source_db_config, 1, 1)
         .await
-        .unwrap();
+        .expect("failed to connect to source database");
 
     // Create the `etl` schema first.
     sqlx::query("create schema if not exists etl")
         .execute(&source_pool)
         .await
-        .unwrap();
+        .expect("failed to create etl schema");
 
     // Set the `etl` schema as search path (this is done to have the migrations metadata table created
     // by sqlx within the `etl` schema).
     sqlx::query("set search_path = 'etl';")
         .execute(&source_pool)
         .await
-        .unwrap();
+        .expect("failed to set search path");
 
     // Run replicator migrations to create the state store tables.
     sqlx::migrate!("../etl-replicator/migrations")
         .run(&source_pool)
         .await
-        .unwrap();
+        .expect("failed to run etl migrations");
 }
