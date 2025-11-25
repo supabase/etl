@@ -1146,6 +1146,51 @@ async fn rollback_table_state_with_full_reset_succeeds() {
     )
     .await;
 
+    // Insert a table schema for this table
+    let table_schema_id: i64 = sqlx::query_scalar(
+        "INSERT INTO etl.table_schemas (pipeline_id, table_id, schema_name, table_name) VALUES ($1, $2, 'test', 'test_users') RETURNING id"
+    )
+    .bind(pipeline_id)
+    .bind(table_oid)
+    .fetch_one(&source_db_pool)
+    .await
+    .unwrap();
+
+    sqlx::query("INSERT INTO etl.table_columns (table_schema_id, column_name, column_type, type_modifier, nullable, primary_key, column_order) VALUES ($1, 'id', 'INT4', -1, false, true, 0)")
+        .bind(table_schema_id)
+        .execute(&source_db_pool)
+        .await
+        .unwrap();
+
+    // Insert a table mapping for this table
+    sqlx::query("INSERT INTO etl.table_mappings (pipeline_id, source_table_id, destination_table_id) VALUES ($1, $2, 'dest_test_users')")
+        .bind(pipeline_id)
+        .bind(table_oid)
+        .execute(&source_db_pool)
+        .await
+        .unwrap();
+
+    // Verify table schema and mapping exist before reset
+    let schema_count_before: i64 = sqlx::query_scalar(
+        "select count(*) from etl.table_schemas where pipeline_id = $1 and table_id = $2",
+    )
+    .bind(pipeline_id)
+    .bind(table_oid)
+    .fetch_one(&source_db_pool)
+    .await
+    .unwrap();
+    assert_eq!(schema_count_before, 1);
+
+    let mapping_count_before: i64 = sqlx::query_scalar(
+        "select count(*) from etl.table_mappings where pipeline_id = $1 and source_table_id = $2",
+    )
+    .bind(pipeline_id)
+    .bind(table_oid)
+    .fetch_one(&source_db_pool)
+    .await
+    .unwrap();
+    assert_eq!(mapping_count_before, 1);
+
     let response = test_rollback(
         &app,
         &tenant_id,
@@ -1174,6 +1219,28 @@ async fn rollback_table_state_with_full_reset_succeeds() {
     .await
     .unwrap();
     assert_eq!(count, 1);
+
+    // Verify table schema was deleted
+    let schema_count_after: i64 = sqlx::query_scalar(
+        "select count(*) from etl.table_schemas where pipeline_id = $1 and table_id = $2",
+    )
+    .bind(pipeline_id)
+    .bind(table_oid)
+    .fetch_one(&source_db_pool)
+    .await
+    .unwrap();
+    assert_eq!(schema_count_after, 0);
+
+    // Verify table mapping was deleted
+    let mapping_count_after: i64 = sqlx::query_scalar(
+        "select count(*) from etl.table_mappings where pipeline_id = $1 and source_table_id = $2",
+    )
+    .bind(pipeline_id)
+    .bind(table_oid)
+    .fetch_one(&source_db_pool)
+    .await
+    .unwrap();
+    assert_eq!(mapping_count_after, 0);
 
     drop_pg_database(&source_db_config).await;
 }

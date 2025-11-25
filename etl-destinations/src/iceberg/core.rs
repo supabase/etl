@@ -8,15 +8,16 @@ use crate::iceberg::IcebergClient;
 use crate::iceberg::error::iceberg_error_to_etl_error;
 use etl::destination::Destination;
 use etl::error::{ErrorKind, EtlResult};
-use etl::etl_error;
 use etl::store::schema::SchemaStore;
 use etl::store::state::StateStore;
 use etl::types::{
     Cell, ColumnSchema, Event, TableId, TableName, TableRow, TableSchema, Type,
     generate_sequence_number,
 };
+use etl::{bail, etl_error};
 use tokio::sync::Mutex;
 use tokio::task::JoinSet;
+use tracing::log::warn;
 use tracing::{debug, info};
 
 /// CDC operation types for Iceberg changelog tables.
@@ -186,26 +187,59 @@ where
     /// Removes all data from the target table by dropping the existing Iceberg table
     /// and creating a fresh empty table with the same schema. Updates the internal
     /// table creation cache to reflect the new table state.
-    async fn truncate_table(&self, table_id: TableId) -> EtlResult<()> {
+    async fn truncate_table(&self, table_id: TableId, is_cdc_truncate: bool) -> EtlResult<()> {
         let mut inner = self.inner.lock().await;
 
-        if let (Some(iceberg_table_name), Some(table_schema)) = (
-            self.store.get_table_mapping(&table_id).await?,
-            self.store.get_table_schema(&table_id).await?,
-        ) {
-            let namespace = schema_to_namespace(&table_schema.name.schema);
-            let namespace = inner.namespace.get(&namespace);
-            self.client
-                .drop_table(namespace, iceberg_table_name.clone())
-                .await
-                .map_err(iceberg_error_to_etl_error)?;
+        let Some(table_schema) = self.store.get_table_schema(&table_id).await? else {
+            if !is_cdc_truncate {
+                warn!(
+                    "the table schema for table {table_id} was not found in the schema store while processing truncate events for Iceberg",
+                    table_id = table_id.to_string()
+                );
 
-            inner.created_tables.remove(&iceberg_table_name);
+                return Ok(());
+            }
 
-            drop(inner);
+            bail!(
+                ErrorKind::MissingTableSchema,
+                "Table not found in the schema store",
+                format!(
+                    "The table schema for table {table_id} was not found in the schema store while processing truncate events for Iceberg"
+                )
+            );
+        };
 
-            self.prepare_table_for_streaming(table_id).await?;
-        }
+        let Some(iceberg_table_name) = self.store.get_table_mapping(&table_id).await? else {
+            // If it's not truncation during cdc, it could be that the mapping is not present, that's
+            // fine.
+            if !is_cdc_truncate {
+                warn!(
+                    "the table mapping for table {table_id} was not found in the state store while processing truncate events for Iceberg",
+                    table_id = table_id.to_string()
+                );
+
+                return Ok(());
+            }
+
+            bail!(
+                ErrorKind::MissingTableMapping,
+                "Table mapping not found",
+                format!(
+                    "The table mapping for table id {table_id} was not found while processing truncate events for Iceberg"
+                )
+            );
+        };
+
+        let namespace = schema_to_namespace(&table_schema.name.schema);
+        let namespace = inner.namespace.get(&namespace);
+
+        self.client
+            .drop_table(namespace, iceberg_table_name.clone())
+            .await
+            .map_err(iceberg_error_to_etl_error)?;
+        inner.created_tables.remove(&iceberg_table_name);
+
+        self.prepare_table_for_streaming(table_id).await?;
 
         Ok(())
     }

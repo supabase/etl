@@ -3,6 +3,8 @@ use serde::{Deserialize, Serialize};
 use sqlx::{PgExecutor, PgPool, Type, postgres::types::Oid as SqlxTableId, prelude::FromRow};
 use tokio_postgres::types::PgLsn;
 
+use crate::replication::schema::delete_table_schema_for_table;
+use crate::replication::table_mappings::delete_table_mappings_for_table;
 use crate::types::TableId;
 
 /// Replication state of a table during the ETL process.
@@ -281,8 +283,10 @@ pub async fn rollback_replication_state(
 
 /// Resets table replication state to initial state.
 ///
-/// Removes all existing state entries for the table and creates a new
-/// [`TableReplicationState::Init`] entry, effectively restarting replication.
+/// Removes all existing state entries for the table, clears the table mapping
+/// and table schema, and creates a new [`TableReplicationState::Init`] entry,
+/// effectively restarting replication. All operations are performed within a
+/// single transaction to ensure consistency.
 pub async fn reset_replication_state(
     pool: &PgPool,
     pipeline_id: i64,
@@ -293,7 +297,7 @@ pub async fn reset_replication_state(
     // Delete all existing entries for this pipeline and table
     sqlx::query(
         r#"
-        delete from etl.replication_state 
+        delete from etl.replication_state
         where pipeline_id = $1 and table_id = $2
         "#,
     )
@@ -301,6 +305,12 @@ pub async fn reset_replication_state(
     .bind(SqlxTableId(table_id.into_inner()))
     .execute(&mut *tx)
     .await?;
+
+    // Delete the table mapping for this table
+    delete_table_mappings_for_table(&mut *tx, pipeline_id, &table_id).await?;
+
+    // Delete the table schema for this table
+    delete_table_schema_for_table(&mut *tx, pipeline_id, table_id).await?;
 
     // Insert new Init state entry and return it
     let (state_type, metadata) = TableReplicationState::Init
