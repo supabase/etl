@@ -3,6 +3,8 @@ use serde::{Deserialize, Serialize};
 use sqlx::{PgExecutor, PgPool, Type, postgres::types::Oid as SqlxTableId, prelude::FromRow};
 use tokio_postgres::types::PgLsn;
 
+use crate::replication::schema::delete_table_schema_for_table;
+use crate::replication::table_mappings::delete_table_mappings_for_table;
 use crate::types::TableId;
 
 /// Replication state of a table during the ETL process.
@@ -269,6 +271,16 @@ pub async fn rollback_replication_state(
         .fetch_one(&mut *tx)
         .await?;
 
+        // If the rollback goes to `Init` or `DataSync`, we also want to clean up the table schema
+        // and table mappings; this way the rollback starts clean.
+        if matches!(
+            restored_row.state,
+            TableReplicationStateType::Init | TableReplicationStateType::DataSync
+        ) {
+            delete_table_mappings_for_table(&mut *tx, pipeline_id, &table_id).await?;
+            delete_table_schema_for_table(&mut *tx, pipeline_id, table_id).await?;
+        }
+
         tx.commit().await?;
 
         return Ok(Some(restored_row));
@@ -281,8 +293,10 @@ pub async fn rollback_replication_state(
 
 /// Resets table replication state to initial state.
 ///
-/// Removes all existing state entries for the table and creates a new
-/// [`TableReplicationState::Init`] entry, effectively restarting replication.
+/// Removes all existing state entries for the table, clears the table mapping
+/// and table schema, and creates a new [`TableReplicationState::Init`] entry,
+/// effectively restarting replication. All operations are performed within a
+/// single transaction to ensure consistency.
 pub async fn reset_replication_state(
     pool: &PgPool,
     pipeline_id: i64,
@@ -293,7 +307,7 @@ pub async fn reset_replication_state(
     // Delete all existing entries for this pipeline and table
     sqlx::query(
         r#"
-        delete from etl.replication_state 
+        delete from etl.replication_state
         where pipeline_id = $1 and table_id = $2
         "#,
     )
@@ -302,7 +316,11 @@ pub async fn reset_replication_state(
     .execute(&mut *tx)
     .await?;
 
-    // Insert new Init state entry and return it
+    // We want to clean up the table schema and table mappings to start fresh.
+    delete_table_mappings_for_table(&mut *tx, pipeline_id, &table_id).await?;
+    delete_table_schema_for_table(&mut *tx, pipeline_id, table_id).await?;
+
+    // Insert a new ` Init ` state entry and return it
     let (state_type, metadata) = TableReplicationState::Init
         .to_storage_format()
         .map_err(|e| sqlx::Error::Encode(Box::new(e)))?;

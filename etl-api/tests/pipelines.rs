@@ -1146,6 +1146,51 @@ async fn rollback_table_state_with_full_reset_succeeds() {
     )
     .await;
 
+    // Insert a table schema for this table
+    let table_schema_id: i64 = sqlx::query_scalar(
+        "INSERT INTO etl.table_schemas (pipeline_id, table_id, schema_name, table_name) VALUES ($1, $2, 'test', 'test_users') RETURNING id"
+    )
+    .bind(pipeline_id)
+    .bind(table_oid)
+    .fetch_one(&source_db_pool)
+    .await
+    .unwrap();
+
+    sqlx::query("INSERT INTO etl.table_columns (table_schema_id, column_name, column_type, type_modifier, nullable, primary_key, column_order) VALUES ($1, 'id', 'INT4', -1, false, true, 0)")
+        .bind(table_schema_id)
+        .execute(&source_db_pool)
+        .await
+        .unwrap();
+
+    // Insert a table mapping for this table
+    sqlx::query("INSERT INTO etl.table_mappings (pipeline_id, source_table_id, destination_table_id) VALUES ($1, $2, 'dest_test_users')")
+        .bind(pipeline_id)
+        .bind(table_oid)
+        .execute(&source_db_pool)
+        .await
+        .unwrap();
+
+    // Verify table schema and mapping exist before reset
+    let schema_count_before: i64 = sqlx::query_scalar(
+        "select count(*) from etl.table_schemas where pipeline_id = $1 and table_id = $2",
+    )
+    .bind(pipeline_id)
+    .bind(table_oid)
+    .fetch_one(&source_db_pool)
+    .await
+    .unwrap();
+    assert_eq!(schema_count_before, 1);
+
+    let mapping_count_before: i64 = sqlx::query_scalar(
+        "select count(*) from etl.table_mappings where pipeline_id = $1 and source_table_id = $2",
+    )
+    .bind(pipeline_id)
+    .bind(table_oid)
+    .fetch_one(&source_db_pool)
+    .await
+    .unwrap();
+    assert_eq!(mapping_count_before, 1);
+
     let response = test_rollback(
         &app,
         &tenant_id,
@@ -1174,6 +1219,200 @@ async fn rollback_table_state_with_full_reset_succeeds() {
     .await
     .unwrap();
     assert_eq!(count, 1);
+
+    // Verify table schema was deleted
+    let schema_count_after: i64 = sqlx::query_scalar(
+        "select count(*) from etl.table_schemas where pipeline_id = $1 and table_id = $2",
+    )
+    .bind(pipeline_id)
+    .bind(table_oid)
+    .fetch_one(&source_db_pool)
+    .await
+    .unwrap();
+    assert_eq!(schema_count_after, 0);
+
+    // Verify table mapping was deleted
+    let mapping_count_after: i64 = sqlx::query_scalar(
+        "select count(*) from etl.table_mappings where pipeline_id = $1 and source_table_id = $2",
+    )
+    .bind(pipeline_id)
+    .bind(table_oid)
+    .fetch_one(&source_db_pool)
+    .await
+    .unwrap();
+    assert_eq!(mapping_count_after, 0);
+
+    drop_pg_database(&source_db_config).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn rollback_to_init_cleans_up_schemas_and_mappings() {
+    init_test_tracing();
+    let (app, tenant_id, pipeline_id, source_db_pool, source_db_config) =
+        setup_pipeline_with_source_db().await;
+
+    // Create state chain: init -> errored (rollback target is init)
+    let table_oid = create_table_with_state_chain(
+        &source_db_pool,
+        pipeline_id,
+        "test_users",
+        &[
+            ("init", r#"{"type": "init"}"#),
+            (
+                "errored",
+                r#"{"type": "errored", "reason": "connection failed", "retry_policy": {"type": "manual_retry"}}"#,
+            ),
+        ],
+    )
+    .await;
+
+    // Insert table schema and mapping
+    let table_schema_id: i64 = sqlx::query_scalar(
+        "INSERT INTO etl.table_schemas (pipeline_id, table_id, schema_name, table_name) VALUES ($1, $2, 'test', 'test_users') RETURNING id"
+    )
+    .bind(pipeline_id)
+    .bind(table_oid)
+    .fetch_one(&source_db_pool)
+    .await
+    .unwrap();
+
+    sqlx::query("INSERT INTO etl.table_columns (table_schema_id, column_name, column_type, type_modifier, nullable, primary_key, column_order) VALUES ($1, 'id', 'INT4', -1, false, true, 0)")
+        .bind(table_schema_id)
+        .execute(&source_db_pool)
+        .await
+        .unwrap();
+
+    sqlx::query("INSERT INTO etl.table_mappings (pipeline_id, source_table_id, destination_table_id) VALUES ($1, $2, 'dest_test_users')")
+        .bind(pipeline_id)
+        .bind(table_oid)
+        .execute(&source_db_pool)
+        .await
+        .unwrap();
+
+    // Do individual rollback (not full reset)
+    let response = test_rollback(
+        &app,
+        &tenant_id,
+        pipeline_id,
+        table_oid,
+        RollbackType::Individual,
+        StatusCode::OK,
+    )
+    .await
+    .unwrap();
+
+    assert!(matches!(
+        response.new_state,
+        SimpleTableReplicationState::Queued
+    ));
+
+    // Verify table schema was deleted (because we rolled back to init)
+    let schema_count: i64 = sqlx::query_scalar(
+        "select count(*) from etl.table_schemas where pipeline_id = $1 and table_id = $2",
+    )
+    .bind(pipeline_id)
+    .bind(table_oid)
+    .fetch_one(&source_db_pool)
+    .await
+    .unwrap();
+    assert_eq!(schema_count, 0);
+
+    // Verify table mapping was deleted
+    let mapping_count: i64 = sqlx::query_scalar(
+        "select count(*) from etl.table_mappings where pipeline_id = $1 and source_table_id = $2",
+    )
+    .bind(pipeline_id)
+    .bind(table_oid)
+    .fetch_one(&source_db_pool)
+    .await
+    .unwrap();
+    assert_eq!(mapping_count, 0);
+
+    drop_pg_database(&source_db_config).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn rollback_to_non_starting_state_keeps_schemas_and_mappings() {
+    init_test_tracing();
+    let (app, tenant_id, pipeline_id, source_db_pool, source_db_config) =
+        setup_pipeline_with_source_db().await;
+
+    // Create state chain: ready -> errored (rollback target is ready, not a starting state)
+    let table_oid = create_table_with_state_chain(
+        &source_db_pool,
+        pipeline_id,
+        "test_users",
+        &[
+            ("ready", r#"{"type": "ready"}"#),
+            (
+                "errored",
+                r#"{"type": "errored", "reason": "connection failed", "retry_policy": {"type": "manual_retry"}}"#,
+            ),
+        ],
+    )
+    .await;
+
+    // Insert table schema and mapping
+    let table_schema_id: i64 = sqlx::query_scalar(
+        "INSERT INTO etl.table_schemas (pipeline_id, table_id, schema_name, table_name) VALUES ($1, $2, 'test', 'test_users') RETURNING id"
+    )
+    .bind(pipeline_id)
+    .bind(table_oid)
+    .fetch_one(&source_db_pool)
+    .await
+    .unwrap();
+
+    sqlx::query("INSERT INTO etl.table_columns (table_schema_id, column_name, column_type, type_modifier, nullable, primary_key, column_order) VALUES ($1, 'id', 'INT4', -1, false, true, 0)")
+        .bind(table_schema_id)
+        .execute(&source_db_pool)
+        .await
+        .unwrap();
+
+    sqlx::query("INSERT INTO etl.table_mappings (pipeline_id, source_table_id, destination_table_id) VALUES ($1, $2, 'dest_test_users')")
+        .bind(pipeline_id)
+        .bind(table_oid)
+        .execute(&source_db_pool)
+        .await
+        .unwrap();
+
+    // Do individual rollback (not full reset)
+    let response = test_rollback(
+        &app,
+        &tenant_id,
+        pipeline_id,
+        table_oid,
+        RollbackType::Individual,
+        StatusCode::OK,
+    )
+    .await
+    .unwrap();
+
+    assert!(matches!(
+        response.new_state,
+        SimpleTableReplicationState::FollowingWal
+    ));
+
+    // Verify table schema was NOT deleted (because we rolled back to ready, not a starting state)
+    let schema_count: i64 = sqlx::query_scalar(
+        "select count(*) from etl.table_schemas where pipeline_id = $1 and table_id = $2",
+    )
+    .bind(pipeline_id)
+    .bind(table_oid)
+    .fetch_one(&source_db_pool)
+    .await
+    .unwrap();
+    assert_eq!(schema_count, 1);
+
+    // Verify table mapping was NOT deleted
+    let mapping_count: i64 = sqlx::query_scalar(
+        "select count(*) from etl.table_mappings where pipeline_id = $1 and source_table_id = $2",
+    )
+    .bind(pipeline_id)
+    .bind(table_oid)
+    .fetch_one(&source_db_pool)
+    .await
+    .unwrap();
+    assert_eq!(mapping_count, 1);
 
     drop_pg_database(&source_db_config).await;
 }

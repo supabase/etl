@@ -163,8 +163,14 @@ async fn run_table_copy_test(destination_namespace: DestinationNamespace) {
     // This feature is planned for future releases. We'll start to use it when it becomes available.
     // The cleanup is not in a Drop impl because each test has different number of object specitic to
     // that test.
-    client.drop_table(&namespace, users_table).await.unwrap();
-    client.drop_table(&namespace, orders_table).await.unwrap();
+    client
+        .drop_table_if_exists(&namespace, users_table)
+        .await
+        .unwrap();
+    client
+        .drop_table_if_exists(&namespace, orders_table)
+        .await
+        .unwrap();
     client.drop_namespace(&namespace).await.unwrap();
     lakekeeper_client
         .drop_warehouse(warehouse_id)
@@ -458,8 +464,14 @@ async fn run_cdc_streaming_test(destination_namespace: DestinationNamespace) {
     pipeline.shutdown_and_wait().await.unwrap();
 
     // Cleanup: drop CDC tables, namespace, and warehouse.
-    client.drop_table(&namespace, users_table).await.unwrap();
-    client.drop_table(&namespace, orders_table).await.unwrap();
+    client
+        .drop_table_if_exists(&namespace, users_table)
+        .await
+        .unwrap();
+    client
+        .drop_table_if_exists(&namespace, orders_table)
+        .await
+        .unwrap();
     client.drop_namespace(&namespace).await.unwrap();
     lakekeeper_client
         .drop_warehouse(warehouse_id)
@@ -662,8 +674,14 @@ async fn run_cdc_streaming_with_truncate_test(destination_namespace: Destination
     pipeline.shutdown_and_wait().await.unwrap();
 
     // Cleanup: drop CDC tables, namespace, and warehouse.
-    client.drop_table(&namespace, users_table).await.unwrap();
-    client.drop_table(&namespace, orders_table).await.unwrap();
+    client
+        .drop_table_if_exists(&namespace, users_table)
+        .await
+        .unwrap();
+    client
+        .drop_table_if_exists(&namespace, orders_table)
+        .await
+        .unwrap();
     client.drop_namespace(&namespace).await.unwrap();
     lakekeeper_client
         .drop_warehouse(warehouse_id)

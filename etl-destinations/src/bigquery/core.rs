@@ -674,7 +674,6 @@ where
             if !is_cdc_truncate {
                 warn!(
                     "the table schema for table {table_id} was not found in the schema store while processing truncate events for BigQuery",
-                    table_id = table_id.to_string()
                 );
 
                 continue;
