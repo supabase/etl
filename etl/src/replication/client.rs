@@ -14,6 +14,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::io::BufReader;
 use std::num::NonZeroI32;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use tokio_postgres::error::SqlState;
@@ -27,20 +28,26 @@ use tracing::{Instrument, error, info, warn};
 /// Spawns a background task to monitor a Postgres connection until it terminates.
 ///
 /// The task will log when the connection terminates, either successfully or with an error.
-fn spawn_postgres_connection<T>(connection: Connection<Socket, T::Stream>)
+/// When the connection terminates for any reason, the `connection_alive` flag is set to `false`.
+fn spawn_postgres_connection<T>(
+    connection: Connection<Socket, T::Stream>,
+    connection_alive: Arc<AtomicBool>,
+)
 where
     T: MakeTlsConnect<Socket>,
     T::Stream: Send + 'static,
 {
-    // TODO: maybe return a handle for this task to keep track of it.
     let span = tracing::Span::current();
     let task = async move {
-        if let Err(e) = connection.await {
-            error!("an error occurred during the Postgres connection: {}", e);
-            return;
-        }
+        let result = connection.await;
 
-        info!("postgres connection terminated successfully")
+        // Mark the connection as dead regardless of success or error.
+        connection_alive.store(false, Ordering::SeqCst);
+
+        match result {
+            Err(err) => error!("an error occurred during the postgres connection: {}", err),
+            Ok(()) => info!("postgres connection terminated successfully"),
+        }
     }
     .instrument(span);
 
@@ -178,6 +185,9 @@ struct PublicationFilter {
 pub struct PgReplicationClient {
     client: Arc<Client>,
     server_version: Option<NonZeroI32>,
+    /// Flag indicating whether the underlying connection is still alive.
+    /// Set to `false` by the connection background task when the connection terminates.
+    connection_alive: Arc<AtomicBool>,
 }
 
 impl PgReplicationClient {
@@ -205,13 +215,15 @@ impl PgReplicationClient {
             .parameter("server_version")
             .and_then(extract_server_version);
 
-        spawn_postgres_connection::<NoTls>(connection);
+        let connection_alive = Arc::new(AtomicBool::new(true));
+        spawn_postgres_connection::<NoTls>(connection, connection_alive.clone());
 
         info!("successfully connected to postgres without tls");
 
         Ok(PgReplicationClient {
             client: Arc::new(client),
             server_version,
+            connection_alive,
         })
     }
 
@@ -242,14 +254,32 @@ impl PgReplicationClient {
             .parameter("server_version")
             .and_then(extract_server_version);
 
-        spawn_postgres_connection::<MakeRustlsConnect>(connection);
+        let connection_alive = Arc::new(AtomicBool::new(true));
+        spawn_postgres_connection::<MakeRustlsConnect>(connection, connection_alive.clone());
 
         info!("successfully connected to postgres with tls");
 
         Ok(PgReplicationClient {
             client: Arc::new(client),
             server_version,
+            connection_alive,
         })
+    }
+
+    /// Checks if the underlying connection is still alive.
+    ///
+    /// Returns `Ok(())` if the connection is alive, or an error if the connection
+    /// has terminated. This is useful for detecting connection failures that might
+    /// not be immediately visible to the replication stream.
+    pub fn check_connection_alive(&self) -> EtlResult<()> {
+        if self.connection_alive.load(Ordering::SeqCst) {
+            Ok(())
+        } else {
+            bail!(
+                ErrorKind::SourceConnectionFailed,
+                "PostgreSQL connection has been terminated"
+            )
+        }
     }
 
     /// Creates a new logical replication slot with the specified name and a transaction which is set

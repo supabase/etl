@@ -42,6 +42,7 @@ use crate::{bail, etl_error};
 /// If set too high, Postgres may timeout before the next status update is sent.
 const STATUS_UPDATE_INTERVAL: Duration = Duration::from_secs(10);
 
+
 /// Result type for the apply loop execution.
 ///
 /// [`ApplyLoopResult`] indicates the reason why the apply loop terminated,
@@ -652,6 +653,9 @@ where
             // 2. Allows Postgres to clean up old WAL files based on our progress
             // 3. Provides a heartbeat mechanism to detect connection issues
             _ = tokio::time::sleep_until(state.next_status_update_deadline()) => {
+                // Check if the connection background task has terminated.
+                replication_client.check_connection_alive()?;
+
                 logical_replication_stream
                     .as_mut()
                     .get_inner()
@@ -661,6 +665,7 @@ where
                         false
                     )
                     .await?;
+
                 state.mark_status_update_sent();
             }
         }
