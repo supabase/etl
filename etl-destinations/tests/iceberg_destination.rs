@@ -670,6 +670,29 @@ async fn run_cdc_streaming_with_truncate_test(destination_namespace: Destination
     ];
     assert_eq!(actual_orders, expected_orders);
 
+    // Truncate again immediately to verify double truncation works (idempotent behavior).
+    let event_notify = destination
+        .wait_for_events_count(vec![(EventType::Truncate, 2)])
+        .await;
+
+    database
+        .truncate_table(database_schema.users_schema().name.clone())
+        .await
+        .unwrap();
+    database
+        .truncate_table(database_schema.orders_schema().name.clone())
+        .await
+        .unwrap();
+
+    event_notify.notified().await;
+    destination.clear_events().await;
+
+    // Tables should be empty after second truncation.
+    let actual_users = read_all_rows(&client, namespace.to_string(), users_table.clone()).await;
+    let actual_orders = read_all_rows(&client, namespace.to_string(), orders_table.clone()).await;
+    assert!(actual_users.is_empty());
+    assert!(actual_orders.is_empty());
+
     // Stop the pipeline to finalize writes.
     pipeline.shutdown_and_wait().await.unwrap();
 
