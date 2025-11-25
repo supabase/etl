@@ -21,11 +21,8 @@ pub trait Destination {
     ///
     /// This operation is called during initial table synchronization to ensure the
     /// destination table starts from a clean state before bulk loading. The operation
-    /// should be atomic and handle cases where the table may not exist.
-    ///
-    /// The implementation should assume that when truncation is called, the table and related states
-    /// might not be present since truncation could be called after a failure that happened before
-    /// the table copy was started.
+    /// should be atomic and handle cases where the table and its states may not exist, since
+    /// truncation is unconditionally called before a table is copied.
     fn truncate_table(&self, table_id: TableId) -> impl Future<Output = EtlResult<()>> + Send;
 
     /// Writes a batch of table rows to the destination.
