@@ -1,8 +1,11 @@
+use etl::config::SchemaCreationMode;
 use etl::destination::Destination;
 use etl::error::{ErrorKind, EtlError, EtlResult};
 use etl::store::schema::SchemaStore;
 use etl::store::state::StateStore;
-use etl::types::{Cell, Event, TableId, TableName, TableRow, generate_sequence_number};
+use etl::types::{
+    Cell, Event, TableId, TableName, TableRow, TableSchema, generate_sequence_number,
+};
 use etl::{bail, etl_error};
 use gcp_bigquery_client::storage::TableDescriptor;
 use std::collections::{HashMap, HashSet};
@@ -313,10 +316,14 @@ where
         &self,
         table_id: &TableId,
         use_cdc_sequence_column: bool,
+        schema_creation_mode: SchemaCreationMode,
     ) -> EtlResult<(SequencedBigQueryTableId, Arc<TableDescriptor>)> {
         // We hold the lock for the entire preparation to avoid race conditions since the consistency
         // of this code path is critical.
         let mut inner = self.inner.lock().await;
+
+        let force_schema_creation =
+            matches!(schema_creation_mode, SchemaCreationMode::CreateIfMissing);
 
         // We load the schema of the table, if present. This is needed to create the table in BigQuery
         // and also prepare the table descriptor for CDC streaming.
@@ -344,7 +351,7 @@ where
         //
         // Note that if the table is deleted outside ETL and the cache marks it as created, the
         // inserts will fail because the table will be missing and won't be created.
-        if !inner.created_tables.contains(&sequenced_bigquery_table_id) {
+        if force_schema_creation || !inner.created_tables.contains(&sequenced_bigquery_table_id) {
             self.client
                 .create_table_if_missing(
                     &self.dataset_id,
@@ -370,6 +377,7 @@ where
             &mut inner,
             &bigquery_table_id,
             &sequenced_bigquery_table_id,
+            force_schema_creation,
         )
         .await?;
 
@@ -433,16 +441,19 @@ where
         inner: &mut Inner,
         view_name: &BigQueryTableId,
         target_table_id: &SequencedBigQueryTableId,
+        force_schema_creation: bool,
     ) -> EtlResult<bool> {
-        if let Some(current_target) = inner.created_views.get(view_name)
-            && current_target == target_table_id
-        {
-            debug!(
-                "view {} already points to {}, skipping creation",
-                view_name, target_table_id
-            );
+        if !force_schema_creation {
+            if let Some(current_target) = inner.created_views.get(view_name)
+                && current_target == target_table_id
+            {
+                debug!(
+                    "view {} already points to {}, skipping creation",
+                    view_name, target_table_id
+                );
 
-            return Ok(false);
+                return Ok(false);
+            }
         }
 
         self.client
@@ -466,14 +477,16 @@ where
     ///
     /// Adds an `Upsert` operation type to each row, splits them into optimal batches based on
     /// `max_concurrent_streams`, and streams to BigQuery using concurrent processing.
-    async fn write_table_rows(
+    async fn write_table_rows_internal(
         &self,
         table_id: TableId,
         mut table_rows: Vec<TableRow>,
+        schema_creation_mode: SchemaCreationMode,
     ) -> EtlResult<()> {
         // Prepare table for streaming.
-        let (sequenced_bigquery_table_id, table_descriptor) =
-            self.prepare_table_for_streaming(&table_id, false).await?;
+        let (sequenced_bigquery_table_id, table_descriptor) = self
+            .prepare_table_for_streaming(&table_id, false, schema_creation_mode)
+            .await?;
 
         // Add CDC operation type to all rows (no lock needed).
         for table_row in table_rows.iter_mut() {
@@ -526,7 +539,11 @@ where
     ///
     /// Groups streaming operations (insert/update/delete) by table and processes them together,
     /// then handles truncate events separately by creating new versioned tables.
-    async fn write_events(&self, events: Vec<Event>) -> EtlResult<()> {
+    async fn write_events_internal(
+        &self,
+        events: Vec<Event>,
+        schema_creation_mode: SchemaCreationMode,
+    ) -> EtlResult<()> {
         let mut event_iter = events.into_iter().peekable();
 
         while event_iter.peek().is_some() {
@@ -595,8 +612,9 @@ where
                 let mut table_batches = Vec::with_capacity(table_id_to_table_rows.len());
 
                 for (table_id, table_rows) in table_id_to_table_rows {
-                    let (sequenced_bigquery_table_id, table_descriptor) =
-                        self.prepare_table_for_streaming(&table_id, true).await?;
+                    let (sequenced_bigquery_table_id, table_descriptor) = self
+                        .prepare_table_for_streaming(&table_id, true, schema_creation_mode)
+                        .await?;
 
                     let table_batch = self.client.create_table_batch(
                         &self.dataset_id,
@@ -792,7 +810,27 @@ where
         "bigquery"
     }
 
-    async fn truncate_table(&self, table_id: TableId) -> EtlResult<()> {
+    async fn create_table_schema(&self, table_schema: Arc<TableSchema>) -> EtlResult<()> {
+        let _ = self
+            .store
+            .store_table_schema((*table_schema).clone())
+            .await?;
+
+        self.prepare_table_for_streaming(
+            &table_schema.id,
+            false,
+            SchemaCreationMode::CreateIfMissing,
+        )
+        .await?;
+
+        Ok(())
+    }
+
+    async fn truncate_table(
+        &self,
+        table_id: TableId,
+        _schema_creation_mode: SchemaCreationMode,
+    ) -> EtlResult<()> {
         self.process_truncate_for_table_ids(iter::once(table_id), false)
             .await
     }
@@ -801,14 +839,21 @@ where
         &self,
         table_id: TableId,
         table_rows: Vec<TableRow>,
+        schema_creation_mode: SchemaCreationMode,
     ) -> EtlResult<()> {
-        self.write_table_rows(table_id, table_rows).await?;
+        self.write_table_rows_internal(table_id, table_rows, schema_creation_mode)
+            .await?;
 
         Ok(())
     }
 
-    async fn write_events(&self, events: Vec<Event>) -> EtlResult<()> {
-        self.write_events(events).await?;
+    async fn write_events(
+        &self,
+        events: Vec<Event>,
+        schema_creation_mode: SchemaCreationMode,
+    ) -> EtlResult<()> {
+        self.write_events_internal(events, schema_creation_mode)
+            .await?;
 
         Ok(())
     }

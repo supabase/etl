@@ -1,3 +1,4 @@
+use etl_config::shared::SchemaCreationMode;
 use etl_postgres::types::TableId;
 use std::collections::HashMap;
 use std::fmt;
@@ -6,9 +7,10 @@ use tokio::runtime::Handle;
 use tokio::sync::{Notify, RwLock};
 
 use crate::destination::Destination;
-use crate::error::EtlResult;
+use crate::error::{ErrorKind, EtlResult};
+use crate::etl_error;
 use crate::test_utils::event::{check_events_count, deduplicate_events};
-use crate::types::{Event, EventType, TableRow};
+use crate::types::{Event, EventType, TableRow, TableSchema};
 
 type EventCondition = Box<dyn Fn(&[Event]) -> bool + Send + Sync>;
 type TableRowCondition = Box<dyn Fn(&HashMap<TableId, Vec<TableRow>>) -> bool + Send + Sync>;
@@ -20,6 +22,7 @@ struct Inner<D> {
     event_conditions: Vec<(EventCondition, Arc<Notify>)>,
     table_row_conditions: Vec<(TableRowCondition, Arc<Notify>)>,
     write_table_rows_called: u64,
+    table_schemas: HashMap<TableId, Arc<TableSchema>>,
 }
 
 impl<D> Inner<D> {
@@ -85,6 +88,7 @@ impl<D> TestDestinationWrapper<D> {
             event_conditions: Vec::new(),
             table_row_conditions: Vec::new(),
             write_table_rows_called: 0,
+            table_schemas: HashMap::new(),
         };
 
         Self {
@@ -145,8 +149,37 @@ impl<D> TestDestinationWrapper<D> {
         inner.events.clear();
     }
 
+    /// Clears the cached table schemas for this wrapped destination.
+    pub async fn clear_table_schemas(&self) {
+        let mut inner = self.inner.write().await;
+        inner.table_schemas.clear();
+    }
+
     pub async fn write_table_rows_called(&self) -> u64 {
         self.inner.read().await.write_table_rows_called
+    }
+
+    fn ensure_schema_exists(inner: &Inner<D>, table_id: &TableId) -> EtlResult<()> {
+        if inner.table_schemas.contains_key(table_id) {
+            return Ok(());
+        }
+
+        Err(etl_error!(
+            ErrorKind::MissingTableSchema,
+            "Table schema not found",
+            format!("Table schema for table {table_id} was not created before writing data")
+        ))
+    }
+
+    fn extract_table_id(event: &Event) -> Option<TableId> {
+        match event {
+            Event::Insert(e) => Some(e.table_id),
+            Event::Update(e) => Some(e.table_id),
+            Event::Delete(e) => Some(e.table_id),
+            Event::Relation(e) => Some(e.table_schema.id),
+            Event::Truncate(e) => e.rel_ids.first().map(|id| TableId::new(*id)),
+            _ => None,
+        }
     }
 }
 
@@ -158,13 +191,38 @@ where
         "wrapper"
     }
 
-    async fn truncate_table(&self, table_id: TableId) -> EtlResult<()> {
+    async fn create_table_schema(&self, table_schema: Arc<TableSchema>) -> EtlResult<()> {
         let destination = {
             let inner = self.inner.read().await;
             inner.wrapped_destination.clone()
         };
 
-        let result = destination.truncate_table(table_id).await;
+        let result = destination.create_table_schema(table_schema.clone()).await;
+
+        if result.is_ok() {
+            let mut inner = self.inner.write().await;
+            inner
+                .table_schemas
+                .insert(table_schema.id, table_schema.clone());
+            inner.check_conditions().await;
+        }
+
+        result
+    }
+
+    async fn truncate_table(
+        &self,
+        table_id: TableId,
+        schema_creation_mode: SchemaCreationMode,
+    ) -> EtlResult<()> {
+        let destination = {
+            let inner = self.inner.read().await;
+            inner.wrapped_destination.clone()
+        };
+
+        let result = destination
+            .truncate_table(table_id, schema_creation_mode)
+            .await;
 
         let mut inner = self.inner.write().await;
 
@@ -196,15 +254,17 @@ where
         &self,
         table_id: TableId,
         table_rows: Vec<TableRow>,
+        schema_creation_mode: SchemaCreationMode,
     ) -> EtlResult<()> {
         let destination = {
             let mut inner = self.inner.write().await;
             inner.write_table_rows_called += 1;
+            Self::ensure_schema_exists(&inner, &table_id)?;
             inner.wrapped_destination.clone()
         };
 
         let result = destination
-            .write_table_rows(table_id, table_rows.clone())
+            .write_table_rows(table_id, table_rows.clone(), schema_creation_mode)
             .await;
 
         {
@@ -223,13 +283,24 @@ where
         result
     }
 
-    async fn write_events(&self, events: Vec<Event>) -> EtlResult<()> {
+    async fn write_events(
+        &self,
+        events: Vec<Event>,
+        schema_creation_mode: SchemaCreationMode,
+    ) -> EtlResult<()> {
         let destination = {
             let inner = self.inner.read().await;
+            for event in &events {
+                if let Some(table_id) = Self::extract_table_id(event) {
+                    Self::ensure_schema_exists(&inner, &table_id)?;
+                }
+            }
             inner.wrapped_destination.clone()
         };
 
-        let result = destination.write_events(events.clone()).await;
+        let result = destination
+            .write_events(events.clone(), schema_creation_mode)
+            .await;
 
         {
             let mut inner = self.inner.write().await;

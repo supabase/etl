@@ -5,7 +5,8 @@ use tracing::info;
 
 use crate::destination::Destination;
 use crate::error::EtlResult;
-use crate::types::{Event, TableId, TableRow};
+use crate::types::{Event, TableId, TableRow, TableSchema};
+use etl_config::shared::SchemaCreationMode;
 
 #[derive(Debug)]
 struct Inner {
@@ -80,7 +81,15 @@ impl Destination for MemoryDestination {
     fn name() -> &'static str {
         "memory"
     }
-    async fn truncate_table(&self, table_id: TableId) -> EtlResult<()> {
+
+    async fn create_table_schema(&self, _table_schema: Arc<TableSchema>) -> EtlResult<()> {
+        Ok(())
+    }
+    async fn truncate_table(
+        &self,
+        table_id: TableId,
+        _schema_creation_mode: SchemaCreationMode,
+    ) -> EtlResult<()> {
         // For truncation, we simulate removing all table rows for a specific table and also the events
         // of that table.
         let mut inner = self.inner.lock().await;
@@ -115,6 +124,7 @@ impl Destination for MemoryDestination {
         &self,
         table_id: TableId,
         table_rows: Vec<TableRow>,
+        _schema_creation_mode: SchemaCreationMode,
     ) -> EtlResult<()> {
         let mut inner = self.inner.lock().await;
 
@@ -128,7 +138,11 @@ impl Destination for MemoryDestination {
         Ok(())
     }
 
-    async fn write_events(&self, events: Vec<Event>) -> EtlResult<()> {
+    async fn write_events(
+        &self,
+        events: Vec<Event>,
+        _schema_creation_mode: SchemaCreationMode,
+    ) -> EtlResult<()> {
         let mut inner = self.inner.lock().await;
 
         info!("writing a batch of {} events:", events.len());

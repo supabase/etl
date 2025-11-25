@@ -85,7 +85,9 @@ You should see one row returned.
 Replace the contents of `src/main.rs`:
 
 ```rust
-use etl::config::{BatchConfig, PgConnectionConfig, PipelineConfig, TlsConfig};
+use etl::config::{
+    BatchConfig, PgConnectionConfig, PipelineConfig, SchemaCreationMode, TlsConfig,
+};
 use etl::pipeline::Pipeline;
 use etl::destination::memory::MemoryDestination;
 use etl::store::both::memory::MemoryStore;
@@ -111,14 +113,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
         id: 1,
         publication_name: "my_publication".to_string(),
         pg_connection: pg_connection_config,
-        batch: BatchConfig {
-            max_size: 1000,
-            max_fill_ms: 5000,
-        },
-        table_error_retry_delay_ms: 10000,
-        table_error_retry_max_attempts: 5,
-        max_table_sync_workers: 4,
-    };
+    batch: BatchConfig {
+        max_size: 1000,
+        max_fill_ms: 5000,
+    },
+    table_error_retry_delay_ms: 10000,
+    table_error_retry_max_attempts: 5,
+    max_table_sync_workers: 4,
+    schema_creation_mode: SchemaCreationMode::CreateIfMissing,
+};
 
     // Create stores and destination.
     let store = MemoryStore::new();

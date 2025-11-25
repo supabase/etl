@@ -156,7 +156,9 @@ where
             // 5. This time, only row id = 2 is copied, but row id = 1 still exists in the destination.
             // Result: the destination has two rows (id = 1 and id = 2) instead of only one (id = 2).
             // Fix: Always truncate the destination table before starting a copy.
-            destination.truncate_table(table_id).await?;
+            destination
+                .truncate_table(table_id, config.schema_creation_mode)
+                .await?;
 
             // We are ready to start copying table data, and we update the state accordingly.
             info!("starting data copy for table {}", table_id);
@@ -202,7 +204,12 @@ where
 
             // We store the table schema in the schema store to be able to retrieve it even when the
             // pipeline is restarted, since it's outside the lifecycle of the pipeline.
-            store.store_table_schema(table_schema.clone()).await?;
+            let table_schema = store.store_table_schema(table_schema).await?;
+
+            // We make sure the destination schema is created before copying any data.
+            destination
+                .create_table_schema(table_schema.clone())
+                .await?;
 
             // We create the copy table stream.
             let table_copy_stream = transaction
@@ -247,7 +254,9 @@ where
 
                         let before_sending = Instant::now();
 
-                        destination.write_table_rows(table_id, table_rows).await?;
+                        destination
+                            .write_table_rows(table_id, table_rows, config.schema_creation_mode)
+                            .await?;
                         table_rows_written = true;
 
                         metrics::counter!(
@@ -290,7 +299,9 @@ where
             // If no table rows were written, we call the method nonetheless with no rows, to kickstart
             // table creation.
             if !table_rows_written {
-                destination.write_table_rows(table_id, vec![]).await?;
+                destination
+                    .write_table_rows(table_id, vec![], config.schema_creation_mode)
+                    .await?;
                 info!(
                     "writing empty table rows since table {} was empty",
                     table_id

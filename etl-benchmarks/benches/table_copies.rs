@@ -4,9 +4,11 @@ use etl::error::EtlResult;
 use etl::pipeline::Pipeline;
 use etl::state::table::TableReplicationPhaseType;
 use etl::test_utils::notify::NotifyingStore;
-use etl::types::{Event, TableRow};
+use etl::types::{Event, TableRow, TableSchema};
 use etl_config::Environment;
-use etl_config::shared::{BatchConfig, PgConnectionConfig, PipelineConfig, TlsConfig};
+use etl_config::shared::{
+    BatchConfig, PgConnectionConfig, PipelineConfig, SchemaCreationMode, TlsConfig,
+};
 use etl_destinations::bigquery::BigQueryDestination;
 use etl_destinations::encryption::install_crypto_provider;
 use etl_postgres::types::TableId;
@@ -334,6 +336,7 @@ async fn start_pipeline(args: RunArgs) -> Result<(), Box<dyn Error>> {
         table_error_retry_delay_ms: 10000,
         table_error_retry_max_attempts: 5,
         max_table_sync_workers: args.max_table_sync_workers,
+        schema_creation_mode: SchemaCreationMode::CreateIfMissing,
     };
 
     // Create the appropriate destination based on the argument
@@ -413,10 +416,28 @@ impl Destination for BenchDestination {
         "bench_destination"
     }
 
-    async fn truncate_table(&self, table_id: TableId) -> EtlResult<()> {
+    async fn create_table_schema(
+        &self,
+        table_schema: std::sync::Arc<TableSchema>,
+    ) -> EtlResult<()> {
         match self {
-            BenchDestination::Null(dest) => dest.truncate_table(table_id).await,
-            BenchDestination::BigQuery(dest) => dest.truncate_table(table_id).await,
+            BenchDestination::Null(dest) => dest.create_table_schema(table_schema).await,
+            BenchDestination::BigQuery(dest) => dest.create_table_schema(table_schema).await,
+        }
+    }
+
+    async fn truncate_table(
+        &self,
+        table_id: TableId,
+        schema_creation_mode: SchemaCreationMode,
+    ) -> EtlResult<()> {
+        match self {
+            BenchDestination::Null(dest) => {
+                dest.truncate_table(table_id, schema_creation_mode).await
+            }
+            BenchDestination::BigQuery(dest) => {
+                dest.truncate_table(table_id, schema_creation_mode).await
+            }
         }
     }
 
@@ -424,17 +445,30 @@ impl Destination for BenchDestination {
         &self,
         table_id: TableId,
         table_rows: Vec<TableRow>,
+        schema_creation_mode: SchemaCreationMode,
     ) -> EtlResult<()> {
         match self {
-            BenchDestination::Null(dest) => dest.write_table_rows(table_id, table_rows).await,
-            BenchDestination::BigQuery(dest) => dest.write_table_rows(table_id, table_rows).await,
+            BenchDestination::Null(dest) => {
+                dest.write_table_rows(table_id, table_rows, schema_creation_mode)
+                    .await
+            }
+            BenchDestination::BigQuery(dest) => {
+                dest.write_table_rows(table_id, table_rows, schema_creation_mode)
+                    .await
+            }
         }
     }
 
-    async fn write_events(&self, events: Vec<Event>) -> EtlResult<()> {
+    async fn write_events(
+        &self,
+        events: Vec<Event>,
+        schema_creation_mode: SchemaCreationMode,
+    ) -> EtlResult<()> {
         match self {
-            BenchDestination::Null(dest) => dest.write_events(events).await,
-            BenchDestination::BigQuery(dest) => dest.write_events(events).await,
+            BenchDestination::Null(dest) => dest.write_events(events, schema_creation_mode).await,
+            BenchDestination::BigQuery(dest) => {
+                dest.write_events(events, schema_creation_mode).await
+            }
         }
     }
 }
@@ -444,7 +478,18 @@ impl Destination for NullDestination {
         "null"
     }
 
-    async fn truncate_table(&self, _table_id: TableId) -> EtlResult<()> {
+    async fn create_table_schema(
+        &self,
+        _table_schema: std::sync::Arc<TableSchema>,
+    ) -> EtlResult<()> {
+        Ok(())
+    }
+
+    async fn truncate_table(
+        &self,
+        _table_id: TableId,
+        _schema_creation_mode: SchemaCreationMode,
+    ) -> EtlResult<()> {
         Ok(())
     }
 
@@ -452,11 +497,16 @@ impl Destination for NullDestination {
         &self,
         _table_id: TableId,
         _table_rows: Vec<TableRow>,
+        _schema_creation_mode: SchemaCreationMode,
     ) -> EtlResult<()> {
         Ok(())
     }
 
-    async fn write_events(&self, _events: Vec<Event>) -> EtlResult<()> {
+    async fn write_events(
+        &self,
+        _events: Vec<Event>,
+        _schema_creation_mode: SchemaCreationMode,
+    ) -> EtlResult<()> {
         Ok(())
     }
 }

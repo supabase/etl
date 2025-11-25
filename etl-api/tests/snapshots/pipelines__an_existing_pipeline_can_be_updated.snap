@@ -26,4 +26,7 @@ FullApiPipelineConfig {
     log_level: Some(
         Info,
     ),
+    schema_creation_mode: Some(
+        CreateOnce,
+    ),
 }

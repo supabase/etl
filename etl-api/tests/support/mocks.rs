@@ -8,6 +8,7 @@ use etl_api::routes::images::{CreateImageRequest, CreateImageResponse};
 use etl_api::routes::pipelines::{CreatePipelineRequest, CreatePipelineResponse};
 use etl_api::routes::sources::{CreateSourceRequest, CreateSourceResponse};
 use etl_config::SerializableSecretString;
+use etl_config::shared::SchemaCreationMode;
 
 use crate::support::test_app::TestApp;
 
@@ -238,6 +239,7 @@ pub mod pipelines {
             table_error_retry_max_attempts: Some(5),
             max_table_sync_workers: Some(2),
             log_level: Some(LogLevel::Info),
+            schema_creation_mode: Some(SchemaCreationMode::CreateIfMissing),
         }
     }
 
@@ -253,6 +255,7 @@ pub mod pipelines {
             table_error_retry_max_attempts: Some(10),
             max_table_sync_workers: Some(4),
             log_level: Some(LogLevel::Info),
+            schema_creation_mode: Some(SchemaCreationMode::CreateOnce),
         }
     }
 
@@ -263,6 +266,7 @@ pub mod pipelines {
         TableErrorRetryMaxAttempts(u32),
         MaxTableSyncWorkers(u16),
         LogLevel(Option<LogLevel>),
+        SchemaCreationMode(SchemaCreationMode),
     }
 
     /// Returns a partial pipeline config with a single field updated.
@@ -277,6 +281,7 @@ pub mod pipelines {
                 table_error_retry_max_attempts: None,
                 max_table_sync_workers: None,
                 log_level: None,
+                schema_creation_mode: None,
             },
             ConfigUpdateType::TableErrorRetryDelayMs(table_error_retry_delay_ms) => {
                 PartialApiPipelineConfig {
@@ -286,6 +291,7 @@ pub mod pipelines {
                     table_error_retry_max_attempts: None,
                     max_table_sync_workers: None,
                     log_level: None,
+                    schema_creation_mode: None,
                 }
             }
             ConfigUpdateType::TableErrorRetryMaxAttempts(max_attempts) => {
@@ -296,6 +302,7 @@ pub mod pipelines {
                     table_error_retry_max_attempts: Some(max_attempts),
                     max_table_sync_workers: None,
                     log_level: None,
+                    schema_creation_mode: None,
                 }
             }
             ConfigUpdateType::MaxTableSyncWorkers(n) => PartialApiPipelineConfig {
@@ -305,6 +312,7 @@ pub mod pipelines {
                 table_error_retry_max_attempts: None,
                 max_table_sync_workers: Some(n),
                 log_level: None,
+                schema_creation_mode: None,
             },
             ConfigUpdateType::LogLevel(log_level) => PartialApiPipelineConfig {
                 publication_name: None,
@@ -313,7 +321,19 @@ pub mod pipelines {
                 table_error_retry_max_attempts: None,
                 max_table_sync_workers: None,
                 log_level,
+                schema_creation_mode: None,
             },
+            ConfigUpdateType::SchemaCreationMode(schema_creation_mode) => {
+                PartialApiPipelineConfig {
+                    publication_name: None,
+                    batch: None,
+                    table_error_retry_delay_ms: None,
+                    table_error_retry_max_attempts: None,
+                    max_table_sync_workers: None,
+                    log_level: None,
+                    schema_creation_mode: Some(schema_creation_mode),
+                }
+            }
         }
     }
 
@@ -329,6 +349,7 @@ pub mod pipelines {
             table_error_retry_max_attempts: Some(6),
             max_table_sync_workers: Some(8),
             log_level: None,
+            schema_creation_mode: Some(SchemaCreationMode::CreateIfMissing),
         }
     }
 

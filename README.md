@@ -73,7 +73,7 @@ Quick example using the in‑memory destination:
 
 ```rust
 use etl::{
-    config::{BatchConfig, PgConnectionConfig, PipelineConfig, TlsConfig},
+    config::{BatchConfig, PgConnectionConfig, PipelineConfig, SchemaCreationMode, TlsConfig},
     destination::memory::MemoryDestination,
     pipeline::Pipeline,
     store::both::memory::MemoryStore,
@@ -101,6 +101,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         table_error_retry_delay_ms: 10_000,
         table_error_retry_max_attempts: 5,
         max_table_sync_workers: 4,
+        schema_creation_mode: SchemaCreationMode::CreateIfMissing,
     };
 
     // Start the pipeline.

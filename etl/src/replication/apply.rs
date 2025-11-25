@@ -1,4 +1,4 @@
-use etl_config::shared::PipelineConfig;
+use etl_config::shared::{PipelineConfig, SchemaCreationMode};
 use etl_postgres::replication::worker::WorkerType;
 use etl_postgres::types::TableId;
 use futures::StreamExt;
@@ -597,6 +597,7 @@ where
                     &destination,
                     &hook,
                     config.batch.max_size,
+                    config.schema_creation_mode,
                     pipeline_id
                 )
                 .await?;
@@ -689,6 +690,7 @@ async fn handle_replication_message_with_timeout<S, D, T>(
     destination: &D,
     hook: &T,
     max_batch_size: usize,
+    schema_creation_mode: SchemaCreationMode,
     pipeline_id: PipelineId,
 ) -> EtlResult<ApplyLoopAction>
 where
@@ -744,6 +746,7 @@ where
                         events_stream.as_mut(),
                         destination,
                         max_batch_size,
+                        schema_creation_mode,
                         pipeline_id,
                     )
                     .await?;
@@ -792,6 +795,7 @@ where
                     events_stream.as_mut(),
                     destination,
                     max_batch_size,
+                    schema_creation_mode,
                     pipeline_id,
                 )
                 .await?;
@@ -813,6 +817,7 @@ async fn send_batch<D>(
     events_stream: Pin<&mut TimeoutEventsStream>,
     destination: &D,
     max_batch_size: usize,
+    schema_creation_mode: SchemaCreationMode,
     pipeline_id: PipelineId,
 ) -> EtlResult<()>
 where
@@ -829,7 +834,9 @@ where
 
     let before_sending = Instant::now();
 
-    destination.write_events(events_batch).await?;
+    destination
+        .write_events(events_batch, schema_creation_mode)
+        .await?;
 
     metrics::counter!(
         ETL_EVENTS_PROCESSED_TOTAL,

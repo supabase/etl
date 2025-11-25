@@ -1,5 +1,7 @@
-use etl_postgres::types::TableId;
+use etl_config::shared::SchemaCreationMode;
+use etl_postgres::types::{TableId, TableSchema};
 use std::future::Future;
+use std::sync::Arc;
 
 use crate::error::EtlResult;
 use crate::types::{Event, TableRow};
@@ -17,6 +19,16 @@ pub trait Destination {
     /// Returns the name of the destination.
     fn name() -> &'static str;
 
+    /// Creates the destination schema for a table.
+    ///
+    /// Implementations should ensure the table (and any related views or namespaces)
+    /// exists and matches the provided schema. This method is invoked during initial
+    /// synchronization before any data is written.
+    fn create_table_schema(
+        &self,
+        table_schema: Arc<TableSchema>,
+    ) -> impl Future<Output = EtlResult<()>> + Send;
+
     /// Truncates all data in the specified table.
     ///
     /// This operation is called during initial table synchronization to ensure the
@@ -26,7 +38,11 @@ pub trait Destination {
     /// The implementation should assume that when truncation is called, the table might not be
     /// present since truncation could be called after a failure that happened before the table copy
     /// was started.
-    fn truncate_table(&self, table_id: TableId) -> impl Future<Output = EtlResult<()>> + Send;
+    fn truncate_table(
+        &self,
+        table_id: TableId,
+        schema_creation_mode: SchemaCreationMode,
+    ) -> impl Future<Output = EtlResult<()>> + Send;
 
     /// Writes a batch of table rows to the destination.
     ///
@@ -42,6 +58,7 @@ pub trait Destination {
         &self,
         table_id: TableId,
         table_rows: Vec<TableRow>,
+        schema_creation_mode: SchemaCreationMode,
     ) -> impl Future<Output = EtlResult<()>> + Send;
 
     /// Writes streaming replication events to the destination.
@@ -52,5 +69,9 @@ pub trait Destination {
     ///
     /// Event ordering within a transaction is guaranteed, and transactions are ordered according to
     /// their commit time.
-    fn write_events(&self, events: Vec<Event>) -> impl Future<Output = EtlResult<()>> + Send;
+    fn write_events(
+        &self,
+        events: Vec<Event>,
+        schema_creation_mode: SchemaCreationMode,
+    ) -> impl Future<Output = EtlResult<()>> + Send;
 }

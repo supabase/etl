@@ -1020,7 +1020,7 @@ mod tests {
 
     use etl_config::shared::{
         BatchConfig, DestinationConfig, PgConnectionConfig, PipelineConfig, ReplicatorConfig,
-        ReplicatorConfigWithoutSecrets, TlsConfig,
+        ReplicatorConfigWithoutSecrets, SchemaCreationMode, TlsConfig,
     };
     use insta::assert_json_snapshot;
 
@@ -1124,6 +1124,7 @@ mod tests {
                 table_error_retry_delay_ms: 500,
                 table_error_retry_max_attempts: 3,
                 max_table_sync_workers: 4,
+                schema_creation_mode: SchemaCreationMode::CreateIfMissing,
             },
             sentry: None,
             supabase: None,

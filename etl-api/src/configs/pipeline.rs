@@ -1,4 +1,4 @@
-use etl_config::shared::{BatchConfig, PgConnectionConfig, PipelineConfig};
+use etl_config::shared::{BatchConfig, PgConnectionConfig, PipelineConfig, SchemaCreationMode};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
@@ -9,9 +9,14 @@ const DEFAULT_BATCH_MAX_FILL_MS: u64 = 10000;
 const DEFAULT_TABLE_ERROR_RETRY_DELAY_MS: u64 = 10000;
 const DEFAULT_TABLE_ERROR_RETRY_MAX_ATTEMPTS: u32 = 5;
 const DEFAULT_MAX_TABLE_SYNC_WORKERS: u16 = 4;
+const DEFAULT_SCHEMA_CREATION_MODE: SchemaCreationMode = SchemaCreationMode::CreateIfMissing;
 
 const fn default_table_error_retry_max_attempts() -> u32 {
     DEFAULT_TABLE_ERROR_RETRY_MAX_ATTEMPTS
+}
+
+const fn default_schema_creation_mode() -> SchemaCreationMode {
+    DEFAULT_SCHEMA_CREATION_MODE
 }
 
 /// Batch processing configuration for pipelines.
@@ -42,6 +47,9 @@ pub struct FullApiPipelineConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_table_sync_workers: Option<u16>,
     pub log_level: Option<LogLevel>,
+    #[schema(value_type = String, example = "create_if_missing")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub schema_creation_mode: Option<SchemaCreationMode>,
 }
 
 impl From<StoredPipelineConfig> for FullApiPipelineConfig {
@@ -56,6 +64,7 @@ impl From<StoredPipelineConfig> for FullApiPipelineConfig {
             table_error_retry_max_attempts: Some(value.table_error_retry_max_attempts),
             max_table_sync_workers: Some(value.max_table_sync_workers),
             log_level: value.log_level,
+            schema_creation_mode: Some(value.schema_creation_mode),
         }
     }
 }
@@ -79,6 +88,9 @@ pub struct PartialApiPipelineConfig {
     pub max_table_sync_workers: Option<u16>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub log_level: Option<LogLevel>,
+    #[schema(value_type = String, example = "create_if_missing")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub schema_creation_mode: Option<SchemaCreationMode>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -90,6 +102,8 @@ pub struct StoredPipelineConfig {
     pub table_error_retry_max_attempts: u32,
     pub max_table_sync_workers: u16,
     pub log_level: Option<LogLevel>,
+    #[serde(default = "default_schema_creation_mode")]
+    pub schema_creation_mode: SchemaCreationMode,
 }
 
 impl StoredPipelineConfig {
@@ -106,6 +120,7 @@ impl StoredPipelineConfig {
             table_error_retry_delay_ms: self.table_error_retry_delay_ms,
             table_error_retry_max_attempts: self.table_error_retry_max_attempts,
             max_table_sync_workers: self.max_table_sync_workers,
+            schema_creation_mode: self.schema_creation_mode,
         }
     }
 
@@ -133,6 +148,10 @@ impl StoredPipelineConfig {
 
         if let Some(value) = partial.max_table_sync_workers {
             self.max_table_sync_workers = value;
+        }
+
+        if let Some(value) = partial.schema_creation_mode {
+            self.schema_creation_mode = value;
         }
 
         self.log_level = partial.log_level
@@ -167,6 +186,9 @@ impl From<FullApiPipelineConfig> for StoredPipelineConfig {
                 .max_table_sync_workers
                 .unwrap_or(DEFAULT_MAX_TABLE_SYNC_WORKERS),
             log_level: value.log_level,
+            schema_creation_mode: value
+                .schema_creation_mode
+                .unwrap_or(DEFAULT_SCHEMA_CREATION_MODE),
         }
     }
 }
@@ -188,6 +210,7 @@ mod tests {
             table_error_retry_max_attempts: 7,
             max_table_sync_workers: 4,
             log_level: None,
+            schema_creation_mode: SchemaCreationMode::CreateOnce,
         };
 
         let json = serde_json::to_string(&config).unwrap();
@@ -207,6 +230,10 @@ mod tests {
             config.max_table_sync_workers,
             deserialized.max_table_sync_workers
         );
+        assert_eq!(
+            config.schema_creation_mode,
+            deserialized.schema_creation_mode
+        );
     }
 
     #[test]
@@ -218,12 +245,17 @@ mod tests {
             table_error_retry_max_attempts: None,
             max_table_sync_workers: None,
             log_level: Some(LogLevel::Debug),
+            schema_creation_mode: Some(SchemaCreationMode::CreateOnce),
         };
 
         let stored: StoredPipelineConfig = full_config.clone().into();
         let back_to_full: FullApiPipelineConfig = stored.into();
 
         assert_eq!(full_config.publication_name, back_to_full.publication_name);
+        assert_eq!(
+            full_config.schema_creation_mode,
+            back_to_full.schema_creation_mode
+        );
     }
 
     #[test]
@@ -235,6 +267,7 @@ mod tests {
             table_error_retry_max_attempts: None,
             max_table_sync_workers: None,
             log_level: None,
+            schema_creation_mode: None,
         };
 
         let stored: StoredPipelineConfig = full_config.into();
@@ -253,6 +286,7 @@ mod tests {
             stored.max_table_sync_workers,
             DEFAULT_MAX_TABLE_SYNC_WORKERS
         );
+        assert_eq!(stored.schema_creation_mode, DEFAULT_SCHEMA_CREATION_MODE);
     }
 
     #[test]
@@ -267,6 +301,7 @@ mod tests {
             table_error_retry_max_attempts: 3,
             max_table_sync_workers: 2,
             log_level: None,
+            schema_creation_mode: SchemaCreationMode::CreateIfMissing,
         };
 
         let partial = PartialApiPipelineConfig {
@@ -279,6 +314,7 @@ mod tests {
             table_error_retry_max_attempts: Some(9),
             max_table_sync_workers: None,
             log_level: None,
+            schema_creation_mode: Some(SchemaCreationMode::CreateOnce),
         };
 
         stored.merge(partial);
@@ -289,5 +325,6 @@ mod tests {
         assert_eq!(stored.table_error_retry_delay_ms, 5000);
         assert_eq!(stored.table_error_retry_max_attempts, 9);
         assert_eq!(stored.max_table_sync_workers, 2);
+        assert_eq!(stored.schema_creation_mode, SchemaCreationMode::CreateOnce);
     }
 }

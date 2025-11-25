@@ -233,6 +233,7 @@ fn log_pipeline_config(config: &PipelineConfig) {
         publication_name = config.publication_name,
         table_error_retry_delay_ms = config.table_error_retry_delay_ms,
         max_table_sync_workers = config.max_table_sync_workers,
+        schema_creation_mode = ?config.schema_creation_mode,
         "pipeline config"
     );
     log_pg_connection_config(&config.pg_connection);

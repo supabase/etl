@@ -4,6 +4,29 @@ use crate::shared::{
     PgConnectionConfig, PgConnectionConfigWithoutSecrets, ValidationError, batch::BatchConfig,
 };
 
+/// Controls how and when schemas are created in destinations.
+///
+/// The creation mode determines whether schema creation is attempted repeatedly
+/// or only once during the pipeline lifecycle.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum SchemaCreationMode {
+    /// Attempt to create schemas only during the initial setup.
+    CreateOnce,
+    /// Attempt to create schemas every time data is written, recreating them if missing.
+    CreateIfMissing,
+}
+
+impl Default for SchemaCreationMode {
+    fn default() -> Self {
+        Self::CreateIfMissing
+    }
+}
+
+const fn default_schema_creation_mode() -> SchemaCreationMode {
+    SchemaCreationMode::CreateIfMissing
+}
+
 /// Configuration for an ETL pipeline.
 ///
 /// Contains all settings required to run a replication pipeline including
@@ -31,6 +54,12 @@ pub struct PipelineConfig {
     pub table_error_retry_max_attempts: u32,
     /// Maximum number of table sync workers that can run at a time
     pub max_table_sync_workers: u16,
+    /// Strategy controlling how destination schemas are created.
+    ///
+    /// Defaults to [`SchemaCreationMode::CreateIfMissing`] to ensure destinations recover
+    /// from out-of-band schema drops.
+    #[serde(default = "default_schema_creation_mode")]
+    pub schema_creation_mode: SchemaCreationMode,
 }
 
 impl PipelineConfig {
@@ -75,6 +104,12 @@ pub struct PipelineConfigWithoutSecrets {
     pub table_error_retry_max_attempts: u32,
     /// Maximum number of table sync workers that can run at a time
     pub max_table_sync_workers: u16,
+    /// Strategy controlling how destination schemas are created.
+    ///
+    /// Defaults to [`SchemaCreationMode::CreateIfMissing`] to ensure destinations recover
+    /// from out-of-band schema drops.
+    #[serde(default = "default_schema_creation_mode")]
+    pub schema_creation_mode: SchemaCreationMode,
 }
 
 impl From<PipelineConfig> for PipelineConfigWithoutSecrets {
@@ -87,6 +122,7 @@ impl From<PipelineConfig> for PipelineConfigWithoutSecrets {
             table_error_retry_delay_ms: value.table_error_retry_delay_ms,
             table_error_retry_max_attempts: value.table_error_retry_max_attempts,
             max_table_sync_workers: value.max_table_sync_workers,
+            schema_creation_mode: value.schema_creation_mode,
         }
     }
 }

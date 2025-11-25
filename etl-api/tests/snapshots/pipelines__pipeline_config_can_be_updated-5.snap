@@ -26,4 +26,7 @@ FullApiPipelineConfig {
     log_level: Some(
         Debug,
     ),
+    schema_creation_mode: Some(
+        CreateIfMissing,
+    ),
 }

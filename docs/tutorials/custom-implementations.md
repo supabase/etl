@@ -170,7 +170,7 @@ impl SchemaStore for CustomStore {
     }
 
     // Store new schema - implements dual-write pattern (persistent first, then cache)
-    async fn store_table_schema(&self, table_schema: TableSchema) -> EtlResult<()> {
+    async fn store_table_schema(&self, table_schema: TableSchema) -> EtlResult<Arc<TableSchema>> {
         let id = table_schema.id;
         info!("Storing schema for table {} using dual-write pattern", id.0);
 
@@ -184,9 +184,10 @@ impl SchemaStore for CustomStore {
         {
             let mut cache = self.cache.lock().await;
             let c = Self::ensure_cache_slot(&mut cache, id);
-            c.schema = Some(Arc::new(table_schema));
+            let arc = Arc::new(table_schema);
+            c.schema = Some(arc.clone());
+            return Ok(arc);
         }
-        Ok(())
     }
 }
 
@@ -470,8 +471,19 @@ impl HttpDestination {
 
 // Implementation of ETL's Destination trait - this is what ETL calls to send data
 impl Destination for HttpDestination {
+    async fn create_table_schema(
+        &self,
+        _table_schema: std::sync::Arc<TableSchema>,
+    ) -> EtlResult<()> {
+        Ok(())
+    }
+
     /// Called when ETL needs to clear all data from a table (e.g., during full refresh)
-    async fn truncate_table(&self, table_id: TableId) -> EtlResult<()> {
+    async fn truncate_table(
+        &self,
+        table_id: TableId,
+        _schema_creation_mode: SchemaCreationMode,
+    ) -> EtlResult<()> {
         info!("Truncating destination table: {}", table_id.0);
 
         // Send DELETE request to truncate endpoint
@@ -488,6 +500,7 @@ impl Destination for HttpDestination {
         &self,
         table_id: TableId,
         table_rows: Vec<TableRow>,
+        _schema_creation_mode: SchemaCreationMode,
     ) -> EtlResult<()> {
         // Skip empty batches - no work to do
         if table_rows.is_empty() {
@@ -530,7 +543,11 @@ impl Destination for HttpDestination {
 
     /// Called when ETL has replication events to send (e.g., transaction markers)
     /// These are metadata events about the replication process itself
-    async fn write_events(&self, events: Vec<Event>) -> EtlResult<()> {
+    async fn write_events(
+        &self,
+        events: Vec<Event>,
+        _schema_creation_mode: SchemaCreationMode,
+    ) -> EtlResult<()> {
         // Skip if no events to process
         if events.is_empty() {
             return Ok(());
@@ -568,7 +585,9 @@ mod http_destination;
 
 use custom_store::CustomStore;
 use http_destination::HttpDestination;
-use etl::config::{BatchConfig, PgConnectionConfig, PipelineConfig, TlsConfig};
+use etl::config::{
+    BatchConfig, PgConnectionConfig, PipelineConfig, SchemaCreationMode, TlsConfig,
+};
 use etl::pipeline::Pipeline;
 use tracing::{info, Level};
 use std::time::Duration;
@@ -623,6 +642,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         table_error_retry_delay_ms: 10000,  // Wait 10s before retrying failed tables
         table_error_retry_max_attempts: 5,  // Stop automatic retries after 5 attempts
         max_table_sync_workers: 2,          // Use 2 workers for parallel table syncing
+        schema_creation_mode: SchemaCreationMode::CreateIfMissing,
     };
 
     // Step 4: Create the pipeline with our custom components

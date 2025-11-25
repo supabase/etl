@@ -71,23 +71,40 @@ The `Destination` trait defines how replicated data is delivered to target syste
 
 ```rust
 pub trait Destination {
-    fn truncate_table(&self, table_id: TableId) -> impl Future<Output = EtlResult<()>> + Send;
+    fn name() -> &'static str;
+
+    fn create_table_schema(
+        &self,
+        table_schema: Arc<TableSchema>,
+    ) -> impl Future<Output = EtlResult<()>> + Send;
+
+    fn truncate_table(
+        &self,
+        table_id: TableId,
+        schema_creation_mode: SchemaCreationMode,
+    ) -> impl Future<Output = EtlResult<()>> + Send;
 
     fn write_table_rows(
         &self,
         table_id: TableId,
         table_rows: Vec<TableRow>,
+        schema_creation_mode: SchemaCreationMode,
     ) -> impl Future<Output = EtlResult<()>> + Send;
 
-    fn write_events(&self, events: Vec<Event>) -> impl Future<Output = EtlResult<()>> + Send;
+    fn write_events(
+        &self,
+        events: Vec<Event>,
+        schema_creation_mode: SchemaCreationMode,
+    ) -> impl Future<Output = EtlResult<()>> + Send;
 }
 ```
 
-The trait provides three operations:
+The trait provides four operations:
 
+- `create_table_schema`: ensures the target schema exists before data is copied.
 - `truncate_table`: clears destination tables before bulk loading.
 - `write_table_rows`: handles bulk data insertion during initial synchronization.
-- `write_events`: processes streaming replication changes.
+- `write_events`: processes streaming replication changes and can recreate schemas if missing.
 
 ### SchemaStore
 
@@ -107,7 +124,7 @@ pub trait SchemaStore {
     fn store_table_schema(
         &self,
         table_schema: TableSchema,
-    ) -> impl Future<Output = EtlResult<()>> + Send;
+    ) -> impl Future<Output = EtlResult<Arc<TableSchema>>> + Send;
 }
 ```
 

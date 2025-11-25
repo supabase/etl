@@ -568,7 +568,7 @@ impl SchemaStore for PostgresStore {
     /// This method persists a table schema to the database and updates the
     /// in-memory cache atomically. Used when new tables are discovered during
     /// replication or when schema definitions need to be updated.
-    async fn store_table_schema(&self, table_schema: TableSchema) -> EtlResult<()> {
+    async fn store_table_schema(&self, table_schema: TableSchema) -> EtlResult<Arc<TableSchema>> {
         debug!("storing table schema for table '{}'", table_schema.name);
 
         let pool = self.connect_to_source().await?;
@@ -584,11 +584,10 @@ impl SchemaStore for PostgresStore {
                     format!("Failed to store table schema in PostgreSQL: {}", err)
                 )
             })?;
-        inner
-            .table_schemas
-            .insert(table_schema.id, Arc::new(table_schema));
+        let arc = Arc::new(table_schema);
+        inner.table_schemas.insert(arc.id, arc.clone());
 
-        Ok(())
+        Ok(arc)
     }
 }
 

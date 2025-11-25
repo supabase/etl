@@ -6,6 +6,7 @@ use std::{
 
 use crate::iceberg::IcebergClient;
 use crate::iceberg::error::iceberg_error_to_etl_error;
+use etl::config::SchemaCreationMode;
 use etl::destination::Destination;
 use etl::error::{ErrorKind, EtlResult};
 use etl::etl_error;
@@ -186,7 +187,7 @@ where
     /// Removes all data from the target table by dropping the existing Iceberg table
     /// and creating a fresh empty table with the same schema. Updates the internal
     /// table creation cache to reflect the new table state.
-    async fn truncate_table(&self, table_id: TableId) -> EtlResult<()> {
+    async fn truncate_table_internal(&self, table_id: TableId) -> EtlResult<()> {
         let mut inner = self.inner.lock().await;
 
         if let (Some(iceberg_table_name), Some(table_schema)) = (
@@ -204,7 +205,8 @@ where
 
             drop(inner);
 
-            self.prepare_table_for_streaming(table_id).await?;
+            self.prepare_table_for_streaming(table_id, SchemaCreationMode::CreateIfMissing)
+                .await?;
         }
 
         Ok(())
@@ -215,12 +217,15 @@ where
     /// Prepares the target table for streaming, augments each row with CDC metadata
     /// (operation type and sequence number), and inserts the rows into the Iceberg table.
     /// All rows are treated as upsert operations in this context.
-    async fn write_table_rows(
+    async fn write_table_rows_internal(
         &self,
         table_id: TableId,
         mut table_rows: Vec<TableRow>,
+        schema_creation_mode: SchemaCreationMode,
     ) -> EtlResult<()> {
-        let (namespace, iceberg_table_name) = self.prepare_table_for_streaming(table_id).await?;
+        let (namespace, iceberg_table_name) = self
+            .prepare_table_for_streaming(table_id, schema_creation_mode)
+            .await?;
 
         for row in &mut table_rows {
             let sequence_number = generate_sequence_number(0.into(), 0.into());
@@ -243,7 +248,11 @@ where
     /// and processing them concurrently. Truncate events are processed separately
     /// and deduplicated for efficiency. Each event is augmented with CDC metadata
     /// including operation type and sequence number based on LSN information.
-    async fn write_events(&self, events: Vec<Event>) -> EtlResult<()> {
+    async fn write_events_internal(
+        &self,
+        events: Vec<Event>,
+        schema_creation_mode: SchemaCreationMode,
+    ) -> EtlResult<()> {
         let mut event_iter = events.into_iter().peekable();
 
         while event_iter.peek().is_some() {
@@ -312,8 +321,9 @@ where
                 let mut join_set = JoinSet::new();
 
                 for (table_id, table_rows) in table_id_to_table_rows {
-                    let (namespace, iceberg_table_name) =
-                        self.prepare_table_for_streaming(table_id).await?;
+                    let (namespace, iceberg_table_name) = self
+                        .prepare_table_for_streaming(table_id, schema_creation_mode)
+                        .await?;
 
                     let client = self.client.clone();
 
@@ -359,7 +369,7 @@ where
             }
 
             for table_id in truncate_table_ids {
-                self.truncate_table(table_id).await?;
+                self.truncate_table_internal(table_id).await?;
             }
         }
 
@@ -375,10 +385,14 @@ where
     async fn prepare_table_for_streaming(
         &self,
         table_id: TableId,
+        schema_creation_mode: SchemaCreationMode,
     ) -> EtlResult<(String, IcebergTableName)> {
         // We hold the lock for the entire preparation to avoid race conditions since the consistency
         // of this code path is critical.
         let mut inner = self.inner.lock().await;
+
+        let force_schema_creation =
+            matches!(schema_creation_mode, SchemaCreationMode::CreateIfMissing);
 
         let table_schema = self.get_table_schema(table_id).await?;
 
@@ -393,11 +407,17 @@ where
         let namespace = schema_to_namespace(&table_schema.name.schema);
         let namespace = inner.namespace.get(&namespace).to_string();
         let namespace = self
-            .create_namespace_if_missing(&mut inner, namespace)
+            .create_namespace_if_missing(&mut inner, namespace, force_schema_creation)
             .await?;
 
         let iceberg_table_name = self
-            .create_table_if_missing(&mut inner, iceberg_table_name, &namespace, &table_schema)
+            .create_table_if_missing(
+                &mut inner,
+                iceberg_table_name,
+                &namespace,
+                &table_schema,
+                force_schema_creation,
+            )
             .await?;
 
         Ok((namespace, iceberg_table_name))
@@ -423,8 +443,9 @@ where
         &self,
         inner: &mut Inner,
         namespace: String,
+        force_schema_creation: bool,
     ) -> EtlResult<String> {
-        if inner.created_namespaces.contains(&namespace) {
+        if !force_schema_creation && inner.created_namespaces.contains(&namespace) {
             return Ok(namespace);
         }
 
@@ -447,8 +468,9 @@ where
         iceberg_table_name: String,
         namespace: &str,
         table_schema: &TableSchema,
+        force_schema_creation: bool,
     ) -> EtlResult<String> {
-        if inner.created_tables.contains(&iceberg_table_name) {
+        if !force_schema_creation && inner.created_tables.contains(&iceberg_table_name) {
             return Ok(iceberg_table_name);
         }
 
@@ -533,12 +555,29 @@ where
         "iceberg"
     }
 
+    /// Creates or verifies the schema for the supplied table in the destination.
+    async fn create_table_schema(&self, table_schema: Arc<TableSchema>) -> EtlResult<()> {
+        let _ = self
+            .store
+            .store_table_schema((*table_schema).clone())
+            .await?;
+
+        self.prepare_table_for_streaming(table_schema.id, SchemaCreationMode::CreateIfMissing)
+            .await?;
+
+        Ok(())
+    }
+
     /// Truncates the specified table by dropping and recreating it.
     ///
     /// Removes all data from the target Iceberg table while preserving
     /// the table schema structure for continued CDC operations.
-    async fn truncate_table(&self, table_id: TableId) -> EtlResult<()> {
-        self.truncate_table(table_id).await?;
+    async fn truncate_table(
+        &self,
+        table_id: TableId,
+        _schema_creation_mode: SchemaCreationMode,
+    ) -> EtlResult<()> {
+        self.truncate_table_internal(table_id).await?;
 
         Ok(())
     }
@@ -552,8 +591,10 @@ where
         &self,
         table_id: TableId,
         table_rows: Vec<TableRow>,
+        schema_creation_mode: SchemaCreationMode,
     ) -> EtlResult<()> {
-        self.write_table_rows(table_id, table_rows).await?;
+        self.write_table_rows_internal(table_id, table_rows, schema_creation_mode)
+            .await?;
 
         Ok(())
     }
@@ -563,8 +604,13 @@ where
     /// Handles insert, update, delete, and truncate events by converting
     /// them to appropriate Iceberg operations. Events are batched by table
     /// and processed concurrently for optimal performance.
-    async fn write_events(&self, events: Vec<Event>) -> EtlResult<()> {
-        self.write_events(events).await?;
+    async fn write_events(
+        &self,
+        events: Vec<Event>,
+        schema_creation_mode: SchemaCreationMode,
+    ) -> EtlResult<()> {
+        self.write_events_internal(events, schema_creation_mode)
+            .await?;
 
         Ok(())
     }
