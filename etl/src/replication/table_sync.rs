@@ -156,6 +156,10 @@ where
             // 5. This time, only row id = 2 is copied, but row id = 1 still exists in the destination.
             // Result: the destination has two rows (id = 1 and id = 2) instead of only one (id = 2).
             // Fix: Always truncate the destination table before starting a copy.
+            //
+            // We also truncate on `Init` because users can reset a table to `Init` and some data could
+            // be on the destination. If we didn't give users this option, we could optimize this and
+            // just perform it on `DataSync`.
             destination
                 .truncate_table(table_id, config.schema_creation_mode)
                 .await?;
