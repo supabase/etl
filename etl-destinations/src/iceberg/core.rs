@@ -196,7 +196,6 @@ where
             if !is_cdc_truncate {
                 warn!(
                     "the table schema for table {table_id} was not found in the schema store while processing truncate events for Iceberg",
-                    table_id = table_id.to_string()
                 );
 
                 return Ok(());
@@ -218,7 +217,6 @@ where
             if !is_cdc_truncate {
                 warn!(
                     "the table mapping for table {table_id} was not found in the state store while processing truncate events for Iceberg",
-                    table_id = table_id.to_string()
                 );
 
                 return Ok(());

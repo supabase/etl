@@ -345,7 +345,86 @@ async fn create_table_if_missing() {
     // This feature is planned for future releases. We'll start to use it when it becomes available.
     // The cleanup is not in a Drop impl because each test has different number of object specitic to
     // that test.
-    client.drop_table(namespace, table_name).await.unwrap();
+    client
+        .drop_table_if_exists(namespace, table_name)
+        .await
+        .unwrap();
+    client.drop_namespace(namespace).await.unwrap();
+    lakekeeper_client
+        .drop_warehouse(warehouse_id)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn drop_table_if_exists_is_idempotent() {
+    init_test_tracing();
+
+    let lakekeeper_client = LakekeeperClient::new(LAKEKEEPER_URL);
+    let (warehouse_name, warehouse_id) = lakekeeper_client.create_warehouse().await.unwrap();
+    let client =
+        IcebergClient::new_with_rest_catalog(get_catalog_url(), warehouse_name, create_props())
+            .await
+            .unwrap();
+
+    // Create namespace first
+    let namespace = "test_namespace";
+    client.create_namespace_if_missing(namespace).await.unwrap();
+
+    // Create a simple table schema
+    let table_name = "test_table".to_string();
+    let column_schemas = vec![ColumnSchema::new(
+        "id".to_string(),
+        Type::INT4,
+        -1,
+        false,
+        true,
+    )];
+
+    // Create table
+    client
+        .create_table_if_missing(namespace, table_name.clone(), &column_schemas)
+        .await
+        .unwrap();
+
+    // Table should exist
+    assert!(
+        client
+            .table_exists(namespace, table_name.clone())
+            .await
+            .unwrap()
+    );
+
+    // First drop should succeed and return true (table was dropped)
+    let dropped = client
+        .drop_table_if_exists(namespace, table_name.clone())
+        .await
+        .unwrap();
+    assert!(dropped);
+
+    // Table should no longer exist
+    assert!(
+        !client
+            .table_exists(namespace, table_name.clone())
+            .await
+            .unwrap()
+    );
+
+    // Second drop should succeed and return false (table didn't exist)
+    let dropped = client
+        .drop_table_if_exists(namespace, table_name.clone())
+        .await
+        .unwrap();
+    assert!(!dropped);
+
+    // Dropping a table that never existed should also succeed and return false
+    let dropped = client
+        .drop_table_if_exists(namespace, "nonexistent_table".to_string())
+        .await
+        .unwrap();
+    assert!(!dropped);
+
+    // Manual cleanup
     client.drop_namespace(namespace).await.unwrap();
     lakekeeper_client
         .drop_warehouse(warehouse_id)
@@ -511,7 +590,10 @@ async fn insert_nullable_scalars() {
     // This feature is planned for future releases. We'll start to use it when it becomes available.
     // The cleanup is not in a Drop impl because each test has different number of object specitic to
     // that test.
-    client.drop_table(namespace, table_name).await.unwrap();
+    client
+        .drop_table_if_exists(namespace, table_name)
+        .await
+        .unwrap();
     client.drop_namespace(namespace).await.unwrap();
     lakekeeper_client
         .drop_warehouse(warehouse_id)
@@ -651,7 +733,10 @@ async fn insert_non_nullable_scalars() {
     // This feature is planned for future releases. We'll start to use it when it becomes available.
     // The cleanup is not in a Drop impl because each test has different number of object specitic to
     // that test.
-    client.drop_table(namespace, table_name).await.unwrap();
+    client
+        .drop_table_if_exists(namespace, table_name)
+        .await
+        .unwrap();
     client.drop_namespace(namespace).await.unwrap();
     lakekeeper_client
         .drop_warehouse(warehouse_id)
@@ -1019,7 +1104,7 @@ async fn insert_nullable_array() {
     // This feature is planned for future releases. We'll start to use it when it becomes available.
     // The cleanup is not in a Drop impl because each test has different number of object specitic to
     // that test.
-    client.drop_table(namespace, table_name).await.unwrap();
+    client.drop_table_if_exists(namespace, table_name).await.unwrap();
     client.drop_namespace(namespace).await.unwrap();
     lakekeeper_client
         .drop_warehouse(warehouse_id)
@@ -1361,7 +1446,10 @@ async fn insert_non_nullable_array() {
     // This feature is planned for future releases. We'll start to use it when it becomes available.
     // The cleanup is not in a Drop impl because each test has different number of object specitic to
     // that test.
-    client.drop_table(namespace, table_name).await.unwrap();
+    client
+        .drop_table_if_exists(namespace, table_name)
+        .await
+        .unwrap();
     client.drop_namespace(namespace).await.unwrap();
     lakekeeper_client
         .drop_warehouse(warehouse_id)
