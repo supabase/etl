@@ -479,10 +479,10 @@ impl PgDatabase<Transaction<'_>> {
     /// This function will not panic on errors - it logs them and continues.
     /// This ensures transaction cleanup doesn't fail unexpectedly.
     pub async fn commit_transaction(mut self) {
-        if let Some(client) = self.client.take() {
-            if let Err(e) = client.commit().await {
-                eprintln!("warning: failed to commit transaction: {e}");
-            }
+        if let Some(client) = self.client.take()
+            && let Err(e) = client.commit().await
+        {
+            eprintln!("warning: failed to commit transaction: {e}");
         }
     }
 }
