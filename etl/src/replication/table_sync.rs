@@ -140,6 +140,9 @@ where
             //  just try to delete the slot and truncate the table.
             // - `DataSync` -> we can be in this state because we failed during data sync, meaning that table
             //  copy failed. In this case, we want to delete the slot and truncate the table.
+            //
+            // We try to delete the slot also during `Init` because we support state rollback and a
+            // slot might be there from the previous run.
             if let Err(err) = replication_client.delete_slot(&slot_name).await {
                 // If the slot is not found, we are safe to continue, for any other error, we bail.
                 if err.kind() != ErrorKind::ReplicationSlotNotFound {
@@ -156,6 +159,9 @@ where
             // 5. This time, only row id = 2 is copied, but row id = 1 still exists in the destination.
             // Result: the destination has two rows (id = 1 and id = 2) instead of only one (id = 2).
             // Fix: Always truncate the destination table before starting a copy.
+            //
+            // We try to truncate the table also during `Init` because we support state rollback and
+            // a table might be there from a previous run.
             destination.truncate_table(table_id).await?;
 
             // We are ready to start copying table data, and we update the state accordingly.

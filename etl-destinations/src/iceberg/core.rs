@@ -242,7 +242,8 @@ where
         inner.created_tables.remove(&iceberg_table_name);
 
         // We recreate the table with the same schema.
-        self.prepare_table_for_streaming(table_id).await?;
+        self.prepare_table_for_streaming(&mut inner, table_id)
+            .await?;
 
         Ok(())
     }
@@ -257,7 +258,13 @@ where
         table_id: TableId,
         mut table_rows: Vec<TableRow>,
     ) -> EtlResult<()> {
-        let (namespace, iceberg_table_name) = self.prepare_table_for_streaming(table_id).await?;
+        let (namespace, iceberg_table_name) = {
+            // We hold the lock for the entire preparation to avoid race conditions since the consistency
+            // of this code path is critical.
+            let mut inner = self.inner.lock().await;
+            self.prepare_table_for_streaming(&mut inner, table_id)
+                .await?
+        };
 
         for row in &mut table_rows {
             let sequence_number = generate_sequence_number(0.into(), 0.into());
@@ -349,8 +356,13 @@ where
                 let mut join_set = JoinSet::new();
 
                 for (table_id, table_rows) in table_id_to_table_rows {
-                    let (namespace, iceberg_table_name) =
-                        self.prepare_table_for_streaming(table_id).await?;
+                    let (namespace, iceberg_table_name) = {
+                        // We hold the lock for the entire preparation to avoid race conditions since the consistency
+                        // of this code path is critical.
+                        let mut inner = self.inner.lock().await;
+                        self.prepare_table_for_streaming(&mut inner, table_id)
+                            .await?
+                    };
 
                     let client = self.client.clone();
 
@@ -365,7 +377,7 @@ where
                     insert_result
                         .map_err(|_| etl_error!(ErrorKind::Unknown, "Failed to join future"))??;
 
-                    //TODO:add egress metrics
+                    // TODO: Add egress metrics.
                     // Logs with egress_metric = true can be used to identify egress logs.
                     // This can e.g. be used to send egress logs to a location different
                     // than the other logs. These logs should also have bytes_sent set to
@@ -411,12 +423,9 @@ where
     /// during the entire preparation to prevent race conditions.
     async fn prepare_table_for_streaming(
         &self,
+        inner: &mut Inner,
         table_id: TableId,
     ) -> EtlResult<(String, IcebergTableName)> {
-        // We hold the lock for the entire preparation to avoid race conditions since the consistency
-        // of this code path is critical.
-        let mut inner = self.inner.lock().await;
-
         let table_schema = self.get_table_schema(table_id).await?;
         let table_schema = Self::modify_schema_with_cdc_columns(&table_schema);
 
@@ -428,12 +437,10 @@ where
 
         let namespace = schema_to_namespace(&table_schema.name.schema);
         let namespace = inner.namespace.get_or(&namespace).to_string();
-        let namespace = self
-            .create_namespace_if_missing(&mut inner, namespace)
-            .await?;
+        let namespace = self.create_namespace_if_missing(inner, namespace).await?;
 
         let iceberg_table_name = self
-            .create_table_if_missing(&mut inner, iceberg_table_name, &namespace, &table_schema)
+            .create_table_if_missing(inner, iceberg_table_name, &namespace, &table_schema)
             .await?;
 
         Ok((namespace, iceberg_table_name))
