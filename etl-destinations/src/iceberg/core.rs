@@ -112,12 +112,12 @@ pub struct IcebergDestination<S> {
 pub enum DestinationNamespace {
     /// A single namespace for all tables in the source
     Single(String),
-    // One namespace for each schema in the source
+    /// One namespace for each schema in the source
     OnePerSchema,
 }
 
 impl DestinationNamespace {
-    fn get<'a>(&'a self, table_namespace: &'a str) -> &'a str {
+    fn get_or<'a>(&'a self, table_namespace: &'a str) -> &'a str {
         match self {
             DestinationNamespace::Single(ns) => ns,
             DestinationNamespace::OnePerSchema => table_namespace,
@@ -191,6 +191,8 @@ where
         let mut inner = self.inner.lock().await;
 
         let Some(table_schema) = self.store.get_table_schema(&table_id).await? else {
+            // If this is not a cdc truncate event, we just raise a warning since it could be that the
+            // table schema is not there.
             if !is_cdc_truncate {
                 warn!(
                     "the table schema for table {table_id} was not found in the schema store while processing truncate events for Iceberg",
@@ -200,6 +202,7 @@ where
                 return Ok(());
             }
 
+            // If this is a cdc truncate event, the table schema must be there, so we raise an error.
             bail!(
                 ErrorKind::MissingTableSchema,
                 "Table not found in the schema store",
@@ -210,8 +213,8 @@ where
         };
 
         let Some(iceberg_table_name) = self.store.get_table_mapping(&table_id).await? else {
-            // If it's not truncation during cdc, it could be that the mapping is not present, that's
-            // fine.
+            // If this is not a cdc truncate event, we just raise a warning since it could be that the
+            // table mapping is not there.
             if !is_cdc_truncate {
                 warn!(
                     "the table mapping for table {table_id} was not found in the state store while processing truncate events for Iceberg",
@@ -221,6 +224,7 @@ where
                 return Ok(());
             }
 
+            // If this is a cdc truncate event, the table mapping must be there, so we raise an error.
             bail!(
                 ErrorKind::MissingTableMapping,
                 "Table mapping not found",
@@ -231,14 +235,15 @@ where
         };
 
         let namespace = schema_to_namespace(&table_schema.name.schema);
-        let namespace = inner.namespace.get(&namespace);
+        let namespace = inner.namespace.get_or(&namespace);
 
         self.client
-            .drop_table(namespace, iceberg_table_name.clone())
+            .drop_table_if_exists(namespace, iceberg_table_name.clone())
             .await
             .map_err(iceberg_error_to_etl_error)?;
         inner.created_tables.remove(&iceberg_table_name);
 
+        // We recreate the table with the same schema.
         self.prepare_table_for_streaming(table_id).await?;
 
         Ok(())
@@ -393,7 +398,7 @@ where
             }
 
             for table_id in truncate_table_ids {
-                self.truncate_table(table_id).await?;
+                self.truncate_table(table_id, true).await?;
             }
         }
 
@@ -415,8 +420,7 @@ where
         let mut inner = self.inner.lock().await;
 
         let table_schema = self.get_table_schema(table_id).await?;
-
-        let table_schema = Self::add_cdc_columns(&table_schema);
+        let table_schema = Self::modify_schema_with_cdc_columns(&table_schema);
 
         let iceberg_table_name =
             table_name_to_iceberg_table_name(&table_schema.name, inner.namespace.is_single());
@@ -425,7 +429,7 @@ where
             .await?;
 
         let namespace = schema_to_namespace(&table_schema.name.schema);
-        let namespace = inner.namespace.get(&namespace).to_string();
+        let namespace = inner.namespace.get_or(&namespace).to_string();
         let namespace = self
             .create_namespace_if_missing(&mut inner, namespace)
             .await?;
@@ -509,10 +513,10 @@ where
     ///
     /// These columns enable CDC consumers to understand the chronological order
     /// of changes and distinguish between different types of operations.
-    fn add_cdc_columns(table_schema: &TableSchema) -> TableSchema {
+    fn modify_schema_with_cdc_columns(table_schema: &TableSchema) -> TableSchema {
         let mut final_schema = table_schema.clone();
-        // Add cdc specific columns
 
+        // Add cdc specific columns.
         let cdc_operation_col =
             find_unique_column_name(&final_schema.column_schemas, CDC_OPERATION_COLUMN_NAME);
         let sequence_number_col =
@@ -572,7 +576,7 @@ where
     /// Removes all data from the target Iceberg table while preserving
     /// the table schema structure for continued CDC operations.
     async fn truncate_table(&self, table_id: TableId) -> EtlResult<()> {
-        self.truncate_table(table_id).await?;
+        self.truncate_table(table_id, false).await?;
 
         Ok(())
     }
@@ -628,7 +632,7 @@ fn find_unique_column_name(column_schemas: &[ColumnSchema], new_column_name: &st
     }
 }
 
-/// Converts a Postgres schema name to an s3tables namespace
+/// Converts a Postgres schema name to a S3 tables namespace
 /// such that the naming rules of the namespace are followed.
 fn schema_to_namespace(schema: &str) -> String {
     // Convert to lowercase and replace invalid characters with underscores.

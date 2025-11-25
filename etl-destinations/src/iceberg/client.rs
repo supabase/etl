@@ -237,6 +237,28 @@ impl IcebergClient {
         self.catalog.drop_table(&table_ident).await
     }
 
+    /// Removes a table from the specified namespace if it exists.
+    ///
+    /// This method checks if the table exists before attempting to drop it,
+    /// providing idempotent behavior. Returns `Ok(true)` if a table was dropped,
+    /// `Ok(false)` if the table did not exist.
+    pub async fn drop_table_if_exists(
+        &self,
+        namespace: &str,
+        table_name: String,
+    ) -> Result<bool, iceberg::Error> {
+        debug!("dropping table {table_name} in namespace {namespace} if exists");
+        let namespace_ident = NamespaceIdent::from_strs(namespace.split('.'))?;
+        let table_ident = TableIdent::new(namespace_ident, table_name);
+
+        if !self.catalog.table_exists(&table_ident).await? {
+            return Ok(false);
+        }
+
+        self.catalog.drop_table(&table_ident).await?;
+        Ok(true)
+    }
+
     /// Removes a namespace from the catalog.
     ///
     /// This method permanently deletes the namespace from the catalog. The namespace
