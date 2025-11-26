@@ -1,18 +1,3 @@
-use etl_config::shared::PipelineConfig;
-use etl_postgres::replication::worker::WorkerType;
-use etl_postgres::types::TableId;
-use futures::StreamExt;
-use metrics::histogram;
-use postgres_replication::protocol;
-use postgres_replication::protocol::{LogicalReplicationMessage, ReplicationMessage};
-use std::future::Future;
-use std::pin::Pin;
-use std::sync::Arc;
-use std::time::{Duration, Instant};
-use tokio::pin;
-use tokio_postgres::types::PgLsn;
-use tracing::{debug, info};
-
 use crate::concurrency::shutdown::ShutdownRx;
 use crate::concurrency::signal::SignalRx;
 use crate::concurrency::stream::{TimeoutStream, TimeoutStreamResult};
@@ -35,13 +20,27 @@ use crate::state::table::{RetryPolicy, TableReplicationError};
 use crate::store::schema::SchemaStore;
 use crate::types::{Event, PipelineId};
 use crate::{bail, etl_error};
+use etl_config::shared::PipelineConfig;
+use etl_postgres::replication::worker::WorkerType;
+use etl_postgres::types::TableId;
+use futures::StreamExt;
+use metrics::histogram;
+use postgres_replication::protocol;
+use postgres_replication::protocol::{LogicalReplicationMessage, ReplicationMessage};
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+use tokio::pin;
+use tokio_postgres::types::PgLsn;
+use tracing::log::warn;
+use tracing::{debug, info};
 
 /// The minimum interval (in milliseconds) between consecutive status updates.
 ///
 /// This value must be less than the `wal_sender_timeout` configured in the Postgres instance.
 /// If set too high, Postgres may timeout before the next status update is sent.
 const STATUS_UPDATE_INTERVAL: Duration = Duration::from_secs(10);
-
 
 /// Result type for the apply loop execution.
 ///
@@ -555,6 +554,18 @@ where
 
     // Main event processing loop - continues until shutdown or fatal error
     loop {
+        // If we detect that the connection is closed, we return an error to stop the loop.
+        if replication_client.is_closed() {
+            warn!(
+                "shutting down the apply loop because the connection to postgres has been terminated"
+            );
+
+            bail!(
+                ErrorKind::SourceConnectionFailed,
+                "PostgreSQL connection has been terminated"
+            )
+        }
+
         tokio::select! {
             // Use biased selection to prioritize shutdown signals over other operations
             // This ensures graceful shutdown takes precedence over event processing
@@ -572,7 +583,7 @@ where
 
                 // If we are not inside a transaction, we can cleanly stop streaming and return.
                 if !state.handling_transaction() {
-                    info!("shutting down apply worker while waiting for incoming events outside of a transaction");
+                    info!("shutting down apply loop while waiting for incoming events outside of a transaction");
                     return Ok(ApplyLoopResult::Paused);
                 }
 
@@ -653,8 +664,15 @@ where
             // 2. Allows Postgres to clean up old WAL files based on our progress
             // 3. Provides a heartbeat mechanism to detect connection issues
             _ = tokio::time::sleep_until(state.next_status_update_deadline()) => {
-                // Check if the connection background task has terminated.
-                replication_client.check_connection_alive()?;
+                // If we detect that the connection is closed, we return an error to stop the loop.
+                if replication_client.is_closed() {
+                    warn!("shutting down the apply loop because the connection to postgres has been terminated");
+
+            bail!(
+                ErrorKind::SourceConnectionFailed,
+                "PostgreSQL connection has been terminated"
+            )
+                }
 
                 logical_replication_stream
                     .as_mut()
