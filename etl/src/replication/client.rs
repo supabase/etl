@@ -25,9 +25,6 @@ use tokio_postgres::{
 use tracing::{Instrument, error, info, warn};
 
 /// Spawns a background task to monitor a Postgres connection until it terminates.
-///
-/// The task will log when the connection terminates, either successfully or with an error.
-/// When the connection terminates for any reason, the `connection_alive` flag is set to `false`.
 fn spawn_postgres_connection<T>(connection: Connection<Socket, T::Stream>)
 where
     T: MakeTlsConnect<Socket>,
@@ -44,7 +41,7 @@ where
     }
     .instrument(span);
 
-    // There is no need to track the connection task via the `JoinHandle` since the `Client` which
+    // There is no need to track the connection task via the `JoinHandle` since the `Client`, which
     // returned the connection, will automatically terminate the connection when dropped.
     tokio::spawn(task);
 }
