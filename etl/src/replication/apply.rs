@@ -591,15 +591,17 @@ where
                     // or something unexpected occurred.
                     if replication_client.is_closed() {
                         warn!("replication stream ended because the postgres connection was closed, the apply loop will terminate");
+
                         bail!(
                             ErrorKind::SourceConnectionFailed,
-                            "PostgreSQL connection has been closed"
+                            "PostgreSQL connection has been closed during the apply loop"
                         )
                     } else {
                         warn!("replication stream ended unexpectedly without the connection being closed, the apply loop will terminate");
+
                         bail!(
                             ErrorKind::SourceConnectionFailed,
-                            "Replication stream ended unexpectedly"
+                            "Replication stream ended unexpectedly during the apply loop"
                         )
                     }
                 };
