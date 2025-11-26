@@ -277,13 +277,14 @@ impl IcebergClient {
     /// This method performs a batch insert operation, converting the provided
     /// table rows into Arrow RecordBatch format and writing them to the Iceberg
     /// table using Parquet format. The operation uses a fast append strategy
-    /// without duplicate checking for optimal performance.
+    /// without duplicate checking for optimal performance. Returns the total
+    /// size in bytes of the written data files.
     pub async fn insert_rows(
         &self,
         namespace: String,
         table_name: String,
         table_rows: Vec<TableRow>,
-    ) -> EtlResult<()> {
+    ) -> EtlResult<u64> {
         let namespace_ident = NamespaceIdent::new(namespace);
         let table_ident = TableIdent::new(namespace_ident, table_name);
 
@@ -304,21 +305,20 @@ impl IcebergClient {
 
         self.write_record_batch(&table, record_batch)
             .await
-            .map_err(iceberg_error_to_etl_error)?;
-
-        Ok(())
+            .map_err(iceberg_error_to_etl_error)
     }
 
     /// Writes a RecordBatch to an Iceberg table using Parquet format.
     ///
     /// This method handles the low-level details of writing Arrow RecordBatch data
     /// to an Iceberg table. It creates the necessary writers, applies the data,
-    /// and commits the transaction to make the data visible in the table.
+    /// and commits the transaction to make the data visible in the table. Returns
+    /// the total number of bytes of the written data files.
     async fn write_record_batch(
         &self,
         table: &Table,
         record_batch: RecordBatch,
-    ) -> Result<(), iceberg::Error> {
+    ) -> Result<u64, iceberg::Error> {
         // Create Parquet writer properties
         let writer_props = WriterProperties::builder()
             .set_compression(Compression::SNAPPY)
@@ -358,6 +358,11 @@ impl IcebergClient {
         // Close writer and get data files
         let data_files = data_file_writer.close().await?;
 
+        let bytes_sent: u64 = data_files
+            .iter()
+            .map(|data_file| data_file.file_size_in_bytes())
+            .sum();
+
         // Create transaction and fast append action
         let transaction = Transaction::new(table);
         let append_action = transaction
@@ -371,6 +376,6 @@ impl IcebergClient {
         // Commit the transaction to the catalog
         let _updated_table = updated_transaction.commit(&*self.catalog).await?;
 
-        Ok(())
+        Ok(bytes_sent)
     }
 }
