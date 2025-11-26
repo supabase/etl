@@ -15,7 +15,6 @@ use std::fmt;
 use std::io::BufReader;
 use std::num::NonZeroI32;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 use tokio_postgres::error::SqlState;
 use tokio_postgres::tls::MakeTlsConnect;

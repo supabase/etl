@@ -554,18 +554,6 @@ where
 
     // Main event processing loop - continues until shutdown or fatal error
     loop {
-        // If we detect that the connection is closed, we return an error to stop the loop.
-        if replication_client.is_closed() {
-            warn!(
-                "shutting down the apply loop because the connection to postgres has been terminated"
-            );
-
-            bail!(
-                ErrorKind::SourceConnectionFailed,
-                "PostgreSQL connection has been terminated"
-            )
-        }
-
         tokio::select! {
             // Use biased selection to prioritize shutdown signals over other operations
             // This ensures graceful shutdown takes precedence over event processing
@@ -595,7 +583,26 @@ where
             // PRIORITY 2: Process incoming replication messages from Postgres.
             // This is the primary data flow, converts replication protocol messages
             // into typed events and accumulates them into batches for efficient processing.
-            Some(message) = logical_replication_stream.next() => {
+            message = logical_replication_stream.next() => {
+                let Some(message) = message else {
+                    // The stream returned None, which should never happen for logical replication
+                    // since it runs indefinitely. This indicates either the connection was closed
+                    // or something unexpected occurred.
+                    if replication_client.is_closed() {
+                        warn!("replication stream ended because the postgres connection was closed, the apply loop will terminate");
+                        bail!(
+                            ErrorKind::SourceConnectionFailed,
+                            "PostgreSQL connection has been closed"
+                        )
+                    } else {
+                        warn!("replication stream ended unexpectedly without the connection being closed, the apply loop will terminate");
+                        bail!(
+                            ErrorKind::SourceConnectionFailed,
+                            "Replication stream ended unexpectedly"
+                        )
+                    }
+                };
+
                 let action = handle_replication_message_with_timeout(
                     &mut state,
                     logical_replication_stream.as_mut(),
@@ -664,16 +671,6 @@ where
             // 2. Allows Postgres to clean up old WAL files based on our progress
             // 3. Provides a heartbeat mechanism to detect connection issues
             _ = tokio::time::sleep_until(state.next_status_update_deadline()) => {
-                // If we detect that the connection is closed, we return an error to stop the loop.
-                if replication_client.is_closed() {
-                    warn!("shutting down the apply loop because the connection to postgres has been terminated");
-
-            bail!(
-                ErrorKind::SourceConnectionFailed,
-                "PostgreSQL connection has been terminated"
-            )
-                }
-
                 logical_replication_stream
                     .as_mut()
                     .get_inner()
