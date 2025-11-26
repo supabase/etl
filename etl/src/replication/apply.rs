@@ -1,3 +1,19 @@
+use etl_config::shared::PipelineConfig;
+use etl_postgres::replication::worker::WorkerType;
+use etl_postgres::types::TableId;
+use futures::StreamExt;
+use metrics::histogram;
+use postgres_replication::protocol;
+use postgres_replication::protocol::{LogicalReplicationMessage, ReplicationMessage};
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+use tokio::pin;
+use tokio_postgres::types::PgLsn;
+use tracing::log::warn;
+use tracing::{debug, info};
+
 use crate::concurrency::shutdown::ShutdownRx;
 use crate::concurrency::signal::SignalRx;
 use crate::concurrency::stream::{TimeoutStream, TimeoutStreamResult};
@@ -20,21 +36,6 @@ use crate::state::table::{RetryPolicy, TableReplicationError};
 use crate::store::schema::SchemaStore;
 use crate::types::{Event, PipelineId};
 use crate::{bail, etl_error};
-use etl_config::shared::PipelineConfig;
-use etl_postgres::replication::worker::WorkerType;
-use etl_postgres::types::TableId;
-use futures::StreamExt;
-use metrics::histogram;
-use postgres_replication::protocol;
-use postgres_replication::protocol::{LogicalReplicationMessage, ReplicationMessage};
-use std::future::Future;
-use std::pin::Pin;
-use std::sync::Arc;
-use std::time::{Duration, Instant};
-use tokio::pin;
-use tokio_postgres::types::PgLsn;
-use tracing::log::warn;
-use tracing::{debug, info};
 
 /// The minimum interval (in milliseconds) between consecutive status updates.
 ///
