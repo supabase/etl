@@ -25,25 +25,24 @@ use tokio_postgres::{
 use tracing::{Instrument, error, info, warn};
 
 /// Spawns a background task to monitor a Postgres connection until it terminates.
-///
-/// The task will log when the connection terminates, either successfully or with an error.
 fn spawn_postgres_connection<T>(connection: Connection<Socket, T::Stream>)
 where
     T: MakeTlsConnect<Socket>,
     T::Stream: Send + 'static,
 {
-    // TODO: maybe return a handle for this task to keep track of it.
     let span = tracing::Span::current();
     let task = async move {
-        if let Err(e) = connection.await {
-            error!("an error occurred during the Postgres connection: {}", e);
-            return;
-        }
+        let result = connection.await;
 
-        info!("postgres connection terminated successfully")
+        match result {
+            Err(err) => error!("an error occurred during the postgres connection: {}", err),
+            Ok(()) => info!("postgres connection terminated successfully"),
+        }
     }
     .instrument(span);
 
+    // There is no need to track the connection task via the `JoinHandle` since the `Client`, which
+    // returned the connection, will automatically terminate the connection when dropped.
     tokio::spawn(task);
 }
 
@@ -250,6 +249,11 @@ impl PgReplicationClient {
             client: Arc::new(client),
             server_version,
         })
+    }
+
+    /// Checks if the underlying connection is closed.
+    pub fn is_closed(&self) -> bool {
+        self.client.is_closed()
     }
 
     /// Creates a new logical replication slot with the specified name and a transaction which is set

@@ -11,6 +11,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::pin;
 use tokio_postgres::types::PgLsn;
+use tracing::log::warn;
 use tracing::{debug, info};
 
 use crate::concurrency::shutdown::ShutdownRx;
@@ -571,7 +572,7 @@ where
 
                 // If we are not inside a transaction, we can cleanly stop streaming and return.
                 if !state.handling_transaction() {
-                    info!("shutting down apply worker while waiting for incoming events outside of a transaction");
+                    info!("shutting down apply loop while waiting for incoming events outside of a transaction");
                     return Ok(ApplyLoopResult::Paused);
                 }
 
@@ -583,7 +584,28 @@ where
             // PRIORITY 2: Process incoming replication messages from Postgres.
             // This is the primary data flow, converts replication protocol messages
             // into typed events and accumulates them into batches for efficient processing.
-            Some(message) = logical_replication_stream.next() => {
+            message = logical_replication_stream.next() => {
+                let Some(message) = message else {
+                    // The stream returned None, which should never happen for logical replication
+                    // since it runs indefinitely. This indicates either the connection was closed
+                    // or something unexpected occurred.
+                    if replication_client.is_closed() {
+                        warn!("replication stream ended because the postgres connection was closed, the apply loop will terminate");
+
+                        bail!(
+                            ErrorKind::SourceConnectionFailed,
+                            "PostgreSQL connection has been closed during the apply loop"
+                        )
+                    } else {
+                        warn!("replication stream ended unexpectedly without the connection being closed, the apply loop will terminate");
+
+                        bail!(
+                            ErrorKind::SourceConnectionFailed,
+                            "Replication stream ended unexpectedly during the apply loop"
+                        )
+                    }
+                };
+
                 let action = handle_replication_message_with_timeout(
                     &mut state,
                     logical_replication_stream.as_mut(),
@@ -661,6 +683,7 @@ where
                         false
                     )
                     .await?;
+
                 state.mark_status_update_sent();
             }
         }
