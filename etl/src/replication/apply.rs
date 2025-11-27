@@ -1023,64 +1023,12 @@ where
             handle_truncate_message(state, start_lsn, truncate_body, hook).await
         }
         LogicalReplicationMessage::Message(message_body) => {
-            let prefix = message_body.prefix()?;
-            let content = message_body.content()?;
-
-            debug!(
-                transactional = message_body.flags(),
-                prefix = prefix,
-                "received logical message"
-            );
-
-            // Check if this is a DDL schema change message
-            if prefix == DDL_MESSAGE_PREFIX {
-                match parse_ddl_schema_change_message(content) {
-                    Ok(ddl_message) => {
-                        info!(
-                            table_id = ddl_message.table_id,
-                            table_name = %ddl_message.table_name,
-                            schema_name = %ddl_message.schema_name,
-                            event = %ddl_message.event,
-                            columns = ddl_message.columns.len(),
-                            "received DDL schema change message"
-                        );
-
-                        // Log the columns for debugging
-                        for col in &ddl_message.columns {
-                            debug!(
-                                column_name = %col.column_name,
-                                column_order = col.column_order,
-                                column_type = %col.column_type,
-                                nullable = col.nullable,
-                                primary_key_order = ?col.primary_key_order,
-                                "DDL message column"
-                            );
-                        }
-
-                        // TODO: In the future, update the stored schema here
-                        // For now, we just log the schema change message
-                    }
-                    Err(e) => {
-                        warn!(
-                            error = %e,
-                            content = content,
-                            "failed to parse DDL schema change message"
-                        );
-                    }
-                }
-            }
-
-            Ok(HandleMessageResult::default())
+            handle_logical_message(message_body).await
         }
-        LogicalReplicationMessage::Origin(_) => {
-            debug!("received unsupported ORIGIN message");
-            Ok(HandleMessageResult::default())
+        message => {
+            debug!("received unsupported message: {:?}", message);
+            Ok(HandleMessageResult::no_event())
         }
-        LogicalReplicationMessage::Type(_) => {
-            debug!("received unsupported TYPE message");
-            Ok(HandleMessageResult::default())
-        }
-        _ => Ok(HandleMessageResult::default()),
     }
 }
 
@@ -1459,4 +1407,60 @@ where
     let event = parse_event_from_truncate_message(start_lsn, remote_final_lsn, message, rel_ids);
 
     Ok(HandleMessageResult::return_event(Event::Truncate(event)))
+}
+
+/// Handles a logical replication message.
+///
+/// Processes `pg_logical_emit_message` messages from the replication stream.
+/// Currently handles DDL schema change messages with the `supabase_etl_ddl` prefix
+/// for tracking schema changes.
+async fn handle_logical_message(message: &protocol::MessageBody) -> EtlResult<HandleMessageResult> {
+    let prefix = message.prefix()?;
+    let content = message.content()?;
+
+    debug!(
+        transactional = message.flags(),
+        prefix = prefix,
+        "received logical message"
+    );
+
+    // Check if this is a DDL schema change message
+    if prefix == DDL_MESSAGE_PREFIX {
+        match parse_ddl_schema_change_message(content) {
+            Ok(ddl_message) => {
+                info!(
+                    table_id = ddl_message.table_id,
+                    table_name = %ddl_message.table_name,
+                    schema_name = %ddl_message.schema_name,
+                    event = %ddl_message.event,
+                    columns = ddl_message.columns.len(),
+                    "received DDL schema change message"
+                );
+
+                // Log the columns for debugging
+                for col in &ddl_message.columns {
+                    debug!(
+                        column_name = %col.column_name,
+                        column_order = col.column_order,
+                        column_type = %col.column_type,
+                        nullable = col.nullable,
+                        primary_key_order = ?col.primary_key_order,
+                        "DDL message column"
+                    );
+                }
+
+                // TODO: In the future, update the stored schema here
+                // For now, we just log the schema change message
+            }
+            Err(e) => {
+                warn!(
+                    error = %e,
+                    content = content,
+                    "failed to parse DDL schema change message"
+                );
+            }
+        }
+    }
+
+    Ok(HandleMessageResult::no_event())
 }

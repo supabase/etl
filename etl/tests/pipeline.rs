@@ -1157,20 +1157,8 @@ async fn empty_tables_are_created_at_destination() {
         table_name,
         &[
             id_column_schema(),
-            ColumnSchema::new_basic(
-                "name".to_string(),
-                Type::TEXT,
-                -1,
-                true,
-                false,
-            ),
-            ColumnSchema::new_basic(
-                "created_at".to_string(),
-                Type::TIMESTAMP,
-                -1,
-                true,
-                false,
-            ),
+            ColumnSchema::new_basic("name".to_string(), Type::TEXT, -1, true, false),
+            ColumnSchema::new_basic("created_at".to_string(), Type::TIMESTAMP, -1, true, false),
         ],
     );
 

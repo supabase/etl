@@ -172,13 +172,7 @@ async fn test_table_schema_copy_is_consistent() {
         .await
         .unwrap();
 
-    let age_schema = ColumnSchema::new_basic(
-        "age".to_string(),
-        Type::INT4,
-        -1,
-        true,
-        false,
-    );
+    let age_schema = ColumnSchema::new_basic("age".to_string(), Type::INT4, -1, true, false);
 
     let table_1_id = database
         .create_table(test_table_name("table_1"), true, &[("age", "integer")])
@@ -217,20 +211,8 @@ async fn test_table_schema_copy_across_multiple_connections() {
         .await
         .unwrap();
 
-    let age_schema = ColumnSchema::new_basic(
-        "age".to_string(),
-        Type::INT4,
-        -1,
-        true,
-        false,
-    );
-    let year_schema = ColumnSchema::new_basic(
-        "year".to_string(),
-        Type::INT4,
-        -1,
-        true,
-        false,
-    );
+    let age_schema = ColumnSchema::new_basic("age".to_string(), Type::INT4, -1, true, false);
+    let year_schema = ColumnSchema::new_basic("year".to_string(), Type::INT4, -1, true, false);
 
     let table_1_id = database
         .create_table(test_table_name("table_1"), true, &[("age", "integer")])
@@ -516,20 +498,8 @@ async fn test_table_copy_stream_respects_column_filter() {
         test_table_name,
         &[
             id_column_schema(),
-            ColumnSchema::new_basic(
-                "name".to_string(),
-                Type::TEXT,
-                -1,
-                true,
-                false,
-            ),
-            ColumnSchema::new_basic(
-                "age".to_string(),
-                Type::INT4,
-                -1,
-                true,
-                false,
-            ),
+            ColumnSchema::new_basic("name".to_string(), Type::TEXT, -1, true, false),
+            ColumnSchema::new_basic("age".to_string(), Type::INT4, -1, true, false),
         ],
     );
 
