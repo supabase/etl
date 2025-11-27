@@ -141,6 +141,7 @@ pub struct PgConnectionConfig {
     pub tls: TlsConfig,
     /// TCP keepalive configuration for connection health monitoring.
     /// When `None`, TCP keepalives are disabled.
+    #[serde(default)]
     pub keepalive: Option<TcpKeepaliveConfig>,
 }
 
@@ -165,6 +166,7 @@ pub struct PgConnectionConfigWithoutSecrets {
     pub tls: TlsConfig,
     /// TCP keepalive configuration for connection health monitoring.
     /// When `None`, TCP keepalives are disabled.
+    #[serde(default)]
     pub keepalive: Option<TcpKeepaliveConfig>,
 }
 
