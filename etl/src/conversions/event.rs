@@ -422,7 +422,8 @@ pub fn ddl_message_to_table_schema(message: &DdlSchemaChangeMessage) -> TableSch
                 col.column_order,
                 col.column_type.clone(),
                 col.primary_key_order,
-                true, // Default to replicated; will be updated by relation messages
+                // Default to replicated; will be updated by relation messages
+                true,
             )
         })
         .collect();

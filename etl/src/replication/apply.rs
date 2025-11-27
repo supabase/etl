@@ -1452,9 +1452,9 @@ async fn handle_logical_message(message: &protocol::MessageBody) -> EtlResult<Ha
                 // TODO: In the future, update the stored schema here
                 // For now, we just log the schema change message
             }
-            Err(e) => {
+            Err(err) => {
                 warn!(
-                    error = %e,
+                    error = %err,
                     content = content,
                     "failed to parse DDL schema change message"
                 );
