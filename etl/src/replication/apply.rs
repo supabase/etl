@@ -32,10 +32,10 @@ use crate::metrics::{
 };
 use crate::replication::client::PgReplicationClient;
 use crate::replication::stream::EventsStream;
-use crate::state::table::{RetryPolicy, TableReplicationError};
+use crate::state::table::TableReplicationError;
 use crate::store::schema::SchemaStore;
 use crate::types::{Event, PipelineId};
-use crate::{bail, etl_error};
+use crate::bail;
 
 /// The minimum interval (in milliseconds) between consecutive status updates.
 ///
@@ -1037,6 +1037,19 @@ where
         LogicalReplicationMessage::Truncate(truncate_body) => {
             handle_truncate_message(state, start_lsn, truncate_body, hook).await
         }
+        LogicalReplicationMessage::Message(message_body) => {
+            let prefix = message_body.prefix()?;
+            let content = message_body.content()?;
+            
+            debug!(
+                transactional = message_body.flags(),
+                prefix = prefix,
+                content = content,
+                "received logical message"
+            );
+            
+            Ok(HandleMessageResult::default())
+        }
         LogicalReplicationMessage::Origin(_) => {
             debug!("received unsupported ORIGIN message");
             Ok(HandleMessageResult::default())
@@ -1200,7 +1213,7 @@ async fn handle_relation_message<S, T>(
     state: &mut ApplyLoopState,
     start_lsn: PgLsn,
     message: &protocol::RelationBody,
-    schema_store: &S,
+    _schema_store: &S,
     hook: &T,
 ) -> EtlResult<HandleMessageResult>
 where
@@ -1224,36 +1237,14 @@ where
         return Ok(HandleMessageResult::no_event());
     }
 
-    // If no table schema is found, it means that something went wrong since we should have schemas
-    // ready before starting the apply loop.
-    let existing_table_schema =
-        schema_store
-            .get_table_schema(&table_id)
-            .await?
-            .ok_or_else(|| {
-                etl_error!(
-                    ErrorKind::MissingTableSchema,
-                    "Table schema not found in cache",
-                    format!("Table schema for table {} not found in cache", table_id)
-                )
-            })?;
-
     // Convert event from the protocol message.
     let event = parse_event_from_relation_message(start_lsn, remote_final_lsn, message)?;
 
-    // We compare the table schema from the relation message with the existing schema (if any).
-    // The purpose of this comparison is that we want to throw an error and stop the processing
-    // of any table that incurs in a schema change after the initial table sync is performed.
-    if !existing_table_schema.partial_eq(&event.table_schema) {
-        let error = TableReplicationError::with_solution(
-            table_id,
-            format!("The schema for table {table_id} has changed during streaming"),
-            "ETL doesn't support schema changes at this point in time, rollback the schema",
-            RetryPolicy::ManualRetry,
-        );
-
-        return Ok(HandleMessageResult::finish_batch_and_exclude_event(error));
-    }
+    debug!(
+        table_id = %table_id,
+        columns = event.table_schema.column_schemas.len(),
+        "received relation message"
+    );
 
     Ok(HandleMessageResult::return_event(Event::Relation(event)))
 }

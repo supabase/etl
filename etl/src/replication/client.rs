@@ -2,11 +2,11 @@ use crate::error::{ErrorKind, EtlResult};
 use crate::utils::tokio::MakeRustlsConnect;
 use crate::{bail, etl_error};
 use etl_config::shared::{IntoConnectOptions, PgConnectionConfig};
+use etl_postgres::below_version;
 use etl_postgres::replication::extract_server_version;
 use etl_postgres::types::convert_type_oid_to_type;
 use etl_postgres::types::{ColumnSchema, TableId, TableName, TableSchema};
 use etl_postgres::version::POSTGRES_15;
-use etl_postgres::{below_version, requires_version};
 use pg_escape::{quote_identifier, quote_literal};
 use postgres_replication::LogicalReplicationStream;
 use rustls::ClientConfig;
@@ -159,14 +159,6 @@ impl PgReplicationSlotTransaction {
     pub async fn rollback(self) -> EtlResult<()> {
         self.client.rollback_tx().await
     }
-}
-
-/// Result of building publication filter SQL components.
-struct PublicationFilter {
-    /// CTEs to include in the WITH clause (empty string if no publication filtering).
-    ctes: String,
-    /// Predicate to include in the WHERE clause (empty string if no publication filtering).
-    predicate: String,
 }
 
 /// A client for interacting with Postgres's logical replication features.
@@ -541,8 +533,8 @@ impl PgReplicationClient {
 
         // Do not convert the query or the options to lowercase, see comment in `create_slot_internal`.
         let options = format!(
-            r#"("proto_version" '1', "publication_names" {})"#,
-            quote_literal(quote_identifier(publication_name).as_ref()),
+            r#"("proto_version" '1', "publication_names" {}, "messages" 'true')"#,
+            quote_literal(quote_identifier(publication_name).as_ref())
         );
 
         let query = format!(
@@ -727,168 +719,63 @@ impl PgReplicationClient {
         );
     }
 
-    /// Builds SQL fragments for filtering columns based on publication settings.
-    ///
-    /// Returns CTEs and predicates that filter columns according to:
-    /// - Postgres 15+: Column-level filtering using `prattrs`
-    /// - Postgres 14 and earlier: Table-level filtering only
-    /// - No publication: No filtering (empty strings)
-    fn build_publication_filter_sql(
-        &self,
-        table_id: TableId,
-        publication_name: Option<&str>,
-    ) -> PublicationFilter {
-        let Some(publication_name) = publication_name else {
-            return PublicationFilter {
-                ctes: String::new(),
-                predicate: String::new(),
-            };
-        };
-
-        // Postgres 15+ supports column-level filtering via prattrs
-        if requires_version!(self.server_version, POSTGRES_15) {
-            return PublicationFilter {
-                ctes: format!(
-                    "pub_info as (
-                        select p.oid as puboid, p.puballtables, r.prattrs
-                        from pg_publication p
-                        left join pg_publication_rel r on r.prpubid = p.oid and r.prrelid = {table_id}
-                        where p.pubname = {publication}
-                    ),
-                    pub_attrs as (
-                        select unnest(prattrs) as attnum
-                        from pub_info
-                        where prattrs is not null
-                    ),
-                    pub_schema as (
-                        select 1 as exists_in_schema_pub
-                        from pub_info
-                        join pg_publication_namespace pn on pn.pnpubid = pub_info.puboid
-                        join pg_class c on c.relnamespace = pn.pnnspid
-                        where c.oid = {table_id}
-                    ),",
-                    publication = quote_literal(publication_name),
-                ),
-                predicate: "and (
-                        (select puballtables from pub_info) = true
-                        or (select count(*) from pub_schema) > 0
-                        or (
-                            case (select count(*) from pub_attrs)
-                                when 0 then true
-                                else (a.attnum in (select attnum from pub_attrs))
-                            end
-                        )
-                    )"
-                .to_string(),
-            };
-        }
-
-        // Postgres 14 and earlier: table-level filtering only
-        PublicationFilter {
-            ctes: format!(
-                "pub_info as (
-                    select p.puballtables
-                    from pg_publication p
-                    where p.pubname = {publication}
-                ),
-                pub_table as (
-                    select 1 as exists_in_pub
-                    from pg_publication_rel r
-                    join pg_publication p on r.prpubid = p.oid
-                    where p.pubname = {publication}
-                        and r.prrelid = {table_id}
-                ),",
-                publication = quote_literal(publication_name),
-            ),
-            predicate: "and ((select puballtables from pub_info) = true or (select count(*) from pub_table) > 0)".to_string(),
-        }
-    }
-
     /// Retrieves schema information for all columns in a table.
     ///
-    /// If a publication is specified, only columns included in that publication
-    /// will be returned.
+    /// All columns are initially loaded with `replicated = true`. The replication status
+    /// will be updated later when relation messages are received during CDC streaming.
     async fn get_column_schemas(
         &self,
         table_id: TableId,
-        publication: Option<&str>,
+        // TODO: remove this parameter.
+        _publication: Option<&str>,
     ) -> EtlResult<Vec<ColumnSchema>> {
-        // Build publication filter CTEs and predicates based on Postgres version.
-        let publication_filter = self.build_publication_filter_sql(table_id, publication);
-
         let column_info_query = format!(
             r#"
-            with {publication_ctes}
-            -- Find the direct parent table (for child partitions)
-            direct_parent as (
-                select i.inhparent as parent_oid
-                from pg_inherits i
-                where i.inhrelid = {table_id}
-                limit 1
-            ),
-            -- Extract primary key column names from the parent table
-            parent_pk_cols as (
-                select array_agg(a.attname order by x.n) as pk_column_names
-                from pg_constraint con
-                join unnest(con.conkey) with ordinality as x(attnum, n) on true
-                join pg_attribute a on a.attrelid = con.conrelid and a.attnum = x.attnum
-                join direct_parent dp on con.conrelid = dp.parent_oid
-                where con.contype = 'p'
-                group by con.conname
-            )
             select
-                a.attname,
-                a.atttypid,
-                a.atttypmod,
-                a.attnotnull,
-                case
-                    -- Check if column has a direct primary key index
-                    when coalesce(i.indisprimary, false) = true then true
-                    -- Check if column name matches parent's primary key (for partitions)
-                    when exists (
-                        select 1
-                        from parent_pk_cols pk
-                        where a.attname = any(pk.pk_column_names)
-                    ) then true
-                    else false
-                end as primary
-            from pg_attribute a
-            left join pg_index i
-                on a.attrelid = i.indrelid
-                and a.attnum = any(i.indkey)
-                and i.indisprimary = true
-            where a.attnum > 0::int2
-                and not a.attisdropped
-                and a.attgenerated = ''
-                and a.attrelid = {table_id}
-                {publication_predicate}
-            order by a.attnum
+                column_name,
+                ordinal_position,
+                data_type,
+                type_oid,
+                type_modifier,
+                is_nullable,
+                primary_key_position
+            from etl.describe_table_schema({table_id})
+            order by ordinal_position
             "#,
-            publication_ctes = publication_filter.ctes,
-            publication_predicate = publication_filter.predicate,
+            table_id = table_id,
         );
 
         let mut column_schemas = vec![];
         for message in self.client.simple_query(&column_info_query).await? {
             if let SimpleQueryMessage::Row(row) = message {
-                let name = Self::get_row_value::<String>(&row, "attname", "pg_attribute").await?;
-                let type_oid = Self::get_row_value::<u32>(&row, "atttypid", "pg_attribute").await?;
+                let name =
+                    Self::get_row_value::<String>(&row, "column_name", "pg_attribute").await?;
+                let ordinal_position =
+                    Self::get_row_value::<i32>(&row, "ordinal_position", "pg_attribute").await?;
+                let data_type =
+                    Self::get_row_value::<String>(&row, "data_type", "pg_type").await?;
+                let type_oid = Self::get_row_value::<u32>(&row, "type_oid", "pg_type").await?;
                 let modifier =
-                    Self::get_row_value::<i32>(&row, "atttypmod", "pg_attribute").await?;
+                    Self::get_row_value::<i32>(&row, "type_modifier", "pg_attribute").await?;
                 let nullable =
-                    Self::get_row_value::<String>(&row, "attnotnull", "pg_attribute").await? == "f";
-                let primary =
-                    Self::get_row_value::<String>(&row, "primary", "pg_index").await? == "t";
+                    Self::get_row_value::<bool>(&row, "is_nullable", "pg_attribute").await?;
+                let primary_key_position: Option<i32> = row
+                    .try_get("primary_key_position")?
+                    .map(|s: &str| s.parse().ok())
+                    .flatten();
 
                 let typ = convert_type_oid_to_type(type_oid);
 
-                column_schemas.push(ColumnSchema {
+                column_schemas.push(ColumnSchema::new(
                     name,
                     typ,
                     modifier,
                     nullable,
-                    primary,
-                })
+                    ordinal_position,
+                    data_type,
+                    primary_key_position,
+                    true, // Initially all columns are marked as replicated
+                ))
             }
         }
 

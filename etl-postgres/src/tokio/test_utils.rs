@@ -506,13 +506,7 @@ impl<G> Drop for PgDatabase<G> {
 /// Creates a [`ColumnSchema`] for a non-nullable, primary key column named "id"
 /// of type `INT8` that is added by default to tables created by [`PgDatabase`].
 pub fn id_column_schema() -> ColumnSchema {
-    ColumnSchema {
-        name: "id".to_string(),
-        typ: Type::INT8,
-        modifier: -1,
-        nullable: false,
-        primary: true,
-    }
+    ColumnSchema::new_basic("id".to_string(), Type::INT8, -1, false, true)
 }
 
 /// Creates a new Postgres database and returns a connected client.

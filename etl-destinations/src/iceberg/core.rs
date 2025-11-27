@@ -538,20 +538,20 @@ where
         let sequence_number_col =
             find_unique_column_name(&final_schema.column_schemas, SEQUENCE_NUMBER_COLUMN_NAME);
 
-        final_schema.add_column_schema(ColumnSchema {
-            name: cdc_operation_col,
-            typ: Type::TEXT,
-            modifier: -1,
-            nullable: false,
-            primary: false,
-        });
-        final_schema.add_column_schema(ColumnSchema {
-            name: sequence_number_col,
-            typ: Type::TEXT,
-            modifier: -1,
-            nullable: false,
-            primary: false,
-        });
+        final_schema.add_column_schema(ColumnSchema::new_basic(
+            cdc_operation_col,
+            Type::TEXT,
+            -1,
+            false,
+            false,
+        ));
+        final_schema.add_column_schema(ColumnSchema::new_basic(
+            sequence_number_col,
+            Type::TEXT,
+            -1,
+            false,
+            false,
+        ));
         final_schema
     }
 
@@ -703,57 +703,40 @@ mod tests {
         let col_name = find_unique_column_name(&column_schemas, CDC_OPERATION_COLUMN_NAME);
         assert_eq!(col_name, CDC_OPERATION_COLUMN_NAME.to_string());
 
-        let column_schemas = vec![ColumnSchema {
-            name: "id".to_string(),
-            typ: Type::BOOL,
-            modifier: -1,
-            nullable: false,
-            primary: true,
-        }];
+        let column_schemas =
+            vec![ColumnSchema::new_basic("id".to_string(), Type::BOOL, -1, false, true)];
         let col_name = find_unique_column_name(&column_schemas, CDC_OPERATION_COLUMN_NAME);
         assert_eq!(col_name, CDC_OPERATION_COLUMN_NAME.to_string());
 
         let column_schemas = vec![
-            ColumnSchema {
-                name: "id".to_string(),
-                typ: Type::BOOL,
-                modifier: -1,
-                nullable: false,
-                primary: true,
-            },
-            ColumnSchema {
-                name: CDC_OPERATION_COLUMN_NAME.to_string(),
-                typ: Type::BOOL,
-                modifier: -1,
-                nullable: false,
-                primary: true,
-            },
+            ColumnSchema::new_basic("id".to_string(), Type::BOOL, -1, false, true),
+            ColumnSchema::new_basic(
+                CDC_OPERATION_COLUMN_NAME.to_string(),
+                Type::BOOL,
+                -1,
+                false,
+                true,
+            ),
         ];
         let col_name = find_unique_column_name(&column_schemas, CDC_OPERATION_COLUMN_NAME);
         assert_eq!(col_name, format!("{CDC_OPERATION_COLUMN_NAME}_1"));
 
         let column_schemas = vec![
-            ColumnSchema {
-                name: "id".to_string(),
-                typ: Type::BOOL,
-                modifier: -1,
-                nullable: false,
-                primary: true,
-            },
-            ColumnSchema {
-                name: CDC_OPERATION_COLUMN_NAME.to_string(),
-                typ: Type::BOOL,
-                modifier: -1,
-                nullable: false,
-                primary: true,
-            },
-            ColumnSchema {
-                name: format!("{CDC_OPERATION_COLUMN_NAME}_1"),
-                typ: Type::BOOL,
-                modifier: -1,
-                nullable: false,
-                primary: true,
-            },
+            ColumnSchema::new_basic("id".to_string(), Type::BOOL, -1, false, true),
+            ColumnSchema::new_basic(
+                CDC_OPERATION_COLUMN_NAME.to_string(),
+                Type::BOOL,
+                -1,
+                false,
+                true,
+            ),
+            ColumnSchema::new_basic(
+                format!("{CDC_OPERATION_COLUMN_NAME}_1"),
+                Type::BOOL,
+                -1,
+                false,
+                true,
+            ),
         ];
         let col_name = find_unique_column_name(&column_schemas, CDC_OPERATION_COLUMN_NAME);
         assert_eq!(col_name, format!("{CDC_OPERATION_COLUMN_NAME}_2"));

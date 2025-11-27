@@ -51,23 +51,60 @@ type TypeModifier = i32;
 /// Represents the schema of a single column in a Postgres table.
 ///
 /// This type contains all metadata about a column including its name, data type,
-/// type modifier, nullability, and whether it's part of the primary key.
+/// type modifier, nullability, primary key information, and replication status.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct ColumnSchema {
-    /// The name of the column
+    /// The name of the column.
     pub name: String,
-    /// The Postgres data type of the column
+    /// The Postgres data type of the column.
     pub typ: Type,
-    /// Type-specific modifier value (e.g., length for varchar)
+    /// Type-specific modifier value (e.g., length for varchar).
     pub modifier: TypeModifier,
-    /// Whether the column can contain NULL values
+    /// Whether the column can contain NULL values.
     pub nullable: bool,
-    /// Whether the column is part of the table's primary key
-    pub primary: bool,
+    /// The 1-based ordinal position of the column in the table.
+    pub ordinal_position: i32,
+    /// The string representation of the Postgres data type (e.g., "text", "int4").
+    pub data_type: String,
+    /// The position of this column in the primary key (1-based), or None if not a primary key.
+    pub primary_key_position: Option<i32>,
+    /// Whether this column is currently being replicated. Columns are replicated by default
+    /// when initially loaded, but may be marked as not replicated when a relation message
+    /// indicates the column is not part of the publication's column list.
+    pub replicated: bool,
 }
 
 impl ColumnSchema {
+    /// Creates a new [`ColumnSchema`] with all fields specified.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
+        name: String,
+        typ: Type,
+        modifier: TypeModifier,
+        nullable: bool,
+        ordinal_position: i32,
+        data_type: String,
+        primary_key_position: Option<i32>,
+        replicated: bool,
+    ) -> ColumnSchema {
+        Self {
+            name,
+            typ,
+            modifier,
+            nullable,
+            ordinal_position,
+            data_type,
+            primary_key_position,
+            replicated,
+        }
+    }
+
+    /// Creates a new [`ColumnSchema`] with default values for the new fields.
+    ///
+    /// This constructor is provided for backwards compatibility with existing code
+    /// that doesn't need to specify ordinal_position, data_type, primary_key_position,
+    /// or replicated. All columns created with this constructor default to replicated=true.
+    pub fn new_basic(
         name: String,
         typ: Type,
         modifier: TypeModifier,
@@ -76,11 +113,19 @@ impl ColumnSchema {
     ) -> ColumnSchema {
         Self {
             name,
-            typ,
+            typ: typ.clone(),
             modifier,
             nullable,
-            primary,
+            ordinal_position: 0,
+            data_type: typ.name().to_string(),
+            primary_key_position: if primary { Some(1) } else { None },
+            replicated: true,
         }
+    }
+
+    /// Returns whether this column is part of the table's primary key.
+    pub fn is_primary(&self) -> bool {
+        self.primary_key_position.is_some()
     }
 
     /// Compares two [`ColumnSchema`] instances, excluding the `nullable` field.
@@ -90,10 +135,10 @@ impl ColumnSchema {
     /// This method is used for comparing table schemas loaded via the initial table sync and the
     /// relation messages received via CDC. The reason for skipping the `nullable` field is that
     /// unfortunately Postgres doesn't seem to propagate nullable information of a column via
-    /// relation messages. The reason for skipping the `primary` field is that if the replica
-    /// identity of a table is set to full, the relation message sets all columns as primary
-    /// key, irrespective of what the actual primary key in the table is.
-    fn partial_eq(&self, other: &ColumnSchema) -> bool {
+    /// relation messages. The reason for skipping the `primary_key_position` field is that if
+    /// the replica identity of a table is set to full, the relation message sets all columns
+    /// as primary key, irrespective of what the actual primary key in the table is.
+    pub fn partial_eq(&self, other: &ColumnSchema) -> bool {
         self.name == other.name && self.typ == other.typ && self.modifier == other.modifier
     }
 }
@@ -212,7 +257,7 @@ impl TableSchema {
     ///
     /// This method checks if any column in the table is marked as part of the primary key.
     pub fn has_primary_keys(&self) -> bool {
-        self.column_schemas.iter().any(|cs| cs.primary)
+        self.column_schemas.iter().any(|cs| cs.is_primary())
     }
 
     /// Compares two [`TableSchema`] instances, excluding the [`ColumnSchema`]'s `nullable` field.
@@ -227,6 +272,27 @@ impl TableSchema {
                 .iter()
                 .zip(other.column_schemas.iter())
                 .all(|(c1, c2)| c1.partial_eq(c2))
+    }
+
+    /// Updates the `replicated` status of columns based on a list of column names
+    /// from a relation message.
+    ///
+    /// Columns whose names appear in `replicated_column_names` will have their
+    /// `replicated` field set to `true`; all other columns will have it set to `false`.
+    /// This is used to track which columns are actually being replicated when
+    /// a publication only includes a subset of columns.
+    pub fn update_replicated_columns(&mut self, replicated_column_names: &[String]) {
+        for column_schema in &mut self.column_schemas {
+            column_schema.replicated = replicated_column_names.contains(&column_schema.name);
+        }
+    }
+
+    /// Returns only the column schemas that are currently marked as replicated.
+    pub fn replicated_column_schemas(&self) -> Vec<&ColumnSchema> {
+        self.column_schemas
+            .iter()
+            .filter(|cs| cs.replicated)
+            .collect()
     }
 }
 

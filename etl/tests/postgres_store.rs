@@ -16,9 +16,9 @@ fn create_sample_table_schema() -> TableSchema {
     let table_id = TableId::new(12345);
     let table_name = TableName::new("public".to_string(), "test_table".to_string());
     let columns = vec![
-        ColumnSchema::new("id".to_string(), PgType::INT4, -1, false, true),
-        ColumnSchema::new("name".to_string(), PgType::TEXT, -1, true, false),
-        ColumnSchema::new(
+        ColumnSchema::new_basic("id".to_string(), PgType::INT4, -1, false, true),
+        ColumnSchema::new_basic("name".to_string(), PgType::TEXT, -1, true, false),
+        ColumnSchema::new_basic(
             "created_at".to_string(),
             PgType::TIMESTAMPTZ,
             -1,
@@ -34,8 +34,8 @@ fn create_another_table_schema() -> TableSchema {
     let table_id = TableId::new(67890);
     let table_name = TableName::new("public".to_string(), "another_table".to_string());
     let columns = vec![
-        ColumnSchema::new("id".to_string(), PgType::INT8, -1, false, true),
-        ColumnSchema::new("description".to_string(), PgType::VARCHAR, 255, true, false),
+        ColumnSchema::new_basic("id".to_string(), PgType::INT8, -1, false, true),
+        ColumnSchema::new_basic("description".to_string(), PgType::VARCHAR, 255, true, false),
     ];
 
     TableSchema::new(table_id, table_name, columns)
@@ -333,7 +333,7 @@ async fn test_schema_store_update_existing() {
         .unwrap();
 
     // Update schema by adding a column
-    table_schema.add_column_schema(ColumnSchema::new(
+    table_schema.add_column_schema(ColumnSchema::new_basic(
         "updated_at".to_string(),
         PgType::TIMESTAMPTZ,
         -1,

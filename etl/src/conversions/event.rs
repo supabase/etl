@@ -249,8 +249,12 @@ where
 /// This helper method extracts column metadata from the replication protocol
 /// and converts it into the internal column schema representation. Some fields
 /// like nullable status have default values due to protocol limitations.
+///
+/// Uses the basic constructor since relation messages don't provide full metadata
+/// like ordinal_position or data_type string. These schemas are primarily used
+/// to identify which columns are being replicated.
 fn build_column_schema(column: &protocol::Column) -> EtlResult<ColumnSchema> {
-    Ok(ColumnSchema::new(
+    Ok(ColumnSchema::new_basic(
         column.name()?.to_string(),
         convert_type_oid_to_type(column.type_id() as u32),
         column.type_modifier(),

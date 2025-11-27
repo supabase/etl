@@ -70,20 +70,8 @@ pub async fn setup_test_database_schema<G: GenericClient>(
             users_table_name,
             vec![
                 id_column_schema(),
-                ColumnSchema {
-                    name: "name".to_string(),
-                    typ: Type::TEXT,
-                    modifier: -1,
-                    nullable: false,
-                    primary: false,
-                },
-                ColumnSchema {
-                    name: "age".to_string(),
-                    typ: Type::INT4,
-                    modifier: -1,
-                    nullable: false,
-                    primary: false,
-                },
+                ColumnSchema::new_basic("name".to_string(), Type::TEXT, -1, false, false),
+                ColumnSchema::new_basic("age".to_string(), Type::INT4, -1, false, false),
             ],
         ));
     }
@@ -106,13 +94,7 @@ pub async fn setup_test_database_schema<G: GenericClient>(
             orders_table_name,
             vec![
                 id_column_schema(),
-                ColumnSchema {
-                    name: "description".to_string(),
-                    typ: Type::TEXT,
-                    modifier: -1,
-                    nullable: false,
-                    primary: false,
-                },
+                ColumnSchema::new_basic("description".to_string(), Type::TEXT, -1, false, false),
             ],
         ));
     }
