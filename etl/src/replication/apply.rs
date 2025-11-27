@@ -1216,7 +1216,7 @@ where
         .map(|cs| cs.name.clone())
         .collect();
 
-    debug!(
+    info!(
         table_id = %table_id,
         columns = event.table_schema.column_schemas.len(),
         replicated_columns = ?replicated_column_names,
@@ -1225,38 +1225,35 @@ where
 
     // Update the stored table schema's replicated flags based on the relation message columns.
     // Columns in the relation message are marked as replicated, others are marked as not replicated.
-    if let Some(stored_schema_arc) = schema_store.get_table_schema(&table_id).await? {
+    if let Some(table_schema) = schema_store.get_table_schema(&table_id).await? {
         // Clone the schema so we can mutate it
-        let mut stored_schema = (*stored_schema_arc).clone();
+        let mut updated_table_schema = (*table_schema).clone();
 
-        let previous_replicated: Vec<String> = stored_schema
+        let previous_replicated: Vec<String> = updated_table_schema
             .column_schemas
             .iter()
             .filter(|cs| cs.replicated)
             .map(|cs| cs.name.clone())
             .collect();
 
-        stored_schema.update_replicated_columns(&replicated_column_names);
+        updated_table_schema.update_replicated_columns(&replicated_column_names);
 
-        let new_replicated: Vec<String> = stored_schema
+        let new_replicated: Vec<String> = updated_table_schema
             .column_schemas
             .iter()
             .filter(|cs| cs.replicated)
             .map(|cs| cs.name.clone())
             .collect();
 
-        // Log if there was a change in replicated columns
-        if previous_replicated != new_replicated {
-            info!(
+        info!(
                 table_id = %table_id,
                 previous_replicated = ?previous_replicated,
                 new_replicated = ?new_replicated,
                 "updated replicated columns based on relation message"
             );
-        }
 
         // Store the updated schema
-        schema_store.store_table_schema(stored_schema).await?;
+        schema_store.store_table_schema(updated_table_schema).await?;
     }
 
     Ok(HandleMessageResult::return_event(Event::Relation(event)))
