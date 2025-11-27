@@ -1116,6 +1116,7 @@ mod tests {
                         trusted_root_certs: "".to_string(),
                         enabled: false,
                     },
+                    keepalive: None,
                 },
                 batch: BatchConfig {
                     max_size: 10_000,

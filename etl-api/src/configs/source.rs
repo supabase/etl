@@ -87,6 +87,7 @@ impl StoredSourceConfig {
                 trusted_root_certs: DEFAULT_TLS_TRUSTED_ROOT_CERTS.to_string(),
                 enabled: DEFAULT_TLS_ENABLED,
             },
+            keepalive: None,
         }
     }
 
@@ -98,6 +99,7 @@ impl StoredSourceConfig {
             username: self.username,
             password: self.password.map(|p| p.into()),
             tls,
+            keepalive: None,
         }
     }
 }
