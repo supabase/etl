@@ -207,8 +207,6 @@ impl StatusUpdate {
 enum EndBatch {
     /// The batch should include the last processed event and end.
     Inclusive,
-    /// The batch should exclude the last processed event and end.
-    Exclusive,
 }
 
 /// Result returned from `handle_replication_message` and related functions
@@ -280,18 +278,6 @@ impl HandleMessageResult {
     fn return_event(event: Event) -> Self {
         Self {
             event: Some(event),
-            ..Default::default()
-        }
-    }
-
-    /// Creates a result that excludes the current event and requests batch termination.
-    ///
-    /// Used when the current message triggers a recoverable table-level error.
-    /// The error is propagated to be handled by the apply loop hook.
-    fn finish_batch_and_exclude_event(error: TableReplicationError) -> Self {
-        Self {
-            end_batch: Some(EndBatch::Exclusive),
-            table_replication_error: Some(error),
             ..Default::default()
         }
     }
