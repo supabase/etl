@@ -18,6 +18,7 @@ use crate::db;
 use crate::db::destinations::{DestinationsDbError, destination_exists};
 use crate::db::images::ImagesDbError;
 use crate::db::pipelines::{MAX_PIPELINES_PER_TENANT, PipelinesDbError, read_pipeline_components};
+use crate::db::publications::PublicationsDbError;
 use crate::db::replicators::ReplicatorsDbError;
 use crate::db::sources::{SourcesDbError, source_exists};
 use crate::k8s::core::{
@@ -51,6 +52,9 @@ pub enum PipelineError {
     #[error("No default image was found")]
     NoDefaultImageFound,
 
+    #[error("The publication '{0}' was not found on the source database")]
+    PublicationNotFound(String),
+
     #[error(transparent)]
     TenantId(#[from] TenantIdError),
 
@@ -77,6 +81,9 @@ pub enum PipelineError {
 
     #[error(transparent)]
     DestinationsDb(#[from] DestinationsDbError),
+
+    #[error(transparent)]
+    PublicationsDb(#[from] PublicationsDbError),
 
     #[error(transparent)]
     PipelinesDb(PipelinesDbError),
@@ -128,6 +135,7 @@ impl PipelineError {
             // Do not expose internal database details in error messages
             PipelineError::SourcesDb(SourcesDbError::Database(_))
             | PipelineError::DestinationsDb(DestinationsDbError::Database(_))
+            | PipelineError::PublicationsDb(PublicationsDbError::Database(_))
             | PipelineError::PipelinesDb(PipelinesDbError::Database(_))
             | PipelineError::ReplicatorsDb(ReplicatorsDbError::Database(_))
             | PipelineError::ImagesDb(ImagesDbError::Database(_))
@@ -147,6 +155,7 @@ impl ResponseError for PipelineError {
             | PipelineError::NoDefaultImageFound
             | PipelineError::SourcesDb(_)
             | PipelineError::DestinationsDb(_)
+            | PipelineError::PublicationsDb(_)
             | PipelineError::PipelinesDb(_)
             | PipelineError::ReplicatorsDb(_)
             | PipelineError::ImagesDb(_)
@@ -162,9 +171,9 @@ impl ResponseError for PipelineError {
             | PipelineError::ImageIdNotDefault(_)
             | PipelineError::DestinationNotFound(_)
             | PipelineError::SourceNotFound(_) => StatusCode::NOT_FOUND,
-            PipelineError::TenantId(_) | PipelineError::NotRollbackable(_) => {
-                StatusCode::BAD_REQUEST
-            }
+            PipelineError::TenantId(_)
+            | PipelineError::NotRollbackable(_)
+            | PipelineError::PublicationNotFound(_) => StatusCode::BAD_REQUEST,
             PipelineError::DuplicatePipeline => StatusCode::CONFLICT,
             PipelineError::PipelineLimitReached { .. } => StatusCode::UNPROCESSABLE_ENTITY,
         }
@@ -460,19 +469,23 @@ pub struct GetPipelineVersionResponse {
 pub async fn create_pipeline(
     req: HttpRequest,
     pool: Data<PgPool>,
+    encryption_key: Data<EncryptionKey>,
     pipeline: Json<CreatePipelineRequest>,
 ) -> Result<impl Responder, PipelineError> {
     let tenant_id = extract_tenant_id(&req)?;
     let pipeline = pipeline.into_inner();
 
     let mut txn = pool.begin().await?;
-    if !source_exists(txn.deref_mut(), tenant_id, pipeline.source_id).await? {
-        return Err(PipelineError::SourceNotFound(pipeline.source_id));
-    }
 
-    if !destination_exists(txn.deref_mut(), tenant_id, pipeline.destination_id).await? {
-        return Err(PipelineError::DestinationNotFound(pipeline.destination_id));
-    }
+    validate_pipeline_inputs(
+        &mut txn,
+        tenant_id,
+        pipeline.source_id,
+        pipeline.destination_id,
+        &pipeline.config.publication_name,
+        &encryption_key,
+    )
+    .await?;
 
     let pipeline_count =
         db::pipelines::count_pipelines_for_tenant(txn.deref_mut(), tenant_id).await?;
@@ -566,6 +579,7 @@ pub async fn read_pipeline(
 pub async fn update_pipeline(
     req: HttpRequest,
     pool: Data<PgPool>,
+    encryption_key: Data<EncryptionKey>,
     pipeline_id: Path<i64>,
     pipeline: Json<UpdatePipelineRequest>,
 ) -> Result<impl Responder, PipelineError> {
@@ -574,13 +588,16 @@ pub async fn update_pipeline(
     let pipeline = pipeline.into_inner();
 
     let mut txn = pool.begin().await?;
-    if !source_exists(txn.deref_mut(), tenant_id, pipeline.source_id).await? {
-        return Err(PipelineError::SourceNotFound(pipeline.source_id));
-    }
 
-    if !destination_exists(txn.deref_mut(), tenant_id, pipeline.destination_id).await? {
-        return Err(PipelineError::DestinationNotFound(pipeline.destination_id));
-    }
+    validate_pipeline_inputs(
+        &mut txn,
+        tenant_id,
+        pipeline.source_id,
+        pipeline.destination_id,
+        &pipeline.config.publication_name,
+        &encryption_key,
+    )
+    .await?;
 
     db::pipelines::update_pipeline(
         txn.deref_mut(),
@@ -1224,4 +1241,38 @@ pub async fn update_pipeline_config(
     };
 
     Ok(Json(response))
+}
+
+/// Validates pipeline inputs: checks source/destination existence and publication validity.
+async fn validate_pipeline_inputs(
+    txn: &mut sqlx::PgTransaction<'_>,
+    tenant_id: &str,
+    source_id: i64,
+    destination_id: i64,
+    publication_name: &str,
+    encryption_key: &EncryptionKey,
+) -> Result<(), PipelineError> {
+    if !source_exists(txn.deref_mut(), tenant_id, source_id).await? {
+        return Err(PipelineError::SourceNotFound(source_id));
+    }
+
+    if !destination_exists(txn.deref_mut(), tenant_id, destination_id).await? {
+        return Err(PipelineError::DestinationNotFound(destination_id));
+    }
+
+    let source = db::sources::read_source(txn.deref_mut(), tenant_id, source_id, encryption_key)
+        .await?
+        .ok_or(PipelineError::SourceNotFound(source_id))?;
+
+    let source_pool =
+        connect_to_source_database_with_defaults(&source.config.into_connection_config()).await?;
+
+    let exists = db::publications::publication_exists(&source_pool, publication_name).await?;
+    if !exists {
+        return Err(PipelineError::PublicationNotFound(
+            publication_name.to_string(),
+        ));
+    }
+
+    Ok(())
 }
