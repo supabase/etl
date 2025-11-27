@@ -5,12 +5,12 @@ create or replace function etl.describe_table_schema(
     p_table oid
 ) returns table (
     column_name text,
-    ordinal_position int,
-    data_type text,
+    column_order int,
+    column_type text,
     type_oid oid,
     type_modifier int,
-    is_nullable boolean,
-    primary_key_position int
+    nullable boolean,
+    primary_key_order int
 )
 language plpgsql
 stable
@@ -23,7 +23,7 @@ begin
         'with direct_parent as (
             select i.inhparent as parent_oid
             from pg_inherits i
-            where i.inhrelid = %2$s
+            where i.inhrelid = %1$s
             limit 1
         ),
         primary_key as (
@@ -31,7 +31,7 @@ begin
             from pg_constraint con
             join unnest(con.conkey) with ordinality as x(attnum, n) on true
             where con.contype = ''p''
-              and con.conrelid = %2$s
+              and con.conrelid = %1$s
         ),
         parent_primary_key as (
             select a.attname, x.n as position
@@ -42,17 +42,17 @@ begin
             where con.contype = ''p''
         )
         select
-            a.attname,
-            a.attnum,
+            a.attname::text,
+            a.attnum::int,
             format_type(a.atttypid, a.atttypmod),
             a.atttypid,
             a.atttypmod,
             not a.attnotnull,
-            coalesce(pk.position, ppk.position)
+            coalesce(pk.position, ppk.position)::int
         from pg_attribute a
                  left join primary_key pk on pk.attnum = a.attnum
                  left join parent_primary_key ppk on ppk.attname = a.attname
-        where a.attrelid = %2$s
+        where a.attrelid = %1$s
           and a.attnum > 0
           and not a.attisdropped
           and a.attgenerated = ''''
@@ -104,12 +104,12 @@ begin
         select jsonb_agg(
                    jsonb_build_object(
                        'column_name', s.column_name,
-                       'ordinal_position', s.ordinal_position,
-                       'data_type', s.data_type,
+                       'column_order', s.column_order,
+                       'column_type', s.column_type,
                        'type_oid', s.type_oid,
                        'type_modifier', s.type_modifier,
-                       'is_nullable', s.is_nullable,
-                       'primary_key_position', s.primary_key_position
+                       'nullable', s.nullable,
+                       'primary_key_order', s.primary_key_order
                    )
                )
         into schema_json

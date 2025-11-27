@@ -733,16 +733,15 @@ impl PgReplicationClient {
             r#"
             select
                 column_name,
-                ordinal_position,
-                data_type,
+                column_order,
+                column_type,
                 type_oid,
                 type_modifier,
-                is_nullable,
-                primary_key_position
+                nullable,
+                primary_key_order
             from etl.describe_table_schema({table_id})
-            order by ordinal_position
-            "#,
-            table_id = table_id,
+            order by column_order
+            "#
         );
 
         let mut column_schemas = vec![];
@@ -750,19 +749,20 @@ impl PgReplicationClient {
             if let SimpleQueryMessage::Row(row) = message {
                 let name =
                     Self::get_row_value::<String>(&row, "column_name", "pg_attribute").await?;
-                let ordinal_position =
-                    Self::get_row_value::<i32>(&row, "ordinal_position", "pg_attribute").await?;
-                let data_type =
-                    Self::get_row_value::<String>(&row, "data_type", "pg_type").await?;
+                let column_order =
+                    Self::get_row_value::<i32>(&row, "column_order", "pg_attribute").await?;
+                let column_type =
+                    Self::get_row_value::<String>(&row, "column_type", "pg_type").await?;
                 let type_oid = Self::get_row_value::<u32>(&row, "type_oid", "pg_type").await?;
                 let modifier =
                     Self::get_row_value::<i32>(&row, "type_modifier", "pg_attribute").await?;
-                let nullable =
-                    Self::get_row_value::<bool>(&row, "is_nullable", "pg_attribute").await?;
-                let primary_key_position: Option<i32> = row
-                    .try_get("primary_key_position")?
-                    .map(|s: &str| s.parse().ok())
-                    .flatten();
+                let nullable_str =
+                    Self::get_row_value::<String>(&row, "nullable", "pg_attribute").await?;
+                let nullable = nullable_str == "t" || nullable_str == "true";
+                let primary_key_order: Option<i32> = row
+                    .try_get("primary_key_order")?
+                    .and_then(|s: &str| s.parse().ok());
+                let primary = primary_key_order.is_some();
 
                 let typ = convert_type_oid_to_type(type_oid);
 
@@ -771,9 +771,10 @@ impl PgReplicationClient {
                     typ,
                     modifier,
                     nullable,
-                    ordinal_position,
-                    data_type,
-                    primary_key_position,
+                    primary,
+                    column_order,
+                    column_type,
+                    primary_key_order,
                     true, // Initially all columns are marked as replicated
                 ))
             }

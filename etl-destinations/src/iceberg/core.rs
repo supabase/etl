@@ -703,8 +703,13 @@ mod tests {
         let col_name = find_unique_column_name(&column_schemas, CDC_OPERATION_COLUMN_NAME);
         assert_eq!(col_name, CDC_OPERATION_COLUMN_NAME.to_string());
 
-        let column_schemas =
-            vec![ColumnSchema::new_basic("id".to_string(), Type::BOOL, -1, false, true)];
+        let column_schemas = vec![ColumnSchema::new_basic(
+            "id".to_string(),
+            Type::BOOL,
+            -1,
+            false,
+            true,
+        )];
         let col_name = find_unique_column_name(&column_schemas, CDC_OPERATION_COLUMN_NAME);
         assert_eq!(col_name, CDC_OPERATION_COLUMN_NAME.to_string());
 

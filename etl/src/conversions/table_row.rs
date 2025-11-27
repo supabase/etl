@@ -174,7 +174,13 @@ mod tests {
     }
 
     fn create_single_column_schema(name: &str, typ: Type) -> Vec<ColumnSchema> {
-        vec![ColumnSchema::new_basic(name.to_string(), typ, -1, false, false)]
+        vec![ColumnSchema::new_basic(
+            name.to_string(),
+            typ,
+            -1,
+            false,
+            false,
+        )]
     }
 
     #[test]

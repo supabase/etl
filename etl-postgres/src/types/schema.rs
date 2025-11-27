@@ -62,12 +62,14 @@ pub struct ColumnSchema {
     pub modifier: TypeModifier,
     /// Whether the column can contain NULL values.
     pub nullable: bool,
-    /// The 1-based ordinal position of the column in the table.
-    pub ordinal_position: i32,
+    /// Whether the column is part of the table's primary key.
+    pub primary: bool,
+    /// The 0-based order of the column in the table.
+    pub column_order: i32,
     /// The string representation of the Postgres data type (e.g., "text", "int4").
-    pub data_type: String,
-    /// The position of this column in the primary key (1-based), or None if not a primary key.
-    pub primary_key_position: Option<i32>,
+    pub column_type: String,
+    /// The order of this column in the primary key (1-based), or None if not a primary key.
+    pub primary_key_order: Option<i32>,
     /// Whether this column is currently being replicated. Columns are replicated by default
     /// when initially loaded, but may be marked as not replicated when a relation message
     /// indicates the column is not part of the publication's column list.
@@ -82,9 +84,10 @@ impl ColumnSchema {
         typ: Type,
         modifier: TypeModifier,
         nullable: bool,
-        ordinal_position: i32,
-        data_type: String,
-        primary_key_position: Option<i32>,
+        primary: bool,
+        column_order: i32,
+        column_type: String,
+        primary_key_order: Option<i32>,
         replicated: bool,
     ) -> ColumnSchema {
         Self {
@@ -92,9 +95,10 @@ impl ColumnSchema {
             typ,
             modifier,
             nullable,
-            ordinal_position,
-            data_type,
-            primary_key_position,
+            primary,
+            column_order,
+            column_type,
+            primary_key_order,
             replicated,
         }
     }
@@ -102,7 +106,7 @@ impl ColumnSchema {
     /// Creates a new [`ColumnSchema`] with default values for the new fields.
     ///
     /// This constructor is provided for backwards compatibility with existing code
-    /// that doesn't need to specify ordinal_position, data_type, primary_key_position,
+    /// that doesn't need to specify column_order, column_type, primary_key_order,
     /// or replicated. All columns created with this constructor default to replicated=true.
     pub fn new_basic(
         name: String,
@@ -116,16 +120,12 @@ impl ColumnSchema {
             typ: typ.clone(),
             modifier,
             nullable,
-            ordinal_position: 0,
-            data_type: typ.name().to_string(),
-            primary_key_position: if primary { Some(1) } else { None },
+            primary,
+            column_order: 0,
+            column_type: typ.name().to_string(),
+            primary_key_order: if primary { Some(1) } else { None },
             replicated: true,
         }
-    }
-
-    /// Returns whether this column is part of the table's primary key.
-    pub fn is_primary(&self) -> bool {
-        self.primary_key_position.is_some()
     }
 
     /// Compares two [`ColumnSchema`] instances, excluding the `nullable` field.
@@ -135,9 +135,9 @@ impl ColumnSchema {
     /// This method is used for comparing table schemas loaded via the initial table sync and the
     /// relation messages received via CDC. The reason for skipping the `nullable` field is that
     /// unfortunately Postgres doesn't seem to propagate nullable information of a column via
-    /// relation messages. The reason for skipping the `primary_key_position` field is that if
-    /// the replica identity of a table is set to full, the relation message sets all columns
-    /// as primary key, irrespective of what the actual primary key in the table is.
+    /// relation messages. The reason for skipping the `primary` field is that if the replica
+    /// identity of a table is set to full, the relation message sets all columns as primary
+    /// key, irrespective of what the actual primary key in the table is.
     pub fn partial_eq(&self, other: &ColumnSchema) -> bool {
         self.name == other.name && self.typ == other.typ && self.modifier == other.modifier
     }
@@ -257,7 +257,7 @@ impl TableSchema {
     ///
     /// This method checks if any column in the table is marked as part of the primary key.
     pub fn has_primary_keys(&self) -> bool {
-        self.column_schemas.iter().any(|cs| cs.is_primary())
+        self.column_schemas.iter().any(|cs| cs.primary)
     }
 
     /// Compares two [`TableSchema`] instances, excluding the [`ColumnSchema`]'s `nullable` field.

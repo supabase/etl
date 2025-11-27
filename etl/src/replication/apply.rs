@@ -11,17 +11,17 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::pin;
 use tokio_postgres::types::PgLsn;
-use tracing::log::warn;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
+use crate::bail;
 use crate::concurrency::shutdown::ShutdownRx;
 use crate::concurrency::signal::SignalRx;
 use crate::concurrency::stream::{TimeoutStream, TimeoutStreamResult};
 use crate::conversions::event::{
-    parse_event_from_begin_message, parse_event_from_commit_message,
-    parse_event_from_delete_message, parse_event_from_insert_message,
-    parse_event_from_relation_message, parse_event_from_truncate_message,
-    parse_event_from_update_message,
+    DDL_MESSAGE_PREFIX, parse_ddl_schema_change_message, parse_event_from_begin_message,
+    parse_event_from_commit_message, parse_event_from_delete_message,
+    parse_event_from_insert_message, parse_event_from_relation_message,
+    parse_event_from_truncate_message, parse_event_from_update_message,
 };
 use crate::destination::Destination;
 use crate::error::{ErrorKind, EtlResult};
@@ -35,7 +35,6 @@ use crate::replication::stream::EventsStream;
 use crate::state::table::TableReplicationError;
 use crate::store::schema::SchemaStore;
 use crate::types::{Event, PipelineId};
-use crate::bail;
 
 /// The minimum interval (in milliseconds) between consecutive status updates.
 ///
@@ -1040,14 +1039,51 @@ where
         LogicalReplicationMessage::Message(message_body) => {
             let prefix = message_body.prefix()?;
             let content = message_body.content()?;
-            
+
             debug!(
                 transactional = message_body.flags(),
                 prefix = prefix,
-                content = content,
                 "received logical message"
             );
-            
+
+            // Check if this is a DDL schema change message
+            if prefix == DDL_MESSAGE_PREFIX {
+                match parse_ddl_schema_change_message(content) {
+                    Ok(ddl_message) => {
+                        info!(
+                            table_id = ddl_message.table_id,
+                            table_name = %ddl_message.table_name,
+                            schema_name = %ddl_message.schema_name,
+                            event = %ddl_message.event,
+                            columns = ddl_message.columns.len(),
+                            "received DDL schema change message"
+                        );
+
+                        // Log the columns for debugging
+                        for col in &ddl_message.columns {
+                            debug!(
+                                column_name = %col.column_name,
+                                column_order = col.column_order,
+                                column_type = %col.column_type,
+                                nullable = col.nullable,
+                                primary_key_order = ?col.primary_key_order,
+                                "DDL message column"
+                            );
+                        }
+
+                        // TODO: In the future, update the stored schema here
+                        // For now, we just log the schema change message
+                    }
+                    Err(e) => {
+                        warn!(
+                            error = %e,
+                            content = content,
+                            "failed to parse DDL schema change message"
+                        );
+                    }
+                }
+            }
+
             Ok(HandleMessageResult::default())
         }
         LogicalReplicationMessage::Origin(_) => {
@@ -1201,19 +1237,17 @@ where
 
 /// Handles Postgres RELATION messages that describe table schemas.
 ///
-/// This function processes schema definition messages by validating that table
-/// schemas haven't changed unexpectedly during replication. Schema stability
-/// is critical for maintaining data consistency between source and destination.
+/// This function processes schema definition messages and updates the `replicated` flag
+/// on the stored table schema. Columns that appear in the relation message are marked
+/// as replicated; columns that don't appear are marked as not replicated.
 ///
-/// When schema changes are detected, the function creates appropriate error
-/// conditions and signals batch termination to prevent processing of events
-/// with mismatched schemas. This protection mechanism ensures data integrity
-/// by failing fast on incompatible schema evolution.
+/// This allows tracking which columns are actually being replicated when a publication
+/// uses column filtering.
 async fn handle_relation_message<S, T>(
     state: &mut ApplyLoopState,
     start_lsn: PgLsn,
     message: &protocol::RelationBody,
-    _schema_store: &S,
+    schema_store: &S,
     hook: &T,
 ) -> EtlResult<HandleMessageResult>
 where
@@ -1240,11 +1274,56 @@ where
     // Convert event from the protocol message.
     let event = parse_event_from_relation_message(start_lsn, remote_final_lsn, message)?;
 
+    // Extract the column names from the relation message
+    let replicated_column_names: Vec<String> = event
+        .table_schema
+        .column_schemas
+        .iter()
+        .map(|cs| cs.name.clone())
+        .collect();
+
     debug!(
         table_id = %table_id,
         columns = event.table_schema.column_schemas.len(),
+        replicated_columns = ?replicated_column_names,
         "received relation message"
     );
+
+    // Update the stored table schema's replicated flags based on the relation message columns.
+    // Columns in the relation message are marked as replicated, others are marked as not replicated.
+    if let Some(stored_schema_arc) = schema_store.get_table_schema(&table_id).await? {
+        // Clone the schema so we can mutate it
+        let mut stored_schema = (*stored_schema_arc).clone();
+
+        let previous_replicated: Vec<String> = stored_schema
+            .column_schemas
+            .iter()
+            .filter(|cs| cs.replicated)
+            .map(|cs| cs.name.clone())
+            .collect();
+
+        stored_schema.update_replicated_columns(&replicated_column_names);
+
+        let new_replicated: Vec<String> = stored_schema
+            .column_schemas
+            .iter()
+            .filter(|cs| cs.replicated)
+            .map(|cs| cs.name.clone())
+            .collect();
+
+        // Log if there was a change in replicated columns
+        if previous_replicated != new_replicated {
+            info!(
+                table_id = %table_id,
+                previous_replicated = ?previous_replicated,
+                new_replicated = ?new_replicated,
+                "updated replicated columns based on relation message"
+            );
+        }
+
+        // Store the updated schema
+        schema_store.store_table_schema(stored_schema).await?;
+    }
 
     Ok(HandleMessageResult::return_event(Event::Relation(event)))
 }

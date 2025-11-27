@@ -3,6 +3,7 @@ use etl_postgres::types::{
     ColumnSchema, TableId, TableName, TableSchema, convert_type_oid_to_type,
 };
 use postgres_replication::protocol;
+use serde::Deserialize;
 use std::sync::Arc;
 use tokio_postgres::types::PgLsn;
 
@@ -14,6 +15,48 @@ use crate::types::{
     TruncateEvent, UpdateEvent,
 };
 use crate::{bail, etl_error};
+
+/// The prefix used for DDL schema change messages emitted by the `etl.emit_schema_change_messages`
+/// event trigger. Messages with this prefix contain JSON-encoded schema information.
+pub const DDL_MESSAGE_PREFIX: &str = "supabase_etl_ddl";
+
+/// Represents a DDL schema change message emitted by Postgres event trigger.
+///
+/// This message is emitted when ALTER TABLE commands are executed on tables
+/// that are part of a publication.
+#[derive(Debug, Clone, Deserialize)]
+pub struct DdlSchemaChangeMessage {
+    /// The DDL command that triggered this message (e.g., "ALTER TABLE").
+    pub event: String,
+    /// The schema name of the affected table.
+    pub schema_name: String,
+    /// The name of the affected table.
+    pub table_name: String,
+    /// The OID of the affected table.
+    pub table_id: i64,
+    /// The columns of the table after the schema change.
+    pub columns: Vec<DdlColumnSchema>,
+}
+
+/// Represents a column schema in a DDL schema change message.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize)]
+pub struct DdlColumnSchema {
+    /// The name of the column.
+    pub column_name: String,
+    /// The 0-based order of the column in the table.
+    pub column_order: i32,
+    /// The formatted Postgres type string (e.g., "integer", "text").
+    pub column_type: String,
+    /// The OID of the column's data type.
+    pub type_oid: u32,
+    /// Type-specific modifier value (e.g., length for varchar).
+    pub type_modifier: i32,
+    /// Whether the column can contain NULL values.
+    pub nullable: bool,
+    /// The order of this column in the primary key (1-based), or null if not a primary key.
+    pub primary_key_order: Option<i32>,
+}
 
 /// Creates a [`BeginEvent`] from Postgres protocol data.
 ///
@@ -344,4 +387,49 @@ pub fn convert_tuple_to_row(
     }
 
     Ok(TableRow { values })
+}
+
+/// Parses a DDL schema change message from its JSON content.
+///
+/// Returns the parsed message if successful, or an error if the JSON is malformed.
+pub fn parse_ddl_schema_change_message(content: &str) -> EtlResult<DdlSchemaChangeMessage> {
+    serde_json::from_str(content).map_err(|e| {
+        etl_error!(
+            ErrorKind::ConversionError,
+            "Failed to parse DDL schema change message",
+            format!("Invalid JSON in DDL message: {}", e)
+        )
+    })
+}
+
+/// Converts a [`DdlSchemaChangeMessage`] to a [`TableSchema`].
+///
+/// This is used to update the stored table schema when a DDL change is detected.
+#[allow(dead_code)]
+pub fn ddl_message_to_table_schema(message: &DdlSchemaChangeMessage) -> TableSchema {
+    let table_name = TableName::new(message.schema_name.clone(), message.table_name.clone());
+    let column_schemas = message
+        .columns
+        .iter()
+        .map(|col| {
+            let typ = convert_type_oid_to_type(col.type_oid);
+            ColumnSchema::new(
+                col.column_name.clone(),
+                typ,
+                col.type_modifier,
+                col.nullable,
+                col.primary_key_order.is_some(),
+                col.column_order,
+                col.column_type.clone(),
+                col.primary_key_order,
+                true, // Default to replicated; will be updated by relation messages
+            )
+        })
+        .collect();
+
+    TableSchema::new(
+        TableId::new(message.table_id as u32),
+        table_name,
+        column_schemas,
+    )
 }

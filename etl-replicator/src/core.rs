@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 
-use crate::migrations::migrate_state_store;
 use etl::destination::memory::MemoryDestination;
 use etl::pipeline::Pipeline;
 use etl::store::both::postgres::PostgresStore;
@@ -38,11 +37,11 @@ pub async fn start_replicator_with_config(
     log_config(&replicator_config);
 
     // We initialize the state store, which for the replicator is not configurable.
+    // Migrations are run by the pipeline during startup.
     let state_store = init_store(
         replicator_config.pipeline.id,
         replicator_config.pipeline.pg_connection.clone(),
-    )
-    .await?;
+    );
 
     // For each destination, we start the pipeline. This is more verbose due to static dispatch, but
     // we prefer more performance at the cost of ergonomics.
@@ -258,17 +257,15 @@ fn log_batch_config(config: &BatchConfig) {
     );
 }
 
-/// Initializes the state store with migrations.
+/// Initializes the state store.
 ///
-/// Runs necessary database migrations on the state store and creates a
-/// [`PostgresStore`] instance for the given pipeline and connection configuration.
-async fn init_store(
+/// Creates a [`PostgresStore`] instance for the given pipeline and connection configuration.
+/// Migrations are handled by the pipeline during startup.
+fn init_store(
     pipeline_id: PipelineId,
     pg_connection_config: PgConnectionConfig,
-) -> anyhow::Result<impl StateStore + SchemaStore + CleanupStore + Clone> {
-    migrate_state_store(&pg_connection_config).await?;
-
-    Ok(PostgresStore::new(pipeline_id, pg_connection_config))
+) -> impl StateStore + SchemaStore + CleanupStore + Clone {
+    PostgresStore::new(pipeline_id, pg_connection_config)
 }
 
 /// Starts a pipeline and handles graceful shutdown signals.

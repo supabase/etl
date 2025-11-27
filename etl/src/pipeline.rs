@@ -8,6 +8,7 @@ use crate::concurrency::shutdown::{ShutdownTx, create_shutdown_channel};
 use crate::destination::Destination;
 use crate::error::{ErrorKind, EtlResult};
 use crate::metrics::register_metrics;
+use crate::migrations::migrate_state_store;
 use crate::replication::client::PgReplicationClient;
 use crate::state::table::TableReplicationPhase;
 use crate::store::cleanup::CleanupStore;
@@ -112,14 +113,25 @@ where
 
     /// Starts the pipeline and begins replication processing.
     ///
-    /// This method initializes the connection to Postgres, sets up table mappings and schemas,
-    /// creates the worker pool for table synchronization, and starts the apply worker for
-    /// processing replication stream events.
+    /// This method runs any pending migrations, initializes the connection to Postgres,
+    /// sets up table mappings and schemas, creates the worker pool for table synchronization,
+    /// and starts the apply worker for processing replication stream events.
     pub async fn start(&mut self) -> EtlResult<()> {
         info!(
             "starting pipeline for publication '{}' with id {}",
             self.config.publication_name, self.config.id
         );
+
+        // Run migrations before starting the pipeline.
+        migrate_state_store(&self.config.pg_connection)
+            .await
+            .map_err(|e| {
+                crate::etl_error!(
+                    ErrorKind::SourceError,
+                    "Failed to run state store migrations",
+                    format!("{}", e)
+                )
+            })?;
 
         // We create the first connection to Postgres.
         let replication_client =

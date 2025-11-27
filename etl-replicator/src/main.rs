@@ -19,7 +19,6 @@ use tracing::{error, info, warn};
 mod config;
 mod core;
 mod feature_flags;
-mod migrations;
 mod notification;
 
 /// The name of the environment variable which contains version information for this replicator.

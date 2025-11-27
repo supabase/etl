@@ -491,7 +491,7 @@ impl BigQueryClient {
     fn add_primary_key_clause(column_schemas: &[ColumnSchema]) -> EtlResult<String> {
         let identity_columns: Vec<String> = column_schemas
             .iter()
-            .filter(|s| s.is_primary())
+            .filter(|s| s.primary)
             .map(|c| {
                 Self::sanitize_identifier(&c.name, "BigQuery primary key column")
                     .map(|name| format!("`{name}`"))
@@ -848,11 +848,13 @@ mod tests {
 
     #[test]
     fn test_column_spec() {
-        let column_schema = ColumnSchema::new_basic("test_col".to_string(), Type::TEXT, -1, true, false);
+        let column_schema =
+            ColumnSchema::new_basic("test_col".to_string(), Type::TEXT, -1, true, false);
         let spec = BigQueryClient::column_spec(&column_schema).expect("column spec generation");
         assert_eq!(spec, "`test_col` string");
 
-        let not_null_column = ColumnSchema::new_basic("id".to_string(), Type::INT4, -1, false, true);
+        let not_null_column =
+            ColumnSchema::new_basic("id".to_string(), Type::INT4, -1, false, true);
         let not_null_spec =
             BigQueryClient::column_spec(&not_null_column).expect("not null column spec");
         assert_eq!(not_null_spec, "`id` int64 not null");
@@ -865,7 +867,8 @@ mod tests {
 
     #[test]
     fn test_column_spec_escapes_backticks() {
-        let column_schema = ColumnSchema::new_basic("pwn`name".to_string(), Type::TEXT, -1, true, false);
+        let column_schema =
+            ColumnSchema::new_basic("pwn`name".to_string(), Type::TEXT, -1, true, false);
 
         let spec = BigQueryClient::column_spec(&column_schema).expect("escaped column spec");
 
