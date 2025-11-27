@@ -18,7 +18,10 @@ use std::ops::DerefMut;
 use thiserror::Error;
 
 /// Maximum number of pipelines allowed per tenant.
-pub const MAX_PIPELINES_PER_TENANT: i64 = 3;
+///
+/// For now, we keep the maximum to 1, this way, we give us a simpler surface area for breaking changes
+/// to the `etl` schema in the source database since only one pipeline will use it.
+pub const MAX_PIPELINES_PER_TENANT: i64 = 1;
 
 pub struct Pipeline {
     pub id: i64,
