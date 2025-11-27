@@ -318,7 +318,10 @@ fn parse_column_schema(row: &PgRow) -> ColumnSchema {
     let primary_key: bool = row.get("primary_key");
     let column_order: i32 = row.get("column_order");
     let primary_key_order: Option<i32> = row.get("primary_key_order");
-    // Default to true for backwards compatibility with existing rows.
+    // Default to true for backwards compatibility with existing state store rows
+    // that were created before the `replicated` column was added. New rows will
+    // have the explicit value stored, which defaults to false until a relation
+    // message activates the column.
     let replicated: Option<bool> = row.get("replicated");
     let replicated = replicated.unwrap_or(true);
 

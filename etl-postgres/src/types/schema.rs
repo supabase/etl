@@ -107,7 +107,8 @@ impl ColumnSchema {
     ///
     /// This constructor is provided for backwards compatibility with existing code
     /// that doesn't need to specify column_order, column_type, primary_key_order,
-    /// or replicated. All columns created with this constructor default to replicated=true.
+    /// or replicated. All columns created with this constructor default to replicated=false,
+    /// since columns are only activated when a relation message is received.
     pub fn new_basic(
         name: String,
         typ: Type,
@@ -124,7 +125,7 @@ impl ColumnSchema {
             column_order: 0,
             column_type: typ.name().to_string(),
             primary_key_order: if primary { Some(1) } else { None },
-            replicated: true,
+            replicated: false,
         }
     }
 
@@ -288,10 +289,14 @@ impl TableSchema {
     }
 
     /// Returns only the column schemas that are currently marked as replicated.
-    pub fn replicated_column_schemas(&self) -> Vec<&ColumnSchema> {
+    ///
+    /// This is used when processing tuple data from logical replication, as the
+    /// tuple data only contains values for columns included in the publication.
+    pub fn replicated_column_schemas(&self) -> Vec<ColumnSchema> {
         self.column_schemas
             .iter()
             .filter(|cs| cs.replicated)
+            .cloned()
             .collect()
     }
 }

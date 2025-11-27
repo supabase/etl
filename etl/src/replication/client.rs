@@ -775,7 +775,10 @@ impl PgReplicationClient {
                     column_order,
                     column_type,
                     primary_key_order,
-                    true, // Initially all columns are marked as replicated
+                    // Columns default to not replicated. During CDC, relation messages
+                    // will indicate which columns are actually being replicated, and
+                    // update_replicated_columns() will mark those as replicated = true.
+                    false,
                 ))
             }
         }
