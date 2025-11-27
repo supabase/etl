@@ -5,12 +5,12 @@ x-lakekeeper-env: &lakekeeper-env
     - LAKEKEEPER__PG_DATABASE_URL_WRITE=postgresql://lakekeeper-postgres:lakekeeper-postgres@lakekeeper-postgres:5432/iceberg-catalog
     - RUST_LOG=info
 
-name: etl-pg-${POSTGRES_VERSION:-17}
+name: etl-pg-${POSTGRES_VERSION:-18}
 
 services:
   # Start Postgres
   postgres:
-    image: postgres:${POSTGRES_VERSION:-17}
+    image: postgres:${POSTGRES_VERSION:-18}
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
@@ -33,7 +33,7 @@ services:
       retries: 5
 
   lakekeeper-postgres:
-      image: postgres:17
+      image: postgres:18
       environment:
         POSTGRES_USER: ${LAKEKEEPER_POSTGRES_USER:-lakekeeper-postgres}
         POSTGRES_PASSWORD: ${LAKEKEEPER_POSTGRES_PASSWORD:-lakekeeper-postgres}

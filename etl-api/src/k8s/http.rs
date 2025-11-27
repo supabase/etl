@@ -46,7 +46,7 @@ const DATA_PLANE_NAMESPACE: &str = "etl-data-plane";
 /// Secret storing the Logflare API key.
 const LOGFLARE_SECRET_NAME: &str = "replicator-logflare-api-key";
 /// Docker image used for the Vector sidecar.
-const VECTOR_IMAGE_NAME: &str = "timberio/vector:0.46.1-distroless-libc";
+const VECTOR_IMAGE_NAME: &str = "timberio/vector:0.51.1-distroless-libc";
 /// ConfigMap name containing the Vector configuration.
 const VECTOR_CONFIG_MAP_NAME: &str = "replicator-vector-config";
 /// Volume name for the replicator config file.

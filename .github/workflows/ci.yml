@@ -24,19 +24,17 @@ jobs:
     strategy:
       matrix:
         check: [fmt, clippy, sort]
+        rust: ["1.88", stable]
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0
 
-      - name: Set up Rust
-        uses: dtolnay/rust-toolchain@1.88.0
+      - name: Set up Rust ${{ matrix.rust }}
+        uses: actions-rust-lang/setup-rust-toolchain@1780873c7b576612439a134613cc4cc74ce5538c # v1.15.2
         with:
           components: ${{ matrix.check == 'fmt' && 'rustfmt' || 'clippy' }}
-
-      - name: Cache Cargo
-        uses: Swatinem/rust-cache@v2
-        with:
-          key: ${{ matrix.check }}
+          toolchain: ${{ matrix.rust }}
+          cache-key: ${{ matrix.check }}
 
       - name: Install cargo-sort
         if: matrix.check == 'sort'
@@ -63,18 +61,17 @@ jobs:
       contents: read
     strategy:
       matrix:
-        postgres_version: [17, 16, 15, 14]
+        postgres_version: [18, 17, 16, 15, 14]
+        rust: ["1.88", stable]
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0
 
-      - name: Set up Rust
-        uses: dtolnay/rust-toolchain@1.88.0
-
-      - name: Cache Cargo
-        uses: Swatinem/rust-cache@v2
+      - name: Set up Rust ${{ matrix.rust }}
+        uses: actions-rust-lang/setup-rust-toolchain@1780873c7b576612439a134613cc4cc74ce5538c # v1.15.2
         with:
-          key: test-partial
+          toolchain: ${{ matrix.rust }}
+          cache-key: test-partial
 
       - name: Start Docker Compose (Postgres ${{ matrix.postgres_version }})
         run: |
@@ -122,18 +119,17 @@ jobs:
       id-token: write
     strategy:
       matrix:
-        postgres_version: [17, 16, 15, 14]
+        postgres_version: [18, 17, 16, 15, 14]
+        rust: ["1.88", stable]
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0
 
-      - name: Set up Rust
-        uses: dtolnay/rust-toolchain@1.88.0
-
-      - name: Cache Cargo
-        uses: Swatinem/rust-cache@v2
+      - name: Set up Rust ${{ matrix.rust }}
+        uses: actions-rust-lang/setup-rust-toolchain@1780873c7b576612439a134613cc4cc74ce5538c # v1.15.2
         with:
-          key: test-full
+          toolchain: ${{ matrix.rust }}
+          cache-key: test-full
 
       - name: Start Docker Compose (Postgres ${{ matrix.postgres_version }})
         run: |
@@ -158,7 +154,9 @@ jobs:
           ./etl-api/scripts/run_migrations.sh
 
       - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@cargo-llvm-cov
+        uses: taiki-e/install-action@1ee706eb04986370fc60419ba172594c51067f29 # v2.62.58
+        with:
+          tool: cargo-llvm-cov
 
       - name: Set up BigQuery Credentials
         run: |
@@ -175,7 +173,7 @@ jobs:
             --lcov --output-path lcov.info
 
       - name: Upload Coverage to Coveralls
-        uses: coverallsapp/github-action@v2
+        uses: coverallsapp/github-action@648a8eb78e6d50909eff900e4ec85cab4524a45b # v2.3.6
         with:
           fail-on-error: false
           github-token: ${{ secrets.GITHUB_TOKEN }}
