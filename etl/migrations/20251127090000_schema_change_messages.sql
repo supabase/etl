@@ -106,7 +106,7 @@ begin
                        'column_name', s.column_name,
                        'column_order', s.column_order,
                        'column_type', s.column_type,
-                       'type_oid', s.type_oid,
+                       'type_oid', s.type_oid::bigint,
                        'type_modifier', s.type_modifier,
                        'nullable', s.nullable,
                        'primary_key_order', s.primary_key_order

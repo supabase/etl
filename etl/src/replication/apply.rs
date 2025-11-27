@@ -1023,7 +1023,7 @@ where
             handle_truncate_message(state, start_lsn, truncate_body, hook).await
         }
         LogicalReplicationMessage::Message(message_body) => {
-            handle_logical_message(message_body).await
+            handle_logical_message(state, message_body, hook).await
         }
         message => {
             debug!("received unsupported message: {:?}", message);
@@ -1246,14 +1246,16 @@ where
             .collect();
 
         info!(
-                table_id = %table_id,
-                previous_replicated = ?previous_replicated,
-                new_replicated = ?new_replicated,
-                "updated replicated columns based on relation message"
-            );
+            table_id = %table_id,
+            previous_replicated = ?previous_replicated,
+            new_replicated = ?new_replicated,
+            "updated replicated columns based on relation message"
+        );
 
         // Store the updated schema
-        schema_store.store_table_schema(updated_table_schema).await?;
+        schema_store
+            .store_table_schema(updated_table_schema)
+            .await?;
     }
 
     Ok(HandleMessageResult::return_event(Event::Relation(event)))
@@ -1411,7 +1413,14 @@ where
 /// Processes `pg_logical_emit_message` messages from the replication stream.
 /// Currently handles DDL schema change messages with the `supabase_etl_ddl` prefix
 /// for tracking schema changes.
-async fn handle_logical_message(message: &protocol::MessageBody) -> EtlResult<HandleMessageResult> {
+async fn handle_logical_message<T>(
+    state: &ApplyLoopState,
+    message: &protocol::MessageBody,
+    hook: &T,
+) -> EtlResult<HandleMessageResult>
+where
+    T: ApplyLoopHook,
+{
     let prefix = message.prefix()?;
     let content = message.content()?;
 
@@ -1425,6 +1434,25 @@ async fn handle_logical_message(message: &protocol::MessageBody) -> EtlResult<Ha
     if prefix == DDL_MESSAGE_PREFIX {
         match parse_ddl_schema_change_message(content) {
             Ok(ddl_message) => {
+                let table_id = TableId::new(ddl_message.table_id as u32);
+
+                // For transactional messages, check if we should apply changes for this table.
+                // Non-transactional messages (flags == 0) are processed regardless.
+                if message.flags() == 1 {
+                    if let Some(remote_final_lsn) = state.remote_final_lsn {
+                        if !hook
+                            .should_apply_changes(table_id, remote_final_lsn)
+                            .await?
+                        {
+                            debug!(
+                                table_id = %table_id,
+                                "skipping DDL message for table not being replicated"
+                            );
+                            return Ok(HandleMessageResult::no_event());
+                        }
+                    }
+                }
+
                 info!(
                     table_id = ddl_message.table_id,
                     table_name = %ddl_message.table_name,
