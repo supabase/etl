@@ -164,13 +164,15 @@ where
     let table_id = update_body.rel_id();
     let table_schema = get_table_schema(schema_store, TableId::new(table_id)).await?;
 
+    let replicated_column_schemas = table_schema.replicated_column_schemas(replicated_columns);
+
     // We try to extract the old tuple by either taking the entire old tuple or the key of the old
     // tuple.
     let is_key = update_body.old_tuple().is_none();
     let old_tuple = update_body.old_tuple().or(update_body.key_tuple());
     let old_table_row = match old_tuple {
         Some(identity) => Some(convert_tuple_to_row(
-            table_schema.replicated_column_schemas(replicated_columns),
+            replicated_column_schemas.clone(),
             identity.tuple_data(),
             &mut None,
             true,
@@ -180,7 +182,7 @@ where
 
     let mut old_table_row_mut = old_table_row;
     let table_row = convert_tuple_to_row(
-        table_schema.replicated_column_schemas(replicated_columns),
+        replicated_column_schemas.clone(),
         update_body.new_tuple().tuple_data(),
         &mut old_table_row_mut,
         false,

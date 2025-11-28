@@ -52,7 +52,7 @@ impl<I> TableCopyStream<I> {
 
 impl<'a, I> Stream for TableCopyStream<I>
 where
-    I: Iterator<Item = &'a ColumnSchema>,
+    I: Iterator<Item = &'a ColumnSchema> + Clone,
 {
     type Item = EtlResult<TableRow>;
 
@@ -74,7 +74,7 @@ where
 
                 // CONVERSION PHASE: Transform raw bytes into structured TableRow
                 // This is where most errors occur due to data format or type issues
-                match parse_table_row_from_postgres_copy_bytes(&row, this.column_schemas) {
+                match parse_table_row_from_postgres_copy_bytes(&row, this.column_schemas.clone()) {
                     Ok(row) => Poll::Ready(Some(Ok(row))),
                     Err(err) => {
                         // CONVERSION ERROR: Preserve full error context for debugging

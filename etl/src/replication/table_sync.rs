@@ -1,6 +1,6 @@
 use etl_config::shared::PipelineConfig;
 use etl_postgres::replication::slots::EtlReplicationSlot;
-use etl_postgres::types::TableId;
+use etl_postgres::types::{ColumnSchema, TableId};
 use futures::StreamExt;
 use metrics::histogram;
 use std::sync::Arc;
@@ -217,18 +217,20 @@ where
                     Some(&config.publication_name),
                 )
                 .await?;
+            let replicated_column_schemas =
+                table_schema.replicated_column_schemas(&replicated_column_names);
 
             // We create the copy table stream on the replicated columns.
             let table_copy_stream = transaction
                 .get_table_copy_stream(
                     table_id,
-                    table_schema.replicated_column_schemas(&replicated_column_names),
+                    replicated_column_schemas.clone(),
                     Some(&config.publication_name),
                 )
                 .await?;
             let table_copy_stream = TableCopyStream::wrap(
                 table_copy_stream,
-                table_schema.replicated_column_schemas(&replicated_column_names),
+                replicated_column_schemas.clone(),
                 pipeline_id,
             );
             let table_copy_stream = TimeoutBatchStream::wrap(

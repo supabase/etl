@@ -246,10 +246,14 @@ impl TableSchema {
     /// tuple data only contains values for columns included in the publication.
     /// The `replicated_columns` set contains the names of columns that are being
     /// replicated according to relation messages.
+    ///
+    /// The iterator is clonable, since it can be used several times consuming from the same
+    /// original list of column schemas. The important thing is to be aware of when the iterator
+    /// is cloned since if you clone it after it has been driven, the clone will keep the progress.
     pub fn replicated_column_schemas<'a>(
         &'a self,
         replicated_columns: &'a HashSet<String>,
-    ) -> impl Iterator<Item = &'a ColumnSchema> {
+    ) -> impl Iterator<Item = &'a ColumnSchema> + Clone {
         self.column_schemas
             .iter()
             .filter(|cs| replicated_columns.contains(&cs.name))
