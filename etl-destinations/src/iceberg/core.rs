@@ -11,8 +11,8 @@ use etl::error::{ErrorKind, EtlResult};
 use etl::store::schema::SchemaStore;
 use etl::store::state::StateStore;
 use etl::types::{
-    Cell, ColumnSchema, Event, TableId, TableName, TableRow, TableSchema, Type,
-    generate_sequence_number,
+    Cell, ColumnSchema, Event, ReplicatedTableSchema, TableId, TableName, TableRow, TableSchema,
+    Type, generate_sequence_number,
 };
 use etl::{bail, etl_error};
 use tokio::sync::Mutex;
@@ -322,8 +322,9 @@ where
                             .push(IcebergOperationType::Insert.into());
                         insert.table_row.values.push(Cell::String(sequence_number));
 
+                        let table_id = insert.replicated_table_schema.id();
                         let table_rows: &mut Vec<TableRow> =
-                            table_id_to_table_rows.entry(insert.table_id).or_default();
+                            table_id_to_table_rows.entry(table_id).or_default();
                         table_rows.push(insert.table_row);
                     }
                     Event::Update(mut update) => {
@@ -335,8 +336,9 @@ where
                             .push(IcebergOperationType::Update.into());
                         update.table_row.values.push(Cell::String(sequence_number));
 
+                        let table_id = update.replicated_table_schema.id();
                         let table_rows: &mut Vec<TableRow> =
-                            table_id_to_table_rows.entry(update.table_id).or_default();
+                            table_id_to_table_rows.entry(table_id).or_default();
                         table_rows.push(update.table_row);
                     }
                     Event::Delete(delete) => {
@@ -352,8 +354,9 @@ where
                             .push(IcebergOperationType::Delete.into());
                         old_table_row.values.push(Cell::String(sequence_number));
 
+                        let table_id = delete.replicated_table_schema.id();
                         let table_rows: &mut Vec<TableRow> =
-                            table_id_to_table_rows.entry(delete.table_id).or_default();
+                            table_id_to_table_rows.entry(table_id).or_default();
                         table_rows.push(old_table_row);
                     }
                     _ => {
@@ -593,7 +596,11 @@ where
     ///
     /// Removes all data from the target Iceberg table while preserving
     /// the table schema structure for continued CDC operations.
-    async fn truncate_table(&self, table_id: TableId) -> EtlResult<()> {
+    async fn truncate_table(
+        &self,
+        table_id: TableId,
+        _replicated_table_schema: &ReplicatedTableSchema,
+    ) -> EtlResult<()> {
         self.truncate_table(table_id, false).await?;
 
         Ok(())
@@ -606,10 +613,11 @@ where
     /// as upsert operations with generated sequence numbers.
     async fn write_table_rows(
         &self,
-        table_id: TableId,
+        replicated_table_schema: &ReplicatedTableSchema,
         table_rows: Vec<TableRow>,
     ) -> EtlResult<()> {
-        self.write_table_rows(table_id, table_rows).await?;
+        self.write_table_rows(replicated_table_schema.id(), table_rows)
+            .await?;
 
         Ok(())
     }

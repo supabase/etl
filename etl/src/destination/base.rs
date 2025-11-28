@@ -1,4 +1,4 @@
-use etl_postgres::types::TableId;
+use etl_postgres::types::{ReplicatedTableSchema, TableId};
 use std::future::Future;
 
 use crate::error::EtlResult;
@@ -23,7 +23,11 @@ pub trait Destination {
     /// destination table starts from a clean state before bulk loading. The operation
     /// should be atomic and handle cases where the table and its states may not exist, since
     /// truncation is unconditionally called before a table is copied.
-    fn truncate_table(&self, table_id: TableId) -> impl Future<Output = EtlResult<()>> + Send;
+    fn truncate_table(
+        &self,
+        table_id: TableId,
+        replicated_table_schema: &ReplicatedTableSchema,
+    ) -> impl Future<Output = EtlResult<()>> + Send;
 
     /// Writes a batch of table rows to the destination.
     ///
@@ -37,7 +41,7 @@ pub trait Destination {
     /// prepare the initial tables before starting streaming.
     fn write_table_rows(
         &self,
-        table_id: TableId,
+        replicated_table_schema: &ReplicatedTableSchema,
         table_rows: Vec<TableRow>,
     ) -> impl Future<Output = EtlResult<()>> + Send;
 
@@ -49,5 +53,8 @@ pub trait Destination {
     ///
     /// Event ordering within a transaction is guaranteed, and transactions are ordered according to
     /// their commit time.
+    ///
+    /// Each [`Event`] that involves data changes (Insert/Update/Delete) contains its own
+    /// [`ReplicatedTableSchema`] which destinations can use to understand the schema for that event.
     fn write_events(&self, events: Vec<Event>) -> impl Future<Output = EtlResult<()>> + Send;
 }

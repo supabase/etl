@@ -1308,7 +1308,7 @@ where
 
     // Convert event from the protocol message.
     let event =
-        parse_event_from_insert_message(&replicated_schema, start_lsn, remote_final_lsn, message)?;
+        parse_event_from_insert_message(replicated_schema, start_lsn, remote_final_lsn, message)?;
 
     Ok(HandleMessageResult::return_event(Event::Insert(event)))
 }
@@ -1360,7 +1360,7 @@ where
 
     // Convert event from the protocol message.
     let event =
-        parse_event_from_update_message(&replicated_schema, start_lsn, remote_final_lsn, message)?;
+        parse_event_from_update_message(replicated_schema, start_lsn, remote_final_lsn, message)?;
 
     Ok(HandleMessageResult::return_event(Event::Update(event)))
 }
@@ -1412,7 +1412,7 @@ where
 
     // Convert event from the protocol message.
     let event =
-        parse_event_from_delete_message(&replicated_schema, start_lsn, remote_final_lsn, message)?;
+        parse_event_from_delete_message(replicated_schema, start_lsn, remote_final_lsn, message)?;
 
     Ok(HandleMessageResult::return_event(Event::Delete(event)))
 }

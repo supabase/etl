@@ -115,13 +115,13 @@ fn parse_column_name_from_column(column: &protocol::Column) -> EtlResult<String>
 /// This function processes an insert operation from the replication stream
 /// and constructs an insert event with the new row data ready for ETL processing.
 pub fn parse_event_from_insert_message(
-    replicated_schema: &ReplicatedTableSchema,
+    replicated_table_schema: ReplicatedTableSchema,
     start_lsn: PgLsn,
     commit_lsn: PgLsn,
     insert_body: &protocol::InsertBody,
 ) -> EtlResult<InsertEvent> {
     let table_row = convert_tuple_to_row(
-        replicated_schema.column_schemas(),
+        replicated_table_schema.column_schemas(),
         insert_body.tuple().tuple_data(),
         &mut None,
         false,
@@ -130,7 +130,7 @@ pub fn parse_event_from_insert_message(
     Ok(InsertEvent {
         start_lsn,
         commit_lsn,
-        table_id: replicated_schema.id(),
+        replicated_table_schema,
         table_row,
     })
 }
@@ -142,7 +142,7 @@ pub fn parse_event_from_insert_message(
 /// the complete row or just the key columns, depending on the table's
 /// `REPLICA IDENTITY` setting in Postgres.
 pub fn parse_event_from_update_message(
-    replicated_schema: &ReplicatedTableSchema,
+    replicated_table_schema: ReplicatedTableSchema,
     start_lsn: PgLsn,
     commit_lsn: PgLsn,
     update_body: &protocol::UpdateBody,
@@ -153,7 +153,7 @@ pub fn parse_event_from_update_message(
     let old_tuple = update_body.old_tuple().or(update_body.key_tuple());
     let old_table_row = match old_tuple {
         Some(identity) => Some(convert_tuple_to_row(
-            replicated_schema.column_schemas(),
+            replicated_table_schema.column_schemas(),
             identity.tuple_data(),
             &mut None,
             true,
@@ -163,7 +163,7 @@ pub fn parse_event_from_update_message(
 
     let mut old_table_row_mut = old_table_row;
     let table_row = convert_tuple_to_row(
-        replicated_schema.column_schemas(),
+        replicated_table_schema.column_schemas(),
         update_body.new_tuple().tuple_data(),
         &mut old_table_row_mut,
         false,
@@ -174,7 +174,7 @@ pub fn parse_event_from_update_message(
     Ok(UpdateEvent {
         start_lsn,
         commit_lsn,
-        table_id: replicated_schema.id(),
+        replicated_table_schema,
         table_row,
         old_table_row,
     })
@@ -187,7 +187,7 @@ pub fn parse_event_from_update_message(
 /// either the complete row or just the key columns, depending on the table's
 /// `REPLICA IDENTITY` setting in Postgres.
 pub fn parse_event_from_delete_message(
-    replicated_schema: &ReplicatedTableSchema,
+    replicated_table_schema: ReplicatedTableSchema,
     start_lsn: PgLsn,
     commit_lsn: PgLsn,
     delete_body: &protocol::DeleteBody,
@@ -198,7 +198,7 @@ pub fn parse_event_from_delete_message(
     let old_tuple = delete_body.old_tuple().or(delete_body.key_tuple());
     let old_table_row = match old_tuple {
         Some(identity) => Some(convert_tuple_to_row(
-            replicated_schema.column_schemas(),
+            replicated_table_schema.column_schemas(),
             identity.tuple_data(),
             &mut None,
             true,
@@ -210,7 +210,7 @@ pub fn parse_event_from_delete_message(
     Ok(DeleteEvent {
         start_lsn,
         commit_lsn,
-        table_id: replicated_schema.id(),
+        replicated_table_schema,
         old_table_row,
     })
 }

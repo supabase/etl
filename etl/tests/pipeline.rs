@@ -627,7 +627,7 @@ async fn table_copy_and_sync_streams_new_data() {
     // Build expected events for verification
     let expected_users_inserts = build_expected_users_inserts(
         11,
-        database_schema.users_schema().id,
+        &database_schema.users_schema(),
         vec![
             ("user_11", 11),
             ("user_12", 12),
@@ -637,7 +637,7 @@ async fn table_copy_and_sync_streams_new_data() {
     );
     let expected_orders_inserts = build_expected_orders_inserts(
         11,
-        database_schema.orders_schema().id,
+        &database_schema.orders_schema(),
         vec![
             "description_11",
             "description_12",
@@ -735,7 +735,7 @@ async fn table_sync_streams_new_data_with_batch_timeout_expired() {
     // Build expected events for verification
     let expected_users_inserts = build_expected_users_inserts(
         1,
-        database_schema.users_schema().id,
+        &database_schema.users_schema(),
         vec![
             ("user_1", 1),
             ("user_2", 2),

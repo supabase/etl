@@ -23,9 +23,9 @@ pub fn group_events_by_type_and_table_id(
         let event_type = EventType::from(event);
         // This grouping only works on simple DML operations.
         let table_ids = match event {
-            Event::Insert(event) => vec![event.table_id],
-            Event::Update(event) => vec![event.table_id],
-            Event::Delete(event) => vec![event.table_id],
+            Event::Insert(event) => vec![event.replicated_table_schema.id()],
+            Event::Update(event) => vec![event.replicated_table_schema.id()],
+            Event::Delete(event) => vec![event.replicated_table_schema.id()],
             Event::Truncate(event) => event
                 .rel_ids
                 .iter()
@@ -55,6 +55,34 @@ pub fn check_events_count(events: &[Event], conditions: Vec<(EventType, u64)>) -
     })
 }
 
+/// Compares two events for equality in test contexts.
+///
+/// This function compares events based on their key fields, ignoring LSN values since those
+/// may vary between pipeline runs.
+fn events_equal(a: &Event, b: &Event) -> bool {
+    match (a, b) {
+        (Event::Begin(a), Event::Begin(b)) => a == b,
+        (Event::Commit(a), Event::Commit(b)) => a == b,
+        (Event::Relation(a), Event::Relation(b)) => a == b,
+        (Event::Truncate(a), Event::Truncate(b)) => a == b,
+        (Event::Insert(a), Event::Insert(b)) => {
+            a.replicated_table_schema.id() == b.replicated_table_schema.id()
+                && a.table_row == b.table_row
+        }
+        (Event::Update(a), Event::Update(b)) => {
+            a.replicated_table_schema.id() == b.replicated_table_schema.id()
+                && a.table_row == b.table_row
+                && a.old_table_row == b.old_table_row
+        }
+        (Event::Delete(a), Event::Delete(b)) => {
+            a.replicated_table_schema.id() == b.replicated_table_schema.id()
+                && a.old_table_row == b.old_table_row
+        }
+        (Event::Unsupported, Event::Unsupported) => true,
+        _ => false,
+    }
+}
+
 /// Returns a new Vec of events with duplicates removed.
 ///
 /// Events that are not tied to a specific row (Begin/Commit/Relation/Truncate/Unsupported)
@@ -69,7 +97,7 @@ pub fn check_events_count(events: &[Event], conditions: Vec<(EventType, u64)>) -
 pub fn deduplicate_events(events: &[Event]) -> Vec<Event> {
     let mut result: Vec<Event> = Vec::with_capacity(events.len());
     for e in events.iter().cloned() {
-        if !result.contains(&e) {
+        if !result.iter().any(|existing| events_equal(existing, &e)) {
             result.push(e);
         }
     }

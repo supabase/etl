@@ -5,7 +5,7 @@ use tracing::info;
 
 use crate::destination::Destination;
 use crate::error::EtlResult;
-use crate::types::{Event, TableId, TableRow};
+use crate::types::{Event, ReplicatedTableSchema, TableId, TableRow};
 
 #[derive(Debug)]
 struct Inner {
@@ -80,7 +80,11 @@ impl Destination for MemoryDestination {
     fn name() -> &'static str {
         "memory"
     }
-    async fn truncate_table(&self, table_id: TableId) -> EtlResult<()> {
+    async fn truncate_table(
+        &self,
+        table_id: TableId,
+        _replicated_table_schema: &ReplicatedTableSchema,
+    ) -> EtlResult<()> {
         // For truncation, we simulate removing all table rows for a specific table and also the events
         // of that table.
         let mut inner = self.inner.lock().await;
@@ -113,10 +117,11 @@ impl Destination for MemoryDestination {
 
     async fn write_table_rows(
         &self,
-        table_id: TableId,
+        replicated_table_schema: &ReplicatedTableSchema,
         table_rows: Vec<TableRow>,
     ) -> EtlResult<()> {
         let mut inner = self.inner.lock().await;
+        let table_id = replicated_table_schema.id();
 
         info!("writing a batch of {} table rows:", table_rows.len());
 

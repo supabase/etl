@@ -1,4 +1,4 @@
-use etl_postgres::types::TableId;
+use etl_postgres::types::{ReplicatedTableSchema, TableId};
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
@@ -158,13 +158,19 @@ where
         "wrapper"
     }
 
-    async fn truncate_table(&self, table_id: TableId) -> EtlResult<()> {
+    async fn truncate_table(
+        &self,
+        table_id: TableId,
+        replicated_table_schema: &ReplicatedTableSchema,
+    ) -> EtlResult<()> {
         let destination = {
             let inner = self.inner.read().await;
             inner.wrapped_destination.clone()
         };
 
-        let result = destination.truncate_table(table_id).await;
+        let result = destination
+            .truncate_table(table_id, replicated_table_schema)
+            .await;
 
         let mut inner = self.inner.write().await;
 
@@ -194,7 +200,7 @@ where
 
     async fn write_table_rows(
         &self,
-        table_id: TableId,
+        replicated_table_schema: &ReplicatedTableSchema,
         table_rows: Vec<TableRow>,
     ) -> EtlResult<()> {
         let destination = {
@@ -204,10 +210,11 @@ where
         };
 
         let result = destination
-            .write_table_rows(table_id, table_rows.clone())
+            .write_table_rows(replicated_table_schema, table_rows.clone())
             .await;
 
         {
+            let table_id = replicated_table_schema.id();
             let mut inner = self.inner.write().await;
             if result.is_ok() {
                 inner

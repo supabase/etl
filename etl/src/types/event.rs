@@ -1,4 +1,4 @@
-use etl_postgres::types::{TableId, TableSchema};
+use etl_postgres::types::{ReplicatedTableSchema, TableId, TableSchema};
 use std::fmt;
 use tokio_postgres::types::PgLsn;
 
@@ -59,14 +59,14 @@ pub struct RelationEvent {
 ///
 /// [`InsertEvent`] represents a new row being added to a table. It contains
 /// the complete row data for insertion into the destination system.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct InsertEvent {
     /// LSN position where the event started.
     pub start_lsn: PgLsn,
     /// LSN position where the transaction of this event will commit.
     pub commit_lsn: PgLsn,
-    /// ID of the table where the row was inserted.
-    pub table_id: TableId,
+    /// The replicated table schema for this event.
+    pub replicated_table_schema: ReplicatedTableSchema,
     /// Complete row data for the inserted row.
     pub table_row: TableRow,
 }
@@ -76,14 +76,14 @@ pub struct InsertEvent {
 /// [`UpdateEvent`] represents an existing row being modified. It contains
 /// both the new row data and optionally the old row data for comparison
 /// and conflict resolution in the destination system.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct UpdateEvent {
     /// LSN position where the event started.
     pub start_lsn: PgLsn,
     /// LSN position where the transaction of this event will commit.
     pub commit_lsn: PgLsn,
-    /// ID of the table where the row was updated.
-    pub table_id: TableId,
+    /// The replicated table schema for this event.
+    pub replicated_table_schema: ReplicatedTableSchema,
     /// New row data after the update.
     pub table_row: TableRow,
     /// Previous row data before the update.
@@ -98,14 +98,14 @@ pub struct UpdateEvent {
 ///
 /// [`DeleteEvent`] represents a row being removed from a table. It contains
 /// information about the deleted row for proper cleanup in the destination system.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct DeleteEvent {
     /// LSN position where the event started.
     pub start_lsn: PgLsn,
     /// LSN position where the transaction of this event will commit.
     pub commit_lsn: PgLsn,
-    /// ID of the table where the row was deleted.
-    pub table_id: TableId,
+    /// The replicated table schema for this event.
+    pub replicated_table_schema: ReplicatedTableSchema,
     /// Data from the deleted row.
     ///
     /// The boolean indicates whether the row contains only key columns (`true`)
@@ -136,7 +136,7 @@ pub struct TruncateEvent {
 /// [`Event`] encapsulates all possible events that can occur in a Postgres replication
 /// stream, including data modification events and transaction control events. Each event
 /// type corresponds to specific operations in the source database.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub enum Event {
     /// Transaction begin event marking the start of a new transaction.
     Begin(BeginEvent),
@@ -172,17 +172,11 @@ impl Event {
     /// specific tables and will always return false.
     pub fn has_table_id(&self, table_id: &TableId) -> bool {
         match self {
-            Event::Insert(insert_event) => insert_event.table_id == *table_id,
-            Event::Update(update_event) => update_event.table_id == *table_id,
-            Event::Delete(delete_event) => delete_event.table_id == *table_id,
-            Event::Relation(relation_event) => relation_event.table_schema.id == *table_id,
-            Event::Truncate(event) => {
-                let Some(_) = event.rel_ids.iter().find(|&&id| table_id.0 == id) else {
-                    return false;
-                };
-
-                true
-            }
+            Event::Insert(e) => e.replicated_table_schema.id() == *table_id,
+            Event::Update(e) => e.replicated_table_schema.id() == *table_id,
+            Event::Delete(e) => e.replicated_table_schema.id() == *table_id,
+            Event::Relation(e) => e.table_schema.id == *table_id,
+            Event::Truncate(e) => e.rel_ids.iter().any(|&id| table_id.0 == id),
             _ => false,
         }
     }

@@ -2,7 +2,9 @@ use etl::destination::Destination;
 use etl::error::{ErrorKind, EtlError, EtlResult};
 use etl::store::schema::SchemaStore;
 use etl::store::state::StateStore;
-use etl::types::{Cell, Event, TableId, TableName, TableRow, generate_sequence_number};
+use etl::types::{
+    Cell, Event, ReplicatedTableSchema, TableId, TableName, TableRow, generate_sequence_number,
+};
 use etl::{bail, etl_error};
 use gcp_bigquery_client::storage::TableDescriptor;
 use std::collections::{HashMap, HashSet};
@@ -549,8 +551,9 @@ where
                             .push(BigQueryOperationType::Upsert.into_cell());
                         insert.table_row.values.push(Cell::String(sequence_number));
 
+                        let table_id = insert.replicated_table_schema.id();
                         let table_rows: &mut Vec<TableRow> =
-                            table_id_to_table_rows.entry(insert.table_id).or_default();
+                            table_id_to_table_rows.entry(table_id).or_default();
                         table_rows.push(insert.table_row);
                     }
                     Event::Update(mut update) => {
@@ -562,8 +565,9 @@ where
                             .push(BigQueryOperationType::Upsert.into_cell());
                         update.table_row.values.push(Cell::String(sequence_number));
 
+                        let table_id = update.replicated_table_schema.id();
                         let table_rows: &mut Vec<TableRow> =
-                            table_id_to_table_rows.entry(update.table_id).or_default();
+                            table_id_to_table_rows.entry(table_id).or_default();
                         table_rows.push(update.table_row);
                     }
                     Event::Delete(delete) => {
@@ -579,8 +583,9 @@ where
                             .push(BigQueryOperationType::Delete.into_cell());
                         old_table_row.values.push(Cell::String(sequence_number));
 
+                        let table_id = delete.replicated_table_schema.id();
                         let table_rows: &mut Vec<TableRow> =
-                            table_id_to_table_rows.entry(delete.table_id).or_default();
+                            table_id_to_table_rows.entry(table_id).or_default();
                         table_rows.push(old_table_row);
                     }
                     _ => {
@@ -791,17 +796,22 @@ where
         "bigquery"
     }
 
-    async fn truncate_table(&self, table_id: TableId) -> EtlResult<()> {
+    async fn truncate_table(
+        &self,
+        table_id: TableId,
+        _replicated_table_schema: &ReplicatedTableSchema,
+    ) -> EtlResult<()> {
         self.process_truncate_for_table_ids(iter::once(table_id), false)
             .await
     }
 
     async fn write_table_rows(
         &self,
-        table_id: TableId,
+        replicated_table_schema: &ReplicatedTableSchema,
         table_rows: Vec<TableRow>,
     ) -> EtlResult<()> {
-        self.write_table_rows(table_id, table_rows).await?;
+        self.write_table_rows(replicated_table_schema.id(), table_rows)
+            .await?;
 
         Ok(())
     }

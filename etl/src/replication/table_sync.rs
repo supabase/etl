@@ -150,20 +150,6 @@ where
                 }
             }
 
-            // We must truncate the destination table before starting a copy to avoid data inconsistencies.
-            // Example scenario:
-            // 1. The source table has a single row (id = 1) that is copied to the destination during the initial copy.
-            // 2. Before the table’s phase is set to `FinishedCopy`, the process crashes.
-            // 3. While down, the source deletes row id = 1 and inserts row id = 2.
-            // 4. When restarted, the process sees the table in the ` DataSync ` state, deletes the slot, and copies again.
-            // 5. This time, only row id = 2 is copied, but row id = 1 still exists in the destination.
-            // Result: the destination has two rows (id = 1 and id = 2) instead of only one (id = 2).
-            // Fix: Always truncate the destination table before starting a copy.
-            //
-            // We try to truncate the table also during `Init` because we support state rollback and
-            // a table might be there from a previous run.
-            destination.truncate_table(table_id).await?;
-
             // We are ready to start copying table data, and we update the state accordingly.
             info!("starting data copy for table {}", table_id);
             {
@@ -195,7 +181,6 @@ where
             //  data.
             info!("fetching table schema for table {}", table_id);
             let table_schema = transaction.get_table_schema(table_id).await?;
-
             if !table_schema.has_primary_keys() {
                 bail!(
                     ErrorKind::SourceSchemaError,
@@ -221,6 +206,23 @@ where
             // Create the replicated table schema with the replication mask.
             let replicated_schema =
                 ReplicatedTableSchema::build(table_schema, &replicated_column_names);
+
+            // We must truncate the destination table before starting a copy to avoid data inconsistencies.
+            //
+            // Example scenario:
+            // 1. The source table has a single row (id = 1) that is copied to the destination during the initial copy.
+            // 2. Before the table’s phase is set to `FinishedCopy`, the process crashes.
+            // 3. While down, the source deletes row id = 1 and inserts row id = 2.
+            // 4. When restarted, the process sees the table in the ` DataSync ` state, deletes the slot, and copies again.
+            // 5. This time, only row id = 2 is copied, but row id = 1 still exists in the destination.
+            // Result: the destination has two rows (id = 1 and id = 2) instead of only one (id = 2).
+            // Fix: Always truncate the destination table before starting a copy.
+            //
+            // We try to truncate the table also during `Init` because we support state rollback and
+            // a table might be there from a previous run.
+            destination
+                .truncate_table(table_id, &replicated_schema)
+                .await?;
 
             // We create the copy table stream on the replicated columns.
             let table_copy_stream = transaction
@@ -268,7 +270,9 @@ where
 
                         let before_sending = Instant::now();
 
-                        destination.write_table_rows(table_id, table_rows).await?;
+                        destination
+                            .write_table_rows(&replicated_schema, table_rows)
+                            .await?;
                         table_rows_written = true;
 
                         metrics::counter!(
@@ -311,7 +315,9 @@ where
             // If no table rows were written, we call the method nonetheless with no rows, to kickstart
             // table creation.
             if !table_rows_written {
-                destination.write_table_rows(table_id, vec![]).await?;
+                destination
+                    .write_table_rows(&replicated_schema, vec![])
+                    .await?;
                 info!(
                     "writing empty table rows since table {} was empty",
                     table_id
