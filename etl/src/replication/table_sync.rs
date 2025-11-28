@@ -194,9 +194,7 @@ where
             // - Destination -> we write here because some consumers might want to have the schema of incoming
             //  data.
             info!("fetching table schema for table {}", table_id);
-            let table_schema = transaction
-                .get_table_schema(table_id, Some(&config.publication_name))
-                .await?;
+            let table_schema = transaction.get_table_schema(table_id).await?;
 
             if !table_schema.has_primary_keys() {
                 bail!(
@@ -210,16 +208,29 @@ where
             // pipeline is restarted, since it's outside the lifecycle of the pipeline.
             store.store_table_schema(table_schema.clone()).await?;
 
-            // We create the copy table stream.
-            let table_copy_stream = transaction
-                .get_table_copy_stream(
+            // Get the names of columns being replicated based on the publication's column filter.
+            // This must be done in the same transaction as `get_table_schema` for consistency.
+            let replicated_column_names = transaction
+                .get_replicated_column_names(
                     table_id,
-                    &table_schema.column_schemas,
+                    &table_schema,
                     Some(&config.publication_name),
                 )
                 .await?;
-            let table_copy_stream =
-                TableCopyStream::wrap(table_copy_stream, &table_schema.column_schemas, pipeline_id);
+
+            // We create the copy table stream on the replicated columns.
+            let table_copy_stream = transaction
+                .get_table_copy_stream(
+                    table_id,
+                    table_schema.replicated_column_schemas(&replicated_column_names),
+                    Some(&config.publication_name),
+                )
+                .await?;
+            let table_copy_stream = TableCopyStream::wrap(
+                table_copy_stream,
+                table_schema.replicated_column_schemas(&replicated_column_names),
+                pipeline_id,
+            );
             let table_copy_stream = TimeoutBatchStream::wrap(
                 table_copy_stream,
                 config.batch.clone(),

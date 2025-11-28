@@ -1,5 +1,6 @@
 use pg_escape::quote_identifier;
 use std::cmp::Ordering;
+use std::collections::HashSet;
 use std::fmt;
 use std::str::FromStr;
 use tokio_postgres::types::{FromSql, ToSql, Type};
@@ -51,7 +52,7 @@ type TypeModifier = i32;
 /// Represents the schema of a single column in a Postgres table.
 ///
 /// This type contains all metadata about a column including its name, data type,
-/// type modifier, ordinal position, primary key information, nullability, and replication status.
+/// type modifier, ordinal position, primary key information, and nullability.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct ColumnSchema {
     /// The name of the column.
@@ -66,10 +67,6 @@ pub struct ColumnSchema {
     pub primary_key_ordinal_position: Option<i32>,
     /// Whether the column can contain NULL values.
     pub nullable: bool,
-    /// Whether this column is currently being replicated. Columns default to not replicated
-    /// when loaded, and are marked as replicated when a relation message indicates the column
-    /// is part of the publication's column list.
-    pub replicated: bool,
 }
 
 impl ColumnSchema {
@@ -81,7 +78,6 @@ impl ColumnSchema {
         ordinal_position: i32,
         primary_key_ordinal_position: Option<i32>,
         nullable: bool,
-        replicated: bool,
     ) -> ColumnSchema {
         Self {
             name,
@@ -90,7 +86,6 @@ impl ColumnSchema {
             ordinal_position,
             primary_key_ordinal_position,
             nullable,
-            replicated,
         }
     }
 
@@ -245,25 +240,19 @@ impl TableSchema {
                 .all(|(c1, c2)| c1.partial_eq(c2))
     }
 
-    /// Updates the `replicated` status of columns based on a list of column names
-    /// from a relation message.
-    ///
-    /// Columns whose names appear in `replicated_column_names` will have their
-    /// `replicated` field set to `true`; all other columns will have it set to `false`.
-    /// This is used to track which columns are actually being replicated when
-    /// a publication only includes a subset of columns.
-    pub fn update_replicated_columns(&mut self, replicated_column_names: &[String]) {
-        for column_schema in &mut self.column_schemas {
-            column_schema.replicated = replicated_column_names.contains(&column_schema.name);
-        }
-    }
-
-    /// Returns only the column schemas that are currently marked as replicated.
+    /// Returns only the column schemas that are currently being replicated.
     ///
     /// This is used when processing tuple data from logical replication, as the
     /// tuple data only contains values for columns included in the publication.
-    pub fn replicated_column_schemas(&self) -> impl Iterator<Item = &ColumnSchema> {
-        self.column_schemas.iter().filter(|cs| cs.replicated)
+    /// The `replicated_columns` set contains the names of columns that are being
+    /// replicated according to relation messages.
+    pub fn replicated_column_schemas<'a>(
+        &'a self,
+        replicated_columns: &'a HashSet<String>,
+    ) -> impl Iterator<Item = &'a ColumnSchema> {
+        self.column_schemas
+            .iter()
+            .filter(|cs| replicated_columns.contains(&cs.name))
     }
 }
 

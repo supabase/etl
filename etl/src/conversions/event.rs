@@ -4,6 +4,7 @@ use etl_postgres::types::{
 };
 use postgres_replication::protocol;
 use serde::Deserialize;
+use std::collections::HashSet;
 use std::sync::Arc;
 use tokio_postgres::types::PgLsn;
 
@@ -129,6 +130,7 @@ pub fn parse_event_from_relation_message(
 /// insert event with the new row data ready for ETL processing.
 pub async fn parse_event_from_insert_message<S>(
     schema_store: &S,
+    replicated_columns: &HashSet<String>,
     start_lsn: PgLsn,
     commit_lsn: PgLsn,
     insert_body: &protocol::InsertBody,
@@ -140,7 +142,7 @@ where
     let table_schema = get_table_schema(schema_store, TableId::new(table_id)).await?;
 
     let table_row = convert_tuple_to_row(
-        table_schema.replicated_column_schemas(),
+        table_schema.replicated_column_schemas(replicated_columns),
         insert_body.tuple().tuple_data(),
         &mut None,
         false,
@@ -162,6 +164,7 @@ where
 /// `REPLICA IDENTITY` setting in Postgres.
 pub async fn parse_event_from_update_message<S>(
     schema_store: &S,
+    replicated_columns: &HashSet<String>,
     start_lsn: PgLsn,
     commit_lsn: PgLsn,
     update_body: &protocol::UpdateBody,
@@ -178,7 +181,7 @@ where
     let old_tuple = update_body.old_tuple().or(update_body.key_tuple());
     let old_table_row = match old_tuple {
         Some(identity) => Some(convert_tuple_to_row(
-            table_schema.replicated_column_schemas(),
+            table_schema.replicated_column_schemas(replicated_columns),
             identity.tuple_data(),
             &mut None,
             true,
@@ -188,7 +191,7 @@ where
 
     let mut old_table_row_mut = old_table_row;
     let table_row = convert_tuple_to_row(
-        table_schema.replicated_column_schemas(),
+        table_schema.replicated_column_schemas(replicated_columns),
         update_body.new_tuple().tuple_data(),
         &mut old_table_row_mut,
         false,
@@ -213,6 +216,7 @@ where
 /// `REPLICA IDENTITY` setting in Postgres.
 pub async fn parse_event_from_delete_message<S>(
     schema_store: &S,
+    replicated_columns: &HashSet<String>,
     start_lsn: PgLsn,
     commit_lsn: PgLsn,
     delete_body: &protocol::DeleteBody,
@@ -229,7 +233,7 @@ where
     let old_tuple = delete_body.old_tuple().or(delete_body.key_tuple());
     let old_table_row = match old_tuple {
         Some(identity) => Some(convert_tuple_to_row(
-            table_schema.replicated_column_schemas(),
+            table_schema.replicated_column_schemas(replicated_columns),
             identity.tuple_data(),
             &mut None,
             true,
@@ -306,7 +310,6 @@ fn build_column_schema(column: &protocol::Column) -> EtlResult<ColumnSchema> {
         0,
         if primary_key { Some(1) } else { None },
         false,
-        true,
     ))
 }
 
@@ -420,7 +423,6 @@ pub fn ddl_message_to_table_schema(message: &DdlSchemaChangeMessage) -> TableSch
                 col.ordinal_position,
                 col.primary_key_ordinal_position,
                 col.nullable,
-                false,
             )
         })
         .collect();

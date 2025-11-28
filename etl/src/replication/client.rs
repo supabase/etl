@@ -10,7 +10,7 @@ use etl_postgres::version::POSTGRES_15;
 use pg_escape::{quote_identifier, quote_literal};
 use postgres_replication::LogicalReplicationStream;
 use rustls::ClientConfig;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::io::BufReader;
 use std::num::NonZeroI32;
@@ -117,36 +117,45 @@ impl PgReplicationSlotTransaction {
     pub async fn get_table_schemas(
         &self,
         table_ids: &[TableId],
-        publication_name: Option<&str>,
     ) -> EtlResult<HashMap<TableId, TableSchema>> {
-        self.client
-            .get_table_schemas(table_ids, publication_name)
-            .await
+        self.client.get_table_schemas(table_ids).await
     }
 
     /// Retrieves the schema information for the supplied table.
     ///
     /// If a publication is specified, only columns included in that publication
     /// will be returned.
-    pub async fn get_table_schema(
-        &self,
-        table_id: TableId,
-        publication: Option<&str>,
-    ) -> EtlResult<TableSchema> {
-        self.client.get_table_schema(table_id, publication).await
+    pub async fn get_table_schema(&self, table_id: TableId) -> EtlResult<TableSchema> {
+        self.client.get_table_schema(table_id).await
     }
 
     /// Creates a COPY stream for reading data from the specified table.
     ///
     /// The stream will include only the columns specified in `column_schemas`.
-    pub async fn get_table_copy_stream(
+    pub async fn get_table_copy_stream<'a>(
         &self,
         table_id: TableId,
-        column_schemas: &[ColumnSchema],
+        column_schemas: impl Iterator<Item = &'a ColumnSchema>,
         publication_name: Option<&str>,
     ) -> EtlResult<CopyOutStream> {
         self.client
             .get_table_copy_stream(table_id, column_schemas, publication_name)
+            .await
+    }
+
+    /// Retrieves the names of columns being replicated for a table in a publication.
+    ///
+    /// Returns a HashSet containing the names of columns that are included in the publication
+    /// for the specified table. If no publication is specified, returns all column names from
+    /// the table schema.
+    pub async fn get_replicated_column_names(
+        &self,
+        table_id: TableId,
+        table_schema: &TableSchema,
+        publication_name: Option<&str>,
+    ) -> EtlResult<HashSet<String>> {
+        self.client
+            .get_replicated_column_names(table_id, table_schema, publication_name)
             .await
     }
 
@@ -644,13 +653,12 @@ impl PgReplicationClient {
     async fn get_table_schemas(
         &self,
         table_ids: &[TableId],
-        publication_name: Option<&str>,
     ) -> EtlResult<HashMap<TableId, TableSchema>> {
         let mut table_schemas = HashMap::new();
 
         // TODO: consider if we want to fail when at least one table was missing or not.
         for table_id in table_ids {
-            let table_schema = self.get_table_schema(*table_id, publication_name).await?;
+            let table_schema = self.get_table_schema(*table_id).await?;
 
             // TODO: this warning and skipping should not happen in this method,
             //  but rather higher in the stack.
@@ -672,13 +680,9 @@ impl PgReplicationClient {
     ///
     /// If a publication is specified, only columns included in that publication
     /// will be returned.
-    async fn get_table_schema(
-        &self,
-        table_id: TableId,
-        publication: Option<&str>,
-    ) -> EtlResult<TableSchema> {
+    async fn get_table_schema(&self, table_id: TableId) -> EtlResult<TableSchema> {
         let table_name = self.get_table_name(table_id).await?;
-        let column_schemas = self.get_column_schemas(table_id, publication).await?;
+        let column_schemas = self.get_column_schemas(table_id).await?;
 
         Ok(TableSchema {
             name: table_name,
@@ -723,12 +727,7 @@ impl PgReplicationClient {
     ///
     /// All columns are initially loaded with `replicated = true`. The replication status
     /// will be updated later when relation messages are received during CDC streaming.
-    async fn get_column_schemas(
-        &self,
-        table_id: TableId,
-        // TODO: remove this parameter.
-        _publication: Option<&str>,
-    ) -> EtlResult<Vec<ColumnSchema>> {
+    async fn get_column_schemas(&self, table_id: TableId) -> EtlResult<Vec<ColumnSchema>> {
         let column_info_query = format!(
             r#"
             select
@@ -768,10 +767,6 @@ impl PgReplicationClient {
                     ordinal_position,
                     primary_key_ordinal_position,
                     nullable,
-                    // Columns default to not replicated. During CDC, relation messages
-                    // will indicate which columns are actually being replicated, and
-                    // update_replicated_columns() will mark those as replicated = true.
-                    false,
                 ))
             }
         }
@@ -823,17 +818,103 @@ impl PgReplicationClient {
         Ok(None)
     }
 
-    /// Creates a COPY stream for reading data from a table using its OID.
+    /// Retrieves the names of columns being replicated for a table in a publication.
     ///
-    /// The stream will include only the specified columns and use text format, and respect publication row filters (if a publication is specified)
-    pub async fn get_table_copy_stream(
+    /// Returns a HashSet containing the names of columns that are included in the publication
+    /// for the specified table. If no publication is specified, returns all column names from
+    /// the table schema. If the PostgreSQL version is below 15 (which doesn't support column
+    /// filtering), returns all column names.
+    ///
+    /// This method should be called in the same transaction as describe_table_schema to ensure
+    /// consistency during initial table sync.
+    pub async fn get_replicated_column_names(
         &self,
         table_id: TableId,
-        column_schemas: &[ColumnSchema],
+        table_schema: &TableSchema,
+        publication_name: Option<&str>,
+    ) -> EtlResult<HashSet<String>> {
+        // Column filtering in publications was added in Postgres 15. For earlier versions,
+        // all columns are replicated.
+        if below_version!(self.server_version, POSTGRES_15) {
+            return Ok(table_schema
+                .column_schemas
+                .iter()
+                .map(|cs| cs.name.clone())
+                .collect());
+        }
+
+        // If no publication is specified, all columns are replicated
+        let publication = match publication_name {
+            Some(publication) => publication,
+            None => {
+                return Ok(table_schema
+                    .column_schemas
+                    .iter()
+                    .map(|cs| cs.name.clone())
+                    .collect());
+            }
+        };
+
+        // Query pg_publication_tables to get the attnames array which contains the column names
+        // being replicated. In PG15+, attnames is NULL when all columns are published.
+        let column_query = format!(
+            "select pt.attnames as column_names
+             from pg_publication_tables pt
+             join pg_namespace n on n.nspname = pt.schemaname
+             join pg_class c on c.relnamespace = n.oid AND c.relname = pt.tablename
+             where pt.pubname = {} and c.oid = {};",
+            quote_literal(publication),
+            table_id,
+        );
+
+        let results = self.client.simple_query(&column_query).await?;
+
+        for result in results {
+            if let SimpleQueryMessage::Row(row) = result {
+                let column_names: Option<&str> = row.try_get("column_names")?;
+                match column_names {
+                    // NULL means all columns are published
+                    None => {
+                        return Ok(table_schema
+                            .column_schemas
+                            .iter()
+                            .map(|cs| cs.name.clone())
+                            .collect());
+                    }
+                    // Parse the array format: {col1,col2,col3}
+                    Some(names_str) => {
+                        let names: HashSet<String> = names_str
+                            .trim_matches(|c| c == '{' || c == '}')
+                            .split(',')
+                            .filter(|s| !s.is_empty())
+                            .map(|s| s.to_string())
+                            .collect();
+                        return Ok(names);
+                    }
+                }
+            }
+        }
+
+        // If no row was found, the table is not in the publication.
+        // Return all columns as a fallback (this shouldn't normally happen).
+        Ok(table_schema
+            .column_schemas
+            .iter()
+            .map(|cs| cs.name.clone())
+            .collect())
+    }
+
+    /// Creates a COPY stream for reading data from a table using its OID.
+    ///
+    /// The stream will include only the specified columns and use text format, and respect
+    /// publication row filters (if a publication is specified)
+    pub async fn get_table_copy_stream<'a>(
+        &self,
+        table_id: TableId,
+        column_schemas: impl Iterator<Item = &'a ColumnSchema>,
         publication: Option<&str>,
     ) -> EtlResult<CopyOutStream> {
         let column_list = column_schemas
-            .iter()
             .map(|col| quote_identifier(&col.name))
             .collect::<Vec<_>>()
             .join(", ");

@@ -545,7 +545,6 @@ where
             0,
             None,
             false,
-            true,
         ));
         final_schema.add_column_schema(ColumnSchema::new(
             sequence_number_col,
@@ -554,7 +553,6 @@ where
             0,
             None,
             false,
-            true,
         ));
         final_schema
     }
@@ -719,7 +717,6 @@ mod tests {
             ordinal_position,
             if primary_key { Some(1) } else { None },
             nullable,
-            true,
         )
     }
 

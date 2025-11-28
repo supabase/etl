@@ -5,6 +5,7 @@ use futures::StreamExt;
 use metrics::histogram;
 use postgres_replication::protocol;
 use postgres_replication::protocol::{LogicalReplicationMessage, ReplicationMessage};
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -314,6 +315,13 @@ struct ApplyLoopState {
     /// transaction boundary is found. If not found, the process will continue until it is killed via
     /// a `SIGKILL`.
     shutdown_discarded: bool,
+    /// Tracks which columns are being replicated for each table.
+    ///
+    /// This map is populated from relation messages during replication. For each table,
+    /// it contains the set of column names that are included in the publication's column
+    /// filter. This allows the apply loop to process only the columns that are actually
+    /// being replicated.
+    replicated_columns: HashMap<TableId, HashSet<String>>,
 }
 
 impl ApplyLoopState {
@@ -331,7 +339,19 @@ impl ApplyLoopState {
             current_tx_begin_ts: None,
             current_tx_events: 0,
             shutdown_discarded: false,
+            replicated_columns: HashMap::new(),
         }
+    }
+
+    /// Returns the replicated columns for a table, or creates a default set with all columns
+    /// if the table hasn't been seen in a relation message yet.
+    fn get_replicated_columns(&self, table_id: &TableId) -> Option<&HashSet<String>> {
+        self.replicated_columns.get(table_id)
+    }
+
+    /// Updates the replicated columns for a table based on a relation message.
+    fn set_replicated_columns(&mut self, table_id: TableId, columns: HashSet<String>) {
+        self.replicated_columns.insert(table_id, columns);
     }
 
     /// Updates the last commit end LSN to track transaction boundaries.
@@ -1171,17 +1191,14 @@ where
 
 /// Handles Postgres RELATION messages that describe table schemas.
 ///
-/// This function processes schema definition messages and updates the `replicated` flag
-/// on the stored table schema. Columns that appear in the relation message are marked
-/// as replicated; columns that don't appear are marked as not replicated.
-///
-/// This allows tracking which columns are actually being replicated when a publication
-/// uses column filtering.
+/// This function processes schema definition messages and updates the replicated columns
+/// tracking in the apply loop state. Columns that appear in the relation message are
+/// tracked as being replicated for subsequent DML event processing.
 async fn handle_relation_message<S, T>(
     state: &mut ApplyLoopState,
     start_lsn: PgLsn,
     message: &protocol::RelationBody,
-    schema_store: &S,
+    _schema_store: &S,
     hook: &T,
 ) -> EtlResult<HandleMessageResult>
 where
@@ -1208,8 +1225,8 @@ where
     // Convert event from the protocol message.
     let event = parse_event_from_relation_message(start_lsn, remote_final_lsn, message)?;
 
-    // Extract the column names from the relation message
-    let replicated_column_names: Vec<String> = event
+    // Extract the column names from the relation message and store them in the state
+    let replicated_column_names: HashSet<String> = event
         .table_schema
         .column_schemas
         .iter()
@@ -1220,50 +1237,18 @@ where
         table_id = %table_id,
         columns = event.table_schema.column_schemas.len(),
         replicated_columns = ?replicated_column_names,
-        "received relation message"
+        "received relation message, updating replicated columns in state"
     );
 
-    // Update the stored table schema's replicated flags based on the relation message columns.
-    // Columns in the relation message are marked as replicated, others are marked as not replicated.
-    if let Some(table_schema) = schema_store.get_table_schema(&table_id).await? {
-        // Clone the schema so we can mutate it
-        let mut updated_table_schema = (*table_schema).clone();
-
-        let previous_replicated: Vec<String> = updated_table_schema
-            .column_schemas
-            .iter()
-            .filter(|cs| cs.replicated)
-            .map(|cs| cs.name.clone())
-            .collect();
-
-        updated_table_schema.update_replicated_columns(&replicated_column_names);
-
-        let new_replicated: Vec<String> = updated_table_schema
-            .column_schemas
-            .iter()
-            .filter(|cs| cs.replicated)
-            .map(|cs| cs.name.clone())
-            .collect();
-
-        info!(
-            table_id = %table_id,
-            previous_replicated = ?previous_replicated,
-            new_replicated = ?new_replicated,
-            "updated replicated columns based on relation message"
-        );
-
-        // Store the updated schema
-        schema_store
-            .store_table_schema(updated_table_schema)
-            .await?;
-    }
+    // Update the replicated columns tracking in the apply loop state
+    state.set_replicated_columns(table_id, replicated_column_names);
 
     Ok(HandleMessageResult::return_event(Event::Relation(event)))
 }
 
 /// Handles Postgres INSERT messages for row insertion events.
 async fn handle_insert_message<S, T>(
-    state: &mut ApplyLoopState,
+    state: &ApplyLoopState,
     start_lsn: PgLsn,
     message: &protocol::InsertBody,
     hook: &T,
@@ -1281,23 +1266,43 @@ where
         );
     };
 
+    let table_id = TableId::new(message.rel_id());
+
     if !hook
-        .should_apply_changes(TableId::new(message.rel_id()), remote_final_lsn)
+        .should_apply_changes(table_id, remote_final_lsn)
         .await?
     {
         return Ok(HandleMessageResult::no_event());
     }
 
+    // Get replicated columns from state, or bail if relation message wasn't received
+    let Some(replicated_columns) = state.get_replicated_columns(&table_id) else {
+        bail!(
+            ErrorKind::InvalidState,
+            "Missing relation message",
+            format!(
+                "No relation message received for table {} before INSERT",
+                table_id
+            )
+        );
+    };
+
     // Convert event from the protocol message.
-    let event =
-        parse_event_from_insert_message(schema_store, start_lsn, remote_final_lsn, message).await?;
+    let event = parse_event_from_insert_message(
+        schema_store,
+        replicated_columns,
+        start_lsn,
+        remote_final_lsn,
+        message,
+    )
+    .await?;
 
     Ok(HandleMessageResult::return_event(Event::Insert(event)))
 }
 
 /// Handles Postgres UPDATE messages for row modification events.
 async fn handle_update_message<S, T>(
-    state: &mut ApplyLoopState,
+    state: &ApplyLoopState,
     start_lsn: PgLsn,
     message: &protocol::UpdateBody,
     hook: &T,
@@ -1315,23 +1320,43 @@ where
         );
     };
 
+    let table_id = TableId::new(message.rel_id());
+
     if !hook
-        .should_apply_changes(TableId::new(message.rel_id()), remote_final_lsn)
+        .should_apply_changes(table_id, remote_final_lsn)
         .await?
     {
         return Ok(HandleMessageResult::no_event());
     }
 
+    // Get replicated columns from state, or bail if relation message wasn't received
+    let Some(replicated_columns) = state.get_replicated_columns(&table_id) else {
+        bail!(
+            ErrorKind::InvalidState,
+            "Missing relation message",
+            format!(
+                "No relation message received for table {} before UPDATE",
+                table_id
+            )
+        );
+    };
+
     // Convert event from the protocol message.
-    let event =
-        parse_event_from_update_message(schema_store, start_lsn, remote_final_lsn, message).await?;
+    let event = parse_event_from_update_message(
+        schema_store,
+        replicated_columns,
+        start_lsn,
+        remote_final_lsn,
+        message,
+    )
+    .await?;
 
     Ok(HandleMessageResult::return_event(Event::Update(event)))
 }
 
 /// Handles Postgres DELETE messages for row removal events.
 async fn handle_delete_message<S, T>(
-    state: &mut ApplyLoopState,
+    state: &ApplyLoopState,
     start_lsn: PgLsn,
     message: &protocol::DeleteBody,
     hook: &T,
@@ -1349,16 +1374,36 @@ where
         );
     };
 
+    let table_id = TableId::new(message.rel_id());
+
     if !hook
-        .should_apply_changes(TableId::new(message.rel_id()), remote_final_lsn)
+        .should_apply_changes(table_id, remote_final_lsn)
         .await?
     {
         return Ok(HandleMessageResult::no_event());
     }
 
+    // Get replicated columns from state, or bail if relation message wasn't received
+    let Some(replicated_columns) = state.get_replicated_columns(&table_id) else {
+        bail!(
+            ErrorKind::InvalidState,
+            "Missing relation message",
+            format!(
+                "No relation message received for table {} before DELETE",
+                table_id
+            )
+        );
+    };
+
     // Convert event from the protocol message.
-    let event =
-        parse_event_from_delete_message(schema_store, start_lsn, remote_final_lsn, message).await?;
+    let event = parse_event_from_delete_message(
+        schema_store,
+        replicated_columns,
+        start_lsn,
+        remote_final_lsn,
+        message,
+    )
+    .await?;
 
     Ok(HandleMessageResult::return_event(Event::Delete(event)))
 }

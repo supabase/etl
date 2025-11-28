@@ -29,23 +29,19 @@ pin_project! {
     /// using the provided column schemas. The conversion process handles both text and
     /// binary format data.
     #[must_use = "streams do nothing unless polled"]
-    pub struct TableCopyStream<'a> {
+    pub struct TableCopyStream<I> {
         #[pin]
         stream: CopyOutStream,
-        column_schemas: &'a [ColumnSchema],
+        column_schemas: I,
         pipeline_id: PipelineId,
     }
 }
 
-impl<'a> TableCopyStream<'a> {
+impl<I> TableCopyStream<I> {
     /// Creates a new [`TableCopyStream`] from a [`CopyOutStream`] and column schemas.
     ///
     /// The column schemas are used to convert the raw Postgres data into [`TableRow`]s.
-    pub fn wrap(
-        stream: CopyOutStream,
-        column_schemas: &'a [ColumnSchema],
-        pipeline_id: PipelineId,
-    ) -> Self {
+    pub fn wrap(stream: CopyOutStream, column_schemas: I, pipeline_id: PipelineId) -> Self {
         Self {
             stream,
             column_schemas,
@@ -54,7 +50,10 @@ impl<'a> TableCopyStream<'a> {
     }
 }
 
-impl<'a> Stream for TableCopyStream<'a> {
+impl<'a, I> Stream for TableCopyStream<I>
+where
+    I: Iterator<Item = &'a ColumnSchema>,
+{
     type Item = EtlResult<TableRow>;
 
     /// Polls the stream for the next converted table row with comprehensive error handling.
@@ -66,7 +65,7 @@ impl<'a> Stream for TableCopyStream<'a> {
         match ready!(this.stream.poll_next(cx)) {
             // TODO: allow pluggable table row conversion based on if the data is in text or binary format.
             Some(Ok(row)) => {
-                // Emit raw row size in bytes. This is a low effort way to estimate table rows size.
+                // Emit raw row size in bytes. This is a low-effort way to estimate table rows size.
                 histogram!(
                     ETL_COPIED_TABLE_ROW_SIZE_BYTES,
                     PIPELINE_ID_LABEL => this.pipeline_id.to_string()

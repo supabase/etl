@@ -2,12 +2,10 @@
 --
 -- These columns store additional metadata about each column:
 -- - primary_key_ordinal_position: The order within the primary key (1-based), NULL if not a primary key
--- - replicated: Whether the column is currently being replicated (default true)
 
 -- Add new columns
 alter table etl.table_columns
-    add column if not exists primary_key_ordinal_position integer,
-    add column if not exists replicated boolean not null default true;
+    add column if not exists primary_key_ordinal_position integer;
 
 -- Set primary_key_ordinal_position = 1 for existing primary key columns.
 -- This is a reasonable default since most tables have single-column primary keys.

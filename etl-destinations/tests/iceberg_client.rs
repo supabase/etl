@@ -24,7 +24,6 @@ fn test_column(
         ordinal_position,
         if primary_key { Some(1) } else { None },
         nullable,
-        true,
     )
 }
 
@@ -180,8 +179,20 @@ async fn create_table_if_missing() {
         test_column("numeric_array_col", Type::NUMERIC_ARRAY, 34, true, false),
         test_column("date_array_col", Type::DATE_ARRAY, 35, true, false),
         test_column("time_array_col", Type::TIME_ARRAY, 36, true, false),
-        test_column("timestamp_array_col", Type::TIMESTAMP_ARRAY, 37, true, false),
-        test_column("timestamptz_array_col", Type::TIMESTAMPTZ_ARRAY, 38, true, false),
+        test_column(
+            "timestamp_array_col",
+            Type::TIMESTAMP_ARRAY,
+            37,
+            true,
+            false,
+        ),
+        test_column(
+            "timestamptz_array_col",
+            Type::TIMESTAMPTZ_ARRAY,
+            38,
+            true,
+            false,
+        ),
         test_column("uuid_array_col", Type::UUID_ARRAY, 39, true, false),
         test_column("json_array_col", Type::JSON_ARRAY, 40, true, false),
         test_column("jsonb_array_col", Type::JSONB_ARRAY, 41, true, false),
@@ -638,8 +649,20 @@ async fn insert_nullable_array() {
         // Date/Time array types
         test_column("date_array_col", Type::DATE_ARRAY, 14, true, false),
         test_column("time_array_col", Type::TIME_ARRAY, 15, true, false),
-        test_column("timestamp_array_col", Type::TIMESTAMP_ARRAY, 16, true, false),
-        test_column("timestamptz_array_col", Type::TIMESTAMPTZ_ARRAY, 17, true, false),
+        test_column(
+            "timestamp_array_col",
+            Type::TIMESTAMP_ARRAY,
+            16,
+            true,
+            false,
+        ),
+        test_column(
+            "timestamptz_array_col",
+            Type::TIMESTAMPTZ_ARRAY,
+            17,
+            true,
+            false,
+        ),
         // UUID array type
         test_column("uuid_array_col", Type::UUID_ARRAY, 18, true, false),
         // JSON array types
@@ -883,8 +906,20 @@ async fn insert_non_nullable_array() {
         // Date/Time array types
         test_column("date_array_col", Type::DATE_ARRAY, 14, false, false),
         test_column("time_array_col", Type::TIME_ARRAY, 15, false, false),
-        test_column("timestamp_array_col", Type::TIMESTAMP_ARRAY, 16, false, false),
-        test_column("timestamptz_array_col", Type::TIMESTAMPTZ_ARRAY, 17, false, false),
+        test_column(
+            "timestamp_array_col",
+            Type::TIMESTAMP_ARRAY,
+            16,
+            false,
+            false,
+        ),
+        test_column(
+            "timestamptz_array_col",
+            Type::TIMESTAMPTZ_ARRAY,
+            17,
+            false,
+            false,
+        ),
         // UUID array type
         test_column("uuid_array_col", Type::UUID_ARRAY, 18, false, false),
         // JSON array types

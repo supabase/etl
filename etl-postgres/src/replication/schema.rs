@@ -178,8 +178,8 @@ pub async fn store_table_schema(
             r#"
             insert into etl.table_columns
             (table_schema_id, column_name, column_type, type_modifier, nullable, primary_key,
-             column_order, primary_key_ordinal_position, replicated)
-            values ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+             column_order, primary_key_ordinal_position)
+            values ($1, $2, $3, $4, $5, $6, $7, $8)
             "#,
         )
         .bind(table_schema_id)
@@ -190,7 +190,6 @@ pub async fn store_table_schema(
         .bind(column_schema.primary_key())
         .bind(column_schema.ordinal_position)
         .bind(column_schema.primary_key_ordinal_position)
-        .bind(column_schema.replicated)
         .execute(&mut *tx)
         .await?;
     }
@@ -220,8 +219,7 @@ pub async fn load_table_schemas(
             tc.nullable,
             tc.primary_key,
             tc.column_order,
-            tc.primary_key_ordinal_position,
-            tc.replicated
+            tc.primary_key_ordinal_position
         from etl.table_schemas ts
         inner join etl.table_columns tc on ts.id = tc.table_schema_id
         where ts.pipeline_id = $1
@@ -309,12 +307,6 @@ fn parse_column_schema(row: &PgRow) -> ColumnSchema {
     let ordinal_position: i32 = row.get("column_order");
     let primary_key_ordinal_position: Option<i32> = row.get("primary_key_ordinal_position");
     let nullable: bool = row.get("nullable");
-    // Default to true for backwards compatibility with existing state store rows
-    // that were created before the `replicated` column was added. New rows will
-    // have the explicit value stored, which defaults to false until a relation
-    // message activates the column.
-    let replicated: Option<bool> = row.get("replicated");
-    let replicated = replicated.unwrap_or(true);
 
     ColumnSchema::new(
         column_name,
@@ -323,7 +315,6 @@ fn parse_column_schema(row: &PgRow) -> ColumnSchema {
         ordinal_position,
         primary_key_ordinal_position,
         nullable,
-        replicated,
     )
 }
 

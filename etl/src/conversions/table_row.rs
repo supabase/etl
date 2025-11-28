@@ -16,9 +16,9 @@ use crate::types::{Cell, TableRow};
 /// # Panics
 ///
 /// Panics if the number of parsed values doesn't match the number of column schemas.
-pub fn parse_table_row_from_postgres_copy_bytes(
+pub fn parse_table_row_from_postgres_copy_bytes<'a>(
     row: &[u8],
-    column_schemas: &[ColumnSchema],
+    column_schemas: impl Iterator<Item = &'a ColumnSchema>,
 ) -> EtlResult<TableRow> {
     let mut values = Vec::with_capacity(column_schemas.len());
 
@@ -180,7 +180,6 @@ mod tests {
             ordinal_position,
             if primary_key { Some(1) } else { None },
             nullable,
-            true,
         )
     }
 
@@ -355,7 +354,13 @@ mod tests {
         let mut expected_row = String::new();
 
         for i in 0..50 {
-            schema.push(test_column(&format!("col{i}"), Type::INT4, (i + 1) as i32, false, false));
+            schema.push(test_column(
+                &format!("col{i}"),
+                Type::INT4,
+                (i + 1) as i32,
+                false,
+                false,
+            ));
             if i > 0 {
                 expected_row.push('\t');
             }
