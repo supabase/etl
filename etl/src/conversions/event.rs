@@ -9,7 +9,7 @@ use std::sync::Arc;
 use tokio_postgres::types::PgLsn;
 
 use crate::conversions::text::{default_value_for_type, parse_cell_from_postgres_text};
-use crate::error::{ErrorKind, EtlResult};
+use crate::error::{ErrorKind, EtlError, EtlResult};
 use crate::store::schema::SchemaStore;
 use crate::types::{
     BeginEvent, Cell, CommitEvent, DeleteEvent, InsertEvent, RelationEvent, TableRow,
@@ -92,35 +92,24 @@ pub fn parse_event_from_commit_message(
     }
 }
 
-/// Creates a [`RelationEvent`] from Postgres protocol data.
-///
-/// This method parses the replication protocol relation message and builds
-/// a complete table schema for use in interpreting subsequent data events.
-pub fn parse_event_from_relation_message(
-    start_lsn: PgLsn,
-    commit_lsn: PgLsn,
+/// Returns a [`HashSet`] of column names to replicate from a relation message.
+pub fn parse_replicated_column_names(
     relation_body: &protocol::RelationBody,
-) -> EtlResult<RelationEvent> {
-    let table_name = TableName::new(
-        relation_body.namespace()?.to_string(),
-        relation_body.name()?.to_string(),
-    );
-    let column_schemas = relation_body
+) -> EtlResult<HashSet<String>> {
+    let column_names = relation_body
         .columns()
         .iter()
-        .map(build_column_schema)
-        .collect::<Result<Vec<ColumnSchema>, _>>()?;
-    let table_schema = TableSchema::new(
-        TableId::new(relation_body.rel_id()),
-        table_name,
-        column_schemas,
-    );
+        .map(parse_column_name_from_column)
+        .collect::<Result<HashSet<String>, _>>()?;
 
-    Ok(RelationEvent {
-        start_lsn,
-        commit_lsn,
-        table_schema,
-    })
+    Ok(column_names)
+}
+
+/// Extracts the column name from a [`protocol::Column`] object.
+fn parse_column_name_from_column(column: &protocol::Column) -> EtlResult<String> {
+    let column_name = column.name()?.to_string();
+
+    Ok(column_name)
 }
 
 /// Converts a Postgres insert message into an [`InsertEvent`].
@@ -287,30 +276,6 @@ where
                 format!("Table schema for table {} not found in cache", table_id)
             )
         })
-}
-
-/// Constructs a [`ColumnSchema`] from Postgres protocol column data.
-///
-/// This helper method extracts column metadata from the replication protocol
-/// and converts it into the internal column schema representation. Some fields
-/// like nullable status have default values due to protocol limitations.
-///
-/// Relation messages don't provide full metadata like ordinal_position or data_type
-/// string. These schemas are primarily used to identify which columns are being
-/// replicated.
-fn build_column_schema(column: &protocol::Column) -> EtlResult<ColumnSchema> {
-    let typ = convert_type_oid_to_type(column.type_id() as u32);
-    // Currently 1 means that the column is part of the primary key.
-    let primary_key = column.flags() == 1;
-
-    Ok(ColumnSchema::new(
-        column.name()?.to_string(),
-        typ,
-        column.type_modifier(),
-        0,
-        if primary_key { Some(1) } else { None },
-        false,
-    ))
 }
 
 /// Converts Postgres tuple data into a [`TableRow`] using column schemas.

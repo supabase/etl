@@ -21,8 +21,8 @@ use crate::concurrency::stream::{TimeoutStream, TimeoutStreamResult};
 use crate::conversions::event::{
     DDL_MESSAGE_PREFIX, parse_ddl_schema_change_message, parse_event_from_begin_message,
     parse_event_from_commit_message, parse_event_from_delete_message,
-    parse_event_from_insert_message, parse_event_from_relation_message,
-    parse_event_from_truncate_message, parse_event_from_update_message,
+    parse_event_from_insert_message, parse_event_from_truncate_message,
+    parse_event_from_update_message, parse_replicated_column_names,
 };
 use crate::destination::Destination;
 use crate::error::{ErrorKind, EtlResult};
@@ -1028,7 +1028,7 @@ where
             handle_commit_message(state, start_lsn, commit_body, hook, pipeline_id).await
         }
         LogicalReplicationMessage::Relation(relation_body) => {
-            handle_relation_message(state, start_lsn, relation_body, schema_store, hook).await
+            handle_relation_message(state, relation_body, hook).await
         }
         LogicalReplicationMessage::Insert(insert_body) => {
             handle_insert_message(state, start_lsn, insert_body, hook, schema_store).await
@@ -1194,15 +1194,12 @@ where
 /// This function processes schema definition messages and updates the replicated columns
 /// tracking in the apply loop state. Columns that appear in the relation message are
 /// tracked as being replicated for subsequent DML event processing.
-async fn handle_relation_message<S, T>(
+async fn handle_relation_message<T>(
     state: &mut ApplyLoopState,
-    start_lsn: PgLsn,
     message: &protocol::RelationBody,
-    _schema_store: &S,
     hook: &T,
 ) -> EtlResult<HandleMessageResult>
 where
-    S: SchemaStore + Clone + Send + 'static,
     T: ApplyLoopHook,
 {
     let Some(remote_final_lsn) = state.remote_final_lsn else {
@@ -1222,28 +1219,19 @@ where
         return Ok(HandleMessageResult::no_event());
     }
 
-    // Convert event from the protocol message.
-    let event = parse_event_from_relation_message(start_lsn, remote_final_lsn, message)?;
-
-    // Extract the column names from the relation message and store them in the state
-    let replicated_column_names: HashSet<String> = event
-        .table_schema
-        .column_schemas
-        .iter()
-        .map(|cs| cs.name.clone())
-        .collect();
+    // Extract the replicated column names from the relation message.
+    let replicated_columns = parse_replicated_column_names(message)?;
 
     info!(
         table_id = %table_id,
-        columns = event.table_schema.column_schemas.len(),
-        replicated_columns = ?replicated_column_names,
+        replicated_columns = ?replicated_columns,
         "received relation message, updating replicated columns in state"
     );
 
-    // Update the replicated columns tracking in the apply loop state
-    state.set_replicated_columns(table_id, replicated_column_names);
+    // Update the replicated columns in the state.
+    state.set_replicated_columns(table_id, replicated_columns);
 
-    Ok(HandleMessageResult::return_event(Event::Relation(event)))
+    Ok(HandleMessageResult::no_event())
 }
 
 /// Handles Postgres INSERT messages for row insertion events.
