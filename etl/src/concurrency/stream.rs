@@ -241,7 +241,7 @@ impl<B, S: Stream<Item = B>> Stream for TimeoutStream<B, S> {
             .deadline
             .as_mut()
             .as_pin_mut()
-            .map(|d| d.poll(cx).is_ready())
+            .map(|deadline| deadline.poll(cx).is_ready())
             .unwrap_or(false);
 
         match this.stream.poll_next(cx) {
