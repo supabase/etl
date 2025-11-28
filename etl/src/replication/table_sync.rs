@@ -1,6 +1,6 @@
 use etl_config::shared::PipelineConfig;
 use etl_postgres::replication::slots::EtlReplicationSlot;
-use etl_postgres::types::{ColumnSchema, TableId};
+use etl_postgres::types::TableId;
 use futures::StreamExt;
 use metrics::histogram;
 use std::sync::Arc;
