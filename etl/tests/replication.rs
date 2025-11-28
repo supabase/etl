@@ -331,12 +331,9 @@ async fn test_table_copy_stream_is_consistent() {
         .unwrap();
 
     // We create a transaction to copy the table data consistently.
+    let columns = [test_column("age", Type::INT4, 2, true, false)];
     let stream = transaction
-        .get_table_copy_stream(
-            table_1_id,
-            &[test_column("age", Type::INT4, 2, true, false)],
-            None,
-        )
+        .get_table_copy_stream(table_1_id, columns.iter(), None)
         .await
         .unwrap();
 
@@ -401,12 +398,9 @@ async fn test_table_copy_stream_respects_row_filter() {
         .unwrap();
 
     // We create a transaction to copy the table data consistently.
+    let columns = [test_column("age", Type::INT4, 2, true, false)];
     let stream = transaction
-        .get_table_copy_stream(
-            test_table_id,
-            &[test_column("age", Type::INT4, 2, true, false)],
-            Some("test_pub"),
-        )
+        .get_table_copy_stream(test_table_id, columns.iter(), Some("test_pub"))
         .await
         .unwrap();
 
@@ -546,12 +540,9 @@ async fn test_table_copy_stream_no_row_filter() {
         .unwrap();
 
     // We create a transaction to copy the table data consistently.
+    let columns = [test_column("age", Type::INT4, 2, true, false)];
     let stream = transaction
-        .get_table_copy_stream(
-            test_table_id,
-            &[test_column("age", Type::INT4, 2, true, false)],
-            Some("test_pub"),
-        )
+        .get_table_copy_stream(test_table_id, columns.iter(), Some("test_pub"))
         .await
         .unwrap();
 
