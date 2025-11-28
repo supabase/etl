@@ -11,8 +11,8 @@ use etl::error::{ErrorKind, EtlResult};
 use etl::store::schema::SchemaStore;
 use etl::store::state::StateStore;
 use etl::types::{
-    Cell, ColumnSchema, Event, TableId, TableName, TableRow, TableSchema, Type,
-    generate_sequence_number,
+    Cell, ColumnSchema, Event, ReplicatedTableSchema, TableId, TableName, TableRow, TableSchema,
+    Type, generate_sequence_number,
 };
 use etl::{bail, etl_error};
 use tokio::sync::Mutex;
@@ -322,8 +322,9 @@ where
                             .push(IcebergOperationType::Insert.into());
                         insert.table_row.values.push(Cell::String(sequence_number));
 
+                        let table_id = insert.replicated_table_schema.id();
                         let table_rows: &mut Vec<TableRow> =
-                            table_id_to_table_rows.entry(insert.table_id).or_default();
+                            table_id_to_table_rows.entry(table_id).or_default();
                         table_rows.push(insert.table_row);
                     }
                     Event::Update(mut update) => {
@@ -335,8 +336,9 @@ where
                             .push(IcebergOperationType::Update.into());
                         update.table_row.values.push(Cell::String(sequence_number));
 
+                        let table_id = update.replicated_table_schema.id();
                         let table_rows: &mut Vec<TableRow> =
-                            table_id_to_table_rows.entry(update.table_id).or_default();
+                            table_id_to_table_rows.entry(table_id).or_default();
                         table_rows.push(update.table_row);
                     }
                     Event::Delete(delete) => {
@@ -352,8 +354,9 @@ where
                             .push(IcebergOperationType::Delete.into());
                         old_table_row.values.push(Cell::String(sequence_number));
 
+                        let table_id = delete.replicated_table_schema.id();
                         let table_rows: &mut Vec<TableRow> =
-                            table_id_to_table_rows.entry(delete.table_id).or_default();
+                            table_id_to_table_rows.entry(table_id).or_default();
                         table_rows.push(old_table_row);
                     }
                     _ => {
@@ -405,20 +408,21 @@ where
 
             // Collect and deduplicate all table IDs from all truncate events.
             //
-            // This is done as an optimization since if we have multiple table ids being truncated in a
+            // This is done as an optimization since if we have multiple tables being truncated in a
             // row without applying other events in the meanwhile, it doesn't make any sense to create
             // new empty tables for each of them.
-            let mut truncate_table_ids = HashSet::new();
+            let mut truncate_schemas: HashMap<TableId, ReplicatedTableSchema> = HashMap::new();
 
             while let Some(Event::Truncate(_)) = event_iter.peek() {
                 if let Some(Event::Truncate(truncate_event)) = event_iter.next() {
-                    for table_id in truncate_event.rel_ids {
-                        truncate_table_ids.insert(TableId::new(table_id));
+                    for schema in truncate_event.truncated_tables {
+                        truncate_schemas.insert(schema.id(), schema);
                     }
                 }
             }
 
-            for table_id in truncate_table_ids {
+            for (table_id, _schema) in truncate_schemas {
+                // TODO: Use schema directly instead of looking it up from store.
                 self.truncate_table(table_id, true).await?;
             }
         }
@@ -538,20 +542,22 @@ where
         let sequence_number_col =
             find_unique_column_name(&final_schema.column_schemas, SEQUENCE_NUMBER_COLUMN_NAME);
 
-        final_schema.add_column_schema(ColumnSchema {
-            name: cdc_operation_col,
-            typ: Type::TEXT,
-            modifier: -1,
-            nullable: false,
-            primary: false,
-        });
-        final_schema.add_column_schema(ColumnSchema {
-            name: sequence_number_col,
-            typ: Type::TEXT,
-            modifier: -1,
-            nullable: false,
-            primary: false,
-        });
+        final_schema.add_column_schema(ColumnSchema::new(
+            cdc_operation_col,
+            Type::TEXT,
+            -1,
+            0,
+            None,
+            false,
+        ));
+        final_schema.add_column_schema(ColumnSchema::new(
+            sequence_number_col,
+            Type::TEXT,
+            -1,
+            0,
+            None,
+            false,
+        ));
         final_schema
     }
 
@@ -591,8 +597,12 @@ where
     ///
     /// Removes all data from the target Iceberg table while preserving
     /// the table schema structure for continued CDC operations.
-    async fn truncate_table(&self, table_id: TableId) -> EtlResult<()> {
-        self.truncate_table(table_id, false).await?;
+    async fn truncate_table(
+        &self,
+        replicated_table_schema: &ReplicatedTableSchema,
+    ) -> EtlResult<()> {
+        self.truncate_table(replicated_table_schema.id(), false)
+            .await?;
 
         Ok(())
     }
@@ -604,10 +614,11 @@ where
     /// as upsert operations with generated sequence numbers.
     async fn write_table_rows(
         &self,
-        table_id: TableId,
+        replicated_table_schema: &ReplicatedTableSchema,
         table_rows: Vec<TableRow>,
     ) -> EtlResult<()> {
-        self.write_table_rows(table_id, table_rows).await?;
+        self.write_table_rows(replicated_table_schema.id(), table_rows)
+            .await?;
 
         Ok(())
     }
@@ -697,63 +708,54 @@ mod tests {
         CDC_OPERATION_COLUMN_NAME, find_unique_column_name, schema_to_namespace,
     };
 
+    /// Creates a test column schema with common defaults.
+    ///
+    /// This helper simplifies column schema creation in tests by providing sensible
+    /// defaults for fields that are typically not relevant to the test logic.
+    fn test_column(
+        name: &str,
+        typ: Type,
+        ordinal_position: i32,
+        nullable: bool,
+        primary_key: bool,
+    ) -> ColumnSchema {
+        ColumnSchema::new(
+            name.to_string(),
+            typ,
+            -1,
+            ordinal_position,
+            if primary_key { Some(1) } else { None },
+            nullable,
+        )
+    }
+
     #[test]
     fn can_find_unique_column_name() {
         let column_schemas = vec![];
         let col_name = find_unique_column_name(&column_schemas, CDC_OPERATION_COLUMN_NAME);
         assert_eq!(col_name, CDC_OPERATION_COLUMN_NAME.to_string());
 
-        let column_schemas = vec![ColumnSchema {
-            name: "id".to_string(),
-            typ: Type::BOOL,
-            modifier: -1,
-            nullable: false,
-            primary: true,
-        }];
+        let column_schemas = vec![test_column("id", Type::BOOL, 1, false, true)];
         let col_name = find_unique_column_name(&column_schemas, CDC_OPERATION_COLUMN_NAME);
         assert_eq!(col_name, CDC_OPERATION_COLUMN_NAME.to_string());
 
         let column_schemas = vec![
-            ColumnSchema {
-                name: "id".to_string(),
-                typ: Type::BOOL,
-                modifier: -1,
-                nullable: false,
-                primary: true,
-            },
-            ColumnSchema {
-                name: CDC_OPERATION_COLUMN_NAME.to_string(),
-                typ: Type::BOOL,
-                modifier: -1,
-                nullable: false,
-                primary: true,
-            },
+            test_column("id", Type::BOOL, 1, false, true),
+            test_column(CDC_OPERATION_COLUMN_NAME, Type::BOOL, 2, false, true),
         ];
         let col_name = find_unique_column_name(&column_schemas, CDC_OPERATION_COLUMN_NAME);
         assert_eq!(col_name, format!("{CDC_OPERATION_COLUMN_NAME}_1"));
 
         let column_schemas = vec![
-            ColumnSchema {
-                name: "id".to_string(),
-                typ: Type::BOOL,
-                modifier: -1,
-                nullable: false,
-                primary: true,
-            },
-            ColumnSchema {
-                name: CDC_OPERATION_COLUMN_NAME.to_string(),
-                typ: Type::BOOL,
-                modifier: -1,
-                nullable: false,
-                primary: true,
-            },
-            ColumnSchema {
-                name: format!("{CDC_OPERATION_COLUMN_NAME}_1"),
-                typ: Type::BOOL,
-                modifier: -1,
-                nullable: false,
-                primary: true,
-            },
+            test_column("id", Type::BOOL, 1, false, true),
+            test_column(CDC_OPERATION_COLUMN_NAME, Type::BOOL, 2, false, true),
+            test_column(
+                &format!("{CDC_OPERATION_COLUMN_NAME}_1"),
+                Type::BOOL,
+                3,
+                false,
+                true,
+            ),
         ];
         let col_name = find_unique_column_name(&column_schemas, CDC_OPERATION_COLUMN_NAME);
         assert_eq!(col_name, format!("{CDC_OPERATION_COLUMN_NAME}_2"));

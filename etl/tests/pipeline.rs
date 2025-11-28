@@ -18,13 +18,31 @@ use etl::types::{Event, EventType, InsertEvent, PipelineId, Type};
 use etl_config::shared::BatchConfig;
 use etl_postgres::below_version;
 use etl_postgres::replication::slots::EtlReplicationSlot;
-use etl_postgres::tokio::test_utils::{TableModification, id_column_schema};
+use etl_postgres::tokio::test_utils::id_column_schema;
 use etl_postgres::types::ColumnSchema;
 use etl_postgres::version::POSTGRES_15;
 use etl_telemetry::tracing::init_test_tracing;
 use rand::random;
 use std::time::Duration;
 use tokio::time::sleep;
+
+/// Creates a test column schema with sensible defaults.
+fn test_column(
+    name: &str,
+    typ: Type,
+    ordinal_position: i32,
+    nullable: bool,
+    primary_key: bool,
+) -> ColumnSchema {
+    ColumnSchema::new(
+        name.to_string(),
+        typ,
+        -1,
+        ordinal_position,
+        if primary_key { Some(1) } else { None },
+        nullable,
+    )
+}
 
 #[tokio::test(flavor = "multi_thread")]
 async fn table_schema_copy_survives_pipeline_restarts() {
@@ -609,7 +627,7 @@ async fn table_copy_and_sync_streams_new_data() {
     // Build expected events for verification
     let expected_users_inserts = build_expected_users_inserts(
         11,
-        database_schema.users_schema().id,
+        &database_schema.users_schema(),
         vec![
             ("user_11", 11),
             ("user_12", 12),
@@ -619,7 +637,7 @@ async fn table_copy_and_sync_streams_new_data() {
     );
     let expected_orders_inserts = build_expected_orders_inserts(
         11,
-        database_schema.orders_schema().id,
+        &database_schema.orders_schema(),
         vec![
             "description_11",
             "description_12",
@@ -717,7 +735,7 @@ async fn table_sync_streams_new_data_with_batch_timeout_expired() {
     // Build expected events for verification
     let expected_users_inserts = build_expected_users_inserts(
         1,
-        database_schema.users_schema().id,
+        &database_schema.users_schema(),
         vec![
             ("user_1", 1),
             ("user_2", 2),
@@ -790,145 +808,146 @@ async fn table_processing_converges_to_apply_loop_with_no_events_coming() {
     assert_eq!(age_sum, expected_age_sum);
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn table_processing_with_schema_change_errors_table() {
-    init_test_tracing();
-    let database = spawn_source_database().await;
-    let database_schema = setup_test_database_schema(&database, TableSelection::OrdersOnly).await;
-
-    // Insert data in the table.
-    database
-        .insert_values(
-            database_schema.orders_schema().name.clone(),
-            &["description"],
-            &[&"description_1"],
-        )
-        .await
-        .unwrap();
-
-    let store = NotifyingStore::new();
-    let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
-
-    // Start pipeline from scratch.
-    let pipeline_id: PipelineId = random();
-    let mut pipeline = create_pipeline(
-        &database.config,
-        pipeline_id,
-        database_schema.publication_name(),
-        store.clone(),
-        destination.clone(),
-    );
-
-    // Register notifications for initial table copy completion.
-    let orders_state_notify = store
-        .notify_on_table_state_type(
-            database_schema.orders_schema().id,
-            TableReplicationPhaseType::FinishedCopy,
-        )
-        .await;
-
-    pipeline.start().await.unwrap();
-
-    orders_state_notify.notified().await;
-
-    // Register notification for the sync done state.
-    let orders_state_notify = store
-        .notify_on_table_state_type(
-            database_schema.orders_schema().id,
-            TableReplicationPhaseType::SyncDone,
-        )
-        .await;
-
-    // Insert new data in the table.
-    database
-        .insert_values(
-            database_schema.orders_schema().name.clone(),
-            &["description"],
-            &[&"description_2"],
-        )
-        .await
-        .unwrap();
-
-    orders_state_notify.notified().await;
-
-    // Register notification for the ready state.
-    let orders_state_notify = store
-        .notify_on_table_state_type(
-            database_schema.orders_schema().id,
-            TableReplicationPhaseType::Ready,
-        )
-        .await;
-
-    // Insert new data in the table.
-    database
-        .insert_values(
-            database_schema.orders_schema().name.clone(),
-            &["description"],
-            &[&"description_3"],
-        )
-        .await
-        .unwrap();
-
-    orders_state_notify.notified().await;
-
-    // Register notification for the errored state.
-    let orders_state_notify = store
-        .notify_on_table_state_type(
-            database_schema.orders_schema().id,
-            TableReplicationPhaseType::Errored,
-        )
-        .await;
-
-    // Change the schema of orders by adding a new column.
-    database
-        .alter_table(
-            database_schema.orders_schema().name.clone(),
-            &[TableModification::AddColumn {
-                name: "date",
-                data_type: "integer",
-            }],
-        )
-        .await
-        .unwrap();
-
-    // Insert new data in the table.
-    database
-        .insert_values(
-            database_schema.orders_schema().name.clone(),
-            &["description", "date"],
-            &[&"description_with_date", &10],
-        )
-        .await
-        .unwrap();
-
-    orders_state_notify.notified().await;
-
-    pipeline.shutdown_and_wait().await.unwrap();
-
-    // We assert that the schema is the initial one.
-    let table_schemas = store.get_table_schemas().await;
-    assert_eq!(table_schemas.len(), 1);
-    assert_eq!(
-        *table_schemas
-            .get(&database_schema.orders_schema().id)
-            .unwrap(),
-        database_schema.orders_schema()
-    );
-
-    // We check that we got the insert events after the first data of the table has been copied.
-    let events = destination.get_events().await;
-    let grouped_events = group_events_by_type_and_table_id(&events);
-    let orders_inserts = grouped_events
-        .get(&(EventType::Insert, database_schema.orders_schema().id))
-        .unwrap();
-
-    let expected_orders_inserts = build_expected_orders_inserts(
-        2,
-        database_schema.orders_schema().id,
-        vec!["description_2", "description_3"],
-    );
-    assert_events_equal(orders_inserts, &expected_orders_inserts);
-}
+// TOOD: re-implement once we clarified the semantics for table change.
+// #[tokio::test(flavor = "multi_thread")]
+// async fn table_processing_with_schema_change_errors_table() {
+//     init_test_tracing();
+//     let database = spawn_source_database().await;
+//     let database_schema = setup_test_database_schema(&database, TableSelection::OrdersOnly).await;
+//
+//     // Insert data in the table.
+//     database
+//         .insert_values(
+//             database_schema.orders_schema().name.clone(),
+//             &["description"],
+//             &[&"description_1"],
+//         )
+//         .await
+//         .unwrap();
+//
+//     let store = NotifyingStore::new();
+//     let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
+//
+//     // Start pipeline from scratch.
+//     let pipeline_id: PipelineId = random();
+//     let mut pipeline = create_pipeline(
+//         &database.config,
+//         pipeline_id,
+//         database_schema.publication_name(),
+//         store.clone(),
+//         destination.clone(),
+//     );
+//
+//     // Register notifications for initial table copy completion.
+//     let orders_state_notify = store
+//         .notify_on_table_state_type(
+//             database_schema.orders_schema().id,
+//             TableReplicationPhaseType::FinishedCopy,
+//         )
+//         .await;
+//
+//     pipeline.start().await.unwrap();
+//
+//     orders_state_notify.notified().await;
+//
+//     // Register notification for the sync done state.
+//     let orders_state_notify = store
+//         .notify_on_table_state_type(
+//             database_schema.orders_schema().id,
+//             TableReplicationPhaseType::SyncDone,
+//         )
+//         .await;
+//
+//     // Insert new data in the table.
+//     database
+//         .insert_values(
+//             database_schema.orders_schema().name.clone(),
+//             &["description"],
+//             &[&"description_2"],
+//         )
+//         .await
+//         .unwrap();
+//
+//     orders_state_notify.notified().await;
+//
+//     // Register notification for the ready state.
+//     let orders_state_notify = store
+//         .notify_on_table_state_type(
+//             database_schema.orders_schema().id,
+//             TableReplicationPhaseType::Ready,
+//         )
+//         .await;
+//
+//     // Insert new data in the table.
+//     database
+//         .insert_values(
+//             database_schema.orders_schema().name.clone(),
+//             &["description"],
+//             &[&"description_3"],
+//         )
+//         .await
+//         .unwrap();
+//
+//     orders_state_notify.notified().await;
+//
+//     // Register notification for the errored state.
+//     let orders_state_notify = store
+//         .notify_on_table_state_type(
+//             database_schema.orders_schema().id,
+//             TableReplicationPhaseType::Errored,
+//         )
+//         .await;
+//
+//     // Change the schema of orders by adding a new column.
+//     database
+//         .alter_table(
+//             database_schema.orders_schema().name.clone(),
+//             &[TableModification::AddColumn {
+//                 name: "date",
+//                 data_type: "integer",
+//             }],
+//         )
+//         .await
+//         .unwrap();
+//
+//     // Insert new data in the table.
+//     database
+//         .insert_values(
+//             database_schema.orders_schema().name.clone(),
+//             &["description", "date"],
+//             &[&"description_with_date", &10],
+//         )
+//         .await
+//         .unwrap();
+//
+//     orders_state_notify.notified().await;
+//
+//     pipeline.shutdown_and_wait().await.unwrap();
+//
+//     // We assert that the schema is the initial one.
+//     let table_schemas = store.get_table_schemas().await;
+//     assert_eq!(table_schemas.len(), 1);
+//     assert_eq!(
+//         *table_schemas
+//             .get(&database_schema.orders_schema().id)
+//             .unwrap(),
+//         database_schema.orders_schema()
+//     );
+//
+//     // We check that we got the insert events after the first data of the table has been copied.
+//     let events = destination.get_events().await;
+//     let grouped_events = group_events_by_type_and_table_id(&events);
+//     let orders_inserts = grouped_events
+//         .get(&(EventType::Insert, database_schema.orders_schema().id))
+//         .unwrap();
+//
+//     let expected_orders_inserts = build_expected_orders_inserts(
+//         2,
+//         database_schema.orders_schema().id,
+//         vec!["description_2", "description_3"],
+//     );
+//     assert_events_equal(orders_inserts, &expected_orders_inserts);
+// }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn table_without_primary_key_is_errored() {
@@ -1073,29 +1092,35 @@ async fn pipeline_respects_column_level_publication() {
     let insert_events = grouped_events.get(&(EventType::Insert, table_id)).unwrap();
     assert_eq!(insert_events.len(), 2);
 
-    // Check that each insert event contains only the published columns (id, name, age).
-    // Since Cell values don't include column names, we verify by checking the count.
+    // Check that each insert event contains only the published columns (id, name, age) and that the
+    // schema used is correct.
     for event in insert_events {
-        if let Event::Insert(InsertEvent { table_row, .. }) = event {
+        if let Event::Insert(InsertEvent {
+            replicated_table_schema,
+            table_row,
+            ..
+        }) = event
+        {
             // Verify exactly 3 columns (id, name, age).
             // If email was included, there would be 4 values.
             assert_eq!(table_row.values.len(), 3);
+
+            // Get only the replicated column names from the schema
+            let replicated_column_names: Vec<&str> = replicated_table_schema
+                .column_schemas()
+                .map(|c| c.name.as_str())
+                .collect();
+            assert!(replicated_column_names.contains(&"id"));
+            assert!(replicated_column_names.contains(&"name"));
+            assert!(replicated_column_names.contains(&"age"));
+            assert!(!replicated_column_names.contains(&"email"));
+            assert_eq!(replicated_column_names.len(), 3);
+
+            // The underlying full schema has all 4 columns
+            let full_schema = replicated_table_schema.get_inner();
+            assert_eq!(full_schema.column_schemas.len(), 4);
         }
     }
-
-    // Also verify the stored table schema only includes published columns.
-    let table_schemas = state_store.get_table_schemas().await;
-    let stored_schema = table_schemas.get(&table_id).unwrap();
-    let column_names: Vec<&str> = stored_schema
-        .column_schemas
-        .iter()
-        .map(|c| c.name.as_str())
-        .collect();
-    assert!(column_names.contains(&"id"));
-    assert!(column_names.contains(&"name"));
-    assert!(column_names.contains(&"age"));
-    assert!(!column_names.contains(&"email"));
-    assert_eq!(stored_schema.column_schemas.len(), 3);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1157,20 +1182,8 @@ async fn empty_tables_are_created_at_destination() {
         table_name,
         &[
             id_column_schema(),
-            ColumnSchema {
-                name: "name".to_string(),
-                typ: Type::TEXT,
-                modifier: -1,
-                nullable: true,
-                primary: false,
-            },
-            ColumnSchema {
-                name: "created_at".to_string(),
-                typ: Type::TIMESTAMP,
-                modifier: -1,
-                nullable: true,
-                primary: false,
-            },
+            test_column("name", Type::TEXT, 2, true, false),
+            test_column("created_at", Type::TIMESTAMP, 3, true, false),
         ],
     );
 

@@ -103,11 +103,11 @@ pub async fn spawn_source_database_for_store() -> PgDatabase<Client> {
         .await
         .expect("Failed to set search path to 'etl'");
 
-    // Run replicator migrations to create the state store tables.
-    sqlx::migrate!("../etl-replicator/migrations")
+    // Run migrations to create the state store tables.
+    sqlx::migrate!("./migrations")
         .run(&pool)
         .await
-        .expect("Failed to run replicator migrations");
+        .expect("Failed to run migrations");
 
     database
 }

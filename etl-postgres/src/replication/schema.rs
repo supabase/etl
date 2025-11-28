@@ -173,23 +173,23 @@ pub async fn store_table_schema(
         .await?;
 
     // Insert all columns
-    for (column_order, column_schema) in table_schema.column_schemas.iter().enumerate() {
-        let column_type_str = postgres_type_to_string(&column_schema.typ);
-
+    for column_schema in table_schema.column_schemas.iter() {
         sqlx::query(
             r#"
-            insert into etl.table_columns 
-            (table_schema_id, column_name, column_type, type_modifier, nullable, primary_key, column_order)
-            values ($1, $2, $3, $4, $5, $6, $7)
+            insert into etl.table_columns
+            (table_schema_id, column_name, column_type, type_modifier, nullable, primary_key,
+             column_order, primary_key_ordinal_position)
+            values ($1, $2, $3, $4, $5, $6, $7, $8)
             "#,
         )
         .bind(table_schema_id)
         .bind(&column_schema.name)
-        .bind(column_type_str)
+        .bind(postgres_type_to_string(&column_schema.typ))
         .bind(column_schema.modifier)
         .bind(column_schema.nullable)
-        .bind(column_schema.primary)
-        .bind(column_order as i32)
+        .bind(column_schema.primary_key())
+        .bind(column_schema.ordinal_position)
+        .bind(column_schema.primary_key_ordinal_position)
         .execute(&mut *tx)
         .await?;
     }
@@ -218,7 +218,8 @@ pub async fn load_table_schemas(
             tc.type_modifier,
             tc.nullable,
             tc.primary_key,
-            tc.column_order
+            tc.column_order,
+            tc.primary_key_ordinal_position
         from etl.table_schemas ts
         inner join etl.table_columns tc on ts.id = tc.table_schema_id
         where ts.pipeline_id = $1
@@ -303,15 +304,17 @@ fn parse_column_schema(row: &PgRow) -> ColumnSchema {
     let column_name: String = row.get("column_name");
     let column_type: String = row.get("column_type");
     let type_modifier: i32 = row.get("type_modifier");
+    let ordinal_position: i32 = row.get("column_order");
+    let primary_key_ordinal_position: Option<i32> = row.get("primary_key_ordinal_position");
     let nullable: bool = row.get("nullable");
-    let primary_key: bool = row.get("primary_key");
 
     ColumnSchema::new(
         column_name,
         string_to_postgres_type(&column_type),
         type_modifier,
+        ordinal_position,
+        primary_key_ordinal_position,
         nullable,
-        primary_key,
     )
 }
 

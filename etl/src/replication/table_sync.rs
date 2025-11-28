@@ -1,6 +1,6 @@
 use etl_config::shared::PipelineConfig;
 use etl_postgres::replication::slots::EtlReplicationSlot;
-use etl_postgres::types::TableId;
+use etl_postgres::types::{ReplicatedTableSchema, TableId};
 use futures::StreamExt;
 use metrics::histogram;
 use std::sync::Arc;
@@ -150,20 +150,6 @@ where
                 }
             }
 
-            // We must truncate the destination table before starting a copy to avoid data inconsistencies.
-            // Example scenario:
-            // 1. The source table has a single row (id = 1) that is copied to the destination during the initial copy.
-            // 2. Before the table’s phase is set to `FinishedCopy`, the process crashes.
-            // 3. While down, the source deletes row id = 1 and inserts row id = 2.
-            // 4. When restarted, the process sees the table in the ` DataSync ` state, deletes the slot, and copies again.
-            // 5. This time, only row id = 2 is copied, but row id = 1 still exists in the destination.
-            // Result: the destination has two rows (id = 1 and id = 2) instead of only one (id = 2).
-            // Fix: Always truncate the destination table before starting a copy.
-            //
-            // We try to truncate the table also during `Init` because we support state rollback and
-            // a table might be there from a previous run.
-            destination.truncate_table(table_id).await?;
-
             // We are ready to start copying table data, and we update the state accordingly.
             info!("starting data copy for table {}", table_id);
             {
@@ -194,10 +180,7 @@ where
             // - Destination -> we write here because some consumers might want to have the schema of incoming
             //  data.
             info!("fetching table schema for table {}", table_id);
-            let table_schema = transaction
-                .get_table_schema(table_id, Some(&config.publication_name))
-                .await?;
-
+            let table_schema = transaction.get_table_schema(table_id).await?;
             if !table_schema.has_primary_keys() {
                 bail!(
                     ErrorKind::SourceSchemaError,
@@ -208,18 +191,50 @@ where
 
             // We store the table schema in the schema store to be able to retrieve it even when the
             // pipeline is restarted, since it's outside the lifecycle of the pipeline.
-            store.store_table_schema(table_schema.clone()).await?;
+            let table_schema = store.store_table_schema(table_schema).await?;
 
-            // We create the copy table stream.
-            let table_copy_stream = transaction
-                .get_table_copy_stream(
+            // Get the names of columns being replicated based on the publication's column filter.
+            // This must be done in the same transaction as `get_table_schema` for consistency.
+            let replicated_column_names = transaction
+                .get_replicated_column_names(
                     table_id,
-                    &table_schema.column_schemas,
+                    &table_schema,
                     Some(&config.publication_name),
                 )
                 .await?;
-            let table_copy_stream =
-                TableCopyStream::wrap(table_copy_stream, &table_schema.column_schemas, pipeline_id);
+
+            // Create the replicated table schema with the replication mask.
+            let replicated_schema =
+                ReplicatedTableSchema::build(table_schema, &replicated_column_names);
+
+            // We must truncate the destination table before starting a copy to avoid data inconsistencies.
+            //
+            // Example scenario:
+            // 1. The source table has a single row (id = 1) that is copied to the destination during the initial copy.
+            // 2. Before the table’s phase is set to `FinishedCopy`, the process crashes.
+            // 3. While down, the source deletes row id = 1 and inserts row id = 2.
+            // 4. When restarted, the process sees the table in the ` DataSync ` state, deletes the slot, and copies again.
+            // 5. This time, only row id = 2 is copied, but row id = 1 still exists in the destination.
+            // Result: the destination has two rows (id = 1 and id = 2) instead of only one (id = 2).
+            // Fix: Always truncate the destination table before starting a copy.
+            //
+            // We try to truncate the table also during `Init` because we support state rollback and
+            // a table might be there from a previous run.
+            destination.truncate_table(&replicated_schema).await?;
+
+            // We create the copy table stream on the replicated columns.
+            let table_copy_stream = transaction
+                .get_table_copy_stream(
+                    table_id,
+                    replicated_schema.column_schemas(),
+                    Some(&config.publication_name),
+                )
+                .await?;
+            let table_copy_stream = TableCopyStream::wrap(
+                table_copy_stream,
+                replicated_schema.column_schemas(),
+                pipeline_id,
+            );
             let table_copy_stream = TimeoutBatchStream::wrap(
                 table_copy_stream,
                 config.batch.clone(),
@@ -253,7 +268,9 @@ where
 
                         let before_sending = Instant::now();
 
-                        destination.write_table_rows(table_id, table_rows).await?;
+                        destination
+                            .write_table_rows(&replicated_schema, table_rows)
+                            .await?;
                         table_rows_written = true;
 
                         metrics::counter!(
@@ -296,7 +313,9 @@ where
             // If no table rows were written, we call the method nonetheless with no rows, to kickstart
             // table creation.
             if !table_rows_written {
-                destination.write_table_rows(table_id, vec![]).await?;
+                destination
+                    .write_table_rows(&replicated_schema, vec![])
+                    .await?;
                 info!(
                     "writing empty table rows since table {} was empty",
                     table_id

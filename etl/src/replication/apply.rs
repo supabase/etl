@@ -1,27 +1,28 @@
 use etl_config::shared::PipelineConfig;
 use etl_postgres::replication::worker::WorkerType;
-use etl_postgres::types::TableId;
+use etl_postgres::types::{ReplicatedTableSchema, ReplicationMask, TableId, TableSchema};
 use futures::StreamExt;
 use metrics::histogram;
 use postgres_replication::protocol;
 use postgres_replication::protocol::{LogicalReplicationMessage, ReplicationMessage};
+use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::pin;
 use tokio_postgres::types::PgLsn;
-use tracing::log::warn;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
+use crate::bail;
 use crate::concurrency::shutdown::ShutdownRx;
 use crate::concurrency::signal::SignalRx;
 use crate::concurrency::stream::{TimeoutStream, TimeoutStreamResult};
 use crate::conversions::event::{
-    parse_event_from_begin_message, parse_event_from_commit_message,
-    parse_event_from_delete_message, parse_event_from_insert_message,
-    parse_event_from_relation_message, parse_event_from_truncate_message,
-    parse_event_from_update_message,
+    DDL_MESSAGE_PREFIX, parse_ddl_schema_change_message, parse_event_from_begin_message,
+    parse_event_from_commit_message, parse_event_from_delete_message,
+    parse_event_from_insert_message, parse_event_from_truncate_message,
+    parse_event_from_update_message, parse_replicated_column_names,
 };
 use crate::destination::Destination;
 use crate::error::{ErrorKind, EtlResult};
@@ -32,10 +33,9 @@ use crate::metrics::{
 };
 use crate::replication::client::PgReplicationClient;
 use crate::replication::stream::EventsStream;
-use crate::state::table::{RetryPolicy, TableReplicationError};
+use crate::state::table::TableReplicationError;
 use crate::store::schema::SchemaStore;
 use crate::types::{Event, PipelineId};
-use crate::{bail, etl_error};
 
 /// The minimum interval (in milliseconds) between consecutive status updates.
 ///
@@ -208,8 +208,6 @@ impl StatusUpdate {
 enum EndBatch {
     /// The batch should include the last processed event and end.
     Inclusive,
-    /// The batch should exclude the last processed event and end.
-    Exclusive,
 }
 
 /// Result returned from `handle_replication_message` and related functions
@@ -284,18 +282,6 @@ impl HandleMessageResult {
             ..Default::default()
         }
     }
-
-    /// Creates a result that excludes the current event and requests batch termination.
-    ///
-    /// Used when the current message triggers a recoverable table-level error.
-    /// The error is propagated to be handled by the apply loop hook.
-    fn finish_batch_and_exclude_event(error: TableReplicationError) -> Self {
-        Self {
-            end_batch: Some(EndBatch::Exclusive),
-            table_replication_error: Some(error),
-            ..Default::default()
-        }
-    }
 }
 
 /// A shared state that is used throughout the apply loop to track progress.
@@ -329,6 +315,13 @@ struct ApplyLoopState {
     /// transaction boundary is found. If not found, the process will continue until it is killed via
     /// a `SIGKILL`.
     shutdown_discarded: bool,
+    /// Tracks which columns are being replicated for each table.
+    ///
+    /// This map is populated from relation messages during replication. For each table,
+    /// it contains a [`ReplicationMask`] indicating which columns are replicated.
+    /// This allows the apply loop to process only the columns that are actually
+    /// being replicated.
+    replication_masks: HashMap<TableId, ReplicationMask>,
 }
 
 impl ApplyLoopState {
@@ -346,7 +339,18 @@ impl ApplyLoopState {
             current_tx_begin_ts: None,
             current_tx_events: 0,
             shutdown_discarded: false,
+            replication_masks: HashMap::new(),
         }
+    }
+
+    /// Returns the replication mask for a table.
+    fn get_replication_mask(&self, table_id: &TableId) -> Option<&ReplicationMask> {
+        self.replication_masks.get(table_id)
+    }
+
+    /// Updates the replication mask for a table based on a relation message.
+    fn set_replication_mask(&mut self, table_id: TableId, mask: ReplicationMask) {
+        self.replication_masks.insert(table_id, mask);
     }
 
     /// Updates the last commit end LSN to track transaction boundaries.
@@ -923,6 +927,25 @@ where
         .await
 }
 
+/// Retrieves a table schema from the schema store by table ID.
+///
+/// Returns an error if the schema is not found in the store.
+async fn get_table_schema<S>(schema_store: &S, table_id: TableId) -> EtlResult<Arc<TableSchema>>
+where
+    S: SchemaStore,
+{
+    schema_store
+        .get_table_schema(&table_id)
+        .await?
+        .ok_or_else(|| {
+            crate::etl_error!(
+                ErrorKind::MissingTableSchema,
+                "Table schema not found in cache",
+                format!("Table schema for table {} not found in cache", table_id)
+            )
+        })
+}
+
 /// Dispatches replication protocol messages to appropriate handlers.
 ///
 /// This function serves as the main routing mechanism for Postgres replication
@@ -1023,7 +1046,7 @@ where
             handle_commit_message(state, start_lsn, commit_body, hook, pipeline_id).await
         }
         LogicalReplicationMessage::Relation(relation_body) => {
-            handle_relation_message(state, start_lsn, relation_body, schema_store, hook).await
+            handle_relation_message(state, relation_body, hook, schema_store).await
         }
         LogicalReplicationMessage::Insert(insert_body) => {
             handle_insert_message(state, start_lsn, insert_body, hook, schema_store).await
@@ -1035,17 +1058,15 @@ where
             handle_delete_message(state, start_lsn, delete_body, hook, schema_store).await
         }
         LogicalReplicationMessage::Truncate(truncate_body) => {
-            handle_truncate_message(state, start_lsn, truncate_body, hook).await
+            handle_truncate_message(state, start_lsn, truncate_body, hook, schema_store).await
         }
-        LogicalReplicationMessage::Origin(_) => {
-            debug!("received unsupported ORIGIN message");
-            Ok(HandleMessageResult::default())
+        LogicalReplicationMessage::Message(message_body) => {
+            handle_logical_message(state, message_body, hook).await
         }
-        LogicalReplicationMessage::Type(_) => {
-            debug!("received unsupported TYPE message");
-            Ok(HandleMessageResult::default())
+        message => {
+            debug!("received unsupported message: {:?}", message);
+            Ok(HandleMessageResult::no_event())
         }
-        _ => Ok(HandleMessageResult::default()),
     }
 }
 
@@ -1188,23 +1209,20 @@ where
 
 /// Handles Postgres RELATION messages that describe table schemas.
 ///
-/// This function processes schema definition messages by validating that table
-/// schemas haven't changed unexpectedly during replication. Schema stability
-/// is critical for maintaining data consistency between source and destination.
+/// This function processes schema definition messages and updates the replicated columns
+/// tracking in the apply loop state. Columns that appear in the relation message are
+/// tracked as being replicated for subsequent DML event processing.
 ///
-/// When schema changes are detected, the function creates appropriate error
-/// conditions and signals batch termination to prevent processing of events
-/// with mismatched schemas. This protection mechanism ensures data integrity
-/// by failing fast on incompatible schema evolution.
+/// This mechanism allows the system to always store a truthful base schema, and dynamically choose
+/// which columns to consider while interpreting data.
 async fn handle_relation_message<S, T>(
     state: &mut ApplyLoopState,
-    start_lsn: PgLsn,
     message: &protocol::RelationBody,
-    schema_store: &S,
     hook: &T,
+    schema_store: &S,
 ) -> EtlResult<HandleMessageResult>
 where
-    S: SchemaStore + Clone + Send + 'static,
+    S: SchemaStore,
     T: ApplyLoopHook,
 {
     let Some(remote_final_lsn) = state.remote_final_lsn else {
@@ -1224,43 +1242,28 @@ where
         return Ok(HandleMessageResult::no_event());
     }
 
-    // If no table schema is found, it means that something went wrong since we should have schemas
-    // ready before starting the apply loop.
-    let existing_table_schema =
-        schema_store
-            .get_table_schema(&table_id)
-            .await?
-            .ok_or_else(|| {
-                etl_error!(
-                    ErrorKind::MissingTableSchema,
-                    "Table schema not found in cache",
-                    format!("Table schema for table {} not found in cache", table_id)
-                )
-            })?;
+    // Extract the replicated column names from the relation message.
+    let replicated_columns = parse_replicated_column_names(message)?;
 
-    // Convert event from the protocol message.
-    let event = parse_event_from_relation_message(start_lsn, remote_final_lsn, message)?;
+    info!(
+        table_id = %table_id,
+        replicated_columns = ?replicated_columns,
+        "received relation message, updating replicated columns in state"
+    );
 
-    // We compare the table schema from the relation message with the existing schema (if any).
-    // The purpose of this comparison is that we want to throw an error and stop the processing
-    // of any table that incurs in a schema change after the initial table sync is performed.
-    if !existing_table_schema.partial_eq(&event.table_schema) {
-        let error = TableReplicationError::with_solution(
-            table_id,
-            format!("The schema for table {table_id} has changed during streaming"),
-            "ETL doesn't support schema changes at this point in time, rollback the schema",
-            RetryPolicy::ManualRetry,
-        );
+    // Get the table schema and compute the replication mask.
+    let table_schema = get_table_schema(schema_store, table_id).await?;
+    let mask = ReplicationMask::build(&table_schema, &replicated_columns);
 
-        return Ok(HandleMessageResult::finish_batch_and_exclude_event(error));
-    }
+    // Store the mask in the state for use by subsequent DML events.
+    state.set_replication_mask(table_id, mask);
 
-    Ok(HandleMessageResult::return_event(Event::Relation(event)))
+    Ok(HandleMessageResult::no_event())
 }
 
 /// Handles Postgres INSERT messages for row insertion events.
 async fn handle_insert_message<S, T>(
-    state: &mut ApplyLoopState,
+    state: &ApplyLoopState,
     start_lsn: PgLsn,
     message: &protocol::InsertBody,
     hook: &T,
@@ -1278,23 +1281,41 @@ where
         );
     };
 
+    let table_id = TableId::new(message.rel_id());
+
     if !hook
-        .should_apply_changes(TableId::new(message.rel_id()), remote_final_lsn)
+        .should_apply_changes(table_id, remote_final_lsn)
         .await?
     {
         return Ok(HandleMessageResult::no_event());
     }
 
+    // Get the replication mask from state, or bail if relation message wasn't received
+    let Some(mask) = state.get_replication_mask(&table_id) else {
+        bail!(
+            ErrorKind::InvalidState,
+            "Missing relation message",
+            format!(
+                "No relation message received for table {} before INSERT",
+                table_id
+            )
+        );
+    };
+
+    // Get the table schema and build the replicated schema with the mask.
+    let table_schema = get_table_schema(schema_store, table_id).await?;
+    let replicated_schema = ReplicatedTableSchema::from_mask(table_schema, mask.clone());
+
     // Convert event from the protocol message.
     let event =
-        parse_event_from_insert_message(schema_store, start_lsn, remote_final_lsn, message).await?;
+        parse_event_from_insert_message(replicated_schema, start_lsn, remote_final_lsn, message)?;
 
     Ok(HandleMessageResult::return_event(Event::Insert(event)))
 }
 
 /// Handles Postgres UPDATE messages for row modification events.
 async fn handle_update_message<S, T>(
-    state: &mut ApplyLoopState,
+    state: &ApplyLoopState,
     start_lsn: PgLsn,
     message: &protocol::UpdateBody,
     hook: &T,
@@ -1312,23 +1333,41 @@ where
         );
     };
 
+    let table_id = TableId::new(message.rel_id());
+
     if !hook
-        .should_apply_changes(TableId::new(message.rel_id()), remote_final_lsn)
+        .should_apply_changes(table_id, remote_final_lsn)
         .await?
     {
         return Ok(HandleMessageResult::no_event());
     }
 
+    // Get the replication mask from state, or bail if relation message wasn't received
+    let Some(mask) = state.get_replication_mask(&table_id) else {
+        bail!(
+            ErrorKind::InvalidState,
+            "Missing relation message",
+            format!(
+                "No relation message received for table {} before UPDATE",
+                table_id
+            )
+        );
+    };
+
+    // Get the table schema and build the replicated schema with the mask.
+    let table_schema = get_table_schema(schema_store, table_id).await?;
+    let replicated_schema = ReplicatedTableSchema::from_mask(table_schema, mask.clone());
+
     // Convert event from the protocol message.
     let event =
-        parse_event_from_update_message(schema_store, start_lsn, remote_final_lsn, message).await?;
+        parse_event_from_update_message(replicated_schema, start_lsn, remote_final_lsn, message)?;
 
     Ok(HandleMessageResult::return_event(Event::Update(event)))
 }
 
 /// Handles Postgres DELETE messages for row removal events.
 async fn handle_delete_message<S, T>(
-    state: &mut ApplyLoopState,
+    state: &ApplyLoopState,
     start_lsn: PgLsn,
     message: &protocol::DeleteBody,
     hook: &T,
@@ -1346,16 +1385,34 @@ where
         );
     };
 
+    let table_id = TableId::new(message.rel_id());
+
     if !hook
-        .should_apply_changes(TableId::new(message.rel_id()), remote_final_lsn)
+        .should_apply_changes(table_id, remote_final_lsn)
         .await?
     {
         return Ok(HandleMessageResult::no_event());
     }
 
+    // Get the replication mask from state, or bail if relation message wasn't received
+    let Some(mask) = state.get_replication_mask(&table_id) else {
+        bail!(
+            ErrorKind::InvalidState,
+            "Missing relation message",
+            format!(
+                "No relation message received for table {} before DELETE",
+                table_id
+            )
+        );
+    };
+
+    // Get the table schema and build the replicated schema with the mask.
+    let table_schema = get_table_schema(schema_store, table_id).await?;
+    let replicated_schema = ReplicatedTableSchema::from_mask(table_schema, mask.clone());
+
     // Convert event from the protocol message.
     let event =
-        parse_event_from_delete_message(schema_store, start_lsn, remote_final_lsn, message).await?;
+        parse_event_from_delete_message(replicated_schema, start_lsn, remote_final_lsn, message)?;
 
     Ok(HandleMessageResult::return_event(Event::Delete(event)))
 }
@@ -1366,13 +1423,15 @@ where
 /// ensuring transaction context, and filtering the affected table list based on
 /// hook decisions. Since TRUNCATE can affect multiple tables simultaneously,
 /// it evaluates each table individually.
-async fn handle_truncate_message<T>(
-    state: &mut ApplyLoopState,
+async fn handle_truncate_message<S, T>(
+    state: &ApplyLoopState,
     start_lsn: PgLsn,
     message: &protocol::TruncateBody,
     hook: &T,
+    schema_store: &S,
 ) -> EtlResult<HandleMessageResult>
 where
+    S: SchemaStore + Clone + Send + 'static,
     T: ApplyLoopHook,
 {
     let Some(remote_final_lsn) = state.remote_final_lsn else {
@@ -1383,24 +1442,125 @@ where
         );
     };
 
-    // We collect only the relation ids for which we are allow to apply changes, thus in this case
-    // the truncation.
-    let mut rel_ids = Vec::with_capacity(message.rel_ids().len());
-    for &table_id in message.rel_ids().iter() {
+    // We collect the replicated schemas for tables we are allowed to apply changes to.
+    let mut truncated_tables = Vec::with_capacity(message.rel_ids().len());
+    for &rel_id in message.rel_ids().iter() {
+        let table_id = TableId::new(rel_id);
+
         if hook
-            .should_apply_changes(TableId::new(table_id), remote_final_lsn)
+            .should_apply_changes(table_id, remote_final_lsn)
             .await?
         {
-            rel_ids.push(table_id)
+            // Get the replication mask from state, or bail if relation message wasn't received
+            let Some(mask) = state.get_replication_mask(&table_id) else {
+                bail!(
+                    ErrorKind::InvalidState,
+                    "Missing relation message",
+                    format!(
+                        "No relation message received for table {} before TRUNCATE",
+                        table_id
+                    )
+                );
+            };
+
+            // Get the table schema and build the replicated schema with the mask.
+            let table_schema = get_table_schema(schema_store, table_id).await?;
+            let replicated_schema = ReplicatedTableSchema::from_mask(table_schema, mask.clone());
+
+            truncated_tables.push(replicated_schema);
         }
     }
-    // If nothing to apply, skip conversion entirely
-    if rel_ids.is_empty() {
+
+    // If nothing to apply, skip conversion entirely.
+    if truncated_tables.is_empty() {
         return Ok(HandleMessageResult::no_event());
     }
 
     // Convert event from the protocol message.
-    let event = parse_event_from_truncate_message(start_lsn, remote_final_lsn, message, rel_ids);
+    let event =
+        parse_event_from_truncate_message(start_lsn, remote_final_lsn, message, truncated_tables);
 
     Ok(HandleMessageResult::return_event(Event::Truncate(event)))
+}
+
+/// Handles a logical replication message.
+///
+/// Processes `pg_logical_emit_message` messages from the replication stream.
+/// Currently handles DDL schema change messages with the `supabase_etl_ddl` prefix
+/// for tracking schema changes.
+async fn handle_logical_message<T>(
+    state: &ApplyLoopState,
+    message: &protocol::MessageBody,
+    hook: &T,
+) -> EtlResult<HandleMessageResult>
+where
+    T: ApplyLoopHook,
+{
+    let prefix = message.prefix()?;
+    let content = message.content()?;
+
+    debug!(
+        transactional = message.flags(),
+        prefix = prefix,
+        "received logical message"
+    );
+
+    // Check if this is a DDL schema change message
+    if prefix == DDL_MESSAGE_PREFIX {
+        match parse_ddl_schema_change_message(content) {
+            Ok(ddl_message) => {
+                let table_id = TableId::new(ddl_message.table_id as u32);
+
+                // For transactional messages, check if we should apply changes for this table.
+                // Non-transactional messages (flags == 0) are processed regardless.
+                if message.flags() == 1 {
+                    if let Some(remote_final_lsn) = state.remote_final_lsn {
+                        if !hook
+                            .should_apply_changes(table_id, remote_final_lsn)
+                            .await?
+                        {
+                            debug!(
+                                table_id = %table_id,
+                                "skipping DDL message for table not being replicated"
+                            );
+                            return Ok(HandleMessageResult::no_event());
+                        }
+                    }
+                }
+
+                info!(
+                    table_id = ddl_message.table_id,
+                    table_name = %ddl_message.table_name,
+                    schema_name = %ddl_message.schema_name,
+                    event = %ddl_message.event,
+                    columns = ddl_message.columns.len(),
+                    "received DDL schema change message"
+                );
+
+                // Log the columns for debugging
+                for col in &ddl_message.columns {
+                    debug!(
+                        name = %col.name,
+                        ordinal_position = col.ordinal_position,
+                        type_oid = col.type_oid,
+                        nullable = col.nullable,
+                        primary_key_ordinal_position = ?col.primary_key_ordinal_position,
+                        "DDL message column"
+                    );
+                }
+
+                // TODO: In the future, update the stored schema here
+                // For now, we just log the schema change message
+            }
+            Err(err) => {
+                warn!(
+                    error = %err,
+                    content = content,
+                    "failed to parse DDL schema change message"
+                );
+            }
+        }
+    }
+
+    Ok(HandleMessageResult::no_event())
 }
