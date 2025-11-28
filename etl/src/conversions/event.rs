@@ -140,10 +140,9 @@ where
 {
     let table_id = insert_body.rel_id();
     let table_schema = get_table_schema(schema_store, TableId::new(table_id)).await?;
-    let replicated_columns = table_schema.replicated_column_schemas();
 
     let table_row = convert_tuple_to_row(
-        &replicated_columns,
+        table_schema.replicated_column_schemas(),
         insert_body.tuple().tuple_data(),
         &mut None,
         false,
@@ -174,7 +173,6 @@ where
 {
     let table_id = update_body.rel_id();
     let table_schema = get_table_schema(schema_store, TableId::new(table_id)).await?;
-    let replicated_columns = table_schema.replicated_column_schemas();
 
     // We try to extract the old tuple by either taking the entire old tuple or the key of the old
     // tuple.
@@ -182,7 +180,7 @@ where
     let old_tuple = update_body.old_tuple().or(update_body.key_tuple());
     let old_table_row = match old_tuple {
         Some(identity) => Some(convert_tuple_to_row(
-            &replicated_columns,
+            table_schema.replicated_column_schemas(),
             identity.tuple_data(),
             &mut None,
             true,
@@ -192,7 +190,7 @@ where
 
     let mut old_table_row_mut = old_table_row;
     let table_row = convert_tuple_to_row(
-        &replicated_columns,
+        table_schema.replicated_column_schemas(),
         update_body.new_tuple().tuple_data(),
         &mut old_table_row_mut,
         false,
@@ -226,7 +224,6 @@ where
 {
     let table_id = delete_body.rel_id();
     let table_schema = get_table_schema(schema_store, TableId::new(table_id)).await?;
-    let replicated_columns = table_schema.replicated_column_schemas();
 
     // We try to extract the old tuple by either taking the entire old tuple or the key of the old
     // tuple.
@@ -234,7 +231,7 @@ where
     let old_tuple = delete_body.old_tuple().or(delete_body.key_tuple());
     let old_table_row = match old_tuple {
         Some(identity) => Some(convert_tuple_to_row(
-            &replicated_columns,
+            table_schema.replicated_column_schemas(),
             identity.tuple_data(),
             &mut None,
             true,
@@ -325,15 +322,15 @@ fn build_column_schema(column: &protocol::Column) -> EtlResult<ColumnSchema> {
 /// Panics if a required (non-nullable) column receives null data and
 /// `use_default_for_missing_cols` is false, as this indicates protocol-level
 /// corruption that should not be handled gracefully.
-pub fn convert_tuple_to_row(
-    column_schemas: &[ColumnSchema],
+pub fn convert_tuple_to_row<'a>(
+    column_schemas: impl Iterator<Item = &'a ColumnSchema>,
     tuple_data: &[protocol::TupleData],
     old_table_row: &mut Option<TableRow>,
     use_default_for_missing_cols: bool,
 ) -> EtlResult<TableRow> {
-    let mut values = Vec::with_capacity(column_schemas.len());
+    let mut values = Vec::with_capacity(tuple_data.len());
 
-    for (i, column_schema) in column_schemas.iter().enumerate() {
+    for (i, column_schema) in column_schemas.enumerate() {
         // We are expecting that for each column, there is corresponding tuple data, even for null
         // values.
         let Some(tuple_data) = &tuple_data.get(i) else {

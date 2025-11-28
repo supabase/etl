@@ -292,12 +292,8 @@ impl TableSchema {
     ///
     /// This is used when processing tuple data from logical replication, as the
     /// tuple data only contains values for columns included in the publication.
-    pub fn replicated_column_schemas(&self) -> Vec<ColumnSchema> {
-        self.column_schemas
-            .iter()
-            .filter(|cs| cs.replicated)
-            .cloned()
-            .collect()
+    pub fn replicated_column_schemas(&self) -> impl Iterator<Item = &ColumnSchema> {
+        self.column_schemas.iter().filter(|cs| cs.replicated)
     }
 }
 
