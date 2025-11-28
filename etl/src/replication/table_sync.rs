@@ -220,9 +220,7 @@ where
             //
             // We try to truncate the table also during `Init` because we support state rollback and
             // a table might be there from a previous run.
-            destination
-                .truncate_table(table_id, &replicated_schema)
-                .await?;
+            destination.truncate_table(&replicated_schema).await?;
 
             // We create the copy table stream on the replicated columns.
             let table_copy_stream = transaction

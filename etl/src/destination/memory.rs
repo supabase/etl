@@ -82,27 +82,25 @@ impl Destination for MemoryDestination {
     }
     async fn truncate_table(
         &self,
-        table_id: TableId,
-        _replicated_table_schema: &ReplicatedTableSchema,
+        replicated_table_schema: &ReplicatedTableSchema,
     ) -> EtlResult<()> {
         // For truncation, we simulate removing all table rows for a specific table and also the events
         // of that table.
         let mut inner = self.inner.lock().await;
 
+        let table_id = replicated_table_schema.id();
         info!("truncating table {}", table_id);
 
         inner.table_rows.remove(&table_id);
         inner.events.retain_mut(|event| {
             let has_table_id = event.has_table_id(&table_id);
-            if let Event::Truncate(event) = event
+            if let Event::Truncate(truncate_event) = event
                 && has_table_id
             {
-                let Some(index) = event.rel_ids.iter().position(|&id| table_id.0 == id) else {
-                    return true;
-                };
-
-                event.rel_ids.remove(index);
-                if event.rel_ids.is_empty() {
+                truncate_event
+                    .truncated_tables
+                    .retain(|s| s.id() != table_id);
+                if truncate_event.truncated_tables.is_empty() {
                     return false;
                 }
 

@@ -1,5 +1,8 @@
 use etl_postgres::tokio::test_utils::{PgDatabase, id_column_schema};
-use etl_postgres::types::{ColumnSchema, ReplicatedTableSchema, TableId, TableName, TableSchema};
+use etl_postgres::types::{
+    ColumnSchema, ReplicatedTableSchema, ReplicationMask, TableId, TableName, TableSchema,
+};
+use std::collections::HashSet;
 use std::ops::RangeInclusive;
 use std::sync::Arc;
 use tokio_postgres::types::{PgLsn, Type};
@@ -316,7 +319,15 @@ pub fn events_equal_excluding_fields(left: &Event, right: &Event) -> bool {
         }
         (Event::Relation(left), Event::Relation(right)) => left.table_schema == right.table_schema,
         (Event::Truncate(left), Event::Truncate(right)) => {
-            left.options == right.options && left.rel_ids == right.rel_ids
+            if left.options != right.options
+                || left.truncated_tables.len() != right.truncated_tables.len()
+            {
+                return false;
+            }
+            // Compare table IDs of truncated tables
+            let left_ids: Vec<_> = left.truncated_tables.iter().map(|s| s.id()).collect();
+            let right_ids: Vec<_> = right.truncated_tables.iter().map(|s| s.id()).collect();
+            left_ids == right_ids
         }
         (Event::Unsupported, Event::Unsupported) => true,
         _ => false, // Different event types
@@ -329,8 +340,17 @@ pub fn build_expected_users_inserts(
     expected_rows: Vec<(&str, i32)>,
 ) -> Vec<Event> {
     let mut events = Vec::new();
-    let replicated_table_schema =
-        ReplicatedTableSchema::all_columns(Arc::new(users_table_schema.clone()));
+
+    // We build the replicated table schema with a mask for all columns.
+    let users_table_column_names = users_table_schema
+        .column_schemas
+        .iter()
+        .map(|c| c.name.clone())
+        .collect::<HashSet<_>>();
+    let replicated_table_schema = ReplicatedTableSchema::from_mask(
+        Arc::new(users_table_schema.clone()),
+        ReplicationMask::build(users_table_schema, &users_table_column_names),
+    );
 
     for (name, age) in expected_rows {
         events.push(Event::Insert(InsertEvent {
@@ -358,8 +378,17 @@ pub fn build_expected_orders_inserts(
     expected_rows: Vec<&str>,
 ) -> Vec<Event> {
     let mut events = Vec::new();
-    let replicated_table_schema =
-        ReplicatedTableSchema::all_columns(Arc::new(orders_table_schema.clone()));
+
+    // We build the replicated table schema with a mask for all columns.
+    let orders_table_column_names = orders_table_schema
+        .column_schemas
+        .iter()
+        .map(|c| c.name.clone())
+        .collect::<HashSet<_>>();
+    let replicated_table_schema = ReplicatedTableSchema::from_mask(
+        Arc::new(orders_table_schema.clone()),
+        ReplicationMask::build(orders_table_schema, &orders_table_column_names),
+    );
 
     for name in expected_rows {
         events.push(Event::Insert(InsertEvent {

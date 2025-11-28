@@ -223,13 +223,13 @@ pub fn parse_event_from_truncate_message(
     start_lsn: PgLsn,
     commit_lsn: PgLsn,
     truncate_body: &protocol::TruncateBody,
-    overridden_rel_ids: Vec<u32>,
+    truncated_tables: Vec<ReplicatedTableSchema>,
 ) -> TruncateEvent {
     TruncateEvent {
         start_lsn,
         commit_lsn,
         options: truncate_body.options(),
-        rel_ids: overridden_rel_ids,
+        truncated_tables,
     }
 }
 

@@ -160,7 +160,6 @@ where
 
     async fn truncate_table(
         &self,
-        table_id: TableId,
         replicated_table_schema: &ReplicatedTableSchema,
     ) -> EtlResult<()> {
         let destination = {
@@ -168,24 +167,21 @@ where
             inner.wrapped_destination.clone()
         };
 
-        let result = destination
-            .truncate_table(table_id, replicated_table_schema)
-            .await;
+        let result = destination.truncate_table(replicated_table_schema).await;
 
         let mut inner = self.inner.write().await;
 
+        let table_id = replicated_table_schema.id();
         inner.table_rows.remove(&table_id);
         inner.events.retain_mut(|event| {
             let has_table_id = event.has_table_id(&table_id);
-            if let Event::Truncate(event) = event
+            if let Event::Truncate(truncate_event) = event
                 && has_table_id
             {
-                let Some(index) = event.rel_ids.iter().position(|&id| table_id.0 == id) else {
-                    return true;
-                };
-
-                event.rel_ids.remove(index);
-                if event.rel_ids.is_empty() {
+                truncate_event
+                    .truncated_tables
+                    .retain(|s| s.id() != table_id);
+                if truncate_event.truncated_tables.is_empty() {
                     return false;
                 }
 

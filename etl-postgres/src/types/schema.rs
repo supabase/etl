@@ -1,5 +1,4 @@
 use pg_escape::quote_identifier;
-use std::cmp::Ordering;
 use std::collections::HashSet;
 use std::fmt;
 use std::str::FromStr;
@@ -93,20 +92,6 @@ impl ColumnSchema {
     /// Returns whether this column is part of the table's primary key.
     pub fn primary_key(&self) -> bool {
         self.primary_key_ordinal_position.is_some()
-    }
-
-    /// Compares two [`ColumnSchema`] instances, excluding the `nullable` field.
-    ///
-    /// Return `true` if all fields except `nullable` are equal, `false` otherwise.
-    ///
-    /// This method is used for comparing table schemas loaded via the initial table sync and the
-    /// relation messages received via CDC. The reason for skipping the `nullable` field is that
-    /// unfortunately Postgres doesn't seem to propagate nullable information of a column via
-    /// relation messages. The reason for skipping the `primary` field is that if the replica
-    /// identity of a table is set to full, the relation message sets all columns as primary
-    /// key, irrespective of what the actual primary key in the table is.
-    pub fn partial_eq(&self, other: &ColumnSchema) -> bool {
-        self.name == other.name && self.typ == other.typ && self.modifier == other.modifier
     }
 }
 
@@ -226,20 +211,6 @@ impl TableSchema {
     pub fn has_primary_keys(&self) -> bool {
         self.column_schemas.iter().any(|cs| cs.primary_key())
     }
-
-    /// Compares two [`TableSchema`] instances, excluding the [`ColumnSchema`]'s `nullable` field.
-    ///
-    /// Return `true` if all fields except `nullable` are equal, `false` otherwise.
-    pub fn partial_eq(&self, other: &TableSchema) -> bool {
-        self.id == other.id
-            && self.name == other.name
-            && self.column_schemas.len() == other.column_schemas.len()
-            && self
-                .column_schemas
-                .iter()
-                .zip(other.column_schemas.iter())
-                .all(|(c1, c2)| c1.partial_eq(c2))
-    }
 }
 
 /// A bitmask indicating which columns are being replicated.
@@ -269,11 +240,6 @@ impl ReplicationMask {
             .collect();
 
         Self(Arc::new(mask))
-    }
-
-    /// Creates a [`ReplicationMask`] where all columns are replicated.
-    pub fn all_columns(column_count: usize) -> Self {
-        Self(Arc::new(vec![1u8; column_count]))
     }
 
     /// Returns the underlying mask as a slice.
@@ -320,15 +286,6 @@ impl ReplicatedTableSchema {
         }
     }
 
-    /// Creates a [`ReplicatedTableSchema`] where all columns are replicated.
-    pub fn all_columns(table_schema: Arc<TableSchema>) -> Self {
-        let replication_mask = ReplicationMask::all_columns(table_schema.column_schemas.len());
-        Self {
-            table_schema,
-            replication_mask,
-        }
-    }
-
     /// Creates a [`ReplicatedTableSchema`] from a schema and a pre-computed mask.
     pub fn from_mask(schema: Arc<TableSchema>, mask: ReplicationMask) -> Self {
         debug_assert_eq!(
@@ -353,7 +310,7 @@ impl ReplicatedTableSchema {
     }
 
     /// Returns the underlying table schema.
-    pub fn table_schema(&self) -> &TableSchema {
+    pub fn get_inner(&self) -> &TableSchema {
         &self.table_schema
     }
 
@@ -367,31 +324,14 @@ impl ReplicatedTableSchema {
     /// This filters the columns based on the mask, returning only those where the
     /// corresponding mask value is 1.
     pub fn column_schemas(&self) -> impl Iterator<Item = &ColumnSchema> + Clone + '_ {
+        // Assuming that the schema is created via the constructor, we can safely assume that the
+        // column schemas and replication mask are of the same length.
+        debug_assert!(self.replication_mask.len() == self.table_schema.column_schemas.len());
+
         self.table_schema
             .column_schemas
             .iter()
             .zip(self.replication_mask.as_slice().iter())
             .filter_map(|(cs, &m)| if m == 1 { Some(cs) } else { None })
-    }
-
-    /// Returns the number of replicated columns.
-    pub fn column_count(&self) -> usize {
-        self.replication_mask
-            .as_slice()
-            .iter()
-            .filter(|&&m| m == 1)
-            .count()
-    }
-}
-
-impl PartialOrd for TableSchema {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for TableSchema {
-    fn cmp(&self, other: &Self) -> Ordering {
-        self.name.cmp(&other.name)
     }
 }

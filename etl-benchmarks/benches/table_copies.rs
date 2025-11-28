@@ -415,16 +415,11 @@ impl Destination for BenchDestination {
 
     async fn truncate_table(
         &self,
-        table_id: TableId,
         replicated_table_schema: &ReplicatedTableSchema,
     ) -> EtlResult<()> {
         match self {
-            BenchDestination::Null(dest) => {
-                dest.truncate_table(table_id, replicated_table_schema).await
-            }
-            BenchDestination::BigQuery(dest) => {
-                dest.truncate_table(table_id, replicated_table_schema).await
-            }
+            BenchDestination::Null(dest) => dest.truncate_table(replicated_table_schema).await,
+            BenchDestination::BigQuery(dest) => dest.truncate_table(replicated_table_schema).await,
         }
     }
 
@@ -460,7 +455,6 @@ impl Destination for NullDestination {
 
     async fn truncate_table(
         &self,
-        _table_id: TableId,
         _replicated_table_schema: &ReplicatedTableSchema,
     ) -> EtlResult<()> {
         Ok(())

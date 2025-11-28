@@ -119,7 +119,7 @@ pub struct DeleteEvent {
 /// [`TruncateEvent`] represents one or more tables being truncated (all rows deleted).
 /// This is a bulk operation that clears entire tables and may affect multiple tables
 /// in a single operation when using cascading truncates.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct TruncateEvent {
     /// LSN position where the event started.
     pub start_lsn: PgLsn,
@@ -127,8 +127,8 @@ pub struct TruncateEvent {
     pub commit_lsn: PgLsn,
     /// Truncate operation options from Postgres.
     pub options: i8,
-    /// List of table IDs that were truncated in this operation.
-    pub rel_ids: Vec<u32>,
+    /// List of schemas for tables that were truncated in this operation.
+    pub truncated_tables: Vec<ReplicatedTableSchema>,
 }
 
 /// Represents a single replication event from Postgres logical replication.
@@ -176,7 +176,7 @@ impl Event {
             Event::Update(e) => e.replicated_table_schema.id() == *table_id,
             Event::Delete(e) => e.replicated_table_schema.id() == *table_id,
             Event::Relation(e) => e.table_schema.id == *table_id,
-            Event::Truncate(e) => e.rel_ids.iter().any(|&id| table_id.0 == id),
+            Event::Truncate(e) => e.truncated_tables.iter().any(|s| s.id() == *table_id),
             _ => false,
         }
     }

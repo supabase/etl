@@ -1092,29 +1092,35 @@ async fn pipeline_respects_column_level_publication() {
     let insert_events = grouped_events.get(&(EventType::Insert, table_id)).unwrap();
     assert_eq!(insert_events.len(), 2);
 
-    // Check that each insert event contains only the published columns (id, name, age).
-    // Since Cell values don't include column names, we verify by checking the count.
+    // Check that each insert event contains only the published columns (id, name, age) and that the
+    // schema used is correct.
     for event in insert_events {
-        if let Event::Insert(InsertEvent { table_row, .. }) = event {
+        if let Event::Insert(InsertEvent {
+            replicated_table_schema,
+            table_row,
+            ..
+        }) = event
+        {
             // Verify exactly 3 columns (id, name, age).
             // If email was included, there would be 4 values.
             assert_eq!(table_row.values.len(), 3);
+
+            // Get only the replicated column names from the schema
+            let replicated_column_names: Vec<&str> = replicated_table_schema
+                .column_schemas()
+                .map(|c| c.name.as_str())
+                .collect();
+            assert!(replicated_column_names.contains(&"id"));
+            assert!(replicated_column_names.contains(&"name"));
+            assert!(replicated_column_names.contains(&"age"));
+            assert!(!replicated_column_names.contains(&"email"));
+            assert_eq!(replicated_column_names.len(), 3);
+
+            // The underlying full schema has all 4 columns
+            let full_schema = replicated_table_schema.get_inner();
+            assert_eq!(full_schema.column_schemas.len(), 4);
         }
     }
-
-    // Also verify the stored table schema only includes published columns.
-    let table_schemas = state_store.get_table_schemas().await;
-    let stored_schema = table_schemas.get(&table_id).unwrap();
-    let column_names: Vec<&str> = stored_schema
-        .column_schemas
-        .iter()
-        .map(|c| c.name.as_str())
-        .collect();
-    assert!(column_names.contains(&"id"));
-    assert!(column_names.contains(&"name"));
-    assert!(column_names.contains(&"age"));
-    assert!(!column_names.contains(&"email"));
-    assert_eq!(stored_schema.column_schemas.len(), 3);
 }
 
 #[tokio::test(flavor = "multi_thread")]

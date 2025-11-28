@@ -1058,7 +1058,7 @@ where
             handle_delete_message(state, start_lsn, delete_body, hook, schema_store).await
         }
         LogicalReplicationMessage::Truncate(truncate_body) => {
-            handle_truncate_message(state, start_lsn, truncate_body, hook).await
+            handle_truncate_message(state, start_lsn, truncate_body, hook, schema_store).await
         }
         LogicalReplicationMessage::Message(message_body) => {
             handle_logical_message(state, message_body, hook).await
@@ -1423,13 +1423,15 @@ where
 /// ensuring transaction context, and filtering the affected table list based on
 /// hook decisions. Since TRUNCATE can affect multiple tables simultaneously,
 /// it evaluates each table individually.
-async fn handle_truncate_message<T>(
-    state: &mut ApplyLoopState,
+async fn handle_truncate_message<S, T>(
+    state: &ApplyLoopState,
     start_lsn: PgLsn,
     message: &protocol::TruncateBody,
     hook: &T,
+    schema_store: &S,
 ) -> EtlResult<HandleMessageResult>
 where
+    S: SchemaStore + Clone + Send + 'static,
     T: ApplyLoopHook,
 {
     let Some(remote_final_lsn) = state.remote_final_lsn else {
@@ -1440,24 +1442,43 @@ where
         );
     };
 
-    // We collect only the relation ids for which we are allow to apply changes, thus in this case
-    // the truncation.
-    let mut rel_ids = Vec::with_capacity(message.rel_ids().len());
-    for &table_id in message.rel_ids().iter() {
+    // We collect the replicated schemas for tables we are allowed to apply changes to.
+    let mut truncated_tables = Vec::with_capacity(message.rel_ids().len());
+    for &rel_id in message.rel_ids().iter() {
+        let table_id = TableId::new(rel_id);
+
         if hook
-            .should_apply_changes(TableId::new(table_id), remote_final_lsn)
+            .should_apply_changes(table_id, remote_final_lsn)
             .await?
         {
-            rel_ids.push(table_id)
+            // Get the replication mask from state, or bail if relation message wasn't received
+            let Some(mask) = state.get_replication_mask(&table_id) else {
+                bail!(
+                    ErrorKind::InvalidState,
+                    "Missing relation message",
+                    format!(
+                        "No relation message received for table {} before TRUNCATE",
+                        table_id
+                    )
+                );
+            };
+
+            // Get the table schema and build the replicated schema with the mask.
+            let table_schema = get_table_schema(schema_store, table_id).await?;
+            let replicated_schema = ReplicatedTableSchema::from_mask(table_schema, mask.clone());
+
+            truncated_tables.push(replicated_schema);
         }
     }
-    // If nothing to apply, skip conversion entirely
-    if rel_ids.is_empty() {
+
+    // If nothing to apply, skip conversion entirely.
+    if truncated_tables.is_empty() {
         return Ok(HandleMessageResult::no_event());
     }
 
     // Convert event from the protocol message.
-    let event = parse_event_from_truncate_message(start_lsn, remote_final_lsn, message, rel_ids);
+    let event =
+        parse_event_from_truncate_message(start_lsn, remote_final_lsn, message, truncated_tables);
 
     Ok(HandleMessageResult::return_event(Event::Truncate(event)))
 }

@@ -1,4 +1,4 @@
-use etl_postgres::types::{ReplicatedTableSchema, TableId};
+use etl_postgres::types::ReplicatedTableSchema;
 use std::future::Future;
 
 use crate::error::EtlResult;
@@ -25,7 +25,6 @@ pub trait Destination {
     /// truncation is unconditionally called before a table is copied.
     fn truncate_table(
         &self,
-        table_id: TableId,
         replicated_table_schema: &ReplicatedTableSchema,
     ) -> impl Future<Output = EtlResult<()>> + Send;
 

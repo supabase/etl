@@ -27,9 +27,9 @@ pub fn group_events_by_type_and_table_id(
             Event::Update(event) => vec![event.replicated_table_schema.id()],
             Event::Delete(event) => vec![event.replicated_table_schema.id()],
             Event::Truncate(event) => event
-                .rel_ids
+                .truncated_tables
                 .iter()
-                .map(|rel_id| TableId::new(*rel_id))
+                .map(|schema| schema.id())
                 .collect(),
             _ => vec![],
         };
@@ -64,7 +64,15 @@ fn events_equal(a: &Event, b: &Event) -> bool {
         (Event::Begin(a), Event::Begin(b)) => a == b,
         (Event::Commit(a), Event::Commit(b)) => a == b,
         (Event::Relation(a), Event::Relation(b)) => a == b,
-        (Event::Truncate(a), Event::Truncate(b)) => a == b,
+        (Event::Truncate(a), Event::Truncate(b)) => {
+            if a.options != b.options || a.truncated_tables.len() != b.truncated_tables.len() {
+                return false;
+            }
+            // Compare table IDs of truncated tables
+            let a_ids: Vec<_> = a.truncated_tables.iter().map(|s| s.id()).collect();
+            let b_ids: Vec<_> = b.truncated_tables.iter().map(|s| s.id()).collect();
+            a_ids == b_ids
+        }
         (Event::Insert(a), Event::Insert(b)) => {
             a.replicated_table_schema.id() == b.replicated_table_schema.id()
                 && a.table_row == b.table_row

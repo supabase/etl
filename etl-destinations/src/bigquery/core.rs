@@ -1,9 +1,9 @@
 use etl::destination::Destination;
 use etl::error::{ErrorKind, EtlError, EtlResult};
-use etl::store::schema::SchemaStore;
 use etl::store::state::StateStore;
 use etl::types::{
-    Cell, Event, ReplicatedTableSchema, TableId, TableName, TableRow, generate_sequence_number,
+    Cell, ColumnSchema, Event, ReplicatedTableSchema, TableId, TableName, TableRow,
+    generate_sequence_number,
 };
 use etl::{bail, etl_error};
 use gcp_bigquery_client::storage::TableDescriptor;
@@ -173,13 +173,13 @@ pub struct BigQueryDestination<S> {
     dataset_id: BigQueryDatasetId,
     max_staleness_mins: Option<u16>,
     max_concurrent_streams: usize,
-    store: S,
+    state_store: S,
     inner: Arc<Mutex<Inner>>,
 }
 
 impl<S> BigQueryDestination<S>
 where
-    S: StateStore + SchemaStore,
+    S: StateStore,
 {
     /// Creates a new [`BigQueryDestination`] using a service account key file path.
     ///
@@ -193,7 +193,7 @@ where
         sa_key: &str,
         max_staleness_mins: Option<u16>,
         max_concurrent_streams: usize,
-        store: S,
+        state_store: S,
     ) -> EtlResult<Self> {
         let client = BigQueryClient::new_with_key_path(project_id, sa_key).await?;
         let inner = Inner {
@@ -206,7 +206,7 @@ where
             dataset_id,
             max_staleness_mins,
             max_concurrent_streams,
-            store,
+            state_store,
             inner: Arc::new(Mutex::new(inner)),
         })
     }
@@ -223,7 +223,7 @@ where
         sa_key: &str,
         max_staleness_mins: Option<u16>,
         max_concurrent_streams: usize,
-        store: S,
+        state_store: S,
     ) -> EtlResult<Self> {
         let client = BigQueryClient::new_with_key(project_id, sa_key).await?;
         let inner = Inner {
@@ -236,7 +236,7 @@ where
             dataset_id,
             max_staleness_mins,
             max_concurrent_streams,
-            store,
+            state_store,
             inner: Arc::new(Mutex::new(inner)),
         })
     }
@@ -251,7 +251,7 @@ where
         dataset_id: BigQueryDatasetId,
         max_staleness_mins: Option<u16>,
         max_concurrent_streams: usize,
-        store: S,
+        state_store: S,
     ) -> EtlResult<Self> {
         let client = BigQueryClient::new_with_adc(project_id).await?;
         let inner = Inner {
@@ -264,7 +264,7 @@ where
             dataset_id,
             max_staleness_mins,
             max_concurrent_streams,
-            store,
+            state_store,
             inner: Arc::new(Mutex::new(inner)),
         })
     }
@@ -301,45 +301,35 @@ where
             dataset_id,
             max_staleness_mins,
             max_concurrent_streams,
-            store,
+            state_store: store,
             inner: Arc::new(Mutex::new(inner)),
         })
     }
 
     /// Prepares a table for CDC streaming operations with schema-aware table creation.
     ///
-    /// Retrieves the table schema from the store, creates or verifies the BigQuery table exists,
+    /// Creates or verifies the BigQuery table exists using the provided schema,
     /// and ensures the view points to the current versioned table. Uses caching to avoid
     /// redundant table creation checks.
     async fn prepare_table_for_streaming(
         &self,
-        table_id: &TableId,
+        replicated_table_schema: &ReplicatedTableSchema,
         use_cdc_sequence_column: bool,
     ) -> EtlResult<(SequencedBigQueryTableId, Arc<TableDescriptor>)> {
         // We hold the lock for the entire preparation to avoid race conditions since the consistency
         // of this code path is critical.
         let mut inner = self.inner.lock().await;
 
-        // We load the schema of the table, if present. This is needed to create the table in BigQuery
-        // and also prepare the table descriptor for CDC streaming.
-        let table_schema = self
-            .store
-            .get_table_schema(table_id)
-            .await?
-            .ok_or_else(|| {
-                etl_error!(
-                    ErrorKind::MissingTableSchema,
-                    "Table not found in the schema store",
-                    format!(
-                        "The table schema for table {table_id} was not found in the schema store"
-                    )
-                )
-            })?;
+        let table_id = replicated_table_schema.id();
+
+        // Collect the replicated column schemas for BigQuery table creation.
+        let column_schemas: Vec<ColumnSchema> =
+            replicated_table_schema.column_schemas().cloned().collect();
 
         // We determine the BigQuery table ID for the table together with the current sequence number.
-        let bigquery_table_id = table_name_to_bigquery_table_id(&table_schema.name);
+        let bigquery_table_id = table_name_to_bigquery_table_id(replicated_table_schema.name());
         let sequenced_bigquery_table_id = self
-            .get_or_create_sequenced_bigquery_table_id(table_id, &bigquery_table_id)
+            .get_or_create_sequenced_bigquery_table_id(&table_id, &bigquery_table_id)
             .await?;
 
         // Optimistically skip table creation if we've already seen this sequenced table.
@@ -352,7 +342,7 @@ where
                     &self.dataset_id,
                     // TODO: down the line we might want to reduce an allocation here.
                     &sequenced_bigquery_table_id.to_string(),
-                    &table_schema.column_schemas,
+                    &column_schemas,
                     self.max_staleness_mins,
                 )
                 .await?;
@@ -376,7 +366,7 @@ where
         .await?;
 
         let table_descriptor = BigQueryClient::column_schemas_to_table_descriptor(
-            &table_schema.column_schemas,
+            &column_schemas,
             use_cdc_sequence_column,
         );
 
@@ -403,7 +393,7 @@ where
         else {
             let sequenced_bigquery_table_id =
                 SequencedBigQueryTableId::new(bigquery_table_id.clone());
-            self.store
+            self.state_store
                 .store_table_mapping(*table_id, sequenced_bigquery_table_id.to_string())
                 .await?;
 
@@ -418,7 +408,7 @@ where
         &self,
         table_id: &TableId,
     ) -> EtlResult<Option<SequencedBigQueryTableId>> {
-        let Some(current_table_id) = self.store.get_table_mapping(table_id).await? else {
+        let Some(current_table_id) = self.state_store.get_table_mapping(table_id).await? else {
             return Ok(None);
         };
 
@@ -470,12 +460,13 @@ where
     /// `max_concurrent_streams`, and streams to BigQuery using concurrent processing.
     async fn write_table_rows(
         &self,
-        table_id: TableId,
+        replicated_table_schema: &ReplicatedTableSchema,
         mut table_rows: Vec<TableRow>,
     ) -> EtlResult<()> {
         // Prepare table for streaming.
-        let (sequenced_bigquery_table_id, table_descriptor) =
-            self.prepare_table_for_streaming(&table_id, false).await?;
+        let (sequenced_bigquery_table_id, table_descriptor) = self
+            .prepare_table_for_streaming(replicated_table_schema, false)
+            .await?;
 
         // Add CDC operation type to all rows (no lock needed).
         for table_row in table_rows.iter_mut() {
@@ -527,12 +518,18 @@ where
     /// Processes CDC events in batches with proper ordering and truncate handling.
     ///
     /// Groups streaming operations (insert/update/delete) by table and processes them together,
-    /// then handles truncate events separately by creating new versioned tables.
+    /// then handles truncate events separately by creating new versioned tables. Uses the schema
+    /// from the first event of each table for table creation and descriptor building.
     async fn write_events(&self, events: Vec<Event>) -> EtlResult<()> {
         let mut event_iter = events.into_iter().peekable();
 
+        // Track schemas seen for each table (used for truncates that don't carry schema info).
+        let mut table_id_to_schema: HashMap<TableId, ReplicatedTableSchema> = HashMap::new();
+
         while event_iter.peek().is_some() {
-            let mut table_id_to_table_rows = HashMap::new();
+            // Maps table ID to (schema, rows) - schema is the first one seen for that table.
+            let mut table_id_to_data: HashMap<TableId, (ReplicatedTableSchema, Vec<TableRow>)> =
+                HashMap::new();
 
             // Process events until we hit a truncate event or run out of events
             while let Some(event) = event_iter.peek() {
@@ -552,9 +549,15 @@ where
                         insert.table_row.values.push(Cell::String(sequence_number));
 
                         let table_id = insert.replicated_table_schema.id();
-                        let table_rows: &mut Vec<TableRow> =
-                            table_id_to_table_rows.entry(table_id).or_default();
-                        table_rows.push(insert.table_row);
+                        let entry = table_id_to_data.entry(table_id).or_insert_with(|| {
+                            (insert.replicated_table_schema.clone(), Vec::new())
+                        });
+                        entry.1.push(insert.table_row);
+
+                        // Track schema for potential truncates.
+                        table_id_to_schema
+                            .entry(table_id)
+                            .or_insert(insert.replicated_table_schema);
                     }
                     Event::Update(mut update) => {
                         let sequence_number =
@@ -566,9 +569,15 @@ where
                         update.table_row.values.push(Cell::String(sequence_number));
 
                         let table_id = update.replicated_table_schema.id();
-                        let table_rows: &mut Vec<TableRow> =
-                            table_id_to_table_rows.entry(table_id).or_default();
-                        table_rows.push(update.table_row);
+                        let entry = table_id_to_data.entry(table_id).or_insert_with(|| {
+                            (update.replicated_table_schema.clone(), Vec::new())
+                        });
+                        entry.1.push(update.table_row);
+
+                        // Track schema for potential truncates.
+                        table_id_to_schema
+                            .entry(table_id)
+                            .or_insert(update.replicated_table_schema);
                     }
                     Event::Delete(delete) => {
                         let Some((_, mut old_table_row)) = delete.old_table_row else {
@@ -584,9 +593,15 @@ where
                         old_table_row.values.push(Cell::String(sequence_number));
 
                         let table_id = delete.replicated_table_schema.id();
-                        let table_rows: &mut Vec<TableRow> =
-                            table_id_to_table_rows.entry(table_id).or_default();
-                        table_rows.push(old_table_row);
+                        let entry = table_id_to_data.entry(table_id).or_insert_with(|| {
+                            (delete.replicated_table_schema.clone(), Vec::new())
+                        });
+                        entry.1.push(old_table_row);
+
+                        // Track schema for potential truncates.
+                        table_id_to_schema
+                            .entry(table_id)
+                            .or_insert(delete.replicated_table_schema);
                     }
                     _ => {
                         // Every other event type is currently not supported.
@@ -596,12 +611,12 @@ where
             }
 
             // Process accumulated events for each table.
-            if !table_id_to_table_rows.is_empty() {
-                let mut table_batches = Vec::with_capacity(table_id_to_table_rows.len());
+            if !table_id_to_data.is_empty() {
+                let mut table_batches = Vec::with_capacity(table_id_to_data.len());
 
-                for (table_id, table_rows) in table_id_to_table_rows {
+                for (_, (schema, table_rows)) in table_id_to_data {
                     let (sequenced_bigquery_table_id, table_descriptor) =
-                        self.prepare_table_for_streaming(&table_id, true).await?;
+                        self.prepare_table_for_streaming(&schema, true).await?;
 
                     let table_batch = self.client.create_table_batch(
                         &self.dataset_id,
@@ -632,23 +647,23 @@ where
                 }
             }
 
-            // Collect and deduplicate all table IDs from all truncate events.
+            // Collect and deduplicate schemas from all truncate events.
             //
-            // This is done as an optimization since if we have multiple table ids being truncated in a
+            // This is done as an optimization since if we have multiple tables being truncated in a
             // row without applying other events in the meanwhile, it doesn't make any sense to create
             // new empty tables for each of them.
-            let mut truncate_table_ids = HashSet::new();
+            let mut truncate_schemas: HashMap<TableId, ReplicatedTableSchema> = HashMap::new();
 
             while let Some(Event::Truncate(_)) = event_iter.peek() {
                 if let Some(Event::Truncate(truncate_event)) = event_iter.next() {
-                    for table_id in truncate_event.rel_ids {
-                        truncate_table_ids.insert(TableId::new(table_id));
+                    for schema in truncate_event.truncated_tables {
+                        truncate_schemas.insert(schema.id(), schema);
                     }
                 }
             }
 
-            if !truncate_table_ids.is_empty() {
-                self.process_truncate_for_table_ids(truncate_table_ids.into_iter(), true)
+            if !truncate_schemas.is_empty() {
+                self.process_truncate_for_schemas(truncate_schemas.into_values())
                     .await?;
             }
         }
@@ -659,38 +674,22 @@ where
     /// Handles table truncation by creating new versioned tables and updating views.
     ///
     /// Creates fresh empty tables with incremented version numbers, updates views to point
-    /// to new tables, and schedules cleanup of old table versions. Deduplicates table IDs
-    /// to optimize multiple truncates of the same table.
-    async fn process_truncate_for_table_ids(
+    /// to new tables, and schedules cleanup of old table versions. Uses the provided schemas
+    /// directly instead of looking them up from a store.
+    async fn process_truncate_for_schemas(
         &self,
-        table_ids: impl IntoIterator<Item = TableId>,
-        is_cdc_truncate: bool,
+        schemas: impl IntoIterator<Item = ReplicatedTableSchema>,
     ) -> EtlResult<()> {
         // We want to lock for the entire processing to ensure that we don't have any race conditions
         // and possible errors are easier to reason about.
         let mut inner = self.inner.lock().await;
 
-        for table_id in table_ids {
-            let table_schema = self.store.get_table_schema(&table_id).await?;
-            // If we are not doing CDC, it means that this truncation has been issued while recovering
-            // from a failed data sync operation. In that case, we could have failed before table schemas
-            // were stored in the schema store, so we just continue and emit a warning. If we are doing
-            // CDC, it's a problem if the schema disappears while streaming, so we error out.
-            if !is_cdc_truncate {
-                warn!(
-                    "the table schema for table {table_id} was not found in the schema store while processing truncate events for BigQuery",
-                );
+        for replicated_table_schema in schemas {
+            let table_id = replicated_table_schema.id();
 
-                continue;
-            }
-
-            let table_schema = table_schema.ok_or_else(|| etl_error!(
-                ErrorKind::MissingTableSchema,
-                    "Table not found in the schema store",
-                    format!(
-                        "The table schema for table {table_id} was not found in the schema store while processing truncate events for BigQuery"
-                    )
-            ))?;
+            // Collect the replicated column schemas.
+            let column_schemas: Vec<ColumnSchema> =
+                replicated_table_schema.column_schemas().cloned().collect();
 
             // We need to determine the current sequenced table ID for this table.
             let sequenced_bigquery_table_id =
@@ -720,7 +719,7 @@ where
                 .create_or_replace_table(
                     &self.dataset_id,
                     &next_sequenced_bigquery_table_id.to_string(),
-                    &table_schema.column_schemas,
+                    &column_schemas,
                     self.max_staleness_mins,
                 )
                 .await?;
@@ -737,7 +736,7 @@ where
             .await?;
 
             // Update the store table mappings to point to the new table.
-            self.store
+            self.state_store
                 .store_table_mapping(table_id, next_sequenced_bigquery_table_id.to_string())
                 .await?;
 
@@ -790,7 +789,7 @@ where
 
 impl<S> Destination for BigQueryDestination<S>
 where
-    S: StateStore + SchemaStore + Send + Sync,
+    S: StateStore + Send + Sync,
 {
     fn name() -> &'static str {
         "bigquery"
@@ -798,10 +797,9 @@ where
 
     async fn truncate_table(
         &self,
-        table_id: TableId,
-        _replicated_table_schema: &ReplicatedTableSchema,
+        replicated_table_schema: &ReplicatedTableSchema,
     ) -> EtlResult<()> {
-        self.process_truncate_for_table_ids(iter::once(table_id), false)
+        self.process_truncate_for_schemas(iter::once(replicated_table_schema.clone()))
             .await
     }
 
@@ -810,7 +808,7 @@ where
         replicated_table_schema: &ReplicatedTableSchema,
         table_rows: Vec<TableRow>,
     ) -> EtlResult<()> {
-        self.write_table_rows(replicated_table_schema.id(), table_rows)
+        self.write_table_rows(replicated_table_schema, table_rows)
             .await?;
 
         Ok(())

@@ -408,20 +408,21 @@ where
 
             // Collect and deduplicate all table IDs from all truncate events.
             //
-            // This is done as an optimization since if we have multiple table ids being truncated in a
+            // This is done as an optimization since if we have multiple tables being truncated in a
             // row without applying other events in the meanwhile, it doesn't make any sense to create
             // new empty tables for each of them.
-            let mut truncate_table_ids = HashSet::new();
+            let mut truncate_schemas: HashMap<TableId, ReplicatedTableSchema> = HashMap::new();
 
             while let Some(Event::Truncate(_)) = event_iter.peek() {
                 if let Some(Event::Truncate(truncate_event)) = event_iter.next() {
-                    for table_id in truncate_event.rel_ids {
-                        truncate_table_ids.insert(TableId::new(table_id));
+                    for schema in truncate_event.truncated_tables {
+                        truncate_schemas.insert(schema.id(), schema);
                     }
                 }
             }
 
-            for table_id in truncate_table_ids {
+            for (table_id, _schema) in truncate_schemas {
+                // TODO: Use schema directly instead of looking it up from store.
                 self.truncate_table(table_id, true).await?;
             }
         }
@@ -598,10 +599,10 @@ where
     /// the table schema structure for continued CDC operations.
     async fn truncate_table(
         &self,
-        table_id: TableId,
-        _replicated_table_schema: &ReplicatedTableSchema,
+        replicated_table_schema: &ReplicatedTableSchema,
     ) -> EtlResult<()> {
-        self.truncate_table(table_id, false).await?;
+        self.truncate_table(replicated_table_schema.id(), false)
+            .await?;
 
         Ok(())
     }
