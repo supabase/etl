@@ -12,19 +12,33 @@ use etl_telemetry::tracing::init_test_tracing;
 use sqlx::postgres::types::Oid as SqlxTableId;
 use tokio_postgres::types::{PgLsn, Type as PgType};
 
+/// Creates a test column schema with sensible defaults.
+fn test_column(
+    name: &str,
+    typ: PgType,
+    modifier: i32,
+    ordinal_position: i32,
+    nullable: bool,
+    primary_key: bool,
+) -> ColumnSchema {
+    ColumnSchema::new(
+        name.to_string(),
+        typ,
+        modifier,
+        ordinal_position,
+        if primary_key { Some(1) } else { None },
+        nullable,
+        true,
+    )
+}
+
 fn create_sample_table_schema() -> TableSchema {
     let table_id = TableId::new(12345);
     let table_name = TableName::new("public".to_string(), "test_table".to_string());
     let columns = vec![
-        ColumnSchema::new_basic("id".to_string(), PgType::INT4, -1, false, true),
-        ColumnSchema::new_basic("name".to_string(), PgType::TEXT, -1, true, false),
-        ColumnSchema::new_basic(
-            "created_at".to_string(),
-            PgType::TIMESTAMPTZ,
-            -1,
-            false,
-            false,
-        ),
+        test_column("id", PgType::INT4, -1, 1, false, true),
+        test_column("name", PgType::TEXT, -1, 2, true, false),
+        test_column("created_at", PgType::TIMESTAMPTZ, -1, 3, false, false),
     ];
 
     TableSchema::new(table_id, table_name, columns)
@@ -34,8 +48,8 @@ fn create_another_table_schema() -> TableSchema {
     let table_id = TableId::new(67890);
     let table_name = TableName::new("public".to_string(), "another_table".to_string());
     let columns = vec![
-        ColumnSchema::new_basic("id".to_string(), PgType::INT8, -1, false, true),
-        ColumnSchema::new_basic("description".to_string(), PgType::VARCHAR, 255, true, false),
+        test_column("id", PgType::INT8, -1, 1, false, true),
+        test_column("description", PgType::VARCHAR, 255, 2, true, false),
     ];
 
     TableSchema::new(table_id, table_name, columns)
@@ -333,10 +347,11 @@ async fn test_schema_store_update_existing() {
         .unwrap();
 
     // Update schema by adding a column
-    table_schema.add_column_schema(ColumnSchema::new_basic(
-        "updated_at".to_string(),
+    table_schema.add_column_schema(test_column(
+        "updated_at",
         PgType::TIMESTAMPTZ,
         -1,
+        4,
         true,
         false,
     ));

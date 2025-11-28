@@ -1465,11 +1465,11 @@ where
                 // Log the columns for debugging
                 for col in &ddl_message.columns {
                     debug!(
-                        column_name = %col.column_name,
-                        column_order = col.column_order,
-                        column_type = %col.column_type,
+                        name = %col.name,
+                        ordinal_position = col.ordinal_position,
+                        type_oid = col.type_oid,
                         nullable = col.nullable,
-                        primary_key_order = ?col.primary_key_order,
+                        primary_key_ordinal_position = ?col.primary_key_ordinal_position,
                         "DDL message column"
                     );
                 }

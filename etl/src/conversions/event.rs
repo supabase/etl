@@ -43,19 +43,17 @@ pub struct DdlSchemaChangeMessage {
 #[derive(Debug, Clone, Deserialize)]
 pub struct DdlColumnSchema {
     /// The name of the column.
-    pub column_name: String,
-    /// The 0-based order of the column in the table.
-    pub column_order: i32,
-    /// The formatted Postgres type string (e.g., "integer", "text").
-    pub column_type: String,
+    pub name: String,
     /// The OID of the column's data type.
     pub type_oid: u32,
     /// Type-specific modifier value (e.g., length for varchar).
     pub type_modifier: i32,
+    /// The 1-based ordinal position of the column in the table.
+    pub ordinal_position: i32,
+    /// The 1-based ordinal position of this column in the primary key, or null if not a primary key.
+    pub primary_key_ordinal_position: Option<i32>,
     /// Whether the column can contain NULL values.
     pub nullable: bool,
-    /// The order of this column in the primary key (1-based), or null if not a primary key.
-    pub primary_key_order: Option<i32>,
 }
 
 /// Creates a [`BeginEvent`] from Postgres protocol data.
@@ -293,20 +291,22 @@ where
 /// and converts it into the internal column schema representation. Some fields
 /// like nullable status have default values due to protocol limitations.
 ///
-/// Uses the basic constructor since relation messages don't provide full metadata
-/// like ordinal_position or data_type string. These schemas are primarily used
-/// to identify which columns are being replicated.
+/// Relation messages don't provide full metadata like ordinal_position or data_type
+/// string. These schemas are primarily used to identify which columns are being
+/// replicated.
 fn build_column_schema(column: &protocol::Column) -> EtlResult<ColumnSchema> {
-    Ok(ColumnSchema::new_basic(
+    let typ = convert_type_oid_to_type(column.type_id() as u32);
+    // Currently 1 means that the column is part of the primary key.
+    let primary_key = column.flags() == 1;
+
+    Ok(ColumnSchema::new(
         column.name()?.to_string(),
-        convert_type_oid_to_type(column.type_id() as u32),
+        typ,
         column.type_modifier(),
-        // We do not have access to this information, so we default it to `false`.
-        // TODO: figure out how to fill this value correctly or how to handle the missing value
-        //  better.
+        0,
+        if primary_key { Some(1) } else { None },
         false,
-        // Currently 1 means that the column is part of the primary key.
-        column.flags() == 1,
+        true,
     ))
 }
 
@@ -347,7 +347,7 @@ pub fn convert_tuple_to_row<'a>(
                 } else if use_default_for_missing_cols {
                     default_value_for_type(&column_schema.typ)?
                 } else {
-                    // This is protocol level error, so we panic instead of carrying on
+                    // This is a protocol level error, so we panic instead of carrying on
                     // with incorrect data to avoid corruption downstream.
                     panic!(
                         "A required column {} was missing from the tuple",
@@ -414,15 +414,12 @@ pub fn ddl_message_to_table_schema(message: &DdlSchemaChangeMessage) -> TableSch
         .map(|col| {
             let typ = convert_type_oid_to_type(col.type_oid);
             ColumnSchema::new(
-                col.column_name.clone(),
+                col.name.clone(),
                 typ,
                 col.type_modifier,
+                col.ordinal_position,
+                col.primary_key_ordinal_position,
                 col.nullable,
-                col.primary_key_order.is_some(),
-                col.column_order,
-                col.column_type.clone(),
-                col.primary_key_order,
-                // Default to not replicated; will be updated by relation messages
                 false,
             )
         })

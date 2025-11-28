@@ -165,22 +165,29 @@ mod tests {
     use etl_postgres::types::ColumnSchema;
     use tokio_postgres::types::Type;
 
+    /// Creates a test column schema with sensible defaults.
+    fn test_column(name: &str, typ: Type, nullable: bool, primary_key: bool) -> ColumnSchema {
+        ColumnSchema::new(
+            name.to_string(),
+            typ,
+            -1,
+            0,
+            if primary_key { Some(1) } else { None },
+            nullable,
+            true,
+        )
+    }
+
     fn create_test_schema() -> Vec<ColumnSchema> {
         vec![
-            ColumnSchema::new_basic("id".to_string(), Type::INT4, -1, false, true),
-            ColumnSchema::new_basic("name".to_string(), Type::TEXT, -1, true, false),
-            ColumnSchema::new_basic("active".to_string(), Type::BOOL, -1, false, false),
+            test_column("id", Type::INT4, false, true),
+            test_column("name", Type::TEXT, true, false),
+            test_column("active", Type::BOOL, false, false),
         ]
     }
 
     fn create_single_column_schema(name: &str, typ: Type) -> Vec<ColumnSchema> {
-        vec![ColumnSchema::new_basic(
-            name.to_string(),
-            typ,
-            -1,
-            false,
-            false,
-        )]
+        vec![test_column(name, typ, false, false)]
     }
 
     #[test]
@@ -236,10 +243,10 @@ mod tests {
     #[test]
     fn try_from_multiple_columns_different_types() {
         let schema = vec![
-            ColumnSchema::new_basic("int_col".to_string(), Type::INT4, -1, false, false),
-            ColumnSchema::new_basic("float_col".to_string(), Type::FLOAT8, -1, false, false),
-            ColumnSchema::new_basic("text_col".to_string(), Type::TEXT, -1, false, false),
-            ColumnSchema::new_basic("bool_col".to_string(), Type::BOOL, -1, false, false),
+            test_column("int_col", Type::INT4, false, false),
+            test_column("float_col", Type::FLOAT8, false, false),
+            test_column("text_col", Type::TEXT, false, false),
+            test_column("bool_col", Type::BOOL, false, false),
         ];
 
         let row_data = b"123\t3.15\tHello World\tt\n";
@@ -342,13 +349,7 @@ mod tests {
         let mut expected_row = String::new();
 
         for i in 0..50 {
-            schema.push(ColumnSchema::new_basic(
-                format!("col{i}"),
-                Type::INT4,
-                -1,
-                false,
-                false,
-            ));
+            schema.push(test_column(&format!("col{i}"), Type::INT4, false, false));
             if i > 0 {
                 expected_row.push('\t');
             }
@@ -378,8 +379,8 @@ mod tests {
     #[test]
     fn try_from_postgres_delimiter_escaping() {
         let schema = vec![
-            ColumnSchema::new_basic("col1".to_string(), Type::TEXT, -1, false, false),
-            ColumnSchema::new_basic("col2".to_string(), Type::TEXT, -1, false, false),
+            test_column("col1", Type::TEXT, false, false),
+            test_column("col2", Type::TEXT, false, false),
         ];
 
         // Postgres escapes tab characters in data with \\t
@@ -396,9 +397,9 @@ mod tests {
     #[test]
     fn try_from_postgres_escape_at_field_boundaries() {
         let schema = vec![
-            ColumnSchema::new_basic("col1".to_string(), Type::TEXT, -1, false, false),
-            ColumnSchema::new_basic("col2".to_string(), Type::TEXT, -1, false, false),
-            ColumnSchema::new_basic("col3".to_string(), Type::TEXT, -1, false, false),
+            test_column("col1", Type::TEXT, false, false),
+            test_column("col2", Type::TEXT, false, false),
+            test_column("col3", Type::TEXT, false, false),
         ];
 
         // Escapes at the beginning, middle, and end of fields

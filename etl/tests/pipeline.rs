@@ -26,6 +26,25 @@ use rand::random;
 use std::time::Duration;
 use tokio::time::sleep;
 
+/// Creates a test column schema with sensible defaults.
+fn test_column(
+    name: &str,
+    typ: Type,
+    ordinal_position: i32,
+    nullable: bool,
+    primary_key: bool,
+) -> ColumnSchema {
+    ColumnSchema::new(
+        name.to_string(),
+        typ,
+        -1,
+        ordinal_position,
+        if primary_key { Some(1) } else { None },
+        nullable,
+        true,
+    )
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn table_schema_copy_survives_pipeline_restarts() {
     init_test_tracing();
@@ -1157,8 +1176,8 @@ async fn empty_tables_are_created_at_destination() {
         table_name,
         &[
             id_column_schema(),
-            ColumnSchema::new_basic("name".to_string(), Type::TEXT, -1, true, false),
-            ColumnSchema::new_basic("created_at".to_string(), Type::TIMESTAMP, -1, true, false),
+            test_column("name", Type::TEXT, 2, true, false),
+            test_column("created_at", Type::TIMESTAMP, 3, true, false),
         ],
     );
 

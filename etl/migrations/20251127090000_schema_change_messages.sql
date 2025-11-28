@@ -4,13 +4,12 @@
 create or replace function etl.describe_table_schema(
     p_table oid
 ) returns table (
-    column_name text,
-    column_order int,
-    column_type text,
+    name text,
     type_oid oid,
     type_modifier int,
-    nullable boolean,
-    primary_key_order int
+    ordinal_position int,
+    primary_key_ordinal_position int,
+    nullable boolean
 )
 language plpgsql
 stable
@@ -43,12 +42,11 @@ begin
         )
         select
             a.attname::text,
-            a.attnum::int,
-            format_type(a.atttypid, a.atttypmod),
             a.atttypid,
             a.atttypmod,
-            not a.attnotnull,
-            coalesce(pk.position, ppk.position)::int
+            a.attnum::int,
+            coalesce(pk.position, ppk.position)::int,
+            not a.attnotnull
         from pg_attribute a
                  left join primary_key pk on pk.attnum = a.attnum
                  left join parent_primary_key ppk on ppk.attname = a.attname
@@ -103,13 +101,12 @@ begin
 
         select jsonb_agg(
                    jsonb_build_object(
-                       'column_name', s.column_name,
-                       'column_order', s.column_order,
-                       'column_type', s.column_type,
+                       'name', s.name,
                        'type_oid', s.type_oid::bigint,
                        'type_modifier', s.type_modifier,
-                       'nullable', s.nullable,
-                       'primary_key_order', s.primary_key_order
+                       'ordinal_position', s.ordinal_position,
+                       'primary_key_ordinal_position', s.primary_key_ordinal_position,
+                       'nullable', s.nullable
                    )
                )
         into schema_json

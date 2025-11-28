@@ -732,49 +732,42 @@ impl PgReplicationClient {
         let column_info_query = format!(
             r#"
             select
-                column_name,
-                column_order,
-                column_type,
+                name,
                 type_oid,
                 type_modifier,
-                nullable,
-                primary_key_order
+                ordinal_position,
+                primary_key_ordinal_position,
+                nullable
             from etl.describe_table_schema({table_id})
-            order by column_order
+            order by ordinal_position
             "#
         );
 
         let mut column_schemas = vec![];
         for message in self.client.simple_query(&column_info_query).await? {
             if let SimpleQueryMessage::Row(row) = message {
-                let name =
-                    Self::get_row_value::<String>(&row, "column_name", "pg_attribute").await?;
-                let column_order =
-                    Self::get_row_value::<i32>(&row, "column_order", "pg_attribute").await?;
-                let column_type =
-                    Self::get_row_value::<String>(&row, "column_type", "pg_type").await?;
+                let name = Self::get_row_value::<String>(&row, "name", "pg_attribute").await?;
                 let type_oid = Self::get_row_value::<u32>(&row, "type_oid", "pg_type").await?;
-                let modifier =
+                let type_modifier =
                     Self::get_row_value::<i32>(&row, "type_modifier", "pg_attribute").await?;
+                let ordinal_position =
+                    Self::get_row_value::<i32>(&row, "ordinal_position", "pg_attribute").await?;
+                let primary_key_ordinal_position: Option<i32> = row
+                    .try_get("primary_key_ordinal_position")?
+                    .and_then(|s: &str| s.parse().ok());
                 let nullable_str =
                     Self::get_row_value::<String>(&row, "nullable", "pg_attribute").await?;
                 let nullable = nullable_str == "t" || nullable_str == "true";
-                let primary_key_order: Option<i32> = row
-                    .try_get("primary_key_order")?
-                    .and_then(|s: &str| s.parse().ok());
-                let primary = primary_key_order.is_some();
 
                 let typ = convert_type_oid_to_type(type_oid);
 
                 column_schemas.push(ColumnSchema::new(
                     name,
                     typ,
-                    modifier,
+                    type_modifier,
+                    ordinal_position,
+                    primary_key_ordinal_position,
                     nullable,
-                    primary,
-                    column_order,
-                    column_type,
-                    primary_key_order,
                     // Columns default to not replicated. During CDC, relation messages
                     // will indicate which columns are actually being replicated, and
                     // update_replicated_columns() will mark those as replicated = true.

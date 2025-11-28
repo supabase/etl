@@ -8,6 +8,25 @@ use crate::test_utils::database::{TEST_DATABASE_SCHEMA, test_table_name};
 use crate::test_utils::test_destination_wrapper::TestDestinationWrapper;
 use crate::types::{Cell, Event, InsertEvent, TableRow};
 
+/// Creates a test column schema with sensible defaults.
+fn test_column(
+    name: &str,
+    typ: Type,
+    ordinal_position: i32,
+    nullable: bool,
+    primary_key: bool,
+) -> ColumnSchema {
+    ColumnSchema::new(
+        name.to_string(),
+        typ,
+        -1,
+        ordinal_position,
+        if primary_key { Some(1) } else { None },
+        nullable,
+        true,
+    )
+}
+
 #[derive(Debug, Clone, Copy)]
 pub enum TableSelection {
     Both,
@@ -70,8 +89,8 @@ pub async fn setup_test_database_schema<G: GenericClient>(
             users_table_name,
             vec![
                 id_column_schema(),
-                ColumnSchema::new_basic("name".to_string(), Type::TEXT, -1, false, false),
-                ColumnSchema::new_basic("age".to_string(), Type::INT4, -1, false, false),
+                test_column("name", Type::TEXT, 2, false, false),
+                test_column("age", Type::INT4, 3, false, false),
             ],
         ));
     }
@@ -94,7 +113,7 @@ pub async fn setup_test_database_schema<G: GenericClient>(
             orders_table_name,
             vec![
                 id_column_schema(),
-                ColumnSchema::new_basic("description".to_string(), Type::TEXT, -1, false, false),
+                test_column("description", Type::TEXT, 2, false, false),
             ],
         ));
     }

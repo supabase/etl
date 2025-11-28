@@ -51,7 +51,7 @@ type TypeModifier = i32;
 /// Represents the schema of a single column in a Postgres table.
 ///
 /// This type contains all metadata about a column including its name, data type,
-/// type modifier, nullability, primary key information, and replication status.
+/// type modifier, ordinal position, primary key information, nullability, and replication status.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct ColumnSchema {
     /// The name of the column.
@@ -60,73 +60,43 @@ pub struct ColumnSchema {
     pub typ: Type,
     /// Type-specific modifier value (e.g., length for varchar).
     pub modifier: TypeModifier,
+    /// The 1-based ordinal position of the column in the table.
+    pub ordinal_position: i32,
+    /// The 1-based ordinal position of this column in the primary key, or None if not a primary key.
+    pub primary_key_ordinal_position: Option<i32>,
     /// Whether the column can contain NULL values.
     pub nullable: bool,
-    /// Whether the column is part of the table's primary key.
-    pub primary: bool,
-    /// The 0-based order of the column in the table.
-    pub column_order: i32,
-    /// The string representation of the Postgres data type (e.g., "text", "int4").
-    pub column_type: String,
-    /// The order of this column in the primary key (1-based), or None if not a primary key.
-    pub primary_key_order: Option<i32>,
-    /// Whether this column is currently being replicated. Columns are replicated by default
-    /// when initially loaded, but may be marked as not replicated when a relation message
-    /// indicates the column is not part of the publication's column list.
+    /// Whether this column is currently being replicated. Columns default to not replicated
+    /// when loaded, and are marked as replicated when a relation message indicates the column
+    /// is part of the publication's column list.
     pub replicated: bool,
 }
 
 impl ColumnSchema {
     /// Creates a new [`ColumnSchema`] with all fields specified.
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         name: String,
         typ: Type,
         modifier: TypeModifier,
+        ordinal_position: i32,
+        primary_key_ordinal_position: Option<i32>,
         nullable: bool,
-        primary: bool,
-        column_order: i32,
-        column_type: String,
-        primary_key_order: Option<i32>,
         replicated: bool,
     ) -> ColumnSchema {
         Self {
             name,
             typ,
             modifier,
+            ordinal_position,
+            primary_key_ordinal_position,
             nullable,
-            primary,
-            column_order,
-            column_type,
-            primary_key_order,
             replicated,
         }
     }
 
-    /// Creates a new [`ColumnSchema`] with default values for the new fields.
-    ///
-    /// This constructor is provided for backwards compatibility with existing code
-    /// that doesn't need to specify column_order, column_type, primary_key_order,
-    /// or replicated. All columns created with this constructor default to replicated=false,
-    /// since columns are only activated when a relation message is received.
-    pub fn new_basic(
-        name: String,
-        typ: Type,
-        modifier: TypeModifier,
-        nullable: bool,
-        primary: bool,
-    ) -> ColumnSchema {
-        Self {
-            name,
-            typ: typ.clone(),
-            modifier,
-            nullable,
-            primary,
-            column_order: 0,
-            column_type: typ.name().to_string(),
-            primary_key_order: if primary { Some(1) } else { None },
-            replicated: false,
-        }
+    /// Returns whether this column is part of the table's primary key.
+    pub fn primary_key(&self) -> bool {
+        self.primary_key_ordinal_position.is_some()
     }
 
     /// Compares two [`ColumnSchema`] instances, excluding the `nullable` field.
@@ -258,7 +228,7 @@ impl TableSchema {
     ///
     /// This method checks if any column in the table is marked as part of the primary key.
     pub fn has_primary_keys(&self) -> bool {
-        self.column_schemas.iter().any(|cs| cs.primary)
+        self.column_schemas.iter().any(|cs| cs.primary_key())
     }
 
     /// Compares two [`TableSchema`] instances, excluding the [`ColumnSchema`]'s `nullable` field.

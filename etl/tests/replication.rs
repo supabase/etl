@@ -20,6 +20,25 @@ use tokio::pin;
 use tokio_postgres::CopyOutStream;
 use tokio_postgres::types::{ToSql, Type};
 
+/// Creates a test column schema with sensible defaults.
+fn test_column(
+    name: &str,
+    typ: Type,
+    ordinal_position: i32,
+    nullable: bool,
+    primary_key: bool,
+) -> ColumnSchema {
+    ColumnSchema::new(
+        name.to_string(),
+        typ,
+        -1,
+        ordinal_position,
+        if primary_key { Some(1) } else { None },
+        nullable,
+        true,
+    )
+}
+
 async fn count_stream_rows(stream: CopyOutStream) -> u64 {
     pin!(stream);
 
@@ -172,7 +191,7 @@ async fn test_table_schema_copy_is_consistent() {
         .await
         .unwrap();
 
-    let age_schema = ColumnSchema::new_basic("age".to_string(), Type::INT4, -1, true, false);
+    let age_schema = test_column("age", Type::INT4, 2, true, false);
 
     let table_1_id = database
         .create_table(test_table_name("table_1"), true, &[("age", "integer")])
@@ -211,8 +230,8 @@ async fn test_table_schema_copy_across_multiple_connections() {
         .await
         .unwrap();
 
-    let age_schema = ColumnSchema::new_basic("age".to_string(), Type::INT4, -1, true, false);
-    let year_schema = ColumnSchema::new_basic("year".to_string(), Type::INT4, -1, true, false);
+    let age_schema = test_column("age", Type::INT4, 2, true, false);
+    let year_schema = test_column("year", Type::INT4, 3, true, false);
 
     let table_1_id = database
         .create_table(test_table_name("table_1"), true, &[("age", "integer")])
@@ -328,13 +347,7 @@ async fn test_table_copy_stream_is_consistent() {
     let stream = transaction
         .get_table_copy_stream(
             table_1_id,
-            &[ColumnSchema::new_basic(
-                "age".to_string(),
-                Type::INT4,
-                -1,
-                true,
-                false,
-            )],
+            &[test_column("age", Type::INT4, 2, true, false)],
             None,
         )
         .await
@@ -404,13 +417,7 @@ async fn test_table_copy_stream_respects_row_filter() {
     let stream = transaction
         .get_table_copy_stream(
             test_table_id,
-            &[ColumnSchema::new_basic(
-                "age".to_string(),
-                Type::INT4,
-                -1,
-                true,
-                false,
-            )],
+            &[test_column("age", Type::INT4, 2, true, false)],
             Some("test_pub"),
         )
         .await
@@ -498,8 +505,8 @@ async fn test_table_copy_stream_respects_column_filter() {
         test_table_name,
         &[
             id_column_schema(),
-            ColumnSchema::new_basic("name".to_string(), Type::TEXT, -1, true, false),
-            ColumnSchema::new_basic("age".to_string(), Type::INT4, -1, true, false),
+            test_column("name", Type::TEXT, 2, true, false),
+            test_column("age", Type::INT4, 3, true, false),
         ],
     );
 
@@ -567,13 +574,7 @@ async fn test_table_copy_stream_no_row_filter() {
     let stream = transaction
         .get_table_copy_stream(
             test_table_id,
-            &[ColumnSchema::new_basic(
-                "age".to_string(),
-                Type::INT4,
-                -1,
-                true,
-                false,
-            )],
+            &[test_column("age", Type::INT4, 2, true, false)],
             Some("test_pub"),
         )
         .await

@@ -173,31 +173,23 @@ pub async fn store_table_schema(
         .await?;
 
     // Insert all columns
-    for (idx, column_schema) in table_schema.column_schemas.iter().enumerate() {
-        let column_type_str = postgres_type_to_string(&column_schema.typ);
-        // Use the column_order from the schema if non-zero, otherwise use the index.
-        let column_order = if column_schema.column_order > 0 {
-            column_schema.column_order
-        } else {
-            idx as i32
-        };
-
+    for column_schema in table_schema.column_schemas.iter() {
         sqlx::query(
             r#"
             insert into etl.table_columns
             (table_schema_id, column_name, column_type, type_modifier, nullable, primary_key,
-             column_order, primary_key_order, replicated)
+             column_order, primary_key_ordinal_position, replicated)
             values ($1, $2, $3, $4, $5, $6, $7, $8, $9)
             "#,
         )
         .bind(table_schema_id)
         .bind(&column_schema.name)
-        .bind(column_type_str)
+        .bind(postgres_type_to_string(&column_schema.typ))
         .bind(column_schema.modifier)
         .bind(column_schema.nullable)
-        .bind(column_schema.primary)
-        .bind(column_order)
-        .bind(column_schema.primary_key_order)
+        .bind(column_schema.primary_key())
+        .bind(column_schema.ordinal_position)
+        .bind(column_schema.primary_key_ordinal_position)
         .bind(column_schema.replicated)
         .execute(&mut *tx)
         .await?;
@@ -228,7 +220,7 @@ pub async fn load_table_schemas(
             tc.nullable,
             tc.primary_key,
             tc.column_order,
-            tc.primary_key_order,
+            tc.primary_key_ordinal_position,
             tc.replicated
         from etl.table_schemas ts
         inner join etl.table_columns tc on ts.id = tc.table_schema_id
@@ -314,10 +306,9 @@ fn parse_column_schema(row: &PgRow) -> ColumnSchema {
     let column_name: String = row.get("column_name");
     let column_type: String = row.get("column_type");
     let type_modifier: i32 = row.get("type_modifier");
+    let ordinal_position: i32 = row.get("column_order");
+    let primary_key_ordinal_position: Option<i32> = row.get("primary_key_ordinal_position");
     let nullable: bool = row.get("nullable");
-    let primary_key: bool = row.get("primary_key");
-    let column_order: i32 = row.get("column_order");
-    let primary_key_order: Option<i32> = row.get("primary_key_order");
     // Default to true for backwards compatibility with existing state store rows
     // that were created before the `replicated` column was added. New rows will
     // have the explicit value stored, which defaults to false until a relation
@@ -329,11 +320,9 @@ fn parse_column_schema(row: &PgRow) -> ColumnSchema {
         column_name,
         string_to_postgres_type(&column_type),
         type_modifier,
+        ordinal_position,
+        primary_key_ordinal_position,
         nullable,
-        primary_key,
-        column_order,
-        column_type,
-        primary_key_order,
         replicated,
     )
 }

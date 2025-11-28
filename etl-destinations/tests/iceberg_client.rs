@@ -6,6 +6,22 @@ use etl_destinations::iceberg::IcebergClient;
 use etl_telemetry::tracing::init_test_tracing;
 use uuid::Uuid;
 
+/// Creates a test column schema with common defaults.
+///
+/// This helper simplifies column schema creation in tests by providing sensible
+/// defaults for fields that are typically not relevant to the test logic.
+fn test_column(name: &str, typ: Type, nullable: bool, primary_key: bool) -> ColumnSchema {
+    ColumnSchema::new(
+        name.to_string(),
+        typ,
+        -1,
+        0,
+        if primary_key { Some(1) } else { None },
+        nullable,
+        true,
+    )
+}
+
 use crate::support::{
     iceberg::{LAKEKEEPER_URL, create_props, get_catalog_url, read_all_rows},
     lakekeeper::LakekeeperClient,
@@ -111,198 +127,65 @@ async fn create_table_if_missing() {
     let table_name = "test_table".to_string();
     let column_schemas = vec![
         // Primary key
-        ColumnSchema::new_basic("id".to_string(), Type::INT4, -1, false, true),
+        test_column("id", Type::INT4, false, true),
         // Boolean types
-        ColumnSchema::new_basic("bool_col".to_string(), Type::BOOL, -1, true, false),
+        test_column("bool_col", Type::BOOL, true, false),
         // String types
-        ColumnSchema::new_basic("char_col".to_string(), Type::CHAR, -1, true, false),
-        ColumnSchema::new_basic("bpchar_col".to_string(), Type::BPCHAR, -1, true, false),
-        ColumnSchema::new_basic("varchar_col".to_string(), Type::VARCHAR, -1, true, false),
-        ColumnSchema::new_basic("name_col".to_string(), Type::NAME, -1, true, false),
-        ColumnSchema::new_basic("text_col".to_string(), Type::TEXT, -1, true, false),
+        test_column("char_col", Type::CHAR, true, false),
+        test_column("bpchar_col", Type::BPCHAR, true, false),
+        test_column("varchar_col", Type::VARCHAR, true, false),
+        test_column("name_col", Type::NAME, true, false),
+        test_column("text_col", Type::TEXT, true, false),
         // Integer types
-        ColumnSchema::new_basic("int2_col".to_string(), Type::INT2, -1, true, false),
-        ColumnSchema::new_basic("int4_col".to_string(), Type::INT4, -1, true, false),
-        ColumnSchema::new_basic("int8_col".to_string(), Type::INT8, -1, true, false),
+        test_column("int2_col", Type::INT2, true, false),
+        test_column("int4_col", Type::INT4, true, false),
+        test_column("int8_col", Type::INT8, true, false),
         // Float types
-        ColumnSchema::new_basic("float4_col".to_string(), Type::FLOAT4, -1, true, false),
-        ColumnSchema::new_basic("float8_col".to_string(), Type::FLOAT8, -1, true, false),
+        test_column("float4_col", Type::FLOAT4, true, false),
+        test_column("float8_col", Type::FLOAT8, true, false),
         // Numeric type
-        ColumnSchema::new_basic("numeric_col".to_string(), Type::NUMERIC, -1, true, false),
+        test_column("numeric_col", Type::NUMERIC, true, false),
         // Date/Time types
-        ColumnSchema::new_basic("date_col".to_string(), Type::DATE, -1, true, false),
-        ColumnSchema::new_basic("time_col".to_string(), Type::TIME, -1, true, false),
-        ColumnSchema::new_basic(
-            "timestamp_col".to_string(),
-            Type::TIMESTAMP,
-            -1,
-            true,
-            false,
-        ),
-        ColumnSchema::new_basic(
-            "timestamptz_col".to_string(),
-            Type::TIMESTAMPTZ,
-            -1,
-            true,
-            false,
-        ),
+        test_column("date_col", Type::DATE, true, false),
+        test_column("time_col", Type::TIME, true, false),
+        test_column("timestamp_col", Type::TIMESTAMP, true, false),
+        test_column("timestamptz_col", Type::TIMESTAMPTZ, true, false),
         // UUID type
-        ColumnSchema::new_basic("uuid_col".to_string(), Type::UUID, -1, true, false),
+        test_column("uuid_col", Type::UUID, true, false),
         // JSON types
-        ColumnSchema::new_basic("json_col".to_string(), Type::JSON, -1, true, false),
-        ColumnSchema::new_basic("jsonb_col".to_string(), Type::JSONB, -1, true, false),
+        test_column("json_col", Type::JSON, true, false),
+        test_column("jsonb_col", Type::JSONB, true, false),
         // OID type
-        ColumnSchema::new_basic("oid_col".to_string(), Type::OID, -1, true, false),
+        test_column("oid_col", Type::OID, true, false),
         // Binary type
-        ColumnSchema::new_basic("bytea_col".to_string(), Type::BYTEA, -1, true, false),
+        test_column("bytea_col", Type::BYTEA, true, false),
         // Array types
-        ColumnSchema::new_basic(
-            "bool_array_col".to_string(),
-            Type::BOOL_ARRAY,
-            -1,
-            true,
-            false,
-        ),
-        ColumnSchema::new_basic(
-            "char_array_col".to_string(),
-            Type::CHAR_ARRAY,
-            -1,
-            true,
-            false,
-        ),
-        ColumnSchema::new_basic(
-            "bpchar_array_col".to_string(),
-            Type::BPCHAR_ARRAY,
-            -1,
-            true,
-            false,
-        ),
-        ColumnSchema::new_basic(
-            "varchar_array_col".to_string(),
-            Type::VARCHAR_ARRAY,
-            -1,
-            true,
-            false,
-        ),
-        ColumnSchema::new_basic(
-            "name_array_col".to_string(),
-            Type::NAME_ARRAY,
-            -1,
-            true,
-            false,
-        ),
-        ColumnSchema::new_basic(
-            "text_array_col".to_string(),
-            Type::TEXT_ARRAY,
-            -1,
-            true,
-            false,
-        ),
-        ColumnSchema::new_basic(
-            "int2_array_col".to_string(),
-            Type::INT2_ARRAY,
-            -1,
-            true,
-            false,
-        ),
-        ColumnSchema::new_basic(
-            "int4_array_col".to_string(),
-            Type::INT4_ARRAY,
-            -1,
-            true,
-            false,
-        ),
-        ColumnSchema::new_basic(
-            "int8_array_col".to_string(),
-            Type::INT8_ARRAY,
-            -1,
-            true,
-            false,
-        ),
-        ColumnSchema::new_basic(
-            "float4_array_col".to_string(),
-            Type::FLOAT4_ARRAY,
-            -1,
-            true,
-            false,
-        ),
-        ColumnSchema::new_basic(
-            "float8_array_col".to_string(),
-            Type::FLOAT8_ARRAY,
-            -1,
-            true,
-            false,
-        ),
-        ColumnSchema::new_basic(
-            "numeric_array_col".to_string(),
-            Type::NUMERIC_ARRAY,
-            -1,
-            true,
-            false,
-        ),
-        ColumnSchema::new_basic(
-            "date_array_col".to_string(),
-            Type::DATE_ARRAY,
-            -1,
-            true,
-            false,
-        ),
-        ColumnSchema::new_basic(
-            "time_array_col".to_string(),
-            Type::TIME_ARRAY,
-            -1,
-            true,
-            false,
-        ),
-        ColumnSchema::new_basic(
-            "timestamp_array_col".to_string(),
-            Type::TIMESTAMP_ARRAY,
-            -1,
-            true,
-            false,
-        ),
-        ColumnSchema::new_basic(
-            "timestamptz_array_col".to_string(),
+        test_column("bool_array_col", Type::BOOL_ARRAY, true, false),
+        test_column("char_array_col", Type::CHAR_ARRAY, true, false),
+        test_column("bpchar_array_col", Type::BPCHAR_ARRAY, true, false),
+        test_column("varchar_array_col", Type::VARCHAR_ARRAY, true, false),
+        test_column("name_array_col", Type::NAME_ARRAY, true, false),
+        test_column("text_array_col", Type::TEXT_ARRAY, true, false),
+        test_column("int2_array_col", Type::INT2_ARRAY, true, false),
+        test_column("int4_array_col", Type::INT4_ARRAY, true, false),
+        test_column("int8_array_col", Type::INT8_ARRAY, true, false),
+        test_column("float4_array_col", Type::FLOAT4_ARRAY, true, false),
+        test_column("float8_array_col", Type::FLOAT8_ARRAY, true, false),
+        test_column("numeric_array_col", Type::NUMERIC_ARRAY, true, false),
+        test_column("date_array_col", Type::DATE_ARRAY, true, false),
+        test_column("time_array_col", Type::TIME_ARRAY, true, false),
+        test_column("timestamp_array_col", Type::TIMESTAMP_ARRAY, true, false),
+        test_column(
+            "timestamptz_array_col",
             Type::TIMESTAMPTZ_ARRAY,
-            -1,
             true,
             false,
         ),
-        ColumnSchema::new_basic(
-            "uuid_array_col".to_string(),
-            Type::UUID_ARRAY,
-            -1,
-            true,
-            false,
-        ),
-        ColumnSchema::new_basic(
-            "json_array_col".to_string(),
-            Type::JSON_ARRAY,
-            -1,
-            true,
-            false,
-        ),
-        ColumnSchema::new_basic(
-            "jsonb_array_col".to_string(),
-            Type::JSONB_ARRAY,
-            -1,
-            true,
-            false,
-        ),
-        ColumnSchema::new_basic(
-            "oid_array_col".to_string(),
-            Type::OID_ARRAY,
-            -1,
-            true,
-            false,
-        ),
-        ColumnSchema::new_basic(
-            "bytea_array_col".to_string(),
-            Type::BYTEA_ARRAY,
-            -1,
-            true,
-            false,
-        ),
+        test_column("uuid_array_col", Type::UUID_ARRAY, true, false),
+        test_column("json_array_col", Type::JSON_ARRAY, true, false),
+        test_column("jsonb_array_col", Type::JSONB_ARRAY, true, false),
+        test_column("oid_array_col", Type::OID_ARRAY, true, false),
+        test_column("bytea_array_col", Type::BYTEA_ARRAY, true, false),
     ];
 
     // table doesn't exist yet
@@ -373,13 +256,7 @@ async fn drop_table_if_exists_is_idempotent() {
 
     // Create a simple table schema
     let table_name = "test_table".to_string();
-    let column_schemas = vec![ColumnSchema::new_basic(
-        "id".to_string(),
-        Type::INT4,
-        -1,
-        false,
-        true,
-    )];
+    let column_schemas = vec![test_column("id", Type::INT4, false, true)];
 
     // Create table
     client
@@ -451,50 +328,38 @@ async fn insert_nullable_scalars() {
     let table_name = "test_table".to_string();
     let column_schemas = vec![
         // Primary key
-        ColumnSchema::new_basic("id".to_string(), Type::INT4, -1, false, true),
+        test_column("id", Type::INT4, false, true),
         // Boolean types
-        ColumnSchema::new_basic("bool_col".to_string(), Type::BOOL, -1, true, false),
+        test_column("bool_col", Type::BOOL, true, false),
         // String types
-        ColumnSchema::new_basic("char_col".to_string(), Type::CHAR, -1, true, false),
-        ColumnSchema::new_basic("bpchar_col".to_string(), Type::BPCHAR, -1, true, false),
-        ColumnSchema::new_basic("varchar_col".to_string(), Type::VARCHAR, -1, true, false),
-        ColumnSchema::new_basic("name_col".to_string(), Type::NAME, -1, true, false),
-        ColumnSchema::new_basic("text_col".to_string(), Type::TEXT, -1, true, false),
+        test_column("char_col", Type::CHAR, true, false),
+        test_column("bpchar_col", Type::BPCHAR, true, false),
+        test_column("varchar_col", Type::VARCHAR, true, false),
+        test_column("name_col", Type::NAME, true, false),
+        test_column("text_col", Type::TEXT, true, false),
         // Integer types
-        ColumnSchema::new_basic("int2_col".to_string(), Type::INT2, -1, true, false),
-        ColumnSchema::new_basic("int4_col".to_string(), Type::INT4, -1, true, false),
-        ColumnSchema::new_basic("int8_col".to_string(), Type::INT8, -1, true, false),
+        test_column("int2_col", Type::INT2, true, false),
+        test_column("int4_col", Type::INT4, true, false),
+        test_column("int8_col", Type::INT8, true, false),
         // Float types
-        ColumnSchema::new_basic("float4_col".to_string(), Type::FLOAT4, -1, true, false),
-        ColumnSchema::new_basic("float8_col".to_string(), Type::FLOAT8, -1, true, false),
+        test_column("float4_col", Type::FLOAT4, true, false),
+        test_column("float8_col", Type::FLOAT8, true, false),
         // Numeric type
-        ColumnSchema::new_basic("numeric_col".to_string(), Type::NUMERIC, -1, true, false),
+        test_column("numeric_col", Type::NUMERIC, true, false),
         // Date/Time types
-        ColumnSchema::new_basic("date_col".to_string(), Type::DATE, -1, true, false),
-        ColumnSchema::new_basic("time_col".to_string(), Type::TIME, -1, true, false),
-        ColumnSchema::new_basic(
-            "timestamp_col".to_string(),
-            Type::TIMESTAMP,
-            -1,
-            true,
-            false,
-        ),
-        ColumnSchema::new_basic(
-            "timestamptz_col".to_string(),
-            Type::TIMESTAMPTZ,
-            -1,
-            true,
-            false,
-        ),
+        test_column("date_col", Type::DATE, true, false),
+        test_column("time_col", Type::TIME, true, false),
+        test_column("timestamp_col", Type::TIMESTAMP, true, false),
+        test_column("timestamptz_col", Type::TIMESTAMPTZ, true, false),
         // UUID type
-        ColumnSchema::new_basic("uuid_col".to_string(), Type::UUID, -1, true, false),
+        test_column("uuid_col", Type::UUID, true, false),
         // JSON types
-        ColumnSchema::new_basic("json_col".to_string(), Type::JSON, -1, true, false),
-        ColumnSchema::new_basic("jsonb_col".to_string(), Type::JSONB, -1, true, false),
+        test_column("json_col", Type::JSON, true, false),
+        test_column("jsonb_col", Type::JSONB, true, false),
         // OID type
-        ColumnSchema::new_basic("oid_col".to_string(), Type::OID, -1, true, false),
+        test_column("oid_col", Type::OID, true, false),
         // Binary type
-        ColumnSchema::new_basic("bytea_col".to_string(), Type::BYTEA, -1, true, false),
+        test_column("bytea_col", Type::BYTEA, true, false),
     ];
 
     client
@@ -620,50 +485,38 @@ async fn insert_non_nullable_scalars() {
     let table_name = "test_table".to_string();
     let column_schemas = vec![
         // Primary key
-        ColumnSchema::new_basic("id".to_string(), Type::INT4, -1, false, true),
+        test_column("id", Type::INT4, false, true),
         // Boolean types
-        ColumnSchema::new_basic("bool_col".to_string(), Type::BOOL, -1, false, false),
+        test_column("bool_col", Type::BOOL, false, false),
         // String types
-        ColumnSchema::new_basic("char_col".to_string(), Type::CHAR, -1, false, false),
-        ColumnSchema::new_basic("bpchar_col".to_string(), Type::BPCHAR, -1, false, false),
-        ColumnSchema::new_basic("varchar_col".to_string(), Type::VARCHAR, -1, false, false),
-        ColumnSchema::new_basic("name_col".to_string(), Type::NAME, -1, false, false),
-        ColumnSchema::new_basic("text_col".to_string(), Type::TEXT, -1, false, false),
+        test_column("char_col", Type::CHAR, false, false),
+        test_column("bpchar_col", Type::BPCHAR, false, false),
+        test_column("varchar_col", Type::VARCHAR, false, false),
+        test_column("name_col", Type::NAME, false, false),
+        test_column("text_col", Type::TEXT, false, false),
         // Integer types
-        ColumnSchema::new_basic("int2_col".to_string(), Type::INT2, -1, false, false),
-        ColumnSchema::new_basic("int4_col".to_string(), Type::INT4, -1, false, false),
-        ColumnSchema::new_basic("int8_col".to_string(), Type::INT8, -1, false, false),
+        test_column("int2_col", Type::INT2, false, false),
+        test_column("int4_col", Type::INT4, false, false),
+        test_column("int8_col", Type::INT8, false, false),
         // Float types
-        ColumnSchema::new_basic("float4_col".to_string(), Type::FLOAT4, -1, false, false),
-        ColumnSchema::new_basic("float8_col".to_string(), Type::FLOAT8, -1, false, false),
+        test_column("float4_col", Type::FLOAT4, false, false),
+        test_column("float8_col", Type::FLOAT8, false, false),
         // Numeric type
-        ColumnSchema::new_basic("numeric_col".to_string(), Type::NUMERIC, -1, false, false),
+        test_column("numeric_col", Type::NUMERIC, false, false),
         // Date/Time types
-        ColumnSchema::new_basic("date_col".to_string(), Type::DATE, -1, false, false),
-        ColumnSchema::new_basic("time_col".to_string(), Type::TIME, -1, false, false),
-        ColumnSchema::new_basic(
-            "timestamp_col".to_string(),
-            Type::TIMESTAMP,
-            -1,
-            false,
-            false,
-        ),
-        ColumnSchema::new_basic(
-            "timestamptz_col".to_string(),
-            Type::TIMESTAMPTZ,
-            -1,
-            false,
-            false,
-        ),
+        test_column("date_col", Type::DATE, false, false),
+        test_column("time_col", Type::TIME, false, false),
+        test_column("timestamp_col", Type::TIMESTAMP, false, false),
+        test_column("timestamptz_col", Type::TIMESTAMPTZ, false, false),
         // UUID type
-        ColumnSchema::new_basic("uuid_col".to_string(), Type::UUID, -1, false, false),
+        test_column("uuid_col", Type::UUID, false, false),
         // JSON types
-        ColumnSchema::new_basic("json_col".to_string(), Type::JSON, -1, false, false),
-        ColumnSchema::new_basic("jsonb_col".to_string(), Type::JSONB, -1, false, false),
+        test_column("json_col", Type::JSON, false, false),
+        test_column("jsonb_col", Type::JSONB, false, false),
         // OID type
-        ColumnSchema::new_basic("oid_col".to_string(), Type::OID, -1, false, false),
+        test_column("oid_col", Type::OID, false, false),
         // Binary type
-        ColumnSchema::new_basic("bytea_col".to_string(), Type::BYTEA, -1, false, false),
+        test_column("bytea_col", Type::BYTEA, false, false),
     ];
 
     client
@@ -763,164 +616,43 @@ async fn insert_nullable_array() {
     let table_name = "test_array_table".to_string();
     let column_schemas = vec![
         // Primary key
-        ColumnSchema::new_basic("id".to_string(), Type::INT4, -1, false, true),
+        test_column("id", Type::INT4, false, true),
         // Boolean array type
-        ColumnSchema::new_basic(
-            "bool_array_col".to_string(),
-            Type::BOOL_ARRAY,
-            -1,
-            true,
-            false,
-        ),
+        test_column("bool_array_col", Type::BOOL_ARRAY, true, false),
         // String array types
-        ColumnSchema::new_basic(
-            "char_array_col".to_string(),
-            Type::CHAR_ARRAY,
-            -1,
-            true,
-            false,
-        ),
-        ColumnSchema::new_basic(
-            "bpchar_array_col".to_string(),
-            Type::BPCHAR_ARRAY,
-            -1,
-            true,
-            false,
-        ),
-        ColumnSchema::new_basic(
-            "varchar_array_col".to_string(),
-            Type::VARCHAR_ARRAY,
-            -1,
-            true,
-            false,
-        ),
-        ColumnSchema::new_basic(
-            "name_array_col".to_string(),
-            Type::NAME_ARRAY,
-            -1,
-            true,
-            false,
-        ),
-        ColumnSchema::new_basic(
-            "text_array_col".to_string(),
-            Type::TEXT_ARRAY,
-            -1,
-            true,
-            false,
-        ),
+        test_column("char_array_col", Type::CHAR_ARRAY, true, false),
+        test_column("bpchar_array_col", Type::BPCHAR_ARRAY, true, false),
+        test_column("varchar_array_col", Type::VARCHAR_ARRAY, true, false),
+        test_column("name_array_col", Type::NAME_ARRAY, true, false),
+        test_column("text_array_col", Type::TEXT_ARRAY, true, false),
         // Integer array types
-        ColumnSchema::new_basic(
-            "int2_array_col".to_string(),
-            Type::INT2_ARRAY,
-            -1,
-            true,
-            false,
-        ),
-        ColumnSchema::new_basic(
-            "int4_array_col".to_string(),
-            Type::INT4_ARRAY,
-            -1,
-            true,
-            false,
-        ),
-        ColumnSchema::new_basic(
-            "int8_array_col".to_string(),
-            Type::INT8_ARRAY,
-            -1,
-            true,
-            false,
-        ),
+        test_column("int2_array_col", Type::INT2_ARRAY, true, false),
+        test_column("int4_array_col", Type::INT4_ARRAY, true, false),
+        test_column("int8_array_col", Type::INT8_ARRAY, true, false),
         // Float array types
-        ColumnSchema::new_basic(
-            "float4_array_col".to_string(),
-            Type::FLOAT4_ARRAY,
-            -1,
-            true,
-            false,
-        ),
-        ColumnSchema::new_basic(
-            "float8_array_col".to_string(),
-            Type::FLOAT8_ARRAY,
-            -1,
-            true,
-            false,
-        ),
+        test_column("float4_array_col", Type::FLOAT4_ARRAY, true, false),
+        test_column("float8_array_col", Type::FLOAT8_ARRAY, true, false),
         // Numeric array type
-        ColumnSchema::new_basic(
-            "numeric_array_col".to_string(),
-            Type::NUMERIC_ARRAY,
-            -1,
-            true,
-            false,
-        ),
+        test_column("numeric_array_col", Type::NUMERIC_ARRAY, true, false),
         // Date/Time array types
-        ColumnSchema::new_basic(
-            "date_array_col".to_string(),
-            Type::DATE_ARRAY,
-            -1,
-            true,
-            false,
-        ),
-        ColumnSchema::new_basic(
-            "time_array_col".to_string(),
-            Type::TIME_ARRAY,
-            -1,
-            true,
-            false,
-        ),
-        ColumnSchema::new_basic(
-            "timestamp_array_col".to_string(),
-            Type::TIMESTAMP_ARRAY,
-            -1,
-            true,
-            false,
-        ),
-        ColumnSchema::new_basic(
-            "timestamptz_array_col".to_string(),
+        test_column("date_array_col", Type::DATE_ARRAY, true, false),
+        test_column("time_array_col", Type::TIME_ARRAY, true, false),
+        test_column("timestamp_array_col", Type::TIMESTAMP_ARRAY, true, false),
+        test_column(
+            "timestamptz_array_col",
             Type::TIMESTAMPTZ_ARRAY,
-            -1,
             true,
             false,
         ),
         // UUID array type
-        ColumnSchema::new_basic(
-            "uuid_array_col".to_string(),
-            Type::UUID_ARRAY,
-            -1,
-            true,
-            false,
-        ),
+        test_column("uuid_array_col", Type::UUID_ARRAY, true, false),
         // JSON array types
-        ColumnSchema::new_basic(
-            "json_array_col".to_string(),
-            Type::JSON_ARRAY,
-            -1,
-            true,
-            false,
-        ),
-        ColumnSchema::new_basic(
-            "jsonb_array_col".to_string(),
-            Type::JSONB_ARRAY,
-            -1,
-            true,
-            false,
-        ),
+        test_column("json_array_col", Type::JSON_ARRAY, true, false),
+        test_column("jsonb_array_col", Type::JSONB_ARRAY, true, false),
         // OID array type
-        ColumnSchema::new_basic(
-            "oid_array_col".to_string(),
-            Type::OID_ARRAY,
-            -1,
-            true,
-            false,
-        ),
+        test_column("oid_array_col", Type::OID_ARRAY, true, false),
         // Binary array type
-        ColumnSchema::new_basic(
-            "bytea_array_col".to_string(),
-            Type::BYTEA_ARRAY,
-            -1,
-            true,
-            false,
-        ),
+        test_column("bytea_array_col", Type::BYTEA_ARRAY, true, false),
     ];
 
     client
@@ -1134,164 +866,43 @@ async fn insert_non_nullable_array() {
     let table_name = "test_non_nullable_array_table".to_string();
     let column_schemas = vec![
         // Primary key
-        ColumnSchema::new_basic("id".to_string(), Type::INT4, -1, false, true),
+        test_column("id", Type::INT4, false, true),
         // Boolean array type
-        ColumnSchema::new_basic(
-            "bool_array_col".to_string(),
-            Type::BOOL_ARRAY,
-            -1,
-            false,
-            false,
-        ),
+        test_column("bool_array_col", Type::BOOL_ARRAY, false, false),
         // String array types
-        ColumnSchema::new_basic(
-            "char_array_col".to_string(),
-            Type::CHAR_ARRAY,
-            -1,
-            false,
-            false,
-        ),
-        ColumnSchema::new_basic(
-            "bpchar_array_col".to_string(),
-            Type::BPCHAR_ARRAY,
-            -1,
-            false,
-            false,
-        ),
-        ColumnSchema::new_basic(
-            "varchar_array_col".to_string(),
-            Type::VARCHAR_ARRAY,
-            -1,
-            false,
-            false,
-        ),
-        ColumnSchema::new_basic(
-            "name_array_col".to_string(),
-            Type::NAME_ARRAY,
-            -1,
-            false,
-            false,
-        ),
-        ColumnSchema::new_basic(
-            "text_array_col".to_string(),
-            Type::TEXT_ARRAY,
-            -1,
-            false,
-            false,
-        ),
+        test_column("char_array_col", Type::CHAR_ARRAY, false, false),
+        test_column("bpchar_array_col", Type::BPCHAR_ARRAY, false, false),
+        test_column("varchar_array_col", Type::VARCHAR_ARRAY, false, false),
+        test_column("name_array_col", Type::NAME_ARRAY, false, false),
+        test_column("text_array_col", Type::TEXT_ARRAY, false, false),
         // Integer array types
-        ColumnSchema::new_basic(
-            "int2_array_col".to_string(),
-            Type::INT2_ARRAY,
-            -1,
-            false,
-            false,
-        ),
-        ColumnSchema::new_basic(
-            "int4_array_col".to_string(),
-            Type::INT4_ARRAY,
-            -1,
-            false,
-            false,
-        ),
-        ColumnSchema::new_basic(
-            "int8_array_col".to_string(),
-            Type::INT8_ARRAY,
-            -1,
-            false,
-            false,
-        ),
+        test_column("int2_array_col", Type::INT2_ARRAY, false, false),
+        test_column("int4_array_col", Type::INT4_ARRAY, false, false),
+        test_column("int8_array_col", Type::INT8_ARRAY, false, false),
         // Float array types
-        ColumnSchema::new_basic(
-            "float4_array_col".to_string(),
-            Type::FLOAT4_ARRAY,
-            -1,
-            false,
-            false,
-        ),
-        ColumnSchema::new_basic(
-            "float8_array_col".to_string(),
-            Type::FLOAT8_ARRAY,
-            -1,
-            false,
-            false,
-        ),
+        test_column("float4_array_col", Type::FLOAT4_ARRAY, false, false),
+        test_column("float8_array_col", Type::FLOAT8_ARRAY, false, false),
         // Numeric array type
-        ColumnSchema::new_basic(
-            "numeric_array_col".to_string(),
-            Type::NUMERIC_ARRAY,
-            -1,
-            false,
-            false,
-        ),
+        test_column("numeric_array_col", Type::NUMERIC_ARRAY, false, false),
         // Date/Time array types
-        ColumnSchema::new_basic(
-            "date_array_col".to_string(),
-            Type::DATE_ARRAY,
-            -1,
-            false,
-            false,
-        ),
-        ColumnSchema::new_basic(
-            "time_array_col".to_string(),
-            Type::TIME_ARRAY,
-            -1,
-            false,
-            false,
-        ),
-        ColumnSchema::new_basic(
-            "timestamp_array_col".to_string(),
-            Type::TIMESTAMP_ARRAY,
-            -1,
-            false,
-            false,
-        ),
-        ColumnSchema::new_basic(
-            "timestamptz_array_col".to_string(),
+        test_column("date_array_col", Type::DATE_ARRAY, false, false),
+        test_column("time_array_col", Type::TIME_ARRAY, false, false),
+        test_column("timestamp_array_col", Type::TIMESTAMP_ARRAY, false, false),
+        test_column(
+            "timestamptz_array_col",
             Type::TIMESTAMPTZ_ARRAY,
-            -1,
             false,
             false,
         ),
         // UUID array type
-        ColumnSchema::new_basic(
-            "uuid_array_col".to_string(),
-            Type::UUID_ARRAY,
-            -1,
-            false,
-            false,
-        ),
+        test_column("uuid_array_col", Type::UUID_ARRAY, false, false),
         // JSON array types
-        ColumnSchema::new_basic(
-            "json_array_col".to_string(),
-            Type::JSON_ARRAY,
-            -1,
-            false,
-            false,
-        ),
-        ColumnSchema::new_basic(
-            "jsonb_array_col".to_string(),
-            Type::JSONB_ARRAY,
-            -1,
-            false,
-            false,
-        ),
+        test_column("json_array_col", Type::JSON_ARRAY, false, false),
+        test_column("jsonb_array_col", Type::JSONB_ARRAY, false, false),
         // OID array type
-        ColumnSchema::new_basic(
-            "oid_array_col".to_string(),
-            Type::OID_ARRAY,
-            -1,
-            false,
-            false,
-        ),
+        test_column("oid_array_col", Type::OID_ARRAY, false, false),
         // Binary array type
-        ColumnSchema::new_basic(
-            "bytea_array_col".to_string(),
-            Type::BYTEA_ARRAY,
-            -1,
-            false,
-            false,
-        ),
+        test_column("bytea_array_col", Type::BYTEA_ARRAY, false, false),
     ];
 
     client
