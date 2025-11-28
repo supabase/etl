@@ -190,13 +190,15 @@ impl SchemaStore for MemoryStore {
         Ok(inner.table_schemas.len())
     }
 
-    async fn store_table_schema(&self, table_schema: TableSchema) -> EtlResult<()> {
+    async fn store_table_schema(&self, table_schema: TableSchema) -> EtlResult<Arc<TableSchema>> {
         let mut inner = self.inner.lock().await;
+
+        let table_schema = Arc::new(table_schema);
         inner
             .table_schemas
-            .insert(table_schema.id, Arc::new(table_schema));
+            .insert(table_schema.id, table_schema.clone());
 
-        Ok(())
+        Ok(table_schema)
     }
 }
 

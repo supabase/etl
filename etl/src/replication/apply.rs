@@ -1,11 +1,11 @@
 use etl_config::shared::PipelineConfig;
 use etl_postgres::replication::worker::WorkerType;
-use etl_postgres::types::TableId;
+use etl_postgres::types::{ReplicatedTableSchema, ReplicationMask, TableId, TableSchema};
 use futures::StreamExt;
 use metrics::histogram;
 use postgres_replication::protocol;
 use postgres_replication::protocol::{LogicalReplicationMessage, ReplicationMessage};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -318,10 +318,10 @@ struct ApplyLoopState {
     /// Tracks which columns are being replicated for each table.
     ///
     /// This map is populated from relation messages during replication. For each table,
-    /// it contains the set of column names that are included in the publication's column
-    /// filter. This allows the apply loop to process only the columns that are actually
+    /// it contains a [`ReplicationMask`] indicating which columns are replicated.
+    /// This allows the apply loop to process only the columns that are actually
     /// being replicated.
-    replicated_columns: HashMap<TableId, HashSet<String>>,
+    replication_masks: HashMap<TableId, ReplicationMask>,
 }
 
 impl ApplyLoopState {
@@ -339,19 +339,18 @@ impl ApplyLoopState {
             current_tx_begin_ts: None,
             current_tx_events: 0,
             shutdown_discarded: false,
-            replicated_columns: HashMap::new(),
+            replication_masks: HashMap::new(),
         }
     }
 
-    /// Returns the replicated columns for a table, or creates a default set with all columns
-    /// if the table hasn't been seen in a relation message yet.
-    fn get_replicated_columns(&self, table_id: &TableId) -> Option<&HashSet<String>> {
-        self.replicated_columns.get(table_id)
+    /// Returns the replication mask for a table.
+    fn get_replication_mask(&self, table_id: &TableId) -> Option<&ReplicationMask> {
+        self.replication_masks.get(table_id)
     }
 
-    /// Updates the replicated columns for a table based on a relation message.
-    fn set_replicated_columns(&mut self, table_id: TableId, columns: HashSet<String>) {
-        self.replicated_columns.insert(table_id, columns);
+    /// Updates the replication mask for a table based on a relation message.
+    fn set_replication_mask(&mut self, table_id: TableId, mask: ReplicationMask) {
+        self.replication_masks.insert(table_id, mask);
     }
 
     /// Updates the last commit end LSN to track transaction boundaries.
@@ -928,6 +927,25 @@ where
         .await
 }
 
+/// Retrieves a table schema from the schema store by table ID.
+///
+/// Returns an error if the schema is not found in the store.
+async fn get_table_schema<S>(schema_store: &S, table_id: TableId) -> EtlResult<Arc<TableSchema>>
+where
+    S: SchemaStore,
+{
+    schema_store
+        .get_table_schema(&table_id)
+        .await?
+        .ok_or_else(|| {
+            crate::etl_error!(
+                ErrorKind::MissingTableSchema,
+                "Table schema not found in cache",
+                format!("Table schema for table {} not found in cache", table_id)
+            )
+        })
+}
+
 /// Dispatches replication protocol messages to appropriate handlers.
 ///
 /// This function serves as the main routing mechanism for Postgres replication
@@ -1028,7 +1046,7 @@ where
             handle_commit_message(state, start_lsn, commit_body, hook, pipeline_id).await
         }
         LogicalReplicationMessage::Relation(relation_body) => {
-            handle_relation_message(state, relation_body, hook).await
+            handle_relation_message(state, relation_body, hook, schema_store).await
         }
         LogicalReplicationMessage::Insert(insert_body) => {
             handle_insert_message(state, start_lsn, insert_body, hook, schema_store).await
@@ -1194,12 +1212,17 @@ where
 /// This function processes schema definition messages and updates the replicated columns
 /// tracking in the apply loop state. Columns that appear in the relation message are
 /// tracked as being replicated for subsequent DML event processing.
-async fn handle_relation_message<T>(
+///
+/// This mechanism allows the system to always store a truthful base schema, and dynamically choose
+/// which columns to consider while interpreting data.
+async fn handle_relation_message<S, T>(
     state: &mut ApplyLoopState,
     message: &protocol::RelationBody,
     hook: &T,
+    schema_store: &S,
 ) -> EtlResult<HandleMessageResult>
 where
+    S: SchemaStore,
     T: ApplyLoopHook,
 {
     let Some(remote_final_lsn) = state.remote_final_lsn else {
@@ -1228,8 +1251,12 @@ where
         "received relation message, updating replicated columns in state"
     );
 
-    // Update the replicated columns in the state.
-    state.set_replicated_columns(table_id, replicated_columns);
+    // Get the table schema and compute the replication mask.
+    let table_schema = get_table_schema(schema_store, table_id).await?;
+    let mask = ReplicationMask::build(&table_schema, &replicated_columns);
+
+    // Store the mask in the state for use by subsequent DML events.
+    state.set_replication_mask(table_id, mask);
 
     Ok(HandleMessageResult::no_event())
 }
@@ -1263,8 +1290,8 @@ where
         return Ok(HandleMessageResult::no_event());
     }
 
-    // Get replicated columns from state, or bail if relation message wasn't received
-    let Some(replicated_columns) = state.get_replicated_columns(&table_id) else {
+    // Get the replication mask from state, or bail if relation message wasn't received
+    let Some(mask) = state.get_replication_mask(&table_id) else {
         bail!(
             ErrorKind::InvalidState,
             "Missing relation message",
@@ -1275,15 +1302,13 @@ where
         );
     };
 
+    // Get the table schema and build the replicated schema with the mask.
+    let table_schema = get_table_schema(schema_store, table_id).await?;
+    let replicated_schema = ReplicatedTableSchema::from_mask(table_schema, mask.clone());
+
     // Convert event from the protocol message.
-    let event = parse_event_from_insert_message(
-        schema_store,
-        replicated_columns,
-        start_lsn,
-        remote_final_lsn,
-        message,
-    )
-    .await?;
+    let event =
+        parse_event_from_insert_message(&replicated_schema, start_lsn, remote_final_lsn, message)?;
 
     Ok(HandleMessageResult::return_event(Event::Insert(event)))
 }
@@ -1317,8 +1342,8 @@ where
         return Ok(HandleMessageResult::no_event());
     }
 
-    // Get replicated columns from state, or bail if relation message wasn't received
-    let Some(replicated_columns) = state.get_replicated_columns(&table_id) else {
+    // Get the replication mask from state, or bail if relation message wasn't received
+    let Some(mask) = state.get_replication_mask(&table_id) else {
         bail!(
             ErrorKind::InvalidState,
             "Missing relation message",
@@ -1329,15 +1354,13 @@ where
         );
     };
 
+    // Get the table schema and build the replicated schema with the mask.
+    let table_schema = get_table_schema(schema_store, table_id).await?;
+    let replicated_schema = ReplicatedTableSchema::from_mask(table_schema, mask.clone());
+
     // Convert event from the protocol message.
-    let event = parse_event_from_update_message(
-        schema_store,
-        replicated_columns,
-        start_lsn,
-        remote_final_lsn,
-        message,
-    )
-    .await?;
+    let event =
+        parse_event_from_update_message(&replicated_schema, start_lsn, remote_final_lsn, message)?;
 
     Ok(HandleMessageResult::return_event(Event::Update(event)))
 }
@@ -1371,8 +1394,8 @@ where
         return Ok(HandleMessageResult::no_event());
     }
 
-    // Get replicated columns from state, or bail if relation message wasn't received
-    let Some(replicated_columns) = state.get_replicated_columns(&table_id) else {
+    // Get the replication mask from state, or bail if relation message wasn't received
+    let Some(mask) = state.get_replication_mask(&table_id) else {
         bail!(
             ErrorKind::InvalidState,
             "Missing relation message",
@@ -1383,15 +1406,13 @@ where
         );
     };
 
+    // Get the table schema and build the replicated schema with the mask.
+    let table_schema = get_table_schema(schema_store, table_id).await?;
+    let replicated_schema = ReplicatedTableSchema::from_mask(table_schema, mask.clone());
+
     // Convert event from the protocol message.
-    let event = parse_event_from_delete_message(
-        schema_store,
-        replicated_columns,
-        start_lsn,
-        remote_final_lsn,
-        message,
-    )
-    .await?;
+    let event =
+        parse_event_from_delete_message(&replicated_schema, start_lsn, remote_final_lsn, message)?;
 
     Ok(HandleMessageResult::return_event(Event::Delete(event)))
 }

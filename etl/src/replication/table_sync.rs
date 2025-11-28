@@ -1,6 +1,6 @@
 use etl_config::shared::PipelineConfig;
 use etl_postgres::replication::slots::EtlReplicationSlot;
-use etl_postgres::types::TableId;
+use etl_postgres::types::{ReplicatedTableSchema, TableId};
 use futures::StreamExt;
 use metrics::histogram;
 use std::sync::Arc;
@@ -206,7 +206,7 @@ where
 
             // We store the table schema in the schema store to be able to retrieve it even when the
             // pipeline is restarted, since it's outside the lifecycle of the pipeline.
-            store.store_table_schema(table_schema.clone()).await?;
+            let table_schema = store.store_table_schema(table_schema).await?;
 
             // Get the names of columns being replicated based on the publication's column filter.
             // This must be done in the same transaction as `get_table_schema` for consistency.
@@ -217,20 +217,22 @@ where
                     Some(&config.publication_name),
                 )
                 .await?;
-            let replicated_column_schemas =
-                table_schema.replicated_column_schemas(&replicated_column_names);
+
+            // Create the replicated table schema with the replication mask.
+            let replicated_schema =
+                ReplicatedTableSchema::build(table_schema, &replicated_column_names);
 
             // We create the copy table stream on the replicated columns.
             let table_copy_stream = transaction
                 .get_table_copy_stream(
                     table_id,
-                    replicated_column_schemas.clone(),
+                    replicated_schema.column_schemas(),
                     Some(&config.publication_name),
                 )
                 .await?;
             let table_copy_stream = TableCopyStream::wrap(
                 table_copy_stream,
-                replicated_column_schemas.clone(),
+                replicated_schema.column_schemas(),
                 pipeline_id,
             );
             let table_copy_stream = TimeoutBatchStream::wrap(

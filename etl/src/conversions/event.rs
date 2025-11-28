@@ -1,19 +1,17 @@
 use core::str;
+use std::collections::HashSet;
+
 use etl_postgres::types::{
-    ColumnSchema, TableId, TableName, TableSchema, convert_type_oid_to_type,
+    ColumnSchema, ReplicatedTableSchema, TableId, TableName, TableSchema, convert_type_oid_to_type,
 };
 use postgres_replication::protocol;
 use serde::Deserialize;
-use std::collections::HashSet;
-use std::sync::Arc;
 use tokio_postgres::types::PgLsn;
 
 use crate::conversions::text::{default_value_for_type, parse_cell_from_postgres_text};
 use crate::error::{ErrorKind, EtlResult};
-use crate::store::schema::SchemaStore;
 use crate::types::{
-    BeginEvent, Cell, CommitEvent, DeleteEvent, InsertEvent, TableRow,
-    TruncateEvent, UpdateEvent,
+    BeginEvent, Cell, CommitEvent, DeleteEvent, InsertEvent, TableRow, TruncateEvent, UpdateEvent,
 };
 use crate::{bail, etl_error};
 
@@ -92,7 +90,7 @@ pub fn parse_event_from_commit_message(
     }
 }
 
-/// Returns a [`HashSet`] of column names to replicate from a relation message.
+/// Returns the set of column names to replicate from a relation message.
 pub fn parse_replicated_column_names(
     relation_body: &protocol::RelationBody,
 ) -> EtlResult<HashSet<String>> {
@@ -114,24 +112,16 @@ fn parse_column_name_from_column(column: &protocol::Column) -> EtlResult<String>
 
 /// Converts a Postgres insert message into an [`InsertEvent`].
 ///
-/// This function processes an insert operation from the replication stream,
-/// retrieves the table schema from the store, and constructs a complete
-/// insert event with the new row data ready for ETL processing.
-pub async fn parse_event_from_insert_message<S>(
-    schema_store: &S,
-    replicated_columns: &HashSet<String>,
+/// This function processes an insert operation from the replication stream
+/// and constructs an insert event with the new row data ready for ETL processing.
+pub fn parse_event_from_insert_message(
+    replicated_schema: &ReplicatedTableSchema,
     start_lsn: PgLsn,
     commit_lsn: PgLsn,
     insert_body: &protocol::InsertBody,
-) -> EtlResult<InsertEvent>
-where
-    S: SchemaStore,
-{
-    let table_id = insert_body.rel_id();
-    let table_schema = get_table_schema(schema_store, TableId::new(table_id)).await?;
-
+) -> EtlResult<InsertEvent> {
     let table_row = convert_tuple_to_row(
-        table_schema.replicated_column_schemas(replicated_columns),
+        replicated_schema.column_schemas(),
         insert_body.tuple().tuple_data(),
         &mut None,
         false,
@@ -140,7 +130,7 @@ where
     Ok(InsertEvent {
         start_lsn,
         commit_lsn,
-        table_id: TableId::new(table_id),
+        table_id: replicated_schema.id(),
         table_row,
     })
 }
@@ -151,28 +141,19 @@ where
 /// handling both the old and new row data. The old row data may be either
 /// the complete row or just the key columns, depending on the table's
 /// `REPLICA IDENTITY` setting in Postgres.
-pub async fn parse_event_from_update_message<S>(
-    schema_store: &S,
-    replicated_columns: &HashSet<String>,
+pub fn parse_event_from_update_message(
+    replicated_schema: &ReplicatedTableSchema,
     start_lsn: PgLsn,
     commit_lsn: PgLsn,
     update_body: &protocol::UpdateBody,
-) -> EtlResult<UpdateEvent>
-where
-    S: SchemaStore,
-{
-    let table_id = update_body.rel_id();
-    let table_schema = get_table_schema(schema_store, TableId::new(table_id)).await?;
-
-    let replicated_column_schemas = table_schema.replicated_column_schemas(replicated_columns);
-
+) -> EtlResult<UpdateEvent> {
     // We try to extract the old tuple by either taking the entire old tuple or the key of the old
     // tuple.
     let is_key = update_body.old_tuple().is_none();
     let old_tuple = update_body.old_tuple().or(update_body.key_tuple());
     let old_table_row = match old_tuple {
         Some(identity) => Some(convert_tuple_to_row(
-            replicated_column_schemas.clone(),
+            replicated_schema.column_schemas(),
             identity.tuple_data(),
             &mut None,
             true,
@@ -182,7 +163,7 @@ where
 
     let mut old_table_row_mut = old_table_row;
     let table_row = convert_tuple_to_row(
-        replicated_column_schemas.clone(),
+        replicated_schema.column_schemas(),
         update_body.new_tuple().tuple_data(),
         &mut old_table_row_mut,
         false,
@@ -193,7 +174,7 @@ where
     Ok(UpdateEvent {
         start_lsn,
         commit_lsn,
-        table_id: TableId::new(table_id),
+        table_id: replicated_schema.id(),
         table_row,
         old_table_row,
     })
@@ -205,26 +186,19 @@ where
 /// extracting the old row data that was deleted. The old row data may be
 /// either the complete row or just the key columns, depending on the table's
 /// `REPLICA IDENTITY` setting in Postgres.
-pub async fn parse_event_from_delete_message<S>(
-    schema_store: &S,
-    replicated_columns: &HashSet<String>,
+pub fn parse_event_from_delete_message(
+    replicated_schema: &ReplicatedTableSchema,
     start_lsn: PgLsn,
     commit_lsn: PgLsn,
     delete_body: &protocol::DeleteBody,
-) -> EtlResult<DeleteEvent>
-where
-    S: SchemaStore,
-{
-    let table_id = delete_body.rel_id();
-    let table_schema = get_table_schema(schema_store, TableId::new(table_id)).await?;
-
+) -> EtlResult<DeleteEvent> {
     // We try to extract the old tuple by either taking the entire old tuple or the key of the old
     // tuple.
     let is_key = delete_body.old_tuple().is_none();
     let old_tuple = delete_body.old_tuple().or(delete_body.key_tuple());
     let old_table_row = match old_tuple {
         Some(identity) => Some(convert_tuple_to_row(
-            table_schema.replicated_column_schemas(replicated_columns),
+            replicated_schema.column_schemas(),
             identity.tuple_data(),
             &mut None,
             true,
@@ -236,7 +210,7 @@ where
     Ok(DeleteEvent {
         start_lsn,
         commit_lsn,
-        table_id: TableId::new(table_id),
+        table_id: replicated_schema.id(),
         old_table_row,
     })
 }
@@ -257,27 +231,6 @@ pub fn parse_event_from_truncate_message(
         options: truncate_body.options(),
         rel_ids: overridden_rel_ids,
     }
-}
-
-/// Retrieves a table schema from the schema store by table ID.
-///
-/// This function looks up the table schema for the specified table ID in the
-/// schema store. If the schema is not found, it returns an error indicating
-/// that the table is missing from the cache.
-async fn get_table_schema<S>(schema_store: &S, table_id: TableId) -> EtlResult<Arc<TableSchema>>
-where
-    S: SchemaStore,
-{
-    schema_store
-        .get_table_schema(&table_id)
-        .await?
-        .ok_or_else(|| {
-            etl_error!(
-                ErrorKind::MissingTableSchema,
-                "Table schema not found in cache",
-                format!("Table schema for table {} not found in cache", table_id)
-            )
-        })
 }
 
 /// Converts Postgres tuple data into a [`TableRow`] using column schemas.

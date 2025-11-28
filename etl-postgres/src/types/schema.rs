@@ -3,6 +3,7 @@ use std::cmp::Ordering;
 use std::collections::HashSet;
 use std::fmt;
 use std::str::FromStr;
+use std::sync::Arc;
 use tokio_postgres::types::{FromSql, ToSql, Type};
 
 /// An object identifier in Postgres.
@@ -239,24 +240,147 @@ impl TableSchema {
                 .zip(other.column_schemas.iter())
                 .all(|(c1, c2)| c1.partial_eq(c2))
     }
+}
 
-    /// Returns only the column schemas that are currently being replicated.
+/// A bitmask indicating which columns are being replicated.
+///
+/// Each element is either 0 (not replicated) or 1 (replicated), with indices
+/// corresponding to the columns in the table schema. Wrapped in [`Arc`] for
+/// efficient sharing across multiple events.
+#[derive(Debug, Clone)]
+pub struct ReplicationMask(Arc<Vec<u8>>);
+
+impl ReplicationMask {
+    /// Creates a new [`ReplicationMask`] from a table schema and column names.
     ///
-    /// This is used when processing tuple data from logical replication, as the
-    /// tuple data only contains values for columns included in the publication.
-    /// The `replicated_columns` set contains the names of columns that are being
-    /// replicated according to relation messages.
-    ///
-    /// The iterator is clonable, since it can be used several times consuming from the same
-    /// original list of column schemas. The important thing is to be aware of when the iterator
-    /// is cloned since if you clone it after it has been driven, the clone will keep the progress.
-    pub fn replicated_column_schemas<'a>(
-        &'a self,
-        replicated_columns: &'a HashSet<String>,
-    ) -> impl Iterator<Item = &'a ColumnSchema> + Clone {
-        self.column_schemas
+    /// The mask is constructed by checking which column names from the schema are present
+    /// in the provided set of replicated column names.
+    pub fn build(schema: &TableSchema, replicated_column_names: &HashSet<String>) -> Self {
+        let mask = schema
+            .column_schemas
             .iter()
-            .filter(|cs| replicated_columns.contains(&cs.name))
+            .map(|cs| {
+                if replicated_column_names.contains(&cs.name) {
+                    1
+                } else {
+                    0
+                }
+            })
+            .collect();
+
+        Self(Arc::new(mask))
+    }
+
+    /// Creates a [`ReplicationMask`] where all columns are replicated.
+    pub fn all_columns(column_count: usize) -> Self {
+        Self(Arc::new(vec![1u8; column_count]))
+    }
+
+    /// Returns the underlying mask as a slice.
+    pub fn as_slice(&self) -> &[u8] {
+        &self.0
+    }
+
+    /// Returns the number of columns in the mask.
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    /// Returns `true` if the mask is empty.
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+/// A wrapper around [`TableSchema`] that tracks which columns are being replicated.
+///
+/// This struct holds a reference to the underlying table schema and a [`ReplicationMask`]
+/// indicating which columns are included in the replication.
+#[derive(Debug, Clone)]
+pub struct ReplicatedTableSchema {
+    /// The underlying table schema.
+    table_schema: Arc<TableSchema>,
+    /// A bitmask where 1 indicates the column at that index is replicated.
+    replication_mask: ReplicationMask,
+}
+
+impl ReplicatedTableSchema {
+    /// Creates a new [`ReplicatedTableSchema`] from a table schema and column names.
+    ///
+    /// The mask is constructed by checking which column names from the schema are present
+    /// in the provided set of replicated column names.
+    pub fn build(
+        table_schema: Arc<TableSchema>,
+        replicated_column_names: &HashSet<String>,
+    ) -> Self {
+        let replication_mask = ReplicationMask::build(&table_schema, replicated_column_names);
+        Self {
+            table_schema,
+            replication_mask,
+        }
+    }
+
+    /// Creates a [`ReplicatedTableSchema`] where all columns are replicated.
+    pub fn all_columns(table_schema: Arc<TableSchema>) -> Self {
+        let replication_mask = ReplicationMask::all_columns(table_schema.column_schemas.len());
+        Self {
+            table_schema,
+            replication_mask,
+        }
+    }
+
+    /// Creates a [`ReplicatedTableSchema`] from a schema and a pre-computed mask.
+    pub fn from_mask(schema: Arc<TableSchema>, mask: ReplicationMask) -> Self {
+        debug_assert_eq!(
+            schema.column_schemas.len(),
+            mask.len(),
+            "mask length must match column count"
+        );
+        Self {
+            table_schema: schema,
+            replication_mask: mask,
+        }
+    }
+
+    /// Returns the table ID.
+    pub fn id(&self) -> TableId {
+        self.table_schema.id
+    }
+
+    /// Returns the table name.
+    pub fn name(&self) -> &TableName {
+        &self.table_schema.name
+    }
+
+    /// Returns the underlying table schema.
+    pub fn table_schema(&self) -> &TableSchema {
+        &self.table_schema
+    }
+
+    /// Returns the replication mask.
+    pub fn replication_mask(&self) -> &ReplicationMask {
+        &self.replication_mask
+    }
+
+    /// Returns an iterator over only the column schemas that are being replicated.
+    ///
+    /// This filters the columns based on the mask, returning only those where the
+    /// corresponding mask value is 1.
+    pub fn column_schemas(&self) -> impl Iterator<Item = &ColumnSchema> + Clone + '_ {
+        self.table_schema
+            .column_schemas
+            .iter()
+            .zip(self.replication_mask.as_slice().iter())
+            .filter_map(|(cs, &m)| if m == 1 { Some(cs) } else { None })
+    }
+
+    /// Returns the number of replicated columns.
+    pub fn column_count(&self) -> usize {
+        self.replication_mask
+            .as_slice()
+            .iter()
+            .filter(|&&m| m == 1)
+            .count()
     }
 }
 
