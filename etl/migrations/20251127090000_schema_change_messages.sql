@@ -6,6 +6,7 @@ create or replace function etl.describe_table_schema(
 ) returns table (
     name text,
     type_oid oid,
+    type_name text,
     type_modifier int,
     ordinal_position int,
     primary_key_ordinal_position int,
@@ -43,11 +44,17 @@ begin
         select
             a.attname::text,
             a.atttypid,
+            case
+                when tn.nspname = ''pg_catalog'' then t.typname
+                else tn.nspname || ''.'' || t.typname
+            end::text,
             a.atttypmod,
             a.attnum::int,
             coalesce(pk.position, ppk.position)::int,
             not a.attnotnull
         from pg_attribute a
+                 join pg_type t on t.oid = a.atttypid
+                 join pg_namespace tn on tn.oid = t.typnamespace
                  left join primary_key pk on pk.attnum = a.attnum
                  left join parent_primary_key ppk on ppk.attname = a.attname
         where a.attrelid = %1$s
