@@ -794,12 +794,18 @@ mod tests {
     ///
     /// This helper simplifies column schema creation in tests by providing sensible
     /// defaults for fields that are typically not relevant to the test logic.
-    fn test_column(name: &str, typ: Type, nullable: bool, primary_key: bool) -> ColumnSchema {
+    fn test_column(
+        name: &str,
+        typ: Type,
+        ordinal_position: i32,
+        nullable: bool,
+        primary_key: bool,
+    ) -> ColumnSchema {
         ColumnSchema::new(
             name.to_string(),
             typ,
             -1,
-            0,
+            ordinal_position,
             if primary_key { Some(1) } else { None },
             nullable,
             true,
@@ -864,23 +870,23 @@ mod tests {
 
     #[test]
     fn test_column_spec() {
-        let column_schema = test_column("test_col", Type::TEXT, true, false);
+        let column_schema = test_column("test_col", Type::TEXT, 1, true, false);
         let spec = BigQueryClient::column_spec(&column_schema).expect("column spec generation");
         assert_eq!(spec, "`test_col` string");
 
-        let not_null_column = test_column("id", Type::INT4, false, true);
+        let not_null_column = test_column("id", Type::INT4, 1, false, true);
         let not_null_spec =
             BigQueryClient::column_spec(&not_null_column).expect("not null column spec");
         assert_eq!(not_null_spec, "`id` int64 not null");
 
-        let array_column = test_column("tags", Type::TEXT_ARRAY, false, false);
+        let array_column = test_column("tags", Type::TEXT_ARRAY, 1, false, false);
         let array_spec = BigQueryClient::column_spec(&array_column).expect("array column spec");
         assert_eq!(array_spec, "`tags` array<string>");
     }
 
     #[test]
     fn test_column_spec_escapes_backticks() {
-        let column_schema = test_column("pwn`name", Type::TEXT, true, false);
+        let column_schema = test_column("pwn`name", Type::TEXT, 1, true, false);
 
         let spec = BigQueryClient::column_spec(&column_schema).expect("escaped column spec");
 
@@ -900,17 +906,17 @@ mod tests {
     #[test]
     fn test_add_primary_key_clause() {
         let columns_with_pk = vec![
-            test_column("id", Type::INT4, false, true),
-            test_column("name", Type::TEXT, true, false),
+            test_column("id", Type::INT4, 1, false, true),
+            test_column("name", Type::TEXT, 2, true, false),
         ];
         let pk_clause =
             BigQueryClient::add_primary_key_clause(&columns_with_pk).expect("pk clause");
         assert_eq!(pk_clause, ", primary key (`id`) not enforced");
 
         let columns_with_composite_pk = vec![
-            test_column("tenant_id", Type::INT4, false, true),
-            test_column("id", Type::INT4, false, true),
-            test_column("name", Type::TEXT, true, false),
+            test_column("tenant_id", Type::INT4, 1, false, true),
+            test_column("id", Type::INT4, 2, false, true),
+            test_column("name", Type::TEXT, 3, true, false),
         ];
         let composite_pk_clause =
             BigQueryClient::add_primary_key_clause(&columns_with_composite_pk)
@@ -921,8 +927,8 @@ mod tests {
         );
 
         let columns_no_pk = vec![
-            test_column("name", Type::TEXT, true, false),
-            test_column("age", Type::INT4, true, false),
+            test_column("name", Type::TEXT, 1, true, false),
+            test_column("age", Type::INT4, 2, true, false),
         ];
         let no_pk_clause =
             BigQueryClient::add_primary_key_clause(&columns_no_pk).expect("no pk clause");
@@ -932,9 +938,9 @@ mod tests {
     #[test]
     fn test_create_columns_spec() {
         let columns = vec![
-            test_column("id", Type::INT4, false, true),
-            test_column("name", Type::TEXT, true, false),
-            test_column("active", Type::BOOL, false, false),
+            test_column("id", Type::INT4, 1, false, true),
+            test_column("name", Type::TEXT, 2, true, false),
+            test_column("active", Type::BOOL, 3, false, false),
         ];
         let spec = BigQueryClient::create_columns_spec(&columns).expect("columns spec");
         assert_eq!(
@@ -952,10 +958,10 @@ mod tests {
     #[test]
     fn test_column_schemas_to_table_descriptor() {
         let columns = vec![
-            test_column("id", Type::INT4, false, true),
-            test_column("name", Type::TEXT, true, false),
-            test_column("active", Type::BOOL, false, false),
-            test_column("tags", Type::TEXT_ARRAY, false, false),
+            test_column("id", Type::INT4, 1, false, true),
+            test_column("name", Type::TEXT, 2, true, false),
+            test_column("active", Type::BOOL, 3, false, false),
+            test_column("tags", Type::TEXT_ARRAY, 4, false, false),
         ];
 
         let descriptor = BigQueryClient::column_schemas_to_table_descriptor(&columns, true);
@@ -1035,12 +1041,12 @@ mod tests {
     #[test]
     fn test_column_schemas_to_table_descriptor_complex_types() {
         let columns = vec![
-            test_column("uuid_col", Type::UUID, true, false),
-            test_column("json_col", Type::JSON, true, false),
-            test_column("bytea_col", Type::BYTEA, true, false),
-            test_column("numeric_col", Type::NUMERIC, true, false),
-            test_column("date_col", Type::DATE, true, false),
-            test_column("time_col", Type::TIME, true, false),
+            test_column("uuid_col", Type::UUID, 1, true, false),
+            test_column("json_col", Type::JSON, 2, true, false),
+            test_column("bytea_col", Type::BYTEA, 3, true, false),
+            test_column("numeric_col", Type::NUMERIC, 4, true, false),
+            test_column("date_col", Type::DATE, 5, true, false),
+            test_column("time_col", Type::TIME, 6, true, false),
         ];
 
         let descriptor = BigQueryClient::column_schemas_to_table_descriptor(&columns, true);
@@ -1097,8 +1103,8 @@ mod tests {
         let table_id = "test_table";
 
         let columns = vec![
-            test_column("id", Type::INT4, false, true),
-            test_column("name", Type::TEXT, true, false),
+            test_column("id", Type::INT4, 1, false, true),
+            test_column("name", Type::TEXT, 2, true, false),
         ];
 
         // Simulate the query generation logic
@@ -1122,7 +1128,7 @@ mod tests {
         let table_id = "test_table";
         let max_staleness_mins = 15;
 
-        let columns = vec![test_column("id", Type::INT4, false, true)];
+        let columns = vec![test_column("id", Type::INT4, 1, false, true)];
 
         // Simulate the query generation logic with staleness
         let full_table_name = format!(

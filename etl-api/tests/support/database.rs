@@ -89,7 +89,7 @@ pub async fn run_etl_migrations_on_source_database(source_db_config: &PgConnecti
         .await
         .expect("failed to set search path");
 
-    // Run migrations to create the state store tables.
+    // Run migrations to create the etl tables.
     sqlx::migrate!("../etl/migrations")
         .run(&source_pool)
         .await

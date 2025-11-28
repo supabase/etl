@@ -705,12 +705,18 @@ mod tests {
     ///
     /// This helper simplifies column schema creation in tests by providing sensible
     /// defaults for fields that are typically not relevant to the test logic.
-    fn test_column(name: &str, typ: Type, nullable: bool, primary_key: bool) -> ColumnSchema {
+    fn test_column(
+        name: &str,
+        typ: Type,
+        ordinal_position: i32,
+        nullable: bool,
+        primary_key: bool,
+    ) -> ColumnSchema {
         ColumnSchema::new(
             name.to_string(),
             typ,
             -1,
-            0,
+            ordinal_position,
             if primary_key { Some(1) } else { None },
             nullable,
             true,
@@ -723,23 +729,24 @@ mod tests {
         let col_name = find_unique_column_name(&column_schemas, CDC_OPERATION_COLUMN_NAME);
         assert_eq!(col_name, CDC_OPERATION_COLUMN_NAME.to_string());
 
-        let column_schemas = vec![test_column("id", Type::BOOL, false, true)];
+        let column_schemas = vec![test_column("id", Type::BOOL, 1, false, true)];
         let col_name = find_unique_column_name(&column_schemas, CDC_OPERATION_COLUMN_NAME);
         assert_eq!(col_name, CDC_OPERATION_COLUMN_NAME.to_string());
 
         let column_schemas = vec![
-            test_column("id", Type::BOOL, false, true),
-            test_column(CDC_OPERATION_COLUMN_NAME, Type::BOOL, false, true),
+            test_column("id", Type::BOOL, 1, false, true),
+            test_column(CDC_OPERATION_COLUMN_NAME, Type::BOOL, 2, false, true),
         ];
         let col_name = find_unique_column_name(&column_schemas, CDC_OPERATION_COLUMN_NAME);
         assert_eq!(col_name, format!("{CDC_OPERATION_COLUMN_NAME}_1"));
 
         let column_schemas = vec![
-            test_column("id", Type::BOOL, false, true),
-            test_column(CDC_OPERATION_COLUMN_NAME, Type::BOOL, false, true),
+            test_column("id", Type::BOOL, 1, false, true),
+            test_column(CDC_OPERATION_COLUMN_NAME, Type::BOOL, 2, false, true),
             test_column(
                 &format!("{CDC_OPERATION_COLUMN_NAME}_1"),
                 Type::BOOL,
+                3,
                 false,
                 true,
             ),

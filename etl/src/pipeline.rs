@@ -8,7 +8,7 @@ use crate::concurrency::shutdown::{ShutdownTx, create_shutdown_channel};
 use crate::destination::Destination;
 use crate::error::{ErrorKind, EtlResult};
 use crate::metrics::register_metrics;
-use crate::migrations::migrate_state_store;
+use crate::migrations::apply_etl_migrations;
 use crate::replication::client::PgReplicationClient;
 use crate::state::table::TableReplicationPhase;
 use crate::store::cleanup::CleanupStore;
@@ -123,7 +123,7 @@ where
         );
 
         // Run migrations before starting the pipeline.
-        migrate_state_store(&self.config.pg_connection)
+        apply_etl_migrations(&self.config.pg_connection)
             .await
             .map_err(|e| {
                 crate::etl_error!(
