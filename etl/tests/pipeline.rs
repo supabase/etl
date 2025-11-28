@@ -18,7 +18,7 @@ use etl::types::{Event, EventType, InsertEvent, PipelineId, Type};
 use etl_config::shared::BatchConfig;
 use etl_postgres::below_version;
 use etl_postgres::replication::slots::EtlReplicationSlot;
-use etl_postgres::tokio::test_utils::{TableModification, id_column_schema};
+use etl_postgres::tokio::test_utils::id_column_schema;
 use etl_postgres::types::ColumnSchema;
 use etl_postgres::version::POSTGRES_15;
 use etl_telemetry::tracing::init_test_tracing;
