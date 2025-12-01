@@ -231,28 +231,27 @@ impl<B, S: Stream<Item = B>> Stream for TimeoutStream<B, S> {
 
         // If the timer should be reset, it means that we want to start counting down again.
         if *this.reset_timer {
-            this.deadline
-                .set(Some(tokio::time::sleep(*this.max_batch_fill_duration)));
+            let sleep = tokio::time::sleep(*this.max_batch_fill_duration);
+            this.deadline.set(Some(sleep));
             *this.reset_timer = false;
         }
+
+        // Check if timeout has already expired.
+        let timeout_expired = this
+            .deadline
+            .as_mut()
+            .as_pin_mut()
+            .map(|deadline| deadline.poll(cx).is_ready())
+            .unwrap_or(false);
 
         match this.stream.poll_next(cx) {
             Poll::Ready(Some(value)) => Poll::Ready(Some(TimeoutStreamResult::Value(value))),
             Poll::Ready(None) => Poll::Ready(None),
-            Poll::Pending => {
-                // If we have no elements, we want to check whether the timer expired. If it did
-                // expire, we return timeout element and request the timer reset.
-                if let Some(deadline) = this.deadline.as_pin_mut() {
-                    // Check if timeout has elapsed (this will register waker if not ready).
-                    ready!(deadline.poll(cx));
-                    // Schedule timer reset for next batch.
-                    *this.reset_timer = true;
-
-                    return Poll::Ready(Some(TimeoutStreamResult::Timeout));
-                }
-
-                Poll::Pending
+            Poll::Pending if timeout_expired => {
+                *this.reset_timer = true;
+                Poll::Ready(Some(TimeoutStreamResult::Timeout))
             }
+            Poll::Pending => Poll::Pending,
         }
     }
 }
