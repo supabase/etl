@@ -141,7 +141,7 @@ pub struct PgConnectionConfig {
     pub tls: TlsConfig,
     /// TCP keepalive configuration for connection health monitoring.
     /// When `None`, TCP keepalives are disabled.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub keepalive: Option<TcpKeepaliveConfig>,
 }
 
@@ -166,7 +166,7 @@ pub struct PgConnectionConfigWithoutSecrets {
     pub tls: TlsConfig,
     /// TCP keepalive configuration for connection health monitoring.
     /// When `None`, TCP keepalives are disabled.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub keepalive: Option<TcpKeepaliveConfig>,
 }
 
@@ -206,11 +206,6 @@ impl TlsConfig {
 }
 
 /// TCP keepalive configuration for Postgres connections.
-///
-/// TCP keepalives provide network-level connection health checking which can
-/// detect dead connections faster than application-level heartbeats alone.
-/// This is especially useful for connections through NAT gateways or load
-/// balancers that may drop idle connections.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TcpKeepaliveConfig {
     /// Time in seconds a connection must be idle before sending keepalive probes.
