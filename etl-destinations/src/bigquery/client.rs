@@ -1,6 +1,8 @@
 use etl::error::{ErrorKind, EtlError, EtlResult};
 use etl::etl_error;
-use etl::types::{Cell, ColumnSchema, TableRow, Type, is_array_type};
+use etl::types::{
+    Cell, ColumnSchema, ReplicatedTableSchema, TableRow, TableSchema, Type, is_array_type,
+};
 use gcp_bigquery_client::google::cloud::bigquery::storage::v1::RowError;
 use gcp_bigquery_client::storage::ColumnMode;
 use gcp_bigquery_client::yup_oauth2::parse_service_account_key;
@@ -151,14 +153,14 @@ impl BigQueryClient {
         &self,
         dataset_id: &BigQueryDatasetId,
         table_id: &BigQueryTableId,
-        column_schemas: &[ColumnSchema],
+        replicated_table_schema: &ReplicatedTableSchema,
         max_staleness_mins: Option<u16>,
     ) -> EtlResult<bool> {
         let table_existed = self.table_exists(dataset_id, table_id).await?;
 
         let full_table_name = self.full_table_name(dataset_id, table_id)?;
 
-        let columns_spec = Self::create_columns_spec(column_schemas)?;
+        let columns_spec = Self::create_columns_spec(replicated_table_schema)?;
         let max_staleness_option = if let Some(max_staleness_mins) = max_staleness_mins {
             Self::max_staleness_option(max_staleness_mins)
         } else {
@@ -186,7 +188,7 @@ impl BigQueryClient {
         &self,
         dataset_id: &BigQueryDatasetId,
         table_id: &BigQueryTableId,
-        column_schemas: &[ColumnSchema],
+        column_schemas: &ReplicatedTableSchema,
         max_staleness_mins: Option<u16>,
     ) -> EtlResult<bool> {
         if self.table_exists(dataset_id, table_id).await? {
@@ -488,9 +490,9 @@ impl BigQueryClient {
     /// Creates a primary key clause for table creation.
     ///
     /// Generates a primary key constraint clause from columns marked as primary key.
-    fn add_primary_key_clause(column_schemas: &[ColumnSchema]) -> EtlResult<String> {
-        let identity_columns: Vec<String> = column_schemas
-            .iter()
+    fn add_primary_key_clause(replicated_table_schema: &ReplicatedTableSchema) -> EtlResult<String> {
+        let identity_columns: Vec<String> = replicated_table_schema
+            .column_schemas()
             .filter(|s| s.primary_key())
             .map(|c| {
                 Self::sanitize_identifier(&c.name, "BigQuery primary key column")
@@ -509,16 +511,15 @@ impl BigQueryClient {
     }
 
     /// Builds complete column specifications for CREATE TABLE statements.
-    fn create_columns_spec(column_schemas: &[ColumnSchema]) -> EtlResult<String> {
-        let mut s = column_schemas
-            .iter()
+    fn create_columns_spec(replicated_table_schema: &ReplicatedTableSchema) -> EtlResult<String> {
+        let mut column_spec = replicated_table_schema.column_schemas()
             .map(Self::column_spec)
             .collect::<EtlResult<Vec<_>>>()?
             .join(",");
 
-        s.push_str(&Self::add_primary_key_clause(column_schemas)?);
+        column_spec.push_str(&Self::add_primary_key_clause(replicated_table_schema)?);
 
-        Ok(format!("({s})"))
+        Ok(format!("({column_spec})"))
     }
 
     /// Creates max staleness option clause for CDC table creation.
@@ -575,13 +576,13 @@ impl BigQueryClient {
     /// Maps data types and nullability to BigQuery column specifications, setting
     /// appropriate column modes and automatically adding CDC special columns.
     pub fn column_schemas_to_table_descriptor(
-        column_schemas: &[ColumnSchema],
+        replicated_table_schema: &ReplicatedTableSchema,
         use_cdc_sequence_column: bool,
     ) -> TableDescriptor {
-        let mut field_descriptors = Vec::with_capacity(column_schemas.len());
+        let mut field_descriptors = vec![];
         let mut number = 1;
 
-        for column_schema in column_schemas {
+        for column_schema in replicated_table_schema.column_schemas() {
             let typ = match column_schema.typ {
                 Type::BOOL => ColumnType::Bool,
                 Type::CHAR | Type::BPCHAR | Type::VARCHAR | Type::NAME | Type::TEXT => {
@@ -790,6 +791,9 @@ fn row_error_to_etl_error(err: RowError) -> EtlError {
 mod tests {
     use super::*;
 
+    use etl::types::TableName;
+    use std::collections::HashSet;
+
     /// Creates a test column schema with common defaults.
     ///
     /// This helper simplifies column schema creation in tests by providing sensible
@@ -809,6 +813,17 @@ mod tests {
             if primary_key { Some(1) } else { None },
             nullable,
         )
+    }
+
+    /// Creates a [`ReplicatedTableSchema`] from test columns with all columns replicated.
+    fn test_replicated_schema(columns: Vec<ColumnSchema>) -> ReplicatedTableSchema {
+        let column_names: HashSet<String> = columns.iter().map(|c| c.name.clone()).collect();
+        let table_schema = Arc::new(TableSchema::new(
+            1, // Dummy table ID
+            TableName::new("public".to_string(), "test_table".to_string()),
+            columns,
+        ));
+        ReplicatedTableSchema::build(table_schema, &column_names)
     }
 
     #[test]
@@ -908,8 +923,9 @@ mod tests {
             test_column("id", Type::INT4, 1, false, true),
             test_column("name", Type::TEXT, 2, true, false),
         ];
+        let schema_with_pk = test_replicated_schema(columns_with_pk);
         let pk_clause =
-            BigQueryClient::add_primary_key_clause(&columns_with_pk).expect("pk clause");
+            BigQueryClient::add_primary_key_clause(&schema_with_pk).expect("pk clause");
         assert_eq!(pk_clause, ", primary key (`id`) not enforced");
 
         let columns_with_composite_pk = vec![
@@ -917,8 +933,9 @@ mod tests {
             test_column("id", Type::INT4, 2, false, true),
             test_column("name", Type::TEXT, 3, true, false),
         ];
+        let schema_with_composite_pk = test_replicated_schema(columns_with_composite_pk);
         let composite_pk_clause =
-            BigQueryClient::add_primary_key_clause(&columns_with_composite_pk)
+            BigQueryClient::add_primary_key_clause(&schema_with_composite_pk)
                 .expect("composite pk clause");
         assert_eq!(
             composite_pk_clause,
@@ -929,8 +946,9 @@ mod tests {
             test_column("name", Type::TEXT, 1, true, false),
             test_column("age", Type::INT4, 2, true, false),
         ];
+        let schema_no_pk = test_replicated_schema(columns_no_pk);
         let no_pk_clause =
-            BigQueryClient::add_primary_key_clause(&columns_no_pk).expect("no pk clause");
+            BigQueryClient::add_primary_key_clause(&schema_no_pk).expect("no pk clause");
         assert_eq!(no_pk_clause, "");
     }
 
@@ -941,7 +959,8 @@ mod tests {
             test_column("name", Type::TEXT, 2, true, false),
             test_column("active", Type::BOOL, 3, false, false),
         ];
-        let spec = BigQueryClient::create_columns_spec(&columns).expect("columns spec");
+        let schema = test_replicated_schema(columns);
+        let spec = BigQueryClient::create_columns_spec(&schema).expect("columns spec");
         assert_eq!(
             spec,
             "(`id` int64 not null,`name` string,`active` bool not null, primary key (`id`) not enforced)"
@@ -962,8 +981,9 @@ mod tests {
             test_column("active", Type::BOOL, 3, false, false),
             test_column("tags", Type::TEXT_ARRAY, 4, false, false),
         ];
+        let schema = test_replicated_schema(columns);
 
-        let descriptor = BigQueryClient::column_schemas_to_table_descriptor(&columns, true);
+        let descriptor = BigQueryClient::column_schemas_to_table_descriptor(&schema, true);
 
         assert_eq!(descriptor.field_descriptors.len(), 6); // 4 columns + CDC columns
 
@@ -1047,8 +1067,9 @@ mod tests {
             test_column("date_col", Type::DATE, 5, true, false),
             test_column("time_col", Type::TIME, 6, true, false),
         ];
+        let schema = test_replicated_schema(columns);
 
-        let descriptor = BigQueryClient::column_schemas_to_table_descriptor(&columns, true);
+        let descriptor = BigQueryClient::column_schemas_to_table_descriptor(&schema, true);
 
         assert_eq!(descriptor.field_descriptors.len(), 8); // 6 columns + CDC columns
 
