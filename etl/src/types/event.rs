@@ -176,13 +176,7 @@ impl Event {
             Event::Update(update_event) => update_event.table_id == *table_id,
             Event::Delete(delete_event) => delete_event.table_id == *table_id,
             Event::Relation(relation_event) => relation_event.table_schema.id == *table_id,
-            Event::Truncate(event) => {
-                let Some(_) = event.rel_ids.iter().find(|&&id| table_id.0 == id) else {
-                    return false;
-                };
-
-                true
-            }
+            Event::Truncate(event) => event.rel_ids.contains(&table_id.0),
             _ => false,
         }
     }
