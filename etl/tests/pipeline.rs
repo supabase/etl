@@ -1022,7 +1022,7 @@ async fn pipeline_respects_column_level_publication() {
         return;
     }
 
-    // Create a table with multiple columns including a sensitive 'email' column.
+    // Create a table with multiple columns.
     let table_name = test_table_name("users");
     let table_id = database
         .create_table(
@@ -1032,12 +1032,13 @@ async fn pipeline_respects_column_level_publication() {
                 ("name", "text not null"),
                 ("age", "integer not null"),
                 ("email", "text not null"),
+                ("phone", "text not null"),
             ],
         )
         .await
         .unwrap();
 
-    // Create publication with only a subset of columns (excluding 'email').
+    // Create publication with only a subset of columns.
     let publication_name = "test_pub".to_string();
     database
         .run_sql(&format!(
@@ -1068,15 +1069,15 @@ async fn pipeline_respects_column_level_publication() {
 
     sync_done_notify.notified().await;
 
-    // Wait for two insert events to be processed.
+    // Wait for an insert event to be processed.
     let insert_events_notify = destination
-        .wait_for_events_count(vec![(EventType::Insert, 2)])
+        .wait_for_events_count(vec![(EventType::Insert, 1)])
         .await;
 
-    // Insert test data with all columns (including email).
+    // Insert test data with all columns (including email and phone).
     database
         .run_sql(&format!(
-            "insert into {} (name, age, email) values ('Alice', 25, 'alice@example.com'), ('Bob', 30, 'bob@example.com')",
+            "insert into {} (name, age, email, phone) values ('Alice', 25, 'alice@example.com', '555-0001')",
             table_name.as_quoted_identifier()
         ))
         .await
@@ -1084,13 +1085,11 @@ async fn pipeline_respects_column_level_publication() {
 
     insert_events_notify.notified().await;
 
-    pipeline.shutdown_and_wait().await.unwrap();
-
     // Verify the events and check that only published columns are included.
     let events = destination.get_events().await;
     let grouped_events = group_events_by_type_and_table_id(&events);
     let insert_events = grouped_events.get(&(EventType::Insert, table_id)).unwrap();
-    assert_eq!(insert_events.len(), 2);
+    assert_eq!(insert_events.len(), 1);
 
     // Check that each insert event contains only the published columns (id, name, age) and that the
     // schema used is correct.
@@ -1102,7 +1101,6 @@ async fn pipeline_respects_column_level_publication() {
         }) = event
         {
             // Verify exactly 3 columns (id, name, age).
-            // If email was included, there would be 4 values.
             assert_eq!(table_row.values.len(), 3);
 
             // Get only the replicated column names from the schema
@@ -1110,16 +1108,113 @@ async fn pipeline_respects_column_level_publication() {
                 .column_schemas()
                 .map(|c| c.name.as_str())
                 .collect();
-            assert!(replicated_column_names.contains(&"id"));
-            assert!(replicated_column_names.contains(&"name"));
-            assert!(replicated_column_names.contains(&"age"));
-            assert!(!replicated_column_names.contains(&"email"));
-            assert_eq!(replicated_column_names.len(), 3);
+            assert_eq!(replicated_column_names, vec!["id", "name", "age"]);
 
-            // The underlying full schema has all 4 columns
+            // The underlying full schema has all 5 columns
             let full_schema = replicated_table_schema.get_inner();
-            assert_eq!(full_schema.column_schemas.len(), 4);
+            assert_eq!(full_schema.column_schemas.len(), 5);
         }
+    }
+
+    // Clear events and restart pipeline.
+    destination.clear_events().await;
+
+    // Add email column to publication -> (id, name, age, email).
+    database
+        .run_sql(&format!(
+            "alter publication {publication_name} set table {} (id, name, age, email)",
+            table_name.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+
+    // Wait for 1 insert event with 4 columns.
+    let insert_notify = destination
+        .wait_for_events_count(vec![(EventType::Insert, 1)])
+        .await;
+
+    database
+        .run_sql(&format!(
+            "insert into {} (name, age, email, phone) values ('Charlie', 35, 'charlie@example.com', '555-0003')",
+            table_name.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+
+    insert_notify.notified().await;
+
+    // Verify 4 columns arrived (id, name, age, email).
+    let events = destination.get_events().await;
+    let grouped = group_events_by_type_and_table_id(&events);
+    let inserts = grouped.get(&(EventType::Insert, table_id)).unwrap();
+    assert_eq!(inserts.len(), 1);
+
+    if let Event::Insert(InsertEvent {
+        replicated_table_schema,
+        table_row,
+        ..
+    }) = &inserts[0]
+    {
+        assert_eq!(table_row.values.len(), 4);
+        let col_names: Vec<&str> = replicated_table_schema
+            .column_schemas()
+            .map(|c| c.name.as_str())
+            .collect();
+        assert_eq!(col_names, vec!["id", "name", "age", "email"]);
+    } else {
+        panic!("Expected Insert event");
+    }
+
+    // Remove age column from publication -> (id, name, email).
+    database
+        .run_sql(&format!(
+            "alter publication {publication_name} set table {} (id, name, email)",
+            table_name.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+
+    // Clear events and restart pipeline.
+    destination.clear_events().await;
+
+    // Wait for 1 insert event with 3 columns (different set than before).
+    let insert_notify = destination
+        .wait_for_events_count(vec![(EventType::Insert, 1)])
+        .await;
+
+    database
+        .run_sql(&format!(
+            "insert into {} (name, age, email, phone) values ('Diana', 40, 'diana@example.com', '555-0004')",
+            table_name.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+
+    insert_notify.notified().await;
+
+    // We shutdown the pipeline.
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    // Verify 3 columns arrived (id, name, email) - age and phone excluded.
+    let events = destination.get_events().await;
+    let grouped = group_events_by_type_and_table_id(&events);
+    let inserts = grouped.get(&(EventType::Insert, table_id)).unwrap();
+    assert_eq!(inserts.len(), 1);
+
+    if let Event::Insert(InsertEvent {
+        replicated_table_schema,
+        table_row,
+        ..
+    }) = &inserts[0]
+    {
+        assert_eq!(table_row.values.len(), 3);
+        let col_names: Vec<&str> = replicated_table_schema
+            .column_schemas()
+            .map(|c| c.name.as_str())
+            .collect();
+        assert_eq!(col_names, vec!["id", "name", "email"]);
+    } else {
+        panic!("Expected Insert event");
     }
 }
 

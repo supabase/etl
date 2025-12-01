@@ -196,11 +196,7 @@ where
             // Get the names of columns being replicated based on the publication's column filter.
             // This must be done in the same transaction as `get_table_schema` for consistency.
             let replicated_column_names = transaction
-                .get_replicated_column_names(
-                    table_id,
-                    &table_schema,
-                    Some(&config.publication_name),
-                )
+                .get_replicated_column_names(table_id, &table_schema, &config.publication_name)
                 .await?;
 
             // Create the replicated table schema with the replication mask.

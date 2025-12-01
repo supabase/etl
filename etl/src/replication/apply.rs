@@ -1046,7 +1046,7 @@ where
             handle_commit_message(state, start_lsn, commit_body, hook, pipeline_id).await
         }
         LogicalReplicationMessage::Relation(relation_body) => {
-            handle_relation_message(state, relation_body, hook, schema_store).await
+            handle_relation_message(state, relation_body, schema_store).await
         }
         LogicalReplicationMessage::Insert(insert_body) => {
             handle_insert_message(state, start_lsn, insert_body, hook, schema_store).await
@@ -1207,40 +1207,27 @@ where
     Ok(result)
 }
 
-/// Handles Postgres RELATION messages that describe table schemas.
+/// Handles Postgres RELATION messages that describes the schema of the data that will be sent in
+/// the logical replication stream.
 ///
-/// This function processes schema definition messages and updates the replicated columns
-/// tracking in the apply loop state. Columns that appear in the relation message are
-/// tracked as being replicated for subsequent DML event processing.
+/// We unconditionally process each RELATION message to compute the replication mask for a specific
+/// table in this apply loop, which allows us to process columns from the stored table schema correctly.
 ///
-/// This mechanism allows the system to always store a truthful base schema, and dynamically choose
-/// which columns to consider while interpreting data.
-async fn handle_relation_message<S, T>(
+/// If no RELATION message is supplied, the pipeline will not be able to determine which columns of
+/// its stored schema are used for replication.
+///
+/// For now, no schema change is supported; however, this mechanism generalizes well over table schema
+/// support since we just have to guarantee that the DDL change is processed in the schema store before
+/// receiving a RELATION message.
+async fn handle_relation_message<S>(
     state: &mut ApplyLoopState,
     message: &protocol::RelationBody,
-    hook: &T,
     schema_store: &S,
 ) -> EtlResult<HandleMessageResult>
 where
     S: SchemaStore,
-    T: ApplyLoopHook,
 {
-    let Some(remote_final_lsn) = state.remote_final_lsn else {
-        bail!(
-            ErrorKind::InvalidState,
-            "Invalid transaction state",
-            "Transaction must be active before processing RELATION message"
-        );
-    };
-
     let table_id = TableId::new(message.rel_id());
-
-    if !hook
-        .should_apply_changes(table_id, remote_final_lsn)
-        .await?
-    {
-        return Ok(HandleMessageResult::no_event());
-    }
 
     // Extract the replicated column names from the relation message.
     let replicated_columns = parse_replicated_column_names(message)?;
@@ -1248,12 +1235,17 @@ where
     info!(
         table_id = %table_id,
         replicated_columns = ?replicated_columns,
-        "received relation message, updating replicated columns in state"
+        "received relation message, preparing to update replication mask"
     );
 
     // Get the table schema and compute the replication mask.
     let table_schema = get_table_schema(schema_store, table_id).await?;
     let mask = ReplicationMask::build(&table_schema, &replicated_columns);
+
+    info!(
+        table_id = %table_id,
+        "replication mask updated"
+    );
 
     // Store the mask in the state for use by subsequent DML events.
     state.set_replication_mask(table_id, mask);

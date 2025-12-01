@@ -556,7 +556,7 @@ async fn table_nullable_scalar_columns() {
 
     table_sync_done_notification.notified().await;
 
-    // insert
+    // Insert
     let event_notify = destination
         .wait_for_events_count(vec![(EventType::Insert, 1)])
         .await;
@@ -600,7 +600,7 @@ async fn table_nullable_scalar_columns() {
     let parsed_table_rows = parse_bigquery_table_rows::<NullableColsScalar>(table_rows);
     assert_eq!(parsed_table_rows, vec![NullableColsScalar::all_nulls(1),]);
 
-    // update
+    // Update
     let event_notify = destination
         .wait_for_events_count(vec![(EventType::Update, 1)])
         .await;
@@ -1580,6 +1580,7 @@ async fn table_array_with_null_values() {
     // We have to reset the state of the table and copy it from scratch, otherwise the CDC will contain
     // the inserts and deletes, failing again.
     store.reset_table_state(table_id).await.unwrap();
+
     // We also clear the events so that it's more idiomatic to wait for them, since we don't have
     // the insert of before.
     destination.clear_events().await;

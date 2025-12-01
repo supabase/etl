@@ -152,7 +152,7 @@ impl PgReplicationSlotTransaction {
         &self,
         table_id: TableId,
         table_schema: &TableSchema,
-        publication_name: Option<&str>,
+        publication_name: &str,
     ) -> EtlResult<HashSet<String>> {
         self.client
             .get_replicated_column_names(table_id, table_schema, publication_name)
@@ -497,9 +497,7 @@ impl PgReplicationClient {
             hierarchy(relid) as (
                 -- Start with published tables
                 select oid from pub_tables
-
                 union
-
                 -- Recursively find parent tables in inheritance hierarchy
                 select i.inhparent
                 from pg_inherits i
@@ -831,7 +829,7 @@ impl PgReplicationClient {
         &self,
         table_id: TableId,
         table_schema: &TableSchema,
-        publication_name: Option<&str>,
+        publication_name: &str,
     ) -> EtlResult<HashSet<String>> {
         // Column filtering in publications was added in Postgres 15. For earlier versions,
         // all columns are replicated.
@@ -843,65 +841,43 @@ impl PgReplicationClient {
                 .collect());
         }
 
-        // If no publication is specified, all columns are replicated
-        let publication = match publication_name {
-            Some(publication) => publication,
-            None => {
-                return Ok(table_schema
-                    .column_schemas
-                    .iter()
-                    .map(|cs| cs.name.clone())
-                    .collect());
-            }
-        };
-
-        // Query pg_publication_tables to get the attnames array which contains the column names
-        // being replicated. In PG15+, attnames is NULL when all columns are published.
+        // Query pg_publication_tables using unnest() to properly decode the attnames array.
+        // This correctly handles column names containing special characters (spaces, commas,
+        // quotes) that would break naive string parsing.
         let column_query = format!(
-            "select pt.attnames as column_names
+            "select u.column_name
              from pg_publication_tables pt
+             left join lateral unnest(pt.attnames) as u(column_name) on true
              join pg_namespace n on n.nspname = pt.schemaname
-             join pg_class c on c.relnamespace = n.oid AND c.relname = pt.tablename
+             join pg_class c on c.relnamespace = n.oid and c.relname = pt.tablename
              where pt.pubname = {} and c.oid = {};",
-            quote_literal(publication),
+            quote_literal(publication_name),
             table_id,
         );
 
         let results = self.client.simple_query(&column_query).await?;
+        let mut column_names: HashSet<String> = HashSet::new();
 
         for result in results {
             if let SimpleQueryMessage::Row(row) = result {
-                let column_names: Option<&str> = row.try_get("column_names")?;
-                match column_names {
-                    // NULL means all columns are published
-                    None => {
-                        return Ok(table_schema
-                            .column_schemas
-                            .iter()
-                            .map(|cs| cs.name.clone())
-                            .collect());
-                    }
-                    // Parse the array format: {col1,col2,col3}
-                    Some(names_str) => {
-                        let names: HashSet<String> = names_str
-                            .trim_matches(|c| c == '{' || c == '}')
-                            .split(',')
-                            .filter(|s| !s.is_empty())
-                            .map(|s| s.to_string())
-                            .collect();
-                        return Ok(names);
-                    }
+                if let Some(column_name) = row.try_get::<&str>("column_name")? {
+                    column_names.insert(column_name.to_string());
                 }
             }
         }
 
-        // If no row was found, the table is not in the publication.
-        // Return all columns as a fallback (this shouldn't normally happen).
-        Ok(table_schema
-            .column_schemas
-            .iter()
-            .map(|cs| cs.name.clone())
-            .collect())
+        // If no column names were found, return all columns. This happens when:
+        // - The table is not in the publication
+        // - The attnames array is NULL (though this is rare in practice)
+        if column_names.is_empty() {
+            return Ok(table_schema
+                .column_schemas
+                .iter()
+                .map(|cs| cs.name.clone())
+                .collect());
+        }
+
+        Ok(column_names)
     }
 
     /// Creates a COPY stream for reading data from a table using its OID.

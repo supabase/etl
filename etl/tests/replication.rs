@@ -483,7 +483,7 @@ async fn test_get_replicated_column_names_respects_column_filter() {
 
     // Get replicated column names from the publication - should only include published columns.
     let replicated_columns = transaction
-        .get_replicated_column_names(test_table_id, table_schema, Some(publication_name))
+        .get_replicated_column_names(test_table_id, table_schema, publication_name)
         .await
         .unwrap();
 
