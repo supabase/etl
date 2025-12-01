@@ -1,3 +1,25 @@
+use crate::bail;
+use crate::concurrency::shutdown::ShutdownRx;
+use crate::concurrency::signal::SignalRx;
+use crate::concurrency::stream::{TimeoutStream, TimeoutStreamResult};
+use crate::conversions::event::{
+    DDL_MESSAGE_PREFIX, parse_ddl_schema_change_message, parse_event_from_begin_message,
+    parse_event_from_commit_message, parse_event_from_delete_message,
+    parse_event_from_insert_message, parse_event_from_truncate_message,
+    parse_event_from_update_message, parse_replicated_column_names,
+};
+use crate::destination::Destination;
+use crate::error::{ErrorKind, EtlResult};
+use crate::metrics::{
+    ACTION_LABEL, DESTINATION_LABEL, ETL_BATCH_ITEMS_SEND_DURATION_SECONDS,
+    ETL_EVENTS_PROCESSED_TOTAL, ETL_EVENTS_RECEIVED_TOTAL, ETL_TRANSACTION_DURATION_SECONDS,
+    ETL_TRANSACTION_SIZE, PIPELINE_ID_LABEL, WORKER_TYPE_LABEL,
+};
+use crate::replication::client::PgReplicationClient;
+use crate::replication::stream::EventsStream;
+use crate::state::table::TableReplicationError;
+use crate::store::schema::SchemaStore;
+use crate::types::{Event, PipelineId};
 use etl_config::shared::PipelineConfig;
 use etl_postgres::replication::worker::WorkerType;
 use etl_postgres::types::{ReplicatedTableSchema, ReplicationMask, TableId, TableSchema};
@@ -13,24 +35,6 @@ use std::time::{Duration, Instant};
 use tokio::pin;
 use tokio_postgres::types::PgLsn;
 use tracing::{debug, info, warn};
-
-use crate::bail;
-use crate::concurrency::shutdown::ShutdownRx;
-use crate::concurrency::signal::SignalRx;
-use crate::concurrency::stream::{TimeoutStream, TimeoutStreamResult};
-use crate::conversions::event::{message_PREFIX, parse_ddl_schema_change_message, parse_event_from_begin_message, parse_event_from_commit_message, parse_event_from_delete_message, parse_event_from_insert_message, parse_event_from_truncate_message, parse_event_from_update_message, parse_replicated_column_names, DDL_MESSAGE_PREFIX};
-use crate::destination::Destination;
-use crate::error::{ErrorKind, EtlResult};
-use crate::metrics::{
-    ACTION_LABEL, DESTINATION_LABEL, ETL_BATCH_ITEMS_SEND_DURATION_SECONDS,
-    ETL_EVENTS_PROCESSED_TOTAL, ETL_EVENTS_RECEIVED_TOTAL, ETL_TRANSACTION_DURATION_SECONDS,
-    ETL_TRANSACTION_SIZE, PIPELINE_ID_LABEL, WORKER_TYPE_LABEL,
-};
-use crate::replication::client::PgReplicationClient;
-use crate::replication::stream::EventsStream;
-use crate::state::table::TableReplicationError;
-use crate::store::schema::SchemaStore;
-use crate::types::{Event, PipelineId};
 
 /// The minimum interval (in milliseconds) between consecutive status updates.
 ///
@@ -1041,7 +1045,7 @@ where
             handle_commit_message(state, start_lsn, commit_body, hook, pipeline_id).await
         }
         LogicalReplicationMessage::Relation(relation_body) => {
-            handle_relation_message(state, relation_body, schema_store).await
+            handle_relation_message(state, relation_body, hook, schema_store).await
         }
         LogicalReplicationMessage::Insert(insert_body) => {
             handle_insert_message(state, start_lsn, insert_body, hook, schema_store).await
@@ -1214,15 +1218,32 @@ where
 /// For now, no schema change is supported; however, this mechanism generalizes well over table schema
 /// support since we just have to guarantee that the DDL change is processed in the schema store before
 /// receiving a RELATION message.
-async fn handle_relation_message<S>(
+async fn handle_relation_message<S, T>(
     state: &mut ApplyLoopState,
     message: &protocol::RelationBody,
+    hook: &T,
     schema_store: &S,
 ) -> EtlResult<HandleMessageResult>
 where
     S: SchemaStore,
+    T: ApplyLoopHook,
 {
+    let Some(remote_final_lsn) = state.remote_final_lsn else {
+        bail!(
+            ErrorKind::InvalidState,
+            "Invalid transaction state",
+            "Transaction must be active before processing RELATION message"
+        );
+    };
+
     let table_id = TableId::new(message.rel_id());
+
+    if !hook
+        .should_apply_changes(table_id, remote_final_lsn)
+        .await?
+    {
+        return Ok(HandleMessageResult::no_event());
+    }
 
     // Extract the replicated column names from the relation message.
     let replicated_columns = parse_replicated_column_names(message)?;

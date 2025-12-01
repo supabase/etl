@@ -332,10 +332,14 @@ async fn publication_for_all_tables_in_schema_ignores_new_tables_until_restart()
         return;
     }
 
-    // Create first table.
+    // Create first table and insert one row.
     let table_1 = test_table_name("table_1");
     let table_1_id = database
         .create_table(table_1.clone(), true, &[("name", "text not null")])
+        .await
+        .unwrap();
+    database
+        .insert_values(table_1.clone(), &["name"], &[&"test_name_1".to_owned()])
         .await
         .unwrap();
 
@@ -366,6 +370,18 @@ async fn publication_for_all_tables_in_schema_ignores_new_tables_until_restart()
 
     sync_done.notified().await;
 
+    // Wait for an insert event in table 1.
+    let insert_events_notify = destination
+        .wait_for_events_count(vec![(EventType::Insert, 1)])
+        .await;
+
+    database
+        .insert_values(table_1.clone(), &["name"], &[&"test_name_2".to_owned()])
+        .await
+        .unwrap();
+
+    insert_events_notify.notified().await;
+
     // Create a new table in the same schema and insert a row.
     let table_2 = test_table_name("table_2");
     let table_2_id = database
@@ -377,7 +393,8 @@ async fn publication_for_all_tables_in_schema_ignores_new_tables_until_restart()
         .await
         .unwrap();
 
-    // Wait for the events to come in from the new table.
+    // Wait for the events to come in from the new table to make sure the pipeline reacts to them
+    // gracefully even if they are not replicated.
     sleep(Duration::from_secs(2)).await;
 
     // Shutdown and verify no errors occurred.
@@ -388,6 +405,16 @@ async fn publication_for_all_tables_in_schema_ignores_new_tables_until_restart()
     assert_eq!(table_schemas.len(), 1);
     assert!(table_schemas.contains_key(&table_1_id));
     assert!(!table_schemas.contains_key(&table_2_id));
+
+    // Verify the table rows and events inserted into table 1.
+    let table_rows = destination.get_table_rows().await;
+    assert_eq!(table_rows.get(&table_1_id).unwrap().len(), 1);
+    let events = destination.get_events().await;
+    let grouped_events = group_events_by_type_and_table_id(&events);
+    let insert_events = grouped_events
+        .get(&(EventType::Insert, table_1_id))
+        .unwrap();
+    assert_eq!(insert_events.len(), 1);
 
     // We restart the pipeline and verify that the new table is now processed.
     let mut pipeline = create_pipeline(
@@ -406,6 +433,21 @@ async fn publication_for_all_tables_in_schema_ignores_new_tables_until_restart()
 
     sync_done.notified().await;
 
+    // We clear the events to make waiting more idiomatic down the line.
+    destination.clear_events().await;
+
+    // Wait for an insert event in table 2.
+    let insert_events_notify = destination
+        .wait_for_events_count(vec![(EventType::Insert, 1)])
+        .await;
+
+    database
+        .insert_values(table_2.clone(), &["value"], &[&2_i32])
+        .await
+        .unwrap();
+
+    insert_events_notify.notified().await;
+
     // Shutdown and verify no errors occurred.
     pipeline.shutdown_and_wait().await.unwrap();
 
@@ -414,6 +456,16 @@ async fn publication_for_all_tables_in_schema_ignores_new_tables_until_restart()
     assert_eq!(table_schemas.len(), 2);
     assert!(table_schemas.contains_key(&table_1_id));
     assert!(table_schemas.contains_key(&table_2_id));
+
+    // Verify the table rows and events inserted into table 2.
+    let table_rows = destination.get_table_rows().await;
+    assert_eq!(table_rows.get(&table_2_id).unwrap().len(), 1);
+    let events = destination.get_events().await;
+    let grouped_events = group_events_by_type_and_table_id(&events);
+    let insert_events = grouped_events
+        .get(&(EventType::Insert, table_2_id))
+        .unwrap();
+    assert_eq!(insert_events.len(), 1);
 }
 
 #[tokio::test(flavor = "multi_thread")]

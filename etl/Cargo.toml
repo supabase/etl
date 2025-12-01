@@ -43,6 +43,7 @@ tokio-rustls = { workspace = true, default-features = false }
 tracing = { workspace = true, default-features = true }
 uuid = { workspace = true, features = ["v4"] }
 x509-cert = { workspace = true, default-features = false }
+log = "0.4.28"
 
 [dev-dependencies]
 etl-postgres = { workspace = true, features = [
