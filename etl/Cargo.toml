@@ -22,6 +22,7 @@ chrono = { workspace = true }
 const-oid = { workspace = true, default-features = false }
 fail = { workspace = true }
 futures = { workspace = true }
+log = "0.4.28"
 metrics = { workspace = true }
 pg_escape = { workspace = true }
 pin-project-lite = { workspace = true }
@@ -43,7 +44,6 @@ tokio-rustls = { workspace = true, default-features = false }
 tracing = { workspace = true, default-features = true }
 uuid = { workspace = true, features = ["v4"] }
 x509-cert = { workspace = true, default-features = false }
-log = "0.4.28"
 
 [dev-dependencies]
 etl-postgres = { workspace = true, features = [
