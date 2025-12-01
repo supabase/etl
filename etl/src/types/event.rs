@@ -1,4 +1,4 @@
-use etl_postgres::types::{ReplicatedTableSchema, TableId, TableSchema};
+use etl_postgres::types::{ReplicatedTableSchema, TableId};
 use std::fmt;
 use tokio_postgres::types::PgLsn;
 
@@ -38,21 +38,6 @@ pub struct CommitEvent {
     pub end_lsn: u64,
     /// Transaction commit timestamp in Postgres format.
     pub timestamp: i64,
-}
-
-/// Table schema definition event from Postgres logical replication.
-///
-/// [`RelationEvent`] provides schema information for tables involved in replication.
-/// It contains complete column definitions and metadata needed to interpret
-/// subsequent data modification events for the table.
-#[derive(Debug, Clone, PartialEq)]
-pub struct RelationEvent {
-    /// LSN position where the event started.
-    pub start_lsn: PgLsn,
-    /// LSN position where the transaction of this event will commit.
-    pub commit_lsn: PgLsn,
-    /// Complete table schema including columns and types.
-    pub table_schema: TableSchema,
 }
 
 /// Row insertion event from Postgres logical replication.
@@ -148,8 +133,6 @@ pub enum Event {
     Update(UpdateEvent),
     /// Row deletion event with deleted row data.
     Delete(DeleteEvent),
-    /// Relation schema information event describing table structure.
-    Relation(RelationEvent),
     /// Table truncation event clearing all rows from tables.
     Truncate(TruncateEvent),
     /// Unsupported event type that cannot be processed.
@@ -175,7 +158,6 @@ impl Event {
             Event::Insert(e) => e.replicated_table_schema.id() == *table_id,
             Event::Update(e) => e.replicated_table_schema.id() == *table_id,
             Event::Delete(e) => e.replicated_table_schema.id() == *table_id,
-            Event::Relation(e) => e.table_schema.id == *table_id,
             Event::Truncate(e) => e.truncated_tables.iter().any(|s| s.id() == *table_id),
             _ => false,
         }
@@ -230,7 +212,6 @@ impl From<&Event> for EventType {
             Event::Insert(_) => EventType::Insert,
             Event::Update(_) => EventType::Update,
             Event::Delete(_) => EventType::Delete,
-            Event::Relation(_) => EventType::Relation,
             Event::Truncate(_) => EventType::Truncate,
             Event::Unsupported => EventType::Unsupported,
         }

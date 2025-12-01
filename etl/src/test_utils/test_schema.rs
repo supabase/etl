@@ -317,7 +317,6 @@ pub fn events_equal_excluding_fields(left: &Event, right: &Event) -> bool {
             left.replicated_table_schema.id() == right.replicated_table_schema.id()
                 && left.old_table_row == right.old_table_row
         }
-        (Event::Relation(left), Event::Relation(right)) => left.table_schema == right.table_schema,
         (Event::Truncate(left), Event::Truncate(right)) => {
             if left.options != right.options
                 || left.truncated_tables.len() != right.truncated_tables.len()

@@ -63,7 +63,6 @@ fn events_equal(a: &Event, b: &Event) -> bool {
     match (a, b) {
         (Event::Begin(a), Event::Begin(b)) => a == b,
         (Event::Commit(a), Event::Commit(b)) => a == b,
-        (Event::Relation(a), Event::Relation(b)) => a == b,
         (Event::Truncate(a), Event::Truncate(b)) => {
             if a.options != b.options || a.truncated_tables.len() != b.truncated_tables.len() {
                 return false;
