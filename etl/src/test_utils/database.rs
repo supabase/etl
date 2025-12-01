@@ -44,19 +44,19 @@ fn local_pg_connection_config() -> PgConnectionConfig {
     }
 }
 
-/// Creates a new test database instance with a unique name.
+/// Creates a new test database instance with a unique name and runs migrations.
 ///
 /// This function spawns a new Postgres database with a random UUID as its name,
 /// using default credentials and disabled SSL. It automatically creates the test schema
-/// for organizing test tables.
+/// for organizing test tables and runs all ETL migrations.
 ///
 /// # Panics
 ///
-/// Panics if the test schema cannot be created.
+/// Panics if the test schema cannot be created or migrations fail.
 pub async fn spawn_source_database() -> PgDatabase<Client> {
     // We create the database via tokio postgres.
     let config = local_pg_connection_config();
-    let database = PgDatabase::new(config).await;
+    let database = PgDatabase::new(config.clone()).await;
 
     // We create the test schema, where all tables will be added.
     database
@@ -66,23 +66,6 @@ pub async fn spawn_source_database() -> PgDatabase<Client> {
         .execute(&format!("create schema {TEST_DATABASE_SCHEMA}"), &[])
         .await
         .expect("Failed to create test schema");
-
-    database
-}
-
-/// Creates a new test database instance with a unique name and all the ETL migrations run.
-///
-/// This function spawns a new Postgres database with a random UUID as its name,
-/// using default credentials and disabled SSL. It automatically creates the test schema
-/// for organizing test tables.
-///
-/// # Panics
-///
-/// Panics if the test schema cannot be created.
-pub async fn spawn_source_database_for_store() -> PgDatabase<Client> {
-    // We create the database via tokio postgres.
-    let config = local_pg_connection_config();
-    let database = PgDatabase::new(config.clone()).await;
 
     // We now connect via sqlx just to run the migrations, but we still use the original tokio postgres
     // connection for the db object returned.

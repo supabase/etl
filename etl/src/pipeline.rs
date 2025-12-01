@@ -10,6 +10,7 @@ use crate::error::{ErrorKind, EtlResult};
 use crate::metrics::register_metrics;
 use crate::migrations::apply_etl_migrations;
 use crate::replication::client::PgReplicationClient;
+use crate::replication::masks::ReplicationMasks;
 use crate::state::table::TableReplicationPhase;
 use crate::store::cleanup::CleanupStore;
 use crate::store::schema::SchemaStore;
@@ -158,8 +159,11 @@ where
         let table_sync_worker_permits =
             Arc::new(Semaphore::new(self.config.max_table_sync_workers as usize));
 
-        // We create and start the apply worker (temporarily leaving out retries_orchestrator)
-        // TODO: Remove retries_orchestrator from ApplyWorker constructor
+        // We create the shared replication masks container that will be used by both the apply
+        // worker and table sync workers to track which columns are being replicated for each table.
+        let replication_masks = ReplicationMasks::new();
+
+        // We create and start the apply worker.
         let apply_worker = ApplyWorker::new(
             self.config.id,
             self.config.clone(),
@@ -167,6 +171,7 @@ where
             pool.clone(),
             self.store.clone(),
             self.destination.clone(),
+            replication_masks,
             self.shutdown_tx.subscribe(),
             table_sync_worker_permits,
         )

@@ -792,7 +792,7 @@ fn row_error_to_etl_error(err: RowError) -> EtlError {
 mod tests {
     use super::*;
 
-    use etl::types::{TableId, TableName, TableSchema};
+    use etl::types::{ReplicationMask, TableId, TableName, TableSchema};
     use std::collections::HashSet;
 
     /// Creates a test column schema with common defaults.
@@ -824,7 +824,9 @@ mod tests {
             TableName::new("public".to_string(), "test_table".to_string()),
             columns,
         ));
-        ReplicatedTableSchema::build(table_schema, &column_names)
+        let replication_mask = ReplicationMask::build(&table_schema, &column_names);
+        
+        ReplicatedTableSchema::from_mask(table_schema, replication_mask)
     }
 
     #[test]

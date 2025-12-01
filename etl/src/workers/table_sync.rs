@@ -19,6 +19,7 @@ use crate::replication::apply::{
     ApplyLoopAction, ApplyLoopHook, ApplyLoopResult, start_apply_loop,
 };
 use crate::replication::client::PgReplicationClient;
+use crate::replication::masks::ReplicationMasks;
 use crate::replication::table_sync::{TableSyncResult, start_table_sync};
 use crate::state::table::{
     RetryPolicy, TableReplicationError, TableReplicationPhase, TableReplicationPhaseType,
@@ -364,6 +365,7 @@ pub struct TableSyncWorker<S, D> {
     table_id: TableId,
     store: S,
     destination: D,
+    replication_masks: ReplicationMasks,
     shutdown_rx: ShutdownRx,
     force_syncing_tables_tx: SignalTx,
     run_permit: Arc<Semaphore>,
@@ -383,6 +385,7 @@ impl<S, D> TableSyncWorker<S, D> {
         table_id: TableId,
         store: S,
         destination: D,
+        replication_masks: ReplicationMasks,
         shutdown_rx: ShutdownRx,
         force_syncing_tables_tx: SignalTx,
         run_permit: Arc<Semaphore>,
@@ -394,6 +397,7 @@ impl<S, D> TableSyncWorker<S, D> {
             table_id,
             store,
             destination,
+            replication_masks,
             shutdown_rx,
             force_syncing_tables_tx,
             run_permit,
@@ -430,6 +434,7 @@ where
         // Clone all the fields we need for retries.
         let pipeline_id = self.pipeline_id;
         let destination = self.destination.clone();
+        let replication_masks = self.replication_masks.clone();
         let shutdown_rx = self.shutdown_rx.clone();
         let force_syncing_tables_tx = self.force_syncing_tables_tx.clone();
         let run_permit = self.run_permit.clone();
@@ -443,6 +448,7 @@ where
                 table_id,
                 store: store.clone(),
                 destination: destination.clone(),
+                replication_masks: replication_masks.clone(),
                 shutdown_rx: shutdown_rx.clone(),
                 force_syncing_tables_tx: force_syncing_tables_tx.clone(),
                 run_permit: run_permit.clone(),
@@ -621,6 +627,7 @@ where
             state.clone(),
             self.store.clone(),
             self.destination.clone(),
+            &self.replication_masks,
             self.shutdown_rx.clone(),
             self.force_syncing_tables_tx,
         )
@@ -645,6 +652,7 @@ where
             self.store.clone(),
             self.destination,
             TableSyncWorkerHook::new(self.table_id, state, self.store),
+            self.replication_masks,
             self.shutdown_rx,
             None,
         )

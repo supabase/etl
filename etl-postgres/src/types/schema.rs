@@ -271,21 +271,6 @@ pub struct ReplicatedTableSchema {
 }
 
 impl ReplicatedTableSchema {
-    /// Creates a new [`ReplicatedTableSchema`] from a table schema and column names.
-    ///
-    /// The mask is constructed by checking which column names from the schema are present
-    /// in the provided set of replicated column names.
-    pub fn build(
-        table_schema: Arc<TableSchema>,
-        replicated_column_names: &HashSet<String>,
-    ) -> Self {
-        let replication_mask = ReplicationMask::build(&table_schema, replicated_column_names);
-        Self {
-            table_schema,
-            replication_mask,
-        }
-    }
-
     /// Creates a [`ReplicatedTableSchema`] from a schema and a pre-computed mask.
     pub fn from_mask(schema: Arc<TableSchema>, mask: ReplicationMask) -> Self {
         debug_assert_eq!(

@@ -16,6 +16,7 @@ use crate::metrics::{
     ETL_TRANSACTION_SIZE, PIPELINE_ID_LABEL, WORKER_TYPE_LABEL,
 };
 use crate::replication::client::PgReplicationClient;
+use crate::replication::masks::ReplicationMasks;
 use crate::replication::stream::EventsStream;
 use crate::state::table::TableReplicationError;
 use crate::store::schema::SchemaStore;
@@ -27,7 +28,6 @@ use futures::StreamExt;
 use metrics::histogram;
 use postgres_replication::protocol;
 use postgres_replication::protocol::{LogicalReplicationMessage, ReplicationMessage};
-use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -283,20 +283,6 @@ impl HandleMessageResult {
     }
 }
 
-/// Represents replication column information in either resolved or unresolved form.
-///
-/// When a RELATION message arrives, we extract the replicated column names. If the table
-/// schema is already available in the schema store, we immediately build a [`ReplicationMask`].
-/// Otherwise, we store the raw column names and defer mask construction until the first
-/// DML event for that table, when the schema will be available.
-#[derive(Debug)]
-enum ReplicationMaskOrRaw {
-    /// A fully resolved replication mask built from the table schema.
-    Mask(ReplicationMask),
-    /// Raw column names awaiting schema resolution to build the mask.
-    Raw(HashSet<String>),
-}
-
 /// A shared state that is used throughout the apply loop to track progress.
 #[derive(Debug)]
 struct ApplyLoopState {
@@ -328,14 +314,6 @@ struct ApplyLoopState {
     /// transaction boundary is found. If not found, the process will continue until it is killed via
     /// a `SIGKILL`.
     shutdown_discarded: bool,
-    /// Tracks which columns are being replicated for each table.
-    ///
-    /// This map is populated from RELATION messages during replication. Each entry contains
-    /// either a resolved [`ReplicationMask`] or raw column names pending resolution. The mask
-    /// is resolved lazily: if the table schema is available when the RELATION message arrives,
-    /// the mask is built immediately; otherwise, raw column names are stored and the mask is
-    /// built on the first DML event when the schema becomes available.
-    replication_masks: HashMap<TableId, ReplicationMaskOrRaw>,
 }
 
 impl ApplyLoopState {
@@ -353,23 +331,7 @@ impl ApplyLoopState {
             current_tx_begin_ts: None,
             current_tx_events: 0,
             shutdown_discarded: false,
-            replication_masks: HashMap::new(),
         }
-    }
-
-    /// Returns the replication mask or raw column names for a table.
-    ///
-    /// Returns `None` if no RELATION message has been received for this table yet.
-    fn get_replication_mask_or_raw(&self, table_id: &TableId) -> Option<&ReplicationMaskOrRaw> {
-        self.replication_masks.get(table_id)
-    }
-
-    /// Stores the replication mask or raw column names for a table.
-    ///
-    /// Called when processing RELATION messages or when resolving raw column names
-    /// to a proper mask during DML event handling.
-    fn set_replication_mask_or_raw(&mut self, table_id: TableId, mask: ReplicationMaskOrRaw) {
-        self.replication_masks.insert(table_id, mask);
     }
 
     /// Updates the last commit end LSN to track transaction boundaries.
@@ -513,6 +475,7 @@ pub async fn start_apply_loop<S, D, T>(
     schema_store: S,
     destination: D,
     hook: T,
+    replication_masks: ReplicationMasks,
     mut shutdown_rx: ShutdownRx,
     mut force_syncing_tables_rx: Option<SignalRx>,
 ) -> EtlResult<ApplyLoopResult>
@@ -636,6 +599,7 @@ where
                     &schema_store,
                     &destination,
                     &hook,
+                    &replication_masks,
                     config.batch.max_size,
                     pipeline_id
                 )
@@ -729,6 +693,7 @@ async fn handle_replication_message_with_timeout<S, D, T>(
     schema_store: &S,
     destination: &D,
     hook: &T,
+    replication_masks: &ReplicationMasks,
     max_batch_size: usize,
     pipeline_id: PipelineId,
 ) -> EtlResult<ApplyLoopAction>
@@ -745,6 +710,7 @@ where
                 message?,
                 schema_store,
                 hook,
+                replication_masks,
                 pipeline_id,
             )
             .await?;
@@ -980,6 +946,7 @@ async fn handle_replication_message<S, T>(
     message: ReplicationMessage<LogicalReplicationMessage>,
     schema_store: &S,
     hook: &T,
+    replication_masks: &ReplicationMasks,
     pipeline_id: PipelineId,
 ) -> EtlResult<HandleMessageResult>
 where
@@ -1007,6 +974,7 @@ where
                 message.into_data(),
                 schema_store,
                 hook,
+                replication_masks,
                 pipeline_id,
             )
             .await
@@ -1049,6 +1017,7 @@ async fn handle_logical_replication_message<S, T>(
     message: LogicalReplicationMessage,
     schema_store: &S,
     hook: &T,
+    replication_masks: &ReplicationMasks,
     pipeline_id: PipelineId,
 ) -> EtlResult<HandleMessageResult>
 where
@@ -1065,19 +1034,52 @@ where
             handle_commit_message(state, start_lsn, commit_body, hook, pipeline_id).await
         }
         LogicalReplicationMessage::Relation(relation_body) => {
-            handle_relation_message(state, relation_body, hook, schema_store).await
+            handle_relation_message(state, relation_body, hook, schema_store, replication_masks)
+                .await
         }
         LogicalReplicationMessage::Insert(insert_body) => {
-            handle_insert_message(state, start_lsn, insert_body, hook, schema_store).await
+            handle_insert_message(
+                state,
+                start_lsn,
+                insert_body,
+                hook,
+                schema_store,
+                replication_masks,
+            )
+            .await
         }
         LogicalReplicationMessage::Update(update_body) => {
-            handle_update_message(state, start_lsn, update_body, hook, schema_store).await
+            handle_update_message(
+                state,
+                start_lsn,
+                update_body,
+                hook,
+                schema_store,
+                replication_masks,
+            )
+            .await
         }
         LogicalReplicationMessage::Delete(delete_body) => {
-            handle_delete_message(state, start_lsn, delete_body, hook, schema_store).await
+            handle_delete_message(
+                state,
+                start_lsn,
+                delete_body,
+                hook,
+                schema_store,
+                replication_masks,
+            )
+            .await
         }
         LogicalReplicationMessage::Truncate(truncate_body) => {
-            handle_truncate_message(state, start_lsn, truncate_body, hook, schema_store).await
+            handle_truncate_message(
+                state,
+                start_lsn,
+                truncate_body,
+                hook,
+                schema_store,
+                replication_masks,
+            )
+            .await
         }
         LogicalReplicationMessage::Message(message_body) => {
             handle_logical_message(state, message_body, hook).await
@@ -1229,59 +1231,54 @@ where
 /// Handles Postgres RELATION messages that describe the schema of data in the replication stream.
 ///
 /// RELATION messages are sent by Postgres before any DML events for a table, describing which
-/// columns are being replicated. This function extracts the replicated column names and either:
+/// columns are being replicated. This function extracts the replicated column names and builds
+/// a [`ReplicationMask`] which is stored in the shared [`ReplicationMasks`] container.
 ///
-/// 1. **Immediate resolution**: If the table schema is already in the schema store (e.g., from
-///    a previous pipeline run or after table sync), builds a [`ReplicationMask`] immediately.
-///
-/// 2. **Deferred resolution**: If the table schema is not yet available (e.g., during initial
-///    table sync before the schema is stored), stores the raw column names. The mask will be
-///    built lazily when the first DML event arrives via [`get_or_build_replicated_table_schema`].
-///
-/// This lazy resolution pattern is necessary because RELATION messages can arrive before the
-/// table sync worker has stored the table schema, but DML events always arrive after.
-///
-/// If no RELATION message is received for a table before its DML events, processing will fail
-/// as there's no way to determine which columns are being replicated.
+/// The mask is built by matching the replicated column names from the RELATION message against
+/// the table schema from the schema store. If the schema is not yet available (e.g., during
+/// initial table sync before the schema is stored), the mask building is skipped and will be
+/// handled when the table sync worker completes and sets the mask.
 async fn handle_relation_message<S, T>(
-    state: &mut ApplyLoopState,
+    state: &ApplyLoopState,
     message: &protocol::RelationBody,
-    _hook: &T,
+    hook: &T,
     schema_store: &S,
+    replication_masks: &ReplicationMasks,
 ) -> EtlResult<HandleMessageResult>
 where
     S: SchemaStore,
     T: ApplyLoopHook,
 {
+    let Some(remote_final_lsn) = state.remote_final_lsn else {
+        bail!(
+            ErrorKind::InvalidState,
+            "Invalid transaction state",
+            "Transaction must be active before processing INSERT message"
+        );
+    };
+
     let table_id = TableId::new(message.rel_id());
+
+    // Skip relation messages for tables we should not apply changes to.
+    if !hook
+        .should_apply_changes(table_id, remote_final_lsn)
+        .await?
+    {
+        return Ok(HandleMessageResult::no_event());
+    }
 
     let replicated_columns = parse_replicated_column_names(message)?;
 
-    // Build the mask immediately if schema is available, otherwise store raw columns for later.
-    let replication_mask_or_raw = match schema_store.get_table_schema(&table_id).await? {
-        Some(table_schema) => {
-            info!(
-                table_id = %table_id,
-                replicated_columns = ?replicated_columns,
-                "received relation message, building replication mask"
-            );
+    let table_schema = get_table_schema(schema_store, &table_id).await?;
 
-            let replication_mask = ReplicationMask::build(&table_schema, &replicated_columns);
-            ReplicationMaskOrRaw::Mask(replication_mask)
-        }
-        None => {
-            warn!(
-                table_id = %table_id,
-                replicated_columns = ?replicated_columns,
-                "received relation message, deferring building of replication mask due to missing table schema"
-            );
+    info!(
+        table_id = %table_id,
+        replicated_columns = ?replicated_columns,
+        "received relation message, building replication mask"
+    );
 
-            ReplicationMaskOrRaw::Raw(replicated_columns)
-        }
-    };
-
-    // Store the mask in the state for use by later DML events.
-    state.set_replication_mask_or_raw(table_id, replication_mask_or_raw);
+    let replication_mask = ReplicationMask::build(&table_schema, &replicated_columns);
+    replication_masks.set(table_id, replication_mask).await;
 
     Ok(HandleMessageResult::no_event())
 }
@@ -1293,6 +1290,7 @@ async fn handle_insert_message<S, T>(
     message: &protocol::InsertBody,
     hook: &T,
     schema_store: &S,
+    replication_masks: &ReplicationMasks,
 ) -> EtlResult<HandleMessageResult>
 where
     S: SchemaStore + Clone + Send + 'static,
@@ -1316,7 +1314,7 @@ where
     }
 
     let replicated_table_schema =
-        get_or_build_replicated_table_schema(state, &table_id, schema_store).await?;
+        get_replicated_table_schema(&table_id, schema_store, replication_masks).await?;
 
     // Convert event from the protocol message.
     let event = parse_event_from_insert_message(
@@ -1336,6 +1334,7 @@ async fn handle_update_message<S, T>(
     message: &protocol::UpdateBody,
     hook: &T,
     schema_store: &S,
+    replication_masks: &ReplicationMasks,
 ) -> EtlResult<HandleMessageResult>
 where
     S: SchemaStore + Clone + Send + 'static,
@@ -1359,7 +1358,7 @@ where
     }
 
     let replicated_table_schema =
-        get_or_build_replicated_table_schema(state, &table_id, schema_store).await?;
+        get_replicated_table_schema(&table_id, schema_store, replication_masks).await?;
 
     // Convert event from the protocol message.
     let event = parse_event_from_update_message(
@@ -1379,6 +1378,7 @@ async fn handle_delete_message<S, T>(
     message: &protocol::DeleteBody,
     hook: &T,
     schema_store: &S,
+    replication_masks: &ReplicationMasks,
 ) -> EtlResult<HandleMessageResult>
 where
     S: SchemaStore + Clone + Send + 'static,
@@ -1402,7 +1402,7 @@ where
     }
 
     let replicated_table_schema =
-        get_or_build_replicated_table_schema(state, &table_id, schema_store).await?;
+        get_replicated_table_schema(&table_id, schema_store, replication_masks).await?;
 
     // Convert event from the protocol message.
     let event = parse_event_from_delete_message(
@@ -1427,6 +1427,7 @@ async fn handle_truncate_message<S, T>(
     message: &protocol::TruncateBody,
     hook: &T,
     schema_store: &S,
+    replication_masks: &ReplicationMasks,
 ) -> EtlResult<HandleMessageResult>
 where
     S: SchemaStore + Clone + Send + 'static,
@@ -1450,7 +1451,7 @@ where
             .await?
         {
             let replicated_table_schema =
-                get_or_build_replicated_table_schema(state, &table_id, schema_store).await?;
+                get_replicated_table_schema(&table_id, schema_store, replication_masks).await?;
             truncated_tables.push(replicated_table_schema);
         }
     }
@@ -1522,31 +1523,29 @@ where
     Ok(HandleMessageResult::no_event())
 }
 
-/// Retrieves or builds a [`ReplicatedTableSchema`] for the given table.
+/// Retrieves a [`ReplicatedTableSchema`] for the given table.
 ///
-/// This function handles the lazy resolution of replication masks. When a RELATION message
-/// is received before the table schema is available (e.g., during table sync), the raw
-/// column names are stored. This function resolves them to a proper [`ReplicationMask`]
-/// when the schema becomes available, caching the result for subsequent DML events.
+/// This function combines the table schema from the schema store with the replication mask
+/// from the shared [`ReplicationMasks`] to create a [`ReplicatedTableSchema`].
 ///
 /// # Errors
 ///
-/// Returns an error if no RELATION message was received for this table (missing replication
-/// info) or if the table schema is not found in the schema store.
-async fn get_or_build_replicated_table_schema<S>(
-    state: &mut ApplyLoopState,
+/// Returns an error if no replication mask is found for this table in the shared masks
+/// container, or if the table schema is not found in the schema store.
+async fn get_replicated_table_schema<S>(
     table_id: &TableId,
     schema_store: &S,
+    replication_masks: &ReplicationMasks,
 ) -> EtlResult<ReplicatedTableSchema>
 where
     S: SchemaStore + Clone + Send + 'static,
 {
-    let Some(replication_mask_or_raw) = state.get_replication_mask_or_raw(table_id) else {
+    let Some(replication_mask) = replication_masks.get(table_id).await else {
         bail!(
             ErrorKind::InvalidState,
             "Missing replication mask",
             format!(
-                "No RELATION message was received for table {} before this DML event",
+                "No replication mask found for table {}, this event can't be processed",
                 table_id
             )
         );
@@ -1554,24 +1553,8 @@ where
 
     let table_schema = get_table_schema(schema_store, table_id).await?;
 
-    match replication_mask_or_raw {
-        ReplicationMaskOrRaw::Mask(replication_mask) => Ok(ReplicatedTableSchema::from_mask(
-            table_schema,
-            replication_mask.clone(),
-        )),
-        ReplicationMaskOrRaw::Raw(replicated_column_names) => {
-            // Resolve raw column names to a mask now that the schema is available.
-            let replication_mask = ReplicationMask::build(&table_schema, replicated_column_names);
-            // Cache the resolved mask for subsequent events.
-            state.set_replication_mask_or_raw(
-                *table_id,
-                ReplicationMaskOrRaw::Mask(replication_mask.clone()),
-            );
-
-            Ok(ReplicatedTableSchema::from_mask(
-                table_schema,
-                replication_mask,
-            ))
-        }
-    }
+    Ok(ReplicatedTableSchema::from_mask(
+        table_schema,
+        replication_mask,
+    ))
 }

@@ -1,6 +1,6 @@
 use etl_config::shared::PipelineConfig;
 use etl_postgres::replication::slots::EtlReplicationSlot;
-use etl_postgres::types::{ReplicatedTableSchema, TableId};
+use etl_postgres::types::{ReplicatedTableSchema, ReplicationMask, TableId};
 use futures::StreamExt;
 use metrics::histogram;
 use std::sync::Arc;
@@ -26,6 +26,7 @@ use crate::metrics::{
     PIPELINE_ID_LABEL, WORKER_TYPE_LABEL,
 };
 use crate::replication::client::PgReplicationClient;
+use crate::replication::masks::ReplicationMasks;
 use crate::replication::stream::TableCopyStream;
 use crate::state::table::{TableReplicationPhase, TableReplicationPhaseType};
 use crate::store::schema::SchemaStore;
@@ -64,6 +65,7 @@ pub async fn start_table_sync<S, D>(
     table_sync_worker_state: TableSyncWorkerState,
     store: S,
     destination: D,
+    replication_masks: &ReplicationMasks,
     shutdown_rx: ShutdownRx,
     force_syncing_tables_tx: SignalTx,
 ) -> EtlResult<TableSyncResult>
@@ -199,9 +201,15 @@ where
                 .get_replicated_column_names(table_id, &table_schema, &config.publication_name)
                 .await?;
 
+            // Build and store the replication mask for use during CDC.
+            let replication_mask = ReplicationMask::build(&table_schema, &replicated_column_names);
+            replication_masks
+                .set(table_id, replication_mask.clone())
+                .await;
+
             // Create the replicated table schema with the replication mask.
-            let replicated_schema =
-                ReplicatedTableSchema::build(table_schema, &replicated_column_names);
+            let replicated_table_schema =
+                ReplicatedTableSchema::from_mask(table_schema, replication_mask);
 
             // We must truncate the destination table before starting a copy to avoid data inconsistencies.
             //
@@ -216,19 +224,19 @@ where
             //
             // We try to truncate the table also during `Init` because we support state rollback and
             // a table might be there from a previous run.
-            destination.truncate_table(&replicated_schema).await?;
+            destination.truncate_table(&replicated_table_schema).await?;
 
             // We create the copy table stream on the replicated columns.
             let table_copy_stream = transaction
                 .get_table_copy_stream(
                     table_id,
-                    replicated_schema.column_schemas(),
+                    replicated_table_schema.column_schemas(),
                     Some(&config.publication_name),
                 )
                 .await?;
             let table_copy_stream = TableCopyStream::wrap(
                 table_copy_stream,
-                replicated_schema.column_schemas(),
+                replicated_table_schema.column_schemas(),
                 pipeline_id,
             );
             let table_copy_stream = TimeoutBatchStream::wrap(
@@ -265,7 +273,7 @@ where
                         let before_sending = Instant::now();
 
                         destination
-                            .write_table_rows(&replicated_schema, table_rows)
+                            .write_table_rows(&replicated_table_schema, table_rows)
                             .await?;
                         table_rows_written = true;
 
@@ -310,7 +318,7 @@ where
             // table creation.
             if !table_rows_written {
                 destination
-                    .write_table_rows(&replicated_schema, vec![])
+                    .write_table_rows(&replicated_table_schema, vec![])
                     .await?;
                 info!(
                     "writing empty table rows since table {} was empty",

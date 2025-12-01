@@ -5,7 +5,7 @@ use etl::store::both::postgres::PostgresStore;
 use etl::store::cleanup::CleanupStore;
 use etl::store::schema::SchemaStore;
 use etl::store::state::StateStore;
-use etl::test_utils::database::spawn_source_database_for_store;
+use etl::test_utils::database::spawn_source_database;
 use etl_postgres::replication::connect_to_source_database;
 use etl_postgres::types::{ColumnSchema, TableId, TableName, TableSchema};
 use etl_telemetry::tracing::init_test_tracing;
@@ -58,7 +58,7 @@ fn create_another_table_schema() -> TableSchema {
 async fn test_state_store_operations() {
     init_test_tracing();
 
-    let database = spawn_source_database_for_store().await;
+    let database = spawn_source_database().await;
     let pipeline_id = 1;
     let table_id = TableId::new(12345);
 
@@ -125,7 +125,7 @@ async fn test_state_store_operations() {
 async fn test_state_store_rollback() {
     init_test_tracing();
 
-    let database = spawn_source_database_for_store().await;
+    let database = spawn_source_database().await;
     let pipeline_id = 1;
     let table_id = TableId::new(12345);
 
@@ -194,7 +194,7 @@ async fn test_state_store_rollback() {
 async fn test_state_store_load_states() {
     init_test_tracing();
 
-    let database = spawn_source_database_for_store().await;
+    let database = spawn_source_database().await;
     let pipeline_id = 1;
     let table_id1 = TableId::new(12345);
     let table_id2 = TableId::new(67890);
@@ -236,7 +236,7 @@ async fn test_state_store_load_states() {
 async fn test_schema_store_operations() {
     init_test_tracing();
 
-    let database = spawn_source_database_for_store().await;
+    let database = spawn_source_database().await;
     let pipeline_id = 1;
 
     let store = PostgresStore::new(pipeline_id, database.config.clone());
@@ -284,7 +284,7 @@ async fn test_schema_store_operations() {
 async fn test_schema_store_load_schemas() {
     init_test_tracing();
 
-    let database = spawn_source_database_for_store().await;
+    let database = spawn_source_database().await;
     let pipeline_id = 1;
 
     let store = PostgresStore::new(pipeline_id, database.config.clone());
@@ -333,7 +333,7 @@ async fn test_schema_store_load_schemas() {
 async fn test_schema_store_update_existing() {
     init_test_tracing();
 
-    let database = spawn_source_database_for_store().await;
+    let database = spawn_source_database().await;
     let pipeline_id = 1;
 
     let store = PostgresStore::new(pipeline_id, database.config.clone());
@@ -379,7 +379,7 @@ async fn test_schema_store_update_existing() {
 async fn test_multiple_pipelines_isolation() {
     init_test_tracing();
 
-    let database = spawn_source_database_for_store().await;
+    let database = spawn_source_database().await;
     let pipeline_id1 = 1;
     let pipeline_id2 = 2;
     let table_id = TableId::new(12345);
@@ -435,7 +435,7 @@ async fn test_multiple_pipelines_isolation() {
 async fn test_errored_state_with_different_retry_policies() {
     init_test_tracing();
 
-    let database = spawn_source_database_for_store().await;
+    let database = spawn_source_database().await;
     let pipeline_id = 1;
     let table_id = TableId::new(12345);
 
@@ -475,7 +475,7 @@ async fn test_errored_state_with_different_retry_policies() {
 async fn test_state_transitions_and_history() {
     init_test_tracing();
 
-    let database = spawn_source_database_for_store().await;
+    let database = spawn_source_database().await;
     let pipeline_id = 1;
     let table_id = TableId::new(12345);
 
@@ -551,7 +551,7 @@ async fn test_state_transitions_and_history() {
 async fn test_table_mappings_basic_operations() {
     init_test_tracing();
 
-    let database = spawn_source_database_for_store().await;
+    let database = spawn_source_database().await;
     let pipeline_id = 1;
 
     let store = PostgresStore::new(pipeline_id, database.config.clone());
@@ -602,7 +602,7 @@ async fn test_table_mappings_basic_operations() {
 async fn test_table_mappings_persistence_and_loading() {
     init_test_tracing();
 
-    let database = spawn_source_database_for_store().await;
+    let database = spawn_source_database().await;
     let pipeline_id = 1;
 
     let store = PostgresStore::new(pipeline_id, database.config.clone());
@@ -645,7 +645,7 @@ async fn test_table_mappings_persistence_and_loading() {
 async fn test_table_mappings_pipeline_isolation() {
     init_test_tracing();
 
-    let database = spawn_source_database_for_store().await;
+    let database = spawn_source_database().await;
     let pipeline_id1 = 1;
     let pipeline_id2 = 2;
 
@@ -684,7 +684,7 @@ async fn test_table_mappings_pipeline_isolation() {
 async fn test_cleanup_deletes_state_schema_and_mapping_for_table() {
     init_test_tracing();
 
-    let database = spawn_source_database_for_store().await;
+    let database = spawn_source_database().await;
     let pipeline_id = 1;
 
     let store = PostgresStore::new(pipeline_id, database.config.clone());
@@ -834,7 +834,7 @@ async fn test_cleanup_deletes_state_schema_and_mapping_for_table() {
 async fn test_cleanup_idempotent_when_no_state_present() {
     init_test_tracing();
 
-    let database = spawn_source_database_for_store().await;
+    let database = spawn_source_database().await;
     let pipeline_id = 1;
     let store = PostgresStore::new(pipeline_id, database.config.clone());
 
