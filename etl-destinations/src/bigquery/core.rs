@@ -516,21 +516,21 @@ where
     /// then handles truncate events separately by creating new versioned tables. Uses the schema
     /// from the first event of each table for table creation and descriptor building.
     async fn write_events(&self, events: Vec<Event>) -> EtlResult<()> {
-        let mut event_iter = events.into_iter().peekable();
+        let mut events_iter = events.into_iter().peekable();
 
-        while event_iter.peek().is_some() {
+        while events_iter.peek().is_some() {
             // Maps table ID to (schema, rows); schema is the first one seen for that table. Once
             // schema change support is implemented, we will re-implement this.
             let mut table_id_to_data: HashMap<TableId, (ReplicatedTableSchema, Vec<TableRow>)> =
                 HashMap::new();
 
             // Process events until we hit a truncate event or run out of events
-            while let Some(event) = event_iter.peek() {
+            while let Some(event) = events_iter.peek() {
                 if matches!(event, Event::Truncate(_)) {
                     break;
                 }
 
-                let event = event_iter.next().unwrap();
+                let event = events_iter.next().unwrap();
                 match event {
                     Event::Insert(mut insert) => {
                         let sequence_number =
@@ -633,8 +633,8 @@ where
             // new empty tables for each of them.
             let mut truncate_schemas: HashMap<TableId, ReplicatedTableSchema> = HashMap::new();
 
-            while let Some(Event::Truncate(_)) = event_iter.peek() {
-                if let Some(Event::Truncate(truncate_event)) = event_iter.next() {
+            while let Some(Event::Truncate(_)) = events_iter.peek() {
+                if let Some(Event::Truncate(truncate_event)) = events_iter.next() {
                     for schema in truncate_event.truncated_tables {
                         truncate_schemas.insert(schema.id(), schema);
                     }
