@@ -8,17 +8,15 @@ use crate::iceberg::IcebergClient;
 use crate::iceberg::error::iceberg_error_to_etl_error;
 use etl::destination::Destination;
 use etl::error::{ErrorKind, EtlResult};
-use etl::store::schema::SchemaStore;
+use etl::etl_error;
 use etl::store::state::StateStore;
 use etl::types::{
-    Cell, ColumnSchema, Event, ReplicatedTableSchema, TableId, TableName, TableRow, TableSchema,
-    Type, generate_sequence_number,
+    Cell, ColumnSchema, Event, ReplicatedTableSchema, TableId, TableName, TableRow, Type,
+    generate_sequence_number,
 };
-use etl::{bail, etl_error};
 use tokio::sync::Mutex;
 use tokio::task::JoinSet;
-use tracing::log::warn;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 /// CDC operation types for Iceberg changelog tables.
 ///
@@ -159,7 +157,7 @@ struct Inner {
 
 impl<S> IcebergDestination<S>
 where
-    S: StateStore + SchemaStore + Send + Sync,
+    S: StateStore + Send + Sync,
 {
     /// Creates a new Iceberg destination instance.
     ///
@@ -187,52 +185,26 @@ where
     /// Removes all data from the target table by dropping the existing Iceberg table
     /// and creating a fresh empty table with the same schema. Updates the internal
     /// table creation cache to reflect the new table state.
-    async fn truncate_table(&self, table_id: TableId, is_cdc_truncate: bool) -> EtlResult<()> {
+    async fn truncate_table(
+        &self,
+        replicated_table_schema: &ReplicatedTableSchema,
+    ) -> EtlResult<()> {
         let mut inner = self.inner.lock().await;
+        let table_id = replicated_table_schema.id();
 
-        let Some(table_schema) = self.store.get_table_schema(&table_id).await? else {
-            // If this is not a cdc truncate event, we just raise a warning since it could be that the
-            // table schema is not there.
-            if !is_cdc_truncate {
-                warn!(
-                    "the table schema for table {table_id} was not found in the schema store while processing truncate events for Iceberg",
-                );
-
-                return Ok(());
-            }
-
-            // If this is a cdc truncate event, the table schema must be there, so we raise an error.
-            bail!(
-                ErrorKind::MissingTableSchema,
-                "Table not found in the schema store",
-                format!(
-                    "The table schema for table {table_id} was not found in the schema store while processing truncate events for Iceberg"
-                )
-            );
-        };
-
+        // Check if a table mapping exists for this table.
+        //
+        // If no mapping exists, it means the table was never created in Iceberg (e.g., due to
+        // errors during copy). In this case, we skip the truncate since there's nothing to truncate.
         let Some(iceberg_table_name) = self.store.get_table_mapping(&table_id).await? else {
-            // If this is not a cdc truncate event, we just raise a warning since it could be that the
-            // table mapping is not there.
-            if !is_cdc_truncate {
-                warn!(
-                    "the table mapping for table {table_id} was not found in the state store while processing truncate events for Iceberg",
-                );
-
-                return Ok(());
-            }
-
-            // If this is a cdc truncate event, the table mapping must be there, so we raise an error.
-            bail!(
-                ErrorKind::MissingTableMapping,
-                "Table mapping not found",
-                format!(
-                    "The table mapping for table id {table_id} was not found while processing truncate events for Iceberg"
-                )
+            warn!(
+                "skipping truncate for table {}: no mapping exists (table was likely never created)",
+                table_id
             );
+            return Ok(());
         };
 
-        let namespace = schema_to_namespace(&table_schema.name.schema);
+        let namespace = schema_to_namespace(&replicated_table_schema.name().schema);
         let namespace = inner.namespace.get_or(&namespace);
 
         self.client
@@ -242,7 +214,7 @@ where
         inner.created_tables.remove(&iceberg_table_name);
 
         // We recreate the table with the same schema.
-        self.prepare_table_for_streaming(&mut inner, table_id)
+        self.prepare_table_for_streaming(&mut inner, replicated_table_schema)
             .await?;
 
         Ok(())
@@ -255,14 +227,14 @@ where
     /// All rows are treated as upsert operations in this context.
     async fn write_table_rows(
         &self,
-        table_id: TableId,
+        replicated_table_schema: &ReplicatedTableSchema,
         mut table_rows: Vec<TableRow>,
     ) -> EtlResult<()> {
         let (namespace, iceberg_table_name) = {
             // We hold the lock for the entire preparation to avoid race conditions since the consistency
             // of this code path is critical.
             let mut inner = self.inner.lock().await;
-            self.prepare_table_for_streaming(&mut inner, table_id)
+            self.prepare_table_for_streaming(&mut inner, replicated_table_schema)
                 .await?
         };
 
@@ -303,7 +275,10 @@ where
         let mut event_iter = events.into_iter().peekable();
 
         while event_iter.peek().is_some() {
-            let mut table_id_to_table_rows = HashMap::new();
+            // Maps table ID to (schema, rows); schema is the first one seen for that table.
+            // Once schema change support is implemented, we will re-implement this.
+            let mut table_id_to_data: HashMap<TableId, (ReplicatedTableSchema, Vec<TableRow>)> =
+                HashMap::new();
 
             // Process events until we hit a truncate event or run out of events
             while let Some(event) = event_iter.peek() {
@@ -323,9 +298,10 @@ where
                         insert.table_row.values.push(Cell::String(sequence_number));
 
                         let table_id = insert.replicated_table_schema.id();
-                        let table_rows: &mut Vec<TableRow> =
-                            table_id_to_table_rows.entry(table_id).or_default();
-                        table_rows.push(insert.table_row);
+                        let entry = table_id_to_data.entry(table_id).or_insert_with(|| {
+                            (insert.replicated_table_schema.clone(), Vec::new())
+                        });
+                        entry.1.push(insert.table_row);
                     }
                     Event::Update(mut update) => {
                         let sequence_number =
@@ -337,9 +313,10 @@ where
                         update.table_row.values.push(Cell::String(sequence_number));
 
                         let table_id = update.replicated_table_schema.id();
-                        let table_rows: &mut Vec<TableRow> =
-                            table_id_to_table_rows.entry(table_id).or_default();
-                        table_rows.push(update.table_row);
+                        let entry = table_id_to_data.entry(table_id).or_insert_with(|| {
+                            (update.replicated_table_schema.clone(), Vec::new())
+                        });
+                        entry.1.push(update.table_row);
                     }
                     Event::Delete(delete) => {
                         let Some((_, mut old_table_row)) = delete.old_table_row else {
@@ -355,9 +332,10 @@ where
                         old_table_row.values.push(Cell::String(sequence_number));
 
                         let table_id = delete.replicated_table_schema.id();
-                        let table_rows: &mut Vec<TableRow> =
-                            table_id_to_table_rows.entry(table_id).or_default();
-                        table_rows.push(old_table_row);
+                        let entry = table_id_to_data.entry(table_id).or_insert_with(|| {
+                            (delete.replicated_table_schema.clone(), Vec::new())
+                        });
+                        entry.1.push(old_table_row);
                     }
                     _ => {
                         // Every other event type is currently not supported.
@@ -367,15 +345,15 @@ where
             }
 
             // Process accumulated events for each table.
-            if !table_id_to_table_rows.is_empty() {
+            if !table_id_to_data.is_empty() {
                 let mut join_set = JoinSet::new();
 
-                for (table_id, table_rows) in table_id_to_table_rows {
+                for (_, (replicated_table_schema, table_rows)) in table_id_to_data {
                     let (namespace, iceberg_table_name) = {
                         // We hold the lock for the entire preparation to avoid race conditions since the consistency
                         // of this code path is critical.
                         let mut inner = self.inner.lock().await;
-                        self.prepare_table_for_streaming(&mut inner, table_id)
+                        self.prepare_table_for_streaming(&mut inner, &replicated_table_schema)
                             .await?
                     };
 
@@ -406,7 +384,7 @@ where
                 );
             }
 
-            // Collect and deduplicate all table IDs from all truncate events.
+            // Collect and deduplicate schemas from all truncate events.
             //
             // This is done as an optimization since if we have multiple tables being truncated in a
             // row without applying other events in the meanwhile, it doesn't make any sense to create
@@ -421,9 +399,8 @@ where
                 }
             }
 
-            for (table_id, _schema) in truncate_schemas {
-                // TODO: Use schema directly instead of looking it up from store.
-                self.truncate_table(table_id, true).await?;
+            for (_, schema) in truncate_schemas {
+                self.truncate_table(&schema).await?;
             }
         }
 
@@ -432,46 +409,33 @@ where
 
     /// Prepares a table for CDC streaming operations with schema-aware table creation.
     ///
-    /// Retrieves the table schema from the store, augments it with CDC columns,
-    /// and ensures the corresponding Iceberg table exists in the namespace.
-    /// Uses caching to avoid redundant table creation checks and holds a lock
-    /// during the entire preparation to prevent race conditions.
+    /// Augments the provided schema with CDC columns and ensures the corresponding
+    /// Iceberg table exists in the namespace. Uses caching to avoid redundant table
+    /// creation checks and holds a lock during the entire preparation to prevent race conditions.
     async fn prepare_table_for_streaming(
         &self,
         inner: &mut Inner,
-        table_id: TableId,
+        replicated_table_schema: &ReplicatedTableSchema,
     ) -> EtlResult<(String, IcebergTableName)> {
-        let table_schema = self.get_table_schema(table_id).await?;
-        let table_schema = Self::modify_schema_with_cdc_columns(&table_schema);
+        let table_id = replicated_table_schema.id();
+        let table_name = replicated_table_schema.name();
+        let column_schemas = Self::build_cdc_column_schemas(replicated_table_schema);
 
         let iceberg_table_name =
-            table_name_to_iceberg_table_name(&table_schema.name, inner.namespace.is_single());
+            table_name_to_iceberg_table_name(table_name, inner.namespace.is_single());
         let iceberg_table_name = self
             .get_or_create_iceberg_table_name(&table_id, iceberg_table_name)
             .await?;
 
-        let namespace = schema_to_namespace(&table_schema.name.schema);
+        let namespace = schema_to_namespace(&table_name.schema);
         let namespace = inner.namespace.get_or(&namespace).to_string();
         let namespace = self.create_namespace_if_missing(inner, namespace).await?;
 
         let iceberg_table_name = self
-            .create_table_if_missing(inner, iceberg_table_name, &namespace, &table_schema)
+            .create_table_if_missing(inner, iceberg_table_name, &namespace, &column_schemas)
             .await?;
 
         Ok((namespace, iceberg_table_name))
-    }
-
-    async fn get_table_schema(&self, table_id: TableId) -> EtlResult<Arc<TableSchema>> {
-        self.store
-            .get_table_schema(&table_id)
-            .await?
-            .ok_or_else(|| {
-                etl_error!(
-                    ErrorKind::MissingTableSchema,
-                    "Table schema not found",
-                    format!("No schema found for table {table_id}")
-                )
-            })
     }
 
     /// Creates a namespace if it is missing in the destination.
@@ -504,18 +468,14 @@ where
         inner: &mut Inner,
         iceberg_table_name: String,
         namespace: &str,
-        table_schema: &TableSchema,
+        column_schemas: &[ColumnSchema],
     ) -> EtlResult<String> {
         if inner.created_tables.contains(&iceberg_table_name) {
             return Ok(iceberg_table_name);
         }
 
         self.client
-            .create_table_if_missing(
-                namespace,
-                iceberg_table_name.clone(),
-                &table_schema.column_schemas,
-            )
+            .create_table_if_missing(namespace, iceberg_table_name.clone(), column_schemas)
             .await
             .map_err(iceberg_error_to_etl_error)?;
 
@@ -524,25 +484,27 @@ where
         Ok(iceberg_table_name)
     }
 
-    /// Derives a CDC table schema by adding CDC-specific columns.
+    /// Builds column schemas with CDC-specific columns added.
     ///
-    /// Creates a new table schema based on the source table schema with two
-    /// additional columns for CDC operations:
-    /// - `cdc_operation`: Tracks whether the row represents an upsert or delete
+    /// Takes the replicated columns from the schema and adds two additional columns
+    /// for CDC operations:
+    /// - `cdc_operation`: Tracks whether the row represents an insert, update, or delete
     /// - `sequence_number`: Provides ordering information based on WAL LSN
     ///
     /// These columns enable CDC consumers to understand the chronological order
     /// of changes and distinguish between different types of operations.
-    fn modify_schema_with_cdc_columns(table_schema: &TableSchema) -> TableSchema {
-        let mut final_schema = table_schema.clone();
+    fn build_cdc_column_schemas(
+        replicated_table_schema: &ReplicatedTableSchema,
+    ) -> Vec<ColumnSchema> {
+        let mut column_schemas: Vec<ColumnSchema> =
+            replicated_table_schema.column_schemas().cloned().collect();
 
         // Add cdc specific columns.
-        let cdc_operation_col =
-            find_unique_column_name(&final_schema.column_schemas, CDC_OPERATION_COLUMN_NAME);
+        let cdc_operation_col = find_unique_column_name(&column_schemas, CDC_OPERATION_COLUMN_NAME);
         let sequence_number_col =
-            find_unique_column_name(&final_schema.column_schemas, SEQUENCE_NUMBER_COLUMN_NAME);
+            find_unique_column_name(&column_schemas, SEQUENCE_NUMBER_COLUMN_NAME);
 
-        final_schema.add_column_schema(ColumnSchema::new(
+        column_schemas.push(ColumnSchema::new(
             cdc_operation_col,
             Type::TEXT,
             -1,
@@ -550,7 +512,7 @@ where
             None,
             false,
         ));
-        final_schema.add_column_schema(ColumnSchema::new(
+        column_schemas.push(ColumnSchema::new(
             sequence_number_col,
             Type::TEXT,
             -1,
@@ -558,7 +520,8 @@ where
             None,
             false,
         ));
-        final_schema
+
+        column_schemas
     }
 
     /// Retrieves or creates a table mapping for the Iceberg table name.
@@ -586,7 +549,7 @@ where
 
 impl<S> Destination for IcebergDestination<S>
 where
-    S: StateStore + SchemaStore + Send + Sync,
+    S: StateStore + Send + Sync,
 {
     /// Returns the identifier name for this destination type.
     fn name() -> &'static str {
@@ -601,8 +564,7 @@ where
         &self,
         replicated_table_schema: &ReplicatedTableSchema,
     ) -> EtlResult<()> {
-        self.truncate_table(replicated_table_schema.id(), false)
-            .await?;
+        self.truncate_table(replicated_table_schema).await?;
 
         Ok(())
     }
@@ -617,7 +579,7 @@ where
         replicated_table_schema: &ReplicatedTableSchema,
         table_rows: Vec<TableRow>,
     ) -> EtlResult<()> {
-        self.write_table_rows(replicated_table_schema.id(), table_rows)
+        self.write_table_rows(replicated_table_schema, table_rows)
             .await?;
 
         Ok(())
