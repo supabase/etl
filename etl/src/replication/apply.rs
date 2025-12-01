@@ -18,12 +18,7 @@ use crate::bail;
 use crate::concurrency::shutdown::ShutdownRx;
 use crate::concurrency::signal::SignalRx;
 use crate::concurrency::stream::{TimeoutStream, TimeoutStreamResult};
-use crate::conversions::event::{
-    DDL_MESSAGE_PREFIX, parse_ddl_schema_change_message, parse_event_from_begin_message,
-    parse_event_from_commit_message, parse_event_from_delete_message,
-    parse_event_from_insert_message, parse_event_from_truncate_message,
-    parse_event_from_update_message, parse_replicated_column_names,
-};
+use crate::conversions::event::{message_PREFIX, parse_ddl_schema_change_message, parse_event_from_begin_message, parse_event_from_commit_message, parse_event_from_delete_message, parse_event_from_insert_message, parse_event_from_truncate_message, parse_event_from_update_message, parse_replicated_column_names, DDL_MESSAGE_PREFIX};
 use crate::destination::Destination;
 use crate::error::{ErrorKind, EtlResult};
 use crate::metrics::{
@@ -1478,6 +1473,7 @@ where
 /// Handles a logical replication message.
 ///
 /// Processes `pg_logical_emit_message` messages from the replication stream.
+///
 /// Currently handles DDL schema change messages with the `supabase_etl_ddl` prefix
 /// for tracking schema changes.
 async fn handle_logical_message<T>(
@@ -1488,71 +1484,43 @@ async fn handle_logical_message<T>(
 where
     T: ApplyLoopHook,
 {
+    // If the prefix is unknown, we don't want to process it.
     let prefix = message.prefix()?;
+    if prefix != DDL_MESSAGE_PREFIX {
+        return Ok(HandleMessageResult::no_event());
+    }
+
     let content = message.content()?;
+    let Ok(message) = parse_ddl_schema_change_message(content) else {
+        bail!(
+            ErrorKind::SourceConnectionFailed,
+            "PostgreSQL connection has been closed during the apply loop"
+        );
+    };
 
-    debug!(
-        transactional = message.flags(),
-        prefix = prefix,
-        "received logical message"
-    );
-
-    // Check if this is a DDL schema change message
-    if prefix == DDL_MESSAGE_PREFIX {
-        match parse_ddl_schema_change_message(content) {
-            Ok(ddl_message) => {
-                let table_id = TableId::new(ddl_message.table_id as u32);
-
-                // For transactional messages, check if we should apply changes for this table.
-                // Non-transactional messages (flags == 0) are processed regardless.
-                if message.flags() == 1 {
-                    if let Some(remote_final_lsn) = state.remote_final_lsn {
-                        if !hook
-                            .should_apply_changes(table_id, remote_final_lsn)
-                            .await?
-                        {
-                            debug!(
-                                table_id = %table_id,
-                                "skipping DDL message for table not being replicated"
-                            );
-                            return Ok(HandleMessageResult::no_event());
-                        }
-                    }
-                }
-
-                info!(
-                    table_id = ddl_message.table_id,
-                    table_name = %ddl_message.table_name,
-                    schema_name = %ddl_message.schema_name,
-                    event = %ddl_message.event,
-                    columns = ddl_message.columns.len(),
-                    "received DDL schema change message"
-                );
-
-                // Log the columns for debugging
-                for col in &ddl_message.columns {
-                    debug!(
-                        name = %col.name,
-                        ordinal_position = col.ordinal_position,
-                        type_oid = col.type_oid,
-                        nullable = col.nullable,
-                        primary_key_ordinal_position = ?col.primary_key_ordinal_position,
-                        "DDL message column"
-                    );
-                }
-
-                // TODO: In the future, update the stored schema here
-                // For now, we just log the schema change message
-            }
-            Err(err) => {
-                warn!(
-                    error = %err,
-                    content = content,
-                    "failed to parse DDL schema change message"
-                );
-            }
+    let table_id = TableId::new(message.table_id as u32);
+    // TODO: check if this check is required or we can leverage the idempotency of schema writing and
+    //  we always unconditionally update the schema.
+    if let Some(remote_final_lsn) = state.remote_final_lsn {
+        if !hook
+            .should_apply_changes(table_id, remote_final_lsn)
+            .await?
+        {
+            return Ok(HandleMessageResult::no_event());
         }
     }
+
+    info!(
+        table_id = message.table_id,
+        table_name = %message.table_name,
+        schema_name = %message.schema_name,
+        event = %message.event,
+        columns = message.columns.len(),
+        "received ddl schema change message"
+    );
+
+    // TODO: In the future, update the stored schema here based on the start_lsn of the
+    //  event as identifier.
 
     Ok(HandleMessageResult::no_event())
 }
