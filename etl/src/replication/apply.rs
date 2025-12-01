@@ -283,9 +283,17 @@ impl HandleMessageResult {
     }
 }
 
+/// Represents replication column information in either resolved or unresolved form.
+///
+/// When a RELATION message arrives, we extract the replicated column names. If the table
+/// schema is already available in the schema store, we immediately build a [`ReplicationMask`].
+/// Otherwise, we store the raw column names and defer mask construction until the first
+/// DML event for that table, when the schema will be available.
 #[derive(Debug)]
 enum ReplicationMaskOrRaw {
+    /// A fully resolved replication mask built from the table schema.
     Mask(ReplicationMask),
+    /// Raw column names awaiting schema resolution to build the mask.
     Raw(HashSet<String>),
 }
 
@@ -322,10 +330,11 @@ struct ApplyLoopState {
     shutdown_discarded: bool,
     /// Tracks which columns are being replicated for each table.
     ///
-    /// This map is populated from relation messages during replication. For each table,
-    /// it contains a [`ReplicationMask`] indicating which columns are replicated.
-    /// This allows the apply loop to process only the columns that are actually
-    /// being replicated.
+    /// This map is populated from RELATION messages during replication. Each entry contains
+    /// either a resolved [`ReplicationMask`] or raw column names pending resolution. The mask
+    /// is resolved lazily: if the table schema is available when the RELATION message arrives,
+    /// the mask is built immediately; otherwise, raw column names are stored and the mask is
+    /// built on the first DML event when the schema becomes available.
     replication_masks: HashMap<TableId, ReplicationMaskOrRaw>,
 }
 
@@ -348,12 +357,17 @@ impl ApplyLoopState {
         }
     }
 
-    /// Returns the replication mask for a table.
+    /// Returns the replication mask or raw column names for a table.
+    ///
+    /// Returns `None` if no RELATION message has been received for this table yet.
     fn get_replication_mask_or_raw(&self, table_id: &TableId) -> Option<&ReplicationMaskOrRaw> {
         self.replication_masks.get(table_id)
     }
 
-    /// Updates the replication mask for a table based on a relation message.
+    /// Stores the replication mask or raw column names for a table.
+    ///
+    /// Called when processing RELATION messages or when resolving raw column names
+    /// to a proper mask during DML event handling.
     fn set_replication_mask_or_raw(&mut self, table_id: TableId, mask: ReplicationMaskOrRaw) {
         self.replication_masks.insert(table_id, mask);
     }
@@ -1212,22 +1226,26 @@ where
     Ok(result)
 }
 
-/// Handles Postgres RELATION messages that describes the schema of the data that will be sent in
-/// the logical replication stream.
+/// Handles Postgres RELATION messages that describe the schema of data in the replication stream.
 ///
-/// We unconditionally process each RELATION message to compute the replication mask for a specific
-/// table in this apply loop, which allows us to process columns from the stored table schema correctly.
+/// RELATION messages are sent by Postgres before any DML events for a table, describing which
+/// columns are being replicated. This function extracts the replicated column names and either:
 ///
-/// If no RELATION message is supplied, the pipeline will not be able to determine which columns of
-/// its stored schema are used for replication.
+/// 1. **Immediate resolution**: If the table schema is already in the schema store (e.g., from
+///    a previous pipeline run or after table sync), builds a [`ReplicationMask`] immediately.
 ///
-/// For now, no schema change is supported; however, this mechanism generalizes well over table schema
-/// support since we just have to guarantee that the DDL change is processed in the schema store before
-/// receiving a RELATION message.
+/// 2. **Deferred resolution**: If the table schema is not yet available (e.g., during initial
+///    table sync before the schema is stored), stores the raw column names. The mask will be
+///    built lazily when the first DML event arrives via [`get_or_build_replicated_table_schema`].
+///
+/// This lazy resolution pattern is necessary because RELATION messages can arrive before the
+/// table sync worker has stored the table schema, but DML events always arrive after.
+///
+/// If no RELATION message is received for a table before its DML events, processing will fail
+/// as there's no way to determine which columns are being replicated.
 async fn handle_relation_message<S, T>(
     state: &mut ApplyLoopState,
     message: &protocol::RelationBody,
-    // TODO: remove later.
     _hook: &T,
     schema_store: &S,
 ) -> EtlResult<HandleMessageResult>
@@ -1237,11 +1255,9 @@ where
 {
     let table_id = TableId::new(message.rel_id());
 
-    // Extract the replicated column names from the relation message.
     let replicated_columns = parse_replicated_column_names(message)?;
 
-    // We try to get the table schema, if we have it, we compute the replication mask, otherwise
-    // we store the raw set of columns for later resolution.
+    // Build the mask immediately if schema is available, otherwise store raw columns for later.
     let replication_mask_or_raw = match schema_store.get_table_schema(&table_id).await? {
         Some(table_schema) => {
             info!(
@@ -1506,6 +1522,17 @@ where
     Ok(HandleMessageResult::no_event())
 }
 
+/// Retrieves or builds a [`ReplicatedTableSchema`] for the given table.
+///
+/// This function handles the lazy resolution of replication masks. When a RELATION message
+/// is received before the table schema is available (e.g., during table sync), the raw
+/// column names are stored. This function resolves them to a proper [`ReplicationMask`]
+/// when the schema becomes available, caching the result for subsequent DML events.
+///
+/// # Errors
+///
+/// Returns an error if no RELATION message was received for this table (missing replication
+/// info) or if the table schema is not found in the schema store.
 async fn get_or_build_replicated_table_schema<S>(
     state: &mut ApplyLoopState,
     table_id: &TableId,
@@ -1514,13 +1541,12 @@ async fn get_or_build_replicated_table_schema<S>(
 where
     S: SchemaStore + Clone + Send + 'static,
 {
-    // Get the replication mask from the state or bail if it's not present.
     let Some(replication_mask_or_raw) = state.get_replication_mask_or_raw(table_id) else {
         bail!(
             ErrorKind::InvalidState,
             "Missing replication mask",
             format!(
-                "No relation mask was built to process this event for table {}",
+                "No RELATION message was received for table {} before this DML event",
                 table_id
             )
         );
@@ -1528,15 +1554,15 @@ where
 
     let table_schema = get_table_schema(schema_store, table_id).await?;
 
-    // Based on the type of replication mask, we either immediately return it or built it from the
-    // raw set of columns.
     match replication_mask_or_raw {
         ReplicationMaskOrRaw::Mask(replication_mask) => Ok(ReplicatedTableSchema::from_mask(
             table_schema,
             replication_mask.clone(),
         )),
         ReplicationMaskOrRaw::Raw(replicated_column_names) => {
+            // Resolve raw column names to a mask now that the schema is available.
             let replication_mask = ReplicationMask::build(&table_schema, replicated_column_names);
+            // Cache the resolved mask for subsequent events.
             state.set_replication_mask_or_raw(
                 *table_id,
                 ReplicationMaskOrRaw::Mask(replication_mask.clone()),
