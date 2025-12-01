@@ -2,8 +2,7 @@ use etl::destination::Destination;
 use etl::error::{ErrorKind, EtlError, EtlResult};
 use etl::store::state::StateStore;
 use etl::types::{
-    Cell, ColumnSchema, Event, ReplicatedTableSchema, TableId, TableName, TableRow,
-    generate_sequence_number,
+    Cell, Event, ReplicatedTableSchema, TableId, TableName, TableRow, generate_sequence_number,
 };
 use etl::{bail, etl_error};
 use gcp_bigquery_client::storage::TableDescriptor;
@@ -464,7 +463,7 @@ where
             .prepare_table_for_streaming(replicated_table_schema, false)
             .await?;
 
-        // Add CDC operation type to all rows (no lock needed).
+        // Add the CDC operation type to all rows (no lock needed).
         for table_row in table_rows.iter_mut() {
             table_row
                 .values
@@ -594,8 +593,9 @@ where
                 let mut table_batches = Vec::with_capacity(table_id_to_data.len());
 
                 for (_, (replicated_table_schema, table_rows)) in table_id_to_data {
-                    let (sequenced_bigquery_table_id, table_descriptor) =
-                        self.prepare_table_for_streaming(&replicated_table_schema, true).await?;
+                    let (sequenced_bigquery_table_id, table_descriptor) = self
+                        .prepare_table_for_streaming(&replicated_table_schema, true)
+                        .await?;
 
                     let table_batch = self.client.create_table_batch(
                         &self.dataset_id,
@@ -667,16 +667,19 @@ where
             let table_id = replicated_table_schema.id();
 
             // We need to determine the current sequenced table ID for this table.
-            let sequenced_bigquery_table_id =
-                self.get_sequenced_bigquery_table_id(&table_id)
-                    .await?
-                    .ok_or_else(|| etl_error!(
-                        ErrorKind::MissingTableMapping,
-                        "Table mapping not found",
-                        format!(
-                            "The table mapping for table id {table_id} was not found while processing truncate events for BigQuery"
-                        )
-                    ))?;
+            //
+            // If no mapping exists, it means the table was never created in BigQuery (e.g., due to
+            // validation errors during copy). In this case, we skip the truncate since there's
+            // nothing to truncate.
+            let Some(sequenced_bigquery_table_id) =
+                self.get_sequenced_bigquery_table_id(&table_id).await?
+            else {
+                warn!(
+                    "skipping truncate for table {}: no mapping exists (table was likely never created)",
+                    table_id
+                );
+                continue;
+            };
 
             // We compute the new sequence table ID since we want a new table for each truncate event.
             let next_sequenced_bigquery_table_id = sequenced_bigquery_table_id.next();

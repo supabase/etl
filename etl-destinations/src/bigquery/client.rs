@@ -1,8 +1,6 @@
 use etl::error::{ErrorKind, EtlError, EtlResult};
 use etl::etl_error;
-use etl::types::{
-    Cell, ColumnSchema, ReplicatedTableSchema, TableRow, TableSchema, Type, is_array_type,
-};
+use etl::types::{Cell, ColumnSchema, ReplicatedTableSchema, TableRow, Type, is_array_type};
 use gcp_bigquery_client::google::cloud::bigquery::storage::v1::RowError;
 use gcp_bigquery_client::storage::ColumnMode;
 use gcp_bigquery_client::yup_oauth2::parse_service_account_key;
@@ -118,9 +116,9 @@ impl BigQueryClient {
     pub async fn new_with_flow_authenticator<S: AsRef<[u8]>, P: Into<std::path::PathBuf>>(
         project_id: BigQueryProjectId,
         secret: S,
-        persistant_file_path: P,
+        persistent_file_path: P,
     ) -> EtlResult<BigQueryClient> {
-        let client = Client::from_installed_flow_authenticator(secret, persistant_file_path)
+        let client = Client::from_installed_flow_authenticator(secret, persistent_file_path)
             .await
             .map_err(bq_error_to_etl_error)?;
 
@@ -209,12 +207,12 @@ impl BigQueryClient {
         &self,
         dataset_id: &BigQueryDatasetId,
         table_id: &BigQueryTableId,
-        column_schemas: &[ColumnSchema],
+        replicated_table_schema: &ReplicatedTableSchema,
         max_staleness_mins: Option<u16>,
     ) -> EtlResult<()> {
         let full_table_name = self.full_table_name(dataset_id, table_id)?;
 
-        let columns_spec = Self::create_columns_spec(column_schemas)?;
+        let columns_spec = Self::create_columns_spec(replicated_table_schema)?;
         let max_staleness_option = if let Some(max_staleness_mins) = max_staleness_mins {
             Self::max_staleness_option(max_staleness_mins)
         } else {
@@ -490,7 +488,9 @@ impl BigQueryClient {
     /// Creates a primary key clause for table creation.
     ///
     /// Generates a primary key constraint clause from columns marked as primary key.
-    fn add_primary_key_clause(replicated_table_schema: &ReplicatedTableSchema) -> EtlResult<String> {
+    fn add_primary_key_clause(
+        replicated_table_schema: &ReplicatedTableSchema,
+    ) -> EtlResult<String> {
         let identity_columns: Vec<String> = replicated_table_schema
             .column_schemas()
             .filter(|s| s.primary_key())
@@ -512,7 +512,8 @@ impl BigQueryClient {
 
     /// Builds complete column specifications for CREATE TABLE statements.
     fn create_columns_spec(replicated_table_schema: &ReplicatedTableSchema) -> EtlResult<String> {
-        let mut column_spec = replicated_table_schema.column_schemas()
+        let mut column_spec = replicated_table_schema
+            .column_schemas()
             .map(Self::column_spec)
             .collect::<EtlResult<Vec<_>>>()?
             .join(",");
@@ -791,7 +792,7 @@ fn row_error_to_etl_error(err: RowError) -> EtlError {
 mod tests {
     use super::*;
 
-    use etl::types::TableName;
+    use etl::types::{TableId, TableName, TableSchema};
     use std::collections::HashSet;
 
     /// Creates a test column schema with common defaults.
@@ -819,7 +820,7 @@ mod tests {
     fn test_replicated_schema(columns: Vec<ColumnSchema>) -> ReplicatedTableSchema {
         let column_names: HashSet<String> = columns.iter().map(|c| c.name.clone()).collect();
         let table_schema = Arc::new(TableSchema::new(
-            1, // Dummy table ID
+            TableId(1), // Dummy table ID
             TableName::new("public".to_string(), "test_table".to_string()),
             columns,
         ));
@@ -924,8 +925,7 @@ mod tests {
             test_column("name", Type::TEXT, 2, true, false),
         ];
         let schema_with_pk = test_replicated_schema(columns_with_pk);
-        let pk_clause =
-            BigQueryClient::add_primary_key_clause(&schema_with_pk).expect("pk clause");
+        let pk_clause = BigQueryClient::add_primary_key_clause(&schema_with_pk).expect("pk clause");
         assert_eq!(pk_clause, ", primary key (`id`) not enforced");
 
         let columns_with_composite_pk = vec![
@@ -934,9 +934,8 @@ mod tests {
             test_column("name", Type::TEXT, 3, true, false),
         ];
         let schema_with_composite_pk = test_replicated_schema(columns_with_composite_pk);
-        let composite_pk_clause =
-            BigQueryClient::add_primary_key_clause(&schema_with_composite_pk)
-                .expect("composite pk clause");
+        let composite_pk_clause = BigQueryClient::add_primary_key_clause(&schema_with_composite_pk)
+            .expect("composite pk clause");
         assert_eq!(
             composite_pk_clause,
             ", primary key (`tenant_id`,`id`) not enforced"
@@ -1126,6 +1125,7 @@ mod tests {
             test_column("id", Type::INT4, 1, false, true),
             test_column("name", Type::TEXT, 2, true, false),
         ];
+        let schema = test_replicated_schema(columns);
 
         // Simulate the query generation logic
         let full_table_name = format!(
@@ -1134,7 +1134,7 @@ mod tests {
             dataset = BigQueryClient::sanitize_identifier(dataset_id, "dataset").unwrap(),
             table = BigQueryClient::sanitize_identifier(table_id, "table").unwrap()
         );
-        let columns_spec = BigQueryClient::create_columns_spec(&columns).unwrap();
+        let columns_spec = BigQueryClient::create_columns_spec(&schema).unwrap();
         let query = format!("create or replace table {full_table_name} {columns_spec}");
 
         let expected_query = "create or replace table `test-project.test_dataset.test_table` (`id` int64 not null,`name` string, primary key (`id`) not enforced)";
@@ -1149,6 +1149,7 @@ mod tests {
         let max_staleness_mins = 15;
 
         let columns = vec![test_column("id", Type::INT4, 1, false, true)];
+        let schema = test_replicated_schema(columns);
 
         // Simulate the query generation logic with staleness
         let full_table_name = format!(
@@ -1157,7 +1158,7 @@ mod tests {
             dataset = BigQueryClient::sanitize_identifier(dataset_id, "dataset").unwrap(),
             table = BigQueryClient::sanitize_identifier(table_id, "table").unwrap()
         );
-        let columns_spec = BigQueryClient::create_columns_spec(&columns).unwrap();
+        let columns_spec = BigQueryClient::create_columns_spec(&schema).unwrap();
         let max_staleness_option = BigQueryClient::max_staleness_option(max_staleness_mins);
         let query = format!(
             "create or replace table {full_table_name} {columns_spec} {max_staleness_option}"
