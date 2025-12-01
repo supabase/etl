@@ -825,7 +825,7 @@ mod tests {
             columns,
         ));
         let replication_mask = ReplicationMask::build(&table_schema, &column_names);
-        
+
         ReplicatedTableSchema::from_mask(table_schema, replication_mask)
     }
 

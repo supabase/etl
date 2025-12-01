@@ -7,12 +7,17 @@
 //! This mask is needed to correctly decode replication events, since the stream only
 //! contains values for replicated columns. Both the apply worker (for CDC events) and
 //! table sync workers (for initial copy) need access to these masks, so they are stored
-//! in a shared container that is passed to all workers.
+//! in a shared container passed to all workers.
+//!
+//! The replication mask is kept in-memory only because PostgreSQL guarantees that RELATION
+//! messages are sent at the start of each connection and whenever the schema changes. This
+//! ensures we always receive schema information before any data events that depend on it,
+//! allowing us to compute the mask on-demand without persistence.
 //!
 //! **Limitation**: Adding or removing columns from a publication while the pipeline is
 //! running will cause schema mismatches. Downstream tables that rely on a fixed schema
 //! will break because the replicated column set changes but the destination schema does
-//! not automatically update. Given the supplied
+//! not automatically update.
 
 use etl_postgres::types::{ReplicationMask, TableId};
 use std::collections::HashMap;

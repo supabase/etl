@@ -67,9 +67,11 @@ fn events_equal(a: &Event, b: &Event) -> bool {
             if a.options != b.options || a.truncated_tables.len() != b.truncated_tables.len() {
                 return false;
             }
+
             // Compare table IDs of truncated tables
             let a_ids: Vec<_> = a.truncated_tables.iter().map(|s| s.id()).collect();
             let b_ids: Vec<_> = b.truncated_tables.iter().map(|s| s.id()).collect();
+
             a_ids == b_ids
         }
         (Event::Insert(a), Event::Insert(b)) => {
@@ -103,10 +105,12 @@ fn events_equal(a: &Event, b: &Event) -> bool {
 /// thus in some tests we might have to exclude duplicates while performing assertions.
 pub fn deduplicate_events(events: &[Event]) -> Vec<Event> {
     let mut result: Vec<Event> = Vec::with_capacity(events.len());
-    for e in events.iter().cloned() {
-        if !result.iter().any(|existing| events_equal(existing, &e)) {
-            result.push(e);
+
+    for event in events.iter().cloned() {
+        if !result.iter().any(|existing| events_equal(existing, &event)) {
+            result.push(event);
         }
     }
+
     result
 }
