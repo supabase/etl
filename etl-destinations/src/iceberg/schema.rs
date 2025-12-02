@@ -95,10 +95,10 @@ pub fn postgres_to_iceberg_schema(
         let current_field_id = field_id;
 
         let field_type = if is_array_type(&column_schema.typ) {
-            // For array types, we need to assign a unique field ID to the list element
-            // We increment field_id and use it for the element field.
+            // For array types, we need to assign a unique field ID to the list element.
+            // The list field uses current_field_id, the element field uses the next ID.
             field_id += 1;
-            postgres_array_type_to_iceberg_type(&column_schema.typ, field_id - 1)
+            postgres_array_type_to_iceberg_type(&column_schema.typ, field_id)
         } else {
             postgres_scalar_type_to_iceberg_type(&column_schema.typ)
         };
