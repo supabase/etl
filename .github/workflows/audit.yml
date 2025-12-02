@@ -17,10 +17,12 @@ jobs:
     runs-on: blacksmith-2vcpu-ubuntu-2404
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0
 
       - name: Install cargo-deny
-        uses: taiki-e/install-action@cargo-deny
+        uses: taiki-e/install-action@1ee706eb04986370fc60419ba172594c51067f29 # v2.62.58
+        with:
+          tool: cargo-deny
 
       - name: Scan for Vulnerabilities
         run: cargo deny check advisories

@@ -1,0 +1,25 @@
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      arrow:
+        patterns: ["arrow", "parquet"]
+      iceberg:
+        patterns: ["iceberg", "iceberg-catalog-rest"]
+  - package-ecosystem: docker
+    directories:
+      - etl-api
+      - etl-replicator
+    schedule:
+      interval: weekly
+  - package-ecosystem: docker-compose
+    directory: scripts
+    schedule:
+      interval: weekly
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
