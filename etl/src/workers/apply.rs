@@ -19,9 +19,7 @@ use crate::replication::apply::{ApplyLoopAction, ApplyLoopHook, start_apply_loop
 use crate::replication::client::PgReplicationClient;
 use crate::replication::common::get_active_table_replication_states;
 use crate::replication::masks::ReplicationMasks;
-use crate::state::table::{
-    TableReplicationPhase, TableReplicationPhaseType,
-};
+use crate::state::table::{TableReplicationPhase, TableReplicationPhaseType};
 use crate::store::schema::SchemaStore;
 use crate::store::state::StateStore;
 use crate::types::PipelineId;
