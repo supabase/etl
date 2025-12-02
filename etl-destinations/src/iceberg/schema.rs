@@ -83,38 +83,50 @@ fn create_iceberg_list_type(element_type: PrimitiveType, field_id: i32) -> Icebe
 /// Primary key columns are converted to Iceberg identifier fields. This enables
 /// Iceberg to understand which columns uniquely identify rows in the table.
 /// Iceberg identifier fields are unordered (stored as a set).
+///
+/// Field IDs are assigned following iceberg-rust's convention: all outer field IDs
+/// are assigned first, then nested field IDs (e.g., list element fields). This ensures
+/// consistency with how the Iceberg library handles schema evolution.
 pub fn postgres_to_iceberg_schema(
     column_schemas: &[ColumnSchema],
 ) -> Result<IcebergSchema, iceberg::Error> {
-    let mut fields = Vec::new();
     let mut identifier_field_ids = Vec::new();
-    let mut field_id = 1;
 
-    // Convert each column to Iceberg field.
-    for column_schema in column_schemas {
-        let current_field_id = field_id;
+    // First pass: assign IDs to all outer fields (1, 2, 3, ...).
+    let mut outer_field_id = 1;
+    let outer_fields: Vec<_> = column_schemas
+        .iter()
+        .map(|col| {
+            let id = outer_field_id;
+            outer_field_id += 1;
+            (col, id)
+        })
+        .collect();
 
+    // Second pass: assign IDs to nested fields (list elements) and build the schema.
+    // Nested field IDs start after all outer field IDs.
+    let mut nested_field_id = outer_field_id;
+    let mut fields = Vec::new();
+
+    for (column_schema, field_id) in outer_fields {
         let field_type = if is_array_type(&column_schema.typ) {
-            // For array types, we need to assign a unique field ID to the list element.
-            // The list field uses current_field_id, the element field uses the next ID.
-            field_id += 1;
-            postgres_array_type_to_iceberg_type(&column_schema.typ, field_id)
+            let element_id = nested_field_id;
+            nested_field_id += 1;
+            postgres_array_type_to_iceberg_type(&column_schema.typ, element_id)
         } else {
             postgres_scalar_type_to_iceberg_type(&column_schema.typ)
         };
 
         let field = if column_schema.nullable {
-            NestedField::optional(current_field_id, &column_schema.name, field_type)
+            NestedField::optional(field_id, &column_schema.name, field_type)
         } else {
-            NestedField::required(current_field_id, &column_schema.name, field_type)
+            NestedField::required(field_id, &column_schema.name, field_type)
         };
         fields.push(Arc::new(field));
 
         if column_schema.primary_key() {
-            identifier_field_ids.push(current_field_id);
+            identifier_field_ids.push(field_id);
         }
-
-        field_id += 1;
     }
 
     let mut builder = IcebergSchema::builder().with_fields(fields);
