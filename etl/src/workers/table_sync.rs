@@ -873,33 +873,6 @@ where
         self.try_advance_phase(current_lsn, update_state).await
     }
 
-    /// Handles table replication errors for the table sync worker.
-    ///
-    /// This method processes errors specific to the table this worker manages.
-    /// If the error relates to this worker's table, it updates the state and
-    /// signals the worker to terminate. Errors for other tables are ignored.
-    async fn mark_table_errored(
-        &self,
-        table_replication_error: TableReplicationError,
-    ) -> EtlResult<ApplyLoopAction> {
-        if self.table_id != table_replication_error.table_id() {
-            // If the table is different from the one handled by this table sync worker, marking
-            // the table will be a noop, and we want to continue the loop.
-            return Ok(ApplyLoopAction::Continue);
-        }
-
-        // Since we already have access to the table sync worker state, we can avoid going through
-        // the pool, and we just modify the state here and also update the state store.
-        let mut inner = self.table_sync_worker_state.lock().await;
-        inner
-            .set_and_store(table_replication_error.into(), &self.state_store)
-            .await?;
-
-        // If a table is marked as errored, this worker should stop processing immediately since there
-        // is no need to continue, and for this we mark the loop as completed.
-        Ok(ApplyLoopAction::Complete)
-    }
-
     /// Determines whether changes should be applied for the given table.
     ///
     /// For table sync workers, changes are only applied if the table matches

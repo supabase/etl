@@ -487,27 +487,38 @@ impl BigQueryClient {
 
     /// Creates a primary key clause for table creation.
     ///
-    /// Generates a primary key constraint clause from columns marked as primary key.
+    /// Generates a primary key constraint clause from columns marked as primary key,
+    /// sorted by their ordinal position to ensure correct composite key ordering.
     fn add_primary_key_clause(
         replicated_table_schema: &ReplicatedTableSchema,
-    ) -> EtlResult<String> {
-        let identity_columns: Vec<String> = replicated_table_schema
+    ) -> EtlResult<Option<String>> {
+        let mut primary_key_columns: Vec<_> = replicated_table_schema
             .column_schemas()
             .filter(|s| s.primary_key())
+            .collect();
+
+        // If no primary key columns are marked, return early.
+        if primary_key_columns.is_empty() {
+            return Ok(None);
+        }
+
+        // Sort by primary_key_ordinal_position to ensure correct composite key ordering.
+        primary_key_columns.sort_by_key(|c| c.primary_key_ordinal_position);
+
+        let primary_key_columns: Vec<String> = primary_key_columns
+            .into_iter()
             .map(|c| {
                 Self::sanitize_identifier(&c.name, "BigQuery primary key column")
                     .map(|name| format!("`{name}`"))
             })
             .collect::<EtlResult<Vec<_>>>()?;
 
-        if identity_columns.is_empty() {
-            return Ok("".to_string());
-        }
-
-        Ok(format!(
+        let primary_key_clause = format!(
             ", primary key ({}) not enforced",
-            identity_columns.join(",")
-        ))
+            primary_key_columns.join(",")
+        );
+
+        Ok(Some(primary_key_clause))
     }
 
     /// Builds complete column specifications for CREATE TABLE statements.
@@ -518,7 +529,9 @@ impl BigQueryClient {
             .collect::<EtlResult<Vec<_>>>()?
             .join(",");
 
-        column_spec.push_str(&Self::add_primary_key_clause(replicated_table_schema)?);
+        if let Some(primary_key_clause) = Self::add_primary_key_clause(replicated_table_schema)? {
+            column_spec.push_str(&primary_key_clause);
+        }
 
         Ok(format!("({column_spec})"))
     }
@@ -804,14 +817,14 @@ mod tests {
         typ: Type,
         ordinal_position: i32,
         nullable: bool,
-        primary_key: bool,
+        primary_key_ordinal: Option<i32>,
     ) -> ColumnSchema {
         ColumnSchema::new(
             name.to_string(),
             typ,
             -1,
             ordinal_position,
-            if primary_key { Some(1) } else { None },
+            primary_key_ordinal,
             nullable,
         )
     }
@@ -887,23 +900,23 @@ mod tests {
 
     #[test]
     fn test_column_spec() {
-        let column_schema = test_column("test_col", Type::TEXT, 1, true, false);
+        let column_schema = test_column("test_col", Type::TEXT, 1, true, None);
         let spec = BigQueryClient::column_spec(&column_schema).expect("column spec generation");
         assert_eq!(spec, "`test_col` string");
 
-        let not_null_column = test_column("id", Type::INT4, 1, false, true);
+        let not_null_column = test_column("id", Type::INT4, 1, false, Some(1));
         let not_null_spec =
             BigQueryClient::column_spec(&not_null_column).expect("not null column spec");
         assert_eq!(not_null_spec, "`id` int64 not null");
 
-        let array_column = test_column("tags", Type::TEXT_ARRAY, 1, false, false);
+        let array_column = test_column("tags", Type::TEXT_ARRAY, 1, false, None);
         let array_spec = BigQueryClient::column_spec(&array_column).expect("array column spec");
         assert_eq!(array_spec, "`tags` array<string>");
     }
 
     #[test]
     fn test_column_spec_escapes_backticks() {
-        let column_schema = test_column("pwn`name", Type::TEXT, 1, true, false);
+        let column_schema = test_column("pwn`name", Type::TEXT, 1, true, None);
 
         let spec = BigQueryClient::column_spec(&column_schema).expect("escaped column spec");
 
@@ -923,42 +936,62 @@ mod tests {
     #[test]
     fn test_add_primary_key_clause() {
         let columns_with_pk = vec![
-            test_column("id", Type::INT4, 1, false, true),
-            test_column("name", Type::TEXT, 2, true, false),
+            test_column("id", Type::INT4, 1, false, Some(1)),
+            test_column("name", Type::TEXT, 2, true, None),
         ];
         let schema_with_pk = test_replicated_schema(columns_with_pk);
-        let pk_clause = BigQueryClient::add_primary_key_clause(&schema_with_pk).expect("pk clause");
+        let pk_clause = BigQueryClient::add_primary_key_clause(&schema_with_pk)
+            .expect("pk clause")
+            .unwrap();
         assert_eq!(pk_clause, ", primary key (`id`) not enforced");
 
+        // Composite primary key with correct ordinal positions.
         let columns_with_composite_pk = vec![
-            test_column("tenant_id", Type::INT4, 1, false, true),
-            test_column("id", Type::INT4, 2, false, true),
-            test_column("name", Type::TEXT, 3, true, false),
+            test_column("tenant_id", Type::INT4, 1, false, Some(1)),
+            test_column("id", Type::INT4, 2, false, Some(2)),
+            test_column("name", Type::TEXT, 3, true, None),
         ];
         let schema_with_composite_pk = test_replicated_schema(columns_with_composite_pk);
         let composite_pk_clause = BigQueryClient::add_primary_key_clause(&schema_with_composite_pk)
+            .unwrap()
             .expect("composite pk clause");
         assert_eq!(
             composite_pk_clause,
             ", primary key (`tenant_id`,`id`) not enforced"
         );
 
+        // Composite primary key with reversed column order but correct ordinal positions.
+        // The primary key clause should still be ordered by ordinal position.
+        let columns_with_reversed_pk = vec![
+            test_column("id", Type::INT4, 1, false, Some(2)),
+            test_column("tenant_id", Type::INT4, 2, false, Some(1)),
+            test_column("name", Type::TEXT, 3, true, None),
+        ];
+        let schema_with_reversed_pk = test_replicated_schema(columns_with_reversed_pk);
+        let reversed_pk_clause = BigQueryClient::add_primary_key_clause(&schema_with_reversed_pk)
+            .unwrap()
+            .expect("reversed pk clause");
+        assert_eq!(
+            reversed_pk_clause,
+            ", primary key (`tenant_id`,`id`) not enforced"
+        );
+
         let columns_no_pk = vec![
-            test_column("name", Type::TEXT, 1, true, false),
-            test_column("age", Type::INT4, 2, true, false),
+            test_column("name", Type::TEXT, 1, true, None),
+            test_column("age", Type::INT4, 2, true, None),
         ];
         let schema_no_pk = test_replicated_schema(columns_no_pk);
         let no_pk_clause =
             BigQueryClient::add_primary_key_clause(&schema_no_pk).expect("no pk clause");
-        assert_eq!(no_pk_clause, "");
+        assert!(no_pk_clause.is_none());
     }
 
     #[test]
     fn test_create_columns_spec() {
         let columns = vec![
-            test_column("id", Type::INT4, 1, false, true),
-            test_column("name", Type::TEXT, 2, true, false),
-            test_column("active", Type::BOOL, 3, false, false),
+            test_column("id", Type::INT4, 1, false, Some(1)),
+            test_column("name", Type::TEXT, 2, true, None),
+            test_column("active", Type::BOOL, 3, false, None),
         ];
         let schema = test_replicated_schema(columns);
         let spec = BigQueryClient::create_columns_spec(&schema).expect("columns spec");
@@ -977,10 +1010,10 @@ mod tests {
     #[test]
     fn test_column_schemas_to_table_descriptor() {
         let columns = vec![
-            test_column("id", Type::INT4, 1, false, true),
-            test_column("name", Type::TEXT, 2, true, false),
-            test_column("active", Type::BOOL, 3, false, false),
-            test_column("tags", Type::TEXT_ARRAY, 4, false, false),
+            test_column("id", Type::INT4, 1, false, Some(1)),
+            test_column("name", Type::TEXT, 2, true, None),
+            test_column("active", Type::BOOL, 3, false, None),
+            test_column("tags", Type::TEXT_ARRAY, 4, false, None),
         ];
         let schema = test_replicated_schema(columns);
 
@@ -1061,12 +1094,12 @@ mod tests {
     #[test]
     fn test_column_schemas_to_table_descriptor_complex_types() {
         let columns = vec![
-            test_column("uuid_col", Type::UUID, 1, true, false),
-            test_column("json_col", Type::JSON, 2, true, false),
-            test_column("bytea_col", Type::BYTEA, 3, true, false),
-            test_column("numeric_col", Type::NUMERIC, 4, true, false),
-            test_column("date_col", Type::DATE, 5, true, false),
-            test_column("time_col", Type::TIME, 6, true, false),
+            test_column("uuid_col", Type::UUID, 1, true, None),
+            test_column("json_col", Type::JSON, 2, true, None),
+            test_column("bytea_col", Type::BYTEA, 3, true, None),
+            test_column("numeric_col", Type::NUMERIC, 4, true, None),
+            test_column("date_col", Type::DATE, 5, true, None),
+            test_column("time_col", Type::TIME, 6, true, None),
         ];
         let schema = test_replicated_schema(columns);
 
@@ -1124,8 +1157,8 @@ mod tests {
         let table_id = "test_table";
 
         let columns = vec![
-            test_column("id", Type::INT4, 1, false, true),
-            test_column("name", Type::TEXT, 2, true, false),
+            test_column("id", Type::INT4, 1, false, Some(1)),
+            test_column("name", Type::TEXT, 2, true, None),
         ];
         let schema = test_replicated_schema(columns);
 
@@ -1150,7 +1183,7 @@ mod tests {
         let table_id = "test_table";
         let max_staleness_mins = 15;
 
-        let columns = vec![test_column("id", Type::INT4, 1, false, true)];
+        let columns = vec![test_column("id", Type::INT4, 1, false, Some(1))];
         let schema = test_replicated_schema(columns);
 
         // Simulate the query generation logic with staleness

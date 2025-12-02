@@ -20,7 +20,7 @@ use crate::replication::client::PgReplicationClient;
 use crate::replication::common::get_active_table_replication_states;
 use crate::replication::masks::ReplicationMasks;
 use crate::state::table::{
-    TableReplicationError, TableReplicationPhase, TableReplicationPhaseType,
+    TableReplicationPhase, TableReplicationPhaseType,
 };
 use crate::store::schema::SchemaStore;
 use crate::store::state::StateStore;
@@ -433,7 +433,7 @@ where
     /// Processes all tables currently in synchronization phases.
     ///
     /// This method coordinates the lifecycle of syncing tables by promoting
-    /// `SyncDone` tables to `Ready` state when the apply worker catches up
+    /// `SyncDone` tables to the `Ready` state when the apply worker catches up
     /// to their sync LSN. For other tables, it handles the typical sync process.
     async fn process_syncing_tables(
         &self,
@@ -486,33 +486,6 @@ where
             }
         }
 
-        Ok(ApplyLoopAction::Continue)
-    }
-
-    /// Handles table replication errors by updating the table's state.
-    ///
-    /// This method processes errors that occur during table replication by
-    /// converting them to appropriate error states and persisting the updated
-    /// state. The apply loop continues processing other tables after handling
-    /// the error.
-    async fn mark_table_errored(
-        &self,
-        table_replication_error: TableReplicationError,
-    ) -> EtlResult<ApplyLoopAction> {
-        let pool = self.pool.lock().await;
-
-        // Convert the table replication error directly to a phase.
-        let table_id = table_replication_error.table_id();
-        TableSyncWorkerState::set_and_store(
-            &pool,
-            &self.store,
-            table_id,
-            table_replication_error.into(),
-        )
-        .await?;
-
-        // We want to always continue the loop, since we have to deal with the events of other
-        // tables.
         Ok(ApplyLoopAction::Continue)
     }
 

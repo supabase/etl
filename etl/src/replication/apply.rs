@@ -18,7 +18,6 @@ use crate::metrics::{
 use crate::replication::client::PgReplicationClient;
 use crate::replication::masks::ReplicationMasks;
 use crate::replication::stream::EventsStream;
-use crate::state::table::TableReplicationError;
 use crate::store::schema::SchemaStore;
 use crate::types::{Event, PipelineId};
 use etl_config::shared::PipelineConfig;
@@ -151,14 +150,6 @@ pub trait ApplyLoopHook {
         update_state: bool,
     ) -> impl Future<Output = EtlResult<ApplyLoopAction>> + Send;
 
-    /// Called when a table encounters an error during replication.
-    ///
-    /// This hook handles error reporting and retry logic for failed tables.
-    fn mark_table_errored(
-        &self,
-        table_replication_error: TableReplicationError,
-    ) -> impl Future<Output = EtlResult<ApplyLoopAction>> + Send;
-
     /// Called to check if the events processed by this apply loop should be applied in the destination.
     ///
     /// Returns `true` if the event should be applied, `false` otherwise.
@@ -241,20 +232,6 @@ struct HandleMessageResult {
     ///   mark the table as skipped in this case. The replication event will be excluded
     ///   from the batch.
     end_batch: Option<EndBatch>,
-    /// Set when the table has encountered an error, and it should consequently be marked as errored
-    /// in the state store.
-    ///
-    /// This error is a "caught" error, meaning that it doesn't crash the apply loop, but it makes it
-    /// continue or gracefully stop based on the worker type that runs the loop.
-    ///
-    /// Other errors that make the apply loop fail, will be propagated to the caller and handled differently
-    /// based on the worker that runs the loop:
-    /// - Apply worker -> the error will make the apply loop crash, which will be propagated to the
-    ///   worker and up if the worker is awaited.
-    /// - Table sync worker -> the error will make the apply loop crash, which will be propagated
-    ///   to the worker, however the error will be caught and persisted via the observer mechanism
-    ///   in place for the table sync workers.
-    table_replication_error: Option<TableReplicationError>,
     /// The action that this event should have on the loop.
     ///
     /// Note that this action might be overridden by operations that are happening when a batch is flushed
@@ -754,24 +731,6 @@ where
                         pipeline_id,
                     )
                     .await?;
-                }
-
-                // If we have a caught table error, we want to mark the table as errored.
-                //
-                // Note that if we have a failure after marking a table as errored and events will
-                // be reprocessed, even the events before the failure will be skipped.
-                //
-                // Usually in the apply loop, errors are propagated upstream and handled based on if
-                // we are in a table sync worker or apply worker, however we have an edge case (for
-                // relation messages that change the schema) where we want to mark a table as errored
-                // manually, not propagating the error outside the loop, which is going to be handled
-                // differently based on the worker:
-                // - Apply worker -> will continue the loop skipping the table.
-                // - Table sync worker -> will stop the work (as if it had a normal uncaught error).
-                // Ideally we would get rid of this since it's an anomalous case which adds unnecessary
-                // complexity.
-                if let Some(error) = result.table_replication_error {
-                    action = action.merge(hook.mark_table_errored(error).await?);
                 }
 
                 // Once the batch is sent, we have the guarantee that all events up to this point have

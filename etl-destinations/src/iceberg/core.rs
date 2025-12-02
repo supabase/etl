@@ -679,14 +679,14 @@ mod tests {
         typ: Type,
         ordinal_position: i32,
         nullable: bool,
-        primary_key: bool,
+        primary_key_ordinal: Option<i32>,
     ) -> ColumnSchema {
         ColumnSchema::new(
             name.to_string(),
             typ,
             -1,
             ordinal_position,
-            if primary_key { Some(1) } else { None },
+            primary_key_ordinal,
             nullable,
         )
     }
@@ -697,26 +697,26 @@ mod tests {
         let col_name = find_unique_column_name(&column_schemas, CDC_OPERATION_COLUMN_NAME);
         assert_eq!(col_name, CDC_OPERATION_COLUMN_NAME.to_string());
 
-        let column_schemas = vec![test_column("id", Type::BOOL, 1, false, true)];
+        let column_schemas = vec![test_column("id", Type::BOOL, 1, false, Some(1))];
         let col_name = find_unique_column_name(&column_schemas, CDC_OPERATION_COLUMN_NAME);
         assert_eq!(col_name, CDC_OPERATION_COLUMN_NAME.to_string());
 
         let column_schemas = vec![
-            test_column("id", Type::BOOL, 1, false, true),
-            test_column(CDC_OPERATION_COLUMN_NAME, Type::BOOL, 2, false, true),
+            test_column("id", Type::BOOL, 1, false, Some(1)),
+            test_column(CDC_OPERATION_COLUMN_NAME, Type::BOOL, 2, false, Some(2)),
         ];
         let col_name = find_unique_column_name(&column_schemas, CDC_OPERATION_COLUMN_NAME);
         assert_eq!(col_name, format!("{CDC_OPERATION_COLUMN_NAME}_1"));
 
         let column_schemas = vec![
-            test_column("id", Type::BOOL, 1, false, true),
-            test_column(CDC_OPERATION_COLUMN_NAME, Type::BOOL, 2, false, true),
+            test_column("id", Type::BOOL, 1, false, Some(1)),
+            test_column(CDC_OPERATION_COLUMN_NAME, Type::BOOL, 2, false, Some(2)),
             test_column(
                 &format!("{CDC_OPERATION_COLUMN_NAME}_1"),
                 Type::BOOL,
                 3,
                 false,
-                true,
+                Some(3),
             ),
         ];
         let col_name = find_unique_column_name(&column_schemas, CDC_OPERATION_COLUMN_NAME);
