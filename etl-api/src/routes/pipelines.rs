@@ -19,10 +19,10 @@ use crate::configs::pipeline::{FullApiPipelineConfig, PartialApiPipelineConfig};
 use crate::db;
 use crate::db::destinations::{DestinationsDbError, destination_exists};
 use crate::db::images::ImagesDbError;
-use crate::db::pipelines::{PipelinesDbError, read_pipeline_components, MAX_PIPELINES_PER_TENANT};
-use crate::feature_flags::get_max_pipelines_per_tenant;
+use crate::db::pipelines::{MAX_PIPELINES_PER_TENANT, PipelinesDbError, read_pipeline_components};
 use crate::db::replicators::ReplicatorsDbError;
 use crate::db::sources::{SourcesDbError, source_exists};
+use crate::feature_flags::get_max_pipelines_per_tenant;
 use crate::k8s::core::{
     create_k8s_object_prefix, create_or_update_pipeline_resources_in_k8s,
     delete_pipeline_resources_in_k8s,
@@ -478,8 +478,12 @@ pub async fn create_pipeline(
         return Err(PipelineError::DestinationNotFound(pipeline.destination_id));
     }
 
-    let max_pipelines =
-        get_max_pipelines_per_tenant(feature_flags_client.as_ref(), tenant_id, MAX_PIPELINES_PER_TENANT).await;
+    let max_pipelines = get_max_pipelines_per_tenant(
+        feature_flags_client.as_ref(),
+        tenant_id,
+        MAX_PIPELINES_PER_TENANT,
+    )
+    .await;
     let pipeline_count =
         db::pipelines::count_pipelines_for_tenant(txn.deref_mut(), tenant_id).await?;
     if pipeline_count >= max_pipelines {

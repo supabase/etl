@@ -33,7 +33,8 @@ pub async fn get_max_pipelines_per_tenant(
     match client {
         Some(client) => {
             let user = configcat::User::new(tenant_id);
-            client.get_value("maximumPipelinesPerTenant", default_value, Some(user))
+            client
+                .get_value("maximumPipelinesPerTenant", default_value, Some(user))
                 .await
         }
         None => default_value,

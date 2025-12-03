@@ -18,9 +18,11 @@ use crate::db;
 use crate::db::destinations::{DestinationsDbError, destination_exists};
 use crate::db::destinations_pipelines::DestinationPipelinesDbError;
 use crate::db::images::ImagesDbError;
-use crate::db::pipelines::{PipelinesDbError, count_pipelines_for_tenant, read_pipeline, MAX_PIPELINES_PER_TENANT};
-use crate::feature_flags::get_max_pipelines_per_tenant;
+use crate::db::pipelines::{
+    MAX_PIPELINES_PER_TENANT, PipelinesDbError, count_pipelines_for_tenant, read_pipeline,
+};
 use crate::db::sources::{SourcesDbError, source_exists};
+use crate::feature_flags::get_max_pipelines_per_tenant;
 
 #[derive(Debug, Error)]
 enum DestinationPipelineError {
@@ -210,8 +212,12 @@ pub async fn create_destination_and_pipeline(
         ));
     }
 
-    let max_pipelines =
-        get_max_pipelines_per_tenant(feature_flags_client.as_ref(), tenant_id, MAX_PIPELINES_PER_TENANT).await;
+    let max_pipelines = get_max_pipelines_per_tenant(
+        feature_flags_client.as_ref(),
+        tenant_id,
+        MAX_PIPELINES_PER_TENANT,
+    )
+    .await;
     let pipeline_count = count_pipelines_for_tenant(txn.deref_mut(), tenant_id).await?;
     if pipeline_count >= max_pipelines {
         return Err(DestinationPipelineError::PipelineLimitReached {
