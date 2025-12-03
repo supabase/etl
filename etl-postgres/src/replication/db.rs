@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::num::NonZeroI32;
 
 use etl_config::shared::{IntoConnectOptions, PgConnectionConfig};
@@ -37,38 +38,45 @@ pub async fn connect_to_source_database(
     Ok(pool)
 }
 
-/// Retrieves table name from table OID by querying system catalogs.
+/// Retrieves table names for multiple table OIDs in a single query.
 ///
-/// Looks up the schema and table name for the given table OID using Postgres's
-/// pg_class and pg_namespace system tables.
-pub async fn get_table_name_from_oid(
+/// Looks up the schema and table names for all given table OIDs using Postgres's
+/// pg_class and pg_namespace system tables. Returns a HashMap mapping each TableId
+/// to its corresponding TableName.
+pub async fn get_table_names_from_oids(
     pool: &PgPool,
-    table_id: TableId,
-) -> Result<TableName, TableLookupError> {
-    let query = "
-        select n.nspname as schema_name, c.relname as table_name
-        from pg_class c
-        join pg_namespace n on c.relnamespace = n.oid
-        where c.oid = $1
+    table_ids: &[TableId],
+) -> Result<HashMap<TableId, TableName>, TableLookupError> {
+    if table_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let oids: Vec<i64> = table_ids.iter().map(|id| id.into_inner() as i64).collect();
+
+    let query = "select c.oid, n.nspname as schema_name, c.relname as table_name
+    from pg_class c
+    join pg_namespace n on c.relnamespace = n.oid
+    where c.oid = any($1)
     ";
 
-    let row = sqlx::query(query)
-        .bind(table_id.into_inner() as i64)
-        .fetch_optional(pool)
-        .await?;
+    let rows = sqlx::query(query).bind(&oids).fetch_all(pool).await?;
 
-    match row {
-        Some(row) => {
-            let schema_name: String = row.try_get("schema_name")?;
-            let table_name: String = row.try_get("table_name")?;
+    let mut result = HashMap::with_capacity(rows.len());
+    for row in rows {
+        let oid: i64 = row.try_get("oid")?;
+        let schema_name: String = row.try_get("schema_name")?;
+        let table_name: String = row.try_get("table_name")?;
 
-            Ok(TableName {
+        result.insert(
+            TableId::new(oid as u32),
+            TableName {
                 schema: schema_name,
                 name: table_name,
-            })
-        }
-        None => Err(TableLookupError::TableNotFound(table_id)),
+            },
+        );
     }
+
+    Ok(result)
 }
 
 /// Extracts the PostgreSQL server version from a version string.

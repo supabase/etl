@@ -1022,6 +1022,7 @@ async fn pipeline_replication_status_returns_table_states_and_names() {
     let response = app
         .get_pipeline_replication_status(&tenant_id, pipeline_id)
         .await;
+    println!("{:?}", response);
     let response: GetPipelineReplicationStatusResponse = response.json().await.unwrap();
 
     assert_eq!(response.pipeline_id, pipeline_id);
