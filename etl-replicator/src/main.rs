@@ -4,6 +4,23 @@
 //! and routes data to configured destinations. Includes telemetry, error handling, and
 //! graceful shutdown capabilities.
 
+#[cfg(not(target_env = "msvc"))]
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
+/// Jemalloc configuration optimized for high-throughput async CDC workloads.
+///
+/// - `background_thread:true`: Offloads memory purging to background threads, improving tail latency.
+/// - `metadata_thp:auto`: Enables transparent huge pages for jemalloc metadata, reducing TLB misses.
+/// - `dirty_decay_ms:10000`: Returns unused dirty pages to the OS after 10 seconds.
+/// - `muzzy_decay_ms:10000`: Returns unused muzzy pages to the OS after 10 seconds.
+/// - `abort_conf:true`: Aborts on invalid configuration for fail-fast behavior.
+#[cfg(not(target_env = "msvc"))]
+#[allow(non_upper_case_globals)]
+#[unsafe(export_name = "malloc_conf")]
+pub static malloc_conf: &[u8] =
+    b"background_thread:true,metadata_thp:auto,dirty_decay_ms:10000,muzzy_decay_ms:10000,abort_conf:true\0";
+
 use crate::config::load_replicator_config;
 use crate::core::start_replicator_with_config;
 use crate::notification::ErrorNotificationClient;

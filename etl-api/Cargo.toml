@@ -59,6 +59,9 @@ utoipa = { workspace = true, features = ["actix_extras"] }
 utoipa-swagger-ui = { workspace = true, features = ["actix-web", "reqwest"] }
 uuid = { workspace = true, features = ["v4"] }
 
+[target.'cfg(not(target_env = "msvc"))'.dependencies]
+tikv-jemallocator = { workspace = true }
+
 [dev-dependencies]
 etl-postgres = { workspace = true, features = ["test-utils", "sqlx"] }
 
