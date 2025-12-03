@@ -80,6 +80,7 @@ impl ResponseError for PublicationError {
 #[derive(Deserialize, ToSchema)]
 pub struct CreatePublicationRequest {
     #[schema(example = "my_publication", required = true)]
+    #[serde(deserialize_with = "crate::utils::trim_string")]
     name: String,
     #[schema(required = true)]
     tables: Vec<Table>,

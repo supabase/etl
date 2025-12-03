@@ -17,12 +17,15 @@ const DEFAULT_TLS_ENABLED: bool = false;
 #[serde(rename_all = "snake_case")]
 pub struct FullApiSourceConfig {
     #[schema(example = "localhost")]
+    #[serde(deserialize_with = "crate::utils::trim_string")]
     pub host: String,
     #[schema(example = 5432)]
     pub port: u16,
     #[schema(example = "mydb")]
+    #[serde(deserialize_with = "crate::utils::trim_string")]
     pub name: String,
     #[schema(example = "postgres")]
+    #[serde(deserialize_with = "crate::utils::trim_string")]
     pub username: String,
     #[schema(example = "secret123")]
     #[serde(skip_serializing_if = "Option::is_none")]

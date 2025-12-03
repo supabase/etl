@@ -29,6 +29,7 @@ pub struct ApiBatchConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct FullApiPipelineConfig {
     #[schema(example = "my_publication")]
+    #[serde(deserialize_with = "crate::utils::trim_string")]
     pub publication_name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub batch: Option<ApiBatchConfig>,
@@ -63,7 +64,11 @@ impl From<StoredPipelineConfig> for FullApiPipelineConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct PartialApiPipelineConfig {
     #[schema(example = "my_publication")]
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        default,
+        deserialize_with = "crate::utils::trim_option_string"
+    )]
     pub publication_name: Option<String>,
     #[schema(example = r#"{"max_size": 1000000, "max_fill_ms": 10000}"#)]
     #[serde(skip_serializing_if = "Option::is_none")]

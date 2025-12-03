@@ -18,8 +18,10 @@ pub enum FullApiDestinationConfig {
     Memory,
     BigQuery {
         #[schema(example = "my-gcp-project")]
+        #[serde(deserialize_with = "crate::utils::trim_string")]
         project_id: String,
         #[schema(example = "my_dataset")]
+        #[serde(deserialize_with = "crate::utils::trim_string")]
         dataset_id: String,
         #[schema(example = "{\"type\": \"service_account\", \"project_id\": \"my-project\"}")]
         service_account_key: SerializableSecretString,
@@ -462,11 +464,17 @@ pub enum StoredIcebergConfig {
 pub enum FullApiIcebergConfig {
     Supabase {
         #[schema(example = "abcdefghijklmnopqrst")]
+        #[serde(deserialize_with = "crate::utils::trim_string")]
         project_ref: String,
         #[schema(example = "my-warehouse")]
+        #[serde(deserialize_with = "crate::utils::trim_string")]
         warehouse_name: String,
         #[schema(example = "my-namespace")]
-        #[serde(skip_serializing_if = "Option::is_none")]
+        #[serde(
+            skip_serializing_if = "Option::is_none",
+            default,
+            deserialize_with = "crate::utils::trim_option_string"
+        )]
         namespace: Option<String>,
         #[schema(
             example = "eyJ0eXAiOiJKV1QiLCJhbGciOiJFUzI1NiIsImtpZCI6IjFkNzFjMGEyNmIxMDFjODQ5ZTkxZmQ1NjdjYjA5NTJmIn0.eyJleHAiOjIwNzA3MTcxNjAsImlhdCI6MTc1NjE0NTE1MCwiaXNzIjoic3VwYWJhc2UiLCJyZWYiOiJhYmNkZWZnaGlqbGttbm9wcXJzdCIsInJvbGUiOiJzZXJ2aWNlX3JvbGUifQ.YdTWkkIvwjSkXot3NC07xyjPjGWQMNzLq5EPzumzrdLzuHrj-zuzI-nlyQtQ5V7gZauysm-wGwmpztRXfPc3AQ"
@@ -477,20 +485,25 @@ pub enum FullApiIcebergConfig {
         #[schema(example = "ca833e890916d848c69135924bcd75e5909184814a0ebc6c988937ee094120d4")]
         s3_secret_access_key: SerializableSecretString,
         #[schema(example = "ap-southeast-1")]
+        #[serde(deserialize_with = "crate::utils::trim_string")]
         s3_region: String,
     },
     Rest {
         #[schema(example = "https://abcdefghijklmnopqrst.storage.supabase.com/storage/v1/iceberg")]
+        #[serde(deserialize_with = "crate::utils::trim_string")]
         catalog_uri: String,
         #[schema(example = "my-warehouse")]
+        #[serde(deserialize_with = "crate::utils::trim_string")]
         warehouse_name: String,
         #[schema(example = "my-namespace")]
+        #[serde(default, deserialize_with = "crate::utils::trim_option_string")]
         namespace: Option<String>,
         #[schema(example = "9156667efc2c70d89af6588da86d2924")]
         s3_access_key_id: SerializableSecretString,
         #[schema(example = "ca833e890916d848c69135924bcd75e5909184814a0ebc6c988937ee094120d4")]
         s3_secret_access_key: SerializableSecretString,
         #[schema(example = "https://s3.endpoint")]
+        #[serde(deserialize_with = "crate::utils::trim_string")]
         s3_endpoint: String,
     },
 }

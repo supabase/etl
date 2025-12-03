@@ -60,8 +60,10 @@ impl ResponseError for TenantError {
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct CreateTenantRequest {
     #[schema(example = "abczjjlmfsijwrlnwatw", required = true)]
+    #[serde(deserialize_with = "crate::utils::trim_string")]
     pub id: String,
     #[schema(example = "My Tenant", required = true)]
+    #[serde(deserialize_with = "crate::utils::trim_string")]
     pub name: String,
 }
 
@@ -74,6 +76,7 @@ pub struct CreateTenantResponse {
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct CreateOrUpdateTenantRequest {
     #[schema(example = "My Updated Tenant", required = true)]
+    #[serde(deserialize_with = "crate::utils::trim_string")]
     pub name: String,
 }
 
@@ -86,6 +89,7 @@ pub struct CreateOrUpdateTenantResponse {
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct UpdateTenantRequest {
     #[schema(example = "My Updated Tenant", required = true)]
+    #[serde(deserialize_with = "crate::utils::trim_string")]
     pub name: String,
 }
 
