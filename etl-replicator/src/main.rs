@@ -14,12 +14,15 @@ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 /// - `metadata_thp:auto`: Enables transparent huge pages for jemalloc metadata, reducing TLB misses.
 /// - `dirty_decay_ms:10000`: Returns unused dirty pages to the OS after 10 seconds.
 /// - `muzzy_decay_ms:10000`: Returns unused muzzy pages to the OS after 10 seconds.
+/// - `tcache_max:8192`: Reduces thread-local cache size for better container memory efficiency.
 /// - `abort_conf:true`: Aborts on invalid configuration for fail-fast behavior.
+///
+/// Note: `narenas` should be set via `MALLOC_CONF` env var to match container CPU limits per environment.
 #[cfg(not(target_env = "msvc"))]
 #[allow(non_upper_case_globals)]
 #[unsafe(export_name = "malloc_conf")]
 pub static malloc_conf: &[u8] =
-    b"background_thread:true,metadata_thp:auto,dirty_decay_ms:10000,muzzy_decay_ms:10000,abort_conf:true\0";
+    b"background_thread:true,metadata_thp:auto,dirty_decay_ms:10000,muzzy_decay_ms:10000,tcache_max:8192,abort_conf:true\0";
 
 use crate::config::load_replicator_config;
 use crate::core::start_replicator_with_config;
@@ -36,6 +39,8 @@ use tracing::{error, info, warn};
 mod config;
 mod core;
 mod feature_flags;
+#[cfg(not(target_env = "msvc"))]
+mod jemalloc_metrics;
 mod migrations;
 mod notification;
 
@@ -78,6 +83,10 @@ fn main() -> anyhow::Result<()> {
 /// Launches the replicator with the provided configuration and captures any errors
 /// to Sentry and optionally sends notifications to the Supabase API.
 async fn async_main(replicator_config: ReplicatorConfig) -> anyhow::Result<()> {
+    // Start jemalloc metrics collection background task.
+    #[cfg(not(target_env = "msvc"))]
+    jemalloc_metrics::spawn_jemalloc_metrics_task();
+
     let notification_client = replicator_config.supabase.as_ref().and_then(
         |supabase_config| match (&supabase_config.api_url, &supabase_config.api_key) {
             (Some(api_url), Some(api_key)) => Some(ErrorNotificationClient::new(
