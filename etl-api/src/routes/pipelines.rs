@@ -4,7 +4,9 @@ use actix_web::{
     post,
     web::{Data, Json, Path},
 };
-use etl_postgres::replication::{TableLookupError, get_table_name_from_oid, health, lag, state};
+use etl_postgres::replication::{
+    TableLookupError, get_table_names_from_table_ids, health, lag, state,
+};
 use etl_postgres::types::TableId;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
@@ -939,7 +941,7 @@ pub async fn get_pipeline_replication_status(
 
     txn.commit().await?;
 
-    // Connect to the source database to read replication state
+    // Connect to the source database to read the necessary state
     let source_pool =
         connect_to_source_database_with_defaults(&source.config.into_connection_config()).await?;
 
@@ -953,11 +955,20 @@ pub async fn get_pipeline_replication_status(
     let mut lag_metrics = lag::get_pipeline_lag_metrics(&source_pool, pipeline_id as u64).await?;
     let apply_lag = lag_metrics.apply.map(Into::into);
 
-    // Convert database states to UI-friendly format and fetch table names
+    // Collect all table IDs and fetch their names in a single batch query
+    let table_ids: Vec<TableId> = state_rows
+        .iter()
+        .map(|row| TableId::new(row.table_id.0))
+        .collect();
+    let table_names = get_table_names_from_table_ids(&source_pool, &table_ids).await?;
+
+    // Convert database states to UI-friendly format
     let mut tables: Vec<TableReplicationStatus> = Vec::new();
     for row in state_rows {
         let table_id = TableId::new(row.table_id.0);
-        let table_name = get_table_name_from_oid(&source_pool, table_id).await?;
+        let table_name = table_names
+            .get(&table_id)
+            .ok_or(TableLookupError::TableNotFound(table_id))?;
 
         // Extract the metadata row from the database
         let table_replication_state = row
