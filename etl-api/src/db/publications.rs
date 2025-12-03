@@ -101,13 +101,7 @@ pub async fn read_publication(
             pt.tablename as "tablename?"
         from pg_publication p
         left join pg_publication_tables pt on p.pubname = pt.pubname
-        where
-           	p.puballtables = false
-           	and p.pubinsert = true
-           	and p.pubupdate = true
-           	and p.pubdelete = true
-           	and p.pubtruncate = true
-            and p.pubname =
+        where p.pubname =
 	   "#,
     );
 
@@ -144,13 +138,7 @@ pub async fn read_all_publications(pool: &PgPool) -> Result<Vec<Publication>, Pu
             pt.schemaname as "schemaname?",
             pt.tablename as "tablename?"
         from pg_publication p
-        left join pg_publication_tables pt on p.pubname = pt.pubname
-        where
-           	p.puballtables = false
-           	and p.pubinsert = true
-           	and p.pubupdate = true
-           	and p.pubdelete = true
-           	and p.pubtruncate = true;
+        left join pg_publication_tables pt on p.pubname = pt.pubname;
 	   "#;
 
     let mut pub_name_to_tables: HashMap<String, Vec<Table>> = HashMap::new();
