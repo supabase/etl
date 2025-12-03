@@ -4,7 +4,9 @@ use actix_web::{
     post,
     web::{Data, Json, Path},
 };
-use etl_postgres::replication::{TableLookupError, get_table_names_from_oids, health, lag, state};
+use etl_postgres::replication::{
+    TableLookupError, get_table_names_from_table_ids, health, lag, state,
+};
 use etl_postgres::types::TableId;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
@@ -954,8 +956,11 @@ pub async fn get_pipeline_replication_status(
     let apply_lag = lag_metrics.apply.map(Into::into);
 
     // Collect all table IDs and fetch their names in a single batch query
-    let table_ids: Vec<TableId> = state_rows.iter().map(|row| TableId::new(row.table_id.0)).collect();
-    let table_names = get_table_names_from_oids(&source_pool, &table_ids).await?;
+    let table_ids: Vec<TableId> = state_rows
+        .iter()
+        .map(|row| TableId::new(row.table_id.0))
+        .collect();
+    let table_names = get_table_names_from_table_ids(&source_pool, &table_ids).await?;
 
     // Convert database states to UI-friendly format
     let mut tables: Vec<TableReplicationStatus> = Vec::new();

@@ -38,12 +38,12 @@ pub async fn connect_to_source_database(
     Ok(pool)
 }
 
-/// Retrieves table names for multiple table OIDs in a single query.
+/// Retrieves table names for multiple table ids in a single query.
 ///
 /// Looks up the schema and table names for all given table OIDs using Postgres's
 /// pg_class and pg_namespace system tables. Returns a HashMap mapping each TableId
 /// to its corresponding TableName.
-pub async fn get_table_names_from_oids(
+pub async fn get_table_names_from_table_ids(
     pool: &PgPool,
     table_ids: &[TableId],
 ) -> Result<HashMap<TableId, TableName>, TableLookupError> {
@@ -51,19 +51,18 @@ pub async fn get_table_names_from_oids(
         return Ok(HashMap::new());
     }
 
-    let oids: Vec<i64> = table_ids.iter().map(|id| id.into_inner() as i64).collect();
-
-    let query = "select c.oid, n.nspname as schema_name, c.relname as table_name
+    let query = "select c.oid::int as oid, n.nspname as schema_name, c.relname as table_name
     from pg_class c
     join pg_namespace n on c.relnamespace = n.oid
-    where c.oid = any($1)
+    where c.oid = any($1::oid[])
     ";
 
+    let oids: Vec<i32> = table_ids.iter().map(|id| id.into_inner() as i32).collect();
     let rows = sqlx::query(query).bind(&oids).fetch_all(pool).await?;
 
     let mut result = HashMap::with_capacity(rows.len());
     for row in rows {
-        let oid: i64 = row.try_get("oid")?;
+        let oid: i32 = row.try_get("oid")?;
         let schema_name: String = row.try_get("schema_name")?;
         let table_name: String = row.try_get("table_name")?;
 
