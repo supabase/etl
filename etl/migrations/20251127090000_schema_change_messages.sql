@@ -142,6 +142,10 @@ $$;
 
 drop event trigger if exists etl_ddl_message_trigger;
 
+-- Only ALTER TABLE is captured because:
+-- - CREATE TABLE: No need, since the initial schema is loaded during the first table copy operation.
+-- - DROP TABLE: No need, since dropped tables are not supported right now.
+-- This trigger focuses on schema changes to existing replicated tables.
 create event trigger etl_ddl_message_trigger
     on ddl_command_end
     when tag in ('ALTER TABLE')

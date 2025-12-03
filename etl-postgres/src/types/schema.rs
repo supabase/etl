@@ -311,7 +311,10 @@ impl ReplicatedTableSchema {
     pub fn column_schemas(&self) -> impl Iterator<Item = &ColumnSchema> + Clone + '_ {
         // Assuming that the schema is created via the constructor, we can safely assume that the
         // column schemas and replication mask are of the same length.
-        debug_assert!(self.replication_mask.len() == self.table_schema.column_schemas.len());
+        debug_assert!(
+            self.replication_mask.len() == self.table_schema.column_schemas.len(),
+            "the replication mask columns have a different len from the table schema columns, they should be the same"
+        );
 
         self.table_schema
             .column_schemas
