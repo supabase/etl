@@ -15,8 +15,7 @@ ARG BUILDPLATFORM
 RUN echo "Native build on $BUILDPLATFORM for $TARGETPLATFORM"
 
 # Install build dependencies including lld linker for faster linking
-# TODO: remove protobuf-compiler once the upstream gcp-bigquery-client remove it from its deps
-# Note: make is required to build jemalloc from tikv-jemallocator
+# TODO: remove protobuf-compiler once the upstream gcp-bigquery-client removes it from its deps.
 RUN apt-get update && \
     apt-get install -y \
     pkg-config \
