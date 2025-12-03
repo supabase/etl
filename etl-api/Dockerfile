@@ -15,12 +15,14 @@ ARG BUILDPLATFORM
 RUN echo "Native build on $BUILDPLATFORM for $TARGETPLATFORM"
 
 # Install build dependencies including lld linker for faster linking
+# make is required for building jemalloc
 RUN apt-get update && \
     apt-get install -y \
     pkg-config \
     libssl-dev \
     clang \
-    lld && \
+    lld \
+    make && \
     rm -rf /var/lib/apt/lists/*
 
 # Copy cargo config for build optimizations (lld linker, etc.)
