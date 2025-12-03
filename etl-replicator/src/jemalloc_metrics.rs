@@ -4,52 +4,15 @@
 //! allocation patterns, fragmentation, and overall allocator health. Uses MIB-based
 //! access for efficient repeated polling.
 //!
-//! # Memory Statistics Relationships
-//!
-//! jemalloc tracks memory at different granularities:
-//!
-//! ```text
-//!   allocated ≤ active ≤ mapped
-//!       │          │
-//!       │          └─► active: pages dedicated to serving allocations
-//!       └──────────►   allocated: bytes actually in use by application
-//!
-//!   resident ⟷ mapped  (no strict ordering - see below)
-//!       │
-//!       └─► resident: pages physically in RAM (what K8s enforces)
-//!
-//!   + retained: virtual address space kept for reuse (no physical memory)
-//!   + metadata: jemalloc's internal bookkeeping structures
-//! ```
-//!
-//! **Guaranteed orderings** (per official jemalloc docs):
-//! - `active >= allocated` (active is page-aligned, allocated is exact bytes)
-//! - `mapped > active` (mapped includes all active extents)
-//!
-//! **No strict ordering** between `mapped` and `resident`:
-//! - `mapped` excludes inactive extents but includes unmaterialized pages
-//! - `resident` includes dirty/muzzy pages but only physically-backed memory
-//!
 //! # Interpreting the Metrics
 //!
 //! - **Healthy state**: `allocated` close to `active`, `active` close to `resident`.
-//! - **Fragmentation**: Large gap between `allocated` and `resident` indicates
+//! - **Fragmentation**: A large gap between `allocated` and `resident` indicates
 //!   overhead from page alignment, dirty pages, or metadata.
 //! - **Memory pressure**: If `resident` approaches container limits while `allocated`
 //!   is much lower, consider tuning decay settings or investigating allocation patterns.
 //! - **Retained memory**: High `retained` is normal on 64-bit Linux. It represents
 //!   virtual address space only - no physical memory cost.
-//!
-//! # Efficiency
-//!
-//! This module uses MIB (Management Information Base) access for minimal overhead:
-//!
-//! - **MIBs**: String keys like `"stats.allocated"` are translated to numeric indices
-//!   once at startup. Subsequent reads are direct memory accesses (~nanoseconds).
-//! - **Epoch**: jemalloc caches statistics internally. `epoch.advance()` refreshes the
-//!   cache with a single atomic operation, ensuring consistent reads.
-//! - **Polling**: Stats are collected every 10 seconds. Total per-poll overhead is
-//!   ~100-500 nanoseconds - completely negligible for application performance.
 
 use std::time::Duration;
 
@@ -151,6 +114,15 @@ const JEMALLOC_FRAGMENTATION_RATIO: &str = "jemalloc_fragmentation_ratio";
 /// Polling interval for jemalloc statistics.
 const POLL_INTERVAL: Duration = Duration::from_secs(10);
 
+/// Label key for pipeline identifier.
+const PIPELINE_ID_LABEL: &str = "pipeline_id";
+
+/// Label key for application type.
+const APP_TYPE_LABEL: &str = "app_type";
+
+/// Application type value for the replicator.
+const APP_TYPE_VALUE: &str = "etl-replicator-app";
+
 /// Registers jemalloc metric descriptions with the global metrics recorder.
 fn register_metrics() {
     describe_gauge!(
@@ -197,8 +169,10 @@ fn register_metrics() {
 ///
 /// This function should be called after [`etl_telemetry::metrics::init_metrics`]
 /// to ensure the metrics recorder is installed.
-pub fn spawn_jemalloc_metrics_task() {
+pub fn spawn_jemalloc_metrics_task(pipeline_id: u64) {
     register_metrics();
+
+    let pipeline_id_str = pipeline_id.to_string();
 
     tokio::spawn(async move {
         // Initialize MIBs once for efficient repeated lookups.
@@ -269,13 +243,43 @@ pub fn spawn_jemalloc_metrics_task() {
             let retained = retained_mib.read().unwrap_or(0) as f64;
             let metadata = metadata_mib.read().unwrap_or(0) as f64;
 
-            // Update gauges.
-            gauge!(JEMALLOC_ALLOCATED_BYTES).set(allocated);
-            gauge!(JEMALLOC_ACTIVE_BYTES).set(active);
-            gauge!(JEMALLOC_RESIDENT_BYTES).set(resident);
-            gauge!(JEMALLOC_MAPPED_BYTES).set(mapped);
-            gauge!(JEMALLOC_RETAINED_BYTES).set(retained);
-            gauge!(JEMALLOC_METADATA_BYTES).set(metadata);
+            // Update gauges with pipeline_id and app_type labels.
+            gauge!(
+                JEMALLOC_ALLOCATED_BYTES,
+                PIPELINE_ID_LABEL => pipeline_id_str.clone(),
+                APP_TYPE_LABEL => APP_TYPE_VALUE,
+            )
+            .set(allocated);
+            gauge!(
+                JEMALLOC_ACTIVE_BYTES,
+                PIPELINE_ID_LABEL => pipeline_id_str.clone(),
+                APP_TYPE_LABEL => APP_TYPE_VALUE,
+            )
+            .set(active);
+            gauge!(
+                JEMALLOC_RESIDENT_BYTES,
+                PIPELINE_ID_LABEL => pipeline_id_str.clone(),
+                APP_TYPE_LABEL => APP_TYPE_VALUE,
+            )
+            .set(resident);
+            gauge!(
+                JEMALLOC_MAPPED_BYTES,
+                PIPELINE_ID_LABEL => pipeline_id_str.clone(),
+                APP_TYPE_LABEL => APP_TYPE_VALUE,
+            )
+            .set(mapped);
+            gauge!(
+                JEMALLOC_RETAINED_BYTES,
+                PIPELINE_ID_LABEL => pipeline_id_str.clone(),
+                APP_TYPE_LABEL => APP_TYPE_VALUE,
+            )
+            .set(retained);
+            gauge!(
+                JEMALLOC_METADATA_BYTES,
+                PIPELINE_ID_LABEL => pipeline_id_str.clone(),
+                APP_TYPE_LABEL => APP_TYPE_VALUE,
+            )
+            .set(metadata);
 
             // Calculate fragmentation ratio: (resident - allocated) / resident.
             // A ratio of 0 means no fragmentation, >0.5 indicates significant fragmentation.
@@ -284,7 +288,12 @@ pub fn spawn_jemalloc_metrics_task() {
             } else {
                 0.0
             };
-            gauge!(JEMALLOC_FRAGMENTATION_RATIO).set(fragmentation);
+            gauge!(
+                JEMALLOC_FRAGMENTATION_RATIO,
+                PIPELINE_ID_LABEL => pipeline_id_str.clone(),
+                APP_TYPE_LABEL => APP_TYPE_VALUE,
+            )
+            .set(fragmentation);
 
             debug!(
                 allocated_mb = allocated / 1_048_576.0,

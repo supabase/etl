@@ -83,9 +83,9 @@ fn main() -> anyhow::Result<()> {
 /// Launches the replicator with the provided configuration and captures any errors
 /// to Sentry and optionally sends notifications to the Supabase API.
 async fn async_main(replicator_config: ReplicatorConfig) -> anyhow::Result<()> {
-    // Start jemalloc metrics collection background task.
+    // Start the jemalloc metrics collection background task.
     #[cfg(not(target_env = "msvc"))]
-    jemalloc_metrics::spawn_jemalloc_metrics_task();
+    jemalloc_metrics::spawn_jemalloc_metrics_task(replicator_config.pipeline.id);
 
     let notification_client = replicator_config.supabase.as_ref().and_then(
         |supabase_config| match (&supabase_config.api_url, &supabase_config.api_key) {
@@ -104,7 +104,7 @@ async fn async_main(replicator_config: ReplicatorConfig) -> anyhow::Result<()> {
         },
     );
 
-    // Initialize ConfigCat feature flags if supplied
+    // Initialize ConfigCat feature flags if supplied.
     let configcat_sdk_key = replicator_config
         .supabase
         .as_ref()
