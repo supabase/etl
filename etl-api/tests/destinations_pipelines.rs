@@ -3,7 +3,7 @@ use etl_api::routes::destinations_pipelines::{
     CreateDestinationPipelineRequest, CreateDestinationPipelineResponse,
     UpdateDestinationPipelineRequest,
 };
-use etl_api::routes::pipelines::{CreatePipelineRequest, ReadPipelineResponse};
+use etl_api::routes::pipelines::ReadPipelineResponse;
 use etl_telemetry::tracing::init_test_tracing;
 use reqwest::StatusCode;
 
@@ -134,7 +134,9 @@ async fn iceberg_supabase_destination_and_pipeline_can_be_created() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn tenant_cannot_create_more_than_three_destinations_pipelines() {
+async fn tenant_cannot_create_more_than_max_destinations_pipelines() {
+    use etl_api::db::pipelines::MAX_PIPELINES_PER_TENANT;
+
     init_test_tracing();
     // Arrange
     let app = spawn_test_app().await;
@@ -142,7 +144,8 @@ async fn tenant_cannot_create_more_than_three_destinations_pipelines() {
     let source_id = create_source(&app, tenant_id).await;
     create_default_image(&app).await;
 
-    for idx in 0..3 {
+    // Create the maximum allowed pipelines
+    for idx in 0..MAX_PIPELINES_PER_TENANT {
         let destination_pipeline = CreateDestinationPipelineRequest {
             destination_name: format!("BigQuery Destination {idx}"),
             destination_config: new_bigquery_destination_config(),
@@ -155,8 +158,9 @@ async fn tenant_cannot_create_more_than_three_destinations_pipelines() {
         assert!(response.status().is_success());
     }
 
+    // Attempt to create one more pipeline should fail
     let destination_pipeline = CreateDestinationPipelineRequest {
-        destination_name: "BigQuery Destination 3".to_string(),
+        destination_name: format!("BigQuery Destination {MAX_PIPELINES_PER_TENANT}"),
         destination_config: new_bigquery_destination_config(),
         source_id,
         pipeline_config: new_pipeline_config(),
@@ -531,43 +535,44 @@ async fn destination_and_pipeline_with_another_tenants_pipeline_cannot_be_update
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn duplicate_destination_pipeline_with_same_source_cannot_be_created() {
-    init_test_tracing();
-    // Arrange
-    let app = spawn_test_app().await;
-    create_default_image(&app).await;
-    let tenant_id = &create_tenant(&app).await;
-    let source_id = create_source(&app, tenant_id).await;
-
-    // Create first destination and pipeline
-    let destination_pipeline = CreateDestinationPipelineRequest {
-        destination_name: new_name(),
-        destination_config: new_bigquery_destination_config(),
-        source_id,
-        pipeline_config: new_pipeline_config(),
-    };
-    let response = app
-        .create_destination_pipeline(tenant_id, &destination_pipeline)
-        .await;
-    assert!(response.status().is_success());
-    let response: CreateDestinationPipelineResponse = response
-        .json()
-        .await
-        .expect("failed to deserialize response");
-    let first_destination_id = response.destination_id;
-
-    // Act - Try to create another pipeline with same source and the first destination
-    let pipeline_request = CreatePipelineRequest {
-        source_id,
-        destination_id: first_destination_id,
-        config: updated_pipeline_config(),
-    };
-    let response = app.create_pipeline(tenant_id, &pipeline_request).await;
-
-    // Assert
-    assert_eq!(response.status(), StatusCode::CONFLICT);
-}
+// TODO: Re-enable these tests once MAX_PIPELINES_PER_TENANT is lifted from 1.
+// #[tokio::test(flavor = "multi_thread")]
+// async fn duplicate_destination_pipeline_with_same_source_cannot_be_created() {
+//     init_test_tracing();
+//     // Arrange
+//     let app = spawn_test_app().await;
+//     create_default_image(&app).await;
+//     let tenant_id = &create_tenant(&app).await;
+//     let source_id = create_source(&app, tenant_id).await;
+//
+//     // Create first destination and pipeline
+//     let destination_pipeline = CreateDestinationPipelineRequest {
+//         destination_name: new_name(),
+//         destination_config: new_bigquery_destination_config(),
+//         source_id,
+//         pipeline_config: new_pipeline_config(),
+//     };
+//     let response = app
+//         .create_destination_pipeline(tenant_id, &destination_pipeline)
+//         .await;
+//     assert!(response.status().is_success());
+//     let response: CreateDestinationPipelineResponse = response
+//         .json()
+//         .await
+//         .expect("failed to deserialize response");
+//     let first_destination_id = response.destination_id;
+//
+//     // Act - Try to create another pipeline with same source and the first destination
+//     let pipeline_request = CreatePipelineRequest {
+//         source_id,
+//         destination_id: first_destination_id,
+//         config: updated_pipeline_config(),
+//     };
+//     let response = app.create_pipeline(tenant_id, &pipeline_request).await;
+//
+//     // Assert
+//     assert_eq!(response.status(), StatusCode::CONFLICT);
+// }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn destination_and_pipeline_can_be_deleted() {

@@ -223,14 +223,17 @@ async fn pipeline_can_be_created() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn tenant_cannot_create_more_than_three_pipelines() {
+async fn tenant_cannot_create_more_than_max_pipelines() {
+    use etl_api::db::pipelines::MAX_PIPELINES_PER_TENANT;
+
     init_test_tracing();
     // Arrange
     let app = spawn_test_app().await;
     create_default_image(&app).await;
     let tenant_id = &create_tenant(&app).await;
 
-    for _ in 0..3 {
+    // Create the maximum allowed pipelines
+    for _ in 0..MAX_PIPELINES_PER_TENANT {
         let source_id = create_source(&app, tenant_id).await;
         let destination_id = create_destination(&app, tenant_id).await;
         let pipeline = CreatePipelineRequest {
@@ -242,6 +245,7 @@ async fn tenant_cannot_create_more_than_three_pipelines() {
         assert!(response.status().is_success());
     }
 
+    // Attempt to create one more pipeline should fail
     let source_id = create_source(&app, tenant_id).await;
     let destination_id = create_destination(&app, tenant_id).await;
     let pipeline = CreatePipelineRequest {
@@ -575,25 +579,15 @@ async fn all_pipelines_can_be_read() {
     let app = spawn_test_app().await;
     create_default_image(&app).await;
     let tenant_id = &create_tenant(&app).await;
-    let source1_id = create_source(&app, tenant_id).await;
-    let source2_id = create_source(&app, tenant_id).await;
-    let destination1_id = create_destination(&app, tenant_id).await;
-    let destination2_id = create_destination(&app, tenant_id).await;
+    let source_id = create_source(&app, tenant_id).await;
+    let destination_id = create_destination(&app, tenant_id).await;
 
-    let pipeline1_id = create_pipeline_with_config(
+    let pipeline_id = create_pipeline_with_config(
         &app,
         tenant_id,
-        source1_id,
-        destination1_id,
+        source_id,
+        destination_id,
         new_pipeline_config(),
-    )
-    .await;
-    let pipeline2_id = create_pipeline_with_config(
-        &app,
-        tenant_id,
-        source2_id,
-        destination2_id,
-        updated_pipeline_config(),
     )
     .await;
 
@@ -606,98 +600,95 @@ async fn all_pipelines_can_be_read() {
         .json()
         .await
         .expect("failed to deserialize response");
-    for pipeline in response.pipelines {
-        if pipeline.id == pipeline1_id {
-            assert_eq!(&pipeline.tenant_id, tenant_id);
-            assert_eq!(pipeline.source_id, source1_id);
-            assert_eq!(pipeline.destination_id, destination1_id);
-            insta::assert_debug_snapshot!(pipeline.config);
-        } else if pipeline.id == pipeline2_id {
-            assert_eq!(&pipeline.tenant_id, tenant_id);
-            assert_eq!(pipeline.source_id, source2_id);
-            assert_eq!(pipeline.destination_id, destination2_id);
-            insta::assert_debug_snapshot!(pipeline.config);
-        }
-    }
+    assert_eq!(response.pipelines.len(), 1);
+    let pipeline = &response.pipelines[0];
+    assert_eq!(pipeline.id, pipeline_id);
+    assert_eq!(&pipeline.tenant_id, tenant_id);
+    assert_eq!(pipeline.source_id, source_id);
+    assert_eq!(pipeline.destination_id, destination_id);
+    insta::assert_debug_snapshot!(pipeline.config);
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn duplicate_pipeline_with_same_source_and_destination_cannot_be_created() {
-    init_test_tracing();
-    // Arrange
-    let app = spawn_test_app().await;
-    create_default_image(&app).await;
-    let tenant_id = &create_tenant(&app).await;
-    let source_id = create_source(&app, tenant_id).await;
-    let destination_id = create_destination(&app, tenant_id).await;
-
-    // Create first pipeline
-    let pipeline = CreatePipelineRequest {
-        source_id,
-        destination_id,
-        config: new_pipeline_config(),
-    };
-    let response = app.create_pipeline(tenant_id, &pipeline).await;
-    assert!(response.status().is_success());
-
-    // Act - Try to create duplicate pipeline with same source and destination
-    let duplicate_pipeline = CreatePipelineRequest {
-        source_id,
-        destination_id,
-        config: updated_pipeline_config(),
-    };
-    let response = app.create_pipeline(tenant_id, &duplicate_pipeline).await;
-
-    // Assert
-    assert_eq!(response.status(), StatusCode::CONFLICT);
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn updating_pipeline_to_duplicate_source_destination_combination_fails() {
-    init_test_tracing();
-    // Arrange
-    let app = spawn_test_app().await;
-    create_default_image(&app).await;
-    let tenant_id = &create_tenant(&app).await;
-    let source1_id = create_source(&app, tenant_id).await;
-    let source2_id = create_source(&app, tenant_id).await;
-    let destination_id = create_destination(&app, tenant_id).await;
-
-    // Create first pipeline
-    let pipeline1 = CreatePipelineRequest {
-        source_id: source1_id,
-        destination_id,
-        config: new_pipeline_config(),
-    };
-    let response = app.create_pipeline(tenant_id, &pipeline1).await;
-    assert!(response.status().is_success());
-
-    // Create second pipeline with different source
-    let pipeline2 = CreatePipelineRequest {
-        source_id: source2_id,
-        destination_id,
-        config: new_pipeline_config(),
-    };
-    let response = app.create_pipeline(tenant_id, &pipeline2).await;
-    let response: CreatePipelineResponse = response
-        .json()
-        .await
-        .expect("failed to deserialize response");
-    let pipeline2_id = response.id;
-
-    // Act - Try to update second pipeline to have same source as first
-    let updated_config = UpdatePipelineRequest {
-        source_id: source1_id, // This would create a duplicate
-        destination_id,
-        config: updated_pipeline_config(),
-    };
-    let response = app
-        .update_pipeline(tenant_id, pipeline2_id, &updated_config)
-        .await;
-
-    // Assert
-    assert_eq!(response.status(), StatusCode::CONFLICT);
-}
+// TODO: Re-enable these tests once MAX_PIPELINES_PER_TENANT is lifted from 1.
+// These tests require multiple pipelines per tenant to function correctly.
+//
+// #[tokio::test(flavor = "multi_thread")]
+// async fn duplicate_pipeline_with_same_source_and_destination_cannot_be_created() {
+//     init_test_tracing();
+//     // Arrange
+//     let app = spawn_test_app().await;
+//     create_default_image(&app).await;
+//     let tenant_id = &create_tenant(&app).await;
+//     let source_id = create_source(&app, tenant_id).await;
+//     let destination_id = create_destination(&app, tenant_id).await;
+//
+//     // Create first pipeline
+//     let pipeline = CreatePipelineRequest {
+//         source_id,
+//         destination_id,
+//         config: new_pipeline_config(),
+//     };
+//     let response = app.create_pipeline(tenant_id, &pipeline).await;
+//     assert!(response.status().is_success());
+//
+//     // Act - Try to create duplicate pipeline with same source and destination
+//     let duplicate_pipeline = CreatePipelineRequest {
+//         source_id,
+//         destination_id,
+//         config: updated_pipeline_config(),
+//     };
+//     let response = app.create_pipeline(tenant_id, &duplicate_pipeline).await;
+//
+//     // Assert
+//     assert_eq!(response.status(), StatusCode::CONFLICT);
+// }
+//
+// #[tokio::test(flavor = "multi_thread")]
+// async fn updating_pipeline_to_duplicate_source_destination_combination_fails() {
+//     init_test_tracing();
+//     // Arrange
+//     let app = spawn_test_app().await;
+//     create_default_image(&app).await;
+//     let tenant_id = &create_tenant(&app).await;
+//     let source1_id = create_source(&app, tenant_id).await;
+//     let source2_id = create_source(&app, tenant_id).await;
+//     let destination_id = create_destination(&app, tenant_id).await;
+//
+//     // Create first pipeline
+//     let pipeline1 = CreatePipelineRequest {
+//         source_id: source1_id,
+//         destination_id,
+//         config: new_pipeline_config(),
+//     };
+//     let response = app.create_pipeline(tenant_id, &pipeline1).await;
+//     assert!(response.status().is_success());
+//
+//     // Create second pipeline with different source
+//     let pipeline2 = CreatePipelineRequest {
+//         source_id: source2_id,
+//         destination_id,
+//         config: new_pipeline_config(),
+//     };
+//     let response = app.create_pipeline(tenant_id, &pipeline2).await;
+//     let response: CreatePipelineResponse = response
+//         .json()
+//         .await
+//         .expect("failed to deserialize response");
+//     let pipeline2_id = response.id;
+//
+//     // Act - Try to update second pipeline to have same source as first
+//     let updated_config = UpdatePipelineRequest {
+//         source_id: source1_id, // This would create a duplicate
+//         destination_id,
+//         config: updated_pipeline_config(),
+//     };
+//     let response = app
+//         .update_pipeline(tenant_id, pipeline2_id, &updated_config)
+//         .await;
+//
+//     // Assert
+//     assert_eq!(response.status(), StatusCode::CONFLICT);
+// }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn pipeline_version_can_be_updated() {
