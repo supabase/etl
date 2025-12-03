@@ -22,6 +22,7 @@ use crate::db::pipelines::{
     MAX_PIPELINES_PER_TENANT, PipelinesDbError, count_pipelines_for_tenant, read_pipeline,
 };
 use crate::db::sources::{SourcesDbError, source_exists};
+use crate::feature_flags::get_max_pipelines_per_tenant;
 
 #[derive(Debug, Error)]
 enum DestinationPipelineError {
@@ -192,6 +193,7 @@ pub async fn create_destination_and_pipeline(
     pool: Data<PgPool>,
     destination_and_pipeline: Json<CreateDestinationPipelineRequest>,
     encryption_key: Data<EncryptionKey>,
+    feature_flags_client: Option<Data<configcat::Client>>,
 ) -> Result<impl Responder, DestinationPipelineError> {
     let tenant_id = extract_tenant_id(&req)?;
     let destination_and_pipeline = destination_and_pipeline.into_inner();
@@ -210,10 +212,16 @@ pub async fn create_destination_and_pipeline(
         ));
     }
 
+    let max_pipelines = get_max_pipelines_per_tenant(
+        feature_flags_client.as_ref(),
+        tenant_id,
+        MAX_PIPELINES_PER_TENANT,
+    )
+    .await;
     let pipeline_count = count_pipelines_for_tenant(txn.deref_mut(), tenant_id).await?;
-    if pipeline_count >= MAX_PIPELINES_PER_TENANT {
+    if pipeline_count >= max_pipelines {
         return Err(DestinationPipelineError::PipelineLimitReached {
-            limit: MAX_PIPELINES_PER_TENANT,
+            limit: max_pipelines,
         });
     }
 
