@@ -119,7 +119,7 @@ jobs:
   create-manifest:
     name: Create Multi-Arch Manifest
     needs: build-platform
-    runs-on: blacksmith-4vcpu-ubuntu-2404-arm
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     if: inputs.push == true
     steps:
       - name: Extract Image Name

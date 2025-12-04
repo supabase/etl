@@ -15,7 +15,7 @@ permissions:
 
 jobs:
   deploy:
-    runs-on: blacksmith-4vcpu-ubuntu-2404-arm
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     if: github.event_name == 'push'
     steps:
       - name: Checkout
@@ -43,7 +43,7 @@ jobs:
         run: mkdocs gh-deploy --force
 
   build:
-    runs-on: blacksmith-4vcpu-ubuntu-2404-arm
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     if: github.event_name == 'pull_request'
     steps:
       - name: Checkout
