@@ -65,6 +65,7 @@ impl From<StoredPipelineConfig> for FullApiPipelineConfig {
 pub struct PartialApiPipelineConfig {
     #[schema(example = "my_publication")]
     #[serde(
+        default,
         skip_serializing_if = "Option::is_none",
         deserialize_with = "crate::utils::trim_option_string"
     )]
