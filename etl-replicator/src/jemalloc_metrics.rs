@@ -130,25 +130,29 @@ const APP_TYPE_VALUE: &str = "etl-replicator-app";
 fn log_jemalloc_config() {
     // Read typed opt values.
     let background_thread = opt::background_thread::read().ok();
-    let narenas = opt::narenas::read().ok();
+    let opt_narenas = opt::narenas::read().ok(); // 0 = auto
     let tcache = opt::tcache::read().ok();
     let tcache_max = opt::tcache_max::read().ok();
-    let abort = opt::abort::read().ok();
 
-    // Read decay settings via raw mallctl (not exposed in typed API).
+    // Read values not exposed in typed API via raw mallctl.
     // SAFETY: These are read-only queries to jemalloc's opt.* configuration values.
-    // The keys are valid null-terminated strings and the return type matches jemalloc's ssize_t.
+    // The keys are valid null-terminated strings and the return types match jemalloc's types.
     let dirty_decay_ms: Option<isize> = unsafe { raw::read(b"opt.dirty_decay_ms\0") }.ok();
     let muzzy_decay_ms: Option<isize> = unsafe { raw::read(b"opt.muzzy_decay_ms\0") }.ok();
+    let abort_conf: Option<bool> = unsafe { raw::read(b"opt.abort_conf\0") }.ok();
+
+    // Get actual runtime narenas (not the configured value).
+    let actual_narenas = tikv_jemalloc_ctl::arenas::narenas::read().ok();
 
     info!(
         background_thread = ?background_thread,
-        narenas = ?narenas,
+        narenas_configured = ?opt_narenas,
+        narenas_actual = ?actual_narenas,
         tcache = ?tcache,
         tcache_max = ?tcache_max,
         dirty_decay_ms = ?dirty_decay_ms,
         muzzy_decay_ms = ?muzzy_decay_ms,
-        abort_conf = ?abort,
+        abort_conf = ?abort_conf,
         "jemalloc configuration"
     );
 }
