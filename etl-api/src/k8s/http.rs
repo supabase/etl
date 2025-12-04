@@ -207,26 +207,28 @@ impl HttpK8sClient {
             return false;
         };
 
-        // Case 1: Currently terminated with non-zero exit code
+        // Currently terminated with non-zero exit code.
         if let Some(terminated) = &state.terminated {
             return terminated.exit_code != 0;
         }
 
-        // Case 2: Waiting state - check for various error conditions
+        // Waiting state, we want to distinguish normal waiting reasons from abnormal ones.
         if let Some(waiting) = &state.waiting {
             if let Some(reason) = &waiting.reason {
                 match reason.as_str() {
-                    // CrashLoopBackOff: container crashed, check lastState for failure
-                    "CrashLoopBackOff" => {
-                        if let Some(last_state) = &container_status.last_state
-                            && let Some(terminated) = &last_state.terminated
-                        {
-                            return terminated.exit_code != 0;
-                        }
-                    }
-                    // Image/container creation errors
-                    "ImagePullBackOff" | "ErrImagePull" | "InvalidImageName" |
-                    "CreateContainerConfigError" | "CreateContainerError" => {
+                    // Crash/restart errors
+                    "CrashLoopBackOff" => return true,
+
+                    // Image-related errors (6 predefined in kubelet)
+                    "ImagePullBackOff"
+                    | "ErrImagePull"
+                    | "ErrImageNeverPull"
+                    | "InvalidImageName"
+                    | "ImageInspectError"
+                    | "RegistryUnavailable" => return true,
+
+                    // Container creation errors
+                    "CreateContainerConfigError" | "CreateContainerError" | "RunContainerError" => {
                         return true;
                     }
                     _ => {}
