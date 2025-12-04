@@ -4,23 +4,26 @@
 //! and routes data to configured destinations. Includes telemetry, error handling, and
 //! graceful shutdown capabilities.
 
+/// Jemalloc allocator for better memory management in high-throughput async workloads.
 #[cfg(not(target_env = "msvc"))]
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 /// Jemalloc configuration optimized for high-throughput async CDC workloads.
 ///
-/// - `background_thread:true`: Offloads memory purging to background threads, improving tail latency.
+/// - `background_thread:true`: Offloads memory purging to background threads (Linux only).
 /// - `metadata_thp:auto`: Enables transparent huge pages for jemalloc metadata, reducing TLB misses.
 /// - `dirty_decay_ms:10000`: Returns unused dirty pages to the OS after 10 seconds.
 /// - `muzzy_decay_ms:10000`: Returns unused muzzy pages to the OS after 10 seconds.
 /// - `tcache_max:8192`: Reduces thread-local cache size for better container memory efficiency.
 /// - `abort_conf:true`: Aborts on invalid configuration for fail-fast behavior.
 ///
-/// Note: `narenas` should be set via `MALLOC_CONF` env var to match container CPU limits per environment.
+/// Note: tikv-jemallocator uses the `_rjem_` prefix for symbols since `unprefixed_malloc_on_supported_platforms`
+/// is not enabled. This config can be overridden via `_RJEM_MALLOC_CONF` env var.
+/// `narenas` should be set via env var to match container CPU limits per environment.
 #[cfg(not(target_env = "msvc"))]
 #[allow(non_upper_case_globals)]
-#[unsafe(export_name = "malloc_conf")]
+#[unsafe(export_name = "_rjem_malloc_conf")]
 pub static malloc_conf: &[u8] =
     b"background_thread:true,metadata_thp:auto,dirty_decay_ms:10000,muzzy_decay_ms:10000,tcache_max:8192,abort_conf:true\0";
 

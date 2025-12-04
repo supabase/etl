@@ -17,8 +17,8 @@
 use std::time::Duration;
 
 use metrics::{Unit, describe_gauge, gauge};
-use tikv_jemalloc_ctl::{epoch, stats};
-use tracing::{debug, warn};
+use tikv_jemalloc_ctl::{epoch, opt, raw, stats};
+use tracing::{debug, info, warn};
 
 /// Total bytes allocated by the application and currently in use.
 ///
@@ -123,6 +123,36 @@ const APP_TYPE_LABEL: &str = "app_type";
 /// Application type value for the replicator.
 const APP_TYPE_VALUE: &str = "etl-replicator-app";
 
+/// Logs the current jemalloc configuration for validation.
+///
+/// Reads and logs opt.* values to verify the malloc_conf settings were applied.
+/// Uses raw mallctl for decay settings not exposed by the typed API.
+fn log_jemalloc_config() {
+    // Read typed opt values.
+    let background_thread = opt::background_thread::read().ok();
+    let narenas = opt::narenas::read().ok();
+    let tcache = opt::tcache::read().ok();
+    let tcache_max = opt::tcache_max::read().ok();
+    let abort = opt::abort::read().ok();
+
+    // Read decay settings via raw mallctl (not exposed in typed API).
+    // SAFETY: These are read-only queries to jemalloc's opt.* configuration values.
+    // The keys are valid null-terminated strings and the return type matches jemalloc's ssize_t.
+    let dirty_decay_ms: Option<isize> = unsafe { raw::read(b"opt.dirty_decay_ms\0") }.ok();
+    let muzzy_decay_ms: Option<isize> = unsafe { raw::read(b"opt.muzzy_decay_ms\0") }.ok();
+
+    info!(
+        background_thread = ?background_thread,
+        narenas = ?narenas,
+        tcache = ?tcache,
+        tcache_max = ?tcache_max,
+        dirty_decay_ms = ?dirty_decay_ms,
+        muzzy_decay_ms = ?muzzy_decay_ms,
+        abort_conf = ?abort,
+        "jemalloc configuration"
+    );
+}
+
 /// Registers jemalloc metric descriptions with the global metrics recorder.
 fn register_metrics() {
     describe_gauge!(
@@ -171,6 +201,7 @@ fn register_metrics() {
 /// to ensure the metrics recorder is installed.
 pub fn spawn_jemalloc_metrics_task(pipeline_id: u64) {
     register_metrics();
+    log_jemalloc_config();
 
     let pipeline_id_str = pipeline_id.to_string();
 
