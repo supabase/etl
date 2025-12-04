@@ -203,11 +203,35 @@ impl HttpK8sClient {
             return false;
         };
 
-        // Check current state for non-zero exit code.
-        if let Some(state) = &container_status.state
-            && let Some(terminated) = &state.terminated
-        {
+        let Some(state) = &container_status.state else {
+            return false;
+        };
+
+        // Case 1: Currently terminated with non-zero exit code
+        if let Some(terminated) = &state.terminated {
             return terminated.exit_code != 0;
+        }
+
+        // Case 2: Waiting state - check for various error conditions
+        if let Some(waiting) = &state.waiting {
+            if let Some(reason) = &waiting.reason {
+                match reason.as_str() {
+                    // CrashLoopBackOff: container crashed, check lastState for failure
+                    "CrashLoopBackOff" => {
+                        if let Some(last_state) = &container_status.last_state
+                            && let Some(terminated) = &last_state.terminated
+                        {
+                            return terminated.exit_code != 0;
+                        }
+                    }
+                    // Image/container creation errors
+                    "ImagePullBackOff" | "ErrImagePull" | "InvalidImageName" |
+                    "CreateContainerConfigError" | "CreateContainerError" => {
+                        return true;
+                    }
+                    _ => {}
+                }
+            }
         }
 
         false
