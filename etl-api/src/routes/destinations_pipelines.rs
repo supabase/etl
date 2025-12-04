@@ -143,6 +143,7 @@ impl ResponseError for DestinationPipelineError {
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct CreateDestinationPipelineRequest {
     #[schema(example = "My New Destination", required = true)]
+    #[serde(deserialize_with = "crate::utils::trim_string")]
     pub destination_name: String,
     #[schema(required = true)]
     pub destination_config: FullApiDestinationConfig,
@@ -163,6 +164,7 @@ pub struct CreateDestinationPipelineResponse {
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct UpdateDestinationPipelineRequest {
     #[schema(example = "My Updated Destination", required = true)]
+    #[serde(deserialize_with = "crate::utils::trim_string")]
     pub destination_name: String,
     #[schema(required = true)]
     pub destination_config: FullApiDestinationConfig,

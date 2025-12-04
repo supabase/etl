@@ -66,10 +66,13 @@ impl ResponseError for TenantSourceError {
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct CreateTenantSourceRequest {
     #[schema(example = "abczjjlmfsijwrlnwatw", required = true)]
+    #[serde(deserialize_with = "crate::utils::trim_string")]
     pub tenant_id: String,
     #[schema(example = "My Tenant", required = true)]
+    #[serde(deserialize_with = "crate::utils::trim_string")]
     pub tenant_name: String,
     #[schema(example = "My Postgres Source", required = true)]
+    #[serde(deserialize_with = "crate::utils::trim_string")]
     pub source_name: String,
     #[schema(required = true)]
     pub source_config: FullApiSourceConfig,

@@ -66,6 +66,7 @@ impl ResponseError for SourceError {
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct CreateSourceRequest {
     #[schema(example = "My Postgres Source", required = true)]
+    #[serde(deserialize_with = "crate::utils::trim_string")]
     pub name: String,
     #[schema(required = true)]
     pub config: FullApiSourceConfig,
@@ -80,6 +81,7 @@ pub struct CreateSourceResponse {
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct UpdateSourceRequest {
     #[schema(example = "My Updated Postgres Source", required = true)]
+    #[serde(deserialize_with = "crate::utils::trim_string")]
     pub name: String,
     #[schema(required = true)]
     pub config: FullApiSourceConfig,

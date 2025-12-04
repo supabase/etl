@@ -64,6 +64,7 @@ impl ResponseError for DestinationError {
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct CreateDestinationRequest {
     #[schema(example = "My BigQuery Destination", required = true)]
+    #[serde(deserialize_with = "crate::utils::trim_string")]
     pub name: String,
     #[schema(required = true)]
     pub config: FullApiDestinationConfig,
@@ -78,6 +79,7 @@ pub struct CreateDestinationResponse {
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct UpdateDestinationRequest {
     #[schema(example = "My Updated BigQuery Destination", required = true)]
+    #[serde(deserialize_with = "crate::utils::trim_string")]
     pub name: String,
     #[schema(required = true)]
     pub config: FullApiDestinationConfig,

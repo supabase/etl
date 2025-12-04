@@ -57,6 +57,7 @@ impl ResponseError for ImageError {
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct CreateImageRequest {
     #[schema(example = "supabase/replicator:1.2.3", required = true)]
+    #[serde(deserialize_with = "crate::utils::trim_string")]
     pub name: String,
     #[schema(example = true, required = true)]
     pub is_default: bool,
@@ -71,6 +72,7 @@ pub struct CreateImageResponse {
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct UpdateImageRequest {
     #[schema(example = "supabase/replicator:1.2.4", required = true)]
+    #[serde(deserialize_with = "crate::utils::trim_string")]
     pub name: String,
     #[schema(example = false, required = true)]
     pub is_default: bool,
