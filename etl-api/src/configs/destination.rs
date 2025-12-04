@@ -472,7 +472,6 @@ pub enum FullApiIcebergConfig {
         #[schema(example = "my-namespace")]
         #[serde(
             skip_serializing_if = "Option::is_none",
-            default,
             deserialize_with = "crate::utils::trim_option_string"
         )]
         namespace: Option<String>,
@@ -496,7 +495,7 @@ pub enum FullApiIcebergConfig {
         #[serde(deserialize_with = "crate::utils::trim_string")]
         warehouse_name: String,
         #[schema(example = "my-namespace")]
-        #[serde(default, deserialize_with = "crate::utils::trim_option_string")]
+        #[serde(deserialize_with = "crate::utils::trim_option_string")]
         namespace: Option<String>,
         #[schema(example = "9156667efc2c70d89af6588da86d2924")]
         s3_access_key_id: SerializableSecretString,

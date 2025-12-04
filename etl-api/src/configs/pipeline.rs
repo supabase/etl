@@ -66,7 +66,6 @@ pub struct PartialApiPipelineConfig {
     #[schema(example = "my_publication")]
     #[serde(
         skip_serializing_if = "Option::is_none",
-        default,
         deserialize_with = "crate::utils::trim_option_string"
     )]
     pub publication_name: Option<String>,
