@@ -11,6 +11,7 @@ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 /// Jemalloc configuration optimized for high-throughput async CDC workloads.
 ///
+/// - `narenas:8`: Fixed arena count for predictable memory behavior in containers.
 /// - `background_thread:true`: Offloads memory purging to background threads (Linux only).
 /// - `metadata_thp:auto`: Enables transparent huge pages for jemalloc metadata, reducing TLB misses.
 /// - `dirty_decay_ms:10000`: Returns unused dirty pages to the OS after 10 seconds.
@@ -18,14 +19,20 @@ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 /// - `tcache_max:8192`: Reduces thread-local cache size for better container memory efficiency.
 /// - `abort_conf:true`: Aborts on invalid configuration for fail-fast behavior.
 ///
-/// Note: tikv-jemallocator uses the `_rjem_` prefix for symbols since `unprefixed_malloc_on_supported_platforms`
-/// is not enabled. This config can be overridden via `_RJEM_MALLOC_CONF` env var.
-/// `narenas` should be set via env var to match container CPU limits per environment.
-#[cfg(not(target_env = "msvc"))]
+/// On Linux, this can be overridden via `MALLOC_CONF` env var.
+/// On macOS, use `_RJEM_MALLOC_CONF` (unprefixed symbols not supported).
+#[cfg(all(target_os = "linux", not(target_env = "msvc")))]
+#[allow(non_upper_case_globals)]
+#[unsafe(export_name = "malloc_conf")]
+pub static malloc_conf: &[u8] =
+    b"narenas:8,background_thread:true,metadata_thp:auto,dirty_decay_ms:10000,muzzy_decay_ms:10000,tcache_max:8192,abort_conf:true\0";
+
+/// Jemalloc configuration for macOS (uses prefixed symbol since unprefixed not supported).
+#[cfg(all(target_os = "macos", not(target_env = "msvc")))]
 #[allow(non_upper_case_globals)]
 #[unsafe(export_name = "_rjem_malloc_conf")]
 pub static malloc_conf: &[u8] =
-    b"background_thread:true,metadata_thp:auto,dirty_decay_ms:10000,muzzy_decay_ms:10000,tcache_max:8192,abort_conf:true\0";
+    b"narenas:8,background_thread:true,metadata_thp:auto,dirty_decay_ms:10000,muzzy_decay_ms:10000,tcache_max:8192,abort_conf:true\0";
 
 use crate::config::load_replicator_config;
 use crate::core::start_replicator_with_config;

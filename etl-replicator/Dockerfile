@@ -46,8 +46,8 @@ WORKDIR /app
 USER nonroot:nonroot
 
 # jemalloc configuration is compiled into the binary (see main.rs).
-# Use _RJEM_MALLOC_CONF env var to override at runtime if needed.
-# Example: _RJEM_MALLOC_CONF="narenas:4,dirty_decay_ms:5000"
+# Use MALLOC_CONF env var to override at runtime if needed.
+# Example: MALLOC_CONF="narenas:4,dirty_decay_ms:5000"
 
 # Copy binary; configuration must be provided at runtime via mounted volume or environment overrides
 COPY --from=builder /app/target/release/etl-replicator ./etl-replicator
