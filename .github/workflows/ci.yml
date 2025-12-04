@@ -20,7 +20,7 @@ concurrency:
 jobs:
   check:
     name: Lint
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: blacksmith-4vcpu-ubuntu-2404-arm
     strategy:
       matrix:
         check: [fmt, clippy, sort]
@@ -56,7 +56,7 @@ jobs:
 
   test-partial:
     name: Tests (Partial)
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: blacksmith-4vcpu-ubuntu-2404-arm
     # Run on forks.
     if: github.event.pull_request.head.repo.fork == true
     permissions:
@@ -114,7 +114,7 @@ jobs:
 
   test-full:
     name: Tests (Full)
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: blacksmith-4vcpu-ubuntu-2404-arm
     # Run on non-forks.
     if: github.event.pull_request.head.repo.fork == false
     permissions:

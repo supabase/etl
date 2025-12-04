@@ -22,7 +22,7 @@ permissions:
 jobs:
   resolve-ref:
     name: Resolve Checkout Ref
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: blacksmith-4vcpu-ubuntu-2404-arm
     outputs:
       ref: ${{ steps.pick.outputs.ref }}
     steps:
@@ -49,7 +49,7 @@ jobs:
   validate-experimental:
     name: Validate Experimental Build
     needs: resolve-ref
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: blacksmith-4vcpu-ubuntu-2404-arm
     if: github.event_name == 'workflow_dispatch' && inputs.experimental == true
     steps:
       - name: Checkout
