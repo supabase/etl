@@ -8,12 +8,13 @@ repository.workspace = true
 homepage.workspace = true
 
 [features]
-test-utils = ["etl-postgres/test-utils"]
+test-utils = ["etl-postgres/test-utils", "etl-mysql/test-utils"]
 failpoints = ["fail/failpoints"]
 default = []
 
 [dependencies]
 etl-config = { workspace = true }
+etl-mysql = { workspace = true, features = ["tokio", "replication"] }
 etl-postgres = { workspace = true, features = ["tokio", "replication"] }
 
 byteorder = { workspace = true }
@@ -44,6 +45,11 @@ uuid = { workspace = true, features = ["v4"] }
 x509-cert = { workspace = true, default-features = false }
 
 [dev-dependencies]
+etl-mysql = { workspace = true, features = [
+    "tokio",
+    "replication",
+    "test-utils",
+] }
 etl-postgres = { workspace = true, features = [
     "tokio",
     "replication",
