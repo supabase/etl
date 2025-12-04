@@ -4,15 +4,10 @@
 //! allocation patterns, fragmentation, and overall allocator health. Uses MIB-based
 //! access for efficient repeated polling.
 //!
-//! # Interpreting the Metrics
-//!
-//! - **Healthy state**: `allocated` close to `active`, `active` close to `resident`.
-//! - **Fragmentation**: A large gap between `allocated` and `resident` indicates
-//!   overhead from page alignment, dirty pages, or metadata.
-//! - **Memory pressure**: If `resident` approaches container limits while `allocated`
-//!   is much lower, consider tuning decay settings or investigating allocation patterns.
-//! - **Retained memory**: High `retained` is normal on 64-bit Linux. It represents
-//!   virtual address space only - no physical memory cost.
+//! Interpreting the metrics: a healthy state has `allocated` close to `active` and
+//! `active` close to `resident`. A large gap between `allocated` and `resident` indicates
+//! fragmentation from page alignment, dirty pages, or metadata. High `retained` is normal
+//! on 64-bit Linux (virtual address space only, no physical memory cost).
 
 use std::time::Duration;
 
