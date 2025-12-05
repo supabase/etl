@@ -20,7 +20,8 @@ RUN apt-get update && \
     pkg-config \
     libssl-dev \
     clang \
-    lld && \
+    lld \
+    make && \
     rm -rf /var/lib/apt/lists/*
 
 # Copy cargo config for build optimizations (lld linker, etc.)

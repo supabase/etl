@@ -15,14 +15,15 @@ ARG BUILDPLATFORM
 RUN echo "Native build on $BUILDPLATFORM for $TARGETPLATFORM"
 
 # Install build dependencies including lld linker for faster linking
-# TODO: remove protobuf-compiler once the upstream gcp-bigquery-client remove it from its deps
+# TODO: remove protobuf-compiler once the upstream gcp-bigquery-client removes it from its deps.
 RUN apt-get update && \
     apt-get install -y \
     pkg-config \
     libssl-dev \
     protobuf-compiler \
     clang \
-    lld && \
+    lld \
+    make && \
     rm -rf /var/lib/apt/lists/*
 
 # Copy cargo config for build optimizations (lld linker, etc.)
@@ -43,6 +44,10 @@ WORKDIR /app
 
 # Create non-root user (distroless already has nonroot user)
 USER nonroot:nonroot
+
+# jemalloc configuration is compiled into the binary (see main.rs).
+# Use MALLOC_CONF env var to override at runtime if needed.
+# Example: MALLOC_CONF="narenas:4,dirty_decay_ms:5000"
 
 # Copy binary; configuration must be provided at runtime via mounted volume or environment overrides
 COPY --from=builder /app/target/release/etl-replicator ./etl-replicator
