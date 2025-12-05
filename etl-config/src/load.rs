@@ -201,7 +201,14 @@ mod tests {
     use super::*;
     use serde::{Deserialize, Serialize};
     use std::fs;
+    use std::sync::{Mutex, OnceLock};
     use tempfile::TempDir;
+
+    /// Mutex to serialize tests that modify environment variables or current directory.
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
 
     #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
     struct ApplicationConfig {
@@ -233,6 +240,8 @@ mod tests {
     }
 
     fn test_roundtrip_with_extension(extension: &str) {
+        let _guard = env_lock().lock().unwrap();
+
         let temp_dir = TempDir::new().unwrap();
         let config_dir = temp_dir.path().join("configuration");
         fs::create_dir(&config_dir).unwrap();
@@ -274,6 +283,7 @@ mod tests {
 
         // Set environment and working directory
         unsafe {
+            std::env::remove_var("APP_CONFIG_DIR");
             std::env::set_var("APP_ENVIRONMENT", "prod");
         }
         std::env::set_current_dir(temp_dir.path()).unwrap();
@@ -322,6 +332,8 @@ mod tests {
 
     #[test]
     fn test_app_config_dir_env_var() {
+        let _guard = env_lock().lock().unwrap();
+
         let temp_dir = TempDir::new().unwrap();
         // Note: NOT using "configuration" subdirectory, using a custom path
         let custom_config_dir = temp_dir.path().join("my-custom-config");
@@ -357,6 +369,8 @@ mod tests {
 
     #[test]
     fn test_fallback_to_current_dir_when_app_config_dir_not_set() {
+        let _guard = env_lock().lock().unwrap();
+
         let temp_dir = TempDir::new().unwrap();
         let config_dir = temp_dir.path().join("configuration");
         fs::create_dir(&config_dir).unwrap();
