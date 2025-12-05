@@ -1,6 +1,7 @@
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use sqlx::postgres::{PgConnectOptions as SqlxConnectOptions, PgSslMode as SqlxSslMode};
+use std::time::Duration;
 use tokio_postgres::{Config as TokioPgConnectOptions, config::SslMode as TokioPgSslMode};
 
 use crate::Config;
@@ -137,6 +138,10 @@ pub struct PgConnectionConfig {
     pub password: Option<SecretString>,
     /// TLS configuration for secure connections.
     pub tls: TlsConfig,
+    /// TCP keepalive configuration for connection health monitoring.
+    /// When `None`, TCP keepalives are disabled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keepalive: Option<TcpKeepaliveConfig>,
 }
 
 impl Config for PgConnectionConfig {
@@ -158,6 +163,10 @@ pub struct PgConnectionConfigWithoutSecrets {
     pub username: String,
     /// TLS configuration for secure connections.
     pub tls: TlsConfig,
+    /// TCP keepalive configuration for connection health monitoring.
+    /// When `None`, TCP keepalives are disabled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keepalive: Option<TcpKeepaliveConfig>,
 }
 
 impl From<PgConnectionConfig> for PgConnectionConfigWithoutSecrets {
@@ -168,6 +177,7 @@ impl From<PgConnectionConfig> for PgConnectionConfigWithoutSecrets {
             name: value.name,
             username: value.username,
             tls: value.tls,
+            keepalive: value.keepalive,
         }
     }
 }
@@ -191,6 +201,27 @@ impl TlsConfig {
         }
 
         Ok(())
+    }
+}
+
+/// TCP keepalive configuration for Postgres connections.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TcpKeepaliveConfig {
+    /// Time in seconds a connection must be idle before sending keepalive probes.
+    pub idle_secs: u64,
+    /// Time in seconds between individual keepalive probes.
+    pub interval_secs: u64,
+    /// Number of keepalive probes to send before considering the connection dead.
+    pub retries: u32,
+}
+
+impl Default for TcpKeepaliveConfig {
+    fn default() -> Self {
+        Self {
+            idle_secs: 30,
+            interval_secs: 30,
+            retries: 3,
+        }
     }
 }
 
@@ -271,6 +302,14 @@ impl IntoConnectOptions<TokioPgConnectOptions> for PgConnectionConfig {
 
         if let Some(password) = &self.password {
             config.password(password.expose_secret());
+        }
+
+        if let Some(keepalive) = &self.keepalive {
+            config
+                .keepalives(true)
+                .keepalives_idle(Duration::from_secs(keepalive.idle_secs))
+                .keepalives_interval(Duration::from_secs(keepalive.interval_secs))
+                .keepalives_retries(keepalive.retries);
         }
 
         config
