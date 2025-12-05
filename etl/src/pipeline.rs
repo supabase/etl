@@ -8,7 +8,9 @@ use crate::concurrency::shutdown::{ShutdownTx, create_shutdown_channel};
 use crate::destination::Destination;
 use crate::error::{ErrorKind, EtlResult};
 use crate::metrics::register_metrics;
+use crate::migrations::apply_etl_migrations;
 use crate::replication::client::PgReplicationClient;
+use crate::replication::masks::ReplicationMasks;
 use crate::state::table::TableReplicationPhase;
 use crate::store::cleanup::CleanupStore;
 use crate::store::schema::SchemaStore;
@@ -112,14 +114,25 @@ where
 
     /// Starts the pipeline and begins replication processing.
     ///
-    /// This method initializes the connection to Postgres, sets up table mappings and schemas,
-    /// creates the worker pool for table synchronization, and starts the apply worker for
-    /// processing replication stream events.
+    /// This method runs any pending migrations, initializes the connection to Postgres,
+    /// sets up table mappings and schemas, creates the worker pool for table synchronization,
+    /// and starts the apply worker for processing replication stream events.
     pub async fn start(&mut self) -> EtlResult<()> {
         info!(
             "starting pipeline for publication '{}' with id {}",
             self.config.publication_name, self.config.id
         );
+
+        // Run migrations before starting the pipeline.
+        apply_etl_migrations(&self.config.pg_connection)
+            .await
+            .map_err(|e| {
+                crate::etl_error!(
+                    ErrorKind::SourceError,
+                    "Failed to run state store migrations",
+                    format!("{}", e)
+                )
+            })?;
 
         // We create the first connection to Postgres.
         let replication_client =
@@ -146,8 +159,11 @@ where
         let table_sync_worker_permits =
             Arc::new(Semaphore::new(self.config.max_table_sync_workers as usize));
 
-        // We create and start the apply worker (temporarily leaving out retries_orchestrator)
-        // TODO: Remove retries_orchestrator from ApplyWorker constructor
+        // We create the shared replication masks container that will be used by both the apply
+        // worker and table sync workers to track which columns are being replicated for each table.
+        let replication_masks = ReplicationMasks::new();
+
+        // We create and start the apply worker.
         let apply_worker = ApplyWorker::new(
             self.config.id,
             self.config.clone(),
@@ -155,6 +171,7 @@ where
             pool.clone(),
             self.store.clone(),
             self.destination.clone(),
+            replication_masks,
             self.shutdown_tx.subscribe(),
             table_sync_worker_permits,
         )

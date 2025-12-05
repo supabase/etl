@@ -19,6 +19,7 @@ use crate::replication::apply::{
     ApplyLoopAction, ApplyLoopHook, ApplyLoopResult, start_apply_loop,
 };
 use crate::replication::client::PgReplicationClient;
+use crate::replication::masks::ReplicationMasks;
 use crate::replication::table_sync::{TableSyncResult, start_table_sync};
 use crate::state::table::{
     RetryPolicy, TableReplicationError, TableReplicationPhase, TableReplicationPhaseType,
@@ -364,6 +365,7 @@ pub struct TableSyncWorker<S, D> {
     table_id: TableId,
     store: S,
     destination: D,
+    replication_masks: ReplicationMasks,
     shutdown_rx: ShutdownRx,
     force_syncing_tables_tx: SignalTx,
     run_permit: Arc<Semaphore>,
@@ -383,6 +385,7 @@ impl<S, D> TableSyncWorker<S, D> {
         table_id: TableId,
         store: S,
         destination: D,
+        replication_masks: ReplicationMasks,
         shutdown_rx: ShutdownRx,
         force_syncing_tables_tx: SignalTx,
         run_permit: Arc<Semaphore>,
@@ -394,6 +397,7 @@ impl<S, D> TableSyncWorker<S, D> {
             table_id,
             store,
             destination,
+            replication_masks,
             shutdown_rx,
             force_syncing_tables_tx,
             run_permit,
@@ -430,6 +434,7 @@ where
         // Clone all the fields we need for retries.
         let pipeline_id = self.pipeline_id;
         let destination = self.destination.clone();
+        let replication_masks = self.replication_masks.clone();
         let shutdown_rx = self.shutdown_rx.clone();
         let force_syncing_tables_tx = self.force_syncing_tables_tx.clone();
         let run_permit = self.run_permit.clone();
@@ -443,6 +448,7 @@ where
                 table_id,
                 store: store.clone(),
                 destination: destination.clone(),
+                replication_masks: replication_masks.clone(),
                 shutdown_rx: shutdown_rx.clone(),
                 force_syncing_tables_tx: force_syncing_tables_tx.clone(),
                 run_permit: run_permit.clone(),
@@ -621,6 +627,7 @@ where
             state.clone(),
             self.store.clone(),
             self.destination.clone(),
+            &self.replication_masks,
             self.shutdown_rx.clone(),
             self.force_syncing_tables_tx,
         )
@@ -645,6 +652,7 @@ where
             self.store.clone(),
             self.destination,
             TableSyncWorkerHook::new(self.table_id, state, self.store),
+            self.replication_masks,
             self.shutdown_rx,
             None,
         )
@@ -863,33 +871,6 @@ where
         );
 
         self.try_advance_phase(current_lsn, update_state).await
-    }
-
-    /// Handles table replication errors for the table sync worker.
-    ///
-    /// This method processes errors specific to the table this worker manages.
-    /// If the error relates to this worker's table, it updates the state and
-    /// signals the worker to terminate. Errors for other tables are ignored.
-    async fn mark_table_errored(
-        &self,
-        table_replication_error: TableReplicationError,
-    ) -> EtlResult<ApplyLoopAction> {
-        if self.table_id != table_replication_error.table_id() {
-            // If the table is different from the one handled by this table sync worker, marking
-            // the table will be a noop, and we want to continue the loop.
-            return Ok(ApplyLoopAction::Continue);
-        }
-
-        // Since we already have access to the table sync worker state, we can avoid going through
-        // the pool, and we just modify the state here and also update the state store.
-        let mut inner = self.table_sync_worker_state.lock().await;
-        inner
-            .set_and_store(table_replication_error.into(), &self.state_store)
-            .await?;
-
-        // If a table is marked as errored, this worker should stop processing immediately since there
-        // is no need to continue, and for this we mark the loop as completed.
-        Ok(ApplyLoopAction::Complete)
     }
 
     /// Determines whether changes should be applied for the given table.

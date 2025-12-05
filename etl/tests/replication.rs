@@ -20,6 +20,24 @@ use tokio::pin;
 use tokio_postgres::CopyOutStream;
 use tokio_postgres::types::{ToSql, Type};
 
+/// Creates a test column schema with sensible defaults.
+fn test_column(
+    name: &str,
+    typ: Type,
+    ordinal_position: i32,
+    nullable: bool,
+    primary_key: bool,
+) -> ColumnSchema {
+    ColumnSchema::new(
+        name.to_string(),
+        typ,
+        -1,
+        ordinal_position,
+        if primary_key { Some(1) } else { None },
+        nullable,
+    )
+}
+
 async fn count_stream_rows(stream: CopyOutStream) -> u64 {
     pin!(stream);
 
@@ -172,13 +190,7 @@ async fn test_table_schema_copy_is_consistent() {
         .await
         .unwrap();
 
-    let age_schema = ColumnSchema {
-        name: "age".to_string(),
-        typ: Type::INT4,
-        modifier: -1,
-        nullable: true,
-        primary: false,
-    };
+    let age_schema = test_column("age", Type::INT4, 2, true, false);
 
     let table_1_id = database
         .create_table(test_table_name("table_1"), true, &[("age", "integer")])
@@ -192,10 +204,7 @@ async fn test_table_schema_copy_is_consistent() {
         .unwrap();
 
     // We use the transaction to consistently read the table schemas.
-    let table_1_schema = transaction
-        .get_table_schemas(&[table_1_id], None)
-        .await
-        .unwrap();
+    let table_1_schema = transaction.get_table_schemas(&[table_1_id]).await.unwrap();
     transaction.commit().await.unwrap();
     assert_table_schema(
         &table_1_schema,
@@ -217,20 +226,8 @@ async fn test_table_schema_copy_across_multiple_connections() {
         .await
         .unwrap();
 
-    let age_schema = ColumnSchema {
-        name: "age".to_string(),
-        typ: Type::INT4,
-        modifier: -1,
-        nullable: true,
-        primary: false,
-    };
-    let year_schema = ColumnSchema {
-        name: "year".to_string(),
-        typ: Type::INT4,
-        modifier: -1,
-        nullable: true,
-        primary: false,
-    };
+    let age_schema = test_column("age", Type::INT4, 2, true, false);
+    let year_schema = test_column("year", Type::INT4, 3, true, false);
 
     let table_1_id = database
         .create_table(test_table_name("table_1"), true, &[("age", "integer")])
@@ -244,10 +241,7 @@ async fn test_table_schema_copy_across_multiple_connections() {
         .unwrap();
 
     // We use the transaction to consistently read the table schemas.
-    let table_1_schema = transaction
-        .get_table_schemas(&[table_1_id], None)
-        .await
-        .unwrap();
+    let table_1_schema = transaction.get_table_schemas(&[table_1_id]).await.unwrap();
     transaction.commit().await.unwrap();
     assert_table_schema(
         &table_1_schema,
@@ -279,14 +273,8 @@ async fn test_table_schema_copy_across_multiple_connections() {
         .unwrap();
 
     // We use the transaction to consistently read the table schemas.
-    let table_1_schema = transaction
-        .get_table_schemas(&[table_1_id], None)
-        .await
-        .unwrap();
-    let table_2_schema = transaction
-        .get_table_schemas(&[table_2_id], None)
-        .await
-        .unwrap();
+    let table_1_schema = transaction.get_table_schemas(&[table_1_id]).await.unwrap();
+    let table_2_schema = transaction.get_table_schemas(&[table_2_id]).await.unwrap();
     transaction.commit().await.unwrap();
     assert_table_schema(
         &table_1_schema,
@@ -343,18 +331,9 @@ async fn test_table_copy_stream_is_consistent() {
         .unwrap();
 
     // We create a transaction to copy the table data consistently.
+    let columns = [test_column("age", Type::INT4, 2, true, false)];
     let stream = transaction
-        .get_table_copy_stream(
-            table_1_id,
-            &[ColumnSchema {
-                name: "age".to_string(),
-                typ: Type::INT4,
-                modifier: -1,
-                nullable: true,
-                primary: false,
-            }],
-            None,
-        )
+        .get_table_copy_stream(table_1_id, columns.iter(), None)
         .await
         .unwrap();
 
@@ -419,18 +398,9 @@ async fn test_table_copy_stream_respects_row_filter() {
         .unwrap();
 
     // We create a transaction to copy the table data consistently.
+    let columns = [test_column("age", Type::INT4, 2, true, false)];
     let stream = transaction
-        .get_table_copy_stream(
-            test_table_id,
-            &[ColumnSchema {
-                name: "age".to_string(),
-                typ: Type::INT4,
-                modifier: -1,
-                nullable: true,
-                primary: false,
-            }],
-            Some("test_pub"),
-        )
+        .get_table_copy_stream(test_table_id, columns.iter(), Some("test_pub"))
         .await
         .unwrap();
 
@@ -444,7 +414,7 @@ async fn test_table_copy_stream_respects_row_filter() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn test_table_copy_stream_respects_column_filter() {
+async fn test_get_replicated_column_names_respects_column_filter() {
     init_test_tracing();
     let database = spawn_source_database().await;
 
@@ -485,71 +455,47 @@ async fn test_table_copy_stream_respects_column_filter() {
         .await
         .unwrap();
 
-    // Insert test data with all columns.
-    database
-        .run_sql(&format!(
-            "insert into {test_table_name} (name, age, email) values ('Alice', 25, 'alice@example.com')"
-        ))
-        .await
-        .unwrap();
-    database
-        .run_sql(&format!(
-            "insert into {test_table_name} (name, age, email) values ('Bob', 30, 'bob@example.com')"
-        ))
-        .await
-        .unwrap();
-
     // Create the slot when the database schema contains the test data.
     let (transaction, _) = parent_client
         .create_slot_with_transaction(&test_slot_name("my_slot"))
         .await
         .unwrap();
 
-    // Get table schema with the publication - should only include published columns.
+    // Get table schema without publication filter - should include ALL columns.
     let table_schemas = transaction
-        .get_table_schemas(&[test_table_id], Some(publication_name))
+        .get_table_schemas(&[test_table_id])
         .await
         .unwrap();
+    let table_schema = &table_schemas[&test_table_id];
+
+    // Verify all columns are present in the schema.
     assert_table_schema(
         &table_schemas,
         test_table_id,
         test_table_name,
         &[
             id_column_schema(),
-            ColumnSchema {
-                name: "name".to_string(),
-                typ: Type::TEXT,
-                modifier: -1,
-                nullable: true,
-                primary: false,
-            },
-            ColumnSchema {
-                name: "age".to_string(),
-                typ: Type::INT4,
-                modifier: -1,
-                nullable: true,
-                primary: false,
-            },
+            test_column("name", Type::TEXT, 2, true, false),
+            test_column("age", Type::INT4, 3, true, false),
+            test_column("email", Type::TEXT, 4, true, false),
         ],
     );
 
-    // Get table copy stream with the publication.
-    let stream = transaction
-        .get_table_copy_stream(
-            test_table_id,
-            &table_schemas[&test_table_id].column_schemas,
-            Some("test_pub"),
-        )
+    // Get replicated column names from the publication - should only include published columns.
+    let replicated_columns = transaction
+        .get_replicated_column_names(test_table_id, table_schema, publication_name)
         .await
         .unwrap();
 
-    let rows_count = count_stream_rows(stream).await;
-
-    // Transaction should be committed after the copy stream is exhausted.
+    // Transaction should be committed after queries are done.
     transaction.commit().await.unwrap();
 
-    // We expect to have 2 rows (the ones we inserted).
-    assert_eq!(rows_count, 2);
+    // Verify only the published columns are returned (id, name, age - not email).
+    assert_eq!(replicated_columns.len(), 3);
+    assert!(replicated_columns.contains("id"));
+    assert!(replicated_columns.contains("name"));
+    assert!(replicated_columns.contains("age"));
+    assert!(!replicated_columns.contains("email"));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -594,18 +540,9 @@ async fn test_table_copy_stream_no_row_filter() {
         .unwrap();
 
     // We create a transaction to copy the table data consistently.
+    let columns = [test_column("age", Type::INT4, 2, true, false)];
     let stream = transaction
-        .get_table_copy_stream(
-            test_table_id,
-            &[ColumnSchema {
-                name: "age".to_string(),
-                typ: Type::INT4,
-                modifier: -1,
-                nullable: true,
-                primary: false,
-            }],
-            Some("test_pub"),
-        )
+        .get_table_copy_stream(test_table_id, columns.iter(), Some("test_pub"))
         .await
         .unwrap();
 

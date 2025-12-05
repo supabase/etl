@@ -18,9 +18,8 @@ use crate::etl_error;
 use crate::replication::apply::{ApplyLoopAction, ApplyLoopHook, start_apply_loop};
 use crate::replication::client::PgReplicationClient;
 use crate::replication::common::get_active_table_replication_states;
-use crate::state::table::{
-    TableReplicationError, TableReplicationPhase, TableReplicationPhaseType,
-};
+use crate::replication::masks::ReplicationMasks;
+use crate::state::table::{TableReplicationPhase, TableReplicationPhaseType};
 use crate::store::schema::SchemaStore;
 use crate::store::state::StateStore;
 use crate::types::PipelineId;
@@ -80,6 +79,7 @@ pub struct ApplyWorker<S, D> {
     pool: TableSyncWorkerPool,
     store: S,
     destination: D,
+    replication_masks: ReplicationMasks,
     shutdown_rx: ShutdownRx,
     table_sync_worker_permits: Arc<Semaphore>,
 }
@@ -98,6 +98,7 @@ impl<S, D> ApplyWorker<S, D> {
         pool: TableSyncWorkerPool,
         store: S,
         destination: D,
+        replication_masks: ReplicationMasks,
         shutdown_rx: ShutdownRx,
         table_sync_worker_permits: Arc<Semaphore>,
     ) -> Self {
@@ -108,6 +109,7 @@ impl<S, D> ApplyWorker<S, D> {
             pool,
             store,
             destination,
+            replication_masks,
             shutdown_rx,
             table_sync_worker_permits,
         }
@@ -153,10 +155,12 @@ where
                     self.pool,
                     self.store,
                     self.destination,
+                    self.replication_masks.clone(),
                     self.shutdown_rx.clone(),
                     force_syncing_tables_tx,
                     self.table_sync_worker_permits.clone(),
                 ),
+                self.replication_masks,
                 self.shutdown_rx,
                 Some(force_syncing_tables_rx),
             )
@@ -220,6 +224,8 @@ struct ApplyWorkerHook<S, D> {
     store: S,
     /// Destination where replicated data is written.
     destination: D,
+    /// Shared replication masks container for tracking column replication status.
+    replication_masks: ReplicationMasks,
     /// Shutdown signal receiver for graceful termination.
     shutdown_rx: ShutdownRx,
     /// Signal transmitter for triggering table sync operations.
@@ -240,6 +246,7 @@ impl<S, D> ApplyWorkerHook<S, D> {
         pool: TableSyncWorkerPool,
         store: S,
         destination: D,
+        replication_masks: ReplicationMasks,
         shutdown_rx: ShutdownRx,
         force_syncing_tables_tx: SignalTx,
         table_sync_worker_permits: Arc<Semaphore>,
@@ -250,6 +257,7 @@ impl<S, D> ApplyWorkerHook<S, D> {
             pool,
             store,
             destination,
+            replication_masks,
             shutdown_rx,
             force_syncing_tables_tx,
             table_sync_worker_permits,
@@ -277,6 +285,7 @@ where
             table_id,
             self.store.clone(),
             self.destination.clone(),
+            self.replication_masks.clone(),
             self.shutdown_rx.clone(),
             self.force_syncing_tables_tx.clone(),
             self.table_sync_worker_permits.clone(),
@@ -422,7 +431,7 @@ where
     /// Processes all tables currently in synchronization phases.
     ///
     /// This method coordinates the lifecycle of syncing tables by promoting
-    /// `SyncDone` tables to `Ready` state when the apply worker catches up
+    /// `SyncDone` tables to the `Ready` state when the apply worker catches up
     /// to their sync LSN. For other tables, it handles the typical sync process.
     async fn process_syncing_tables(
         &self,
@@ -475,33 +484,6 @@ where
             }
         }
 
-        Ok(ApplyLoopAction::Continue)
-    }
-
-    /// Handles table replication errors by updating the table's state.
-    ///
-    /// This method processes errors that occur during table replication by
-    /// converting them to appropriate error states and persisting the updated
-    /// state. The apply loop continues processing other tables after handling
-    /// the error.
-    async fn mark_table_errored(
-        &self,
-        table_replication_error: TableReplicationError,
-    ) -> EtlResult<ApplyLoopAction> {
-        let pool = self.pool.lock().await;
-
-        // Convert the table replication error directly to a phase.
-        let table_id = table_replication_error.table_id();
-        TableSyncWorkerState::set_and_store(
-            &pool,
-            &self.store,
-            table_id,
-            table_replication_error.into(),
-        )
-        .await?;
-
-        // We want to always continue the loop, since we have to deal with the events of other
-        // tables.
         Ok(ApplyLoopAction::Continue)
     }
 
