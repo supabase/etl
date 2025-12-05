@@ -321,6 +321,58 @@ where
     Ok(pipelines)
 }
 
+pub async fn find_pipelines_by_publication<'c, E>(
+    executor: E,
+    tenant_id: &str,
+    source_id: i64,
+    publication_name: &str,
+) -> Result<Vec<Pipeline>, PipelinesDbError>
+where
+    E: PgExecutor<'c>,
+{
+    let records = sqlx::query!(
+        r#"
+        select p.id,
+            p.tenant_id,
+            source_id,
+            s.name as source_name,
+            destination_id,
+            d.name as destination_name,
+            replicator_id,
+            p.config
+        from app.pipelines p
+        join app.sources s on p.source_id = s.id
+        join app.destinations d on p.destination_id = d.id
+        where p.tenant_id = $1
+            and p.source_id = $2
+            and p.config->>'publication_name' = $3
+        "#,
+        tenant_id,
+        source_id,
+        publication_name,
+    )
+    .fetch_all(executor)
+    .await?;
+
+    let mut pipelines = Vec::with_capacity(records.len());
+    for record in records {
+        let config = deserialize_from_value::<StoredPipelineConfig>(record.config.clone())?;
+
+        pipelines.push(Pipeline {
+            id: record.id,
+            tenant_id: record.tenant_id,
+            source_id: record.source_id,
+            source_name: record.source_name,
+            destination_id: record.destination_id,
+            destination_name: record.destination_name,
+            replicator_id: record.replicator_id,
+            config,
+        });
+    }
+
+    Ok(pipelines)
+}
+
 pub async fn update_pipeline_config(
     txn: &mut PgTransaction<'_>,
     tenant_id: &str,

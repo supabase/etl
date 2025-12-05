@@ -10,6 +10,7 @@ use etl_api::routes::pipelines::{
     CreatePipelineRequest, RollbackTableStateRequest, UpdatePipelineConfigRequest,
     UpdatePipelineRequest, UpdatePipelineVersionRequest,
 };
+use etl_api::routes::sources::publications::{CreatePublicationRequest, UpdatePublicationRequest};
 use etl_api::routes::sources::{CreateSourceRequest, UpdateSourceRequest};
 use etl_api::routes::tenants::{
     CreateOrUpdateTenantRequest, CreateTenantRequest, UpdateTenantRequest,
@@ -492,6 +493,104 @@ impl TestApp {
         ))
         .header("tenant_id", tenant_id)
         .json(rollback_request)
+        .send()
+        .await
+        .expect("failed to execute request")
+    }
+
+    pub async fn create_publication(
+        &self,
+        tenant_id: &str,
+        source_id: i64,
+        publication: &CreatePublicationRequest,
+    ) -> reqwest::Response {
+        self.post_authenticated(format!(
+            "{}/v1/sources/{}/publications",
+            &self.address, source_id
+        ))
+        .header("tenant_id", tenant_id)
+        .json(publication)
+        .send()
+        .await
+        .expect("Failed to execute request.")
+    }
+
+    pub async fn read_publication(
+        &self,
+        tenant_id: &str,
+        source_id: i64,
+        publication_name: &str,
+    ) -> reqwest::Response {
+        self.get_authenticated(format!(
+            "{}/v1/sources/{}/publications/{}",
+            &self.address, source_id, publication_name
+        ))
+        .header("tenant_id", tenant_id)
+        .send()
+        .await
+        .expect("failed to execute request")
+    }
+
+    pub async fn update_publication(
+        &self,
+        tenant_id: &str,
+        source_id: i64,
+        publication_name: &str,
+        publication: &UpdatePublicationRequest,
+    ) -> reqwest::Response {
+        self.post_authenticated(format!(
+            "{}/v1/sources/{}/publications/{}",
+            &self.address, source_id, publication_name
+        ))
+        .header("tenant_id", tenant_id)
+        .json(publication)
+        .send()
+        .await
+        .expect("failed to execute request")
+    }
+
+    pub async fn delete_publication(
+        &self,
+        tenant_id: &str,
+        source_id: i64,
+        publication_name: &str,
+    ) -> reqwest::Response {
+        self.delete_authenticated(format!(
+            "{}/v1/sources/{}/publications/{}",
+            &self.address, source_id, publication_name
+        ))
+        .header("tenant_id", tenant_id)
+        .send()
+        .await
+        .expect("Failed to execute request.")
+    }
+
+    pub async fn read_all_publications(
+        &self,
+        tenant_id: &str,
+        source_id: i64,
+    ) -> reqwest::Response {
+        self.get_authenticated(format!(
+            "{}/v1/sources/{}/publications",
+            &self.address, source_id
+        ))
+        .header("tenant_id", tenant_id)
+        .send()
+        .await
+        .expect("failed to execute request")
+    }
+
+    pub async fn list_pipelines_for_publication(
+        &self,
+        tenant_id: &str,
+        source_id: i64,
+        publication_name: &str,
+    ) -> reqwest::Response {
+        self.get_authenticated(format!(
+            "{}/v1/sources/{}/publications/{}/pipelines",
+            &self.address, source_id, publication_name
+        ))
+        .header("tenant_id", tenant_id)
         .send()
         .await
         .expect("failed to execute request")

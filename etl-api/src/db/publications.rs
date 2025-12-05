@@ -164,3 +164,21 @@ pub async fn read_all_publications(pool: &PgPool) -> Result<Vec<Publication>, Pu
 
     Ok(publications)
 }
+
+pub async fn publication_exists(
+    pool: &PgPool,
+    publication_name: &str,
+) -> Result<bool, PublicationsDbError> {
+    let exists = sqlx::query_scalar!(
+        r#"
+        select exists(
+            select 1 from pg_publication where pubname = $1
+        ) as "exists!"
+        "#,
+        publication_name
+    )
+    .fetch_one(pool)
+    .await?;
+
+    Ok(exists)
+}

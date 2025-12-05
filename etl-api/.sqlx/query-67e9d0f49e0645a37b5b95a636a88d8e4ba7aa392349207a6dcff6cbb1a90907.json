@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        select exists(\n            select 1 from pg_publication where pubname = $1\n        ) as \"exists!\"\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "exists!",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Name"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "67e9d0f49e0645a37b5b95a636a88d8e4ba7aa392349207a6dcff6cbb1a90907"
+}
