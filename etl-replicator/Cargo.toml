@@ -15,6 +15,7 @@ etl-telemetry = { workspace = true }
 
 anyhow = { workspace = true, features = ["std"] }
 configcat = { workspace = true }
+metrics = { workspace = true }
 reqwest = { workspace = true, features = ["rustls-tls", "json"] }
 secrecy = { workspace = true }
 sentry = { workspace = true }
@@ -28,3 +29,7 @@ sqlx = { workspace = true, features = [
 
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal"] }
 tracing = { workspace = true, default-features = true }
+
+[target.'cfg(not(target_env = "msvc"))'.dependencies]
+tikv-jemalloc-ctl = { workspace = true }
+tikv-jemallocator = { workspace = true }

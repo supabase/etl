@@ -71,7 +71,9 @@ serde_json = { version = "1.0.141", default-features = false }
 serde_yaml = { version = "0.9.34", default-features = false }
 sqlx = { version = "0.8.6", default-features = false }
 tempfile = { version = "3.23.0", default-features = false }
-thiserror = "2.0.12"
+thiserror = "2.0.12"    
+tikv-jemalloc-ctl = { version = "0.6.0", default-features = false, features = ["stats"] }
+tikv-jemallocator = { version = "0.6.1", default-features = false, features = ["background_threads_runtime_support", "unprefixed_malloc_on_supported_platforms"] }
 tokio = { version = "1.47.0", default-features = false }
 tokio-postgres = { git = "https://github.com/iambriccardo/rust-postgres", default-features = false, rev = "31acf55c7e5c2244e5bb3a36e7afa2a01bf52c38" }
 tokio-rustls = { version = "0.26.2", default-features = false }
