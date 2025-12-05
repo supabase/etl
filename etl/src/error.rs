@@ -1010,6 +1010,27 @@ impl From<etl_postgres::replication::slots::EtlReplicationSlotError> for EtlErro
     }
 }
 
+/// Converts [`etl_postgres::types::SchemaError`] to [`EtlError`] with [`ErrorKind::InvalidState`].
+impl From<etl_postgres::types::SchemaError> for EtlError {
+    #[track_caller]
+    fn from(err: etl_postgres::types::SchemaError) -> EtlError {
+        match err {
+            etl_postgres::types::SchemaError::UnknownReplicatedColumns(columns) => {
+                EtlError::from_components(
+                    ErrorKind::InvalidState,
+                    Cow::Borrowed(
+                        "Received columns during replication that are not in the stored table schema",
+                    ),
+                    Some(Cow::Owned(format!(
+                        "The columns that are not in the table schema are: {columns:?}"
+                    ))),
+                    None,
+                )
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1236,7 +1236,7 @@ where
         "received relation message, building replication mask"
     );
 
-    let replication_mask = ReplicationMask::build(&table_schema, &replicated_columns);
+    let replication_mask = ReplicationMask::build(&table_schema, &replicated_columns)?;
     replication_masks.set(table_id, replication_mask).await;
 
     Ok(HandleMessageResult::no_event())

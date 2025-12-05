@@ -837,7 +837,7 @@ mod tests {
             TableName::new("public".to_string(), "test_table".to_string()),
             columns,
         ));
-        let replication_mask = ReplicationMask::build(&table_schema, &column_names);
+        let replication_mask = ReplicationMask::build(&table_schema, &column_names).unwrap();
 
         ReplicatedTableSchema::from_mask(table_schema, replication_mask)
     }

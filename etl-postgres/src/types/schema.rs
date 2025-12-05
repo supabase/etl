@@ -3,7 +3,16 @@ use std::collections::HashSet;
 use std::fmt;
 use std::str::FromStr;
 use std::sync::Arc;
+use thiserror::Error;
 use tokio_postgres::types::{FromSql, ToSql, Type};
+
+/// Errors that can occur during schema operations.
+#[derive(Debug, Error)]
+pub enum SchemaError {
+    /// Columns were received during replication that do not exist in the stored table schema.
+    #[error("received columns during replication that are not in the stored table schema: {0:?}")]
+    UnknownReplicatedColumns(Vec<String>),
+}
 
 /// An object identifier in Postgres.
 type Oid = u32;
@@ -226,8 +235,35 @@ impl ReplicationMask {
     ///
     /// The mask is constructed by checking which column names from the schema are present
     /// in the provided set of replicated column names.
-    pub fn build(schema: &TableSchema, replicated_column_names: &HashSet<String>) -> Self {
-        let mask = schema
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SchemaError::UnknownReplicatedColumns`] if any column in
+    /// `replicated_column_names` does not exist in the table schema.
+    ///
+    /// The column validation occurs because we have to make sure that the stored table schema is always
+    /// up to date, if not, it's a critical problem.
+    pub fn build(
+        table_schema: &TableSchema,
+        replicated_column_names: &HashSet<String>,
+    ) -> Result<Self, SchemaError> {
+        let schema_column_names: HashSet<&str> = table_schema
+            .column_schemas
+            .iter()
+            .map(|column_schema| column_schema.name.as_str())
+            .collect();
+
+        let unknown_columns: Vec<String> = replicated_column_names
+            .iter()
+            .filter(|name| !schema_column_names.contains(name.as_str()))
+            .cloned()
+            .collect();
+
+        if !unknown_columns.is_empty() {
+            return Err(SchemaError::UnknownReplicatedColumns(unknown_columns));
+        }
+
+        let mask = table_schema
             .column_schemas
             .iter()
             .map(|cs| {
@@ -239,7 +275,7 @@ impl ReplicationMask {
             })
             .collect();
 
-        Self(Arc::new(mask))
+        Ok(Self(Arc::new(mask)))
     }
 
     /// Returns the underlying mask as a slice.
@@ -272,15 +308,16 @@ pub struct ReplicatedTableSchema {
 
 impl ReplicatedTableSchema {
     /// Creates a [`ReplicatedTableSchema`] from a schema and a pre-computed mask.
-    pub fn from_mask(schema: Arc<TableSchema>, mask: ReplicationMask) -> Self {
+    pub fn from_mask(table_schema: Arc<TableSchema>, replication_mask: ReplicationMask) -> Self {
         debug_assert_eq!(
-            schema.column_schemas.len(),
-            mask.len(),
+            table_schema.column_schemas.len(),
+            replication_mask.len(),
             "mask length must match column count"
         );
+
         Self {
-            table_schema: schema,
-            replication_mask: mask,
+            table_schema,
+            replication_mask,
         }
     }
 
@@ -321,5 +358,93 @@ impl ReplicatedTableSchema {
             .iter()
             .zip(self.replication_mask.as_slice().iter())
             .filter_map(|(cs, &m)| if m == 1 { Some(cs) } else { None })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn create_test_table_schema() -> TableSchema {
+        TableSchema::new(
+            TableId::new(123),
+            TableName::new("public".to_string(), "test_table".to_string()),
+            vec![
+                ColumnSchema::new("id".to_string(), Type::INT4, -1, 1, Some(1), false),
+                ColumnSchema::new("name".to_string(), Type::TEXT, -1, 2, None, true),
+                ColumnSchema::new("age".to_string(), Type::INT4, -1, 3, None, true),
+            ],
+        )
+    }
+
+    #[test]
+    fn test_replication_mask_build_all_columns_replicated() {
+        let schema = create_test_table_schema();
+        let replicated_columns: HashSet<String> = ["id", "name", "age"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+
+        let mask = ReplicationMask::build(&schema, &replicated_columns).unwrap();
+
+        assert_eq!(mask.as_slice(), &[1, 1, 1]);
+    }
+
+    #[test]
+    fn test_replication_mask_build_partial_columns_replicated() {
+        let schema = create_test_table_schema();
+        let replicated_columns: HashSet<String> =
+            ["id", "age"].into_iter().map(String::from).collect();
+
+        let mask = ReplicationMask::build(&schema, &replicated_columns).unwrap();
+
+        assert_eq!(mask.as_slice(), &[1, 0, 1]);
+    }
+
+    #[test]
+    fn test_replication_mask_build_no_columns_replicated() {
+        let schema = create_test_table_schema();
+        let replicated_columns: HashSet<String> = HashSet::new();
+
+        let mask = ReplicationMask::build(&schema, &replicated_columns).unwrap();
+
+        assert_eq!(mask.as_slice(), &[0, 0, 0]);
+    }
+
+    #[test]
+    fn test_replication_mask_build_unknown_column_error() {
+        let schema = create_test_table_schema();
+        let replicated_columns: HashSet<String> = ["id", "unknown_column"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+
+        let result = ReplicationMask::build(&schema, &replicated_columns);
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        match err {
+            SchemaError::UnknownReplicatedColumns(columns) => {
+                assert_eq!(columns, vec!["unknown_column".to_string()]);
+            }
+        }
+    }
+
+    #[test]
+    fn test_replication_mask_build_multiple_unknown_columns_error() {
+        let schema = create_test_table_schema();
+        let replicated_columns: HashSet<String> =
+            ["id", "foo", "bar"].into_iter().map(String::from).collect();
+
+        let result = ReplicationMask::build(&schema, &replicated_columns);
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        match err {
+            SchemaError::UnknownReplicatedColumns(mut columns) => {
+                columns.sort();
+                assert_eq!(columns, vec!["bar".to_string(), "foo".to_string()]);
+            }
+        }
     }
 }

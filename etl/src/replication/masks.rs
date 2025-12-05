@@ -76,7 +76,7 @@ mod tests {
 
         let replicated_columns: HashSet<String> =
             ["id".to_string(), "age".to_string()].into_iter().collect();
-        ReplicationMask::build(&schema, &replicated_columns)
+        ReplicationMask::build(&schema, &replicated_columns).unwrap()
     }
 
     #[tokio::test]

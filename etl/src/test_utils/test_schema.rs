@@ -348,7 +348,7 @@ pub fn build_expected_users_inserts(
         .collect::<HashSet<_>>();
     let replicated_table_schema = ReplicatedTableSchema::from_mask(
         Arc::new(users_table_schema.clone()),
-        ReplicationMask::build(users_table_schema, &users_table_column_names),
+        ReplicationMask::build(users_table_schema, &users_table_column_names).unwrap(),
     );
 
     for (name, age) in expected_rows {
@@ -386,7 +386,7 @@ pub fn build_expected_orders_inserts(
         .collect::<HashSet<_>>();
     let replicated_table_schema = ReplicatedTableSchema::from_mask(
         Arc::new(orders_table_schema.clone()),
-        ReplicationMask::build(orders_table_schema, &orders_table_column_names),
+        ReplicationMask::build(orders_table_schema, &orders_table_column_names).unwrap(),
     );
 
     for name in expected_rows {

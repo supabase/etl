@@ -202,7 +202,7 @@ where
                 .await?;
 
             // Build and store the replication mask for use during CDC.
-            let replication_mask = ReplicationMask::build(&table_schema, &replicated_column_names);
+            let replication_mask = ReplicationMask::build(&table_schema, &replicated_column_names)?;
             replication_masks
                 .set(table_id, replication_mask.clone())
                 .await;
