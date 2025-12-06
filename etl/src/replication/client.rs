@@ -10,9 +10,10 @@ use etl_postgres::{below_version, requires_version};
 use pg_escape::{quote_identifier, quote_literal};
 use postgres_replication::LogicalReplicationStream;
 use rustls::ClientConfig;
+use rustls_pki_types::CertificateDer;
+use rustls_pki_types::pem::PemObject;
 use std::collections::HashMap;
 use std::fmt;
-use std::io::BufReader;
 use std::num::NonZeroI32;
 use std::sync::Arc;
 
@@ -223,10 +224,11 @@ impl PgReplicationClient {
 
         let mut root_store = rustls::RootCertStore::empty();
         if pg_connection_config.tls.enabled {
-            let mut root_certs_reader =
-                BufReader::new(pg_connection_config.tls.trusted_root_certs.as_bytes());
-            for cert in rustls_pemfile::certs(&mut root_certs_reader) {
-                let cert = cert?;
+            let certs = CertificateDer::pem_slice_iter(
+                pg_connection_config.tls.trusted_root_certs.as_bytes(),
+            )
+            .collect::<Result<Vec<_>, _>>()?;
+            for cert in certs {
                 root_store.add(cert)?;
             }
         };
