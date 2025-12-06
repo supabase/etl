@@ -913,6 +913,21 @@ impl From<rustls::Error> for EtlError {
     }
 }
 
+/// Converts [`rustls_pki_types::pem::Error`] to [`EtlError`] with [`ErrorKind::EncryptionError`].
+impl From<rustls_pki_types::pem::Error> for EtlError {
+    #[track_caller]
+    fn from(err: rustls_pki_types::pem::Error) -> EtlError {
+        let detail = err.to_string();
+        let source = Arc::new(err);
+        EtlError::from_components(
+            ErrorKind::EncryptionError,
+            Cow::Borrowed("Failed to parse PEM certificate"),
+            Some(Cow::Owned(detail)),
+            Some(source),
+        )
+    }
+}
+
 /// Converts [`uuid::Error`] to [`EtlError`] with [`ErrorKind::InvalidData`].
 impl From<uuid::Error> for EtlError {
     #[track_caller]
