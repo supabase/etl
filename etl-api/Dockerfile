@@ -1,6 +1,6 @@
 # Build stage with cargo-chef for better layer caching
 # Native build: each runner builds for its own architecture
-FROM lukemathwalker/cargo-chef:latest-rust-1.88.0-slim-bookworm AS chef
+FROM lukemathwalker/cargo-chef:latest-rust-1.88.0-slim-trixie AS chef
 WORKDIR /app
 
 # Install system dependencies
@@ -38,7 +38,7 @@ RUN cargo build --release -p etl-api && \
     strip target/release/etl-api
 
 # Runtime stage with distroless for security
-FROM gcr.io/distroless/cc-debian12:nonroot
+FROM gcr.io/distroless/cc-debian13:nonroot
 WORKDIR /app
 
 # Create non-root user (distroless already has nonroot user)

@@ -62,7 +62,7 @@ extra_css:
   - stylesheets/extra.css
 
 extra_javascript:
-  - https://unpkg.com/mermaid@10.6.1/dist/mermaid.min.js
+  - https://unpkg.com/mermaid@11.12.1/dist/mermaid.min.js
 
 extra:
   social:
