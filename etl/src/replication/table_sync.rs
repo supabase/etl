@@ -1,6 +1,6 @@
 use etl_config::shared::PipelineConfig;
 use etl_postgres::replication::slots::EtlReplicationSlot;
-use etl_postgres::types::{ReplicatedTableSchema, ReplicationMask, TableId};
+use etl_postgres::types::{ReplicatedTableSchema, ReplicationMask, SchemaError, TableId};
 use futures::StreamExt;
 use metrics::histogram;
 use std::sync::Arc;
@@ -202,7 +202,18 @@ where
                 .await?;
 
             // Build and store the replication mask for use during CDC.
-            let replication_mask = ReplicationMask::build(&table_schema, &replicated_column_names)?;
+            // We use `try_build` here because the schema was just loaded and should match
+            // the publication's column filter. Any mismatch indicates a schema inconsistency.
+            let replication_mask =
+                ReplicationMask::try_build(&table_schema, &replicated_column_names).map_err(
+                    |err: SchemaError| {
+                        crate::etl_error!(
+                            ErrorKind::InvalidState,
+                            "Schema mismatch during table sync",
+                            format!("{}", err)
+                        )
+                    },
+                )?;
             replication_masks
                 .set(table_id, replication_mask.clone())
                 .await;

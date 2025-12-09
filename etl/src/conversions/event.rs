@@ -39,15 +39,11 @@ pub struct SchemaChangeMessage {
 }
 
 impl SchemaChangeMessage {
-
     /// Converts a [`SchemaChangeMessage`] to a [`TableSchema`] with a specific snapshot ID.
     ///
     /// This is used to update the stored table schema when a DDL change is detected.
     /// The snapshot_id should be the start_lsn of the DDL message.
-    pub fn into_table_schema(
-        self,
-        snapshot_id: SnapshotId,
-    ) -> TableSchema {
+    pub fn into_table_schema(self, snapshot_id: SnapshotId) -> TableSchema {
         let table_name = TableName::new(self.schema_name, self.table_name);
         let column_schemas = self
             .columns
