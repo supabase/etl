@@ -136,9 +136,9 @@ define_type_mappings! {
 
 /// Stores a table schema in the database with a specific snapshot ID.
 ///
-/// Inserts a new table schema version and column information in schema storage tables
-/// using a transaction to ensure atomicity. Unlike upsert, this creates a new version
-/// entry for schema versioning.
+/// Upserts table schema and replaces all column information in schema storage tables
+/// using a transaction to ensure atomicity. If a schema version already exists for
+/// the same (pipeline_id, table_id, snapshot_id), columns are deleted and re-inserted.
 pub async fn store_table_schema(
     pool: &PgPool,
     pipeline_id: i64,
@@ -146,11 +146,13 @@ pub async fn store_table_schema(
 ) -> Result<(), sqlx::Error> {
     let mut tx = pool.begin().await?;
 
-    // Insert new table schema version
+    // Upsert table schema version
     let table_schema_id: i64 = sqlx::query(
         r#"
         insert into etl.table_schemas (pipeline_id, table_id, schema_name, table_name, snapshot_id)
         values ($1, $2, $3, $4, $5)
+        on conflict (pipeline_id, table_id, snapshot_id)
+        do update set schema_name = excluded.schema_name, table_name = excluded.table_name
         returning id
         "#,
     )
@@ -162,6 +164,12 @@ pub async fn store_table_schema(
     .fetch_one(&mut *tx)
     .await?
     .get(0);
+
+    // Delete existing columns for this table schema to handle schema changes
+    sqlx::query("delete from etl.table_columns where table_schema_id = $1")
+        .bind(table_schema_id)
+        .execute(&mut *tx)
+        .await?;
 
     // Insert all columns
     for column_schema in table_schema.column_schemas.iter() {

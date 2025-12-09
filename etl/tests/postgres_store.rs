@@ -399,6 +399,156 @@ async fn test_schema_store_versioning() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn test_schema_store_upsert_replaces_columns() {
+    init_test_tracing();
+
+    let database = spawn_source_database().await;
+    let pipeline_id = 1;
+
+    let store = PostgresStore::new(pipeline_id, database.config.clone());
+
+    // Create initial schema with 3 columns
+    let table_id = TableId::new(12345);
+    let table_name = TableName::new("public".to_string(), "test_table".to_string());
+    let initial_columns = vec![
+        test_column("id", PgType::INT4, -1, 1, false, true),
+        test_column("name", PgType::TEXT, -1, 2, true, false),
+        test_column("old_column", PgType::TEXT, -1, 3, true, false),
+    ];
+    let table_schema = TableSchema::new(table_id, table_name.clone(), initial_columns);
+
+    // Store initial schema
+    store
+        .store_table_schema(table_schema.clone())
+        .await
+        .unwrap();
+
+    // Verify initial columns
+    let schema = store
+        .get_table_schema(&table_id, i64::MAX)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(schema.column_schemas.len(), 3);
+    assert!(schema.column_schemas.iter().any(|c| c.name == "old_column"));
+
+    // Create updated schema with SAME snapshot_id but different columns
+    // (simulating a retry or re-processing scenario)
+    let updated_columns = vec![
+        test_column("id", PgType::INT4, -1, 1, false, true),
+        test_column("name", PgType::TEXT, -1, 2, true, false),
+        test_column("new_column", PgType::TEXT, -1, 3, true, false), // replaced old_column
+        test_column("extra_column", PgType::INT8, -1, 4, true, false), // added column
+    ];
+    let updated_schema = TableSchema::new(table_id, table_name, updated_columns);
+
+    // Store updated schema with same snapshot_id (upsert)
+    store
+        .store_table_schema(updated_schema.clone())
+        .await
+        .unwrap();
+
+    // Verify columns were replaced, not accumulated
+    // Need to clear cache and reload from DB to verify DB state
+    let new_store = PostgresStore::new(pipeline_id, database.config.clone());
+    let schema = new_store
+        .get_table_schema(&table_id, i64::MAX)
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(schema.column_schemas.len(), 4); // Should be 4, not 3+4=7
+    assert!(
+        !schema.column_schemas.iter().any(|c| c.name == "old_column"),
+        "old_column should have been deleted"
+    );
+    assert!(
+        schema.column_schemas.iter().any(|c| c.name == "new_column"),
+        "new_column should exist"
+    );
+    assert!(
+        schema
+            .column_schemas
+            .iter()
+            .any(|c| c.name == "extra_column"),
+        "extra_column should exist"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_schema_cache_eviction() {
+    init_test_tracing();
+
+    let database = spawn_source_database().await;
+    let pipeline_id = 1;
+
+    let store = PostgresStore::new(pipeline_id, database.config.clone());
+
+    // Store 3 schema versions for table 1
+    let table_id_1 = TableId::new(12345);
+    let table_name_1 = TableName::new("public".to_string(), "test_table".to_string());
+    for snapshot_id in [0, 100, 200] {
+        let columns = vec![
+            test_column("id", PgType::INT4, -1, 1, false, true),
+            test_column(
+                &format!("col_at_{}", snapshot_id),
+                PgType::TEXT,
+                -1,
+                2,
+                true,
+                false,
+            ),
+        ];
+        let mut table_schema = TableSchema::new(table_id_1, table_name_1.clone(), columns);
+        table_schema.snapshot_id = snapshot_id;
+        store
+            .store_table_schema(table_schema.clone())
+            .await
+            .unwrap();
+    }
+
+    // Store 3 schemas for table 2 to verify eviction is per-table
+    let table_id_2 = TableId::new(67890);
+    let table_name_2 = TableName::new("public".to_string(), "table_2".to_string());
+    for snapshot_id in [0, 100, 200] {
+        let columns = vec![test_column("id", PgType::INT4, -1, 1, false, true)];
+        let mut schema = TableSchema::new(table_id_2, table_name_2.clone(), columns);
+        schema.snapshot_id = snapshot_id;
+        store.store_table_schema(schema).await.unwrap();
+    }
+
+    // Check cache size - should have 2 schemas per table = 4 total
+    let cached_schemas = store.get_table_schemas().await.unwrap();
+    assert_eq!(cached_schemas.len(), 4, "Should have 2 schemas per table");
+
+    // Verify eviction keeps newest snapshots (100 and 200), evicts oldest (0)
+    let table_1_snapshots: Vec<i64> = cached_schemas
+        .iter()
+        .filter(|s| s.id == table_id_1)
+        .map(|s| s.snapshot_id)
+        .collect();
+    assert!(table_1_snapshots.contains(&100) && table_1_snapshots.contains(&200));
+    assert!(!table_1_snapshots.contains(&0), "Snapshot 0 should be evicted");
+
+    let table_2_snapshots: Vec<i64> = cached_schemas
+        .iter()
+        .filter(|s| s.id == table_id_2)
+        .map(|s| s.snapshot_id)
+        .collect();
+    assert!(!table_2_snapshots.contains(&0), "Table 2 snapshot 0 should be evicted");
+
+    // Evicted schemas should still be loadable from DB
+    let new_store = PostgresStore::new(pipeline_id, database.config.clone());
+    let schema_0 = new_store
+        .get_table_schema(&table_id_1, 0)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(schema_0.snapshot_id, 0);
+    assert!(schema_0.column_schemas.iter().any(|c| c.name == "col_at_0"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn test_multiple_pipelines_isolation() {
     init_test_tracing();
 
@@ -410,41 +560,35 @@ async fn test_multiple_pipelines_isolation() {
     let store1 = PostgresStore::new(pipeline_id1, database.config.clone());
     let store2 = PostgresStore::new(pipeline_id2, database.config.clone());
 
-    // Add state to pipeline 1
+    // Test state isolation
     let init_phase = TableReplicationPhase::Init;
     store1
         .update_table_replication_state(table_id, init_phase.clone())
         .await
         .unwrap();
 
-    // Add different state to pipeline 2 for the same table
     let data_sync_phase = TableReplicationPhase::DataSync;
     store2
         .update_table_replication_state(table_id, data_sync_phase.clone())
         .await
         .unwrap();
 
-    // Verify isolation - each pipeline sees only its own state
-    let state1 = store1.get_table_replication_state(table_id).await.unwrap();
-    assert_eq!(state1, Some(init_phase));
-
-    let state2 = store2.get_table_replication_state(table_id).await.unwrap();
-    assert_eq!(state2, Some(data_sync_phase));
+    assert_eq!(
+        store1.get_table_replication_state(table_id).await.unwrap(),
+        Some(init_phase)
+    );
+    assert_eq!(
+        store2.get_table_replication_state(table_id).await.unwrap(),
+        Some(data_sync_phase)
+    );
 
     // Test schema isolation
     let table_schema1 = create_sample_table_schema();
     let table_schema2 = create_another_table_schema();
 
-    store1
-        .store_table_schema(table_schema1.clone())
-        .await
-        .unwrap();
-    store2
-        .store_table_schema(table_schema2.clone())
-        .await
-        .unwrap();
+    store1.store_table_schema(table_schema1.clone()).await.unwrap();
+    store2.store_table_schema(table_schema2.clone()).await.unwrap();
 
-    // Each pipeline sees only its own schemas
     let schemas1 = store1.get_table_schemas().await.unwrap();
     assert_eq!(schemas1.len(), 1);
     assert_eq!(schemas1[0].id, table_schema1.id);
@@ -452,6 +596,33 @@ async fn test_multiple_pipelines_isolation() {
     let schemas2 = store2.get_table_schemas().await.unwrap();
     assert_eq!(schemas2.len(), 1);
     assert_eq!(schemas2[0].id, table_schema2.id);
+
+    // Test table mappings isolation
+    store1
+        .store_table_mapping(table_id, "pipeline1_table".to_string())
+        .await
+        .unwrap();
+    store2
+        .store_table_mapping(table_id, "pipeline2_table".to_string())
+        .await
+        .unwrap();
+
+    assert_eq!(
+        store1.get_table_mapping(&table_id).await.unwrap(),
+        Some("pipeline1_table".to_string())
+    );
+    assert_eq!(
+        store2.get_table_mapping(&table_id).await.unwrap(),
+        Some("pipeline2_table".to_string())
+    );
+
+    // Verify isolation persists after loading from database
+    let new_store1 = PostgresStore::new(pipeline_id1, database.config.clone());
+    new_store1.load_table_mappings().await.unwrap();
+    assert_eq!(
+        new_store1.get_table_mapping(&table_id).await.unwrap(),
+        Some("pipeline1_table".to_string())
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -665,45 +836,6 @@ async fn test_table_mappings_persistence_and_loading() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn test_table_mappings_pipeline_isolation() {
-    init_test_tracing();
-
-    let database = spawn_source_database().await;
-    let pipeline_id1 = 1;
-    let pipeline_id2 = 2;
-
-    let store1 = PostgresStore::new(pipeline_id1, database.config.clone());
-    let store2 = PostgresStore::new(pipeline_id2, database.config.clone());
-
-    let table_id = TableId::new(12345);
-
-    // Store different mappings for the same table ID in different pipelines
-    store1
-        .store_table_mapping(table_id, "pipeline1_table".to_string())
-        .await
-        .unwrap();
-
-    store2
-        .store_table_mapping(table_id, "pipeline2_table".to_string())
-        .await
-        .unwrap();
-
-    // Verify isolation - each pipeline sees only its own mapping
-    let mapping1 = store1.get_table_mapping(&table_id).await.unwrap();
-    assert_eq!(mapping1, Some("pipeline1_table".to_string()));
-
-    let mapping2 = store2.get_table_mapping(&table_id).await.unwrap();
-    assert_eq!(mapping2, Some("pipeline2_table".to_string()));
-
-    // Verify isolation persists after loading from database
-    let new_store1 = PostgresStore::new(pipeline_id1, database.config.clone());
-    new_store1.load_table_mappings().await.unwrap();
-
-    let loaded_mapping1 = new_store1.get_table_mapping(&table_id).await.unwrap();
-    assert_eq!(loaded_mapping1, Some("pipeline1_table".to_string()));
-}
-
-#[tokio::test(flavor = "multi_thread")]
 async fn test_cleanup_deletes_state_schema_and_mapping_for_table() {
     init_test_tracing();
 
@@ -711,6 +843,13 @@ async fn test_cleanup_deletes_state_schema_and_mapping_for_table() {
     let pipeline_id = 1;
 
     let store = PostgresStore::new(pipeline_id, database.config.clone());
+
+    // Test idempotency: cleanup on non-existent table should succeed
+    let nonexistent_table_id = TableId::new(99999);
+    store
+        .cleanup_table_state(nonexistent_table_id)
+        .await
+        .unwrap();
 
     // Prepare two tables: one we will delete, one we will keep
     let table_1_schema = create_sample_table_schema();
@@ -869,66 +1008,4 @@ async fn test_cleanup_deletes_state_schema_and_mapping_for_table() {
             .unwrap()
             .is_some()
     );
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn test_cleanup_idempotent_when_no_state_present() {
-    init_test_tracing();
-
-    let database = spawn_source_database().await;
-    let pipeline_id = 1;
-    let store = PostgresStore::new(pipeline_id, database.config.clone());
-
-    let table_schema = create_sample_table_schema();
-    let table_id = table_schema.id;
-
-    // Ensure no state exists yet
-    assert!(
-        store
-            .get_table_replication_state(table_id)
-            .await
-            .unwrap()
-            .is_none()
-    );
-    assert!(
-        store
-            .get_table_schema(&table_id, i64::MAX)
-            .await
-            .unwrap()
-            .is_none()
-    );
-    assert!(store.get_table_mapping(&table_id).await.unwrap().is_none());
-
-    // Calling cleanup should succeed even if nothing exists
-    store.cleanup_table_state(table_id).await.unwrap();
-
-    // Add state and clean up again
-    store
-        .update_table_replication_state(table_id, TableReplicationPhase::Init)
-        .await
-        .unwrap();
-    store.store_table_schema(table_schema).await.unwrap();
-    store
-        .store_table_mapping(table_id, "dest_table".to_string())
-        .await
-        .unwrap();
-
-    store.cleanup_table_state(table_id).await.unwrap();
-
-    // Verify everything is gone
-    assert!(
-        store
-            .get_table_replication_state(table_id)
-            .await
-            .unwrap()
-            .is_none()
-    );
-    assert!(
-        store
-            .get_table_schema(&table_id, i64::MAX)
-            .await
-            .unwrap()
-            .is_none()
-    );
-    assert!(store.get_table_mapping(&table_id).await.unwrap().is_none());
 }

@@ -19,6 +19,13 @@ use crate::{bail, etl_error};
 
 const NUM_POOL_CONNECTIONS: u32 = 1;
 
+/// Maximum number of schema snapshots to keep cached per table.
+///
+/// This limits memory usage by evicting older snapshots when new ones are added.
+/// In practice, during a single batch of events, it's highly unlikely to need
+/// more than 2 schema versions for any given table.
+const MAX_CACHED_SCHEMAS_PER_TABLE: usize = 2;
+
 /// Converts ETL table replication phases to Postgres database state format.
 ///
 /// This conversion transforms internal ETL replication states into the format
@@ -156,6 +163,38 @@ impl Inner {
     fn increment_phase_count(&mut self, phase: &'static str) {
         let count = self.phase_counts.entry(phase).or_default();
         *count += 1;
+    }
+
+    /// Inserts a schema into the cache and evicts older snapshots if necessary.
+    ///
+    /// Maintains at most [`MAX_CACHED_SCHEMAS_PER_TABLE`] snapshots per table,
+    /// evicting the oldest snapshots when the limit is exceeded.
+    fn insert_schema_with_eviction(&mut self, table_schema: Arc<TableSchema>) {
+        let table_id = table_schema.id;
+        let snapshot_id = table_schema.snapshot_id;
+
+        // Insert the new schema
+        self.table_schemas.insert((table_id, snapshot_id), table_schema);
+
+        // Collect all snapshot_ids for this table
+        let mut snapshots_for_table: Vec<SnapshotId> = self
+            .table_schemas
+            .keys()
+            .filter(|(tid, _)| *tid == table_id)
+            .map(|(_, sid)| *sid)
+            .collect();
+
+        // If we exceed the limit, evict oldest snapshots
+        if snapshots_for_table.len() > MAX_CACHED_SCHEMAS_PER_TABLE {
+            // Sort ascending so oldest are first
+            snapshots_for_table.sort();
+
+            // Remove oldest entries until we're at the limit
+            let to_remove = snapshots_for_table.len() - MAX_CACHED_SCHEMAS_PER_TABLE;
+            for &old_snapshot_id in snapshots_for_table.iter().take(to_remove) {
+                self.table_schemas.remove(&(table_id, old_snapshot_id));
+            }
+        }
     }
 }
 
@@ -573,9 +612,7 @@ impl SchemaStore for PostgresStore {
             let mut inner = self.inner.lock().await;
 
             let table_schema = Arc::new(table_schema);
-            inner
-                .table_schemas
-                .insert((*table_id, table_schema.snapshot_id), table_schema.clone());
+            inner.insert_schema_with_eviction(table_schema.clone());
 
             Some(table_schema)
         };
@@ -643,7 +680,6 @@ impl SchemaStore for PostgresStore {
 
         let pool = self.connect_to_source().await?;
 
-        let mut inner = self.inner.lock().await;
         schema::store_table_schema(&pool, self.pipeline_id as i64, &table_schema)
             .await
             .map_err(|err| {
@@ -654,9 +690,9 @@ impl SchemaStore for PostgresStore {
                 )
             })?;
 
-        let key = (table_schema.id, table_schema.snapshot_id);
+        let mut inner = self.inner.lock().await;
         let table_schema = Arc::new(table_schema);
-        inner.table_schemas.insert(key, table_schema.clone());
+        inner.insert_schema_with_eviction(table_schema.clone());
 
         Ok(table_schema)
     }
