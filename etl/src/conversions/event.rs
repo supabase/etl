@@ -20,12 +20,12 @@ use crate::{bail, etl_error};
 /// event trigger. Messages with this prefix contain JSON-encoded schema information.
 pub const DDL_MESSAGE_PREFIX: &str = "supabase_etl_ddl";
 
-/// Represents a DDL schema change message emitted by Postgres event trigger.
+/// Represents a schema change message emitted by Postgres event trigger.
 ///
 /// This message is emitted when ALTER TABLE commands are executed on tables
 /// that are part of a publication.
 #[derive(Debug, Clone, Deserialize)]
-pub struct DdlSchemaChangeMessage {
+pub struct SchemaChangeMessage {
     /// The DDL command that triggered this message (e.g., "ALTER TABLE").
     pub event: String,
     /// The schema name of the affected table.
@@ -35,13 +35,49 @@ pub struct DdlSchemaChangeMessage {
     /// The OID of the affected table.
     pub table_id: i64,
     /// The columns of the table after the schema change.
-    pub columns: Vec<DdlColumnSchema>,
+    pub columns: Vec<ColumnSchemaMessage>,
 }
 
-/// Represents a column schema in a DDL schema change message.
+impl SchemaChangeMessage {
+
+    /// Converts a [`SchemaChangeMessage`] to a [`TableSchema`] with a specific snapshot ID.
+    ///
+    /// This is used to update the stored table schema when a DDL change is detected.
+    /// The snapshot_id should be the start_lsn of the DDL message.
+    pub fn into_table_schema(
+        self,
+        snapshot_id: SnapshotId,
+    ) -> TableSchema {
+        let table_name = TableName::new(self.schema_name, self.table_name);
+        let column_schemas = self
+            .columns
+            .into_iter()
+            .map(|column| {
+                let typ = convert_type_oid_to_type(column.type_oid);
+                ColumnSchema::new(
+                    column.name,
+                    typ,
+                    column.type_modifier,
+                    column.ordinal_position,
+                    column.primary_key_ordinal_position,
+                    column.nullable,
+                )
+            })
+            .collect();
+
+        TableSchema::with_snapshot_id(
+            TableId::new(self.table_id as u32),
+            table_name,
+            column_schemas,
+            snapshot_id,
+        )
+    }
+}
+
+/// Represents a column schema in a schema change message.
 #[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
-pub struct DdlColumnSchema {
+pub struct ColumnSchemaMessage {
     /// The name of the column.
     pub name: String,
     /// The OID of the column's data type.
@@ -316,45 +352,12 @@ pub fn convert_tuple_to_row<'a>(
 /// Parses a DDL schema change message from its JSON content.
 ///
 /// Returns the parsed message if successful, or an error if the JSON is malformed.
-pub fn parse_ddl_schema_change_message(content: &str) -> EtlResult<DdlSchemaChangeMessage> {
+pub fn parse_schema_change_message(content: &str) -> EtlResult<SchemaChangeMessage> {
     serde_json::from_str(content).map_err(|e| {
         etl_error!(
             ErrorKind::ConversionError,
-            "Failed to parse DDL schema change message",
-            format!("Invalid JSON in DDL message: {}", e)
+            "Failed to parse schema change message",
+            format!("Invalid JSON in schema change message: {}", e)
         )
     })
-}
-
-/// Converts a [`DdlSchemaChangeMessage`] to a [`TableSchema`] with a specific snapshot ID.
-///
-/// This is used to update the stored table schema when a DDL change is detected.
-/// The snapshot_id should be the start_lsn of the DDL message.
-pub fn ddl_message_to_table_schema(
-    message: &DdlSchemaChangeMessage,
-    snapshot_id: SnapshotId,
-) -> TableSchema {
-    let table_name = TableName::new(message.schema_name.clone(), message.table_name.clone());
-    let column_schemas = message
-        .columns
-        .iter()
-        .map(|col| {
-            let typ = convert_type_oid_to_type(col.type_oid);
-            ColumnSchema::new(
-                col.name.clone(),
-                typ,
-                col.type_modifier,
-                col.ordinal_position,
-                col.primary_key_ordinal_position,
-                col.nullable,
-            )
-        })
-        .collect();
-
-    TableSchema::with_snapshot_id(
-        TableId::new(message.table_id as u32),
-        table_name,
-        column_schemas,
-        snapshot_id,
-    )
 }
