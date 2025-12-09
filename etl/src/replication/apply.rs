@@ -3,7 +3,7 @@ use crate::concurrency::shutdown::ShutdownRx;
 use crate::concurrency::signal::SignalRx;
 use crate::concurrency::stream::{TimeoutStream, TimeoutStreamResult};
 use crate::conversions::event::{
-    DDL_MESSAGE_PREFIX, ddl_message_to_table_schema, parse_ddl_schema_change_message,
+    DDL_MESSAGE_PREFIX, parse_schema_change_message,
     parse_event_from_begin_message, parse_event_from_commit_message,
     parse_event_from_delete_message, parse_event_from_insert_message,
     parse_event_from_truncate_message, parse_event_from_update_message,
@@ -1524,14 +1524,14 @@ where
     }
 
     let content = message.content()?;
-    let Ok(ddl_message) = parse_ddl_schema_change_message(content) else {
+    let Ok(schema_change_message) = parse_schema_change_message(content) else {
         bail!(
             ErrorKind::SourceConnectionFailed,
             "PostgreSQL connection has been closed during the apply loop"
         );
     };
 
-    let table_id = TableId::new(ddl_message.table_id as u32);
+    let table_id = TableId::new(schema_change_message.table_id as u32);
     // TODO: check if this check is required or we can leverage the idempotency of schema writing and
     //  we always unconditionally update the schema.
     if let Some(remote_final_lsn) = state.remote_final_lsn {
@@ -1544,26 +1544,27 @@ where
     }
 
     info!(
-        table_id = ddl_message.table_id,
-        table_name = %ddl_message.table_name,
-        schema_name = %ddl_message.schema_name,
-        event = %ddl_message.event,
-        columns = ddl_message.columns.len(),
+        table_id = schema_change_message.table_id,
+        table_name = %schema_change_message.table_name,
+        schema_name = %schema_change_message.schema_name,
+        event = %schema_change_message.event,
+        columns = schema_change_message.columns.len(),
         "received ddl schema change message"
     );
 
     // Build table schema from DDL message with start_lsn as the snapshot_id.
     let snapshot_id: SnapshotId = u64::from(start_lsn) as i64;
-    let table_schema = ddl_message_to_table_schema(&ddl_message, snapshot_id);
+    let table_schema = schema_change_message.into_table_schema(snapshot_id);
 
-    // Store the new schema version.
+    // Store the new schema version in the store.
     schema_store.store_table_schema(table_schema).await?;
 
     // Update the current schema snapshot in the state.
     state.update_schema_snapshot(snapshot_id);
 
+    let table_id: u32 = table_id.into();
     info!(
-        table_id = ddl_message.table_id,
+        table_id = table_id,
         snapshot_id = snapshot_id,
         "stored new schema version from ddl message"
     );
