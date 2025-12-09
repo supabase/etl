@@ -700,11 +700,7 @@ impl PgReplicationClient {
         let table_name = self.get_table_name(table_id).await?;
         let column_schemas = self.get_column_schemas(table_id).await?;
 
-        Ok(TableSchema {
-            name: table_name,
-            id: table_id,
-            column_schemas,
-        })
+        Ok(TableSchema::new(table_id, table_name, column_schemas))
     }
 
     /// Loads the table name and schema information for a given table OID.

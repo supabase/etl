@@ -3,10 +3,11 @@ use crate::concurrency::shutdown::ShutdownRx;
 use crate::concurrency::signal::SignalRx;
 use crate::concurrency::stream::{TimeoutStream, TimeoutStreamResult};
 use crate::conversions::event::{
-    DDL_MESSAGE_PREFIX, parse_ddl_schema_change_message, parse_event_from_begin_message,
-    parse_event_from_commit_message, parse_event_from_delete_message,
-    parse_event_from_insert_message, parse_event_from_truncate_message,
-    parse_event_from_update_message, parse_replicated_column_names,
+    DDL_MESSAGE_PREFIX, ddl_message_to_table_schema, parse_ddl_schema_change_message,
+    parse_event_from_begin_message, parse_event_from_commit_message,
+    parse_event_from_delete_message, parse_event_from_insert_message,
+    parse_event_from_truncate_message, parse_event_from_update_message,
+    parse_replicated_column_names,
 };
 use crate::destination::Destination;
 use crate::error::{ErrorKind, EtlResult};
@@ -19,10 +20,12 @@ use crate::replication::client::PgReplicationClient;
 use crate::replication::masks::ReplicationMasks;
 use crate::replication::stream::EventsStream;
 use crate::store::schema::SchemaStore;
-use crate::types::{Event, PipelineId};
+use crate::types::{Event, PipelineId, RelationEvent};
 use etl_config::shared::PipelineConfig;
 use etl_postgres::replication::worker::WorkerType;
-use etl_postgres::types::{ReplicatedTableSchema, ReplicationMask, TableId, TableSchema};
+use etl_postgres::types::{
+    ReplicatedTableSchema, ReplicationMask, SnapshotId, TableId, TableSchema,
+};
 use futures::StreamExt;
 use metrics::histogram;
 use postgres_replication::protocol;
@@ -291,14 +294,22 @@ struct ApplyLoopState {
     /// transaction boundary is found. If not found, the process will continue until it is killed via
     /// a `SIGKILL`.
     shutdown_discarded: bool,
+    /// The current schema snapshot being tracked.
+    ///
+    /// This is updated when DDL messages are processed, tracking the latest schema version.
+    current_schema_snapshot: SnapshotId,
 }
 
 impl ApplyLoopState {
-    /// Creates a new [`ApplyLoopState`] with initial status update and event batch.
+    /// Creates a new [`ApplyLoopState`] with initial status update, event batch, and schema snapshot.
     ///
     /// This constructor initializes the state tracking structure used throughout
     /// the apply loop to maintain replication progress and coordinate batching.
-    fn new(next_status_update: StatusUpdate, events_batch: Vec<Event>) -> Self {
+    fn new(
+        next_status_update: StatusUpdate,
+        events_batch: Vec<Event>,
+        current_schema_snapshot: SnapshotId,
+    ) -> Self {
         Self {
             last_commit_end_lsn: None,
             remote_final_lsn: None,
@@ -308,7 +319,13 @@ impl ApplyLoopState {
             current_tx_begin_ts: None,
             current_tx_events: 0,
             shutdown_discarded: false,
+            current_schema_snapshot,
         }
+    }
+
+    /// Updates the current schema snapshot to a new value.
+    fn update_schema_snapshot(&mut self, snapshot_id: SnapshotId) {
+        self.current_schema_snapshot = snapshot_id;
     }
 
     /// Updates the last commit end LSN to track transaction boundaries.
@@ -477,6 +494,10 @@ where
         return Ok(result);
     }
 
+    // Initialize the current schema snapshot from the start LSN.
+    // Schemas will be loaded on-demand when get_table_schema is called.
+    let current_schema_snapshot: SnapshotId = u64::from(start_lsn) as i64;
+
     // The first status update is defaulted from the start lsn since at this point we haven't
     // processed anything.
     let first_status_update = StatusUpdate {
@@ -514,6 +535,7 @@ where
     let mut state = ApplyLoopState::new(
         first_status_update,
         Vec::with_capacity(config.batch.max_size),
+        current_schema_snapshot,
     );
 
     // Main event processing loop - continues until shutdown or fatal error
@@ -871,21 +893,28 @@ where
         .await
 }
 
-/// Retrieves a table schema from the schema store by table ID.
+/// Retrieves a table schema from the schema store by table ID and snapshot.
 ///
 /// Returns an error if the schema is not found in the store.
-async fn get_table_schema<S>(schema_store: &S, table_id: &TableId) -> EtlResult<Arc<TableSchema>>
+async fn get_table_schema<S>(
+    schema_store: &S,
+    table_id: &TableId,
+    snapshot_id: SnapshotId,
+) -> EtlResult<Arc<TableSchema>>
 where
     S: SchemaStore,
 {
     schema_store
-        .get_table_schema(table_id)
+        .get_table_schema(table_id, snapshot_id)
         .await?
         .ok_or_else(|| {
             crate::etl_error!(
                 ErrorKind::MissingTableSchema,
-                "Table schema not found in cache",
-                format!("Table schema for table {} not found in cache", table_id)
+                "Table schema not found",
+                format!(
+                    "Table schema for table {} at snapshot {} not found",
+                    table_id, snapshot_id
+                )
             )
         })
 }
@@ -993,8 +1022,15 @@ where
             handle_commit_message(state, start_lsn, commit_body, hook, pipeline_id).await
         }
         LogicalReplicationMessage::Relation(relation_body) => {
-            handle_relation_message(state, relation_body, hook, schema_store, replication_masks)
-                .await
+            handle_relation_message(
+                state,
+                start_lsn,
+                relation_body,
+                hook,
+                schema_store,
+                replication_masks,
+            )
+            .await
         }
         LogicalReplicationMessage::Insert(insert_body) => {
             handle_insert_message(
@@ -1041,7 +1077,7 @@ where
             .await
         }
         LogicalReplicationMessage::Message(message_body) => {
-            handle_logical_message(state, message_body, hook).await
+            handle_logical_message(state, start_lsn, message_body, hook, schema_store).await
         }
         message => {
             debug!("received unsupported message: {:?}", message);
@@ -1197,8 +1233,12 @@ where
 /// the table schema from the schema store. If the schema is not yet available (e.g., during
 /// initial table sync before the schema is stored), the mask building is skipped and will be
 /// handled when the table sync worker completes and sets the mask.
+///
+/// Emits an [`Event::Relation`] containing the [`ReplicatedTableSchema`] to notify downstream
+/// consumers about which columns are being replicated for this table.
 async fn handle_relation_message<S, T>(
     state: &ApplyLoopState,
+    start_lsn: PgLsn,
     message: &protocol::RelationBody,
     hook: &T,
     schema_store: &S,
@@ -1212,7 +1252,7 @@ where
         bail!(
             ErrorKind::InvalidState,
             "Invalid transaction state",
-            "Transaction must be active before processing INSERT message"
+            "Transaction must be active before processing RELATION message"
         );
     };
 
@@ -1228,7 +1268,8 @@ where
 
     let replicated_columns = parse_replicated_column_names(message)?;
 
-    let table_schema = get_table_schema(schema_store, &table_id).await?;
+    let table_schema =
+        get_table_schema(schema_store, &table_id, state.current_schema_snapshot).await?;
 
     info!(
         table_id = %table_id,
@@ -1237,9 +1278,22 @@ where
     );
 
     let replication_mask = ReplicationMask::build(&table_schema, &replicated_columns)?;
-    replication_masks.set(table_id, replication_mask).await;
+    replication_masks
+        .set(table_id, replication_mask.clone())
+        .await;
 
-    Ok(HandleMessageResult::no_event())
+    // Build the ReplicatedTableSchema and emit a Relation event.
+    let replicated_table_schema = ReplicatedTableSchema::from_mask(table_schema, replication_mask);
+
+    let relation_event = RelationEvent {
+        start_lsn,
+        commit_lsn: remote_final_lsn,
+        replicated_table_schema,
+    };
+
+    Ok(HandleMessageResult::return_event(Event::Relation(
+        relation_event,
+    )))
 }
 
 /// Handles Postgres INSERT messages for row insertion events.
@@ -1272,8 +1326,13 @@ where
         return Ok(HandleMessageResult::no_event());
     }
 
-    let replicated_table_schema =
-        get_replicated_table_schema(&table_id, schema_store, replication_masks).await?;
+    let replicated_table_schema = get_replicated_table_schema(
+        &table_id,
+        state.current_schema_snapshot,
+        schema_store,
+        replication_masks,
+    )
+    .await?;
 
     // Convert event from the protocol message.
     let event = parse_event_from_insert_message(
@@ -1316,8 +1375,13 @@ where
         return Ok(HandleMessageResult::no_event());
     }
 
-    let replicated_table_schema =
-        get_replicated_table_schema(&table_id, schema_store, replication_masks).await?;
+    let replicated_table_schema = get_replicated_table_schema(
+        &table_id,
+        state.current_schema_snapshot,
+        schema_store,
+        replication_masks,
+    )
+    .await?;
 
     // Convert event from the protocol message.
     let event = parse_event_from_update_message(
@@ -1360,8 +1424,13 @@ where
         return Ok(HandleMessageResult::no_event());
     }
 
-    let replicated_table_schema =
-        get_replicated_table_schema(&table_id, schema_store, replication_masks).await?;
+    let replicated_table_schema = get_replicated_table_schema(
+        &table_id,
+        state.current_schema_snapshot,
+        schema_store,
+        replication_masks,
+    )
+    .await?;
 
     // Convert event from the protocol message.
     let event = parse_event_from_delete_message(
@@ -1409,8 +1478,13 @@ where
             .should_apply_changes(table_id, remote_final_lsn)
             .await?
         {
-            let replicated_table_schema =
-                get_replicated_table_schema(&table_id, schema_store, replication_masks).await?;
+            let replicated_table_schema = get_replicated_table_schema(
+                &table_id,
+                state.current_schema_snapshot,
+                schema_store,
+                replication_masks,
+            )
+            .await?;
             truncated_tables.push(replicated_table_schema);
         }
     }
@@ -1430,15 +1504,17 @@ where
 /// Handles a logical replication message.
 ///
 /// Processes `pg_logical_emit_message` messages from the replication stream.
-///
-/// Currently handles DDL schema change messages with the `supabase_etl_ddl` prefix
-/// for tracking schema changes.
-async fn handle_logical_message<T>(
-    state: &ApplyLoopState,
+/// Handles DDL schema change messages with the `supabase_etl_ddl` prefix by
+/// storing the new schema version with the start_lsn as the snapshot_id.
+async fn handle_logical_message<S, T>(
+    state: &mut ApplyLoopState,
+    start_lsn: PgLsn,
     message: &protocol::MessageBody,
     hook: &T,
+    schema_store: &S,
 ) -> EtlResult<HandleMessageResult>
 where
+    S: SchemaStore,
     T: ApplyLoopHook,
 {
     // If the prefix is unknown, we don't want to process it.
@@ -1448,14 +1524,14 @@ where
     }
 
     let content = message.content()?;
-    let Ok(message) = parse_ddl_schema_change_message(content) else {
+    let Ok(ddl_message) = parse_ddl_schema_change_message(content) else {
         bail!(
             ErrorKind::SourceConnectionFailed,
             "PostgreSQL connection has been closed during the apply loop"
         );
     };
 
-    let table_id = TableId::new(message.table_id as u32);
+    let table_id = TableId::new(ddl_message.table_id as u32);
     // TODO: check if this check is required or we can leverage the idempotency of schema writing and
     //  we always unconditionally update the schema.
     if let Some(remote_final_lsn) = state.remote_final_lsn {
@@ -1468,21 +1544,34 @@ where
     }
 
     info!(
-        table_id = message.table_id,
-        table_name = %message.table_name,
-        schema_name = %message.schema_name,
-        event = %message.event,
-        columns = message.columns.len(),
+        table_id = ddl_message.table_id,
+        table_name = %ddl_message.table_name,
+        schema_name = %ddl_message.schema_name,
+        event = %ddl_message.event,
+        columns = ddl_message.columns.len(),
         "received ddl schema change message"
     );
 
-    // TODO: In the future, update the stored schema here based on the start_lsn of the
-    //  event as identifier.
+    // Build table schema from DDL message with start_lsn as the snapshot_id.
+    let snapshot_id: SnapshotId = u64::from(start_lsn) as i64;
+    let table_schema = ddl_message_to_table_schema(&ddl_message, snapshot_id);
+
+    // Store the new schema version.
+    schema_store.store_table_schema(table_schema).await?;
+
+    // Update the current schema snapshot in the state.
+    state.update_schema_snapshot(snapshot_id);
+
+    info!(
+        table_id = ddl_message.table_id,
+        snapshot_id = snapshot_id,
+        "stored new schema version from ddl message"
+    );
 
     Ok(HandleMessageResult::no_event())
 }
 
-/// Retrieves a [`ReplicatedTableSchema`] for the given table.
+/// Retrieves a [`ReplicatedTableSchema`] for the given table at the specified snapshot.
 ///
 /// This function combines the table schema from the schema store with the replication mask
 /// from the shared [`ReplicationMasks`] to create a [`ReplicatedTableSchema`].
@@ -1493,6 +1582,7 @@ where
 /// container, or if the table schema is not found in the schema store.
 async fn get_replicated_table_schema<S>(
     table_id: &TableId,
+    snapshot_id: SnapshotId,
     schema_store: &S,
     replication_masks: &ReplicationMasks,
 ) -> EtlResult<ReplicatedTableSchema>
@@ -1510,7 +1600,7 @@ where
         );
     };
 
-    let table_schema = get_table_schema(schema_store, table_id).await?;
+    let table_schema = get_table_schema(schema_store, table_id, snapshot_id).await?;
 
     Ok(ReplicatedTableSchema::from_mask(
         table_schema,

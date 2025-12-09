@@ -2,7 +2,8 @@ use core::str;
 use std::collections::HashSet;
 
 use etl_postgres::types::{
-    ColumnSchema, ReplicatedTableSchema, TableId, TableName, TableSchema, convert_type_oid_to_type,
+    ColumnSchema, ReplicatedTableSchema, SnapshotId, TableId, TableName, TableSchema,
+    convert_type_oid_to_type,
 };
 use postgres_replication::protocol;
 use serde::Deserialize;
@@ -325,11 +326,14 @@ pub fn parse_ddl_schema_change_message(content: &str) -> EtlResult<DdlSchemaChan
     })
 }
 
-/// Converts a [`DdlSchemaChangeMessage`] to a [`TableSchema`].
+/// Converts a [`DdlSchemaChangeMessage`] to a [`TableSchema`] with a specific snapshot ID.
 ///
 /// This is used to update the stored table schema when a DDL change is detected.
-#[allow(dead_code)]
-pub fn ddl_message_to_table_schema(message: &DdlSchemaChangeMessage) -> TableSchema {
+/// The snapshot_id should be the start_lsn of the DDL message.
+pub fn ddl_message_to_table_schema(
+    message: &DdlSchemaChangeMessage,
+    snapshot_id: SnapshotId,
+) -> TableSchema {
     let table_name = TableName::new(message.schema_name.clone(), message.table_name.clone());
     let column_schemas = message
         .columns
@@ -347,9 +351,10 @@ pub fn ddl_message_to_table_schema(message: &DdlSchemaChangeMessage) -> TableSch
         })
         .collect();
 
-    TableSchema::new(
+    TableSchema::with_snapshot_id(
         TableId::new(message.table_id as u32),
         table_name,
         column_schemas,
+        snapshot_id,
     )
 }

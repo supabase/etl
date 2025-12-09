@@ -17,6 +17,15 @@ pub enum SchemaError {
 /// An object identifier in Postgres.
 type Oid = u32;
 
+/// Snapshot identifier for schema versioning.
+///
+/// The value represents the start_lsn of the DDL message that created this schema version.
+/// A value of 0 indicates the initial schema before any DDL changes.
+pub type SnapshotId = i64;
+
+/// The initial snapshot ID used for the first schema version.
+pub const INITIAL_SNAPSHOT_ID: SnapshotId = 0;
+
 /// A fully qualified Postgres table name consisting of a schema and table name.
 ///
 /// This type represents a table identifier in Postgres, which requires both a schema name
@@ -189,23 +198,39 @@ impl ToSql for TableId {
 /// Represents the complete schema of a Postgres table.
 ///
 /// This type contains all metadata about a table including its name, OID,
-/// and the schemas of all its columns.
+/// the schemas of all its columns, and a snapshot identifier for versioning.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct TableSchema {
-    /// The Postgres OID of the table
+    /// The Postgres OID of the table.
     pub id: TableId,
-    /// The fully qualified name of the table
+    /// The fully qualified name of the table.
     pub name: TableName,
-    /// The schemas of all columns in the table
+    /// The schemas of all columns in the table.
     pub column_schemas: Vec<ColumnSchema>,
+    /// The snapshot identifier for this schema version.
+    ///
+    /// Value 0 indicates the initial schema, other values are start_lsn positions of DDL changes.
+    pub snapshot_id: SnapshotId,
 }
 
 impl TableSchema {
+    /// Creates a new [`TableSchema`] with the initial snapshot ID (0).
     pub fn new(id: TableId, name: TableName, column_schemas: Vec<ColumnSchema>) -> Self {
+        Self::with_snapshot_id(id, name, column_schemas, INITIAL_SNAPSHOT_ID)
+    }
+
+    /// Creates a new [`TableSchema`] with a specific snapshot ID.
+    pub fn with_snapshot_id(
+        id: TableId,
+        name: TableName,
+        column_schemas: Vec<ColumnSchema>,
+        snapshot_id: SnapshotId,
+    ) -> Self {
         Self {
             id,
             name,
             column_schemas,
+            snapshot_id,
         }
     }
 

@@ -2,7 +2,7 @@ use std::{collections::HashMap, sync::Arc};
 
 use etl_config::shared::PgConnectionConfig;
 use etl_postgres::replication::{connect_to_source_database, schema, state, table_mappings};
-use etl_postgres::types::{TableId, TableSchema};
+use etl_postgres::types::{SnapshotId, TableId, TableSchema};
 use metrics::gauge;
 use sqlx::PgPool;
 use tokio::sync::Mutex;
@@ -135,8 +135,14 @@ struct Inner {
     phase_counts: HashMap<&'static str, u64>,
     /// Cached table replication states indexed by table ID.
     table_states: HashMap<TableId, TableReplicationPhase>,
-    /// Cached table schemas indexed by table ID.
-    table_schemas: HashMap<TableId, Arc<TableSchema>>,
+    /// Cached table schemas indexed by (table_id, snapshot_id) for versioning support.
+    ///
+    /// This cache is optimized for keeping the most actively used schemas in memory,
+    /// not all historical snapshots. Schemas are loaded on-demand from the database
+    /// when not found in cache. During normal operation, this typically contains
+    /// only the latest schema version for each table, since that's what the
+    /// replication pipeline actively uses.
+    table_schemas: HashMap<(TableId, SnapshotId), Arc<TableSchema>>,
     /// Cached table mappings from source table ID to destination table name.
     table_mappings: HashMap<TableId, String>,
 }
@@ -501,22 +507,86 @@ impl StateStore for PostgresStore {
 }
 
 impl SchemaStore for PostgresStore {
-    /// Retrieves a table schema from cache by table ID.
+    /// Retrieves a table schema at a specific snapshot point.
     ///
-    /// This method provides fast access to cached table schemas, which are
-    /// essential for processing replication events. Schemas are loaded during
-    /// startup and cached for the lifetime of the pipeline.
-    async fn get_table_schema(&self, table_id: &TableId) -> EtlResult<Option<Arc<TableSchema>>> {
-        let inner = self.inner.lock().await;
+    /// Returns the schema version with the largest snapshot_id <= the requested snapshot_id.
+    /// First checks the in-memory cache, then loads from the database if not found.
+    /// The loaded schema is cached for subsequent requests. Note that the cache is
+    /// optimized for active schemas, not historical snapshots.
+    async fn get_table_schema(
+        &self,
+        table_id: &TableId,
+        snapshot_id: SnapshotId,
+    ) -> EtlResult<Option<Arc<TableSchema>>> {
+        // First, check if we have a cached schema that matches the criteria.
+        //
+        // We can afford to hold the lock only for this short critical section since we assume that
+        // there is not really concurrency at the table level since each table is processed by exactly
+        // one worker.
+        {
+            let inner = self.inner.lock().await;
 
-        Ok(inner.table_schemas.get(table_id).cloned())
+            // Find the best matching schema in the cache (largest snapshot_id <= requested).
+            let newest_table_schema = inner
+                .table_schemas
+                .iter()
+                .filter(|((tid, sid), _)| *tid == *table_id && *sid <= snapshot_id)
+                .max_by_key(|((_, sid), _)| *sid)
+                .map(|(_, schema)| schema.clone());
+
+            if newest_table_schema.is_some() {
+                return Ok(newest_table_schema);
+            }
+        }
+
+        debug!(
+            "schema for table {} at snapshot {} not in cache, loading from database",
+            table_id, snapshot_id
+        );
+
+        let pool = self.connect_to_source().await?;
+
+        // Load the schema at the requested snapshot.
+        let table_schema = schema::load_table_schema_at_snapshot(
+            &pool,
+            self.pipeline_id as i64,
+            *table_id,
+            snapshot_id,
+        )
+        .await
+        .map_err(|err| {
+            etl_error!(
+                ErrorKind::SourceQueryFailed,
+                "Table schema loading failed",
+                format!(
+                    "Failed to load table schema for table {} at snapshot {} from PostgreSQL: {}",
+                    table_id, snapshot_id, err
+                )
+            )
+        })?;
+
+        let Some(table_schema) = table_schema else {
+            return Ok(None);
+        };
+
+        let result = {
+            let mut inner = self.inner.lock().await;
+
+            let table_schema = Arc::new(table_schema);
+            inner
+                .table_schemas
+                .insert((*table_id, table_schema.snapshot_id), table_schema.clone());
+
+            Some(table_schema)
+        };
+
+        Ok(result)
     }
 
     /// Retrieves all cached table schemas as a vector.
     ///
     /// This method returns all currently cached table schemas, providing a
     /// complete view of the schema information available to the pipeline.
-    /// Useful for operations that need to process or analyze all table schemas.
     async fn get_table_schemas(&self) -> EtlResult<Vec<Arc<TableSchema>>> {
         let inner = self.inner.lock().await;
 
@@ -525,8 +595,8 @@ impl SchemaStore for PostgresStore {
 
     /// Loads table schemas from Postgres into memory cache.
     ///
-    /// This method connects to the source database, retrieves schema information
-    /// for all tables in this pipeline, and populates the in-memory cache.
+    /// This method connects to the source database, retrieves the latest schema
+    /// version for all tables in this pipeline, and populates the in-memory cache.
     /// Called during pipeline initialization to establish the schema context
     /// needed for processing replication events.
     async fn load_table_schemas(&self) -> EtlResult<usize> {
@@ -545,14 +615,11 @@ impl SchemaStore for PostgresStore {
             })?;
         let table_schemas_len = table_schemas.len();
 
-        // For performance reasons, since we load the table schemas only once during startup
-        // and from a single thread, we can afford to have a super short critical section.
         let mut inner = self.inner.lock().await;
         inner.table_schemas.clear();
         for table_schema in table_schemas {
-            inner
-                .table_schemas
-                .insert(table_schema.id, Arc::new(table_schema));
+            let key = (table_schema.id, table_schema.snapshot_id);
+            inner.table_schemas.insert(key, Arc::new(table_schema));
         }
 
         info!(
@@ -566,14 +633,16 @@ impl SchemaStore for PostgresStore {
     /// Stores a table schema in both database and cache.
     ///
     /// This method persists a table schema to the database and updates the
-    /// in-memory cache atomically. Used when new tables are discovered during
-    /// replication or when schema definitions need to be updated.
+    /// in-memory cache atomically. The schema's snapshot_id determines which
+    /// version this schema represents.
     async fn store_table_schema(&self, table_schema: TableSchema) -> EtlResult<Arc<TableSchema>> {
-        debug!("storing table schema for table '{}'", table_schema.name);
+        debug!(
+            "storing table schema for table '{}' at snapshot {}",
+            table_schema.name, table_schema.snapshot_id
+        );
 
         let pool = self.connect_to_source().await?;
 
-        // We also lock the entire section to be consistent.
         let mut inner = self.inner.lock().await;
         schema::store_table_schema(&pool, self.pipeline_id as i64, &table_schema)
             .await
@@ -584,10 +653,10 @@ impl SchemaStore for PostgresStore {
                     format!("Failed to store table schema in PostgreSQL: {}", err)
                 )
             })?;
+
+        let key = (table_schema.id, table_schema.snapshot_id);
         let table_schema = Arc::new(table_schema);
-        inner
-            .table_schemas
-            .insert(table_schema.id, table_schema.clone());
+        inner.table_schemas.insert(key, table_schema.clone());
 
         Ok(table_schema)
     }
@@ -633,7 +702,8 @@ impl CleanupStore for PostgresStore {
         let mut inner = self.inner.lock().await;
 
         inner.table_states.remove(&table_id);
-        inner.table_schemas.remove(&table_id);
+        // Remove all schema versions for this table
+        inner.table_schemas.retain(|(tid, _), _| *tid != table_id);
         inner.table_mappings.remove(&table_id);
 
         emit_table_metrics(
