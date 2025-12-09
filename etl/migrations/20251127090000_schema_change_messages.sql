@@ -85,7 +85,9 @@ begin
     for cmd in
         select * from pg_event_trigger_ddl_commands()
     loop
-        if cmd.object_type not in ('table', 'column') then
+        -- 'table' covers most ALTER TABLE operations (ADD/DROP COLUMN, ALTER TYPE, etc.)
+        -- 'table column' is returned specifically for RENAME COLUMN operations
+        if cmd.object_type not in ('table', 'table column') then
             continue;
         end if;
 
