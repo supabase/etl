@@ -1223,7 +1223,7 @@ async fn pipeline_respects_column_level_publication() {
 
     // Wait for an insert event to be processed.
     let insert_events_notify = destination
-        .wait_for_events_count(vec![(EventType::Insert, 1)])
+        .wait_for_events_count(vec![(EventType::Relation, 1), (EventType::Insert, 1)])
         .await;
 
     // Insert test data with all columns (including email and phone).
@@ -1242,6 +1242,39 @@ async fn pipeline_respects_column_level_publication() {
     let grouped_events = group_events_by_type_and_table_id(&events);
     let insert_events = grouped_events.get(&(EventType::Insert, table_id)).unwrap();
     assert_eq!(insert_events.len(), 1);
+
+    let initial_relation_event = events
+        .iter()
+        .rev()
+        .find_map(|event| match event {
+            Event::Relation(relation) if relation.replicated_table_schema.id() == table_id => {
+                Some(relation.clone())
+            }
+            _ => None,
+        })
+        .expect("Expected relation event for initial publication state");
+
+    let initial_relation_columns: Vec<&str> = initial_relation_event
+        .replicated_table_schema
+        .column_schemas()
+        .map(|c| c.name.as_str())
+        .collect();
+    assert_eq!(initial_relation_columns, vec!["id", "name", "age"]);
+    assert_eq!(
+        initial_relation_event
+            .replicated_table_schema
+            .replication_mask()
+            .as_slice(),
+        &[1, 1, 1, 0, 0]
+    );
+    assert_eq!(
+        initial_relation_event
+            .replicated_table_schema
+            .get_inner()
+            .column_schemas
+            .len(),
+        5
+    );
 
     // Check that each insert event contains only the published columns (id, name, age) and that the
     // schema used is correct.
@@ -1282,7 +1315,7 @@ async fn pipeline_respects_column_level_publication() {
 
     // Wait for 1 insert event with 4 columns.
     let insert_notify = destination
-        .wait_for_events_count(vec![(EventType::Insert, 1)])
+        .wait_for_events_count(vec![(EventType::Relation, 1), (EventType::Insert, 1)])
         .await;
 
     database
@@ -1301,6 +1334,17 @@ async fn pipeline_respects_column_level_publication() {
     let inserts = grouped.get(&(EventType::Insert, table_id)).unwrap();
     assert_eq!(inserts.len(), 1);
 
+    let relation_after_adding_email = events
+        .iter()
+        .rev()
+        .find_map(|event| match event {
+            Event::Relation(relation) if relation.replicated_table_schema.id() == table_id => {
+                Some(relation.clone())
+            }
+            _ => None,
+        })
+        .expect("Expected relation event after adding email to publication");
+
     if let Event::Insert(InsertEvent {
         replicated_table_schema,
         table_row,
@@ -1317,6 +1361,28 @@ async fn pipeline_respects_column_level_publication() {
         panic!("Expected Insert event");
     }
 
+    let relation_columns: Vec<&str> = relation_after_adding_email
+        .replicated_table_schema
+        .column_schemas()
+        .map(|c| c.name.as_str())
+        .collect();
+    assert_eq!(relation_columns, vec!["id", "name", "age", "email"]);
+    assert_eq!(
+        relation_after_adding_email
+            .replicated_table_schema
+            .replication_mask()
+            .as_slice(),
+        &[1, 1, 1, 1, 0]
+    );
+    assert_eq!(
+        relation_after_adding_email
+            .replicated_table_schema
+            .get_inner()
+            .column_schemas
+            .len(),
+        5
+    );
+
     // Remove age column from publication -> (id, name, email).
     database
         .run_sql(&format!(
@@ -1331,7 +1397,7 @@ async fn pipeline_respects_column_level_publication() {
 
     // Wait for 1 insert event with 3 columns (different set than before).
     let insert_notify = destination
-        .wait_for_events_count(vec![(EventType::Insert, 1)])
+        .wait_for_events_count(vec![(EventType::Relation, 1), (EventType::Insert, 1)])
         .await;
 
     database
@@ -1349,6 +1415,16 @@ async fn pipeline_respects_column_level_publication() {
 
     // Verify 3 columns arrived (id, name, email) - age and phone excluded.
     let events = destination.get_events().await;
+    let relation_after_removing_age = events
+        .iter()
+        .rev()
+        .find_map(|event| match event {
+            Event::Relation(relation) if relation.replicated_table_schema.id() == table_id => {
+                Some(relation.clone())
+            }
+            _ => None,
+        })
+        .expect("Expected relation event after removing age from publication");
     let grouped = group_events_by_type_and_table_id(&events);
     let inserts = grouped.get(&(EventType::Insert, table_id)).unwrap();
     assert_eq!(inserts.len(), 1);
@@ -1368,6 +1444,28 @@ async fn pipeline_respects_column_level_publication() {
     } else {
         panic!("Expected Insert event");
     }
+
+    let relation_columns: Vec<&str> = relation_after_removing_age
+        .replicated_table_schema
+        .column_schemas()
+        .map(|c| c.name.as_str())
+        .collect();
+    assert_eq!(relation_columns, vec!["id", "name", "email"]);
+    assert_eq!(
+        relation_after_removing_age
+            .replicated_table_schema
+            .replication_mask()
+            .as_slice(),
+        &[1, 1, 0, 1, 0]
+    );
+    assert_eq!(
+        relation_after_removing_age
+            .replicated_table_schema
+            .get_inner()
+            .column_schemas
+            .len(),
+        5
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
