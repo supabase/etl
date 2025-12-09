@@ -194,6 +194,9 @@ async fn get_start_lsn<S: StateStore>(
     store: &S,
 ) -> EtlResult<PgLsn> {
     let slot_name: String = EtlReplicationSlot::for_apply_worker(pipeline_id).try_into()?;
+
+    // We try to get or create the slot. Both operations will return an LSN that we can use to start
+    // streaming events.
     let slot = replication_client.get_or_create_slot(&slot_name).await?;
 
     // When creating a new apply worker slot, all tables must be in the `Init` state. If any table
@@ -208,6 +211,10 @@ async fn get_start_lsn<S: StateStore>(
             .collect();
 
         if !non_init_tables.is_empty() {
+            // We need to delete the slot before failing, otherwise the system will be restarted, and
+            // since the slot will be already there, it will skip validation.
+            replication_client.delete_slot(&slot_name).await?;
+
             let table_details: Vec<String> = non_init_tables
                 .iter()
                 .map(|(id, phase)| format!("table {id} in state {phase}"))
