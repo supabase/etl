@@ -277,24 +277,21 @@ pub async fn load_table_schemas_at_snapshot(
     pipeline_id: i64,
     snapshot_id: SnapshotId,
 ) -> Result<Vec<TableSchema>, sqlx::Error> {
-    // Use a window function to find the latest schema version for each table
-    // at or before the requested snapshot
+    // Use DISTINCT ON to efficiently find the latest schema version for each table.
+    // PostgreSQL optimizes DISTINCT ON with ORDER BY using index scans when possible.
     let rows = sqlx::query(
         r#"
         with latest_schemas as (
-            select
+            select distinct on (ts.table_id)
                 ts.id,
                 ts.table_id,
                 ts.schema_name,
                 ts.table_name,
-                ts.snapshot_id,
-                row_number() over (
-                    partition by ts.table_id
-                    order by ts.snapshot_id desc
-                ) as rn
+                ts.snapshot_id
             from etl.table_schemas ts
             where ts.pipeline_id = $1
               and ts.snapshot_id <= $2
+            order by ts.table_id, ts.snapshot_id desc
         )
         select
             ls.table_id,
@@ -310,7 +307,6 @@ pub async fn load_table_schemas_at_snapshot(
             tc.primary_key_ordinal_position
         from latest_schemas ls
         inner join etl.table_columns tc on ls.id = tc.table_schema_id
-        where ls.rn = 1
         order by ls.table_id, tc.column_order
         "#,
     )
