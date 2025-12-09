@@ -244,7 +244,7 @@ async fn test_schema_store_operations() {
     let table_id = table_schema.id;
 
     // Test initial state - should be empty
-    let schema = store.get_table_schema(&table_id).await.unwrap();
+    let schema = store.get_table_schema(&table_id, i64::MAX).await.unwrap();
     assert!(schema.is_none());
 
     let all_schemas = store.get_table_schemas().await.unwrap();
@@ -256,7 +256,7 @@ async fn test_schema_store_operations() {
         .await
         .unwrap();
 
-    let schema = store.get_table_schema(&table_id).await.unwrap();
+    let schema = store.get_table_schema(&table_id, i64::MAX).await.unwrap();
     assert!(schema.is_some());
     let schema = schema.unwrap();
     assert_eq!(schema.id, table_schema.id);
@@ -316,13 +316,19 @@ async fn test_schema_store_load_schemas() {
     let schemas = new_store.get_table_schemas().await.unwrap();
     assert_eq!(schemas.len(), 2);
 
-    let schema1 = new_store.get_table_schema(&table_schema1.id).await.unwrap();
+    let schema1 = new_store
+        .get_table_schema(&table_schema1.id, i64::MAX)
+        .await
+        .unwrap();
     assert!(schema1.is_some());
     let schema1 = schema1.unwrap();
     assert_eq!(schema1.id, table_schema1.id);
     assert_eq!(schema1.name, table_schema1.name);
 
-    let schema2 = new_store.get_table_schema(&table_schema2.id).await.unwrap();
+    let schema2 = new_store
+        .get_table_schema(&table_schema2.id, i64::MAX)
+        .await
+        .unwrap();
     assert!(schema2.is_some());
     let schema2 = schema2.unwrap();
     assert_eq!(schema2.id, table_schema2.id);
@@ -330,7 +336,7 @@ async fn test_schema_store_load_schemas() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn test_schema_store_update_existing() {
+async fn test_schema_store_versioning() {
     init_test_tracing();
 
     let database = spawn_source_database().await;
@@ -339,13 +345,13 @@ async fn test_schema_store_update_existing() {
     let store = PostgresStore::new(pipeline_id, database.config.clone());
     let mut table_schema = create_sample_table_schema();
 
-    // Store initial schema
+    // Store initial schema at snapshot 0
     store
         .store_table_schema(table_schema.clone())
         .await
         .unwrap();
 
-    // Update schema by adding a column
+    // Create a new version with a higher snapshot_id
     table_schema.add_column_schema(test_column(
         "updated_at",
         PgType::TIMESTAMPTZ,
@@ -354,20 +360,37 @@ async fn test_schema_store_update_existing() {
         true,
         false,
     ));
+    table_schema.snapshot_id = 100; // New snapshot for the schema change
 
-    // Store updated schema
+    // Store updated schema as new version
     store
         .store_table_schema(table_schema.clone())
         .await
         .unwrap();
 
-    // Verify updated schema
-    let schema = store.get_table_schema(&table_schema.id).await.unwrap();
+    // Verify querying at snapshot 100+ returns the updated schema
+    let schema = store
+        .get_table_schema(&table_schema.id, i64::MAX)
+        .await
+        .unwrap();
     assert!(schema.is_some());
     let schema = schema.unwrap();
     assert_eq!(schema.column_schemas.len(), 4); // Original 3 + 1 new column
+    assert_eq!(schema.snapshot_id, 100);
 
-    // Verify the new column was added
+    // Verify querying at snapshot 50 returns the original schema
+    let schema = store.get_table_schema(&table_schema.id, 50).await.unwrap();
+    assert!(schema.is_some());
+    let schema = schema.unwrap();
+    assert_eq!(schema.column_schemas.len(), 3); // Original 3 columns
+    assert_eq!(schema.snapshot_id, 0);
+
+    // Verify the new column was added in the latest version
+    let schema = store
+        .get_table_schema(&table_schema.id, i64::MAX)
+        .await
+        .unwrap()
+        .unwrap();
     let updated_at_column = schema
         .column_schemas
         .iter()
@@ -731,7 +754,13 @@ async fn test_cleanup_deletes_state_schema_and_mapping_for_table() {
             .unwrap()
             .is_some()
     );
-    assert!(store.get_table_schema(&table_1_id).await.unwrap().is_some());
+    assert!(
+        store
+            .get_table_schema(&table_1_id, i64::MAX)
+            .await
+            .unwrap()
+            .is_some()
+    );
     assert!(
         store
             .get_table_mapping(&table_1_id)
@@ -751,7 +780,13 @@ async fn test_cleanup_deletes_state_schema_and_mapping_for_table() {
             .unwrap()
             .is_none()
     );
-    assert!(store.get_table_schema(&table_1_id).await.unwrap().is_none());
+    assert!(
+        store
+            .get_table_schema(&table_1_id, i64::MAX)
+            .await
+            .unwrap()
+            .is_none()
+    );
     assert!(
         store
             .get_table_mapping(&table_1_id)
@@ -768,7 +803,13 @@ async fn test_cleanup_deletes_state_schema_and_mapping_for_table() {
             .unwrap()
             .is_some()
     );
-    assert!(store.get_table_schema(&table_2_id).await.unwrap().is_some());
+    assert!(
+        store
+            .get_table_schema(&table_2_id, i64::MAX)
+            .await
+            .unwrap()
+            .is_some()
+    );
     assert!(
         store
             .get_table_mapping(&table_2_id)
@@ -793,7 +834,7 @@ async fn test_cleanup_deletes_state_schema_and_mapping_for_table() {
     );
     assert!(
         new_store
-            .get_table_schema(&table_1_id)
+            .get_table_schema(&table_1_id, i64::MAX)
             .await
             .unwrap()
             .is_none()
@@ -816,7 +857,7 @@ async fn test_cleanup_deletes_state_schema_and_mapping_for_table() {
     );
     assert!(
         new_store
-            .get_table_schema(&table_2_id)
+            .get_table_schema(&table_2_id, i64::MAX)
             .await
             .unwrap()
             .is_some()
@@ -849,7 +890,13 @@ async fn test_cleanup_idempotent_when_no_state_present() {
             .unwrap()
             .is_none()
     );
-    assert!(store.get_table_schema(&table_id).await.unwrap().is_none());
+    assert!(
+        store
+            .get_table_schema(&table_id, i64::MAX)
+            .await
+            .unwrap()
+            .is_none()
+    );
     assert!(store.get_table_mapping(&table_id).await.unwrap().is_none());
 
     // Calling cleanup should succeed even if nothing exists
@@ -876,6 +923,12 @@ async fn test_cleanup_idempotent_when_no_state_present() {
             .unwrap()
             .is_none()
     );
-    assert!(store.get_table_schema(&table_id).await.unwrap().is_none());
+    assert!(
+        store
+            .get_table_schema(&table_id, i64::MAX)
+            .await
+            .unwrap()
+            .is_none()
+    );
     assert!(store.get_table_mapping(&table_id).await.unwrap().is_none());
 }

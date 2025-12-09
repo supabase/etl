@@ -116,6 +116,22 @@ pub struct TruncateEvent {
     pub truncated_tables: Vec<ReplicatedTableSchema>,
 }
 
+/// Relation (schema) event from Postgres logical replication.
+///
+/// [`RelationEvent`] represents a table schema notification in the replication stream.
+/// It is emitted when a RELATION message is received, containing the current
+/// replication mask for the table. This event notifies downstream consumers
+/// about which columns are being replicated for a table.
+#[derive(Debug, Clone)]
+pub struct RelationEvent {
+    /// LSN position where the event started.
+    pub start_lsn: PgLsn,
+    /// LSN position where the transaction of this event will commit.
+    pub commit_lsn: PgLsn,
+    /// The replicated table schema containing the table schema and replication mask.
+    pub replicated_table_schema: ReplicatedTableSchema,
+}
+
 /// Represents a single replication event from Postgres logical replication.
 ///
 /// [`Event`] encapsulates all possible events that can occur in a Postgres replication
@@ -135,6 +151,8 @@ pub enum Event {
     Delete(DeleteEvent),
     /// Table truncation event clearing all rows from tables.
     Truncate(TruncateEvent),
+    /// Relation (schema) event notifying about table schema and replication mask.
+    Relation(RelationEvent),
     /// Unsupported event type that cannot be processed.
     Unsupported,
 }
@@ -159,6 +177,7 @@ impl Event {
             Event::Update(e) => e.replicated_table_schema.id() == *table_id,
             Event::Delete(e) => e.replicated_table_schema.id() == *table_id,
             Event::Truncate(e) => e.truncated_tables.iter().any(|s| s.id() == *table_id),
+            Event::Relation(e) => e.replicated_table_schema.id() == *table_id,
             _ => false,
         }
     }
@@ -213,6 +232,7 @@ impl From<&Event> for EventType {
             Event::Update(_) => EventType::Update,
             Event::Delete(_) => EventType::Delete,
             Event::Truncate(_) => EventType::Truncate,
+            Event::Relation(_) => EventType::Relation,
             Event::Unsupported => EventType::Unsupported,
         }
     }
