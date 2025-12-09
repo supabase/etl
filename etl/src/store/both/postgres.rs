@@ -174,7 +174,8 @@ impl Inner {
         let snapshot_id = table_schema.snapshot_id;
 
         // Insert the new schema
-        self.table_schemas.insert((table_id, snapshot_id), table_schema);
+        self.table_schemas
+            .insert((table_id, snapshot_id), table_schema);
 
         // Collect all snapshot_ids for this table
         let mut snapshots_for_table: Vec<SnapshotId> = self
