@@ -528,14 +528,20 @@ async fn test_schema_cache_eviction() {
         .map(|s| s.snapshot_id)
         .collect();
     assert!(table_1_snapshots.contains(&100) && table_1_snapshots.contains(&200));
-    assert!(!table_1_snapshots.contains(&0), "Snapshot 0 should be evicted");
+    assert!(
+        !table_1_snapshots.contains(&0),
+        "Snapshot 0 should be evicted"
+    );
 
     let table_2_snapshots: Vec<i64> = cached_schemas
         .iter()
         .filter(|s| s.id == table_id_2)
         .map(|s| s.snapshot_id)
         .collect();
-    assert!(!table_2_snapshots.contains(&0), "Table 2 snapshot 0 should be evicted");
+    assert!(
+        !table_2_snapshots.contains(&0),
+        "Table 2 snapshot 0 should be evicted"
+    );
 
     // Evicted schemas should still be loadable from DB
     let new_store = PostgresStore::new(pipeline_id, database.config.clone());
@@ -586,8 +592,14 @@ async fn test_multiple_pipelines_isolation() {
     let table_schema1 = create_sample_table_schema();
     let table_schema2 = create_another_table_schema();
 
-    store1.store_table_schema(table_schema1.clone()).await.unwrap();
-    store2.store_table_schema(table_schema2.clone()).await.unwrap();
+    store1
+        .store_table_schema(table_schema1.clone())
+        .await
+        .unwrap();
+    store2
+        .store_table_schema(table_schema2.clone())
+        .await
+        .unwrap();
 
     let schemas1 = store1.get_table_schemas().await.unwrap();
     assert_eq!(schemas1.len(), 1);
