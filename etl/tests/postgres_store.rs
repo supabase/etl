@@ -491,7 +491,7 @@ async fn test_schema_cache_eviction() {
         let columns = vec![
             test_column("id", PgType::INT4, -1, 1, false, true),
             test_column(
-                &format!("col_at_{}", snapshot_id),
+                &format!("col_at_{snapshot_id}"),
                 PgType::TEXT,
                 -1,
                 2,

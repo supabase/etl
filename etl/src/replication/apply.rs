@@ -3,11 +3,10 @@ use crate::concurrency::shutdown::ShutdownRx;
 use crate::concurrency::signal::SignalRx;
 use crate::concurrency::stream::{TimeoutStream, TimeoutStreamResult};
 use crate::conversions::event::{
-    DDL_MESSAGE_PREFIX, parse_schema_change_message,
-    parse_event_from_begin_message, parse_event_from_commit_message,
+    DDL_MESSAGE_PREFIX, parse_event_from_begin_message, parse_event_from_commit_message,
     parse_event_from_delete_message, parse_event_from_insert_message,
     parse_event_from_truncate_message, parse_event_from_update_message,
-    parse_replicated_column_names,
+    parse_replicated_column_names, parse_schema_change_message,
 };
 use crate::destination::Destination;
 use crate::error::{ErrorKind, EtlResult};
@@ -24,12 +23,13 @@ use crate::types::{Event, PipelineId, RelationEvent};
 use etl_config::shared::PipelineConfig;
 use etl_postgres::replication::worker::WorkerType;
 use etl_postgres::types::{
-    ReplicatedTableSchema, ReplicationMask, SnapshotId, TableId, TableSchema,
+    ReplicatedTableSchema, ReplicationMask, SchemaError, SnapshotId, TableId, TableSchema,
 };
 use futures::StreamExt;
 use metrics::histogram;
 use postgres_replication::protocol;
 use postgres_replication::protocol::{LogicalReplicationMessage, ReplicationMessage};
+use std::collections::HashSet as StdHashSet;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -298,6 +298,14 @@ struct ApplyLoopState {
     ///
     /// This is updated when DDL messages are processed, tracking the latest schema version.
     current_schema_snapshot: SnapshotId,
+    /// Tracks tables for which we have already received the first relation message.
+    ///
+    /// Postgres sends a `Relation` message at the start of each connection containing the current
+    /// schema. If we crash and restart without acking progress, and there were DDL changes in
+    /// between, the initial `Relation` message will have columns that don't exist in our stored
+    /// schema. For the first relation message per table, we use lenient validation (falling back
+    /// to all columns). Subsequent relation messages (after DDL changes) use strict validation.
+    tables_with_relation_received: StdHashSet<TableId>,
 }
 
 impl ApplyLoopState {
@@ -320,7 +328,15 @@ impl ApplyLoopState {
             current_tx_events: 0,
             shutdown_discarded: false,
             current_schema_snapshot,
+            tables_with_relation_received: StdHashSet::new(),
         }
+    }
+
+    /// Checks if this is the first relation message for the given table and marks it as received.
+    ///
+    /// Returns `true` if this is the first relation message, `false` otherwise.
+    fn mark_first_relation_for_table(&mut self, table_id: TableId) -> bool {
+        self.tables_with_relation_received.insert(table_id)
     }
 
     /// Updates the current schema snapshot to a new value.
@@ -951,6 +967,8 @@ where
             let end_lsn = PgLsn::from(message.wal_end());
             state.next_status_update.update_write_lsn(end_lsn);
 
+            info!("message {:?}", message);
+
             debug!(
                 "handling logical replication data message (start_lsn: {}, end_lsn: {})",
                 start_lsn, end_lsn
@@ -1236,8 +1254,22 @@ where
 ///
 /// Emits an [`Event::Relation`] containing the [`ReplicatedTableSchema`] to notify downstream
 /// consumers about which columns are being replicated for this table.
+///
+/// # Mask Building Strategy
+///
+/// The mask building uses different strategies based on whether this is the first `Relation`
+/// message for a table:
+///
+/// - **First relation message**: Uses [`ReplicationMask::build_or_all`] which falls back to
+///   an all-columns mask if validation fails. This handles the case where Postgres sends a
+///   `Relation` message on reconnection with the current schema, but our stored schema is
+///   from before DDL changes occurred.
+///
+/// - **Subsequent relation messages**: Uses [`ReplicationMask::try_build`] which fails if
+///   the columns don't match. After the first message, subsequent `Relation` messages only
+///   occur after DDL changes, so the schema should be in sync.
 async fn handle_relation_message<S, T>(
-    state: &ApplyLoopState,
+    state: &mut ApplyLoopState,
     start_lsn: PgLsn,
     message: &protocol::RelationBody,
     hook: &T,
@@ -1271,13 +1303,42 @@ where
     let table_schema =
         get_table_schema(schema_store, &table_id, state.current_schema_snapshot).await?;
 
+    // Check if this is the first relation message for this table.
+    let is_first_relation = state.mark_first_relation_for_table(table_id);
+
     info!(
         table_id = %table_id,
         replicated_columns = ?replicated_columns,
+        is_first_relation = is_first_relation,
         "received relation message, building replication mask"
     );
 
-    let replication_mask = ReplicationMask::build(&table_schema, &replicated_columns)?;
+    // Build the replication mask using the appropriate strategy.
+    //
+    // For the first relation message per table, we use `build_or_all` which falls back to
+    // an all-columns mask if validation fails. This is done because the first `Relation` message
+    // sent for each table on a new connection contains the latest schema at the creation time of the
+    // connection, which causes issues in case we are replying events from an older schema. To be more
+    // resilient against this case, we pass down all columns and let future DDL changes (which are
+    // materialized in the WAL), converge the schema to the latest version.
+    //
+    // For subsequent relation messages (which only occur after DDL changes or publication column
+    // filtering changes), we use `try_build` which fails if columns don't match, since the schema
+    // should be in sync and if it's not it's a violated invariant.
+    let replication_mask = if is_first_relation {
+        ReplicationMask::build_or_all(&table_schema, &replicated_columns)
+    } else {
+        ReplicationMask::try_build(&table_schema, &replicated_columns).map_err(
+            |err: SchemaError| {
+                crate::etl_error!(
+                    ErrorKind::InvalidState,
+                    "Schema mismatch",
+                    format!("{}", err)
+                )
+            },
+        )?
+    };
+
     replication_masks
         .set(table_id, replication_mask.clone())
         .await;
