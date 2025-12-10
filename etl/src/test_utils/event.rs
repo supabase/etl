@@ -21,8 +21,9 @@ pub fn group_events_by_type_and_table_id(
     let mut grouped = HashMap::new();
     for event in events {
         let event_type = EventType::from(event);
-        // This grouping only works on simple DML operations.
+        // This grouping works on DML operations and Relation events.
         let table_ids = match event {
+            Event::Relation(event) => vec![event.replicated_table_schema.id()],
             Event::Insert(event) => vec![event.replicated_table_schema.id()],
             Event::Update(event) => vec![event.replicated_table_schema.id()],
             Event::Delete(event) => vec![event.replicated_table_schema.id()],
