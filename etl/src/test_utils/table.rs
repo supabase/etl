@@ -1,4 +1,5 @@
-use etl_postgres::types::{ColumnSchema, TableId, TableName, TableSchema};
+use crate::types::Type;
+use etl_postgres::types::{ColumnSchema, ReplicatedTableSchema, TableId, TableName, TableSchema};
 use std::collections::HashMap;
 
 /// Asserts that a table schema matches the expected schema.
@@ -31,4 +32,57 @@ pub fn assert_table_schema(
         assert_eq!(actual.nullable, expected.nullable);
         assert_eq!(actual.primary_key(), expected.primary_key());
     }
+}
+
+/// Asserts that a replicated table schema has the expected columns with all columns replicated.
+///
+/// Verifies that:
+/// - The column names match in order.
+/// - The column types match in order.
+/// - All columns are marked as replicated (replication mask is all 1s).
+///
+/// # Panics
+///
+/// Panics if the column count doesn't match, or if any column name, type, or
+/// replication status doesn't match expectations.
+pub fn assert_replicated_columns(
+    replicated_schema: &ReplicatedTableSchema,
+    expected_columns: &[(&str, Type)],
+) {
+    let columns: Vec<_> = replicated_schema
+        .column_schemas()
+        .map(|c| (c.name.as_str(), c.typ.clone()))
+        .collect();
+
+    assert_eq!(
+        columns.len(),
+        expected_columns.len(),
+        "column count mismatch: got {} columns, expected {}",
+        columns.len(),
+        expected_columns.len()
+    );
+
+    for (i, ((actual_name, actual_type), (expected_name, expected_type))) in
+        columns.iter().zip(expected_columns.iter()).enumerate()
+    {
+        assert_eq!(
+            actual_name, expected_name,
+            "column name mismatch at index {i}: got '{actual_name}', expected '{expected_name}'"
+        );
+        assert_eq!(
+            actual_type, expected_type,
+            "column type mismatch for '{actual_name}' at index {i}: got {actual_type:?}, expected {expected_type:?}"
+        );
+    }
+
+    let mask = replicated_schema.replication_mask().as_slice();
+    assert_eq!(
+        mask.len(),
+        expected_columns.len(),
+        "replication mask length mismatch"
+    );
+    assert!(
+        mask.iter().all(|&bit| bit == 1),
+        "expected all columns to be replicated, but mask is {mask:?}"
+    );
 }
