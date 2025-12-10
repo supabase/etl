@@ -499,6 +499,245 @@ async fn test_get_replicated_column_names_respects_column_filter() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn test_get_replicated_column_names_for_all_tables_publication() {
+    init_test_tracing();
+    let database = spawn_source_database().await;
+
+    // Column filters in publication are only available from Postgres 15+.
+    if below_version!(database.server_version(), POSTGRES_15) {
+        eprintln!("Skipping test: PostgreSQL 15+ required for column filters");
+        return;
+    }
+
+    // Create a table with multiple columns.
+    let test_table_name = test_table_name("table_1");
+    let test_table_id = database
+        .create_table(
+            test_table_name.clone(),
+            true,
+            &[("name", "text"), ("age", "integer"), ("email", "text")],
+        )
+        .await
+        .unwrap();
+
+    database
+        .run_sql(&format!(
+            "alter table {test_table_name} replica identity full"
+        ))
+        .await
+        .unwrap();
+
+    // Create a FOR ALL TABLES publication. Column filtering is NOT supported with this type.
+    let publication_name = "test_pub_all_tables";
+    database
+        .run_sql(&format!(
+            "create publication {publication_name} for all tables"
+        ))
+        .await
+        .unwrap();
+
+    let parent_client = PgReplicationClient::connect(database.config.clone())
+        .await
+        .unwrap();
+
+    let (transaction, _) = parent_client
+        .create_slot_with_transaction(&test_slot_name("my_slot"))
+        .await
+        .unwrap();
+
+    // Get table schema.
+    let table_schemas = transaction
+        .get_table_schemas(&[test_table_id])
+        .await
+        .unwrap();
+    let table_schema = &table_schemas[&test_table_id];
+
+    // Get replicated column names - FOR ALL TABLES doesn't support column filtering,
+    // so all columns should be returned.
+    let replicated_columns = transaction
+        .get_replicated_column_names(test_table_id, table_schema, publication_name)
+        .await
+        .unwrap();
+
+    transaction.commit().await.unwrap();
+
+    // All columns should be returned since FOR ALL TABLES doesn't support column filtering.
+    assert_eq!(replicated_columns.len(), 4);
+    assert!(replicated_columns.contains("id"));
+    assert!(replicated_columns.contains("name"));
+    assert!(replicated_columns.contains("age"));
+    assert!(replicated_columns.contains("email"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_get_replicated_column_names_for_tables_in_schema_publication() {
+    init_test_tracing();
+    let database = spawn_source_database().await;
+
+    // Column filters in publication are only available from Postgres 15+.
+    if below_version!(database.server_version(), POSTGRES_15) {
+        eprintln!("Skipping test: PostgreSQL 15+ required for column filters");
+        return;
+    }
+
+    // Create a table with multiple columns.
+    let test_table_name = test_table_name("table_1");
+    let test_table_id = database
+        .create_table(
+            test_table_name.clone(),
+            true,
+            &[("name", "text"), ("age", "integer"), ("email", "text")],
+        )
+        .await
+        .unwrap();
+
+    database
+        .run_sql(&format!(
+            "alter table {test_table_name} replica identity full"
+        ))
+        .await
+        .unwrap();
+
+    // Create a FOR TABLES IN SCHEMA publication. Column filtering is NOT supported with this type.
+    // Note: Tables are created in the "test" schema by test_table_name().
+    let publication_name = "test_pub_schema";
+    database
+        .run_sql(&format!(
+            "create publication {publication_name} for tables in schema test"
+        ))
+        .await
+        .unwrap();
+
+    let parent_client = PgReplicationClient::connect(database.config.clone())
+        .await
+        .unwrap();
+
+    let (transaction, _) = parent_client
+        .create_slot_with_transaction(&test_slot_name("my_slot"))
+        .await
+        .unwrap();
+
+    // Get table schema.
+    let table_schemas = transaction
+        .get_table_schemas(&[test_table_id])
+        .await
+        .unwrap();
+    let table_schema = &table_schemas[&test_table_id];
+
+    // Get replicated column names - FOR TABLES IN SCHEMA doesn't support column filtering,
+    // so all columns should be returned.
+    let replicated_columns = transaction
+        .get_replicated_column_names(test_table_id, table_schema, publication_name)
+        .await
+        .unwrap();
+
+    transaction.commit().await.unwrap();
+
+    // All columns should be returned since FOR TABLES IN SCHEMA doesn't support column filtering.
+    assert_eq!(replicated_columns.len(), 4);
+    assert!(replicated_columns.contains("id"));
+    assert!(replicated_columns.contains("name"));
+    assert!(replicated_columns.contains("age"));
+    assert!(replicated_columns.contains("email"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_get_replicated_column_names_errors_when_table_not_in_publication() {
+    init_test_tracing();
+    let database = spawn_source_database().await;
+
+    // Column filters in publication are only available from Postgres 15+.
+    if below_version!(database.server_version(), POSTGRES_15) {
+        eprintln!("Skipping test: PostgreSQL 15+ required for column filters");
+        return;
+    }
+
+    // Create a table with multiple columns.
+    let table_1_name = test_table_name("table_1");
+    let table_1_id = database
+        .create_table(
+            table_1_name.clone(),
+            true,
+            &[("name", "text"), ("age", "integer")],
+        )
+        .await
+        .unwrap();
+
+    database
+        .run_sql(&format!("alter table {table_1_name} replica identity full"))
+        .await
+        .unwrap();
+
+    // Create a second table that WILL be in the publication.
+    let table_2_name = test_table_name("table_2");
+    database
+        .create_table(table_2_name.clone(), true, &[("data", "text")])
+        .await
+        .unwrap();
+
+    // Create publication for only the second table, NOT including table_1.
+    let publication_name = "test_pub_other";
+    database
+        .run_sql(&format!(
+            "create publication {publication_name} for table {table_2_name}"
+        ))
+        .await
+        .unwrap();
+
+    let parent_client = PgReplicationClient::connect(database.config.clone())
+        .await
+        .unwrap();
+
+    let (transaction, _) = parent_client
+        .create_slot_with_transaction(&test_slot_name("my_slot"))
+        .await
+        .unwrap();
+
+    // Get table schema for the table NOT in the publication.
+    let table_schemas = transaction.get_table_schemas(&[table_1_id]).await.unwrap();
+    let table_schema = &table_schemas[&table_1_id];
+
+    // Attempting to get replicated column names for a table not in the publication should error.
+    let result = transaction
+        .get_replicated_column_names(table_1_id, table_schema, publication_name)
+        .await;
+
+    transaction.commit().await.unwrap();
+
+    // Should return a ConfigError since the table is not in the publication.
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    assert_eq!(err.kind(), ErrorKind::ConfigError);
+    assert!(err.to_string().contains("not included in publication"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_get_publication_table_ids_errors_when_empty() {
+    init_test_tracing();
+    let database = spawn_source_database().await;
+
+    // Create an empty publication (no tables).
+    let publication_name = "test_pub_empty";
+    database
+        .run_sql(&format!("create publication {publication_name}"))
+        .await
+        .unwrap();
+
+    let client = PgReplicationClient::connect(database.config.clone())
+        .await
+        .unwrap();
+
+    // Attempting to get table IDs from an empty publication should error.
+    let result = client.get_publication_table_ids(publication_name).await;
+
+    // Should return a ConfigError since the publication has no tables.
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    assert_eq!(err.kind(), ErrorKind::ConfigError);
+    assert!(err.to_string().contains("does not contain any tables"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn test_table_copy_stream_no_row_filter() {
     init_test_tracing();
     let database = spawn_source_database().await;

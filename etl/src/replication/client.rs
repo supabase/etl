@@ -479,6 +479,11 @@ impl PgReplicationClient {
     /// For partitioned tables with `publish_via_partition_root=true`, this returns only the parent
     /// table OID. The query uses a recursive CTE to walk up the partition inheritance hierarchy
     /// and identify root tables that have no parent themselves.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ErrorKind::ConfigError`] if the publication contains no tables. This typically
+    /// indicates a misconfigured publication that won't replicate any data.
     pub async fn get_publication_table_ids(
         &self,
         publication_name: &str,
@@ -513,15 +518,28 @@ impl PgReplicationClient {
             pub = quote_literal(publication_name)
         );
 
-        let mut roots = vec![];
-        for msg in self.client.simple_query(&query).await? {
-            if let SimpleQueryMessage::Row(row) = msg {
+        let mut root_tables = vec![];
+        for row in self.client.simple_query(&query).await? {
+            if let SimpleQueryMessage::Row(row) = row {
                 let table_id = Self::get_row_value::<TableId>(&row, "oid", "pg_class").await?;
-                roots.push(table_id);
+                root_tables.push(table_id);
             }
         }
 
-        Ok(roots)
+        if root_tables.is_empty() {
+            bail!(
+                ErrorKind::ConfigError,
+                "Publication has no tables",
+                format!(
+                    "Publication '{}' does not contain any tables. Ensure the publication \
+                     is configured with tables using FOR TABLE, FOR ALL TABLES, or \
+                     FOR TABLES IN SCHEMA.",
+                    publication_name
+                )
+            );
+        }
+
+        Ok(root_tables)
     }
 
     /// Starts a logical replication stream from the specified publication and slot.
@@ -819,9 +837,16 @@ impl PgReplicationClient {
     /// Retrieves the names of columns being replicated for a table in a publication.
     ///
     /// Returns a HashSet containing the names of columns that are included in the publication
-    /// for the specified table. If no publication is specified, returns all column names from
-    /// the table schema. If the PostgreSQL version is below 15 (which doesn't support column
-    /// filtering), returns all column names.
+    /// for the specified table. If the PostgreSQL version is below 15 (which doesn't support
+    /// column filtering), returns all column names from the table schema.
+    ///
+    /// For publications created with `FOR ALL TABLES` or `FOR TABLES IN SCHEMA`, all columns
+    /// are replicated since these publication types don't support column filtering.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ErrorKind::ConfigError`] if the table is not included in the publication.
+    /// This prevents silently syncing tables that won't receive CDC updates.
     ///
     /// This method should be called in the same transaction as describe_table_schema to ensure
     /// consistency during initial table sync.
@@ -844,8 +869,16 @@ impl PgReplicationClient {
         // Query pg_publication_tables using unnest() to properly decode the attnames array.
         // This correctly handles column names containing special characters (spaces, commas,
         // quotes) that would break naive string parsing.
+        //
+        // The query returns two columns:
+        // - table_in_publication: true if the table is in the publication
+        // - column_name: the column name (NULL if attnames is NULL, meaning all columns)
+        //
+        // When attnames is NULL (FOR ALL TABLES or FOR TABLES IN SCHEMA publications),
+        // all columns are replicated. When attnames has values, only those columns are
+        // replicated. If no rows are returned, the table is not in the publication.
         let column_query = format!(
-            "select u.column_name
+            "select true as table_in_publication, u.column_name
              from pg_publication_tables pt
              left join lateral unnest(pt.attnames) as u(column_name) on true
              join pg_namespace n on n.nspname = pt.schemaname
@@ -855,20 +888,37 @@ impl PgReplicationClient {
             table_id,
         );
 
-        let results = self.client.simple_query(&column_query).await?;
+        let rows = self.client.simple_query(&column_query).await?;
         let mut column_names: HashSet<String> = HashSet::new();
+        let mut table_in_publication = false;
 
-        for result in results {
-            if let SimpleQueryMessage::Row(row) = result {
+        for row in rows {
+            if let SimpleQueryMessage::Row(row) = row {
+                // If we got any row, the table is in the publication.
+                table_in_publication = true;
+
                 if let Some(column_name) = row.try_get::<&str>("column_name")? {
                     column_names.insert(column_name.to_string());
                 }
             }
         }
 
-        // If no column names were found, return all columns. This happens when:
-        // - The table is not in the publication
-        // - The attnames array is NULL (though this is rare in practice)
+        // If the table is not in the publication, error out. This prevents silently syncing
+        // tables that won't receive events, leaving the destination stale.
+        if !table_in_publication {
+            bail!(
+                ErrorKind::ConfigError,
+                "Table not in publication",
+                format!(
+                    "Table '{}' is not included in publication '{}'. \
+                     The table must be added to the publication to receive events.",
+                    table_schema.name, publication_name
+                )
+            );
+        }
+
+        // If column_names is empty but table is in publication, it means attnames was NULL,
+        // which indicates all columns are replicated (FOR ALL TABLES or FOR TABLES IN SCHEMA).
         if column_names.is_empty() {
             return Ok(table_schema
                 .column_schemas
