@@ -22,10 +22,15 @@ pub enum TableModification<'a> {
     DropColumn {
         name: &'a str,
     },
-    /// Alter an existing column with the specified alteration.
+    /// Alter an existing column with the specified alteration (e.g., "type bigint").
     AlterColumn {
         name: &'a str,
         alteration: &'a str,
+    },
+    /// Rename an existing column.
+    RenameColumn {
+        old_name: &'a str,
+        new_name: &'a str,
     },
     ReplicaIdentity {
         value: &'a str,
@@ -210,6 +215,9 @@ impl<G: GenericClient> PgDatabase<G> {
                 }
                 TableModification::AlterColumn { name, alteration } => {
                     format!("alter column {name} {alteration}")
+                }
+                TableModification::RenameColumn { old_name, new_name } => {
+                    format!("rename column {old_name} to {new_name}")
                 }
                 TableModification::ReplicaIdentity { value } => {
                     format!("replica identity {value}")

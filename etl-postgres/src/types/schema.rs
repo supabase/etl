@@ -284,6 +284,22 @@ impl ReplicationMask {
             .cloned()
             .collect();
 
+        // This check ensures all replicated columns are present in the schema.
+        //
+        // Limitation: If a column exists in the schema but is absent from the replicated columns,
+        // we assume publication-level column filtering is enabled. However, this is indistinguishable
+        // from an invalid state where the schema has diverged, we cannot detect the difference.
+        //
+        // How schema divergence occurs: When progress tracking fails and the system restarts,
+        // we may receive a `Relation` message reflecting the *current* table schema rather than
+        // the schema at the time the in-flight events were emitted. This is how Postgres handles
+        // initial `Relation` messages on reconnection. It's not the wrong behavior since the data
+        // has the columns that it announces, but it conflicts with our schema management logic.
+        //
+        // Invariant: Our schema management assumes the schema in `Relation` messages is consistent
+        // with the schema under which the corresponding row events were produced.
+        //
+        // In the future we might want to implement a system to go around this edge case.
         if !unknown_columns.is_empty() {
             return Err(SchemaError::UnknownReplicatedColumns(unknown_columns));
         }
