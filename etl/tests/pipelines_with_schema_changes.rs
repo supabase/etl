@@ -474,72 +474,72 @@ async fn pipeline_recovers_after_multiple_schema_changes_and_restart() {
     pipeline.shutdown_and_wait().await.unwrap();
     destination.clear_events().await;
 
-    // // Phase 4: Add another column + rename existing + insert, then verify
-    // let mut pipeline = create_pipeline(
-    //     &database.config,
-    //     pipeline_id,
-    //     publication,
-    //     store.clone(),
-    //     destination.clone(),
-    // );
-    // pipeline.start().await.unwrap();
-    //
-    // let notify = destination
-    //     .wait_for_events_count(vec![(EventType::Insert, 1)])
-    //     .await;
-    //
-    // database
-    //     .alter_table(
-    //         table_name.clone(),
-    //         &[TableModification::AddColumn {
-    //             name: "created_at",
-    //             data_type: "timestamp not null default now()",
-    //         }],
-    //     )
-    //     .await
-    //     .unwrap();
-    //
-    // database
-    //     .alter_table(
-    //         table_name.clone(),
-    //         &[TableModification::RenameColumn {
-    //             old_name: "email",
-    //             new_name: "contact_email",
-    //         }],
-    //     )
-    //     .await
-    //     .unwrap();
-    //
-    // database
-    //     .insert_values(
-    //         table_name.clone(),
-    //         &["name", "years", "contact_email"],
-    //         &[&"Dave", &40_i64, &"dave@example.com"],
-    //     )
-    //     .await
-    //     .unwrap();
-    //
-    // notify.notified().await;
-    // pipeline.shutdown_and_wait().await.unwrap();
-    //
-    // // Final schema should be: id (int8), name (text), years (int8), contact_email (text), created_at (timestamp)
-    // let events = destination.get_events().await;
-    //
-    // let Event::Relation(r) = get_last_relation_event(&events, table_id) else {
-    //     panic!("expected relation event");
-    // };
-    // assert_replicated_columns(
-    //     &r.replicated_table_schema,
-    //     &[
-    //         ("id", Type::INT8),
-    //         ("name", Type::TEXT),
-    //         ("years", Type::INT8),
-    //         ("contact_email", Type::TEXT),
-    //         ("created_at", Type::TIMESTAMP),
-    //     ],
-    // );
-    // let Event::Insert(i) = get_last_insert_event(&events, table_id) else {
-    //     panic!("expected insert event");
-    // };
-    // assert_eq!(i.table_row.values.len(), 5);
+    // Phase 4: Add another column + rename existing + insert, then verify
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        publication,
+        store.clone(),
+        destination.clone(),
+    );
+    pipeline.start().await.unwrap();
+
+    let notify = destination
+        .wait_for_events_count(vec![(EventType::Relation, 1), (EventType::Insert, 1)])
+        .await;
+
+    database
+        .alter_table(
+            table_name.clone(),
+            &[TableModification::AddColumn {
+                name: "created_at",
+                data_type: "timestamp not null default now()",
+            }],
+        )
+        .await
+        .unwrap();
+
+    database
+        .alter_table(
+            table_name.clone(),
+            &[TableModification::RenameColumn {
+                old_name: "email",
+                new_name: "contact_email",
+            }],
+        )
+        .await
+        .unwrap();
+
+    database
+        .insert_values(
+            table_name.clone(),
+            &["name", "years", "contact_email"],
+            &[&"Dave", &40_i64, &"dave@example.com"],
+        )
+        .await
+        .unwrap();
+
+    notify.notified().await;
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    // Final schema should be: id (int8), name (text), years (int8), contact_email (text), created_at (timestamp)
+    let events = destination.get_events().await;
+
+    let Event::Relation(r) = get_last_relation_event(&events, table_id) else {
+        panic!("expected relation event");
+    };
+    assert_replicated_columns(
+        &r.replicated_table_schema,
+        &[
+            ("id", Type::INT8),
+            ("name", Type::TEXT),
+            ("years", Type::INT8),
+            ("contact_email", Type::TEXT),
+            ("created_at", Type::TIMESTAMP),
+        ],
+    );
+    let Event::Insert(i) = get_last_insert_event(&events, table_id) else {
+        panic!("expected insert event");
+    };
+    assert_eq!(i.table_row.values.len(), 5);
 }
