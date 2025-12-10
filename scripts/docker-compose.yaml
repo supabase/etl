@@ -19,12 +19,15 @@ services:
       - "${POSTGRES_PORT:-5430}:5432"
     volumes:
       - ${POSTGRES_DATA_VOLUME:-postgres_data}:/var/lib/postgresql/data
+    # These parameters are configured for local testing only.
+    # In production, use PostgreSQL defaults or your own tuned values.
     command: >
       postgres
       -N 1000
       -c wal_level=logical
       -c max_wal_senders=100
       -c max_replication_slots=100
+      -c wal_sender_timeout=1s
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres}"]
