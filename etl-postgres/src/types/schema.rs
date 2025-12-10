@@ -1,8 +1,18 @@
 use pg_escape::quote_identifier;
-use std::cmp::Ordering;
+use std::collections::HashSet;
 use std::fmt;
 use std::str::FromStr;
+use std::sync::Arc;
+use thiserror::Error;
 use tokio_postgres::types::{FromSql, ToSql, Type};
+
+/// Errors that can occur during schema operations.
+#[derive(Debug, Error)]
+pub enum SchemaError {
+    /// Columns were received during replication that do not exist in the stored table schema.
+    #[error("received columns during replication that are not in the stored table schema: {0:?}")]
+    UnknownReplicatedColumns(Vec<String>),
+}
 
 /// An object identifier in Postgres.
 type Oid = u32;
@@ -51,50 +61,46 @@ type TypeModifier = i32;
 /// Represents the schema of a single column in a Postgres table.
 ///
 /// This type contains all metadata about a column including its name, data type,
-/// type modifier, nullability, and whether it's part of the primary key.
+/// type modifier, ordinal position, primary key information, and nullability.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct ColumnSchema {
-    /// The name of the column
+    /// The name of the column.
     pub name: String,
-    /// The Postgres data type of the column
+    /// The Postgres data type of the column.
     pub typ: Type,
-    /// Type-specific modifier value (e.g., length for varchar)
+    /// Type-specific modifier value (e.g., length for varchar).
     pub modifier: TypeModifier,
-    /// Whether the column can contain NULL values
+    /// The 1-based ordinal position of the column in the table.
+    pub ordinal_position: i32,
+    /// The 1-based ordinal position of this column in the primary key, or None if not a primary key.
+    pub primary_key_ordinal_position: Option<i32>,
+    /// Whether the column can contain NULL values.
     pub nullable: bool,
-    /// Whether the column is part of the table's primary key
-    pub primary: bool,
 }
 
 impl ColumnSchema {
+    /// Creates a new [`ColumnSchema`] with all fields specified.
     pub fn new(
         name: String,
         typ: Type,
         modifier: TypeModifier,
+        ordinal_position: i32,
+        primary_key_ordinal_position: Option<i32>,
         nullable: bool,
-        primary: bool,
     ) -> ColumnSchema {
         Self {
             name,
             typ,
             modifier,
+            ordinal_position,
+            primary_key_ordinal_position,
             nullable,
-            primary,
         }
     }
 
-    /// Compares two [`ColumnSchema`] instances, excluding the `nullable` field.
-    ///
-    /// Return `true` if all fields except `nullable` are equal, `false` otherwise.
-    ///
-    /// This method is used for comparing table schemas loaded via the initial table sync and the
-    /// relation messages received via CDC. The reason for skipping the `nullable` field is that
-    /// unfortunately Postgres doesn't seem to propagate nullable information of a column via
-    /// relation messages. The reason for skipping the `primary` field is that if the replica
-    /// identity of a table is set to full, the relation message sets all columns as primary
-    /// key, irrespective of what the actual primary key in the table is.
-    fn partial_eq(&self, other: &ColumnSchema) -> bool {
-        self.name == other.name && self.typ == other.typ && self.modifier == other.modifier
+    /// Returns whether this column is part of the table's primary key.
+    pub fn primary_key(&self) -> bool {
+        self.primary_key_ordinal_position.is_some()
     }
 }
 
@@ -212,32 +218,233 @@ impl TableSchema {
     ///
     /// This method checks if any column in the table is marked as part of the primary key.
     pub fn has_primary_keys(&self) -> bool {
-        self.column_schemas.iter().any(|cs| cs.primary)
+        self.column_schemas.iter().any(|cs| cs.primary_key())
     }
+}
 
-    /// Compares two [`TableSchema`] instances, excluding the [`ColumnSchema`]'s `nullable` field.
+/// A bitmask indicating which columns are being replicated.
+///
+/// Each element is either 0 (not replicated) or 1 (replicated), with indices
+/// corresponding to the columns in the table schema. Wrapped in [`Arc`] for
+/// efficient sharing across multiple events.
+#[derive(Debug, Clone)]
+pub struct ReplicationMask(Arc<Vec<u8>>);
+
+impl ReplicationMask {
+    /// Creates a new [`ReplicationMask`] from a table schema and column names.
     ///
-    /// Return `true` if all fields except `nullable` are equal, `false` otherwise.
-    pub fn partial_eq(&self, other: &TableSchema) -> bool {
-        self.id == other.id
-            && self.name == other.name
-            && self.column_schemas.len() == other.column_schemas.len()
-            && self
-                .column_schemas
-                .iter()
-                .zip(other.column_schemas.iter())
-                .all(|(c1, c2)| c1.partial_eq(c2))
+    /// The mask is constructed by checking which column names from the schema are present
+    /// in the provided set of replicated column names.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SchemaError::UnknownReplicatedColumns`] if any column in
+    /// `replicated_column_names` does not exist in the table schema.
+    ///
+    /// The column validation occurs because we have to make sure that the stored table schema is always
+    /// up to date, if not, it's a critical problem.
+    pub fn build(
+        table_schema: &TableSchema,
+        replicated_column_names: &HashSet<String>,
+    ) -> Result<Self, SchemaError> {
+        let schema_column_names: HashSet<&str> = table_schema
+            .column_schemas
+            .iter()
+            .map(|column_schema| column_schema.name.as_str())
+            .collect();
+
+        let unknown_columns: Vec<String> = replicated_column_names
+            .iter()
+            .filter(|name| !schema_column_names.contains(name.as_str()))
+            .cloned()
+            .collect();
+
+        if !unknown_columns.is_empty() {
+            return Err(SchemaError::UnknownReplicatedColumns(unknown_columns));
+        }
+
+        let mask = table_schema
+            .column_schemas
+            .iter()
+            .map(|cs| {
+                if replicated_column_names.contains(&cs.name) {
+                    1
+                } else {
+                    0
+                }
+            })
+            .collect();
+
+        Ok(Self(Arc::new(mask)))
+    }
+
+    /// Returns the underlying mask as a slice.
+    pub fn as_slice(&self) -> &[u8] {
+        &self.0
+    }
+
+    /// Returns the number of columns in the mask.
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    /// Returns `true` if the mask is empty.
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
     }
 }
 
-impl PartialOrd for TableSchema {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
+/// A wrapper around [`TableSchema`] that tracks which columns are being replicated.
+///
+/// This struct holds a reference to the underlying table schema and a [`ReplicationMask`]
+/// indicating which columns are included in the replication.
+#[derive(Debug, Clone)]
+pub struct ReplicatedTableSchema {
+    /// The underlying table schema.
+    table_schema: Arc<TableSchema>,
+    /// A bitmask where 1 indicates the column at that index is replicated.
+    replication_mask: ReplicationMask,
+}
+
+impl ReplicatedTableSchema {
+    /// Creates a [`ReplicatedTableSchema`] from a schema and a pre-computed mask.
+    pub fn from_mask(table_schema: Arc<TableSchema>, replication_mask: ReplicationMask) -> Self {
+        debug_assert_eq!(
+            table_schema.column_schemas.len(),
+            replication_mask.len(),
+            "mask length must match column count"
+        );
+
+        Self {
+            table_schema,
+            replication_mask,
+        }
+    }
+
+    /// Returns the table ID.
+    pub fn id(&self) -> TableId {
+        self.table_schema.id
+    }
+
+    /// Returns the table name.
+    pub fn name(&self) -> &TableName {
+        &self.table_schema.name
+    }
+
+    /// Returns the underlying table schema.
+    pub fn get_inner(&self) -> &TableSchema {
+        &self.table_schema
+    }
+
+    /// Returns the replication mask.
+    pub fn replication_mask(&self) -> &ReplicationMask {
+        &self.replication_mask
+    }
+
+    /// Returns an iterator over only the column schemas that are being replicated.
+    ///
+    /// This filters the columns based on the mask, returning only those where the
+    /// corresponding mask value is 1.
+    pub fn column_schemas(&self) -> impl Iterator<Item = &ColumnSchema> + Clone + '_ {
+        // Assuming that the schema is created via the constructor, we can safely assume that the
+        // column schemas and replication mask are of the same length.
+        debug_assert!(
+            self.replication_mask.len() == self.table_schema.column_schemas.len(),
+            "the replication mask columns have a different len from the table schema columns, they should be the same"
+        );
+
+        self.table_schema
+            .column_schemas
+            .iter()
+            .zip(self.replication_mask.as_slice().iter())
+            .filter_map(|(cs, &m)| if m == 1 { Some(cs) } else { None })
     }
 }
 
-impl Ord for TableSchema {
-    fn cmp(&self, other: &Self) -> Ordering {
-        self.name.cmp(&other.name)
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn create_test_table_schema() -> TableSchema {
+        TableSchema::new(
+            TableId::new(123),
+            TableName::new("public".to_string(), "test_table".to_string()),
+            vec![
+                ColumnSchema::new("id".to_string(), Type::INT4, -1, 1, Some(1), false),
+                ColumnSchema::new("name".to_string(), Type::TEXT, -1, 2, None, true),
+                ColumnSchema::new("age".to_string(), Type::INT4, -1, 3, None, true),
+            ],
+        )
+    }
+
+    #[test]
+    fn test_replication_mask_build_all_columns_replicated() {
+        let schema = create_test_table_schema();
+        let replicated_columns: HashSet<String> = ["id", "name", "age"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+
+        let mask = ReplicationMask::build(&schema, &replicated_columns).unwrap();
+
+        assert_eq!(mask.as_slice(), &[1, 1, 1]);
+    }
+
+    #[test]
+    fn test_replication_mask_build_partial_columns_replicated() {
+        let schema = create_test_table_schema();
+        let replicated_columns: HashSet<String> =
+            ["id", "age"].into_iter().map(String::from).collect();
+
+        let mask = ReplicationMask::build(&schema, &replicated_columns).unwrap();
+
+        assert_eq!(mask.as_slice(), &[1, 0, 1]);
+    }
+
+    #[test]
+    fn test_replication_mask_build_no_columns_replicated() {
+        let schema = create_test_table_schema();
+        let replicated_columns: HashSet<String> = HashSet::new();
+
+        let mask = ReplicationMask::build(&schema, &replicated_columns).unwrap();
+
+        assert_eq!(mask.as_slice(), &[0, 0, 0]);
+    }
+
+    #[test]
+    fn test_replication_mask_build_unknown_column_error() {
+        let schema = create_test_table_schema();
+        let replicated_columns: HashSet<String> = ["id", "unknown_column"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+
+        let result = ReplicationMask::build(&schema, &replicated_columns);
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        match err {
+            SchemaError::UnknownReplicatedColumns(columns) => {
+                assert_eq!(columns, vec!["unknown_column".to_string()]);
+            }
+        }
+    }
+
+    #[test]
+    fn test_replication_mask_build_multiple_unknown_columns_error() {
+        let schema = create_test_table_schema();
+        let replicated_columns: HashSet<String> =
+            ["id", "foo", "bar"].into_iter().map(String::from).collect();
+
+        let result = ReplicationMask::build(&schema, &replicated_columns);
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        match err {
+            SchemaError::UnknownReplicatedColumns(mut columns) => {
+                columns.sort();
+                assert_eq!(columns, vec!["bar".to_string(), "foo".to_string()]);
+            }
+        }
     }
 }

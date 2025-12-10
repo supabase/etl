@@ -32,5 +32,5 @@ pub trait SchemaStore {
     fn store_table_schema(
         &self,
         table_schema: TableSchema,
-    ) -> impl Future<Output = EtlResult<()>> + Send;
+    ) -> impl Future<Output = EtlResult<Arc<TableSchema>>> + Send;
 }

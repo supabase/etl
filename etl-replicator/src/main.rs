@@ -51,7 +51,6 @@ mod core;
 mod feature_flags;
 #[cfg(not(target_env = "msvc"))]
 mod jemalloc_metrics;
-mod migrations;
 mod notification;
 
 /// The name of the environment variable which contains version information for this replicator.
