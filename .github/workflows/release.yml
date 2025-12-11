@@ -18,6 +18,7 @@ on:
 permissions:
   contents: write
   actions: write
+  id-token: write
 
 jobs:
   version:
@@ -107,14 +108,15 @@ jobs:
         image: [etl-api, etl-replicator]
     uses: ./.github/workflows/docker-build.yml
     with:
-      image: docker.io/${{ vars.DOCKERHUB_USERNAME }}/${{ matrix.image }}
+      image: public.ecr.aws/supabase/${{ matrix.image }}
       context: .
       file: ./${{ matrix.image }}/Dockerfile
       push: true
       tag_with_version: true
       version: ${{ needs.version.outputs.version }}
       checkout_ref: refs/tags/${{ needs.version.outputs.tag }}
-    secrets: inherit
+    secrets:
+      PROD_AWS_ROLE: ${{ secrets.PROD_AWS_ROLE }}
 
   github-release:
     name: Create GitHub Release
@@ -126,21 +128,20 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          USER="${{ vars.DOCKERHUB_USERNAME }}"
           TAG="${{ needs.version.outputs.tag }}"
           {
             echo "body<<MARKER"
             echo "Release ${TAG}"
             echo
             echo "Docker images published:"
-            echo "- docker.io/${USER}/etl-api:latest"
-            echo "- docker.io/${USER}/etl-api:${TAG}"
-            echo "- docker.io/${USER}/etl-replicator:latest"
-            echo "- docker.io/${USER}/etl-replicator:${TAG}"
+            echo "- public.ecr.aws/supabase/etl-api:latest"
+            echo "- public.ecr.aws/supabase/etl-api:${TAG}"
+            echo "- public.ecr.aws/supabase/etl-replicator:latest"
+            echo "- public.ecr.aws/supabase/etl-replicator:${TAG}"
             echo
-            echo "View on Docker Hub:"
-            echo "- https://hub.docker.com/r/${USER}/etl-api"
-            echo "- https://hub.docker.com/r/${USER}/etl-replicator"
+            echo "View on ECR Public Gallery:"
+            echo "- https://gallery.ecr.aws/supabase/etl-api"
+            echo "- https://gallery.ecr.aws/supabase/etl-replicator"
             echo "MARKER"
           } >> "$GITHUB_OUTPUT"
 

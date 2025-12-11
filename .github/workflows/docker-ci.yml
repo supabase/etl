@@ -18,7 +18,7 @@ on:
 permissions:
   contents: read
   actions: write
-
+  id-token: write
 jobs:
   resolve-ref:
     name: Resolve Checkout Ref
@@ -101,9 +101,10 @@ jobs:
       matrix:
         image: [etl-api, etl-replicator]
     uses: ./.github/workflows/docker-build.yml
-    secrets: inherit
+    secrets:
+      PROD_AWS_ROLE: ${{ secrets.PROD_AWS_ROLE }}
     with:
-      image: docker.io/${{ vars.DOCKERHUB_USERNAME }}/${{ matrix.image }}
+      image: public.ecr.aws/supabase/${{ matrix.image }}
       context: .
       file: ./${{ matrix.image }}/Dockerfile
       push: true
