@@ -1,7 +1,7 @@
 use actix_web::{
     HttpRequest, HttpResponse, Responder, ResponseError, delete, get,
     http::{StatusCode, header::ContentType},
-    post,
+    post, route,
     web::{Data, Json, Path},
 };
 use serde::{Deserialize, Serialize};
@@ -191,7 +191,11 @@ pub async fn read_publication(
         (status = 500, description = "Internal server error", body = ErrorMessage)
     )
 )]
-#[post("/sources/{source_id}/publications/{publication_name}")]
+#[route(
+    "/sources/{source_id}/publications/{publication_name}",
+    method = "PUT",
+    method = "POST"
+)]
 pub async fn update_publication(
     req: HttpRequest,
     pool: Data<PgPool>,

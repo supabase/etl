@@ -53,6 +53,10 @@ impl TestApp {
         self.api_client.post(url).bearer_auth(self.api_key.clone())
     }
 
+    fn patch_authenticated<U: IntoUrl>(&self, url: U) -> RequestBuilder {
+        self.api_client.patch(url).bearer_auth(self.api_key.clone())
+    }
+
     fn put_authenticated<U: IntoUrl>(&self, url: U) -> RequestBuilder {
         self.api_client.put(url).bearer_auth(self.api_key.clone())
     }
@@ -158,7 +162,7 @@ impl TestApp {
         source_id: i64,
         source: &UpdateSourceRequest,
     ) -> reqwest::Response {
-        self.post_authenticated(format!("{}/v1/sources/{source_id}", &self.address))
+        self.put_authenticated(format!("{}/v1/sources/{source_id}", &self.address))
             .header("tenant_id", tenant_id)
             .json(source)
             .send()
@@ -277,7 +281,7 @@ impl TestApp {
         pipeline_id: i64,
         pipeline: &UpdatePipelineRequest,
     ) -> reqwest::Response {
-        self.post_authenticated(format!("{}/v1/pipelines/{pipeline_id}", &self.address))
+        self.put_authenticated(format!("{}/v1/pipelines/{pipeline_id}", &self.address))
             .header("tenant_id", tenant_id)
             .json(pipeline)
             .send()
@@ -395,7 +399,7 @@ impl TestApp {
         image_id: i64,
         image: &UpdateImageRequest,
     ) -> reqwest::Response {
-        self.post_authenticated(format!("{}/v1/images/{image_id}", &self.address))
+        self.put_authenticated(format!("{}/v1/images/{image_id}", &self.address))
             .json(image)
             .send()
             .await
