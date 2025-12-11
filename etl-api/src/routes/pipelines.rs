@@ -1,7 +1,7 @@
 use actix_web::{
-    HttpRequest, HttpResponse, Responder, ResponseError, delete, get,
+    HttpRequest, HttpResponse, Responder, ResponseError, delete, get, patch,
     http::{StatusCode, header::ContentType},
-    post,
+    post, route,
     web::{Data, Json, Path},
 };
 use etl_postgres::replication::{
@@ -572,7 +572,11 @@ pub async fn read_pipeline(
 )]
 // Forcing {pipeline_id} to be all digits by appending :\\d+
 // to avoid this route clashing with /pipelines/stop
-#[post("/pipelines/{pipeline_id:\\d+}")]
+#[route(
+    "/pipelines/{pipeline_id:\\d+}",
+    method = "PUT",
+    method = "POST"
+)]
 pub async fn update_pipeline(
     req: HttpRequest,
     pool: Data<PgPool>,
@@ -1129,7 +1133,11 @@ pub async fn rollback_table_state(
     ),
     tag = "Pipelines"
 )]
-#[post("/pipelines/{pipeline_id}/version")]
+#[route(
+    "/pipelines/{pipeline_id}/version",
+    method = "PUT",
+    method = "POST"
+)]
 pub async fn update_pipeline_version(
     req: HttpRequest,
     pool: Data<PgPool>,
@@ -1198,25 +1206,7 @@ pub async fn update_pipeline_version(
     Ok(HttpResponse::Ok().finish())
 }
 
-#[utoipa::path(
-    summary = "Update pipeline config",
-    description = "Updates the pipeline's configuration while preserving its running state.",
-    context_path = "/v1",
-    request_body = UpdatePipelineConfigRequest,
-    params(
-        ("pipeline_id" = i64, Path, description = "Unique ID of the pipeline"),
-        ("tenant_id" = String, Header, description = "Tenant ID used to scope the request")
-    ),
-    responses(
-        (status = 200, description = "Pipeline configuration updated successfully", body = UpdatePipelineConfigResponse),
-        (status = 400, description = "Bad request or pipeline not running", body = ErrorMessage),
-        (status = 404, description = "Pipeline not found", body = ErrorMessage),
-        (status = 500, description = "Internal server error", body = ErrorMessage)
-    ),
-    tag = "Pipelines"
-)]
-#[post("/pipelines/{pipeline_id}/update-config")]
-pub async fn update_pipeline_config(
+async fn update_pipeline_config_inner(
     req: HttpRequest,
     pool: Data<PgPool>,
     pipeline_id: Path<i64>,
@@ -1243,4 +1233,43 @@ pub async fn update_pipeline_config(
     };
 
     Ok(Json(response))
+}
+
+#[utoipa::path(
+    patch,
+    path = "/pipelines/{pipeline_id}/config",
+    summary = "Update pipeline config",
+    description = "Updates the pipeline's configuration while preserving its running state.",
+    context_path = "/v1",
+    request_body = UpdatePipelineConfigRequest,
+    params(
+        ("pipeline_id" = i64, Path, description = "Unique ID of the pipeline"),
+        ("tenant_id" = String, Header, description = "Tenant ID used to scope the request")
+    ),
+    responses(
+        (status = 200, description = "Pipeline configuration updated successfully", body = UpdatePipelineConfigResponse),
+        (status = 400, description = "Bad request or pipeline not running", body = ErrorMessage),
+        (status = 404, description = "Pipeline not found", body = ErrorMessage),
+        (status = 500, description = "Internal server error", body = ErrorMessage)
+    ),
+    tag = "Pipelines"
+)]
+#[patch("/pipelines/{pipeline_id}/config")]
+pub async fn update_pipeline_config(
+    req: HttpRequest,
+    pool: Data<PgPool>,
+    pipeline_id: Path<i64>,
+    update_request: Json<UpdatePipelineConfigRequest>,
+) -> Result<impl Responder, PipelineError> {
+    update_pipeline_config_inner(req, pool, pipeline_id, update_request).await
+}
+
+#[post("/pipelines/{pipeline_id}/update-config")]
+pub async fn update_pipeline_config_legacy(
+    req: HttpRequest,
+    pool: Data<PgPool>,
+    pipeline_id: Path<i64>,
+    update_request: Json<UpdatePipelineConfigRequest>,
+) -> Result<impl Responder, PipelineError> {
+    update_pipeline_config_inner(req, pool, pipeline_id, update_request).await
 }

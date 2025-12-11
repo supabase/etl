@@ -1,7 +1,7 @@
 use actix_web::{
     HttpRequest, HttpResponse, Responder, ResponseError, delete,
     http::{StatusCode, header::ContentType},
-    post,
+    post, route,
     web::{Data, Json, Path},
 };
 use serde::{Deserialize, Serialize};
@@ -271,7 +271,11 @@ pub async fn create_destination_and_pipeline(
     ),
     tag = "Destinations and Pipelines"
 )]
-#[post("/destinations-pipelines/{destination_id}/{pipeline_id}")]
+#[route(
+    "/destinations-pipelines/{destination_id}/{pipeline_id}",
+    method = "PUT",
+    method = "POST"
+)]
 pub async fn update_destination_and_pipeline(
     req: HttpRequest,
     pool: Data<PgPool>,

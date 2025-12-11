@@ -1,7 +1,7 @@
 use actix_web::{
     HttpResponse, Responder, ResponseError, delete, get,
     http::{StatusCode, header::ContentType},
-    post,
+    post, route,
     web::{Data, Json, Path},
 };
 use serde::{Deserialize, Serialize};
@@ -164,7 +164,11 @@ pub async fn read_image(
     ),
     tag = "Images"
 )]
-#[post("/images/{image_id}")]
+#[route(
+    "/images/{image_id}",
+    method = "PUT",
+    method = "POST"
+)]
 pub async fn update_image(
     pool: Data<PgPool>,
     image_id: Path<i64>,
