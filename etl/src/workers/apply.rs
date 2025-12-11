@@ -144,7 +144,7 @@ where
             // We create the signal used to notify the apply worker that it should force syncing tables.
             let (force_syncing_tables_tx, force_syncing_tables_rx) = create_signal();
 
-            start_apply_loop(
+            let result = start_apply_loop(
                 self.pipeline_id,
                 start_lsn,
                 self.config.clone(),
@@ -166,11 +166,19 @@ where
                 self.shutdown_rx,
                 Some(force_syncing_tables_rx),
             )
-            .await?;
+            .await;
 
-            info!("apply worker completed successfully");
-
-            Ok(())
+            match result {
+                Ok(_) => {
+                    info!("apply worker completed successfully");
+                    Ok(())
+                },
+                Err(err) => {
+                    // We log the error here, this way it's logged even if the worker is not awaited.
+                    error!("apply worker failed: {}", err);
+                    Err(err)
+                }
+            }
         }
         .instrument(apply_worker_span.or_current());
 

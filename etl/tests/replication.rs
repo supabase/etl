@@ -6,7 +6,7 @@ use etl::error::ErrorKind;
 use etl::replication::client::PgReplicationClient;
 use etl::test_utils::database::{spawn_source_database, test_table_name};
 use etl::test_utils::pipeline::test_slot_name;
-use etl::test_utils::table::assert_table_schema;
+use etl::test_utils::schema::assert_table_schema;
 use etl::test_utils::test_schema::create_partitioned_table;
 use etl_postgres::below_version;
 use etl_postgres::tokio::test_utils::{TableModification, id_column_schema};

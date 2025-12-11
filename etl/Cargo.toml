@@ -26,6 +26,7 @@ metrics = { workspace = true }
 pg_escape = { workspace = true }
 pin-project-lite = { workspace = true }
 postgres-replication = { workspace = true }
+rand = { workspace = true, features = ["thread_rng"] }
 ring = { workspace = true, default-features = false }
 rustls = { workspace = true, features = ["aws-lc-rs", "logging"] }
 serde = { workspace = true, features = ["derive"] }
@@ -50,5 +51,3 @@ etl-postgres = { workspace = true, features = [
     "test-utils",
 ] }
 etl-telemetry = { workspace = true }
-
-rand = { workspace = true, features = ["thread_rng"] }

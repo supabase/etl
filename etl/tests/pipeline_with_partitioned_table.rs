@@ -75,7 +75,7 @@ async fn partitioned_table_copy_replicates_existing_data() {
     let _ = pipeline.shutdown_and_wait().await;
 
     // Verify table schema was discovered correctly.
-    let table_schemas = state_store.get_table_schemas().await;
+    let table_schemas = state_store.get_latest_table_schemas().await;
     assert!(table_schemas.contains_key(&parent_table_id));
 
     let parent_schema = &table_schemas[&parent_table_id];
@@ -1246,7 +1246,7 @@ async fn nested_partitioned_table_copy_and_cdc() {
     parent_sync_done.notified().await;
 
     // Verify table schema was discovered correctly for nested partitioned table.
-    let table_schemas = state_store.get_table_schemas().await;
+    let table_schemas = state_store.get_latest_table_schemas().await;
     assert!(table_schemas.contains_key(&parent_table_id));
 
     let parent_schema = &table_schemas[&parent_table_id];

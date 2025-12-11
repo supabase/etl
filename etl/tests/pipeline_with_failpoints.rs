@@ -2,25 +2,25 @@
 
 use etl::destination::memory::MemoryDestination;
 use etl::error::ErrorKind;
-use etl::failpoints::{
-    START_TABLE_SYNC_BEFORE_DATA_SYNC_SLOT_CREATION, START_TABLE_SYNC_DURING_DATA_SYNC,
-};
+use etl::failpoints::{SEND_STATUS_UPDATE_FP, START_TABLE_SYNC_BEFORE_DATA_SYNC_SLOT_CREATION_FP, START_TABLE_SYNC_DURING_DATA_SYNC_FP};
 use etl::state::table::{RetryPolicy, TableReplicationPhase, TableReplicationPhaseType};
 use etl::test_utils::database::spawn_source_database;
 use etl::test_utils::notify::NotifyingStore;
-use etl::test_utils::pipeline::create_pipeline;
+use etl::test_utils::pipeline::{create_pipeline, create_database_and_pipeline_with_table};
 use etl::test_utils::test_destination_wrapper::TestDestinationWrapper;
 use etl::test_utils::test_schema::{TableSelection, insert_users_data, setup_test_database_schema};
-use etl::types::PipelineId;
+use etl::types::{EventType, PipelineId};
 use etl_telemetry::tracing::init_test_tracing;
 use fail::FailScenario;
 use rand::random;
+use etl::test_utils::event::group_events_by_type_and_table_id;
+use etl_postgres::tokio::test_utils::TableModification;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn table_copy_fails_after_data_sync_threw_an_error_with_no_retry() {
     let _scenario = FailScenario::setup();
     fail::cfg(
-        START_TABLE_SYNC_BEFORE_DATA_SYNC_SLOT_CREATION,
+        START_TABLE_SYNC_BEFORE_DATA_SYNC_SLOT_CREATION_FP,
         "1*return(no_retry)",
     )
     .unwrap();
@@ -74,7 +74,7 @@ async fn table_copy_fails_after_data_sync_threw_an_error_with_no_retry() {
     assert!(table_rows.is_empty());
 
     // Verify table schemas were correctly stored.
-    let table_schemas = store.get_table_schemas().await;
+    let table_schemas = store.get_latest_table_schemas().await;
     assert!(table_schemas.is_empty());
 }
 
@@ -84,7 +84,7 @@ async fn table_copy_fails_after_timed_retry_exceeded_max_attempts() {
     // Since we have table_error_retry_max_attempts: 2, we want to fail 3 times, so that on the 3rd
     // time, the system switches to manual retry.
     fail::cfg(
-        START_TABLE_SYNC_BEFORE_DATA_SYNC_SLOT_CREATION,
+        START_TABLE_SYNC_BEFORE_DATA_SYNC_SLOT_CREATION_FP,
         "3*return(timed_retry)",
     )
     .unwrap();
@@ -144,7 +144,7 @@ async fn table_copy_fails_after_timed_retry_exceeded_max_attempts() {
     assert!(table_rows.is_empty());
 
     // Verify table schemas were correctly stored.
-    let table_schemas = store.get_table_schemas().await;
+    let table_schemas = store.get_latest_table_schemas().await;
     assert!(table_schemas.is_empty());
 }
 
@@ -152,7 +152,7 @@ async fn table_copy_fails_after_timed_retry_exceeded_max_attempts() {
 async fn table_copy_is_consistent_after_data_sync_threw_an_error_with_timed_retry() {
     let _scenario = FailScenario::setup();
     fail::cfg(
-        START_TABLE_SYNC_BEFORE_DATA_SYNC_SLOT_CREATION,
+        START_TABLE_SYNC_BEFORE_DATA_SYNC_SLOT_CREATION_FP,
         "1*return(timed_retry)",
     )
     .unwrap();
@@ -205,7 +205,7 @@ async fn table_copy_is_consistent_after_data_sync_threw_an_error_with_timed_retr
     assert_eq!(users_table_rows.len(), rows_inserted);
 
     // Verify table schemas were correctly stored.
-    let table_schemas = store.get_table_schemas().await;
+    let table_schemas = store.get_latest_table_schemas().await;
     assert_eq!(table_schemas.len(), 1);
     assert_eq!(
         *table_schemas
@@ -218,7 +218,11 @@ async fn table_copy_is_consistent_after_data_sync_threw_an_error_with_timed_retr
 #[tokio::test(flavor = "multi_thread")]
 async fn table_copy_is_consistent_during_data_sync_threw_an_error_with_timed_retry() {
     let _scenario = FailScenario::setup();
-    fail::cfg(START_TABLE_SYNC_DURING_DATA_SYNC, "1*return(timed_retry)").unwrap();
+    fail::cfg(
+        START_TABLE_SYNC_DURING_DATA_SYNC_FP,
+        "1*return(timed_retry)",
+    )
+    .unwrap();
 
     init_test_tracing();
 
@@ -268,12 +272,135 @@ async fn table_copy_is_consistent_during_data_sync_threw_an_error_with_timed_ret
     assert_eq!(users_table_rows.len(), rows_inserted);
 
     // Verify table schemas were correctly stored.
-    let table_schemas = store.get_table_schemas().await;
+    let table_schemas = store.get_latest_table_schemas().await;
     assert_eq!(table_schemas.len(), 1);
     assert_eq!(
         *table_schemas
             .get(&database_schema.users_schema().id)
             .unwrap(),
         database_schema.users_schema()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn table_schema_snapshots_are_consistent_after_missing_status_update() {
+    let _scenario = FailScenario::setup();
+    fail::cfg(SEND_STATUS_UPDATE_FP, "return").unwrap();
+
+    init_test_tracing();
+
+    let (database, table_name, table_id, store, destination, pipeline, pipeline_id, publication) =
+        create_database_and_pipeline_with_table(
+            "schema_add_column",
+            &[("name", "text not null"), ("age", "integer not null")],
+        )
+        .await;
+
+    let notify = destination
+        .wait_for_events_count(vec![(EventType::Relation, 2), (EventType::Insert, 2)])
+        .await;
+
+    database
+        .insert_values(
+            table_name.clone(),
+            &["name", "age"],
+            &[&"Alice", &25],
+        )
+        .await
+        .unwrap();
+
+    database
+        .alter_table(
+            table_name.clone(),
+            &[TableModification::AddColumn {
+                name: "email",
+                data_type: "text null",
+            }],
+        )
+        .await
+        .unwrap();
+
+    database
+        .insert_values(
+            table_name.clone(),
+            &["name", "age", "email"],
+            &[&"Bob", &28, &"bob@example.com"],
+        )
+        .await
+        .unwrap();
+
+    notify.notified().await;
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    // Assert that we got all the events correctly.
+    let events = destination.get_events().await;
+    let grouped = group_events_by_type_and_table_id(&events);
+
+    assert_eq!(
+        grouped.get(&(EventType::Relation, table_id)).unwrap().len(),
+        2
+    );
+    assert_eq!(
+        grouped.get(&(EventType::Insert, table_id)).unwrap().len(),
+        2
+    );
+
+    // Assert that we have 2 schema snapshots stored.
+    let table_schemas = store.get_table_schemas().await;
+    let table_schemas_snapshots: Vec<_> = table_schemas.get(&table_id).unwrap().clone();
+    assert_eq!(table_schemas_snapshots.len(), 2);
+
+    // Verify the first snapshot has the original schema (id, name, age).
+    let (first_snapshot_id, first_schema) = &table_schemas_snapshots[0];
+    assert_eq!(first_schema.column_schemas.len(), 3);
+    assert_eq!(first_schema.column_schemas[0].name, "id");
+    assert_eq!(first_schema.column_schemas[1].name, "name");
+    assert_eq!(first_schema.column_schemas[2].name, "age");
+
+    // Verify the second snapshot has the new column added (id, name, age, email).
+    let (second_snapshot_id, second_schema) = &table_schemas_snapshots[1];
+    assert_eq!(second_schema.column_schemas.len(), 4);
+    assert_eq!(second_schema.column_schemas[0].name, "id");
+    assert_eq!(second_schema.column_schemas[1].name, "name");
+    assert_eq!(second_schema.column_schemas[2].name, "age");
+    assert_eq!(second_schema.column_schemas[3].name, "email");
+
+    // Clear up the state and allow the status update to be sent.
+    destination.clear_events().await;
+    fail::cfg(SEND_STATUS_UPDATE_FP, "off").unwrap();
+
+    // Restart the pipeline with the failpoint disabled to verify recovery.
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        publication,
+        store.clone(),
+        destination.clone(),
+    );
+    pipeline.start().await.unwrap();
+
+    // Wait for another insert to verify events flow correctly after recovery.
+    let notify = destination
+        .wait_for_events_count(vec![(EventType::Relation, 2), (EventType::Insert, 3)])
+        .await;
+
+    database
+        .insert_values(
+            table_name.clone(),
+            &["name", "age", "email"],
+            &[&"Charlie", &35, &"charlie@example.com"],
+        )
+        .await
+        .unwrap();
+
+    notify.notified().await;
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    // Verify we received the insert event after recovery.
+    let events = destination.get_events().await;
+    let grouped = group_events_by_type_and_table_id(&events);
+    assert_eq!(
+        grouped.get(&(EventType::Insert, table_id)).unwrap().len(),
+        3
     );
 }

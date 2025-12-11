@@ -9,6 +9,6 @@ pub mod event;
 pub mod materialize;
 pub mod notify;
 pub mod pipeline;
-pub mod table;
+pub mod schema;
 pub mod test_destination_wrapper;
 pub mod test_schema;
