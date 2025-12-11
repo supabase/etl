@@ -548,7 +548,10 @@ impl ReplicatedTableSchema {
         let new_positions: HashSet<i32> = new_columns.keys().copied().collect();
 
         // Intersection: common positions (potential renames).
-        let common_positions: HashSet<i32> = old_positions.intersection(&new_positions).copied().collect();
+        let common_positions: HashSet<i32> = old_positions
+            .intersection(&new_positions)
+            .copied()
+            .collect();
 
         // Columns to rename: same position, different name.
         let columns_to_rename: Vec<ColumnRename> = common_positions
@@ -570,7 +573,8 @@ impl ReplicatedTableSchema {
             .collect();
 
         // Columns to remove: positions in old but not in new.
-        let positions_to_remove: HashSet<i32> = old_positions.difference(&new_positions).copied().collect();
+        let positions_to_remove: HashSet<i32> =
+            old_positions.difference(&new_positions).copied().collect();
         let columns_to_remove: Vec<ColumnSchema> = positions_to_remove
             .iter()
             .map(|pos| old_columns.get(pos).unwrap())
@@ -579,7 +583,8 @@ impl ReplicatedTableSchema {
             .collect();
 
         // Columns to add: positions in new but not in old.
-        let positions_to_add: HashSet<i32> = new_positions.difference(&old_positions).copied().collect();
+        let positions_to_add: HashSet<i32> =
+            new_positions.difference(&old_positions).copied().collect();
         let columns_to_add: Vec<ColumnSchema> = positions_to_add
             .iter()
             .map(|pos| new_columns.get(pos).unwrap())
@@ -883,9 +888,14 @@ mod tests {
 
     #[test]
     fn test_schema_diff_multiple_additions() {
-        let old_schema = create_replicated_schema(vec![
-            ColumnSchema::new("id".to_string(), Type::INT4, -1, 1, Some(1), false),
-        ]);
+        let old_schema = create_replicated_schema(vec![ColumnSchema::new(
+            "id".to_string(),
+            Type::INT4,
+            -1,
+            1,
+            Some(1),
+            false,
+        )]);
         let new_schema = create_replicated_schema(vec![
             ColumnSchema::new("id".to_string(), Type::INT4, -1, 1, Some(1), false),
             ColumnSchema::new("name".to_string(), Type::TEXT, -1, 2, None, true),
@@ -895,7 +905,11 @@ mod tests {
         let diff = old_schema.diff(&new_schema);
 
         assert_eq!(diff.columns_to_add.len(), 2);
-        let added_names: HashSet<&str> = diff.columns_to_add.iter().map(|c| c.name.as_str()).collect();
+        let added_names: HashSet<&str> = diff
+            .columns_to_add
+            .iter()
+            .map(|c| c.name.as_str())
+            .collect();
         assert!(added_names.contains("name"));
         assert!(added_names.contains("email"));
         assert!(diff.columns_to_remove.is_empty());
@@ -909,15 +923,24 @@ mod tests {
             ColumnSchema::new("name".to_string(), Type::TEXT, -1, 2, None, true),
             ColumnSchema::new("email".to_string(), Type::TEXT, -1, 3, None, true),
         ]);
-        let new_schema = create_replicated_schema(vec![
-            ColumnSchema::new("id".to_string(), Type::INT4, -1, 1, Some(1), false),
-        ]);
+        let new_schema = create_replicated_schema(vec![ColumnSchema::new(
+            "id".to_string(),
+            Type::INT4,
+            -1,
+            1,
+            Some(1),
+            false,
+        )]);
 
         let diff = old_schema.diff(&new_schema);
 
         assert!(diff.columns_to_add.is_empty());
         assert_eq!(diff.columns_to_remove.len(), 2);
-        let removed_names: HashSet<&str> = diff.columns_to_remove.iter().map(|c| c.name.as_str()).collect();
+        let removed_names: HashSet<&str> = diff
+            .columns_to_remove
+            .iter()
+            .map(|c| c.name.as_str())
+            .collect();
         assert!(removed_names.contains("name"));
         assert!(removed_names.contains("email"));
         assert!(diff.columns_to_rename.is_empty());

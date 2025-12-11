@@ -11,6 +11,7 @@ use etl::test_utils::test_destination_wrapper::TestDestinationWrapper;
 use etl::test_utils::test_schema::{TableSelection, insert_mock_data, setup_test_database_schema};
 use etl::types::{EventType, PgNumeric, PipelineId};
 use etl_destinations::encryption::install_crypto_provider;
+use etl_postgres::tokio::test_utils::TableModification;
 use etl_telemetry::tracing::init_test_tracing;
 use rand::random;
 use std::str::FromStr;
@@ -18,8 +19,8 @@ use std::time::Duration;
 use tokio::time::sleep;
 
 use crate::support::bigquery::{
-    BigQueryOrder, BigQueryUser, NonNullableColsScalar, NullableColsArray, NullableColsScalar,
-    parse_bigquery_table_rows, setup_bigquery_connection,
+    BigQueryColumnSchema, BigQueryOrder, BigQueryUser, NonNullableColsScalar, NullableColsArray,
+    NullableColsScalar, parse_bigquery_table_rows, setup_bigquery_connection,
 };
 
 mod support;
@@ -1773,4 +1774,508 @@ async fn table_validation_out_of_bounds_values() {
         err.kinds()
             .contains(&ErrorKind::UnsupportedValueInDestination)
     );
+}
+
+// TODO: These schema change tests are currently failing because BigQuery's Storage Write API
+// caches schema information and doesn't immediately reflect DDL changes. After ALTER TABLE
+// adds a column, the streaming API rejects inserts with the new column as "extra fields".
+// This requires either:
+// 1. Retry logic on schema mismatch errors
+// 2. Falling back to batch loading after schema changes
+// 3. Creating a new table version with the new schema
+#[ignore = "BigQuery Storage Write API schema cache doesn't immediately reflect DDL changes"]
+#[tokio::test(flavor = "multi_thread")]
+async fn table_schema_change_add_column() {
+    init_test_tracing();
+    install_crypto_provider();
+
+    let database = spawn_source_database().await;
+    let bigquery_database = setup_bigquery_connection().await;
+    let table_name = test_table_name("schema_add_col");
+    let table_id = database
+        .create_table(
+            table_name.clone(),
+            true,
+            &[("name", "text not null"), ("age", "integer not null")],
+        )
+        .await
+        .unwrap();
+
+    let store = NotifyingStore::new();
+    let pipeline_id: PipelineId = random();
+    let raw_destination = bigquery_database.build_destination(store.clone()).await;
+    let destination = TestDestinationWrapper::wrap(raw_destination);
+
+    let publication_name = "test_pub_add_col".to_string();
+    database
+        .create_publication(&publication_name, std::slice::from_ref(&table_name))
+        .await
+        .expect("Failed to create publication");
+
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        publication_name,
+        store.clone(),
+        destination.clone(),
+    );
+
+    let table_sync_done = store
+        .notify_on_table_state_type(table_id, TableReplicationPhaseType::SyncDone)
+        .await;
+
+    pipeline.start().await.unwrap();
+    table_sync_done.notified().await;
+
+    // Insert initial row.
+    let event_notify = destination
+        .wait_for_events_count(vec![(EventType::Insert, 1)])
+        .await;
+
+    database
+        .insert_values(table_name.clone(), &["name", "age"], &[&"Alice", &25])
+        .await
+        .unwrap();
+
+    event_notify.notified().await;
+
+    // Query initial schema - should have id, name, age + CDC columns.
+    let initial_schema = bigquery_database
+        .query_table_schema(table_name.clone())
+        .await
+        .unwrap();
+    assert!(initial_schema.iter().any(|c| c.column_name == "id"));
+    assert!(initial_schema.iter().any(|c| c.column_name == "name"));
+    assert!(initial_schema.iter().any(|c| c.column_name == "age"));
+    assert!(!initial_schema.iter().any(|c| c.column_name == "email"));
+
+    // Add a column to the source table.
+    let event_notify = destination
+        .wait_for_events_count(vec![(EventType::Relation, 1), (EventType::Insert, 1)])
+        .await;
+
+    database
+        .alter_table(
+            table_name.clone(),
+            &[TableModification::AddColumn {
+                name: "email",
+                data_type: "text",
+            }],
+        )
+        .await
+        .unwrap();
+
+    // Insert row with new column.
+    database
+        .insert_values(
+            table_name.clone(),
+            &["name", "age", "email"],
+            &[&"Bob", &30, &"bob@example.com"],
+        )
+        .await
+        .unwrap();
+
+    event_notify.notified().await;
+
+    // Give BigQuery time to apply the schema change.
+    sleep(Duration::from_secs(2)).await;
+
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    // Query updated schema - should now have email column.
+    let updated_schema = bigquery_database
+        .query_table_schema(table_name.clone())
+        .await
+        .unwrap();
+    assert!(updated_schema.iter().any(|c| c.column_name == "id"));
+    assert!(updated_schema.iter().any(|c| c.column_name == "name"));
+    assert!(updated_schema.iter().any(|c| c.column_name == "age"));
+    assert!(updated_schema.iter().any(|c| c.column_name == "email"));
+
+    // Verify data was inserted correctly.
+    let rows = bigquery_database.query_table(table_name).await.unwrap();
+    assert_eq!(rows.len(), 2);
+}
+
+#[ignore = "BigQuery Storage Write API schema cache doesn't immediately reflect DDL changes"]
+#[tokio::test(flavor = "multi_thread")]
+async fn table_schema_change_drop_column() {
+    init_test_tracing();
+    install_crypto_provider();
+
+    let database = spawn_source_database().await;
+    let bigquery_database = setup_bigquery_connection().await;
+    let table_name = test_table_name("schema_drop_col");
+    let table_id = database
+        .create_table(
+            table_name.clone(),
+            true,
+            &[
+                ("name", "text not null"),
+                ("age", "integer not null"),
+                ("status", "text"),
+            ],
+        )
+        .await
+        .unwrap();
+
+    let store = NotifyingStore::new();
+    let pipeline_id: PipelineId = random();
+    let raw_destination = bigquery_database.build_destination(store.clone()).await;
+    let destination = TestDestinationWrapper::wrap(raw_destination);
+
+    let publication_name = "test_pub_drop_col".to_string();
+    database
+        .create_publication(&publication_name, std::slice::from_ref(&table_name))
+        .await
+        .expect("Failed to create publication");
+
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        publication_name,
+        store.clone(),
+        destination.clone(),
+    );
+
+    let table_sync_done = store
+        .notify_on_table_state_type(table_id, TableReplicationPhaseType::SyncDone)
+        .await;
+
+    pipeline.start().await.unwrap();
+    table_sync_done.notified().await;
+
+    // Insert initial row.
+    let event_notify = destination
+        .wait_for_events_count(vec![(EventType::Insert, 1)])
+        .await;
+
+    database
+        .insert_values(
+            table_name.clone(),
+            &["name", "age", "status"],
+            &[&"Alice", &25, &"active"],
+        )
+        .await
+        .unwrap();
+
+    event_notify.notified().await;
+
+    // Query initial schema - should have id, name, age, status + CDC columns.
+    let initial_schema = bigquery_database
+        .query_table_schema(table_name.clone())
+        .await
+        .unwrap();
+    assert!(initial_schema.iter().any(|c| c.column_name == "id"));
+    assert!(initial_schema.iter().any(|c| c.column_name == "name"));
+    assert!(initial_schema.iter().any(|c| c.column_name == "age"));
+    assert!(initial_schema.iter().any(|c| c.column_name == "status"));
+
+    // Drop the status column from the source table.
+    let event_notify = destination
+        .wait_for_events_count(vec![(EventType::Relation, 1), (EventType::Insert, 1)])
+        .await;
+
+    database
+        .alter_table(
+            table_name.clone(),
+            &[TableModification::DropColumn { name: "status" }],
+        )
+        .await
+        .unwrap();
+
+    // Insert row without the dropped column.
+    database
+        .insert_values(table_name.clone(), &["name", "age"], &[&"Bob", &30])
+        .await
+        .unwrap();
+
+    event_notify.notified().await;
+
+    // Give BigQuery time to apply the schema change.
+    sleep(Duration::from_secs(2)).await;
+
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    // Query updated schema - status column should be gone.
+    let updated_schema = bigquery_database
+        .query_table_schema(table_name.clone())
+        .await
+        .unwrap();
+    assert!(updated_schema.iter().any(|c| c.column_name == "id"));
+    assert!(updated_schema.iter().any(|c| c.column_name == "name"));
+    assert!(updated_schema.iter().any(|c| c.column_name == "age"));
+    assert!(!updated_schema.iter().any(|c| c.column_name == "status"));
+
+    // Verify data was inserted correctly.
+    let rows = bigquery_database.query_table(table_name).await.unwrap();
+    assert_eq!(rows.len(), 2);
+}
+
+#[ignore = "BigQuery Storage Write API schema cache doesn't immediately reflect DDL changes"]
+#[tokio::test(flavor = "multi_thread")]
+async fn table_schema_change_rename_column() {
+    init_test_tracing();
+    install_crypto_provider();
+
+    let database = spawn_source_database().await;
+    let bigquery_database = setup_bigquery_connection().await;
+    let table_name = test_table_name("schema_rename_col");
+    let table_id = database
+        .create_table(
+            table_name.clone(),
+            true,
+            &[("name", "text not null"), ("age", "integer not null")],
+        )
+        .await
+        .unwrap();
+
+    let store = NotifyingStore::new();
+    let pipeline_id: PipelineId = random();
+    let raw_destination = bigquery_database.build_destination(store.clone()).await;
+    let destination = TestDestinationWrapper::wrap(raw_destination);
+
+    let publication_name = "test_pub_rename_col".to_string();
+    database
+        .create_publication(&publication_name, std::slice::from_ref(&table_name))
+        .await
+        .expect("Failed to create publication");
+
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        publication_name,
+        store.clone(),
+        destination.clone(),
+    );
+
+    let table_sync_done = store
+        .notify_on_table_state_type(table_id, TableReplicationPhaseType::SyncDone)
+        .await;
+
+    pipeline.start().await.unwrap();
+    table_sync_done.notified().await;
+
+    // Insert initial row.
+    let event_notify = destination
+        .wait_for_events_count(vec![(EventType::Insert, 1)])
+        .await;
+
+    database
+        .insert_values(table_name.clone(), &["name", "age"], &[&"Alice", &25])
+        .await
+        .unwrap();
+
+    event_notify.notified().await;
+
+    // Query initial schema - should have name column.
+    let initial_schema = bigquery_database
+        .query_table_schema(table_name.clone())
+        .await
+        .unwrap();
+    assert!(initial_schema.iter().any(|c| c.column_name == "name"));
+    assert!(!initial_schema.iter().any(|c| c.column_name == "full_name"));
+
+    // Rename the name column to full_name.
+    let event_notify = destination
+        .wait_for_events_count(vec![(EventType::Relation, 1), (EventType::Insert, 1)])
+        .await;
+
+    database
+        .alter_table(
+            table_name.clone(),
+            &[TableModification::RenameColumn {
+                old_name: "name",
+                new_name: "full_name",
+            }],
+        )
+        .await
+        .unwrap();
+
+    // Insert row with renamed column.
+    database
+        .insert_values(table_name.clone(), &["full_name", "age"], &[&"Bob", &30])
+        .await
+        .unwrap();
+
+    event_notify.notified().await;
+
+    // Give BigQuery time to apply the schema change.
+    sleep(Duration::from_secs(2)).await;
+
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    // Query updated schema - name column should be renamed to full_name.
+    let updated_schema = bigquery_database
+        .query_table_schema(table_name.clone())
+        .await
+        .unwrap();
+    assert!(!updated_schema.iter().any(|c| c.column_name == "name"));
+    assert!(updated_schema.iter().any(|c| c.column_name == "full_name"));
+
+    // Verify data was inserted correctly.
+    let rows = bigquery_database.query_table(table_name).await.unwrap();
+    assert_eq!(rows.len(), 2);
+}
+
+#[ignore = "BigQuery Storage Write API schema cache doesn't immediately reflect DDL changes"]
+#[tokio::test(flavor = "multi_thread")]
+async fn table_schema_change_multiple_operations() {
+    init_test_tracing();
+    install_crypto_provider();
+
+    let database = spawn_source_database().await;
+    let bigquery_database = setup_bigquery_connection().await;
+    let table_name = test_table_name("schema_multi_ops");
+    let table_id = database
+        .create_table(
+            table_name.clone(),
+            true,
+            &[
+                ("name", "text not null"),
+                ("age", "integer not null"),
+                ("status", "text"),
+            ],
+        )
+        .await
+        .unwrap();
+
+    let store = NotifyingStore::new();
+    let pipeline_id: PipelineId = random();
+    let raw_destination = bigquery_database.build_destination(store.clone()).await;
+    let destination = TestDestinationWrapper::wrap(raw_destination);
+
+    let publication_name = "test_pub_multi_ops".to_string();
+    database
+        .create_publication(&publication_name, std::slice::from_ref(&table_name))
+        .await
+        .expect("Failed to create publication");
+
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        publication_name,
+        store.clone(),
+        destination.clone(),
+    );
+
+    let table_sync_done = store
+        .notify_on_table_state_type(table_id, TableReplicationPhaseType::SyncDone)
+        .await;
+
+    pipeline.start().await.unwrap();
+    table_sync_done.notified().await;
+
+    // Insert initial row.
+    let event_notify = destination
+        .wait_for_events_count(vec![(EventType::Insert, 1)])
+        .await;
+
+    database
+        .insert_values(
+            table_name.clone(),
+            &["name", "age", "status"],
+            &[&"Alice", &25, &"active"],
+        )
+        .await
+        .unwrap();
+
+    event_notify.notified().await;
+
+    // Verify initial schema.
+    let initial_schema = bigquery_database
+        .query_table_schema(table_name.clone())
+        .await
+        .unwrap();
+    let initial_col_names: Vec<&str> = initial_schema
+        .iter()
+        .map(|c| c.column_name.as_str())
+        .collect();
+    assert!(initial_col_names.contains(&"name"));
+    assert!(initial_col_names.contains(&"age"));
+    assert!(initial_col_names.contains(&"status"));
+
+    // Apply multiple schema changes:
+    // 1. Rename name -> full_name
+    // 2. Drop status column
+    // 3. Add email column
+    let event_notify = destination
+        .wait_for_events_count(vec![(EventType::Relation, 3), (EventType::Insert, 1)])
+        .await;
+
+    database
+        .alter_table(
+            table_name.clone(),
+            &[TableModification::RenameColumn {
+                old_name: "name",
+                new_name: "full_name",
+            }],
+        )
+        .await
+        .unwrap();
+
+    database
+        .alter_table(
+            table_name.clone(),
+            &[TableModification::DropColumn { name: "status" }],
+        )
+        .await
+        .unwrap();
+
+    database
+        .alter_table(
+            table_name.clone(),
+            &[TableModification::AddColumn {
+                name: "email",
+                data_type: "text",
+            }],
+        )
+        .await
+        .unwrap();
+
+    // Insert row with new schema.
+    database
+        .insert_values(
+            table_name.clone(),
+            &["full_name", "age", "email"],
+            &[&"Bob", &30, &"bob@example.com"],
+        )
+        .await
+        .unwrap();
+
+    event_notify.notified().await;
+
+    // Give BigQuery time to apply all schema changes.
+    sleep(Duration::from_secs(3)).await;
+
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    // Verify final schema:
+    // - name should be renamed to full_name
+    // - status should be dropped
+    // - email should be added
+    let final_schema = bigquery_database
+        .query_table_schema(table_name.clone())
+        .await
+        .unwrap();
+    let final_col_names: Vec<&str> = final_schema
+        .iter()
+        .map(|c| c.column_name.as_str())
+        .collect();
+
+    assert!(!final_col_names.contains(&"name"), "name should be renamed");
+    assert!(
+        final_col_names.contains(&"full_name"),
+        "full_name should exist"
+    );
+    assert!(
+        !final_col_names.contains(&"status"),
+        "status should be dropped"
+    );
+    assert!(final_col_names.contains(&"email"), "email should be added");
+    assert!(final_col_names.contains(&"age"), "age should still exist");
+
+    // Verify data was inserted correctly.
+    let rows = bigquery_database.query_table(table_name).await.unwrap();
+    assert_eq!(rows.len(), 2);
 }

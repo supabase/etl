@@ -572,16 +572,18 @@ impl StateStore for PostgresStore {
 
         let pool = self.connect_to_source().await?;
 
-        let state_rows =
-            schema::load_destination_schema_states(&pool, self.pipeline_id as i64)
-                .await
-                .map_err(|err| {
-                    etl_error!(
-                        ErrorKind::SourceQueryFailed,
-                        "Destination schema states loading failed",
-                        format!("Failed to load destination schema states from PostgreSQL: {}", err)
+        let state_rows = schema::load_destination_schema_states(&pool, self.pipeline_id as i64)
+            .await
+            .map_err(|err| {
+                etl_error!(
+                    ErrorKind::SourceQueryFailed,
+                    "Destination schema states loading failed",
+                    format!(
+                        "Failed to load destination schema states from PostgreSQL: {}",
+                        err
                     )
-                })?;
+                )
+            })?;
 
         let mut states: HashMap<TableId, DestinationSchemaState> = HashMap::new();
         for (table_id, row) in state_rows {
@@ -646,7 +648,10 @@ impl StateStore for PostgresStore {
             etl_error!(
                 ErrorKind::SourceQueryFailed,
                 "Destination schema state storage failed",
-                format!("Failed to store destination schema state in PostgreSQL: {}", err)
+                format!(
+                    "Failed to store destination schema state in PostgreSQL: {}",
+                    err
+                )
             )
         })?;
 

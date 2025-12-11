@@ -309,7 +309,8 @@ impl BigQueryClient {
         );
 
         // BigQuery requires new columns to be nullable (no NOT NULL constraint allowed).
-        let query = format!("alter table {full_table_name} add column `{column_name}` {column_type}");
+        let query =
+            format!("alter table {full_table_name} add column `{column_name}` {column_type}");
 
         let _ = self.query(QueryRequest::new(query)).await?;
 
@@ -865,8 +866,34 @@ fn bq_error_to_etl_error(err: BQError) -> EtlError {
     etl_error!(kind, description, err.to_string())
 }
 
+/// Patterns that indicate a schema mismatch error from BigQuery Storage Write API.
+///
+/// These patterns are matched against the error message to determine if the error
+/// is due to schema mismatch (e.g., after DDL changes when the cached schema is stale).
+const SCHEMA_MISMATCH_PATTERNS: &[&str] = &["extra field"];
+
+/// Checks if an error message indicates a schema mismatch.
+fn is_schema_mismatch_message(message: &str) -> bool {
+    let lower = message.to_lowercase();
+    SCHEMA_MISMATCH_PATTERNS
+        .iter()
+        .any(|pattern| lower.contains(pattern))
+}
+
 /// Converts BigQuery row errors to ETL destination errors.
+///
+/// Detects schema mismatch errors by checking for specific patterns in the error
+/// message that indicate the destination schema differs from the expected schema.
 fn row_error_to_etl_error(err: RowError) -> EtlError {
+    // Check if this is a schema mismatch error based on the message content.
+    if is_schema_mismatch_message(&err.message) {
+        return etl_error!(
+            ErrorKind::DestinationSchemaMismatch,
+            "BigQuery schema mismatch",
+            format!("{err:?}")
+        );
+    }
+
     etl_error!(
         ErrorKind::DestinationError,
         "BigQuery row error",
@@ -1274,5 +1301,18 @@ mod tests {
 
         let expected_query = "create or replace table `test-project.test_dataset.test_table` (`id` int64 not null, primary key (`id`) not enforced) options (max_staleness = interval 15 minute)";
         assert_eq!(query, expected_query);
+    }
+
+    #[test]
+    fn test_is_schema_mismatch_message() {
+        // Test messages that should match (empirically observed patterns only).
+        assert!(is_schema_mismatch_message("extra field in row"));
+        assert!(is_schema_mismatch_message("Extra Field detected"));
+
+        // Test messages that should not match.
+        assert!(!is_schema_mismatch_message("connection timeout"));
+        assert!(!is_schema_mismatch_message("permission denied"));
+        assert!(!is_schema_mismatch_message("invalid data format"));
+        assert!(!is_schema_mismatch_message(""));
     }
 }

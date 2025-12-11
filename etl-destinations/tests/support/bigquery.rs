@@ -161,6 +161,50 @@ impl BigQueryDatabase {
         }
     }
 
+    /// Queries the schema (column metadata) for a table.
+    ///
+    /// Returns the column names and data types from INFORMATION_SCHEMA.COLUMNS.
+    /// The table name pattern matches using REGEXP_CONTAINS to match the sequenced
+    /// table name format: `{table_id}_{sequence_number}`.
+    pub async fn query_table_schema(
+        &self,
+        table_name: TableName,
+    ) -> Option<Vec<BigQueryColumnSchema>> {
+        let client = self.client().unwrap();
+
+        let project_id = self.project_id();
+        let dataset_id = self.dataset_id();
+        let table_id = table_name_to_bigquery_table_id(&table_name);
+
+        // Use REGEXP_CONTAINS to match the sequenced table name format.
+        // BigQuery table names have format: {schema}_{table}_{sequence_number}
+        // The regex matches the table_id followed by underscore and one or more digits.
+        let query = format!(
+            "SELECT column_name, data_type, ordinal_position \
+             FROM `{project_id}.{dataset_id}.INFORMATION_SCHEMA.COLUMNS` \
+             WHERE REGEXP_CONTAINS(table_name, r'^{table_id}_[0-9]+$') \
+             ORDER BY ordinal_position"
+        );
+
+        let mut attempts_remaining = BIGQUERY_QUERY_MAX_ATTEMPTS;
+
+        loop {
+            let rows = client
+                .job()
+                .query(project_id, QueryRequest::new(query.clone()))
+                .await
+                .unwrap()
+                .rows;
+
+            if rows.is_some() || attempts_remaining == 1 {
+                return rows.map(|r| parse_bigquery_table_rows(r));
+            }
+
+            attempts_remaining -= 1;
+            sleep(Duration::from_millis(BIGQUERY_QUERY_RETRY_DELAY_MS)).await;
+        }
+    }
+
     /// Manually creates a table in the test dataset using column definitions.
     ///
     /// Creates a table by generating a DDL statement from the provided column specifications.
@@ -1001,4 +1045,24 @@ where
     parsed_table_rows.sort();
 
     parsed_table_rows
+}
+
+/// Represents a column in a BigQuery table schema.
+#[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd)]
+pub struct BigQueryColumnSchema {
+    pub column_name: String,
+    pub data_type: String,
+    pub ordinal_position: i64,
+}
+
+impl From<TableRow> for BigQueryColumnSchema {
+    fn from(value: TableRow) -> Self {
+        let columns = value.columns.unwrap();
+
+        BigQueryColumnSchema {
+            column_name: parse_table_cell(columns[0].clone()).unwrap(),
+            data_type: parse_table_cell(columns[1].clone()).unwrap(),
+            ordinal_position: parse_table_cell(columns[2].clone()).unwrap(),
+        }
+    }
 }

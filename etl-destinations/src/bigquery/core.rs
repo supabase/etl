@@ -7,13 +7,17 @@ use etl::types::{
     generate_sequence_number,
 };
 use etl::{bail, etl_error};
-use gcp_bigquery_client::storage::TableDescriptor;
+use gcp_bigquery_client::storage::{TableBatch, TableDescriptor};
+
+use crate::bigquery::encoding::BigQueryTableRow;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
 use std::iter;
 use std::str::FromStr;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::Mutex;
+use tokio::time::sleep;
 use tracing::{debug, info, warn};
 
 use crate::bigquery::client::{BigQueryClient, BigQueryOperationType};
@@ -23,6 +27,14 @@ use crate::bigquery::{BigQueryDatasetId, BigQueryTableId};
 const BIGQUERY_TABLE_ID_DELIMITER: &str = "_";
 /// Replacement string for escaping underscores in Postgres names.
 const BIGQUERY_TABLE_ID_DELIMITER_ESCAPE_REPLACEMENT: &str = "__";
+
+/// Maximum number of retry attempts for schema mismatch errors.
+///
+/// After DDL changes, the BigQuery Storage Write API may cache stale schema information.
+/// These retries allow the cache to refresh before failing permanently.
+const MAX_SCHEMA_MISMATCH_ATTEMPTS: usize = 10;
+/// Delay between schema mismatch retry attempts in milliseconds.
+const SCHEMA_MISMATCH_RETRY_DELAY_MS: u64 = 1000;
 
 /// Returns the [`BigQueryTableId`] for a supplied [`TableName`].
 ///
@@ -475,27 +487,26 @@ where
         // Split table rows into optimal batches for parallel execution.
         let table_rows_batches = split_table_rows(table_rows, self.max_concurrent_streams);
 
-        // Create table batches from the split rows.
-        let mut table_batches = Vec::with_capacity(table_rows_batches.len());
-        for table_rows in table_rows_batches {
-            if !table_rows.is_empty() {
-                let table_batch = self.client.create_table_batch(
-                    &self.dataset_id,
-                    &sequenced_bigquery_table_id.to_string(),
-                    table_descriptor.clone(),
-                    table_rows,
-                )?;
-                table_batches.push(table_batch);
-            }
-        }
+        // Stream with schema mismatch retry by recreating batches on each attempt.
+        let (bytes_sent, bytes_received) = self
+            .stream_with_schema_retry(|| {
+                let mut table_batches = Vec::with_capacity(table_rows_batches.len());
+                for table_rows in &table_rows_batches {
+                    if !table_rows.is_empty() {
+                        let table_batch = self.client.create_table_batch(
+                            &self.dataset_id,
+                            &sequenced_bigquery_table_id.to_string(),
+                            table_descriptor.clone(),
+                            table_rows.clone(),
+                        )?;
+                        table_batches.push(table_batch);
+                    }
+                }
+                Ok(table_batches)
+            })
+            .await?;
 
-        // Stream all the batches concurrently.
-        if !table_batches.is_empty() {
-            let (bytes_sent, bytes_received) = self
-                .client
-                .stream_table_batches_concurrent(table_batches, self.max_concurrent_streams)
-                .await?;
-
+        if bytes_sent > 0 {
             // Logs with egress_metric = true can be used to identify egress logs.
             // This can e.g. be used to send egress logs to a location different
             // than the other logs. These logs should also have bytes_sent set to
@@ -519,10 +530,7 @@ where
     /// 2. If no state exists, this is the initial schema - just records it as applied.
     /// 3. If state exists and snapshot_id differs, computes the diff and applies changes.
     /// 4. If state is in `Applying`, a previous change was interrupted - returns an error.
-    async fn handle_relation_event(
-        &self,
-        new_schema: &ReplicatedTableSchema,
-    ) -> EtlResult<()> {
+    async fn handle_relation_event(&self, new_schema: &ReplicatedTableSchema) -> EtlResult<()> {
         let table_id = new_schema.id();
         let new_snapshot_id = new_schema.get_inner().snapshot_id;
 
@@ -701,7 +709,11 @@ where
         // Apply column removals last.
         for column in &diff.columns_to_remove {
             self.client
-                .drop_column(&self.dataset_id, &bigquery_table_id.to_string(), &column.name)
+                .drop_column(
+                    &self.dataset_id,
+                    &bigquery_table_id.to_string(),
+                    &column.name,
+                )
                 .await?;
         }
 
@@ -711,6 +723,67 @@ where
         );
 
         Ok(())
+    }
+
+    /// Checks if an error indicates a schema mismatch that can be retried.
+    ///
+    /// Returns `true` if any of the error kinds is [`ErrorKind::DestinationSchemaMismatch`],
+    /// which indicates the BigQuery Storage Write API has a stale cached schema.
+    fn is_schema_mismatch_error(error: &EtlError) -> bool {
+        error
+            .kinds()
+            .contains(&ErrorKind::DestinationSchemaMismatch)
+    }
+
+    /// Streams table batches to BigQuery with automatic retry on schema mismatch errors.
+    ///
+    /// After DDL changes (e.g., `ALTER TABLE ADD COLUMN`), the BigQuery Storage Write API
+    /// may cache stale schema information and reject inserts with "extra field" errors.
+    /// This method retries streaming operations when such errors are detected, allowing
+    /// time for the schema cache to refresh.
+    ///
+    /// Since `TableBatch` doesn't implement `Clone`, this method accepts a closure that
+    /// creates fresh batches for each retry attempt.
+    async fn stream_with_schema_retry<F>(&self, mut create_batches: F) -> EtlResult<(usize, usize)>
+    where
+        F: FnMut() -> EtlResult<Vec<TableBatch<BigQueryTableRow>>>,
+    {
+        let retry_delay = Duration::from_millis(SCHEMA_MISMATCH_RETRY_DELAY_MS);
+        let mut attempts = 0;
+
+        loop {
+            let table_batches = create_batches()?;
+
+            if table_batches.is_empty() {
+                return Ok((0, 0));
+            }
+
+            match self
+                .client
+                .stream_table_batches_concurrent(table_batches, self.max_concurrent_streams)
+                .await
+            {
+                Ok(result) => return Ok(result),
+                Err(error) => {
+                    if !Self::is_schema_mismatch_error(&error) {
+                        return Err(error);
+                    }
+
+                    attempts += 1;
+                    if attempts >= MAX_SCHEMA_MISMATCH_ATTEMPTS {
+                        return Err(error);
+                    }
+
+                    warn!(
+                        attempt = attempts,
+                        max_attempts = MAX_SCHEMA_MISMATCH_ATTEMPTS,
+                        error = %error,
+                        "schema mismatch detected; retrying after delay"
+                    );
+                    sleep(retry_delay).await;
+                }
+            }
+        }
     }
 
     /// Processes CDC events in batches with proper ordering and truncate handling.
@@ -727,9 +800,11 @@ where
             let mut table_id_to_data: HashMap<TableId, (ReplicatedTableSchema, Vec<TableRow>)> =
                 HashMap::new();
 
-            // Process events until we hit a truncate event or run out of events
+            // Process events until we hit a truncate or relation event, or run out of events.
+            // Truncate and Relation events require flushing all batched data first before
+            // they can be processed, to maintain correct ordering.
             while let Some(event) = events_iter.peek() {
-                if matches!(event, Event::Truncate(_)) {
+                if matches!(event, Event::Truncate(_) | Event::Relation(_)) {
                     break;
                 }
 
@@ -784,11 +859,6 @@ where
                         });
                         entry.1.push(old_table_row);
                     }
-                    Event::Relation(relation) => {
-                        // Handle schema change event.
-                        self.handle_relation_event(&relation.replicated_table_schema)
-                            .await?;
-                    }
                     _ => {
                         // Begin, Commit, Unsupported events are skipped.
                         debug!("skipping non-data event in BigQuery");
@@ -798,28 +868,41 @@ where
 
             // Process accumulated events for each table.
             if !table_id_to_data.is_empty() {
-                let mut table_batches = Vec::with_capacity(table_id_to_data.len());
+                // Prepare batch metadata for all tables before streaming.
+                // This collects (sequenced_table_id, table_descriptor, rows) for retry support.
+                let mut prepared_data: Vec<(String, Arc<TableDescriptor>, Vec<TableRow>)> =
+                    Vec::with_capacity(table_id_to_data.len());
 
                 for (_, (replicated_table_schema, table_rows)) in table_id_to_data {
                     let (sequenced_bigquery_table_id, table_descriptor) = self
                         .prepare_table_for_streaming(&replicated_table_schema, true)
                         .await?;
 
-                    let table_batch = self.client.create_table_batch(
-                        &self.dataset_id,
-                        &sequenced_bigquery_table_id.to_string(),
-                        table_descriptor.clone(),
+                    prepared_data.push((
+                        sequenced_bigquery_table_id.to_string(),
+                        table_descriptor,
                         table_rows,
-                    )?;
-                    table_batches.push(table_batch);
+                    ));
                 }
 
-                if !table_batches.is_empty() {
-                    let (bytes_sent, bytes_received) = self
-                        .client
-                        .stream_table_batches_concurrent(table_batches, self.max_concurrent_streams)
-                        .await?;
+                // Stream with schema mismatch retry by recreating batches on each attempt.
+                let (bytes_sent, bytes_received) = self
+                    .stream_with_schema_retry(|| {
+                        let mut table_batches = Vec::with_capacity(prepared_data.len());
+                        for (table_id, descriptor, rows) in &prepared_data {
+                            let table_batch = self.client.create_table_batch(
+                                &self.dataset_id,
+                                table_id,
+                                descriptor.clone(),
+                                rows.clone(),
+                            )?;
+                            table_batches.push(table_batch);
+                        }
+                        Ok(table_batches)
+                    })
+                    .await?;
 
+                if bytes_sent > 0 {
                     // Logs with egress_metric = true can be used to identify egress logs.
                     // This can e.g. be used to send egress logs to a location different
                     // than the other logs. These logs should also have bytes_sent set to
@@ -831,6 +914,15 @@ where
                         egress_metric = true,
                         "wrote cdc events to bigquery"
                     );
+                }
+            }
+
+            // Process any Relation events (schema changes) that caused the batch to flush.
+            // Multiple consecutive Relation events are processed sequentially.
+            while let Some(Event::Relation(_)) = events_iter.peek() {
+                if let Some(Event::Relation(relation)) = events_iter.next() {
+                    self.handle_relation_event(&relation.replicated_table_schema)
+                        .await?;
                 }
             }
 
