@@ -9,11 +9,12 @@ use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 use tokio_postgres::CopyOutStream;
 use tokio_postgres::types::PgLsn;
-use tracing::debug;
+use tracing::{debug, warn};
 
 use crate::conversions::table_row::parse_table_row_from_postgres_copy_bytes;
 use crate::error::{ErrorKind, EtlResult};
 use crate::etl_error;
+use crate::failpoints::{SEND_STATUS_UPDATE_FP, etl_fail_point_active};
 use crate::metrics::{ETL_COPIED_TABLE_ROW_SIZE_BYTES, PIPELINE_ID_LABEL};
 use crate::types::{PipelineId, TableRow};
 use metrics::histogram;
@@ -127,6 +128,15 @@ impl EventsStream {
         mut flush_lsn: PgLsn,
         force: bool,
     ) -> EtlResult<()> {
+        // If the failpoint is active, we do not send any status update. This is useful for testing
+        // the system when we want to check what happens when no status updates are sent.
+        #[cfg(feature = "failpoints")]
+        if etl_fail_point_active(SEND_STATUS_UPDATE_FP) {
+            warn!("not sending status update due to active failpoint");
+
+            return Ok(());
+        }
+
         let this = self.project();
 
         // If the new LSN is less than the last one, we can safely ignore it, since we only want

@@ -103,18 +103,35 @@ impl NotifyingStore {
         inner.table_replication_states.clone()
     }
 
-    pub async fn get_table_schemas(&self) -> HashMap<TableId, TableSchema> {
+    pub async fn get_latest_table_schemas(&self) -> HashMap<TableId, TableSchema> {
         let inner = self.inner.read().await;
-        // Return the latest schema version for each table
+
+        // Return the latest schema version for each table.
         let mut result: HashMap<TableId, TableSchema> = HashMap::new();
         for ((table_id, _snapshot_id), schema) in &inner.table_schemas {
             let entry = result
                 .entry(*table_id)
                 .or_insert_with(|| Arc::as_ref(schema).clone());
+
             if schema.snapshot_id > entry.snapshot_id {
                 *entry = Arc::as_ref(schema).clone();
             }
         }
+
+        result
+    }
+
+    pub async fn get_table_schemas(&self) -> HashMap<TableId, Vec<(SnapshotId, TableSchema)>> {
+        let inner = self.inner.read().await;
+
+        let mut result: HashMap<TableId, Vec<(SnapshotId, TableSchema)>> = HashMap::new();
+        for ((table_id, snapshot_id), schema) in &inner.table_schemas {
+            result
+                .entry(*table_id)
+                .or_default()
+                .push((*snapshot_id, Arc::as_ref(schema).clone()));
+        }
+        
         result
     }
 

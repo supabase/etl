@@ -8,8 +8,8 @@ use etl::state::table::TableReplicationPhaseType;
 use etl::test_utils::database::{spawn_source_database, test_table_name};
 use etl::test_utils::event::group_events_by_type_and_table_id;
 use etl::test_utils::notify::NotifyingStore;
-use etl::test_utils::pipeline::create_pipeline;
-use etl::test_utils::table::assert_replicated_columns;
+use etl::test_utils::pipeline::{create_pipeline, create_database_and_pipeline_with_table};
+use etl::test_utils::schema::assert_replicated_columns;
 use etl::test_utils::test_destination_wrapper::TestDestinationWrapper;
 use etl::types::{Event, EventType, PipelineId, Type};
 use etl_postgres::tokio::test_utils::{PgDatabase, TableModification};
@@ -18,63 +18,6 @@ use etl_telemetry::tracing::init_test_tracing;
 use rand::random;
 use tokio::time::sleep;
 use tokio_postgres::Client;
-
-async fn setup_pipeline(
-    table_suffix: &str,
-    columns: &[(&str, &str)],
-) -> (
-    PgDatabase<Client>,
-    TableName,
-    TableId,
-    NotifyingStore,
-    TestDestinationWrapper<MemoryDestination>,
-    Pipeline<NotifyingStore, TestDestinationWrapper<MemoryDestination>>,
-    PipelineId,
-    String,
-) {
-    let database = spawn_source_database().await;
-    let table_name = test_table_name(table_suffix);
-    let table_id = database
-        .create_table(table_name.clone(), true, columns)
-        .await
-        .unwrap();
-
-    let publication_name = format!("pub_{}", random::<u32>());
-    database
-        .create_publication(&publication_name, &[table_name.clone()])
-        .await
-        .unwrap();
-
-    let store = NotifyingStore::new();
-    let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
-
-    let pipeline_id: PipelineId = random();
-    let mut pipeline = create_pipeline(
-        &database.config,
-        pipeline_id,
-        publication_name.clone(),
-        store.clone(),
-        destination.clone(),
-    );
-
-    let sync_done = store
-        .notify_on_table_state_type(table_id, TableReplicationPhaseType::SyncDone)
-        .await;
-
-    pipeline.start().await.unwrap();
-    sync_done.notified().await;
-
-    (
-        database,
-        table_name,
-        table_id,
-        store,
-        destination,
-        pipeline,
-        pipeline_id,
-        publication_name,
-    )
-}
 
 fn get_last_relation_event(events: &[Event], table_id: TableId) -> &Event {
     events
@@ -97,7 +40,7 @@ async fn relation_message_updates_when_column_added() {
     init_test_tracing();
 
     let (database, table_name, table_id, _store, destination, pipeline, _pipeline_id, _publication) =
-        setup_pipeline(
+        create_database_and_pipeline_with_table(
             "schema_add_column",
             &[("name", "text not null"), ("age", "integer not null")],
         )
@@ -165,7 +108,7 @@ async fn relation_message_updates_when_column_removed() {
     init_test_tracing();
 
     let (database, table_name, table_id, _store, destination, pipeline, _pipeline_id, _publication) =
-        setup_pipeline(
+        create_database_and_pipeline_with_table(
             "schema_remove_column",
             &[("name", "text not null"), ("age", "integer not null")],
         )
@@ -221,7 +164,7 @@ async fn relation_message_updates_when_column_renamed() {
     init_test_tracing();
 
     let (database, table_name, table_id, _store, destination, pipeline, _pipeline_id, _publication) =
-        setup_pipeline(
+        create_database_and_pipeline_with_table(
             "schema_rename_column",
             &[("name", "text not null"), ("age", "integer not null")],
         )
@@ -284,7 +227,7 @@ async fn relation_message_updates_when_column_type_changes() {
     init_test_tracing();
 
     let (database, table_name, table_id, _store, destination, pipeline, _pipeline_id, _publication) =
-        setup_pipeline(
+        create_database_and_pipeline_with_table(
             "schema_change_type",
             &[("name", "text not null"), ("age", "integer not null")],
         )
@@ -348,7 +291,7 @@ async fn pipeline_recovers_after_multiple_schema_changes_and_restart() {
 
     // Start with initial schema: id (auto), name (text), age (integer), status (text)
     let (database, table_name, table_id, store, destination, pipeline, pipeline_id, publication) =
-        setup_pipeline(
+        create_database_and_pipeline_with_table(
             "schema_multi_change_restart",
             &[
                 ("name", "text not null"),
