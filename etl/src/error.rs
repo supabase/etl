@@ -106,6 +106,7 @@ pub enum ErrorKind {
     DestinationTableAlreadyExists,
     DestinationNamespaceMissing,
     DestinationTableMissing,
+    DestinationSchemaMismatch,
 
     // Data & Transformation Errors
     ConversionError,
