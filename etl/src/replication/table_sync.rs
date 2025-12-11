@@ -15,10 +15,10 @@ use crate::concurrency::signal::SignalTx;
 use crate::concurrency::stream::TimeoutBatchStream;
 use crate::destination::Destination;
 use crate::error::{ErrorKind, EtlResult};
-use crate::failpoints::etl_fail_point;
 #[cfg(feature = "failpoints")]
 use crate::failpoints::{
     START_TABLE_SYNC_BEFORE_DATA_SYNC_SLOT_CREATION_FP, START_TABLE_SYNC_DURING_DATA_SYNC_FP,
+    etl_fail_point,
 };
 use crate::metrics::{
     ACTION_LABEL, DESTINATION_LABEL, ETL_BATCH_ITEMS_SEND_DURATION_SECONDS,
