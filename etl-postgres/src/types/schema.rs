@@ -1,5 +1,5 @@
 use pg_escape::quote_identifier;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::str::FromStr;
@@ -478,6 +478,15 @@ impl ReplicatedTableSchema {
         }
     }
 
+    /// Creates a [`ReplicatedTableSchema`] where all columns are replicated.
+    pub fn all(table_schema: Arc<TableSchema>) -> Self {
+        let replication_mask = ReplicationMask::all(&table_schema);
+        Self {
+            table_schema,
+            replication_mask,
+        }
+    }
+
     /// Returns the table ID.
     pub fn id(&self) -> TableId {
         self.table_schema.id
@@ -516,6 +525,108 @@ impl ReplicatedTableSchema {
             .zip(self.replication_mask.as_slice().iter())
             .filter_map(|(cs, &m)| if m == 1 { Some(cs) } else { None })
     }
+
+    /// Computes the diff between this schema (old) and another schema (new).
+    ///
+    /// Only considers replicated columns. Uses ordinal positions to track columns:
+    /// - Columns at same position with different names are renames.
+    /// - Positions in old but not in new are columns to remove.
+    /// - Positions in new but not in old are columns to add.
+    pub fn diff(&self, new_schema: &ReplicatedTableSchema) -> SchemaDiff {
+        // Build maps: ordinal_position -> ColumnSchema for replicated columns only.
+        let old_columns: HashMap<i32, &ColumnSchema> = self
+            .column_schemas()
+            .map(|col| (col.ordinal_position, col))
+            .collect();
+
+        let new_columns: HashMap<i32, &ColumnSchema> = new_schema
+            .column_schemas()
+            .map(|col| (col.ordinal_position, col))
+            .collect();
+
+        let old_positions: HashSet<i32> = old_columns.keys().copied().collect();
+        let new_positions: HashSet<i32> = new_columns.keys().copied().collect();
+
+        // Intersection: common positions (potential renames).
+        let common_positions: HashSet<i32> = old_positions.intersection(&new_positions).copied().collect();
+
+        // Columns to rename: same position, different name.
+        let columns_to_rename: Vec<ColumnRename> = common_positions
+            .iter()
+            .filter_map(|pos| {
+                let old_col = old_columns.get(pos).unwrap();
+                let new_col = new_columns.get(pos).unwrap();
+
+                if old_col.name != new_col.name {
+                    Some(ColumnRename {
+                        old_name: old_col.name.clone(),
+                        new_name: new_col.name.clone(),
+                        ordinal_position: *pos,
+                    })
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        // Columns to remove: positions in old but not in new.
+        let positions_to_remove: HashSet<i32> = old_positions.difference(&new_positions).copied().collect();
+        let columns_to_remove: Vec<ColumnSchema> = positions_to_remove
+            .iter()
+            .map(|pos| old_columns.get(pos).unwrap())
+            .cloned()
+            .cloned()
+            .collect();
+
+        // Columns to add: positions in new but not in old.
+        let positions_to_add: HashSet<i32> = new_positions.difference(&old_positions).copied().collect();
+        let columns_to_add: Vec<ColumnSchema> = positions_to_add
+            .iter()
+            .map(|pos| new_columns.get(pos).unwrap())
+            .cloned()
+            .cloned()
+            .collect();
+
+        SchemaDiff {
+            columns_to_add,
+            columns_to_remove,
+            columns_to_rename,
+        }
+    }
+}
+
+/// Represents differences between two schema versions.
+///
+/// Used to determine what schema changes need to be applied to a destination
+/// when the source schema has evolved.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SchemaDiff {
+    /// Columns that need to be added to the destination.
+    pub columns_to_add: Vec<ColumnSchema>,
+    /// Columns that need to be removed from the destination.
+    pub columns_to_remove: Vec<ColumnSchema>,
+    /// Columns that need to be renamed in the destination.
+    pub columns_to_rename: Vec<ColumnRename>,
+}
+
+impl SchemaDiff {
+    /// Returns `true` if there are no schema changes.
+    pub fn is_empty(&self) -> bool {
+        self.columns_to_add.is_empty()
+            && self.columns_to_remove.is_empty()
+            && self.columns_to_rename.is_empty()
+    }
+}
+
+/// Represents a column rename operation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ColumnRename {
+    /// The old name of the column.
+    pub old_name: String,
+    /// The new name of the column.
+    pub new_name: String,
+    /// The ordinal position of the column (used to identify the column across renames).
+    pub ordinal_position: i32,
 }
 
 #[cfg(test)]
@@ -638,5 +749,177 @@ mod tests {
         let mask = ReplicationMask::all(&schema);
 
         assert_eq!(mask.as_slice(), &[1, 1, 1]);
+    }
+
+    fn create_replicated_schema(columns: Vec<ColumnSchema>) -> ReplicatedTableSchema {
+        let column_names: HashSet<String> = columns.iter().map(|c| c.name.clone()).collect();
+        let table_schema = Arc::new(TableSchema::new(
+            TableId::new(123),
+            TableName::new("public".to_string(), "test_table".to_string()),
+            columns,
+        ));
+        let mask = ReplicationMask::build(&table_schema, &column_names);
+        ReplicatedTableSchema::from_mask(table_schema, mask)
+    }
+
+    #[test]
+    fn test_schema_diff_no_changes() {
+        let old_schema = create_replicated_schema(vec![
+            ColumnSchema::new("id".to_string(), Type::INT4, -1, 1, Some(1), false),
+            ColumnSchema::new("name".to_string(), Type::TEXT, -1, 2, None, true),
+        ]);
+        let new_schema = create_replicated_schema(vec![
+            ColumnSchema::new("id".to_string(), Type::INT4, -1, 1, Some(1), false),
+            ColumnSchema::new("name".to_string(), Type::TEXT, -1, 2, None, true),
+        ]);
+
+        let diff = old_schema.diff(&new_schema);
+
+        assert!(diff.is_empty());
+        assert!(diff.columns_to_add.is_empty());
+        assert!(diff.columns_to_remove.is_empty());
+        assert!(diff.columns_to_rename.is_empty());
+    }
+
+    #[test]
+    fn test_schema_diff_column_added() {
+        let old_schema = create_replicated_schema(vec![
+            ColumnSchema::new("id".to_string(), Type::INT4, -1, 1, Some(1), false),
+            ColumnSchema::new("name".to_string(), Type::TEXT, -1, 2, None, true),
+        ]);
+        let new_schema = create_replicated_schema(vec![
+            ColumnSchema::new("id".to_string(), Type::INT4, -1, 1, Some(1), false),
+            ColumnSchema::new("name".to_string(), Type::TEXT, -1, 2, None, true),
+            ColumnSchema::new("email".to_string(), Type::TEXT, -1, 3, None, true),
+        ]);
+
+        let diff = old_schema.diff(&new_schema);
+
+        assert!(!diff.is_empty());
+        assert_eq!(diff.columns_to_add.len(), 1);
+        assert_eq!(diff.columns_to_add[0].name, "email");
+        assert_eq!(diff.columns_to_add[0].ordinal_position, 3);
+        assert!(diff.columns_to_remove.is_empty());
+        assert!(diff.columns_to_rename.is_empty());
+    }
+
+    #[test]
+    fn test_schema_diff_column_removed() {
+        let old_schema = create_replicated_schema(vec![
+            ColumnSchema::new("id".to_string(), Type::INT4, -1, 1, Some(1), false),
+            ColumnSchema::new("name".to_string(), Type::TEXT, -1, 2, None, true),
+            ColumnSchema::new("age".to_string(), Type::INT4, -1, 3, None, true),
+        ]);
+        let new_schema = create_replicated_schema(vec![
+            ColumnSchema::new("id".to_string(), Type::INT4, -1, 1, Some(1), false),
+            ColumnSchema::new("name".to_string(), Type::TEXT, -1, 2, None, true),
+        ]);
+
+        let diff = old_schema.diff(&new_schema);
+
+        assert!(!diff.is_empty());
+        assert!(diff.columns_to_add.is_empty());
+        assert_eq!(diff.columns_to_remove.len(), 1);
+        assert_eq!(diff.columns_to_remove[0].name, "age");
+        assert_eq!(diff.columns_to_remove[0].ordinal_position, 3);
+        assert!(diff.columns_to_rename.is_empty());
+    }
+
+    #[test]
+    fn test_schema_diff_column_renamed() {
+        let old_schema = create_replicated_schema(vec![
+            ColumnSchema::new("id".to_string(), Type::INT4, -1, 1, Some(1), false),
+            ColumnSchema::new("name".to_string(), Type::TEXT, -1, 2, None, true),
+        ]);
+        let new_schema = create_replicated_schema(vec![
+            ColumnSchema::new("id".to_string(), Type::INT4, -1, 1, Some(1), false),
+            ColumnSchema::new("full_name".to_string(), Type::TEXT, -1, 2, None, true),
+        ]);
+
+        let diff = old_schema.diff(&new_schema);
+
+        assert!(!diff.is_empty());
+        assert!(diff.columns_to_add.is_empty());
+        assert!(diff.columns_to_remove.is_empty());
+        assert_eq!(diff.columns_to_rename.len(), 1);
+        assert_eq!(diff.columns_to_rename[0].old_name, "name");
+        assert_eq!(diff.columns_to_rename[0].new_name, "full_name");
+        assert_eq!(diff.columns_to_rename[0].ordinal_position, 2);
+    }
+
+    #[test]
+    fn test_schema_diff_mixed_operations() {
+        // Old schema: id (pos 1), name (pos 2), age (pos 3)
+        // New schema: id (pos 1), full_name (pos 2), email (pos 4)
+        // Expected: age removed (pos 3), name -> full_name renamed (pos 2), email added (pos 4)
+        let old_schema = create_replicated_schema(vec![
+            ColumnSchema::new("id".to_string(), Type::INT4, -1, 1, Some(1), false),
+            ColumnSchema::new("name".to_string(), Type::TEXT, -1, 2, None, true),
+            ColumnSchema::new("age".to_string(), Type::INT4, -1, 3, None, true),
+        ]);
+        let new_schema = create_replicated_schema(vec![
+            ColumnSchema::new("id".to_string(), Type::INT4, -1, 1, Some(1), false),
+            ColumnSchema::new("full_name".to_string(), Type::TEXT, -1, 2, None, true),
+            ColumnSchema::new("email".to_string(), Type::TEXT, -1, 4, None, true),
+        ]);
+
+        let diff = old_schema.diff(&new_schema);
+
+        assert!(!diff.is_empty());
+
+        // Column added: email at position 4.
+        assert_eq!(diff.columns_to_add.len(), 1);
+        assert_eq!(diff.columns_to_add[0].name, "email");
+
+        // Column removed: age at position 3.
+        assert_eq!(diff.columns_to_remove.len(), 1);
+        assert_eq!(diff.columns_to_remove[0].name, "age");
+
+        // Column renamed: name -> full_name at position 2.
+        assert_eq!(diff.columns_to_rename.len(), 1);
+        assert_eq!(diff.columns_to_rename[0].old_name, "name");
+        assert_eq!(diff.columns_to_rename[0].new_name, "full_name");
+    }
+
+    #[test]
+    fn test_schema_diff_multiple_additions() {
+        let old_schema = create_replicated_schema(vec![
+            ColumnSchema::new("id".to_string(), Type::INT4, -1, 1, Some(1), false),
+        ]);
+        let new_schema = create_replicated_schema(vec![
+            ColumnSchema::new("id".to_string(), Type::INT4, -1, 1, Some(1), false),
+            ColumnSchema::new("name".to_string(), Type::TEXT, -1, 2, None, true),
+            ColumnSchema::new("email".to_string(), Type::TEXT, -1, 3, None, true),
+        ]);
+
+        let diff = old_schema.diff(&new_schema);
+
+        assert_eq!(diff.columns_to_add.len(), 2);
+        let added_names: HashSet<&str> = diff.columns_to_add.iter().map(|c| c.name.as_str()).collect();
+        assert!(added_names.contains("name"));
+        assert!(added_names.contains("email"));
+        assert!(diff.columns_to_remove.is_empty());
+        assert!(diff.columns_to_rename.is_empty());
+    }
+
+    #[test]
+    fn test_schema_diff_multiple_removals() {
+        let old_schema = create_replicated_schema(vec![
+            ColumnSchema::new("id".to_string(), Type::INT4, -1, 1, Some(1), false),
+            ColumnSchema::new("name".to_string(), Type::TEXT, -1, 2, None, true),
+            ColumnSchema::new("email".to_string(), Type::TEXT, -1, 3, None, true),
+        ]);
+        let new_schema = create_replicated_schema(vec![
+            ColumnSchema::new("id".to_string(), Type::INT4, -1, 1, Some(1), false),
+        ]);
+
+        let diff = old_schema.diff(&new_schema);
+
+        assert!(diff.columns_to_add.is_empty());
+        assert_eq!(diff.columns_to_remove.len(), 2);
+        let removed_names: HashSet<&str> = diff.columns_to_remove.iter().map(|c| c.name.as_str()).collect();
+        assert!(removed_names.contains("name"));
+        assert!(removed_names.contains("email"));
+        assert!(diff.columns_to_rename.is_empty());
     }
 }

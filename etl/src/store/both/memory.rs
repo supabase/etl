@@ -8,7 +8,7 @@ use crate::etl_error;
 use crate::state::table::TableReplicationPhase;
 use crate::store::cleanup::CleanupStore;
 use crate::store::schema::SchemaStore;
-use crate::store::state::StateStore;
+use crate::store::state::{DestinationSchemaState, StateStore};
 
 /// Inner state of [`MemoryStore`]
 #[derive(Debug)]
@@ -25,6 +25,8 @@ struct Inner {
     /// Mapping from table IDs to human-readable table names for easier debugging
     /// and logging. These mappings are established during schema discovery.
     table_mappings: HashMap<TableId, String>,
+    /// Cached destination schema states indexed by table ID.
+    destination_schema_states: HashMap<TableId, DestinationSchemaState>,
 }
 
 /// In-memory storage for ETL pipeline state and schema information.
@@ -52,6 +54,7 @@ impl MemoryStore {
             table_state_history: HashMap::new(),
             table_schemas: HashMap::new(),
             table_mappings: HashMap::new(),
+            destination_schema_states: HashMap::new(),
         };
 
         Self {
@@ -167,6 +170,32 @@ impl StateStore for MemoryStore {
 
         Ok(())
     }
+
+    async fn get_destination_schema_state(
+        &self,
+        table_id: &TableId,
+    ) -> EtlResult<Option<DestinationSchemaState>> {
+        let inner = self.inner.lock().await;
+
+        Ok(inner.destination_schema_states.get(table_id).cloned())
+    }
+
+    async fn load_destination_schema_states(&self) -> EtlResult<usize> {
+        let inner = self.inner.lock().await;
+
+        Ok(inner.destination_schema_states.len())
+    }
+
+    async fn store_destination_schema_state(
+        &self,
+        table_id: TableId,
+        state: DestinationSchemaState,
+    ) -> EtlResult<()> {
+        let mut inner = self.inner.lock().await;
+        inner.destination_schema_states.insert(table_id, state);
+
+        Ok(())
+    }
 }
 
 impl SchemaStore for MemoryStore {
@@ -224,6 +253,7 @@ impl CleanupStore for MemoryStore {
         // Remove all schema versions for this table
         inner.table_schemas.retain(|(tid, _), _| *tid != table_id);
         inner.table_mappings.remove(&table_id);
+        inner.destination_schema_states.remove(&table_id);
 
         Ok(())
     }

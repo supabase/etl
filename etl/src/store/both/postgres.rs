@@ -13,7 +13,7 @@ use crate::metrics::{ETL_TABLES_TOTAL, PHASE_LABEL, PIPELINE_ID_LABEL};
 use crate::state::table::{RetryPolicy, TableReplicationPhase};
 use crate::store::cleanup::CleanupStore;
 use crate::store::schema::SchemaStore;
-use crate::store::state::StateStore;
+use crate::store::state::{DestinationSchemaState, DestinationSchemaStateType, StateStore};
 use crate::types::PipelineId;
 use crate::{bail, etl_error};
 
@@ -152,6 +152,8 @@ struct Inner {
     table_schemas: HashMap<(TableId, SnapshotId), Arc<TableSchema>>,
     /// Cached table mappings from source table ID to destination table name.
     table_mappings: HashMap<TableId, String>,
+    /// Cached destination schema states indexed by table ID.
+    destination_schema_states: HashMap<TableId, DestinationSchemaState>,
 }
 
 impl Inner {
@@ -228,6 +230,7 @@ impl PostgresStore {
             table_states: HashMap::new(),
             table_schemas: HashMap::new(),
             table_mappings: HashMap::new(),
+            destination_schema_states: HashMap::new(),
         };
 
         Self {
@@ -541,6 +544,113 @@ impl StateStore for PostgresStore {
         inner
             .table_mappings
             .insert(source_table_id, destination_table_id);
+
+        Ok(())
+    }
+
+    /// Retrieves the destination schema state for a table from cache.
+    ///
+    /// This method provides fast access to destination schema states by reading
+    /// from the in-memory cache. The cache is populated during startup via
+    /// [`load_destination_schema_states`] and updated as states change.
+    async fn get_destination_schema_state(
+        &self,
+        table_id: &TableId,
+    ) -> EtlResult<Option<DestinationSchemaState>> {
+        let inner = self.inner.lock().await;
+
+        Ok(inner.destination_schema_states.get(table_id).cloned())
+    }
+
+    /// Loads destination schema states from Postgres into memory cache.
+    ///
+    /// This method connects to the source database, retrieves all destination
+    /// schema state records for this pipeline, deserializes them, and populates
+    /// the in-memory cache. It's typically called during pipeline startup.
+    async fn load_destination_schema_states(&self) -> EtlResult<usize> {
+        debug!("loading destination schema states from postgres state store");
+
+        let pool = self.connect_to_source().await?;
+
+        let state_rows =
+            schema::load_destination_schema_states(&pool, self.pipeline_id as i64)
+                .await
+                .map_err(|err| {
+                    etl_error!(
+                        ErrorKind::SourceQueryFailed,
+                        "Destination schema states loading failed",
+                        format!("Failed to load destination schema states from PostgreSQL: {}", err)
+                    )
+                })?;
+
+        let mut states: HashMap<TableId, DestinationSchemaState> = HashMap::new();
+        for (table_id, row) in state_rows {
+            let state_type = match row.state_type.as_str() {
+                "applying" => DestinationSchemaStateType::Applying,
+                "applied" => DestinationSchemaStateType::Applied,
+                _ => {
+                    return Err(etl_error!(
+                        ErrorKind::InvalidState,
+                        "Invalid destination schema state type",
+                        format!("Unknown state type '{}' in database", row.state_type)
+                    ));
+                }
+            };
+            states.insert(
+                table_id,
+                DestinationSchemaState {
+                    state: state_type,
+                    snapshot_id: row.snapshot_id,
+                },
+            );
+        }
+
+        let states_len = states.len();
+        let mut inner = self.inner.lock().await;
+        inner.destination_schema_states = states;
+
+        info!(
+            "loaded {} destination schema states from postgres state store",
+            states_len
+        );
+
+        Ok(states_len)
+    }
+
+    /// Stores a destination schema state in both database and cache.
+    ///
+    /// This method performs atomic updates by first acquiring the cache lock,
+    /// then updating the database, and finally updating the cache.
+    async fn store_destination_schema_state(
+        &self,
+        table_id: TableId,
+        state: DestinationSchemaState,
+    ) -> EtlResult<()> {
+        let state_type = match state.state {
+            DestinationSchemaStateType::Applying => "applying",
+            DestinationSchemaStateType::Applied => "applied",
+        };
+
+        let pool = self.connect_to_source().await?;
+
+        let mut inner = self.inner.lock().await;
+        schema::store_destination_schema_state(
+            &pool,
+            self.pipeline_id as i64,
+            table_id,
+            state_type,
+            state.snapshot_id,
+        )
+        .await
+        .map_err(|err| {
+            etl_error!(
+                ErrorKind::SourceQueryFailed,
+                "Destination schema state storage failed",
+                format!("Failed to store destination schema state in PostgreSQL: {}", err)
+            )
+        })?;
+
+        inner.destination_schema_states.insert(table_id, state);
 
         Ok(())
     }

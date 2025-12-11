@@ -8,7 +8,7 @@ use crate::etl_error;
 use crate::state::table::{TableReplicationPhase, TableReplicationPhaseType};
 use crate::store::cleanup::CleanupStore;
 use crate::store::schema::SchemaStore;
-use crate::store::state::StateStore;
+use crate::store::state::{DestinationSchemaState, StateStore};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum StateStoreMethod {
@@ -32,6 +32,7 @@ struct Inner {
     /// Stores table schemas in insertion order per table.
     table_schemas: HashMap<TableId, Vec<Arc<TableSchema>>>,
     table_mappings: HashMap<TableId, String>,
+    destination_schema_states: HashMap<TableId, DestinationSchemaState>,
     table_state_type_conditions: Vec<TableStateTypeCondition>,
     table_state_conditions: Vec<TableStateCondition>,
     method_call_notifiers: HashMap<StateStoreMethod, Vec<Arc<Notify>>>,
@@ -89,6 +90,7 @@ impl NotifyingStore {
             table_state_history: HashMap::new(),
             table_schemas: HashMap::new(),
             table_mappings: HashMap::new(),
+            destination_schema_states: HashMap::new(),
             table_state_type_conditions: Vec::new(),
             table_state_conditions: Vec::new(),
             method_call_notifiers: HashMap::new(),
@@ -311,6 +313,29 @@ impl StateStore for NotifyingStore {
             .insert(source_table_id, destination_table_id);
         Ok(())
     }
+
+    async fn get_destination_schema_state(
+        &self,
+        table_id: &TableId,
+    ) -> EtlResult<Option<DestinationSchemaState>> {
+        let inner = self.inner.read().await;
+        Ok(inner.destination_schema_states.get(table_id).cloned())
+    }
+
+    async fn load_destination_schema_states(&self) -> EtlResult<usize> {
+        let inner = self.inner.read().await;
+        Ok(inner.destination_schema_states.len())
+    }
+
+    async fn store_destination_schema_state(
+        &self,
+        table_id: TableId,
+        state: DestinationSchemaState,
+    ) -> EtlResult<()> {
+        let mut inner = self.inner.write().await;
+        inner.destination_schema_states.insert(table_id, state);
+        Ok(())
+    }
 }
 
 impl SchemaStore for NotifyingStore {
@@ -371,6 +396,7 @@ impl CleanupStore for NotifyingStore {
         inner.table_state_history.remove(&table_id);
         inner.table_schemas.remove(&table_id);
         inner.table_mappings.remove(&table_id);
+        inner.destination_schema_states.remove(&table_id);
 
         Ok(())
     }

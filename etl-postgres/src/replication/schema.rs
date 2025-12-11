@@ -421,6 +421,114 @@ fn parse_column_schema(row: &PgRow) -> ColumnSchema {
     )
 }
 
+/// Represents the state of the schema at a destination.
+///
+/// This is the database representation of the destination schema state,
+/// used for serialization/deserialization to/from the database.
+#[derive(Debug, Clone)]
+pub struct DestinationSchemaStateRow {
+    pub table_id: TableId,
+    pub state_type: String,
+    pub snapshot_id: SnapshotId,
+}
+
+/// Stores a destination schema state in the database.
+///
+/// Inserts or updates the destination schema state for the specified pipeline and table.
+pub async fn store_destination_schema_state(
+    pool: &PgPool,
+    pipeline_id: i64,
+    table_id: TableId,
+    state_type: &str,
+    snapshot_id: SnapshotId,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        r#"
+        INSERT INTO etl.destination_schema_states
+            (pipeline_id, table_id, state_type, snapshot_id)
+        VALUES ($1, $2, $3, $4)
+        ON CONFLICT (pipeline_id, table_id)
+        DO UPDATE SET
+            state_type = EXCLUDED.state_type,
+            snapshot_id = EXCLUDED.snapshot_id,
+            updated_at = NOW()
+        "#,
+    )
+    .bind(pipeline_id)
+    .bind(SqlxTableId(table_id.into_inner()))
+    .bind(state_type)
+    .bind(snapshot_id)
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
+
+/// Loads all destination schema states for a pipeline from the database.
+///
+/// Retrieves all destination schema state records for the specified pipeline.
+pub async fn load_destination_schema_states(
+    pool: &PgPool,
+    pipeline_id: i64,
+) -> Result<HashMap<TableId, DestinationSchemaStateRow>, sqlx::Error> {
+    let rows = sqlx::query(
+        r#"
+        SELECT table_id, state_type, snapshot_id
+        FROM etl.destination_schema_states
+        WHERE pipeline_id = $1
+        "#,
+    )
+    .bind(pipeline_id)
+    .fetch_all(pool)
+    .await?;
+
+    let mut states = HashMap::new();
+    for row in rows {
+        let table_id: SqlxTableId = row.get("table_id");
+        let state_type: String = row.get("state_type");
+        let snapshot_id: SnapshotId = row.get("snapshot_id");
+
+        states.insert(
+            TableId::new(table_id.0),
+            DestinationSchemaStateRow {
+                table_id: TableId::new(table_id.0),
+                state_type,
+                snapshot_id,
+            },
+        );
+    }
+
+    Ok(states)
+}
+
+/// Gets a single destination schema state for a specific table.
+pub async fn get_destination_schema_state(
+    pool: &PgPool,
+    pipeline_id: i64,
+    table_id: TableId,
+) -> Result<Option<DestinationSchemaStateRow>, sqlx::Error> {
+    let row = sqlx::query(
+        r#"
+        SELECT table_id, state_type, snapshot_id
+        FROM etl.destination_schema_states
+        WHERE pipeline_id = $1 AND table_id = $2
+        "#,
+    )
+    .bind(pipeline_id)
+    .bind(SqlxTableId(table_id.into_inner()))
+    .fetch_optional(pool)
+    .await?;
+
+    Ok(row.map(|r| {
+        let table_id: SqlxTableId = r.get("table_id");
+        DestinationSchemaStateRow {
+            table_id: TableId::new(table_id.0),
+            state_type: r.get("state_type"),
+            snapshot_id: r.get("snapshot_id"),
+        }
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
