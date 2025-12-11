@@ -2,7 +2,7 @@ use std::{collections::HashMap, sync::Arc};
 
 use etl_config::shared::PgConnectionConfig;
 use etl_postgres::replication::{connect_to_source_database, schema, state, table_mappings};
-use etl_postgres::types::{SnapshotId, TableId, TableSchema};
+use etl_postgres::types::{ReplicationMask, SnapshotId, TableId, TableSchema};
 use metrics::gauge;
 use sqlx::PgPool;
 use tokio::sync::Mutex;
@@ -603,6 +603,7 @@ impl StateStore for PostgresStore {
                 DestinationSchemaState {
                     state: state_type,
                     snapshot_id: row.snapshot_id,
+                    replication_mask: ReplicationMask::from_bytes(row.replication_mask),
                 },
             );
         }
@@ -642,6 +643,7 @@ impl StateStore for PostgresStore {
             table_id,
             state_type,
             state.snapshot_id,
+            state.replication_mask.as_slice(),
         )
         .await
         .map_err(|err| {
