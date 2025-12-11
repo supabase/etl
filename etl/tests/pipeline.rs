@@ -7,7 +7,7 @@ use etl::test_utils::database::{spawn_source_database, test_table_name};
 use etl::test_utils::event::group_events_by_type_and_table_id;
 use etl::test_utils::notify::NotifyingStore;
 use etl::test_utils::pipeline::{create_pipeline, create_pipeline_with};
-use etl::test_utils::table::assert_table_schema;
+use etl::test_utils::schema::assert_table_schema;
 use etl::test_utils::test_destination_wrapper::TestDestinationWrapper;
 use etl::test_utils::test_schema::{
     TableSelection, assert_events_equal, build_expected_orders_inserts,
@@ -103,7 +103,7 @@ async fn table_schema_copy_survives_pipeline_restarts() {
     );
 
     // We check that the table schemas have been stored.
-    let table_schemas = store.get_table_schemas().await;
+    let table_schemas = store.get_latest_table_schemas().await;
     assert_eq!(table_schemas.len(), 2);
     assert_eq!(
         *table_schemas
@@ -401,7 +401,7 @@ async fn publication_for_all_tables_in_schema_ignores_new_tables_until_restart()
     pipeline.shutdown_and_wait().await.unwrap();
 
     // Check that only the schemas of the first table were stored.
-    let table_schemas = store.get_table_schemas().await;
+    let table_schemas = store.get_latest_table_schemas().await;
     assert_eq!(table_schemas.len(), 1);
     assert!(table_schemas.contains_key(&table_1_id));
     assert!(!table_schemas.contains_key(&table_2_id));
@@ -452,7 +452,7 @@ async fn publication_for_all_tables_in_schema_ignores_new_tables_until_restart()
     pipeline.shutdown_and_wait().await.unwrap();
 
     // Check that both schemas exist.
-    let table_schemas = store.get_table_schemas().await;
+    let table_schemas = store.get_latest_table_schemas().await;
     assert_eq!(table_schemas.len(), 2);
     assert!(table_schemas.contains_key(&table_1_id));
     assert!(table_schemas.contains_key(&table_2_id));
@@ -1420,7 +1420,7 @@ async fn empty_tables_are_created_at_destination() {
     pipeline.shutdown_and_wait().await.unwrap();
 
     // Verify the table schema was stored.
-    let table_schemas = state_store.get_table_schemas().await;
+    let table_schemas = state_store.get_latest_table_schemas().await;
     assert_table_schema(
         &table_schemas,
         table_id,
