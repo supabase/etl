@@ -290,6 +290,79 @@ impl BigQueryClient {
         Ok(())
     }
 
+    /// Adds a column to an existing BigQuery table.
+    ///
+    /// Executes an ALTER TABLE ADD COLUMN statement to add a new column with the
+    /// specified schema. New columns must be nullable in BigQuery.
+    pub async fn add_column(
+        &self,
+        dataset_id: &BigQueryDatasetId,
+        table_id: &BigQueryTableId,
+        column_schema: &ColumnSchema,
+    ) -> EtlResult<()> {
+        let full_table_name = self.full_table_name(dataset_id, table_id)?;
+        let column_name = Self::sanitize_identifier(&column_schema.name, "BigQuery column name")?;
+        let column_type = Self::postgres_to_bigquery_type(&column_schema.typ);
+
+        info!(
+            "adding column `{column_name}` ({column_type}) to table {full_table_name} in BigQuery"
+        );
+
+        // BigQuery requires new columns to be nullable (no NOT NULL constraint allowed).
+        let query = format!("alter table {full_table_name} add column `{column_name}` {column_type}");
+
+        let _ = self.query(QueryRequest::new(query)).await?;
+
+        Ok(())
+    }
+
+    /// Drops a column from an existing BigQuery table.
+    ///
+    /// Executes an ALTER TABLE DROP COLUMN statement to remove the specified column.
+    pub async fn drop_column(
+        &self,
+        dataset_id: &BigQueryDatasetId,
+        table_id: &BigQueryTableId,
+        column_name: &str,
+    ) -> EtlResult<()> {
+        let full_table_name = self.full_table_name(dataset_id, table_id)?;
+        let column_name = Self::sanitize_identifier(column_name, "BigQuery column name")?;
+
+        info!("dropping column `{column_name}` from table {full_table_name} in BigQuery");
+
+        let query = format!("alter table {full_table_name} drop column `{column_name}`");
+
+        let _ = self.query(QueryRequest::new(query)).await?;
+
+        Ok(())
+    }
+
+    /// Renames a column in an existing BigQuery table.
+    ///
+    /// Executes an ALTER TABLE RENAME COLUMN statement to rename the specified column.
+    pub async fn rename_column(
+        &self,
+        dataset_id: &BigQueryDatasetId,
+        table_id: &BigQueryTableId,
+        old_name: &str,
+        new_name: &str,
+    ) -> EtlResult<()> {
+        let full_table_name = self.full_table_name(dataset_id, table_id)?;
+        let old_name = Self::sanitize_identifier(old_name, "BigQuery column name")?;
+        let new_name = Self::sanitize_identifier(new_name, "BigQuery column name")?;
+
+        info!(
+            "renaming column `{old_name}` to `{new_name}` in table {full_table_name} in BigQuery"
+        );
+
+        let query =
+            format!("alter table {full_table_name} rename column `{old_name}` to `{new_name}`");
+
+        let _ = self.query(QueryRequest::new(query)).await?;
+
+        Ok(())
+    }
+
     /// Checks whether a table exists in the BigQuery dataset.
     ///
     /// Returns `true` if the table exists, `false` otherwise.

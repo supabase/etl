@@ -1,8 +1,10 @@
 use etl::destination::Destination;
 use etl::error::{ErrorKind, EtlError, EtlResult};
-use etl::store::state::StateStore;
+use etl::store::schema::SchemaStore;
+use etl::store::state::{DestinationSchemaState, DestinationSchemaStateType, StateStore};
 use etl::types::{
-    Cell, Event, ReplicatedTableSchema, TableId, TableName, TableRow, generate_sequence_number,
+    Cell, Event, ReplicatedTableSchema, SchemaDiff, TableId, TableName, TableRow,
+    generate_sequence_number,
 };
 use etl::{bail, etl_error};
 use gcp_bigquery_client::storage::TableDescriptor;
@@ -178,7 +180,7 @@ pub struct BigQueryDestination<S> {
 
 impl<S> BigQueryDestination<S>
 where
-    S: StateStore,
+    S: StateStore + SchemaStore,
 {
     /// Creates a new [`BigQueryDestination`] using a service account key file path.
     ///
@@ -510,6 +512,207 @@ where
         Ok(())
     }
 
+    /// Handles a schema change event (Relation) by computing the diff and applying changes.
+    ///
+    /// This method:
+    /// 1. Gets the current destination schema state from the state store.
+    /// 2. If no state exists, this is the initial schema - just records it as applied.
+    /// 3. If state exists and snapshot_id differs, computes the diff and applies changes.
+    /// 4. If state is in `Applying`, a previous change was interrupted - returns an error.
+    async fn handle_relation_event(
+        &self,
+        new_schema: &ReplicatedTableSchema,
+    ) -> EtlResult<()> {
+        let table_id = new_schema.id();
+        let new_snapshot_id = new_schema.get_inner().snapshot_id;
+
+        // Get current destination schema state.
+        let current_state = self
+            .state_store
+            .get_destination_schema_state(&table_id)
+            .await?;
+
+        match current_state {
+            None => {
+                // No state exists - this is a broken invariant since the schema should
+                // have been recorded during write_table_rows. For now, just record it.
+                warn!(
+                    "no destination schema state found for table {} - recording initial state (snapshot_id: {})",
+                    table_id, new_snapshot_id
+                );
+
+                self.state_store
+                    .store_destination_schema_state(
+                        table_id,
+                        DestinationSchemaState {
+                            state: DestinationSchemaStateType::Applied,
+                            snapshot_id: new_snapshot_id,
+                        },
+                    )
+                    .await?;
+            }
+            Some(state) if state.state == DestinationSchemaStateType::Applying => {
+                // A previous schema change was interrupted - require manual intervention.
+                // The previous valid snapshot_id can be derived from table_schemas table
+                // by finding the second-highest snapshot_id for this table.
+                bail!(
+                    ErrorKind::InvalidState,
+                    "Schema change recovery required",
+                    format!(
+                        "A previous schema change for table {} was interrupted at snapshot_id {}. \
+                         Manual intervention is required to resolve the destination schema state. \
+                         The previous valid snapshot can be derived from the table_schemas table.",
+                        table_id, state.snapshot_id
+                    )
+                );
+            }
+            Some(state) if state.state == DestinationSchemaStateType::Applied => {
+                let current_snapshot_id = state.snapshot_id;
+
+                if current_snapshot_id == new_snapshot_id {
+                    // Schema hasn't changed - nothing to do.
+                    debug!(
+                        "schema for table {} unchanged (snapshot_id: {})",
+                        table_id, new_snapshot_id
+                    );
+                    return Ok(());
+                }
+
+                info!(
+                    "schema change detected for table {}: {} -> {}",
+                    table_id, current_snapshot_id, new_snapshot_id
+                );
+
+                // Get the old schema from the schema store to compute the diff.
+                let old_table_schema = self
+                    .state_store
+                    .get_table_schema(&table_id, current_snapshot_id)
+                    .await?
+                    .ok_or_else(|| {
+                        etl_error!(
+                            ErrorKind::InvalidState,
+                            "Old schema not found",
+                            format!(
+                                "Could not find schema for table {} at snapshot_id {}",
+                                table_id, current_snapshot_id
+                            )
+                        )
+                    })?;
+
+                // Build a ReplicatedTableSchema from the old TableSchema.
+                // For diffing purposes, we consider all columns as replicated.
+                let old_schema = ReplicatedTableSchema::all(old_table_schema);
+
+                // Mark as applying before making changes (with the NEW snapshot_id).
+                self.state_store
+                    .store_destination_schema_state(
+                        table_id,
+                        DestinationSchemaState {
+                            state: DestinationSchemaStateType::Applying,
+                            snapshot_id: new_snapshot_id,
+                        },
+                    )
+                    .await?;
+
+                // Compute and apply the diff.
+                let diff = old_schema.diff(new_schema);
+                if let Err(err) = self.apply_schema_diff(&table_id, &diff).await {
+                    warn!(
+                        "schema change failed for table {}: {}. Manual intervention may be required.",
+                        table_id, err
+                    );
+                    return Err(err);
+                }
+
+                // Mark as applied after successful changes.
+                self.state_store
+                    .store_destination_schema_state(
+                        table_id,
+                        DestinationSchemaState {
+                            state: DestinationSchemaStateType::Applied,
+                            snapshot_id: new_snapshot_id,
+                        },
+                    )
+                    .await?;
+
+                info!(
+                    "schema change completed for table {}: snapshot_id {} applied",
+                    table_id, new_snapshot_id
+                );
+            }
+            Some(_) => unreachable!("All state types are covered"),
+        }
+
+        Ok(())
+    }
+
+    /// Applies a schema diff to the BigQuery table.
+    ///
+    /// Executes the necessary DDL operations (ADD COLUMN, DROP COLUMN, RENAME COLUMN)
+    /// to transform the destination schema.
+    async fn apply_schema_diff(&self, table_id: &TableId, diff: &SchemaDiff) -> EtlResult<()> {
+        if diff.is_empty() {
+            debug!("no schema changes to apply for table {}", table_id);
+            return Ok(());
+        }
+
+        // Get the BigQuery table ID for this table.
+        let bigquery_table_id = self
+            .get_sequenced_bigquery_table_id(table_id)
+            .await?
+            .ok_or_else(|| {
+                etl_error!(
+                    ErrorKind::InvalidState,
+                    "Table not found",
+                    format!(
+                        "No BigQuery table mapping found for table {}. Schema changes cannot be applied to a non-existent table.",
+                        table_id
+                    )
+                )
+            })?;
+
+        info!(
+            "applying schema changes to table {}: {} additions, {} removals, {} renames",
+            bigquery_table_id,
+            diff.columns_to_add.len(),
+            diff.columns_to_remove.len(),
+            diff.columns_to_rename.len()
+        );
+
+        // Apply column additions first (safest operation).
+        for column in &diff.columns_to_add {
+            self.client
+                .add_column(&self.dataset_id, &bigquery_table_id.to_string(), column)
+                .await?;
+        }
+
+        // Apply column renames (must be done before removals in case of position conflicts).
+        for rename in &diff.columns_to_rename {
+            self.client
+                .rename_column(
+                    &self.dataset_id,
+                    &bigquery_table_id.to_string(),
+                    &rename.old_name,
+                    &rename.new_name,
+                )
+                .await?;
+        }
+
+        // Apply column removals last.
+        for column in &diff.columns_to_remove {
+            self.client
+                .drop_column(&self.dataset_id, &bigquery_table_id.to_string(), &column.name)
+                .await?;
+        }
+
+        info!(
+            "schema changes applied successfully to table {}",
+            bigquery_table_id
+        );
+
+        Ok(())
+    }
+
     /// Processes CDC events in batches with proper ordering and truncate handling.
     ///
     /// Groups streaming operations (insert/update/delete) by table and processes them together,
@@ -581,9 +784,14 @@ where
                         });
                         entry.1.push(old_table_row);
                     }
+                    Event::Relation(relation) => {
+                        // Handle schema change event.
+                        self.handle_relation_event(&relation.replicated_table_schema)
+                            .await?;
+                    }
                     _ => {
-                        // Every other event type is currently not supported.
-                        debug!("skipping unsupported event in BigQuery");
+                        // Begin, Commit, Unsupported events are skipped.
+                        debug!("skipping non-data event in BigQuery");
                     }
                 }
             }
@@ -767,7 +975,7 @@ where
 
 impl<S> Destination for BigQueryDestination<S>
 where
-    S: StateStore + Send + Sync,
+    S: StateStore + SchemaStore + Send + Sync,
 {
     fn name() -> &'static str {
         "bigquery"

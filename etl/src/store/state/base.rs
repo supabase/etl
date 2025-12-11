@@ -1,8 +1,37 @@
-use etl_postgres::types::TableId;
+use etl_postgres::types::{SnapshotId, TableId};
 use std::{collections::HashMap, future::Future};
 
 use crate::error::EtlResult;
 use crate::state::table::TableReplicationPhase;
+
+/// The state of a schema change operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DestinationSchemaStateType {
+    /// A schema change is currently being applied.
+    ///
+    /// If the system restarts and finds this state, it indicates that a previous
+    /// schema change was interrupted and manual intervention may be required.
+    /// The previous valid snapshot_id can be derived from table_schemas table.
+    Applying,
+    /// The schema has been successfully applied.
+    Applied,
+}
+
+/// Represents the state of the schema at a destination.
+///
+/// Used to track which schema version is currently applied at a destination
+/// and to detect interrupted schema changes that require recovery.
+///
+/// This is a lightweight tracking structure - the actual schema data lives in
+/// the schema store. The previous snapshot_id can be derived by querying the
+/// table_schemas table if recovery is needed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DestinationSchemaState {
+    /// The current state of the schema change operation.
+    pub state: DestinationSchemaStateType,
+    /// The current snapshot_id at the destination.
+    pub snapshot_id: SnapshotId,
+}
 
 /// Trait for storing and retrieving table replication state and mapping information.
 ///
@@ -72,5 +101,25 @@ pub trait StateStore {
         &self,
         source_table_id: TableId,
         destination_table_id: String,
+    ) -> impl Future<Output = EtlResult<()>> + Send;
+
+    /// Returns the destination schema state for a table from the cache.
+    ///
+    /// Does not load any new data into the cache.
+    fn get_destination_schema_state(
+        &self,
+        table_id: &TableId,
+    ) -> impl Future<Output = EtlResult<Option<DestinationSchemaState>>> + Send;
+
+    /// Loads all destination schema states from the persistent state into the cache.
+    ///
+    /// This should be called during startup to load the states into the cache.
+    fn load_destination_schema_states(&self) -> impl Future<Output = EtlResult<usize>> + Send;
+
+    /// Stores a destination schema state in both the cache and the persistent store.
+    fn store_destination_schema_state(
+        &self,
+        table_id: TableId,
+        state: DestinationSchemaState,
     ) -> impl Future<Output = EtlResult<()>> + Send;
 }
