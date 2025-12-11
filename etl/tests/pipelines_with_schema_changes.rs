@@ -8,8 +8,11 @@ use etl::state::table::TableReplicationPhaseType;
 use etl::test_utils::database::{spawn_source_database, test_table_name};
 use etl::test_utils::event::group_events_by_type_and_table_id;
 use etl::test_utils::notify::NotifyingStore;
-use etl::test_utils::pipeline::{create_pipeline, create_database_and_pipeline_with_table};
-use etl::test_utils::schema::assert_replicated_columns;
+use etl::test_utils::pipeline::{create_database_and_pipeline_with_table, create_pipeline};
+use etl::test_utils::schema::{
+    assert_replicated_schema_column_names_types, assert_schema_snapshots_ordering,
+    assert_table_schema_column_names_types,
+};
 use etl::test_utils::test_destination_wrapper::TestDestinationWrapper;
 use etl::types::{Event, EventType, PipelineId, Type};
 use etl_postgres::tokio::test_utils::{PgDatabase, TableModification};
@@ -39,7 +42,7 @@ fn get_last_insert_event(events: &[Event], table_id: TableId) -> &Event {
 async fn relation_message_updates_when_column_added() {
     init_test_tracing();
 
-    let (database, table_name, table_id, _store, destination, pipeline, _pipeline_id, _publication) =
+    let (database, table_name, table_id, store, destination, pipeline, _pipeline_id, _publication) =
         create_database_and_pipeline_with_table(
             "schema_add_column",
             &[("name", "text not null"), ("age", "integer not null")],
@@ -88,7 +91,7 @@ async fn relation_message_updates_when_column_added() {
     let Event::Relation(r) = get_last_relation_event(&events, table_id) else {
         panic!("expected relation event");
     };
-    assert_replicated_columns(
+    assert_replicated_schema_column_names_types(
         &r.replicated_table_schema,
         &[
             ("id", Type::INT8),
@@ -101,13 +104,40 @@ async fn relation_message_updates_when_column_added() {
         panic!("expected insert event");
     };
     assert_eq!(i.table_row.values.len(), 4);
+
+    // Verify schema snapshots are stored in order.
+    let table_schemas = store.get_table_schemas().await;
+    let snapshots = table_schemas.get(&table_id).unwrap();
+    assert_eq!(snapshots.len(), 2);
+    assert_schema_snapshots_ordering(snapshots, true);
+
+    let (_, first_schema) = &snapshots[0];
+    assert_table_schema_column_names_types(
+        first_schema,
+        &[
+            ("id", Type::INT8),
+            ("name", Type::TEXT),
+            ("age", Type::INT4),
+        ],
+    );
+
+    let (_, second_schema) = &snapshots[1];
+    assert_table_schema_column_names_types(
+        second_schema,
+        &[
+            ("id", Type::INT8),
+            ("name", Type::TEXT),
+            ("age", Type::INT4),
+            ("email", Type::TEXT),
+        ],
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn relation_message_updates_when_column_removed() {
     init_test_tracing();
 
-    let (database, table_name, table_id, _store, destination, pipeline, _pipeline_id, _publication) =
+    let (database, table_name, table_id, store, destination, pipeline, _pipeline_id, _publication) =
         create_database_and_pipeline_with_table(
             "schema_remove_column",
             &[("name", "text not null"), ("age", "integer not null")],
@@ -149,7 +179,7 @@ async fn relation_message_updates_when_column_removed() {
     let Event::Relation(r) = get_last_relation_event(&events, table_id) else {
         panic!("expected relation event");
     };
-    assert_replicated_columns(
+    assert_replicated_schema_column_names_types(
         &r.replicated_table_schema,
         &[("id", Type::INT8), ("name", Type::TEXT)],
     );
@@ -157,13 +187,35 @@ async fn relation_message_updates_when_column_removed() {
         panic!("expected insert event");
     };
     assert_eq!(i.table_row.values.len(), 2);
+
+    // Verify schema snapshots are stored in order.
+    let table_schemas = store.get_table_schemas().await;
+    let snapshots = table_schemas.get(&table_id).unwrap();
+    assert_eq!(snapshots.len(), 2);
+    assert_schema_snapshots_ordering(snapshots, true);
+
+    let (_, first_schema) = &snapshots[0];
+    assert_table_schema_column_names_types(
+        first_schema,
+        &[
+            ("id", Type::INT8),
+            ("name", Type::TEXT),
+            ("age", Type::INT4),
+        ],
+    );
+
+    let (_, second_schema) = &snapshots[1];
+    assert_table_schema_column_names_types(
+        second_schema,
+        &[("id", Type::INT8), ("name", Type::TEXT)],
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn relation_message_updates_when_column_renamed() {
     init_test_tracing();
 
-    let (database, table_name, table_id, _store, destination, pipeline, _pipeline_id, _publication) =
+    let (database, table_name, table_id, store, destination, pipeline, _pipeline_id, _publication) =
         create_database_and_pipeline_with_table(
             "schema_rename_column",
             &[("name", "text not null"), ("age", "integer not null")],
@@ -208,7 +260,7 @@ async fn relation_message_updates_when_column_renamed() {
     let Event::Relation(r) = get_last_relation_event(&events, table_id) else {
         panic!("expected relation event");
     };
-    assert_replicated_columns(
+    assert_replicated_schema_column_names_types(
         &r.replicated_table_schema,
         &[
             ("id", Type::INT8),
@@ -220,13 +272,39 @@ async fn relation_message_updates_when_column_renamed() {
         panic!("expected insert event");
     };
     assert_eq!(i.table_row.values.len(), 3);
+
+    // Verify schema snapshots are stored in order.
+    let table_schemas = store.get_table_schemas().await;
+    let snapshots = table_schemas.get(&table_id).unwrap();
+    assert_eq!(snapshots.len(), 2);
+    assert_schema_snapshots_ordering(snapshots, true);
+
+    let (_, first_schema) = &snapshots[0];
+    assert_table_schema_column_names_types(
+        first_schema,
+        &[
+            ("id", Type::INT8),
+            ("name", Type::TEXT),
+            ("age", Type::INT4),
+        ],
+    );
+
+    let (_, second_schema) = &snapshots[1];
+    assert_table_schema_column_names_types(
+        second_schema,
+        &[
+            ("id", Type::INT8),
+            ("full_name", Type::TEXT),
+            ("age", Type::INT4),
+        ],
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn relation_message_updates_when_column_type_changes() {
     init_test_tracing();
 
-    let (database, table_name, table_id, _store, destination, pipeline, _pipeline_id, _publication) =
+    let (database, table_name, table_id, store, destination, pipeline, _pipeline_id, _publication) =
         create_database_and_pipeline_with_table(
             "schema_change_type",
             &[("name", "text not null"), ("age", "integer not null")],
@@ -271,7 +349,7 @@ async fn relation_message_updates_when_column_type_changes() {
     let Event::Relation(r) = get_last_relation_event(&events, table_id) else {
         panic!("expected relation event");
     };
-    assert_replicated_columns(
+    assert_replicated_schema_column_names_types(
         &r.replicated_table_schema,
         &[
             ("id", Type::INT8),
@@ -283,6 +361,32 @@ async fn relation_message_updates_when_column_type_changes() {
         panic!("expected insert event");
     };
     assert_eq!(i.table_row.values.len(), 3);
+
+    // Verify schema snapshots are stored in order.
+    let table_schemas = store.get_table_schemas().await;
+    let snapshots = table_schemas.get(&table_id).unwrap();
+    assert_eq!(snapshots.len(), 2);
+    assert_schema_snapshots_ordering(snapshots, true);
+
+    let (_, first_schema) = &snapshots[0];
+    assert_table_schema_column_names_types(
+        first_schema,
+        &[
+            ("id", Type::INT8),
+            ("name", Type::TEXT),
+            ("age", Type::INT4),
+        ],
+    );
+
+    let (_, second_schema) = &snapshots[1];
+    assert_table_schema_column_names_types(
+        second_schema,
+        &[
+            ("id", Type::INT8),
+            ("name", Type::TEXT),
+            ("age", Type::INT8),
+        ],
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -471,7 +575,7 @@ async fn pipeline_recovers_after_multiple_schema_changes_and_restart() {
     let Event::Relation(r) = get_last_relation_event(&events, table_id) else {
         panic!("expected relation event");
     };
-    assert_replicated_columns(
+    assert_replicated_schema_column_names_types(
         &r.replicated_table_schema,
         &[
             ("id", Type::INT8),
@@ -485,4 +589,107 @@ async fn pipeline_recovers_after_multiple_schema_changes_and_restart() {
         panic!("expected insert event");
     };
     assert_eq!(i.table_row.values.len(), 5);
+
+    // Verify all schema snapshots are stored in order.
+    // We have 7 snapshots:
+    // - Initial (id, name, age, status)
+    // - After adding email
+    // - After renaming age -> years
+    // - After changing years type to bigint
+    // - After dropping status
+    // - After adding created_at
+    // - After renaming email -> contact_email (this is the final schema for the insert)
+    let table_schemas = store.get_table_schemas().await;
+    let snapshots = table_schemas.get(&table_id).unwrap();
+    assert_eq!(snapshots.len(), 7);
+    assert_schema_snapshots_ordering(snapshots, true);
+
+    // Initial schema: id, name, age, status
+    let (_, schema) = &snapshots[0];
+    assert_table_schema_column_names_types(
+        schema,
+        &[
+            ("id", Type::INT8),
+            ("name", Type::TEXT),
+            ("age", Type::INT4),
+            ("status", Type::TEXT),
+        ],
+    );
+
+    // After adding email: id, name, age, status, email
+    let (_, schema) = &snapshots[1];
+    assert_table_schema_column_names_types(
+        schema,
+        &[
+            ("id", Type::INT8),
+            ("name", Type::TEXT),
+            ("age", Type::INT4),
+            ("status", Type::TEXT),
+            ("email", Type::TEXT),
+        ],
+    );
+
+    // After renaming age -> years: id, name, years, status, email
+    let (_, schema) = &snapshots[2];
+    assert_table_schema_column_names_types(
+        schema,
+        &[
+            ("id", Type::INT8),
+            ("name", Type::TEXT),
+            ("years", Type::INT4),
+            ("status", Type::TEXT),
+            ("email", Type::TEXT),
+        ],
+    );
+
+    // After changing years type to bigint: id, name, years (int8), status, email
+    let (_, schema) = &snapshots[3];
+    assert_table_schema_column_names_types(
+        schema,
+        &[
+            ("id", Type::INT8),
+            ("name", Type::TEXT),
+            ("years", Type::INT8),
+            ("status", Type::TEXT),
+            ("email", Type::TEXT),
+        ],
+    );
+
+    // After dropping status: id, name, years, email
+    let (_, schema) = &snapshots[4];
+    assert_table_schema_column_names_types(
+        schema,
+        &[
+            ("id", Type::INT8),
+            ("name", Type::TEXT),
+            ("years", Type::INT8),
+            ("email", Type::TEXT),
+        ],
+    );
+
+    // After adding created_at: id, name, years, email, created_at
+    let (_, schema) = &snapshots[5];
+    assert_table_schema_column_names_types(
+        schema,
+        &[
+            ("id", Type::INT8),
+            ("name", Type::TEXT),
+            ("years", Type::INT8),
+            ("email", Type::TEXT),
+            ("created_at", Type::TIMESTAMP),
+        ],
+    );
+
+    // Final schema after renaming email -> contact_email: id, name, years, contact_email, created_at
+    let (_, schema) = &snapshots[6];
+    assert_table_schema_column_names_types(
+        schema,
+        &[
+            ("id", Type::INT8),
+            ("name", Type::TEXT),
+            ("years", Type::INT8),
+            ("contact_email", Type::TEXT),
+            ("created_at", Type::TIMESTAMP),
+        ],
+    );
 }

@@ -7,7 +7,7 @@ use etl::test_utils::database::{spawn_source_database, test_table_name};
 use etl::test_utils::event::group_events_by_type_and_table_id;
 use etl::test_utils::notify::NotifyingStore;
 use etl::test_utils::pipeline::{create_pipeline, create_pipeline_with};
-use etl::test_utils::schema::assert_table_schema;
+use etl::test_utils::schema::assert_table_schema_columns;
 use etl::test_utils::test_destination_wrapper::TestDestinationWrapper;
 use etl::test_utils::test_schema::{
     TableSelection, assert_events_equal, build_expected_orders_inserts,
@@ -1421,10 +1421,11 @@ async fn empty_tables_are_created_at_destination() {
 
     // Verify the table schema was stored.
     let table_schemas = state_store.get_latest_table_schemas().await;
-    assert_table_schema(
-        &table_schemas,
-        table_id,
-        table_name,
+    let table_schema = table_schemas.get(&table_id).unwrap();
+    assert_eq!(table_schema.id, table_id);
+    assert_eq!(table_schema.name, table_name);
+    assert_table_schema_columns(
+        table_schema,
         &[
             id_column_schema(),
             test_column("name", Type::TEXT, 2, true, false),

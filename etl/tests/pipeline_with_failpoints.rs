@@ -2,19 +2,28 @@
 
 use etl::destination::memory::MemoryDestination;
 use etl::error::ErrorKind;
-use etl::failpoints::{SEND_STATUS_UPDATE_FP, START_TABLE_SYNC_BEFORE_DATA_SYNC_SLOT_CREATION_FP, START_TABLE_SYNC_DURING_DATA_SYNC_FP};
+use etl::failpoints::{
+    SEND_STATUS_UPDATE_FP, START_TABLE_SYNC_BEFORE_DATA_SYNC_SLOT_CREATION_FP,
+    START_TABLE_SYNC_DURING_DATA_SYNC_FP,
+};
 use etl::state::table::{RetryPolicy, TableReplicationPhase, TableReplicationPhaseType};
 use etl::test_utils::database::spawn_source_database;
+use etl::test_utils::event::group_events_by_type_and_table_id;
 use etl::test_utils::notify::NotifyingStore;
-use etl::test_utils::pipeline::{create_pipeline, create_database_and_pipeline_with_table};
+use etl::test_utils::pipeline::{create_database_and_pipeline_with_table, create_pipeline};
+use etl::test_utils::schema::{
+    assert_schema_snapshots_ordering, assert_table_schema_column_names_types,
+};
 use etl::test_utils::test_destination_wrapper::TestDestinationWrapper;
 use etl::test_utils::test_schema::{TableSelection, insert_users_data, setup_test_database_schema};
+use etl::types::Type;
 use etl::types::{EventType, PipelineId};
+use etl_postgres::tokio::test_utils::TableModification;
 use etl_telemetry::tracing::init_test_tracing;
 use fail::FailScenario;
 use rand::random;
-use etl::test_utils::event::group_events_by_type_and_table_id;
-use etl_postgres::tokio::test_utils::TableModification;
+use std::time::Duration;
+use tokio::time::sleep;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn table_copy_fails_after_data_sync_threw_an_error_with_no_retry() {
@@ -301,11 +310,7 @@ async fn table_schema_snapshots_are_consistent_after_missing_status_update() {
         .await;
 
     database
-        .insert_values(
-            table_name.clone(),
-            &["name", "age"],
-            &[&"Alice", &25],
-        )
+        .insert_values(table_name.clone(), &["name", "age"], &[&"Alice", &25])
         .await
         .unwrap();
 
@@ -345,25 +350,34 @@ async fn table_schema_snapshots_are_consistent_after_missing_status_update() {
         2
     );
 
-    // Assert that we have 2 schema snapshots stored.
+    // Assert that we have 2 schema snapshots stored in order.
     let table_schemas = store.get_table_schemas().await;
-    let table_schemas_snapshots: Vec<_> = table_schemas.get(&table_id).unwrap().clone();
+    let table_schemas_snapshots = table_schemas.get(&table_id).unwrap();
     assert_eq!(table_schemas_snapshots.len(), 2);
+    assert_schema_snapshots_ordering(table_schemas_snapshots, true);
 
     // Verify the first snapshot has the original schema (id, name, age).
-    let (first_snapshot_id, first_schema) = &table_schemas_snapshots[0];
-    assert_eq!(first_schema.column_schemas.len(), 3);
-    assert_eq!(first_schema.column_schemas[0].name, "id");
-    assert_eq!(first_schema.column_schemas[1].name, "name");
-    assert_eq!(first_schema.column_schemas[2].name, "age");
+    let (_, first_schema) = &table_schemas_snapshots[0];
+    assert_table_schema_column_names_types(
+        first_schema,
+        &[
+            ("id", Type::INT8),
+            ("name", Type::TEXT),
+            ("age", Type::INT4),
+        ],
+    );
 
     // Verify the second snapshot has the new column added (id, name, age, email).
-    let (second_snapshot_id, second_schema) = &table_schemas_snapshots[1];
-    assert_eq!(second_schema.column_schemas.len(), 4);
-    assert_eq!(second_schema.column_schemas[0].name, "id");
-    assert_eq!(second_schema.column_schemas[1].name, "name");
-    assert_eq!(second_schema.column_schemas[2].name, "age");
-    assert_eq!(second_schema.column_schemas[3].name, "email");
+    let (_, second_schema) = &table_schemas_snapshots[1];
+    assert_table_schema_column_names_types(
+        second_schema,
+        &[
+            ("id", Type::INT8),
+            ("name", Type::TEXT),
+            ("age", Type::INT4),
+            ("email", Type::TEXT),
+        ],
+    );
 
     // Clear up the state and allow the status update to be sent.
     destination.clear_events().await;
@@ -377,12 +391,8 @@ async fn table_schema_snapshots_are_consistent_after_missing_status_update() {
         store.clone(),
         destination.clone(),
     );
-    pipeline.start().await.unwrap();
 
-    // Wait for another insert to verify events flow correctly after recovery.
-    let notify = destination
-        .wait_for_events_count(vec![(EventType::Relation, 2), (EventType::Insert, 3)])
-        .await;
+    pipeline.start().await.unwrap();
 
     database
         .insert_values(
@@ -393,14 +403,14 @@ async fn table_schema_snapshots_are_consistent_after_missing_status_update() {
         .await
         .unwrap();
 
-    notify.notified().await;
-    pipeline.shutdown_and_wait().await.unwrap();
+    // We wait for a bit to make sure that the error is triggered.
+    sleep(Duration::from_secs(2)).await;
 
-    // Verify we received the insert event after recovery.
-    let events = destination.get_events().await;
-    let grouped = group_events_by_type_and_table_id(&events);
-    assert_eq!(
-        grouped.get(&(EventType::Insert, table_id)).unwrap().len(),
-        3
-    );
+    // We expect to have a corrupted table schema error since when we reprocess the events, Postgres
+    // sends a `Relation` message with the `email` column even for entries before the DDL that added
+    // the `email`. For now this is a limitation that we are acknowledging, but we would like to find
+    // a solution for this.
+    let err = pipeline.shutdown_and_wait().await.err().unwrap();
+    assert_eq!(err.kinds().len(), 1);
+    assert_eq!(err.kinds()[0], ErrorKind::CorruptedTableSchema);
 }

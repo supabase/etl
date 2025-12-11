@@ -1,9 +1,3 @@
-use rand::random;
-use tokio_postgres::Client;
-use etl_config::shared::{BatchConfig, PgConnectionConfig, PipelineConfig};
-use uuid::Uuid;
-use etl_postgres::tokio::test_utils::PgDatabase;
-use etl_postgres::types::{TableId, TableName};
 use crate::destination::Destination;
 use crate::destination::memory::MemoryDestination;
 use crate::pipeline::Pipeline;
@@ -15,6 +9,12 @@ use crate::test_utils::database::{spawn_source_database, test_table_name};
 use crate::test_utils::notify::NotifyingStore;
 use crate::test_utils::test_destination_wrapper::TestDestinationWrapper;
 use crate::types::PipelineId;
+use etl_config::shared::{BatchConfig, PgConnectionConfig, PipelineConfig};
+use etl_postgres::tokio::test_utils::PgDatabase;
+use etl_postgres::types::{TableId, TableName};
+use rand::random;
+use tokio_postgres::Client;
+use uuid::Uuid;
 
 /// Generates a test-specific replication slot name with a random component.
 ///
