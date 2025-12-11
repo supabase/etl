@@ -435,9 +435,23 @@ impl ReplicationMask {
         Self(Arc::new(mask))
     }
 
+    /// Creates a [`ReplicationMask`] from raw bytes.
+    ///
+    /// Used for deserializing a mask from storage.
+    pub fn from_bytes(bytes: Vec<u8>) -> Self {
+        Self(Arc::new(bytes))
+    }
+
     /// Returns the underlying mask as a slice.
     pub fn as_slice(&self) -> &[u8] {
         &self.0
+    }
+
+    /// Returns the underlying mask as a vector of bytes.
+    ///
+    /// Used for serializing the mask to storage.
+    pub fn to_bytes(&self) -> Vec<u8> {
+        self.0.as_ref().clone()
     }
 
     /// Returns the number of columns in the mask.

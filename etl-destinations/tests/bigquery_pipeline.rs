@@ -19,8 +19,8 @@ use std::time::Duration;
 use tokio::time::sleep;
 
 use crate::support::bigquery::{
-    BigQueryOrder, BigQueryUser, NonNullableColsScalar, NullableColsArray,
-    NullableColsScalar, parse_bigquery_table_rows, setup_bigquery_connection,
+    BigQueryOrder, BigQueryUser, NonNullableColsScalar, NullableColsArray, NullableColsScalar,
+    parse_bigquery_table_rows, setup_bigquery_connection,
 };
 
 mod support;

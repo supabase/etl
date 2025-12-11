@@ -430,6 +430,7 @@ pub struct DestinationSchemaStateRow {
     pub table_id: TableId,
     pub state_type: String,
     pub snapshot_id: SnapshotId,
+    pub replication_mask: Vec<u8>,
 }
 
 /// Stores a destination schema state in the database.
@@ -441,16 +442,18 @@ pub async fn store_destination_schema_state(
     table_id: TableId,
     state_type: &str,
     snapshot_id: SnapshotId,
+    replication_mask: &[u8],
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
         r#"
         INSERT INTO etl.destination_schema_states
-            (pipeline_id, table_id, state_type, snapshot_id)
-        VALUES ($1, $2, $3, $4)
+            (pipeline_id, table_id, state_type, snapshot_id, replication_mask)
+        VALUES ($1, $2, $3, $4, $5)
         ON CONFLICT (pipeline_id, table_id)
         DO UPDATE SET
             state_type = EXCLUDED.state_type,
             snapshot_id = EXCLUDED.snapshot_id,
+            replication_mask = EXCLUDED.replication_mask,
             updated_at = NOW()
         "#,
     )
@@ -458,6 +461,7 @@ pub async fn store_destination_schema_state(
     .bind(SqlxTableId(table_id.into_inner()))
     .bind(state_type)
     .bind(snapshot_id)
+    .bind(replication_mask)
     .execute(pool)
     .await?;
 
@@ -473,7 +477,7 @@ pub async fn load_destination_schema_states(
 ) -> Result<HashMap<TableId, DestinationSchemaStateRow>, sqlx::Error> {
     let rows = sqlx::query(
         r#"
-        SELECT table_id, state_type, snapshot_id
+        SELECT table_id, state_type, snapshot_id, replication_mask
         FROM etl.destination_schema_states
         WHERE pipeline_id = $1
         "#,
@@ -487,6 +491,7 @@ pub async fn load_destination_schema_states(
         let table_id: SqlxTableId = row.get("table_id");
         let state_type: String = row.get("state_type");
         let snapshot_id: SnapshotId = row.get("snapshot_id");
+        let replication_mask: Vec<u8> = row.get("replication_mask");
 
         states.insert(
             TableId::new(table_id.0),
@@ -494,6 +499,7 @@ pub async fn load_destination_schema_states(
                 table_id: TableId::new(table_id.0),
                 state_type,
                 snapshot_id,
+                replication_mask,
             },
         );
     }
@@ -509,7 +515,7 @@ pub async fn get_destination_schema_state(
 ) -> Result<Option<DestinationSchemaStateRow>, sqlx::Error> {
     let row = sqlx::query(
         r#"
-        SELECT table_id, state_type, snapshot_id
+        SELECT table_id, state_type, snapshot_id, replication_mask
         FROM etl.destination_schema_states
         WHERE pipeline_id = $1 AND table_id = $2
         "#,
@@ -525,6 +531,7 @@ pub async fn get_destination_schema_state(
             table_id: TableId::new(table_id.0),
             state_type: r.get("state_type"),
             snapshot_id: r.get("snapshot_id"),
+            replication_mask: r.get("replication_mask"),
         }
     }))
 }

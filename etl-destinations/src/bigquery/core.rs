@@ -543,28 +543,24 @@ where
         match current_state {
             None => {
                 // No state exists - this is a broken invariant since the schema should
-                // have been recorded during write_table_rows. For now, just record it.
-                warn!(
-                    "no destination schema state found for table {} - recording initial state (snapshot_id: {})",
-                    table_id, new_snapshot_id
-                );
-
-                self.state_store
-                    .store_destination_schema_state(
-                        table_id,
-                        DestinationSchemaState {
-                            state: DestinationSchemaStateType::Applied,
-                            snapshot_id: new_snapshot_id,
-                        },
+                // have been recorded during write_table_rows before any Relation event.
+                bail!(
+                    ErrorKind::InvalidState,
+                    "Missing destination schema state",
+                    format!(
+                        "No destination schema state found for table {} when processing schema change. \
+                         This indicates a broken invariant - the schema should have been recorded \
+                         during initial table synchronization.",
+                        table_id
                     )
-                    .await?;
+                );
             }
             Some(state) if state.state == DestinationSchemaStateType::Applying => {
-                // A previous schema change was interrupted - require manual intervention.
+                // A previous schema change was interrupted, require manual intervention.
                 // The previous valid snapshot_id can be derived from table_schemas table
                 // by finding the second-highest snapshot_id for this table.
                 bail!(
-                    ErrorKind::InvalidState,
+                    ErrorKind::CorruptedTableSchema,
                     "Schema change recovery required",
                     format!(
                         "A previous schema change for table {} was interrupted at snapshot_id {}. \
@@ -578,11 +574,12 @@ where
                 let current_snapshot_id = state.snapshot_id;
 
                 if current_snapshot_id == new_snapshot_id {
-                    // Schema hasn't changed - nothing to do.
+                    // Schema hasn't changed, nothing to do.
                     debug!(
                         "schema for table {} unchanged (snapshot_id: {})",
                         table_id, new_snapshot_id
                     );
+
                     return Ok(());
                 }
 

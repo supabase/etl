@@ -1,4 +1,4 @@
-use etl_postgres::types::{SnapshotId, TableId};
+use etl_postgres::types::{ReplicationMask, SnapshotId, TableId};
 use std::{collections::HashMap, future::Future};
 
 use crate::error::EtlResult;
@@ -22,15 +22,21 @@ pub enum DestinationSchemaStateType {
 /// Used to track which schema version is currently applied at a destination
 /// and to detect interrupted schema changes that require recovery.
 ///
-/// This is a lightweight tracking structure - the actual schema data lives in
-/// the schema store. The previous snapshot_id can be derived by querying the
-/// table_schemas table if recovery is needed.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// This structure tracks both the snapshot_id and the replication mask, which
+/// is needed to correctly reconstruct the [`ReplicatedTableSchema`] for diffing
+/// when schema changes occur.
+#[derive(Debug, Clone)]
 pub struct DestinationSchemaState {
     /// The current state of the schema change operation.
     pub state: DestinationSchemaStateType,
     /// The current snapshot_id at the destination.
     pub snapshot_id: SnapshotId,
+    /// The replication mask indicating which columns are replicated.
+    ///
+    /// This is stored alongside the snapshot_id so that when a schema change
+    /// occurs, we can reconstruct the old [`ReplicatedTableSchema`] with the
+    /// correct mask for accurate diffing.
+    pub replication_mask: ReplicationMask,
 }
 
 /// Trait for storing and retrieving table replication state and mapping information.
