@@ -19,7 +19,7 @@ use std::time::Duration;
 use tokio::time::sleep;
 
 use crate::support::bigquery::{
-    BigQueryColumnSchema, BigQueryOrder, BigQueryUser, NonNullableColsScalar, NullableColsArray,
+    BigQueryOrder, BigQueryUser, NonNullableColsScalar, NullableColsArray,
     NullableColsScalar, parse_bigquery_table_rows, setup_bigquery_connection,
 };
 

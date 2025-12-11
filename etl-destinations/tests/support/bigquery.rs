@@ -197,7 +197,7 @@ impl BigQueryDatabase {
                 .rows;
 
             if rows.is_some() || attempts_remaining == 1 {
-                return rows.map(|r| parse_bigquery_table_rows(r));
+                return rows.map(parse_bigquery_table_rows);
             }
 
             attempts_remaining -= 1;
