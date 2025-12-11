@@ -6,7 +6,7 @@ use etl::error::ErrorKind;
 use etl::replication::client::PgReplicationClient;
 use etl::test_utils::database::{spawn_source_database, test_table_name};
 use etl::test_utils::pipeline::test_slot_name;
-use etl::test_utils::schema::assert_table_schema;
+use etl::test_utils::schema::assert_table_schema_columns;
 use etl::test_utils::test_schema::create_partitioned_table;
 use etl_postgres::below_version;
 use etl_postgres::tokio::test_utils::{TableModification, id_column_schema};
@@ -204,14 +204,12 @@ async fn test_table_schema_copy_is_consistent() {
         .unwrap();
 
     // We use the transaction to consistently read the table schemas.
-    let table_1_schema = transaction.get_table_schemas(&[table_1_id]).await.unwrap();
+    let table_1_schemas = transaction.get_table_schemas(&[table_1_id]).await.unwrap();
     transaction.commit().await.unwrap();
-    assert_table_schema(
-        &table_1_schema,
-        table_1_id,
-        test_table_name("table_1"),
-        &[id_column_schema(), age_schema.clone()],
-    );
+    let table_1_schema = table_1_schemas.get(&table_1_id).unwrap();
+    assert_eq!(table_1_schema.id, table_1_id);
+    assert_eq!(table_1_schema.name, test_table_name("table_1"));
+    assert_table_schema_columns(table_1_schema, &[id_column_schema(), age_schema.clone()]);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -241,14 +239,12 @@ async fn test_table_schema_copy_across_multiple_connections() {
         .unwrap();
 
     // We use the transaction to consistently read the table schemas.
-    let table_1_schema = transaction.get_table_schemas(&[table_1_id]).await.unwrap();
+    let table_1_schemas = transaction.get_table_schemas(&[table_1_id]).await.unwrap();
     transaction.commit().await.unwrap();
-    assert_table_schema(
-        &table_1_schema,
-        table_1_id,
-        test_table_name("table_1"),
-        &[id_column_schema(), age_schema.clone()],
-    );
+    let table_1_schema = table_1_schemas.get(&table_1_id).unwrap();
+    assert_eq!(table_1_schema.id, table_1_id);
+    assert_eq!(table_1_schema.name, test_table_name("table_1"));
+    assert_table_schema_columns(table_1_schema, &[id_column_schema(), age_schema.clone()]);
 
     // We create a new table in the database and update the schema of the old one.
     let table_2_id = database
@@ -273,21 +269,20 @@ async fn test_table_schema_copy_across_multiple_connections() {
         .unwrap();
 
     // We use the transaction to consistently read the table schemas.
-    let table_1_schema = transaction.get_table_schemas(&[table_1_id]).await.unwrap();
-    let table_2_schema = transaction.get_table_schemas(&[table_2_id]).await.unwrap();
+    let table_1_schemas = transaction.get_table_schemas(&[table_1_id]).await.unwrap();
+    let table_2_schemas = transaction.get_table_schemas(&[table_2_id]).await.unwrap();
     transaction.commit().await.unwrap();
-    assert_table_schema(
-        &table_1_schema,
-        table_1_id,
-        test_table_name("table_1"),
+    let table_1_schema = table_1_schemas.get(&table_1_id).unwrap();
+    assert_eq!(table_1_schema.id, table_1_id);
+    assert_eq!(table_1_schema.name, test_table_name("table_1"));
+    assert_table_schema_columns(
+        table_1_schema,
         &[id_column_schema(), age_schema.clone(), year_schema.clone()],
     );
-    assert_table_schema(
-        &table_2_schema,
-        table_2_id,
-        test_table_name("table_2"),
-        &[id_column_schema(), year_schema],
-    );
+    let table_2_schema = table_2_schemas.get(&table_2_id).unwrap();
+    assert_eq!(table_2_schema.id, table_2_id);
+    assert_eq!(table_2_schema.name, test_table_name("table_2"));
+    assert_table_schema_columns(table_2_schema, &[id_column_schema(), year_schema]);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -469,10 +464,10 @@ async fn test_get_replicated_column_names_respects_column_filter() {
     let table_schema = &table_schemas[&test_table_id];
 
     // Verify all columns are present in the schema.
-    assert_table_schema(
-        &table_schemas,
-        test_table_id,
-        test_table_name,
+    assert_eq!(table_schema.id, test_table_id);
+    assert_eq!(table_schema.name, test_table_name);
+    assert_table_schema_columns(
+        table_schema,
         &[
             id_column_schema(),
             test_column("name", Type::TEXT, 2, true, false),
