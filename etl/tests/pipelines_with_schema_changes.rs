@@ -2,25 +2,17 @@
 
 use std::time::Duration;
 
-use etl::destination::memory::MemoryDestination;
-use etl::pipeline::Pipeline;
-use etl::state::table::TableReplicationPhaseType;
-use etl::test_utils::database::{spawn_source_database, test_table_name};
 use etl::test_utils::event::group_events_by_type_and_table_id;
-use etl::test_utils::notify::NotifyingStore;
 use etl::test_utils::pipeline::{create_database_and_pipeline_with_table, create_pipeline};
 use etl::test_utils::schema::{
     assert_replicated_schema_column_names_types, assert_schema_snapshots_ordering,
     assert_table_schema_column_names_types,
 };
-use etl::test_utils::test_destination_wrapper::TestDestinationWrapper;
-use etl::types::{Event, EventType, PipelineId, Type};
-use etl_postgres::tokio::test_utils::{PgDatabase, TableModification};
-use etl_postgres::types::{TableId, TableName};
+use etl::types::{Event, EventType, Type};
+use etl_postgres::tokio::test_utils::TableModification;
+use etl_postgres::types::TableId;
 use etl_telemetry::tracing::init_test_tracing;
-use rand::random;
 use tokio::time::sleep;
-use tokio_postgres::Client;
 
 fn get_last_relation_event(events: &[Event], table_id: TableId) -> &Event {
     events

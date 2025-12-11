@@ -9,11 +9,14 @@ use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 use tokio_postgres::CopyOutStream;
 use tokio_postgres::types::PgLsn;
-use tracing::{debug, warn};
+use tracing::debug;
+#[cfg(feature = "failpoints")]
+use tracing::warn;
 
 use crate::conversions::table_row::parse_table_row_from_postgres_copy_bytes;
 use crate::error::{ErrorKind, EtlResult};
 use crate::etl_error;
+#[cfg(feature = "failpoints")]
 use crate::failpoints::{SEND_STATUS_UPDATE_FP, etl_fail_point_active};
 use crate::metrics::{ETL_COPIED_TABLE_ROW_SIZE_BYTES, PIPELINE_ID_LABEL};
 use crate::types::{PipelineId, TableRow};
