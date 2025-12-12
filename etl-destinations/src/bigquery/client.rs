@@ -849,6 +849,11 @@ fn bq_error_to_etl_error(err: BQError) -> EtlError {
                 == "The caller does not have permission to execute the specified operation"
             {
                 (ErrorKind::PermissionDenied, "BigQuery permission denied")
+            } else if is_schema_mismatch_message(status.message()) {
+                (
+                    ErrorKind::DestinationSchemaMismatch,
+                    "BigQuery schema mismatch",
+                )
             } else {
                 (ErrorKind::DestinationError, "BigQuery gRPC status error")
             }
