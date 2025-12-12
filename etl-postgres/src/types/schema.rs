@@ -17,6 +17,15 @@ pub enum SchemaError {
 /// An object identifier in Postgres.
 type Oid = u32;
 
+/// Snapshot identifier for schema versioning.
+///
+/// The value represents the start_lsn of the DDL message that created this schema version.
+/// A value of 0 indicates the initial schema before any DDL changes.
+pub type SnapshotId = i64;
+
+/// The initial snapshot ID used for the first schema version.
+pub const INITIAL_SNAPSHOT_ID: SnapshotId = 0;
+
 /// A fully qualified Postgres table name consisting of a schema and table name.
 ///
 /// This type represents a table identifier in Postgres, which requires both a schema name
@@ -189,23 +198,39 @@ impl ToSql for TableId {
 /// Represents the complete schema of a Postgres table.
 ///
 /// This type contains all metadata about a table including its name, OID,
-/// and the schemas of all its columns.
+/// the schemas of all its columns, and a snapshot identifier for versioning.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct TableSchema {
-    /// The Postgres OID of the table
+    /// The Postgres OID of the table.
     pub id: TableId,
-    /// The fully qualified name of the table
+    /// The fully qualified name of the table.
     pub name: TableName,
-    /// The schemas of all columns in the table
+    /// The schemas of all columns in the table.
     pub column_schemas: Vec<ColumnSchema>,
+    /// The snapshot identifier for this schema version.
+    ///
+    /// Value 0 indicates the initial schema, other values are start_lsn positions of DDL changes.
+    pub snapshot_id: SnapshotId,
 }
 
 impl TableSchema {
+    /// Creates a new [`TableSchema`] with the initial snapshot ID (0).
     pub fn new(id: TableId, name: TableName, column_schemas: Vec<ColumnSchema>) -> Self {
+        Self::with_snapshot_id(id, name, column_schemas, INITIAL_SNAPSHOT_ID)
+    }
+
+    /// Creates a new [`TableSchema`] with a specific snapshot ID.
+    pub fn with_snapshot_id(
+        id: TableId,
+        name: TableName,
+        column_schemas: Vec<ColumnSchema>,
+        snapshot_id: SnapshotId,
+    ) -> Self {
         Self {
             id,
             name,
             column_schemas,
+            snapshot_id,
         }
     }
 
@@ -231,7 +256,7 @@ impl TableSchema {
 pub struct ReplicationMask(Arc<Vec<u8>>);
 
 impl ReplicationMask {
-    /// Creates a new [`ReplicationMask`] from a table schema and column names.
+    /// Tries to create a new [`ReplicationMask`] from a table schema and column names.
     ///
     /// The mask is constructed by checking which column names from the schema are present
     /// in the provided set of replicated column names.
@@ -243,7 +268,7 @@ impl ReplicationMask {
     ///
     /// The column validation occurs because we have to make sure that the stored table schema is always
     /// up to date, if not, it's a critical problem.
-    pub fn build(
+    pub fn try_build(
         table_schema: &TableSchema,
         replicated_column_names: &HashSet<String>,
     ) -> Result<Self, SchemaError> {
@@ -259,10 +284,52 @@ impl ReplicationMask {
             .cloned()
             .collect();
 
+        // This check ensures all replicated columns are present in the schema.
+        //
+        // Limitation: If a column exists in the schema but is absent from the replicated columns,
+        // we assume publication-level column filtering is enabled. However, this is indistinguishable
+        // from an invalid state where the schema has diverged, we cannot detect the difference.
+        //
+        // How schema divergence occurs: When progress tracking fails and the system restarts,
+        // we may receive a `Relation` message reflecting the *current* table schema rather than
+        // the schema at the time the in-flight events were emitted. This is how Postgres handles
+        // initial `Relation` messages on reconnection. It's not the wrong behavior since the data
+        // has the columns that it announces, but it conflicts with our schema management logic.
+        //
+        // Invariant: Our schema management assumes the schema in `Relation` messages is consistent
+        // with the schema under which the corresponding row events were produced.
+        //
+        // In the future we might want to implement a system to go around this edge case.
         if !unknown_columns.is_empty() {
             return Err(SchemaError::UnknownReplicatedColumns(unknown_columns));
         }
 
+        Ok(Self::build(table_schema, replicated_column_names))
+    }
+
+    /// Creates a new [`ReplicationMask`] from a table schema and column names, falling back
+    /// to an all-replicated mask if validation fails.
+    ///
+    /// This method attempts to validate that all replicated column names exist in the schema.
+    /// If validation succeeds, it builds a mask based on matching columns. If validation fails
+    /// (unknown columns are present), it returns a mask with all columns marked as replicated.
+    ///
+    /// This fallback behavior handles the case where Postgres sends a `Relation` message on
+    /// reconnection with the current schema, but the stored schema is from an earlier point
+    /// before DDL changes. Rather than failing, we enable all columns and let the system
+    /// converge when the actual DDL message is replayed.
+    pub fn build_or_all(
+        table_schema: &TableSchema,
+        replicated_column_names: &HashSet<String>,
+    ) -> Self {
+        match Self::try_build(table_schema, replicated_column_names) {
+            Ok(mask) => mask,
+            Err(_) => Self::all(table_schema),
+        }
+    }
+
+    /// Creates a new [`ReplicationMask`] from a table schema and column names.
+    pub fn build(table_schema: &TableSchema, replicated_column_names: &HashSet<String>) -> Self {
         let mask = table_schema
             .column_schemas
             .iter()
@@ -275,7 +342,13 @@ impl ReplicationMask {
             })
             .collect();
 
-        Ok(Self(Arc::new(mask)))
+        Self(Arc::new(mask))
+    }
+
+    /// Creates a [`ReplicationMask`] with all columns marked as replicated.
+    pub fn all(table_schema: &TableSchema) -> Self {
+        let mask = vec![1; table_schema.column_schemas.len()];
+        Self(Arc::new(mask))
     }
 
     /// Returns the underlying mask as a slice.
@@ -378,48 +451,48 @@ mod tests {
     }
 
     #[test]
-    fn test_replication_mask_build_all_columns_replicated() {
+    fn test_replication_mask_try_build_all_columns_replicated() {
         let schema = create_test_table_schema();
         let replicated_columns: HashSet<String> = ["id", "name", "age"]
             .into_iter()
             .map(String::from)
             .collect();
 
-        let mask = ReplicationMask::build(&schema, &replicated_columns).unwrap();
+        let mask = ReplicationMask::try_build(&schema, &replicated_columns).unwrap();
 
         assert_eq!(mask.as_slice(), &[1, 1, 1]);
     }
 
     #[test]
-    fn test_replication_mask_build_partial_columns_replicated() {
+    fn test_replication_mask_try_build_partial_columns_replicated() {
         let schema = create_test_table_schema();
         let replicated_columns: HashSet<String> =
             ["id", "age"].into_iter().map(String::from).collect();
 
-        let mask = ReplicationMask::build(&schema, &replicated_columns).unwrap();
+        let mask = ReplicationMask::try_build(&schema, &replicated_columns).unwrap();
 
         assert_eq!(mask.as_slice(), &[1, 0, 1]);
     }
 
     #[test]
-    fn test_replication_mask_build_no_columns_replicated() {
+    fn test_replication_mask_try_build_no_columns_replicated() {
         let schema = create_test_table_schema();
         let replicated_columns: HashSet<String> = HashSet::new();
 
-        let mask = ReplicationMask::build(&schema, &replicated_columns).unwrap();
+        let mask = ReplicationMask::try_build(&schema, &replicated_columns).unwrap();
 
         assert_eq!(mask.as_slice(), &[0, 0, 0]);
     }
 
     #[test]
-    fn test_replication_mask_build_unknown_column_error() {
+    fn test_replication_mask_try_build_unknown_column_error() {
         let schema = create_test_table_schema();
         let replicated_columns: HashSet<String> = ["id", "unknown_column"]
             .into_iter()
             .map(String::from)
             .collect();
 
-        let result = ReplicationMask::build(&schema, &replicated_columns);
+        let result = ReplicationMask::try_build(&schema, &replicated_columns);
 
         assert!(result.is_err());
         let err = result.unwrap_err();
@@ -431,12 +504,12 @@ mod tests {
     }
 
     #[test]
-    fn test_replication_mask_build_multiple_unknown_columns_error() {
+    fn test_replication_mask_try_build_multiple_unknown_columns_error() {
         let schema = create_test_table_schema();
         let replicated_columns: HashSet<String> =
             ["id", "foo", "bar"].into_iter().map(String::from).collect();
 
-        let result = ReplicationMask::build(&schema, &replicated_columns);
+        let result = ReplicationMask::try_build(&schema, &replicated_columns);
 
         assert!(result.is_err());
         let err = result.unwrap_err();
@@ -446,5 +519,38 @@ mod tests {
                 assert_eq!(columns, vec!["bar".to_string(), "foo".to_string()]);
             }
         }
+    }
+
+    #[test]
+    fn test_replication_mask_build_or_all_success() {
+        let schema = create_test_table_schema();
+        let replicated_columns: HashSet<String> =
+            ["id", "age"].into_iter().map(String::from).collect();
+
+        let mask = ReplicationMask::build_or_all(&schema, &replicated_columns);
+
+        assert_eq!(mask.as_slice(), &[1, 0, 1]);
+    }
+
+    #[test]
+    fn test_replication_mask_build_or_all_falls_back_to_all() {
+        let schema = create_test_table_schema();
+        let replicated_columns: HashSet<String> = ["id", "unknown_column"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+
+        let mask = ReplicationMask::build_or_all(&schema, &replicated_columns);
+
+        // Falls back to all columns being replicated.
+        assert_eq!(mask.as_slice(), &[1, 1, 1]);
+    }
+
+    #[test]
+    fn test_replication_mask_all() {
+        let schema = create_test_table_schema();
+        let mask = ReplicationMask::all(&schema);
+
+        assert_eq!(mask.as_slice(), &[1, 1, 1]);
     }
 }

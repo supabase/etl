@@ -1,6 +1,6 @@
 use etl_config::shared::PipelineConfig;
 use etl_postgres::replication::slots::EtlReplicationSlot;
-use etl_postgres::types::{ReplicatedTableSchema, ReplicationMask, TableId};
+use etl_postgres::types::{ReplicatedTableSchema, ReplicationMask, SchemaError, TableId};
 use futures::StreamExt;
 use metrics::histogram;
 use std::sync::Arc;
@@ -17,7 +17,7 @@ use crate::destination::Destination;
 use crate::error::{ErrorKind, EtlResult};
 #[cfg(feature = "failpoints")]
 use crate::failpoints::{
-    START_TABLE_SYNC_BEFORE_DATA_SYNC_SLOT_CREATION, START_TABLE_SYNC_DURING_DATA_SYNC,
+    START_TABLE_SYNC_BEFORE_DATA_SYNC_SLOT_CREATION_FP, START_TABLE_SYNC_DURING_DATA_SYNC_FP,
     etl_fail_point,
 };
 use crate::metrics::{
@@ -163,7 +163,7 @@ where
 
             // Fail point to test when the table sync fails before copying data.
             #[cfg(feature = "failpoints")]
-            etl_fail_point(START_TABLE_SYNC_BEFORE_DATA_SYNC_SLOT_CREATION)?;
+            etl_fail_point(START_TABLE_SYNC_BEFORE_DATA_SYNC_SLOT_CREATION_FP)?;
 
             // We create the slot with a transaction, since we need to have a consistent snapshot of the database
             // before copying the schema and tables.
@@ -202,7 +202,18 @@ where
                 .await?;
 
             // Build and store the replication mask for use during CDC.
-            let replication_mask = ReplicationMask::build(&table_schema, &replicated_column_names)?;
+            // We use `try_build` here because the schema was just loaded and should match
+            // the publication's column filter. Any mismatch indicates a schema inconsistency.
+            let replication_mask =
+                ReplicationMask::try_build(&table_schema, &replicated_column_names).map_err(
+                    |err: SchemaError| {
+                        crate::etl_error!(
+                            ErrorKind::InvalidState,
+                            "Schema mismatch during table sync",
+                            format!("{}", err)
+                        )
+                    },
+                )?;
             replication_masks
                 .set(table_id, replication_mask.clone())
                 .await;
@@ -298,7 +309,7 @@ where
 
                         // Fail point to test when the table sync fails after copying one batch.
                         #[cfg(feature = "failpoints")]
-                        etl_fail_point(START_TABLE_SYNC_DURING_DATA_SYNC)?;
+                        etl_fail_point(START_TABLE_SYNC_DURING_DATA_SYNC_FP)?;
                     }
                     ShutdownResult::Shutdown(_) => {
                         // If we received a shutdown in the middle of a table copy, we bail knowing

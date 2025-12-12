@@ -100,6 +100,7 @@ pub enum ErrorKind {
     SourceSchemaError,
     MissingTableSchema,
     MissingTableMapping,
+    CorruptedTableSchema,
     DestinationTableNameInvalid,
     DestinationNamespaceAlreadyExists,
     DestinationTableAlreadyExists,
@@ -1010,19 +1011,22 @@ impl From<etl_postgres::replication::slots::EtlReplicationSlotError> for EtlErro
     }
 }
 
-/// Converts [`etl_postgres::types::SchemaError`] to [`EtlError`] with [`ErrorKind::InvalidState`].
+/// Converts [`etl_postgres::types::SchemaError`] to [`EtlError`] with [`ErrorKind::CorruptedTableSchema`].
 impl From<etl_postgres::types::SchemaError> for EtlError {
     #[track_caller]
     fn from(err: etl_postgres::types::SchemaError) -> EtlError {
         match err {
             etl_postgres::types::SchemaError::UnknownReplicatedColumns(columns) => {
                 EtlError::from_components(
-                    ErrorKind::InvalidState,
+                    ErrorKind::CorruptedTableSchema,
                     Cow::Borrowed(
                         "Received columns during replication that are not in the stored table schema",
                     ),
                     Some(Cow::Owned(format!(
-                        "The columns that are not in the table schema are: {columns:?}"
+                        "Unknown columns: {columns:?}\n\n\
+                        Cause: The pipeline crashed after a schema change but before reporting progress \
+                        back to Postgres. On restart, event streaming resumed from past events with an \
+                        outdated schema."
                     ))),
                     None,
                 )

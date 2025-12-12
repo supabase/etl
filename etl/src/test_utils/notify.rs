@@ -1,6 +1,6 @@
 use std::{collections::HashMap, fmt, sync::Arc};
 
-use etl_postgres::types::{TableId, TableSchema};
+use etl_postgres::types::{SnapshotId, TableId, TableSchema};
 use tokio::sync::{Notify, RwLock};
 
 use crate::error::{ErrorKind, EtlResult};
@@ -29,7 +29,8 @@ type TableStateCondition = (
 struct Inner {
     table_replication_states: HashMap<TableId, TableReplicationPhase>,
     table_state_history: HashMap<TableId, Vec<TableReplicationPhase>>,
-    table_schemas: HashMap<TableId, Arc<TableSchema>>,
+    /// Stores table schemas in insertion order per table.
+    table_schemas: HashMap<TableId, Vec<Arc<TableSchema>>>,
     table_mappings: HashMap<TableId, String>,
     table_state_type_conditions: Vec<TableStateTypeCondition>,
     table_state_conditions: Vec<TableStateCondition>,
@@ -103,12 +104,35 @@ impl NotifyingStore {
         inner.table_replication_states.clone()
     }
 
-    pub async fn get_table_schemas(&self) -> HashMap<TableId, TableSchema> {
+    pub async fn get_latest_table_schemas(&self) -> HashMap<TableId, TableSchema> {
         let inner = self.inner.read().await;
+
+        // Return the latest schema version for each table (last in the Vec).
         inner
             .table_schemas
             .iter()
-            .map(|(id, schema)| (*id, Arc::as_ref(schema).clone()))
+            .filter_map(|(table_id, schemas)| {
+                schemas
+                    .last()
+                    .map(|schema| (*table_id, Arc::as_ref(schema).clone()))
+            })
+            .collect()
+    }
+
+    pub async fn get_table_schemas(&self) -> HashMap<TableId, Vec<(SnapshotId, TableSchema)>> {
+        let inner = self.inner.read().await;
+
+        // Return schemas in insertion order per table.
+        inner
+            .table_schemas
+            .iter()
+            .map(|(table_id, schemas)| {
+                let schemas_with_ids: Vec<_> = schemas
+                    .iter()
+                    .map(|schema| (schema.snapshot_id, Arc::as_ref(schema).clone()))
+                    .collect();
+                (*table_id, schemas_with_ids)
+            })
             .collect()
     }
 
@@ -290,30 +314,50 @@ impl StateStore for NotifyingStore {
 }
 
 impl SchemaStore for NotifyingStore {
-    async fn get_table_schema(&self, table_id: &TableId) -> EtlResult<Option<Arc<TableSchema>>> {
+    async fn get_table_schema(
+        &self,
+        table_id: &TableId,
+        snapshot_id: SnapshotId,
+    ) -> EtlResult<Option<Arc<TableSchema>>> {
         let inner = self.inner.read().await;
 
-        Ok(inner.table_schemas.get(table_id).cloned())
+        // Find the best matching schema (largest snapshot_id <= requested).
+        let best_match = inner.table_schemas.get(table_id).and_then(|schemas| {
+            schemas
+                .iter()
+                .filter(|schema| schema.snapshot_id <= snapshot_id)
+                .max_by_key(|schema| schema.snapshot_id)
+                .cloned()
+        });
+
+        Ok(best_match)
     }
 
     async fn get_table_schemas(&self) -> EtlResult<Vec<Arc<TableSchema>>> {
         let inner = self.inner.read().await;
 
-        Ok(inner.table_schemas.values().cloned().collect())
+        Ok(inner
+            .table_schemas
+            .values()
+            .flat_map(|schemas| schemas.iter().cloned())
+            .collect())
     }
 
     async fn load_table_schemas(&self) -> EtlResult<usize> {
         let inner = self.inner.read().await;
-        Ok(inner.table_schemas.len())
+        Ok(inner.table_schemas.values().map(|v| v.len()).sum())
     }
 
     async fn store_table_schema(&self, table_schema: TableSchema) -> EtlResult<Arc<TableSchema>> {
         let mut inner = self.inner.write().await;
 
+        let table_id = table_schema.id;
         let table_schema = Arc::new(table_schema);
         inner
             .table_schemas
-            .insert(table_schema.id, table_schema.clone());
+            .entry(table_id)
+            .or_default()
+            .push(table_schema.clone());
 
         Ok(table_schema)
     }

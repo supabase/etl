@@ -22,11 +22,11 @@ chrono = { workspace = true }
 const-oid = { workspace = true, default-features = false }
 fail = { workspace = true }
 futures = { workspace = true }
-log = "0.4.28"
 metrics = { workspace = true }
 pg_escape = { workspace = true }
 pin-project-lite = { workspace = true }
 postgres-replication = { workspace = true }
+rand = { workspace = true, features = ["thread_rng"] }
 ring = { workspace = true, default-features = false }
 rustls = { workspace = true, features = ["aws-lc-rs", "logging"] }
 rustls-pemfile = { workspace = true, features = ["std"] }
@@ -52,5 +52,3 @@ etl-postgres = { workspace = true, features = [
     "test-utils",
 ] }
 etl-telemetry = { workspace = true }
-
-rand = { workspace = true, features = ["thread_rng"] }
