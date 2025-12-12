@@ -328,7 +328,7 @@ where
         &self,
         replicated_table_schema: &ReplicatedTableSchema,
         use_cdc_sequence_column: bool,
-    ) -> EtlResult<(SequencedBigQueryTableId, Arc<TableDescriptor>)> {
+    ) -> EtlResult<(SequencedBigQueryTableId, TableDescriptor)> {
         // We hold the lock for the entire preparation to avoid race conditions since the consistency
         // of this code path is critical.
         let mut inner = self.inner.lock().await;
@@ -388,12 +388,17 @@ where
         )
         .await?;
 
+        // Note: We return TableDescriptor by value for simplicity, which means callers clone it
+        // when creating multiple batches. This is acceptable because the descriptor is small
+        // (one String per column) and the cost is negligible compared to network I/O. If profiling
+        // shows this is a bottleneck, we could wrap it in Arc here and use Arc::unwrap_or_clone
+        // at the call site to avoid redundant clones.
         let table_descriptor = BigQueryClient::column_schemas_to_table_descriptor(
             replicated_table_schema,
             use_cdc_sequence_column,
         );
 
-        Ok((sequenced_bigquery_table_id, Arc::new(table_descriptor)))
+        Ok((sequenced_bigquery_table_id, table_descriptor))
     }
 
     /// Adds a table to the creation cache to avoid redundant existence checks.
@@ -516,7 +521,7 @@ where
         }
 
         // Stream with schema mismatch retry.
-        let (bytes_sent, bytes_received) = self.stream_with_schema_retry(table_batches).await?;
+        let (bytes_sent, bytes_received) = self.stream_with_schema_retry(&table_batches).await?;
 
         if bytes_sent > 0 {
             // Logs with egress_metric = true can be used to identify egress logs.
@@ -753,22 +758,28 @@ where
     /// may cache stale schema information and reject inserts with "extra field" errors.
     /// This method retries streaming operations when such errors are detected, allowing
     /// time for the schema cache to refresh.
-    async fn stream_with_schema_retry<T>(&self, table_batches: T) -> EtlResult<(usize, usize)>
-    where
-        T: Into<Arc<[TableBatch<BigQueryTableRow>]>>,
-    {
-        let retry_delay = Duration::from_millis(SCHEMA_MISMATCH_RETRY_DELAY_MS);
-        let mut attempts = 0;
-
-        let table_batches = table_batches.into();
+    ///
+    /// Takes a slice of `Arc<TableBatch>` to enable efficient retries - on each attempt,
+    /// we iterate over the slice and clone the `Arc`s (O(1) per batch) rather than
+    /// recreating the batches.
+    async fn stream_with_schema_retry(
+        &self,
+        table_batches: &[Arc<TableBatch<BigQueryTableRow>>],
+    ) -> EtlResult<(usize, usize)> {
         if table_batches.is_empty() {
             return Ok((0, 0));
         }
 
+        let retry_delay = Duration::from_millis(SCHEMA_MISMATCH_RETRY_DELAY_MS);
+        let mut attempts = 0;
+
         loop {
+            // Clone the Arc references (O(1) per batch) to create an iterator for this attempt.
+            let batches_iter = table_batches.iter().cloned();
+
             match self
                 .client
-                .stream_table_batches_concurrent(table_batches.clone(), self.max_concurrent_streams)
+                .stream_table_batches_concurrent(batches_iter, self.max_concurrent_streams)
                 .await
             {
                 Ok(result) => return Ok(result),
@@ -878,7 +889,7 @@ where
             if !table_id_to_data.is_empty() {
                 // Prepare batch metadata for all tables before streaming.
                 // This collects (sequenced_table_id, table_descriptor, rows) for retry support.
-                let mut prepared_data: Vec<(String, Arc<TableDescriptor>, Vec<TableRow>)> =
+                let mut prepared_data: Vec<(String, TableDescriptor, Vec<TableRow>)> =
                     Vec::with_capacity(table_id_to_data.len());
 
                 for (_, (replicated_table_schema, table_rows)) in table_id_to_data {
@@ -907,7 +918,7 @@ where
 
                 // Stream with schema mismatch retry.
                 let (bytes_sent, bytes_received) =
-                    self.stream_with_schema_retry(table_batches).await?;
+                    self.stream_with_schema_retry(&table_batches).await?;
 
                 if bytes_sent > 0 {
                     // Logs with egress_metric = true can be used to identify egress logs.

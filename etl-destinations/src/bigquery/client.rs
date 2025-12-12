@@ -394,12 +394,17 @@ impl BigQueryClient {
     /// which can be processed concurrently.
     /// If ordering guarantees are needed, all data for a given table must be included
     /// in a single batch.
-    pub async fn stream_table_batches_concurrent(
+    pub async fn stream_table_batches_concurrent<I>(
         &self,
-        table_batches: Arc<[TableBatch<BigQueryTableRow>]>,
+        table_batches: I,
         max_concurrent_streams: usize,
-    ) -> EtlResult<(usize, usize)> {
-        if table_batches.is_empty() {
+    ) -> EtlResult<(usize, usize)>
+    where
+        I: IntoIterator<Item = Arc<TableBatch<BigQueryTableRow>>>,
+        I::IntoIter: ExactSizeIterator,
+    {
+        let table_batches = table_batches.into_iter();
+        if table_batches.len() == 0 {
             return Ok((0, 0));
         }
 
@@ -462,14 +467,14 @@ impl BigQueryClient {
     /// Creates a TableBatch for a specific table with validated rows.
     ///
     /// Converts TableRow instances to BigQueryTableRow and creates a properly configured
-    /// TableBatch with the appropriate stream name and table descriptor.
+    /// TableBatch wrapped in Arc for efficient sharing and retry operations.
     pub fn create_table_batch(
         &self,
         dataset_id: &BigQueryDatasetId,
         table_id: &BigQueryTableId,
-        table_descriptor: Arc<TableDescriptor>,
+        table_descriptor: TableDescriptor,
         rows: Vec<TableRow>,
-    ) -> EtlResult<TableBatch<BigQueryTableRow>> {
+    ) -> EtlResult<Arc<TableBatch<BigQueryTableRow>>> {
         let validated_rows = rows
             .into_iter()
             .map(BigQueryTableRow::try_from)
@@ -484,11 +489,11 @@ impl BigQueryClient {
             table_id.to_string(),
         );
 
-        Ok(TableBatch::new(
-            Arc::new(stream_name),
+        Ok(Arc::new(TableBatch::new(
+            stream_name,
             table_descriptor,
-            validated_rows.into(),
-        ))
+            validated_rows,
+        )))
     }
 
     /// Executes a BigQuery SQL query and returns the result set.
