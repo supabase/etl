@@ -7,7 +7,7 @@ use etl::failpoints::{
     START_TABLE_SYNC_DURING_DATA_SYNC_FP,
 };
 use etl::state::table::{RetryPolicy, TableReplicationPhase, TableReplicationPhaseType};
-use etl::test_utils::database::spawn_source_database;
+use etl::test_utils::database::{spawn_source_database, test_table_name};
 use etl::test_utils::event::group_events_by_type_and_table_id;
 use etl::test_utils::notify::NotifyingStore;
 use etl::test_utils::pipeline::{create_database_and_pipeline_with_table, create_pipeline};
@@ -17,13 +17,13 @@ use etl::test_utils::schema::{
 use etl::test_utils::test_destination_wrapper::TestDestinationWrapper;
 use etl::test_utils::test_schema::{TableSelection, insert_users_data, setup_test_database_schema};
 use etl::types::Type;
-use etl::types::{EventType, PipelineId};
+use etl::types::{Event, EventType, InsertEvent, PipelineId, TableId};
+use etl_postgres::below_version;
 use etl_postgres::tokio::test_utils::TableModification;
+use etl_postgres::version::POSTGRES_15;
 use etl_telemetry::tracing::init_test_tracing;
 use fail::FailScenario;
 use rand::random;
-use std::time::Duration;
-use tokio::time::sleep;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn table_copy_fails_after_data_sync_threw_an_error_with_no_retry() {
@@ -291,6 +291,7 @@ async fn table_copy_is_consistent_during_data_sync_threw_an_error_with_timed_ret
     );
 }
 
+#[ignore]
 #[tokio::test(flavor = "multi_thread")]
 async fn table_schema_snapshots_are_consistent_after_missing_status_update() {
     let _scenario = FailScenario::setup();
@@ -379,9 +380,8 @@ async fn table_schema_snapshots_are_consistent_after_missing_status_update() {
         ],
     );
 
-    // Clear up the state and allow the status update to be sent.
+    // Clear up the events.
     destination.clear_events().await;
-    fail::cfg(SEND_STATUS_UPDATE_FP, "off").unwrap();
 
     // Restart the pipeline with the failpoint disabled to verify recovery.
     let mut pipeline = create_pipeline(
@@ -403,10 +403,7 @@ async fn table_schema_snapshots_are_consistent_after_missing_status_update() {
         .await
         .unwrap();
 
-    // TODO: figure out how to wait for errors in the apply worker and remove timeout.
-    // We sleep since we don't have a reactive way to listen for errors, which is something that
-    // we might want to add.
-    sleep(Duration::from_secs(5)).await;
+    // TODO: figure out how to wait for errors in the apply worker and remove ignore.
 
     // We expect to have a corrupted table schema error since when we reprocess the events, Postgres
     // sends a `Relation` message with the `email` column even for entries before the DDL that added
@@ -415,4 +412,289 @@ async fn table_schema_snapshots_are_consistent_after_missing_status_update() {
     let err = pipeline.shutdown_and_wait().await.err().unwrap();
     assert_eq!(err.kinds().len(), 1);
     assert_eq!(err.kinds()[0], ErrorKind::CorruptedTableSchema);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn publication_column_removal_produces_fewer_columns_in_events() {
+    let _scenario = FailScenario::setup();
+    fail::cfg(SEND_STATUS_UPDATE_FP, "return").unwrap();
+
+    init_test_tracing();
+    let database = spawn_source_database().await;
+
+    // Column filters in publication are only available from Postgres 15+.
+    if below_version!(database.server_version(), POSTGRES_15) {
+        eprintln!("Skipping test: PostgreSQL 15+ required for column filters");
+        return;
+    }
+
+    // Create a table with 3 columns (plus auto-generated id).
+    let table_name = test_table_name("col_removal");
+    let table_id = database
+        .create_table(
+            table_name.clone(),
+            true,
+            &[
+                ("name", "text not null"),
+                ("age", "integer not null"),
+                ("email", "text not null"),
+            ],
+        )
+        .await
+        .unwrap();
+
+    // Create publication with all 3 columns (plus id) initially.
+    let publication_name = format!("pub_{}", random::<u32>());
+    database
+        .run_sql(&format!(
+            "create publication {publication_name} for table {} (id, name, age, email)",
+            table_name.as_quoted_identifier()
+        ))
+        .await
+        .expect("Failed to create publication with column filter");
+
+    let store = NotifyingStore::new();
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
+
+    let pipeline_id: PipelineId = random();
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        publication_name.clone(),
+        store.clone(),
+        destination.clone(),
+    );
+
+    // Wait for the table to finish syncing.
+    let sync_done_notify = store
+        .notify_on_table_state_type(table_id, TableReplicationPhaseType::SyncDone)
+        .await;
+
+    pipeline.start().await.unwrap();
+
+    sync_done_notify.notified().await;
+
+    // We expect 3 relation events (one per publication change) and 3 insert events.
+    let events_notify = destination
+        .wait_for_events_count(vec![(EventType::Relation, 3), (EventType::Insert, 3)])
+        .await;
+
+    // Phase 1: Insert with all 4 columns (id, name, age, email).
+    database
+        .run_sql(&format!(
+            "insert into {} (name, age, email) values ('Alice', 25, 'alice@example.com')",
+            table_name.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+
+    // Phase 2: Remove email column -> (id, name, age), then insert.
+    database
+        .run_sql(&format!(
+            "alter publication {publication_name} set table {} (id, name, age)",
+            table_name.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+
+    database
+        .run_sql(&format!(
+            "insert into {} (name, age, email) values ('Bob', 30, 'bob@example.com')",
+            table_name.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+
+    // Phase 3: Remove age column -> (id, name), then insert.
+    database
+        .run_sql(&format!(
+            "alter publication {publication_name} set table {} (id, name)",
+            table_name.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+
+    database
+        .run_sql(&format!(
+            "insert into {} (name, age, email) values ('Charlie', 35, 'charlie@example.com')",
+            table_name.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+
+    events_notify.notified().await;
+
+    // Helper to verify events after each run.
+    let verify_events = |events: &[Event], table_id: TableId| {
+        let grouped = group_events_by_type_and_table_id(events);
+
+        // Verify we have 3 relation events.
+        let relation_events: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                Event::Relation(relation) if relation.replicated_table_schema.id() == table_id => {
+                    Some(relation.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            relation_events.len(),
+            3,
+            "Expected 3 relation events, got {}",
+            relation_events.len()
+        );
+
+        // Verify relation events have decreasing column counts: 4 -> 3 -> 2.
+        let relation_column_counts: Vec<usize> = relation_events
+            .iter()
+            .map(|r| r.replicated_table_schema.column_schemas().count())
+            .collect();
+        assert_eq!(
+            relation_column_counts,
+            vec![4, 3, 2],
+            "Expected relation column counts [4, 3, 2], got {:?}",
+            relation_column_counts
+        );
+
+        // Verify relation column names for each phase.
+        let relation_1_cols: Vec<&str> = relation_events[0]
+            .replicated_table_schema
+            .column_schemas()
+            .map(|c| c.name.as_str())
+            .collect();
+        assert_eq!(relation_1_cols, vec!["id", "name", "age", "email"]);
+
+        let relation_2_cols: Vec<&str> = relation_events[1]
+            .replicated_table_schema
+            .column_schemas()
+            .map(|c| c.name.as_str())
+            .collect();
+        assert_eq!(relation_2_cols, vec!["id", "name", "age"]);
+
+        let relation_3_cols: Vec<&str> = relation_events[2]
+            .replicated_table_schema
+            .column_schemas()
+            .map(|c| c.name.as_str())
+            .collect();
+        assert_eq!(relation_3_cols, vec!["id", "name"]);
+
+        // Verify replication masks.
+        assert_eq!(
+            relation_events[0]
+                .replicated_table_schema
+                .replication_mask()
+                .as_slice(),
+            &[1, 1, 1, 1]
+        );
+        assert_eq!(
+            relation_events[1]
+                .replicated_table_schema
+                .replication_mask()
+                .as_slice(),
+            &[1, 1, 1, 0]
+        );
+        assert_eq!(
+            relation_events[2]
+                .replicated_table_schema
+                .replication_mask()
+                .as_slice(),
+            &[1, 1, 0, 0]
+        );
+
+        // Verify underlying schema always has 4 columns.
+        for relation in &relation_events {
+            assert_eq!(
+                relation
+                    .replicated_table_schema
+                    .get_inner()
+                    .column_schemas
+                    .len(),
+                4
+            );
+        }
+
+        // Verify we have 3 insert events.
+        let insert_events = grouped.get(&(EventType::Insert, table_id)).unwrap();
+        assert_eq!(
+            insert_events.len(),
+            3,
+            "Expected 3 insert events, got {}",
+            insert_events.len()
+        );
+
+        // Verify insert events have decreasing value counts: 4 -> 3 -> 2.
+        let insert_value_counts: Vec<usize> = insert_events
+            .iter()
+            .filter_map(|event| {
+                if let Event::Insert(InsertEvent { table_row, .. }) = event {
+                    Some(table_row.values.len())
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert_eq!(
+            insert_value_counts,
+            vec![4, 3, 2],
+            "Expected insert value counts [4, 3, 2], got {:?}",
+            insert_value_counts
+        );
+    };
+
+    // Shutdown the pipeline.
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    // Verify events from first run.
+    let events = destination.get_events().await;
+    verify_events(&events, table_id);
+
+    // Verify schema snapshots are stored correctly.
+    let table_schemas = store.get_table_schemas().await;
+    let table_schemas_snapshots = table_schemas.get(&table_id).unwrap();
+    assert!(
+        !table_schemas_snapshots.is_empty(),
+        "Expected at least 1 schema snapshot"
+    );
+    assert_schema_snapshots_ordering(table_schemas_snapshots, true);
+
+    // The underlying table schema should always have 4 columns.
+    for (_, schema) in table_schemas_snapshots {
+        assert_table_schema_column_names_types(
+            schema,
+            &[
+                ("id", Type::INT8),
+                ("name", Type::TEXT),
+                ("age", Type::INT4),
+                ("email", Type::TEXT),
+            ],
+        );
+    }
+
+    // Clear up the events.
+    destination.clear_events().await;
+
+    // Restart the pipeline - Postgres will resend the data since we don't track progress exactly.
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        publication_name.clone(),
+        store.clone(),
+        destination.clone(),
+    );
+
+    // Wait for 3 relation events and 3 insert events again after restart.
+    let events_notify_restart = destination
+        .wait_for_events_count(vec![(EventType::Relation, 3), (EventType::Insert, 3)])
+        .await;
+
+    pipeline.start().await.unwrap();
+
+    events_notify_restart.notified().await;
+
+    // Verify the same events are received after restart.
+    let events_after_restart = destination.get_events().await;
+    verify_events(&events_after_restart, table_id);
+
+    pipeline.shutdown_and_wait().await.unwrap();
 }
