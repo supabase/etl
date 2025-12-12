@@ -1,7 +1,6 @@
 use crate::types::{Event, EventType};
 use etl_postgres::types::TableId;
 use std::collections::HashMap;
-use tracing::warn;
 
 pub fn group_events_by_type(events: &[Event]) -> HashMap<EventType, Vec<Event>> {
     let mut grouped = HashMap::new();
@@ -49,7 +48,6 @@ pub fn group_events_by_type_and_table_id(
 pub fn check_events_count(events: &[Event], conditions: Vec<(EventType, u64)>) -> bool {
     let grouped_events = group_events_by_type(events);
 
-    warn!("grouped_events: {:#?}", grouped_events);
     conditions.into_iter().all(|(event_type, count)| {
         grouped_events
             .get(&event_type)
