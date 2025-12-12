@@ -356,6 +356,20 @@ where
                 )
                 .await?;
 
+            // Store the initial destination schema state with the current snapshot and mask.
+            // This is needed so that when schema changes occur, we can reconstruct the old
+            // ReplicatedTableSchema for accurate diffing.
+            self.state_store
+                .store_destination_schema_state(
+                    table_id,
+                    DestinationSchemaState {
+                        state: DestinationSchemaStateType::Applied,
+                        snapshot_id: replicated_table_schema.get_inner().snapshot_id,
+                        replication_mask: replicated_table_schema.replication_mask().clone(),
+                    },
+                )
+                .await?;
+
             // Add the sequenced table to the cache.
             Self::add_to_created_tables_cache(&mut inner, &sequenced_bigquery_table_id);
 
@@ -487,24 +501,22 @@ where
         // Split table rows into optimal batches for parallel execution.
         let table_rows_batches = split_table_rows(table_rows, self.max_concurrent_streams);
 
-        // Stream with schema mismatch retry by recreating batches on each attempt.
-        let (bytes_sent, bytes_received) = self
-            .stream_with_schema_retry(|| {
-                let mut table_batches = Vec::with_capacity(table_rows_batches.len());
-                for table_rows in &table_rows_batches {
-                    if !table_rows.is_empty() {
-                        let table_batch = self.client.create_table_batch(
-                            &self.dataset_id,
-                            &sequenced_bigquery_table_id.to_string(),
-                            table_descriptor.clone(),
-                            table_rows.clone(),
-                        )?;
-                        table_batches.push(table_batch);
-                    }
-                }
-                Ok(table_batches)
-            })
-            .await?;
+        // Create table batches from the split rows.
+        let mut table_batches = Vec::with_capacity(table_rows_batches.len());
+        for table_rows in table_rows_batches {
+            if !table_rows.is_empty() {
+                let table_batch = self.client.create_table_batch(
+                    &self.dataset_id,
+                    &sequenced_bigquery_table_id.to_string(),
+                    table_descriptor.clone(),
+                    table_rows,
+                )?;
+                table_batches.push(table_batch);
+            }
+        }
+
+        // Stream with schema mismatch retry.
+        let (bytes_sent, bytes_received) = self.stream_with_schema_retry(table_batches).await?;
 
         if bytes_sent > 0 {
             // Logs with egress_metric = true can be used to identify egress logs.
@@ -572,6 +584,7 @@ where
             }
             Some(state) if state.state == DestinationSchemaStateType::Applied => {
                 let current_snapshot_id = state.snapshot_id;
+                let current_replication_mask = state.replication_mask.clone();
 
                 if current_snapshot_id == new_snapshot_id {
                     // Schema hasn't changed, nothing to do.
@@ -604,17 +617,18 @@ where
                         )
                     })?;
 
-                // Build a ReplicatedTableSchema from the old TableSchema.
-                // For diffing purposes, we consider all columns as replicated.
-                let old_schema = ReplicatedTableSchema::all(old_table_schema);
+                // Build a ReplicatedTableSchema using the stored replication mask.
+                let old_schema =
+                    ReplicatedTableSchema::from_mask(old_table_schema, current_replication_mask);
 
-                // Mark as applying before making changes (with the NEW snapshot_id).
+                // Mark as applying before making changes (with the NEW snapshot_id and mask).
                 self.state_store
                     .store_destination_schema_state(
                         table_id,
                         DestinationSchemaState {
                             state: DestinationSchemaStateType::Applying,
                             snapshot_id: new_snapshot_id,
+                            replication_mask: new_schema.replication_mask().clone(),
                         },
                     )
                     .await?;
@@ -636,6 +650,7 @@ where
                         DestinationSchemaState {
                             state: DestinationSchemaStateType::Applied,
                             snapshot_id: new_snapshot_id,
+                            replication_mask: new_schema.replication_mask().clone(),
                         },
                     )
                     .await?;
@@ -738,26 +753,22 @@ where
     /// may cache stale schema information and reject inserts with "extra field" errors.
     /// This method retries streaming operations when such errors are detected, allowing
     /// time for the schema cache to refresh.
-    ///
-    /// Since `TableBatch` doesn't implement `Clone`, this method accepts a closure that
-    /// creates fresh batches for each retry attempt.
-    async fn stream_with_schema_retry<F>(&self, mut create_batches: F) -> EtlResult<(usize, usize)>
+    async fn stream_with_schema_retry<T>(&self, table_batches: T) -> EtlResult<(usize, usize)>
     where
-        F: FnMut() -> EtlResult<Vec<TableBatch<BigQueryTableRow>>>,
+        T: Into<Arc<[TableBatch<BigQueryTableRow>]>>,
     {
         let retry_delay = Duration::from_millis(SCHEMA_MISMATCH_RETRY_DELAY_MS);
         let mut attempts = 0;
 
+        let table_batches = table_batches.into();
+        if table_batches.is_empty() {
+            return Ok((0, 0));
+        }
+
         loop {
-            let table_batches = create_batches()?;
-
-            if table_batches.is_empty() {
-                return Ok((0, 0));
-            }
-
             match self
                 .client
-                .stream_table_batches_concurrent(table_batches, self.max_concurrent_streams)
+                .stream_table_batches_concurrent(table_batches.clone(), self.max_concurrent_streams)
                 .await
             {
                 Ok(result) => return Ok(result),
@@ -882,22 +893,21 @@ where
                     ));
                 }
 
-                // Stream with schema mismatch retry by recreating batches on each attempt.
-                let (bytes_sent, bytes_received) = self
-                    .stream_with_schema_retry(|| {
-                        let mut table_batches = Vec::with_capacity(prepared_data.len());
-                        for (table_id, descriptor, rows) in &prepared_data {
-                            let table_batch = self.client.create_table_batch(
-                                &self.dataset_id,
-                                table_id,
-                                descriptor.clone(),
-                                rows.clone(),
-                            )?;
-                            table_batches.push(table_batch);
-                        }
-                        Ok(table_batches)
-                    })
-                    .await?;
+                // Create table batches from prepared data.
+                let mut table_batches = Vec::with_capacity(prepared_data.len());
+                for (table_id, descriptor, rows) in prepared_data {
+                    let table_batch = self.client.create_table_batch(
+                        &self.dataset_id,
+                        &table_id,
+                        descriptor,
+                        rows,
+                    )?;
+                    table_batches.push(table_batch);
+                }
+
+                // Stream with schema mismatch retry.
+                let (bytes_sent, bytes_received) =
+                    self.stream_with_schema_retry(table_batches).await?;
 
                 if bytes_sent > 0 {
                     // Logs with egress_metric = true can be used to identify egress logs.
