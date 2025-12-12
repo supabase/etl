@@ -1776,14 +1776,10 @@ async fn table_validation_out_of_bounds_values() {
     );
 }
 
-// TODO: These schema change tests are currently failing because BigQuery's Storage Write API
-// caches schema information and doesn't immediately reflect DDL changes. After ALTER TABLE
-// adds a column, the streaming API rejects inserts with the new column as "extra fields".
-// This requires either:
-// 1. Retry logic on schema mismatch errors
-// 2. Falling back to batch loading after schema changes
-// 3. Creating a new table version with the new schema
-#[ignore = "BigQuery Storage Write API schema cache doesn't immediately reflect DDL changes"]
+// Schema change tests verify that DDL changes (ADD/DROP/RENAME COLUMN) are correctly
+// replicated to BigQuery. The Storage Write API caches schema information, so after DDL
+// changes, initial inserts may fail with "extra fields" errors until the cache refreshes.
+// The retry logic in `stream_with_schema_retry` handles this by retrying on schema mismatch.
 #[tokio::test(flavor = "multi_thread")]
 async fn table_schema_change_add_column() {
     init_test_tracing();
@@ -1897,7 +1893,6 @@ async fn table_schema_change_add_column() {
     assert_eq!(rows.len(), 2);
 }
 
-#[ignore = "BigQuery Storage Write API schema cache doesn't immediately reflect DDL changes"]
 #[tokio::test(flavor = "multi_thread")]
 async fn table_schema_change_drop_column() {
     init_test_tracing();
@@ -2012,7 +2007,6 @@ async fn table_schema_change_drop_column() {
     assert_eq!(rows.len(), 2);
 }
 
-#[ignore = "BigQuery Storage Write API schema cache doesn't immediately reflect DDL changes"]
 #[tokio::test(flavor = "multi_thread")]
 async fn table_schema_change_rename_column() {
     init_test_tracing();
@@ -2118,7 +2112,6 @@ async fn table_schema_change_rename_column() {
     assert_eq!(rows.len(), 2);
 }
 
-#[ignore = "BigQuery Storage Write API schema cache doesn't immediately reflect DDL changes"]
 #[tokio::test(flavor = "multi_thread")]
 async fn table_schema_change_multiple_operations() {
     init_test_tracing();
