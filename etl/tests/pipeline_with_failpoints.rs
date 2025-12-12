@@ -553,8 +553,7 @@ async fn table_schema_replication_masks_are_consistent_after_restart() {
         assert_eq!(
             relation_column_counts,
             vec![4, 3, 2],
-            "Expected relation column counts [4, 3, 2], got {:?}",
-            relation_column_counts
+            "Expected relation column counts [4, 3, 2], got {relation_column_counts:?}"
         );
 
         // Verify relation column names for each phase.
@@ -637,8 +636,7 @@ async fn table_schema_replication_masks_are_consistent_after_restart() {
         assert_eq!(
             insert_value_counts,
             vec![4, 3, 2],
-            "Expected insert value counts [4, 3, 2], got {:?}",
-            insert_value_counts
+            "Expected insert value counts [4, 3, 2], got {insert_value_counts:?}"
         );
     };
 
