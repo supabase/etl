@@ -950,8 +950,6 @@ where
             let end_lsn = PgLsn::from(message.wal_end());
             state.next_status_update.update_write_lsn(end_lsn);
 
-            info!("message {:?}", message);
-
             debug!(
                 "handling logical replication data message (start_lsn: {}, end_lsn: {})",
                 start_lsn, end_lsn
