@@ -1,17 +1,23 @@
 use etl::destination::Destination;
 use etl::error::{ErrorKind, EtlError, EtlResult};
-use etl::store::state::StateStore;
+use etl::store::schema::SchemaStore;
+use etl::store::state::{DestinationSchemaState, StateStore};
 use etl::types::{
-    Cell, Event, ReplicatedTableSchema, TableId, TableName, TableRow, generate_sequence_number,
+    Cell, Event, ReplicatedTableSchema, SchemaDiff, TableId, TableName, TableRow,
+    generate_sequence_number,
 };
 use etl::{bail, etl_error};
-use gcp_bigquery_client::storage::TableDescriptor;
+use gcp_bigquery_client::storage::{TableBatch, TableDescriptor};
+
+use crate::bigquery::encoding::BigQueryTableRow;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
 use std::iter;
 use std::str::FromStr;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::Mutex;
+use tokio::time::sleep;
 use tracing::{debug, info, warn};
 
 use crate::bigquery::client::{BigQueryClient, BigQueryOperationType};
@@ -21,6 +27,14 @@ use crate::bigquery::{BigQueryDatasetId, BigQueryTableId};
 const BIGQUERY_TABLE_ID_DELIMITER: &str = "_";
 /// Replacement string for escaping underscores in Postgres names.
 const BIGQUERY_TABLE_ID_DELIMITER_ESCAPE_REPLACEMENT: &str = "__";
+
+/// Maximum number of retry attempts for schema mismatch errors.
+///
+/// After DDL changes, the BigQuery Storage Write API may cache stale schema information.
+/// These retries allow the cache to refresh before failing permanently.
+const MAX_SCHEMA_MISMATCH_ATTEMPTS: usize = 10;
+/// Delay between schema mismatch retry attempts in milliseconds.
+const SCHEMA_MISMATCH_RETRY_DELAY_MS: u64 = 1000;
 
 /// Returns the [`BigQueryTableId`] for a supplied [`TableName`].
 ///
@@ -178,7 +192,7 @@ pub struct BigQueryDestination<S> {
 
 impl<S> BigQueryDestination<S>
 where
-    S: StateStore,
+    S: StateStore + SchemaStore,
 {
     /// Creates a new [`BigQueryDestination`] using a service account key file path.
     ///
@@ -314,7 +328,7 @@ where
         &self,
         replicated_table_schema: &ReplicatedTableSchema,
         use_cdc_sequence_column: bool,
-    ) -> EtlResult<(SequencedBigQueryTableId, Arc<TableDescriptor>)> {
+    ) -> EtlResult<(SequencedBigQueryTableId, TableDescriptor)> {
         // We hold the lock for the entire preparation to avoid race conditions since the consistency
         // of this code path is critical.
         let mut inner = self.inner.lock().await;
@@ -332,6 +346,18 @@ where
         // Note that if the table is deleted outside ETL and the cache marks it as created, the
         // inserts will fail because the table will be missing and won't be created.
         if !inner.created_tables.contains(&sequenced_bigquery_table_id) {
+            let snapshot_id = replicated_table_schema.get_inner().snapshot_id;
+            let replication_mask = replicated_table_schema.replication_mask().clone();
+
+            // Mark the state as applying BEFORE creating the table. This ensures that if the
+            // process crashes during table creation, we'll detect the incomplete state on restart.
+            self.state_store
+                .store_destination_schema_state(
+                    table_id,
+                    DestinationSchemaState::applying(snapshot_id, replication_mask.clone()),
+                )
+                .await?;
+
             self.client
                 .create_table_if_missing(
                     &self.dataset_id,
@@ -339,6 +365,14 @@ where
                     &sequenced_bigquery_table_id.to_string(),
                     replicated_table_schema,
                     self.max_staleness_mins,
+                )
+                .await?;
+
+            // Mark as applied after successful table creation.
+            self.state_store
+                .store_destination_schema_state(
+                    table_id,
+                    DestinationSchemaState::applied(snapshot_id, replication_mask),
                 )
                 .await?;
 
@@ -360,12 +394,17 @@ where
         )
         .await?;
 
+        // Note: We return TableDescriptor by value for simplicity, which means callers clone it
+        // when creating multiple batches. This is acceptable because the descriptor is small
+        // (one String per column) and the cost is negligible compared to network I/O. If profiling
+        // shows this is a bottleneck, we could wrap it in Arc here and use Arc::unwrap_or_clone
+        // at the call site to avoid redundant clones.
         let table_descriptor = BigQueryClient::column_schemas_to_table_descriptor(
             replicated_table_schema,
             use_cdc_sequence_column,
         );
 
-        Ok((sequenced_bigquery_table_id, Arc::new(table_descriptor)))
+        Ok((sequenced_bigquery_table_id, table_descriptor))
     }
 
     /// Adds a table to the creation cache to avoid redundant existence checks.
@@ -487,13 +526,10 @@ where
             }
         }
 
-        // Stream all the batches concurrently.
-        if !table_batches.is_empty() {
-            let (bytes_sent, bytes_received) = self
-                .client
-                .stream_table_batches_concurrent(table_batches, self.max_concurrent_streams)
-                .await?;
+        // Stream with schema mismatch retry.
+        let (bytes_sent, bytes_received) = self.stream_with_schema_retry(&table_batches).await?;
 
+        if bytes_sent > 0 {
             // Logs with egress_metric = true can be used to identify egress logs.
             // This can e.g. be used to send egress logs to a location different
             // than the other logs. These logs should also have bytes_sent set to
@@ -510,6 +546,268 @@ where
         Ok(())
     }
 
+    /// Handles a schema change event (Relation) by computing the diff and applying changes.
+    ///
+    /// This method:
+    /// 1. Gets the current destination schema state from the state store.
+    /// 2. If no state exists, this is the initial schema - just records it as applied.
+    /// 3. If state exists and snapshot_id differs, computes the diff and applies changes.
+    /// 4. If state is in `Applying`, a previous change was interrupted - returns an error.
+    async fn handle_relation_event(&self, new_schema: &ReplicatedTableSchema) -> EtlResult<()> {
+        let table_id = new_schema.id();
+        let new_snapshot_id = new_schema.get_inner().snapshot_id;
+
+        // Get current destination schema state.
+        let current_state = self
+            .state_store
+            .get_destination_schema_state(&table_id)
+            .await?;
+
+        match current_state {
+            None => {
+                // No state exists - this is a broken invariant since the schema should
+                // have been recorded during write_table_rows before any Relation event.
+                bail!(
+                    ErrorKind::InvalidState,
+                    "Missing destination schema state",
+                    format!(
+                        "No destination schema state found for table {} when processing schema change. \
+                         This indicates a broken invariant - the schema should have been recorded \
+                         during initial table synchronization.",
+                        table_id
+                    )
+                );
+            }
+            Some(state) if state.is_applying() => {
+                // A previous schema change was interrupted, require manual intervention.
+                // The previous valid snapshot_id can be derived from table_schemas table
+                // by finding the second-highest snapshot_id for this table.
+                bail!(
+                    ErrorKind::CorruptedTableSchema,
+                    "Schema change recovery required",
+                    format!(
+                        "A previous schema change for table {} was interrupted at snapshot_id {}. \
+                         Manual intervention is required to resolve the destination schema state. \
+                         The previous valid snapshot can be derived from the table_schemas table.",
+                        table_id, state.snapshot_id
+                    )
+                );
+            }
+            Some(state) if state.is_applied() => {
+                let current_snapshot_id = state.snapshot_id;
+                let current_replication_mask = state.replication_mask.clone();
+
+                if current_snapshot_id == new_snapshot_id {
+                    // Schema hasn't changed, nothing to do.
+                    debug!(
+                        "schema for table {} unchanged (snapshot_id: {})",
+                        table_id, new_snapshot_id
+                    );
+
+                    return Ok(());
+                }
+
+                info!(
+                    "schema change detected for table {}: {} -> {}",
+                    table_id, current_snapshot_id, new_snapshot_id
+                );
+
+                // Get the old schema from the schema store to compute the diff.
+                let old_table_schema = self
+                    .state_store
+                    .get_table_schema(&table_id, current_snapshot_id)
+                    .await?
+                    .ok_or_else(|| {
+                        etl_error!(
+                            ErrorKind::InvalidState,
+                            "Old schema not found",
+                            format!(
+                                "Could not find schema for table {} at snapshot_id {}",
+                                table_id, current_snapshot_id
+                            )
+                        )
+                    })?;
+
+                // Build a ReplicatedTableSchema using the stored replication mask.
+                let old_schema =
+                    ReplicatedTableSchema::from_mask(old_table_schema, current_replication_mask);
+
+                let new_replication_mask = new_schema.replication_mask().clone();
+
+                // Mark as applying before making changes (with the NEW snapshot_id and mask).
+                self.state_store
+                    .store_destination_schema_state(
+                        table_id,
+                        DestinationSchemaState::applying(
+                            new_snapshot_id,
+                            new_replication_mask.clone(),
+                        ),
+                    )
+                    .await?;
+
+                // Compute and apply the diff.
+                let diff = old_schema.diff(new_schema);
+                if let Err(err) = self.apply_schema_diff(&table_id, &diff).await {
+                    warn!(
+                        "schema change failed for table {}: {}. Manual intervention may be required.",
+                        table_id, err
+                    );
+                    return Err(err);
+                }
+
+                // Mark as applied after successful changes.
+                self.state_store
+                    .store_destination_schema_state(
+                        table_id,
+                        DestinationSchemaState::applied(new_snapshot_id, new_replication_mask),
+                    )
+                    .await?;
+
+                info!(
+                    "schema change completed for table {}: snapshot_id {} applied",
+                    table_id, new_snapshot_id
+                );
+            }
+            Some(_) => unreachable!("All state types are covered"),
+        }
+
+        Ok(())
+    }
+
+    /// Applies a schema diff to the BigQuery table.
+    ///
+    /// Executes the necessary DDL operations (ADD COLUMN, DROP COLUMN, RENAME COLUMN)
+    /// to transform the destination schema.
+    async fn apply_schema_diff(&self, table_id: &TableId, diff: &SchemaDiff) -> EtlResult<()> {
+        if diff.is_empty() {
+            debug!("no schema changes to apply for table {}", table_id);
+            return Ok(());
+        }
+
+        // Get the BigQuery table ID for this table.
+        let bigquery_table_id = self
+            .get_sequenced_bigquery_table_id(table_id)
+            .await?
+            .ok_or_else(|| {
+                etl_error!(
+                    ErrorKind::InvalidState,
+                    "Table not found",
+                    format!(
+                        "No BigQuery table mapping found for table {}. Schema changes cannot be applied to a non-existent table.",
+                        table_id
+                    )
+                )
+            })?;
+
+        info!(
+            "applying schema changes to table {}: {} additions, {} removals, {} renames",
+            bigquery_table_id,
+            diff.columns_to_add.len(),
+            diff.columns_to_remove.len(),
+            diff.columns_to_rename.len()
+        );
+
+        // Apply column additions first (safest operation).
+        for column in &diff.columns_to_add {
+            self.client
+                .add_column(&self.dataset_id, &bigquery_table_id.to_string(), column)
+                .await?;
+        }
+
+        // Apply column renames (must be done before removals in case of position conflicts).
+        for rename in &diff.columns_to_rename {
+            self.client
+                .rename_column(
+                    &self.dataset_id,
+                    &bigquery_table_id.to_string(),
+                    &rename.old_name,
+                    &rename.new_name,
+                )
+                .await?;
+        }
+
+        // Apply column removals last.
+        for column in &diff.columns_to_remove {
+            self.client
+                .drop_column(
+                    &self.dataset_id,
+                    &bigquery_table_id.to_string(),
+                    &column.name,
+                )
+                .await?;
+        }
+
+        info!(
+            "schema changes applied successfully to table {}",
+            bigquery_table_id
+        );
+
+        Ok(())
+    }
+
+    /// Checks if an error indicates a schema mismatch that can be retried.
+    ///
+    /// Returns `true` if any of the error kinds is [`ErrorKind::DestinationSchemaMismatch`],
+    /// which indicates the BigQuery Storage Write API has a stale cached schema.
+    fn is_schema_mismatch_error(error: &EtlError) -> bool {
+        error
+            .kinds()
+            .contains(&ErrorKind::DestinationSchemaMismatch)
+    }
+
+    /// Streams table batches to BigQuery with automatic retry on schema mismatch errors.
+    ///
+    /// After DDL changes (e.g., `ALTER TABLE ADD COLUMN`), the BigQuery Storage Write API
+    /// may cache stale schema information and reject inserts with "extra field" errors.
+    /// This method retries streaming operations when such errors are detected, allowing
+    /// time for the schema cache to refresh.
+    ///
+    /// Takes a slice of `Arc<TableBatch>` to enable efficient retries - on each attempt,
+    /// we iterate over the slice and clone the `Arc`s (O(1) per batch) rather than
+    /// recreating the batches.
+    async fn stream_with_schema_retry(
+        &self,
+        table_batches: &[Arc<TableBatch<BigQueryTableRow>>],
+    ) -> EtlResult<(usize, usize)> {
+        if table_batches.is_empty() {
+            return Ok((0, 0));
+        }
+
+        let retry_delay = Duration::from_millis(SCHEMA_MISMATCH_RETRY_DELAY_MS);
+        let mut attempts = 0;
+
+        loop {
+            // Clone the Arc references (O(1) per batch) to create an iterator for this attempt.
+            let batches_iter = table_batches.iter().cloned();
+
+            match self
+                .client
+                .stream_table_batches_concurrent(batches_iter, self.max_concurrent_streams)
+                .await
+            {
+                Ok(result) => return Ok(result),
+                Err(error) => {
+                    if !Self::is_schema_mismatch_error(&error) {
+                        return Err(error);
+                    }
+
+                    attempts += 1;
+                    if attempts >= MAX_SCHEMA_MISMATCH_ATTEMPTS {
+                        return Err(error);
+                    }
+
+                    warn!(
+                        attempt = attempts,
+                        max_attempts = MAX_SCHEMA_MISMATCH_ATTEMPTS,
+                        error = %error,
+                        "schema mismatch detected; retrying after delay"
+                    );
+                    sleep(retry_delay).await;
+                }
+            }
+        }
+    }
+
     /// Processes CDC events in batches with proper ordering and truncate handling.
     ///
     /// Groups streaming operations (insert/update/delete) by table and processes them together,
@@ -524,9 +822,11 @@ where
             let mut table_id_to_data: HashMap<TableId, (ReplicatedTableSchema, Vec<TableRow>)> =
                 HashMap::new();
 
-            // Process events until we hit a truncate event or run out of events
+            // Process events until we hit a truncate or relation event, or run out of events.
+            // Truncate and Relation events require flushing all batched data first before
+            // they can be processed, to maintain correct ordering.
             while let Some(event) = events_iter.peek() {
-                if matches!(event, Event::Truncate(_)) {
+                if matches!(event, Event::Truncate(_) | Event::Relation(_)) {
                     break;
                 }
 
@@ -582,36 +882,48 @@ where
                         entry.1.push(old_table_row);
                     }
                     _ => {
-                        // Every other event type is currently not supported.
-                        debug!("skipping unsupported event in BigQuery");
+                        // Begin, Commit, Unsupported events are skipped.
+                        debug!("skipping non-data event in BigQuery");
                     }
                 }
             }
 
             // Process accumulated events for each table.
             if !table_id_to_data.is_empty() {
-                let mut table_batches = Vec::with_capacity(table_id_to_data.len());
+                // Prepare batch metadata for all tables before streaming.
+                // This collects (sequenced_table_id, table_descriptor, rows) for retry support.
+                let mut prepared_data: Vec<(String, TableDescriptor, Vec<TableRow>)> =
+                    Vec::with_capacity(table_id_to_data.len());
 
                 for (_, (replicated_table_schema, table_rows)) in table_id_to_data {
                     let (sequenced_bigquery_table_id, table_descriptor) = self
                         .prepare_table_for_streaming(&replicated_table_schema, true)
                         .await?;
 
+                    prepared_data.push((
+                        sequenced_bigquery_table_id.to_string(),
+                        table_descriptor,
+                        table_rows,
+                    ));
+                }
+
+                // Create table batches from prepared data.
+                let mut table_batches = Vec::with_capacity(prepared_data.len());
+                for (table_id, descriptor, rows) in prepared_data {
                     let table_batch = self.client.create_table_batch(
                         &self.dataset_id,
-                        &sequenced_bigquery_table_id.to_string(),
-                        table_descriptor.clone(),
-                        table_rows,
+                        &table_id,
+                        descriptor,
+                        rows,
                     )?;
                     table_batches.push(table_batch);
                 }
 
-                if !table_batches.is_empty() {
-                    let (bytes_sent, bytes_received) = self
-                        .client
-                        .stream_table_batches_concurrent(table_batches, self.max_concurrent_streams)
-                        .await?;
+                // Stream with schema mismatch retry.
+                let (bytes_sent, bytes_received) =
+                    self.stream_with_schema_retry(&table_batches).await?;
 
+                if bytes_sent > 0 {
                     // Logs with egress_metric = true can be used to identify egress logs.
                     // This can e.g. be used to send egress logs to a location different
                     // than the other logs. These logs should also have bytes_sent set to
@@ -623,6 +935,15 @@ where
                         egress_metric = true,
                         "wrote cdc events to bigquery"
                     );
+                }
+            }
+
+            // Process any Relation events (schema changes) that caused the batch to flush.
+            // Multiple consecutive Relation events are processed sequentially.
+            while let Some(Event::Relation(_)) = events_iter.peek() {
+                if let Some(Event::Relation(relation)) = events_iter.next() {
+                    self.handle_relation_event(&relation.replicated_table_schema)
+                        .await?;
                 }
             }
 
@@ -767,7 +1088,7 @@ where
 
 impl<S> Destination for BigQueryDestination<S>
 where
-    S: StateStore + Send + Sync,
+    S: StateStore + SchemaStore + Send + Sync,
 {
     fn name() -> &'static str {
         "bigquery"

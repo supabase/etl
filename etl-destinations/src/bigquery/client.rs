@@ -290,6 +290,80 @@ impl BigQueryClient {
         Ok(())
     }
 
+    /// Adds a column to an existing BigQuery table.
+    ///
+    /// Executes an ALTER TABLE ADD COLUMN statement to add a new column with the
+    /// specified schema. New columns must be nullable in BigQuery.
+    pub async fn add_column(
+        &self,
+        dataset_id: &BigQueryDatasetId,
+        table_id: &BigQueryTableId,
+        column_schema: &ColumnSchema,
+    ) -> EtlResult<()> {
+        let full_table_name = self.full_table_name(dataset_id, table_id)?;
+        let column_name = Self::sanitize_identifier(&column_schema.name, "BigQuery column name")?;
+        let column_type = Self::postgres_to_bigquery_type(&column_schema.typ);
+
+        info!(
+            "adding column `{column_name}` ({column_type}) to table {full_table_name} in BigQuery"
+        );
+
+        // BigQuery requires new columns to be nullable (no NOT NULL constraint allowed).
+        let query =
+            format!("alter table {full_table_name} add column `{column_name}` {column_type}");
+
+        let _ = self.query(QueryRequest::new(query)).await?;
+
+        Ok(())
+    }
+
+    /// Drops a column from an existing BigQuery table.
+    ///
+    /// Executes an ALTER TABLE DROP COLUMN statement to remove the specified column.
+    pub async fn drop_column(
+        &self,
+        dataset_id: &BigQueryDatasetId,
+        table_id: &BigQueryTableId,
+        column_name: &str,
+    ) -> EtlResult<()> {
+        let full_table_name = self.full_table_name(dataset_id, table_id)?;
+        let column_name = Self::sanitize_identifier(column_name, "BigQuery column name")?;
+
+        info!("dropping column `{column_name}` from table {full_table_name} in BigQuery");
+
+        let query = format!("alter table {full_table_name} drop column `{column_name}`");
+
+        let _ = self.query(QueryRequest::new(query)).await?;
+
+        Ok(())
+    }
+
+    /// Renames a column in an existing BigQuery table.
+    ///
+    /// Executes an ALTER TABLE RENAME COLUMN statement to rename the specified column.
+    pub async fn rename_column(
+        &self,
+        dataset_id: &BigQueryDatasetId,
+        table_id: &BigQueryTableId,
+        old_name: &str,
+        new_name: &str,
+    ) -> EtlResult<()> {
+        let full_table_name = self.full_table_name(dataset_id, table_id)?;
+        let old_name = Self::sanitize_identifier(old_name, "BigQuery column name")?;
+        let new_name = Self::sanitize_identifier(new_name, "BigQuery column name")?;
+
+        info!(
+            "renaming column `{old_name}` to `{new_name}` in table {full_table_name} in BigQuery"
+        );
+
+        let query =
+            format!("alter table {full_table_name} rename column `{old_name}` to `{new_name}`");
+
+        let _ = self.query(QueryRequest::new(query)).await?;
+
+        Ok(())
+    }
+
     /// Checks whether a table exists in the BigQuery dataset.
     ///
     /// Returns `true` if the table exists, `false` otherwise.
@@ -320,12 +394,17 @@ impl BigQueryClient {
     /// which can be processed concurrently.
     /// If ordering guarantees are needed, all data for a given table must be included
     /// in a single batch.
-    pub async fn stream_table_batches_concurrent(
+    pub async fn stream_table_batches_concurrent<I>(
         &self,
-        table_batches: Vec<TableBatch<BigQueryTableRow>>,
+        table_batches: I,
         max_concurrent_streams: usize,
-    ) -> EtlResult<(usize, usize)> {
-        if table_batches.is_empty() {
+    ) -> EtlResult<(usize, usize)>
+    where
+        I: IntoIterator<Item = Arc<TableBatch<BigQueryTableRow>>>,
+        I::IntoIter: ExactSizeIterator,
+    {
+        let table_batches = table_batches.into_iter();
+        if table_batches.len() == 0 {
             return Ok((0, 0));
         }
 
@@ -388,14 +467,14 @@ impl BigQueryClient {
     /// Creates a TableBatch for a specific table with validated rows.
     ///
     /// Converts TableRow instances to BigQueryTableRow and creates a properly configured
-    /// TableBatch with the appropriate stream name and table descriptor.
+    /// TableBatch wrapped in Arc for efficient sharing and retry operations.
     pub fn create_table_batch(
         &self,
         dataset_id: &BigQueryDatasetId,
         table_id: &BigQueryTableId,
-        table_descriptor: Arc<TableDescriptor>,
+        table_descriptor: TableDescriptor,
         rows: Vec<TableRow>,
-    ) -> EtlResult<TableBatch<BigQueryTableRow>> {
+    ) -> EtlResult<Arc<TableBatch<BigQueryTableRow>>> {
         let validated_rows = rows
             .into_iter()
             .map(BigQueryTableRow::try_from)
@@ -410,11 +489,11 @@ impl BigQueryClient {
             table_id.to_string(),
         );
 
-        Ok(TableBatch::new(
+        Ok(Arc::new(TableBatch::new(
             stream_name,
             table_descriptor,
             validated_rows,
-        ))
+        )))
     }
 
     /// Executes a BigQuery SQL query and returns the result set.
@@ -770,6 +849,11 @@ fn bq_error_to_etl_error(err: BQError) -> EtlError {
                 == "The caller does not have permission to execute the specified operation"
             {
                 (ErrorKind::PermissionDenied, "BigQuery permission denied")
+            } else if is_schema_mismatch_message(status.message()) {
+                (
+                    ErrorKind::DestinationSchemaMismatch,
+                    "BigQuery schema mismatch",
+                )
             } else {
                 (ErrorKind::DestinationError, "BigQuery gRPC status error")
             }
@@ -792,8 +876,34 @@ fn bq_error_to_etl_error(err: BQError) -> EtlError {
     etl_error!(kind, description, err.to_string())
 }
 
+/// Patterns that indicate a schema mismatch error from BigQuery Storage Write API.
+///
+/// These patterns are matched against the error message to determine if the error
+/// is due to schema mismatch (e.g., after DDL changes when the cached schema is stale).
+const SCHEMA_MISMATCH_PATTERNS: &[&str] = &["extra field", "is missing in the proto"];
+
+/// Checks if an error message indicates a schema mismatch.
+fn is_schema_mismatch_message(message: &str) -> bool {
+    let lower = message.to_lowercase();
+    SCHEMA_MISMATCH_PATTERNS
+        .iter()
+        .any(|pattern| lower.contains(pattern))
+}
+
 /// Converts BigQuery row errors to ETL destination errors.
+///
+/// Detects schema mismatch errors by checking for specific patterns in the error
+/// message that indicate the destination schema differs from the expected schema.
 fn row_error_to_etl_error(err: RowError) -> EtlError {
+    // Check if this is a schema mismatch error based on the message content.
+    if is_schema_mismatch_message(&err.message) {
+        return etl_error!(
+            ErrorKind::DestinationSchemaMismatch,
+            "BigQuery schema mismatch",
+            format!("{err:?}")
+        );
+    }
+
     etl_error!(
         ErrorKind::DestinationError,
         "BigQuery row error",
@@ -1201,5 +1311,18 @@ mod tests {
 
         let expected_query = "create or replace table `test-project.test_dataset.test_table` (`id` int64 not null, primary key (`id`) not enforced) options (max_staleness = interval 15 minute)";
         assert_eq!(query, expected_query);
+    }
+
+    #[test]
+    fn test_is_schema_mismatch_message() {
+        // Test messages that should match (empirically observed patterns only).
+        assert!(is_schema_mismatch_message("extra field in row"));
+        assert!(is_schema_mismatch_message("Extra Field detected"));
+
+        // Test messages that should not match.
+        assert!(!is_schema_mismatch_message("connection timeout"));
+        assert!(!is_schema_mismatch_message("permission denied"));
+        assert!(!is_schema_mismatch_message("invalid data format"));
+        assert!(!is_schema_mismatch_message(""));
     }
 }

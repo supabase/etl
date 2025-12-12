@@ -4,6 +4,8 @@ use std::{collections::HashMap, future::Future};
 use crate::error::EtlResult;
 use crate::state::table::TableReplicationPhase;
 
+use super::DestinationSchemaState;
+
 /// Trait for storing and retrieving table replication state and mapping information.
 ///
 /// [`StateStore`] implementations are responsible for defining how table replication states and
@@ -72,5 +74,25 @@ pub trait StateStore {
         &self,
         source_table_id: TableId,
         destination_table_id: String,
+    ) -> impl Future<Output = EtlResult<()>> + Send;
+
+    /// Returns the destination schema state for a table from the cache.
+    ///
+    /// Does not load any new data into the cache.
+    fn get_destination_schema_state(
+        &self,
+        table_id: &TableId,
+    ) -> impl Future<Output = EtlResult<Option<DestinationSchemaState>>> + Send;
+
+    /// Loads all destination schema states from the persistent state into the cache.
+    ///
+    /// This should be called during startup to load the states into the cache.
+    fn load_destination_schema_states(&self) -> impl Future<Output = EtlResult<usize>> + Send;
+
+    /// Stores a destination schema state in both the cache and the persistent store.
+    fn store_destination_schema_state(
+        &self,
+        table_id: TableId,
+        state: DestinationSchemaState,
     ) -> impl Future<Output = EtlResult<()>> + Send;
 }
