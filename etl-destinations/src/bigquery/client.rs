@@ -880,7 +880,7 @@ fn bq_error_to_etl_error(err: BQError) -> EtlError {
 ///
 /// These patterns are matched against the error message to determine if the error
 /// is due to schema mismatch (e.g., after DDL changes when the cached schema is stale).
-const SCHEMA_MISMATCH_PATTERNS: &[&str] = &["extra field"];
+const SCHEMA_MISMATCH_PATTERNS: &[&str] = &["extra field", "is missing in the proto"];
 
 /// Checks if an error message indicates a schema mismatch.
 fn is_schema_mismatch_message(message: &str) -> bool {
