@@ -4,6 +4,7 @@ use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use etl::config::BatchConfig;
 use etl::error::ErrorKind;
 use etl::state::table::TableReplicationPhaseType;
+use etl::store::state::StateStore;
 use etl::test_utils::database::{spawn_source_database, test_table_name};
 use etl::test_utils::notify::NotifyingStore;
 use etl::test_utils::pipeline::{create_pipeline, create_pipeline_with};
@@ -1776,13 +1777,6 @@ async fn table_validation_out_of_bounds_values() {
     );
 }
 
-/// Tests schema change support (ADD COLUMN, DROP COLUMN, RENAME COLUMN) in BigQuery.
-///
-/// This test verifies that DDL changes are correctly replicated to BigQuery by applying
-/// multiple schema changes (rename, drop, add) and verifying the final schema matches.
-/// The Storage Write API caches schema information, so after DDL changes, initial inserts
-/// may fail with "extra fields" errors until the cache refreshes. The retry logic in
-/// `stream_with_schema_retry` handles this by retrying on schema mismatch.
 #[tokio::test(flavor = "multi_thread")]
 async fn table_schema_change() {
     init_test_tracing();
@@ -1830,7 +1824,7 @@ async fn table_schema_change() {
     pipeline.start().await.unwrap();
     table_sync_done.notified().await;
 
-    // Insert initial row.
+    // Insert the initial row.
     let event_notify = destination
         .wait_for_events_count(vec![(EventType::Insert, 1)])
         .await;
@@ -1853,9 +1847,21 @@ async fn table_schema_change() {
         .unwrap();
     initial_schema.assert_columns(&["id", "name", "age", "status"]);
 
+    // Verify destination schema state is applied after initial table creation.
+    let initial_state = store
+        .get_destination_schema_state(&table_id)
+        .await
+        .unwrap()
+        .expect("destination schema state should exist after table creation");
+    assert!(
+        initial_state.is_applied(),
+        "initial destination schema state should be applied"
+    );
+    let initial_snapshot_id = initial_state.snapshot_id;
+
     // Apply multiple schema changes:
     // 1. Rename name -> full_name
-    // 2. Drop status column
+    // 2. Drop the status column
     // 3. Add email column
     //
     // Note: Each DDL change is captured via the DDL event trigger and stored in the schema
@@ -1913,7 +1919,7 @@ async fn table_schema_change() {
 
     pipeline.shutdown_and_wait().await.unwrap();
 
-    // Verify final schema:
+    // Verify the final schema:
     // - name should be renamed to full_name
     // - status should be dropped
     // - email should be added
@@ -1924,6 +1930,21 @@ async fn table_schema_change() {
     final_schema.assert_columns(&["id", "full_name", "age", "email"]);
     final_schema.assert_no_column("name");
     final_schema.assert_no_column("status");
+
+    // Verify destination schema state is applied after schema changes.
+    let final_state = store
+        .get_destination_schema_state(&table_id)
+        .await
+        .unwrap()
+        .expect("destination schema state should exist after schema change");
+    assert!(
+        final_state.is_applied(),
+        "final destination schema state should be applied"
+    );
+    assert!(
+        final_state.snapshot_id > initial_snapshot_id,
+        "snapshot_id should have increased after schema change"
+    );
 
     // Verify data was inserted correctly.
     let rows = bigquery_database.query_table(table_name).await.unwrap();
