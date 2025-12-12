@@ -169,7 +169,7 @@ impl BigQueryDatabase {
     pub async fn query_table_schema(
         &self,
         table_name: TableName,
-    ) -> Option<Vec<BigQueryColumnSchema>> {
+    ) -> Option<BigQueryTableSchema> {
         let client = self.client().unwrap();
 
         let project_id = self.project_id();
@@ -197,7 +197,7 @@ impl BigQueryDatabase {
                 .rows;
 
             if rows.is_some() || attempts_remaining == 1 {
-                return rows.map(parse_bigquery_table_rows);
+                return rows.map(|r| BigQueryTableSchema::new(parse_bigquery_table_rows(r)));
             }
 
             attempts_remaining -= 1;
@@ -1064,5 +1064,83 @@ impl From<TableRow> for BigQueryColumnSchema {
             data_type: parse_table_cell(columns[1].clone()).unwrap(),
             ordinal_position: parse_table_cell(columns[2].clone()).unwrap(),
         }
+    }
+}
+
+/// Wrapper around a BigQuery table schema for cleaner assertions in tests.
+///
+/// Provides convenient methods to check column presence and absence, making
+/// schema validation in tests more readable and reducing boilerplate.
+#[derive(Debug)]
+pub struct BigQueryTableSchema(Vec<BigQueryColumnSchema>);
+
+impl BigQueryTableSchema {
+    /// Creates a new schema wrapper from a vector of column schemas.
+    pub fn new(columns: Vec<BigQueryColumnSchema>) -> Self {
+        Self(columns)
+    }
+
+    /// Returns true if a column with the given name exists in the schema.
+    pub fn has_column(&self, name: &str) -> bool {
+        self.0.iter().any(|c| c.column_name == name)
+    }
+
+    /// Asserts that a column with the given name exists in the schema.
+    ///
+    /// Panics with a descriptive message if the column is not found.
+    pub fn assert_has_column(&self, name: &str) {
+        assert!(
+            self.has_column(name),
+            "expected column '{}' to exist in schema, but it was not found. Columns: {:?}",
+            name,
+            self.column_names()
+        );
+    }
+
+    /// Asserts that a column with the given name does not exist in the schema.
+    ///
+    /// Panics with a descriptive message if the column is found.
+    pub fn assert_no_column(&self, name: &str) {
+        assert!(
+            !self.has_column(name),
+            "expected column '{}' to not exist in schema, but it was found. Columns: {:?}",
+            name,
+            self.column_names()
+        );
+    }
+
+    /// Asserts that the schema contains exactly the specified columns (by name).
+    ///
+    /// The order of columns does not matter. CDC columns (`_CHANGE_TYPE` and
+    /// `_CHANGE_SEQUENCE_NUMBER`) are excluded from the comparison.
+    pub fn assert_columns(&self, expected: &[&str]) {
+        let actual: Vec<&str> = self
+            .0
+            .iter()
+            .map(|c| c.column_name.as_str())
+            .filter(|name| !name.starts_with("_CHANGE"))
+            .collect();
+
+        let mut expected_sorted: Vec<&str> = expected.to_vec();
+        expected_sorted.sort();
+
+        let mut actual_sorted: Vec<&str> = actual.clone();
+        actual_sorted.sort();
+
+        assert_eq!(
+            actual_sorted, expected_sorted,
+            "schema columns mismatch. Expected: {:?}, Actual: {:?}",
+            expected_sorted, actual_sorted
+        );
+    }
+
+    /// Returns the names of all columns in the schema.
+    pub fn column_names(&self) -> Vec<&str> {
+        self.0.iter().map(|c| c.column_name.as_str()).collect()
+    }
+
+    /// Returns a reference to the underlying column schemas.
+    pub fn columns(&self) -> &[BigQueryColumnSchema] {
+        &self.0
     }
 }
