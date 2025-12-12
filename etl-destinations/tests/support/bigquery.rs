@@ -166,10 +166,7 @@ impl BigQueryDatabase {
     /// Returns the column names and data types from INFORMATION_SCHEMA.COLUMNS.
     /// The table name pattern matches using REGEXP_CONTAINS to match the sequenced
     /// table name format: `{table_id}_{sequence_number}`.
-    pub async fn query_table_schema(
-        &self,
-        table_name: TableName,
-    ) -> Option<BigQueryTableSchema> {
+    pub async fn query_table_schema(&self, table_name: TableName) -> Option<BigQueryTableSchema> {
         let client = self.client().unwrap();
 
         let project_id = self.project_id();
@@ -1129,8 +1126,7 @@ impl BigQueryTableSchema {
 
         assert_eq!(
             actual_sorted, expected_sorted,
-            "schema columns mismatch. Expected: {:?}, Actual: {:?}",
-            expected_sorted, actual_sorted
+            "schema columns mismatch. Expected: {expected_sorted:?}, Actual: {actual_sorted:?}"
         );
     }
 

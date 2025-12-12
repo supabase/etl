@@ -1,7 +1,7 @@
 use etl::destination::Destination;
 use etl::error::{ErrorKind, EtlError, EtlResult};
 use etl::store::schema::SchemaStore;
-use etl::store::state::{DestinationSchemaState, DestinationSchemaStateType, StateStore};
+use etl::store::state::{DestinationSchemaState, StateStore};
 use etl::types::{
     Cell, Event, ReplicatedTableSchema, SchemaDiff, TableId, TableName, TableRow,
     generate_sequence_number,
@@ -346,6 +346,18 @@ where
         // Note that if the table is deleted outside ETL and the cache marks it as created, the
         // inserts will fail because the table will be missing and won't be created.
         if !inner.created_tables.contains(&sequenced_bigquery_table_id) {
+            let snapshot_id = replicated_table_schema.get_inner().snapshot_id;
+            let replication_mask = replicated_table_schema.replication_mask().clone();
+
+            // Mark the state as applying BEFORE creating the table. This ensures that if the
+            // process crashes during table creation, we'll detect the incomplete state on restart.
+            self.state_store
+                .store_destination_schema_state(
+                    table_id,
+                    DestinationSchemaState::applying(snapshot_id, replication_mask.clone()),
+                )
+                .await?;
+
             self.client
                 .create_table_if_missing(
                     &self.dataset_id,
@@ -356,17 +368,11 @@ where
                 )
                 .await?;
 
-            // Store the initial destination schema state with the current snapshot and mask.
-            // This is needed so that when schema changes occur, we can reconstruct the old
-            // ReplicatedTableSchema for accurate diffing.
+            // Mark as applied after successful table creation.
             self.state_store
                 .store_destination_schema_state(
                     table_id,
-                    DestinationSchemaState {
-                        state: DestinationSchemaStateType::Applied,
-                        snapshot_id: replicated_table_schema.get_inner().snapshot_id,
-                        replication_mask: replicated_table_schema.replication_mask().clone(),
-                    },
+                    DestinationSchemaState::applied(snapshot_id, replication_mask),
                 )
                 .await?;
 
@@ -572,7 +578,7 @@ where
                     )
                 );
             }
-            Some(state) if state.state == DestinationSchemaStateType::Applying => {
+            Some(state) if state.is_applying() => {
                 // A previous schema change was interrupted, require manual intervention.
                 // The previous valid snapshot_id can be derived from table_schemas table
                 // by finding the second-highest snapshot_id for this table.
@@ -587,7 +593,7 @@ where
                     )
                 );
             }
-            Some(state) if state.state == DestinationSchemaStateType::Applied => {
+            Some(state) if state.is_applied() => {
                 let current_snapshot_id = state.snapshot_id;
                 let current_replication_mask = state.replication_mask.clone();
 
@@ -626,15 +632,16 @@ where
                 let old_schema =
                     ReplicatedTableSchema::from_mask(old_table_schema, current_replication_mask);
 
+                let new_replication_mask = new_schema.replication_mask().clone();
+
                 // Mark as applying before making changes (with the NEW snapshot_id and mask).
                 self.state_store
                     .store_destination_schema_state(
                         table_id,
-                        DestinationSchemaState {
-                            state: DestinationSchemaStateType::Applying,
-                            snapshot_id: new_snapshot_id,
-                            replication_mask: new_schema.replication_mask().clone(),
-                        },
+                        DestinationSchemaState::applying(
+                            new_snapshot_id,
+                            new_replication_mask.clone(),
+                        ),
                     )
                     .await?;
 
@@ -652,11 +659,7 @@ where
                 self.state_store
                     .store_destination_schema_state(
                         table_id,
-                        DestinationSchemaState {
-                            state: DestinationSchemaStateType::Applied,
-                            snapshot_id: new_snapshot_id,
-                            replication_mask: new_schema.replication_mask().clone(),
-                        },
+                        DestinationSchemaState::applied(new_snapshot_id, new_replication_mask),
                     )
                     .await?;
 

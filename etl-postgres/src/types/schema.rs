@@ -336,7 +336,7 @@ impl TableSchema {
 /// Each element is either 0 (not replicated) or 1 (replicated), with indices
 /// corresponding to the columns in the table schema. Wrapped in [`Arc`] for
 /// efficient sharing across multiple events.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReplicationMask(Arc<Vec<u8>>);
 
 impl ReplicationMask {
