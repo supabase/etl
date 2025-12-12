@@ -415,7 +415,7 @@ async fn table_schema_snapshots_are_consistent_after_missing_status_update() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn publication_column_removal_produces_fewer_columns_in_events() {
+async fn table_schema_replication_masks_are_consistent_after_restart() {
     let _scenario = FailScenario::setup();
     fail::cfg(SEND_STATUS_UPDATE_FP, "return").unwrap();
 
