@@ -396,7 +396,7 @@ impl BigQueryClient {
     /// in a single batch.
     pub async fn stream_table_batches_concurrent(
         &self,
-        table_batches: Vec<TableBatch<BigQueryTableRow>>,
+        table_batches: Arc<[TableBatch<BigQueryTableRow>]>,
         max_concurrent_streams: usize,
     ) -> EtlResult<(usize, usize)> {
         if table_batches.is_empty() {
@@ -485,9 +485,9 @@ impl BigQueryClient {
         );
 
         Ok(TableBatch::new(
-            stream_name,
+            Arc::new(stream_name),
             table_descriptor,
-            validated_rows,
+            validated_rows.into(),
         ))
     }
 
