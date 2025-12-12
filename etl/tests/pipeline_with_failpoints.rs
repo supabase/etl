@@ -403,8 +403,10 @@ async fn table_schema_snapshots_are_consistent_after_missing_status_update() {
         .await
         .unwrap();
 
-    // We wait for a bit to make sure that the error is triggered.
-    sleep(Duration::from_secs(2)).await;
+    // TODO: figure out how to wait for errors in the apply worker and remove timeout.
+    // We sleep since we don't have a reactive way to listen for errors, which is something that
+    // we might want to add.
+    sleep(Duration::from_secs(5)).await;
 
     // We expect to have a corrupted table schema error since when we reprocess the events, Postgres
     // sends a `Relation` message with the `email` column even for entries before the DDL that added
