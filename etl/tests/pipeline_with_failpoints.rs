@@ -293,7 +293,7 @@ async fn table_copy_is_consistent_during_data_sync_threw_an_error_with_timed_ret
 
 #[ignore]
 #[tokio::test(flavor = "multi_thread")]
-async fn table_schema_snapshots_are_consistent_after_missing_status_update() {
+async fn table_schema_snapshots_are_consistent_after_missing_status_update_with_interleaved_ddl() {
     let _scenario = FailScenario::setup();
     fail::cfg(SEND_STATUS_UPDATE_FP, "return").unwrap();
 
@@ -412,6 +412,166 @@ async fn table_schema_snapshots_are_consistent_after_missing_status_update() {
     let err = pipeline.shutdown_and_wait().await.err().unwrap();
     assert_eq!(err.kinds().len(), 1);
     assert_eq!(err.kinds()[0], ErrorKind::CorruptedTableSchema);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn table_schema_snapshots_are_consistent_after_missing_status_update_with_initial_ddl() {
+    let _scenario = FailScenario::setup();
+    fail::cfg(SEND_STATUS_UPDATE_FP, "return").unwrap();
+
+    init_test_tracing();
+
+    let (database, table_name, table_id, store, destination, pipeline, pipeline_id, publication) =
+        create_database_and_pipeline_with_table(
+            "schema_add_column",
+            &[("name", "text not null"), ("age", "integer not null")],
+        )
+        .await;
+
+    // The reason for why we wait for two `Relation` messages is that since we have a DDL event before
+    // DML statements, Postgres likely avoids sending an initial `Relation` message since it's already
+    // sent given the DDL event.
+    let notify = destination
+        .wait_for_events_count(vec![(EventType::Relation, 2), (EventType::Insert, 2)])
+        .await;
+
+    // We immediately add a column to the table without any DML, to show the case where we can recover
+    // in case we immediately start with a DDL event.
+    database
+        .alter_table(
+            table_name.clone(),
+            &[TableModification::AddColumn {
+                name: "email",
+                data_type: "text null",
+            }],
+        )
+        .await
+        .unwrap();
+
+    database
+        .insert_values(
+            table_name.clone(),
+            &["name", "age", "email"],
+            &[&"Bob", &28, &"bob@example.com"],
+        )
+        .await
+        .unwrap();
+
+    database
+        .alter_table(
+            table_name.clone(),
+            &[TableModification::DropColumn { name: "age" }],
+        )
+        .await
+        .unwrap();
+
+    database
+        .insert_values(
+            table_name.clone(),
+            &["name", "email"],
+            &[&"Matt", &"matt@example.com"],
+        )
+        .await
+        .unwrap();
+
+    notify.notified().await;
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    // Assert that we got all the events correctly.
+    let events = destination.get_events().await;
+    let grouped = group_events_by_type_and_table_id(&events);
+
+    assert_eq!(
+        grouped.get(&(EventType::Relation, table_id)).unwrap().len(),
+        2
+    );
+    assert_eq!(
+        grouped.get(&(EventType::Insert, table_id)).unwrap().len(),
+        2
+    );
+
+    // Assert that we have 3 schema snapshots stored in order (1 base snapshot + 2 relation changes).
+    let table_schemas = store.get_table_schemas().await;
+    let table_schemas_snapshots = table_schemas.get(&table_id).unwrap();
+    assert_eq!(table_schemas_snapshots.len(), 3);
+    assert_schema_snapshots_ordering(table_schemas_snapshots, true);
+
+    // Verify the first snapshot has the initial schema (id, name, age).
+    let (_, first_schema) = &table_schemas_snapshots[0];
+    assert_table_schema_column_names_types(
+        first_schema,
+        &[
+            ("id", Type::INT8),
+            ("name", Type::TEXT),
+            ("age", Type::INT4),
+        ],
+    );
+
+    // Verify the first snapshot has the new schema (id, name, age, email).
+    let (_, first_schema) = &table_schemas_snapshots[1];
+    assert_table_schema_column_names_types(
+        first_schema,
+        &[
+            ("id", Type::INT8),
+            ("name", Type::TEXT),
+            ("age", Type::INT4),
+            ("email", Type::TEXT),
+        ],
+    );
+
+    // Verify the second snapshot doesn't have the age column (id, name, email).
+    let (_, second_schema) = &table_schemas_snapshots[2];
+    assert_table_schema_column_names_types(
+        second_schema,
+        &[
+            ("id", Type::INT8),
+            ("name", Type::TEXT),
+            ("email", Type::TEXT),
+        ],
+    );
+
+    // Clear up the events.
+    destination.clear_events().await;
+
+    // Restart the pipeline with the failpoint disabled to verify recovery.
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        publication,
+        store.clone(),
+        destination.clone(),
+    );
+
+    pipeline.start().await.unwrap();
+
+    let notify = destination
+        .wait_for_events_count(vec![(EventType::Relation, 2), (EventType::Insert, 3)])
+        .await;
+
+    database
+        .insert_values(
+            table_name.clone(),
+            &["name", "email"],
+            &[&"Charlie", &"charlie@example.com"],
+        )
+        .await
+        .unwrap();
+
+    notify.notified().await;
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    // Assert that we got all the events correctly.
+    let events = destination.get_events().await;
+    let grouped = group_events_by_type_and_table_id(&events);
+
+    assert_eq!(
+        grouped.get(&(EventType::Relation, table_id)).unwrap().len(),
+        2
+    );
+    assert_eq!(
+        grouped.get(&(EventType::Insert, table_id)).unwrap().len(),
+        3
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
