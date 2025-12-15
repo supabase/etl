@@ -81,64 +81,82 @@ declare
     table_oid oid;
     schema_json jsonb;
     msg_json jsonb;
+    v_wal_level text;
 begin
+    -- Check if logical replication is enabled; if not, silently skip.
+    -- This prevents crashes when ETL is installed but wal_level != logical.
+    v_wal_level := current_setting('wal_level', true);
+    if v_wal_level is null or v_wal_level != 'logical' then
+        return;
+    end if;
+
     for cmd in
         select * from pg_event_trigger_ddl_commands()
     loop
-        -- 'table' covers most ALTER TABLE operations (ADD/DROP COLUMN, ALTER TYPE, etc.)
-        -- 'table column' is returned specifically for RENAME COLUMN operations
-        if cmd.object_type not in ('table', 'table column') then
-            continue;
-        end if;
+        begin
+            -- 'table' covers most ALTER TABLE operations (ADD/DROP COLUMN, ALTER TYPE, etc.)
+            -- 'table column' is returned specifically for RENAME COLUMN operations
+            if cmd.object_type not in ('table', 'table column') then
+                continue;
+            end if;
 
-        table_oid := cmd.objid;
+            table_oid := cmd.objid;
 
-        if table_oid is null then
-            continue;
-        end if;
+            if table_oid is null then
+                continue;
+            end if;
 
-        select n.nspname, c.relname
-        into table_schema, table_name
-        from pg_class c
-                 join pg_namespace n on n.oid = c.relnamespace
-        where c.oid = table_oid
-          and c.relkind = 'r';
+            select n.nspname, c.relname
+            into table_schema, table_name
+            from pg_class c
+            join pg_namespace n on n.oid = c.relnamespace
+            where c.oid = table_oid
+              and c.relkind in ('r', 'p');
 
-        if table_schema is null or table_name is null then
-            continue;
-        end if;
+            if table_schema is null or table_name is null then
+                continue;
+            end if;
 
-        select jsonb_agg(
-                   jsonb_build_object(
-                       'name', s.name,
-                       'type_oid', s.type_oid::bigint,
-                       'type_modifier', s.type_modifier,
-                       'ordinal_position', s.ordinal_position,
-                       'primary_key_ordinal_position', s.primary_key_ordinal_position,
-                       'nullable', s.nullable
-                   )
-               )
-        into schema_json
-        from etl.describe_table_schema(table_oid) s;
+            select jsonb_agg(
+                jsonb_build_object(
+                    'name', s.name,
+                    'type_oid', s.type_oid::bigint,
+                    'type_modifier', s.type_modifier,
+                    'ordinal_position', s.ordinal_position,
+                    'primary_key_ordinal_position', s.primary_key_ordinal_position,
+                    'nullable', s.nullable
+                )
+            )
+            into schema_json
+            from etl.describe_table_schema(table_oid) s;
 
-        if schema_json is null then
-            continue;
-        end if;
+            if schema_json is null then
+                continue;
+            end if;
 
-        msg_json := jsonb_build_object(
-            'event', cmd.command_tag,
-            'schema_name', table_schema,
-            'table_name', table_name,
-            'table_id', table_oid::bigint,
-            'columns', schema_json
-        );
+            msg_json := jsonb_build_object(
+                'event', cmd.command_tag,
+                'schema_name', table_schema,
+                'table_name', table_name,
+                'table_id', table_oid::bigint,
+                'columns', schema_json
+            );
 
-        perform pg_logical_emit_message(
-            true,
-            'supabase_etl_ddl',
-            convert_to(msg_json::text, 'utf8')
-        );
+            perform pg_logical_emit_message(
+                true,
+                'supabase_etl_ddl',
+                convert_to(msg_json::text, 'utf8')
+            );
+
+        exception when others then
+            -- Never crash customer DDL; log warning instead.
+            raise warning '[ETL] emit_schema_change_messages failed for table %: %',
+                          coalesce(table_oid::text, 'unknown'), SQLERRM;
+        end;
     end loop;
+exception when others then
+    -- Outer safety net.
+    raise warning '[ETL] emit_schema_change_messages outer exception: %', SQLERRM;
 end;
 $$;
 
