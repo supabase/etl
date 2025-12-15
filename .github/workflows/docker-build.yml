@@ -4,7 +4,7 @@ on:
   workflow_call:
     inputs:
       image:
-        description: "Docker image (e.g. docker.io/<org>/<repo>)"
+        description: "Docker image (e.g. public.ecr.aws/supabase/<repo>)"
         type: string
         required: true
       checkout_ref:
@@ -35,10 +35,15 @@ on:
         description: "Build experimental image (main branch excluded)"
         type: boolean
         default: false
+    secrets:
+      PROD_AWS_ROLE:
+        description: "AWS IAM role ARN for ECR push access"
+        required: true
 
 permissions:
   contents: read
   actions: write
+  id-token: write
 
 jobs:
   # Build each platform natively on its own runner
@@ -79,12 +84,18 @@ jobs:
       - name: Set up Docker Buildx
         uses: useblacksmith/setup-docker-builder@v1
 
-      - name: Log in to Docker Hub
+      - name: Configure AWS credentials
+        if: inputs.push == true
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.PROD_AWS_ROLE }}
+          aws-region: us-east-1
+
+      - name: Log in to Amazon ECR Public
         if: inputs.push == true
         uses: docker/login-action@v3
         with:
-          username: ${{ vars.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          registry: public.ecr.aws
 
       - name: Build and Push Single-Platform Image
         id: build
@@ -139,11 +150,16 @@ jobs:
       - name: Set up Docker Buildx
         uses: useblacksmith/setup-docker-builder@v1
 
-      - name: Log in to Docker Hub
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.PROD_AWS_ROLE }}
+          aws-region: us-east-1
+
+      - name: Log in to Amazon ECR Public
         uses: docker/login-action@v3
         with:
-          username: ${{ vars.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          registry: public.ecr.aws
 
       - name: Checkout (specific ref)
         if: inputs.checkout_ref != ''
@@ -196,8 +212,7 @@ jobs:
               TAGS="${TAGS}, v${{ inputs.version }}"
             fi
           fi
-          HUB_PATH=$(echo "${IMAGE}" | sed -E 's@^docker\.io/@@')
           echo "✅ Successfully built and pushed ${NAME} multi-arch image (${MODE} mode)"
           echo "🏷️ Tags: ${TAGS}"
           echo "🏗️ Platforms: linux/amd64, linux/arm64"
-          echo "🔗 View at: https://hub.docker.com/r/${HUB_PATH}"
+          echo "🔗 View at: https://gallery.ecr.aws/supabase/${NAME}"
