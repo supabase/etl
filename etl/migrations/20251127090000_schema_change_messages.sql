@@ -84,9 +84,10 @@ declare
     v_wal_level text;
 begin
     -- Check if logical replication is enabled; if not, silently skip.
-    -- This prevents crashes when ETL is installed but wal_level != logical.
+    -- This prevents crashes when Supabase ETL is installed but wal_level != logical.
     v_wal_level := current_setting('wal_level', true);
     if v_wal_level is null or v_wal_level != 'logical' then
+        raise warning '[Supabase ETL] wal_level is %, not logical. Schema change will not be captured.', v_wal_level;
         return;
     end if;
 
@@ -150,13 +151,13 @@ begin
 
         exception when others then
             -- Never crash customer DDL; log warning instead.
-            raise warning '[ETL] emit_schema_change_messages failed for table %: %',
+            raise warning '[Supabase ETL] emit_schema_change_messages failed for table %: %',
                           coalesce(table_oid::text, 'unknown'), SQLERRM;
         end;
     end loop;
 exception when others then
     -- Outer safety net.
-    raise warning '[ETL] emit_schema_change_messages outer exception: %', SQLERRM;
+    raise warning '[Supabase ETL] emit_schema_change_messages outer exception: %', SQLERRM;
 end;
 $$;
 
