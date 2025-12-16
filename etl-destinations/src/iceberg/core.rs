@@ -338,6 +338,33 @@ where
                         });
                         entry.1.push(old_table_row);
                     }
+                    Event::Relation(relation) => {
+                        // Check if schema has changed - if so, error since Iceberg doesn't
+                        // support schema changes yet.
+                        let table_id = relation.replicated_table_schema.id();
+                        let new_snapshot_id =
+                            relation.replicated_table_schema.get_inner().snapshot_id;
+                        let new_replication_mask =
+                            relation.replicated_table_schema.replication_mask();
+
+                        if let Some(metadata) =
+                            self.store.get_destination_table_metadata(&table_id).await?
+                        {
+                            if metadata.snapshot_id != new_snapshot_id
+                                || &metadata.replication_mask != new_replication_mask
+                            {
+                                return Err(etl_error!(
+                                    ErrorKind::CorruptedTableSchema,
+                                    "Schema changes not supported",
+                                    format!(
+                                        "Iceberg destination does not support schema changes. \
+                                         Table {} schema changed from snapshot_id {} to {}.",
+                                        table_id, metadata.snapshot_id, new_snapshot_id
+                                    )
+                                ));
+                            }
+                        }
+                    }
                     _ => {
                         // Every other event type is currently not supported.
                         debug!("skipping unsupported event in iceberg");
@@ -413,6 +440,11 @@ where
     /// Augments the provided schema with CDC columns and ensures the corresponding
     /// Iceberg table exists in the namespace. Uses caching to avoid redundant table
     /// creation checks and holds a lock during the entire preparation to prevent race conditions.
+    ///
+    /// Follows the applying -> applied pattern for crash recovery:
+    /// 1. Store metadata with `Applying` status before creating the table
+    /// 2. Create the table
+    /// 3. Update metadata to `Applied` after successful creation
     async fn prepare_table_for_streaming(
         &self,
         inner: &mut Inner,
@@ -420,25 +452,59 @@ where
     ) -> EtlResult<(String, IcebergTableName)> {
         let table_id = replicated_table_schema.id();
         let table_name = replicated_table_schema.name();
+        let snapshot_id = replicated_table_schema.get_inner().snapshot_id;
+        let replication_mask = replicated_table_schema.replication_mask().clone();
         let column_schemas = Self::build_cdc_column_schemas(replicated_table_schema);
+
+        // Check if we have existing metadata for this table.
+        let existing_metadata = self.store.get_destination_table_metadata(&table_id).await?;
 
         let iceberg_table_name =
             table_name_to_iceberg_table_name(table_name, inner.namespace.is_single());
-        let iceberg_table_name = self
-            .get_or_create_iceberg_table_name(
-                &table_id,
-                iceberg_table_name,
-                replicated_table_schema,
-            )
-            .await?;
+        let iceberg_table_name = match &existing_metadata {
+            Some(metadata) => metadata.destination_table_id.clone(),
+            None => iceberg_table_name,
+        };
 
+        // We prepare the namespace.
         let namespace = schema_to_namespace(&table_name.schema);
         let namespace = inner.namespace.get_or(&namespace).to_string();
         let namespace = self.create_namespace_if_missing(inner, namespace).await?;
 
-        let iceberg_table_name = self
-            .create_table_if_missing(inner, iceberg_table_name, &namespace, &column_schemas)
+        // If the table is already in the cache, we skip the creation. This works assuming that etl
+        // is the only system managing the underlyind tables.
+        if inner.created_tables.contains(&iceberg_table_name) {
+            debug!(
+                "iceberg table {iceberg_table_name} found in creation cache, skipping existence check"
+            );
+
+            return Ok((namespace, iceberg_table_name));
+        }
+
+        // Create metadata with applying status before creating the table.
+        let metadata = DestinationTableMetadata::new_applying(
+            iceberg_table_name.clone(),
+            snapshot_id,
+            replication_mask,
+        );
+        self.store
+            .store_destination_table_metadata(table_id, metadata.clone())
             .await?;
+
+        self.client
+            .create_table_if_missing(&namespace, iceberg_table_name.clone(), &column_schemas)
+            .await
+            .map_err(iceberg_error_to_etl_error)?;
+
+        // Mark as applied after successful table creation.
+        self.store
+            .store_destination_table_metadata(table_id, metadata.to_applied())
+            .await?;
+
+        // We add the table to the cache.
+        inner.created_tables.insert(iceberg_table_name.clone());
+
+        debug!("iceberg table {iceberg_table_name} added to creation cache");
 
         Ok((namespace, iceberg_table_name))
     }
@@ -463,30 +529,6 @@ where
         inner.created_namespaces.insert(namespace.clone());
 
         Ok(namespace)
-    }
-
-    /// Creates a table if it is missing in the destination.
-    /// Once created adds it to the created_trees HashMap to
-    /// avoid creating it again.
-    async fn create_table_if_missing(
-        &self,
-        inner: &mut Inner,
-        iceberg_table_name: String,
-        namespace: &str,
-        column_schemas: &[ColumnSchema],
-    ) -> EtlResult<String> {
-        if inner.created_tables.contains(&iceberg_table_name) {
-            return Ok(iceberg_table_name);
-        }
-
-        self.client
-            .create_table_if_missing(namespace, iceberg_table_name.clone(), column_schemas)
-            .await
-            .map_err(iceberg_error_to_etl_error)?;
-
-        inner.created_tables.insert(iceberg_table_name.clone());
-
-        Ok(iceberg_table_name)
     }
 
     /// Builds column schemas with CDC-specific columns added.
@@ -527,36 +569,6 @@ where
         ));
 
         column_schemas
-    }
-
-    /// Retrieves or creates destination metadata for the Iceberg table.
-    ///
-    /// Checks if metadata already exists for the given table ID.
-    /// If no metadata exists, creates new metadata with the provided
-    /// Iceberg table name and schema info. This ensures consistent table
-    /// name resolution across multiple operations on the same logical table.
-    async fn get_or_create_iceberg_table_name(
-        &self,
-        table_id: &TableId,
-        iceberg_table_name: IcebergTableName,
-        replicated_table_schema: &ReplicatedTableSchema,
-    ) -> EtlResult<IcebergTableName> {
-        let Some(metadata) = self.store.get_destination_table_metadata(table_id).await? else {
-            // Create metadata using the first schema's snapshot_id and replication_mask.
-            // Iceberg doesn't support schema changes yet, so this is sufficient.
-            let metadata = DestinationTableMetadata::new_applied(
-                iceberg_table_name.to_string(),
-                replicated_table_schema.get_inner().snapshot_id,
-                replicated_table_schema.replication_mask().clone(),
-            );
-            self.store
-                .store_destination_table_metadata(*table_id, metadata)
-                .await?;
-
-            return Ok(iceberg_table_name);
-        };
-
-        Ok(metadata.destination_table_id)
     }
 }
 
