@@ -394,6 +394,9 @@ impl BigQueryClient {
     /// which can be processed concurrently.
     /// If ordering guarantees are needed, all data for a given table must be included
     /// in a single batch.
+    ///
+    /// TODO: we might want to improve the detection of retriable errors by having a special error
+    ///  type that we return for this.
     pub async fn stream_table_batches_concurrent<I>(
         &self,
         table_batches: I,
@@ -849,10 +852,10 @@ fn bq_error_to_etl_error(err: BQError) -> EtlError {
                 == "The caller does not have permission to execute the specified operation"
             {
                 (ErrorKind::PermissionDenied, "BigQuery permission denied")
-            } else if is_schema_mismatch_message(status.message()) {
+            } else if is_retryable_streaming_message(status.message()) {
                 (
                     ErrorKind::DestinationSchemaMismatch,
-                    "BigQuery schema mismatch",
+                    "BigQuery transient streaming error",
                 )
             } else {
                 (ErrorKind::DestinationError, "BigQuery gRPC status error")
@@ -876,27 +879,37 @@ fn bq_error_to_etl_error(err: BQError) -> EtlError {
     etl_error!(kind, description, err.to_string())
 }
 
-/// Patterns that indicate a schema mismatch error from BigQuery Storage Write API.
+/// Patterns that indicate transient/retryable errors from BigQuery Storage Write API.
 ///
-/// These patterns are matched against the error message to determine if the error
-/// is due to schema mismatch (e.g., after DDL changes when the cached schema is stale).
-const SCHEMA_MISMATCH_PATTERNS: &[&str] = &["extra field", "is missing in the proto"];
+/// These errors can occur temporarily after DDL operations (e.g., column renames,
+/// ADD/DROP COLUMN) when BigQuery hasn't fully propagated changes. They include:
+/// - Schema mismatch errors when the cached schema is stale
+/// - Entity not found errors when streaming endpoints aren't ready
+///
+/// Retrying with backoff typically resolves these issues.
+const RETRYABLE_STREAMING_PATTERNS: &[&str] = &[
+    // Schema mismatch patterns
+    "extra field",
+    "is missing in the proto",
+    // Entity not found patterns (transient after DDL)
+    "was not found",
+    "entity was not found",
+];
 
-/// Checks if an error message indicates a schema mismatch.
-fn is_schema_mismatch_message(message: &str) -> bool {
+/// Checks if an error message indicates a retryable streaming error.
+fn is_retryable_streaming_message(message: &str) -> bool {
     let lower = message.to_lowercase();
-    SCHEMA_MISMATCH_PATTERNS
+    RETRYABLE_STREAMING_PATTERNS
         .iter()
         .any(|pattern| lower.contains(pattern))
 }
 
 /// Converts BigQuery row errors to ETL destination errors.
 ///
-/// Detects schema mismatch errors by checking for specific patterns in the error
-/// message that indicate the destination schema differs from the expected schema.
+/// Detects retryable streaming errors by checking for specific patterns in the
+/// error message that indicate transient issues after DDL operations.
 fn row_error_to_etl_error(err: RowError) -> EtlError {
-    // Check if this is a schema mismatch error based on the message content.
-    if is_schema_mismatch_message(&err.message) {
+    if is_retryable_streaming_message(&err.message) {
         return etl_error!(
             ErrorKind::DestinationSchemaMismatch,
             "BigQuery schema mismatch",
@@ -1314,15 +1327,25 @@ mod tests {
     }
 
     #[test]
-    fn test_is_schema_mismatch_message() {
-        // Test messages that should match (empirically observed patterns only).
-        assert!(is_schema_mismatch_message("extra field in row"));
-        assert!(is_schema_mismatch_message("Extra Field detected"));
+    fn test_is_retryable_streaming_message() {
+        // Schema mismatch patterns.
+        assert!(is_retryable_streaming_message("extra field in row"));
+        assert!(is_retryable_streaming_message("Extra Field detected"));
+        assert!(is_retryable_streaming_message(
+            "field foo is missing in the proto"
+        ));
 
-        // Test messages that should not match.
-        assert!(!is_schema_mismatch_message("connection timeout"));
-        assert!(!is_schema_mismatch_message("permission denied"));
-        assert!(!is_schema_mismatch_message("invalid data format"));
-        assert!(!is_schema_mismatch_message(""));
+        // Entity not found patterns (transient after DDL).
+        assert!(is_retryable_streaming_message(
+            "Requested entity was not found. Entity: projects/foo/datasets/bar/tables/baz/streams/_default"
+        ));
+        assert!(is_retryable_streaming_message("entity was not found"));
+        assert!(is_retryable_streaming_message("Table was not found"));
+
+        // Messages that should not match.
+        assert!(!is_retryable_streaming_message("connection timeout"));
+        assert!(!is_retryable_streaming_message("permission denied"));
+        assert!(!is_retryable_streaming_message("invalid data format"));
+        assert!(!is_retryable_streaming_message(""));
     }
 }

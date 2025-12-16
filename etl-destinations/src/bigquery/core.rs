@@ -517,7 +517,7 @@ where
         }
 
         // Stream with schema mismatch retry.
-        let (bytes_sent, bytes_received) = self.stream_with_schema_retry(&table_batches).await?;
+        let (bytes_sent, bytes_received) = self.stream_with_retry(&table_batches).await?;
 
         if bytes_sent > 0 {
             // Logs with egress_metric = true can be used to identify egress logs.
@@ -589,7 +589,7 @@ where
 
                 if current_snapshot_id == new_snapshot_id {
                     // Schema hasn't changed, nothing to do.
-                    debug!(
+                    info!(
                         "schema for table {} unchanged (snapshot_id: {})",
                         table_id, new_snapshot_id
                     );
@@ -731,27 +731,32 @@ where
         Ok(())
     }
 
-    /// Checks if an error indicates a schema mismatch that can be retried.
+    /// Checks if an error is a transient streaming error that can be retried.
     ///
     /// Returns `true` if any of the error kinds is [`ErrorKind::DestinationSchemaMismatch`],
-    /// which indicates the BigQuery Storage Write API has a stale cached schema.
-    fn is_schema_mismatch_error(error: &EtlError) -> bool {
+    /// which indicates transient BigQuery issues after DDL changes such as:
+    /// - Stale cached schema information ("extra field" errors)
+    /// - Streaming endpoint not yet available ("entity not found" errors)
+    fn is_retryable_streaming_error(error: &EtlError) -> bool {
         error
             .kinds()
             .contains(&ErrorKind::DestinationSchemaMismatch)
     }
 
-    /// Streams table batches to BigQuery with automatic retry on schema mismatch errors.
+    /// Streams table batches to BigQuery with automatic retry on transient errors.
     ///
-    /// After DDL changes (e.g., `ALTER TABLE ADD COLUMN`), the BigQuery Storage Write API
-    /// may cache stale schema information and reject inserts with "extra field" errors.
-    /// This method retries streaming operations when such errors are detected, allowing
-    /// time for the schema cache to refresh.
+    /// After DDL changes (e.g., `ALTER TABLE ADD COLUMN`, column renames), the BigQuery
+    /// Storage Write API may temporarily:
+    /// - Cache stale schema information and reject inserts with "extra field" errors
+    /// - Return "entity not found" errors for streaming endpoints
+    ///
+    /// This method retries streaming operations when such transient errors are detected,
+    /// allowing time for BigQuery to propagate DDL changes.
     ///
     /// Takes a slice of `Arc<TableBatch>` to enable efficient retries - on each attempt,
     /// we iterate over the slice and clone the `Arc`s (O(1) per batch) rather than
     /// recreating the batches.
-    async fn stream_with_schema_retry(
+    async fn stream_with_retry(
         &self,
         table_batches: &[Arc<TableBatch<BigQueryTableRow>>],
     ) -> EtlResult<(usize, usize)> {
@@ -773,7 +778,7 @@ where
             {
                 Ok(result) => return Ok(result),
                 Err(error) => {
-                    if !Self::is_schema_mismatch_error(&error) {
+                    if !Self::is_retryable_streaming_error(&error) {
                         return Err(error);
                     }
 
@@ -786,7 +791,7 @@ where
                         attempt = attempts,
                         max_attempts = MAX_SCHEMA_MISMATCH_ATTEMPTS,
                         error = %error,
-                        "schema mismatch detected; retrying after delay"
+                        "transient streaming error detected; retrying after delay"
                     );
                     sleep(retry_delay).await;
                 }
@@ -906,8 +911,7 @@ where
                 }
 
                 // Stream with schema mismatch retry.
-                let (bytes_sent, bytes_received) =
-                    self.stream_with_schema_retry(&table_batches).await?;
+                let (bytes_sent, bytes_received) = self.stream_with_retry(&table_batches).await?;
 
                 if bytes_sent > 0 {
                     // Logs with egress_metric = true can be used to identify egress logs.
