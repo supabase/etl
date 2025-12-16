@@ -58,4 +58,5 @@ JOIN (
 ) column_counts ON column_counts.table_schema_id = ts.id;
 
 -- Drop the old table_mappings table as it's now unified into destination_tables_metadata.
+-- This is a breaking change, for now we assume that no two pipelines share the same state storage.
 DROP TABLE etl.table_mappings;
