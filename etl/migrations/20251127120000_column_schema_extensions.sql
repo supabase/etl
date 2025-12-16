@@ -5,10 +5,19 @@
 
 -- Add new columns
 alter table etl.table_columns
-    add column if not exists primary_key_ordinal_position integer;
+    add column if not exists primary_key_ordinal_position pg_catalog.int4;
 
--- Set primary_key_ordinal_position = 1 for existing primary key columns.
--- This is a reasonable default since most tables have single-column primary keys.
-update etl.table_columns
-set primary_key_ordinal_position = 1
-where primary_key = true and primary_key_ordinal_position is null;
+-- Set primary_key_ordinal_position for existing primary key columns.
+-- For composite PKs, we assign ordinal positions based on the column_order within each table,
+-- which is a reasonable approximation when the original PK constraint order is unavailable.
+update etl.table_columns tc
+set primary_key_ordinal_position = pk_order.ordinal
+from (
+    select
+        id,
+        row_number() over (partition by table_schema_id order by column_order) as ordinal
+    from etl.table_columns
+    where primary_key = true
+) pk_order
+where tc.id = pk_order.id
+  and tc.primary_key_ordinal_position is null;
