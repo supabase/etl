@@ -1,9 +1,9 @@
 -- Add snapshot_id column to table_schemas for schema versioning.
 -- The snapshot_id value is the start_lsn of the DDL message that created this schema version.
--- Initial schemas use snapshot_id=0.
+-- Initial schemas use snapshot_id='0/0'.
 
 ALTER TABLE etl.table_schemas
-    ADD COLUMN IF NOT EXISTS snapshot_id BIGINT NOT NULL DEFAULT 0;
+    ADD COLUMN IF NOT EXISTS snapshot_id PG_LSN NOT NULL DEFAULT '0/0';
 
 -- Change unique constraint from (pipeline_id, table_id) to (pipeline_id, table_id, snapshot_id)
 -- to allow multiple schema versions per table.

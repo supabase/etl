@@ -209,12 +209,13 @@ pub fn assert_schema_snapshots_ordering(
     let (first_snapshot_id, _) = &snapshots[0];
     if first_is_zero {
         assert_eq!(
-            *first_snapshot_id, 0,
+            *first_snapshot_id,
+            SnapshotId::initial(),
             "first snapshot_id is {first_snapshot_id}, expected 0"
         );
     } else {
         assert!(
-            *first_snapshot_id > 0,
+            *first_snapshot_id > SnapshotId::initial(),
             "first snapshot_id is {first_snapshot_id}, expected > 0"
         );
     }

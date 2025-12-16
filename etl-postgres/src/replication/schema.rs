@@ -150,7 +150,7 @@ pub async fn store_table_schema(
     let table_schema_id: i64 = sqlx::query(
         r#"
         insert into etl.table_schemas (pipeline_id, table_id, schema_name, table_name, snapshot_id)
-        values ($1, $2, $3, $4, $5)
+        values ($1, $2, $3, $4, $5::pg_lsn)
         on conflict (pipeline_id, table_id, snapshot_id)
         do update set schema_name = excluded.schema_name, table_name = excluded.table_name
         returning id
@@ -160,7 +160,7 @@ pub async fn store_table_schema(
     .bind(table_schema.id.into_inner() as i64)
     .bind(&table_schema.name.schema)
     .bind(&table_schema.name.name)
-    .bind(table_schema.snapshot_id)
+    .bind(table_schema.snapshot_id.to_pg_lsn_string())
     .fetch_one(&mut *tx)
     .await?
     .get(0);
@@ -202,12 +202,12 @@ pub async fn store_table_schema(
 ///
 /// Retrieves table schemas and columns from schema storage tables,
 /// reconstructing complete [`TableSchema`] objects. This is equivalent to
-/// calling [`load_table_schemas_at_snapshot`] with `i64::MAX`.
+/// calling [`load_table_schemas_at_snapshot`] with the maximum LSN value.
 pub async fn load_table_schemas(
     pool: &PgPool,
     pipeline_id: i64,
 ) -> Result<Vec<TableSchema>, sqlx::Error> {
-    load_table_schemas_at_snapshot(pool, pipeline_id, i64::MAX).await
+    load_table_schemas_at_snapshot(pool, pipeline_id, SnapshotId::max()).await
 }
 
 /// Loads a single table schema with the largest snapshot_id <= the requested snapshot.
@@ -225,7 +225,7 @@ pub async fn load_table_schema_at_snapshot(
             ts.table_id,
             ts.schema_name,
             ts.table_name,
-            ts.snapshot_id,
+            ts.snapshot_id::text as snapshot_id,
             tc.column_name,
             tc.column_type,
             tc.type_modifier,
@@ -237,7 +237,7 @@ pub async fn load_table_schema_at_snapshot(
         inner join etl.table_columns tc on ts.id = tc.table_schema_id
         where ts.id = (
             select id from etl.table_schemas
-            where pipeline_id = $1 and table_id = $2 and snapshot_id <= $3
+            where pipeline_id = $1 and table_id = $2 and snapshot_id <= $3::pg_lsn
             order by snapshot_id desc
             limit 1
         )
@@ -246,7 +246,7 @@ pub async fn load_table_schema_at_snapshot(
     )
     .bind(pipeline_id)
     .bind(SqlxTableId(table_id.into_inner()))
-    .bind(snapshot_id)
+    .bind(snapshot_id.to_pg_lsn_string())
     .fetch_all(pool)
     .await?;
 
@@ -259,7 +259,8 @@ pub async fn load_table_schema_at_snapshot(
     let table_id = TableId::new(table_oid.0);
     let schema_name: String = first_row.get("schema_name");
     let table_name: String = first_row.get("table_name");
-    let snapshot_id: SnapshotId = first_row.get("snapshot_id");
+    let snapshot_id_str: String = first_row.get("snapshot_id");
+    let snapshot_id = SnapshotId::from_pg_lsn_string(&snapshot_id_str);
 
     let mut table_schema = TableSchema::with_snapshot_id(
         table_id,
@@ -298,14 +299,14 @@ pub async fn load_table_schemas_at_snapshot(
                 ts.snapshot_id
             from etl.table_schemas ts
             where ts.pipeline_id = $1
-              and ts.snapshot_id <= $2
+              and ts.snapshot_id <= $2::pg_lsn
             order by ts.table_id, ts.snapshot_id desc
         )
         select
             ls.table_id,
             ls.schema_name,
             ls.table_name,
-            ls.snapshot_id,
+            ls.snapshot_id::text as snapshot_id,
             tc.column_name,
             tc.column_type,
             tc.type_modifier,
@@ -319,7 +320,7 @@ pub async fn load_table_schemas_at_snapshot(
         "#,
     )
     .bind(pipeline_id)
-    .bind(snapshot_id)
+    .bind(snapshot_id.to_pg_lsn_string())
     .fetch_all(pool)
     .await?;
 
@@ -330,7 +331,8 @@ pub async fn load_table_schemas_at_snapshot(
         let table_id = TableId::new(table_oid.0);
         let schema_name: String = row.get("schema_name");
         let table_name: String = row.get("table_name");
-        let row_snapshot_id: SnapshotId = row.get("snapshot_id");
+        let snapshot_id_str: String = row.get("snapshot_id");
+        let row_snapshot_id = SnapshotId::from_pg_lsn_string(&snapshot_id_str);
 
         let entry = table_schemas.entry(table_id).or_insert_with(|| {
             TableSchema::with_snapshot_id(

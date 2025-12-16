@@ -1,10 +1,11 @@
 use pg_escape::quote_identifier;
 use std::collections::HashSet;
 use std::fmt;
+use std::hash::{Hash, Hasher};
 use std::str::FromStr;
 use std::sync::Arc;
 use thiserror::Error;
-use tokio_postgres::types::{FromSql, ToSql, Type};
+use tokio_postgres::types::{FromSql, PgLsn, ToSql, Type};
 
 /// Errors that can occur during schema operations.
 #[derive(Debug, Error)]
@@ -19,12 +20,85 @@ type Oid = u32;
 
 /// Snapshot identifier for schema versioning.
 ///
-/// The value represents the start_lsn of the DDL message that created this schema version.
-/// A value of 0 indicates the initial schema before any DDL changes.
-pub type SnapshotId = i64;
+/// Wraps a [`PgLsn`] to represent the start_lsn of the DDL message that created a schema version.
+/// A value of 0/0 indicates the initial schema before any DDL changes.
+/// Stored as `pg_lsn` in the database.
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd)]
+pub struct SnapshotId(PgLsn);
 
-/// The initial snapshot ID used for the first schema version.
-pub const INITIAL_SNAPSHOT_ID: SnapshotId = 0;
+impl SnapshotId {
+    /// Returns the initial snapshot ID (0/0) for the first schema version.
+    pub fn initial() -> Self {
+        Self(PgLsn::from(0))
+    }
+
+    /// Returns the maximum possible snapshot ID.
+    pub fn max() -> Self {
+        Self(PgLsn::from(u64::MAX))
+    }
+
+    /// Creates a new [`SnapshotId`] from a [`PgLsn`].
+    pub fn new(lsn: PgLsn) -> Self {
+        Self(lsn)
+    }
+
+    /// Returns the inner [`PgLsn`] value.
+    pub fn into_inner(self) -> PgLsn {
+        self.0
+    }
+
+    /// Returns the underlying `u64` representation.
+    pub fn as_u64(self) -> u64 {
+        self.0.into()
+    }
+
+    /// Converts to a `pg_lsn` string for database storage.
+    pub fn to_pg_lsn_string(self) -> String {
+        self.0.to_string()
+    }
+
+    /// Parses a `pg_lsn` string from the database.
+    pub fn from_pg_lsn_string(s: &str) -> Self {
+        Self(s.parse::<PgLsn>().expect("invalid pg_lsn from database"))
+    }
+}
+
+impl Hash for SnapshotId {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        let value: u64 = self.0.into();
+        value.hash(state);
+    }
+}
+
+impl From<PgLsn> for SnapshotId {
+    fn from(lsn: PgLsn) -> Self {
+        Self(lsn)
+    }
+}
+
+impl From<SnapshotId> for PgLsn {
+    fn from(snapshot_id: SnapshotId) -> Self {
+        snapshot_id.0
+    }
+}
+
+impl From<u64> for SnapshotId {
+    fn from(value: u64) -> Self {
+        Self(PgLsn::from(value))
+    }
+}
+
+impl From<SnapshotId> for u64 {
+    fn from(snapshot_id: SnapshotId) -> Self {
+        snapshot_id.0.into()
+    }
+}
+
+impl fmt::Display for SnapshotId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
 
 /// A fully qualified Postgres table name consisting of a schema and table name.
 ///
@@ -214,9 +288,9 @@ pub struct TableSchema {
 }
 
 impl TableSchema {
-    /// Creates a new [`TableSchema`] with the initial snapshot ID (0).
+    /// Creates a new [`TableSchema`] with the initial snapshot ID (0/0).
     pub fn new(id: TableId, name: TableName, column_schemas: Vec<ColumnSchema>) -> Self {
-        Self::with_snapshot_id(id, name, column_schemas, INITIAL_SNAPSHOT_ID)
+        Self::with_snapshot_id(id, name, column_schemas, SnapshotId::initial())
     }
 
     /// Creates a new [`TableSchema`] with a specific snapshot ID.
