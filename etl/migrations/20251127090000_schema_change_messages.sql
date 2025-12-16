@@ -62,7 +62,7 @@ order by a.attnum;
 $fnc$;
 
 create or replace function etl.emit_schema_change_messages()
-returns event_trigger
+returns pg_catalog.event_trigger
 language plpgsql
 set search_path = pg_catalog
 as
