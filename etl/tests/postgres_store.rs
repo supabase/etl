@@ -7,7 +7,7 @@ use etl::store::schema::SchemaStore;
 use etl::store::state::StateStore;
 use etl::test_utils::database::spawn_source_database;
 use etl_postgres::replication::connect_to_source_database;
-use etl_postgres::types::{ColumnSchema, TableId, TableName, TableSchema};
+use etl_postgres::types::{ColumnSchema, SnapshotId, TableId, TableName, TableSchema};
 use etl_telemetry::tracing::init_test_tracing;
 use sqlx::postgres::types::Oid as SqlxTableId;
 use tokio_postgres::types::{PgLsn, Type as PgType};
@@ -244,7 +244,10 @@ async fn test_schema_store_operations() {
     let table_id = table_schema.id;
 
     // Test initial state - should be empty
-    let schema = store.get_table_schema(&table_id, i64::MAX).await.unwrap();
+    let schema = store
+        .get_table_schema(&table_id, SnapshotId::max())
+        .await
+        .unwrap();
     assert!(schema.is_none());
 
     let all_schemas = store.get_table_schemas().await.unwrap();
@@ -256,7 +259,10 @@ async fn test_schema_store_operations() {
         .await
         .unwrap();
 
-    let schema = store.get_table_schema(&table_id, i64::MAX).await.unwrap();
+    let schema = store
+        .get_table_schema(&table_id, SnapshotId::max())
+        .await
+        .unwrap();
     assert!(schema.is_some());
     let schema = schema.unwrap();
     assert_eq!(schema.id, table_schema.id);
@@ -317,7 +323,7 @@ async fn test_schema_store_load_schemas() {
     assert_eq!(schemas.len(), 2);
 
     let schema1 = new_store
-        .get_table_schema(&table_schema1.id, i64::MAX)
+        .get_table_schema(&table_schema1.id, SnapshotId::max())
         .await
         .unwrap();
     assert!(schema1.is_some());
@@ -326,7 +332,7 @@ async fn test_schema_store_load_schemas() {
     assert_eq!(schema1.name, table_schema1.name);
 
     let schema2 = new_store
-        .get_table_schema(&table_schema2.id, i64::MAX)
+        .get_table_schema(&table_schema2.id, SnapshotId::max())
         .await
         .unwrap();
     assert!(schema2.is_some());
@@ -360,7 +366,7 @@ async fn test_schema_store_versioning() {
         true,
         false,
     ));
-    table_schema.snapshot_id = 100; // New snapshot for the schema change
+    table_schema.snapshot_id = SnapshotId::from(100u64); // New snapshot for the schema change
 
     // Store updated schema as new version
     store
@@ -370,24 +376,27 @@ async fn test_schema_store_versioning() {
 
     // Verify querying at snapshot 100+ returns the updated schema
     let schema = store
-        .get_table_schema(&table_schema.id, i64::MAX)
+        .get_table_schema(&table_schema.id, SnapshotId::max())
         .await
         .unwrap();
     assert!(schema.is_some());
     let schema = schema.unwrap();
     assert_eq!(schema.column_schemas.len(), 4); // Original 3 + 1 new column
-    assert_eq!(schema.snapshot_id, 100);
+    assert_eq!(schema.snapshot_id, SnapshotId::from(100u64));
 
     // Verify querying at snapshot 50 returns the original schema
-    let schema = store.get_table_schema(&table_schema.id, 50).await.unwrap();
+    let schema = store
+        .get_table_schema(&table_schema.id, SnapshotId::from(50u64))
+        .await
+        .unwrap();
     assert!(schema.is_some());
     let schema = schema.unwrap();
     assert_eq!(schema.column_schemas.len(), 3); // Original 3 columns
-    assert_eq!(schema.snapshot_id, 0);
+    assert_eq!(schema.snapshot_id, SnapshotId::initial());
 
     // Verify the new column was added in the latest version
     let schema = store
-        .get_table_schema(&table_schema.id, i64::MAX)
+        .get_table_schema(&table_schema.id, SnapshotId::max())
         .await
         .unwrap()
         .unwrap();
@@ -425,7 +434,7 @@ async fn test_schema_store_upsert_replaces_columns() {
 
     // Verify initial columns
     let schema = store
-        .get_table_schema(&table_id, i64::MAX)
+        .get_table_schema(&table_id, SnapshotId::max())
         .await
         .unwrap()
         .unwrap();
@@ -452,7 +461,7 @@ async fn test_schema_store_upsert_replaces_columns() {
     // Need to clear cache and reload from DB to verify DB state
     let new_store = PostgresStore::new(pipeline_id, database.config.clone());
     let schema = new_store
-        .get_table_schema(&table_id, i64::MAX)
+        .get_table_schema(&table_id, SnapshotId::max())
         .await
         .unwrap()
         .unwrap();
@@ -487,7 +496,7 @@ async fn test_schema_cache_eviction() {
     // Store 3 schema versions for table 1
     let table_id_1 = TableId::new(12345);
     let table_name_1 = TableName::new("public".to_string(), "test_table".to_string());
-    for snapshot_id in [0, 100, 200] {
+    for snapshot_id in [0u64, 100, 200] {
         let columns = vec![
             test_column("id", PgType::INT4, -1, 1, false, true),
             test_column(
@@ -500,7 +509,7 @@ async fn test_schema_cache_eviction() {
             ),
         ];
         let mut table_schema = TableSchema::new(table_id_1, table_name_1.clone(), columns);
-        table_schema.snapshot_id = snapshot_id;
+        table_schema.snapshot_id = SnapshotId::from(snapshot_id);
         store
             .store_table_schema(table_schema.clone())
             .await
@@ -510,10 +519,10 @@ async fn test_schema_cache_eviction() {
     // Store 3 schemas for table 2 to verify eviction is per-table
     let table_id_2 = TableId::new(67890);
     let table_name_2 = TableName::new("public".to_string(), "table_2".to_string());
-    for snapshot_id in [0, 100, 200] {
+    for snapshot_id in [0u64, 100, 200] {
         let columns = vec![test_column("id", PgType::INT4, -1, 1, false, true)];
         let mut schema = TableSchema::new(table_id_2, table_name_2.clone(), columns);
-        schema.snapshot_id = snapshot_id;
+        schema.snapshot_id = SnapshotId::from(snapshot_id);
         store.store_table_schema(schema).await.unwrap();
     }
 
@@ -522,35 +531,38 @@ async fn test_schema_cache_eviction() {
     assert_eq!(cached_schemas.len(), 4, "Should have 2 schemas per table");
 
     // Verify eviction keeps newest snapshots (100 and 200), evicts oldest (0)
-    let table_1_snapshots: Vec<i64> = cached_schemas
+    let table_1_snapshots: Vec<SnapshotId> = cached_schemas
         .iter()
         .filter(|s| s.id == table_id_1)
         .map(|s| s.snapshot_id)
         .collect();
-    assert!(table_1_snapshots.contains(&100) && table_1_snapshots.contains(&200));
     assert!(
-        !table_1_snapshots.contains(&0),
+        table_1_snapshots.contains(&SnapshotId::from(100u64))
+            && table_1_snapshots.contains(&SnapshotId::from(200u64))
+    );
+    assert!(
+        !table_1_snapshots.contains(&SnapshotId::initial()),
         "Snapshot 0 should be evicted"
     );
 
-    let table_2_snapshots: Vec<i64> = cached_schemas
+    let table_2_snapshots: Vec<SnapshotId> = cached_schemas
         .iter()
         .filter(|s| s.id == table_id_2)
         .map(|s| s.snapshot_id)
         .collect();
     assert!(
-        !table_2_snapshots.contains(&0),
+        !table_2_snapshots.contains(&SnapshotId::initial()),
         "Table 2 snapshot 0 should be evicted"
     );
 
     // Evicted schemas should still be loadable from DB
     let new_store = PostgresStore::new(pipeline_id, database.config.clone());
     let schema_0 = new_store
-        .get_table_schema(&table_id_1, 0)
+        .get_table_schema(&table_id_1, SnapshotId::initial())
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(schema_0.snapshot_id, 0);
+    assert_eq!(schema_0.snapshot_id, SnapshotId::initial());
     assert!(schema_0.column_schemas.iter().any(|c| c.name == "col_at_0"));
 }
 
@@ -907,7 +919,7 @@ async fn test_cleanup_deletes_state_schema_and_mapping_for_table() {
     );
     assert!(
         store
-            .get_table_schema(&table_1_id, i64::MAX)
+            .get_table_schema(&table_1_id, SnapshotId::max())
             .await
             .unwrap()
             .is_some()
@@ -933,7 +945,7 @@ async fn test_cleanup_deletes_state_schema_and_mapping_for_table() {
     );
     assert!(
         store
-            .get_table_schema(&table_1_id, i64::MAX)
+            .get_table_schema(&table_1_id, SnapshotId::max())
             .await
             .unwrap()
             .is_none()
@@ -956,7 +968,7 @@ async fn test_cleanup_deletes_state_schema_and_mapping_for_table() {
     );
     assert!(
         store
-            .get_table_schema(&table_2_id, i64::MAX)
+            .get_table_schema(&table_2_id, SnapshotId::max())
             .await
             .unwrap()
             .is_some()
@@ -985,7 +997,7 @@ async fn test_cleanup_deletes_state_schema_and_mapping_for_table() {
     );
     assert!(
         new_store
-            .get_table_schema(&table_1_id, i64::MAX)
+            .get_table_schema(&table_1_id, SnapshotId::max())
             .await
             .unwrap()
             .is_none()
@@ -1008,7 +1020,7 @@ async fn test_cleanup_deletes_state_schema_and_mapping_for_table() {
     );
     assert!(
         new_store
-            .get_table_schema(&table_2_id, i64::MAX)
+            .get_table_schema(&table_2_id, SnapshotId::max())
             .await
             .unwrap()
             .is_some()

@@ -296,7 +296,7 @@ struct ApplyLoopState {
     /// The current schema snapshot being tracked.
     ///
     /// This is updated when DDL messages are processed, tracking the latest schema version.
-    current_schema_snapshot: SnapshotId,
+    current_schema_snapshot_id: SnapshotId,
 }
 
 impl ApplyLoopState {
@@ -307,7 +307,7 @@ impl ApplyLoopState {
     fn new(
         next_status_update: StatusUpdate,
         events_batch: Vec<Event>,
-        current_schema_snapshot: SnapshotId,
+        current_schema_snapshot_id: SnapshotId,
     ) -> Self {
         Self {
             last_commit_end_lsn: None,
@@ -318,13 +318,13 @@ impl ApplyLoopState {
             current_tx_begin_ts: None,
             current_tx_events: 0,
             shutdown_discarded: false,
-            current_schema_snapshot,
+            current_schema_snapshot_id,
         }
     }
 
     /// Updates the current schema snapshot to a new value.
-    fn update_schema_snapshot(&mut self, snapshot_id: SnapshotId) {
-        self.current_schema_snapshot = snapshot_id;
+    fn update_schema_snapshot_id(&mut self, snapshot_id: SnapshotId) {
+        self.current_schema_snapshot_id = snapshot_id;
     }
 
     /// Updates the last commit end LSN to track transaction boundaries.
@@ -493,9 +493,11 @@ where
         return Ok(result);
     }
 
-    // Initialize the current schema snapshot from the start LSN.
+    // Initialize the current schema snapshot from the start LSN (this is fine to do even if the
+    // start lsn is not like any of the existing snapshot ids since the system is designed to return
+    // the biggest snapshot id <= the current snapshot id).
     // Schemas will be loaded on-demand when get_table_schema is called.
-    let current_schema_snapshot: SnapshotId = u64::from(start_lsn) as i64;
+    let current_schema_snapshot_id: SnapshotId = start_lsn.into();
 
     // The first status update is defaulted from the start lsn since at this point we haven't
     // processed anything.
@@ -534,7 +536,7 @@ where
     let mut state = ApplyLoopState::new(
         first_status_update,
         Vec::with_capacity(config.batch.max_size),
-        current_schema_snapshot,
+        current_schema_snapshot_id,
     );
 
     // Main event processing loop - continues until shutdown or fatal error
@@ -1274,7 +1276,7 @@ where
     let replicated_columns = parse_replicated_column_names(message)?;
 
     let table_schema =
-        get_table_schema(schema_store, &table_id, state.current_schema_snapshot).await?;
+        get_table_schema(schema_store, &table_id, state.current_schema_snapshot_id).await?;
 
     info!(
         table_id = %table_id,
@@ -1341,7 +1343,7 @@ where
 
     let replicated_table_schema = get_replicated_table_schema(
         &table_id,
-        state.current_schema_snapshot,
+        state.current_schema_snapshot_id,
         schema_store,
         replication_masks,
     )
@@ -1390,7 +1392,7 @@ where
 
     let replicated_table_schema = get_replicated_table_schema(
         &table_id,
-        state.current_schema_snapshot,
+        state.current_schema_snapshot_id,
         schema_store,
         replication_masks,
     )
@@ -1439,7 +1441,7 @@ where
 
     let replicated_table_schema = get_replicated_table_schema(
         &table_id,
-        state.current_schema_snapshot,
+        state.current_schema_snapshot_id,
         schema_store,
         replication_masks,
     )
@@ -1493,7 +1495,7 @@ where
         {
             let replicated_table_schema = get_replicated_table_schema(
                 &table_id,
-                state.current_schema_snapshot,
+                state.current_schema_snapshot_id,
                 schema_store,
                 replication_masks,
             )
@@ -1566,19 +1568,19 @@ where
     );
 
     // Build table schema from DDL message with start_lsn as the snapshot_id.
-    let snapshot_id: SnapshotId = u64::from(start_lsn) as i64;
+    let snapshot_id: SnapshotId = start_lsn.into();
     let table_schema = schema_change_message.into_table_schema(snapshot_id);
 
     // Store the new schema version in the store.
     schema_store.store_table_schema(table_schema).await?;
 
     // Update the current schema snapshot in the state.
-    state.update_schema_snapshot(snapshot_id);
+    state.update_schema_snapshot_id(snapshot_id);
 
     let table_id: u32 = table_id.into();
     info!(
         table_id = table_id,
-        snapshot_id = snapshot_id,
+        %snapshot_id,
         "stored new schema version from ddl message"
     );
 
