@@ -45,17 +45,17 @@ pub async fn store_destination_table_metadata(
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
         r#"
-        INSERT INTO etl.destination_tables_metadata
+        insert into etl.destination_tables_metadata
             (pipeline_id, table_id, destination_table_id, snapshot_id,
              schema_status, replication_mask)
-        VALUES ($1, $2, $3, $4, $5, $6)
-        ON CONFLICT (pipeline_id, table_id)
-        DO UPDATE SET
-            destination_table_id = EXCLUDED.destination_table_id,
-            snapshot_id = EXCLUDED.snapshot_id,
-            schema_status = EXCLUDED.schema_status,
-            replication_mask = EXCLUDED.replication_mask,
-            updated_at = NOW()
+        values ($1, $2, $3, $4, $5, $6)
+        on conflict (pipeline_id, table_id)
+        do update set
+            destination_table_id = excluded.destination_table_id,
+            snapshot_id = excluded.snapshot_id,
+            schema_status = excluded.schema_status,
+            replication_mask = excluded.replication_mask,
+            updated_at = now()
         "#,
     )
     .bind(pipeline_id)
@@ -79,10 +79,10 @@ pub async fn load_destination_tables_metadata(
 ) -> Result<HashMap<TableId, DestinationTableMetadataRow>, sqlx::Error> {
     let rows = sqlx::query(
         r#"
-        SELECT table_id, destination_table_id, snapshot_id,
+        select table_id, destination_table_id, snapshot_id,
                schema_status, replication_mask
-        FROM etl.destination_tables_metadata
-        WHERE pipeline_id = $1
+        from etl.destination_tables_metadata
+        where pipeline_id = $1
         "#,
     )
     .bind(pipeline_id)
@@ -117,10 +117,10 @@ pub async fn get_destination_table_metadata(
 ) -> Result<Option<DestinationTableMetadataRow>, sqlx::Error> {
     let row = sqlx::query(
         r#"
-        SELECT table_id, destination_table_id, snapshot_id,
+        select table_id, destination_table_id, snapshot_id,
                schema_status, replication_mask
-        FROM etl.destination_tables_metadata
-        WHERE pipeline_id = $1 AND table_id = $2
+        from etl.destination_tables_metadata
+        where pipeline_id = $1 and table_id = $2
         "#,
     )
     .bind(pipeline_id)
@@ -152,8 +152,8 @@ where
 {
     let result = sqlx::query(
         r#"
-        DELETE FROM etl.destination_tables_metadata
-        WHERE pipeline_id = $1
+        delete from etl.destination_tables_metadata
+        where pipeline_id = $1
         "#,
     )
     .bind(pipeline_id)
@@ -174,8 +174,8 @@ where
 {
     let result = sqlx::query(
         r#"
-        DELETE FROM etl.destination_tables_metadata
-        WHERE pipeline_id = $1 AND table_id = $2
+        delete from etl.destination_tables_metadata
+        where pipeline_id = $1 and table_id = $2
         "#,
     )
     .bind(pipeline_id)
