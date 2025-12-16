@@ -96,10 +96,9 @@ pub enum ErrorKind {
     SourceLockTimeout,
     SourceOperationCanceled,
 
-    // Schema & Mapping Errors
+    // Schema Errors
     SourceSchemaError,
     MissingTableSchema,
-    MissingTableMapping,
     CorruptedTableSchema,
     DestinationTableNameInvalid,
     DestinationNamespaceAlreadyExists,

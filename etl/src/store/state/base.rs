@@ -2,15 +2,13 @@ use etl_postgres::types::TableId;
 use std::{collections::HashMap, future::Future};
 
 use crate::error::EtlResult;
+use crate::state::destination::DestinationTableMetadata;
 use crate::state::table::TableReplicationPhase;
 
-use super::DestinationSchemaState;
-
-/// Trait for storing and retrieving table replication state and mapping information.
+/// Trait for storing and retrieving table replication state and destination metadata.
 ///
-/// [`StateStore`] implementations are responsible for defining how table replication states and
-/// table mappings are stored and retrieved. Table mappings define the relationship between
-/// source table identifiers and destination table names.
+/// [`StateStore`] implementations are responsible for defining how table replication states
+/// and destination table metadata are stored and retrieved.
 ///
 /// Implementations should ensure thread-safety and handle concurrent access to the data.
 pub trait StateStore {
@@ -23,12 +21,14 @@ pub trait StateStore {
     ) -> impl Future<Output = EtlResult<Option<TableReplicationPhase>>> + Send;
 
     /// Returns the table replication states for all the tables from the cache.
+    ///
     /// Does not read from the persistent store.
     fn get_table_replication_states(
         &self,
     ) -> impl Future<Output = EtlResult<HashMap<TableId, TableReplicationPhase>>> + Send;
 
     /// Loads the table replication states from the persistent state into the cache.
+    ///
     /// This should be called once at program start to load the state into the cache
     /// and then use only the `get_X` methods to access the state. Updating the state
     /// by calling the `update_table_replication_state` updates in both the cache and
@@ -49,50 +49,26 @@ pub trait StateStore {
         table_id: TableId,
     ) -> impl Future<Output = EtlResult<TableReplicationPhase>> + Send;
 
-    /// Returns table mapping for a specific source table ID from the cache.
+    /// Returns destination table metadata for a specific table from the cache.
     ///
     /// Does not load any new data into the cache.
-    fn get_table_mapping(
-        &self,
-        source_table_id: &TableId,
-    ) -> impl Future<Output = EtlResult<Option<String>>> + Send;
-
-    /// Returns all table mappings from the cache.
-    ///
-    /// Does not read from the persistent store.
-    fn get_table_mappings(
-        &self,
-    ) -> impl Future<Output = EtlResult<HashMap<TableId, String>>> + Send;
-
-    /// Loads all table mappings from the persistent state into the cache.
-    ///
-    /// This can be called lazily when table mappings are needed by the destination.
-    fn load_table_mappings(&self) -> impl Future<Output = EtlResult<usize>> + Send;
-
-    /// Stores a table mapping in both the cache and the persistent store.
-    fn store_table_mapping(
-        &self,
-        source_table_id: TableId,
-        destination_table_id: String,
-    ) -> impl Future<Output = EtlResult<()>> + Send;
-
-    /// Returns the destination schema state for a table from the cache.
-    ///
-    /// Does not load any new data into the cache.
-    fn get_destination_schema_state(
+    fn get_destination_table_metadata(
         &self,
         table_id: &TableId,
-    ) -> impl Future<Output = EtlResult<Option<DestinationSchemaState>>> + Send;
+    ) -> impl Future<Output = EtlResult<Option<DestinationTableMetadata>>> + Send;
 
-    /// Loads all destination schema states from the persistent state into the cache.
+    /// Loads all destination table metadata from the persistent state into the cache.
     ///
-    /// This should be called during startup to load the states into the cache.
-    fn load_destination_schema_states(&self) -> impl Future<Output = EtlResult<usize>> + Send;
+    /// This should be called during startup to load the metadata into the cache.
+    fn load_destination_tables_metadata(&self) -> impl Future<Output = EtlResult<usize>> + Send;
 
-    /// Stores a destination schema state in both the cache and the persistent store.
-    fn store_destination_schema_state(
+    /// Stores destination table metadata in both the cache and persistent store.
+    ///
+    /// This performs a full upsert. For updates, get the current metadata, modify
+    /// the fields you need to change, and store it back.
+    fn store_destination_table_metadata(
         &self,
         table_id: TableId,
-        state: DestinationSchemaState,
+        metadata: DestinationTableMetadata,
     ) -> impl Future<Output = EtlResult<()>> + Send;
 }

@@ -12,7 +12,7 @@ use crate::db::replicators::{Replicator, ReplicatorsDbError, create_replicator};
 use crate::db::sources::Source;
 use crate::routes::connect_to_source_database_with_defaults;
 use crate::routes::pipelines::PipelineError;
-use etl_postgres::replication::{health, schema, slots, state, table_mappings};
+use etl_postgres::replication::{destination_metadata, health, schema, slots, state};
 use sqlx::{PgExecutor, PgTransaction};
 use std::ops::DerefMut;
 use thiserror::Error;
@@ -247,13 +247,13 @@ pub async fn delete_pipeline_cascading(
         None
     };
 
-    // Delete state, schema, and table mappings from the source database, only if ETL tables exist.
+    // Delete state, schema, and destination metadata from the source database, only if ETL tables exist.
     if etl_present {
         let _ = state::delete_replication_state_for_all_tables(source_txn.deref_mut(), pipeline.id)
             .await?;
         let _ = schema::delete_table_schemas_for_all_tables(source_txn.deref_mut(), pipeline.id)
             .await?;
-        let _ = table_mappings::delete_table_mappings_for_all_tables(
+        let _ = destination_metadata::delete_destination_tables_metadata_for_all_tables(
             source_txn.deref_mut(),
             pipeline.id,
         )

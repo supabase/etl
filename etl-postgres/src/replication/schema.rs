@@ -1,6 +1,6 @@
 use sqlx::postgres::PgRow;
 use sqlx::postgres::types::Oid as SqlxTableId;
-use sqlx::{PgExecutor, PgPool, Row};
+use sqlx::{PgExecutor, PgPool, Row, Type};
 use std::collections::HashMap;
 use tokio_postgres::types::Type as PgType;
 
@@ -421,46 +421,64 @@ fn parse_column_schema(row: &PgRow) -> ColumnSchema {
     )
 }
 
-/// Represents the state of the schema at a destination.
+/// Database enum type for destination schema phase.
 ///
-/// This is the database representation of the destination schema state,
-/// used for serialization/deserialization to/from the database.
+/// Maps to the `etl.destination_schema_state` PostgreSQL enum type.
+/// This is internal to the postgres store and should not be exposed.
+#[derive(Debug, Clone, Copy, Type, PartialEq, Eq)]
+#[sqlx(type_name = "etl.destination_schema_state", rename_all = "snake_case")]
+pub enum DestinationSchemaPhase {
+    /// A schema change is currently being applied.
+    Applying,
+    /// The schema has been successfully applied.
+    Applied,
+}
+
+/// Database row representation of destination schema state.
+///
+/// Contains all fields from the `destination_schema_states` table joined with `table_schemas`.
+/// This is internal to the postgres store and should not be exposed.
 #[derive(Debug, Clone)]
 pub struct DestinationSchemaStateRow {
     pub table_id: TableId,
-    pub state_type: String,
+    pub phase: DestinationSchemaPhase,
     pub snapshot_id: SnapshotId,
     pub replication_mask: Vec<u8>,
 }
 
 /// Stores a destination schema state in the database.
 ///
-/// Inserts or updates the destination schema state for the specified pipeline and table.
+/// Inserts or updates the destination schema state for the specified table schema.
+/// The `table_schema_id` is looked up from the `table_schemas` table using
+/// (pipeline_id, table_id, snapshot_id) to maintain referential integrity.
 pub async fn store_destination_schema_state(
     pool: &PgPool,
     pipeline_id: i64,
     table_id: TableId,
-    state_type: &str,
+    phase: DestinationSchemaPhase,
     snapshot_id: SnapshotId,
     replication_mask: &[u8],
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
         r#"
         INSERT INTO etl.destination_schema_states
-            (pipeline_id, table_id, state_type, snapshot_id, replication_mask)
-        VALUES ($1, $2, $3, $4, $5)
-        ON CONFLICT (pipeline_id, table_id)
+            (table_schema_id, state_type, replication_mask)
+        VALUES (
+            (SELECT id FROM etl.table_schemas WHERE pipeline_id = $1 AND table_id = $2 AND snapshot_id = $3),
+            $4,
+            $5
+        )
+        ON CONFLICT (table_schema_id)
         DO UPDATE SET
             state_type = EXCLUDED.state_type,
-            snapshot_id = EXCLUDED.snapshot_id,
             replication_mask = EXCLUDED.replication_mask,
             updated_at = NOW()
         "#,
     )
     .bind(pipeline_id)
     .bind(SqlxTableId(table_id.into_inner()))
-    .bind(state_type)
     .bind(snapshot_id)
+    .bind(phase)
     .bind(replication_mask)
     .execute(pool)
     .await?;
@@ -470,16 +488,18 @@ pub async fn store_destination_schema_state(
 
 /// Loads all destination schema states for a pipeline from the database.
 ///
-/// Retrieves all destination schema state records for the specified pipeline.
+/// Retrieves all destination schema state records for the specified pipeline by
+/// joining with table_schemas to get pipeline_id, table_id, and snapshot_id.
 pub async fn load_destination_schema_states(
     pool: &PgPool,
     pipeline_id: i64,
 ) -> Result<HashMap<TableId, DestinationSchemaStateRow>, sqlx::Error> {
     let rows = sqlx::query(
         r#"
-        SELECT table_id, state_type, snapshot_id, replication_mask
-        FROM etl.destination_schema_states
-        WHERE pipeline_id = $1
+        SELECT ts.table_id, dss.state_type, ts.snapshot_id, dss.replication_mask
+        FROM etl.destination_schema_states dss
+        JOIN etl.table_schemas ts ON ts.id = dss.table_schema_id
+        WHERE ts.pipeline_id = $1
         "#,
     )
     .bind(pipeline_id)
@@ -489,7 +509,7 @@ pub async fn load_destination_schema_states(
     let mut states = HashMap::new();
     for row in rows {
         let table_id: SqlxTableId = row.get("table_id");
-        let state_type: String = row.get("state_type");
+        let phase: DestinationSchemaPhase = row.get("state_type");
         let snapshot_id: SnapshotId = row.get("snapshot_id");
         let replication_mask: Vec<u8> = row.get("replication_mask");
 
@@ -497,7 +517,7 @@ pub async fn load_destination_schema_states(
             TableId::new(table_id.0),
             DestinationSchemaStateRow {
                 table_id: TableId::new(table_id.0),
-                state_type,
+                phase,
                 snapshot_id,
                 replication_mask,
             },
@@ -508,6 +528,8 @@ pub async fn load_destination_schema_states(
 }
 
 /// Gets a single destination schema state for a specific table.
+///
+/// Joins with table_schemas to look up by pipeline_id and table_id.
 pub async fn get_destination_schema_state(
     pool: &PgPool,
     pipeline_id: i64,
@@ -515,9 +537,10 @@ pub async fn get_destination_schema_state(
 ) -> Result<Option<DestinationSchemaStateRow>, sqlx::Error> {
     let row = sqlx::query(
         r#"
-        SELECT table_id, state_type, snapshot_id, replication_mask
-        FROM etl.destination_schema_states
-        WHERE pipeline_id = $1 AND table_id = $2
+        SELECT ts.table_id, dss.state_type, ts.snapshot_id, dss.replication_mask
+        FROM etl.destination_schema_states dss
+        JOIN etl.table_schemas ts ON ts.id = dss.table_schema_id
+        WHERE ts.pipeline_id = $1 AND ts.table_id = $2
         "#,
     )
     .bind(pipeline_id)
@@ -529,7 +552,7 @@ pub async fn get_destination_schema_state(
         let table_id: SqlxTableId = r.get("table_id");
         DestinationSchemaStateRow {
             table_id: TableId::new(table_id.0),
-            state_type: r.get("state_type"),
+            phase: r.get("state_type"),
             snapshot_id: r.get("snapshot_id"),
             replication_mask: r.get("replication_mask"),
         }

@@ -5,10 +5,11 @@ use tokio::sync::{Notify, RwLock};
 
 use crate::error::{ErrorKind, EtlResult};
 use crate::etl_error;
+use crate::state::destination::DestinationTableMetadata;
 use crate::state::table::{TableReplicationPhase, TableReplicationPhaseType};
 use crate::store::cleanup::CleanupStore;
 use crate::store::schema::SchemaStore;
-use crate::store::state::{DestinationSchemaState, StateStore};
+use crate::store::state::StateStore;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum StateStoreMethod {
@@ -31,8 +32,7 @@ struct Inner {
     table_state_history: HashMap<TableId, Vec<TableReplicationPhase>>,
     /// Stores table schemas in insertion order per table.
     table_schemas: HashMap<TableId, Vec<Arc<TableSchema>>>,
-    table_mappings: HashMap<TableId, String>,
-    destination_schema_states: HashMap<TableId, DestinationSchemaState>,
+    destination_tables_metadata: HashMap<TableId, DestinationTableMetadata>,
     table_state_type_conditions: Vec<TableStateTypeCondition>,
     table_state_conditions: Vec<TableStateCondition>,
     method_call_notifiers: HashMap<StateStoreMethod, Vec<Arc<Notify>>>,
@@ -89,8 +89,7 @@ impl NotifyingStore {
             table_replication_states: HashMap::new(),
             table_state_history: HashMap::new(),
             table_schemas: HashMap::new(),
-            table_mappings: HashMap::new(),
-            destination_schema_states: HashMap::new(),
+            destination_tables_metadata: HashMap::new(),
             table_state_type_conditions: Vec::new(),
             table_state_conditions: Vec::new(),
             method_call_notifiers: HashMap::new(),
@@ -287,53 +286,26 @@ impl StateStore for NotifyingStore {
         Ok(previous_state)
     }
 
-    async fn get_table_mapping(&self, source_table_id: &TableId) -> EtlResult<Option<String>> {
-        let inner = self.inner.read().await;
-        Ok(inner.table_mappings.get(source_table_id).cloned())
-    }
-
-    async fn get_table_mappings(&self) -> EtlResult<HashMap<TableId, String>> {
-        let inner = self.inner.read().await;
-        Ok(inner.table_mappings.clone())
-    }
-
-    async fn load_table_mappings(&self) -> EtlResult<usize> {
-        let inner = self.inner.read().await;
-        Ok(inner.table_mappings.len())
-    }
-
-    async fn store_table_mapping(
-        &self,
-        source_table_id: TableId,
-        destination_table_id: String,
-    ) -> EtlResult<()> {
-        let mut inner = self.inner.write().await;
-        inner
-            .table_mappings
-            .insert(source_table_id, destination_table_id);
-        Ok(())
-    }
-
-    async fn get_destination_schema_state(
+    async fn get_destination_table_metadata(
         &self,
         table_id: &TableId,
-    ) -> EtlResult<Option<DestinationSchemaState>> {
+    ) -> EtlResult<Option<DestinationTableMetadata>> {
         let inner = self.inner.read().await;
-        Ok(inner.destination_schema_states.get(table_id).cloned())
+        Ok(inner.destination_tables_metadata.get(table_id).cloned())
     }
 
-    async fn load_destination_schema_states(&self) -> EtlResult<usize> {
+    async fn load_destination_tables_metadata(&self) -> EtlResult<usize> {
         let inner = self.inner.read().await;
-        Ok(inner.destination_schema_states.len())
+        Ok(inner.destination_tables_metadata.len())
     }
 
-    async fn store_destination_schema_state(
+    async fn store_destination_table_metadata(
         &self,
         table_id: TableId,
-        state: DestinationSchemaState,
+        metadata: DestinationTableMetadata,
     ) -> EtlResult<()> {
         let mut inner = self.inner.write().await;
-        inner.destination_schema_states.insert(table_id, state);
+        inner.destination_tables_metadata.insert(table_id, metadata);
         Ok(())
     }
 }
@@ -395,8 +367,7 @@ impl CleanupStore for NotifyingStore {
         inner.table_replication_states.remove(&table_id);
         inner.table_state_history.remove(&table_id);
         inner.table_schemas.remove(&table_id);
-        inner.table_mappings.remove(&table_id);
-        inner.destination_schema_states.remove(&table_id);
+        inner.destination_tables_metadata.remove(&table_id);
 
         Ok(())
     }

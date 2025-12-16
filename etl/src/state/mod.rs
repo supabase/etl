@@ -4,3 +4,4 @@
 //! across restarts and worker coordination.
 
 pub mod table;
+pub mod destination;

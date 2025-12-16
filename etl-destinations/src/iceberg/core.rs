@@ -9,7 +9,7 @@ use crate::iceberg::error::iceberg_error_to_etl_error;
 use etl::destination::Destination;
 use etl::error::{ErrorKind, EtlResult};
 use etl::etl_error;
-use etl::store::state::StateStore;
+use etl::store::state::{DestinationTableMetadata, StateStore};
 use etl::types::{
     Cell, ColumnSchema, Event, ReplicatedTableSchema, TableId, TableName, TableRow, Type,
     generate_sequence_number,
@@ -192,17 +192,22 @@ where
         let mut inner = self.inner.lock().await;
         let table_id = replicated_table_schema.id();
 
-        // Check if a table mapping exists for this table.
+        // Check if metadata exists for this table.
         //
-        // If no mapping exists, it means the table was never created in Iceberg (e.g., due to
+        // If no metadata exists, it means the table was never created in Iceberg (e.g., due to
         // errors during copy). In this case, we skip the truncate since there's nothing to truncate.
-        let Some(iceberg_table_name) = self.store.get_table_mapping(&table_id).await? else {
+        let Some(metadata) = self
+            .store
+            .get_destination_table_metadata(&table_id)
+            .await?
+        else {
             warn!(
-                "skipping truncate for table {}: no mapping exists (table was likely never created)",
+                "skipping truncate for table {}: no metadata exists (table was likely never created)",
                 table_id
             );
             return Ok(());
         };
+        let iceberg_table_name = metadata.destination_table_id;
 
         let namespace = schema_to_namespace(&replicated_table_schema.name().schema);
         let namespace = inner.namespace.get_or(&namespace);
@@ -424,7 +429,7 @@ where
         let iceberg_table_name =
             table_name_to_iceberg_table_name(table_name, inner.namespace.is_single());
         let iceberg_table_name = self
-            .get_or_create_iceberg_table_name(&table_id, iceberg_table_name)
+            .get_or_create_iceberg_table_name(&table_id, iceberg_table_name, replicated_table_schema)
             .await?;
 
         let namespace = schema_to_namespace(&table_name.schema);
@@ -524,26 +529,38 @@ where
         column_schemas
     }
 
-    /// Retrieves or creates a table mapping for the Iceberg table name.
+    /// Retrieves or creates destination metadata for the Iceberg table.
     ///
-    /// Checks if a table mapping already exists for the given table ID.
-    /// If no mapping exists, creates a new mapping with the provided
-    /// Iceberg table name. This ensures consistent table name resolution
-    /// across multiple operations on the same logical table.
+    /// Checks if metadata already exists for the given table ID.
+    /// If no metadata exists, creates new metadata with the provided
+    /// Iceberg table name and schema info. This ensures consistent table
+    /// name resolution across multiple operations on the same logical table.
     async fn get_or_create_iceberg_table_name(
         &self,
         table_id: &TableId,
         iceberg_table_name: IcebergTableName,
+        replicated_table_schema: &ReplicatedTableSchema,
     ) -> EtlResult<IcebergTableName> {
-        let Some(iceberg_table_name) = self.store.get_table_mapping(table_id).await? else {
+        let Some(metadata) = self
+            .store
+            .get_destination_table_metadata(table_id)
+            .await?
+        else {
+            // Create metadata using the first schema's snapshot_id and replication_mask.
+            // Iceberg doesn't support schema changes yet, so this is sufficient.
+            let metadata = DestinationTableMetadata::new_applied(
+                iceberg_table_name.to_string(),
+                replicated_table_schema.get_inner().snapshot_id,
+                replicated_table_schema.replication_mask().clone(),
+            );
             self.store
-                .store_table_mapping(*table_id, iceberg_table_name.to_string())
+                .store_destination_table_metadata(*table_id, metadata)
                 .await?;
 
             return Ok(iceberg_table_name);
         };
 
-        Ok(iceberg_table_name)
+        Ok(metadata.destination_table_id)
     }
 }
 

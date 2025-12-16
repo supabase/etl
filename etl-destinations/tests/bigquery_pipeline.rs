@@ -1849,7 +1849,7 @@ async fn table_schema_change() {
 
     // Verify destination schema state is applied after initial table creation.
     let initial_state = store
-        .get_destination_schema_state(&table_id)
+        .get_destination_table_metadata(&table_id)
         .await
         .unwrap()
         .expect("destination schema state should exist after table creation");
@@ -1933,7 +1933,7 @@ async fn table_schema_change() {
 
     // Verify destination schema state is applied after schema changes.
     let final_state = store
-        .get_destination_schema_state(&table_id)
+        .get_destination_table_metadata(&table_id)
         .await
         .unwrap()
         .expect("destination schema state should exist after schema change");

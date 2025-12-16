@@ -1,7 +1,7 @@
 use etl::destination::Destination;
 use etl::error::{ErrorKind, EtlError, EtlResult};
 use etl::store::schema::SchemaStore;
-use etl::store::state::{DestinationSchemaState, StateStore};
+use etl::store::state::{DestinationTableMetadata, DestinationTableSchemaStatus, StateStore};
 use etl::types::{
     Cell, Event, ReplicatedTableSchema, SchemaDiff, TableId, TableName, TableRow,
     generate_sequence_number,
@@ -337,31 +337,41 @@ where
 
         // We determine the BigQuery table ID for the table together with the current sequence number.
         let bigquery_table_id = table_name_to_bigquery_table_id(replicated_table_schema.name());
-        let sequenced_bigquery_table_id = self
-            .get_or_create_sequenced_bigquery_table_id(&table_id, &bigquery_table_id)
+        let snapshot_id = replicated_table_schema.get_inner().snapshot_id;
+        let replication_mask = replicated_table_schema.replication_mask().clone();
+
+        // Check if we have existing metadata for this table.
+        let existing_metadata = self
+            .state_store
+            .get_destination_table_metadata(&table_id)
             .await?;
+
+        let sequenced_bigquery_table_id = match &existing_metadata {
+            Some(metadata) => metadata.destination_table_id.parse()?,
+            None => SequencedBigQueryTableId::new(bigquery_table_id.clone()),
+        };
 
         // Optimistically skip table creation if we've already seen this sequenced table.
         //
         // Note that if the table is deleted outside ETL and the cache marks it as created, the
         // inserts will fail because the table will be missing and won't be created.
         if !inner.created_tables.contains(&sequenced_bigquery_table_id) {
-            let snapshot_id = replicated_table_schema.get_inner().snapshot_id;
-            let replication_mask = replicated_table_schema.replication_mask().clone();
+            // Create metadata with applying status. For new tables, this is the initial insert.
+            // For existing tables, this updates the status.
+            let metadata = DestinationTableMetadata::new_applying(
+                sequenced_bigquery_table_id.to_string(),
+                snapshot_id,
+                replication_mask.clone(),
+            );
 
-            // Mark the state as applying BEFORE creating the table. This ensures that if the
-            // process crashes during table creation, we'll detect the incomplete state on restart.
+            // Store or update metadata before creating the table.
             self.state_store
-                .store_destination_schema_state(
-                    table_id,
-                    DestinationSchemaState::applying(snapshot_id, replication_mask.clone()),
-                )
+                .store_destination_table_metadata(table_id, metadata.clone())
                 .await?;
 
             self.client
                 .create_table_if_missing(
                     &self.dataset_id,
-                    // TODO: down the line we might want to reduce an allocation here.
                     &sequenced_bigquery_table_id.to_string(),
                     replicated_table_schema,
                     self.max_staleness_mins,
@@ -370,10 +380,7 @@ where
 
             // Mark as applied after successful table creation.
             self.state_store
-                .store_destination_schema_state(
-                    table_id,
-                    DestinationSchemaState::applied(snapshot_id, replication_mask),
-                )
+                .store_destination_table_metadata(table_id, metadata.to_applied())
                 .await?;
 
             // Add the sequenced table to the cache.
@@ -416,37 +423,20 @@ where
         inner.created_tables.insert(table_id.clone());
     }
 
-    /// Retrieves the current sequenced table ID or creates a new one starting at version 0.
-    async fn get_or_create_sequenced_bigquery_table_id(
-        &self,
-        table_id: &TableId,
-        bigquery_table_id: &BigQueryTableId,
-    ) -> EtlResult<SequencedBigQueryTableId> {
-        let Some(sequenced_bigquery_table_id) =
-            self.get_sequenced_bigquery_table_id(table_id).await?
-        else {
-            let sequenced_bigquery_table_id =
-                SequencedBigQueryTableId::new(bigquery_table_id.clone());
-            self.state_store
-                .store_table_mapping(*table_id, sequenced_bigquery_table_id.to_string())
-                .await?;
-
-            return Ok(sequenced_bigquery_table_id);
-        };
-
-        Ok(sequenced_bigquery_table_id)
-    }
-
-    /// Retrieves the current sequenced table ID from the state store.
+    /// Retrieves the current sequenced table ID from the destination metadata.
     async fn get_sequenced_bigquery_table_id(
         &self,
         table_id: &TableId,
     ) -> EtlResult<Option<SequencedBigQueryTableId>> {
-        let Some(current_table_id) = self.state_store.get_table_mapping(table_id).await? else {
+        let Some(metadata) = self
+            .state_store
+            .get_destination_table_metadata(table_id)
+            .await?
+        else {
             return Ok(None);
         };
 
-        let sequenced_bigquery_table_id = current_table_id.parse()?;
+        let sequenced_bigquery_table_id = metadata.destination_table_id.parse()?;
 
         Ok(Some(sequenced_bigquery_table_id))
     }
@@ -557,28 +547,28 @@ where
         let table_id = new_schema.id();
         let new_snapshot_id = new_schema.get_inner().snapshot_id;
 
-        // Get current destination schema state.
-        let current_state = self
+        // Get current destination metadata.
+        let current_metadata = self
             .state_store
-            .get_destination_schema_state(&table_id)
+            .get_destination_table_metadata(&table_id)
             .await?;
 
-        match current_state {
+        match current_metadata {
             None => {
-                // No state exists - this is a broken invariant since the schema should
+                // No metadata exists - this is a broken invariant since the metadata should
                 // have been recorded during write_table_rows before any Relation event.
                 bail!(
                     ErrorKind::InvalidState,
-                    "Missing destination schema state",
+                    "Missing destination table metadata",
                     format!(
-                        "No destination schema state found for table {} when processing schema change. \
-                         This indicates a broken invariant - the schema should have been recorded \
+                        "No destination table metadata found for table {} when processing schema change. \
+                         This indicates a broken invariant, the metadata should have been recorded \
                          during initial table synchronization.",
                         table_id
                     )
                 );
             }
-            Some(state) if state.is_applying() => {
+            Some(metadata) if metadata.is_applying() => {
                 // A previous schema change was interrupted, require manual intervention.
                 // The previous valid snapshot_id can be derived from table_schemas table
                 // by finding the second-highest snapshot_id for this table.
@@ -589,13 +579,13 @@ where
                         "A previous schema change for table {} was interrupted at snapshot_id {}. \
                          Manual intervention is required to resolve the destination schema state. \
                          The previous valid snapshot can be derived from the table_schemas table.",
-                        table_id, state.snapshot_id
+                        table_id, metadata.snapshot_id
                     )
                 );
             }
-            Some(state) if state.is_applied() => {
-                let current_snapshot_id = state.snapshot_id;
-                let current_replication_mask = state.replication_mask.clone();
+            Some(metadata) if metadata.is_applied() => {
+                let current_snapshot_id = metadata.snapshot_id;
+                let current_replication_mask = metadata.replication_mask.clone();
 
                 if current_snapshot_id == new_snapshot_id {
                     // Schema hasn't changed, nothing to do.
@@ -635,14 +625,13 @@ where
                 let new_replication_mask = new_schema.replication_mask().clone();
 
                 // Mark as applying before making changes (with the NEW snapshot_id and mask).
+                let updated_metadata = metadata.with_schema_change(
+                    new_snapshot_id,
+                    new_replication_mask.clone(),
+                    DestinationTableSchemaStatus::Applying,
+                );
                 self.state_store
-                    .store_destination_schema_state(
-                        table_id,
-                        DestinationSchemaState::applying(
-                            new_snapshot_id,
-                            new_replication_mask.clone(),
-                        ),
-                    )
+                    .store_destination_table_metadata(table_id, updated_metadata.clone())
                     .await?;
 
                 // Compute and apply the diff.
@@ -657,10 +646,7 @@ where
 
                 // Mark as applied after successful changes.
                 self.state_store
-                    .store_destination_schema_state(
-                        table_id,
-                        DestinationSchemaState::applied(new_snapshot_id, new_replication_mask),
-                    )
+                    .store_destination_table_metadata(table_id, updated_metadata.to_applied())
                     .await?;
 
                 info!(
@@ -1034,9 +1020,14 @@ where
             )
             .await?;
 
-            // Update the store table mappings to point to the new table.
+            // Update the metadata to point to the new table.
+            let metadata = DestinationTableMetadata::new_applied(
+                next_sequenced_bigquery_table_id.to_string(),
+                replicated_table_schema.get_inner().snapshot_id,
+                replicated_table_schema.replication_mask().clone(),
+            );
             self.state_store
-                .store_table_mapping(table_id, next_sequenced_bigquery_table_id.to_string())
+                .store_destination_table_metadata(table_id, metadata)
                 .await?;
 
             // Please note that the three statements above are not transactional, so if one fails,

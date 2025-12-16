@@ -542,8 +542,8 @@ impl ReplicatedTableSchema {
 
     /// Computes the diff between this schema (old) and another schema (new).
     ///
-    /// Only considers replicated columns. Uses ordinal positions to track columns:
-    /// - Columns at same position with different names are renames.
+    /// Only consider replicated columns. Uses ordinal positions to track columns:
+    /// - Columns in the same position with different names are renamed.
     /// - Positions in old but not in new are columns to remove.
     /// - Positions in new but not in old are columns to add.
     pub fn diff(&self, new_schema: &ReplicatedTableSchema) -> SchemaDiff {

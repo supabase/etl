@@ -1,7 +1,9 @@
 use std::{collections::HashMap, sync::Arc};
 
 use etl_config::shared::PgConnectionConfig;
-use etl_postgres::replication::{connect_to_source_database, schema, state, table_mappings};
+use etl_postgres::replication::{
+    connect_to_source_database, destination_metadata, schema, state,
+};
 use etl_postgres::types::{ReplicationMask, SnapshotId, TableId, TableSchema};
 use metrics::gauge;
 use sqlx::PgPool;
@@ -10,10 +12,11 @@ use tracing::{debug, info};
 
 use crate::error::{ErrorKind, EtlError, EtlResult};
 use crate::metrics::{ETL_TABLES_TOTAL, PHASE_LABEL, PIPELINE_ID_LABEL};
+use crate::state::destination::{DestinationTableMetadata, DestinationTableSchemaStatus};
 use crate::state::table::{RetryPolicy, TableReplicationPhase};
 use crate::store::cleanup::CleanupStore;
 use crate::store::schema::SchemaStore;
-use crate::store::state::{DestinationSchemaState, DestinationSchemaStateType, StateStore};
+use crate::store::state::StateStore;
 use crate::types::PipelineId;
 use crate::{bail, etl_error};
 
@@ -135,6 +138,34 @@ impl TryFrom<state::TableReplicationStateRow> for TableReplicationPhase {
     }
 }
 
+/// Converts application layer destination schema status to postgres layer.
+impl From<DestinationTableSchemaStatus> for destination_metadata::DestinationTableSchemaStatus {
+    fn from(value: DestinationTableSchemaStatus) -> Self {
+        match value {
+            DestinationTableSchemaStatus::Applying => {
+                destination_metadata::DestinationTableSchemaStatus::Applying
+            }
+            DestinationTableSchemaStatus::Applied => {
+                destination_metadata::DestinationTableSchemaStatus::Applied
+            }
+        }
+    }
+}
+
+/// Converts postgres layer destination schema status to application layer.
+impl From<destination_metadata::DestinationTableSchemaStatus> for DestinationTableSchemaStatus {
+    fn from(value: destination_metadata::DestinationTableSchemaStatus) -> Self {
+        match value {
+            destination_metadata::DestinationTableSchemaStatus::Applying => {
+                DestinationTableSchemaStatus::Applying
+            }
+            destination_metadata::DestinationTableSchemaStatus::Applied => {
+                DestinationTableSchemaStatus::Applied
+            }
+        }
+    }
+}
+
 /// Inner state of [`PostgresStore`].
 #[derive(Debug)]
 struct Inner {
@@ -150,10 +181,8 @@ struct Inner {
     /// only the latest schema version for each table, since that's what the
     /// replication pipeline actively uses.
     table_schemas: HashMap<(TableId, SnapshotId), Arc<TableSchema>>,
-    /// Cached table mappings from source table ID to destination table name.
-    table_mappings: HashMap<TableId, String>,
-    /// Cached destination schema states indexed by table ID.
-    destination_schema_states: HashMap<TableId, DestinationSchemaState>,
+    /// Cached destination table metadata indexed by table ID.
+    destination_tables_metadata: HashMap<TableId, DestinationTableMetadata>,
 }
 
 impl Inner {
@@ -229,8 +258,7 @@ impl PostgresStore {
             phase_counts: HashMap::new(),
             table_states: HashMap::new(),
             table_schemas: HashMap::new(),
-            table_mappings: HashMap::new(),
-            destination_schema_states: HashMap::new(),
+            destination_tables_metadata: HashMap::new(),
         };
 
         Self {
@@ -453,211 +481,100 @@ impl StateStore for PostgresStore {
         }
     }
 
-    /// Retrieves a table mapping from source table ID to destination name.
+    /// Retrieves destination table metadata for a specific table from cache.
     ///
-    /// This method looks up the destination table name for a given source table
-    /// ID from the cache. Table mappings define how source tables are mapped
-    /// to tables in the destination system.
-    async fn get_table_mapping(&self, source_table_id: &TableId) -> EtlResult<Option<String>> {
-        let inner = self.inner.lock().await;
-
-        Ok(inner.table_mappings.get(source_table_id).cloned())
-    }
-
-    /// Retrieves all table mappings from cache.
-    ///
-    /// This method returns a complete snapshot of all cached table mappings,
-    /// showing how source table IDs map to destination table names. Useful
-    /// for operations that need visibility into the complete mapping configuration.
-    async fn get_table_mappings(&self) -> EtlResult<HashMap<TableId, String>> {
-        let inner = self.inner.lock().await;
-
-        Ok(inner.table_mappings.clone())
-    }
-
-    /// Loads table mappings from Postgres into memory cache.
-    ///
-    /// This method connects to the source database, retrieves all table mapping
-    /// definitions for this pipeline, and populates the in-memory cache.
-    /// Called during pipeline initialization to establish source-to-destination
-    /// table mappings.
-    async fn load_table_mappings(&self) -> EtlResult<usize> {
-        debug!("loading table mappings from postgres state store");
-
-        let pool = self.connect_to_source().await?;
-
-        let table_mappings = table_mappings::load_table_mappings(&pool, self.pipeline_id as i64)
-            .await
-            .map_err(|err| {
-                etl_error!(
-                    ErrorKind::SourceQueryFailed,
-                    "Table mappings loading failed",
-                    format!("Failed to load table mappings from PostgreSQL: {}", err)
-                )
-            })?;
-        let table_mappings_len = table_mappings.len();
-
-        let mut inner = self.inner.lock().await;
-        inner.table_mappings = table_mappings;
-
-        info!(
-            "loaded {} table mappings from postgres state store",
-            table_mappings_len
-        );
-
-        Ok(table_mappings_len)
-    }
-
-    /// Stores a table mapping in both database and cache.
-    ///
-    /// This method persists a table mapping from source table ID to destination
-    /// table name in the database and updates the in-memory cache atomically.
-    /// Used when establishing or updating the mapping configuration between
-    /// source and destination systems.
-    async fn store_table_mapping(
-        &self,
-        source_table_id: TableId,
-        destination_table_id: String,
-    ) -> EtlResult<()> {
-        debug!(
-            "storing table mapping: '{}' -> '{}'",
-            source_table_id, destination_table_id
-        );
-
-        let pool = self.connect_to_source().await?;
-
-        let mut inner = self.inner.lock().await;
-        table_mappings::store_table_mapping(
-            &pool,
-            self.pipeline_id as i64,
-            &source_table_id,
-            &destination_table_id,
-        )
-        .await
-        .map_err(|err| {
-            etl_error!(
-                ErrorKind::SourceQueryFailed,
-                "Table mapping storage failed",
-                format!("Failed to store table mapping in PostgreSQL: {}", err)
-            )
-        })?;
-        inner
-            .table_mappings
-            .insert(source_table_id, destination_table_id);
-
-        Ok(())
-    }
-
-    /// Retrieves the destination schema state for a table from cache.
-    ///
-    /// This method provides fast access to destination schema states by reading
-    /// from the in-memory cache. The cache is populated during startup via
-    /// [`load_destination_schema_states`] and updated as states change.
-    async fn get_destination_schema_state(
+    /// This method provides fast access to destination metadata by reading
+    /// from the in-memory cache.
+    async fn get_destination_table_metadata(
         &self,
         table_id: &TableId,
-    ) -> EtlResult<Option<DestinationSchemaState>> {
+    ) -> EtlResult<Option<DestinationTableMetadata>> {
         let inner = self.inner.lock().await;
 
-        Ok(inner.destination_schema_states.get(table_id).cloned())
+        Ok(inner.destination_tables_metadata.get(table_id).cloned())
     }
 
-    /// Loads destination schema states from Postgres into memory cache.
+    /// Loads all destination table metadata from Postgres into memory cache.
     ///
     /// This method connects to the source database, retrieves all destination
-    /// schema state records for this pipeline, deserializes them, and populates
-    /// the in-memory cache. It's typically called during pipeline startup.
-    async fn load_destination_schema_states(&self) -> EtlResult<usize> {
-        debug!("loading destination schema states from postgres state store");
+    /// table metadata for this pipeline, and populates the in-memory cache.
+    async fn load_destination_tables_metadata(&self) -> EtlResult<usize> {
+        debug!("loading destination tables metadata from postgres state store");
 
         let pool = self.connect_to_source().await?;
 
-        let state_rows = schema::load_destination_schema_states(&pool, self.pipeline_id as i64)
-            .await
-            .map_err(|err| {
-                etl_error!(
-                    ErrorKind::SourceQueryFailed,
-                    "Destination schema states loading failed",
-                    format!(
-                        "Failed to load destination schema states from PostgreSQL: {}",
-                        err
+        let rows =
+            destination_metadata::load_destination_tables_metadata(&pool, self.pipeline_id as i64)
+                .await
+                .map_err(|err| {
+                    etl_error!(
+                        ErrorKind::SourceQueryFailed,
+                        "Destination tables metadata loading failed",
+                        format!(
+                            "Failed to load destination tables metadata from PostgreSQL: {}",
+                            err
+                        )
                     )
-                )
-            })?;
+                })?;
 
-        let mut states: HashMap<TableId, DestinationSchemaState> = HashMap::new();
-        for (table_id, row) in state_rows {
-            let state_type = match row.state_type.as_str() {
-                "applying" => DestinationSchemaStateType::Applying,
-                "applied" => DestinationSchemaStateType::Applied,
-                _ => {
-                    return Err(etl_error!(
-                        ErrorKind::InvalidState,
-                        "Invalid destination schema state type",
-                        format!("Unknown state type '{}' in database", row.state_type)
-                    ));
-                }
-            };
-            states.insert(
+        let mut metadata: HashMap<TableId, DestinationTableMetadata> = HashMap::new();
+        for (table_id, row) in rows {
+            metadata.insert(
                 table_id,
-                DestinationSchemaState {
-                    state: state_type,
+                DestinationTableMetadata {
+                    destination_table_id: row.destination_table_id,
                     snapshot_id: row.snapshot_id,
+                    schema_status: row.schema_status.into(),
                     replication_mask: ReplicationMask::from_bytes(row.replication_mask),
                 },
             );
         }
 
-        let states_len = states.len();
+        let metadata_len = metadata.len();
         let mut inner = self.inner.lock().await;
-        inner.destination_schema_states = states;
+        inner.destination_tables_metadata = metadata;
 
         info!(
-            "loaded {} destination schema states from postgres state store",
-            states_len
+            "loaded {} destination tables metadata from postgres state store",
+            metadata_len
         );
 
-        Ok(states_len)
+        Ok(metadata_len)
     }
 
-    /// Stores a destination schema state in both database and cache.
+    /// Stores complete destination table metadata in both database and cache.
     ///
-    /// This method performs atomic updates by first acquiring the cache lock,
-    /// then updating the database, and finally updating the cache.
-    async fn store_destination_schema_state(
+    /// Performs a full upsert - use for initial table creation.
+    async fn store_destination_table_metadata(
         &self,
         table_id: TableId,
-        state: DestinationSchemaState,
+        metadata: DestinationTableMetadata,
     ) -> EtlResult<()> {
-        let state_type = match state.state {
-            DestinationSchemaStateType::Applying => "applying",
-            DestinationSchemaStateType::Applied => "applied",
-        };
-
         let pool = self.connect_to_source().await?;
 
         let mut inner = self.inner.lock().await;
-        schema::store_destination_schema_state(
+        destination_metadata::store_destination_table_metadata(
             &pool,
             self.pipeline_id as i64,
             table_id,
-            state_type,
-            state.snapshot_id,
-            state.replication_mask.as_slice(),
+            &metadata.destination_table_id,
+            metadata.snapshot_id,
+            metadata.schema_status.into(),
+            metadata.replication_mask.as_slice(),
         )
         .await
         .map_err(|err| {
             etl_error!(
                 ErrorKind::SourceQueryFailed,
-                "Destination schema state storage failed",
+                "Destination table metadata storage failed",
                 format!(
-                    "Failed to store destination schema state in PostgreSQL: {}",
+                    "Failed to store destination table metadata in PostgreSQL: {}",
                     err
                 )
             )
         })?;
 
-        inner.destination_schema_states.insert(table_id, state);
+        inner.destination_tables_metadata.insert(table_id, metadata);
 
         Ok(())
     }
@@ -823,17 +740,20 @@ impl CleanupStore for PostgresStore {
         // Use a single DB transaction to keep persistent state consistent.
         let mut tx = pool.begin().await?;
 
-        table_mappings::delete_table_mappings_for_table(
+        destination_metadata::delete_destination_table_metadata(
             &mut *tx,
             self.pipeline_id as i64,
-            &table_id,
+            table_id,
         )
         .await
         .map_err(|err| {
             etl_error!(
                 ErrorKind::SourceQueryFailed,
-                "Table mapping deletion failed",
-                format!("Failed to delete table mapping in PostgreSQL: {}", err)
+                "Destination table metadata deletion failed",
+                format!(
+                    "Failed to delete destination table metadata in PostgreSQL: {}",
+                    err
+                )
             )
         })?;
 
@@ -858,7 +778,7 @@ impl CleanupStore for PostgresStore {
         inner.table_states.remove(&table_id);
         // Remove all schema versions for this table
         inner.table_schemas.retain(|(tid, _), _| *tid != table_id);
-        inner.table_mappings.remove(&table_id);
+        inner.destination_tables_metadata.remove(&table_id);
 
         emit_table_metrics(
             self.pipeline_id,
