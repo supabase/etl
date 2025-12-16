@@ -855,7 +855,7 @@ fn bq_error_to_etl_error(err: BQError) -> EtlError {
             } else if is_retryable_streaming_message(status.message()) {
                 (
                     ErrorKind::DestinationSchemaMismatch,
-                    "BigQuery transient streaming error",
+                    "BigQuery schema mismatch",
                 )
             } else {
                 (ErrorKind::DestinationError, "BigQuery gRPC status error")

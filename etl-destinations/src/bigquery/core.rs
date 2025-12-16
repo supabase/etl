@@ -586,20 +586,29 @@ where
             Some(metadata) if metadata.is_applied() => {
                 let current_snapshot_id = metadata.snapshot_id;
                 let current_replication_mask = metadata.replication_mask.clone();
+                let new_replication_mask = new_schema.replication_mask().clone();
 
-                if current_snapshot_id == new_snapshot_id {
+                // Check both snapshot_id and replication mask - the mask can change
+                // independently if columns are added/removed from the publication.
+                if current_snapshot_id == new_snapshot_id
+                    && current_replication_mask == new_replication_mask
+                {
                     // Schema hasn't changed, nothing to do.
                     info!(
-                        "schema for table {} unchanged (snapshot_id: {})",
-                        table_id, new_snapshot_id
+                        "schema for table {} unchanged (snapshot_id: {}, replication_mask: {})",
+                        table_id, new_snapshot_id, new_replication_mask
                     );
 
                     return Ok(());
                 }
 
                 info!(
-                    "schema change detected for table {}: {} -> {}",
-                    table_id, current_snapshot_id, new_snapshot_id
+                    "schema change detected for table {}: snapshot_id {} -> {}, mask {} -> {}",
+                    table_id,
+                    current_snapshot_id,
+                    new_snapshot_id,
+                    current_replication_mask,
+                    new_replication_mask
                 );
 
                 // Get the old schema from the schema store to compute the diff.
@@ -621,8 +630,6 @@ where
                 // Build a ReplicatedTableSchema using the stored replication mask.
                 let old_schema =
                     ReplicatedTableSchema::from_mask(old_table_schema, current_replication_mask);
-
-                let new_replication_mask = new_schema.replication_mask().clone();
 
                 // Mark as applying before making changes (with the NEW snapshot_id and mask).
                 let updated_metadata = metadata.with_schema_change(

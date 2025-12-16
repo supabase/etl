@@ -339,6 +339,19 @@ impl TableSchema {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReplicationMask(Arc<Vec<u8>>);
 
+impl fmt::Display for ReplicationMask {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "(")?;
+        for (i, &v) in self.0.iter().enumerate() {
+            if i > 0 {
+                write!(f, ",")?;
+            }
+            write!(f, "{v}")?;
+        }
+        write!(f, ")")
+    }
+}
+
 impl ReplicationMask {
     /// Tries to create a new [`ReplicationMask`] from a table schema and column names.
     ///
@@ -958,5 +971,46 @@ mod tests {
         assert!(removed_names.contains("name"));
         assert!(removed_names.contains("email"));
         assert!(diff.columns_to_rename.is_empty());
+    }
+
+    #[test]
+    fn test_replication_mask_display_all_replicated() {
+        let schema = create_test_table_schema();
+        let replicated_columns: HashSet<String> = ["id", "name", "age"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+
+        let mask = ReplicationMask::build(&schema, &replicated_columns);
+
+        assert_eq!(mask.to_string(), "(1,1,1)");
+    }
+
+    #[test]
+    fn test_replication_mask_display_partial_replicated() {
+        let schema = create_test_table_schema();
+        let replicated_columns: HashSet<String> =
+            ["id", "age"].into_iter().map(String::from).collect();
+
+        let mask = ReplicationMask::build(&schema, &replicated_columns);
+
+        assert_eq!(mask.to_string(), "(1,0,1)");
+    }
+
+    #[test]
+    fn test_replication_mask_display_none_replicated() {
+        let schema = create_test_table_schema();
+        let replicated_columns: HashSet<String> = HashSet::new();
+
+        let mask = ReplicationMask::build(&schema, &replicated_columns);
+
+        assert_eq!(mask.to_string(), "(0,0,0)");
+    }
+
+    #[test]
+    fn test_replication_mask_display_empty() {
+        let mask = ReplicationMask::from_bytes(vec![]);
+
+        assert_eq!(mask.to_string(), "()");
     }
 }
