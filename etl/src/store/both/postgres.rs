@@ -1,9 +1,7 @@
 use std::{collections::HashMap, sync::Arc};
 
 use etl_config::shared::PgConnectionConfig;
-use etl_postgres::replication::{
-    connect_to_source_database, destination_metadata, schema, state,
-};
+use etl_postgres::replication::{connect_to_source_database, destination_metadata, schema, state};
 use etl_postgres::types::{ReplicationMask, SnapshotId, TableId, TableSchema};
 use metrics::gauge;
 use sqlx::PgPool;

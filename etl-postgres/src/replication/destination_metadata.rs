@@ -8,7 +8,10 @@ use crate::types::{SnapshotId, TableId};
 ///
 /// Maps to the `etl.destination_table_schema_status` PostgreSQL enum type.
 #[derive(Debug, Clone, Copy, Type, PartialEq, Eq)]
-#[sqlx(type_name = "etl.destination_table_schema_status", rename_all = "snake_case")]
+#[sqlx(
+    type_name = "etl.destination_table_schema_status",
+    rename_all = "snake_case"
+)]
 pub enum DestinationTableSchemaStatus {
     /// A schema change is currently being applied.
     Applying,

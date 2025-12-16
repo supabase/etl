@@ -196,11 +196,7 @@ where
         //
         // If no metadata exists, it means the table was never created in Iceberg (e.g., due to
         // errors during copy). In this case, we skip the truncate since there's nothing to truncate.
-        let Some(metadata) = self
-            .store
-            .get_destination_table_metadata(&table_id)
-            .await?
-        else {
+        let Some(metadata) = self.store.get_destination_table_metadata(&table_id).await? else {
             warn!(
                 "skipping truncate for table {}: no metadata exists (table was likely never created)",
                 table_id
@@ -429,7 +425,11 @@ where
         let iceberg_table_name =
             table_name_to_iceberg_table_name(table_name, inner.namespace.is_single());
         let iceberg_table_name = self
-            .get_or_create_iceberg_table_name(&table_id, iceberg_table_name, replicated_table_schema)
+            .get_or_create_iceberg_table_name(
+                &table_id,
+                iceberg_table_name,
+                replicated_table_schema,
+            )
             .await?;
 
         let namespace = schema_to_namespace(&table_name.schema);
@@ -541,11 +541,7 @@ where
         iceberg_table_name: IcebergTableName,
         replicated_table_schema: &ReplicatedTableSchema,
     ) -> EtlResult<IcebergTableName> {
-        let Some(metadata) = self
-            .store
-            .get_destination_table_metadata(table_id)
-            .await?
-        else {
+        let Some(metadata) = self.store.get_destination_table_metadata(table_id).await? else {
             // Create metadata using the first schema's snapshot_id and replication_mask.
             // Iceberg doesn't support schema changes yet, so this is sufficient.
             let metadata = DestinationTableMetadata::new_applied(
