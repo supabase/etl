@@ -626,12 +626,12 @@ async fn test_multiple_pipelines_isolation() {
     // Test destination metadata isolation
     let metadata1 = DestinationTableMetadata::new_applied(
         "pipeline1_table".to_string(),
-        0,
+        SnapshotId::initial(),
         ReplicationMask::from_bytes(vec![1, 1, 1]),
     );
     let metadata2 = DestinationTableMetadata::new_applied(
         "pipeline2_table".to_string(),
-        0,
+        SnapshotId::initial(),
         ReplicationMask::from_bytes(vec![1, 1, 1]),
     );
 
@@ -833,12 +833,12 @@ async fn test_cleanup_deletes_state_schema_and_metadata_for_table() {
 
     let metadata1 = DestinationTableMetadata::new_applied(
         "dest_table_1".to_string(),
-        0,
+        SnapshotId::initial(),
         ReplicationMask::from_bytes(vec![1, 1, 1]),
     );
     let metadata2 = DestinationTableMetadata::new_applied(
         "dest_table_2".to_string(),
-        0,
+        SnapshotId::initial(),
         ReplicationMask::from_bytes(vec![1, 1, 1]),
     );
 

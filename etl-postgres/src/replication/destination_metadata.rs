@@ -48,7 +48,7 @@ pub async fn store_destination_table_metadata(
         insert into etl.destination_tables_metadata
             (pipeline_id, table_id, destination_table_id, snapshot_id,
              schema_status, replication_mask)
-        values ($1, $2, $3, $4, $5, $6)
+        values ($1, $2, $3, $4::pg_lsn, $5, $6)
         on conflict (pipeline_id, table_id)
         do update set
             destination_table_id = excluded.destination_table_id,
@@ -61,7 +61,7 @@ pub async fn store_destination_table_metadata(
     .bind(pipeline_id)
     .bind(SqlxTableId(table_id.into_inner()))
     .bind(destination_table_id)
-    .bind(snapshot_id)
+    .bind(snapshot_id.to_pg_lsn_string())
     .bind(schema_status)
     .bind(replication_mask)
     .execute(pool)
@@ -79,7 +79,7 @@ pub async fn load_destination_tables_metadata(
 ) -> Result<HashMap<TableId, DestinationTableMetadataRow>, sqlx::Error> {
     let rows = sqlx::query(
         r#"
-        select table_id, destination_table_id, snapshot_id,
+        select table_id, destination_table_id, snapshot_id::text as snapshot_id,
                schema_status, replication_mask
         from etl.destination_tables_metadata
         where pipeline_id = $1
@@ -93,13 +93,14 @@ pub async fn load_destination_tables_metadata(
     for row in rows {
         let table_id: SqlxTableId = row.get("table_id");
         let table_id = TableId::new(table_id.0);
+        let snapshot_id_str: String = row.get("snapshot_id");
 
         metadata.insert(
             table_id,
             DestinationTableMetadataRow {
                 table_id,
                 destination_table_id: row.get("destination_table_id"),
-                snapshot_id: row.get("snapshot_id"),
+                snapshot_id: SnapshotId::from_pg_lsn_string(&snapshot_id_str),
                 schema_status: row.get("schema_status"),
                 replication_mask: row.get("replication_mask"),
             },
@@ -117,7 +118,7 @@ pub async fn get_destination_table_metadata(
 ) -> Result<Option<DestinationTableMetadataRow>, sqlx::Error> {
     let row = sqlx::query(
         r#"
-        select table_id, destination_table_id, snapshot_id,
+        select table_id, destination_table_id, snapshot_id::text as snapshot_id,
                schema_status, replication_mask
         from etl.destination_tables_metadata
         where pipeline_id = $1 and table_id = $2
@@ -130,10 +131,11 @@ pub async fn get_destination_table_metadata(
 
     Ok(row.map(|r| {
         let table_id: SqlxTableId = r.get("table_id");
+        let snapshot_id_str: String = r.get("snapshot_id");
         DestinationTableMetadataRow {
             table_id: TableId::new(table_id.0),
             destination_table_id: r.get("destination_table_id"),
-            snapshot_id: r.get("snapshot_id"),
+            snapshot_id: SnapshotId::from_pg_lsn_string(&snapshot_id_str),
             schema_status: r.get("schema_status"),
             replication_mask: r.get("replication_mask"),
         }

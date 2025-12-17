@@ -464,7 +464,7 @@ pub async fn store_destination_schema_state(
         INSERT INTO etl.destination_schema_states
             (table_schema_id, state_type, replication_mask)
         VALUES (
-            (SELECT id FROM etl.table_schemas WHERE pipeline_id = $1 AND table_id = $2 AND snapshot_id = $3),
+            (SELECT id FROM etl.table_schemas WHERE pipeline_id = $1 AND table_id = $2 AND snapshot_id = $3::pg_lsn),
             $4,
             $5
         )
@@ -477,7 +477,7 @@ pub async fn store_destination_schema_state(
     )
     .bind(pipeline_id)
     .bind(SqlxTableId(table_id.into_inner()))
-    .bind(snapshot_id)
+    .bind(snapshot_id.to_pg_lsn_string())
     .bind(phase)
     .bind(replication_mask)
     .execute(pool)
@@ -496,7 +496,7 @@ pub async fn load_destination_schema_states(
 ) -> Result<HashMap<TableId, DestinationSchemaStateRow>, sqlx::Error> {
     let rows = sqlx::query(
         r#"
-        SELECT ts.table_id, dss.state_type, ts.snapshot_id, dss.replication_mask
+        SELECT ts.table_id, dss.state_type, ts.snapshot_id::text as snapshot_id, dss.replication_mask
         FROM etl.destination_schema_states dss
         JOIN etl.table_schemas ts ON ts.id = dss.table_schema_id
         WHERE ts.pipeline_id = $1
@@ -510,7 +510,8 @@ pub async fn load_destination_schema_states(
     for row in rows {
         let table_id: SqlxTableId = row.get("table_id");
         let phase: DestinationSchemaPhase = row.get("state_type");
-        let snapshot_id: SnapshotId = row.get("snapshot_id");
+        let snapshot_id_str: String = row.get("snapshot_id");
+        let snapshot_id = SnapshotId::from_pg_lsn_string(&snapshot_id_str);
         let replication_mask: Vec<u8> = row.get("replication_mask");
 
         states.insert(
@@ -537,7 +538,7 @@ pub async fn get_destination_schema_state(
 ) -> Result<Option<DestinationSchemaStateRow>, sqlx::Error> {
     let row = sqlx::query(
         r#"
-        SELECT ts.table_id, dss.state_type, ts.snapshot_id, dss.replication_mask
+        SELECT ts.table_id, dss.state_type, ts.snapshot_id::text as snapshot_id, dss.replication_mask
         FROM etl.destination_schema_states dss
         JOIN etl.table_schemas ts ON ts.id = dss.table_schema_id
         WHERE ts.pipeline_id = $1 AND ts.table_id = $2
@@ -550,10 +551,11 @@ pub async fn get_destination_schema_state(
 
     Ok(row.map(|r| {
         let table_id: SqlxTableId = r.get("table_id");
+        let snapshot_id_str: String = r.get("snapshot_id");
         DestinationSchemaStateRow {
             table_id: TableId::new(table_id.0),
             phase: r.get("state_type"),
-            snapshot_id: r.get("snapshot_id"),
+            snapshot_id: SnapshotId::from_pg_lsn_string(&snapshot_id_str),
             replication_mask: r.get("replication_mask"),
         }
     }))
