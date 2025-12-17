@@ -55,6 +55,11 @@ pub struct IcebergClient {
 }
 
 impl IcebergClient {
+    /// Creates a new [`IcebergClient`] with the specified catalog.
+    pub fn new(catalog: Arc<dyn Catalog>) -> Self {
+        IcebergClient { catalog }
+    }
+
     /// Creates a new [`IcebergClient`] using a REST catalog configuration.
     ///
     /// This constructor initializes a client that connects to an Iceberg catalog
@@ -71,9 +76,7 @@ impl IcebergClient {
         let builder = RestCatalogBuilder::default();
         let catalog = builder.load("RestCatalog", props).await?;
 
-        Ok(IcebergClient {
-            catalog: Arc::new(catalog),
-        })
+        Ok(IcebergClient::new(Arc::new(catalog)))
     }
 
     /// Creates a new [`IcebergClient`] configured for Supabase storage integration.
@@ -116,9 +119,7 @@ impl IcebergClient {
         let client = SupabaseClient::new(catalog_uri, warehouse_name, catalog_token);
         let catalog = SupabaseCatalog::new(inner, client);
 
-        Ok(IcebergClient {
-            catalog: Arc::new(catalog),
-        })
+        Ok(IcebergClient::new(Arc::new(catalog)))
     }
 
     /// Creates a namespace if it does not already exist.
