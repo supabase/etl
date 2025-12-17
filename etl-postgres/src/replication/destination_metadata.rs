@@ -43,23 +43,23 @@ pub async fn store_destination_table_metadata(
     table_id: TableId,
     destination_table_id: &str,
     snapshot_id: SnapshotId,
+    previous_snapshot_id: Option<SnapshotId>,
     schema_status: DestinationTableSchemaStatus,
     replication_mask: &[u8],
-    previous_snapshot_id: Option<SnapshotId>,
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
         r#"
         insert into etl.destination_tables_metadata
             (pipeline_id, table_id, destination_table_id, snapshot_id,
-             schema_status, replication_mask, previous_snapshot_id)
-        values ($1, $2, $3, $4::pg_lsn, $5, $6, $7::pg_lsn)
+             previous_snapshot_id, schema_status, replication_mask)
+        values ($1, $2, $3, $4::pg_lsn, $5::pg_lsn, $6, $7)
         on conflict (pipeline_id, table_id)
         do update set
             destination_table_id = excluded.destination_table_id,
             snapshot_id = excluded.snapshot_id,
+            previous_snapshot_id = excluded.previous_snapshot_id,
             schema_status = excluded.schema_status,
             replication_mask = excluded.replication_mask,
-            previous_snapshot_id = excluded.previous_snapshot_id,
             updated_at = now()
         "#,
     )
@@ -67,9 +67,9 @@ pub async fn store_destination_table_metadata(
     .bind(SqlxTableId(table_id.into_inner()))
     .bind(destination_table_id)
     .bind(snapshot_id.to_pg_lsn_string())
+    .bind(previous_snapshot_id.map(|s| s.to_pg_lsn_string()))
     .bind(schema_status)
     .bind(replication_mask)
-    .bind(previous_snapshot_id.map(|s| s.to_pg_lsn_string()))
     .execute(pool)
     .await?;
 
@@ -86,7 +86,7 @@ pub async fn load_destination_tables_metadata(
     let rows = sqlx::query(
         r#"
         select table_id, destination_table_id, snapshot_id::text as snapshot_id,
-               schema_status, replication_mask, previous_snapshot_id::text as previous_snapshot_id
+               previous_snapshot_id::text as previous_snapshot_id, schema_status, replication_mask
         from etl.destination_tables_metadata
         where pipeline_id = $1
         "#,
@@ -108,10 +108,10 @@ pub async fn load_destination_tables_metadata(
                 table_id,
                 destination_table_id: row.get("destination_table_id"),
                 snapshot_id: SnapshotId::from_pg_lsn_string(&snapshot_id_str),
-                schema_status: row.get("schema_status"),
-                replication_mask: row.get("replication_mask"),
                 previous_snapshot_id: previous_snapshot_id_str
                     .map(|s| SnapshotId::from_pg_lsn_string(&s)),
+                schema_status: row.get("schema_status"),
+                replication_mask: row.get("replication_mask"),
             },
         );
     }
@@ -128,7 +128,7 @@ pub async fn get_destination_table_metadata(
     let row = sqlx::query(
         r#"
         select table_id, destination_table_id, snapshot_id::text as snapshot_id,
-               schema_status, replication_mask, previous_snapshot_id::text as previous_snapshot_id
+               previous_snapshot_id::text as previous_snapshot_id, schema_status, replication_mask
         from etl.destination_tables_metadata
         where pipeline_id = $1 and table_id = $2
         "#,
@@ -146,10 +146,10 @@ pub async fn get_destination_table_metadata(
             table_id: TableId::new(table_id.0),
             destination_table_id: r.get("destination_table_id"),
             snapshot_id: SnapshotId::from_pg_lsn_string(&snapshot_id_str),
-            schema_status: r.get("schema_status"),
-            replication_mask: r.get("replication_mask"),
             previous_snapshot_id: previous_snapshot_id_str
                 .map(|s| SnapshotId::from_pg_lsn_string(&s)),
+            schema_status: r.get("schema_status"),
+            replication_mask: r.get("replication_mask"),
         }
     }))
 }

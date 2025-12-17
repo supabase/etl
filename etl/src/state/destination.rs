@@ -54,9 +54,9 @@ impl DestinationTableMetadata {
         Self {
             destination_table_id,
             snapshot_id,
+            previous_snapshot_id: None,
             schema_status: DestinationTableSchemaStatus::Applying,
             replication_mask,
-            previous_snapshot_id: None,
         }
     }
 
@@ -71,9 +71,9 @@ impl DestinationTableMetadata {
         Self {
             destination_table_id,
             snapshot_id,
+            previous_snapshot_id: None,
             schema_status: DestinationTableSchemaStatus::Applied,
             replication_mask,
-            previous_snapshot_id: None,
         }
     }
 
