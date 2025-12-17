@@ -33,6 +33,10 @@ pub struct SchemaChangeMessage {
     /// The name of the affected table.
     pub table_name: String,
     /// The OID of the affected table.
+    ///
+    /// PostgreSQL table OIDs are `u32` values, but JSON serialization from the event trigger
+    /// uses `bigint` (i64) for transmission. The cast back to `u32` in [`into_table_schema`]
+    /// is safe because PostgreSQL OIDs are always within the `u32` range.
     pub table_id: i64,
     /// The columns of the table after the schema change.
     pub columns: Vec<ColumnSchemaMessage>,

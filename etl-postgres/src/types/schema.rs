@@ -13,6 +13,11 @@ pub enum SchemaError {
     /// Columns were received during replication that do not exist in the stored table schema.
     #[error("received columns during replication that are not in the stored table schema: {0:?}")]
     UnknownReplicatedColumns(Vec<String>),
+
+    /// A snapshot ID string from the database could not be parsed as a valid `pg_lsn`.
+    /// This indicates data corruption or a bug in the database layer.
+    #[error("invalid snapshot_id '{0}' from database: this indicates data corruption")]
+    InvalidSnapshotId(String),
 }
 
 /// An object identifier in Postgres.
@@ -58,8 +63,16 @@ impl SnapshotId {
     }
 
     /// Parses a `pg_lsn` string from the database.
-    pub fn from_pg_lsn_string(s: &str) -> Self {
-        Self(s.parse::<PgLsn>().expect("invalid pg_lsn from database"))
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SchemaError::InvalidSnapshotId`] if the string is not a valid `pg_lsn` format.
+    /// This indicates data corruption or a bug in the database layer, as all stored LSN values
+    /// should be valid.
+    pub fn from_pg_lsn_string(s: &str) -> Result<Self, SchemaError> {
+        s.parse::<PgLsn>()
+            .map(Self)
+            .map_err(|_| SchemaError::InvalidSnapshotId(s.to_string()))
     }
 }
 
@@ -574,6 +587,7 @@ mod tests {
             SchemaError::UnknownReplicatedColumns(columns) => {
                 assert_eq!(columns, vec!["unknown_column".to_string()]);
             }
+            _ => panic!("expected UnknownReplicatedColumns error"),
         }
     }
 
@@ -592,6 +606,7 @@ mod tests {
                 columns.sort();
                 assert_eq!(columns, vec!["bar".to_string(), "foo".to_string()]);
             }
+            _ => panic!("expected UnknownReplicatedColumns error"),
         }
     }
 
