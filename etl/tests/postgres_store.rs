@@ -9,7 +9,6 @@ use etl::store::state::StateStore;
 use etl::test_utils::database::spawn_source_database;
 use etl_postgres::replication::connect_to_source_database;
 use etl_postgres::types::ReplicationMask;
-use etl_postgres::types::{ColumnSchema, TableId, TableName, TableSchema};
 use etl_postgres::types::{ColumnSchema, SnapshotId, TableId, TableName, TableSchema};
 use etl_telemetry::tracing::init_test_tracing;
 use sqlx::postgres::types::Oid as SqlxTableId;
