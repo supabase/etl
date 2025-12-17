@@ -16,6 +16,10 @@ CREATE TABLE etl.destination_tables_metadata (
     destination_table_id TEXT NOT NULL,
     -- The snapshot_id of the schema currently applied at the destination.
     snapshot_id PG_LSN NOT NULL,
+    -- The schema version before the current change. NULL for initial schemas.
+    -- Destinations that support atomic DDL can use this for recovery by rolling back
+    -- to the previous snapshot when schema_status is 'applying' on startup.
+    previous_snapshot_id PG_LSN,
     -- Status: 'applying' when a schema change is in progress, 'applied' when complete.
     -- If 'applying' is found on startup, recovery may be needed.
     schema_status etl.destination_table_schema_status NOT NULL,

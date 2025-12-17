@@ -25,6 +25,8 @@ pub struct DestinationTableMetadataRow {
     pub table_id: TableId,
     pub destination_table_id: String,
     pub snapshot_id: SnapshotId,
+    /// The schema version before the current change. None for initial schemas.
+    pub previous_snapshot_id: Option<SnapshotId>,
     pub schema_status: DestinationTableSchemaStatus,
     pub replication_mask: Vec<u8>,
 }
@@ -34,6 +36,7 @@ pub struct DestinationTableMetadataRow {
 /// Inserts or updates the complete metadata for a table at a destination.
 /// Uses upsert semantics: if a row exists for (pipeline_id, table_id),
 /// all fields are updated.
+#[allow(clippy::too_many_arguments)]
 pub async fn store_destination_table_metadata(
     pool: &PgPool,
     pipeline_id: i64,
@@ -42,19 +45,21 @@ pub async fn store_destination_table_metadata(
     snapshot_id: SnapshotId,
     schema_status: DestinationTableSchemaStatus,
     replication_mask: &[u8],
+    previous_snapshot_id: Option<SnapshotId>,
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
         r#"
         insert into etl.destination_tables_metadata
             (pipeline_id, table_id, destination_table_id, snapshot_id,
-             schema_status, replication_mask)
-        values ($1, $2, $3, $4::pg_lsn, $5, $6)
+             schema_status, replication_mask, previous_snapshot_id)
+        values ($1, $2, $3, $4::pg_lsn, $5, $6, $7::pg_lsn)
         on conflict (pipeline_id, table_id)
         do update set
             destination_table_id = excluded.destination_table_id,
             snapshot_id = excluded.snapshot_id,
             schema_status = excluded.schema_status,
             replication_mask = excluded.replication_mask,
+            previous_snapshot_id = excluded.previous_snapshot_id,
             updated_at = now()
         "#,
     )
@@ -64,6 +69,7 @@ pub async fn store_destination_table_metadata(
     .bind(snapshot_id.to_pg_lsn_string())
     .bind(schema_status)
     .bind(replication_mask)
+    .bind(previous_snapshot_id.map(|s| s.to_pg_lsn_string()))
     .execute(pool)
     .await?;
 
@@ -80,7 +86,7 @@ pub async fn load_destination_tables_metadata(
     let rows = sqlx::query(
         r#"
         select table_id, destination_table_id, snapshot_id::text as snapshot_id,
-               schema_status, replication_mask
+               schema_status, replication_mask, previous_snapshot_id::text as previous_snapshot_id
         from etl.destination_tables_metadata
         where pipeline_id = $1
         "#,
@@ -94,6 +100,7 @@ pub async fn load_destination_tables_metadata(
         let table_id: SqlxTableId = row.get("table_id");
         let table_id = TableId::new(table_id.0);
         let snapshot_id_str: String = row.get("snapshot_id");
+        let previous_snapshot_id_str: Option<String> = row.get("previous_snapshot_id");
 
         metadata.insert(
             table_id,
@@ -103,6 +110,8 @@ pub async fn load_destination_tables_metadata(
                 snapshot_id: SnapshotId::from_pg_lsn_string(&snapshot_id_str),
                 schema_status: row.get("schema_status"),
                 replication_mask: row.get("replication_mask"),
+                previous_snapshot_id: previous_snapshot_id_str
+                    .map(|s| SnapshotId::from_pg_lsn_string(&s)),
             },
         );
     }
@@ -119,7 +128,7 @@ pub async fn get_destination_table_metadata(
     let row = sqlx::query(
         r#"
         select table_id, destination_table_id, snapshot_id::text as snapshot_id,
-               schema_status, replication_mask
+               schema_status, replication_mask, previous_snapshot_id::text as previous_snapshot_id
         from etl.destination_tables_metadata
         where pipeline_id = $1 and table_id = $2
         "#,
@@ -132,12 +141,15 @@ pub async fn get_destination_table_metadata(
     Ok(row.map(|r| {
         let table_id: SqlxTableId = r.get("table_id");
         let snapshot_id_str: String = r.get("snapshot_id");
+        let previous_snapshot_id_str: Option<String> = r.get("previous_snapshot_id");
         DestinationTableMetadataRow {
             table_id: TableId::new(table_id.0),
             destination_table_id: r.get("destination_table_id"),
             snapshot_id: SnapshotId::from_pg_lsn_string(&snapshot_id_str),
             schema_status: r.get("schema_status"),
             replication_mask: r.get("replication_mask"),
+            previous_snapshot_id: previous_snapshot_id_str
+                .map(|s| SnapshotId::from_pg_lsn_string(&s)),
         }
     }))
 }

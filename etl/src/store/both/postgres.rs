@@ -524,6 +524,7 @@ impl StateStore for PostgresStore {
                     snapshot_id: row.snapshot_id,
                     schema_status: row.schema_status.into(),
                     replication_mask: ReplicationMask::from_bytes(row.replication_mask),
+                    previous_snapshot_id: row.previous_snapshot_id,
                 },
             );
         }
@@ -559,6 +560,7 @@ impl StateStore for PostgresStore {
             metadata.snapshot_id,
             metadata.schema_status.into(),
             metadata.replication_mask.as_slice(),
+            metadata.previous_snapshot_id,
         )
         .await
         .map_err(|err| {

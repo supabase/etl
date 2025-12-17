@@ -23,10 +23,16 @@ pub struct DestinationTableMetadata {
     pub destination_table_id: String,
     /// The snapshot_id of the schema currently applied at the destination.
     pub snapshot_id: SnapshotId,
+    /// The schema version before the current change. None for initial schemas.
+    ///
+    /// Destinations that support atomic DDL can use this for recovery: if
+    /// `schema_status` is `Applying` on startup, the destination knows the
+    /// DDL was rolled back and can reset to this snapshot to retry.
+    pub previous_snapshot_id: Option<SnapshotId>,
     /// Status of the current schema change operation.
     ///
     /// If `Applying` is found on startup, the destination schema may be in
-    /// an unknown state and recovery is needed.
+    /// an unknown state and recovery may be needed depending on the destination.
     pub schema_status: DestinationTableSchemaStatus,
     /// The replication mask indicating which columns are replicated.
     ///
@@ -39,6 +45,7 @@ impl DestinationTableMetadata {
     /// Creates new metadata for a table being created at the destination.
     ///
     /// Initializes with `Applying` status since the table creation is in progress.
+    /// For initial table creation, `previous_snapshot_id` is None.
     pub fn new_applying(
         destination_table_id: String,
         snapshot_id: SnapshotId,
@@ -49,6 +56,7 @@ impl DestinationTableMetadata {
             snapshot_id,
             schema_status: DestinationTableSchemaStatus::Applying,
             replication_mask,
+            previous_snapshot_id: None,
         }
     }
 
@@ -65,6 +73,7 @@ impl DestinationTableMetadata {
             snapshot_id,
             schema_status: DestinationTableSchemaStatus::Applied,
             replication_mask,
+            previous_snapshot_id: None,
         }
     }
 
@@ -79,18 +88,25 @@ impl DestinationTableMetadata {
     }
 
     /// Transitions this metadata to applied status.
+    ///
+    /// Clears the previous_snapshot_id since the change completed successfully.
     pub fn to_applied(mut self) -> Self {
         self.schema_status = DestinationTableSchemaStatus::Applied;
+        self.previous_snapshot_id = None;
         self
     }
 
     /// Updates the schema state for a new schema change.
+    ///
+    /// Sets `previous_snapshot_id` to the current snapshot before updating,
+    /// enabling recovery if the change fails on destinations that support atomic DDL.
     pub fn with_schema_change(
         mut self,
         snapshot_id: SnapshotId,
         replication_mask: ReplicationMask,
         status: DestinationTableSchemaStatus,
     ) -> Self {
+        self.previous_snapshot_id = Some(self.snapshot_id);
         self.snapshot_id = snapshot_id;
         self.replication_mask = replication_mask;
         self.schema_status = status;

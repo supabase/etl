@@ -555,10 +555,10 @@ where
 
         match current_metadata {
             None => {
-                // No metadata exists - this is a broken invariant since the metadata should
+                // No metadata exists, this is a broken invariant since the metadata should
                 // have been recorded during write_table_rows before any Relation event.
                 bail!(
-                    ErrorKind::InvalidState,
+                    ErrorKind::CorruptedTableSchema,
                     "Missing destination table metadata",
                     format!(
                         "No destination table metadata found for table {} when processing schema change. \
@@ -569,9 +569,8 @@ where
                 );
             }
             Some(metadata) if metadata.is_applying() => {
-                // A previous schema change was interrupted, require manual intervention.
-                // The previous valid snapshot_id can be derived from table_schemas table
-                // by finding the second-highest snapshot_id for this table.
+                // A previous schema change was interrupted, require manual intervention since BigQuery
+                // DDL is not atomic, thus we can't say anything about the table schema.
                 bail!(
                     ErrorKind::CorruptedTableSchema,
                     "Schema change recovery required",
@@ -632,6 +631,11 @@ where
                     ReplicatedTableSchema::from_mask(old_table_schema, current_replication_mask);
 
                 // Mark as applying before making changes (with the NEW snapshot_id and mask).
+                //
+                // NOTE: BigQuery does not support transactional DDL, so if the system crashes
+                // while in 'Applying' state, the destination table may be in an inconsistent
+                // state and manual intervention may be required. The `previous_snapshot_id`
+                // is stored for debugging purposes but automatic recovery is not possible.
                 let updated_metadata = metadata.with_schema_change(
                     new_snapshot_id,
                     new_replication_mask.clone(),
@@ -815,8 +819,8 @@ where
         let mut events_iter = events.into_iter().peekable();
 
         while events_iter.peek().is_some() {
-            // Maps table ID to (schema, rows); schema is the first one seen for that table. Once
-            // schema change support is implemented, we will re-implement this.
+            // Maps table ID to (schema, rows). We are assuming that the table schema is the same for
+            // all events within two Relation event boundaries.
             let mut table_id_to_data: HashMap<TableId, (ReplicatedTableSchema, Vec<TableRow>)> =
                 HashMap::new();
 

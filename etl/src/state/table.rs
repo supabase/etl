@@ -151,7 +151,7 @@ impl TableReplicationError {
             ErrorKind::CorruptedTableSchema => Self::with_solution(
                 table_id,
                 error,
-                "Manually update the stored table schema with the current schema of the table.",
+                "Reset the table state and restart the replication.",
                 RetryPolicy::ManualRetry,
             ),
 
